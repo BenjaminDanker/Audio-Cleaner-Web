@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Cleaner</title>
+</head>
+<body>
+    <h1>Upload a video to denoise</h1>
+    <form method="post" enctype="multipart/form-data">
+        <input type="file" name="video" required><br><br>
+        <label>Attenuation Limit (dB):
+            <input type="number" name="atten" min="1" max="60" value="{{ default_atten }}">
+        </label><br><br>
+        <button type="submit">Process Video</button>
+    </form>
+</body>
+</html>
