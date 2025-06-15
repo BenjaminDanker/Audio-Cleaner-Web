@@ -2,4 +2,5 @@
 build
 buildenv
 dist
-video__pycache__/
+video
+__pycache__
