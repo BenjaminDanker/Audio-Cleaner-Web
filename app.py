@@ -1,32 +1,40 @@
 from flask import Flask, render_template, request, send_file, after_this_request
 import os
-import tempfile
-import shutil
-
-from processing import denoise_video, DEFAULT_ATTEN_DB
+from video_handler import DEFAULT_ATTEN_DB
+from video_handler import VideoProcessor
 
 app = Flask(__name__)
 
 
-@app.route('/', methods=['GET', 'POST'])
+@app.route("/", methods=["GET", "POST"])
 def index():
-    if request.method == 'POST':
-        uploaded = request.files.get('video')
-        if not uploaded:
-            return 'No video uploaded', 400
+    if request.method == "POST":
+        uploaded_file = request.files.get("video")
+        if not uploaded_file or not uploaded_file.filename:
+            return "No video uploaded or filename missing", 400
+
         try:
-            atten = int(request.form.get('atten', DEFAULT_ATTEN_DB))
+            atten = int(request.form.get("atten", DEFAULT_ATTEN_DB))
         except ValueError:
             atten = DEFAULT_ATTEN_DB
-        tmpdir = tempfile.mkdtemp()
-        input_path = os.path.join(tmpdir, uploaded.filename)
-        uploaded.save(input_path)
-        output_path = os.path.join(tmpdir, 'output.mp4')
-        denoise_video(input_path, output_path, atten_lim_db=atten)
 
-        response = send_file(output_path, as_attachment=True, download_name='denoised.mp4')
-        response.call_on_close(lambda: shutil.rmtree(tmpdir, ignore_errors=True))
-        return response
+        processor = VideoProcessor(uploaded_file, atten)
+
+        try:
+            output_path = processor.process()
+            response = send_file(output_path, as_attachment=True, download_name='denoised.mp4')
+
+            @after_this_request
+            def cleanup_after_request(response_param):
+                processor.schedule_cleanup(app.logger)
+                return response_param
+
+            return response
+        except Exception as e:
+            app.logger.error(f"Error during video processing or file sending: {e}")
+            processor.immediate_cleanup(app.logger)
+            return "Error processing video", 500
+
     return render_template('index.html', default_atten=DEFAULT_ATTEN_DB)
 
 
