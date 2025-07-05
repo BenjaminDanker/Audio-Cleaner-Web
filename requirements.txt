@@ -5,3 +5,10 @@ deepfilternet
 moviepy
 torch
 torchaudio
+azure-storage-blob
+azure-servicebus
+azure-cosmos
+azure-identity
+azure-keyvault-secrets
+requests
+python-dotenv

@@ -1,0 +1,157 @@
+.video-upload {
+  max-width: 600px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.video-upload h2 {
+  color: #333;
+  margin-bottom: 2rem;
+}
+
+.upload-zone {
+  border: 2px dashed #ccc;
+  border-radius: 12px;
+  padding: 3rem 2rem;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background-color: #fafafa;
+}
+
+.upload-zone:hover {
+  border-color: #646cff;
+  background-color: #f8f9ff;
+}
+
+.upload-zone.dragover {
+  border-color: #646cff;
+  background-color: #f0f2ff;
+  transform: scale(1.02);
+}
+
+.upload-icon {
+  color: #666;
+  margin-bottom: 1rem;
+}
+
+.upload-zone h3 {
+  color: #333;
+  margin-bottom: 0.5rem;
+  font-size: 1.3rem;
+}
+
+.upload-zone p {
+  color: #666;
+  margin-bottom: 0.5rem;
+}
+
+.upload-note {
+  font-size: 0.9rem;
+  color: #999 !important;
+  margin-top: 1rem !important;
+}
+
+.selected-file {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  border: 1px solid #e1e5e9;
+  border-radius: 8px;
+  background-color: #fff;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.file-details {
+  flex-grow: 1;
+  text-align: left;
+}
+
+.file-details h4 {
+  margin: 0 0 0.25rem 0;
+  color: #333;
+  font-size: 1rem;
+}
+
+.file-details p {
+  margin: 0;
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.remove-file-btn {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 0.5rem;
+  border-radius: 4px;
+  transition: all 0.3s ease;
+}
+
+.remove-file-btn:hover:not(:disabled) {
+  color: #dc3545;
+  background-color: #ffe6e6;
+}
+
+.remove-file-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.progress-container {
+  margin: 1rem 0;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background-color: #e9ecef;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 0.5rem;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background-color: #646cff;
+  transition: width 0.3s ease;
+}
+
+.progress-container p {
+  color: #666;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.upload-btn {
+  width: 100%;
+  padding: 0.75rem;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
+
+@media (max-width: 768px) {
+  .video-upload {
+    padding: 0 1rem;
+  }
+  
+  .upload-zone {
+    padding: 2rem 1rem;
+  }
+  
+  .file-info {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  
+  .file-details {
+    text-align: center;
+    width: 100%;
+  }
+}

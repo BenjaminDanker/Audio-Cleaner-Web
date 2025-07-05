@@ -1,0 +1,24 @@
+{
+  "name": "audio-cleaner-api",
+  "version": "1.0.0",
+  "description": "Azure Functions API for Audio Cleaner Pro",
+  "main": "index.js",
+  "scripts": {
+    "start": "func start",
+    "dev": "func start --cors true"
+  },
+  "dependencies": {
+    "@azure/cosmos": "^4.0.0",
+    "@azure/functions": "^4.0.0",
+    "@azure/service-bus": "^7.9.0",
+    "@azure/storage-blob": "^12.17.0",
+    "busboy": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "multer": "^2.0.1",
+    "stripe": "^14.0.0"
+  },
+  "devDependencies": {
+    "azure-functions-core-tools": "^4.0.5455"
+  }
+}
