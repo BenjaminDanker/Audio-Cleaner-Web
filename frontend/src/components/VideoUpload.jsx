@@ -67,7 +67,7 @@ const VideoUpload = ({ onJobCreated }) => {
           'Content-Type': 'multipart/form-data'
         },
         onUploadProgress: (progressEvent) => {
-          const progress = Math.round((progressEvent.loaded / progressEvent.total) * 70) // 70% for upload
+          const progress = Math.round((progressEvent.loaded / progressEvent.total) * 80) // 80% for upload
           setUploadProgress(progress)
         }
       })
@@ -77,7 +77,7 @@ const VideoUpload = ({ onJobCreated }) => {
       }
 
       const { fileUrl, fileName } = uploadResponse.data
-      setUploadProgress(75)
+      setUploadProgress(85)
 
       // Step 2: Create processing job
       const jobData = {
@@ -87,7 +87,7 @@ const VideoUpload = ({ onJobCreated }) => {
       }
 
       const jobResponse = await axios.post('/api/enqueue-job', jobData)
-      setUploadProgress(90)
+      setUploadProgress(95)
       
       if (jobResponse.data.success || jobResponse.data.id) {
         const job = {
@@ -108,6 +108,7 @@ const VideoUpload = ({ onJobCreated }) => {
         }
         
         setUploadProgress(100)
+        
         alert('File uploaded successfully! Check the Processing Jobs tab to monitor progress.')
       } else {
         throw new Error(jobResponse.data.error || 'Job creation failed')
@@ -115,9 +116,9 @@ const VideoUpload = ({ onJobCreated }) => {
     } catch (error) {
       console.error('Upload failed:', error)
       alert('Upload failed: ' + (error.response?.data?.error || error.message))
+      setUploadProgress(0) // Reset on error
     } finally {
       setIsUploading(false)
-      setUploadProgress(0)
     }
   }
 

@@ -1,33 +1,126 @@
-# Local Development Setup Guide
+# Audio Cleaner Pro - Azure Video Denoising Web App
 
-## Prerequisites
+> **A complete Azure-based video denoising application using AI to clean audio tracks from video files.**
 
-1. **Node.js** (v18 or later)
-2. **Python** (3.11 or later)
-3. **Azure Functions Core Tools**
-4. **Docker Desktop**
-5. **Azure CLI**
+## 🏗️ Architecture
 
-## Local Development Environment Setup
+- **Frontend**: React + Vite (Azure Static Web Apps)
+- **API**: Azure Functions (Node.js)
+- **Processing**: Python Container App with DeepFilterNet3
+- **Storage**: Azure Blob Storage, Cosmos DB
+- **Messaging**: Azure Service Bus
+- **Infrastructure**: Bicep templates with Azure Developer CLI
 
-### 1. Install Azure Storage Emulator (Azurite)
+## 🚀 Quick Deploy to Azure
+
+### Prerequisites
+1. **Azure subscription** with Owner or Contributor access
+2. **Azure Developer CLI** (`azd`) - [Install guide](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd)
+3. **Azure CLI** - [Install guide](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli)
+4. **Git** and **GitHub account**
+
+### Deploy Steps
+
+1. **Clone and setup**:
 ```bash
-npm install -g azurite
+git clone <your-repo-url>
+cd Audio-Cleaner-Web
 ```
 
-### 2. Install Azure Cosmos DB Emulator
-Download and install from: https://docs.microsoft.com/en-us/azure/cosmos-db/local-emulator
-
-### 3. Setup Environment Variables
+2. **Login to Azure**:
 ```bash
-# Copy the example environment file
-cp .env.local.example .env.local
-
-# Edit .env.local with your local values
-# For development, you can use the provided Azurite and Cosmos DB emulator connection strings
+azd auth login
+az login
 ```
 
-### 4. Start Local Services
+3. **Initialize environment**:
+```bash
+azd init
+# Follow prompts to set environment name and region
+```
+
+4. **Deploy to Azure**:
+```bash
+azd up
+```
+
+This will:
+- ✅ Provision all Azure resources using Bicep
+- ✅ Build and deploy the React frontend
+- ✅ Deploy Azure Functions API
+- ✅ Build and deploy the Python processing container
+- ✅ Configure networking, security, and monitoring
+
+### Post-deployment
+- Frontend URL: Check `azd show` output
+- API URL: Check Azure Functions app in portal
+- Monitor logs: `azd logs`
+
+## 🛠️ Local Development
+
+See [docs/LOCAL_DEV_GUIDE.md](docs/LOCAL_DEV_GUIDE.md) for detailed local development setup.
+
+### Quick Start
+```bash
+# Frontend
+cd frontend && npm install && npm run dev
+
+# API
+cd api && npm install && func start
+
+# Processor (for testing)
+pip install -r requirements.txt
+python local-dev/local_processor.py
+```
+
+## 📚 Documentation
+
+- [Project Structure](docs/PROJECT_STRUCTURE.md)
+- [Local Development Guide](docs/LOCAL_DEV_GUIDE.md)
+- [Deployment Secrets](docs/DEPLOYMENT_SECRETS.md)
+- [Azure CLI Commands](docs/AZURE_CLI_COMMANDS.md)
+
+## 🔧 Configuration
+
+Key environment variables:
+- `AZURE_ENV_NAME`: Your environment name
+- `AZURE_LOCATION`: Azure region (e.g., eastus)
+- `AZURE_SUBSCRIPTION_ID`: Your Azure subscription ID
+
+## 🎯 Features
+
+- ✅ Video upload with progress tracking
+- ✅ AI-powered audio denoising using DeepFilterNet3
+- ✅ Real-time job status monitoring
+- ✅ User authentication and subscription management
+- ✅ Stripe payment integration
+- ✅ Fully scalable Azure infrastructure
+- ✅ CI/CD with GitHub Actions
+
+## 🔒 Security
+
+- Managed Identity authentication
+- RBAC for resource access
+- Secure secrets management with Key Vault
+- HTTPS everywhere with proper CORS
+
+## 📊 Monitoring
+
+- Application Insights for telemetry
+- Log Analytics for centralized logging
+- Health checks and metrics
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test locally
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License.
 
 #### Start Azurite (Azure Storage Emulator)
 ```bash

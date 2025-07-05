@@ -67,6 +67,17 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
     environmentId: containerAppsEnvironment.id
     configuration: {
       activeRevisionsMode: 'Single'
+      ingress: {
+        external: true
+        targetPort: 8080
+        allowInsecure: false
+        corsPolicy: {
+          allowedOrigins: ['*']
+          allowedMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+          allowedHeaders: ['*']
+          allowCredentials: true
+        }
+      }
       registries: [
         {
           server: containerRegistry.properties.loginServer
@@ -110,7 +121,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       containers: [
         {
           name: 'audio-processor'
-          image: 'ghcr.io/your-repo/audio-cleaner-processor:latest'
+          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           env: [
             {
               name: 'AZURE_STORAGE_CONNECTION_STRING'
@@ -151,7 +162,23 @@ resource acrPullRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-
   }
 }
 
-// Grant Container App access to Storage
+// Grant Container App access to Storage Blob Data Owner
+resource storageBlobDataOwner 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b' // Storage Blob Data Owner
+}
+
+resource storageBlobOwnerRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(containerAppManagedIdentity.id, storageAccount.id, storageBlobDataOwner.id)
+  properties: {
+    roleDefinitionId: storageBlobDataOwner.id
+    principalId: containerAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant Container App access to Storage Blob Data Contributor
 resource storageBlobDataContributor 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
   scope: subscription()
   name: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe' // Storage Blob Data Contributor
@@ -178,6 +205,54 @@ resource serviceBusReceiverRoleAssignment 'Microsoft.Authorization/roleAssignmen
   name: guid(containerAppManagedIdentity.id, serviceBusNamespace.id, serviceBusDataReceiver.id)
   properties: {
     roleDefinitionId: serviceBusDataReceiver.id
+    principalId: containerAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant Container App access to Storage Queue Data
+resource storageQueueDataContributor 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: '974c5e8b-45b9-4653-ba55-5f855dd0fb88' // Storage Queue Data Contributor
+}
+
+resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(containerAppManagedIdentity.id, storageAccount.id, storageQueueDataContributor.id)
+  properties: {
+    roleDefinitionId: storageQueueDataContributor.id
+    principalId: containerAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant Container App access to Storage Table Data
+resource storageTableDataContributor 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3' // Storage Table Data Contributor
+}
+
+resource storageTableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(containerAppManagedIdentity.id, storageAccount.id, storageTableDataContributor.id)
+  properties: {
+    roleDefinitionId: storageTableDataContributor.id
+    principalId: containerAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+}
+
+// Grant Container App access to Monitoring Metrics Publisher
+resource monitoringMetricsPublisher 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: '3913510d-42f4-4e42-8a64-420c390055eb' // Monitoring Metrics Publisher
+}
+
+resource monitoringMetricsRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: resourceGroup()
+  name: guid(containerAppManagedIdentity.id, resourceGroup().id, monitoringMetricsPublisher.id)
+  properties: {
+    roleDefinitionId: monitoringMetricsPublisher.id
     principalId: containerAppManagedIdentity.properties.principalId
     principalType: 'ServicePrincipal'
   }
