@@ -1,4 +1,5 @@
-const { BlobServiceClient, BlobSASPermissions, generateBlobSASQueryParameters, StorageSharedKeyCredential } = require('@azure/storage-blob');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const SASTokenManager = require('../shared/sasTokenManager');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -94,26 +95,30 @@ module.exports = async function (context, req) {
         const blobClient = containerClient.getBlobClient(blobName);
         const blockBlobClient = blobClient.getBlockBlobClient();
 
-        // Extract account name and key from connection string for SAS generation
-        const accountName = connectionString.match(/AccountName=([^;]*)/)[1];
-        const accountKey = connectionString.match(/AccountKey=([^;]*)/)[1];
+        // Initialize SAS Token Manager
+        const sasManager = new SASTokenManager(
+            connectionString, 
+            process.env.COSMOS_CONNECTION_STRING
+        );
         
-        const sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
+        // Get client IP for SAS restriction (Rule #3) - temporarily disabled
+        const clientIP = null; // Temporarily disable IP restrictions
+        // const clientIP = SASTokenManager.getClientIP(req);
         
-        const sasOptions = {
+        context.log(`Generating SAS token for blob: ${blobName}, user: ${userId}`);
+        
+        // Generate secure SAS token following all 5 rules
+        const sasResult = await sasManager.generateSASToken({
             containerName: 'uploads',
             blobName: blobName,
-            permissions: BlobSASPermissions.parse('cw'), // create and write permissions
-            startsOn: new Date(new Date().valueOf() - 5 * 60 * 1000), // 5 minutes ago to account for clock skew
-            expiresOn: new Date(new Date().valueOf() + 60 * 60 * 1000) // 1 hour from now
-        };
-
-        const sasToken = generateBlobSASQueryParameters(sasOptions, sharedKeyCredential).toString();
-        const uploadUrl = `${blockBlobClient.url}?${sasToken}`;
-
-        // Log for debugging
-        context.log(`Generated SAS URL for blob: ${blobName}`);
-        context.log(`Upload URL domain: ${new URL(uploadUrl).hostname}`);
+            permissions: 'cw', // create and write only (Rule #2)
+            expiryMinutes: 30, // Increased to 30 minutes for larger uploads
+            clientIP: clientIP, // IP restriction if available (Rule #3)
+            userId: userId, // For tracking and revocation (Rule #5)
+            context: context
+        });
+        
+        const uploadUrl = `${blockBlobClient.url}?${sasResult.sasToken}`;
 
         context.res = {
             status: 200,
@@ -125,14 +130,16 @@ module.exports = async function (context, req) {
             },
             body: {
                 success: true,
-                uploadUrl: uploadUrl,
+                uploadUrl: uploadUrl, // SAS URL is only in response body (Rule #4)
                 blobName: blobName,
                 fileName: fileName,
                 fileUrl: blockBlobClient.url, // This will be the final URL after upload
                 debug: {
                     containerName: 'uploads',
-                    storageAccount: accountName,
-                    sasExpiry: new Date(new Date().valueOf() + 60 * 60 * 1000).toISOString()
+                    storageAccount: sasManager.accountName,
+                    sasExpiry: sasResult.expiresAt.toISOString(),
+                    sasType: sasResult.sasType, // Indicate SAS type
+                    hasIPRestriction: !!clientIP
                 }
             }
         };

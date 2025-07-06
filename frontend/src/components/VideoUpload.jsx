@@ -8,6 +8,7 @@ const VideoUpload = ({ onJobCreated }) => {
   const [isDragging, setIsDragging] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
+  const [attenuationDb, setAttenuationDb] = useState(30) // Default attenuation level
   const fileInputRef = useRef(null)
 
   const handleFileSelect = (file) => {
@@ -57,6 +58,10 @@ const VideoUpload = ({ onJobCreated }) => {
     setIsUploading(true)
     setUploadProgress(0)
 
+    let uploadUrl = null
+    let blobName = null
+    let fileUrl = null
+
     try {
       // First, get the SAS upload URL from our API
       setUploadProgress(10)
@@ -74,7 +79,11 @@ const VideoUpload = ({ onJobCreated }) => {
         throw new Error(uploadUrlResponse.data.error || 'Failed to get upload URL')
       }
 
-      const { uploadUrl, fileUrl, blobName } = uploadUrlResponse.data
+      // Extract variables from response
+      uploadUrl = uploadUrlResponse.data.uploadUrl
+      fileUrl = uploadUrlResponse.data.fileUrl
+      blobName = uploadUrlResponse.data.blobName
+      
       setUploadProgress(20)
 
       // Check if we're in local development
@@ -135,7 +144,8 @@ const VideoUpload = ({ onJobCreated }) => {
       const jobData = {
         fileName: blobName,
         fileUrl: fileUrl,
-        processingType: 'denoise'
+        processingType: 'denoise',
+        attenuationDb: attenuationDb
       }
 
       const jobResponse = await axios.post('/api/enqueue-job', jobData)
@@ -233,6 +243,31 @@ const VideoUpload = ({ onJobCreated }) => {
             >
               <X size={20} />
             </button>
+          </div>
+          
+          {/* Attenuation Control */}
+          <div className="attenuation-control">
+            <label htmlFor="attenuation-slider" className="attenuation-label">
+              Noise Reduction Strength: {attenuationDb} dB
+            </label>
+            <input
+              id="attenuation-slider"
+              type="range"
+              min="10"
+              max="50"
+              value={attenuationDb}
+              onChange={(e) => setAttenuationDb(parseInt(e.target.value))}
+              className="attenuation-slider"
+              disabled={isUploading}
+            />
+            <div className="attenuation-hints">
+              <span className="hint-low">Gentle (10 dB)</span>
+              <span className="hint-high">Aggressive (50 dB)</span>
+            </div>
+            <p className="attenuation-description">
+              Higher values remove more noise but may affect audio quality. 
+              Start with 30 dB for most videos.
+            </p>
           </div>
           
           {isUploading && (

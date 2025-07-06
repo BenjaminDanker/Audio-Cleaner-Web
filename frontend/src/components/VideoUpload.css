@@ -135,6 +135,119 @@
   font-weight: 500;
 }
 
+/* Attenuation Control Styling */
+.attenuation-control {
+  margin: 1.5rem 0;
+  padding: 1.5rem;
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  border: 1px solid #e9ecef;
+}
+
+.attenuation-label {
+  display: block;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 1rem;
+  font-size: 1rem;
+}
+
+.attenuation-slider {
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: #ddd;
+  outline: none;
+  margin-bottom: 0.75rem;
+  cursor: pointer;
+  transition: background 0.3s ease;
+}
+
+.attenuation-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #646cff;
+  cursor: pointer;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s ease;
+}
+
+.attenuation-slider::-webkit-slider-thumb:hover {
+  background: #5a64e6;
+  transform: scale(1.1);
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+
+.attenuation-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #646cff;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s ease;
+}
+
+.attenuation-slider::-moz-range-thumb:hover {
+  background: #5a64e6;
+  transform: scale(1.1);
+  box-shadow: 0 3px 6px rgba(0, 0, 0, 0.3);
+}
+
+.attenuation-slider:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.attenuation-slider:disabled::-webkit-slider-thumb {
+  cursor: not-allowed;
+  background: #999;
+}
+
+.attenuation-slider:disabled::-moz-range-thumb {
+  cursor: not-allowed;
+  background: #999;
+}
+
+.attenuation-hints {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.hint-low, .hint-high {
+  font-weight: 500;
+}
+
+.attenuation-description {
+  font-size: 0.9rem;
+  color: #666;
+  text-align: center;
+  margin: 0;
+  line-height: 1.4;
+}
+
+/* Mobile responsiveness for attenuation control */
+@media (max-width: 600px) {
+  .attenuation-control {
+    margin: 1rem 0;
+    padding: 1rem;
+  }
+  
+  .attenuation-label {
+    font-size: 0.95rem;
+  }
+  
+  .attenuation-description {
+    font-size: 0.85rem;
+  }
+}
+
 @media (max-width: 768px) {
   .video-upload {
     padding: 0 1rem;

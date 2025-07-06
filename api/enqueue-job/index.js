@@ -13,11 +13,21 @@ module.exports = async function (context, req) {
             context.log('Local development mode - using local processor');
             
             // Validate request body
-            const { fileName, fileUrl, processingType = 'denoise' } = req.body;
+            const { fileName, fileUrl, processingType = 'denoise', attenuationDb = 30 } = req.body;
             if (!fileName || !fileUrl) {
                 context.res = {
                     status: 400,
                     body: { error: 'fileName and fileUrl are required' }
+                };
+                return;
+            }
+
+            // Validate attenuation parameter
+            const atten = parseInt(attenuationDb);
+            if (isNaN(atten) || atten < 10 || atten > 50) {
+                context.res = {
+                    status: 400,
+                    body: { error: 'attenuationDb must be a number between 10 and 50' }
                 };
                 return;
             }
@@ -32,7 +42,7 @@ module.exports = async function (context, req) {
                 fileName: fileName,
                 fileUrl: fileUrl,
                 processingType: processingType,
-                attenuation: 30,
+                attenuation: atten,
                 userId: 'dev-user',
                 userEmail: 'dev@example.com'
             };
@@ -63,7 +73,7 @@ module.exports = async function (context, req) {
                     fileUrl: fileUrl,
                     filePath: actualFilePath || fileUrl, // Use actual file path for processing
                     processingType: processingType,
-                    attenuation: 30,
+                    attenuation: atten,
                     userId: 'dev-user',
                     userEmail: 'dev@example.com',
                     status: 'queued',
@@ -113,11 +123,21 @@ module.exports = async function (context, req) {
         const userEmail = principal.userDetails;
 
         // Validate request body
-        const { fileName, fileUrl, processingType = 'denoise' } = req.body;
+        const { fileName, fileUrl, processingType = 'denoise', attenuationDb = 30 } = req.body;
         if (!fileName || !fileUrl) {
             context.res = {
                 status: 400,
                 body: { error: 'fileName and fileUrl are required' }
+            };
+            return;
+        }
+
+        // Validate attenuation parameter
+        const atten = parseInt(attenuationDb);
+        if (isNaN(atten) || atten < 10 || atten > 50) {
+            context.res = {
+                status: 400,
+                body: { error: 'attenuationDb must be a number between 10 and 50' }
             };
             return;
         }
@@ -141,6 +161,7 @@ module.exports = async function (context, req) {
             fileName: fileName,
             fileUrl: fileUrl,
             processingType: processingType,
+            attenuation: atten,
             status: 'queued',
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
@@ -156,7 +177,7 @@ module.exports = async function (context, req) {
                 fileName: fileName,
                 fileUrl: fileUrl,
                 processingType: processingType,
-                attenuation: 30 // Default attenuation level
+                attenuation: atten
             }),
             messageId: jobId,
             contentType: 'application/json'

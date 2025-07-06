@@ -163,12 +163,13 @@ class LocalProcessor:
                         
                         # Get the file path from job data, fallback to test video
                         file_path = job_data.get('filePath', 'video/C1395.MP4')
+                        attenuation = job_data.get('attenuation', 30)
                         
                         if Path(file_path).exists():
                             # Process in background thread to not block the loop
                             thread = threading.Thread(
                                 target=self.process_video_file,
-                                args=(job_id, file_path)
+                                args=(job_id, file_path, attenuation)
                             )
                             thread.daemon = True
                             thread.start()

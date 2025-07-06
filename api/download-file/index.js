@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { BlobServiceClient } = require('@azure/storage-blob');
+const SASTokenManager = require('../shared/sasTokenManager');
 
 module.exports = async function (context, req) {
     context.log('Download endpoint called');
@@ -118,19 +119,35 @@ module.exports = async function (context, req) {
                 return;
             }
             
-            // Generate SAS token for direct download (valid for 1 hour)
-            const sasOptions = {
+            // Get current user for tracking
+            const clientPrincipal = req.headers['x-ms-client-principal'];
+            let userId = null;
+            if (clientPrincipal) {
+                const user = JSON.parse(Buffer.from(clientPrincipal, 'base64').toString());
+                userId = user.userId;
+            }
+            
+            // Initialize SAS Token Manager
+            const sasManager = new SASTokenManager(
+                process.env.AzureWebJobsStorage,
+                process.env.COSMOS_CONNECTION_STRING
+            );
+            
+            // Get client IP for SAS restriction (Rule #3)  
+            const clientIP = SASTokenManager.getClientIP(req);
+            
+            // Generate secure SAS token for download
+            const sasResult = await sasManager.generateSASToken({
                 containerName: 'processed',
                 blobName: blobName,
-                permissions: BlobSASPermissions.parse('r'), // read permission
-                startsOn: new Date(),
-                expiresOn: new Date(new Date().valueOf() + 3600 * 1000), // 1 hour from now
-            };
+                permissions: 'r', // read-only (Rule #2)
+                expiryMinutes: 10, // Very short-lived for downloads (Rule #2)
+                clientIP: clientIP, // IP restriction if available (Rule #3)
+                userId: userId, // For tracking and revocation (Rule #5)
+                context: context
+            });
             
-            const sasToken = generateBlobSASQueryParameters(sasOptions, sharedKeyCredential).toString();
-            const sasUrl = `${blobClient.url}?${sasToken}`;
-            
-            context.log(`Generated SAS URL for blob: ${blobName}`);
+            const sasUrl = `${blobClient.url}?${sasResult.sasToken}`;
             
             // Redirect to the SAS URL for direct download
             context.res = {
