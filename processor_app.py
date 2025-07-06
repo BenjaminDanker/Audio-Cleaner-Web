@@ -8,26 +8,16 @@ import threading
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create Flask app for health checks
+# Create Flask app
 app = Flask(__name__)
 processor = None
-
-@app.route('/health')
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        "status": "healthy",
-        "service": "audio-cleaner-processor",
-        "version": "1.0.0"
-    })
 
 @app.route('/')
 def root():
     """Root endpoint"""
     return jsonify({
-        "service": "Audio Cleaner Processor",
-        "status": "running",
-        "endpoints": ["/health"]
+        "service": "Audio Cleaner Processor", 
+        "status": "running"
     })
 
 def run_processor():

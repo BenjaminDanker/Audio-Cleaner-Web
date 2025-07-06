@@ -108,7 +108,6 @@ Key environment variables:
 
 - Application Insights for telemetry
 - Log Analytics for centralized logging
-- Health checks and metrics
 
 ## 🤝 Contributing
 

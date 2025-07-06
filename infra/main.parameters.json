@@ -9,7 +9,7 @@
             "value": "${AZURE_LOCATION}"
         },
         "resourceGroupName": {
-            "value": "${AZURE_RESOURCE_GROUP}"
+            "value": "rg-${AZURE_ENV_NAME}"
         }
     }
 }

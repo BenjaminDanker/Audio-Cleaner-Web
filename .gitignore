@@ -96,9 +96,6 @@ coverage/
 # nyc test coverage
 .nyc_output
 
-# Docker
-.dockerignore
-
 # Local development
 dev-processes.json
 c:/azurite/

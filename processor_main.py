@@ -8,7 +8,6 @@ from pathlib import Path
 from azure.servicebus.aio import ServiceBusClient
 from azure.storage.blob import BlobServiceClient
 from azure.cosmos import CosmosClient
-from azure.identity import DefaultAzureCredential
 from video_handler import VideoProcessor
 import traceback
 
@@ -18,8 +17,14 @@ logger = logging.getLogger(__name__)
 
 class AudioCleanerProcessor:
     def __init__(self):
-        # Initialize Azure clients
-        self.credential = DefaultAzureCredential()
+        # Only initialize DefaultAzureCredential if explicitly requested (e.g., in Azure)
+        self.credential = None
+        if os.getenv('USE_MANAGED_IDENTITY', '').lower() == 'true':
+            from azure.identity import DefaultAzureCredential
+            self.credential = DefaultAzureCredential()
+            logger.info("Using DefaultAzureCredential for Azure authentication.")
+        else:
+            logger.info("Skipping DefaultAzureCredential; using connection strings for local development.")
         
         # Service Bus
         self.service_bus_connection = os.getenv('AZURE_SERVICE_BUS_CONNECTION_STRING')
@@ -226,10 +231,6 @@ class AudioCleanerProcessor:
         except Exception as e:
             logger.error(f"Error updating job status: {e}")
             # Don't raise here as it's not critical for processing
-
-    async def health_check(self):
-        """Health check endpoint"""
-        return {"status": "healthy", "timestamp": time.time()}
 
 async def main():
     """Main entry point"""

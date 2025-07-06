@@ -22,6 +22,9 @@ param cosmosAccountName string
 @description('Service Bus namespace name')
 param serviceBusNamespaceName string
 
+@description('Log Analytics workspace name')
+param logAnalyticsWorkspaceName string
+
 // Get existing resources
 resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' existing = {
   name: storageAccountName
@@ -41,6 +44,10 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-04-15' existi
 
 resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' existing = {
   name: serviceBusNamespaceName
+}
+
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2021-12-01-preview' existing = {
+  name: logAnalyticsWorkspaceName
 }
 
 // Create hosting plan for Functions
@@ -200,7 +207,11 @@ resource serviceBusSenderRoleAssignment 'Microsoft.Authorization/roleAssignments
   properties: {
     roleDefinitionId: serviceBusDataSender.id
     principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
   }
+  dependsOn: [
+    functionApp
+  ]
 }
 
 resource serviceBusReceiverRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
@@ -209,6 +220,31 @@ resource serviceBusReceiverRoleAssignment 'Microsoft.Authorization/roleAssignmen
   properties: {
     roleDefinitionId: serviceBusDataReceiver.id
     principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+  dependsOn: [
+    functionApp
+  ]
+}
+
+// Add diagnostic settings for Function App
+resource functionAppDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  scope: functionApp
+  name: 'functionapp-diagnostics'
+  properties: {
+    workspaceId: logAnalyticsWorkspace.id
+    logs: [
+      {
+        category: 'FunctionAppLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 

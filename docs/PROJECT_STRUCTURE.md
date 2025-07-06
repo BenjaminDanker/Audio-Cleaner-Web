@@ -51,8 +51,7 @@ d:\Coding\Python\Audio-Cleaner-Web\
 │
 ├── scripts/                       # Development scripts
 │   ├── start-dev.ps1             # Start development environment
-│   ├── stop-dev.ps1              # Stop development environment
-│   └── health-check.ps1          # Health check script
+│   └── stop-dev.ps1              # Stop development environment
 │
 ├── .github/                       # GitHub Actions workflows
 │   └── workflows/
@@ -137,12 +136,6 @@ d:\Coding\Python\Audio-Cleaner-Web\
    scripts\stop-dev.ps1
    ```
 
-#### Health Check
-Run the health check script to verify everything is working:
-```powershell
-scripts\health-check.ps1
-```
-
 ## API Endpoints
 
 - `GET/POST /api/auth` - Authentication
@@ -174,8 +167,6 @@ See `.env.local.example` for required environment variables. Copy to `.env.local
 2. **Frontend build errors**: Ensure all dependencies are installed
 3. **Port conflicts**: Stop other services using ports 7071 or 5173
 4. **Azure Functions errors**: Check local.settings.json configuration
-
-For more detailed troubleshooting, run `scripts\health-check.ps1`.
 
 ## Next Steps
 

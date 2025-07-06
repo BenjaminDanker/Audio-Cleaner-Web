@@ -206,17 +206,6 @@ class LocalProcessor:
 # Global processor instance
 processor = None
 
-@app.route('/health')
-def health_check():
-    """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'service': 'local-processor',
-        'timestamp': datetime.now().isoformat(),
-        'jobs_dir': str(Path("api/temp/jobs").resolve()),
-        'running': processor.running if processor else False
-    })
-
 @app.route('/jobs')
 def list_jobs():
     """List all jobs and their statuses"""

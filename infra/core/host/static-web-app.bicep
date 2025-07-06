@@ -7,12 +7,6 @@ param location string = resourceGroup().location
 @description('Tags to apply to all resources')
 param tags object = {}
 
-@description('GitHub repository URL')
-param repositoryUrl string
-
-@description('GitHub branch')
-param branch string = 'main'
-
 @description('Function App URL for API backend')
 param functionAppUrl string
 
@@ -27,16 +21,15 @@ resource staticWebApp 'Microsoft.Web/staticSites@2022-09-01' = {
     tier: 'Standard'
   }
   properties: {
-    repositoryUrl: repositoryUrl
-    branch: branch
     buildProperties: {
       appLocation: '/frontend'
-      apiLocation: '/api'
+      apiLocation: ''
       outputLocation: 'dist'
+      appBuildCommand: 'npm run build'
+      apiBuildCommand: ''
     }
     stagingEnvironmentPolicy: 'Enabled'
     allowConfigFileUpdates: true
-    provider: 'GitHub'
     enterpriseGradeCdnStatus: 'Disabled'
   }
 }

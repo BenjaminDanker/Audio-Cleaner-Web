@@ -58,19 +58,41 @@ const VideoUpload = ({ onJobCreated }) => {
     setUploadProgress(0)
 
     try {
-      // Step 1: Upload file to Azure Blob Storage
-      const formData = new FormData()
-      formData.append('file', selectedFile)
+      // Check if we're in local development
+      const isLocalDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
       
-      const uploadResponse = await axios.post('/api/upload-file', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        },
-        onUploadProgress: (progressEvent) => {
-          const progress = Math.round((progressEvent.loaded / progressEvent.total) * 80) // 80% for upload
-          setUploadProgress(progress)
-        }
-      })
+      let uploadResponse
+      
+      if (isLocalDev) {
+        // Local development: Direct blob simulation - just call the upload API without multipart
+        setUploadProgress(30)
+        
+        uploadResponse = await axios.post('/api/upload-file', {
+          fileName: selectedFile.name,
+          fileSize: selectedFile.size,
+          mockUpload: true
+        }, {
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        })
+        
+        setUploadProgress(80)
+      } else {
+        // Production: Use actual FormData upload to Azure Blob Storage
+        const formData = new FormData()
+        formData.append('file', selectedFile)
+        
+        uploadResponse = await axios.post('/api/upload-file', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          },
+          onUploadProgress: (progressEvent) => {
+            const progress = Math.round((progressEvent.loaded / progressEvent.total) * 80)
+            setUploadProgress(progress)
+          }
+        })
+      }
 
       if (!uploadResponse.data.success) {
         throw new Error(uploadResponse.data.error || 'File upload failed')

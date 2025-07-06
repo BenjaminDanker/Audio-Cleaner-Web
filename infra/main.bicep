@@ -12,12 +12,6 @@ param location string
 @description('Name of the resource group. If empty, a name will be generated.')
 param resourceGroupName string = ''
 
-@description('GitHub repository URL')
-param repositoryUrl string = ''
-
-@description('GitHub branch')
-param branch string = 'main'
-
 // Optional parameters for customization
 @description('Tags to apply to all resources')
 param tags object = {}
@@ -97,6 +91,7 @@ module functionApp './core/host/function-app.bicep' = {
     keyVaultName: keyVault.outputs.name
     cosmosAccountName: cosmos.outputs.cosmosAccountName
     serviceBusNamespaceName: serviceBus.outputs.serviceBusNamespaceName
+    logAnalyticsWorkspaceName: monitoring.outputs.logAnalyticsWorkspaceName
   }
 }
 
@@ -107,8 +102,6 @@ module staticWebApp './core/host/static-web-app.bicep' = {
     location: location
     tags: tags
     staticWebAppName: '${abbrs.webStaticSites}${resourceToken}'
-    repositoryUrl: repositoryUrl
-    branch: branch
     functionAppUrl: functionApp.outputs.functionAppUrl
   }
 }
@@ -147,6 +140,7 @@ module processorContainerApp './app/processor.bicep' = {
     applicationInsightsName: monitoring.outputs.applicationInsightsName
     storageAccountName: storage.outputs.name
     serviceBusNamespaceName: serviceBus.outputs.serviceBusNamespaceName
+    cosmosAccountName: cosmos.outputs.cosmosAccountName
   }
 }
 

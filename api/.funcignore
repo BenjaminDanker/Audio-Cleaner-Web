@@ -1,0 +1,118 @@
+# Azure Functions ignore file for api/ directory
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# Node.js logs (but NOT node_modules - we need that for deployment)
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build outputs
+dist/
+build/
+.next/
+
+# Documentation
+*.md
+README*
+docs/
+.github/
+
+# Git and version control
+.git/
+.gitignore
+.gitattributes
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vs/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Test files
+test/
+tests/
+*.test.js
+*.spec.js
+.coverage
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+.nyc_output/
+coverage/
+
+# Local development files
+temp/
+uploads/
+downloads/
+video/
+local-dev/
+dev-processes.json
+
+# Environment files (sensitive data)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Azure development files
+.azure/
+azd-hooks/
+
+# Log files
+*.log
+logs/
+
+# Infrastructure and deployment files
+infra/
+scripts/
+azure.yaml
+swa-cli.config.json
+Dockerfile
+.dockerignore
+
+# Frontend files (not needed in Functions)
+frontend/
+
+# Python processor files (not needed in Functions)
+processor_*.py
+local_processor.py
+models/
+
+# Media files
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.mkv
+**/*.wav
+**/*.mp3
+
+# Backup and temporary files
+**/*.bak
+**/*.tmp
+**/*.temp
+**/*~
+
+# Package management files (keep these for proper dependency installation)
+# package-lock.json should be included for Azure Functions
+# yarn.lock

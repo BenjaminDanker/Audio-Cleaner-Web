@@ -63,7 +63,7 @@ audio-cleaner-web/
 ├── models/DeepFilterNet3/  # AI model files
 ├── Dockerfile             # AI service container
 ├── processor_main.py      # Service Bus processor
-├── processor_app.py       # Health check endpoint
+├── processor_app.py       # Flask app wrapper
 ├── azure.yaml            # Azure Developer CLI config
 └── requirements.txt      # Python dependencies
 ```

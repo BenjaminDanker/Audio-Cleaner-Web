@@ -169,15 +169,6 @@ app.post('/api/upload-file', upload.single('file'), async (req, res) => {
 });
 app.post('/api/webhook-stripe', loadFunction('./webhook-stripe/index.js'));
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        timestamp: new Date().toISOString(),
-        port: PORT
-    });
-});
-
 // Error handling middleware
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
@@ -187,8 +178,7 @@ app.use((error, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
     console.log(`🚀 API Server running on http://localhost:${PORT}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
-    console.log(`🔧 Available endpoints:`);
+    console.log(` Available endpoints:`);
     console.log(`   GET  /api/auth`);
     console.log(`   POST /api/create-checkout-session`);
     console.log(`   GET  /api/download-file/:filename`);

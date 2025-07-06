@@ -51,9 +51,14 @@ if (Test-Path $processFile) {
     try {
         $processes = Get-Content $processFile | ConvertFrom-Json
         
-        # Stop API job
+        # Stop API job (Azure Functions)
         if ($processes.api) {
-            Stop-BackgroundJob $processes.api "API Server"
+            Stop-BackgroundJob $processes.api "Azure Functions API"
+        }
+        
+        # Stop SWA CLI job
+        if ($processes.swa) {
+            Stop-BackgroundJob $processes.swa "Azure Static Web Apps CLI"
         }
         
         # Stop Processor job
@@ -61,9 +66,9 @@ if (Test-Path $processFile) {
             Stop-BackgroundJob $processes.processor "Processor Service"
         }
         
-        # Stop Frontend job
+        # Stop Frontend job (Vite)
         if ($processes.frontend) {
-            Stop-BackgroundJob $processes.frontend "Frontend Server"
+            Stop-BackgroundJob $processes.frontend "Frontend Vite Server"
         }
         
         # Remove process file
@@ -77,12 +82,13 @@ if (Test-Path $processFile) {
 # Force stop any remaining processes on known ports
 Write-Host "Checking for remaining processes on development ports..." -ForegroundColor Yellow
 Stop-ProcessByPort 7071 "Azure Functions API"
+Stop-ProcessByPort 4280 "Azure Static Web Apps CLI"
 Stop-ProcessByPort 8080 "Python Processor"
 Stop-ProcessByPort 5173 "Vite Frontend"
 Stop-ProcessByPort 3000 "Alternative Frontend"
 
 # Stop any remaining background jobs from this session
-$jobs = Get-Job | Where-Object { $_.Name -like "*dev*" -or $_.Command -like "*func*" -or $_.Command -like "*npm*" }
+$jobs = Get-Job | Where-Object { $_.Name -like "*dev*" -or $_.Command -like "*func*" -or $_.Command -like "*npm*" -or $_.Command -like "*swa*" }
 if ($jobs) {
     Write-Host "Stopping remaining background jobs..." -ForegroundColor Yellow
     $jobs | Stop-Job -ErrorAction SilentlyContinue

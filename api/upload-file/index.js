@@ -12,9 +12,44 @@ module.exports = async function (context, req) {
         const isLocalDev = !clientPrincipal || process.env.AZURE_COSMOS_CONNECTION_STRING?.includes('localhost');
         
         if (isLocalDev) {
-            context.log('Local development mode - saving file locally');
+            context.log('Local development mode - direct blob simulation');
             
-            // Handle Express multer upload
+            // Handle JSON request (simplified local upload)
+            if (req.body && req.body.mockUpload) {
+                const fileName = req.body.fileName || 'test-video.mp4';
+                const fileSize = req.body.fileSize || 0;
+                const testVideoPath = path.resolve('../video/C1395.MP4');
+                const uniqueFileName = `dev-${Date.now()}-${fileName}`;
+                
+                // Copy test video to uploads directory to simulate blob storage
+                const uploadsDir = path.join(process.cwd(), 'temp', 'uploads');
+                try {
+                    await fs.mkdir(uploadsDir, { recursive: true });
+                    const targetPath = path.join(uploadsDir, uniqueFileName);
+                    await fs.copyFile(testVideoPath, targetPath);
+                    
+                    context.res = {
+                        status: 200,
+                        body: {
+                            success: true,
+                            fileName: fileName,
+                            fileUrl: `local://${uniqueFileName}`,
+                            localPath: targetPath,
+                            fileSize: (await fs.stat(targetPath)).size,
+                            message: 'File uploaded successfully (direct blob simulation)'
+                        }
+                    };
+                } catch (error) {
+                    context.log.error('Error in blob simulation:', error);
+                    context.res = {
+                        status: 500,
+                        body: { error: 'Failed to simulate blob upload: ' + error.message }
+                    };
+                }
+                return;
+            }
+            
+            // Handle Express multer upload (when coming through SWA proxy)
             if (req.file) {
                 const fileName = req.file.originalname;
                 const fileSize = req.file.size;
@@ -36,39 +71,37 @@ module.exports = async function (context, req) {
                 return;
             }
             
-            // Fallback for other upload methods
-            const fileName = req.headers['x-file-name'] || 'uploaded-file.mp4';
-            const fileSize = req.headers['content-length'] || 0;
+            // Handle direct Azure Functions request (fallback)
+            context.log('Direct Azure Functions upload request - using mock response');
+            const fileName = req.headers['x-file-name'] || 'test-video.mp4';
+            const testVideoPath = path.resolve('../video/C1395.MP4');  // Go up one level from api folder
+            const uniqueFileName = `dev-${Date.now()}-${fileName}`;
             
-            context.log(`Mock upload: ${fileName}, size: ${fileSize}`);
-            
-            // Create uploads directory if it doesn't exist
+            // Copy test video to uploads directory
             const uploadsDir = path.join(process.cwd(), 'temp', 'uploads');
             try {
                 await fs.mkdir(uploadsDir, { recursive: true });
+                const targetPath = path.join(uploadsDir, uniqueFileName);
+                await fs.copyFile(testVideoPath, targetPath);
+                
+                context.res = {
+                    status: 200,
+                    body: {
+                        success: true,
+                        fileName: fileName,
+                        fileUrl: `local://${uniqueFileName}`,
+                        localPath: targetPath,
+                        fileSize: (await fs.stat(targetPath)).size,
+                        message: 'File uploaded successfully (development mode - using test video)'
+                    }
+                };
             } catch (error) {
-                // Directory might already exist
+                context.log.error('Error copying test video:', error);
+                context.res = {
+                    status: 500,
+                    body: { error: 'Failed to upload file: ' + error.message }
+                };
             }
-            
-            // Generate a unique filename for the mock
-            const uniqueFileName = `dev-${Date.now()}-${fileName}`;
-            const localPath = path.join(uploadsDir, uniqueFileName);
-            
-            // For now, we'll just create a placeholder file and use the test video
-            // In a real implementation, you'd save the actual uploaded file
-            const testVideoPath = path.resolve('video/C1395.MP4');
-            
-            context.res = {
-                status: 200,
-                body: {
-                    success: true,
-                    fileName: fileName,
-                    fileUrl: `local://${uniqueFileName}`,
-                    localPath: testVideoPath, // Use test video for processing
-                    fileSize: fileSize,
-                    message: 'File uploaded successfully (development mode - using test video)'
-                }
-            };
             return;
         }
 

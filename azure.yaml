@@ -7,9 +7,26 @@ metadata:
 variables:
   AZURE_ENV_NAME: "audio-cleaner-${AZURE_ENV_NAME}"
 
+hooks:
+  prepackage:
+    windows:
+      shell: pwsh
+      run: |
+        Write-Host "Building frontend..."
+        cd frontend
+        npm run build
+        cd ..
+    posix:
+      shell: bash
+      run: |
+        echo "Building frontend..."
+        cd frontend
+        npm run build
+        cd ..
+
 services:
   web:
-    project: ./frontend
+    project: ./frontend/dist
     host: staticwebapp
     language: js
 

@@ -22,6 +22,9 @@ param storageAccountName string
 @description('Service Bus namespace name')
 param serviceBusNamespaceName string
 
+@description('Cosmos DB account name')
+param cosmosAccountName string
+
 // Get existing resources
 resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2023-05-01' existing = {
   name: containerAppsEnvironmentName
@@ -41,6 +44,10 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' existing 
 
 resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview' existing = {
   name: serviceBusNamespaceName
+}
+
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-04-15' existing = {
+  name: cosmosAccountName
 }
 
 // Create managed identity for Container App
@@ -93,6 +100,10 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           name: 'servicebus-connection-string'
           value: listKeys('${serviceBusNamespace.id}/authorizationRules/RootManageSharedAccessKey', serviceBusNamespace.apiVersion).primaryConnectionString
         }
+        {
+          name: 'cosmos-connection-string'
+          value: 'AccountEndpoint=https://${cosmosAccount.name}.documents.azure.com:443/;AccountKey=${cosmosAccount.listKeys().primaryMasterKey};'
+        }
       ]
     }
     template: {
@@ -130,6 +141,10 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
             {
               name: 'AZURE_SERVICE_BUS_CONNECTION_STRING'
               secretRef: 'servicebus-connection-string'
+            }
+            {
+              name: 'AZURE_COSMOS_CONNECTION_STRING'
+              secretRef: 'cosmos-connection-string'
             }
             {
               name: 'APPLICATIONINSIGHTS_CONNECTION_STRING'
