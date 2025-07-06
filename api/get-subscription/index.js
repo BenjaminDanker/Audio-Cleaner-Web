@@ -6,7 +6,7 @@ module.exports = async function (context, req) {
     try {
         // Check if we're in local development (no real auth header)
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.AZURE_COSMOS_CONNECTION_STRING?.includes('localhost');
+        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
         
         if (isLocalDev) {
             context.log('Local development mode - returning mock subscription data');
@@ -42,7 +42,7 @@ module.exports = async function (context, req) {
         const userId = principal.userId;
 
         // Initialize Cosmos client
-        const client = new CosmosClient(process.env.AZURE_COSMOS_CONNECTION_STRING);
+        const client = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
         const database = client.database('audiocleaner');
         const container = database.container('subscriptions');
 

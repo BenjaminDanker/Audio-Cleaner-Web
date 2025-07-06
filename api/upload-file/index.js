@@ -1,215 +1,150 @@
-const { BlobServiceClient } = require('@azure/storage-blob');
-const busboy = require('busboy');
+const { BlobServiceClient, BlobSASPermissions, generateBlobSASQueryParameters, StorageSharedKeyCredential } = require('@azure/storage-blob');
 const fs = require('fs').promises;
 const path = require('path');
 
 module.exports = async function (context, req) {
-    context.log('Upload file endpoint called');
-    
+    context.log('Upload file function processed a request.');
     try {
         // Check if we're in local development
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.AZURE_COSMOS_CONNECTION_STRING?.includes('localhost');
+        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
         
         if (isLocalDev) {
-            context.log('Local development mode - direct blob simulation');
+            context.log('Development mode: simulating file upload');
             
-            // Handle JSON request (simplified local upload)
-            if (req.body && req.body.mockUpload) {
-                const fileName = req.body.fileName || 'test-video.mp4';
-                const fileSize = req.body.fileSize || 0;
-                const testVideoPath = path.resolve('../video/C1395.MP4');
-                const uniqueFileName = `dev-${Date.now()}-${fileName}`;
-                
-                // Copy test video to uploads directory to simulate blob storage
-                const uploadsDir = path.join(process.cwd(), 'temp', 'uploads');
-                try {
-                    await fs.mkdir(uploadsDir, { recursive: true });
-                    const targetPath = path.join(uploadsDir, uniqueFileName);
-                    await fs.copyFile(testVideoPath, targetPath);
-                    
-                    context.res = {
-                        status: 200,
-                        body: {
-                            success: true,
-                            fileName: fileName,
-                            fileUrl: `local://${uniqueFileName}`,
-                            localPath: targetPath,
-                            fileSize: (await fs.stat(targetPath)).size,
-                            message: 'File uploaded successfully (direct blob simulation)'
-                        }
-                    };
-                } catch (error) {
-                    context.log.error('Error in blob simulation:', error);
-                    context.res = {
-                        status: 500,
-                        body: { error: 'Failed to simulate blob upload: ' + error.message }
-                    };
+            const { fileName, fileSize } = req.body || {};
+            if (!fileName) {
+                context.res = {
+                    status: 400,
+                    body: { success: false, error: 'fileName is required in development mode' }
+                };
+                return;
+            }
+
+            // Simulate SAS URL generation for development
+            const mockFileUrl = `local://uploads/${Date.now()}_${Math.random().toString(36).substr(2, 5)}.${fileName.split('.').pop()}`;
+            
+            context.res = {
+                status: 200,
+                body: {
+                    success: true,
+                    uploadUrl: mockFileUrl, // This would be the SAS URL in production
+                    blobName: fileName,
+                    fileName: fileName,
+                    fileUrl: mockFileUrl // Final URL after upload
                 }
-                return;
-            }
-            
-            // Handle Express multer upload (when coming through SWA proxy)
-            if (req.file) {
-                const fileName = req.file.originalname;
-                const fileSize = req.file.size;
-                const filePath = req.file.path;
-                
-                context.log(`File uploaded: ${fileName}, size: ${fileSize}, path: ${filePath}`);
-                
-                context.res = {
-                    status: 200,
-                    body: {
-                        success: true,
-                        fileName: fileName,
-                        fileUrl: `local://${req.file.filename}`,
-                        localPath: filePath,
-                        fileSize: fileSize,
-                        message: 'File uploaded successfully (development mode)'
-                    }
-                };
-                return;
-            }
-            
-            // Handle direct Azure Functions request (fallback)
-            context.log('Direct Azure Functions upload request - using mock response');
-            const fileName = req.headers['x-file-name'] || 'test-video.mp4';
-            const testVideoPath = path.resolve('../video/C1395.MP4');  // Go up one level from api folder
-            const uniqueFileName = `dev-${Date.now()}-${fileName}`;
-            
-            // Copy test video to uploads directory
-            const uploadsDir = path.join(process.cwd(), 'temp', 'uploads');
-            try {
-                await fs.mkdir(uploadsDir, { recursive: true });
-                const targetPath = path.join(uploadsDir, uniqueFileName);
-                await fs.copyFile(testVideoPath, targetPath);
-                
-                context.res = {
-                    status: 200,
-                    body: {
-                        success: true,
-                        fileName: fileName,
-                        fileUrl: `local://${uniqueFileName}`,
-                        localPath: targetPath,
-                        fileSize: (await fs.stat(targetPath)).size,
-                        message: 'File uploaded successfully (development mode - using test video)'
-                    }
-                };
-            } catch (error) {
-                context.log.error('Error copying test video:', error);
-                context.res = {
-                    status: 500,
-                    body: { error: 'Failed to upload file: ' + error.message }
-                };
-            }
+            };
             return;
         }
 
-        // Production code - verify authentication
+        // Production: Check if user is authenticated
         if (!clientPrincipal) {
             context.res = {
                 status: 401,
-                body: { error: 'Unauthorized - No client principal found' }
+                body: { success: false, error: 'Unauthorized' }
             };
             return;
         }
 
-        // Parse multipart form data
-        const chunks = [];
-        let fileName = '';
-        let fileSize = 0;
+        const user = JSON.parse(Buffer.from(clientPrincipal, 'base64').toString());
+        const userId = user.userId;
 
-        const bb = busboy({
-            headers: req.headers,
-            limits: {
-                fileSize: 500 * 1024 * 1024 // 500MB limit
-            }
-        });
-
-        bb.on('file', (fieldname, file, filename, encoding, mimetype) => {
-            fileName = `${Date.now()}-${filename.filename}`;
-            
-            file.on('data', (data) => {
-                chunks.push(data);
-                fileSize += data.length;
-            });
-        });
-
-        bb.on('close', async () => {
-            try {
-                if (chunks.length === 0) {
-                    context.res = {
-                        status: 400,
-                        body: { error: 'No file data received' }
-                    };
-                    return;
-                }
-
-                // Combine all chunks
-                const fileBuffer = Buffer.concat(chunks);
-
-                // Upload to Azure Blob Storage
-                const blobServiceClient = BlobServiceClient.fromConnectionString(
-                    process.env.AzureWebJobsStorage
-                );
-                
-                const containerClient = blobServiceClient.getContainerClient('uploads');
-                
-                // Ensure container exists
-                await containerClient.createIfNotExists({
-                    access: 'blob'
-                });
-                
-                const blockBlobClient = containerClient.getBlockBlobClient(fileName);
-                
-                // Upload the file
-                await blockBlobClient.upload(fileBuffer, fileBuffer.length, {
-                    blobHTTPHeaders: {
-                        blobContentType: 'video/mp4'
-                    }
-                });
-
-                const fileUrl = blockBlobClient.url;
-
-                context.res = {
-                    status: 200,
-                    body: {
-                        success: true,
-                        fileName: fileName,
-                        fileUrl: fileUrl,
-                        fileSize: fileSize,
-                        message: 'File uploaded successfully'
-                    }
-                };
-
-            } catch (uploadError) {
-                context.log.error('Upload error:', uploadError);
-                context.res = {
-                    status: 500,
-                    body: { error: 'File upload failed: ' + uploadError.message }
-                };
-            }
-        });
-
-        bb.on('error', (error) => {
-            context.log.error('Busboy error:', error);
+        // Handle SAS token request for direct blob upload
+        const { fileName, fileSize } = req.body || {};
+        
+        if (!fileName) {
             context.res = {
                 status: 400,
-                body: { error: 'Invalid file format: ' + error.message }
+                body: { success: false, error: 'fileName is required' }
             };
-        });
-
-        // Write the request body to busboy
-        if (req.body) {
-            bb.write(req.body);
+            return;
         }
-        bb.end();
+
+        // Validate file size (optional - Azure Blob Storage can handle very large files)
+        const maxFileSize = 2 * 1024 * 1024 * 1024; // 2GB
+        if (fileSize && fileSize > maxFileSize) {
+            context.res = {
+                status: 413,
+                body: { 
+                    success: false, 
+                    error: `File size ${Math.round(fileSize / 1024 / 1024)}MB exceeds maximum allowed size of ${maxFileSize / 1024 / 1024}MB` 
+                }
+            };
+            return;
+        }
+
+        // Create blob service client
+        const connectionString = process.env.AzureWebJobsStorage;
+        if (!connectionString) {
+            throw new Error('Storage connection string not configured');
+        }
+
+        const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+        const containerClient = blobServiceClient.getContainerClient('uploads');
+
+        // Ensure container exists (private container by default)
+        await containerClient.createIfNotExists();
+
+        // Generate unique blob name
+        const timestamp = Date.now();
+        const randomId = Math.random().toString(36).substr(2, 5);
+        const fileExtension = fileName.split('.').pop();
+        const blobName = `${userId}/${timestamp}_${randomId}.${fileExtension}`;
+
+        const blobClient = containerClient.getBlobClient(blobName);
+        const blockBlobClient = blobClient.getBlockBlobClient();
+
+        // Extract account name and key from connection string for SAS generation
+        const accountName = connectionString.match(/AccountName=([^;]*)/)[1];
+        const accountKey = connectionString.match(/AccountKey=([^;]*)/)[1];
+        
+        const sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
+        
+        const sasOptions = {
+            containerName: 'uploads',
+            blobName: blobName,
+            permissions: BlobSASPermissions.parse('cw'), // create and write permissions
+            startsOn: new Date(new Date().valueOf() - 5 * 60 * 1000), // 5 minutes ago to account for clock skew
+            expiresOn: new Date(new Date().valueOf() + 60 * 60 * 1000) // 1 hour from now
+        };
+
+        const sasToken = generateBlobSASQueryParameters(sasOptions, sharedKeyCredential).toString();
+        const uploadUrl = `${blockBlobClient.url}?${sasToken}`;
+
+        // Log for debugging
+        context.log(`Generated SAS URL for blob: ${blobName}`);
+        context.log(`Upload URL domain: ${new URL(uploadUrl).hostname}`);
+
+        context.res = {
+            status: 200,
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-ms-blob-type'
+            },
+            body: {
+                success: true,
+                uploadUrl: uploadUrl,
+                blobName: blobName,
+                fileName: fileName,
+                fileUrl: blockBlobClient.url, // This will be the final URL after upload
+                debug: {
+                    containerName: 'uploads',
+                    storageAccount: accountName,
+                    sasExpiry: new Date(new Date().valueOf() + 60 * 60 * 1000).toISOString()
+                }
+            }
+        };
 
     } catch (error) {
-        context.log.error('Error uploading file:', error);
+        context.log.error('Upload file error:', error);
         context.res = {
             status: 500,
-            body: { error: 'Internal server error: ' + error.message }
+            body: { 
+                success: false, 
+                error: error.message || 'Internal server error' 
+            }
         };
     }
 };

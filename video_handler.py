@@ -5,11 +5,15 @@ import subprocess
 import tempfile
 import time
 import threading
+import logging
 from pathlib import Path
 
 import imageio_ffmpeg
 from df.enhance import enhance, init_df, load_audio, save_audio
 from moviepy.video.io.VideoFileClip import VideoFileClip
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Constants moved from processing.py
 AUDIO_BITRATE_AAC = "320k"
@@ -48,21 +52,98 @@ class VideoProcessor:
             "-map", "0:v", "-map", "0:a?", "-c", "copy",
             "-movflags", "+faststart", str(out_path),
         ]
-        subprocess.run(cmd, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
-        return str(out_path)
+        
+        try:
+            result = subprocess.run(cmd, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
+            return str(out_path)
+        except subprocess.CalledProcessError as e:
+            # Log the actual FFmpeg error for debugging
+            logger.error(f"FFmpeg remux failed with stderr: {e.stderr}")
+            logger.error(f"FFmpeg remux failed with stdout: {e.stdout}")
+            
+            # Try a more compatible remux without ignore_editlist
+            logger.info("Retrying remux without ignore_editlist flag")
+            cmd_fallback = [
+                ffmpeg, "-y", "-i", source_path,
+                "-map", "0:v", "-map", "0:a?", "-c", "copy",
+                "-movflags", "+faststart", str(out_path),
+            ]
+            
+            try:
+                result = subprocess.run(cmd_fallback, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
+                return str(out_path)
+            except subprocess.CalledProcessError as e2:
+                logger.error(f"FFmpeg fallback remux also failed with stderr: {e2.stderr}")
+                logger.error(f"FFmpeg fallback remux also failed with stdout: {e2.stdout}")
+                
+                # Try transcoding the audio to a compatible format
+                logger.info("Trying to transcode audio to compatible format")
+                cmd_transcode = [
+                    ffmpeg, "-y", "-i", source_path,
+                    "-map", "0:v", "-map", "0:a?", 
+                    "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                    "-movflags", "+faststart", str(out_path),
+                ]
+                
+                try:
+                    result = subprocess.run(cmd_transcode, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
+                    logger.info("Successfully transcoded audio to AAC")
+                    return str(out_path)
+                except subprocess.CalledProcessError as e3:
+                    logger.error(f"Audio transcoding also failed: {e3.stderr}")
+                    
+                    # If all FFmpeg attempts fail, try to return the original file
+                    logger.warning("All remux attempts failed, using original file directly")
+                    return source_path
 
     def _extract_audio(self, video_path: str, temp_dir: str) -> str:
         audio_path = os.path.join(temp_dir, "temp_original_audio.wav")
-        clip = VideoFileClip(video_path)
+        logger.info(f"Extracting audio from {video_path} to {audio_path}")
+        
+        # Try moviepy first
+        clip = None
         try:
+            clip = VideoFileClip(video_path)
             if clip.audio is None:
+                logger.error("No audio track found in video")
                 raise ValueError("No audio track found.")
+            logger.info(f"Audio track found, duration: {clip.audio.duration}s")
             clip.audio.write_audiofile(audio_path, codec="pcm_s16le", logger=None)
             if not os.path.exists(audio_path):
+                logger.error("Audio extraction failed - output file not created")
                 raise FileNotFoundError("Audio extraction failed.")
+            logger.info(f"Audio extraction successful: {audio_path}")
             return audio_path
+        except Exception as e:
+            logger.error(f"MoviePy audio extraction failed: {e}")
+            
+            # Try direct FFmpeg extraction as fallback
+            logger.info("Attempting direct FFmpeg audio extraction")
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                logger.error("FFmpeg not found")
+                raise
+                
+            cmd = [
+                ffmpeg, "-y", "-i", video_path,
+                "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                audio_path
+            ]
+            
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+                if os.path.exists(audio_path):
+                    logger.info(f"FFmpeg audio extraction successful: {audio_path}")
+                    return audio_path
+                else:
+                    logger.error("FFmpeg audio extraction failed - no output file")
+                    raise FileNotFoundError("FFmpeg audio extraction failed")
+            except subprocess.CalledProcessError as e2:
+                logger.error(f"FFmpeg audio extraction failed: {e2.stderr}")
+                raise
         finally:
-            clip.close()
+            if clip:
+                clip.close()
 
     def _enhance_audio(self, audio_path: str, atten_lim_db: int | None):
         audio, _ = load_audio(audio_path, sr=self.df_state.sr())
@@ -82,7 +163,28 @@ class VideoProcessor:
             "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE_AAC,
             "-shortest", output_video,
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
+        
+        try:
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg audio replacement failed with stderr: {e.stderr}")
+            logger.error(f"FFmpeg audio replacement failed with stdout: {e.stdout}")
+            
+            # Try fallback without ignore_editlist
+            logger.info("Retrying audio replacement without ignore_editlist flag")
+            cmd_fallback = [
+                ffmpeg_exe, "-y", "-i", video_input,
+                "-i", new_audio, "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", AUDIO_BITRATE_AAC,
+                "-shortest", output_video,
+            ]
+            
+            try:
+                result = subprocess.run(cmd_fallback, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
+            except subprocess.CalledProcessError as e2:
+                logger.error(f"FFmpeg fallback audio replacement also failed with stderr: {e2.stderr}")
+                logger.error(f"FFmpeg fallback audio replacement also failed with stdout: {e2.stdout}")
+                raise
 
     def process(self):
         """

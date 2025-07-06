@@ -213,7 +213,7 @@ az containerapp update --name your-container-app --resource-group rg-audio-clean
 ### Required for Local Development
 - `AZURE_STORAGE_CONNECTION_STRING`: Connection to Azurite or Azure Storage
 - `AZURE_SERVICE_BUS_CONNECTION_STRING`: Connection to Service Bus
-- `AZURE_COSMOS_CONNECTION_STRING`: Connection to Cosmos DB Emulator or Azure Cosmos DB
+- `COSMOS_CONNECTION_STRING`: Connection to Cosmos DB Emulator or Azure Cosmos DB
 - `STRIPE_SECRET_KEY`: Your Stripe secret key (test mode for development)
 
 ### Required for Production

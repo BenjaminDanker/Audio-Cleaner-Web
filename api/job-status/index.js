@@ -8,7 +8,7 @@ module.exports = async function (context, req) {
     try {
         // Check if we're in local development
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.AZURE_COSMOS_CONNECTION_STRING?.includes('localhost');
+        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
         
         if (isLocalDev) {
             context.log('Local development mode - checking local job status');
@@ -92,7 +92,7 @@ module.exports = async function (context, req) {
         }
 
         // Initialize Cosmos client
-        const client = new CosmosClient(process.env.AZURE_COSMOS_CONNECTION_STRING);
+        const client = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
         const database = client.database('audiocleaner');
         const container = database.container('jobs');
 
@@ -125,7 +125,8 @@ module.exports = async function (context, req) {
                     progress: job.progress || 0,
                     fileName: job.fileName,
                     processingType: job.processingType,
-                    downloadUrl: job.downloadUrl || null,
+                    downloadUrl: job.downloadUrl || job.output_blob_url || null,
+                    output_blob_url: job.output_blob_url || null,
                     message: job.message || 'Processing in progress',
                     createdAt: job.createdAt,
                     updatedAt: job.updatedAt,

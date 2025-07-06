@@ -2,7 +2,7 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { CosmosClient } = require('@azure/cosmos');
 
 // Initialize Cosmos DB client
-const cosmosClient = new CosmosClient(process.env.AZURE_COSMOS_CONNECTION_STRING);
+const cosmosClient = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
 const database = cosmosClient.database('audiocleaner');
 const container = database.container('subscriptions');
 

@@ -58,52 +58,82 @@ const VideoUpload = ({ onJobCreated }) => {
     setUploadProgress(0)
 
     try {
+      // First, get the SAS upload URL from our API
+      setUploadProgress(10)
+      
+      const uploadUrlResponse = await axios.post('/api/upload-file', {
+        fileName: selectedFile.name,
+        fileSize: selectedFile.size
+      }, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+
+      if (!uploadUrlResponse.data.success) {
+        throw new Error(uploadUrlResponse.data.error || 'Failed to get upload URL')
+      }
+
+      const { uploadUrl, fileUrl, blobName } = uploadUrlResponse.data
+      setUploadProgress(20)
+
       // Check if we're in local development
       const isLocalDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
       
-      let uploadResponse
-      
       if (isLocalDev) {
-        // Local development: Direct blob simulation - just call the upload API without multipart
-        setUploadProgress(30)
-        
-        uploadResponse = await axios.post('/api/upload-file', {
-          fileName: selectedFile.name,
-          fileSize: selectedFile.size,
-          mockUpload: true
-        }, {
-          headers: {
-            'Content-Type': 'application/json'
-          }
-        })
-        
+        // Local development: Simulate upload
         setUploadProgress(80)
       } else {
-        // Production: Use actual FormData upload to Azure Blob Storage
-        const formData = new FormData()
-        formData.append('file', selectedFile)
-        
-        uploadResponse = await axios.post('/api/upload-file', formData, {
-          headers: {
-            'Content-Type': 'multipart/form-data'
-          },
+        // Production: Upload directly to Azure Blob Storage using the SAS URL
+        const config = {
           onUploadProgress: (progressEvent) => {
-            const progress = Math.round((progressEvent.loaded / progressEvent.total) * 80)
+            const progress = 20 + Math.round((progressEvent.loaded / progressEvent.total) * 60)
+            setUploadProgress(progress)
+          },
+          headers: {
+            'x-ms-blob-type': 'BlockBlob'
+          }
+        }
+        
+        // Use XMLHttpRequest directly to avoid Axios CORS complications
+        const xhr = new XMLHttpRequest()
+        
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            const progress = 20 + Math.round((e.loaded / e.total) * 60)
             setUploadProgress(progress)
           }
         })
+        
+        await new Promise((resolve, reject) => {
+          xhr.onload = () => {
+            if (xhr.status >= 200 && xhr.status < 300) {
+              resolve(xhr.response)
+            } else {
+              reject(new Error(`Upload failed with status ${xhr.status}: ${xhr.statusText}`))
+            }
+          }
+          
+          xhr.onerror = () => reject(new Error('Network error during upload'))
+          xhr.ontimeout = () => reject(new Error('Upload timeout'))
+          
+          xhr.open('PUT', uploadUrl)
+          xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob')
+          
+          // Set content type if available
+          if (selectedFile.type) {
+            xhr.setRequestHeader('Content-Type', selectedFile.type)
+          }
+          
+          xhr.send(selectedFile)
+        })
       }
 
-      if (!uploadResponse.data.success) {
-        throw new Error(uploadResponse.data.error || 'File upload failed')
-      }
-
-      const { fileUrl, fileName } = uploadResponse.data
       setUploadProgress(85)
 
-      // Step 2: Create processing job
+      // Step 2: Create processing job using the blob info
       const jobData = {
-        fileName: fileName,
+        fileName: blobName,
         fileUrl: fileUrl,
         processingType: 'denoise'
       }
@@ -137,6 +167,17 @@ const VideoUpload = ({ onJobCreated }) => {
       }
     } catch (error) {
       console.error('Upload failed:', error)
+      
+      // Clean up any partial blob upload if it exists
+      if (uploadUrl && blobName) {
+        try {
+          await axios.delete(uploadUrl)
+          console.log('Cleaned up partial blob upload')
+        } catch (cleanupError) {
+          console.warn('Failed to cleanup partial blob:', cleanupError)
+        }
+      }
+      
       alert('Upload failed: ' + (error.response?.data?.error || error.message))
       setUploadProgress(0) // Reset on error
     } finally {

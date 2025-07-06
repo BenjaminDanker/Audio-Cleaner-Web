@@ -32,6 +32,71 @@ const Dashboard = () => {
     localStorage.setItem('audio_cleaner_jobs', JSON.stringify(updatedJobs))
   }
 
+  const deleteJob = async (jobId) => {
+    if (!window.confirm('Are you sure you want to delete this job? This will permanently delete the job record and associated files.')) {
+      return
+    }
+
+    try {
+      const response = await fetch(`/api/clear-jobs?jobId=${jobId}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      const result = await response.json()
+      
+      if (result.success) {
+        const updatedJobs = jobs.filter(job => job.id !== jobId)
+        setJobs(updatedJobs)
+        localStorage.setItem('audio_cleaner_jobs', JSON.stringify(updatedJobs))
+        alert('Job deleted successfully')
+      } else {
+        alert(`Error deleting job: ${result.error}`)
+      }
+    } catch (error) {
+      console.error('Error deleting job:', error)
+      alert('Error deleting job. Please try again.')
+    }
+  }
+
+  const clearAllJobs = async () => {
+    if (!window.confirm('Are you sure you want to clear all jobs? This will permanently delete all job records.')) {
+      return
+    }
+
+    try {
+      const response = await fetch('/api/clear-jobs', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+      }
+
+      const result = await response.json()
+      
+      if (result.success) {
+        setJobs([])
+        localStorage.removeItem('audio_cleaner_jobs')
+        alert(`Successfully cleared ${result.deletedCount} jobs`)
+      } else {
+        alert(`Error clearing jobs: ${result.error}`)
+      }
+    } catch (error) {
+      console.error('Error clearing jobs:', error)
+      alert('Error clearing jobs. Please try again.')
+    }
+  }
+
   return (
     <div className="dashboard">
       <div className="dashboard-header">
@@ -67,7 +132,18 @@ const Dashboard = () => {
         
         {activeTab === 'jobs' && (
           <div className="jobs-container">
-            <h2>Processing Jobs</h2>
+            <div className="jobs-header">
+              <h2>Processing Jobs</h2>
+              {jobs.length > 0 && (
+                <button 
+                  className="clear-jobs-btn"
+                  onClick={clearAllJobs}
+                  title="Clear all your job records and associated files"
+                >
+                  Clear All Jobs
+                </button>
+              )}
+            </div>
             {jobs.length === 0 ? (
               <p className="no-jobs">No jobs yet. Upload a video to get started!</p>
             ) : (
@@ -77,6 +153,7 @@ const Dashboard = () => {
                     key={job.id} 
                     job={job} 
                     onUpdate={(updates) => updateJob(job.id, updates)}
+                    onDelete={() => deleteJob(job.id)}
                   />
                 ))}
               </div>

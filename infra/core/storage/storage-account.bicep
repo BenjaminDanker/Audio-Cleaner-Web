@@ -30,7 +30,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2022-05-01' = {
   }
   properties: {
     minimumTlsVersion: 'TLS1_2'
-    allowBlobPublicAccess: false
+    allowBlobPublicAccess: true
     supportsHttpsTrafficOnly: true
     networkAcls: {
       bypass: 'AzureServices'
@@ -47,7 +47,23 @@ resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2022-05-01
   name: 'default'
   properties: {
     cors: {
-      corsRules: []
+      corsRules: [
+        {
+          allowedOrigins: [
+            'https://nice-hill-026326b10.1.azurestaticapps.net'
+            'https://localhost:3000'
+            'http://localhost:3000'
+            'https://localhost:4280'
+            'http://localhost:4280'
+            'https://localhost:5173'
+            'http://localhost:5173'
+          ]
+          allowedMethods: ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS']
+          allowedHeaders: ['*']
+          exposedHeaders: ['*']
+          maxAgeInSeconds: 3600
+        }
+      ]
     }
     deleteRetentionPolicy: {
       enabled: true
@@ -69,6 +85,77 @@ resource processedContainer 'Microsoft.Storage/storageAccounts/blobServices/cont
   name: 'processed'
   properties: {
     publicAccess: 'None'
+  }
+}
+
+// Lifecycle management policy to automatically clean up old blobs
+resource lifecyclePolicy 'Microsoft.Storage/storageAccounts/managementPolicies@2022-05-01' = {
+  parent: storageAccount
+  name: 'default'
+  properties: {
+    policy: {
+      rules: [
+        {
+          name: 'cleanupUploads'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: ['blockBlob']
+              prefixMatch: ['uploads/']
+            }
+            actions: {
+              baseBlob: {
+                delete: {
+                  daysAfterModificationGreaterThan: 7 // Delete uploads after 7 days
+                }
+              }
+            }
+          }
+        }
+        {
+          name: 'cleanupProcessed'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: ['blockBlob']
+              prefixMatch: ['processed/']
+            }
+            actions: {
+              baseBlob: {
+                tierToCool: {
+                  daysAfterModificationGreaterThan: 30 // Move to cool storage after 30 days
+                }
+                tierToArchive: {
+                  daysAfterModificationGreaterThan: 90 // Move to archive after 90 days
+                }
+                delete: {
+                  daysAfterModificationGreaterThan: 365 // Delete after 1 year
+                }
+              }
+            }
+          }
+        }
+        {
+          name: 'cleanupOrphanedBlobs'
+          enabled: true
+          type: 'Lifecycle'
+          definition: {
+            filters: {
+              blobTypes: ['blockBlob']
+            }
+            actions: {
+              baseBlob: {
+                delete: {
+                  daysAfterModificationGreaterThan: 30 // Delete any blob older than 30 days
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
   }
 }
 

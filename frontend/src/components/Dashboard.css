@@ -56,9 +56,39 @@
   text-align: center;
 }
 
+.jobs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  max-width: 800px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.jobs-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .jobs-container h2 {
   color: #333;
-  margin-bottom: 1.5rem;
+  margin: 0;
+}
+
+.clear-jobs-btn {
+  background-color: #dc3545;
+  color: white;
+  border: none;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: background-color 0.3s ease;
+}
+
+.clear-jobs-btn:hover {
+  background-color: #c82333;
 }
 
 .no-jobs {

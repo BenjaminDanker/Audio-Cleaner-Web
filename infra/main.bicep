@@ -103,6 +103,7 @@ module staticWebApp './core/host/static-web-app.bicep' = {
     tags: tags
     staticWebAppName: '${abbrs.webStaticSites}${resourceToken}'
     functionAppUrl: functionApp.outputs.functionAppUrl
+    functionAppId: functionApp.outputs.functionAppId
   }
 }
 

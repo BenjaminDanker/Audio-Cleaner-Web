@@ -40,20 +40,25 @@ export const AuthProvider = ({ children }) => {
       } else {
         // Use Static Web Apps built-in authentication in production
         try {
-          const response = await axios.get('/.auth/me')
+          const response = await axios.get('/.auth/me', {
+            timeout: 5000 // 5 second timeout
+          })
           
-          if (response.data.clientPrincipal) {
+          if (response.data.clientPrincipal && response.data.clientPrincipal.userId) {
             const principal = response.data.clientPrincipal
             setUser({
               id: principal.userId,
               email: principal.userDetails,
-              name: principal.userDetails
+              name: principal.userDetails || principal.userRoles?.[0] || 'User'
             })
             await fetchSubscription()
+          } else {
+            // No authenticated user
+            setUser(null)
           }
         } catch (authError) {
+          console.error('Auth endpoint failed:', authError)
           // If auth endpoint fails, user is not authenticated
-          console.log('User not authenticated')
           setUser(null)
         }
       }
@@ -69,6 +74,9 @@ export const AuthProvider = ({ children }) => {
           email: 'dev@example.com',
           name: 'Development User'
         })
+        await fetchSubscription()
+      } else {
+        setUser(null)
       }
     } finally {
       setLoading(false)
@@ -102,7 +110,6 @@ export const AuthProvider = ({ children }) => {
       return { success: true }
     } else {
       // For Static Web Apps, redirect to the built-in login
-      // Remove the period to make it compatible with Azure Functions routing
       window.location.href = '/.auth/login/aad'
       return { success: true }
     }

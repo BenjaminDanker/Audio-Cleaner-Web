@@ -117,6 +117,22 @@ resource functionApp 'Microsoft.Web/sites@2022-09-01' = {
           value: 'node'
         }
         {
+          name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
+          value: 'true'
+        }
+        {
+          name: 'ENABLE_ORYX_BUILD'
+          value: 'true'
+        }
+        {
+          name: 'WEBSITE_RUN_FROM_PACKAGE'
+          value: '0'
+        }
+        {
+          name: 'WEBSITE_ENABLE_SYNC_UPDATE_SITE'
+          value: 'true'
+        }
+        {
           name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
           value: applicationInsights.properties.InstrumentationKey
         }
@@ -129,7 +145,7 @@ resource functionApp 'Microsoft.Web/sites@2022-09-01' = {
           value: 'AccountEndpoint=${cosmosAccount.properties.documentEndpoint};AccountKey=${cosmosAccount.listKeys().primaryMasterKey}'
         }
         {
-          name: 'SERVICE_BUS_CONNECTION_STRING'
+          name: 'AZURE_SERVICE_BUS_CONNECTION_STRING'
           value: listKeys('${serviceBusNamespace.id}/authorizationRules/RootManageSharedAccessKey', serviceBusNamespace.apiVersion).primaryConnectionString
         }
         {
@@ -227,6 +243,79 @@ resource serviceBusReceiverRoleAssignment 'Microsoft.Authorization/roleAssignmen
   ]
 }
 
+// Grant Function App access to Storage Account
+resource storageBlobDataContributor 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: 'ba92f5b4-2d11-453d-a403-e96b0029c9fe' // Storage Blob Data Contributor
+}
+
+resource storageQueueDataContributor 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: '974c5e8b-45b9-4653-ba55-5f855dd0fb88' // Storage Queue Data Contributor
+}
+
+resource storageTableDataContributor 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3' // Storage Table Data Contributor
+}
+
+resource monitoringMetricsPublisher 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: '3913510d-42f4-4e42-8a64-420c390055eb' // Monitoring Metrics Publisher
+}
+
+resource storageBlobRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(functionAppManagedIdentity.id, storageAccount.id, storageBlobDataContributor.id)
+  properties: {
+    roleDefinitionId: storageBlobDataContributor.id
+    principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+  dependsOn: [
+    functionApp
+  ]
+}
+
+resource storageQueueRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(functionAppManagedIdentity.id, storageAccount.id, storageQueueDataContributor.id)
+  properties: {
+    roleDefinitionId: storageQueueDataContributor.id
+    principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+  dependsOn: [
+    functionApp
+  ]
+}
+
+resource storageTableRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(functionAppManagedIdentity.id, storageAccount.id, storageTableDataContributor.id)
+  properties: {
+    roleDefinitionId: storageTableDataContributor.id
+    principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+  dependsOn: [
+    functionApp
+  ]
+}
+
+resource monitoringMetricsRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: resourceGroup()
+  name: guid(functionAppManagedIdentity.id, resourceGroup().id, monitoringMetricsPublisher.id)
+  properties: {
+    roleDefinitionId: monitoringMetricsPublisher.id
+    principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+  dependsOn: [
+    functionApp
+  ]
+}
+
 // Add diagnostic settings for Function App
 resource functionAppDiagnosticSettings 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
   scope: functionApp
@@ -252,3 +341,21 @@ output functionAppName string = functionApp.name
 output functionAppId string = functionApp.id
 output functionAppUrl string = 'https://${functionApp.properties.defaultHostName}'
 output functionAppManagedIdentityId string = functionAppManagedIdentity.id
+
+resource storageBlobDataOwner 'Microsoft.Authorization/roleDefinitions@2022-04-01' existing = {
+  scope: subscription()
+  name: 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b' // Storage Blob Data Owner
+}
+
+resource storageBlobOwnerRoleAssignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: storageAccount
+  name: guid(functionAppManagedIdentity.id, storageAccount.id, storageBlobDataOwner.id)
+  properties: {
+    roleDefinitionId: storageBlobDataOwner.id
+    principalId: functionAppManagedIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+  }
+  dependsOn: [
+    functionApp
+  ]
+}

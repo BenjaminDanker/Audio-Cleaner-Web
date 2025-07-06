@@ -33,10 +33,11 @@ class AudioCleanerProcessor:
         # Storage
         self.storage_connection = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
         self.blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection)
-        self.container_name = 'audio-files'  # Updated container name
+        self.uploads_container = 'uploads'  # Container for input files
+        self.processed_container = 'processed'  # Container for output files
         
         # Cosmos DB
-        self.cosmos_connection = os.getenv('AZURE_COSMOS_CONNECTION_STRING')  # Updated env var name
+        self.cosmos_connection = os.getenv('COSMOS_CONNECTION_STRING')  # Updated env var name
         self.cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection)
         self.database = self.cosmos_client.get_database_client('audiocleaner')  # Updated database name
         self.jobs_container = self.database.get_container_client('jobs')
@@ -61,8 +62,23 @@ class AudioCleanerProcessor:
                         
                         for msg in received_msgs:
                             try:
-                                # Parse message
-                                message_data = json.loads(str(msg))
+                                # Extract message body from Service Bus message
+                                # The body is a generator, so we need to collect all bytes
+                                body_parts = []
+                                for part in msg.body:
+                                    body_parts.append(part)
+                                
+                                # Join all parts and decode to string
+                                message_body = b''.join(body_parts).decode('utf-8')
+                                
+                                # Parse the JSON message
+                                message_data = json.loads(message_body)
+                                
+                                # Ensure we have a dictionary
+                                if isinstance(message_data, str):
+                                    # If it's still a string, try parsing again
+                                    message_data = json.loads(message_data)
+                                
                                 logger.info(f"Processing job: {message_data.get('jobId')}")
                                 
                                 # Process the video
@@ -94,50 +110,101 @@ class AudioCleanerProcessor:
     async def process_video_job(self, job_data):
         """Process a single video job"""
         job_id = job_data['jobId']
+        user_id = job_data['userId']  # Get user ID from job data
         file_url = job_data['fileUrl']  # Changed from inputBlobUrl
         file_name = job_data['fileName']
         atten_db = job_data.get('attenuation', 30)  # Default attenuation
         
-        # Generate output filename
+        # Generate output filename with user ID directory structure
         input_path = Path(file_name)
-        output_file_name = f"{input_path.stem}_denoised{input_path.suffix}"
+        output_file_name = f"{user_id}/{input_path.stem}_denoised{input_path.suffix}"
         
         # Update job status to processing
-        await self.update_job_status(job_id, 'processing')
+        await self.update_job_status(job_id, 'processing', progress=10)
         
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
                 # Download input video from blob storage
+                await self.update_job_status(job_id, 'processing', progress=20)
                 input_file_path = await self.download_blob_from_url(file_url, temp_dir)
                 
                 # Create a mock uploaded file object for VideoProcessor
+                await self.update_job_status(job_id, 'processing', progress=30)
                 class MockUploadedFile:
                     def __init__(self, file_path):
                         self.path = file_path
                         self.filename = Path(file_path).name
                     
-                    def save(self, path):
-                        # VideoProcessor expects to save the file, but we already have it
-                        import shutil
-                        shutil.copy2(self.path, path)
+                    def save(self, target_path):
+                        # VideoProcessor expects to save the file to a specific path
+                        # If the target path is different from our current path, copy it
+                        if os.path.abspath(self.path) != os.path.abspath(target_path):
+                            import shutil
+                            # Ensure the target directory exists
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                            shutil.copy2(self.path, target_path)
+                        # If they're the same, do nothing (file is already where it needs to be)
                 
                 mock_file = MockUploadedFile(input_file_path)
                 
+                logger.info(f"Starting video processing for job {job_id}")
+                
                 # Process video using existing VideoProcessor
+                await self.update_job_status(job_id, 'processing', progress=40)
                 processor = VideoProcessor(mock_file, atten_db)
                 
                 try:
-                    output_path = processor.process()
+                    logger.info(f"Calling processor.process() for job {job_id}")
+                    await self.update_job_status(job_id, 'processing', progress=50)
+                    
+                    # Add progress updates during processing
+                    import asyncio
+                    
+                    # Start processing in a separate task and update progress
+                    async def process_with_progress():
+                        # Simulate progress updates during processing
+                        for i in range(55, 75, 5):
+                            await asyncio.sleep(2)  # Update every 2 seconds
+                            await self.update_job_status(job_id, 'processing', progress=i)
+                    
+                    # Start progress updates
+                    progress_task = asyncio.create_task(process_with_progress())
+                    
+                    # Run the actual processing
+                    loop = asyncio.get_event_loop()
+                    output_path = await loop.run_in_executor(None, processor.process)
+                    
+                    # Cancel progress updates
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
+                    
+                    await self.update_job_status(job_id, 'processing', progress=80)
+                    logger.info(f"Video processing completed for job {job_id}, output: {output_path}")
                     
                     # Upload processed video to blob storage
+                    logger.info(f"Uploading processed video for job {job_id}")
+                    await self.update_job_status(job_id, 'processing', progress=90)
                     output_blob_url = await self.upload_blob(output_path, output_file_name)
+                    logger.info(f"Upload completed for job {job_id}, URL: {output_blob_url}")
                     
                     # Update job status to completed
                     await self.update_job_status(
                         job_id,
                         'completed',
+                        progress=100,
                         output_blob_url=output_blob_url
                     )
+                    
+                    # Delete the input blob now that processing is complete
+                    try:
+                        await self.delete_input_blob(file_url)
+                        logger.info(f"Deleted input blob for job {job_id}")
+                    except Exception as delete_error:
+                        logger.warning(f"Could not delete input blob for job {job_id}: {delete_error}")
+                        # Don't fail the job if we can't delete the input blob
                     
                     logger.info(f"Job {job_id} completed successfully")
                     
@@ -160,10 +227,19 @@ class AudioCleanerProcessor:
     async def download_blob_from_url(self, blob_url, temp_dir):
         """Download a blob from URL to local file"""
         try:
-            # Extract container and blob name from URL
-            url_parts = blob_url.split('/')
-            container_name = url_parts[-2]
-            blob_name = url_parts[-1]
+            # Parse the blob URL to extract container and blob name
+            from urllib.parse import urlparse
+            parsed_url = urlparse(blob_url)
+            
+            # URL format: https://storage.blob.core.windows.net/container/blob/path
+            path_parts = parsed_url.path.strip('/').split('/')
+            if len(path_parts) < 2:
+                raise ValueError(f"Invalid blob URL format: {blob_url}")
+                
+            container_name = path_parts[0]
+            blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
+            
+            logger.info(f"Downloading from container: {container_name}, blob: {blob_name}")
             
             # Get blob client
             blob_client = self.blob_service_client.get_blob_client(
@@ -173,6 +249,9 @@ class AudioCleanerProcessor:
             
             # Download to temp file
             local_file_path = os.path.join(temp_dir, blob_name)
+            
+            # Create intermediate directories if they don't exist
+            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
             
             with open(local_file_path, 'wb') as download_file:
                 download_stream = blob_client.download_blob()
@@ -189,7 +268,7 @@ class AudioCleanerProcessor:
         """Upload a local file to blob storage"""
         try:
             blob_client = self.blob_service_client.get_blob_client(
-                container=self.container_name,
+                container=self.processed_container,
                 blob=blob_name
             )
             
@@ -231,6 +310,34 @@ class AudioCleanerProcessor:
         except Exception as e:
             logger.error(f"Error updating job status: {e}")
             # Don't raise here as it's not critical for processing
+
+    async def delete_input_blob(self, blob_url):
+        """Delete the input blob from storage"""
+        try:
+            # Parse the blob URL to extract container and blob name
+            from urllib.parse import urlparse
+            parsed_url = urlparse(blob_url)
+            
+            # URL format: https://storage.blob.core.windows.net/container/blob/path
+            path_parts = parsed_url.path.strip('/').split('/')
+            if len(path_parts) < 2:
+                raise ValueError(f"Invalid blob URL format: {blob_url}")
+                
+            container_name = path_parts[0]
+            blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
+            
+            # Get blob client and delete
+            blob_client = self.blob_service_client.get_blob_client(
+                container=container_name,
+                blob=blob_name
+            )
+            
+            await blob_client.delete_blob()
+            logger.info(f"Successfully deleted input blob: {blob_name}")
+            
+        except Exception as e:
+            logger.error(f"Error deleting input blob: {e}")
+            raise
 
 async def main():
     """Main entry point"""

@@ -7,7 +7,7 @@ module.exports = async function (context, req) {
     try {
         // Check if we're in local development
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.AZURE_COSMOS_CONNECTION_STRING?.includes('localhost');
+        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
         
         if (isLocalDev) {
             context.log('Local development mode - using local processor');
@@ -126,7 +126,7 @@ module.exports = async function (context, req) {
         const jobId = 'job-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 
         // Initialize clients
-        const cosmosClient = new CosmosClient(process.env.AZURE_COSMOS_CONNECTION_STRING);
+        const cosmosClient = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
         const database = cosmosClient.database('audiocleaner');
         const jobsContainer = database.container('jobs');
 

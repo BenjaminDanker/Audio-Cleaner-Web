@@ -116,3 +116,6 @@ models/
 # Package management files (keep these for proper dependency installation)
 # package-lock.json should be included for Azure Functions
 # yarn.lock
+# Also keep deployment files
+# .deployment
+# deploy.cmd

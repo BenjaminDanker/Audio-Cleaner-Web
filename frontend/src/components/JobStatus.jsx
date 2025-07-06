@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react'
-import { Clock, CheckCircle, XCircle, Download, RefreshCw } from 'lucide-react'
+import { Clock, CheckCircle, XCircle, Download, RefreshCw, Trash2 } from 'lucide-react'
 import axios from 'axios'
 import './JobStatus.css'
 
-const JobStatus = ({ job, onUpdate }) => {
+const JobStatus = ({ job, onUpdate, onDelete }) => {
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   useEffect(() => {
@@ -77,16 +77,30 @@ const JobStatus = ({ job, onUpdate }) => {
   }
 
   const getDownloadUrl = () => {
-    if (!job.downloadUrl) return null
+    // Check for different possible field names for the download URL
+    const downloadUrl = job.downloadUrl || job.output_blob_url || job.outputBlobUrl
+    if (!downloadUrl) return null
     
     // Handle local development URLs
-    if (job.downloadUrl.startsWith('local://downloads/')) {
-      const filename = job.downloadUrl.replace('local://downloads/', '')
-      return `http://localhost:7071/api/download-file/${filename}`
+    if (downloadUrl.startsWith('local://downloads/')) {
+      const filename = downloadUrl.replace('local://downloads/', '')
+      return `/api/download-file/${filename}`
     }
     
-    // For production, return the URL as-is (Azure Blob Storage URL)
-    return job.downloadUrl
+    // For production Azure Blob Storage URLs, extract filename and use download API
+    if (downloadUrl.startsWith('https://')) {
+      // Extract filename from URL like: https://storageaccount.blob.core.windows.net/container/filename.mp4
+      const urlParts = downloadUrl.split('/')
+      const filename = urlParts[urlParts.length - 1]
+      return `/api/download-file/${filename}`
+    }
+    
+    // If it's just a filename, construct the download API URL
+    return `/api/download-file/${downloadUrl}`
+  }
+
+  const hasDownloadUrl = () => {
+    return !!(job.downloadUrl || job.output_blob_url || job.outputBlobUrl)
   }
 
   return (
@@ -112,7 +126,15 @@ const JobStatus = ({ job, onUpdate }) => {
             <RefreshCw size={16} className={isRefreshing ? 'spinning' : ''} />
           </button>
           
-          {job.status === 'completed' && job.downloadUrl && (
+          <button 
+            onClick={onDelete}
+            className="delete-btn"
+            title="Delete this job"
+          >
+            <Trash2 size={16} />
+          </button>
+          
+          {job.status === 'completed' && hasDownloadUrl() && (
             <a 
               href={getDownloadUrl()} 
               download
@@ -149,7 +171,11 @@ const JobStatus = ({ job, onUpdate }) => {
 
       {job.status === 'completed' && (
         <div className="completion-message">
-          <p>Your audio has been cleaned and is ready for download!</p>
+          {hasDownloadUrl() ? (
+            <p>Your audio has been cleaned and is ready for download!</p>
+          ) : (
+            <p>Processing completed, but download link is not available. Please contact support.</p>
+          )}
         </div>
       )}
     </div>

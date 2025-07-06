@@ -102,7 +102,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
         }
         {
           name: 'cosmos-connection-string'
-          value: 'AccountEndpoint=https://${cosmosAccount.name}.documents.azure.com:443/;AccountKey=${cosmosAccount.listKeys().primaryMasterKey};'
+          value: 'AccountEndpoint=https://${cosmosAccount.name}.documents.azure.com:443/;AccountKey=${cosmosAccount.listKeys().primaryMasterKey}'
         }
       ]
     }
@@ -143,7 +143,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
               secretRef: 'servicebus-connection-string'
             }
             {
-              name: 'AZURE_COSMOS_CONNECTION_STRING'
+              name: 'COSMOS_CONNECTION_STRING'
               secretRef: 'cosmos-connection-string'
             }
             {

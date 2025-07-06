@@ -10,6 +10,9 @@ param tags object = {}
 @description('Function App URL for API backend')
 param functionAppUrl string
 
+@description('Function App resource ID for linking')
+param functionAppId string
+
 resource staticWebApp 'Microsoft.Web/staticSites@2022-09-01' = {
   name: staticWebAppName
   location: location
@@ -31,6 +34,16 @@ resource staticWebApp 'Microsoft.Web/staticSites@2022-09-01' = {
     stagingEnvironmentPolicy: 'Enabled'
     allowConfigFileUpdates: true
     enterpriseGradeCdnStatus: 'Disabled'
+  }
+}
+
+// Link the Function App as API backend
+resource staticWebAppBackend 'Microsoft.Web/staticSites/linkedBackends@2022-09-01' = {
+  parent: staticWebApp
+  name: 'default'
+  properties: {
+    backendResourceId: functionAppId
+    region: location
   }
 }
 
