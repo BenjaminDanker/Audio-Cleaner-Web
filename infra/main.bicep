@@ -147,6 +147,7 @@ module processorContainerApp './app/processor.bicep' = {
 
 // App outputs
 output AZURE_LOCATION string = location
+output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
 output AZURE_TENANT_ID string = tenant().tenantId
 output AZURE_RESOURCE_GROUP string = rg.name
 output RESOURCE_GROUP_ID string = rg.id

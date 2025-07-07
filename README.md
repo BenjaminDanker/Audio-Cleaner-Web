@@ -156,7 +156,7 @@ The API will be available at `http://localhost:7071`
 pip install -r requirements.txt
 
 # Run the processor locally (for testing)
-python processor_app.py
+python processor/src/processor_app.py
 ```
 
 ### 8. Docker Development

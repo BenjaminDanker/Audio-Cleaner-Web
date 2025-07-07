@@ -48,7 +48,7 @@ cd api
 func start --port 7071
 
 # Terminal 3: Start Python Processor (optional for full testing)
-python processor_main.py
+python processor/src/processor_main.py
 ```
 
 ## Local Development Features

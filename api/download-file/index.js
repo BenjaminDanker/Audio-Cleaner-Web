@@ -42,6 +42,43 @@ module.exports = async function (context, req) {
             const stats = fs.statSync(filePath);
             const fileSize = stats.size;
             
+            // Handle Range requests for partial content
+            const rangeHeader = req.headers['range'];
+            if (rangeHeader) {
+                const [startStr, endStr] = rangeHeader.replace(/bytes=/, '').split('-');
+                const start = parseInt(startStr, 10);
+                const end = endStr ? parseInt(endStr, 10) : fileSize - 1;
+                const chunkSize = end - start + 1;
+                const buffer = Buffer.alloc(chunkSize);
+                const fd = fs.openSync(filePath, 'r');
+                fs.readSync(fd, buffer, 0, chunkSize, start);
+                fs.closeSync(fd);
+                context.res = {
+                    status: 206,
+                    headers: {
+                        'Content-Type': 'video/mp4',
+                        'Content-Length': chunkSize.toString(),
+                        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                        'Accept-Ranges': 'bytes',
+                        'Content-Disposition': `attachment; filename="${filename}"`
+                    },
+                    body: buffer,
+                    isRaw: true
+                };
+                return;
+            }
+            // For HEAD requests, return only headers
+            if (req.method === 'HEAD') {
+                context.res = {
+                    status: 200,
+                    headers: {
+                        'Content-Type': 'video/mp4',
+                        'Content-Disposition': `attachment; filename="${filename}"`,
+                        'Content-Length': fileSize.toString()
+                    }
+                };
+                return;
+            }
             // Read the file
             const fileBuffer = fs.readFileSync(filePath);
             

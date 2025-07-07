@@ -15,6 +15,12 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, jsonify
+import sys
+
+# Add the processor directory to the Python path
+processor_dir = Path(__file__).parent.parent / "processor" / "src"
+sys.path.insert(0, str(processor_dir))
+
 from video_handler import VideoProcessor
 
 # Configure logging

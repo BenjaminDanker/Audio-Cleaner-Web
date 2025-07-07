@@ -35,7 +35,9 @@ class VideoProcessor:
 
     def _resource_path(self, relative_path: str) -> str:
         """Resolve resource path for bundled or development environments."""
-        base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+        # Get the processor directory (parent of src)
+        processor_dir = Path(__file__).parent.parent
+        base_path = getattr(sys, "_MEIPASS", str(processor_dir))
         return os.path.join(base_path, relative_path)
 
     def _init_df_model(self):

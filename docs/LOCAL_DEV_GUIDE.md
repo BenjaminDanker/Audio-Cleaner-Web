@@ -24,7 +24,7 @@ The API will be available at http://localhost:7071
 pip install -r requirements.txt
 
 # Run the processor
-python processor_main.py
+python processor/src/processor_main.py
 ```
 
 ## Environment Configuration

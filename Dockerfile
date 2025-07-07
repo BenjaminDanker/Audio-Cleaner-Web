@@ -21,8 +21,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Copy models directory
-COPY models/ ./models/
+# Ensure models directory is properly accessible
+COPY processor/models/ ./processor/models/
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -34,4 +34,4 @@ ENV COSMOS_CONNECTION_STRING=""
 EXPOSE 8080
 
 # Run the application
-CMD ["python", "processor_main.py"]
+CMD ["python", "processor/src/processor_main.py"]

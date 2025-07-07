@@ -60,10 +60,14 @@ audio-cleaner-web/
 ├── .github/workflows/      # CI/CD pipelines
 │   ├── deploy.yml         # Main deployment workflow
 │   └── docker.yml         # Container build workflow
-├── models/DeepFilterNet3/  # AI model files
+├── processor/             # Audio processing service
+│   ├── src/              # Source code
+│   │   ├── processor_app.py    # Flask app wrapper
+│   │   ├── processor_main.py   # Service Bus processor
+│   │   └── video_handler.py    # Video processing logic
+│   └── models/           # AI models
+│       └── DeepFilterNet3/     # AI model files
 ├── Dockerfile             # AI service container
-├── processor_main.py      # Service Bus processor
-├── processor_app.py       # Flask app wrapper
 ├── azure.yaml            # Azure Developer CLI config
 └── requirements.txt      # Python dependencies
 ```
@@ -167,7 +171,7 @@ cd frontend && npm run dev
 cd api && npm run dev
 
 # Run processor locally
-python processor_app.py
+python processor/src/processor_app.py
 ```
 
 ### Build Container

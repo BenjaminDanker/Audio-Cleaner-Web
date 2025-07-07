@@ -134,7 +134,7 @@ try {
         }
         
         # Only kill processes that look like our processor
-        if ($commandLine -match "local_processor.py|processor_app.py") {
+        if ($commandLine -match "local_processor.py|processor[/\\]src[/\\]processor_app.py") {
             Write-Host "Stopping Python process (PID: $($process.Id))..." -ForegroundColor Yellow
             try {
                 Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
