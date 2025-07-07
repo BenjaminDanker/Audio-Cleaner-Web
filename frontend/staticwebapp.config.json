@@ -1,22 +1,6 @@
 {
   "routes": [
     {
-      "route": "/api/get-subscription",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/api/auth",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/api/index",
-      "allowedRoles": ["anonymous"]
-    },
-    {
-      "route": "/api/clear-jobs",
-      "allowedRoles": ["authenticated"]
-    },
-    {
       "route": "/api/*",
       "allowedRoles": ["authenticated"]
     },
@@ -40,6 +24,10 @@
     "exclude": ["/api/*", "/_framework/*", "/css/*", "/js/*", "/*.{css,js,png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}"]
   },
   "responseOverrides": {
+    "404": {
+      "redirect": "/",
+      "statusCode": 302
+    },
     "401": {
       "redirect": "/.auth/login/aad",
       "statusCode": 302
