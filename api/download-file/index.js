@@ -74,7 +74,8 @@ module.exports = async function (context, req) {
                     headers: {
                         'Content-Type': 'video/mp4',
                         'Content-Disposition': `attachment; filename="${filename}"`,
-                        'Content-Length': fileSize.toString()
+                        'Content-Length': fileSize.toString(),
+                        'Accept-Ranges': 'bytes'
                     }
                 };
                 return;
@@ -87,7 +88,8 @@ module.exports = async function (context, req) {
                 headers: {
                     'Content-Type': 'video/mp4',
                     'Content-Disposition': `attachment; filename="${filename}"`,
-                    'Content-Length': fileSize.toString()
+                    'Content-Length': fileSize.toString(),
+                    'Accept-Ranges': 'bytes'
                 },
                 body: fileBuffer,
                 isRaw: true
@@ -186,7 +188,30 @@ module.exports = async function (context, req) {
             
             const sasUrl = `${blobClient.url}?${sasResult.sasToken}`;
             
-            // Redirect to the SAS URL for direct download
+            // For HEAD requests, get blob properties and return headers
+            if (req.method === 'HEAD') {
+                try {
+                    const properties = await blobClient.getProperties();
+                    context.res = {
+                    status: 200,
+                    headers: {
+                        'Content-Type': properties.contentType || 'video/mp4',
+                        'Content-Length': properties.contentLength?.toString() || '0',
+                        'Accept-Ranges': 'bytes',
+                        'Location': sasUrl
+                    }
+                    };
+                } catch (e) {
+                    context.log.error('HEAD request failed:', e.message);
+                    context.res = {
+                    status: 404,
+                    body: { error: 'Blob not found or inaccessible' }
+                    };
+                }
+                return;
+            }
+
+            // For GET requests, redirect to the SAS URL
             context.res = {
                 status: 302,
                 headers: {

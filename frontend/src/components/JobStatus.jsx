@@ -106,47 +106,64 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
   }
 
   // Parallel download helper for large files
-  const downloadInParallel = async (downloadEndpoint, filename, chunkCount = 4) => {
+  const downloadInParallel = async (downloadEndpoint, filename) => {
     setIsDownloading(true)
     setDownloadProgress(0)
+
     try {
-      // 1. Get SAS URL from our API by doing a HEAD request without following redirects
-      const headResponse = await fetch(downloadEndpoint, { method: 'HEAD', redirect: 'manual' });
-      const sasUrl = headResponse.headers.get('Location') || downloadEndpoint;
-      // 2. Fetch total size
-      const info = await fetch(sasUrl, { method: 'HEAD' });
-      const total = parseInt(info.headers.get('Content-Length'), 10);
-      let loaded = 0
-      const chunkSize = Math.ceil(total / chunkCount);
-      // 3. Parallel ranged GETs
-      const buffers = await Promise.all(
-        Array.from({ length: chunkCount }, (_, i) => {
-          const start = i * chunkSize;
-          const end = Math.min(total - 1, (i + 1) * chunkSize - 1);
-          return fetch(sasUrl, { headers: { Range: `bytes=${start}-${end}` } })
-            .then(async r => {
-              const buf = await r.arrayBuffer();
-              loaded += buf.byteLength;
-              setDownloadProgress(Math.floor((loaded / total) * 100));
-              return buf;
-            });
+      // Step 1: Resolve redirect if needed (get SAS URL)
+      const headResponse = await fetch(downloadEndpoint, { method: 'HEAD', redirect: 'manual' })
+      const sasUrl = headResponse.headers.get('Location') || downloadEndpoint
+
+      // ✅ Step 2: Use GET with Range to determine total file size (more reliable than HEAD)
+      const info = await fetch(sasUrl, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' }
+      })
+      const contentRange = info.headers.get('Content-Range') // "bytes 0-0/387873715"
+      const totalSize = parseInt(contentRange?.split('/')?.[1], 10)
+      if (!totalSize || isNaN(totalSize)) throw new Error('Could not determine file size')
+
+      // Step 3: Setup chunk size and ranges
+      const chunkSize = 4 * 1024 * 1024 // 4 MB
+      const chunkCount = Math.ceil(totalSize / chunkSize)
+      const ranges = Array.from({ length: chunkCount }, (_, i) => {
+        const start = i * chunkSize
+        const end = Math.min(totalSize - 1, (i + 1) * chunkSize - 1)
+        return { index: i, range: `bytes=${start}-${end}` }
+      })
+
+      // Step 4: Fetch all chunks in parallel
+      const chunks = await Promise.all(
+        ranges.map(async ({ index, range }) => {
+          const res = await fetch(sasUrl, {
+            headers: { Range: range }
+          })
+          const buffer = await res.arrayBuffer()
+          setDownloadProgress(prev => {
+            const next = Math.min(100, Math.floor(((index + 1) / chunkCount) * 100))
+            return next
+          })
+          return { index, buffer }
         })
-      );
-      setDownloadProgress(100)
-      // 4. Stitch and trigger download
-      const blob = new Blob(buffers, { type: 'application/octet-stream' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      )
+
+      // Step 5: Sort and stitch
+      chunks.sort((a, b) => a.index - b.index)
+      const blob = new Blob(chunks.map(c => c.buffer), { type: 'application/octet-stream' })
+
+      // Step 6: Trigger download
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
     } catch (err) {
-      console.error('Parallel download failed:', err);
-      // fallback to normal download
-      window.location.href = downloadEndpoint;
+      console.error('Parallel download failed:', err)
+      window.location.href = downloadEndpoint
     } finally {
       setIsDownloading(false)
     }
@@ -184,28 +201,15 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
           </button>
           
           {job.status === 'completed' && hasDownloadUrl() && (
-            <>
-              <button
-                onClick={() => downloadInParallel(getDownloadUrl(), job.filename)}
-                className="btn btn-sm btn-primary"
-                title="Download"
-                disabled={isDownloading}
-              >
-                <Download size={16} />
-                {isDownloading ? `${downloadProgress}%` : 'Download'}
-              </button>
-              {isDownloading && (
-                <div className="download-progress-container">
-                  <div className="progress-bar">
-                    <div
-                      className="progress-bar-fill"
-                      style={{ width: `${downloadProgress}%` }}
-                    />
-                  </div>
-                  <span className="progress-text">{downloadProgress}%</span>
-                </div>
-              )}
-            </>
+            <button
+              onClick={() => downloadInParallel(getDownloadUrl(), job.filename)}
+              className="btn btn-sm btn-primary"
+              title="Download"
+              disabled={isDownloading}
+            >
+              <Download size={16} />
+              Download
+            </button>
           )}
         </div>
       </div>
@@ -223,6 +227,18 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
             ></div>
           </div>
           <span className="progress-text">{job.progress || 0}%</span>
+        </div>
+      )}
+
+      {isDownloading && (
+        <div className="progress-container">
+          <div className="progress-bar">
+            <div
+              className="progress-bar-fill"
+              style={{ width: `${downloadProgress}%` }}
+            />
+          </div>
+          <span className="progress-text">Downloading {downloadProgress}%</span>
         </div>
       )}
 
