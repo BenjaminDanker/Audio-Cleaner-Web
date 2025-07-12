@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 -->
 # Rate Limiting and Parallel Operations - Complete Analysis
 
 ## 🔄 **How Rate Limiting Interacts with Parallel Upload/Download**

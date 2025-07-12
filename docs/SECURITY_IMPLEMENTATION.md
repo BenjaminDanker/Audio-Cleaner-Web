@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 -->
 # Audio Cleaner Web - Security Implementation Guide
 
 ## Overview

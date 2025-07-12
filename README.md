@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 MD009 MD024-->
 # Audio Cleaner Pro
 
 > AI-powered video denoising web application built on Azure

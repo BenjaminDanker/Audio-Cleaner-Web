@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 -->
 # Security Testing Guide for Audio Cleaner Web Application
 
 ## 🛡️ Comprehensive Security Implementation Summary

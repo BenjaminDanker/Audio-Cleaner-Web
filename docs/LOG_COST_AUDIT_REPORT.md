@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 MD009 MD024-->
 # 🔥 CRITICAL LOG COST AUDIT REPORT
 **Issue**: $100/hour Azure log costs from 44.11 GB data ingestion
 

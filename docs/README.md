@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 -->
 # Documentation Index
 
 Welcome to the Audio Cleaner Pro documentation. This guide will help you understand, deploy, and contribute to the project.
