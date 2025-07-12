@@ -4,31 +4,8 @@ module.exports = async function (context, req) {
     context.log('Get subscription endpoint called');
     
     try {
-        // Check if we're in local development (no real auth header)
+        // Verify authentication
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
-        
-        if (isLocalDev) {
-            context.log('Local development mode - returning mock subscription data');
-            // Return mock subscription data for local development
-            context.res = {
-                status: 200,
-                body: {
-                    id: 'dev-subscription',
-                    status: 'active',
-                    planName: 'Free Tier',
-                    plan: 'free',
-                    tier: 'free',
-                    usageLimit: 5,
-                    currentUsage: 0,
-                    nextBillingDate: null,
-                    price: '$0.00'
-                }
-            };
-            return;
-        }
-
-        // Production code - verify authentication
         if (!clientPrincipal) {
             context.res = {
                 status: 401,
@@ -104,7 +81,7 @@ module.exports = async function (context, req) {
             }
         }
     } catch (error) {
-        context.log.error('Error getting subscription:', error);
+        context.log.error('Error getting subscription:', error.message || 'Unknown error');
         context.res = {
             status: 500,
             body: { error: 'Internal server error' }

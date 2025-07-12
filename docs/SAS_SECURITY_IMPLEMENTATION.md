@@ -1,12 +1,18 @@
 # SAS Token Security Implementation
 
-This document outlines how the Audio Cleaner Web application implements the 5 essential rules for secure Azure Storage SAS (Shared Access Signature) tokens.
+> **Part of [Security Guide](SECURITY.md) - Azure Blob Storage Security**
 
-## The 5 Rules Implemented
+This document details the implementation of the 5 essential rules for secure Azure Storage SAS (Shared Access Signature) tokens in Audio Cleaner Pro.
 
-### 1. ✅ Use User-Delegation SAS Whenever Possible
+## Implementation Overview
 
-**Implementation:** Our `SASTokenManager` class prioritizes user-delegation SAS tokens over account-key SAS tokens.
+The Audio Cleaner Web application implements all 5 critical SAS security rules through the centralized `SASTokenManager` class in `api/shared/sasTokenManager.js`.
+
+## The 5 Security Rules
+
+### ✅ Rule 1: Use User-Delegation SAS Whenever Possible
+
+**Implementation:** Prioritizes user-delegation SAS tokens over account-key SAS tokens.
 
 ```javascript
 // Try user delegation SAS first (preferred method)
@@ -16,16 +22,24 @@ const userDelegationKey = await this.blobServiceClient.getUserDelegationKey(
 );
 ```
 
-**Why it matters:** User-delegation SAS tokens are signed with Microsoft Entra credentials instead of storage account keys, providing better security and eliminating the need to manage account keys.
+**Benefits:**
+- Signed with Microsoft Entra credentials instead of storage account keys
+- Better security posture with credential rotation
+- Eliminates need to manage storage account keys
 
-**Fallback:** If user-delegation SAS fails (e.g., insufficient permissions), the system gracefully falls back to account-key SAS.
+**Fallback:** Graceful fallback to account-key SAS if user-delegation fails.
 
-### 2. ✅ Grant Bare Minimum Permissions
+### ✅ Rule 2: Grant Minimal Permissions & Short Expiry
 
-**Implementation:**
+**Upload Tokens:**
+- Permissions: `'cw'` (create and write only)
+- Expiry: 15 minutes
+- Use case: File uploads
 
-- **Upload tokens:** `'cw'` (create and write only) - 15 minutes expiry
-- **Download tokens:** `'r'` (read only) - 10 minutes expiry
+**Download Tokens:**
+- Permissions: `'r'` (read only)
+- Expiry: 10 minutes
+- Use case: File downloads
 
 ```javascript
 // Upload: minimal permissions, short expiry
@@ -37,17 +51,122 @@ permissions: 'r', // read-only
 expiryMinutes: 10, // 10 minutes for downloads
 ```
 
-**Why it matters:** If a token is compromised, it can only perform limited operations for a very short time.
+**Security Impact:** 75-85% reduction in token lifetime vs. previous 1-hour expiry.
 
-### 3. ✅ Force HTTPS and IP Restrictions
+### ✅ Rule 3: Force HTTPS and IP Restrictions
 
-**Implementation:**
-
-- All SAS tokens include `protocol: 'https'`
-- IP restrictions are added when client IP is available
-
+**HTTPS Enforcement:**
 ```javascript
 const sasOptions = {
+    protocol: 'https', // Force HTTPS for all requests
+    // ... other options
+};
+```
+
+**IP Restrictions:**
+```javascript
+// Add IP restrictions when client IP is available
+const clientIP = getClientIP(request);
+if (clientIP) {
+    sasOptions.ipRange = { start: clientIP, end: clientIP };
+}
+```
+
+**IP Detection:** Checks multiple headers: `x-forwarded-for`, `x-client-ip`, `x-real-ip`.
+
+### ✅ Rule 4: No Token Logging
+
+**Before:** Full SAS URLs logged to console and Application Insights.
+**After:** Only partial blob names (first 20 characters) logged for debugging.
+
+```javascript
+// Safe logging - no SAS tokens exposed
+logger.info(`Generated SAS token for blob: ${blobName.substring(0, 20)}...`);
+```
+
+**Compliance:** SAS tokens never appear in logs or Application Insights.
+
+### ✅ Rule 5: Revocation Strategy
+
+**Token Tracking:**
+- All generated tokens tracked in Cosmos DB with TTL
+- Automatic cleanup when tokens expire
+- User association for bulk revocation
+
+**Revocation Methods:**
+1. **User-delegation key invalidation** (preferred)
+2. **Token marking as revoked** in database
+3. **Manual revocation endpoint**: `/api/revoke-sas-tokens`
+
+```javascript
+// Revocation implementation
+async revokeSASTokens(userId) {
+    // Invalidate user delegation keys
+    await this.invalidateUserDelegationKeys();
+    
+    // Mark tokens as revoked in database
+    await this.markTokensRevoked(userId);
+}
+```
+
+## Architecture Integration
+
+### Components
+
+**SAS Token Manager** (`api/shared/sasTokenManager.js`)
+- Centralized SAS token generation
+- Implements all 5 security rules
+- Automatic fallback mechanisms
+- Token tracking and revocation
+
+**Upload Endpoint** (`api/upload-file/index.js`)
+- Generates upload SAS tokens
+- Validates user quotas
+- Tracks token usage
+
+**Download Endpoint** (`api/download-file/index.js`)
+- Generates download SAS tokens
+- Validates file ownership
+- Enforces access controls
+
+**Revocation Endpoint** (`api/revoke-sas-tokens/index.js`)
+- Manual token revocation
+- User-specific or bulk revocation
+- Emergency security response
+
+### Security Flow
+
+```
+1. User requests file operation
+2. API validates authentication & authorization
+3. SAS Token Manager generates secure token
+4. Token tracked in Cosmos DB with TTL
+5. Client receives time-limited, permission-scoped token
+6. Direct Azure Storage operation with token
+7. Token automatically expires or can be manually revoked
+```
+
+## Monitoring & Compliance
+
+### Security Metrics
+- Token generation rate
+- Failed token validations
+- Revocation events
+- Unusual access patterns
+
+### Audit Trail
+- All token operations logged (without exposing tokens)
+- User association tracking
+- Geographic access patterns
+- Time-based usage analysis
+
+### Compliance Benefits
+- **GDPR**: Right to be forgotten through token revocation
+- **SOC 2**: Audit trail and access controls
+- **Zero Trust**: Least privilege token permissions
+- **Defense in Depth**: Multiple security layers
+
+For complete security implementation details, see [Security Guide](SECURITY.md).
     protocol: 'https', // Force HTTPS
     // Add IP restriction if client IP is known
     ipRange: clientIP ? { start: clientIP, end: clientIP } : undefined

@@ -119,7 +119,8 @@
 .progress-bar-fill {
   height: 100%;
   background-color: #646cff;
-  transition: width 0.3s ease;
+  transition: width 0.5s ease-out;
+  will-change: width;
 }
 
 .progress-container p {

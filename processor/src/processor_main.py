@@ -25,7 +25,7 @@ class AudioCleanerProcessor:
             self.credential = DefaultAzureCredential()
             logger.info("Using DefaultAzureCredential for Azure authentication.")
         else:
-            logger.info("Skipping DefaultAzureCredential; using connection strings for local development.")
+            logger.info("Using connection strings for authentication.")
         
         # Service Bus
         self.service_bus_connection = os.getenv('AZURE_SERVICE_BUS_CONNECTION_STRING')
@@ -33,7 +33,37 @@ class AudioCleanerProcessor:
         
         # Storage
         self.storage_connection = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-        self.blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection)
+        self.storage_account_name = None
+        
+        if not self.storage_connection:
+            logger.error("AZURE_STORAGE_CONNECTION_STRING environment variable is not set")
+            raise ValueError("Storage connection string is required")
+        
+        # Extract storage account name for potential managed identity usage
+        try:
+            import re
+            match = re.search(r'AccountName=([^;]+)', self.storage_connection)
+            if match:
+                self.storage_account_name = match.group(1)
+                logger.info(f"Extracted storage account name: {self.storage_account_name}")
+        except Exception as e:
+            logger.warning(f"Could not extract storage account name: {e}")
+            
+        try:
+            self.blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection)
+            logger.info("BlobServiceClient initialized successfully with connection string")
+            
+            # Test the connection by listing containers
+            try:
+                containers = list(self.blob_service_client.list_containers(max_results=1))
+                logger.info(f"Storage connection test successful, found {len(containers)} container(s)")
+            except Exception as test_error:
+                logger.warning(f"Storage connection test failed: {test_error}")
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize BlobServiceClient: {e}")
+            raise
+            
         self.uploads_container = 'uploads'  # Container for input files
         self.processed_container = 'processed'  # Container for output files
         
@@ -205,11 +235,13 @@ class AudioCleanerProcessor:
                     
                     # Delete the input blob now that processing is complete
                     try:
+                        logger.info(f"Attempting to delete input blob for job {job_id}: {file_url}")
                         await self.delete_input_blob(file_url)
-                        logger.info(f"Deleted input blob for job {job_id}")
+                        logger.info(f"Successfully deleted input blob for job {job_id}")
                     except Exception as delete_error:
-                        logger.warning(f"Could not delete input blob for job {job_id}: {delete_error}")
-                        # Don't fail the job if we can't delete the input blob
+                        logger.error(f"Failed to delete input blob for job {job_id}: {delete_error}")
+                        logger.error(f"Blob URL was: {file_url}")
+                        # Don't fail the job if we can't delete the input blob, but log it for investigation
                     
                     logger.info(f"Job {job_id} completed successfully")
                     
@@ -568,6 +600,8 @@ class AudioCleanerProcessor:
     async def delete_input_blob(self, blob_url):
         """Delete the input blob from storage"""
         try:
+            logger.info(f"Starting blob deletion process for: {blob_url}")
+            
             # Parse the blob URL to extract container and blob name
             from urllib.parse import urlparse
             parsed_url = urlparse(blob_url)
@@ -580,17 +614,59 @@ class AudioCleanerProcessor:
             container_name = path_parts[0]
             blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
             
-            # Get blob client and delete (delete_blob is not async, so no await)
+            logger.info(f"Parsed URL - Container: {container_name}, Blob: {blob_name}")
+            
+            # Check if blob service client is properly initialized
+            if not self.blob_service_client:
+                raise Exception("BlobServiceClient is not initialized")
+            
+            # Get blob client and check if blob exists first
             blob_client = self.blob_service_client.get_blob_client(
                 container=container_name,
                 blob=blob_name
             )
             
-            blob_client.delete_blob()
+            # Check if blob exists before attempting deletion
+            try:
+                logger.info(f"Checking if blob exists: {blob_name}")
+                exists = blob_client.exists()
+                if not exists:
+                    logger.warning(f"Blob does not exist, skipping deletion: {blob_name}")
+                    return
+                else:
+                    logger.info(f"Blob exists, proceeding with deletion: {blob_name}")
+            except Exception as exists_error:
+                logger.warning(f"Could not check if blob exists (proceeding anyway): {exists_error}")
+                # Continue with deletion attempt anyway
+            
+            # Attempt deletion
+            logger.info(f"Attempting to delete blob: {blob_name}")
+            delete_result = blob_client.delete_blob()
             logger.info(f"Successfully deleted input blob: {blob_name}")
+            
+            # Verify deletion
+            try:
+                still_exists = blob_client.exists()
+                if still_exists:
+                    logger.warning(f"Blob still exists after deletion attempt: {blob_name}")
+                else:
+                    logger.info(f"Confirmed blob deletion: {blob_name}")
+            except Exception as verify_error:
+                logger.warning(f"Could not verify blob deletion: {verify_error}")
             
         except Exception as e:
             logger.error(f"Error deleting input blob: {e}")
+            logger.error(f"Blob URL: {blob_url}")
+            logger.error(f"Storage connection string exists: {bool(self.storage_connection)}")
+            logger.error(f"Storage account name: {getattr(self, 'storage_account_name', 'Not extracted')}")
+            logger.error(f"BlobServiceClient exists: {bool(self.blob_service_client)}")
+            
+            # Additional error context
+            if hasattr(e, 'error_code'):
+                logger.error(f"Azure error code: {e.error_code}")
+            if hasattr(e, 'message'):
+                logger.error(f"Azure error message: {e.message}")
+                
             raise
 
 async def main():

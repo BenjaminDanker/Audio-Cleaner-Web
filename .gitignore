@@ -96,11 +96,6 @@ coverage/
 # nyc test coverage
 .nyc_output
 
-# Local development
-dev-processes.json
-c:/azurite/
-azurite/
-
 # Stripe
 stripe-cli.log
 

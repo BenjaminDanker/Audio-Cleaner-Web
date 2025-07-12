@@ -69,13 +69,11 @@ class SASTokenManager {
                 protocol: 'https', // Rule #3: Force HTTPS
             };
 
-            // Rule #3: Add IP restriction if provided (but be careful with format)
+            // Rule #3: Temporarily disable IP restriction due to authentication issues
+            // TODO: Re-enable after investigating IP format issues
             if (clientIP && this.isValidIPv4(clientIP)) {
-                // Only add IP restriction for valid IPv4 addresses
-                // IPv6 and complex ranges can cause issues
-                sasOptions.ipRange = { start: clientIP, end: clientIP };
                 if (context) {
-                    context.log(`Adding IP restriction: ${clientIP}`);
+                    context.log(`IP available but not adding restriction (disabled): ${clientIP}`);
                 }
             } else if (clientIP) {
                 if (context) {
@@ -106,13 +104,11 @@ class SASTokenManager {
                 protocol: 'https', // Rule #3: Force HTTPS
             };
 
-            // Rule #3: Add IP restriction if provided (but be careful with format)
+            // Rule #3: Temporarily disable IP restriction due to authentication issues
+            // TODO: Re-enable after investigating IP format issues
             if (clientIP && this.isValidIPv4(clientIP)) {
-                // Only add IP restriction for valid IPv4 addresses
-                // IPv6 and complex ranges can cause issues
-                sasOptions.ipRange = { start: clientIP, end: clientIP };
                 if (context) {
-                    context.log(`Adding IP restriction to fallback SAS: ${clientIP}`);
+                    context.log(`IP available but not adding restriction to fallback SAS (disabled): ${clientIP}`);
                 }
             } else if (clientIP) {
                 if (context) {

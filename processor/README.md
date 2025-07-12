@@ -60,7 +60,3 @@ The processor requires the following environment variables:
 - `AZURE_STORAGE_CONNECTION_STRING` - Blob storage connection  
 - `COSMOS_CONNECTION_STRING` - Cosmos DB connection
 - `USE_MANAGED_IDENTITY` - Set to 'true' for Azure deployment
-
-## Local Development
-
-For local development, use the `local-dev/local_processor.py` which provides a simplified version that works with local files instead of Azure services.

@@ -59,14 +59,7 @@ tests/
 htmlcov/
 .nyc_output/
 coverage/
-
-# Local development files
-temp/
-uploads/
-downloads/
-video/
-local-dev/
-dev-processes.json
+scripts/
 
 # Environment files (sensitive data)
 .env
@@ -85,9 +78,7 @@ logs/
 
 # Infrastructure and deployment files
 infra/
-scripts/
 azure.yaml
-swa-cli.config.json
 Dockerfile
 .dockerignore
 
@@ -96,7 +87,6 @@ frontend/
 
 # Python processor files (not needed in Functions)
 processor_*.py
-local_processor.py
 models/
 
 # Media files

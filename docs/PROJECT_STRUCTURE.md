@@ -16,7 +16,7 @@ d:\Coding\Python\Audio-Cleaner-Web\
 │   ├── job-status/               # Job status function
 │   ├── package.json              # API dependencies
 │   ├── host.json                 # Azure Functions configuration
-│   └── local.settings.json       # Local development settings
+│   └── local.settings.json       # Local configuration
 │
 ├── frontend/                      # React frontend application
 │   ├── src/                      # Source code
@@ -59,8 +59,7 @@ d:\Coding\Python\Audio-Cleaner-Web\
 │       └── deploy.yml            # Deployment workflow
 │
 ├── azure.yaml                     # Azure Developer CLI configuration
-├── .env.local                     # Local environment variables
-├── .env.local.example            # Environment variables template
+├── .env.example                  # Environment variables template
 ├── .gitignore                    # Git ignore rules
 └── README.md                     # Project documentation
 ```
@@ -91,7 +90,7 @@ d:\Coding\Python\Audio-Cleaner-Web\
 - **PowerShell** - Development scripts
 - **GitHub Actions** - CI/CD pipelines
 - **Azure Developer CLI (azd)** - Deployment tool
-- **Docker** - Containerization (optional for local dev)
+- **Docker** - Containerization
 
 ## Key Features
 
@@ -104,36 +103,27 @@ d:\Coding\Python\Audio-Cleaner-Web\
 - ✅ Azure Functions API endpoints
 - ✅ Infrastructure as Code with Bicep
 - ✅ CI/CD pipelines with GitHub Actions
-- ✅ Local development environment
 
-### Development Environment
+### Deployment
 
 #### Prerequisites
+
 - Node.js 20.x LTS
 - npm
-- Azure Functions Core Tools v4
-- PowerShell (for scripts)
-- Docker (optional)
+- Azure CLI
+- Azure Developer CLI (azd)
 
 #### Quick Start
+
 1. Install dependencies:
    ```powershell
    cd api && npm install
    cd ../frontend && npm install
    ```
 
-2. Start development environment:
+2. Deploy to Azure:
    ```powershell
-   scripts\start-dev.ps1
-   ```
-
-3. Access the application:
-   - Frontend: http://localhost:5173
-   - API: http://localhost:7071
-
-4. Stop development environment:
-   ```powershell
-   scripts\stop-dev.ps1
+   azd up
    ```
 
 ## API Endpoints
@@ -159,21 +149,17 @@ Alternatively, use GitHub Actions for automated deployment when pushing to the m
 
 ## Environment Variables
 
-See `.env.local.example` for required environment variables. Copy to `.env.local` and configure for local development.
+Environment variables are configured during Azure deployment.
 
 ## Troubleshooting
 
-1. **API not starting**: Check Node.js version (should be 20.x)
-2. **Frontend build errors**: Ensure all dependencies are installed
-3. **Port conflicts**: Stop other services using ports 7071 or 5173
-4. **Azure Functions errors**: Check local.settings.json configuration
+1. **Deployment errors**: Check Azure CLI authentication
+2. **Build errors**: Ensure all dependencies are installed
+3. **Service connectivity**: Verify Azure resource configurations
 
 ## Next Steps
 
-1. Implement actual audio processing logic
-2. Add Azure Storage integration for file uploads
-3. Configure authentication providers
-4. Add monitoring and alerting
-5. Implement automated testing
-6. Add error handling and validation
-7. Configure production secrets management
+1. Configure Azure monitoring and alerting
+2. Implement automated testing
+3. Add enhanced error handling and validation
+4. Configure production secrets management

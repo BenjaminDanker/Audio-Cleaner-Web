@@ -56,6 +56,7 @@ module keyVault './core/security/keyvault.bicep' = {
     location: location
     tags: tags
     name: '${abbrs.keyVaultVaults}${resourceToken}'
+    logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsWorkspaceId
   }
 }
 

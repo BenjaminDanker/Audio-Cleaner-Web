@@ -111,20 +111,30 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
     setDownloadProgress(0)
 
     try {
-      // Step 1: Resolve redirect if needed (get SAS URL)
-      const headResponse = await fetch(downloadEndpoint, { method: 'HEAD', redirect: 'manual' })
-      const sasUrl = headResponse.headers.get('Location') || downloadEndpoint
+      // Step 1: Get SAS URL from download endpoint
+      console.log('Getting SAS URL from:', downloadEndpoint)
+      const response = await fetch(downloadEndpoint, { method: 'GET' })
+      
+      if (!response.ok) {
+        throw new Error(`Failed to get SAS URL: ${response.status} ${response.statusText}`)
+      }
+      
+      const data = await response.json()
+      const sasUrl = data.sasUrl
+      const totalSize = data.contentLength
+      
+      if (!sasUrl) {
+        throw new Error('No SAS URL received from API')
+      }
+      
+      if (!totalSize || totalSize <= 0) {
+        throw new Error('Could not determine file size or file is empty')
+      }
+      
+      console.log('SAS URL received, downloading directly from blob storage')
+      console.log('File size:', totalSize, 'bytes')
 
-      // ✅ Step 2: Use GET with Range to determine total file size (more reliable than HEAD)
-      const info = await fetch(sasUrl, {
-        method: 'GET',
-        headers: { Range: 'bytes=0-0' }
-      })
-      const contentRange = info.headers.get('Content-Range') // "bytes 0-0/387873715"
-      const totalSize = parseInt(contentRange?.split('/')?.[1], 10)
-      if (!totalSize || isNaN(totalSize)) throw new Error('Could not determine file size')
-
-      // Step 3: Setup chunk size and ranges
+      // Step 2: Setup chunk size and ranges
       const chunkSize = 4 * 1024 * 1024 // 4 MB
       const chunkCount = Math.ceil(totalSize / chunkSize)
       const ranges = Array.from({ length: chunkCount }, (_, i) => {
@@ -133,24 +143,41 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
         return { index: i, range: `bytes=${start}-${end}` }
       })
 
-      // Step 4: Fetch all chunks in parallel
+      // Step 3: Track progress with completed chunks
+      let completedChunks = 0
+      const updateProgress = () => {
+        completedChunks++
+        const progress = Math.floor((completedChunks / chunkCount) * 100)
+        setDownloadProgress(progress)
+      }
+
+      // Step 4: Fetch all chunks in parallel using the SAS URL
       const chunks = await Promise.all(
         ranges.map(async ({ index, range }) => {
-          const res = await fetch(sasUrl, {
-            headers: { Range: range }
-          })
-          const buffer = await res.arrayBuffer()
-          setDownloadProgress(prev => {
-            const next = Math.min(100, Math.floor(((index + 1) / chunkCount) * 100))
-            return next
-          })
-          return { index, buffer }
+          try {
+            const res = await fetch(sasUrl, {
+              headers: { Range: range }
+            })
+            
+            if (!res.ok) {
+              throw new Error(`Failed to fetch chunk ${index}: ${res.status}`)
+            }
+            
+            const buffer = await res.arrayBuffer()
+            updateProgress()
+            return { index, buffer }
+          } catch (error) {
+            console.error(`Error downloading chunk ${index}:`, error)
+            throw error
+          }
         })
       )
 
       // Step 5: Sort and stitch
       chunks.sort((a, b) => a.index - b.index)
-      const blob = new Blob(chunks.map(c => c.buffer), { type: 'application/octet-stream' })
+      const blob = new Blob(chunks.map(c => c.buffer), { 
+        type: data.contentType || 'application/octet-stream' 
+      })
 
       // Step 6: Trigger download
       const url = URL.createObjectURL(blob)
@@ -161,11 +188,28 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
       link.click()
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
+      
+      console.log('Download completed successfully')
     } catch (err) {
       console.error('Parallel download failed:', err)
-      window.location.href = downloadEndpoint
+      // Fallback: try to redirect to the original SAS URL for direct download
+      try {
+        const response = await fetch(downloadEndpoint, { method: 'GET' })
+        if (response.ok) {
+          const data = await response.json()
+          if (data.sasUrl) {
+            window.open(data.sasUrl, '_blank')
+            return
+          }
+        }
+      } catch (fallbackError) {
+        console.error('Fallback download also failed:', fallbackError)
+      }
+      
+      alert(`Download failed: ${err.message}. Please try again or contact support.`)
     } finally {
       setIsDownloading(false)
+      setDownloadProgress(0)
     }
   };
 

@@ -29,7 +29,12 @@ resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2023-04-15' = {
     databaseAccountOfferType: 'Standard'
     enableAutomaticFailover: false
     enableMultipleWriteLocations: false
-    enableFreeTier: true
+    enableFreeTier: false
+    capabilities: [
+      {
+        name: 'EnableServerless'
+      }
+    ]
     publicNetworkAccess: 'Enabled'
     networkAclBypass: 'AzureServices'
     disableKeyBasedMetadataWriteAccess: false
@@ -48,9 +53,7 @@ resource cosmosDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2023
     resource: {
       id: databaseName
     }
-    options: {
-      throughput: 400
-    }
+    // No throughput options needed for serverless
   }
 }
 
@@ -66,9 +69,7 @@ resource subscriptionsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDataba
       }
       defaultTtl: -1
     }
-    options: {
-      throughput: 400
-    }
+    // No throughput options - inherits from database autoscale
   }
 }
 
@@ -84,8 +85,36 @@ resource jobsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/conta
       }
       defaultTtl: -1
     }
-    options: {
-      throughput: 400
+    // No throughput options - inherits from database autoscale
+  }
+}
+
+resource rateLimitsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2023-04-15' = {
+  parent: cosmosDatabase
+  name: 'ratelimits'
+  properties: {
+    resource: {
+      id: 'ratelimits'
+      partitionKey: {
+        paths: ['/clientId']
+        kind: 'Hash'
+      }
+      defaultTtl: 3600 // 1 hour TTL for rate limit records
+    }
+  }
+}
+
+resource securityEventsContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2023-04-15' = {
+  parent: cosmosDatabase
+  name: 'securityevents'
+  properties: {
+    resource: {
+      id: 'securityevents'
+      partitionKey: {
+        paths: ['/clientId']
+        kind: 'Hash'
+      }
+      defaultTtl: 86400 // 24 hours TTL for security events
     }
   }
 }

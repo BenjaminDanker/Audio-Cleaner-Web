@@ -50,17 +50,23 @@ resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2022-05-01
       corsRules: [
         {
           allowedOrigins: [
-            'https://nice-hill-026326b10.1.azurestaticapps.net'
-            'https://localhost:3000'
+            'https://zealous-river-020499810.2.azurestaticapps.net'
             'http://localhost:3000'
-            'https://localhost:4280'
-            'http://localhost:4280'
-            'https://localhost:5173'
             'http://localhost:5173'
+            'http://127.0.0.1:3000'
+            'http://127.0.0.1:5173'
           ]
           allowedMethods: ['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS']
           allowedHeaders: ['*']
-          exposedHeaders: ['*']
+          exposedHeaders: [
+            'Content-Range'
+            'Content-Length'
+            'Content-Type'
+            'Accept-Ranges'
+            'ETag'
+            'Last-Modified'
+            'x-ms-*'
+          ]
           maxAgeInSeconds: 3600
         }
       ]

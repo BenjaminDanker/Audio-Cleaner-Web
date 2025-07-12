@@ -23,61 +23,26 @@ export const AuthProvider = ({ children }) => {
 
   const checkAuthStatus = async () => {
     try {
-      // Check if we're in development mode (Static Web Apps auth not available locally)
-      const isDevelopment = window.location.hostname === 'localhost' || 
-                           window.location.hostname === '127.0.0.1' ||
-                           window.location.port === '5173'
+      // Use Static Web Apps built-in authentication
+      const response = await axios.get('/.auth/me', {
+        timeout: 5000 // 5 second timeout
+      })
       
-      if (isDevelopment) {
-        // For local development, simulate a logged-in user
-        console.log('Development mode detected - simulating authenticated user')
+      if (response.data.clientPrincipal && response.data.clientPrincipal.userId) {
+        const principal = response.data.clientPrincipal
         setUser({
-          id: 'dev-user-123',
-          email: 'dev@example.com',
-          name: 'Development User'
+          id: principal.userId,
+          email: principal.userDetails,
+          name: principal.userDetails || principal.userRoles?.[0] || 'User'
         })
         await fetchSubscription()
       } else {
-        // Use Static Web Apps built-in authentication in production
-        try {
-          const response = await axios.get('/.auth/me', {
-            timeout: 5000 // 5 second timeout
-          })
-          
-          if (response.data.clientPrincipal && response.data.clientPrincipal.userId) {
-            const principal = response.data.clientPrincipal
-            setUser({
-              id: principal.userId,
-              email: principal.userDetails,
-              name: principal.userDetails || principal.userRoles?.[0] || 'User'
-            })
-            await fetchSubscription()
-          } else {
-            // No authenticated user
-            setUser(null)
-          }
-        } catch (authError) {
-          console.error('Auth endpoint failed:', authError)
-          // If auth endpoint fails, user is not authenticated
-          setUser(null)
-        }
+        // No authenticated user
+        setUser(null)
       }
     } catch (error) {
       console.error('Auth check failed:', error)
-      // In case of error, check if we're in development
-      const isDevelopment = window.location.hostname === 'localhost' || 
-                           window.location.hostname === '127.0.0.1' ||
-                           window.location.port === '5173'
-      if (isDevelopment) {
-        setUser({
-          id: 'dev-user-123',
-          email: 'dev@example.com',
-          name: 'Development User'
-        })
-        await fetchSubscription()
-      } else {
-        setUser(null)
-      }
+      setUser(null)
     } finally {
       setLoading(false)
     }
@@ -93,43 +58,14 @@ export const AuthProvider = ({ children }) => {
   }
 
   const login = async () => {
-    // Check if we're in development mode
-    const isDevelopment = window.location.hostname === 'localhost' || 
-                         window.location.hostname === '127.0.0.1' ||
-                         window.location.port === '5173'
-    
-    if (isDevelopment) {
-      // For local development, just simulate login
-      console.log('Development login - simulating authenticated user')
-      setUser({
-        id: 'dev-user-123',
-        email: 'dev@example.com',
-        name: 'Development User'
-      })
-      await fetchSubscription()
-      return { success: true }
-    } else {
-      // For Static Web Apps, redirect to the built-in login
-      window.location.href = '/.auth/login/aad'
-      return { success: true }
-    }
+    // For Static Web Apps, redirect to the built-in login
+    window.location.href = '/.auth/login/aad'
+    return { success: true }
   }
 
   const logout = () => {
-    // Check if we're in development mode
-    const isDevelopment = window.location.hostname === 'localhost' || 
-                         window.location.hostname === '127.0.0.1' ||
-                         window.location.port === '5173'
-    
-    if (isDevelopment) {
-      // For local development, just clear user state
-      console.log('Development logout - clearing user state')
-      setUser(null)
-      setSubscription(null)
-    } else {
-      // Use Static Web Apps built-in logout
-      window.location.href = '/.auth/logout'
-    }
+    // Use Static Web Apps built-in logout
+    window.location.href = '/.auth/logout'
   }
 
   const value = {

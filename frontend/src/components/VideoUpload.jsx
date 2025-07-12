@@ -1,38 +1,99 @@
-import React, { useState, useRef } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { Upload, FileVideo, X } from 'lucide-react'
 import axios from 'axios'
 import './VideoUpload.css'
 
+// Configuration function for optimal upload settings
+const getUploadConfig = (fileSize) => {
+  if (fileSize < 64 * 1024 * 1024) { // < 64MB
+    return {
+      useParallel: false,
+      maxConcurrency: 1,
+      chunkSize: 4 * 1024 * 1024,
+      retryDelay: 1000,
+      rateLimitStrategy: 'standard'
+    }
+  } else if (fileSize < 500 * 1024 * 1024) { // 64MB - 500MB
+    return {
+      useParallel: true,
+      maxConcurrency: 3, // Reduced to respect rate limits
+      chunkSize: 4 * 1024 * 1024,
+      retryDelay: 2000,
+      rateLimitStrategy: 'enhanced'
+    }
+  } else if (fileSize < 2 * 1024 * 1024 * 1024) { // 500MB - 2GB
+    return {
+      useParallel: true,
+      maxConcurrency: 4,
+      chunkSize: 8 * 1024 * 1024, // Larger chunks for big files
+      retryDelay: 3000,
+      rateLimitStrategy: 'bulk'
+    }
+  } else { // > 2GB
+    return {
+      useParallel: true,
+      maxConcurrency: 5,
+      chunkSize: 16 * 1024 * 1024, // Even larger chunks
+      retryDelay: 5000,
+      rateLimitStrategy: 'enterprise'
+    }
+  }
+}
+
 // Utility function for parallel block uploads with Azure best practices
-const uploadFileInParallel = async (file, uploadUrl, onProgress) => {
+// Enhanced parallel upload with rate limiting awareness
+const uploadFileInParallel = async (file, uploadUrl, onProgress, uploadId, activeUploadIdRef) => {
   const fileSize = file.size
-  const blockSize = 4 * 1024 * 1024 // 4MB blocks (optimal for Azure)
-  const maxConcurrency = 6 // Maximum parallel uploads
   
-  // For files smaller than 32MB, use simple upload
-  if (fileSize < 32 * 1024 * 1024) {
-    return uploadFileSimple(file, uploadUrl, onProgress)
+  // Dynamic configuration based on file size
+  const config = getUploadConfig(fileSize)
+  
+  // For files smaller than 64MB, use simple upload
+  if (!config.useParallel) {
+    return uploadFileSimple(file, uploadUrl, onProgress, uploadId, activeUploadIdRef)
   }
   
-  const blockCount = Math.ceil(fileSize / blockSize)
+  const blockCount = Math.ceil(fileSize / config.chunkSize)
   const blockIds = []
   
   // Generate block IDs with proper encoding
   for (let i = 0; i < blockCount; i++) {
-    // Use URL-safe base64 encoding
-    const blockId = btoa(`block-${i.toString().padStart(6, '0')}`).replace(/[+/]/g, (m) => m === '+' ? '-' : '_').replace(/=+$/, '')
+    // Use proper base64 encoding for Azure - must be exactly 64 bytes when base64 decoded
+    const blockId = btoa(String.fromCharCode(...new Array(64).fill(0).map((_, idx) => 
+      idx < 8 ? (i >>> ((7 - idx) * 8)) & 0xFF : 0
+    )))
     blockIds.push(blockId)
   }
   
-  let uploadedBlocks = 0
+  let uploadedBytes = 0
+  const totalBytes = fileSize
   const failedBlocks = new Set()
+  const blockProgressMap = new Map() // Track individual block progress
   
-  // Enhanced block upload with retry logic
+  // Function to calculate and report overall progress
+  const updateOverallProgress = () => {
+    let totalProgress = 0
+    for (const [blockIndex, progress] of blockProgressMap) {
+      const blockSize = Math.min(config.chunkSize, totalBytes - (blockIndex * config.chunkSize))
+      totalProgress += (progress * blockSize)
+    }
+    const overallProgress = Math.min(totalProgress / totalBytes, 1.0)
+    
+    // Check if upload is still active before calling progress callback
+    if (activeUploadIdRef.current === uploadId) {
+      onProgress(overallProgress)
+    }
+  }
+  
+  // Enhanced block upload with retry logic and smooth progress
   const uploadBlockWithRetry = async (blockIndex, maxRetries = 3) => {
     const blockId = blockIds[blockIndex]
-    const start = blockIndex * blockSize
-    const end = Math.min(start + blockSize, fileSize)
+    const start = blockIndex * config.chunkSize  // Use config.chunkSize instead of blockSize
+    const end = Math.min(start + config.chunkSize, fileSize)
     const chunk = file.slice(start, end)
+    
+    // Initialize progress for this block
+    blockProgressMap.set(blockIndex, 0)
     
     // Parse the upload URL to get base URL and SAS token
     const urlParts = uploadUrl.split('?')
@@ -46,13 +107,23 @@ const uploadFileInParallel = async (file, uploadUrl, onProgress) => {
         await new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest()
           
-          // Set timeout (2 minutes per block)
-          xhr.timeout = 120000
+          // Set longer timeout for larger files
+          xhr.timeout = Math.min(240000, 60000 + (chunk.size / 1024 / 1024) * 5000) // 1-4 minutes based on chunk size
+          
+          // Track upload progress for this specific block
+          xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+              const blockProgress = e.loaded / e.total
+              blockProgressMap.set(blockIndex, blockProgress)
+              updateOverallProgress()
+            }
+          })
           
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
-              uploadedBlocks++
-              onProgress(uploadedBlocks / blockCount)
+              // Ensure this block is marked as 100% complete
+              blockProgressMap.set(blockIndex, 1.0)
+              updateOverallProgress()
               resolve(blockId)
             } else {
               reject(new Error(`Block upload failed: ${xhr.status} ${xhr.statusText}`))
@@ -65,34 +136,43 @@ const uploadFileInParallel = async (file, uploadUrl, onProgress) => {
           xhr.open('PUT', blockUrl)
           xhr.setRequestHeader('Content-Type', 'application/octet-stream')
           xhr.setRequestHeader('x-ms-blob-type', 'BlockBlob')
+          // Add rate limiting awareness headers
+          xhr.setRequestHeader('X-Chunk-Upload', 'true')
+          xhr.setRequestHeader('X-Expected-Chunks', blockCount.toString())
+          xhr.setRequestHeader('X-Upload-Strategy', config.rateLimitStrategy || 'enhanced')
           xhr.send(chunk)
         })
         
         return blockId // Success, exit retry loop
-        
-      } catch (error) {
-        if (attempt < maxRetries) {
-          // Exponential backoff with jitter
-          const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 10000)
-          console.warn(`Block ${blockIndex} upload attempt ${attempt + 1} failed: ${error.message}. Retrying in ${delay}ms...`)
-          await new Promise(resolve => setTimeout(resolve, delay))
-        } else {
-          console.error(`Block ${blockIndex} upload failed after ${maxRetries + 1} attempts: ${error.message}`)
-          failedBlocks.add(blockIndex)
-          throw error
+        } catch (error) {
+          // Enhanced error handling for rate limiting
+          if (error.response?.status === 429) {
+            const retryAfter = parseInt(error.response.headers['retry-after'] || '10')
+            const rateLimitType = error.response.headers['x-ratelimit-type'] || 'unknown'
+            console.warn(`Rate limited (${rateLimitType}), retrying after ${retryAfter}s (attempt ${attempt + 1}/${maxRetries + 1})`)
+            await new Promise(resolve => setTimeout(resolve, retryAfter * 1000))
+          } else if (attempt < maxRetries) {
+            // Exponential backoff with jitter for other errors
+            const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 10000)
+            console.warn(`Block ${blockIndex} upload attempt ${attempt + 1} failed: ${error.message}. Retrying in ${delay}ms...`)
+            await new Promise(resolve => setTimeout(resolve, delay))
+          } else {
+            console.error(`Block ${blockIndex} upload failed after ${maxRetries + 1} attempts: ${error.message}`)
+            failedBlocks.add(blockIndex)
+            throw error
+          }
         }
-      }
     }
   }
   
   // Upload blocks with controlled concurrency
   const uploadTasks = []
-  const semaphore = new Array(maxConcurrency).fill(null).map(() => Promise.resolve())
+  const semaphore = new Array(config.maxConcurrency).fill(null).map(() => Promise.resolve())
   let semaphoreIndex = 0
   
   for (let i = 0; i < blockCount; i++) {
     const currentIndex = semaphoreIndex
-    semaphoreIndex = (semaphoreIndex + 1) % maxConcurrency
+    semaphoreIndex = (semaphoreIndex + 1) % config.maxConcurrency
     
     const task = semaphore[currentIndex].then(() => uploadBlockWithRetry(i))
     semaphore[currentIndex] = task.catch(() => {}) // Prevent unhandled rejection
@@ -122,7 +202,7 @@ const uploadFileInParallel = async (file, uploadUrl, onProgress) => {
       ${blockIds.map(id => `<Latest>${id}</Latest>`).join('')}
     </BlockList>`
   
-  // Retry commit operation
+  // Commit the block list with retry (progress will naturally be at ~100% already)
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await new Promise((resolve, reject) => {
@@ -146,6 +226,10 @@ const uploadFileInParallel = async (file, uploadUrl, onProgress) => {
       })
       
       console.log(`Successfully uploaded file using ${blockCount} parallel blocks`)
+      // Ensure progress reaches 100% for the upload portion
+      if (activeUploadIdRef.current === uploadId) {
+        onProgress(1.0)
+      }
       return // Success, exit retry loop
       
     } catch (error) {
@@ -161,19 +245,32 @@ const uploadFileInParallel = async (file, uploadUrl, onProgress) => {
   }
 }
 
-// Simple upload for smaller files
-const uploadFileSimple = async (file, uploadUrl, onProgress) => {
-  const xhr = new XMLHttpRequest()
-  
-  xhr.upload.addEventListener('progress', (e) => {
-    if (e.lengthComputable) {
-      onProgress(e.loaded / e.total)
-    }
-  })
+// Simple upload for smaller files with smooth progress
+const uploadFileSimple = async (file, uploadUrl, onProgress, uploadId, activeUploadIdRef) => {
+  console.log(`Using simple upload for file: ${file.name} (${file.size} bytes)`)
   
   return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    
+    // Track upload progress smoothly
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) {
+        // Provide smooth progress updates during upload (0 to 1)
+        const progress = e.loaded / e.total
+        console.log(`Simple upload progress: ${(progress * 100).toFixed(1)}% (${e.loaded}/${e.total} bytes)`)
+        
+        // Check if upload is still active before calling progress callback
+        if (activeUploadIdRef.current === uploadId) {
+          onProgress(progress)
+        }
+      }
+    })
+    
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
+        if (activeUploadIdRef.current === uploadId) {
+          onProgress(1.0) // Ensure we reach 100% on completion
+        }
         resolve()
       } else {
         reject(new Error(`Upload failed: ${xhr.status} ${xhr.statusText}`))
@@ -198,7 +295,29 @@ const VideoUpload = ({ onJobCreated }) => {
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [attenuationDb, setAttenuationDb] = useState(30) // Default attenuation level
+  const [activeUploadId, setActiveUploadId] = useState(null) // Track active upload to prevent races
   const fileInputRef = useRef(null)
+  const activeUploadRef = useRef(null) // More reliable tracking using ref
+
+  // Debug effect to track activeUploadId changes
+  useEffect(() => {
+    console.log(`activeUploadId changed to: ${activeUploadId}`)
+  }, [activeUploadId])
+
+  // Cleanup effect to handle component unmounting during active uploads
+  useEffect(() => {
+    return () => {
+      // Component is unmounting, cancel any active uploads
+      // Use a ref to get the current activeUploadId value
+      setActiveUploadId(current => {
+        if (current || activeUploadRef.current) {
+          console.log('Component unmounting, cancelling active upload:', current || activeUploadRef.current)
+        }
+        return null
+      })
+      activeUploadRef.current = null
+    }
+  }, []) // Empty dependency array - only run on mount/unmount
 
   const handleFileSelect = (file) => {
     if (file && file.type.startsWith('video/')) {
@@ -242,25 +361,49 @@ const VideoUpload = ({ onJobCreated }) => {
   }
 
   const handleUpload = async () => {
-    if (!selectedFile) return
+    if (!selectedFile || isUploading) return
 
+    // Generate unique upload ID to prevent race conditions
+    const uploadId = `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    console.log(`Starting new upload with ID: ${uploadId}`)
+    
+    // Check if there's already an active upload
+    if (activeUploadId) {
+      console.warn('Upload already in progress, ignoring new upload request')
+      console.warn(`Current activeUploadId: ${activeUploadId}`)
+      return
+    }
+
+    console.log(`Setting activeUploadId to: ${uploadId}`)
+    setActiveUploadId(uploadId)
+    activeUploadRef.current = uploadId
+    
+    // Small delay to ensure state is set before proceeding
+    await new Promise(resolve => setTimeout(resolve, 10))
     setIsUploading(true)
     setUploadProgress(0)
 
     let uploadUrl = null
     let blobName = null
     let fileUrl = null
+    let cleanup = null // Function to clean up resources
 
     try {
       // First, get the SAS upload URL from our API
-      setUploadProgress(10)
+      setUploadProgress(2) // Initial progress for getting upload URL
+      
+      // Get upload configuration for rate limiting awareness
+      const uploadConfig = getUploadConfig(selectedFile.size)
       
       const uploadUrlResponse = await axios.post('/api/upload-file', {
         fileName: selectedFile.name,
         fileSize: selectedFile.size
       }, {
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'X-Upload-Strategy': uploadConfig.rateLimitStrategy,
+          'X-Expected-Chunks': uploadConfig.useParallel ? Math.ceil(selectedFile.size / uploadConfig.chunkSize).toString() : '1',
+          'X-Parallel-Upload': uploadConfig.useParallel.toString()
         }
       })
 
@@ -273,22 +416,67 @@ const VideoUpload = ({ onJobCreated }) => {
       fileUrl = uploadUrlResponse.data.fileUrl
       blobName = uploadUrlResponse.data.blobName
       
-      setUploadProgress(20)
-
-      // Check if we're in local development
-      const isLocalDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      setUploadProgress(5) // URL obtained, ready to start upload
       
-      if (isLocalDev) {
-        // Local development: Simulate upload
-        setUploadProgress(80)
-      } else {
-        // Production: Upload directly to Azure Blob Storage using parallel block uploads
-        await uploadFileInParallel(selectedFile, uploadUrl, (progress) => {
-          setUploadProgress(20 + Math.round(progress * 60))
-        })
+      // Set up cleanup function for this specific upload
+        cleanup = async () => {
+          if (blobName) {
+            try {
+              await axios.delete(`/api/cleanup-blob`, {
+                data: { blobName: blobName },
+                headers: { 'Content-Type': 'application/json' }
+              })
+              console.log(`Cleaned up blob: ${blobName}`)
+            } catch (cleanupError) {
+              console.warn('Failed to cleanup blob:', cleanupError)
+            }
+          }
+        }
+      
+      // Check if this upload is still the active one (prevent race conditions)
+      // Only abort if BOTH state and ref indicate this upload is no longer active
+      const isStateInvalid = activeUploadId !== null && activeUploadId !== uploadId
+      const isRefInvalid = activeUploadRef.current !== null && activeUploadRef.current !== uploadId
+      
+      if (isStateInvalid && isRefInvalid) {
+        console.warn('Upload was superseded by newer upload, aborting')
+        console.warn(`Current activeUploadId: ${activeUploadId}, activeUploadRef: ${activeUploadRef.current}, this uploadId: ${uploadId}`)
+        await cleanup()
+        return
+      } else if (activeUploadId !== uploadId || activeUploadRef.current !== uploadId) {
+        console.log(`Race condition check: activeUploadId: ${activeUploadId}, activeUploadRef: ${activeUploadRef.current}, uploadId: ${uploadId} - continuing upload`)
+      }
+      
+      // Upload directly to Azure Blob Storage
+      // File upload takes 5% to 90% of progress bar for smooth visual feedback
+      console.log(`Starting upload for file size: ${selectedFile.size} bytes`)
+      console.log(`Upload config:`, getUploadConfig(selectedFile.size))
+      
+      await uploadFileInParallel(selectedFile, uploadUrl, (progress) => {
+          // Check if this upload is still active before updating progress
+          if (activeUploadRef.current === uploadId) {
+            // Map file upload progress (0-1) to progress bar range (5-90%)
+            const uploadProgressPercent = 5 + Math.round(progress * 85)
+            setUploadProgress(uploadProgressPercent)
+          }
+        }, uploadId, activeUploadRef)
+
+      // Final race condition check before job creation
+      // Only abort if BOTH state and ref indicate this upload is no longer active
+      const isFinalStateInvalid = activeUploadId !== null && activeUploadId !== uploadId
+      const isFinalRefInvalid = activeUploadRef.current !== null && activeUploadRef.current !== uploadId
+      
+      if (isFinalStateInvalid && isFinalRefInvalid) {
+        console.warn('Upload was superseded during file transfer, aborting job creation')
+        console.warn(`Current activeUploadId: ${activeUploadId}, activeUploadRef: ${activeUploadRef.current}, this uploadId: ${uploadId}`)
+        await cleanup()
+        return
+      } else if (activeUploadId !== uploadId || activeUploadRef.current !== uploadId) {
+        console.log(`Upload still active after file transfer - activeUploadId: ${activeUploadId}, activeUploadRef: ${activeUploadRef.current}, uploadId: ${uploadId}`)
       }
 
-      setUploadProgress(85)
+      // File upload complete, preparing job creation
+      setUploadProgress(92) // File uploaded, preparing job creation
 
       // Step 2: Create processing job using the blob info
       const jobData = {
@@ -298,10 +486,14 @@ const VideoUpload = ({ onJobCreated }) => {
         attenuationDb: attenuationDb
       }
 
+      setUploadProgress(95) // Submitting job
       const jobResponse = await axios.post('/api/enqueue-job', jobData)
-      setUploadProgress(95)
+      setUploadProgress(98) // Job submitted
+      
+      console.log('Job response:', jobResponse.data)
       
       if (jobResponse.data.success || jobResponse.data.id) {
+        console.log('Job created successfully, clearing selected file')
         const job = {
           id: jobResponse.data.id || jobResponse.data.jobId,
           filename: selectedFile.name,
@@ -323,25 +515,32 @@ const VideoUpload = ({ onJobCreated }) => {
         
         alert('File uploaded successfully! Check the Processing Jobs tab to monitor progress.')
       } else {
+        console.error('Job creation failed:', jobResponse.data)
         throw new Error(jobResponse.data.error || 'Job creation failed')
       }
     } catch (error) {
       console.error('Upload failed:', error)
       
-      // Clean up any partial blob upload if it exists
-      if (uploadUrl && blobName) {
-        try {
-          await axios.delete(uploadUrl)
-          console.log('Cleaned up partial blob upload')
-        } catch (cleanupError) {
-          console.warn('Failed to cleanup partial blob:', cleanupError)
-        }
+      // Only clean up if this is still the active upload
+      if (activeUploadId === uploadId && cleanup) {
+        await cleanup()
       }
       
-      alert('Upload failed: ' + (error.response?.data?.error || error.message))
-      setUploadProgress(0) // Reset on error
+      // Only show alert if this is still the active upload (prevent stale error messages)
+      if (activeUploadId === uploadId) {
+        alert('Upload failed: ' + (error.response?.data?.error || error.message))
+        setUploadProgress(0) // Reset on error
+      }
     } finally {
-      setIsUploading(false)
+      // Only reset state if this upload is still the active upload (using ref as primary check)
+      if (activeUploadRef.current === uploadId) {
+        console.log(`Upload ${uploadId} completed, resetting activeUploadId`)
+        setIsUploading(false)
+        setActiveUploadId(null)
+        activeUploadRef.current = null
+      } else {
+        console.log(`Upload ${uploadId} not resetting state (activeUploadId: ${activeUploadId}, activeUploadRef: ${activeUploadRef.current})`)
+      }
     }
   }
 
@@ -435,7 +634,8 @@ const VideoUpload = ({ onJobCreated }) => {
           <button 
             onClick={handleUpload}
             className="btn btn-primary upload-btn"
-            disabled={isUploading}
+            disabled={isUploading || activeUploadId !== null}
+            title={activeUploadId ? "Upload already in progress" : "Start processing this video"}
           >
             {isUploading ? 'Uploading...' : 'Start Audio Cleaning'}
           </button>

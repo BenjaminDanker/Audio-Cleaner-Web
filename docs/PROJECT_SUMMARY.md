@@ -53,10 +53,6 @@ audio-cleaner-web/
 │   ├── main.bicep          # Main Bicep template
 │   ├── main.parameters.json # Deployment parameters
 │   └── abbreviations.json  # Resource naming
-├── scripts/                # Development scripts
-│   ├── start-dev.ps1      # Local development setup
-│   ├── stop-dev.ps1       # Stop local services
-│   └── deploy-check.ps1   # Deployment verification
 ├── .github/workflows/      # CI/CD pipelines
 │   ├── deploy.yml         # Main deployment workflow
 │   └── docker.yml         # Container build workflow
@@ -81,21 +77,8 @@ audio-cleaner-web/
 - Azure CLI
 - Azure Developer CLI (azd)
 
-### 1. Local Development
+### Deploy to Azure
 ```powershell
-# Start all local services
-./scripts/start-dev.ps1
-
-# Access the app
-# Frontend: http://localhost:5173
-# API: http://localhost:7071
-```
-
-### 2. Deploy to Azure
-```powershell
-# Verify deployment readiness
-./scripts/deploy-check.ps1
-
 # Login to Azure
 az login
 
@@ -105,15 +88,15 @@ azd up
 
 ## 🔧 Configuration
 
-### Environment Variables (.env.local)
+### Environment Variables
 ```bash
-# Azure Storage (use Azurite for local)
+# Azure Storage
 AZURE_STORAGE_CONNECTION_STRING=...
 
 # Azure Service Bus
 AZURE_SERVICE_BUS_CONNECTION_STRING=...
 
-# Azure Cosmos DB (use emulator for local)
+# Azure Cosmos DB
 COSMOS_CONNECTION_STRING=...
 
 # Stripe
@@ -156,24 +139,6 @@ AZURE_TENANT_ID=...
 
 ## 🛠️ Development
 
-### Local Testing
-```powershell
-# Start Azurite (Azure Storage Emulator)
-azurite --location c:\azurite
-
-# Start Cosmos DB Emulator
-# (Install from Microsoft)
-
-# Start frontend
-cd frontend && npm run dev
-
-# Start API
-cd api && npm run dev
-
-# Run processor locally
-python processor/src/processor_app.py
-```
-
 ### Build Container
 ```powershell
 docker build -t audio-cleaner-processor .
@@ -210,7 +175,6 @@ docker run -e AZURE_STORAGE_CONNECTION_STRING="..." audio-cleaner-processor
 - Python AI processing service with Docker
 - Complete Bicep infrastructure templates
 - GitHub Actions CI/CD workflows
-- Local development environment
 - Deployment verification scripts
 
 ### 🔄 Next Steps

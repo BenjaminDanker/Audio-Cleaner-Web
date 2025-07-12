@@ -71,7 +71,7 @@ module.exports = async function (context, req) {
         };
 
     } catch (error) {
-        context.log.error('Error processing webhook:', error);
+        context.log.error('Error processing webhook:', error.message || 'Unknown error');
         context.res = {
             status: 500,
             body: { error: 'Internal server error' }
@@ -108,7 +108,7 @@ async function handleCheckoutSessionCompleted(context, session) {
             context.log(`Subscription created for user ${userId}`);
         }
     } catch (error) {
-        context.log.error('Error handling checkout session:', error);
+        context.log.error('Error handling checkout session:', error.message || 'Unknown error');
         throw error;
     }
 }
@@ -146,7 +146,7 @@ async function handleSubscriptionUpdated(context, subscription) {
             context.log(`Subscription updated for ${existingSubscription.userId}`);
         }
     } catch (error) {
-        context.log.error('Error handling subscription update:', error);
+        context.log.error('Error handling subscription update:', error.message || 'Unknown error');
         throw error;
     }
 }
@@ -175,7 +175,7 @@ async function handleSubscriptionDeleted(context, subscription) {
             context.log(`Subscription canceled for ${existingSubscription.userId}`);
         }
     } catch (error) {
-        context.log.error('Error handling subscription deletion:', error);
+        context.log.error('Error handling subscription deletion:', error.message || 'Unknown error');
         throw error;
     }
 }

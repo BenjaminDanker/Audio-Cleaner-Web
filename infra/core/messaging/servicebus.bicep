@@ -13,8 +13,8 @@ resource serviceBusNamespace 'Microsoft.ServiceBus/namespaces@2022-10-01-preview
   location: location
   tags: tags
   sku: {
-    name: 'Standard'
-    tier: 'Standard'
+    name: 'Basic'
+    tier: 'Basic'
   }
   properties: {
     minimumTlsVersion: '1.2'
@@ -27,17 +27,16 @@ resource serviceBusQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-prev
   parent: serviceBusNamespace
   name: 'audio-processing-queue'
   properties: {
-    lockDuration: 'PT5M'
+    lockDuration: 'PT2M'  // Reduced from 5M - audio processing should be faster or fail quickly
     maxSizeInMegabytes: 1024
     requiresDuplicateDetection: false
     requiresSession: false
-    defaultMessageTimeToLive: 'P10675199DT2H48M5.4775807S'
-    deadLetteringOnMessageExpiration: false
-    duplicateDetectionHistoryTimeWindow: 'PT10M'
-    maxDeliveryCount: 10
-    autoDeleteOnIdle: 'P10675199DT2H48M5.4775807S'
-    enablePartitioning: false
-    enableExpress: false
+    defaultMessageTimeToLive: 'P7D'  // Reduced from 14D - audio jobs shouldn't sit that long
+    deadLetteringOnMessageExpiration: true  // Enable dead lettering for failed jobs
+    maxDeliveryCount: 3  // Reduced for faster failure detection and lower costs
+    // autoDeleteOnIdle: 'P30D'  // Removed - not supported in Basic tier
+    enablePartitioning: false  // Not available in Basic tier
+    enableExpress: false  // Not available in Basic tier
   }
 }
 

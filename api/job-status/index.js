@@ -1,74 +1,11 @@
 const { CosmosClient } = require('@azure/cosmos');
-const fs = require('fs').promises;
-const path = require('path');
 
 module.exports = async function (context, req) {
     context.log('Job status endpoint called');
     
     try {
-        // Check if we're in local development
+        // Verify authentication
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
-        
-        if (isLocalDev) {
-            context.log('Local development mode - checking local job status');
-            
-            // Get job ID from query parameters
-            const jobId = req.query.jobId;
-            if (!jobId) {
-                context.res = {
-                    status: 400,
-                    body: { error: 'jobId query parameter is required' }
-                };
-                return;
-            }
-
-            try {
-                // Check for local job status file
-                const jobStatusPath = path.join(process.cwd(), 'temp', 'jobs', `${jobId}.json`);
-                const jobStatusExists = await fs.access(jobStatusPath).then(() => true).catch(() => false);
-                
-                if (jobStatusExists) {
-                    const jobData = JSON.parse(await fs.readFile(jobStatusPath, 'utf8'));
-                    context.res = {
-                        status: 200,
-                        body: jobData
-                    };
-                } else {
-                    // Return mock job status for development if no file exists
-                    const mockStatuses = ['queued', 'processing', 'completed', 'failed'];
-                    const randomStatus = mockStatuses[Math.floor(Math.random() * mockStatuses.length)];
-                    
-                    context.res = {
-                        status: 200,
-                        body: {
-                            id: jobId,
-                            status: randomStatus,
-                            fileName: 'test-video.mp4',
-                            processingType: 'denoise',
-                            progress: randomStatus === 'processing' ? Math.floor(Math.random() * 100) : 
-                                     randomStatus === 'completed' ? 100 : 0,
-                            createdAt: new Date(Date.now() - 300000).toISOString(),
-                            updatedAt: new Date().toISOString(),
-                            downloadUrl: randomStatus === 'completed' ? 
-                                `http://localhost:7071/api/download/${jobId}` : null,
-                            message: randomStatus === 'failed' ? 'Processing failed' : 
-                                    randomStatus === 'completed' ? 'Processing completed successfully' :
-                                    'Processing in progress'
-                        }
-                    };
-                }
-            } catch (error) {
-                context.log.error('Error reading local job status:', error);
-                context.res = {
-                    status: 500,
-                    body: { error: 'Error reading job status' }
-                };
-            }
-            return;
-        }
-
-        // Production code - verify authentication
         if (!clientPrincipal) {
             context.res = {
                 status: 401,
@@ -141,7 +78,7 @@ module.exports = async function (context, req) {
                     body: { error: 'Job not found' }
                 };
             } else {
-                context.log.error('Error querying Cosmos DB:', error);
+                context.log.error('Error querying Cosmos DB:', error.message || 'Unknown error');
                 context.res = {
                     status: 500,
                     body: { error: 'Database error' }
@@ -150,7 +87,7 @@ module.exports = async function (context, req) {
         }
 
     } catch (error) {
-        context.log.error('Error getting job status:', error);
+        context.log.error('Error getting job status:', error.message || 'Unknown error');
         context.res = {
             status: 500,
             body: { error: 'Internal server error' }

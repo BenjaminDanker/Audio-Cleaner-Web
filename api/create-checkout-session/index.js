@@ -4,36 +4,8 @@ module.exports = async function (context, req) {
     context.log('Create checkout session endpoint called');
     
     try {
-        // Check if we're in local development
+        // Verify authentication
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || !process.env.STRIPE_SECRET_KEY?.startsWith('sk_live_');
-        
-        if (isLocalDev) {
-            context.log('Local development mode - returning mock checkout URL');
-            
-            // Validate request body
-            const { priceId, mode = 'subscription' } = req.body;
-            if (!priceId) {
-                context.res = {
-                    status: 400,
-                    body: { error: 'Price ID is required' }
-                };
-                return;
-            }
-
-            // Return mock checkout session for development
-            context.res = {
-                status: 200,
-                body: {
-                    sessionId: 'cs_test_development_session_id',
-                    url: 'https://checkout.stripe.com/pay/cs_test_development_session_id',
-                    message: 'Development mode - no actual payment will be processed'
-                }
-            };
-            return;
-        }
-
-        // Production code - verify authentication
         if (!clientPrincipal) {
             context.res = {
                 status: 401,
@@ -90,7 +62,7 @@ module.exports = async function (context, req) {
         };
 
     } catch (error) {
-        context.log.error('Error creating checkout session:', error);
+        context.log.error('Error creating checkout session:', error.message || 'Unknown error');
         context.res = {
             status: 500,
             body: { 
