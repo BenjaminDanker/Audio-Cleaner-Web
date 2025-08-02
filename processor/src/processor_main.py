@@ -492,9 +492,14 @@ class AudioCleanerProcessor:
             if file_size > 64 * 1024 * 1024:  # 64MB threshold
                 await self._upload_large_blob_parallel(blob_client, local_file_path, file_size, job_id)
             else:
-                # For smaller files, use simple upload
+            # For smaller files, use simple upload
                 with open(local_file_path, 'rb') as data:
-                    blob_client.upload_blob(data, overwrite=True)
+                    # Upload processed videos to cold tier immediately since they're accessed infrequently
+                    blob_client.upload_blob(
+                        data, 
+                        overwrite=True,
+                        standard_blob_tier='Cold'  # Upload directly to cold tier
+                    )
             
             blob_url = blob_client.url
             logger.info(f"Uploaded blob: {blob_url}")

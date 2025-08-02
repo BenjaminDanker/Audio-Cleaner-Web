@@ -55,6 +55,59 @@ resource "azurerm_storage_container" "output" {
   container_access_type = "private"
 }
 
+# Lifecycle management policy for automatic tier transitions
+resource "azurerm_storage_management_policy" "main" {
+  storage_account_id = azurerm_storage_account.main.id
+
+  rule {
+    name    = "upload-files-hot-to-delete"
+    enabled = true
+
+    filters {
+      prefix_match = ["uploads/"]
+      blob_types   = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_creation_greater_than = 1
+      }
+    }
+  }
+
+  rule {
+    name    = "processed-videos-cleanup"
+    enabled = true
+
+    filters {
+      prefix_match = ["processed-videos/"]
+      blob_types   = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        delete_after_days_since_creation_greater_than = 3
+      }
+    }
+  }
+
+  rule {
+    name    = "general-cleanup"
+    enabled = true
+
+    filters {
+      blob_types = ["blockBlob"]
+    }
+
+    actions {
+      base_blob {
+        tier_to_cool_after_days_since_modification_greater_than = 30
+        tier_to_cold_after_days_since_modification_greater_than = 90
+      }
+    }
+  }
+}
+
 # Service Bus for job queue
 resource "azurerm_servicebus_namespace" "main" {
   name                = "sb-${local.project_name}-${local.resource_suffix}"
