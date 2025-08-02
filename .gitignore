@@ -48,6 +48,10 @@ build/
 .azure/
 *.log
 local.settings.json
+local.settings.cloud.json
+
+# Local development cloud configuration
+processor/.env.cloud
 
 # Development
 video/
@@ -103,5 +107,13 @@ stripe-cli.log
 *.pem
 *.key
 *.crt
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+*.tfplan
 
 .fake

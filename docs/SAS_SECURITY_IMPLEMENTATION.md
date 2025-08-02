@@ -294,7 +294,6 @@ Create a container for SAS token tracking:
 ### Environment Variables
 
 ```bash
-AzureWebJobsStorage=<storage-connection-string>
 COSMOS_CONNECTION_STRING=<cosmos-connection-string>
 ```
 

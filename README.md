@@ -40,21 +40,32 @@ That's it! The deployment will provision all Azure resources and deploy your app
 ## 🏗️ Architecture
 
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Static Web App                                │
+│  ┌─────────────────┐       ┌─────────────────────────────────┐   │
+│  │   React SPA     │───────│    Managed Functions API       │   │
+│  │  (Frontend)     │       │      (Node.js)                 │   │
+│  └─────────────────┘       └─────────────────────────────────┘   │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │ Container Apps  │
+                        │   (Python AI)   │
+                        └─────────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         │                       │                        │
+         ▼                       ▼                        ▼
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   React SPA     │───▶│ Azure Functions │───▶│ Container Apps  │
-│ (Static Web App)│    │    (Node.js)    │    │   (Python AI)   │
+│   Cosmos DB     │    │  Blob Storage   │    │  Service Bus    │
+│  (Metadata)     │    │ (Video Files)   │    │   (Queuing)     │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         │                       ▼                       ▼
-         │              ┌─────────────────┐    ┌─────────────────┐
-         │              │   Cosmos DB     │    │  Blob Storage   │
-         │              │  (Metadata)     │    │ (Video Files)   │
-         └─────────────▶└─────────────────┘    └─────────────────┘
 ```
 
 **Components:**
 - **Frontend**: React + Vite hosted on Azure Static Web Apps
-- **API**: Node.js Azure Functions with JWT authentication
+- **API**: Node.js managed functions integrated within Static Web Apps
 - **Processing**: Python container with DeepFilterNet3 AI model
 - **Storage**: Cosmos DB for metadata, Blob Storage for files
 - **Infrastructure**: Bicep templates with automated deployment

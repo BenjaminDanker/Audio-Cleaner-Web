@@ -1,0 +1,12 @@
+imageio_ffmpeg
+soundfile
+deepfilternet
+moviepy
+azure-storage-blob
+azure-servicebus
+azure-cosmos
+azure-identity
+azure-monitor-opentelemetry
+torch==2.1.0+cpu
+torchaudio==2.1.0+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu

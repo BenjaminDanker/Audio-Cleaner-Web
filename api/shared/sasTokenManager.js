@@ -1,157 +1,162 @@
+const { BlobServiceClient, StorageSharedKeyCredential, generateBlobSASQueryParameters, BlobSASPermissions } = require('@azure/storage-blob');
+
 /**
- * SAS Token Manager - Implements the 5 rules for secure SAS tokens
+ * SAS Token Manager for Azure Blob Storage
  * 
- * 1. Use user-delegation SAS whenever possible
- * 2. Grant bare minimum permissions with short expiry
- * 3. Force HTTPS and optionally IP ranges  
- * 4. Keep tokens out of logs
- * 5. Have a revocation strategy
+ * This class manages SAS token generation for Azure Blob Storage.
+ * 
+ * Usage:
+ * 1. Connection String (Account Key auth): new SASTokenManager(connectionString)
+ * 2. Azure AD (for User Delegation SAS): SASTokenManager.fromAzureAD(accountName, credential)
+ * 
+ * Authentication Note:
+ * - When initialized with a connection string, only Account Key SAS tokens can be generated
+ * - User Delegation SAS requires Azure AD authentication (DefaultAzureCredential) which is not available with connection string auth
+ * - The class will attempt User Delegation SAS but fall back to Account Key SAS when using connection string
+ * 
+ * Security Best Practices:
+ * - User Delegation SAS is more secure as it uses Azure AD and can be revoked
+ * - Account Key SAS works but cannot be revoked without rotating the storage account key
+ * - For production, consider using Managed Identity + DefaultAzureCredential instead of connection strings
  */
-
-const { BlobServiceClient, BlobSASPermissions, generateBlobSASQueryParameters, StorageSharedKeyCredential } = require('@azure/storage-blob');
-const { DefaultAzureCredential } = require('@azure/identity');
-const { CosmosClient } = require('@azure/cosmos');
-
 class SASTokenManager {
-    constructor(connectionString, cosmosConnectionString) {
-        this.connectionString = connectionString;
-        this.blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+    constructor(storageConnectionString) {
+        // Initialize blob service client
+        this.blobServiceClient = BlobServiceClient.fromConnectionString(storageConnectionString);
         
-        // Extract account details for fallback
-        this.accountName = connectionString.match(/AccountName=([^;]*)/)[1];
-        const accountKey = connectionString.match(/AccountKey=([^;]*)/)[1];
-        this.sharedKeyCredential = new StorageSharedKeyCredential(this.accountName, accountKey);
+        // Extract account details for SAS generation
+        const accountNameMatch = storageConnectionString.match(/AccountName=([^;]+)/);
+        const accountKeyMatch = storageConnectionString.match(/AccountKey=([^;]+)/);
         
-        // For token tracking and revocation (Rule #5)
-        if (cosmosConnectionString) {
-            this.cosmosClient = new CosmosClient(cosmosConnectionString);
-            this.tokensContainer = this.cosmosClient.database('audiocleaner').container('sastokens');
+        if (!accountNameMatch || !accountKeyMatch) {
+            throw new Error('Invalid storage connection string format');
         }
+        
+        this.accountName = accountNameMatch[1];
+        const accountKey = accountKeyMatch[1];
+        
+        if (!this.accountName || !accountKey) {
+            throw new Error('Empty AccountName or AccountKey in connection string');
+        }
+
+        try {
+            this.sharedKeyCredential = new StorageSharedKeyCredential(this.accountName, accountKey);
+        } catch (error) {
+            throw new Error(`Failed to create shared key credential: ${error.message}`);
+        }
+        
+        this.authType = 'ConnectionString';
     }
 
     /**
-     * Generate a secure SAS token following all 5 rules
+     * Alternative constructor for Azure AD authentication (enables true user delegation SAS)
+     * @param {string} accountName - Storage account name
+     * @param {object} credential - Azure AD credential (e.g., DefaultAzureCredential)
+     * @returns {SASTokenManager} Instance configured for Azure AD authentication
+     */
+    static fromAzureAD(accountName, credential) {
+        const instance = Object.create(SASTokenManager.prototype);
+        instance.accountName = accountName;
+        instance.blobServiceClient = new BlobServiceClient(
+            `https://${accountName}.blob.core.windows.net`,
+            credential
+        );
+        instance.sharedKeyCredential = null; // No account key available
+        instance.authType = 'AzureAD';
+        return instance;
+    }    /**
+     * Generate a secure SAS token (simplified - no tracking needed for short-lived tokens)
+     * Note: User delegation SAS requires Azure AD authentication, not connection string auth
      */
     async generateSASToken(options) {
         const {
             containerName,
             blobName,
-            permissions = 'r', // Default to read-only (Rule #2)
-            expiryMinutes = 10, // Default to 10 minutes (Rule #2)
-            clientIP = null, // Optional IP restriction (Rule #3)
-            userId = null, // For tracking and revocation
-            context = null // For logging
+            permissions = 'r',
+            expiryMinutes = 5,
+            clientIP = null,
+            context = null
         } = options;
 
         let sasToken;
         let sasType = 'AccountKey';
         
+        // Note: User delegation SAS will likely fail when BlobServiceClient is created from connection string
+        // Connection string uses account key auth, but user delegation requires Azure AD auth
         try {
-            // Rule #1: Prefer user delegation SAS
-            const delegationKeyStart = new Date();
-            const delegationKeyExpiry = new Date(delegationKeyStart.getTime() + Math.max(expiryMinutes, 30) * 60 * 1000);
-            
+            // Try user delegation SAS first (more secure)
             if (context) {
-                context.log(`Attempting to get user delegation key, expires: ${delegationKeyExpiry.toISOString()}`);
+                context.log(`Attempting user delegation SAS (auth type: ${this.authType})...`);
             }
+            
+            const delegationKeyStart = new Date();
+            // Delegation key should live longer than the SAS token, minimum 1 hour, max 7 days
+            const delegationKeyMinutes = Math.max(expiryMinutes * 2, 60); // At least double the SAS lifetime or 1 hour
+            const delegationKeyExpiry = new Date(delegationKeyStart.getTime() + delegationKeyMinutes * 60 * 1000);
             
             const userDelegationKey = await this.blobServiceClient.getUserDelegationKey(
                 delegationKeyStart,
                 delegationKeyExpiry
             );
             
-            const sasOptions = {
-                containerName,
-                blobName,
-                permissions: BlobSASPermissions.parse(permissions), // Rule #2: minimal permissions
-                startsOn: new Date(new Date().valueOf() - 2 * 60 * 1000), // 2 min buffer for clock skew
-                expiresOn: new Date(new Date().valueOf() + expiryMinutes * 60 * 1000), // Rule #2: short expiry
-                protocol: 'https', // Rule #3: Force HTTPS
-            };
+            if (userDelegationKey) {
+                // Generate user delegation SAS
+                const sasOptions = {
+                    containerName,
+                    blobName,
+                    permissions: BlobSASPermissions.parse(permissions),
+                    startsOn: new Date(),
+                    expiresOn: new Date(Date.now() + expiryMinutes * 60 * 1000),
+                    ipRange: clientIP ? { start: clientIP, end: clientIP } : undefined
+                };
 
-            // Rule #3: Temporarily disable IP restriction due to authentication issues
-            // TODO: Re-enable after investigating IP format issues
-            if (clientIP && this.isValidIPv4(clientIP)) {
-                if (context) {
-                    context.log(`IP available but not adding restriction (disabled): ${clientIP}`);
-                }
-            } else if (clientIP) {
-                if (context) {
-                    context.log(`Skipping invalid IP: ${clientIP}`);
-                }
-            }
-
-            sasToken = generateBlobSASQueryParameters(sasOptions, userDelegationKey, this.accountName).toString();
-            sasType = 'UserDelegation';
-            
-            if (context) {
-                // Rule #4: Don't log the actual token or full blob path
-                context.log(`Generated User Delegation SAS: ${blobName.substring(0, 20)}..., expires in ${expiryMinutes}min`);
-            }
-            
-        } catch (error) {
-            // Fallback to account key SAS
-            if (context) {
-                context.log('User delegation SAS failed, using account key SAS:', error.message);
-            }
-            
-            const sasOptions = {
-                containerName,
-                blobName,
-                permissions: BlobSASPermissions.parse(permissions), // Rule #2: minimal permissions
-                startsOn: new Date(new Date().valueOf() - 2 * 60 * 1000),
-                expiresOn: new Date(new Date().valueOf() + expiryMinutes * 60 * 1000), // Rule #2: short expiry
-                protocol: 'https', // Rule #3: Force HTTPS
-            };
-
-            // Rule #3: Temporarily disable IP restriction due to authentication issues
-            // TODO: Re-enable after investigating IP format issues
-            if (clientIP && this.isValidIPv4(clientIP)) {
-                if (context) {
-                    context.log(`IP available but not adding restriction to fallback SAS (disabled): ${clientIP}`);
-                }
-            } else if (clientIP) {
-                if (context) {
-                    context.log(`Skipping invalid IP for fallback SAS: ${clientIP}`);
-                }
-            }
-
-            try {
-                sasToken = generateBlobSASQueryParameters(sasOptions, this.sharedKeyCredential).toString();
+                // Note: generateBlobSASQueryParameters for user delegation requires: (options, userDelegationKey, accountName)
+                sasToken = generateBlobSASQueryParameters(sasOptions, userDelegationKey, this.accountName).toString();
+                sasType = 'UserDelegation';
                 
                 if (context) {
-                    // Rule #4: Don't log the actual token or full blob path
-                    context.log(`Generated Account Key SAS: ${blobName.substring(0, 20)}..., expires in ${expiryMinutes}min`);
+                    context.log('Generated user delegation SAS token');
+                }
+            }
+        } catch (error) {
+            if (context) {
+                const expectedFailure = this.authType === 'ConnectionString' ? ' (expected with connection string auth)' : '';
+                context.log(`User delegation SAS failed${expectedFailure}, falling back to account key:`, error.message);
+            }
+        }
+
+        // Fallback to account key SAS (this will always be used when initialized with connection string)
+        if (!sasToken) {
+            if (!this.sharedKeyCredential) {
+                throw new Error('Cannot generate account key SAS: no shared key credential available (Azure AD auth mode)');
+            }
+            
+            try {
+                const sasOptions = {
+                    containerName,
+                    blobName,
+                    permissions: BlobSASPermissions.parse(permissions),
+                    startsOn: new Date(),
+                    expiresOn: new Date(Date.now() + expiryMinutes * 60 * 1000),
+                    ipRange: clientIP ? { start: clientIP, end: clientIP } : undefined
+                };
+
+                sasToken = generateBlobSASQueryParameters(sasOptions, this.sharedKeyCredential).toString();
+                sasType = 'AccountKey';
+                
+                if (context) {
+                    context.log('Generated account key SAS token');
                 }
             } catch (fallbackError) {
                 if (context) {
-                    context.log('Account key SAS also failed:', fallbackError.message);
+                    context.log.error('Account key SAS also failed:', fallbackError.message);
                 }
                 throw new Error(`Failed to generate SAS token: ${fallbackError.message}`);
             }
         }
 
-        // Rule #5: Track token for potential revocation
-        if (this.tokensContainer && userId) {
-            try {
-                await this.tokensContainer.items.create({
-                    id: `${userId}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-                    userId,
-                    containerName,
-                    blobName: blobName.substring(0, 50), // Store partial path only for privacy
-                    sasType,
-                    permissions,
-                    createdAt: Date.now(),
-                    expiresAt: Date.now() + (expiryMinutes * 60 * 1000),
-                    clientIP,
-                    ttl: expiryMinutes * 60 + 300 // Auto-delete 5 minutes after expiry
-                });
-            } catch (error) {
-                if (context) {
-                    context.log('Failed to track SAS token:', error.message);
-                }
-                // Don't fail the request if tracking fails
-            }
+        if (!sasToken) {
+            throw new Error('SAS token generation completed but token is empty');
         }
 
         return {
@@ -162,75 +167,14 @@ class SASTokenManager {
     }
 
     /**
-     * Rule #5: Revoke SAS tokens for a user by invalidating user delegation key
-     * Note: This only works for user delegation SAS tokens
-     */
-    async revokeSASTokensForUser(userId, context = null) {
-        try {
-            // For user delegation SAS: Get a new delegation key to invalidate old ones
-            // This is a simplified approach - in production you might want more granular control
-            const newKey = await this.blobServiceClient.getUserDelegationKey(
-                new Date(),
-                new Date(Date.now() + 60 * 60 * 1000) // 1 hour
-            );
-            
-            // Mark tracked tokens as revoked
-            if (this.tokensContainer) {
-                const { resources: userTokens } = await this.tokensContainer.items
-                    .query(`SELECT * FROM c WHERE c.userId = "${userId}" AND c.expiresAt > ${Date.now()}`)
-                    .fetchAll();
-                
-                for (const token of userTokens) {
-                    await this.tokensContainer.item(token.id).patch([
-                        { op: 'add', path: '/revoked', value: true },
-                        { op: 'add', path: '/revokedAt', value: Date.now() }
-                    ]);
-                }
-                
-                if (context) {
-                    context.log(`Revoked ${userTokens.length} SAS tokens for user ${userId}`);
-                }
-            }
-            
-            return true;
-        } catch (error) {
-            if (context) {
-                context.log(`Failed to revoke SAS tokens for user ${userId}:`, error.message);
-            }
-            return false;
-        }
-    }
-
-    /**
-     * Validate if an IP address is a valid IPv4 format
-     */
-    isValidIPv4(ip) {
-        if (!ip || typeof ip !== 'string') return false;
-        
-        // Remove any port numbers
-        const cleanIP = ip.split(':')[0];
-        
-        const parts = cleanIP.split('.');
-        if (parts.length !== 4) return false;
-        
-        return parts.every(part => {
-            const num = parseInt(part, 10);
-            return num >= 0 && num <= 255 && part === num.toString();
-        });
-    }
-
-    /**
-     * Get client IP from Azure Functions request headers with better parsing
+     * Get client IP from Azure Functions request headers
      */
     static getClientIP(req) {
-        // Try various headers that might contain the real client IP
         const forwardedFor = req.headers['x-forwarded-for'];
         if (forwardedFor) {
-            // x-forwarded-for can contain multiple IPs, take the first one
             const firstIP = forwardedFor.split(',')[0].trim();
-            // Remove any port numbers and validate
             const cleanIP = firstIP.split(':')[0];
-            if (SASTokenManager.prototype.isValidIPv4.call({}, cleanIP)) {
+            if (this.isValidIPv4(cleanIP)) {
                 return cleanIP;
             }
         }
@@ -238,7 +182,7 @@ class SASTokenManager {
         const clientIP = req.headers['x-client-ip'];
         if (clientIP) {
             const cleanIP = clientIP.split(':')[0];
-            if (SASTokenManager.prototype.isValidIPv4.call({}, cleanIP)) {
+            if (this.isValidIPv4(cleanIP)) {
                 return cleanIP;
             }
         }
@@ -246,21 +190,27 @@ class SASTokenManager {
         const realIP = req.headers['x-real-ip'];
         if (realIP) {
             const cleanIP = realIP.split(':')[0];
-            if (SASTokenManager.prototype.isValidIPv4.call({}, cleanIP)) {
+            if (this.isValidIPv4(cleanIP)) {
                 return cleanIP;
             }
         }
         
-        // Fallback to connection remote address
-        const remoteAddress = req.connection?.remoteAddress;
-        if (remoteAddress) {
-            const cleanIP = remoteAddress.split(':')[0];
-            if (SASTokenManager.prototype.isValidIPv4.call({}, cleanIP)) {
-                return cleanIP;
-            }
-        }
+        return null;
+    }
+
+    /**
+     * Validate if an IP address is a valid IPv4 format
+     */
+    static isValidIPv4(ip) {
+        if (!ip || typeof ip !== 'string') return false;
         
-        return null; // Return null if no valid IPv4 found
+        const parts = ip.split('.');
+        if (parts.length !== 4) return false;
+        
+        return parts.every(part => {
+            const num = parseInt(part, 10);
+            return num >= 0 && num <= 255 && part === num.toString();
+        });
     }
 }
 

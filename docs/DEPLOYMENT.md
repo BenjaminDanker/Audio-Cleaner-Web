@@ -16,8 +16,7 @@ Audio Cleaner Pro uses Azure Developer CLI (azd) for streamlined deployment with
 ### Azure Requirements
 - Azure subscription with **Contributor** or **Owner** access
 - Subscription must support:
-  - Azure Static Web Apps
-  - Azure Functions Premium
+  - Azure Static Web Apps (Standard tier for managed functions)
   - Azure Container Apps
   - Azure Cosmos DB
   - Azure Storage (General Purpose v2)
@@ -255,8 +254,8 @@ Edit `infra/main.parameters.json` to adjust scaling:
     "containerAppMaxReplicas": {
       "value": 10
     },
-    "functionAppPlanSku": {
-      "value": "EP1"
+    "staticWebAppSku": {
+      "value": "Standard"
     }
   }
 }
@@ -331,11 +330,11 @@ az containerapp logs show \
   --resource-group $(azd env get-value AZURE_RESOURCE_GROUP)
 ```
 
-#### Function App Cold Start Issues
+#### Static Web App Configuration Issues
 ```bash
-# Check if Premium plan is enabled
-az functionapp show \
-  --name $(azd env get-value AZURE_API_APP_NAME) \
+# Check if Standard tier is enabled for managed functions
+az staticwebapp show \
+  --name $(azd env get-value AZURE_STATIC_WEB_APP_NAME) \
   --resource-group $(azd env get-value AZURE_RESOURCE_GROUP) \
   --query "sku"
 ```
@@ -370,7 +369,7 @@ az consumption usage list \
 # Scale down development environments
 azd env select dev
 azd env set CONTAINER_APP_MIN_REPLICAS 0
-azd env set FUNCTION_APP_PLAN_SKU "Y1"  # Consumption plan
+azd env set STATIC_WEB_APP_SKU "Free"  # Free tier for development
 azd up
 ```
 

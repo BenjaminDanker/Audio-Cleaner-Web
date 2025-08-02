@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  processor:
+    build: 
+      context: ./processor
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    env_file:
+      - ./processor/.env.cloud
+    environment:
+      # Override with cloud settings
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Mount source code for development (optional - remove for production-like testing)
+      - ./processor/src:/app/src
+    restart: unless-stopped
+    networks:
+      - audio-cleaner-dev
+
+  # Optional: Add Azurite for local storage testing if needed
+  # azurite:
+  #   image: mcr.microsoft.com/azure-storage/azurite
+  #   ports:
+  #     - "10000:10000"  # Blob service
+  #     - "10001:10001"  # Queue service
+  #     - "10002:10002"  # Table service
+  #   volumes:
+  #     - azurite-data:/data
+  #   command: "azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0"
+  #   networks:
+  #     - audio-cleaner-dev
+
+networks:
+  audio-cleaner-dev:
+    driver: bridge
+
+# volumes:
+#   azurite-data:

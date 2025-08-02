@@ -14,26 +14,35 @@ hooks:
       run: |
         Write-Host "Building frontend..."
         cd frontend
+        npm install
         npm run build
+        cd ..
+        Write-Host "Installing API dependencies..."
+        cd api
+        npm install
+        npm prune --production
         cd ..
     posix:
       shell: bash
       run: |
         echo "Building frontend..."
         cd frontend
+        npm install
         npm run build
+        cd ..
+        echo "Installing API dependencies..."
+        cd api
+        npm install
+        npm prune --production
         cd ..
 
 services:
   web:
-    project: ./frontend/dist
+    project: ./frontend
+    dist: ./dist
+    api: ../api
     host: staticwebapp
     language: js
-
-  api:
-    project: ./api
-    language: js
-    host: function
     
   processor:
     project: .

@@ -16,35 +16,32 @@ Internet
 │                    (Global Load Balancer)                       │
 └─────────────────────────────┬───────────────────────────────────┘
                               │
-    ┌─────────────────────────┼─────────────────────────┐
-    │                         │                         │
-    ▼                         ▼                         ▼
-┌─────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend  │    │   API Gateway   │    │   Web Portal    │
-│    (SPA)    │◄──►│ Azure Functions │    │   (Optional)    │
-│Static Web App│    │    (Node.js)    │    │                 │
-└─────────────┘    └─────────┬───────┘    └─────────────────┘
-                             │
-                             ▼
-                   ┌─────────────────┐
-                   │  Authentication │
-                   │   Azure AD B2C  │
-                   └─────────┬───────┘
-                             │
-          ┌──────────────────┼──────────────────┐
-          │                  │                  │
-          ▼                  ▼                  ▼
-    ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-    │   Storage   │   │  Database   │   │  Messaging  │
-    │Blob Storage │   │ Cosmos DB   │   │Service Bus  │
-    └─────────────┘   └─────────────┘   └─────┬───────┘
-                                               │
-                                               ▼
-                                    ┌─────────────────┐
-                                    │   AI Processor  │
-                                    │ Container Apps  │
-                                    │   (Python)      │
-                                    └─────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Static Web App                                │
+│  ┌─────────────────┐       ┌─────────────────────────────────┐   │
+│  │   Frontend      │───────│    Managed Functions API       │   │
+│  │    (SPA)        │       │      (Node.js)                 │   │
+│  │                 │       │  ┌─────────────────────────────┐│   │
+│  │                 │       │  │  Authentication (Azure AD)  ││   │
+│  └─────────────────┘       │  └─────────────────────────────┘│   │
+│                            └─────────────────────────────────┘   │
+└─────────────────────────────────┬───────────────────────────────┘
+                                  │
+          ┌───────────────────────┼───────────────────────┐
+          │                       │                       │
+          ▼                       ▼                       ▼
+    ┌─────────────┐   ┌─────────────────┐   ┌─────────────────┐
+    │   Storage   │   │    Database     │   │    Messaging    │
+    │Blob Storage │   │   Cosmos DB     │   │  Service Bus    │
+    └─────────────┘   └─────────────────┘   └─────┬───────────┘
+                                                   │
+                                                   ▼
+                                        ┌─────────────────┐
+                                        │   AI Processor  │
+                                        │ Container Apps  │
+                                        │   (Python)      │
+                                        └─────────────────┘
 ```
 
 ## Components
@@ -52,7 +49,7 @@ Internet
 ### Frontend Layer
 
 **Technology**: React 18 + Vite
-**Hosting**: Azure Static Web Apps
+**Hosting**: Azure Static Web Apps (with integrated API)
 **Responsibilities**:
 - User interface for file upload and management
 - Real-time job status monitoring
@@ -63,12 +60,13 @@ Internet
 - Progressive Web App (PWA) capabilities
 - Responsive design for mobile/desktop
 - Drag-and-drop file upload with progress tracking
-- WebSocket connections for real-time updates
+- Integrated API communication (no CORS issues)
+- Built-in authentication with Azure AD B2C
 
 ### API Layer
 
-**Technology**: Azure Functions (Node.js v18)
-**Hosting**: Azure Functions Premium Plan
+**Technology**: Azure Functions (Node.js v18) - Managed Functions
+**Hosting**: Azure Static Web Apps (integrated)
 **Authentication**: JWT tokens with Azure AD B2C
 
 **Endpoints**:
@@ -82,7 +80,7 @@ Internet
 
 **Security Features**:
 - Managed Identity for Azure service authentication
-- CORS policies for cross-origin requests
+- Integrated with Static Web App authentication
 - Rate limiting and request validation
 - SAS token generation with minimal permissions
 
@@ -178,7 +176,7 @@ Internet
 
 ### Auto-scaling
 - **Container Apps**: Scale 0-30 instances based on queue depth
-- **Functions**: Premium plan with pre-warmed instances
+- **Static Web Apps**: Managed functions with automatic scaling
 - **Storage**: Automatic scaling with geo-redundancy
 
 ### Performance Optimizations

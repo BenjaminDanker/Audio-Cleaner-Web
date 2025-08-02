@@ -1,69 +1,25 @@
 {
   "routes": [
-    {
-      "route": "/api/*",
-      "allowedRoles": ["authenticated"]
-    },
-    {
-      "route": "/dashboard",
-      "allowedRoles": ["authenticated"]
-    },
-    {
-      "route": "/dashboard/*",
-      "allowedRoles": ["authenticated"]
-    },
-    {
-      "route": "/login"
-    },
-    {
-      "route": "/*"
-    }
+    { "route": "/login",  "redirect": "/.auth/login/github?post_login_redirect_uri=/dashboard" },
+    { "route": "/logout", "redirect": "/.auth/logout?post_logout_redirect_uri=/" },
+    { "route": "/dashboard", "allowedRoles": ["authenticated"] }
   ],
+
   "navigationFallback": {
     "rewrite": "/index.html",
-    "exclude": ["/api/*", "/_framework/*", "/css/*", "/js/*", "/*.{css,js,png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot}"]
+    "exclude": ["/images/*.{png,jpg,gif}", "/css/*", "/.auth/*"]
   },
+
   "responseOverrides": {
-    "404": {
-      "redirect": "/",
-      "statusCode": 302
-    },
     "401": {
-      "redirect": "/.auth/login/aad",
-      "statusCode": 302
+      "rewrite": "/index.html"
     }
   },
-  "auth": {
-    "rolesSource": "/api/GetRoles",
-    "identityProviders": {
-      "azureActiveDirectory": {
-        "registration": {
-          "openIdIssuer": "https://login.microsoftonline.com/common/v2.0",
-          "clientIdSettingName": "AZURE_CLIENT_ID",
-          "clientSecretSettingName": "AZURE_CLIENT_SECRET"
-        },
-        "login": {
-          "loginParameters": [
-            "resource=https://graph.microsoft.com"
-          ]
-        }
-      }
-    }
-  },
+
   "globalHeaders": {
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "X-XSS-Protection": "1; mode=block",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
-    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=()",
-    "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
-    "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self' https://*.core.windows.net https://login.microsoftonline.com; frame-ancestors 'none';"
+    "content-security-policy":
+      "default-src https: 'unsafe-inline' 'unsafe-eval'; object-src 'none'"
   },
-  "platform": {
-    "apiRuntime": "node:18"
-  },
-  "trailingSlash": "never",
-  "mimeTypes": {
-    ".json": "application/json"
-  }
+
+  "trailingSlash": "auto"
 }

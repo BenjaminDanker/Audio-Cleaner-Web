@@ -1,0 +1,84 @@
+# This .dockerignore is for building from processor/ directory
+# All paths are relative to processor/ folder
+
+# Documentation and markdown files
+*.md
+README*
+CHANGELOG*
+LICENSE*
+
+# Git and version control (in parent)
+../.git/
+../.gitignore
+../.gitattributes
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+.venv/
+venv/
+env/
+
+# IDE files
+../.vscode/
+../.vs/
+.idea/
+*.swp
+*.swo
+*~
+
+# Other project directories (siblings to processor/)
+../frontend/
+../api/
+../terraform/
+../scripts/
+../docs/
+../backup-components/
+../node_modules/
+../.azure/
+
+# Config files in parent
+../azure.yaml
+../swa-cli.config.json
+../.env*
+../package-lock.json
+
+# Temporary files
+**/*.tmp
+**/*.temp
+**/*.bak
+**/*~
+
+# Media files (except local models/)
+**/*.mp4
+**/*.avi
+**/*.mov
+**/*.mkv
+**/*.wav
+**/*.mp3
+# Keep processor models specifically
+!processor/models/**/*
+
+# Backup and temporary files
+**/*.bak
+**/*.tmp
+**/*.temp
+**/*~
+
+# Large binary files and archives
+**/*.zip
+**/*.tar
+**/*.tar.gz
+**/*.tgz
+**/*.rar
+**/*.7z
+
+# Python compiled bytecode in nested dirs
+**/__pycache__/
+**/**.pyc
+**/**.pyo
+**/**.pyd

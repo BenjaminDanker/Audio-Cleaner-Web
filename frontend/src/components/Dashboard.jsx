@@ -1,12 +1,15 @@
 import React, { useState, useEffect } from 'react'
+import axios from 'axios'
 import { useAuth } from './AuthContext'
+import { useSubscription } from './SubscriptionContext'
 import VideoUpload from './VideoUpload'
 import JobStatus from './JobStatus'
 import SubscriptionInfo from './SubscriptionInfo'
 import './Dashboard.css'
 
 const Dashboard = () => {
-  const { user, subscription } = useAuth()
+  const { user } = useAuth()
+  const { loadSubscription } = useSubscription()
   const [activeTab, setActiveTab] = useState('upload')
   const [jobs, setJobs] = useState([])
 
@@ -17,6 +20,13 @@ const Dashboard = () => {
       setJobs(JSON.parse(savedJobs))
     }
   }, [])
+
+  // Load subscription data when subscription tab is activated
+  useEffect(() => {
+    if (activeTab === 'subscription') {
+      loadSubscription()
+    }
+  }, [activeTab, loadSubscription])
 
   const addJob = (job) => {
     const newJobs = [...jobs, job]
@@ -38,27 +48,20 @@ const Dashboard = () => {
     }
 
     try {
-      const response = await fetch(`/api/clear-jobs?jobId=${jobId}`, {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      const result = await response.json()
+      // Always remove from localStorage first
+      const updatedJobs = jobs.filter(job => job.id !== jobId)
+      setJobs(updatedJobs)
+      localStorage.setItem('audio_cleaner_jobs', JSON.stringify(updatedJobs))
       
-      if (result.success) {
-        const updatedJobs = jobs.filter(job => job.id !== jobId)
-        setJobs(updatedJobs)
-        localStorage.setItem('audio_cleaner_jobs', JSON.stringify(updatedJobs))
-        alert('Job deleted successfully')
-      } else {
-        alert(`Error deleting job: ${result.error}`)
+      // Try to delete from API, but don't fail if it doesn't exist
+      try {
+        const response = await axios.delete(`/api/clear-jobs?jobId=${jobId}`)
+        console.log('API delete result:', response.data)
+      } catch (apiError) {
+        console.warn('API delete failed (job may not exist in database):', apiError)
       }
+      
+      alert('Job deleted successfully')
     } catch (error) {
       console.error('Error deleting job:', error)
       alert('Error deleting job. Please try again.')
@@ -71,25 +74,18 @@ const Dashboard = () => {
     }
 
     try {
-      const response = await fetch('/api/clear-jobs', {
-        method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      })
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`)
-      }
-
-      const result = await response.json()
+      // Always clear localStorage first
+      setJobs([])
+      localStorage.removeItem('audio_cleaner_jobs')
       
-      if (result.success) {
-        setJobs([])
-        localStorage.removeItem('audio_cleaner_jobs')
-        alert(`Successfully cleared ${result.deletedCount} jobs`)
-      } else {
-        alert(`Error clearing jobs: ${result.error}`)
+      // Try to clear from API, but don't fail if it doesn't work
+      try {
+        const response = await axios.delete('/api/clear-jobs')
+        console.log('API clear result:', response.data)
+        alert(`Successfully cleared all jobs${response.data.deletedCount ? ` (${response.data.deletedCount} from database)` : ''}`)
+      } catch (apiError) {
+        console.warn('API clear failed:', apiError)
+        alert('All jobs cleared from browser (database may be empty)')
       }
     } catch (error) {
       console.error('Error clearing jobs:', error)
@@ -162,7 +158,7 @@ const Dashboard = () => {
         )}
         
         {activeTab === 'subscription' && (
-          <SubscriptionInfo subscription={subscription} />
+          <SubscriptionInfo />
         )}
       </div>
     </div>

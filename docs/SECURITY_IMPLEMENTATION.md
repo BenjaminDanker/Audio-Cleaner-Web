@@ -111,7 +111,6 @@ This document outlines the comprehensive security measures implemented in the Au
 ```
 COSMOS_CONNECTION_STRING=<cosmos-db-connection>
 AZURE_SERVICE_BUS_CONNECTION_STRING=<service-bus-connection>
-AzureWebJobsStorage=<storage-connection>
 JOB_SECURITY_SALT=<random-salt-for-job-hashing>
 ```
 

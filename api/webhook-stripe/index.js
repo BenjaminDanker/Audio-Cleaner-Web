@@ -3,7 +3,7 @@ const { CosmosClient } = require('@azure/cosmos');
 
 // Initialize Cosmos DB client
 const cosmosClient = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
-const database = cosmosClient.database('audiocleaner');
+const database = cosmosClient.database('AudioCleanerDB');
 const container = database.container('subscriptions');
 
 module.exports = async function (context, req) {

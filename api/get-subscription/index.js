@@ -20,7 +20,7 @@ module.exports = async function (context, req) {
 
         // Initialize Cosmos client
         const client = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
-        const database = client.database('audiocleaner');
+        const database = client.database('AudioCleanerDB');
         const container = database.container('subscriptions');
 
         try {

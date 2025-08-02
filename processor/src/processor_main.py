@@ -9,8 +9,32 @@ from pathlib import Path
 from azure.servicebus.aio import ServiceBusClient
 from azure.storage.blob import BlobServiceClient
 from azure.cosmos import CosmosClient
+from azure.monitor.opentelemetry import configure_azure_monitor
 from video_handler import VideoProcessor
 import traceback
+
+# Configure Application Insights if available
+def setup_application_insights():
+    connection_string = os.getenv('APPLICATIONINSIGHTS_CONNECTION_STRING')
+    if connection_string:
+        try:
+            # Set environment variable to disable problematic instrumentations before configuring
+            os.environ['OTEL_PYTHON_DISABLED_INSTRUMENTATIONS'] = 'psycopg2,psycopg'
+            
+            # Configure Azure Monitor
+            configure_azure_monitor(
+                connection_string=connection_string,
+                disable_offline_storage=True
+            )
+            print("✓ Application Insights configured successfully")
+        except Exception as e:
+            print(f"⚠ Failed to configure Application Insights: {e}")
+            # Continue without Application Insights rather than crashing
+    else:
+        print("⚠ APPLICATIONINSIGHTS_CONNECTION_STRING not found - using console logging only")
+
+# Set up Application Insights first
+setup_application_insights()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +53,7 @@ class AudioCleanerProcessor:
         
         # Service Bus
         self.service_bus_connection = os.getenv('AZURE_SERVICE_BUS_CONNECTION_STRING')
-        self.queue_name = 'audio-processing-queue'  # Updated queue name
+        self.queue_name = 'video-processing-jobs'  # Correct queue name
         
         # Storage
         self.storage_connection = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
@@ -65,103 +89,119 @@ class AudioCleanerProcessor:
             raise
             
         self.uploads_container = 'uploads'  # Container for input files
-        self.processed_container = 'processed'  # Container for output files
+        self.processed_container = 'processed-videos'  # Container for output files
         
         # Cosmos DB
         self.cosmos_connection = os.getenv('COSMOS_CONNECTION_STRING')  # Updated env var name
         self.cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection)
-        self.database = self.cosmos_client.get_database_client('audiocleaner')  # Updated database name
-        self.jobs_container = self.database.get_container_client('jobs')
+        self.database = self.cosmos_client.get_database_client('AudioCleanerDB')  # Correct database name
+        self.jobs_container = self.database.get_container_client('Jobs')
         
         logger.info("AudioCleanerProcessor initialized")
 
-    async def process_messages(self):
-        """Main message processing loop"""
+    async def process_single_batch(self):
+        """Process a single batch of messages and exit (job-style)"""
         async with ServiceBusClient.from_connection_string(
             self.service_bus_connection
         ) as client:
             
             receiver = client.get_queue_receiver(queue_name=self.queue_name)
             
-            logger.info(f"Starting to listen for messages on queue: {self.queue_name}")
+            logger.info(f"Checking for messages on queue: {self.queue_name}")
             
             async with receiver:
-                while True:
+                # Process up to 5 messages in this batch, then exit
+                received_msgs = await receiver.receive_messages(max_message_count=5, max_wait_time=10)
+                
+                if not received_msgs:
+                    logger.info("No messages found, exiting")
+                    return
+                
+                logger.info(f"Processing {len(received_msgs)} message(s)")
+                
+                for msg in received_msgs:
                     try:
-                        # Receive messages
-                        received_msgs = await receiver.receive_messages(max_message_count=1, max_wait_time=30)
+                        # Extract message body from Service Bus message
+                        # The body is a generator, so we need to collect all bytes
+                        body_parts = []
+                        for part in msg.body:
+                            body_parts.append(part)
                         
-                        for msg in received_msgs:
-                            try:
-                                # Extract message body from Service Bus message
-                                # The body is a generator, so we need to collect all bytes
-                                body_parts = []
-                                for part in msg.body:
-                                    body_parts.append(part)
+                        # Join all parts and decode to string
+                        message_body = b''.join(body_parts).decode('utf-8')
                                 
-                                # Join all parts and decode to string
-                                message_body = b''.join(body_parts).decode('utf-8')
-                                
-                                # Parse the JSON message
-                                message_data = json.loads(message_body)
-                                
-                                # Ensure we have a dictionary
-                                if isinstance(message_data, str):
-                                    # If it's still a string, try parsing again
-                                    message_data = json.loads(message_data)
-                                
-                                logger.info(f"Processing job: {message_data.get('jobId')}")
-                                
-                                # Process the video
-                                await self.process_video_job(message_data)
-                                
-                                # Complete the message
-                                await receiver.complete_message(msg)
-                                logger.info(f"Message completed: {message_data.get('jobId')}")
-                                
-                            except Exception as e:
-                                logger.error(f"Error processing message: {e}")
-                                logger.error(traceback.format_exc())
-                                
-                                # Update job status to failed
-                                if 'message_data' in locals():
-                                    await self.update_job_status(
-                                        message_data.get('jobId'),
-                                        'failed',
-                                        error_message=str(e)
-                                    )
-                                
-                                # Dead letter the message
-                                await receiver.dead_letter_message(msg, reason="ProcessingError", error_description=str(e))
-                    
+                        
+                        # Parse the JSON message
+                        message_data = json.loads(message_body)
+                        
+                        # Ensure we have a dictionary
+                        if isinstance(message_data, str):
+                            # If it's still a string, try parsing again
+                            message_data = json.loads(message_data)
+                        
+                        logger.info(f"Processing job: {message_data.get('jobId')}")
+                        
+                        # Process the video
+                        await self.process_video_job(message_data)
+                        
+                        # Complete the message
+                        await receiver.complete_message(msg)
+                        logger.info(f"Message completed: {message_data.get('jobId')}")
+                        
                     except Exception as e:
-                        logger.error(f"Error in message loop: {e}")
-                        await asyncio.sleep(5)  # Wait before retrying
+                        logger.error(f"Error processing message: {e}")
+                        logger.error(traceback.format_exc())
+                        
+                        # Update job status to failed
+                        if 'message_data' in locals():
+                            user_id = message_data.get('userId')
+                            await self.update_job_status(
+                                message_data.get('jobId'),
+                                'failed',
+                                user_id,
+                                error_message=str(e)
+                            )
+                        
+                        # Dead letter the message
+                        await receiver.dead_letter_message(msg, reason="ProcessingError", error_description=str(e))
+                
+                logger.info(f"Batch processing complete, exiting")
 
     async def process_video_job(self, job_data):
         """Process a single video job"""
         job_id = job_data['jobId']
         user_id = job_data['userId']  # Get user ID from job data
-        file_url = job_data['fileUrl']  # Changed from inputBlobUrl
-        file_name = job_data['fileName']
+        file_name = job_data['inputFile']  # This is the blob name/path
         atten_db = job_data.get('attenuation', 30)  # Default attenuation
         
         # Generate output filename with user ID directory structure
         input_path = Path(file_name)
-        output_file_name = f"{user_id}/{input_path.stem}_denoised{input_path.suffix}"
+        
+        # Extract just the filename without user directory if present
+        if '/' in file_name and file_name.startswith(f"{user_id}/"):
+            # Input file is like "userId/timestamp_randomId_originalname.ext"
+            # Extract just the "timestamp_randomId_originalname" part
+            filename_only = file_name.split('/', 1)[1]  # Remove user directory prefix
+            input_name_part = Path(filename_only).stem
+        else:
+            # Input file is just a filename without directory
+            input_name_part = input_path.stem
+            
+        output_file_name = f"{user_id}/{input_name_part}_denoised{input_path.suffix}"
         
         # Update job status to processing
-        await self.update_job_status(job_id, 'processing', progress=10)
+        await self.update_job_status(job_id, 'processing', user_id, progress=10)
         
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
                 # Download input video from blob storage
-                await self.update_job_status(job_id, 'processing', progress=15)
-                input_file_path = await self.download_blob_from_url(file_url, temp_dir, job_id)
-                await self.update_job_status(job_id, 'processing', progress=25)
+                await self.update_job_status(job_id, 'processing', user_id, progress=15)
+                input_file_path = await self.download_blob_from_url(file_name, temp_dir, user_id, job_id)
+                await self.update_job_status(job_id, 'processing', user_id, progress=25)
                 
                 # Create a mock uploaded file object for VideoProcessor
-                await self.update_job_status(job_id, 'processing', progress=30)
+                # Extract audio
+                await self.update_job_status(job_id, 'processing', user_id, progress=30)
                 class MockUploadedFile:
                     def __init__(self, file_path):
                         self.path = file_path
@@ -182,12 +222,12 @@ class AudioCleanerProcessor:
                 logger.info(f"Starting video processing for job {job_id}")
                 
                 # Process video using existing VideoProcessor
-                await self.update_job_status(job_id, 'processing', progress=35)
+                await self.update_job_status(job_id, 'processing', user_id, progress=35)
                 processor = VideoProcessor(mock_file, atten_db)
                 
                 try:
                     logger.info(f"Calling processor.process() for job {job_id}")
-                    await self.update_job_status(job_id, 'processing', progress=40)
+                    await self.update_job_status(job_id, 'processing', user_id, progress=40)
                     
                     # Add progress updates during processing
                     import asyncio
@@ -197,7 +237,7 @@ class AudioCleanerProcessor:
                         # Simulate progress updates during processing
                         for i in range(45, 75, 5):
                             await asyncio.sleep(2)  # Update every 2 seconds
-                            await self.update_job_status(job_id, 'processing', progress=i)
+                            await self.update_job_status(job_id, 'processing', user_id, progress=i)
                     
                     # Start progress updates
                     progress_task = asyncio.create_task(process_with_progress())
@@ -213,21 +253,22 @@ class AudioCleanerProcessor:
                     except asyncio.CancelledError:
                         pass
                     
-                    await self.update_job_status(job_id, 'processing', progress=80)
+                    await self.update_job_status(job_id, 'processing', user_id, progress=80)
                     logger.info(f"Video processing completed for job {job_id}, output: {output_path}")
                     
                     # Upload processed video to blob storage
                     logger.info(f"Uploading processed video for job {job_id}")
-                    await self.update_job_status(job_id, 'processing', progress=85)
+                    await self.update_job_status(job_id, 'processing', user_id, progress=85)
                     output_blob_url = await self.upload_blob_with_progress(output_path, output_file_name, job_id)
                     logger.info(f"Upload completed for job {job_id}, URL: {output_blob_url}")
                     
-                    await self.update_job_status(job_id, 'processing', progress=95)
+                    await self.update_job_status(job_id, 'processing', user_id, progress=95)
                     
                     # Update job status to completed
                     await self.update_job_status(
                         job_id,
                         'completed',
+                        user_id,
                         progress=100,
                         output_blob_url=output_blob_url,
                         downloadUrl=output_blob_url  # Also set downloadUrl for frontend compatibility
@@ -235,12 +276,18 @@ class AudioCleanerProcessor:
                     
                     # Delete the input blob now that processing is complete
                     try:
-                        logger.info(f"Attempting to delete input blob for job {job_id}: {file_url}")
-                        await self.delete_input_blob(file_url)
+                        # Construct blob URL for deletion
+                        if file_name.startswith('https://'):
+                            input_blob_url = file_name
+                        else:
+                            input_blob_url = f"https://{self.storage_account_name}.blob.core.windows.net/uploads/{file_name}"
+                        
+                        logger.info(f"Attempting to delete input blob for job {job_id}: {input_blob_url}")
+                        await self.delete_input_blob(input_blob_url)
                         logger.info(f"Successfully deleted input blob for job {job_id}")
                     except Exception as delete_error:
                         logger.error(f"Failed to delete input blob for job {job_id}: {delete_error}")
-                        logger.error(f"Blob URL was: {file_url}")
+                        logger.error(f"Blob URL was: {input_blob_url if 'input_blob_url' in locals() else file_name}")
                         # Don't fail the job if we can't delete the input blob, but log it for investigation
                     
                     logger.info(f"Job {job_id} completed successfully")
@@ -257,24 +304,42 @@ class AudioCleanerProcessor:
                 await self.update_job_status(
                     job_id,
                     'failed',
+                    user_id,
                     error_message=str(e)
                 )
                 raise
 
-    async def download_blob_from_url(self, blob_url, temp_dir, job_id=None):
-        """Download a blob from URL to local file using parallel downloads for large files"""
+    async def download_blob_from_url(self, input_file, temp_dir, user_id, job_id=None):
+        """Download a blob from URL or path to local file using parallel downloads for large files"""
         try:
-            # Parse the blob URL to extract container and blob name
-            from urllib.parse import urlparse
-            parsed_url = urlparse(blob_url)
-            
-            # URL format: https://storage.blob.core.windows.net/container/blob/path
-            path_parts = parsed_url.path.strip('/').split('/')
-            if len(path_parts) < 2:
-                raise ValueError(f"Invalid blob URL format: {blob_url}")
+            # If we have a full URL, parse it. Otherwise construct URL from blob path
+            if input_file.startswith('https://'):
+                # Full URL provided
+                from urllib.parse import urlparse
+                parsed_url = urlparse(input_file)
                 
-            container_name = path_parts[0]
-            blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
+                # URL format: https://storage.blob.core.windows.net/container/blob/path
+                path_parts = parsed_url.path.strip('/').split('/')
+                if len(path_parts) < 2:
+                    raise ValueError(f"Invalid blob URL format: {input_file}")
+                    
+                container_name = path_parts[0]
+                blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
+                blob_url = input_file
+            else:
+                # Just blob path provided, construct full URL
+                # Validate that blob path starts with user's directory for security
+                if not input_file.startswith(f"{user_id}/"):
+                    raise ValueError(f"Security violation: Blob path '{input_file}' does not belong to user '{user_id}'")
+                
+                container_name = 'uploads'
+                blob_name = input_file
+                
+                # Construct blob URL using storage account name
+                if not self.storage_account_name:
+                    raise ValueError("Storage account name not available to construct blob URL")
+                    
+                blob_url = f"https://{self.storage_account_name}.blob.core.windows.net/{container_name}/{blob_name}"
             
             logger.info(f"Downloading from container: {container_name}, blob: {blob_name}")
             
@@ -569,11 +634,14 @@ class AudioCleanerProcessor:
                 logger.warning(f"Cleanup failed: {cleanup_error}")
             raise
 
-    async def update_job_status(self, job_id, status, **kwargs):
+    async def update_job_status(self, job_id, status, user_id=None, **kwargs):
         """Update job status in Cosmos DB"""
         try:
+            # Use the provided user_id as partition key, fallback to job_id for backward compatibility
+            partition_key = user_id if user_id else job_id
+            
             # Read current job
-            job = self.jobs_container.read_item(item=job_id, partition_key=job_id)
+            job = self.jobs_container.read_item(item=job_id, partition_key=partition_key)
             
             # Update status
             job['status'] = status
@@ -591,7 +659,7 @@ class AudioCleanerProcessor:
             # Update in database
             self.jobs_container.upsert_item(job)
             
-            logger.info(f"Updated job {job_id} status to {status}")
+            logger.info(f"Updated job {job_id} status to {status} (partition_key: {partition_key})")
             
         except Exception as e:
             logger.error(f"Error updating job status: {e}")
@@ -670,11 +738,13 @@ class AudioCleanerProcessor:
             raise
 
 async def main():
-    """Main entry point"""
+    """Main entry point - process a batch and exit"""
     processor = AudioCleanerProcessor()
     
-    # Start processing messages
-    await processor.process_messages()
+    # Process a single batch of messages and exit
+    await processor.process_single_batch()
+    
+    logger.info("Processing complete, exiting")
 
 if __name__ == "__main__":
     asyncio.run(main())

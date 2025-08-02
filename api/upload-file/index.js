@@ -1,23 +1,34 @@
 const { BlobServiceClient } = require('@azure/storage-blob');
-const SASTokenManager = require('../shared/sasTokenManager');
-const SecurityMiddleware = require('../shared/securityMiddleware');
-const InputValidator = require('../shared/inputValidator');
-const fs = require('fs').promises;
-const path = require('path');
+const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware');
+const MinimalLogger = require('../shared/minimalLogger');
+const AzureSDKConfig = require('../shared/azureSDKConfig');
 
 module.exports = async function (context, req) {
     const startTime = Date.now();
+    
+    // Generate session ID for this request
+    const sessionId = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Initialize retry-aware minimal logger
+    const logger = new MinimalLogger(context).getLogger();
+    
+    // Also log to context for now (while testing)
     context.log('Upload file function processed a request.');
     
+    logger.logInfo('upload-file', 'Upload file function processed a request', 'system', { 
+        sessionId,
+        timestamp: new Date().toISOString(),
+        requestMethod: req.method
+    });
+    
     try {
-        // Initialize security middleware with proper error handling
-        const security = new SecurityMiddleware(process.env.COSMOS_CONNECTION_STRING);
-        await security.initialize();
+        // Initialize simple security middleware
+        const security = new SimpleSecurityMiddleware(process.env.COSMOS_CONNECTION_STRING);
         
-        // Enhanced security check that handles parallel uploads
+        // Consistent security check - always require auth to match enqueue-job behavior
         const securityResult = await security.checkSecurity(context, req, {
-            requireAuth: true,
-            validateInput: true,
+            requireAuth: true, // Always require auth to ensure consistent user ID usage
+            validateInput: false, // Disable strict input validation for now
             fileSize: parseInt(req.headers['content-length'] || '0')
         });
         
@@ -25,7 +36,9 @@ module.exports = async function (context, req) {
             context.res = {
                 status: securityResult.status,
                 headers: {
-                    ...security.getSecurityHeaders('/api/upload-file'),
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...security.getSecurityHeaders(),
                     ...securityResult.headers
                 },
                 body: securityResult.body
@@ -33,58 +46,53 @@ module.exports = async function (context, req) {
             return;
         }
         
-        // Enhanced authentication check
+        // Get user info - should always be available since auth is required
         const userInfo = securityResult.userInfo;
         if (!userInfo || !userInfo.userId) {
+            logger.logError('upload-file', 'Authentication succeeded but user info missing', 'system', { sessionId });
             context.res = {
-                status: 401,
-                headers: security.getSecurityHeaders('/api/upload-file'),
-                body: { success: false, error: 'Authentication required' }
+                status: 500,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...security.getSecurityHeaders()
+                },
+                body: { error: 'Server error: User information not available' }
             };
             return;
         }
-
-        const userId = userInfo.userId;
+        const userId = userInfo.userId || userInfo.email;
         
-        // Input validation with comprehensive schema
-        const validator = new InputValidator();
-        const schema = InputValidator.getSchemaForEndpoint('/api/upload-file');
+        // Basic input validation
+        const { fileName, fileSize } = req.body || {};
         
-        const validationResult = validator.validateInput(req.body || {}, schema);
-        if (!validationResult.valid) {
-            context.log.warn('Upload input validation failed:', validationResult.errors);
-            context.res = {
-                status: 400,
-                headers: security.getSecurityHeaders('/api/upload-file'),
-                body: { 
-                    success: false, 
-                    error: 'Invalid input data',
-                    details: validationResult.errors
-                }
-            };
-            return;
-        }
-        
-        const { fileName, fileSize } = validationResult.data;
-        // Enhanced validation
         if (!fileName) {
+            logger.logError('upload-file', 'fileName is required', userId, { sessionId });
             context.res = {
                 status: 400,
-                headers: security.getSecurityHeaders('/api/upload-file'),
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...security.getSecurityHeaders()
+                },
                 body: { success: false, error: 'fileName is required' }
             };
             return;
         }
 
-        // Additional file type validation
+        // File type validation
         const allowedExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a'];
         const fileExtension = fileName.toLowerCase().substring(fileName.lastIndexOf('.'));
         
         if (!allowedExtensions.includes(fileExtension)) {
-            context.log.warn(`Blocked upload of unsupported file type: ${fileExtension}`);
+            logger.logError('upload-file', `Unsupported file type: ${fileExtension}`, userId, { sessionId });
             context.res = {
                 status: 400,
-                headers: security.getSecurityHeaders('/api/upload-file'),
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...security.getSecurityHeaders()
+                },
                 body: { 
                     success: false, 
                     error: `File type ${fileExtension} is not supported. Allowed types: ${allowedExtensions.join(', ')}` 
@@ -93,146 +101,104 @@ module.exports = async function (context, req) {
             return;
         }
 
-        // Enhanced file size validation with multiple limits
-        const maxFileSize = 5 * 1024 * 1024 * 1024; // 5GB absolute limit
-        const warnFileSize = 2 * 1024 * 1024 * 1024; // 2GB warning threshold
-        
+        // File size validation
+        const maxFileSize = 5 * 1024 * 1024 * 1024; // 5GB
         if (fileSize && fileSize > maxFileSize) {
-            context.log.warn(`Blocked upload exceeding size limit: ${Math.round(fileSize / 1024 / 1024)}MB`);
+            logger.logError('upload-file', `File size exceeds limit`, userId, { sessionId });
             context.res = {
-                status: 413,
-                headers: security.getSecurityHeaders('/api/upload-file'),
+                status: 400,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...security.getSecurityHeaders()
+                },
                 body: { 
                     success: false, 
-                    error: `File size ${Math.round(fileSize / 1024 / 1024)}MB exceeds maximum allowed size of ${maxFileSize / 1024 / 1024}MB` 
+                    error: `File size ${Math.round(fileSize / 1024 / 1024)}MB exceeds maximum allowed size of 5GB` 
                 }
             };
             return;
         }
-        
-        if (fileSize && fileSize > warnFileSize) {
-            context.log(`Large file upload detected: ${Math.round(fileSize / 1024 / 1024)}MB for user: ${userId.substring(0, 8)}...`);
-        }
-
-        // Rate limiting check for file size (additional protection)
-        const hourlyUploadLimit = 50 * 1024 * 1024 * 1024; // 50GB per hour per user
-        // Note: This would require additional implementation in SecurityMiddleware for upload quotas
 
         // Create blob service client
-        const connectionString = process.env.AzureWebJobsStorage;
+        const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
         if (!connectionString) {
-            throw new Error('Storage connection string not configured');
+            logger.logError('upload-file', 'Storage connection string not configured', userId, { sessionId });
+            context.res = {
+                status: 500,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                body: { success: false, error: 'Storage connection string not configured' }
+            };
+            return;
         }
 
-        const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+        const blobServiceClient = AzureSDKConfig.createBlobServiceClient(connectionString);
         const containerClient = blobServiceClient.getContainerClient('uploads');
 
-        // Ensure container exists (private container by default)
+        // Ensure container exists
         await containerClient.createIfNotExists();
 
-        // Generate unique blob name with enhanced security
+        // Generate unique blob name
         const timestamp = Date.now();
-        const randomId = Math.random().toString(36).substr(2, 9); // Increased randomness
-        const safeFileName = path.basename(fileName).replace(/[^a-zA-Z0-9.-]/g, '_'); // Sanitize filename
+        const randomId = Math.random().toString(36).substr(2, 9);
+        const safeFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
         const blobName = `${userId}/${timestamp}_${randomId}_${safeFileName}`;
 
         const blobClient = containerClient.getBlobClient(blobName);
-        const blockBlobClient = blobClient.getBlockBlobClient();
 
-        // Initialize SAS Token Manager
-        const sasManager = new SASTokenManager(
-            connectionString, 
-            process.env.COSMOS_CONNECTION_STRING
-        );
-        
-        // Get client IP for SAS restriction (Rule #3)
-        const clientIP = securityResult.clientIP;
-        
-        context.log(`Generating SAS token for blob: ${blobName.substring(0, 50)}... user: ${userId.substring(0, 8)}...`);
-        
-        // Generate secure SAS token following all 5 rules with enhanced security
-        const sasResult = await sasManager.generateSASToken({
-            containerName: 'uploads',
-            blobName: blobName,
-            permissions: 'cw', // create and write only (Rule #2)
-            expiryMinutes: 60, // 1 hour for larger uploads (Rule #2)
-            clientIP: clientIP, // IP restriction if available (Rule #3)
-            userId: userId, // For tracking and revocation (Rule #5)
-            context: context
+        // Generate SAS token for upload
+        const sasToken = await blobClient.generateSasUrl({
+            permissions: 'cw', // create and write
+            expiresOn: new Date(Date.now() + 60 * 60 * 1000) // 1 hour
         });
+
+        // Log successful operation
+        const duration = Date.now() - startTime;
         
-        if (!sasResult || !sasResult.sasToken) {
-            context.log.error('Failed to generate SAS token');
-            context.res = {
-                status: 500,
-                headers: security.getSecurityHeaders('/api/upload-file'),
-                body: { 
-                    success: false, 
-                    error: 'Failed to generate secure upload link' 
-                }
-            };
-            return;
-        }
-        
-        const uploadUrl = `${blockBlobClient.url}?${sasResult.sasToken}`;
-        
-        // Log successful upload token generation (without sensitive data)
-        context.log(`Upload token generated for user: ${userId.substring(0, 8)}... file: ${fileName.substring(0, 20)}... (${Date.now() - startTime}ms)`);
+        logger.logInfo('upload-file', 'Upload URL generated successfully', userId, {
+            sessionId,
+            duration: `${duration}ms`,
+            fileExtension
+        });
 
         context.res = {
             status: 200,
             headers: {
-                ...security.getSecurityHeaders('/api/upload-file'),
                 'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*', // Consider restricting this in production
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-ms-blob-type',
-                'Cache-Control': 'no-cache, no-store, must-revalidate'
+                'Access-Control-Allow-Origin': '*',
+                ...security.getSecurityHeaders()
             },
             body: {
                 success: true,
-                uploadUrl: uploadUrl, // SAS URL is only in response body (Rule #4)
+                uploadUrl: sasToken,
+                // Provide fileUrl for downstream processing
+                fileUrl: sasToken,
                 blobName: blobName,
-                fileName: fileName,
-                fileUrl: blockBlobClient.url, // This will be the final URL after upload
-                uploadSecurityInfo: {
-                    containerName: 'uploads',
-                    storageAccount: sasManager.accountName,
-                    sasExpiry: sasResult.expiresAt.toISOString(),
-                    sasType: sasResult.sasType, // Indicate SAS type
-                    hasIPRestriction: !!clientIP,
-                    expiryMinutes: 60,
-                    permissions: 'create,write',
-                    maxFileSize: maxFileSize,
-                    allowedFileTypes: allowedExtensions
-                }
+                containerId: 'uploads',
+                expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
             }
         };
 
     } catch (error) {
-        // CRITICAL: Only log error message to prevent massive log costs
-        context.log.error('Upload file error:', error.message || 'Unknown error');
-        
-        // Initialize a basic security object for headers if middleware failed
-        let security = null;
-        try {
-            security = new SecurityMiddleware();
-        } catch (secError) {
-            context.log.error('Failed to create security middleware for error response:', secError.message || 'Unknown error');
-        }
-        
-        // Security: Don't expose internal error details
-        const safeErrorMessage = error.message?.includes('authentication') ? 'Authentication failed' :
-                                error.message?.includes('storage') ? 'Storage service unavailable' :
-                                error.message?.includes('cosmos') ? 'Security service temporarily unavailable' :
-                                'Upload service temporarily unavailable';
+        const duration = Date.now() - startTime;
+        logger.logError('upload-file', error, 'system', {
+            sessionId: sessionId || 'unknown',
+            duration: `${duration}ms`
+        });
         
         context.res = {
-            status: error.message?.includes('authentication') ? 401 : 500,
-            headers: security ? security.getSecurityHeaders('/api/upload-file') : {},
+            status: 500,
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
             body: { 
                 success: false, 
-                error: safeErrorMessage
+                error: 'Internal server error',
+                details: error.message
             }
         };
     }

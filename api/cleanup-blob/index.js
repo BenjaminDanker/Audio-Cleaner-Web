@@ -1,7 +1,12 @@
 const { BlobServiceClient } = require('@azure/storage-blob');
+const MinimalLogger = require('../shared/minimalLogger');
+const AzureSDKConfig = require('../shared/azureSDKConfig');
 
 module.exports = async function (context, req) {
-    context.log('Manual blob cleanup function called');
+    // Initialize retry-aware minimal logger
+    const logger = new MinimalLogger(context).getLogger();
+    
+    logger.logInfo('cleanup-blob', 'Manual blob cleanup function called', 'system');
     
     // Handle CORS preflight requests
     if (req.method === 'OPTIONS') {
@@ -56,12 +61,12 @@ module.exports = async function (context, req) {
         }
 
         // Initialize blob service client
-        const connectionString = process.env.AzureWebJobsStorage;
+        const connectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
         if (!connectionString) {
             throw new Error('Storage connection string not configured');
         }
 
-        const blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
+        const blobServiceClient = AzureSDKConfig.createBlobServiceClient(connectionString);
         const containerClient = blobServiceClient.getContainerClient('uploads');
         const blobClient = containerClient.getBlobClient(blobName);
 
@@ -103,7 +108,7 @@ module.exports = async function (context, req) {
         };
 
     } catch (error) {
-        context.log.error('Blob cleanup error:', error);
+        context.log.error('Blob cleanup error:', error.message || 'Unknown error');
         context.res = {
             status: 500,
             body: { 

@@ -1,25 +1,45 @@
 const { CosmosClient } = require('@azure/cosmos');
+const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware');
+const MinimalLogger = require('../shared/minimalLogger');
+const AzureSDKConfig = require('../shared/azureSDKConfig');
 
 module.exports = async function (context, req) {
-    context.log('Job status endpoint called');
+    // Initialize retry-aware minimal logger
+    const logger = new MinimalLogger(context).getLogger();
     
     try {
-        // Verify authentication
-        const clientPrincipal = req.headers['x-ms-client-principal'];
-        if (!clientPrincipal) {
+        // Security check with simple middleware
+        const security = new SimpleSecurityMiddleware(process.env.COSMOS_CONNECTION_STRING);
+        const securityResult = await security.checkSecurity(context, req, { requireAuth: true });
+        
+        if (!securityResult.allowed) {
+            context.res = {
+                status: securityResult.status,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...securityResult.headers
+                },
+                body: securityResult.body
+            };
+            return;
+        }
+        
+        const userId = securityResult.userInfo?.userId;
+        context.log('Security result userInfo:', securityResult.userInfo);
+        context.log('Extracted userId:', userId);
+
+        if (!userId) {
             context.res = {
                 status: 401,
-                body: { error: 'Unauthorized - No client principal found' }
+                body: { error: 'Unauthorized - No user ID found' }
             };
             return;
         }
 
-        // Decode the client principal
-        const principal = JSON.parse(Buffer.from(clientPrincipal, 'base64').toString());
-        const userId = principal.userId;
-
         // Get job ID from query parameters
         const jobId = req.query.jobId;
+        
         if (!jobId) {
             context.res = {
                 status: 400,
@@ -28,14 +48,14 @@ module.exports = async function (context, req) {
             return;
         }
 
-        // Initialize Cosmos client
-        const client = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
-        const database = client.database('audiocleaner');
-        const container = database.container('jobs');
+        // Initialize optimized Cosmos client
+        const client = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
+        const database = client.database('AudioCleanerDB');
+        const container = database.container('Jobs');
 
         try {
-            // Get job record from Cosmos DB
-            const { resource: job } = await container.item(jobId, jobId).read();
+            const { resource: job } = await container.item(jobId, userId).read();
+            
             
             if (!job) {
                 context.res = {
@@ -54,21 +74,23 @@ module.exports = async function (context, req) {
                 return;
             }
 
+            const responseData = {
+                id: job.id,
+                status: job.status,
+                progress: job.progress || 0,
+                fileName: job.fileName,
+                processingType: job.processingType,
+                downloadUrl: job.downloadUrl || job.output_blob_url || null,
+                output_blob_url: job.output_blob_url || null,
+                message: job.message || 'Processing in progress',
+                createdAt: job.createdAt,
+                updatedAt: job.updatedAt,
+                completedAt: job.completedAt || null
+            };
+
             context.res = {
                 status: 200,
-                body: {
-                    id: job.id,
-                    status: job.status,
-                    progress: job.progress || 0,
-                    fileName: job.fileName,
-                    processingType: job.processingType,
-                    downloadUrl: job.downloadUrl || job.output_blob_url || null,
-                    output_blob_url: job.output_blob_url || null,
-                    message: job.message || 'Processing in progress',
-                    createdAt: job.createdAt,
-                    updatedAt: job.updatedAt,
-                    completedAt: job.completedAt || null
-                }
+                body: responseData
             };
 
         } catch (error) {

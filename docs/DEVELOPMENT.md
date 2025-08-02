@@ -231,7 +231,6 @@ Environment configuration in `local.settings.json`:
 {
   "IsEncrypted": false,
   "Values": {
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "node",
     "AZURE_STORAGE_CONNECTION_STRING": "your-dev-connection-string",
     "COSMOS_CONNECTION_STRING": "your-dev-cosmos-connection"

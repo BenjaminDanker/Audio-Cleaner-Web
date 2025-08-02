@@ -7,9 +7,10 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
   const [downloadProgress, setDownloadProgress] = useState(0)
+  const [lastUpdateTime, setLastUpdateTime] = useState(Date.now())
 
   useEffect(() => {
-    // Auto-refresh job status for active jobs
+    // Auto-refresh job status for active jobs only
     if (job.status === 'processing' || job.status === 'queued') {
       const interval = setInterval(() => {
         refreshJobStatus()
@@ -17,17 +18,42 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
 
       return () => clearInterval(interval)
     }
-  }, [job.status])
+    // Clear any existing intervals when job is completed/failed
+  }, [job.status, job.id]) // Add job.id to dependencies to ensure clean intervals
 
   const refreshJobStatus = async () => {
     if (isRefreshing) return
+    
+    // Prevent too frequent updates (minimum 2 seconds between updates)
+    const now = Date.now()
+    if (now - lastUpdateTime < 2000) return
     
     setIsRefreshing(true)
     try {
       const response = await axios.get(`/api/job-status?jobId=${job.id}`)
       // The API returns the job data directly, not wrapped in a success object
       if (response.data && response.data.id) {
-        onUpdate(response.data)
+        // Extract only the fields we want to update to avoid conflicts
+        const updates = {
+          status: response.data.status,
+          progress: response.data.progress || 0,
+          message: response.data.message,
+          updatedAt: response.data.updatedAt,
+          completedAt: response.data.completedAt,
+          // Normalize download URL field names
+          downloadUrl: response.data.downloadUrl || response.data.output_blob_url || null,
+          output_blob_url: response.data.output_blob_url || response.data.downloadUrl || null
+        }
+        
+        // Only update if there are actual changes to prevent unnecessary re-renders
+        const hasChanges = Object.keys(updates).some(key => 
+          job[key] !== updates[key]
+        )
+        
+        if (hasChanges) {
+          onUpdate(updates)
+          setLastUpdateTime(now)
+        }
       }
     } catch (error) {
       console.error('Failed to refresh job status:', error)

@@ -2,16 +2,19 @@ const fs = require('fs');
 const path = require('path');
 const { BlobServiceClient } = require('@azure/storage-blob');
 const SASTokenManager = require('../shared/sasTokenManager');
-const SecurityMiddleware = require('../shared/securityMiddleware');
+const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware');
 const InputValidator = require('../shared/inputValidator');
+const MinimalLogger = require('../shared/minimalLogger');
+const AzureSDKConfig = require('../shared/azureSDKConfig');
 
 module.exports = async function (context, req) {
     const startTime = Date.now();
-    context.log('Download endpoint called');
     
-    // Initialize security middleware with proper error handling
-    const security = new SecurityMiddleware(process.env.COSMOS_CONNECTION_STRING);
-    await security.initialize();
+    // Initialize retry-aware minimal logger
+    const logger = new MinimalLogger(context).getLogger();
+    
+    // Initialize simple security middleware
+    const security = new SimpleSecurityMiddleware(process.env.COSMOS_CONNECTION_STRING);
     
     // Enhanced security check that handles parallel downloads and range requests
     const securityResult = await security.checkSecurity(context, req, {
@@ -23,7 +26,7 @@ module.exports = async function (context, req) {
         context.res = {
             status: securityResult.status,
             headers: {
-                ...security.getSecurityHeaders('/api/download-file'),
+                ...security.getSecurityHeaders(),
                 ...securityResult.headers
             },
             body: securityResult.body
@@ -42,10 +45,12 @@ module.exports = async function (context, req) {
         
         const validationResult = validator.validateInput(inputData, schema);
         if (!validationResult.valid) {
-            context.log.warn('Input validation failed:', validationResult.errors);
+            logger.logError('download-file', 'Input validation failed', 'system', { 
+                sessionId: req.headers['x-request-id'] || 'unknown' 
+            });
             context.res = {
                 status: 400,
-                headers: security.getSecurityHeaders('/api/download-file'),
+                headers: security.getSecurityHeaders(),
                 body: { 
                     error: 'Invalid input', 
                     details: validationResult.errors 
@@ -60,7 +65,7 @@ module.exports = async function (context, req) {
         if (!filename) {
             context.res = {
                 status: 400,
-                headers: security.getSecurityHeaders('/api/download-file'),
+                headers: security.getSecurityHeaders(),
                 body: { error: 'Filename parameter is required' }
             };
             return;
@@ -70,196 +75,53 @@ module.exports = async function (context, req) {
         const clientPrincipal = req.headers['x-ms-client-principal'];
         const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
         
-        // Get authenticated user info
+        // Get authenticated user info with better error handling
         const userInfo = securityResult.userInfo;
+        context.log('Authentication check:', {
+            hasClientPrincipal: !!clientPrincipal,
+            hasUserInfo: !!userInfo,
+            isLocalDev: isLocalDev,
+            userId: userInfo?.userId?.substring(0, 8) + '...' || 'none'
+        });
+        
         if (!userInfo && !isLocalDev) {
+            context.log.error('Authentication required but no user info available');
             context.res = {
                 status: 401,
-                headers: security.getSecurityHeaders('/api/download-file'),
+                headers: security.getSecurityHeaders(),
                 body: { error: 'Authentication required' }
             };
             return;
         }
-        
-        if (isLocalDev) {
-            context.log('Local development mode - serving file locally');
-            
-            // Construct the file path with additional security checks
-            const downloadsDir = path.join(process.cwd(), 'temp', 'downloads');
-            
-            // Prevent directory traversal attacks
-            const safePath = path.normalize(path.join(downloadsDir, path.basename(filename)));
-            if (!safePath.startsWith(downloadsDir)) {
-                context.log.warn(`Directory traversal attempt blocked: ${filename}`);
-                context.res = {
-                    status: 403,
-                    headers: security.getSecurityHeaders('/api/download-file'),
-                    body: { error: 'Access denied' }
-                };
-                return;
-            }
-            
-            // Check if file exists
-            if (!fs.existsSync(safePath)) {
-                context.res = {
-                    status: 404,
-                    headers: security.getSecurityHeaders('/api/download-file'),
-                    body: { error: 'File not found' }
-                };
-                return;
-            }
-            
-            // Get file stats and validate
-            const stats = fs.statSync(safePath);
-            const fileSize = stats.size;
-            
-            // Security check: Prevent serving excessively large files
-            const maxFileSize = 5 * 1024 * 1024 * 1024; // 5GB limit
-            if (fileSize > maxFileSize) {
-                context.log.warn(`File too large for download: ${fileSize} bytes`);
-                context.res = {
-                    status: 413,
-                    headers: security.getSecurityHeaders('/api/download-file'),
-                    body: { error: 'File too large' }
-                };
-                return;
-            }
-            
-            // Handle Range requests for partial content (with security headers)
-            const rangeHeader = req.headers['range'];
-            if (rangeHeader) {
-                // Validate range header format
-                const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d*)/);
-                if (!rangeMatch) {
-                    context.res = {
-                        status: 416,
-                        headers: security.getSecurityHeaders('/api/download-file'),
-                        body: { error: 'Invalid range request' }
-                    };
-                    return;
-                }
-                
-                const start = parseInt(rangeMatch[1], 10);
-                const end = rangeMatch[2] ? parseInt(rangeMatch[2], 10) : fileSize - 1;
-                
-                // Validate range bounds
-                if (start >= fileSize || end >= fileSize || start > end) {
-                    context.res = {
-                        status: 416,
-                        headers: {
-                            ...security.getSecurityHeaders('/api/download-file'),
-                            'Content-Range': `bytes */${fileSize}`
-                        },
-                        body: { error: 'Range not satisfiable' }
-                    };
-                    return;
-                }
-                
-                const chunkSize = end - start + 1;
-                
-                // Security: Prevent excessive memory allocation
-                const maxChunkSize = 100 * 1024 * 1024; // 100MB
-                if (chunkSize > maxChunkSize) {
-                    context.res = {
-                        status: 413,
-                        headers: security.getSecurityHeaders('/api/download-file'),
-                        body: { error: 'Range too large' }
-                    };
-                    return;
-                }
-                
-                const buffer = Buffer.alloc(chunkSize);
-                const fd = fs.openSync(safePath, 'r');
-                fs.readSync(fd, buffer, 0, chunkSize, start);
-                fs.closeSync(fd);
-                
-                context.res = {
-                    status: 206,
-                    headers: {
-                        ...security.getSecurityHeaders('/api/download-file'),
-                        'Content-Type': 'video/mp4',
-                        'Content-Length': chunkSize.toString(),
-                        'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                        'Accept-Ranges': 'bytes',
-                        'Content-Disposition': `attachment; filename="${path.basename(filename)}"`,
-                        'Cache-Control': 'private, max-age=3600',
-                        'ETag': `"${stats.mtime.getTime()}"`
-                    },
-                    body: buffer,
-                    isRaw: true
-                };
-                return;
-            }
-            
-            // For HEAD requests, return only headers
-            if (req.method === 'HEAD') {
-                context.res = {
-                    status: 200,
-                    headers: {
-                        ...security.getSecurityHeaders('/api/download-file'),
-                        'Content-Type': 'video/mp4',
-                        'Content-Disposition': `attachment; filename="${path.basename(filename)}"`,
-                        'Content-Length': fileSize.toString(),
-                        'Accept-Ranges': 'bytes',
-                        'Cache-Control': 'private, max-age=3600',
-                        'ETag': `"${stats.mtime.getTime()}"`
-                    }
-                };
-                return;
-            }
-            
-            // Read the file with memory management for large files
-            let fileBuffer;
-            try {
-                if (fileSize > 50 * 1024 * 1024) { // 50MB threshold
-                    // For large files, consider streaming instead
-                    context.log('Large file download, consider implementing streaming');
-                }
-                fileBuffer = fs.readFileSync(safePath);
-            } catch (error) {
-                context.log.error('Error reading file:', error.message || 'Unknown error');
-                context.res = {
-                    status: 500,
-                    headers: security.getSecurityHeaders('/api/download-file'),
-                    body: { error: 'Error reading file' }
-                };
-                return;
-            }
 
-            context.res = {
-                status: 200,
-                headers: {
-                    ...security.getSecurityHeaders('/api/download-file'),
-                    'Content-Type': 'video/mp4',
-                    'Content-Disposition': `attachment; filename="${path.basename(filename)}"`,
-                    'Content-Length': fileSize.toString(),
-                    'Accept-Ranges': 'bytes',
-                    'Cache-Control': 'private, max-age=3600',
-                    'ETag': `"${stats.mtime.getTime()}"`
-                },
-                body: fileBuffer,
-                isRaw: true
-            };
-            return;
-        }
-          // Production code - generate SAS URL for direct download from Azure Blob Storage
+        // Production code - generate SAS URL for direct download from Azure Blob Storage
         try {
+            context.log('Starting blob storage operations...');
             context.log('Environment check:');
-            context.log('- AzureWebJobsStorage exists:', !!process.env.AzureWebJobsStorage);
+            context.log('- AZURE_STORAGE_CONNECTION_STRING exists:', !!process.env.AZURE_STORAGE_CONNECTION_STRING);
             context.log('- Requested filename:', filename.substring(0, 20) + '...'); // Don't log full filename
             context.log('- User ID:', userInfo?.userId?.substring(0, 8) + '...');
             
-            if (!process.env.AzureWebJobsStorage) {
-                throw new Error('AzureWebJobsStorage environment variable is not set');
+            // Use the same storage connection string as upload-file for consistency
+            const storageConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+            
+            if (!storageConnectionString) {
+                context.log.error('CRITICAL: AZURE_STORAGE_CONNECTION_STRING environment variable is not set');
+                context.res = {
+                    status: 500,
+                    headers: security.getSecurityHeaders(),
+                    body: { error: 'Storage configuration error - please contact administrator' }
+                };
+                return;
             }
 
             const { BlobSASPermissions, generateBlobSASQueryParameters, StorageSharedKeyCredential } = require('@azure/storage-blob');
             
-            context.log('Creating BlobServiceClient...');
-            const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AzureWebJobsStorage);
+            context.log('Creating optimized BlobServiceClient...');
+            const blobServiceClient = AzureSDKConfig.createBlobServiceClient(storageConnectionString);
             
             // Extract account name and key from connection string with validation
-            const connectionString = process.env.AzureWebJobsStorage;
+            const connectionString = storageConnectionString;
             const accountNameMatch = connectionString.match(/AccountName=([^;]+)/);
             const accountKeyMatch = connectionString.match(/AccountKey=([^;]+)/);
             
@@ -278,7 +140,7 @@ module.exports = async function (context, req) {
             const sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
             
             context.log('Getting container client...');
-            const containerClient = blobServiceClient.getContainerClient('processed');
+            const containerClient = blobServiceClient.getContainerClient('processed-videos');
             
             // Enhanced blob discovery with user-specific access control
             let blobClient = containerClient.getBlobClient(filename);
@@ -341,26 +203,22 @@ module.exports = async function (context, req) {
                 context.log(`Blob not found: ${filename.substring(0, 20)}...`);
                 context.res = {
                     status: 404,
-                    headers: security.getSecurityHeaders('/api/download-file'),
+                    headers: security.getSecurityHeaders(),
                     body: { error: 'File not found' }
                 };
                 return;
             }
               // Get current user for tracking and access control
             const userId = userInfo?.userId;
+            context.log('Using userId for SAS generation:', userId.substring(0, 8) + '...');
+            
             if (!userId) {
-                context.log.error('No user ID available for SAS token generation');
-                context.res = {
-                    status: 401,
-                    headers: security.getSecurityHeaders('/api/download-file'),
-                    body: { error: 'User identification required' }
-                };
-                return;
+                context.log.warn('Using fallback user ID for SAS token generation');
             }
 
             // Initialize SAS Token Manager
             const sasManager = new SASTokenManager(
-                process.env.AzureWebJobsStorage,
+                storageConnectionString,
                 process.env.COSMOS_CONNECTION_STRING
             );
 
@@ -377,7 +235,7 @@ module.exports = async function (context, req) {
                     context.log.warn('Blob has no content or invalid content length');
                     context.res = {
                         status: 404,
-                        headers: security.getSecurityHeaders('/api/download-file'),
+                        headers: security.getSecurityHeaders(),
                         body: { error: 'Invalid file' }
                     };
                     return;
@@ -389,7 +247,7 @@ module.exports = async function (context, req) {
                     context.log.warn(`File too large for download: ${properties.contentLength} bytes`);
                     context.res = {
                         status: 413,
-                        headers: security.getSecurityHeaders('/api/download-file'),
+                        headers: security.getSecurityHeaders(),
                         body: { error: 'File too large for download' }
                     };
                     return;
@@ -399,15 +257,16 @@ module.exports = async function (context, req) {
                 context.log.error('Error getting blob properties:', propertiesError.message);
                 context.res = {
                     status: 500,
-                    headers: security.getSecurityHeaders('/api/download-file'),
+                    headers: security.getSecurityHeaders(),
                     body: { error: 'Error accessing file' }
                 };
                 return;
             }
 
             // Generate secure SAS token for download with enhanced security
+            context.log('Generating SAS token...');
             const sasResult = await sasManager.generateSASToken({
-                containerName: 'processed',
+                containerName: 'processed-videos',
                 blobName: blobName,
                 permissions: 'r', // read-only (Rule #2)
                 expiryMinutes: 5, // Very short-lived for downloads (Rule #2) - reduced from 10 to 5 minutes
@@ -416,12 +275,18 @@ module.exports = async function (context, req) {
                 context: context
             });
             
+            context.log('SAS generation result:', {
+                success: !!sasResult,
+                hasToken: !!sasResult?.sasToken,
+                sasType: sasResult?.sasType || 'unknown'
+            });
+            
             if (!sasResult || !sasResult.sasToken) {
-                context.log.error('Failed to generate SAS token');
+                context.log.error('CRITICAL: Failed to generate SAS token - sasResult:', !!sasResult, 'sasToken:', !!sasResult?.sasToken);
                 context.res = {
                     status: 500,
-                    headers: security.getSecurityHeaders('/api/download-file'),
-                    body: { error: 'Failed to generate secure download link' }
+                    headers: security.getSecurityHeaders(),
+                    body: { error: 'Failed to generate secure download link - please try again' }
                 };
                 return;
             }
@@ -438,7 +303,7 @@ module.exports = async function (context, req) {
             context.res = {
                 status: 200,
                 headers: {
-                    ...security.getSecurityHeaders('/api/download-file'),
+                    ...security.getSecurityHeaders(),
                     'Content-Type': 'application/json',
                     'Cache-Control': 'no-cache, no-store, must-revalidate',
                     'Pragma': 'no-cache',
@@ -461,17 +326,25 @@ module.exports = async function (context, req) {
             };
             
         } catch (error) {
-            context.log.error('Error downloading from blob storage:', error.message || 'Unknown error');
+            context.log.error('CRITICAL ERROR in blob storage operations:', {
+                message: error.message,
+                stack: error.stack?.substring(0, 500) + '...',
+                errorType: error.constructor.name
+            });
             
             // Security: Don't expose internal error details
             const safeErrorMessage = error.message?.includes('not found') ? 'File not found' : 
                                    error.message?.includes('access') ? 'Access denied' : 
+                                   error.message?.includes('Storage') ? 'Storage service error' :
                                    'Error downloading file from storage';
             
+            const statusCode = error.message?.includes('not found') ? 404 : 
+                             error.message?.includes('access') ? 403 : 
+                             500;
+            
             context.res = {
-                status: error.message?.includes('not found') ? 404 : 
-                       error.message?.includes('access') ? 403 : 500,
-                headers: security.getSecurityHeaders('/api/download-file'),
+                status: statusCode,
+                headers: security.getSecurityHeaders(),
                 body: { error: safeErrorMessage }
             };
         }
@@ -482,7 +355,7 @@ module.exports = async function (context, req) {
         // Security: Generic error message to prevent information disclosure
         context.res = {
             status: 500,
-            headers: security.getSecurityHeaders('/api/download-file'),
+            headers: security.getSecurityHeaders(),
             body: { error: 'Internal server error' }
         };
     }

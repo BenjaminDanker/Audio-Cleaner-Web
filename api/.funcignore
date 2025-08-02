@@ -9,7 +9,8 @@ venv/
 env/
 ENV/
 
-# Node.js logs (but NOT node_modules - we need that for deployment)
+# Node.js dependencies and logs
+node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -52,6 +53,24 @@ test/
 tests/
 *.test.js
 *.spec.js
+
+# Local settings and development files
+local.settings.json
+.env
+.env.local
+.env.development
+
+# Package manager files
+package-lock.json
+yarn.lock
+
+# Deployment files (not needed in runtime)
+.deployment
+deploy.cmd
+test/
+tests/
+*.test.js
+*.spec.js
 .coverage
 .pytest_cache/
 .tox/
@@ -78,6 +97,7 @@ logs/
 
 # Infrastructure and deployment files
 infra/
+terraform/
 azure.yaml
 Dockerfile
 .dockerignore

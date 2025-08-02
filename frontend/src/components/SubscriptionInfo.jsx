@@ -1,21 +1,29 @@
 import React from 'react'
-import { useAuth } from './AuthContext'
+import { useSubscription } from './SubscriptionContext'
 import { CreditCard, Calendar, Users, Zap } from 'lucide-react'
 import './SubscriptionInfo.css'
 
-const SubscriptionInfo = ({ subscription }) => {
-  const { refreshSubscription } = useAuth()
+const SubscriptionInfo = () => {
+  const { subscription, refreshSubscription, loading } = useSubscription()
 
   const handleRefresh = () => {
     refreshSubscription()
   }
 
-  if (!subscription) {
+  if (!subscription && loading) {
     return (
       <div className="subscription-loading">
         <p>Loading subscription information...</p>
+      </div>
+    )
+  }
+
+  if (!subscription) {
+    return (
+      <div className="subscription-loading">
+        <p>No subscription information available.</p>
         <button onClick={handleRefresh} className="btn btn-primary">
-          Refresh
+          Load Subscription
         </button>
       </div>
     )

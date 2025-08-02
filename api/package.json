@@ -2,7 +2,6 @@
   "name": "audio-cleaner-api",
   "version": "1.0.0",
   "description": "Azure Functions API for Audio Cleaner Pro",
-  "main": "index.js",
   "engines": {
     "node": ">=18.0.0"
   },
@@ -28,6 +27,6 @@
     "validator": "13.11.0"
   },
   "devDependencies": {
-    "azure-functions-core-tools": "^4.0.5455"
+    
   }
 }

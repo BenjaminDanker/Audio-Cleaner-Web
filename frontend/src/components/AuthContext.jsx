@@ -14,11 +14,18 @@ export const useAuth = () => {
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [subscription, setSubscription] = useState(null)
 
   useEffect(() => {
     // Check if user is already authenticated using Static Web Apps
     checkAuthStatus()
+    
+    // Handle auth callback completion
+    if (window.location.pathname === '/.auth/complete') {
+      // Wait a moment for auth to process, then redirect
+      setTimeout(() => {
+        window.location.href = '/dashboard'
+      }, 1000)
+    }
   }, [])
 
   const checkAuthStatus = async () => {
@@ -35,7 +42,6 @@ export const AuthProvider = ({ children }) => {
           email: principal.userDetails,
           name: principal.userDetails || principal.userRoles?.[0] || 'User'
         })
-        await fetchSubscription()
       } else {
         // No authenticated user
         setUser(null)
@@ -48,33 +54,23 @@ export const AuthProvider = ({ children }) => {
     }
   }
 
-  const fetchSubscription = async () => {
-    try {
-      const response = await axios.get('/api/get-subscription')
-      setSubscription(response.data)
-    } catch (error) {
-      console.error('Failed to fetch subscription:', error)
-    }
-  }
-
   const login = async () => {
-    // For Static Web Apps, redirect to the built-in login
-    window.location.href = '/.auth/login/aad'
+    // SWA handles login automatically via staticwebapp.config.json routes
+    // No manual redirect needed - just navigate to /login
+    window.location.href = '/login'
     return { success: true }
   }
 
   const logout = () => {
-    // Use Static Web Apps built-in logout
-    window.location.href = '/.auth/logout'
+    // SWA handles logout automatically via staticwebapp.config.json routes
+    window.location.href = '/logout'
   }
 
   const value = {
     user,
-    subscription,
     loading,
     login,
-    logout,
-    refreshSubscription: fetchSubscription
+    logout
   }
 
   return (

@@ -1,10 +1,17 @@
 {
   "bindings": [
     {
-      "name": "timerTrigger",
-      "type": "timerTrigger",
+      "authLevel": "anonymous",
+      "type": "httpTrigger",
       "direction": "in",
-      "schedule": "0 0 */6 * * *"
+      "name": "req",
+      "methods": ["post", "options"],
+      "route": "cleanup-security"
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "res"
     }
   ],
   "disabled": false,
