@@ -1,97 +1,174 @@
-<!-- markdownlint-disable MD031 MD032 MD040 MD022 MD036 MD058 MD026 MD009 MD024-->
-# Audio Cleaner Pro
+# 🎵 Audio Cleaner Web
 
-> AI-powered video denoising web application built on Azure
+[![Build Status](https://github.com/BenjaminDanker/Audio-Cleaner-Web/actions/workflows/ci.yml/badge.svg)](https://github.com/BenjaminDanker/Audio-Cleaner-Web/actions)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)  [![Version](https://img.shields.io/github/v/release/BenjaminDanker/Audio-Cleaner-Web)](https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases)
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/)
+AI-powered video noise reduction in the cloud. Upload a video and receive a version with crystal-clear audio using state-of-the-art DeepFilterNet3.
 
-## ✨ Features
+## Table of Contents
 
-- 🎵 **AI Audio Denoising** - Remove background noise from videos using DeepFilterNet3
-- 📁 **Drag & Drop Upload** - Intuitive file upload with progress tracking
-- ⚡ **Real-time Processing** - Monitor job status and download results instantly
-- 🔐 **Secure Authentication** - User accounts with subscription management
-- 💳 **Stripe Integration** - Flexible payment plans
-- 🌐 **Fully Scalable** - Azure-native architecture
+- [🎵 Audio Cleaner Web](#-audio-cleaner-web)
+  - [Table of Contents](#table-of-contents)
+  - [Features](#features)
+  - [Prerequisites](#prerequisites)
+  - [Project Structure](#project-structure)
+  - [Architecture](#architecture)
+  - [Installation \& Local Development](#installation--local-development)
+  - [Configuration](#configuration)
+  - [Usage](#usage)
+  - [Deployment](#deployment)
+  - [Troubleshooting \& Tips](#troubleshooting--tips)
+  - [Contributing](#contributing)
+  - [License](#license)
 
-## 🚀 Quick Start
+## Features
 
-### Prerequisites
-- Azure subscription with Owner/Contributor access
-- [Azure Developer CLI](https://learn.microsoft.com/en-us/azure/developer/azure-developer-cli/install-azd)
-- [Azure CLI](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli)
+- Noise reduction for any video format via DeepFilterNet3 AI model
+- Secure direct-to-blob uploads/downloads with time-limited SAS tokens
+- Serverless API (Azure Functions) and queue-based processing (Service Bus)
+- GitHub OAuth authentication and Stripe subscription management
+- Automatic cleanup of old files and cost-efficient scaling to zero
 
-### Deploy to Azure
+## Prerequisites
 
-1. **Clone the repository**
+- Node.js (>=14.x) and npm
+- Azure Static Web Apps CLI (`npm install -g @azure/static-web-apps-cli`)
+- Azure Functions Core Tools (`npm install -g azure-functions-core-tools@4`)
+- Docker (for local AI processor)
+- Terraform (for infrastructure provisioning)
+
+## Project Structure
+
+```text
+Audio-Cleaner-Web/
+├── frontend/          # React + Vite UI
+├── api/               # Azure Functions (Node.js)
+│   ├── upload-file/   # Generate upload SAS URL
+│   ├── enqueue-job/   # Enqueue processing job
+│   ├── job-status/    # Poll job status
+│   ├── download-file/ # Generate download SAS URL
+│   └── shared/        # Utilities and middleware
+├── processor/         # Python AI service container
+│   ├── Dockerfile     # Container spec
+│   └── src/           # DeepFilterNet3 inference code
+└── terraform/         # Infrastructure as Code
+```
+
+## Architecture
+
+```mermaid
+graph LR
+  F[Frontend (React)] -->|API calls| A[Azure Functions]
+  A --> B[Service Bus]
+  B --> C[AI Processor (Container App)]
+  C --> D[Blob Storage]
+  A --> E[Cosmos DB]
+```
+
+- Frontend & API scale to zero when idle
+- Processor: containerized AI runs per job
+- Storage & DB: secure, pay-per-use
+
+## Installation & Local Development
+
+1. Clone the repository:
+
    ```bash
-   git clone <your-repo-url>
+   git clone https://github.com/BenjaminDanker/Audio-Cleaner-Web.git
    cd Audio-Cleaner-Web
    ```
 
-2. **Login and deploy**
+2. Start frontend:
+
    ```bash
-   azd auth login
-   azd up
+   cd frontend
+   npm install
+   npm run dev
    ```
 
-That's it! The deployment will provision all Azure resources and deploy your application.
+3. Start API:
 
-## 🏗️ Architecture
+   ```bash
+   cd ../api
+   npm install
+   npm run dev
+   ```
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Static Web App                                │
-│  ┌─────────────────┐       ┌─────────────────────────────────┐   │
-│  │   React SPA     │───────│    Managed Functions API       │   │
-│  │  (Frontend)     │       │      (Node.js)                 │   │
-│  └─────────────────┘       └─────────────────────────────────┘   │
-└─────────────────────────────────┬───────────────────────────────┘
-                                  │
-                                  ▼
-                        ┌─────────────────┐
-                        │ Container Apps  │
-                        │   (Python AI)   │
-                        └─────────────────┘
-                                  │
-         ┌────────────────────────┼────────────────────────┐
-         │                       │                        │
-         ▼                       ▼                        ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Cosmos DB     │    │  Blob Storage   │    │  Service Bus    │
-│  (Metadata)     │    │ (Video Files)   │    │   (Queuing)     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
+4. Start AI processor:
 
-**Components:**
-- **Frontend**: React + Vite hosted on Azure Static Web Apps
-- **API**: Node.js managed functions integrated within Static Web Apps
-- **Processing**: Python container with DeepFilterNet3 AI model
-- **Storage**: Cosmos DB for metadata, Blob Storage for files
-- **Infrastructure**: Bicep templates with automated deployment
+   ```bash
+   cd ../processor
+   docker compose -f docker-compose.dev.yml up
+   ```
 
-## � Documentation
+5. Launch full stack locally:
 
-- **[Architecture Guide](docs/ARCHITECTURE.md)** - Detailed system design and components
-- **[Deployment Guide](docs/DEPLOYMENT.md)** - CI/CD setup and environment configuration
-- **[Security Guide](docs/SECURITY.md)** - Authentication, authorization, and best practices
-- **[Developer Guide](docs/DEVELOPMENT.md)** - Local setup and contribution guidelines
+   ```bash
+   npx swa start
+   ```
 
-## 🔧 Configuration
+6. Open <http://localhost:4280> in your browser.
 
-Key environment variables (automatically configured during deployment):
-- `AZURE_ENV_NAME` - Environment identifier
-- `AZURE_LOCATION` - Deployment region
-- `AZURE_SUBSCRIPTION_ID` - Target subscription
+## Configuration
 
-## 🤝 Contributing
+1. Copy and fill local settings:
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+   ```bash
+   cd api
+   cp local.settings.json.example local.settings.json
+   ```
 
-## 📄 License
+2. In `local.settings.json`, set:
+   - `AzureWebJobsStorage` (Blob Storage connection string)
+   - `SERVICE_BUS_CONNECTION` (Service Bus connection string)
+   - `COSMOS_DB_CONNECTION` (Cosmos DB connection string)
+   - `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`
+   - `STRIPE_SECRET_KEY`
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+3. Terraform variables:
+
+   Edit `terraform/terraform.tfvars` with your Azure subscription and resource group.
+
+## Usage
+
+1. Log in via GitHub on the frontend.
+2. Upload a video → frontend requests a SAS URL → upload to Blob Storage.
+3. Click **Process** → job enqueued on Service Bus.
+4. View processing status in real time.
+5. Download the processed video via SAS-protected URL.
+
+## Deployment
+
+1. Provision infrastructure:
+
+   ```bash
+   cd terraform
+   terraform init
+   terraform apply
+   ```
+
+2. Deploy frontend & API:
+
+   ```bash
+   npx swa deploy
+   ```
+
+3. Monitor services in the Azure portal as needed.
+
+## Troubleshooting & Tips
+
+- **Azure Functions errors**: run `func start --verbose` in the `api` directory.
+- **Blob access issues**: verify SAS token validity and storage CORS settings.
+- **Queue delays**: check Service Bus SKU and message metrics.
+- **Processor rebuild**: rerun `docker build` if model files change.
+
+## Contributing
+
+1. Fork the repository.
+2. Create a branch: `git checkout -b feature/your-feature`.
+3. Implement changes and add tests.
+4. Test end-to-end locally.
+5. Submit a pull request against `main`.
+
+## License
+
+Released under the MIT License. See [LICENSE](LICENSE) for details.
