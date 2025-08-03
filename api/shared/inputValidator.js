@@ -3,17 +3,17 @@
  * Provides comprehensive validation for all input types
  */
 
-const crypto = require('crypto');
 const validator = require('validator'); // Note: Add this to package.json
 
 class InputValidator {
     constructor() {
+        // Centralized limits - single source of truth
         this.maxSizes = {
             string: 10000,
             fileName: 255,
             email: 320,
             url: 2048,
-            base64: 50 * 1024 * 1024 // 50MB for file uploads
+            fileUpload: 5 * 1024 * 1024 * 1024 // 5GB - unified file upload limit
         };
 
         this.patterns = {
@@ -128,9 +128,6 @@ class InputValidator {
                 break;
             case 'fileName':
                 sanitized = this.validateFileName(fieldName, value, schema, errors);
-                break;
-            case 'base64':
-                sanitized = this.validateBase64(fieldName, value, schema, errors);
                 break;
             case 'guid':
                 sanitized = this.validateGuid(fieldName, value, schema, errors);
@@ -391,37 +388,6 @@ class InputValidator {
     }
 
     /**
-     * Base64 validation
-     */
-    validateBase64(fieldName, value, schema, errors) {
-        if (typeof value !== 'string') {
-            errors.push(`${fieldName} must be a string`);
-            return value;
-        }
-
-        if (value.length > this.maxSizes.base64) {
-            errors.push(`${fieldName} base64 data too large`);
-            return value;
-        }
-
-        // Check base64 format
-        const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
-        if (!base64Regex.test(value)) {
-            errors.push(`${fieldName} is not valid base64`);
-            return value;
-        }
-
-        try {
-            Buffer.from(value, 'base64');
-        } catch {
-            errors.push(`${fieldName} is not valid base64`);
-            return value;
-        }
-
-        return value;
-    }
-
-    /**
      * GUID validation
      */
     validateGuid(fieldName, value, schema, errors) {
@@ -470,13 +436,20 @@ class InputValidator {
     }
 
     /**
+     * Get file upload size limit
+     */
+    getFileUploadLimit() {
+        return this.maxSizes.fileUpload;
+    }
+
+    /**
      * Create validation schema for common API endpoints
      */
-    static getSchemaForEndpoint(endpoint) {
+    getSchemaForEndpoint(endpoint) {
         const schemas = {
             '/api/upload-file': {
                 fileName: { type: 'fileName', required: true, maxLength: 255 },
-                fileSize: { type: 'integer', min: 1, max: 2 * 1024 * 1024 * 1024 } // 2GB
+                fileSize: { type: 'integer', min: 1, max: this.maxSizes.fileUpload } // Use centralized limit
             },
             '/api/enqueue-job': {
                 fileName: { type: 'fileName', required: true },

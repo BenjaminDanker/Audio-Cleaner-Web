@@ -164,9 +164,7 @@ class AzureSDKConfig {
         throw lastError;
     }
 
-    /**
-     * Determine if an error should trigger a retry
-     */
+    // Determine if an error should trigger a retry
     static shouldRetryError(error, attempt, maxRetries) {
         if (attempt >= maxRetries) return false;
 

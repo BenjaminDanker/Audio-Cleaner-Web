@@ -99,10 +99,10 @@ module.exports = async function (context, req) {
         for (const job of jobs) {
             try {
                 // Only delete output blob since input blob is automatically deleted after processing
-                if (job.output_blob_url) {
+                if (job.downloadUrl) {
                     try {
                         // Extract blob name from URL
-                        const url = new URL(job.output_blob_url);
+                        const url = new URL(job.downloadUrl);
                         const pathParts = url.pathname.split('/');
                         if (pathParts.length >= 3) {
                             const outputBlobName = pathParts.slice(2).join('/'); // Skip empty string and container name
@@ -116,7 +116,7 @@ module.exports = async function (context, req) {
                             }
                         }
                     } catch (blobError) {
-                        context.log.warn(`Could not delete output blob from ${job.output_blob_url}:`, blobError.message);
+                        context.log.warn(`Could not delete output blob from ${job.downloadUrl}:`, blobError.message);
                         // Don't fail the entire operation for blob deletion issues
                     }
                 }

@@ -37,7 +37,7 @@ module.exports = async function (context, req) {
     try {
         // Input validation with proper schema
         const validator = new InputValidator();
-        const schema = InputValidator.getSchemaForEndpoint('/api/download-file');
+        const schema = validator.getSchemaForEndpoint('/api/download-file');
         
         const inputData = {
             filename: req.params.filename || req.query.filename
@@ -73,18 +73,16 @@ module.exports = async function (context, req) {
         
         // Check if we're in local development
         const clientPrincipal = req.headers['x-ms-client-principal'];
-        const isLocalDev = !clientPrincipal || process.env.COSMOS_CONNECTION_STRING?.includes('localhost');
         
         // Get authenticated user info with better error handling
         const userInfo = securityResult.userInfo;
         context.log('Authentication check:', {
             hasClientPrincipal: !!clientPrincipal,
             hasUserInfo: !!userInfo,
-            isLocalDev: isLocalDev,
             userId: userInfo?.userId?.substring(0, 8) + '...' || 'none'
         });
         
-        if (!userInfo && !isLocalDev) {
+        if (!userInfo) {
             context.log.error('Authentication required but no user info available');
             context.res = {
                 status: 401,
@@ -102,7 +100,6 @@ module.exports = async function (context, req) {
             context.log('- Requested filename:', filename.substring(0, 20) + '...'); // Don't log full filename
             context.log('- User ID:', userInfo?.userId?.substring(0, 8) + '...');
             
-            // Use the same storage connection string as upload-file for consistency
             const storageConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
             
             if (!storageConnectionString) {
@@ -138,15 +135,13 @@ module.exports = async function (context, req) {
             }
             
             const sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
-            
-            context.log('Getting container client...');
             const containerClient = blobServiceClient.getContainerClient('processed-videos');
             
-            // Enhanced blob discovery with user-specific access control
-            let blobClient = containerClient.getBlobClient(filename);
-            let blobName = filename;
-            let exists = false;
+            // Security: Use exact blob path
+            const blobClient = containerClient.getBlobClient(filename);
+            const blobName = filename;
             
+            let exists = false;
             try {
                 exists = await blobClient.exists();
             } catch (error) {
@@ -154,53 +149,8 @@ module.exports = async function (context, req) {
                 exists = false;
             }
             
-            // If not found and filename doesn't contain a path, try searching for it
-            if (!exists && !filename.includes('/')) {
-                context.log(`Direct filename not found, searching for blob containing: ${filename.substring(0, 20)}...`);
-                
-                let foundBlob = null;
-                try {
-                    // Security: Limit blob listing and search only user's files if possible
-                    const searchPrefix = userInfo?.userId ? `${userInfo.userId}/` : '';
-                    const listOptions = {
-                        prefix: searchPrefix,
-                        maxPageSize: 100 // Limit to prevent excessive API calls
-                    };
-                    
-                    let blobCount = 0;
-                    for await (const blob of containerClient.listBlobsFlat(listOptions)) {
-                        blobCount++;
-                        if (blobCount > 500) { // Safety limit
-                            context.log.warn('Blob search limit reached');
-                            break;
-                        }
-                        
-                        if (blob.name.endsWith(filename) || blob.name.includes(filename)) {
-                            // Additional security: Check if user has access to this blob
-                            if (userInfo?.userId && !blob.name.startsWith(userInfo.userId + '/') && 
-                                !blob.name.includes('shared/') && !blob.name.includes('public/')) {
-                                context.log.warn(`Access denied to blob: ${blob.name.substring(0, 20)}... for user: ${userInfo.userId.substring(0, 8)}...`);
-                                continue;
-                            }
-                            
-                            context.log(`Found matching blob: ${blob.name.substring(0, 30)}...`);
-                            foundBlob = blob;
-                            break;
-                        }
-                    }
-                } catch (listError) {
-                    context.log.error('Error listing blobs:', listError.message);
-                }
-                
-                if (foundBlob) {
-                    blobClient = containerClient.getBlobClient(foundBlob.name);
-                    blobName = foundBlob.name;
-                    exists = true;
-                }
-            }
-            
             if (!exists) {
-                context.log(`Blob not found: ${filename.substring(0, 20)}...`);
+                context.log(`Blob not found with exact path: ${filename.substring(0, 20)}...`);
                 context.res = {
                     status: 404,
                     headers: security.getSecurityHeaders(),
@@ -208,7 +158,7 @@ module.exports = async function (context, req) {
                 };
                 return;
             }
-              // Get current user for tracking and access control
+            // Get current user for tracking and access control
             const userId = userInfo?.userId;
             context.log('Using userId for SAS generation:', userId.substring(0, 8) + '...');
             
@@ -225,6 +175,17 @@ module.exports = async function (context, req) {
             // Get client IP for SAS restriction (Rule #3)  
             const clientIP = securityResult.clientIP;
             
+            // Security: Require client IP for SAS token generation
+            if (!clientIP) {
+                context.log.error('Client IP is required for secure SAS token generation');
+                context.res = {
+                    status: 403,
+                    headers: security.getSecurityHeaders(),
+                    body: { error: 'Client IP validation required for secure download' }
+                };
+                return;
+            }
+            
             // Get blob properties for content validation and metadata
             let properties;
             try {
@@ -240,19 +201,6 @@ module.exports = async function (context, req) {
                     };
                     return;
                 }
-                
-                // Security: Check for reasonable file size limits
-                const maxDownloadSize = 10 * 1024 * 1024 * 1024; // 10GB
-                if (properties.contentLength > maxDownloadSize) {
-                    context.log.warn(`File too large for download: ${properties.contentLength} bytes`);
-                    context.res = {
-                        status: 413,
-                        headers: security.getSecurityHeaders(),
-                        body: { error: 'File too large for download' }
-                    };
-                    return;
-                }
-                
             } catch (propertiesError) {
                 context.log.error('Error getting blob properties:', propertiesError.message);
                 context.res = {
@@ -263,14 +211,14 @@ module.exports = async function (context, req) {
                 return;
             }
 
-            // Generate secure SAS token for download with enhanced security
-            context.log('Generating SAS token...');
+            // Generate secure SAS token for download with mandatory IP restriction
+            context.log('Generating SAS token with IP restriction...');
             const sasResult = await sasManager.generateSASToken({
                 containerName: 'processed-videos',
                 blobName: blobName,
                 permissions: 'r', // read-only (Rule #2)
-                expiryMinutes: 5, // Very short-lived for downloads (Rule #2) - reduced from 10 to 5 minutes
-                clientIP: clientIP, // IP restriction if available (Rule #3)
+                expiryMinutes: 5, // Very short-lived for downloads (Rule #2)
+                clientIP: clientIP, // IP restriction (Rule #3)
                 userId: userId, // For tracking and revocation (Rule #5)
                 context: context
             });

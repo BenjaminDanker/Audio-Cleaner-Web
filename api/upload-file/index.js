@@ -2,6 +2,7 @@ const { BlobServiceClient } = require('@azure/storage-blob');
 const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware');
 const MinimalLogger = require('../shared/minimalLogger');
 const AzureSDKConfig = require('../shared/azureSDKConfig');
+const InputValidator = require('../shared/inputValidator');
 
 module.exports = async function (context, req) {
     const startTime = Date.now();
@@ -12,23 +13,14 @@ module.exports = async function (context, req) {
     // Initialize retry-aware minimal logger
     const logger = new MinimalLogger(context).getLogger();
     
-    // Also log to context for now (while testing)
-    context.log('Upload file function processed a request.');
-    
-    logger.logInfo('upload-file', 'Upload file function processed a request', 'system', { 
-        sessionId,
-        timestamp: new Date().toISOString(),
-        requestMethod: req.method
-    });
-    
     try {
         // Initialize simple security middleware
         const security = new SimpleSecurityMiddleware(process.env.COSMOS_CONNECTION_STRING);
         
         // Consistent security check - always require auth to match enqueue-job behavior
         const securityResult = await security.checkSecurity(context, req, {
-            requireAuth: true, // Always require auth to ensure consistent user ID usage
-            validateInput: false, // Disable strict input validation for now
+            requireAuth: true,
+            validateInput: true,
             fileSize: parseInt(req.headers['content-length'] || '0')
         });
         
@@ -80,8 +72,11 @@ module.exports = async function (context, req) {
             return;
         }
 
-        // File type validation
-        const allowedExtensions = ['.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v', '.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a'];
+        // Initialize input validator for centralized validation
+        const validator = new InputValidator();
+        
+        // File type validation using validator
+        const allowedExtensions = validator.allowedFileTypes;
         const fileExtension = fileName.toLowerCase().substring(fileName.lastIndexOf('.'));
         
         if (!allowedExtensions.includes(fileExtension)) {
@@ -101,8 +96,8 @@ module.exports = async function (context, req) {
             return;
         }
 
-        // File size validation
-        const maxFileSize = 5 * 1024 * 1024 * 1024; // 5GB
+        // File size validation using centralized limit
+        const maxFileSize = validator.getFileUploadLimit();
         if (fileSize && fileSize > maxFileSize) {
             logger.logError('upload-file', `File size exceeds limit`, userId, { sessionId });
             context.res = {
@@ -114,7 +109,7 @@ module.exports = async function (context, req) {
                 },
                 body: { 
                     success: false, 
-                    error: `File size ${Math.round(fileSize / 1024 / 1024)}MB exceeds maximum allowed size of 5GB` 
+                    error: `File size ${Math.round(fileSize / 1024 / 1024)}MB exceeds maximum allowed size of ${Math.round(maxFileSize / 1024 / 1024 / 1024)}GB` 
                 }
             };
             return;
@@ -174,7 +169,6 @@ module.exports = async function (context, req) {
             body: {
                 success: true,
                 uploadUrl: sasToken,
-                // Provide fileUrl for downstream processing
                 fileUrl: sasToken,
                 blobName: blobName,
                 containerId: 'uploads',

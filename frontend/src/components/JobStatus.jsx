@@ -40,9 +40,7 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
           message: response.data.message,
           updatedAt: response.data.updatedAt,
           completedAt: response.data.completedAt,
-          // Normalize download URL field names
-          downloadUrl: response.data.downloadUrl || response.data.output_blob_url || null,
-          output_blob_url: response.data.output_blob_url || response.data.downloadUrl || null
+          downloadUrl: response.data.downloadUrl
         }
         
         // Only update if there are actual changes to prevent unnecessary re-renders
@@ -105,8 +103,7 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
   }
 
   const getDownloadUrl = () => {
-    // Check for different possible field names for the download URL
-    const downloadUrl = job.downloadUrl || job.output_blob_url || job.outputBlobUrl
+    const downloadUrl = job.downloadUrl
     if (!downloadUrl) return null
     
     // Handle local development URLs
@@ -128,7 +125,7 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
   }
 
   const hasDownloadUrl = () => {
-    return !!(job.downloadUrl || job.output_blob_url || job.outputBlobUrl)
+    return !!job.downloadUrl
   }
 
   // Parallel download helper for large files

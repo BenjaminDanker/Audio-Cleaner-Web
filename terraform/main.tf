@@ -212,8 +212,6 @@ resource "azurerm_static_web_app" "main" {
     "AZURE_SERVICE_BUS_CONNECTION_STRING" = azurerm_servicebus_namespace.main.default_primary_connection_string
     "COSMOS_CONNECTION_STRING"            = azurerm_cosmosdb_account.main.primary_sql_connection_string
     "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
-    "LOCAL_DEV_MODE"                      = "false"
-    // Stripe keys
     "STRIPE_SECRET_KEY"                   = var.stripe_secret_key
     "STRIPE_PUBLIC_KEY"                   = var.stripe_public_key
     "STRIPE_WEBHOOK_SECRET"               = var.stripe_webhook_secret

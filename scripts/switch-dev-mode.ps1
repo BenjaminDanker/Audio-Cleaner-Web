@@ -35,7 +35,6 @@ switch ($Mode) {
                     "STRIPE_SECRET_KEY" = "sk_test_your_stripe_test_key_here"
                     "STRIPE_WEBHOOK_SECRET" = "whsec_your_webhook_secret_here"
                     "FRONTEND_URL" = "http://localhost:5173"
-                    "LOCAL_DEV_MODE" = "true"
                     # Fetch Azure account info dynamically
                     "AZURE_CLIENT_ID" = (az account show --query "user.name" -o tsv)
                     "AZURE_TENANT_ID" = (az account show --query "tenantId" -o tsv)
@@ -84,11 +83,9 @@ switch ($Mode) {
 Write-Host "`n📝 Current configuration summary:" -ForegroundColor Green
 if (Test-Path $localSettingsActive) {
     $config = Get-Content $localSettingsActive | ConvertFrom-Json
-    $isLocal = $config.Values.LOCAL_DEV_MODE -eq "true"
     $storageMode = if ($isLocal) { "Local (Azurite)" } else { "Cloud (Azure)" }
     $cosmosMode = if ($config.Values.COSMOS_CONNECTION_STRING -eq "file-based-for-local-dev") { "Local (File-based)" } else { "Cloud (Azure)" }
     
     Write-Host "  Storage: $storageMode" -ForegroundColor White
     Write-Host "  Cosmos: $cosmosMode" -ForegroundColor White
-    Write-Host "  Local Dev Mode: $($config.Values.LOCAL_DEV_MODE)" -ForegroundColor White
 }

@@ -125,22 +125,6 @@ module.exports = async function (context, req) {
         // Generate job ID and output file name
         const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const outputFileName = fileName ? fileName.replace(/\.[^/.]+$/, '_cleaned.mp3') : 'cleaned_audio.mp3';
-        
-        // Create job record with minimal logging
-        logger.logInfo('enqueue-job', 'Creating job record', userId, {
-            sessionId,
-            jobId,
-            fileName: fileName?.substring(0, 20) + '...', // Truncate for cost optimization
-            processingType
-        });
-        await logger.logInfo('enqueue-job', `Creating job for file processing`, userId, {
-            sessionId,
-            jobId,
-            fileName,
-            fileUrl,
-            processingType: processingType || 'noise_reduction',
-            attenuationDb: attenuationDb || null
-        });
 
         // Initialize optimized Cosmos client with retry-aware configuration
         const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
@@ -152,8 +136,8 @@ module.exports = async function (context, req) {
             userId: userId,
             fileName: fileName,
             input_blob_url: fileUrl,
-            processingType: processingType || 'noise_reduction',
-            attenuationDb: attenuationDb || null,
+            processingType: processingType,
+            attenuationDb: attenuationDb,
             status: 'queued',
             progress: 0,
             message: 'Job queued successfully',
@@ -232,7 +216,7 @@ module.exports = async function (context, req) {
             message: 'Job queued successfully',
             fileUrl: fileUrl,
             fileName: fileName,
-            processingType: processingType || 'noise_reduction'
+            processingType: processingType
         };
 
         const duration = Date.now() - startTime;
