@@ -259,8 +259,8 @@ class AudioCleanerProcessor:
                     # Upload processed video to blob storage
                     logger.info(f"Uploading processed video for job {job_id}")
                     await self.update_job_status(job_id, 'processing', user_id, progress=85)
-                    output_blob_url = await self.upload_blob_with_progress(output_path, output_file_name, job_id)
-                    logger.info(f"Upload completed for job {job_id}, URL: {output_blob_url}")
+                    download_url = await self.upload_blob_with_progress(output_path, output_file_name, job_id)
+                    logger.info(f"Upload completed for job {job_id}, URL: {download_url}")
                     
                     await self.update_job_status(job_id, 'processing', user_id, progress=95)
                     
@@ -270,8 +270,7 @@ class AudioCleanerProcessor:
                         'completed',
                         user_id,
                         progress=100,
-                        output_blob_url=output_blob_url,
-                        downloadUrl=output_blob_url  # Also set downloadUrl for frontend compatibility
+                        downloadUrl=download_url  # Unified download URL field
                     )
                     
                     # Delete the input blob now that processing is complete
@@ -473,10 +472,6 @@ class AudioCleanerProcessor:
         
         logger.info(f"Successfully downloaded {chunk_count} chunks in parallel")
 
-    async def upload_blob(self, local_file_path, blob_name):
-        """Upload a local file to blob storage using parallel block uploads"""
-        return await self.upload_blob_with_progress(local_file_path, blob_name, None)
-    
     async def upload_blob_with_progress(self, local_file_path, blob_name, job_id=None):
         """Upload a local file to blob storage using parallel block uploads with progress tracking"""
         try:

@@ -127,7 +127,6 @@ $localDevConfig = @{
     "STRIPE_SECRET_KEY" = "sk_test_your_stripe_test_key_here"
     "STRIPE_WEBHOOK_SECRET" = "whsec_your_webhook_secret_here"
     "FRONTEND_URL" = "http://localhost:5173"
-    "LOCAL_DEV_MODE" = "false"  # Using cloud services
     # Fetch Azure account info dynamically
     "AZURE_CLIENT_ID" = (az account show --query "user.name" -o tsv)
     "AZURE_TENANT_ID" = (az account show --query "tenantId" -o tsv)
@@ -162,7 +161,6 @@ $envContent = @"
 AZURE_STORAGE_CONNECTION_STRING=$storageConnectionString
 COSMOS_CONNECTION_STRING=$cosmosConnectionString
 AZURE_SERVICE_BUS_CONNECTION_STRING=$serviceBusConnectionString
-LOCAL_DEV_MODE=false
 "@
 
 $envPath = Join-Path $processorPath ".env.cloud"

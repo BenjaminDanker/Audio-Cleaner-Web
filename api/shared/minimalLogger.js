@@ -6,21 +6,17 @@
 const RetryAwareLogger = require('./retryAwareLogger');
 
 class MinimalLogger {
-    constructor(context, useRetryAwareness = true) {
+    constructor(context) {
         this.context = context;
         this.initialized = true; // Always ready
-        
-        // Optionally wrap with retry-aware logging
-        if (useRetryAwareness) {
-            this.retryLogger = new RetryAwareLogger(this, 2); // Max 2 duplicates per minute
-        }
+        this.retryLogger = new RetryAwareLogger(this, 2); // Max 2 duplicates per minute
     }
 
     /**
-     * Get the effective logger (retry-aware if enabled, otherwise this)
+     * Get the retry-aware logger
      */
     getLogger() {
-        return this.retryLogger || this;
+        return this.retryLogger;
     }
 
     /**
@@ -130,9 +126,7 @@ class MinimalLogger {
      * Cleanup method
      */
     destroy() {
-        if (this.retryLogger) {
-            this.retryLogger.destroy();
-        }
+        this.retryLogger.destroy();
     }
 }
 

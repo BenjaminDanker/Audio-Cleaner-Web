@@ -95,20 +95,10 @@ When in local mode, your local development will:
 
 ### Key Variables Used
 
-- `LOCAL_DEV_MODE`: Controls whether to use local or cloud services
 - `AZURE_STORAGE_CONNECTION_STRING`: Storage account connection
 - `COSMOS_CONNECTION_STRING`: Cosmos DB connection
 - `AZURE_SERVICE_BUS_CONNECTION_STRING`: Service Bus connection
 
-### Automatic Detection
-
-Your code automatically detects the environment:
-
-```javascript
-// Example from your codebase
-const isLocalDev = process.env.LOCAL_DEV_MODE === 'true' || 
-                   !process.env.AZURE_STORAGE_CONNECTION_STRING;
-```
 
 ## Benefits
 

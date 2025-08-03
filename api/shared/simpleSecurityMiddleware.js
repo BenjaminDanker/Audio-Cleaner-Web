@@ -41,10 +41,11 @@ class SimpleSecurityMiddleware {
                 context.log.error('Security check error:', error.message);
             }
             
-            // Fail securely but allow request if security fails
+            // Fail securely - deny request if security check fails
             return {
-                allowed: true,
-                userInfo: null
+                allowed: false,
+                status: 500,
+                body: { error: 'Security validation failed' }
             };
         }
     }
@@ -56,17 +57,6 @@ class SimpleSecurityMiddleware {
         const clientPrincipal = req.headers['x-ms-client-principal'];
         
         if (!clientPrincipal) {
-            // Allow in development mode
-            const isDev = process.env.LOCAL_DEV_MODE === 'true' || !process.env.AZURE_STORAGE_CONNECTION_STRING;
-            if (isDev) {
-                return { 
-                    valid: true, 
-                    principal: { 
-                        userId: 'dev-user', 
-                        userDetails: 'development@test.com'
-                    } 
-                };
-            }
             return { valid: false, error: 'No authentication' };
         }
 
@@ -85,14 +75,6 @@ class SimpleSecurityMiddleware {
         try {
             const clientPrincipal = req.headers['x-ms-client-principal'];
             if (!clientPrincipal) {
-                // Development mode
-                const isDev = process.env.LOCAL_DEV_MODE === 'true' || !process.env.AZURE_STORAGE_CONNECTION_STRING;
-                if (isDev) {
-                    return {
-                        userId: 'dev-user',
-                        email: 'development@test.com'
-                    };
-                }
                 return null;
             }
             
