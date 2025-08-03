@@ -10,7 +10,9 @@
       "default": "Information",
       "Host.Results": "Error",
       "Function": "Information",
-      "Host.Aggregator": "Trace"
+      "Host.Aggregator": "Trace",
+      "Azure.Identity": "Debug",
+      "Azure.Identity.ManagedIdentityClient": "Debug"
     },
     "applicationInsights": {
       "samplingSettings": {

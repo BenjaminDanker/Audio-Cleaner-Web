@@ -93,6 +93,7 @@ class SimpleSecurityMiddleware {
      */
     getSecurityHeaders() {
         return {
+            'Access-Control-Allow-Origin': '*',
             'X-Content-Type-Options': 'nosniff',
             'X-Frame-Options': 'DENY',
             'Cache-Control': 'no-store'

@@ -79,7 +79,7 @@ class AudioCleanerProcessor:
             
             # Test the connection by listing containers
             try:
-                containers = list(self.blob_service_client.list_containers(max_results=1))
+                containers = list(self.blob_service_client.list_containers(results_per_page=1))
                 logger.info(f"Storage connection test successful, found {len(containers)} container(s)")
             except Exception as test_error:
                 logger.warning(f"Storage connection test failed: {test_error}")
@@ -171,32 +171,36 @@ class AudioCleanerProcessor:
         """Process a single video job"""
         job_id = job_data['jobId']
         user_id = job_data['userId']  # Get user ID from job data
-        file_name = job_data['inputFile']  # This is the blob name/path
-        atten_db = job_data.get('attenuation', 30)  # Default attenuation
         
-        # Generate output filename with user ID directory structure
-        input_path = Path(file_name)
+        # Get complete job information from Cosmos DB (authoritative source)
+        try:
+            job_record = self.jobs_container.read_item(item=job_id, partition_key=user_id)
+            logger.info(f"Retrieved job record for {job_id}")
+        except Exception as e:
+            logger.error(f"Failed to retrieve job record for {job_id}: {e}")
+            raise ValueError(f"Job record not found: {job_id}")
         
-        # Extract just the filename without user directory if present
-        if '/' in file_name and file_name.startswith(f"{user_id}/"):
-            # Input file is like "userId/timestamp_randomId_originalname.ext"
-            # Extract just the "timestamp_randomId_originalname" part
-            filename_only = file_name.split('/', 1)[1]  # Remove user directory prefix
-            input_name_part = Path(filename_only).stem
-        else:
-            # Input file is just a filename without directory
-            input_name_part = input_path.stem
-            
-        output_file_name = f"{user_id}/{input_name_part}_denoised{input_path.suffix}"
+        # Use data from job record (not Service Bus message)
+        input_blob_url = job_record['input_blob_url']  # Actual uploaded blob URL
+        original_filename = job_record['fileName']  # Original filename
+        atten_db = job_record.get('attenuationDb', 30)  # Default attenuation
+        processing_type = job_record.get('processingType', 'denoise')
+        
+        # Generate output filename using job ID for uniqueness (no more arbitrary construction)
+        file_ext = Path(original_filename).suffix or '.mp3'
+        # Use job ID to ensure unique, predictable output names
+        output_file_name = f"{user_id}/{job_id}_processed{file_ext}"
+        
+        logger.info(f"Job {job_id}: Input={input_blob_url}, Output={output_file_name}, Type={processing_type}")
         
         # Update job status to processing
         await self.update_job_status(job_id, 'processing', user_id, progress=10)
         
         with tempfile.TemporaryDirectory() as temp_dir:
             try:
-                # Download input video from blob storage
+                # Download input video from blob storage using the actual URL
                 await self.update_job_status(job_id, 'processing', user_id, progress=15)
-                input_file_path = await self.download_blob_from_url(file_name, temp_dir, user_id, job_id)
+                input_file_path = await self.download_blob_from_url(input_blob_url, temp_dir, user_id, job_id)
                 await self.update_job_status(job_id, 'processing', user_id, progress=25)
                 
                 # Create a mock uploaded file object for VideoProcessor
@@ -270,23 +274,19 @@ class AudioCleanerProcessor:
                         'completed',
                         user_id,
                         progress=100,
-                        downloadUrl=download_url  # Unified download URL field
+                        downloadUrl=download_url,  # Full blob URL for reference
+                        outputBlobName=output_file_name  # Exact blob name for download API
                     )
                     
                     # Delete the input blob now that processing is complete
                     try:
-                        # Construct blob URL for deletion
-                        if file_name.startswith('https://'):
-                            input_blob_url = file_name
-                        else:
-                            input_blob_url = f"https://{self.storage_account_name}.blob.core.windows.net/uploads/{file_name}"
-                        
+                        # Use the input blob URL directly (no construction needed)
                         logger.info(f"Attempting to delete input blob for job {job_id}: {input_blob_url}")
                         await self.delete_input_blob(input_blob_url)
                         logger.info(f"Successfully deleted input blob for job {job_id}")
                     except Exception as delete_error:
                         logger.error(f"Failed to delete input blob for job {job_id}: {delete_error}")
-                        logger.error(f"Blob URL was: {input_blob_url if 'input_blob_url' in locals() else file_name}")
+                        logger.error(f"Blob URL was: {input_blob_url}")
                         # Don't fail the job if we can't delete the input blob, but log it for investigation
                     
                     logger.info(f"Job {job_id} completed successfully")
@@ -308,37 +308,24 @@ class AudioCleanerProcessor:
                 )
                 raise
 
-    async def download_blob_from_url(self, input_file, temp_dir, user_id, job_id=None):
-        """Download a blob from URL or path to local file using parallel downloads for large files"""
+    async def download_blob_from_url(self, blob_url, temp_dir, user_id, job_id=None):
+        """Download a blob from full URL to local file using parallel downloads for large files"""
         try:
-            # If we have a full URL, parse it. Otherwise construct URL from blob path
-            if input_file.startswith('https://'):
-                # Full URL provided
-                from urllib.parse import urlparse
-                parsed_url = urlparse(input_file)
+            # Parse the blob URL to extract container and blob name
+            from urllib.parse import urlparse
+            parsed_url = urlparse(blob_url)
+            
+            # URL format: https://storage.blob.core.windows.net/container/blob/path
+            path_parts = parsed_url.path.strip('/').split('/')
+            if len(path_parts) < 2:
+                raise ValueError(f"Invalid blob URL format: {blob_url}")
                 
-                # URL format: https://storage.blob.core.windows.net/container/blob/path
-                path_parts = parsed_url.path.strip('/').split('/')
-                if len(path_parts) < 2:
-                    raise ValueError(f"Invalid blob URL format: {input_file}")
-                    
-                container_name = path_parts[0]
-                blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
-                blob_url = input_file
-            else:
-                # Just blob path provided, construct full URL
-                # Validate that blob path starts with user's directory for security
-                if not input_file.startswith(f"{user_id}/"):
-                    raise ValueError(f"Security violation: Blob path '{input_file}' does not belong to user '{user_id}'")
-                
-                container_name = 'uploads'
-                blob_name = input_file
-                
-                # Construct blob URL using storage account name
-                if not self.storage_account_name:
-                    raise ValueError("Storage account name not available to construct blob URL")
-                    
-                blob_url = f"https://{self.storage_account_name}.blob.core.windows.net/{container_name}/{blob_name}"
+            container_name = path_parts[0]
+            blob_name = '/'.join(path_parts[1:])  # Join remaining parts as blob name can contain /
+            
+            # Security: Validate that blob belongs to user
+            if not blob_name.startswith(f"{user_id}/"):
+                raise ValueError(f"Security violation: Blob '{blob_name}' does not belong to user '{user_id}'")
             
             logger.info(f"Downloading from container: {container_name}, blob: {blob_name}")
             
@@ -352,11 +339,9 @@ class AudioCleanerProcessor:
             blob_properties = blob_client.get_blob_properties()
             blob_size = blob_properties.size
             
-            # Download to temp file
-            local_file_path = os.path.join(temp_dir, blob_name)
-            
-            # Create intermediate directories if they don't exist
-            os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+            # Download to temp file (use just the filename part for local storage)
+            local_filename = Path(blob_name).name  # Extract just the filename
+            local_file_path = os.path.join(temp_dir, local_filename)
             
             # Use parallel download for files larger than 32MB
             if blob_size > 32 * 1024 * 1024:  # 32MB threshold

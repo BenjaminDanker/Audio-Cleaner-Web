@@ -3,6 +3,7 @@ const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware');
 const MinimalLogger = require('../shared/minimalLogger');
 const AzureSDKConfig = require('../shared/azureSDKConfig');
 const InputValidator = require('../shared/inputValidator');
+const SASTokenManager = require('../shared/sasTokenManager');
 
 module.exports = async function (context, req) {
     const startTime = Date.now();
@@ -29,7 +30,6 @@ module.exports = async function (context, req) {
                 status: securityResult.status,
                 headers: {
                     'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
                     ...security.getSecurityHeaders(),
                     ...securityResult.headers
                 },
@@ -46,7 +46,6 @@ module.exports = async function (context, req) {
                 status: 500,
                 headers: {
                     'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
                     ...security.getSecurityHeaders()
                 },
                 body: { error: 'Server error: User information not available' }
@@ -64,7 +63,6 @@ module.exports = async function (context, req) {
                 status: 400,
                 headers: {
                     'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
                     ...security.getSecurityHeaders()
                 },
                 body: { success: false, error: 'fileName is required' }
@@ -85,7 +83,6 @@ module.exports = async function (context, req) {
                 status: 400,
                 headers: {
                     'Content-Type': 'application/json',
-                    'Access-Control-Allow-Origin': '*',
                     ...security.getSecurityHeaders()
                 },
                 body: { 
@@ -144,11 +141,42 @@ module.exports = async function (context, req) {
 
         const blobClient = containerClient.getBlobClient(blobName);
 
-        // Generate SAS token for upload
-        const sasToken = await blobClient.generateSasUrl({
+        // Initialize SAS Token Manager for secure token generation
+        const sasManager = new SASTokenManager(connectionString, context);
+
+        // Get client IP for SAS restriction
+        const clientIP = SASTokenManager.getClientIP(req);
+        
+        // Generate secure upload SAS token
+        context.log('Generating secure upload SAS token...');
+        const sasResult = await sasManager.generateSASToken({
+            containerName: 'uploads',
+            blobName: blobName,
             permissions: 'cw', // create and write
-            expiresOn: new Date(Date.now() + 60 * 60 * 1000) // 1 hour
+            expiryMinutes: 60, // 1 hour
+            clientIP: clientIP, // IP restriction for security
+            context: context
         });
+        
+        if (!sasResult || !sasResult.sasToken) {
+            logger.logError('upload-file', 'Failed to generate secure upload SAS token', userId, { sessionId });
+            context.res = {
+                status: 500,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*',
+                    ...security.getSecurityHeaders()
+                },
+                body: { 
+                    success: false, 
+                    error: 'Failed to generate secure upload URL - please try again'
+                }
+            };
+            return;
+        }
+
+        // Construct full upload URL
+        const uploadUrl = `${blobClient.url}?${sasResult.sasToken}`;
 
         // Log successful operation
         const duration = Date.now() - startTime;
@@ -168,11 +196,17 @@ module.exports = async function (context, req) {
             },
             body: {
                 success: true,
-                uploadUrl: sasToken,
-                fileUrl: sasToken,
+                uploadUrl: uploadUrl,
+                fileUrl: uploadUrl,
                 blobName: blobName,
                 containerId: 'uploads',
-                expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+                expiresAt: sasResult.expiresAt.toISOString(),
+                uploadSecurityInfo: {
+                    sasType: sasResult.sasType,
+                    hasIPRestriction: !!clientIP,
+                    expiryMinutes: 60,
+                    permissions: 'create-write-only'
+                }
             }
         };
 

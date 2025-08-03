@@ -16,6 +16,10 @@ AI-powered video noise reduction in the cloud. Upload a video and receive a vers
   - [Configuration](#configuration)
   - [Usage](#usage)
   - [Deployment](#deployment)
+    - [Deployment Prerequisites](#deployment-prerequisites)
+    - [Build and Deploy Steps](#build-and-deploy-steps)
+    - [Deployment Configuration](#deployment-configuration)
+    - [Quick Deployment (Alternative)](#quick-deployment-alternative)
   - [Troubleshooting \& Tips](#troubleshooting--tips)
   - [Contributing](#contributing)
   - [License](#license)
@@ -138,7 +142,16 @@ graph LR
 
 ## Deployment
 
-1. Provision infrastructure:
+### Deployment Prerequisites
+
+- Azure CLI installed and authenticated
+- Docker installed
+- Node.js and npm installed
+- Access to Azure Container Registry
+
+### Build and Deploy Steps
+
+1. **Provision infrastructure:**
 
    ```bash
    cd terraform
@@ -146,13 +159,48 @@ graph LR
    terraform apply
    ```
 
-2. Deploy frontend & API:
+2. **Build and push the processor container:**
 
    ```bash
-   npx swa deploy
+   cd processor
+   az acr login --name <your-acr-name>
+   docker build -t audio-cleaner-processor:latest .
+   docker tag audio-cleaner-processor:latest <your-acr-name>.azurecr.io/audio-cleaner-processor:latest
+   docker push <your-acr-name>.azurecr.io/audio-cleaner-processor:latest
+   az acr manifest list-metadata --registry <your-acr-name> --name audio-cleaner-processor
+   az acr repository delete --name <your-acr-name> --image audio-cleaner-processor@sha256:aaaaa --yes
    ```
 
-3. Monitor services in the Azure portal as needed.
+3. **Build the frontend:**
+
+   ```bash
+   cd frontend
+   npm run build
+   ```
+
+4. **Deploy the application:**
+
+   ```bash
+   cd $(git rev-parse --show-toplevel)
+   npx @azure/static-web-apps-cli deploy --resource-group <your-resource-group> --app-name <your-swa-name> --subscription-id <your-subscription-id> --tenant-id <your-tenant-id>
+   ```
+
+### Deployment Configuration
+
+- Set up your Azure Container Registry name in your deployment scripts
+- Configure environment variables for your specific Azure resources
+- Replace placeholders with your actual Azure resource names and IDs
+- Monitor services in the Azure portal as needed
+
+### Quick Deployment (Alternative)
+
+For convenience, you can create private deployment scripts with your actual resource names:
+
+1. Create `deploy.ps1` (Windows) or `deploy.sh` (Linux/Mac) with your actual Azure resource values
+2. Add these files to `.gitignore` to keep credentials private
+3. Run the script for one-command deployment
+
+**Note**: Never commit deployment scripts with real credentials to version control.
 
 ## Troubleshooting & Tips
 

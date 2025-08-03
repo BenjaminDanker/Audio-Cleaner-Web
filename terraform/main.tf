@@ -203,10 +203,6 @@ resource "azurerm_static_web_app" "main" {
   sku_tier            = "Standard"
   sku_size            = "Standard"
 
-  identity {
-    type = "SystemAssigned"
-  }
-
   app_settings = {
     "AZURE_STORAGE_CONNECTION_STRING"     = azurerm_storage_account.main.primary_connection_string
     "AZURE_SERVICE_BUS_CONNECTION_STRING" = azurerm_servicebus_namespace.main.default_primary_connection_string
@@ -349,7 +345,7 @@ resource "azurerm_container_app" "processor" {
       name   = "processor"
       image  = "${azurerm_container_registry.main.login_server}/audio-cleaner-processor:latest"
       cpu    = 1.0
-      memory = "2.0Gi"
+      memory = "2Gi"
 
       env {
         name  = "AZURE_CLIENT_ID"

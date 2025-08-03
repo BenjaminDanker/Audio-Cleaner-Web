@@ -103,29 +103,13 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
   }
 
   const getDownloadUrl = () => {
-    const downloadUrl = job.downloadUrl
-    if (!downloadUrl) return null
-    
-    // Handle local development URLs
-    if (downloadUrl.startsWith('local://downloads/')) {
-      const filename = downloadUrl.replace('local://downloads/', '')
-      return `/api/download-file/${filename}`
-    }
-    
-    // For production Azure Blob Storage URLs, extract filename and use download API
-    if (downloadUrl.startsWith('https://')) {
-      // Extract filename from URL like: https://storageaccount.blob.core.windows.net/container/filename.mp4
-      const urlParts = downloadUrl.split('/')
-      const filename = urlParts[urlParts.length - 1]
-      return `/api/download-file/${filename}`
-    }
-    
-    // If it's just a filename, construct the download API URL
-    return `/api/download-file/${downloadUrl}`
+    // Use job-centric download with jobId parameter
+    return `/api/download-file?jobId=${job.id}`
   }
 
   const hasDownloadUrl = () => {
-    return !!job.downloadUrl
+    // Download is available when job is completed and has a job ID
+    return job.status === 'completed' && !!job.id
   }
 
   // Parallel download helper for large files

@@ -40,13 +40,16 @@ module.exports = async function (context, req) {
         const schema = validator.getSchemaForEndpoint('/api/download-file');
         
         const inputData = {
-            filename: req.params.filename || req.query.filename
+            jobId: req.query.jobId || req.params.jobId  // Query parameter first, then path parameter
         };
         
         const validationResult = validator.validateInput(inputData, schema);
         if (!validationResult.valid) {
             logger.logError('download-file', 'Input validation failed', 'system', { 
-                sessionId: req.headers['x-request-id'] || 'unknown' 
+                sessionId: req.headers['x-request-id'] || 'unknown',
+                inputData: inputData,
+                validationErrors: validationResult.errors,
+                schema: schema
             });
             context.res = {
                 status: 400,
@@ -59,14 +62,14 @@ module.exports = async function (context, req) {
             return;
         }
         
-        const filename = validationResult.data.filename;
+        const jobId = validationResult.data.jobId;
         
-        // Additional filename security checks
-        if (!filename) {
+        // Additional jobId security checks
+        if (!jobId) {
             context.res = {
                 status: 400,
                 headers: security.getSecurityHeaders(),
-                body: { error: 'Filename parameter is required' }
+                body: { error: 'Job ID parameter is required' }
             };
             return;
         }
@@ -92,13 +95,96 @@ module.exports = async function (context, req) {
             return;
         }
 
+        // Get current user ID for exact path construction
+        const userId = userInfo?.userId;
+        if (!userId) {
+            context.log.error('User ID is required for secure file access');
+            context.res = {
+                status: 401,
+                headers: security.getSecurityHeaders(),
+                body: { error: 'User ID required for file access' }
+            };
+            return;
+        }
+
         // Production code - generate SAS URL for direct download from Azure Blob Storage
         try {
-            context.log('Starting blob storage operations...');
+            context.log('Starting job lookup and blob storage operations...');
             context.log('Environment check:');
             context.log('- AZURE_STORAGE_CONNECTION_STRING exists:', !!process.env.AZURE_STORAGE_CONNECTION_STRING);
-            context.log('- Requested filename:', filename.substring(0, 20) + '...'); // Don't log full filename
+            context.log('- Requested jobId:', jobId.substring(0, 20) + '...');
             context.log('- User ID:', userInfo?.userId?.substring(0, 8) + '...');
+            
+            // First, get the job record from Cosmos DB to get the exact blob name
+            const { CosmosClient } = require('@azure/cosmos');
+            const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
+            const database = cosmosClient.database('AudioCleanerDB');
+            const container = database.container('Jobs');
+            
+            let job;
+            try {
+                const { resource: jobRecord } = await container.item(jobId, userId).read();
+                job = jobRecord;
+                context.log('Job record retrieved successfully:', {
+                    jobId: jobId,
+                    status: job.status,
+                    hasOutputBlobName: !!job.outputBlobName,
+                    hasDownloadUrl: !!job.downloadUrl,
+                    userId: job.userId?.substring(0, 8) + '...'
+                });
+            } catch (cosmosError) {
+                context.log.error('Cosmos DB error:', {
+                    code: cosmosError.code,
+                    message: cosmosError.message,
+                    statusCode: cosmosError.statusCode
+                });
+                if (cosmosError.code === 404) {
+                    context.log(`Job not found: ${jobId} for user: ${userId.substring(0, 8)}...`);
+                    context.res = {
+                        status: 404,
+                        headers: security.getSecurityHeaders(),
+                        body: { error: 'Job not found' }
+                    };
+                    return;
+                } else {
+                    throw cosmosError;
+                }
+            }
+            
+            // Verify job belongs to user and is completed
+            if (job.userId !== userId) {
+                context.log(`Access denied: Job ${jobId} belongs to different user`);
+                context.res = {
+                    status: 403,
+                    headers: security.getSecurityHeaders(),
+                    body: { error: 'Access denied' }
+                };
+                return;
+            }
+            
+            if (job.status !== 'completed') {
+                context.log(`Job not ready for download: ${jobId} status: ${job.status}`);
+                context.res = {
+                    status: 400,
+                    headers: security.getSecurityHeaders(),
+                    body: { error: `Job not ready for download. Status: ${job.status}` }
+                };
+                return;
+            }
+            
+            // Get the exact blob name from the job record
+            const blobName = job.outputBlobName;
+            if (!blobName) {
+                context.log(`No output blob name found for job: ${jobId}`);
+                context.res = {
+                    status: 500,
+                    headers: security.getSecurityHeaders(),
+                    body: { error: 'Output file information not available' }
+                };
+                return;
+            }
+            
+            context.log('Retrieved blob name from job record:', blobName.substring(0, 40) + '...');
             
             const storageConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
             
@@ -137,9 +223,8 @@ module.exports = async function (context, req) {
             const sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
             const containerClient = blobServiceClient.getContainerClient('processed-videos');
             
-            // Security: Use exact blob path
-            const blobClient = containerClient.getBlobClient(filename);
-            const blobName = filename;
+            // Use exact blob name from job record - no construction needed
+            const blobClient = containerClient.getBlobClient(blobName);
             
             let exists = false;
             try {
@@ -150,7 +235,7 @@ module.exports = async function (context, req) {
             }
             
             if (!exists) {
-                context.log(`Blob not found with exact path: ${filename.substring(0, 20)}...`);
+                context.log(`Blob not found with exact path: ${blobName.substring(0, 30)}...`);
                 context.res = {
                     status: 404,
                     headers: security.getSecurityHeaders(),
@@ -159,21 +244,13 @@ module.exports = async function (context, req) {
                 return;
             }
             // Get current user for tracking and access control
-            const userId = userInfo?.userId;
             context.log('Using userId for SAS generation:', userId.substring(0, 8) + '...');
-            
-            if (!userId) {
-                context.log.warn('Using fallback user ID for SAS token generation');
-            }
 
             // Initialize SAS Token Manager
-            const sasManager = new SASTokenManager(
-                storageConnectionString,
-                process.env.COSMOS_CONNECTION_STRING
-            );
+            const sasManager = new SASTokenManager(storageConnectionString, context);
 
             // Get client IP for SAS restriction (Rule #3)  
-            const clientIP = securityResult.clientIP;
+            const clientIP = SASTokenManager.getClientIP(req);
             
             // Security: Require client IP for SAS token generation
             if (!clientIP) {
@@ -216,10 +293,9 @@ module.exports = async function (context, req) {
             const sasResult = await sasManager.generateSASToken({
                 containerName: 'processed-videos',
                 blobName: blobName,
-                permissions: 'r', // read-only (Rule #2)
-                expiryMinutes: 5, // Very short-lived for downloads (Rule #2)
-                clientIP: clientIP, // IP restriction (Rule #3)
-                userId: userId, // For tracking and revocation (Rule #5)
+                permissions: 'r', // read-only
+                expiryMinutes: 60, // 1 hour
+                clientIP: clientIP, // IP restriction
                 context: context
             });
             

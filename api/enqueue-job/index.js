@@ -171,8 +171,6 @@ module.exports = async function (context, req) {
                     body: {
                         jobId: jobId,
                         userId: userId,
-                        inputFile: fileName,
-                        outputFile: outputFileName,
                         sessionId: sessionId,
                         timestamp: new Date().toISOString()
                     },

@@ -1,38 +1,28 @@
-const { BlobServiceClient, generateBlobSASQueryParameters, BlobSASPermissions } = require('@azure/storage-blob');
+const { BlobServiceClient, generateBlobSASQueryParameters, BlobSASPermissions, StorageSharedKeyCredential } = require('@azure/storage-blob');
 
 class SASTokenManager {
-    constructor(storageConnectionString) {
-        // Initialize blob service client for User Delegation SAS
-        this.blobServiceClient = BlobServiceClient.fromConnectionString(storageConnectionString);
-        
-        // Extract account name for SAS generation
+    constructor(storageConnectionString, context = null) {
+        // Extract account name and key from connection string
         const accountNameMatch = storageConnectionString.match(/AccountName=([^;]+)/);
+        const accountKeyMatch = storageConnectionString.match(/AccountKey=([^;]+)/);
         
-        if (!accountNameMatch) {
-            throw new Error('Invalid storage connection string format - missing AccountName');
+        if (!accountNameMatch || !accountKeyMatch) {
+            throw new Error('Invalid storage connection string format - missing AccountName or AccountKey');
         }
         
         this.accountName = accountNameMatch[1];
+        this.accountKey = accountKeyMatch[1];
         
-        if (!this.accountName) {
-            throw new Error('Empty AccountName in connection string');
+        if (!this.accountName || !this.accountKey) {
+            throw new Error('Empty AccountName or AccountKey in connection string');
         }
-    }
 
-    /**
-     * Alternative constructor for Azure AD authentication
-     * @param {string} accountName - Storage account name
-     * @param {object} credential - Azure AD credential (e.g., DefaultAzureCredential)
-     * @returns {SASTokenManager} Instance configured for Azure AD authentication
-     */
-    static fromAzureAD(accountName, credential) {
-        const instance = Object.create(SASTokenManager.prototype);
-        instance.accountName = accountName;
-        instance.blobServiceClient = new BlobServiceClient(
-            `https://${accountName}.blob.core.windows.net`,
-            credential
+        // Initialize with account key credential
+        this.credential = new StorageSharedKeyCredential(this.accountName, this.accountKey);
+        this.blobServiceClient = new BlobServiceClient(
+            `https://${this.accountName}.blob.core.windows.net`,
+            this.credential
         );
-        return instance;
     }
 
     async generateSASToken(options) {
@@ -46,25 +36,14 @@ class SASTokenManager {
         } = options;
 
         if (context) {
-            context.log('Generating User Delegation SAS token...');
+            context.log('Generating account key-based SAS token...');
+            context.log('Storage account:', this.accountName);
+            context.log('Container:', containerName);
+            context.log('Blob:', blobName);
         }
         
         try {
-            const delegationKeyStart = new Date();
-            // Delegation key should live longer than the SAS token, minimum 1 hour, max 7 days
-            const delegationKeyMinutes = Math.max(expiryMinutes * 2, 60);
-            const delegationKeyExpiry = new Date(delegationKeyStart.getTime() + delegationKeyMinutes * 60 * 1000);
-            
-            const userDelegationKey = await this.blobServiceClient.getUserDelegationKey(
-                delegationKeyStart,
-                delegationKeyExpiry
-            );
-            
-            if (!userDelegationKey) {
-                throw new Error('Failed to obtain user delegation key from Azure AD');
-            }
-
-            // Generate user delegation SAS
+            // Generate account key-based SAS
             const sasOptions = {
                 containerName,
                 blobName,
@@ -74,27 +53,27 @@ class SASTokenManager {
                 ipRange: clientIP ? { start: clientIP, end: clientIP } : undefined
             };
 
-            const sasToken = generateBlobSASQueryParameters(sasOptions, userDelegationKey, this.accountName).toString();
+            const sasToken = generateBlobSASQueryParameters(sasOptions, this.credential).toString();
             
             if (!sasToken) {
                 throw new Error('Generated SAS token is empty');
             }
             
             if (context) {
-                context.log('Successfully generated User Delegation SAS token');
+                context.log('Successfully generated account key-based SAS token');
             }
 
             return {
                 sasToken,
-                sasType: 'UserDelegation',
+                sasType: 'AccountKey',
                 expiresAt: new Date(Date.now() + expiryMinutes * 60 * 1000)
             };
             
         } catch (error) {
             if (context) {
-                context.log.error('User Delegation SAS generation failed:', error.message);
+                context.log.error('SAS token generation failed:', error.message);
             }
-            throw new Error(`Failed to generate secure SAS token: ${error.message}`);
+            throw new Error(`Failed to generate SAS token: ${error.message}`);
         }
     }
 

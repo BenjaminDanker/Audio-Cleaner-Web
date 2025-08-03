@@ -18,7 +18,7 @@ class InputValidator {
 
         this.patterns = {
             fileName: /^[a-zA-Z0-9._-]+$/,
-            jobId: /^job-\d+-[a-z0-9]+$/,
+            jobId: /^job_\d+_[a-z0-9]+$/,
             guid: /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
             alphanumeric: /^[a-zA-Z0-9]+$/,
             safeString: /^[a-zA-Z0-9\s._-]+$/
@@ -461,7 +461,7 @@ class InputValidator {
                 jobId: { type: 'jobId', required: true }
             },
             '/api/download-file': {
-                filename: { type: 'fileName', required: true }
+                jobId: { type: 'jobId', required: true }
             }
         };
 

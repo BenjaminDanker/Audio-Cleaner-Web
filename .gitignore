@@ -117,3 +117,6 @@ terraform.tfvars
 *.tfplan
 
 .fake
+
+# Deployment scripts
+/deploy.ps1
