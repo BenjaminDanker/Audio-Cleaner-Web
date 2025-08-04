@@ -1,0 +1,12 @@
+{
+  "bindings": [
+    {
+      "name": "deadLetterMsg",
+      "type": "serviceBusTrigger",
+      "direction": "in",
+      "queueName": "video-processing-jobs/$deadletterqueue",
+      "connection": "AZURE_SERVICE_BUS_CONNECTION_STRING",
+      "cardinality": "one"
+    }
+  ]
+}

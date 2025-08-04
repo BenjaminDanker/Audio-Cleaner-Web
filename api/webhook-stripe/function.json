@@ -5,8 +5,9 @@
       "type": "httpTrigger",
       "direction": "in",
       "name": "req",
-      "methods": ["post"],
-      "route": "webhook-stripe"
+      "methods": [
+        "post"
+      ]
     },
     {
       "type": "http",

@@ -4,7 +4,8 @@ const { CosmosClient } = require('@azure/cosmos');
 // Initialize Cosmos DB client
 const cosmosClient = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
 const database = cosmosClient.database('AudioCleanerDB');
-const container = database.container('subscriptions');
+const accountsContainer = database.container('accounts');
+const transactionsContainer = database.container('transactions');
 
 module.exports = async function (context, req) {
     context.log('Stripe webhook endpoint called');
@@ -41,23 +42,11 @@ module.exports = async function (context, req) {
                 await handleCheckoutSessionCompleted(context, event.data.object);
                 break;
             
-            case 'customer.subscription.created':
-                await handleSubscriptionCreated(context, event.data.object);
-                break;
-            
-            case 'customer.subscription.updated':
-                await handleSubscriptionUpdated(context, event.data.object);
-                break;
-            
-            case 'customer.subscription.deleted':
-                await handleSubscriptionDeleted(context, event.data.object);
-                break;
-            
-            case 'invoice.payment_succeeded':
+            case 'payment_intent.succeeded':
                 await handlePaymentSucceeded(context, event.data.object);
                 break;
             
-            case 'invoice.payment_failed':
+            case 'payment_intent.payment_failed':
                 await handlePaymentFailed(context, event.data.object);
                 break;
             
@@ -85,27 +74,22 @@ async function handleCheckoutSessionCompleted(context, session) {
     try {
         const userId = session.metadata.userId;
         const userEmail = session.metadata.userEmail;
+        const amount = parseInt(session.metadata.amount);
         
-        if (session.mode === 'subscription') {
-            // Get the subscription details from Stripe
-            const subscription = await stripe.subscriptions.retrieve(session.subscription);
+        if (session.metadata.type === 'account_topup' && userId && amount > 0) {
+            // Update account balance
+            await updateAccountBalance(context, userId, amount);
             
-            // Save subscription to Cosmos DB
-            await container.items.create({
-                id: userId,
+            // Create transaction record
+            await createTransaction(context, {
                 userId: userId,
-                userEmail: userEmail,
-                stripeCustomerId: session.customer,
-                stripeSubscriptionId: session.subscription,
-                status: subscription.status,
-                currentPeriodStart: new Date(subscription.current_period_start * 1000),
-                currentPeriodEnd: new Date(subscription.current_period_end * 1000),
-                planId: subscription.items.data[0].price.id,
-                createdAt: new Date(),
-                updatedAt: new Date()
+                type: 'payment',
+                amount: amount,
+                description: 'Account top-up via Stripe',
+                stripePaymentIntentId: session.payment_intent
             });
             
-            context.log(`Subscription created for user ${userId}`);
+            context.log(`Account balance updated for user ${userId}: +$${amount/100}`);
         }
     } catch (error) {
         context.log.error('Error handling checkout session:', error.message || 'Unknown error');
@@ -113,79 +97,74 @@ async function handleCheckoutSessionCompleted(context, session) {
     }
 }
 
-async function handleSubscriptionCreated(context, subscription) {
-    context.log('Processing subscription created:', subscription.id);
-    // Additional logic if needed
+async function handlePaymentSucceeded(context, paymentIntent) {
+    context.log('Processing payment succeeded:', paymentIntent.id);
+    // Additional logic for successful payments if needed
 }
 
-async function handleSubscriptionUpdated(context, subscription) {
-    context.log('Processing subscription updated:', subscription.id);
-    
+async function handlePaymentFailed(context, paymentIntent) {
+    context.log('Processing payment failed:', paymentIntent.id);
+    // Additional logic for failed payments if needed
+}
+
+async function updateAccountBalance(context, userId, amount) {
     try {
-        // Find the subscription in Cosmos DB
-        const querySpec = {
-            query: 'SELECT * FROM c WHERE c.stripeSubscriptionId = @subscriptionId',
-            parameters: [
-                { name: '@subscriptionId', value: subscription.id }
-            ]
-        };
-        
-        const { resources } = await container.items.query(querySpec).fetchAll();
-        
-        if (resources.length > 0) {
-            const existingSubscription = resources[0];
-            
-            // Update the subscription
-            existingSubscription.status = subscription.status;
-            existingSubscription.currentPeriodStart = new Date(subscription.current_period_start * 1000);
-            existingSubscription.currentPeriodEnd = new Date(subscription.current_period_end * 1000);
-            existingSubscription.updatedAt = new Date();
-            
-            await container.item(existingSubscription.id, existingSubscription.userId).replace(existingSubscription);
-            
-            context.log(`Subscription updated for ${existingSubscription.userId}`);
+        // Get existing account or create new one
+        let account;
+        try {
+            const { resource } = await accountsContainer.item(userId, userId).read();
+            account = resource;
+        } catch (error) {
+            if (error.code === 404) {
+                // Create new account
+                account = {
+                    id: userId,
+                    userId: userId,
+                    balance: 0,
+                    currency: 'usd',
+                    createdAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString()
+                };
+            } else {
+                throw error;
+            }
         }
+        
+        // Update balance
+        account.balance = (account.balance || 0) + amount;
+        account.updatedAt = new Date().toISOString();
+        
+        // Save updated account
+        if (account.id) {
+            await accountsContainer.item(account.id, account.userId).replace(account);
+        } else {
+            await accountsContainer.items.create(account);
+        }
+        
+        context.log(`Account balance updated: ${userId} -> $${account.balance/100}`);
     } catch (error) {
-        context.log.error('Error handling subscription update:', error.message || 'Unknown error');
+        context.log.error('Error updating account balance:', error.message);
         throw error;
     }
 }
 
-async function handleSubscriptionDeleted(context, subscription) {
-    context.log('Processing subscription deleted:', subscription.id);
-    
+async function createTransaction(context, transactionData) {
     try {
-        // Find and update the subscription status
-        const querySpec = {
-            query: 'SELECT * FROM c WHERE c.stripeSubscriptionId = @subscriptionId',
-            parameters: [
-                { name: '@subscriptionId', value: subscription.id }
-            ]
+        const transaction = {
+            id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+            userId: transactionData.userId,
+            type: transactionData.type,
+            amount: transactionData.amount,
+            description: transactionData.description,
+            jobId: transactionData.jobId || null,
+            stripePaymentIntentId: transactionData.stripePaymentIntentId || null,
+            createdAt: new Date().toISOString()
         };
         
-        const { resources } = await container.items.query(querySpec).fetchAll();
-        
-        if (resources.length > 0) {
-            const existingSubscription = resources[0];
-            existingSubscription.status = 'canceled';
-            existingSubscription.updatedAt = new Date();
-            
-            await container.item(existingSubscription.id, existingSubscription.userId).replace(existingSubscription);
-            
-            context.log(`Subscription canceled for ${existingSubscription.userId}`);
-        }
+        await transactionsContainer.items.create(transaction);
+        context.log(`Transaction created: ${transaction.id}`);
     } catch (error) {
-        context.log.error('Error handling subscription deletion:', error.message || 'Unknown error');
+        context.log.error('Error creating transaction:', error.message);
         throw error;
     }
-}
-
-async function handlePaymentSucceeded(context, invoice) {
-    context.log('Processing payment succeeded:', invoice.id);
-    // Additional logic for successful payments
-}
-
-async function handlePaymentFailed(context, invoice) {
-    context.log('Processing payment failed:', invoice.id);
-    // Additional logic for failed payments
 }

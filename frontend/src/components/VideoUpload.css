@@ -103,6 +103,63 @@
   opacity: 0.5;
 }
 
+/* Cost Information Styles */
+.cost-info {
+  margin: 1rem 0;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  border: 1px solid #e9ecef;
+  text-align: left;
+}
+
+.calculating-cost {
+  text-align: center;
+  color: #666;
+  font-style: italic;
+}
+
+.duration-info,
+.cost-display,
+.balance-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  color: #333;
+  font-weight: 500;
+}
+
+.duration-info:last-child,
+.cost-display:last-child,
+.balance-info:last-child {
+  margin-bottom: 0;
+}
+
+.cost-display {
+  color: #646cff;
+  font-weight: 600;
+}
+
+.balance-info {
+  color: #28a745;
+}
+
+.insufficient-funds {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  background-color: #fff3cd;
+  border: 1px solid #ffeaa7;
+  border-radius: 4px;
+  color: #856404;
+  text-align: center;
+}
+
+.insufficient-funds p {
+  margin: 0;
+  font-weight: 500;
+}
+
 .progress-container {
   margin: 1rem 0;
 }

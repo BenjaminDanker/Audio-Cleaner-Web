@@ -165,8 +165,17 @@ resource "azurerm_cosmosdb_sql_container" "jobs" {
   partition_key_paths = ["/userId"]
 }
 
-resource "azurerm_cosmosdb_sql_container" "subscriptions" {
-  name                = "subscriptions"
+resource "azurerm_cosmosdb_sql_container" "accounts" {
+  name                = "accounts"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.main.name
+  
+  partition_key_paths = ["/userId"]
+}
+
+resource "azurerm_cosmosdb_sql_container" "transactions" {
+  name                = "transactions"
   resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
   account_name        = azurerm_cosmosdb_account.main.name
   database_name       = azurerm_cosmosdb_sql_database.main.name
@@ -211,6 +220,7 @@ resource "azurerm_static_web_app" "main" {
     "STRIPE_SECRET_KEY"                   = var.stripe_secret_key
     "STRIPE_PUBLIC_KEY"                   = var.stripe_public_key
     "STRIPE_WEBHOOK_SECRET"               = var.stripe_webhook_secret
+    "FRONTEND_URL"                        = "https://${azurerm_static_web_app.main.default_host_name}"
   }
 
   tags = var.tags

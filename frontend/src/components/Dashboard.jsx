@@ -1,17 +1,39 @@
 import React, { useState, useEffect } from 'react'
 import axios from 'axios'
 import { useAuth } from './AuthContext'
-import { useSubscription } from './SubscriptionContext'
+import { useAccount } from './AccountContext'
 import VideoUpload from './VideoUpload'
 import JobStatus from './JobStatus'
-import SubscriptionInfo from './SubscriptionInfo'
+import AccountBalance from './AccountBalance'
 import './Dashboard.css'
 
 const Dashboard = () => {
   const { user } = useAuth()
-  const { loadSubscription } = useSubscription()
+  const { loadAccount } = useAccount()
   const [activeTab, setActiveTab] = useState('upload')
   const [jobs, setJobs] = useState([])
+  const [paymentMessage, setPaymentMessage] = useState(null)
+
+  useEffect(() => {
+    // Check for payment status in URL params
+    const urlParams = new URLSearchParams(window.location.search)
+    if (urlParams.get('payment_success') === 'true') {
+      setPaymentMessage({ type: 'success', text: 'Payment successful! Your account has been credited.' })
+      setActiveTab('account') // Switch to account tab to show updated balance
+      // Clean up URL
+      window.history.replaceState({}, document.title, '/dashboard')
+    } else if (urlParams.get('payment_cancelled') === 'true') {
+      setPaymentMessage({ type: 'error', text: 'Payment was cancelled.' })
+      // Clean up URL
+      window.history.replaceState({}, document.title, '/dashboard')
+    }
+
+    // Auto-hide payment message after 5 seconds
+    if (paymentMessage) {
+      const timer = setTimeout(() => setPaymentMessage(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [paymentMessage])
 
   useEffect(() => {
     // Load any existing jobs from localStorage or API
@@ -21,12 +43,12 @@ const Dashboard = () => {
     }
   }, [])
 
-  // Load subscription data when subscription tab is activated
+  // Load account data when account tab is activated
   useEffect(() => {
-    if (activeTab === 'subscription') {
-      loadSubscription()
+    if (activeTab === 'account') {
+      loadAccount()
     }
-  }, [activeTab, loadSubscription])
+  }, [activeTab, loadAccount])
 
   const addJob = (job) => {
     const newJobs = [...jobs, job]
@@ -100,6 +122,13 @@ const Dashboard = () => {
         <p>Clean your audio files with AI-powered noise reduction</p>
       </div>
 
+      {paymentMessage && (
+        <div className={`payment-message ${paymentMessage.type}`}>
+          {paymentMessage.text}
+          <button onClick={() => setPaymentMessage(null)}>×</button>
+        </div>
+      )}
+
       <div className="dashboard-tabs">
         <button 
           className={`tab ${activeTab === 'upload' ? 'active' : ''}`}
@@ -114,10 +143,10 @@ const Dashboard = () => {
           Processing Jobs ({jobs.length})
         </button>
         <button 
-          className={`tab ${activeTab === 'subscription' ? 'active' : ''}`}
-          onClick={() => setActiveTab('subscription')}
+          className={`tab ${activeTab === 'account' ? 'active' : ''}`}
+          onClick={() => setActiveTab('account')}
         >
-          Subscription
+          Account Balance
         </button>
       </div>
 
@@ -157,8 +186,8 @@ const Dashboard = () => {
           </div>
         )}
         
-        {activeTab === 'subscription' && (
-          <SubscriptionInfo />
+        {activeTab === 'account' && (
+          <AccountBalance />
         )}
       </div>
     </div>

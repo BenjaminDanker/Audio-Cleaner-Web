@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Upload, FileVideo, X } from 'lucide-react'
+import { Upload, FileVideo, X, DollarSign, Clock } from 'lucide-react'
 import axios from 'axios'
+import { useAccount } from './AccountContext'
+import { calculateJobCost } from '../utils/pricing'
 import './VideoUpload.css'
 
 // Configuration function for optimal upload settings
@@ -290,14 +292,22 @@ const uploadFileSimple = async (file, uploadUrl, onProgress, uploadId, activeUpl
 }
 
 const VideoUpload = ({ onJobCreated }) => {
+  const { account, canAffordJob, refreshAccount } = useAccount()
   const [selectedFile, setSelectedFile] = useState(null)
   const [isDragging, setIsDragging] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
   const [uploadProgress, setUploadProgress] = useState(0)
   const [attenuationDb, setAttenuationDb] = useState(30) // Default attenuation level
   const [activeUploadId, setActiveUploadId] = useState(null) // Track active upload to prevent races
+  const [estimatedCost, setEstimatedCost] = useState(null)
+  const [isCalculatingCost, setIsCalculatingCost] = useState(false)
   const fileInputRef = useRef(null)
   const activeUploadRef = useRef(null) // More reliable tracking using ref
+
+  // Load account when component mounts
+  useEffect(() => {
+    refreshAccount()
+  }, [])
 
   // Debug effect to track activeUploadId changes
   useEffect(() => {
@@ -318,10 +328,33 @@ const VideoUpload = ({ onJobCreated }) => {
       activeUploadRef.current = null
     }
   }, []) // Empty dependency array - only run on mount/unmount
+  // Function to calculate cost based on file size (for UX only)
+  const calculateCostForVideo = async (file) => {
+    try {
+      setIsCalculatingCost(true)
+      
+      // Calculate estimated cost based on file size for UX only
+      // Note: Actual cost will be calculated securely on backend
+      const estimatedCostCents = calculateJobCost(file.size)
+      
+      setEstimatedCost(estimatedCostCents)
+      setIsCalculatingCost(false)
+      
+      return { fileSizeBytes: file.size, cost: estimatedCostCents }
+    } catch (error) {
+      console.error('Error calculating cost:', error)
+      setIsCalculatingCost(false)
+      return null
+    }
+  }
 
-  const handleFileSelect = (file) => {
+  const handleFileSelect = async (file) => {
     if (file && file.type.startsWith('video/')) {
       setSelectedFile(file)
+      setEstimatedCost(null)
+      
+      // Calculate cost for the selected video
+      await calculateCostForVideo(file)
     } else {
       alert('Please select a valid video file')
     }
@@ -361,7 +394,13 @@ const VideoUpload = ({ onJobCreated }) => {
   }
 
   const handleUpload = async () => {
-    if (!selectedFile || isUploading) return
+    if (!selectedFile || isUploading || !estimatedCost) return
+
+    // Check if user can afford the job
+    if (!canAffordJob(estimatedCost)) {
+      alert(`Insufficient account balance. You need $${(estimatedCost / 100).toFixed(2)} but only have $${((account?.balance || 0) / 100).toFixed(2)}.`)
+      return
+    }
 
     // Generate unique upload ID to prevent race conditions
     const uploadId = `upload_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -505,11 +544,15 @@ const VideoUpload = ({ onJobCreated }) => {
 
         onJobCreated(job)
         setSelectedFile(null)
+        setEstimatedCost(null)
         
         // Reset file input
         if (fileInputRef.current) {
           fileInputRef.current.value = ''
         }
+        
+        // Refresh account balance after successful job creation
+        refreshAccount()
         
         setUploadProgress(100)
         
@@ -593,6 +636,40 @@ const VideoUpload = ({ onJobCreated }) => {
               <X size={20} />
             </button>
           </div>
+
+          {/* Cost and Duration Information */}
+          <div className="cost-info">
+            {isCalculatingCost ? (
+              <div className="calculating-cost">
+                <p>Calculating cost...</p>
+              </div>
+            ) : (
+              <>
+                {selectedFile && (
+                  <div className="file-info">
+                    <Clock size={16} />
+                    <span>File Size: {(selectedFile.size / (1024 * 1024)).toFixed(2)} MB</span>
+                  </div>
+                )}
+                {estimatedCost && (
+                  <div className="cost-display">
+                    <DollarSign size={16} />
+                    <span>Estimated Cost: ${(estimatedCost / 100).toFixed(2)} (final cost calculated securely on backend)</span>
+                  </div>
+                )}
+                {account && (
+                  <div className="balance-info">
+                    <span>Account Balance: ${((account.balance || 0) / 100).toFixed(2)}</span>
+                  </div>
+                )}
+                {estimatedCost && account && !canAffordJob(estimatedCost) && (
+                  <div className="insufficient-funds">
+                    <p>⚠️ Insufficient funds. Please add money to your account.</p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
           
           {/* Attenuation Control */}
           <div className="attenuation-control">
@@ -634,10 +711,23 @@ const VideoUpload = ({ onJobCreated }) => {
           <button 
             onClick={handleUpload}
             className="btn btn-primary upload-btn"
-            disabled={isUploading || activeUploadId !== null}
-            title={activeUploadId ? "Upload already in progress" : "Start processing this video"}
+            disabled={
+              isUploading || 
+              activeUploadId !== null || 
+              !estimatedCost || 
+              !canAffordJob(estimatedCost) ||
+              isCalculatingCost
+            }
+            title={
+              activeUploadId ? "Upload already in progress" :
+              !estimatedCost ? "Calculating cost..." :
+              !canAffordJob(estimatedCost) ? "Insufficient account balance" :
+              "Start processing this video"
+            }
           >
-            {isUploading ? 'Uploading...' : 'Start Audio Cleaning'}
+            {isUploading ? 'Uploading...' : 
+             isCalculatingCost ? 'Calculating Cost...' :
+             'Start Audio Cleaning'}
           </button>
         </div>
       )}

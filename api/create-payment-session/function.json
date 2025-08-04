@@ -5,8 +5,10 @@
       "type": "httpTrigger",
       "direction": "in",
       "name": "req",
-      "methods": ["post"],
-      "route": "create-checkout-session"
+      "methods": [
+        "post",
+        "options"
+      ]
     },
     {
       "type": "http",

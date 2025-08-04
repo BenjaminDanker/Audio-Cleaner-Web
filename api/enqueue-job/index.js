@@ -4,6 +4,7 @@ const { ServiceBusClient } = require('@azure/service-bus');
 const MinimalLogger = require('../shared/minimalLogger');
 const AzureSDKConfig = require('../shared/azureSDKConfig');
 const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware');
+const { calculateProcessingCost } = require('../shared/pricingUtils');
 
 module.exports = async function (context, req) {
     const startTime = Date.now();
@@ -122,14 +123,129 @@ module.exports = async function (context, req) {
             return;
         }
 
-        // Generate job ID and output file name
-        const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const outputFileName = fileName ? fileName.replace(/\.[^/.]+$/, '_cleaned.mp3') : 'cleaned_audio.mp3';
+        // Get actual file size from blob storage
+        let actualFileSizeBytes;
+        try {
+            const blobServiceClient = new BlobServiceClient(process.env.AZURE_STORAGE_CONNECTION_STRING);
+            const containerClient = blobServiceClient.getContainerClient('uploads');
+            
+            // Extract blob name from URL
+            const url = new URL(fileUrl);
+            const pathParts = url.pathname.split('/');
+            const blobName = pathParts[pathParts.length - 1];
+            
+            const blobClient = containerClient.getBlobClient(blobName);
+            const properties = await blobClient.getProperties();
+            actualFileSizeBytes = properties.contentLength;
+            
+            if (!actualFileSizeBytes || actualFileSizeBytes <= 0) {
+                throw new Error('Invalid file size from blob properties');
+            }
+            
+            logger.logInfo('enqueue-job', 'Retrieved actual file size from blob', userId, {
+                sessionId,
+                blobName,
+                fileSizeBytes: actualFileSizeBytes
+            });
+            
+        } catch (blobError) {
+            logger.logError('enqueue-job', 'Failed to get file size from blob storage', userId, {
+                sessionId,
+                fileUrl,
+                error: blobError.message
+            });
+            context.res = {
+                status: 400,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                body: { error: 'Could not retrieve file information from storage' }
+            };
+            return;
+        }
+
+        const actualCost = calculateProcessingCost(actualFileSizeBytes);
 
         // Initialize optimized Cosmos client with retry-aware configuration
         const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
         const database = cosmosClient.database('AudioCleanerDB');
-        const container = database.container('Jobs');
+        const jobsContainer = database.container('Jobs');
+        const accountsContainer = database.container('accounts');
+        const transactionsContainer = database.container('transactions');
+
+        // Check account balance and deduct cost
+        try {
+            const { resource: account } = await accountsContainer.item(userId, userId).read();
+            
+            if (!account || account.balance < actualCost) {
+                logger.logError('enqueue-job', 'Insufficient account balance', userId, { 
+                    sessionId, 
+                    balance: account?.balance || 0, 
+                    requiredCost: actualCost 
+                });
+                context.res = {
+                    status: 402, // Payment Required
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    body: { 
+                        error: 'Insufficient account balance',
+                        currentBalance: account?.balance || 0,
+                        requiredAmount: actualCost
+                    }
+                };
+                return;
+            }
+
+            // Deduct cost from account balance
+            account.balance -= actualCost;
+            account.updatedAt = new Date().toISOString();
+            await accountsContainer.item(account.id, account.userId).replace(account);
+
+            // Create transaction record
+            const transactionId = `txn_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+            const transaction = {
+                id: transactionId,
+                userId: userId,
+                type: 'processing',
+                amount: actualCost,
+                description: `Video processing: ${fileName}`,
+                jobId: null, // Will be updated after job creation
+                createdAt: new Date().toISOString()
+            };
+
+            await transactionsContainer.items.create(transaction);
+
+            logger.logInfo('enqueue-job', 'Account balance updated and transaction created', userId, {
+                sessionId,
+                previousBalance: account.balance + actualCost,
+                newBalance: account.balance,
+                transactionId,
+                actualCost
+            });
+
+        } catch (error) {
+            if (error.code === 404) {
+                // Account doesn't exist
+                logger.logError('enqueue-job', 'Account not found', userId, { sessionId });
+                context.res = {
+                    status: 404,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Access-Control-Allow-Origin': '*'
+                    },
+                    body: { error: 'Account not found. Please ensure your account is set up.' }
+                };
+                return;
+            }
+            throw error; // Re-throw other errors
+        }
+
+        // Generate job ID and output file name
+        const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const outputFileName = fileName ? fileName.replace(/\.[^/.]+$/, '_cleaned.mp3') : 'cleaned_audio.mp3';
         
         const jobRecord = {
             id: jobId,
@@ -138,13 +254,27 @@ module.exports = async function (context, req) {
             input_blob_url: fileUrl,
             processingType: processingType,
             attenuationDb: attenuationDb,
+            actualCost: actualCost, // Store actual cost for potential refund
+            fileSizeBytes: actualFileSizeBytes,
             status: 'queued',
             progress: 0,
             message: 'Job queued successfully',
             createdAt: new Date().toISOString()
         };
         
-        await container.items.create(jobRecord);
+        await jobsContainer.items.create(jobRecord);
+
+        // Update transaction with jobId
+        const transactionQuery = {
+            query: 'SELECT * FROM c WHERE c.userId = @userId AND c.jobId IS NULL ORDER BY c.createdAt DESC OFFSET 0 LIMIT 1',
+            parameters: [{ name: '@userId', value: userId }]
+        };
+        const { resources: transactions } = await transactionsContainer.items.query(transactionQuery).fetchAll();
+        if (transactions.length > 0) {
+            const transaction = transactions[0];
+            transaction.jobId = jobId;
+            await transactionsContainer.item(transaction.id, transaction.userId).replace(transaction);
+        }
 
         await logger.logInfo('enqueue-job', 'Job successfully created in database', userId, {
             sessionId,
