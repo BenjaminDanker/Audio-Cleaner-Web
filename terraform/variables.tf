@@ -50,3 +50,9 @@ variable "stripe_webhook_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "frontend_url" {
+  description = "Frontend URL for Stripe redirects"
+  type        = string
+  default     = ""
+}
