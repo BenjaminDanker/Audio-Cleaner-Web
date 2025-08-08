@@ -113,7 +113,7 @@ resource "azurerm_servicebus_namespace" "main" {
   name                = "sb-${local.project_name}-${local.resource_suffix}"
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
-  sku                 = "Standard"
+  sku                 = "Basic"
 
   tags = var.tags
 }
@@ -121,8 +121,6 @@ resource "azurerm_servicebus_namespace" "main" {
 resource "azurerm_servicebus_queue" "video_jobs" {
   name         = "video-processing-jobs"
   namespace_id = azurerm_servicebus_namespace.main.id
-
-  partitioning_enabled                = false
   max_delivery_count                  = 10
   default_message_ttl                 = "PT1H"
   dead_lettering_on_message_expiration = true
