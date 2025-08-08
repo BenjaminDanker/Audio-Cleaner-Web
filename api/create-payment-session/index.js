@@ -94,8 +94,13 @@ module.exports = async function (context, req) {
             logger.logWarn('create-payment-session', 'Customer lookup/create failed – proceeding without persistent customer', userId, { error: custErr.message });
         }
 
-    // Simpler 1:1 setup: use a single price (can be a custom_unit_amount price) with quantity fixed at 1.
-    const basePriceId = 'price_1RkGUKRxGAWCymT9ryuzOleo';
+    // Simpler 1:1 setup: use single top-up price from env var
+    const basePriceId = process.env.STRIPE_TOPUP_PRICE_ID;
+    if (!basePriceId) {
+        logger.logError('create-payment-session', 'Missing STRIPE_TOPUP_PRICE_ID env var');
+        context.res = { status: 500, headers: { 'Access-Control-Allow-Origin': '*'}, body: { error: 'Server config error (price id missing)' } };
+        return;
+    }
     const lineItem = { price: basePriceId, quantity: 1 };
 
         const session = await stripe.checkout.sessions.create({

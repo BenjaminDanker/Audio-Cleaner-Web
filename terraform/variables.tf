@@ -51,6 +51,13 @@ variable "stripe_webhook_secret" {
   sensitive   = true
 }
 
+# Stripe top-up price (one-time). Keeping non-sensitive (price IDs are public-safe)
+variable "stripe_topup_price_id" {
+  description = "Stripe Price ID used for account top-ups (one-time payment)"
+  type        = string
+  default     = ""
+}
+
 variable "frontend_url" {
   description = "Frontend URL for Stripe redirects"
   type        = string

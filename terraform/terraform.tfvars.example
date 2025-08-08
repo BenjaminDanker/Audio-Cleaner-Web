@@ -12,6 +12,7 @@ location     = "Central US"
 stripe_secret_key     = "sk_test_your_stripe_secret_key_here"
 stripe_public_key     = "pk_test_your_stripe_public_key_here"
 stripe_webhook_secret = "whsec_your_webhook_secret_here"
+stripe_topup_price_id = "price_your_topup_price_id_here"
 
 tags = {
   Project     = "AudioCleanerPro"

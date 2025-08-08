@@ -225,6 +225,7 @@ resource "azurerm_static_web_app" "main" {
     "STRIPE_PUBLIC_KEY"                     = var.stripe_public_key
     "STRIPE_WEBHOOK_SECRET"                 = var.stripe_webhook_secret
     "FRONTEND_URL"                          = var.frontend_url
+    "STRIPE_TOPUP_PRICE_ID"                 = var.stripe_topup_price_id
   }
 
   tags = var.tags
