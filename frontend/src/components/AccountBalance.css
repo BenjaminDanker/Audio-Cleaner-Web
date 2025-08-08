@@ -255,12 +255,20 @@
   color: #dc3545;
 }
 
+.transaction-amount.refund {
+  color: #28a745;
+}
+
 .transaction-item:has(.transaction-amount.payment) {
   border-left-color: #28a745;
 }
 
 .transaction-item:has(.transaction-amount.processing) {
   border-left-color: #dc3545;
+}
+
+.transaction-item:has(.transaction-amount.refund) {
+  border-left-color: #28a745;
 }
 
 @media (max-width: 768px) {

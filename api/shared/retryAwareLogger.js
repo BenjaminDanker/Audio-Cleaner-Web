@@ -138,6 +138,22 @@ class RetryAwareLogger {
     }
 
     /**
+     * Pass through warning logs so older code using logWarning/logWarn works
+     */
+    logWarning(functionName, message, userId = 'system', metadata = {}) {
+        if (this.baseLogger.logWarning) {
+            this.baseLogger.logWarning(functionName, message, userId, metadata);
+        } else if (this.baseLogger.logInfo) {
+            // Fallback if base does not implement
+            this.baseLogger.logInfo(functionName, message, userId, { ...metadata, elevated: 'warn' });
+        }
+    }
+
+    logWarn(functionName, message, userId = 'system', metadata = {}) {
+        return this.logWarning(functionName, message, userId, metadata);
+    }
+
+    /**
      * Initialize method for compatibility
      */
     async initialize() {

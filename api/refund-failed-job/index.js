@@ -1,35 +1,33 @@
 const { CosmosClient } = require('@azure/cosmos');
 const MinimalLogger = require('../shared/minimalLogger');
 
-module.exports = async function (context, deadLetterMsg) {
+module.exports = async function (context, req) {
     const logger = new MinimalLogger(context).getLogger();
     
     try {
-        logger.logInfo('refund-failed-job', 'Processing failed job for refund', 'system', {
-            messageId: deadLetterMsg.messageId,
-            reason: deadLetterMsg.deadLetterReason,
-            description: deadLetterMsg.deadLetterErrorDescription
+        logger.logInfo('refund-failed-job', 'Processing HTTP refund request', 'system', {
+            method: req.method,
+            url: req.url
         });
 
-        // Parse the message body
-        const messageBody = deadLetterMsg.body || deadLetterMsg;
+        // Parse the request body for job information
         let jobId, userId;
 
-        if (typeof messageBody === 'string') {
-            const parsed = JSON.parse(messageBody);
-            jobId = parsed.jobId;
-            userId = parsed.userId;
-        } else {
-            jobId = messageBody.jobId;
-            userId = messageBody.userId;
+        if (req.body) {
+            jobId = req.body.jobId;
+            userId = req.body.userId;
         }
 
         if (!jobId || !userId) {
-            logger.logError('refund-failed-job', 'Missing jobId or userId in dead letter message', 'system', {
-                messageBody,
+            logger.logError('refund-failed-job', 'Missing jobId or userId in request', 'system', {
+                body: req.body,
                 hasJobId: !!jobId,
                 hasUserId: !!userId
             });
+            context.res = {
+                status: 400,
+                body: { error: 'Missing jobId or userId in request body' }
+            };
             return;
         }
 
@@ -42,10 +40,14 @@ module.exports = async function (context, deadLetterMsg) {
         const { resource: job } = await jobsContainer.item(jobId, userId).read();
         
         if (!job) {
-            logger.logWarning('refund-failed-job', 'Job not found for dead letter message', 'system', {
+            logger.logWarning('refund-failed-job', 'Job not found for refund request', 'system', {
                 jobId,
                 userId
             });
+            context.res = {
+                status: 404,
+                body: { error: 'Job not found' }
+            };
             return;
         }
 
@@ -59,7 +61,7 @@ module.exports = async function (context, deadLetterMsg) {
             
             logger.logInfo('refund-failed-job', 'Updated job status to failed', userId, {
                 jobId,
-                reason: deadLetterMsg.deadLetterReason
+                reason: 'HTTP refund request'
             });
         }
 
@@ -74,6 +76,10 @@ module.exports = async function (context, deadLetterMsg) {
                 const { resource: account } = await accountsContainer.item(userId, userId).read();
                 if (!account) {
                     logger.logError('refund-failed-job', 'User account not found for refund', userId, { jobId });
+                    context.res = {
+                        status: 404,
+                        body: { error: 'User account not found' }
+                    };
                     return;
                 }
                 
@@ -108,13 +114,44 @@ module.exports = async function (context, deadLetterMsg) {
                     transactionId: refundTransactionId
                 });
 
+                context.res = {
+                    status: 200,
+                    body: {
+                        success: true,
+                        jobId,
+                        refundAmount: job.actualCost,
+                        transactionId: refundTransactionId,
+                        message: 'Refund processed successfully'
+                    }
+                };
+
             } catch (refundError) {
                 logger.logError('refund-failed-job', 'Failed to process refund', userId, {
                     jobId,
                     refundAmount: job.actualCost,
                     error: refundError.message
                 });
+                context.res = {
+                    status: 500,
+                    body: { error: 'Failed to process refund', details: refundError.message }
+                };
             }
+        } else {
+            // Job doesn't need refund (no cost or already refunded)
+            logger.logInfo('refund-failed-job', 'No refund needed for job', userId, {
+                jobId,
+                actualCost: job.actualCost,
+                alreadyRefunded: job.refunded
+            });
+            
+            context.res = {
+                status: 200,
+                body: {
+                    success: true,
+                    jobId,
+                    message: job.refunded ? 'Job already refunded' : 'No refund needed (no cost)'
+                }
+            };
         }
 
     } catch (error) {
@@ -122,6 +159,9 @@ module.exports = async function (context, deadLetterMsg) {
             error: error.message,
             stack: error.stack
         });
-        throw error;
+        context.res = {
+            status: 500,
+            body: { error: 'Internal server error', details: error.message }
+        };
     }
 };

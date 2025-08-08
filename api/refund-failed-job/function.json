@@ -1,12 +1,16 @@
 {
   "bindings": [
     {
-      "name": "deadLetterMsg",
-      "type": "serviceBusTrigger",
+      "authLevel": "function",
+      "type": "httpTrigger",
       "direction": "in",
-      "queueName": "video-processing-jobs/$deadletterqueue",
-      "connection": "AZURE_SERVICE_BUS_CONNECTION_STRING",
-      "cardinality": "one"
+      "name": "req",
+      "methods": ["post"]
+    },
+    {
+      "type": "http",
+      "direction": "out",
+      "name": "res"
     }
   ]
 }

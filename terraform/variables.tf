@@ -35,18 +35,18 @@ variable "tags" {
 
 # Stripe Configuration
 variable "stripe_secret_key" {
-  description = "Stripe secret key for payments"
+  description = "Stripe secret key"
   type        = string
   sensitive   = true
 }
 
 variable "stripe_public_key" {
-  description = "Stripe public key for payments"
+  description = "Stripe public key"
   type        = string
 }
 
 variable "stripe_webhook_secret" {
-  description = "Stripe webhook secret for event validation"
+  description = "Stripe webhook secret"
   type        = string
   sensitive   = true
 }

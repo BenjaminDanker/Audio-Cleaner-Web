@@ -9,7 +9,7 @@ import './Dashboard.css'
 
 const Dashboard = () => {
   const { user } = useAuth()
-  const { loadAccount } = useAccount()
+  const { loadAccount, account, loading: accountLoading } = useAccount()
   const [activeTab, setActiveTab] = useState('upload')
   const [jobs, setJobs] = useState([])
   const [paymentMessage, setPaymentMessage] = useState(null)
@@ -43,12 +43,12 @@ const Dashboard = () => {
     }
   }, [])
 
-  // Load account data when account tab is activated
+  // Prefetch account data once user is available so we can decide when to show the tab
   useEffect(() => {
-    if (activeTab === 'account') {
+    if (user && !account && !accountLoading) {
       loadAccount()
     }
-  }, [activeTab, loadAccount])
+  }, [user, account, accountLoading, loadAccount])
 
   const addJob = (job) => {
     const newJobs = [...jobs, job]

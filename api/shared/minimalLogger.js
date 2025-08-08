@@ -116,6 +116,38 @@ class MinimalLogger {
     }
 
     /**
+     * Warning log (backwards compatibility for previous logger API)
+     * Some existing function code calls logger.logWarn / logger.logWarning which did not exist
+     * Implement it as a thin wrapper around info with a distinct level.
+     */
+    logWarning(functionName, message, userId = 'system', metadata = {}) {
+        if (!this.context) return;
+
+        const logData = {
+            level: 'WARN',
+            function: functionName,
+            message: message,
+            userId: userId,
+            timestamp: new Date().toISOString()
+        };
+
+        if (metadata.sessionId) logData.sessionId = metadata.sessionId;
+        if (metadata.operation) logData.operation = metadata.operation;
+
+        // Use warn channel if available to aid filtering
+        if (this.context.log.warn) {
+            this.context.log.warn(`[${functionName}]`, JSON.stringify(logData));
+        } else {
+            this.context.log(`[${functionName}]`, JSON.stringify(logData));
+        }
+    }
+
+    // Alias for code that uses logWarn
+    logWarn(functionName, message, userId = 'system', metadata = {}) {
+        return this.logWarning(functionName, message, userId, metadata);
+    }
+
+    /**
      * Initialize method for compatibility with BlobLogger
      */
     async initialize() {

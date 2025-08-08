@@ -1,42 +1,42 @@
-import React, { useState, useEffect } from 'react'
+import React, { useEffect } from 'react'
 import axios from 'axios'
+import { useAccount } from './AccountContext'
 import { CreditCard, DollarSign, Upload, History } from 'lucide-react'
 import './AccountBalance.css'
 
 const AccountBalance = () => {
-  const [account, setAccount] = useState(null)
-  const [transactions, setTransactions] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [addAmount, setAddAmount] = useState('')
+  const { account, loading, refreshAccount, loadAccount } = useAccount()
+  const [transactions, setTransactions] = React.useState([])
 
+  // Trigger load if user navigated here before prefetch completed
   useEffect(() => {
-    fetchAccountData()
-  }, [])
-
-  const fetchAccountData = async () => {
-    try {
-      setLoading(true)
-      const response = await axios.get('/api/get-account-data')
-      setAccount(response.data.account)
-      setTransactions(response.data.transactions)
-    } catch (error) {
-      console.error('Failed to fetch account data:', error)
-    } finally {
-      setLoading(false)
+    if (!account && !loading) {
+      loadAccount()
     }
-  }
+  }, [account, loading, loadAccount])
+
+  // We still need transactions (not stored in context) so fetch them when account becomes available.
+  useEffect(() => {
+    const fetchTransactions = async () => {
+      try {
+        if (!account) return
+        const res = await fetch('/api/get-account-data')
+        if (res.ok) {
+          const data = await res.json()
+          setTransactions(data.transactions || [])
+        }
+      } catch (e) {
+        console.error('Failed to fetch transactions:', e)
+      }
+    }
+    fetchTransactions()
+  }, [account])
 
   const handleAddFunds = async () => {
-    const amount = parseFloat(addAmount)
-    if (!amount || amount <= 0) {
-      alert('Please enter a valid amount')
-      return
-    }
-
+    // Just redirect to Stripe - let them handle everything
     try {
       const response = await axios.post('/api/create-payment-session', {
-        amount: amount * 100, // Convert to cents for Stripe
-        currency: 'usd'
+        // Let Stripe handle amount selection
       })
 
       if (response.data.url) {
@@ -65,10 +65,11 @@ const AccountBalance = () => {
     })
   }
 
-  if (loading && !account) {
+  if (loading || !account) {
     return (
-      <div className="account-loading">
-        <p>Loading account information...</p>
+      <div className="account-balance loading-state">
+        <h2>Account Balance</h2>
+        <p>Loading your account data...</p>
       </div>
     )
   }
@@ -77,7 +78,7 @@ const AccountBalance = () => {
     <div className="account-balance">
       <div className="account-header">
         <h2>Account Balance</h2>
-        <button onClick={fetchAccountData} className="btn btn-secondary">
+  <button onClick={refreshAccount} className="btn btn-secondary">
           Refresh
         </button>
       </div>
@@ -104,25 +105,15 @@ const AccountBalance = () => {
             <h3>Add Funds</h3>
           </div>
           <div className="add-funds-form">
-            <div className="input-group">
-              <span className="currency-symbol">$</span>
-              <input
-                type="number"
-                value={addAmount}
-                onChange={(e) => setAddAmount(e.target.value)}
-                placeholder="0.00"
-                min="1"
-                step="0.01"
-                className="amount-input"
-              />
-            </div>
+            <p className="add-funds-description">
+              Add money to your account using Stripe's secure checkout
+            </p>
             <button 
               onClick={handleAddFunds}
               className="btn btn-primary"
-              disabled={!addAmount || parseFloat(addAmount) <= 0}
             >
               <Upload size={16} />
-              Add Funds
+              Add Funds via Stripe
             </button>
           </div>
         </div>
@@ -135,10 +126,14 @@ const AccountBalance = () => {
           <div className="pricing-info">
             <div className="pricing-item">
               <span className="pricing-label">Video Processing:</span>
-              <span className="pricing-value">$0.50 per minute</span>
+              <span className="pricing-value">$0.50 per GB</span>
+            </div>
+            <div className="pricing-item">
+              <span className="pricing-label">Minimum charge:</span>
+              <span className="pricing-value">$0.05</span>
             </div>
             <div className="pricing-note">
-              Cost is calculated based on video duration before processing
+              Cost is calculated based on file size. Perfect for small test files!
             </div>
           </div>
         </div>
@@ -164,6 +159,7 @@ const AccountBalance = () => {
                   <div className="transaction-type">
                     {transaction.type === 'payment' ? 'Funds Added' : 
                      transaction.type === 'processing' ? 'Video Processing' : 
+                     transaction.type === 'refund' ? 'Refund' :
                      transaction.type}
                   </div>
                   <div className="transaction-date">
@@ -171,7 +167,7 @@ const AccountBalance = () => {
                   </div>
                 </div>
                 <div className={`transaction-amount ${transaction.type}`}>
-                  {transaction.type === 'payment' ? '+' : '-'}
+                  {transaction.type === 'payment' || transaction.type === 'refund' ? '+' : '-'}
                   {formatCurrency(Math.abs(transaction.amount))}
                 </div>
               </div>

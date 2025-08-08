@@ -217,14 +217,14 @@ resource "azurerm_static_web_app" "main" {
   }
 
   app_settings = {
-    "AZURE_STORAGE_CONNECTION_STRING"     = azurerm_storage_account.main.primary_connection_string
-    "AZURE_SERVICE_BUS_CONNECTION_STRING" = azurerm_servicebus_namespace.main.default_primary_connection_string
-    "COSMOS_CONNECTION_STRING"            = azurerm_cosmosdb_account.main.primary_sql_connection_string
+    "AZURE_STORAGE_CONNECTION_STRING"       = azurerm_storage_account.main.primary_connection_string
+    "AZURE_SERVICE_BUS_CONNECTION_STRING"   = azurerm_servicebus_namespace.main.default_primary_connection_string
+    "COSMOS_CONNECTION_STRING"              = azurerm_cosmosdb_account.main.primary_sql_connection_string
     "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
-    "STRIPE_SECRET_KEY"                   = "@Microsoft.KeyVault(VaultName=${azurerm_key_vault.main.name};SecretName=stripe-secret-key)"
-    "STRIPE_PUBLIC_KEY"                   = "@Microsoft.KeyVault(VaultName=${azurerm_key_vault.main.name};SecretName=stripe-public-key)"
-    "STRIPE_WEBHOOK_SECRET"               = "@Microsoft.KeyVault(VaultName=${azurerm_key_vault.main.name};SecretName=stripe-webhook-secret)"
-    "FRONTEND_URL"                        = var.frontend_url
+    "STRIPE_SECRET_KEY"                     = var.stripe_secret_key
+    "STRIPE_PUBLIC_KEY"                     = var.stripe_public_key
+    "STRIPE_WEBHOOK_SECRET"                 = var.stripe_webhook_secret
+    "FRONTEND_URL"                          = var.frontend_url
   }
 
   tags = var.tags
@@ -232,62 +232,6 @@ resource "azurerm_static_web_app" "main" {
 
 # Get current client configuration
 data "azurerm_client_config" "current" {}
-
-# Key Vault for storing secrets
-resource "azurerm_key_vault" "main" {
-  name                = "kv-${local.project_name}-${local.resource_suffix}"
-  location            = azurerm_resource_group.main.location
-  resource_group_name = azurerm_resource_group.main.name
-  tenant_id           = data.azurerm_client_config.current.tenant_id
-  sku_name            = "standard"
-  
-  # Enable RBAC authorization instead of access policies
-  enable_rbac_authorization = true
-
-  tags = var.tags
-}
-
-# RBAC role assignments for Key Vault access
-
-# Grant the current user/service principal Key Vault Administrator role for Terraform operations
-resource "azurerm_role_assignment" "keyvault_admin" {
-  scope                = azurerm_key_vault.main.id
-  role_definition_name = "Key Vault Administrator"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
-
-# Grant the Static Web App managed identity access to read Key Vault secrets
-resource "azurerm_role_assignment" "static_web_app_keyvault" {
-  scope                = azurerm_key_vault.main.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_static_web_app.main.identity[0].principal_id
-  depends_on          = [
-    azurerm_static_web_app.main,
-    azurerm_key_vault.main
-  ]
-}
-
-# Key Vault secrets for Stripe (depends on admin role assignment)
-resource "azurerm_key_vault_secret" "stripe_secret_key" {
-  name         = "stripe-secret-key"
-  value        = var.stripe_secret_key
-  key_vault_id = azurerm_key_vault.main.id
-  depends_on   = [azurerm_role_assignment.keyvault_admin]
-}
-
-resource "azurerm_key_vault_secret" "stripe_public_key" {
-  name         = "stripe-public-key"
-  value        = var.stripe_public_key
-  key_vault_id = azurerm_key_vault.main.id
-  depends_on   = [azurerm_role_assignment.keyvault_admin]
-}
-
-resource "azurerm_key_vault_secret" "stripe_webhook_secret" {
-  name         = "stripe-webhook-secret"
-  value        = var.stripe_webhook_secret
-  key_vault_id = azurerm_key_vault.main.id
-  depends_on   = [azurerm_role_assignment.keyvault_admin]
-}
 
 // Azure Container Registry for storing processor image
 resource "azurerm_container_registry" "main" {
@@ -405,6 +349,11 @@ resource "azurerm_container_app" "processor" {
       env {
         name        = "COSMOS_CONNECTION_STRING"
         secret_name = "cosmos-connectionstring"
+      }
+
+      env {
+        name  = "REFUND_API_ENDPOINT"
+        value = "https://${azurerm_static_web_app.main.default_host_name}/api/refund-failed-job"
       }
     }
 

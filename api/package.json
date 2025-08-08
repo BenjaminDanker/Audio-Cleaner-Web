@@ -14,9 +14,9 @@
   "dependencies": {
     "@azure/cosmos": "4.0.0",
     "@azure/functions": "4.0.0",
-    "@azure/identity": "^4.10.1",
     "@azure/service-bus": "7.9.0",
     "@azure/storage-blob": "12.17.0",
+    "@pagopa/express-azure-functions": "^3.0.0",
     "cors": "2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "7.1.5",
@@ -25,8 +25,5 @@
     "multer": "1.4.5-lts.1",
     "stripe": "14.0.0",
     "validator": "13.11.0"
-  },
-  "devDependencies": {
-    
   }
 }

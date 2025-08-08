@@ -293,9 +293,20 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
         </div>
       )}
 
-      {job.status === 'failed' && job.error && (
+      {job.status === 'failed' && (
         <div className="error-message">
-          <p><strong>Error:</strong> {job.error}</p>
+          {job.error && <p><strong>Error:</strong> {job.error}</p>}
+          {job.message && <p>{job.message}</p>}
+          {job.refunded && (
+            <p className="refund-notice">
+              💰 <strong>Refund processed:</strong> Your account has been credited for this failed job.
+            </p>
+          )}
+          {!job.refunded && job.actualCost > 0 && (
+            <p className="refund-processing">
+              ⏳ Processing automatic refund for this failed job...
+            </p>
+          )}
         </div>
       )}
 
