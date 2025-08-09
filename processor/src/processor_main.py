@@ -53,6 +53,8 @@ class AudioCleanerProcessor:
         
         # Service Bus
         self.service_bus_connection = os.getenv('AZURE_SERVICE_BUS_CONNECTION_STRING')
+        if not self.service_bus_connection:
+            raise ValueError("AZURE_SERVICE_BUS_CONNECTION_STRING environment variable is required")
         self.queue_name = 'video-processing-jobs'  # Correct queue name
         
         # Storage
@@ -93,79 +95,72 @@ class AudioCleanerProcessor:
         
         # Cosmos DB
         self.cosmos_connection = os.getenv('COSMOS_CONNECTION_STRING')  # Updated env var name
+        if not self.cosmos_connection:
+            raise ValueError("COSMOS_CONNECTION_STRING environment variable is required")
         self.cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection)
         self.database = self.cosmos_client.get_database_client('AudioCleanerDB')  # Correct database name
         self.jobs_container = self.database.get_container_client('Jobs')
+
+        # Validate that required blob containers exist (fail fast with clear message)
+        try:
+            existing_containers = {c['name'] for c in self.blob_service_client.list_containers()}
+            missing = {self.uploads_container, self.processed_container} - existing_containers
+            if missing:
+                raise ValueError(f"Missing required storage container(s): {', '.join(missing)}")
+        except Exception as e:
+            logger.error(f"Container existence validation failed: {e}")
+            raise
         
         logger.info("AudioCleanerProcessor initialized")
 
-    async def process_single_batch(self):
-        """Process a single batch of messages and exit (job-style)"""
-        async with ServiceBusClient.from_connection_string(
-            self.service_bus_connection
-        ) as client:
-            
-            receiver = client.get_queue_receiver(queue_name=self.queue_name)
-            
-            logger.info(f"Checking for messages on queue: {self.queue_name}")
-            
-            async with receiver:
-                # Process up to 5 messages in this batch, then exit
-                received_msgs = await receiver.receive_messages(max_message_count=5, max_wait_time=10)
-                
-                if not received_msgs:
-                    logger.info("No messages found, exiting")
-                    return
-                
-                logger.info(f"Processing {len(received_msgs)} message(s)")
-                
-                for msg in received_msgs:
-                    try:
-                        # Extract message body from Service Bus message
-                        # The body is a generator, so we need to collect all bytes
-                        body_parts = []
-                        for part in msg.body:
-                            body_parts.append(part)
-                        
-                        # Join all parts and decode to string
-                        message_body = b''.join(body_parts).decode('utf-8')
-                                
-                        
-                        # Parse the JSON message
-                        message_data = json.loads(message_body)
-                        
-                        # Ensure we have a dictionary
-                        if isinstance(message_data, str):
-                            # If it's still a string, try parsing again
-                            message_data = json.loads(message_data)
-                        
-                        logger.info(f"Processing job: {message_data.get('jobId')}")
-                        
-                        # Process the video
-                        await self.process_video_job(message_data)
-                        
-                        # Complete the message
-                        await receiver.complete_message(msg)
-                        logger.info(f"Message completed: {message_data.get('jobId')}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing message: {e}")
-                        logger.error(traceback.format_exc())
-                        
-                        # Update job status to failed
-                        if 'message_data' in locals():
-                            user_id = message_data.get('userId')
-                            await self.update_job_status(
-                                message_data.get('jobId'),
-                                'failed',
-                                user_id,
-                                error_message=str(e)
-                            )
-                        
-                        # Dead letter the message
-                        await receiver.dead_letter_message(msg, reason="ProcessingError", error_description=str(e))
-                
-                logger.info(f"Batch processing complete, exiting")
+    async def run_continuous(self):
+        """Continuously poll the queue and process messages until the platform scales the replica down.
+        Designed to be low-idle: waits for messages, sleeps briefly when none are found.
+        """
+        idle_sleep = float(os.getenv('IDLE_SLEEP_SECONDS', '5'))
+        logger.info(f"Starting continuous processor loop (idle sleep {idle_sleep}s when queue empty)")
+        # Reuse a single ServiceBusClient for efficiency
+        async with ServiceBusClient.from_connection_string(self.service_bus_connection) as client:
+            while True:
+                try:
+                    receiver = client.get_queue_receiver(queue_name=self.queue_name)
+                    async with receiver:
+                        msgs = await receiver.receive_messages(max_message_count=1, max_wait_time=15)
+                        if not msgs:
+                            # No messages this poll cycle
+                            await asyncio.sleep(idle_sleep)
+                            continue
+                        msg = msgs[0]
+                        try:
+                            body_parts = [part for part in msg.body]
+                            message_body = b''.join(body_parts).decode('utf-8')
+                            message_data = json.loads(message_body)
+                            if isinstance(message_data, str):
+                                message_data = json.loads(message_data)
+                            logger.info(f"Processing job: {message_data.get('jobId')} (continuous mode)")
+                            await self.process_video_job(message_data)
+                            await receiver.complete_message(msg)
+                            logger.info(f"Completed job: {message_data.get('jobId')}")
+                        except Exception as e:
+                            logger.error(f"Error processing message in continuous loop: {e}")
+                            logger.error(traceback.format_exc())
+                            if 'message_data' in locals():
+                                user_id = message_data.get('userId')
+                                await self.update_job_status(
+                                    message_data.get('jobId'),
+                                    'failed',
+                                    user_id,
+                                    error_message=str(e)
+                                )
+                            try:
+                                await receiver.dead_letter_message(msg, reason="ProcessingError", error_description=str(e))
+                            except Exception as dlq_err:
+                                logger.error(f"Failed to dead-letter message: {dlq_err}")
+                except Exception as loop_err:
+                    logger.error(f"Top-level continuous loop error: {loop_err}")
+                    logger.error(traceback.format_exc())
+                    # Backoff before retrying to avoid tight error loop
+                    await asyncio.sleep(min(idle_sleep * 2, 30))
 
     async def process_video_job(self, job_data):
         """Process a single video job"""
@@ -632,7 +627,7 @@ class AudioCleanerProcessor:
             job['status'] = status
             job['updatedAt'] = datetime.now().isoformat()
             
-            if status == 'processing':
+            if status == 'processing' and 'startedAt' not in job:
                 job['startedAt'] = datetime.now().isoformat()
             elif status in ['completed', 'failed']:
                 job['completedAt'] = datetime.now().isoformat()
@@ -723,13 +718,9 @@ class AudioCleanerProcessor:
             raise
 
 async def main():
-    """Main entry point - process a batch and exit"""
+    """Entry point: continuous consumption only (minimal code)."""
     processor = AudioCleanerProcessor()
-    
-    # Process a single batch of messages and exit
-    await processor.process_single_batch()
-    
-    logger.info("Processing complete, exiting")
+    await processor.run_continuous()
 
 if __name__ == "__main__":
     asyncio.run(main())

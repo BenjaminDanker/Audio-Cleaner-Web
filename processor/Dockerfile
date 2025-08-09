@@ -21,11 +21,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Set environment variables
+# Minimal environment variable setup (runtime will inject secrets)
 ENV PYTHONPATH=/app
-ENV AZURE_STORAGE_CONNECTION_STRING=""
-ENV AZURE_SERVICE_BUS_CONNECTION_STRING=""
-ENV COSMOS_CONNECTION_STRING=""
+
+# NOTE: Do NOT bake placeholder empty secrets here. They must be supplied at runtime
+# via container app secrets / environment. Leaving them unset makes validation clearer.
 
 # Expose port
 EXPOSE 8080
