@@ -63,3 +63,22 @@ variable "frontend_url" {
   type        = string
   default     = ""
 }
+
+# Storage container names (allow override to keep code & infra in sync)
+variable "uploads_container_name" {
+  description = "Name of the uploads storage container"
+  type        = string
+  default     = "uploads"
+}
+
+variable "processed_container_name" {
+  description = "Name of the processed videos storage container"
+  type        = string
+  default     = "processed-videos"
+}
+
+variable "queue_name" {
+  description = "Name of the Service Bus queue for video processing jobs"
+  type        = string
+  default     = "video-processing-jobs"
+}

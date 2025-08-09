@@ -15,7 +15,6 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 # Set up logging
 logger = logging.getLogger(__name__)
 
-# Constants moved from processing.py
 AUDIO_BITRATE_AAC = "320k"
 FFMPEG_TIMEOUT_S = 300
 DEFAULT_ATTEN_DB = 30
@@ -56,7 +55,7 @@ class VideoProcessor:
         ]
         
         try:
-            result = subprocess.run(cmd, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
+            subprocess.run(cmd, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
             return str(out_path)
         except subprocess.CalledProcessError as e:
             # Log the actual FFmpeg error for debugging
@@ -72,7 +71,7 @@ class VideoProcessor:
             ]
             
             try:
-                result = subprocess.run(cmd_fallback, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
+                subprocess.run(cmd_fallback, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
                 return str(out_path)
             except subprocess.CalledProcessError as e2:
                 logger.error(f"FFmpeg fallback remux also failed with stderr: {e2.stderr}")
@@ -88,7 +87,7 @@ class VideoProcessor:
                 ]
                 
                 try:
-                    result = subprocess.run(cmd_transcode, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
+                    subprocess.run(cmd_transcode, check=True, timeout=FFMPEG_TIMEOUT_S, capture_output=True, text=True)
                     logger.info("Successfully transcoded audio to AAC")
                     return str(out_path)
                 except subprocess.CalledProcessError as e3:
@@ -167,7 +166,7 @@ class VideoProcessor:
         ]
         
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
+            subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
         except subprocess.CalledProcessError as e:
             logger.error(f"FFmpeg audio replacement failed with stderr: {e.stderr}")
             logger.error(f"FFmpeg audio replacement failed with stdout: {e.stdout}")
@@ -182,7 +181,7 @@ class VideoProcessor:
             ]
             
             try:
-                result = subprocess.run(cmd_fallback, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
+                subprocess.run(cmd_fallback, check=True, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT_S)
             except subprocess.CalledProcessError as e2:
                 logger.error(f"FFmpeg fallback audio replacement also failed with stderr: {e2.stderr}")
                 logger.error(f"FFmpeg fallback audio replacement also failed with stdout: {e2.stdout}")
@@ -194,6 +193,15 @@ class VideoProcessor:
         Returns the path to the processed output file.
         Raises exceptions on failure.
         """
+        # Validate attenuation bounds (defensive; model typically expects reasonable values)
+        if self.atten_db is not None:
+            try:
+                self.atten_db = int(self.atten_db)
+            except ValueError:
+                raise ValueError(f"Invalid attenuation dB value: {self.atten_db}")
+            if not (-10 <= self.atten_db <= 80):  # heuristic bounds
+                raise ValueError(f"Attenuation dB out of acceptable range (-10..80): {self.atten_db}")
+
         self.uploaded_file.save(self.input_path)
         
         remuxed_path = self._remux(self.input_path, self.temp_dir_path)

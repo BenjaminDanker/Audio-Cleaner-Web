@@ -44,13 +44,13 @@ resource "azurerm_storage_account" "main" {
 
 # Storage containers
 resource "azurerm_storage_container" "input" {
-  name                  = "uploads"
+  name                  = var.uploads_container_name
   storage_account_id    = azurerm_storage_account.main.id
   container_access_type = "private"
 }
 
 resource "azurerm_storage_container" "output" {
-  name                  = "processed-videos"
+  name                  = var.processed_container_name
   storage_account_id    = azurerm_storage_account.main.id
   container_access_type = "private"
 }
@@ -64,7 +64,7 @@ resource "azurerm_storage_management_policy" "main" {
     enabled = true
 
     filters {
-      prefix_match = ["uploads/"]
+  prefix_match = ["${var.uploads_container_name}/"]
       blob_types   = ["blockBlob"]
     }
 
@@ -80,7 +80,7 @@ resource "azurerm_storage_management_policy" "main" {
     enabled = true
 
     filters {
-      prefix_match = ["processed-videos/"]
+  prefix_match = ["${var.processed_container_name}/"]
       blob_types   = ["blockBlob"]
     }
 
@@ -119,7 +119,7 @@ resource "azurerm_servicebus_namespace" "main" {
 }
 
 resource "azurerm_servicebus_queue" "video_jobs" {
-  name         = "video-processing-jobs"
+  name         = var.queue_name
   namespace_id = azurerm_servicebus_namespace.main.id
   max_delivery_count                  = 10
   default_message_ttl                 = "PT1H"
@@ -215,15 +215,18 @@ resource "azurerm_static_web_app" "main" {
   }
 
   app_settings = {
-    "AZURE_STORAGE_CONNECTION_STRING"       = azurerm_storage_account.main.primary_connection_string
-    "AZURE_SERVICE_BUS_CONNECTION_STRING"   = azurerm_servicebus_namespace.main.default_primary_connection_string
-    "COSMOS_CONNECTION_STRING"              = azurerm_cosmosdb_account.main.primary_sql_connection_string
-    "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
-    "STRIPE_SECRET_KEY"                     = var.stripe_secret_key
-    "STRIPE_PUBLIC_KEY"                     = var.stripe_public_key
-    "STRIPE_WEBHOOK_SECRET"                 = var.stripe_webhook_secret
-    "FRONTEND_URL"                          = var.frontend_url
-    "STRIPE_TOPUP_PRICE_ID"                 = var.stripe_topup_price_id
+  "AZURE_STORAGE_CONNECTION_STRING"       = azurerm_storage_account.main.primary_connection_string
+  "AZURE_SERVICE_BUS_CONNECTION_STRING"   = azurerm_servicebus_namespace.main.default_primary_connection_string
+  "COSMOS_CONNECTION_STRING"              = azurerm_cosmosdb_account.main.primary_sql_connection_string
+  "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
+  "STRIPE_SECRET_KEY"                     = var.stripe_secret_key
+  "STRIPE_PUBLIC_KEY"                     = var.stripe_public_key
+  "STRIPE_WEBHOOK_SECRET"                 = var.stripe_webhook_secret
+  "FRONTEND_URL"                          = var.frontend_url
+  "STRIPE_TOPUP_PRICE_ID"                 = var.stripe_topup_price_id
+  "UPLOADS_CONTAINER_NAME"                = var.uploads_container_name
+  "PROCESSED_CONTAINER_NAME"              = var.processed_container_name
+  "QUEUE_NAME"                            = var.queue_name
   }
 
   tags = var.tags
@@ -339,15 +342,28 @@ resource "azurerm_container_app" "processor" {
         name        = "AZURE_SERVICE_BUS_CONNECTION_STRING"
         secret_name = "servicebus-connectionstring"
       }
-
       env {
         name        = "AZURE_STORAGE_CONNECTION_STRING"
         secret_name = "storage-connectionstring"
       }
-
       env {
         name        = "COSMOS_CONNECTION_STRING"
         secret_name = "cosmos-connectionstring"
+      }
+
+      # Propagate container names for future code configurability
+      env {
+        name  = "UPLOADS_CONTAINER_NAME"
+        value = var.uploads_container_name
+      }
+      env {
+        name  = "PROCESSED_CONTAINER_NAME"
+        value = var.processed_container_name
+      }
+
+      env {
+        name  = "QUEUE_NAME"
+        value = var.queue_name
       }
 
       env {
@@ -359,7 +375,7 @@ resource "azurerm_container_app" "processor" {
     # KEDA Service Bus scaling rule
     azure_queue_scale_rule {
       name         = "servicebus-scale-rule"
-      queue_name   = "video-processing-jobs"
+      queue_name   = var.queue_name
       queue_length = 1
 
       authentication {
