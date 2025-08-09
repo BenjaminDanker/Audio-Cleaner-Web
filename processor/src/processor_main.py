@@ -1,5 +1,4 @@
 import os, json, asyncio, tempfile, logging, traceback, signal, contextlib
-from datetime import datetime
 from pathlib import Path
 from azure.servicebus.aio import ServiceBusClient
 from azure.storage.blob.aio import BlobServiceClient
@@ -299,16 +298,30 @@ class AudioCleanerProcessor:
                         outputBlobName=output_file_name
                     )
 
-                    # Delete the input blob now that processing is complete
-                    try:
-                        # Use the input blob URL directly (no construction needed)
-                        logger.info(f"Attempting to delete input blob for job {job_id}: {input_blob_url}")
-                        await self.storage.delete(input_blob_url)
-                        logger.info(f"Successfully deleted input blob for job {job_id}")
-                    except Exception as delete_error:
-                        logger.error(f"Failed to delete input blob for job {job_id}: {delete_error}")
-                        logger.error(f"Blob URL was: {input_blob_url}")
-                        # Don't fail the job if we can't delete the input blob, but log it for investigation
+                    # Delete the input blob now that processing is complete (optional)
+                    if self.cfg.delete_inputs_on_success:
+                        try:
+                            logger.info(f"Attempting to delete input blob for job {job_id}: {input_blob_url}")
+                            # Simple transient retry (e.g. if lease/replication delay) up to 3 times
+                            last_err = None
+                            for attempt in range(1,4):
+                                try:
+                                    await self.storage.delete(input_blob_url)
+                                    logger.info(f"Successfully deleted input blob for job {job_id} attempt={attempt}")
+                                    last_err = None
+                                    break
+                                except Exception as inner_del_err:
+                                    last_err = inner_del_err
+                                    logger.warning(f"Delete attempt {attempt} failed for job {job_id}: {inner_del_err}")
+                                    await asyncio.sleep(1 * attempt)
+                            if last_err:
+                                raise last_err
+                        except Exception as delete_error:
+                            logger.error(f"Failed to delete input blob for job {job_id}: {delete_error}")
+                            logger.error(f"Blob URL was: {input_blob_url}")
+                            # Don't fail the job if we can't delete the input blob, but log it for investigation
+                    else:
+                        logger.info(f"Configured to retain input blob for job {job_id}: {input_blob_url}")
 
                     self._log(event="job_complete", jobId=job_id)
 

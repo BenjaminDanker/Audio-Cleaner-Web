@@ -7,6 +7,13 @@ README*
 CHANGELOG*
 LICENSE*
 
+# Local compose/dev orchestration files (not needed in image)
+docker-compose*.yml
+docker-compose*.yaml
+
+# Local env file containing secrets (should be injected at runtime, not baked)
+.env.cloud
+
 # Git and version control (in parent)
 ../.git/
 ../.gitignore

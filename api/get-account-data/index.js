@@ -68,14 +68,21 @@ module.exports = async function (context, req) {
 
         // Handle transactions
         const transactions = transactionsResult.status === 'fulfilled' ? 
-            transactionsResult.value.resources.map(t => ({
-                id: t.id,
-                type: t.type,
-                amount: t.amount,
-                description: t.description,
-                jobId: t.jobId,
-                createdAt: t.createdAt
-            })) : [];
+            transactionsResult.value.resources.map(t => {
+                let amt = t.amount;
+                // Normalize legacy processing/refund amounts stored in USD (<1) to cents
+                if ((t.type === 'processing' || t.type === 'refund') && amt > 0 && amt < 1) {
+                    amt = Math.round(amt * 100);
+                }
+                return {
+                    id: t.id,
+                    type: t.type,
+                    amount: amt,
+                    description: t.description,
+                    jobId: t.jobId,
+                    createdAt: t.createdAt
+                };
+            }) : [];
 
         context.res = {
             status: 200,

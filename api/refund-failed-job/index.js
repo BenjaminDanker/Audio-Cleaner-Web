@@ -83,8 +83,16 @@ module.exports = async function (context, req) {
                     return;
                 }
                 
-                // Add refund amount back to account balance
-                account.balance += job.actualCost;
+                // Determine unit of stored cost (legacy jobs may have stored USD < 1)
+                let refundAmountCents;
+                if (job.actualCost < 1) {
+                    // Treat as USD dollars -> convert
+                    refundAmountCents = Math.round(job.actualCost * 100);
+                } else {
+                    // Assume already cents
+                    refundAmountCents = Math.round(job.actualCost);
+                }
+                account.balance += refundAmountCents;
                 account.updatedAt = new Date().toISOString();
                 await accountsContainer.item(account.id, account.userId).replace(account);
                 
@@ -109,7 +117,7 @@ module.exports = async function (context, req) {
 
                 logger.logInfo('refund-failed-job', 'Refund processed successfully', userId, {
                     jobId,
-                    refundAmount: job.actualCost,
+                    refundAmount: refundAmountCents,
                     newBalance: account.balance,
                     transactionId: refundTransactionId
                 });
@@ -119,7 +127,7 @@ module.exports = async function (context, req) {
                     body: {
                         success: true,
                         jobId,
-                        refundAmount: job.actualCost,
+                        refundAmount: refundAmountCents,
                         transactionId: refundTransactionId,
                         message: 'Refund processed successfully'
                     }

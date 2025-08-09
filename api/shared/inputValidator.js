@@ -452,8 +452,7 @@ class InputValidator {
                 fileSize: { type: 'integer', min: 1, max: this.maxSizes.fileUpload } // Use centralized limit
             },
             '/api/enqueue-job': {
-                fileName: { type: 'fileName', required: true },
-                fileUrl: { type: 'url', required: true },
+                    fileName: { type: 'fileName', required: true },
                 processingType: { type: 'string', pattern: /^(denoise|enhance|normalize)$/, required: false },
                 attenuationDb: { type: 'integer', min: 1, max: 100, required: false }
             },

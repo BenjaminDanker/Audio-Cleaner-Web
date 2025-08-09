@@ -2,20 +2,22 @@ version: '3.8'
 
 services:
   processor:
-    build: 
-      context: ./processor
+    build:
+      # Compose file lives inside the processor/ directory already, so context is current dir
+      context: .
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
     env_file:
-      - ./processor/.env.cloud
+      # Use cloud env values for now (contains Azure connection strings)
+      - ./.env.cloud
     environment:
       # Override with cloud settings
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     volumes:
       # Mount source code for development (optional - remove for production-like testing)
-      - ./processor/src:/app/src
+      - ./src:/app/src
     restart: unless-stopped
     networks:
       - audio-cleaner-dev

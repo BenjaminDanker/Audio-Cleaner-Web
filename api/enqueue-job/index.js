@@ -106,54 +106,110 @@ module.exports = async function (context, req) {
          userId = principal.userId; // Update userId with principal data
 
          // Basic input validation
-        const { fileName, fileUrl, processingType, attenuationDb } = req.body || {};
+        const { fileName, processingType, attenuationDb } = req.body || {};
 
-        if (!fileName || !fileUrl) {
-            logger.logError('enqueue-job', 'Missing required fields: fileName and fileUrl', userId, { 
-                sessionId
-            });
+        if (!fileName) {
+            logger.logError('enqueue-job', 'Missing required field: fileName (blobName)', userId, { sessionId });
             context.res = {
                 status: 400,
                 headers: {
                     'Content-Type': 'application/json',
                     'Access-Control-Allow-Origin': '*'
                 },
-                body: { error: 'fileName and fileUrl are required' }
+                body: { error: 'fileName (blobName) is required' }
             };
             return;
         }
 
-        // Get actual file size from blob storage
+        // Treat fileName as blobName (path relative to uploads container). Must start with userId/ for ownership.
+        const blobName = fileName.trim();
+        if (!blobName.startsWith(userId + '/')) {
+            logger.logError('enqueue-job', `Blob name does not belong to user userId=${userId} blobName=${blobName}`, userId, { sessionId });
+            context.res = {
+                status: 403,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                body: { error: 'Blob does not belong to authenticated user' }
+            };
+            return;
+        }
+        // Basic pattern check (alphanumeric, separators . _ - / )
+        if (!/^[-A-Za-z0-9_./]+$/.test(blobName)) {
+            logger.logError('enqueue-job', 'Invalid blobName pattern', userId, { sessionId });
+            context.res = {
+                status: 400,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                body: { error: 'Invalid blob name' }
+            };
+            return;
+        }
+
+        // Get actual file size from blob storage (container fixed 'uploads')
         let actualFileSizeBytes;
+        const derivedContainerName = 'uploads';
+        let attemptsTried = 0;
         try {
-            const blobServiceClient = new BlobServiceClient(process.env.AZURE_STORAGE_CONNECTION_STRING);
-            const containerClient = blobServiceClient.getContainerClient('uploads');
-            
-            // Extract blob name from URL
-            const url = new URL(fileUrl);
-            const pathParts = url.pathname.split('/');
-            const blobName = pathParts[pathParts.length - 1];
-            
-            const blobClient = containerClient.getBlobClient(blobName);
-            const properties = await blobClient.getProperties();
-            actualFileSizeBytes = properties.contentLength;
-            
-            if (!actualFileSizeBytes || actualFileSizeBytes <= 0) {
-                throw new Error('Invalid file size from blob properties');
+            const storageConnectionString = process.env.AZURE_STORAGE_CONNECTION_STRING;
+            if (!storageConnectionString) {
+                throw new Error('AZURE_STORAGE_CONNECTION_STRING not set');
             }
-            
-            logger.logInfo('enqueue-job', 'Retrieved actual file size from blob', userId, {
-                sessionId,
-                blobName,
-                fileSizeBytes: actualFileSizeBytes
-            });
-            
+            logger.logInfo('enqueue-job', `Using provided blobName container=${derivedContainerName} blob=${blobName}`, userId, { sessionId });
+
+            // Use helper to correctly create client from connection string (previous direct constructor caused Invalid URL)
+            const blobServiceClient = AzureSDKConfig.createBlobServiceClient(storageConnectionString);
+            const containerClient = blobServiceClient.getContainerClient(derivedContainerName);
+            const blobClient = containerClient.getBlobClient(blobName);
+
+            const maxAttempts = 5;
+            const baseDelayMs = 300;
+            let lastErr;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                attemptsTried = attempt;
+                try {
+                    const properties = await blobClient.getProperties();
+                    actualFileSizeBytes = properties.contentLength;
+                    if (!actualFileSizeBytes || actualFileSizeBytes <= 0) {
+                        throw new Error(`Invalid contentLength (${actualFileSizeBytes})`);
+                    }
+                    logger.logInfo(
+                        'enqueue-job',
+                        `Retrieved blob size attempt=${attempt}/${maxAttempts} container=${derivedContainerName} blob=${blobName} sizeBytes=${actualFileSizeBytes}`,
+                        userId,
+                        { sessionId }
+                    );
+                    break; // success
+                } catch (innerErr) {
+                    lastErr = innerErr;
+                    // If 404 or similar, wait then retry (upload may not be committed yet)
+                    if (attempt < maxAttempts) {
+                        await new Promise(r => setTimeout(r, baseDelayMs * attempt));
+                        logger.logInfo(
+                            'enqueue-job',
+                            `Retrying blob properties after error attempt=${attempt} container=${derivedContainerName} blob=${blobName} err=${innerErr?.name || 'Error'}:${innerErr?.message}`,
+                            userId,
+                            { sessionId }
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            if (!actualFileSizeBytes) {
+                throw lastErr || new Error('Unknown error retrieving blob properties');
+            }
         } catch (blobError) {
-            logger.logError('enqueue-job', 'Failed to get file size from blob storage', userId, {
-                sessionId,
-                fileUrl,
-                error: blobError.message
-            });
+            const stackFirst = blobError?.stack?.split('\n')[0] || '';
+            logger.logError(
+                'enqueue-job',
+                `Failed to get blob size container=${derivedContainerName} blob=${blobName} attempts=${attemptsTried} err=${blobError?.name || 'Error'}:${blobError?.message} hasConn=${!!process.env.AZURE_STORAGE_CONNECTION_STRING} stackFirst=${stackFirst}`,
+                userId,
+                { sessionId }
+            );
             context.res = {
                 status: 400,
                 headers: {
@@ -165,7 +221,9 @@ module.exports = async function (context, req) {
             return;
         }
 
-        const actualCost = calculateProcessingCost(actualFileSizeBytes);
+    // Pricing util returns cost in USD (float, 2 decimals). Convert to integer cents for storage consistency.
+    const actualCostUsd = calculateProcessingCost(actualFileSizeBytes);
+    const actualCost = Math.round(actualCostUsd * 100); // store in cents
 
         // Initialize optimized Cosmos client with retry-aware configuration
         const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
@@ -174,15 +232,19 @@ module.exports = async function (context, req) {
         const accountsContainer = database.container('accounts');
         const transactionsContainer = database.container('transactions');
 
-        // Check account balance and deduct cost
+    // Track the transaction we create so we can update it with jobId later without a query
+    let pendingTransactionId = null;
+
+    // Check account balance and deduct cost
         try {
             const { resource: account } = await accountsContainer.item(userId, userId).read();
             
             if (!account || account.balance < actualCost) {
                 logger.logError('enqueue-job', 'Insufficient account balance', userId, { 
                     sessionId, 
-                    balance: account?.balance || 0, 
-                    requiredCost: actualCost 
+                balance: account?.balance || 0, 
+                requiredCostCents: actualCost, 
+                requiredCostUsd: actualCost / 100
                 });
                 context.res = {
                     status: 402, // Payment Required
@@ -193,14 +255,15 @@ module.exports = async function (context, req) {
                     body: { 
                         error: 'Insufficient account balance',
                         currentBalance: account?.balance || 0,
-                        requiredAmount: actualCost
+                        requiredAmountCents: actualCost,
+                        requiredAmountUsd: actualCost / 100
                     }
                 };
                 return;
             }
 
             // Deduct cost from account balance
-            account.balance -= actualCost;
+            account.balance -= actualCost; // both in cents
             account.updatedAt = new Date().toISOString();
             await accountsContainer.item(account.id, account.userId).replace(account);
 
@@ -210,20 +273,22 @@ module.exports = async function (context, req) {
                 id: transactionId,
                 userId: userId,
                 type: 'processing',
-                amount: actualCost,
+                amount: actualCost, // cents
                 description: `Video processing: ${fileName}`,
                 jobId: null, // Will be updated after job creation
                 createdAt: new Date().toISOString()
             };
 
             await transactionsContainer.items.create(transaction);
+            pendingTransactionId = transactionId; // remember for later update
 
             logger.logInfo('enqueue-job', 'Account balance updated and transaction created', userId, {
                 sessionId,
-                previousBalance: account.balance + actualCost,
+                previousBalance: account.balance + actualCost, // log pre-deduction (in cents)
                 newBalance: account.balance,
                 transactionId,
-                actualCost
+                actualCostCents: actualCost,
+                actualCostUsd: actualCost / 100
             });
 
         } catch (error) {
@@ -251,10 +316,10 @@ module.exports = async function (context, req) {
             id: jobId,
             userId: userId,
             fileName: fileName,
-            input_blob_url: fileUrl,
+            input_blob_url: `https://${process.env.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/${derivedContainerName}/${blobName}`,
             processingType: processingType,
             attenuationDb: attenuationDb,
-            actualCost: actualCost, // Store actual cost for potential refund
+            actualCost: actualCost, // cents
             fileSizeBytes: actualFileSizeBytes,
             status: 'queued',
             progress: 0,
@@ -264,16 +329,22 @@ module.exports = async function (context, req) {
         
         await jobsContainer.items.create(jobRecord);
 
-        // Update transaction with jobId
-        const transactionQuery = {
-            query: 'SELECT * FROM c WHERE c.userId = @userId AND c.jobId IS NULL ORDER BY c.createdAt DESC OFFSET 0 LIMIT 1',
-            parameters: [{ name: '@userId', value: userId }]
-        };
-        const { resources: transactions } = await transactionsContainer.items.query(transactionQuery).fetchAll();
-        if (transactions.length > 0) {
-            const transaction = transactions[0];
-            transaction.jobId = jobId;
-            await transactionsContainer.item(transaction.id, transaction.userId).replace(transaction);
+        // Update the previously created transaction with the jobId (avoid problematic SQL query)
+        if (pendingTransactionId) {
+            try {
+                const { resource: txn } = await transactionsContainer.item(pendingTransactionId, userId).read();
+                if (txn) {
+                    txn.jobId = jobId;
+                    await transactionsContainer.item(txn.id, txn.userId).replace(txn);
+                    await logger.logInfo('enqueue-job', 'Transaction updated with jobId', userId, { sessionId, jobId, transactionId: pendingTransactionId });
+                } else {
+                    await logger.logError('enqueue-job', 'Pending transaction not found for update', userId, { sessionId, jobId, transactionId: pendingTransactionId });
+                }
+            } catch (txnErr) {
+                await logger.logError('enqueue-job', `Failed to update transaction with jobId err=${txnErr.message}`, userId, { sessionId, jobId, transactionId: pendingTransactionId });
+            }
+        } else {
+            await logger.logError('enqueue-job', 'No pendingTransactionId recorded to update', userId, { sessionId, jobId });
         }
 
         await logger.logInfo('enqueue-job', 'Job successfully created in database', userId, {
@@ -342,7 +413,6 @@ module.exports = async function (context, req) {
             id: jobId,
             status: 'queued',
             message: 'Job queued successfully',
-            fileUrl: fileUrl,
             fileName: fileName,
             processingType: processingType
         };

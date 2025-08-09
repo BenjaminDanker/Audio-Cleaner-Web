@@ -424,7 +424,6 @@ const VideoUpload = ({ onJobCreated }) => {
 
     let uploadUrl = null
     let blobName = null
-    let fileUrl = null
     let cleanup = null // Function to clean up resources
 
     try {
@@ -452,7 +451,6 @@ const VideoUpload = ({ onJobCreated }) => {
 
       // Extract variables from response
       uploadUrl = uploadUrlResponse.data.uploadUrl
-      fileUrl = uploadUrlResponse.data.fileUrl
       blobName = uploadUrlResponse.data.blobName
       
       setUploadProgress(5) // URL obtained, ready to start upload
@@ -520,7 +518,6 @@ const VideoUpload = ({ onJobCreated }) => {
       // Step 2: Create processing job using the blob info
       const jobData = {
         fileName: blobName,
-        fileUrl: fileUrl,
         processingType: 'denoise',
         attenuationDb: attenuationDb
       }

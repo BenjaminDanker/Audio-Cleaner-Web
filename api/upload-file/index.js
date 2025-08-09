@@ -197,7 +197,6 @@ module.exports = async function (context, req) {
             body: {
                 success: true,
                 uploadUrl: uploadUrl,
-                fileUrl: uploadUrl,
                 blobName: blobName,
                 containerId: 'uploads',
                 expiresAt: sasResult.expiresAt.toISOString(),
