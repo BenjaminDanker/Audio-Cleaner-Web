@@ -187,6 +187,7 @@ resource "azurerm_log_analytics_workspace" "main" {
   location            = azurerm_resource_group.main.location
   resource_group_name = azurerm_resource_group.main.name
   sku                 = "PerGB2018"
+  # Retention: Azure Log Analytics minimum is 30 days for PerGB2018; cannot go lower (7 or 15 not supported).
   retention_in_days   = 30
 
   tags = var.tags
@@ -198,6 +199,8 @@ resource "azurerm_application_insights" "main" {
   resource_group_name = azurerm_resource_group.main.name
   workspace_id        = azurerm_log_analytics_workspace.main.id
   application_type    = "web"
+  daily_data_cap_in_gb                  = 2
+  daily_data_cap_notifications_disabled = true
 
   tags = var.tags
 }
@@ -372,12 +375,14 @@ resource "azurerm_container_app" "processor" {
       }
     }
 
-    # KEDA Service Bus scaling rule
-    azure_queue_scale_rule {
-      name         = "servicebus-scale-rule"
-      queue_name   = var.queue_name
-      queue_length = 1
-
+    # Service Bus queue scaling rule
+    custom_scale_rule {
+      name             = "servicebus-queue-scale"
+      custom_rule_type = "azure-servicebus"
+      metadata = {
+        queueName    = var.queue_name
+        messageCount = "1"  # scale out as soon as 1 message pending
+      }
       authentication {
         secret_name       = "servicebus-connectionstring"
         trigger_parameter = "connection"
