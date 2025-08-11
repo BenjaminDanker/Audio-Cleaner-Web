@@ -3,7 +3,7 @@ from pathlib import Path
 from azure.servicebus.aio import ServiceBusClient
 from azure.storage.blob.aio import BlobServiceClient
 from azure.cosmos import CosmosClient
-from video_handler import VideoProcessor
+from media_processor import MediaProcessor  # (VideoProcessor alias retained for backward compat)
 from config import load_config, setup_application_insights
 from job_store import JobStore
 from storage_service import BlobStorageService
@@ -248,36 +248,34 @@ class AudioCleanerProcessor:
 
                 self._log(event="processing_begin", jobId=job_id)
 
-                # Process video using existing VideoProcessor
+                # Process video using MediaProcessor with real progress callback
                 await self.progress(job_id, user_id, 35)
-                processor = VideoProcessor(mock_file, atten_db)
+                processor = MediaProcessor(mock_file, atten_db, processing_type=processing_type or "denoise")
 
                 try:
                     self._log(event="invoke_processor", jobId=job_id)
-                    await self.progress(job_id, user_id, 40)
 
-                    # Add progress updates during processing
-                    async def process_with_progress():
-                        # Simulate progress updates during processing
-                        for i in range(45, 75, 5):
-                            await asyncio.sleep(2)  # Update every 2 seconds
-                            await self.progress(job_id, user_id, i)
+                    progress_milestones = {10:45, 30:60, 85:80}  # task-level -> job progress mapping
 
-                    # Start progress updates
-                    progress_task = asyncio.create_task(process_with_progress())
+                    # Thread-safe bridge for task progress (task runs in executor)
+                    def task_progress_bridge(pct: int):  # called from loop thread via call_soon_threadsafe
+                        mapped = None
+                        # Pick the highest milestone <= pct
+                        for k in sorted(progress_milestones):
+                            if pct >= k:
+                                mapped = progress_milestones[k]
+                        if mapped is not None:
+                            asyncio.run_coroutine_threadsafe(self.progress(job_id, user_id, mapped), asyncio.get_event_loop())
 
-                    # Run the actual processing
-                    loop = asyncio.get_event_loop()
-                    output_path = await loop.run_in_executor(None, processor.process)
+                    async def run_processing():
+                        loop = asyncio.get_event_loop()
+                        # Provide a wrapper that schedules the bridge onto loop thread
+                        def progress_cb(p: int):
+                            loop.call_soon_threadsafe(task_progress_bridge, p)
+                        return await loop.run_in_executor(None, lambda: processor.process(progress_cb))
 
-                    # Cancel progress updates
-                    progress_task.cancel()
-                    try:
-                        await progress_task
-                    except asyncio.CancelledError:
-                        pass
+                    output_path = await run_processing()
 
-                    await self.progress(job_id, user_id, 80)
                     self._log(event="processing_done", jobId=job_id, output=output_path)
 
                     # Upload processed video to blob storage
