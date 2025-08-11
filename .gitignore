@@ -120,3 +120,4 @@ terraform.tfvars
 
 # Deployment scripts
 /deploy.ps1
+/docker-push.ps1

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 FFMPEG_TIMEOUT_S = 300
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+# Keep audio extensions in sync with api/shared/inputValidator.js allowedFileTypes
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 
 

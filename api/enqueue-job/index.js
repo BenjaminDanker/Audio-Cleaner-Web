@@ -274,7 +274,7 @@ module.exports = async function (context, req) {
                 userId: userId,
                 type: 'processing',
                 amount: actualCost, // cents
-                description: `Video processing: ${fileName}`,
+                description: `Media processing: ${fileName}`,
                 jobId: null, // Will be updated after job creation
                 createdAt: new Date().toISOString()
             };
@@ -310,7 +310,20 @@ module.exports = async function (context, req) {
 
         // Generate job ID and output file name
         const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const outputFileName = fileName ? fileName.replace(/\.[^/.]+$/, '_cleaned.mp3') : 'cleaned_audio.mp3';
+        // Preserve original extension for output artifact; just append _cleaned before extension
+        let outputFileName;
+        if (fileName) {
+            const lastDot = fileName.lastIndexOf('.')
+            if (lastDot !== -1) {
+                const base = fileName.substring(0, lastDot)
+                const ext = fileName.substring(lastDot)
+                outputFileName = `${base}_cleaned${ext}`
+            } else {
+                outputFileName = `${fileName}_cleaned`
+            }
+        } else {
+            outputFileName = 'cleaned_media'
+        }
         
         const jobRecord = {
             id: jobId,

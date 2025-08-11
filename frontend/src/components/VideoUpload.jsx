@@ -349,14 +349,15 @@ const VideoUpload = ({ onJobCreated }) => {
   }
 
   const handleFileSelect = async (file) => {
-    if (file && file.type.startsWith('video/')) {
+    // Accept both audio and video types
+    if (file && (file.type.startsWith('video/') || file.type.startsWith('audio/'))) {
       setSelectedFile(file)
       setEstimatedCost(null)
       
       // Calculate cost for the selected video
       await calculateCostForVideo(file)
     } else {
-      alert('Please select a valid video file')
+      alert('Please select a valid audio or video file')
     }
   }
 
@@ -594,7 +595,7 @@ const VideoUpload = ({ onJobCreated }) => {
 
   return (
     <div className="video-upload">
-      <h2>Upload Video for Audio Cleaning</h2>
+      <h2>Upload Audio or Video for Cleaning</h2>
       
       <div 
         className={`upload-zone ${isDragging ? 'dragover' : ''}`}
@@ -604,14 +605,14 @@ const VideoUpload = ({ onJobCreated }) => {
         onClick={() => fileInputRef.current?.click()}
       >
         <Upload size={48} className="upload-icon" />
-        <h3>Drop your video file here</h3>
+        <h3>Drop your media file here</h3>
         <p>or click to browse files</p>
-        <p className="upload-note">Supported formats: MP4, AVI, MOV, MKV</p>
+        <p className="upload-note">Supported video: MP4, AVI, MOV, MKV, WEBM • Audio: MP3, WAV, M4A, AAC, FLAC, OGG, OPUS</p>
         
         <input
           ref={fileInputRef}
           type="file"
-          accept="video/*"
+          accept="video/*,audio/*"
           onChange={handleFileInputChange}
           style={{ display: 'none' }}
         />

@@ -25,8 +25,10 @@ class InputValidator {
         };
 
         this.allowedFileTypes = [
+            // Video
             '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v',
-            '.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a'
+            // Audio
+            '.mp3', '.wav', '.aac', '.ogg', '.flac', '.m4a', '.opus'
         ];
 
         this.dangerousPatterns = [

@@ -66,32 +66,64 @@ class Config:
 
 
 def load_config() -> Config:
+    """
+    Load strongly validated configuration from environment.
+    """
+
+    errors: list[str] = []
+
+    # Core connection strings
     sb = os.getenv('AZURE_SERVICE_BUS_CONNECTION_STRING')
-    if not sb:
-        raise ValueError("AZURE_SERVICE_BUS_CONNECTION_STRING required")
     storage = os.getenv('AZURE_STORAGE_CONNECTION_STRING')
-    if not storage:
-        raise ValueError("AZURE_STORAGE_CONNECTION_STRING required")
     cosmos = os.getenv('COSMOS_CONNECTION_STRING')
+    if not sb:
+        errors.append('AZURE_SERVICE_BUS_CONNECTION_STRING')
+    if not storage:
+        errors.append('AZURE_STORAGE_CONNECTION_STRING')
     if not cosmos:
-        raise ValueError("COSMOS_CONNECTION_STRING required")
-    idle = float(os.getenv('IDLE_SLEEP_SECONDS', '5'))
-    uploads_container = os.getenv('UPLOADS_CONTAINER_NAME')
-    processed_container = os.getenv('PROCESSED_CONTAINER_NAME')
-    queue_name = os.getenv('QUEUE_NAME') or os.getenv('AZURE_SERVICE_BUS_QUEUE_NAME')
-    delete_inputs = os.getenv('DELETE_INPUT_ON_SUCCESS', 'true').lower() in {'1','true','yes','on'}
-    missing = [name for name, val in [
-        ("UPLOADS_CONTAINER_NAME", uploads_container),
-        ("PROCESSED_CONTAINER_NAME", processed_container),
-        ("QUEUE_NAME", queue_name)
-    ] if not val]
-    if missing:
-        raise ValueError("Missing required environment variable(s): " + ", ".join(missing))
+        errors.append('COSMOS_CONNECTION_STRING')
+
+    uploads_container = os.getenv('UPLOADS_CONTAINER_NAME') or ''
+    processed_container = os.getenv('PROCESSED_CONTAINER_NAME') or ''
+    queue_name = os.getenv('QUEUE_NAME') or ''
+    if not uploads_container:
+        errors.append('UPLOADS_CONTAINER_NAME')
+    if not processed_container:
+        errors.append('PROCESSED_CONTAINER_NAME')
+    if not queue_name:
+        errors.append('QUEUE_NAME')
+
+    # Boolean + numeric parsing
+    delete_inputs_raw = os.getenv('DELETE_INPUT_ON_SUCCESS', 'true')
+    delete_inputs = delete_inputs_raw.lower() in {'1', 'true', 'yes', 'on'}
+
+    idle_raw = os.getenv('IDLE_SLEEP_SECONDS', '5')
+    try:
+        idle = float(idle_raw)
+    except ValueError:
+        logger.warning("Invalid IDLE_SLEEP_SECONDS=%s; defaulting to 5.0", idle_raw)
+        idle = 5.0
+
+    if errors:
+        raise ValueError(
+            "Configuration error (set these env vars for local docker run):\n  - " + "\n  - ".join(errors)
+        )
+
+    # Log minimal summary (avoid printing secrets)
+    logger.info(
+        "Config loaded: containers=(%s,%s) queue=%s idle=%s delete_inputs=%s",
+        uploads_container,
+        processed_container,
+        queue_name,
+        idle,
+        delete_inputs,
+    )
+
     return Config(
-        service_bus_connection=sb,
-        storage_connection=storage,
-        cosmos_connection=cosmos,
-        queue_name=queue_name,
+        service_bus_connection=sb,  # type: ignore[arg-type]
+        storage_connection=storage,  # type: ignore[arg-type]
+        cosmos_connection=cosmos,  # type: ignore[arg-type]
+        queue_name=queue_name,  # type: ignore[arg-type]
         uploads_container=uploads_container,
         processed_container=processed_container,
         idle_sleep_seconds=idle,

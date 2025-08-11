@@ -119,7 +119,7 @@ const Dashboard = () => {
     <div className="dashboard">
       <div className="dashboard-header">
         <h1>Welcome back, {user?.name || 'User'}!</h1>
-        <p>Clean your audio files with AI-powered noise reduction</p>
+        <p>Clean audio from your audio or video files with AI-powered noise reduction</p>
       </div>
 
       {paymentMessage && (
@@ -134,7 +134,7 @@ const Dashboard = () => {
           className={`tab ${activeTab === 'upload' ? 'active' : ''}`}
           onClick={() => setActiveTab('upload')}
         >
-          Upload Video
+          Upload Media
         </button>
         <button 
           className={`tab ${activeTab === 'jobs' ? 'active' : ''}`}

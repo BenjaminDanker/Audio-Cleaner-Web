@@ -253,9 +253,17 @@ const JobStatus = ({ job, onUpdate, onDelete }) => {
           
           {job.status === 'completed' && hasDownloadUrl() && (
             <button
-              onClick={() => downloadInParallel(getDownloadUrl(), job.filename)}
+              onClick={() => downloadInParallel(getDownloadUrl(), (() => {
+                // Derive processed filename: insert _processed before extension
+                const name = job.filename || 'download';
+                const lastDot = name.lastIndexOf('.');
+                if (lastDot > 0 && lastDot !== name.length - 1) {
+                  return name.slice(0, lastDot) + '_processed' + name.slice(lastDot);
+                }
+                return name + '_processed';
+              })())}
               className="btn btn-sm btn-primary"
-              title="Download"
+              title="Download processed file"
               disabled={isDownloading}
             >
               <Download size={16} />

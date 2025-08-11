@@ -69,7 +69,7 @@ class DeepFilterNetEnhancer:
 
 
 def resolve_models_root(relative: str = "models/DeepFilterNet3") -> str:
-    base_dir = Path(__file__).parent.parent  # processor/src
+    base_dir = Path(__file__).parent.parent.parent  # processor/src/ai -> processor/src -> processor -> /app
     root = getattr(__import__('sys'), "_MEIPASS", str(base_dir))  # type: ignore[attr-defined]
     return os.path.join(root, relative)
 
@@ -78,9 +78,9 @@ def _get_enhancer_and_extractor():
     global _ENHANCER, _EXTRACTOR  # noqa: PLW0603
     if _ENHANCER is None or _EXTRACTOR is None:
         model_root = resolve_models_root()
-    enh = DeepFilterNetEnhancer(model_root)
-    ext = MediaExtractor(enh.sample_rate)
-    _ENHANCER, _EXTRACTOR = enh, ext
+        enh = DeepFilterNetEnhancer(model_root)
+        ext = MediaExtractor(enh.sample_rate)
+        _ENHANCER, _EXTRACTOR = enh, ext
     return _ENHANCER, _EXTRACTOR
 
 
