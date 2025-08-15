@@ -11,3 +11,8 @@ aiohttp
 torch==2.1.0+cpu
 torchaudio==2.1.0+cpu
 --extra-index-url https://download.pytorch.org/whl/cpu
+numpy
+scipy
+pyloudnorm
+openai>=1.30.0
+requests

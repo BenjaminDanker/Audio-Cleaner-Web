@@ -4,6 +4,19 @@ import axios from 'axios'
 import { useAccount } from './AccountContext'
 import { calculateJobCost } from '../utils/pricing'
 import './VideoUpload.css'
+// Common language options (BCP-47 codes)
+const AVAILABLE_LANGUAGES = [
+  { code: 'en', name: 'English' },
+  { code: 'es', name: 'Spanish' },
+  { code: 'fr', name: 'French' },
+  { code: 'de', name: 'German' },
+  { code: 'it', name: 'Italian' },
+  { code: 'pt', name: 'Portuguese' },
+  { code: 'ja', name: 'Japanese' },
+  { code: 'ko', name: 'Korean' },
+  { code: 'zh-Hans', name: 'Chinese (Simplified)' },
+]
+
 
 // Configuration function for optimal upload settings
 const getUploadConfig = (fileSize) => {
@@ -301,6 +314,7 @@ const VideoUpload = ({ onJobCreated }) => {
   const [activeUploadId, setActiveUploadId] = useState(null) // Track active upload to prevent races
   const [estimatedCost, setEstimatedCost] = useState(null)
   const [isCalculatingCost, setIsCalculatingCost] = useState(false)
+  const [selectedLanguages, setSelectedLanguages] = useState(['en'])
   const fileInputRef = useRef(null)
   const activeUploadRef = useRef(null) // More reliable tracking using ref
 
@@ -519,8 +533,9 @@ const VideoUpload = ({ onJobCreated }) => {
       // Step 2: Create processing job using the blob info
       const jobData = {
         fileName: blobName,
-        processingType: 'denoise',
-        attenuationDb: attenuationDb
+        processingType: 'clarity',
+        attenuationDb: attenuationDb,
+        languagesRequested: selectedLanguages
       }
 
       setUploadProgress(95) // Submitting job
@@ -596,6 +611,33 @@ const VideoUpload = ({ onJobCreated }) => {
   return (
     <div className="video-upload">
       <h2>Upload Audio or Video for Cleaning</h2>
+
+      <div className="language-options" style={{ marginBottom: 12 }}>
+        <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Subtitles / Translations</label>
+        <p style={{ marginTop: 0, marginBottom: 8, fontSize: 12, color: '#666' }}>
+          Select one or more languages for subtitles. English counts as the primary language; each additional language may cost extra credits.
+        </p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {AVAILABLE_LANGUAGES.map((lang) => (
+            <label key={lang.code} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, border: '1px solid #ddd', borderRadius: 6, padding: '6px 10px' }}>
+              <input
+                type="checkbox"
+                checked={selectedLanguages.includes(lang.code)}
+                onChange={(e) => {
+                  const checked = e.target.checked
+                  setSelectedLanguages((prev) => {
+                    if (checked) {
+                      return Array.from(new Set([...(prev || []), lang.code]))
+                    }
+                    return (prev || []).filter((c) => c !== lang.code)
+                  })
+                }}
+              />
+              <span>{lang.name}</span>
+            </label>
+          ))}
+        </div>
+      </div>
       
       <div 
         className={`upload-zone ${isDragging ? 'dragover' : ''}`}

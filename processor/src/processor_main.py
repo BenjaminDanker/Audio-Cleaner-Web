@@ -7,6 +7,10 @@ from media_processor import MediaProcessor  # (VideoProcessor alias retained for
 from config import load_config, setup_application_insights
 from job_store import JobStore
 from storage_service import BlobStorageService
+from ai.asr_pipeline import transcribe_and_translate_file, SubtitleBundle
+from captions.caption_encoder import write_srt, write_vtt, Segment as CapSegment
+from media_extractor import MediaExtractor
+from pricing import extra_language_charge_cents
 
 setup_application_insights()
 
@@ -286,6 +290,37 @@ class AudioCleanerProcessor:
 
                     await self.progress(job_id, user_id, 95)
 
+                    # Optional: Transcription + translations -> SRT/VTT
+                    subtitles_urls = {}
+                    try:
+                        # Look for requested languages in job record metadata
+                        requested_langs = []
+                        try:
+                            requested_langs = record.metadata.get('languagesRequested', []) or []
+                        except Exception:
+                            requested_langs = []
+                        if requested_langs:
+                            # Extract WAV from processed output for ASR
+                            extractor = MediaExtractor(16000)
+                            extraction = extractor.extract(output_path, temp_dir)
+                            wav_for_asr = extraction.extracted_wav_path
+                            bundle: SubtitleBundle = transcribe_and_translate_file(wav_for_asr, 16000, requested_langs)
+                            # Persist SRT/VTT per language
+                            for lang, segs in bundle.segments_by_lang.items():
+                                cap_segments = [CapSegment(s.start, s.end, s.text) for s in segs]
+                                base_name = f"{record.user_id}/{record.id}_{lang}"
+                                srt_path = os.path.join(temp_dir, f"{lang}.srt")
+                                vtt_path = os.path.join(temp_dir, f"{lang}.vtt")
+                                write_srt(cap_segments, srt_path)
+                                write_vtt(cap_segments, vtt_path)
+                                srt_blob = f"{base_name}.srt"
+                                vtt_blob = f"{base_name}.vtt"
+                                srt_url = await self.storage.upload_processed(srt_path, srt_blob)
+                                vtt_url = await self.storage.upload_processed(vtt_path, vtt_blob)
+                                subtitles_urls[lang] = {"srt": srt_url, "vtt": vtt_url}
+                    except Exception as sub_err:
+                        self._log(level=logging.WARNING, event="subtitles_failed", jobId=job_id, error=str(sub_err))
+
                     # Update job status to completed
                     await self.update_job_status(
                         job_id,
@@ -293,8 +328,61 @@ class AudioCleanerProcessor:
                         user_id,
                         progress=100,
                         downloadUrl=download_url,
-                        outputBlobName=output_file_name
+                        outputBlobName=output_file_name,
+                        subtitles=subtitles_urls
                     )
+
+                    # Post-completion: apply extra language credit deduction if any
+                    try:
+                        additional_langs = 0
+                        try:
+                            requested_langs = record.metadata.get('languagesRequested', []) or []
+                            # Count languages beyond the primary
+                            additional_langs = max(0, len(requested_langs) - 1)
+                        except Exception:
+                            additional_langs = 0
+                        if additional_langs > 0:
+                            # Approx minutes from extracted WAV duration
+                            try:
+                                import soundfile as sf
+                                import numpy as np
+                                # Extract WAV from the processed output to measure duration
+                                extractor2 = MediaExtractor(16000)
+                                extraction2 = extractor2.extract(output_path, temp_dir)
+                                wav_path2 = extraction2.extracted_wav_path
+                                data, rate = sf.read(wav_path2, dtype='float32')
+                                samples = data.shape[0] if getattr(data, 'shape', None) else len(data)
+                                dur_min = float(samples) / float(rate) / 60.0
+                            except Exception:
+                                dur_min = 0.0
+                            extra_cents = extra_language_charge_cents(dur_min, additional_langs)
+                            if extra_cents > 0:
+                                # Deduct from accounts container and create a transaction record
+                                accounts = self.database.get_container_client('accounts')
+                                txns = self.database.get_container_client('transactions')
+                                # Fetch account
+                                acc = accounts.read_item(user_id, user_id)
+                                bal = int(acc.get('balance', 0))
+                                if bal >= extra_cents:
+                                    acc['balance'] = bal - extra_cents
+                                    acc['updatedAt'] = self.repo._now_iso()
+                                    accounts.upsert_item(acc)
+                                    tid = f"txn_lang_{job_id}"
+                                    tx = {
+                                        'id': tid,
+                                        'userId': user_id,
+                                        'type': 'translation-extra',
+                                        'amount': extra_cents,
+                                        'description': f'Extra languages ({additional_langs}) for job {job_id}',
+                                        'jobId': job_id,
+                                        'createdAt': self.repo._now_iso(),
+                                    }
+                                    txns.upsert_item(tx)
+                                    self._log(event="extra_lang_deducted", jobId=job_id, userId=user_id, cents=extra_cents)
+                                else:
+                                    self._log(level=logging.WARNING, event="extra_lang_insufficient_balance", jobId=job_id, needed=extra_cents, balance=bal)
+                    except Exception as credit_err:
+                        self._log(level=logging.WARNING, event="extra_lang_credit_error", jobId=job_id, error=str(credit_err))
 
                     # Delete the input blob now that processing is complete (optional)
                     if self.cfg.delete_inputs_on_success:

@@ -82,3 +82,106 @@ variable "queue_name" {
   type        = string
   default     = "video-processing-jobs"
 }
+
+# Streaming & AI configuration
+variable "streaming_api_keys" {
+  description = "Comma-separated API keys for streaming auth"
+  type        = string
+  default     = ""
+}
+
+variable "cosmos_api_keys_container_name" {
+  description = "Cosmos DB container name for API keys"
+  type        = string
+  default     = "ApiKeys"
+}
+
+variable "openai_endpoint" {
+  description = "Azure OpenAI endpoint"
+  type        = string
+  default     = ""
+}
+
+variable "openai_api_version" {
+  description = "Azure OpenAI API version"
+  type        = string
+  default     = "2024-02-15-preview"
+}
+
+variable "openai_whisper_deployment" {
+  description = "Azure OpenAI Whisper deployment name"
+  type        = string
+  default     = ""
+}
+
+variable "openai_whisper_model_name" {
+  description = "Azure OpenAI Whisper model name (e.g., 'whisper' or 'gpt-4o-transcribe' depending on region availability)"
+  type        = string
+  default     = ""
+}
+
+variable "openai_whisper_model_version" {
+  description = "Azure OpenAI Whisper model version"
+  type        = string
+  default     = ""
+}
+
+variable "openai_chat_deployment" {
+  description = "Azure OpenAI chat deployment for cleanup"
+  type        = string
+  default     = ""
+}
+
+variable "openai_chat_model_name" {
+  description = "Azure OpenAI chat model name for cleanup (e.g., 'gpt-4o-mini')"
+  type        = string
+  default     = ""
+}
+
+variable "openai_chat_model_version" {
+  description = "Azure OpenAI chat model version"
+  type        = string
+  default     = ""
+}
+
+variable "openai_api_key" {
+  description = "Azure OpenAI API key"
+  type        = string
+  sensitive   = true
+}
+
+variable "translator_region" {
+  description = "Azure Translator region"
+  type        = string
+  default     = ""
+}
+
+variable "translator_key" {
+  description = "Azure Translator key"
+  type        = string
+  sensitive   = true
+}
+
+variable "streaming_min_replicas" {
+  description = "Min replicas for streaming container app"
+  type        = number
+  default     = 0
+}
+
+variable "streaming_max_replicas" {
+  description = "Max replicas for streaming container app"
+  type        = number
+  default     = 3
+}
+
+variable "streaming_image_name" {
+  description = "Streaming container image name"
+  type        = string
+  default     = "audio-cleaner-streaming"
+}
+
+variable "streaming_image_tag" {
+  description = "Streaming container image tag"
+  type        = string
+  default     = "latest"
+}

@@ -106,7 +106,7 @@ module.exports = async function (context, req) {
          userId = principal.userId; // Update userId with principal data
 
          // Basic input validation
-        const { fileName, processingType, attenuationDb } = req.body || {};
+    const { fileName, processingType, attenuationDb, languagesRequested } = req.body || {};
 
         if (!fileName) {
             logger.logError('enqueue-job', 'Missing required field: fileName (blobName)', userId, { sessionId });
@@ -337,7 +337,9 @@ module.exports = async function (context, req) {
             status: 'queued',
             progress: 0,
             message: 'Job queued successfully',
-            createdAt: new Date().toISOString()
+            createdAt: new Date().toISOString(),
+            // Store requested languages in flexible metadata field
+            languagesRequested: Array.isArray(languagesRequested) ? languagesRequested : []
         };
         
         await jobsContainer.items.create(jobRecord);
@@ -427,7 +429,8 @@ module.exports = async function (context, req) {
             status: 'queued',
             message: 'Job queued successfully',
             fileName: fileName,
-            processingType: processingType
+            processingType: processingType,
+            languagesRequested: Array.isArray(languagesRequested) ? languagesRequested : []
         };
 
         const duration = Date.now() - startTime;

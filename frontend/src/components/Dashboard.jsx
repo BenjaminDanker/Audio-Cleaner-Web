@@ -3,8 +3,10 @@ import axios from 'axios'
 import { useAuth } from './AuthContext'
 import { useAccount } from './AccountContext'
 import VideoUpload from './VideoUpload'
+import Streaming from './Streaming'
 import JobStatus from './JobStatus'
 import AccountBalance from './AccountBalance'
+import ApiKeys from './components/ApiKeys'
 import './Dashboard.css'
 
 const Dashboard = () => {
@@ -137,6 +139,12 @@ const Dashboard = () => {
           Upload Media
         </button>
         <button 
+          className={`tab ${activeTab === 'stream' ? 'active' : ''}`}
+          onClick={() => setActiveTab('stream')}
+        >
+          Streaming (Preview)
+        </button>
+        <button 
           className={`tab ${activeTab === 'jobs' ? 'active' : ''}`}
           onClick={() => setActiveTab('jobs')}
         >
@@ -148,11 +156,21 @@ const Dashboard = () => {
         >
           Account Balance
         </button>
+        <button 
+          className={`tab ${activeTab === 'keys' ? 'active' : ''}`}
+          onClick={() => setActiveTab('keys')}
+        >
+          API Keys
+        </button>
       </div>
 
       <div className="dashboard-content">
         {activeTab === 'upload' && (
           <VideoUpload onJobCreated={addJob} />
+        )}
+
+        {activeTab === 'stream' && (
+          <Streaming />
         )}
         
         {activeTab === 'jobs' && (
@@ -188,6 +206,10 @@ const Dashboard = () => {
         
         {activeTab === 'account' && (
           <AccountBalance />
+        )}
+
+        {activeTab === 'keys' && (
+          <ApiKeys />
         )}
       </div>
     </div>

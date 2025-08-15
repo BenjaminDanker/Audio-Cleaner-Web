@@ -1,0 +1,14 @@
+.streaming{max-width:920px;margin:0 auto;padding:16px}
+.streaming-header{margin-bottom:16px}
+.streaming-error{background:#ffe5e5;color:#8b0000;padding:8px 12px;border-radius:6px;display:flex;justify-content:space-between;align-items:center}
+.streaming-controls{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:16px 0}
+.language-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;padding:8px;border:1px solid #e5e5e5;border-radius:8px}
+.lang-item{display:flex;gap:8px;align-items:center;font-size:14px}
+.account-row{display:flex;gap:8px;align-items:center}
+.streaming-actions{margin-top:16px}
+.start-btn,.stop-btn{padding:10px 16px;border:none;border-radius:6px;color:#fff;cursor:pointer}
+.start-btn{background:#2563eb}
+.start-btn:disabled{opacity:.5;cursor:not-allowed}
+.stop-btn{background:#dc2626}
+.session-info{margin-top:16px;display:grid;gap:6px}
+.session-info code{background:#f4f4f5;padding:2px 6px;border-radius:4px}

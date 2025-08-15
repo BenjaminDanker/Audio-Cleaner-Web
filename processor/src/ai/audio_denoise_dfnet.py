@@ -19,6 +19,7 @@ from pathlib import Path
 from ai.base import MediaTask, MediaTaskContext, registry, ProgressCallback
 from media_extractor import MediaExtractor, MediaType
 from df.enhance import enhance, init_df, load_audio, save_audio  # type: ignore
+from .audio_clarity_pipeline import process_file as clarity_process_file  # full CPU clarity chain
 
 logger = logging.getLogger(__name__)
 
@@ -112,13 +113,20 @@ class DenoiseDFNetTask(MediaTask):
         if self._enhancer is None or self._extractor is None:
             self._enhancer, self._extractor = _get_enhancer_and_extractor()
         _schedule_progress(progress_cb, 10)
+        # Detect media type first, then run the full clarity pipeline on the ORIGINAL input
+        # (clarity_process_file performs its own extraction and returns a processed WAV)
         extraction = self._extractor.extract(input_path, ctx.work_dir)
         _schedule_progress(progress_cb, 30)
-        enhanced_wav = os.path.join(ctx.work_dir, "enhanced.wav")
-        self._enhancer.enhance_file(extraction.extracted_wav_path, ctx.attenuation_db, enhanced_wav)
+        try:
+            clarity_wav, _sr = clarity_process_file(input_path, ctx.work_dir, params={"denoise_atten_db": ctx.attenuation_db})
+        except Exception:
+            # Fallback to simple DFNet enhancement if clarity chain fails for any reason
+            enhanced_wav = os.path.join(ctx.work_dir, "enhanced.wav")
+            self._enhancer.enhance_file(extraction.extracted_wav_path, ctx.attenuation_db, enhanced_wav)
+            clarity_wav = enhanced_wav
         if extraction.media_type == MediaType.AUDIO:
-            return self._finalize_audio(enhanced_wav, extraction.original_extension, ctx, progress_cb)
-        return self._finalize_video(enhanced_wav, input_path, extraction.original_extension, ctx, progress_cb)
+            return self._finalize_audio(clarity_wav, extraction.original_extension, ctx, progress_cb)
+        return self._finalize_video(clarity_wav, input_path, extraction.original_extension, ctx, progress_cb)
 
     # ---- Internal finalize helpers ----
     def _finalize_audio(

@@ -27,10 +27,12 @@ AI-powered video noise reduction in the cloud. Upload a video and receive a vers
 ## Features
 
 - Noise reduction for any video format via DeepFilterNet3 AI model
+- CPU-only speech clarity pipeline with optional subtitles/translations
 - Secure direct-to-blob uploads/downloads with time-limited SAS tokens
 - Serverless API (Azure Functions) and queue-based processing (Service Bus)
 - GitHub OAuth authentication and Stripe subscription management
 - Automatic cleanup of old files and cost-efficient scaling to zero
+- Live streaming via OBS companion using API key authentication
 
 ## Prerequisites
 
@@ -112,6 +114,14 @@ graph LR
 
 6. Open <http://localhost:4280> in your browser.
 
+7. (Optional) Start streaming service for local dev:
+
+   ```bash
+   # In a Python venv
+   pip install -r processor/streaming/requirements.txt
+   uvicorn processor.streaming.app:app --reload --host 127.0.0.1 --port 8000
+   ```
+
 ## Configuration
 
 1. Copy and fill local settings:
@@ -127,6 +137,7 @@ graph LR
    - `COSMOS_DB_CONNECTION` (Cosmos DB connection string)
    - `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`
    - `STRIPE_SECRET_KEY`
+   - `STREAMING_API_KEY` (single key) or `STREAMING_API_KEYS` (comma-separated) for OBS/plugin auth
 
 3. Terraform variables:
 
@@ -139,6 +150,25 @@ graph LR
 3. Click **Process** → job enqueued on Service Bus.
 4. View processing status in real time.
 5. Download the processed video via SAS-protected URL.
+
+### Live Streaming (OBS Companion)
+
+1. Set an API key in your environment (and in Azure for production):
+
+   - `STREAMING_API_KEY` or `STREAMING_API_KEYS`
+
+2. Run the streaming service locally (see above) or deploy it.
+
+3. Use the reference companion in `obs-companion/`:
+
+   ```powershell
+   # PowerShell
+   $env:API_BASE = "http://localhost:4280/api"
+   $env:STREAMING_API_KEY = "<your_key>"
+   python obs-companion/obs_companion.py --sr 16000 --lang en
+   ```
+
+The website does not start streaming; OBS companion initiates sessions with the API key and streams audio over WebSocket.
 
 ## Deployment
 

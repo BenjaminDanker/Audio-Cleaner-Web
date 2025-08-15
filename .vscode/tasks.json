@@ -28,6 +28,17 @@
 			"options": {
 				"cwd": "${workspaceFolder}/api"
 			}
+		},
+		{
+			"label": "shell: npm install (functions)",
+			"type": "shell",
+			"command": "npm install",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": [
+				"$eslint-stylish"
+			],
+			"group": "build"
 		}
 	]
 }

@@ -181,6 +181,16 @@ resource "azurerm_cosmosdb_sql_container" "transactions" {
   partition_key_paths = ["/userId"]
 }
 
+# Cosmos container for API Keys (hashed storage)
+resource "azurerm_cosmosdb_sql_container" "api_keys" {
+  name                = var.cosmos_api_keys_container_name
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  database_name       = azurerm_cosmosdb_sql_database.main.name
+
+  partition_key_paths = ["/id"]
+}
+
 # Application Insights
 resource "azurerm_log_analytics_workspace" "main" {
   name                = "log-${local.project_name}-${local.resource_suffix}"
@@ -203,6 +213,71 @@ resource "azurerm_application_insights" "main" {
   daily_data_cap_notifications_disabled = true
 
   tags = var.tags
+}
+
+# Azure OpenAI account (Cognitive Services - OpenAI)
+resource "azurerm_cognitive_account" "openai" {
+  name                = "aoai-${local.project_name}-${local.resource_suffix}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  kind                = "OpenAI"
+  sku_name            = "S0"
+  public_network_access_enabled = true
+
+  tags = var.tags
+}
+
+data "azurerm_cognitive_account_api_keys" "openai" {
+  resource_group_name = azurerm_resource_group.main.name
+  name                = azurerm_cognitive_account.openai.name
+}
+
+# Optional: model deployments for Whisper and Chat cleanup
+resource "azurerm_cognitive_deployment" "openai_whisper" {
+  count                = length(var.openai_whisper_deployment) > 0 && length(var.openai_whisper_model_name) > 0 ? 1 : 0
+  name                 = var.openai_whisper_deployment
+  cognitive_account_id = azurerm_cognitive_account.openai.id
+  model {
+    format  = "OpenAI"
+    name    = var.openai_whisper_model_name
+    version = var.openai_whisper_model_version
+  }
+  sku {
+    name     = "GlobalStandard"
+    capacity = 1
+  }
+}
+
+resource "azurerm_cognitive_deployment" "openai_chat" {
+  count                = length(var.openai_chat_deployment) > 0 && length(var.openai_chat_model_name) > 0 ? 1 : 0
+  name                 = var.openai_chat_deployment
+  cognitive_account_id = azurerm_cognitive_account.openai.id
+  model {
+    format  = "OpenAI"
+    name    = var.openai_chat_model_name
+    version = var.openai_chat_model_version
+  }
+  sku {
+    name     = "GlobalStandard"
+    capacity = 1
+  }
+}
+
+# Azure Translator (TextTranslation)
+resource "azurerm_cognitive_account" "translator" {
+  name                = "tr-${local.project_name}-${local.resource_suffix}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  kind                = "TextTranslation"
+  sku_name            = "S1"
+  public_network_access_enabled = true
+
+  tags = var.tags
+}
+
+data "azurerm_cognitive_account_api_keys" "translator" {
+  resource_group_name = azurerm_resource_group.main.name
+  name                = azurerm_cognitive_account.translator.name
 }
 
 # Static Web App (with integrated Azure Functions)
@@ -230,6 +305,18 @@ resource "azurerm_static_web_app" "main" {
   "UPLOADS_CONTAINER_NAME"                = var.uploads_container_name
   "PROCESSED_CONTAINER_NAME"              = var.processed_container_name
   "QUEUE_NAME"                            = var.queue_name
+  # API Keys + Cosmos names for Functions/APIs
+  "STREAMING_API_KEYS"                    = var.streaming_api_keys
+  "COSMOS_DB_NAME"                        = azurerm_cosmosdb_sql_database.main.name
+  "COSMOS_API_KEYS_CONTAINER"             = var.cosmos_api_keys_container_name
+  # Azure OpenAI + Translator (for Functions if needed later)
+  # Azure OpenAI / Translator for Functions (if needed)
+  "AZURE_OPENAI_ENDPOINT"                 = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
+  "AZURE_OPENAI_API_VERSION"              = var.openai_api_version
+  "AZURE_OPENAI_WHISPER_DEPLOYMENT"       = var.openai_whisper_deployment
+  "AZURE_OPENAI_CLEANUP_DEPLOYMENT"       = var.openai_chat_deployment
+  "AZURE_TRANSLATOR_REGION"               = var.translator_region
+  "AZURE_TRANSLATOR_ENDPOINT"             = "https://api.cognitive.microsofttranslator.com"
   }
 
   tags = var.tags
@@ -354,6 +441,55 @@ resource "azurerm_container_app" "processor" {
         secret_name = "cosmos-connectionstring"
       }
 
+      # Azure OpenAI & Translator configuration for file/batch pipeline
+      # Azure OpenAI env expected by processor code
+      env {
+        name  = "AZURE_OPENAI_ENDPOINT"
+        value = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
+      }
+      env {
+        name  = "AZURE_OPENAI_API_VERSION"
+        value = var.openai_api_version
+      }
+      env {
+        name  = "AZURE_OPENAI_WHISPER_DEPLOYMENT"
+        value = var.openai_whisper_deployment
+      }
+      env {
+        name  = "AZURE_OPENAI_CLEANUP_DEPLOYMENT"
+        value = var.openai_chat_deployment
+      }
+      # Translator env expected by processor code
+      env {
+        name  = "AZURE_TRANSLATOR_REGION"
+        value = var.translator_region
+      }
+      env {
+        name  = "AZURE_TRANSLATOR_ENDPOINT"
+        value = "https://api.cognitive.microsofttranslator.com"
+      }
+      env {
+        name  = "STREAMING_API_KEYS"
+        value = var.streaming_api_keys
+      }
+      env {
+        name  = "COSMOS_DB_NAME"
+        value = azurerm_cosmosdb_sql_database.main.name
+      }
+      env {
+        name  = "COSMOS_API_KEYS_CONTAINER"
+        value = var.cosmos_api_keys_container_name
+      }
+
+      env {
+        name        = "AZURE_OPENAI_API_KEY"
+        secret_name = "openai-api-key"
+      }
+      env {
+        name        = "AZURE_TRANSLATOR_KEY"
+        secret_name = "translator-key"
+      }
+
       # Propagate container names for future code configurability
       env {
         name  = "UPLOADS_CONTAINER_NAME"
@@ -403,6 +539,128 @@ resource "azurerm_container_app" "processor" {
   }
 
   # Cosmos connection string for processor
+  secret {
+    name  = "cosmos-connectionstring"
+    value = azurerm_cosmosdb_account.main.primary_sql_connection_string
+  }
+
+  # Secrets for external APIs
+  secret {
+    name  = "openai-api-key"
+    value = (length(var.openai_api_key) > 0 ? var.openai_api_key : data.azurerm_cognitive_account_api_keys.openai.primary_key)
+  }
+  secret {
+    name  = "translator-key"
+    value = (length(var.translator_key) > 0 ? var.translator_key : data.azurerm_cognitive_account_api_keys.translator.primary_key)
+  }
+
+  tags = var.tags
+}
+
+# Streaming Container App (FastAPI WS service)
+resource "azurerm_container_app" "streaming" {
+  name                         = "ca-stream-${local.resource_suffix}"
+  container_app_environment_id = azurerm_container_app_environment.main.id
+  resource_group_name          = azurerm_resource_group.main.name
+  revision_mode                = "Single"
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.processor.id]
+  }
+
+  registry {
+    server   = azurerm_container_registry.main.login_server
+    identity = azurerm_user_assigned_identity.processor.id
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8000
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+
+  template {
+    min_replicas = var.streaming_min_replicas
+    max_replicas = var.streaming_max_replicas
+
+    container {
+      name   = "streaming"
+      image  = "${azurerm_container_registry.main.login_server}/${var.streaming_image_name}:${var.streaming_image_tag}"
+      cpu    = 1.0
+      memory = "1.5Gi"
+
+      env {
+        name  = "STREAMING_API_KEYS"
+        value = var.streaming_api_keys
+      }
+      # Azure OpenAI env expected by streaming code
+      env {
+        name  = "AZURE_OPENAI_ENDPOINT"
+        value = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
+      }
+      env {
+        name  = "AZURE_OPENAI_API_VERSION"
+        value = var.openai_api_version
+      }
+      env {
+        name  = "AZURE_OPENAI_WHISPER_DEPLOYMENT"
+        value = var.openai_whisper_deployment
+      }
+      env {
+        name  = "AZURE_OPENAI_CLEANUP_DEPLOYMENT"
+        value = var.openai_chat_deployment
+      }
+      env {
+        name        = "AZURE_OPENAI_API_KEY"
+        secret_name = "openai-api-key"
+      }
+      env {
+        name  = "AZURE_TRANSLATOR_REGION"
+        value = var.translator_region
+      }
+      env {
+        name        = "AZURE_TRANSLATOR_KEY"
+        secret_name = "translator-key"
+      }
+      env {
+        name  = "AZURE_TRANSLATOR_ENDPOINT"
+        value = "https://api.cognitive.microsofttranslator.com"
+      }
+      env {
+        name        = "COSMOS_CONNECTION_STRING"
+        secret_name = "cosmos-connectionstring"
+      }
+      env {
+        name  = "AZURE_STORAGE_CONNECTION_STRING"
+        value = azurerm_storage_account.main.primary_connection_string
+      }
+      env {
+        name  = "PROCESSED_CONTAINER_NAME"
+        value = var.processed_container_name
+      }
+      env {
+        name  = "COSMOS_DB_NAME"
+        value = azurerm_cosmosdb_sql_database.main.name
+      }
+      env {
+        name  = "COSMOS_API_KEYS_CONTAINER"
+        value = var.cosmos_api_keys_container_name
+      }
+    }
+  }
+
+  secret {
+    name  = "openai-api-key"
+    value = var.openai_api_key
+  }
+  secret {
+    name  = "translator-key"
+    value = var.translator_key
+  }
   secret {
     name  = "cosmos-connectionstring"
     value = azurerm_cosmosdb_account.main.primary_sql_connection_string
