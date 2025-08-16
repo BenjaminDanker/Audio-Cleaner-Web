@@ -16,6 +16,8 @@
     "@azure/functions": "4.0.0",
     "@azure/service-bus": "7.9.0",
     "@azure/storage-blob": "12.17.0",
+    "@azure/identity": "^4.0.1",
+    "@azure/arm-appcontainers": "^2.0.0",
     "@pagopa/express-azure-functions": "^3.0.0",
     "cors": "2.8.5",
     "express": "^4.21.2",

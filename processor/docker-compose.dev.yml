@@ -1,23 +1,20 @@
-version: '3.8'
-
 services:
-  processor:
+  streaming:
     build:
       # Compose file lives inside the processor/ directory already, so context is current dir
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.streaming
     ports:
-      - "8080:8080"
+      - "8000:8000"
     env_file:
-      # Use cloud env values for now (contains Azure connection strings)
-      - ./.env.cloud
+      - ./.env
     environment:
-      # Override with cloud settings
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
     volumes:
-      # Mount source code for development (optional - remove for production-like testing)
-      - ./src:/app/src
+      # Mount source code for hot-reload style iteration; remove for prod-like testing
+      - ./shared:/app/shared
+      - ./streaming:/app/streaming
     restart: unless-stopped
     networks:
       - audio-cleaner-dev

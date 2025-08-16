@@ -61,7 +61,10 @@ module.exports = async function (context, req) {
                 balance: 0,
                 currency: 'usd',
                 createdAt: new Date().toISOString(),
-                updatedAt: new Date().toISOString()
+                updatedAt: new Date().toISOString(),
+                apiKeyHash: null,
+                apiKeyCreatedAt: null,
+                apiKeyName: null
             };
             await accountsContainer.items.create(account);
         }

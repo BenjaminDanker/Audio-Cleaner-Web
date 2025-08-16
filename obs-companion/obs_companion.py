@@ -9,8 +9,10 @@ import numpy as np
 import sounddevice as sd
 import websockets
 
-API_BASE = os.getenv("API_BASE", "http://localhost:4280/api")
-STREAMING_API_KEY = os.getenv("STREAMING_API_KEY", "")
+API_BASE = os.getenv("API_BASE", "http://localhost:7071/api")
+# SECURITY FIX: Use user-specific API key from environment or config
+# Users should set this to their personal API key from the frontend
+USER_API_KEY = os.getenv("USER_API_KEY", "")  # Changed from STREAMING_API_KEY
 
 CHUNK_MS = 320  # ~0.32s chunks at 16k -> about 2s server window
 
@@ -18,13 +20,13 @@ def create_session(languages):
     url = f"{API_BASE}/create-stream-session"
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": STREAMING_API_KEY,
+        "x-api-key": USER_API_KEY,  # Use user-specific key
     }
     resp = requests.post(url, headers=headers, json={"languagesRequested": languages}, timeout=10)
     resp.raise_for_status()
     return resp.json()
 
-async def stream_audio(session_id: str, ws_url: str, sr: int, languages, device=None):
+async def stream_audio(session_id: str, ws_url: str, token: str, sr: int, languages, device=None):
     # Convert relative wsUrl to absolute ws
     if ws_url.startswith("/"):
         # Dev: map /stream/* to local processor service at 127.0.0.1:8000
@@ -34,7 +36,8 @@ async def stream_audio(session_id: str, ws_url: str, sr: int, languages, device=
         ws_full = ws_url
 
     print(f"Connecting WS: {ws_full}")
-    async with websockets.connect(ws_full, extra_headers={"x-api-key": STREAMING_API_KEY}) as ws:
+    # SIMPLIFIED: Only send session token, API key already validated during session creation
+    async with websockets.connect(ws_full, extra_headers={"x-session-token": token}) as ws:
         # Send init
         init = {"type": "init", "sr": sr, "languages": languages}
         await ws.send(json.dumps(init))
@@ -101,16 +104,17 @@ def main():
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
 
-    if not STREAMING_API_KEY:
-        print("Missing STREAMING_API_KEY env var", file=sys.stderr)
+    if not USER_API_KEY:
+        print("Missing USER_API_KEY env var - please set your personal API key from the frontend", file=sys.stderr)
         sys.exit(1)
 
     data = create_session(args.lang)
     session_id = data.get("sessionId")
     ws_url = data.get("wsUrl")
+    token = data.get("token")  # Get session token from response
     print("Session:", session_id, ws_url)
     
-    asyncio.run(stream_audio(session_id, ws_url, args.sr, args.lang, device=args.device))
+    asyncio.run(stream_audio(session_id, ws_url, token, args.sr, args.lang, device=args.device))
 
 if __name__ == "__main__":
     main()

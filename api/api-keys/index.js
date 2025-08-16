@@ -1,9 +1,9 @@
-const { CosmosClient } = require('@azure/cosmos')
 const crypto = require('crypto')
 const SimpleSecurityMiddleware = require('../shared/simpleSecurityMiddleware')
+const AzureSDKConfig = require('../shared/azureSDKConfig')
 
 const DB_NAME = process.env.COSMOS_DB_NAME || 'app'
-const KEYS_CONTAINER = process.env.COSMOS_API_KEYS_CONTAINER || 'ApiKeys'
+const ACCOUNTS_CONTAINER = 'accounts'  // Store API keys in user accounts
 
 module.exports = async function (context, req) {
   const security = new SimpleSecurityMiddleware(process.env.COSMOS_CONNECTION_STRING)
@@ -14,13 +14,23 @@ module.exports = async function (context, req) {
     return
   }
 
+  const userId = sec.userInfo?.userId
+  if (!userId) {
+    context.res = { 
+      status: 400, 
+      headers: { 'Access-Control-Allow-Origin': '*', ...security.getSecurityHeaders() },
+      jsonBody: { message: 'User identification required' } 
+    }
+    return
+  }
+
   // Only basic CORS headers
   const headers = { 'Access-Control-Allow-Origin': '*', ...security.getSecurityHeaders() }
   const method = req.method
 
-  const cosmos = security.cosmosClient || new CosmosClient(process.env.COSMOS_CONNECTION_STRING)
+  const cosmos = security.cosmosClient || AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING)
   const db = cosmos.database(DB_NAME)
-  const container = db.container(KEYS_CONTAINER)
+  const container = db.container(ACCOUNTS_CONTAINER)
 
   try {
     if (method === 'OPTIONS') {
@@ -28,45 +38,108 @@ module.exports = async function (context, req) {
       return
     }
 
+    // Get user account
+    const { resource: account } = await container.item(userId, userId).read()
+    if (!account) {
+      context.res = { status: 404, headers, jsonBody: { message: 'Account not found' } }
+      return
+    }
+
     if (method === 'GET') {
-      const { resources } = await container.items.query({ query: 'SELECT c.id, c.name, c.isActive, c.createdAt FROM c ORDER BY c.createdAt DESC' }).fetchAll()
-      context.res = { status: 200, headers, jsonBody: { keys: resources || [] } }
+      // Return current API key info (but not the key itself)
+      const keyInfo = account.apiKeyHash ? {
+        hasKey: true,
+        name: account.apiKeyName || 'API Key',
+        createdAt: account.apiKeyCreatedAt
+      } : {
+        hasKey: false
+      }
+      
+      context.res = { status: 200, headers, jsonBody: keyInfo }
       return
     }
 
     if (method === 'POST') {
       const body = req.body || {}
-      const name = body.name || 'obs'
-      const key = crypto.randomBytes(24).toString('base64url')
-      const hash = crypto.createHash('sha256').update(key).digest('hex')
-      const doc = {
-        id: crypto.randomUUID(),
-        name,
-        apiKeyHash: hash,
-        isActive: true,
-        createdAt: new Date().toISOString(),
-        createdBy: sec.userInfo?.userId || 'system',
+      const name = body.name || 'OBS Streaming Key'
+      
+      // Don't allow creating a key if one already exists
+      if (account.apiKeyHash) {
+        context.res = { status: 409, headers, jsonBody: { 
+          message: 'API key already exists. Use PUT to rotate it.' 
+        }}
+        return
       }
-      await container.items.create(doc)
-      context.res = { status: 201, headers, jsonBody: { id: doc.id, name: doc.name, apiKey: key } }
+      
+      // Generate API key with user identification: userId_randomKey
+      const keyPart = crypto.randomBytes(32).toString('base64url')
+      const key = `${userId}_${keyPart}`
+      const hash = crypto.createHash('sha256').update(key).digest('hex')
+      
+      // Update account with new API key
+      const updatedAccount = {
+        ...account,
+        apiKeyHash: hash,
+        apiKeyName: name,
+        apiKeyCreatedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      
+      await container.item(userId, userId).replace(updatedAccount)
+      context.res = { status: 201, headers, jsonBody: { 
+        name: name, 
+        apiKey: key,
+        message: 'API key created successfully'
+      }}
       return
     }
 
     if (method === 'DELETE') {
-      const id = context.bindingData.id
-      if (!id) {
-        context.res = { status: 400, headers, jsonBody: { message: 'Missing id' } }
+      // Remove API key from account
+      if (!account.apiKeyHash) {
+        context.res = { status: 404, headers, jsonBody: { message: 'No API key found' } }
         return
       }
-      // Soft delete: set isActive=false
-      const { resource } = await container.item(id, id).read()
-      if (!resource) {
-        context.res = { status: 404, headers, jsonBody: { message: 'Not found' } }
+      
+      const updatedAccount = {
+        ...account,
+        apiKeyHash: null,
+        apiKeyName: null,
+        apiKeyCreatedAt: null,
+        updatedAt: new Date().toISOString()
+      }
+      
+      await container.item(userId, userId).replace(updatedAccount)
+      context.res = { status: 200, headers, jsonBody: { message: 'API key deleted' } }
+      return
+    }
+
+    if (method === 'PUT') {
+      // API Key rotation
+      if (!account.apiKeyHash) {
+        context.res = { status: 404, headers, jsonBody: { message: 'No API key to rotate' } }
         return
       }
-      resource.isActive = false
-      await container.item(id, id).replace(resource)
-      context.res = { status: 200, headers, jsonBody: { id, isActive: false } }
+      
+      // Generate new key with user identification: userId_randomKey  
+      const newKeyPart = crypto.randomBytes(32).toString('base64url')
+      const newKey = `${userId}_${newKeyPart}`
+      const newHash = crypto.createHash('sha256').update(newKey).digest('hex')
+      
+      // Update account with rotated key
+      const updatedAccount = {
+        ...account,
+        apiKeyHash: newHash,
+        apiKeyCreatedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      
+      await container.item(userId, userId).replace(updatedAccount)
+      context.res = { status: 200, headers, jsonBody: { 
+        name: account.apiKeyName,
+        apiKey: newKey,
+        message: 'API key rotated successfully'
+      }}
       return
     }
 

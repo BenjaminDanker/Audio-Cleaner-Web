@@ -5,10 +5,12 @@ const crypto = require('crypto');
 const createAzureFunctionHandler = require("@pagopa/express-azure-functions/dist/src/createAzureFunctionsHandler").default;
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { CosmosClient } = require('@azure/cosmos');
+const MinimalLogger = require('../shared/minimalLogger');
+const AzureSDKConfig = require('../shared/azureSDKConfig');
 
-// Initialize Cosmos DB client
-const cosmosClient = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
-const database = cosmosClient.database('AudioCleanerDB');
+// Initialize Cosmos DB client with optimized configuration
+const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
+const database = cosmosClient.database(process.env.COSMOS_DB_NAME || 'app');
 const accountsContainer = database.container('accounts');
 const transactionsContainer = database.container('transactions');
 
@@ -48,92 +50,123 @@ app.use('/api/webhook-stripe', (req, res, next) => {
 app.post(
   "/api/webhook-stripe",
   async (req, res) => {
-    console.log('Stripe webhook endpoint called');
-    console.log('Method:', req.method);
-    console.log('Content-Type:', req.headers['content-type']);
-    if (DEBUG) {
-      console.log('Body present (req.body keys):', req.body && typeof req.body === 'object' ? Object.keys(req.body) : typeof req.body);
-    }
-    console.log('Raw buffer length:', req._rawBuffer ? req._rawBuffer.length : 'none');
+    // Initialize retry-aware minimal logger
+    const logger = new MinimalLogger({ log: console }).getLogger();
+    
+    // Generate session ID for request tracking
+    const sessionId = `webhook_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    logger.logInfo('webhook-stripe', 'Stripe webhook endpoint called', 'system', {
+      sessionId,
+      method: req.method,
+      contentType: req.headers['content-type'],
+      rawBufferLength: req._rawBuffer ? req._rawBuffer.length : 0,
+      hasBody: !!req.body
+    });
     
     try {
-  const sig = req.headers["stripe-signature"]; 
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+      const sig = req.headers["stripe-signature"]; 
+      const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
       if (!endpointSecret) {
         // List any STRIPE* env keys to help diagnose missing secret (without values)
         const stripeEnvKeys = Object.keys(process.env).filter(k => k.startsWith('STRIPE'));
-        console.warn('STRIPE_WEBHOOK_SECRET env var missing. Available STRIPE-related keys:', stripeEnvKeys);
+        logger.logError('webhook-stripe', 'STRIPE_WEBHOOK_SECRET env var missing', 'system', {
+          sessionId,
+          availableStripeKeys: stripeEnvKeys
+        });
       }
 
-      console.log('Resolved webhook secret (single)');
-      console.log(`Secret present: ${!!endpointSecret}`);
-      console.log(`Stripe signature exists: ${!!sig}`);
+      logger.logDebug('webhook-stripe', 'Webhook authentication check', 'system', {
+        sessionId,
+        secretPresent: !!endpointSecret,
+        signaturePresent: !!sig
+      });
       
       if (!sig || !endpointSecret) {
-        console.error(`Missing signature or webhook secret. Sig: ${!!sig}, Secret: ${!!endpointSecret}`);
+        logger.logError('webhook-stripe', 'Missing signature or webhook secret', 'system', {
+          sessionId,
+          hasSignature: !!sig,
+          hasSecret: !!endpointSecret
+        });
         return res.status(400).json({ error: 'Missing stripe signature or webhook secret' });
       }
 
       // Raw body obtained from middleware or adapter
       const rawBody = req._rawBuffer || (Buffer.isBuffer(req.body) ? req.body : Buffer.from(typeof req.body === 'string' ? req.body : ''));
-      if (DEBUG) {
-        const preview = rawBody.slice(0, 80).toString();
-        const sha256 = crypto.createHash('sha256').update(rawBody).digest('hex');
-        console.log('Raw body preview (first 80 chars):', preview);
-        console.log('Raw body sha256:', sha256);
-      }
+      
+      logger.logDebug('webhook-stripe', 'Raw body processing', 'system', {
+        sessionId,
+        rawBodyLength: rawBody.length,
+        bodyType: typeof req.body,
+        hasRawBuffer: !!req._rawBuffer
+      });
 
       let event;
       try {
-  event = stripe.webhooks.constructEvent(
-          rawBody,
-          sig,
-          endpointSecret
-        );
-        console.log("✅ Signature verified successfully");
-        if (DEBUG) {
-          try {
-            // Recompute signature (primary v1) for diagnostic only
-            const timestamp = (sig.split(',').find(p => p.startsWith('t=')) || '').split('=')[1];
-            if (timestamp) {
-              const signedPayload = `${timestamp}.${rawBody.toString()}`;
-              const expected = crypto.createHmac('sha256', endpointSecret).update(signedPayload).digest('hex');
-              console.log('Computed expected v1 signature (first 16 hex):', expected.slice(0,16));
-            }
-          } catch (sigErr) {
-            console.warn('Signature recompute diagnostic failed:', sigErr.message);
-          }
-        }
+        event = stripe.webhooks.constructEvent(rawBody, sig, endpointSecret);
+        
+        logger.logInfo('webhook-stripe', 'Signature verified successfully', 'system', {
+          sessionId,
+          eventType: event.type,
+          eventId: event.id
+        });
+        
       } catch (err) {
-        console.error("❌ Webhook signature verification failed:", err.message);
+        logger.logError('webhook-stripe', 'Webhook signature verification failed', 'system', {
+          sessionId,
+          error: err.message,
+          hasRawBody: !!rawBody,
+          rawBodyLength: rawBody.length
+        });
         return res.status(400).json({ error: `Webhook Error: ${err.message}` });
       }
 
       // Handle the event
-      console.log(`Event type: ${event.type}`);
-      console.log(`Event ID: ${event.id}`);
+      logger.logInfo('webhook-stripe', 'Processing webhook event', 'system', {
+        sessionId,
+        eventType: event.type,
+        eventId: event.id
+      });
       
       switch (event.type) {
         case 'checkout.session.completed':
-          console.log('Processing checkout.session.completed event');
-          await handleCheckoutSessionCompleted(event.data.object, event.id);
+          logger.logInfo('webhook-stripe', 'Processing checkout.session.completed event', 'system', {
+            sessionId,
+            checkoutSessionId: event.data.object.id
+          });
+          await handleCheckoutSessionCompleted(event.data.object, event.id, logger, sessionId);
           break;
         case 'payment_intent.succeeded':
-          console.log('Processing payment_intent.succeeded event');
-          await handlePaymentSucceeded(event.data.object);
+          logger.logInfo('webhook-stripe', 'Processing payment_intent.succeeded event', 'system', {
+            sessionId,
+            paymentIntentId: event.data.object.id
+          });
+          await handlePaymentSucceeded(event.data.object, logger, sessionId);
           break;
         case 'payment_intent.payment_failed':
-          await handlePaymentFailed(event.data.object);
+          logger.logInfo('webhook-stripe', 'Processing payment_intent.payment_failed event', 'system', {
+            sessionId,
+            paymentIntentId: event.data.object.id
+          });
+          await handlePaymentFailed(event.data.object, logger, sessionId);
           break;
         default:
-          console.log(`Unhandled event type: ${event.type}`);
+          logger.logWarning('webhook-stripe', 'Unhandled event type', 'system', {
+            sessionId,
+            eventType: event.type,
+            eventId: event.id
+          });
       }
 
       res.json({ received: true });
 
     } catch (error) {
-      console.error('Error processing webhook:', error.message || 'Unknown error');
+      logger.logError('webhook-stripe', 'Error processing webhook', 'system', {
+        sessionId,
+        error: error.message || 'Unknown error',
+        stack: error.stack
+      });
       res.status(500).json({ error: 'Internal server error' });
     }
   }
@@ -141,34 +174,54 @@ app.post(
 
 module.exports = createAzureFunctionHandler(app);
 
-async function handleCheckoutSessionCompleted(session, eventId) {
-  console.log('Processing checkout session completed:', session.id);
-  console.log('Session metadata:', JSON.stringify(session.metadata, null, 2));
-  console.log('Session amount_total:', session.amount_total);
-  console.log('Session payment_status:', session.payment_status);
+async function handleCheckoutSessionCompleted(session, eventId, logger, sessionId) {
+  logger.logInfo('webhook-stripe', 'Processing checkout session completed', 'system', {
+    sessionId,
+    checkoutSessionId: session.id,
+    amountTotal: session.amount_total,
+    paymentStatus: session.payment_status,
+    hasMetadata: !!session.metadata
+  });
 
   try {
     if (!session || !session.metadata) {
-      console.warn('Missing session metadata – skipping');
+      logger.logWarning('webhook-stripe', 'Missing session metadata - skipping', 'system', {
+        sessionId,
+        checkoutSessionId: session.id
+      });
       return;
     }
+    
     if (session.payment_status && session.payment_status !== 'paid') {
-      console.log(`Session payment_status is ${session.payment_status}, not crediting yet.`);
+      logger.logInfo('webhook-stripe', 'Session payment not completed yet', 'system', {
+        sessionId,
+        checkoutSessionId: session.id,
+        paymentStatus: session.payment_status
+      });
       return;
     }
+    
     const userId = session.metadata.userId;
     const userEmail = session.metadata.userEmail;
     const actualAmount = Number(session.amount_total) || 0; // integer (cents)
     const paymentIntentId = session.payment_intent;
 
-    console.log(`User ID: ${userId}, Email: ${userEmail}, Amount (cents): ${actualAmount}`);
+    logger.logInfo('webhook-stripe', 'Processing payment for user account topup', 'system', {
+      sessionId,
+      userId: userId?.substring(0, 8) + '...',
+      userEmail,
+      amountCents: actualAmount,
+      hasPaymentIntentId: !!paymentIntentId,
+      metadataType: session.metadata.type
+    });
 
     if (!(session.metadata.type === 'account_topup' && userId && actualAmount > 0 && paymentIntentId)) {
-      console.log('Conditions not met for crediting account:', {
+      logger.logWarning('webhook-stripe', 'Conditions not met for crediting account', 'system', {
+        sessionId,
         type: session.metadata.type,
         hasUserId: !!userId,
         actualAmount,
-        paymentIntentIdPresent: !!paymentIntentId
+        hasPaymentIntentId: !!paymentIntentId
       });
       return;
     }
@@ -181,14 +234,25 @@ async function handleCheckoutSessionCompleted(session, eventId) {
         { name: '@pid', value: paymentIntentId }
       ]
     };
+    
     const { resources: existing } = await transactionsContainer.items.query(querySpec, { partitionKey: userId }).fetchAll();
     if (existing && existing.length > 0) {
-      console.log(`Duplicate event/payment intent detected (paymentIntentId=${paymentIntentId}) – skipping credit.`);
+      logger.logWarning('webhook-stripe', 'Duplicate payment intent detected - skipping credit', 'system', {
+        sessionId,
+        userId: userId.substring(0, 8) + '...',
+        paymentIntentId,
+        existingTransactionId: existing[0].id
+      });
       return;
     }
 
-    console.log('Idempotency OK, updating account balance...');
-    await updateAccountBalance(userId, actualAmount);
+    logger.logInfo('webhook-stripe', 'Idempotency check passed - updating account balance', 'system', {
+      sessionId,
+      userId: userId.substring(0, 8) + '...',
+      amountCents: actualAmount
+    });
+    
+    await updateAccountBalance(userId, actualAmount, logger, sessionId);
 
     await createTransaction({
       userId,
@@ -197,31 +261,59 @@ async function handleCheckoutSessionCompleted(session, eventId) {
       description: 'Account top-up via Stripe',
       stripePaymentIntentId: paymentIntentId,
       eventId
+    }, logger, sessionId);
+    
+    logger.logInfo('webhook-stripe', 'Account balance updated successfully', 'system', {
+      sessionId,
+      userId: userId.substring(0, 8) + '...',
+      amountCents: actualAmount,
+      amountDollars: (actualAmount/100).toFixed(2)
     });
-    console.log(`Account balance updated for user ${userId}: +$${actualAmount/100}`);
+    
   } catch (error) {
-    console.error('Error handling checkout session:', error.message || 'Unknown error');
+    logger.logError('webhook-stripe', 'Error handling checkout session', 'system', {
+      sessionId,
+      userId: userId?.substring(0, 8) + '...',
+      error: error.message || 'Unknown error',
+      stack: error.stack
+    });
     throw error;
   }
 }
 
-async function handlePaymentSucceeded(paymentIntent) {
-    console.log('Processing payment succeeded:', paymentIntent.id);
+async function handlePaymentSucceeded(paymentIntent, logger, sessionId) {
+    logger.logInfo('webhook-stripe', 'Processing payment succeeded', 'system', {
+      sessionId,
+      paymentIntentId: paymentIntent.id,
+      amount: paymentIntent.amount
+    });
     // Additional logic for successful payments if needed
 }
 
-async function handlePaymentFailed(paymentIntent) {
-    console.log('Processing payment failed:', paymentIntent.id);
+async function handlePaymentFailed(paymentIntent, logger, sessionId) {
+    logger.logError('webhook-stripe', 'Processing payment failed', 'system', {
+      sessionId,
+      paymentIntentId: paymentIntent.id,
+      amount: paymentIntent.amount,
+      lastPaymentError: paymentIntent.last_payment_error
+    });
     // Additional logic for failed payments if needed
 }
 
-async function updateAccountBalance(userId, amount) {
+async function updateAccountBalance(userId, amount, logger, sessionId) {
     try {
         // Get existing account or create new one
         let account;
         try {
             const { resource } = await accountsContainer.item(userId, userId).read();
             account = resource;
+            
+            logger.logDebug('webhook-stripe', 'Found existing account', 'system', {
+              sessionId,
+              userId: userId.substring(0, 8) + '...',
+              currentBalance: account.balance
+            });
+            
         } catch (error) {
             if (error.code === 404) {
                 // Create new account
@@ -249,14 +341,21 @@ async function updateAccountBalance(userId, amount) {
             await accountsContainer.items.create(account);
         }
         
-        console.log(`Account balance updated: ${userId} -> $${account.balance/100}`);
+        logger.logInfo('webhook-stripe', 'Account balance updated', 'system', {
+          sessionId,
+          userId: userId.substring(0, 8) + '...',
+          amountDollars: (account.balance/100).toFixed(2)
+        });
     } catch (error) {
-        console.error('Error updating account balance:', error.message);
+        logger.logError('webhook-stripe', 'Error updating account balance', 'system', {
+          sessionId,
+          error: error.message
+        });
         throw error;
     }
 }
 
-async function createTransaction(transactionData) {
+async function createTransaction(transactionData, logger, sessionId) {
     try {
         const transaction = {
             id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -270,9 +369,16 @@ async function createTransaction(transactionData) {
         };
         
         await transactionsContainer.items.create(transaction);
-        console.log(`Transaction created: ${transaction.id}`);
+        logger.logInfo('webhook-stripe', 'Transaction created', 'system', {
+          sessionId,
+          transactionId: transaction.id,
+          userId: (transactionData.userId || '').substring(0, 8) + '...'
+        });
     } catch (error) {
-        console.error('Error creating transaction:', error.message);
+        logger.logError('webhook-stripe', 'Error creating transaction', 'system', {
+          sessionId,
+          error: error.message
+        });
         throw error;
     }
 }

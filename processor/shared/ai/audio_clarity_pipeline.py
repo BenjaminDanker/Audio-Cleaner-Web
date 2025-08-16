@@ -32,7 +32,19 @@ except Exception:  # pragma: no cover - optional dependency during dev
     def lfilter(b, a, x):  # type: ignore
         return x
 
-from .audio_denoise_dfnet import _get_enhancer_and_extractor  # reuse model + extractor
+_ENHANCER_ONLY = None
+_GET_EXTRACTOR = None
+
+def _get_enhancer_only():
+    global _ENHANCER_ONLY  # noqa: PLW0603
+    if _ENHANCER_ONLY is None:
+        from .audio_denoise_dfnet import _get_enhancer
+        _ENHANCER_ONLY = _get_enhancer()
+    return _ENHANCER_ONLY
+
+def _get_enhancer_and_extractor():
+    from .audio_denoise_dfnet import _get_enhancer_and_extractor as _gee
+    return _gee()
 
 
 # ---------------------------- Utilities ----------------------------
@@ -290,7 +302,8 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     p = ClarityParams(**(params or {}))
     if state is None:
         state = StreamState()
-    enhancer, _ = _get_enhancer_and_extractor()
+    # Streaming does NOT require media extraction; get enhancer only to avoid batch dependency
+    enhancer = _get_enhancer_only()
     x = _ensure_mono_f32(chunk_mono_f32)
     from df.enhance import enhance  # type: ignore
 

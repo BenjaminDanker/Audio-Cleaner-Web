@@ -1,6 +1,9 @@
 # Audio Cleaner Pro - Terraform Infrastructure
 # Target: Static Web Apps + Azure Functions + Container Apps for Processor
 
+# Get current Azure subscription
+data "azurerm_subscription" "current" {}
+
 # Generate a random suffix for unique naming
 resource "random_id" "suffix" {
   byte_length = 4
@@ -170,6 +173,12 @@ resource "azurerm_cosmosdb_sql_container" "accounts" {
   database_name       = azurerm_cosmosdb_sql_database.main.name
   
   partition_key_paths = ["/userId"]
+  
+  # API keys are now stored as fields in user accounts
+  # Unique constraint on apiKeyHash to prevent duplicate keys across all users
+  unique_key {
+    paths = ["/apiKeyHash"]
+  }
 }
 
 resource "azurerm_cosmosdb_sql_container" "transactions" {
@@ -179,16 +188,6 @@ resource "azurerm_cosmosdb_sql_container" "transactions" {
   database_name       = azurerm_cosmosdb_sql_database.main.name
   
   partition_key_paths = ["/userId"]
-}
-
-# Cosmos container for API Keys (hashed storage)
-resource "azurerm_cosmosdb_sql_container" "api_keys" {
-  name                = var.cosmos_api_keys_container_name
-  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
-  account_name        = azurerm_cosmosdb_account.main.name
-  database_name       = azurerm_cosmosdb_sql_database.main.name
-
-  partition_key_paths = ["/id"]
 }
 
 # Application Insights
@@ -227,10 +226,8 @@ resource "azurerm_cognitive_account" "openai" {
   tags = var.tags
 }
 
-data "azurerm_cognitive_account_api_keys" "openai" {
-  resource_group_name = azurerm_resource_group.main.name
-  name                = azurerm_cognitive_account.openai.name
-}
+// Note: AzureRM provider does not expose a data source to read Cognitive Services keys.
+// Provide OpenAI keys via variables/secrets instead of reading from the resource.
 
 # Optional: model deployments for Whisper and Chat cleanup
 resource "azurerm_cognitive_deployment" "openai_whisper" {
@@ -275,10 +272,7 @@ resource "azurerm_cognitive_account" "translator" {
   tags = var.tags
 }
 
-data "azurerm_cognitive_account_api_keys" "translator" {
-  resource_group_name = azurerm_resource_group.main.name
-  name                = azurerm_cognitive_account.translator.name
-}
+// Translator key must be provided via variables/secrets; do not attempt to read via provider.
 
 # Static Web App (with integrated Azure Functions)
 resource "azurerm_static_web_app" "main" {
@@ -305,10 +299,15 @@ resource "azurerm_static_web_app" "main" {
   "UPLOADS_CONTAINER_NAME"                = var.uploads_container_name
   "PROCESSED_CONTAINER_NAME"              = var.processed_container_name
   "QUEUE_NAME"                            = var.queue_name
-  # API Keys + Cosmos names for Functions/APIs
-  "STREAMING_API_KEYS"                    = var.streaming_api_keys
+  # Streaming configuration - API Keys are managed per-user in Cosmos DB
+  "STREAMING_ENDPOINT"                    = "https://${azurerm_container_app.streaming.ingress[0].fqdn}"
+  "STREAM_SESSION_SIGNING_KEY"            = var.stream_session_signing_key
   "COSMOS_DB_NAME"                        = azurerm_cosmosdb_sql_database.main.name
-  "COSMOS_API_KEYS_CONTAINER"             = var.cosmos_api_keys_container_name
+  # Container scaling configuration
+  "AZURE_SUBSCRIPTION_ID"                 = data.azurerm_subscription.current.subscription_id
+  "AZURE_RESOURCE_GROUP_NAME"             = azurerm_resource_group.main.name
+  "STREAMING_CONTAINER_APP_NAME"          = azurerm_container_app.streaming.name
+  "MIN_STREAMING_BALANCE"                 = "1.0"
   # Azure OpenAI + Translator (for Functions if needed later)
   # Azure OpenAI / Translator for Functions (if needed)
   "AZURE_OPENAI_ENDPOINT"                 = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
@@ -320,6 +319,13 @@ resource "azurerm_static_web_app" "main" {
   }
 
   tags = var.tags
+}
+
+# Role assignment for Static Web App to manage Container Apps
+resource "azurerm_role_assignment" "swa_container_contributor" {
+  scope                = azurerm_resource_group.main.id
+  role_definition_name = "Contributor"
+  principal_id         = azurerm_static_web_app.main.identity[0].principal_id
 }
 
 # Get current client configuration
@@ -414,11 +420,6 @@ resource "azurerm_container_app" "processor" {
       }
 
       env {
-        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
-        value = azurerm_application_insights.main.connection_string
-      }
-
-      env {
         name  = "USE_MANAGED_IDENTITY"
         value = "true"
       }
@@ -469,16 +470,12 @@ resource "azurerm_container_app" "processor" {
         value = "https://api.cognitive.microsofttranslator.com"
       }
       env {
-        name  = "STREAMING_API_KEYS"
-        value = var.streaming_api_keys
-      }
-      env {
         name  = "COSMOS_DB_NAME"
         value = azurerm_cosmosdb_sql_database.main.name
       }
       env {
-        name  = "COSMOS_API_KEYS_CONTAINER"
-        value = var.cosmos_api_keys_container_name
+        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        value = azurerm_application_insights.main.connection_string
       }
 
       env {
@@ -509,6 +506,11 @@ resource "azurerm_container_app" "processor" {
         name  = "REFUND_API_ENDPOINT"
         value = "https://${azurerm_static_web_app.main.default_host_name}/api/refund-failed-job"
       }
+
+      env {
+        name  = "PROCESSOR_MODE"
+        value = "batch"
+      }
     }
 
     # Service Bus queue scaling rule
@@ -524,21 +526,20 @@ resource "azurerm_container_app" "processor" {
         trigger_parameter = "connection"
       }
     }
-  }
 
-  # Service Bus connection string secret for KEDA
+  } # end template
+
+  # KEDA/connection secrets for the processor app
   secret {
     name  = "servicebus-connectionstring"
     value = azurerm_servicebus_namespace.main.default_primary_connection_string
   }
 
-  # Storage connection string for processor
   secret {
     name  = "storage-connectionstring"
     value = azurerm_storage_account.main.primary_connection_string
   }
 
-  # Cosmos connection string for processor
   secret {
     name  = "cosmos-connectionstring"
     value = azurerm_cosmosdb_account.main.primary_sql_connection_string
@@ -547,11 +548,11 @@ resource "azurerm_container_app" "processor" {
   # Secrets for external APIs
   secret {
     name  = "openai-api-key"
-    value = (length(var.openai_api_key) > 0 ? var.openai_api_key : data.azurerm_cognitive_account_api_keys.openai.primary_key)
+  value = var.openai_api_key
   }
   secret {
     name  = "translator-key"
-    value = (length(var.translator_key) > 0 ? var.translator_key : data.azurerm_cognitive_account_api_keys.translator.primary_key)
+  value = var.translator_key
   }
 
   tags = var.tags
@@ -593,10 +594,6 @@ resource "azurerm_container_app" "streaming" {
       cpu    = 1.0
       memory = "1.5Gi"
 
-      env {
-        name  = "STREAMING_API_KEYS"
-        value = var.streaming_api_keys
-      }
       # Azure OpenAI env expected by streaming code
       env {
         name  = "AZURE_OPENAI_ENDPOINT"
@@ -647,8 +644,16 @@ resource "azurerm_container_app" "streaming" {
         value = azurerm_cosmosdb_sql_database.main.name
       }
       env {
-        name  = "COSMOS_API_KEYS_CONTAINER"
-        value = var.cosmos_api_keys_container_name
+        name  = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+        value = azurerm_application_insights.main.connection_string
+      }
+      env {
+        name  = "STREAM_SESSION_SIGNING_KEY"
+        value = var.stream_session_signing_key
+      }
+      env {
+        name  = "PROCESSOR_MODE"
+        value = "stream"
       }
     }
   }

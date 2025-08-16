@@ -1,0 +1,40 @@
+# Streaming service Dockerfile
+# Use Python 3.11 slim base image
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies for audio processing
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+COPY streaming/requirements.txt ./streaming/
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r streaming/requirements.txt
+
+# Install uvicorn for serving FastAPI
+RUN pip install --no-cache-dir uvicorn[standard]==0.24.0
+
+# Copy application code
+COPY shared/ ./shared/
+COPY streaming/ ./streaming/
+
+# Set Python path to include shared modules
+ENV PYTHONPATH=/app
+
+# Expose port for FastAPI
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run the streaming service
+CMD ["python", "streaming/main.py"]

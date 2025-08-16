@@ -1,6 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.responses import JSONResponse
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Union
 import asyncio
 import json
 import os
@@ -11,37 +11,52 @@ import io
 import soundfile as sf
 from datetime import datetime, timezone
 
-# Make processor/src importable
+# Make processor/shared importable
 CUR_DIR = os.path.dirname(__file__)
-SRC_DIR = os.path.abspath(os.path.join(CUR_DIR, "..", "src"))
-if SRC_DIR not in sys.path:
-    sys.path.append(SRC_DIR)
+SHARED_DIR = os.path.abspath(os.path.join(CUR_DIR, "..", "shared"))
+if SHARED_DIR not in sys.path:
+    sys.path.append(SHARED_DIR)
 
-from ai.audio_clarity_pipeline import process_stream_chunk, StreamState  # type: ignore
+from ai.streaming_audio import process_stream_chunk, StreamState  # type: ignore
 from ai.asr_pipeline import _get_openai_client, _cleanup_segments_with_llm, _translate_segments, SubtitleSegment  # type: ignore
-from captions.caption_encoder import write_srt, write_vtt, Segment as CapSegment  # type: ignore
+# Caption encoder imports removed because we no longer persist transcripts
 
-app = FastAPI(title="Audio Cleaner Streaming Service", version="0.2.0")
+app = FastAPI(title="Audio Cleaner Streaming Service", version="0.4.0")
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration"""
+    return {
+        "status": "healthy",
+        "service": "audio-cleaner-streaming",
+        "version": "0.4.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+# Configuration flags
+ACCUMULATE_CAPTIONS = bool(int(os.getenv("STREAM_ACCUMULATE_CAPTIONS", "0")))  # default off
+TOKEN_SIGNING_KEY = os.getenv("STREAM_SESSION_SIGNING_KEY", "")
 
 class SessionState:
     def __init__(self, session_id: str):
         self.id = session_id
-        self.ws = None  # type: Optional[WebSocket]
+        self.ws: Optional[WebSocket] = None
         self.sr = 16000
-        self.langs = ["en"]  # type: List[str]
-        self.user_id = None  # set from init message
-        self.proc_state = None  # type: Optional[StreamState]
+        self.langs: List[str] = ["en"]
+        self.user_id: Optional[str] = None
+        self.proc_state: Optional[StreamState] = None
         self.processed_seconds = 0.0
         self.last_deducted_seconds = 0.0
         self.credits_cents_spent = 0
         self._buf = bytearray()
-        self.token = None
+        self.token: Optional[str] = None
         # ASR state
         self._pcm_ring = np.zeros(1, dtype=np.float32)
         self._pcm_samples = 0
         self._asr_running = False
         self._asr_last_run = 0.0
-        self._asr_last_end_by_lang = {}
+        self._asr_last_end_by_lang: Dict[str, float] = {}
         self._asr_max_seconds = float(os.getenv("STREAM_ASR_BUFFER_SECONDS", "6"))
         self._asr_stride_seconds = float(os.getenv("STREAM_ASR_STRIDE_SECONDS", "2"))
         # Credit policy
@@ -50,15 +65,22 @@ class SessionState:
         self._low_credits_grace_sec = float(os.getenv("STREAM_LOW_CREDITS_GRACE_SECONDS", "8"))
         self._low_sent = False
         self._stop_sent = False
-        # Transcript accumulation
-        self._segments_by_lang = {}
+        # Transcript accumulation (disabled by default)
+        self._segments_by_lang = {} if ACCUMULATE_CAPTIONS else None
         self._started_at = datetime.utcnow().replace(tzinfo=timezone.utc).isoformat()
+        # Billing availability control
+        self.paused_due_to_billing = False
+        self._pause_notified = False
+        self._resume_notified = False
+        self._billing_last_probe = 0.0
+
+# Optional mode guard to avoid accidental batch code running here
+if os.getenv("PROCESSOR_MODE", "stream").lower() not in ("stream", "both"):
+    # Misconfiguration: this container should run in stream mode
+    # We don't raise at import time in case the process manager wants to set env later
+    pass
 
 sessions: Dict[str, SessionState] = {}
-
-@app.get("/healthz")
-async def healthz():
-    return JSONResponse({"status": "ok"})
 
 @app.post("/stream/stop")
 async def stop_stream(payload: dict = Body(...)):
@@ -69,67 +91,34 @@ async def stop_stream(payload: dict = Body(...)):
             await st.ws.close()
         except Exception:
             pass
-    # Persist transcript SRT/VTT per language to Blob Storage if configured
-    urls = {}
-    try:
-        conn = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-        container = os.getenv("PROCESSED_CONTAINER_NAME", "processed-videos")
-        if conn and st and st._segments_by_lang:
-            from azure.storage.blob import BlobServiceClient  # type: ignore
-            bsc = BlobServiceClient.from_connection_string(conn)
-            cont = bsc.get_container_client(container)
-            try:
-                cont.create_container()
-            except Exception:
-                pass
-            base = f"streams/{sid}/{int(time.time())}"
-            # Write temp files in-memory
-            for lang, segs in st._segments_by_lang.items():
-                caps = [CapSegment(s.start, s.end, s.text) for s in segs]
-                srt_buf = io.StringIO()
-                vtt_buf = io.StringIO()
-                # Use helpers to generate files on disk-like buffers
-                # Workaround: encoder writes to file paths; use temp files
-                import tempfile
-                with tempfile.TemporaryDirectory() as td:
-                    srt_path = os.path.join(td, f"{lang}.srt")
-                    vtt_path = os.path.join(td, f"{lang}.vtt")
-                    write_srt(caps, srt_path)
-                    write_vtt(caps, vtt_path)
-                    with open(srt_path, "rb") as f:
-                        cont.upload_blob(f"{base}_{lang}.srt", f.read(), overwrite=True)
-                    with open(vtt_path, "rb") as f:
-                        cont.upload_blob(f"{base}_{lang}.vtt", f.read(), overwrite=True)
-                    sas_srt = cont.get_blob_client(f"{base}_{lang}.srt").url
-                    sas_vtt = cont.get_blob_client(f"{base}_{lang}.vtt").url
-                    urls[lang] = {"srt": sas_srt, "vtt": sas_vtt}
-    except Exception:
-        urls = {}
+    # No transcript persistence by design
     return JSONResponse({
         "sessionId": sid,
         "processedSeconds": round(st.processed_seconds, 2) if st else 0.0,
-        "subtitles": urls,
+        "subtitles": {},
     })
 
 @app.websocket("/stream/{session_id}")
 async def stream_ws(websocket: WebSocket, session_id: str):
-    # Require API key header for non-browser clients
-    api_key = websocket.headers.get("x-api-key") or websocket.headers.get("authorization", "").removeprefix("Bearer ")
-    env_keys = set(filter(None, [os.getenv("STREAMING_API_KEY", "")] + [k.strip() for k in os.getenv("STREAMING_API_KEYS", "").split(",") if k.strip()]))
-    if not api_key or (env_keys and api_key not in env_keys):
-        # If no env keys configured, allow for local dev; otherwise enforce
-        if env_keys:
-            await websocket.close(code=4401)
-            return
-    # Basic session token check (query param t)
-    token = websocket.query_params.get("t")
-    if not token:
-        # Allow during early local dev
-        pass
+    # SIMPLIFIED: Only validate HMAC token, no API key needed
+    # API key was already validated when creating the session
+    
+    # Get session token from headers (secure) or URL params (fallback)
+    token = websocket.headers.get("x-session-token") or websocket.query_params.get("t")
+    token_payload = _verify_session_token(token, expected_session=session_id)
+    if not token_payload:
+        await websocket.close(code=4401)
+        return
+        
     await websocket.accept()
     st = sessions.get(session_id) or SessionState(session_id)
     st.ws = websocket
     st.token = token
+    
+    # Extract userId from validated token for billing (no API key validation needed)
+    if isinstance(token_payload, dict):
+        st.user_id = token_payload.get("userId")
+    
     sessions[session_id] = st
     try:
         # Protocol: first message should be text JSON { type: 'init', sr, languages[] }
@@ -157,6 +146,11 @@ async def stream_ws(websocket: WebSocket, session_id: str):
                     x = np.frombuffer(raw, dtype=np.float32)
                 except Exception:
                     await websocket.send_text(json.dumps({"type": "error", "message": "Bad PCM chunk"}))
+                    continue
+                # Probe billing availability and pause/resume if needed
+                await _probe_billing_and_update_state(st)
+                if st.paused_due_to_billing:
+                    # Drop processing while paused; send one-time notice handled in probe helper
                     continue
                 y, st.proc_state = process_stream_chunk(x, st.sr, st.proc_state, params=None)
                 st.processed_seconds += float(y.shape[0]) / float(st.sr)
@@ -206,7 +200,7 @@ async def _run_asr_and_emit(st: SessionState):
         bio = io.BytesIO()
         sf.write(bio, pcm, st.sr, format="WAV", subtype="PCM_16")
         bio.seek(0)
-        # Call Azure OpenAI Whisper
+    # Call Azure OpenAI Whisper
         client = _get_openai_client()
         whisper_depl = os.getenv("AZURE_OPENAI_WHISPER_DEPLOYMENT", "whisper-1")
         resp = client.audio.transcriptions.create(
@@ -251,14 +245,9 @@ async def _run_asr_and_emit(st: SessionState):
             by_lang[lang] = [{"start": s.start, "end": s.end, "text": s.text} for s in new_tr]
             if new_tr:
                 st._asr_last_end_by_lang[lang] = max(s.end for s in new_tr)
-        # Send delta if any
+        # Send delta if any (no accumulation)
         any_new = any(len(v) > 0 for v in by_lang.values())
         if any_new and st.ws:
-            # Accumulate for final persistence
-            for lang, items in by_lang.items():
-                st._segments_by_lang.setdefault(lang, [])
-                for it in items:
-                    st._segments_by_lang[lang].append(SubtitleSegment(start=it["start"], end=it["end"], text=it["text"]))
             await st.ws.send_text(json.dumps({"type": "delta", "segmentsByLang": by_lang, "isFinal": False}))
     except Exception as e:
         try:
@@ -319,7 +308,97 @@ async def _tick_credits_and_maybe_signal(st: SessionState):
                             except Exception:
                                 pass
                     except Exception:
-                        # If deduction fails, do not crash stream; optionally log
-                        pass
+                        # If deduction fails (e.g., Cosmos outage), pause processing but keep session open
+                        st.paused_due_to_billing = True
+                        if st.ws and not st._pause_notified:
+                            st._pause_notified = True
+                            st._resume_notified = False
+                            await st.ws.send_text(json.dumps({"type": "PAUSED_BILLING"}))
     except Exception:
         pass
+
+
+async def _probe_billing_and_update_state(st: SessionState):
+    try:
+        now = time.time()
+        # Probe at most every 5 seconds to avoid hammering
+        if now - float(st._billing_last_probe or 0.0) < 5.0:
+            return
+        st._billing_last_probe = now
+        conn = os.getenv("COSMOS_CONNECTION_STRING")
+        db_name = os.getenv("COSMOS_DB_NAME", "AudioCleanerDB")
+        if not conn:
+            st.paused_due_to_billing = True
+            if st.ws and not st._pause_notified:
+                st._pause_notified = True
+                st._resume_notified = False
+                await st.ws.send_text(json.dumps({"type": "PAUSED_BILLING"}))
+            return
+        # Try a lightweight read to verify availability
+        from azure.cosmos import CosmosClient  # type: ignore
+        cli = CosmosClient.from_connection_string(conn)
+        db = cli.get_database_client(db_name)
+        # Get container properties as a lightweight probe (SDKs vary)
+        cont = db.get_container_client('accounts')
+        try:
+            _ = cont.read()
+        except Exception:
+            _ = cont.read_container()
+        # If we reach here, billing is available
+        if st.paused_due_to_billing:
+            st.paused_due_to_billing = False
+            if st.ws and not st._resume_notified:
+                st._resume_notified = True
+                st._pause_notified = False
+                await st.ws.send_text(json.dumps({"type": "RESUMED_BILLING"}))
+    except Exception:
+        # Treat any failure as pause state
+        st.paused_due_to_billing = True
+        if st.ws and not st._pause_notified:
+            st._pause_notified = True
+            st._resume_notified = False
+            try:
+                await st.ws.send_text(json.dumps({"type": "PAUSED_BILLING"}))
+            except Exception:
+                pass
+
+
+def _b64url_no_pad(data: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _b64url_decode(s: str) -> bytes:
+    import base64
+    pad = "=" * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def _verify_session_token(token: str, expected_session: str) -> Union[bool, dict]:
+    """Verify HMAC-signed token: base64url(payload).base64url(hmacSHA256(payload, key))
+    payload JSON: {"sid": str, "exp": unix_ts, "mode": "stream", "userId": str}
+    Returns False if invalid, or payload dict if valid
+    """
+    try:
+        if not TOKEN_SIGNING_KEY:
+            # No key configured -> reject in prod; allow in dev if explicitly opted-in
+            return False
+        parts = token.split(".")
+        if len(parts) != 2:
+            return False
+        payload_b64, mac_b64 = parts
+        import hmac, hashlib, json as _json, time as _time
+        calc = hmac.new(TOKEN_SIGNING_KEY.encode(), payload_b64.encode(), hashlib.sha256).digest()
+        if not hmac.compare_digest(_b64url_no_pad(calc), mac_b64):
+            return False
+        payload = _json.loads(_b64url_decode(payload_b64).decode())
+        if str(payload.get("sid")) != str(expected_session):
+            return False
+        if str(payload.get("mode")) != "stream":
+            return False
+        exp = int(payload.get("exp", 0))
+        if exp <= int(_time.time()):
+            return False
+        return payload
+    except Exception:
+        return False

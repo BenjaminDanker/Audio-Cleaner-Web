@@ -17,9 +17,8 @@ import logging
 from pathlib import Path
 
 from ai.base import MediaTask, MediaTaskContext, registry, ProgressCallback
-from media_extractor import MediaExtractor, MediaType
 from df.enhance import enhance, init_df, load_audio, save_audio  # type: ignore
-from .audio_clarity_pipeline import process_file as clarity_process_file  # full CPU clarity chain
+# Note: do NOT import audio_clarity_pipeline at module level to avoid circular imports.
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +74,29 @@ def resolve_models_root(relative: str = "models/DeepFilterNet3") -> str:
     return os.path.join(root, relative)
 
 
-def _get_enhancer_and_extractor():
-    global _ENHANCER, _EXTRACTOR  # noqa: PLW0603
-    if _ENHANCER is None or _EXTRACTOR is None:
+def _get_enhancer():
+    """Return singleton DeepFilterNet enhancer without requiring media_extractor.
+
+    Used by streaming path to avoid importing batch-only utilities.
+    """
+    global _ENHANCER  # noqa: PLW0603
+    if _ENHANCER is None:
         model_root = resolve_models_root()
-        enh = DeepFilterNetEnhancer(model_root)
-        ext = MediaExtractor(enh.sample_rate)
-        _ENHANCER, _EXTRACTOR = enh, ext
+        _ENHANCER = DeepFilterNetEnhancer(model_root)
+    return _ENHANCER
+
+
+def _get_enhancer_and_extractor():
+    """Return enhancer + extractor, importing media_extractor lazily.
+
+    Keeps module import side-effect free so streaming doesn't need batch/ on path.
+    """
+    global _ENHANCER, _EXTRACTOR  # noqa: PLW0603
+    if _ENHANCER is None:
+        _ENHANCER = _get_enhancer()
+    if _EXTRACTOR is None:
+        from media_extractor import MediaExtractor  # type: ignore
+        _EXTRACTOR = MediaExtractor(_ENHANCER.sample_rate)
     return _ENHANCER, _EXTRACTOR
 
 
@@ -118,13 +133,18 @@ class DenoiseDFNetTask(MediaTask):
         extraction = self._extractor.extract(input_path, ctx.work_dir)
         _schedule_progress(progress_cb, 30)
         try:
+            from .audio_clarity_pipeline import process_file as clarity_process_file
             clarity_wav, _sr = clarity_process_file(input_path, ctx.work_dir, params={"denoise_atten_db": ctx.attenuation_db})
         except Exception:
             # Fallback to simple DFNet enhancement if clarity chain fails for any reason
             enhanced_wav = os.path.join(ctx.work_dir, "enhanced.wav")
             self._enhancer.enhance_file(extraction.extracted_wav_path, ctx.attenuation_db, enhanced_wav)
             clarity_wav = enhanced_wav
-        if extraction.media_type == MediaType.AUDIO:
+        try:
+            from media_extractor import MediaType  # type: ignore
+        except Exception:
+            MediaType = None  # type: ignore
+        if MediaType is None or extraction.media_type == MediaType.AUDIO:
             return self._finalize_audio(clarity_wav, extraction.original_extension, ctx, progress_cb)
         return self._finalize_video(clarity_wav, input_path, extraction.original_extension, ctx, progress_cb)
 

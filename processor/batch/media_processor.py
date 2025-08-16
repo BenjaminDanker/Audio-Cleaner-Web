@@ -29,8 +29,12 @@ import logging
 import os
 import shutil
 import tempfile
+import sys
 from pathlib import Path
 from typing import Optional
+
+# Add shared directory to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
 
 import ai  # noqa: F401 - ensure task registration
 from ai.base import registry, MediaTaskContext, ProgressCallback

@@ -83,19 +83,7 @@ variable "queue_name" {
   default     = "video-processing-jobs"
 }
 
-# Streaming & AI configuration
-variable "streaming_api_keys" {
-  description = "Comma-separated API keys for streaming auth"
-  type        = string
-  default     = ""
-}
-
-variable "cosmos_api_keys_container_name" {
-  description = "Cosmos DB container name for API keys"
-  type        = string
-  default     = "ApiKeys"
-}
-
+# AI configuration
 variable "openai_endpoint" {
   description = "Azure OpenAI endpoint"
   type        = string
@@ -184,4 +172,10 @@ variable "streaming_image_tag" {
   description = "Streaming container image tag"
   type        = string
   default     = "latest"
+}
+
+variable "stream_session_signing_key" {
+  description = "HMAC signing key for streaming session tokens"
+  type        = string
+  sensitive   = true
 }
