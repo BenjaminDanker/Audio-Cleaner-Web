@@ -64,3 +64,23 @@ output "application_insights_connection_string" {
   value       = azurerm_application_insights.main.connection_string
   sensitive   = true
 }
+
+output "speech_services_endpoint" {
+  description = "Azure AI Speech Services endpoint"
+  value       = azurerm_cognitive_account.speech_services.endpoint
+}
+
+output "speech_services_region" {
+  description = "Azure AI Speech Services region"
+  value       = azurerm_cognitive_account.speech_services.location
+}
+
+output "openai_endpoint" {
+  description = "Azure OpenAI endpoint (for cleanup only)"
+  value       = azurerm_cognitive_account.openai.endpoint
+}
+
+output "translator_endpoint" {
+  description = "Azure Translator endpoint"
+  value       = azurerm_cognitive_account.translator.endpoint
+}

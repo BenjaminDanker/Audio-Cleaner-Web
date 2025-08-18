@@ -214,7 +214,19 @@ resource "azurerm_application_insights" "main" {
   tags = var.tags
 }
 
-# Azure OpenAI account (Cognitive Services - OpenAI)
+# Azure AI Speech Services (for batch transcription - cheaper than OpenAI Whisper)
+resource "azurerm_cognitive_account" "speech_services" {
+  name                = "speech-${local.project_name}-${local.resource_suffix}"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  kind                = "SpeechServices"
+  sku_name            = "S0"
+  public_network_access_enabled = true
+
+  tags = var.tags
+}
+
+# Azure OpenAI account (for GPT-4.1-nano cleanup only)
 resource "azurerm_cognitive_account" "openai" {
   name                = "aoai-${local.project_name}-${local.resource_suffix}"
   location            = azurerm_resource_group.main.location
@@ -227,24 +239,9 @@ resource "azurerm_cognitive_account" "openai" {
 }
 
 // Note: AzureRM provider does not expose a data source to read Cognitive Services keys.
-// Provide OpenAI keys via variables/secrets instead of reading from the resource.
+// Provide OpenAI and Speech Services keys via variables/secrets instead of reading from the resource.
 
-# Optional: model deployments for Whisper and Chat cleanup
-resource "azurerm_cognitive_deployment" "openai_whisper" {
-  count                = length(var.openai_whisper_deployment) > 0 && length(var.openai_whisper_model_name) > 0 ? 1 : 0
-  name                 = var.openai_whisper_deployment
-  cognitive_account_id = azurerm_cognitive_account.openai.id
-  model {
-    format  = "OpenAI"
-    name    = var.openai_whisper_model_name
-    version = var.openai_whisper_model_version
-  }
-  sku {
-    name     = "GlobalStandard"
-    capacity = 1
-  }
-}
-
+# Chat model deployment for transcript cleanup (no more Whisper deployment needed)
 resource "azurerm_cognitive_deployment" "openai_chat" {
   count                = length(var.openai_chat_deployment) > 0 && length(var.openai_chat_model_name) > 0 ? 1 : 0
   name                 = var.openai_chat_deployment
@@ -308,12 +305,12 @@ resource "azurerm_static_web_app" "main" {
   "AZURE_RESOURCE_GROUP_NAME"             = azurerm_resource_group.main.name
   "STREAMING_CONTAINER_APP_NAME"          = azurerm_container_app.streaming.name
   "MIN_STREAMING_BALANCE"                 = "1.0"
-  # Azure OpenAI + Translator (for Functions if needed later)
-  # Azure OpenAI / Translator for Functions (if needed)
+  # Azure OpenAI (cleanup only) + Speech Services + Translator
   "AZURE_OPENAI_ENDPOINT"                 = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
   "AZURE_OPENAI_API_VERSION"              = var.openai_api_version
-  "AZURE_OPENAI_WHISPER_DEPLOYMENT"       = var.openai_whisper_deployment
   "AZURE_OPENAI_CLEANUP_DEPLOYMENT"       = var.openai_chat_deployment
+  "AZURE_SPEECH_SERVICES_REGION"          = azurerm_resource_group.main.location
+  "USE_SPEECH_SERVICES"                   = "true"
   "AZURE_TRANSLATOR_REGION"               = var.translator_region
   "AZURE_TRANSLATOR_ENDPOINT"             = "https://api.cognitive.microsofttranslator.com"
   }
@@ -442,8 +439,21 @@ resource "azurerm_container_app" "processor" {
         secret_name = "cosmos-connectionstring"
       }
 
-      # Azure OpenAI & Translator configuration for file/batch pipeline
-      # Azure OpenAI env expected by processor code
+      # Azure Speech Services + OpenAI (cleanup) + Translator configuration
+      env {
+        name  = "AZURE_SPEECH_SERVICES_REGION"
+        value = azurerm_resource_group.main.location
+      }
+      env {
+        name        = "AZURE_SPEECH_SERVICES_KEY"
+        secret_name = "speech-services-key"
+      }
+      env {
+        name  = "USE_SPEECH_SERVICES"
+        value = "true"
+      }
+
+      # Azure OpenAI env for cleanup only
       env {
         name  = "AZURE_OPENAI_ENDPOINT"
         value = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
@@ -451,10 +461,6 @@ resource "azurerm_container_app" "processor" {
       env {
         name  = "AZURE_OPENAI_API_VERSION"
         value = var.openai_api_version
-      }
-      env {
-        name  = "AZURE_OPENAI_WHISPER_DEPLOYMENT"
-        value = var.openai_whisper_deployment
       }
       env {
         name  = "AZURE_OPENAI_CLEANUP_DEPLOYMENT"
@@ -554,6 +560,10 @@ resource "azurerm_container_app" "processor" {
     name  = "translator-key"
   value = var.translator_key
   }
+  secret {
+    name  = "speech-services-key"
+    value = var.speech_services_key
+  }
 
   tags = var.tags
 }
@@ -594,7 +604,21 @@ resource "azurerm_container_app" "streaming" {
       cpu    = 1.0
       memory = "1.5Gi"
 
-      # Azure OpenAI env expected by streaming code
+      # Azure Speech Services + OpenAI (cleanup) + Translator for streaming
+      env {
+        name  = "AZURE_SPEECH_SERVICES_REGION"
+        value = azurerm_resource_group.main.location
+      }
+      env {
+        name        = "AZURE_SPEECH_SERVICES_KEY"
+        secret_name = "speech-services-key"
+      }
+      env {
+        name  = "USE_SPEECH_SERVICES"
+        value = "true"
+      }
+
+      # Azure OpenAI env for cleanup only
       env {
         name  = "AZURE_OPENAI_ENDPOINT"
         value = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
@@ -602,10 +626,6 @@ resource "azurerm_container_app" "streaming" {
       env {
         name  = "AZURE_OPENAI_API_VERSION"
         value = var.openai_api_version
-      }
-      env {
-        name  = "AZURE_OPENAI_WHISPER_DEPLOYMENT"
-        value = var.openai_whisper_deployment
       }
       env {
         name  = "AZURE_OPENAI_CLEANUP_DEPLOYMENT"
@@ -665,6 +685,10 @@ resource "azurerm_container_app" "streaming" {
   secret {
     name  = "translator-key"
     value = var.translator_key
+  }
+  secret {
+    name  = "speech-services-key"
+    value = var.speech_services_key
   }
   secret {
     name  = "cosmos-connectionstring"

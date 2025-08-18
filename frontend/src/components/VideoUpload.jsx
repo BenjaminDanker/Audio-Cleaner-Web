@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react'
 import { Upload, FileVideo, X, DollarSign, Clock } from 'lucide-react'
 import axios from 'axios'
 import { useAccount } from './AccountContext'
-import { calculateJobCost } from '../utils/pricing'
+import { calculateJobCost, formatCost } from '../utils/pricing'
 import './VideoUpload.css'
 // Common language options (BCP-47 codes)
 const AVAILABLE_LANGUAGES = [
@@ -347,9 +347,9 @@ const VideoUpload = ({ onJobCreated }) => {
     try {
       setIsCalculatingCost(true)
       
-      // Calculate estimated cost based on file size for UX only
+      // Calculate estimated cost based on file size and selected languages for UX only
       // Note: Actual cost will be calculated securely on backend
-      const estimatedCostCents = calculateJobCost(file.size)
+      const estimatedCostCents = calculateJobCost(file.size, selectedLanguages)
       
       setEstimatedCost(estimatedCostCents)
       setIsCalculatingCost(false)
@@ -413,7 +413,7 @@ const VideoUpload = ({ onJobCreated }) => {
 
     // Check if user can afford the job
     if (!canAffordJob(estimatedCost)) {
-      alert(`Insufficient account balance. You need $${(estimatedCost / 100).toFixed(2)} but only have $${((account?.balance || 0) / 100).toFixed(2)}.`)
+      alert(`Insufficient account balance. You need ${formatCost(estimatedCost)} but only have ${formatCost(account?.balance || 0)}.`)
       return
     }
 
@@ -626,10 +626,19 @@ const VideoUpload = ({ onJobCreated }) => {
                 onChange={(e) => {
                   const checked = e.target.checked
                   setSelectedLanguages((prev) => {
-                    if (checked) {
-                      return Array.from(new Set([...(prev || []), lang.code]))
+                    const newLanguages = checked 
+                      ? Array.from(new Set([...(prev || []), lang.code]))
+                      : (prev || []).filter((c) => c !== lang.code)
+                    
+                    // Recalculate cost when languages change
+                    if (selectedFile) {
+                      setTimeout(() => {
+                        const newCost = calculateJobCost(selectedFile.size, newLanguages)
+                        setEstimatedCost(newCost)
+                      }, 0)
                     }
-                    return (prev || []).filter((c) => c !== lang.code)
+                    
+                    return newLanguages
                   })
                 }}
               />
@@ -694,7 +703,7 @@ const VideoUpload = ({ onJobCreated }) => {
                 {estimatedCost && (
                   <div className="cost-display">
                     <DollarSign size={16} />
-                    <span>Estimated Cost: ${(estimatedCost / 100).toFixed(2)} (final cost calculated securely on backend)</span>
+                    <span>Estimated Cost: {formatCost(estimatedCost)} (final cost calculated securely on backend)</span>
                   </div>
                 )}
                 {account && (

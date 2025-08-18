@@ -32,19 +32,42 @@ except Exception:  # pragma: no cover - optional dependency during dev
     def lfilter(b, a, x):  # type: ignore
         return x
 
-_ENHANCER_ONLY = None
-_GET_EXTRACTOR = None
+from df.enhance import enhance, init_df, load_audio, save_audio  # type: ignore
 
-def _get_enhancer_only():
-    global _ENHANCER_ONLY  # noqa: PLW0603
-    if _ENHANCER_ONLY is None:
-        from .audio_denoise_dfnet import _get_enhancer
-        _ENHANCER_ONLY = _get_enhancer()
-    return _ENHANCER_ONLY
+# Global enhancer for streaming (no media_extractor dependency)
+_GLOBAL_ENHANCER = None
 
-def _get_enhancer_and_extractor():
-    from .audio_denoise_dfnet import _get_enhancer_and_extractor as _gee
-    return _gee()
+def _get_global_enhancer():
+    """Get singleton enhancer without media_extractor dependency."""
+    global _GLOBAL_ENHANCER
+    if _GLOBAL_ENHANCER is None:
+        from pathlib import Path
+        import os
+        base_dir = Path(__file__).parent.parent.parent
+        root = getattr(__import__('sys'), "_MEIPASS", str(base_dir))
+        models_root = os.path.join(root, "models/DeepFilterNet3")
+        model, df_state, _ = init_df(models_root, post_filter=True)
+        
+        class SimpleEnhancer:
+            def __init__(self, model, df_state):
+                self.model = model
+                self.df_state = df_state
+            
+            def clamp_atten(self, atten_db):
+                if atten_db is None:
+                    return None
+                try:
+                    val = int(atten_db)
+                except (ValueError, TypeError):
+                    val = 30
+                return max(-10, min(80, val))
+            
+            @property
+            def sample_rate(self):
+                return self.df_state.sr()
+        
+        _GLOBAL_ENHANCER = SimpleEnhancer(model, df_state)
+    return _GLOBAL_ENHANCER
 
 
 # ---------------------------- Utilities ----------------------------
@@ -246,6 +269,9 @@ def _loudness_normalize_file(y: np.ndarray, fs: int, target_lufs: float) -> np.n
 def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] = None) -> Tuple[str, int]:
     """Run clarity pipeline on a media file path and return wav artifact path + sample rate."""
     p = ClarityParams(**(params or {}))
+    
+    # For file processing, we need the full extractor - lazy import to avoid circular dependency
+    from .audio_denoise_dfnet import _get_enhancer_and_extractor
     enhancer, extractor = _get_enhancer_and_extractor()
 
     # 1) Extract to mono wav at model SR
@@ -303,7 +329,7 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     if state is None:
         state = StreamState()
     # Streaming does NOT require media extraction; get enhancer only to avoid batch dependency
-    enhancer = _get_enhancer_only()
+    enhancer = _get_global_enhancer()
     x = _ensure_mono_f32(chunk_mono_f32)
     from df.enhance import enhance  # type: ignore
 

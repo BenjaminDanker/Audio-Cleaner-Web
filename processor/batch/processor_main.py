@@ -2,11 +2,13 @@ import os, json, asyncio, tempfile, logging, traceback, signal, contextlib, sys
 from pathlib import Path
 from azure.servicebus.aio import ServiceBusClient
 from azure.storage.blob.aio import BlobServiceClient
-from azure.cosmos import CosmosClient
 
 # Add shared directory to path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
+SHARED_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'shared'))
+if SHARED_DIR not in sys.path:
+    sys.path.append(SHARED_DIR)
 
+from clients import get_cosmos_db, get_container, get_cosmos_client, get_blob_service_client, get_service_bus_client  # centralized client accessor
 from media_processor import MediaProcessor  # (VideoProcessor alias retained for backward compat)
 from config import load_config, setup_application_insights
 from job_store import JobStore
@@ -14,7 +16,6 @@ from storage_service import BlobStorageService
 from ai.asr_pipeline import transcribe_and_translate_file, SubtitleBundle
 from captions.caption_encoder import write_srt, write_vtt, Segment as CapSegment
 from media_extractor import MediaExtractor
-from pricing import extra_language_charge_cents
 
 setup_application_insights()
 
@@ -65,15 +66,18 @@ class AudioCleanerProcessor:
         except Exception:
             pass
 
-        # Blob service client
-        self.blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection)
+        # Blob service client (via shared factory for future MI support)
+        try:
+            self.blob_service_client = get_blob_service_client()
+        except Exception:
+            # Fallback to connection string if factory/env not ready
+            self.blob_service_client = BlobServiceClient.from_connection_string(self.storage_connection)
         self.uploads_container = self.cfg.uploads_container
         self.processed_container = self.cfg.processed_container
 
-        # Cosmos DB
+        # Cosmos DB (centralized helper)
         self.cosmos_connection = self.cfg.cosmos_connection
-        self.cosmos_client = CosmosClient.from_connection_string(self.cosmos_connection)
-        self.database = self.cosmos_client.get_database_client('AudioCleanerDB')
+        self.database = get_cosmos_db('AudioCleanerDB')
         self.jobs_container = self.database.get_container_client('Jobs')
 
         # Abstractions
@@ -134,7 +138,13 @@ class AudioCleanerProcessor:
         """
         idle_sleep = self.cfg.idle_sleep_seconds
         logger.info(f"Starting continuous processor loop (idle sleep {idle_sleep}s when queue empty)")
-        async with ServiceBusClient.from_connection_string(self.service_bus_connection) as client:
+        # Service Bus client via factory if available
+        try:
+            sb_client_ctx = get_service_bus_client()
+        except Exception:
+            sb_client_ctx = ServiceBusClient.from_connection_string(self.service_bus_connection)
+
+        async with sb_client_ctx as client:
             containers_validated = False
             receiver = client.get_queue_receiver(queue_name=self.queue_name)
             async with receiver:
@@ -342,57 +352,7 @@ class AudioCleanerProcessor:
                         subtitles=subtitles_urls
                     )
 
-                    # Post-completion: apply extra language credit deduction if any
-                    try:
-                        additional_langs = 0
-                        try:
-                            requested_langs = record.metadata.get('languagesRequested', []) or []
-                            # Count languages beyond the primary
-                            additional_langs = max(0, len(requested_langs) - 1)
-                        except Exception:
-                            additional_langs = 0
-                        if additional_langs > 0:
-                            # Approx minutes from extracted WAV duration
-                            try:
-                                import soundfile as sf
-                                import numpy as np
-                                # Extract WAV from the processed output to measure duration
-                                extractor2 = MediaExtractor(16000)
-                                extraction2 = extractor2.extract(output_path, temp_dir)
-                                wav_path2 = extraction2.extracted_wav_path
-                                data, rate = sf.read(wav_path2, dtype='float32')
-                                samples = data.shape[0] if getattr(data, 'shape', None) else len(data)
-                                dur_min = float(samples) / float(rate) / 60.0
-                            except Exception:
-                                dur_min = 0.0
-                            extra_cents = extra_language_charge_cents(dur_min, additional_langs)
-                            if extra_cents > 0:
-                                # Deduct from accounts container and create a transaction record
-                                accounts = self.database.get_container_client('accounts')
-                                txns = self.database.get_container_client('transactions')
-                                # Fetch account
-                                acc = accounts.read_item(user_id, user_id)
-                                bal = int(acc.get('balance', 0))
-                                if bal >= extra_cents:
-                                    acc['balance'] = bal - extra_cents
-                                    acc['updatedAt'] = self.repo._now_iso()
-                                    accounts.upsert_item(acc)
-                                    tid = f"txn_lang_{job_id}"
-                                    tx = {
-                                        'id': tid,
-                                        'userId': user_id,
-                                        'type': 'translation-extra',
-                                        'amount': extra_cents,
-                                        'description': f'Extra languages ({additional_langs}) for job {job_id}',
-                                        'jobId': job_id,
-                                        'createdAt': self.repo._now_iso(),
-                                    }
-                                    txns.upsert_item(tx)
-                                    self._log(event="extra_lang_deducted", jobId=job_id, userId=user_id, cents=extra_cents)
-                                else:
-                                    self._log(level=logging.WARNING, event="extra_lang_insufficient_balance", jobId=job_id, needed=extra_cents, balance=bal)
-                    except Exception as credit_err:
-                        self._log(level=logging.WARNING, event="extra_lang_credit_error", jobId=job_id, error=str(credit_err))
+                    # Batch processor only processes - all billing is handled by API backend
 
                     # Delete the input blob now that processing is complete (optional)
                     if self.cfg.delete_inputs_on_success:
@@ -442,7 +402,10 @@ async def main():
     except Exception:
         pass
     with contextlib.suppress(Exception):
-        processor.cosmos_client.close()
+        cli = get_cosmos_client()
+        close = getattr(cli, "close", None)
+        if callable(close):
+            close()
 
 if __name__ == "__main__":
     asyncio.run(main())

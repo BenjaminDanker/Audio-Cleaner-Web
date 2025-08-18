@@ -54,7 +54,7 @@ module.exports = async function (context, req) {
       return
     }
 
-    // Check account balance for streaming (similar to enqueue-job)
+    // Check account balance for streaming and charge initial session fee
     if (process.env.COSMOS_CONNECTION_STRING) {
       try {
         const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING)
@@ -72,18 +72,32 @@ module.exports = async function (context, req) {
           return
         }
 
+        // Calculate initial streaming session fee (covers setup and first few minutes)
+        const streamingSessionFee = parseFloat(process.env.STREAMING_SESSION_FEE || '0.25') // $0.25 initial fee
         const minStreamingBalance = parseFloat(process.env.MIN_STREAMING_BALANCE || '1.0')
-        if (account.balance < minStreamingBalance) {
+        
+        if (account.balance < Math.max(minStreamingBalance, streamingSessionFee)) {
           context.res = {
             status: 402,
             headers: { 'Access-Control-Allow-Origin': '*', ...security.getSecurityHeaders() },
             jsonBody: { 
-              message: `Insufficient balance for streaming. Minimum $${minStreamingBalance} required.`,
+              message: `Insufficient balance for streaming. Minimum $${Math.max(minStreamingBalance, streamingSessionFee)} required.`,
               balance: account.balance 
             }
           }
           return
         }
+
+        // Charge initial session fee upfront (processor will handle per-minute charges)
+        const newBalance = account.balance - streamingSessionFee
+        await accountContainer.item(userId, userId).replace({
+          ...account,
+          balance: newBalance,
+          lastUpdated: new Date().toISOString()
+        })
+
+        context.log.info(`Charged streaming session fee: $${streamingSessionFee} for user ${userId}, new balance: $${newBalance}`)
+        
       } catch (accountErr) {
         context.log.warn('Could not check account balance:', accountErr.message)
         // Continue anyway in case billing is not fully set up

@@ -1,11 +1,12 @@
-"""ASR + cleanup + translation pipeline using Azure OpenAI Whisper and Translator.
+"""ASR + cleanup + translation pipeline using Azure AI Speech Services and OpenAI for cleanup.
 
 Environment variables expected:
+  - AZURE_SPEECH_SERVICES_KEY
+  - AZURE_SPEECH_SERVICES_REGION
   - AZURE_OPENAI_ENDPOINT
   - AZURE_OPENAI_API_KEY
   - AZURE_OPENAI_API_VERSION (e.g., 2024-06-01)
-  - AZURE_OPENAI_WHISPER_DEPLOYMENT (audio transcription model deployment name, e.g., whisper-1)
-  - AZURE_OPENAI_CLEANUP_DEPLOYMENT (small chat model for cleanup, e.g., gpt-4o-mini)
+  - AZURE_OPENAI_CLEANUP_DEPLOYMENT (small chat model for cleanup, e.g., gpt-4.1-nano)
   - AZURE_TRANSLATOR_KEY
   - AZURE_TRANSLATOR_ENDPOINT (e.g., https://api.cognitive.microsofttranslator.com)
   - AZURE_TRANSLATOR_REGION
@@ -21,8 +22,8 @@ from typing import Dict, List, Optional, Tuple
 import os
 import io
 import json
-import time
 import requests
+import tempfile
 
 import soundfile as sf
 
@@ -30,6 +31,11 @@ try:
     from openai import OpenAI  # type: ignore
 except Exception:  # pragma: no cover - dependency optional in dev
     OpenAI = None  # type: ignore
+
+try:
+    import azure.cognitiveservices.speech as speechsdk  # type: ignore
+except Exception:  # pragma: no cover - dependency optional in dev
+    speechsdk = None  # type: ignore
 
 
 @dataclass
@@ -72,34 +78,108 @@ def _get_openai_client():
     return client
 
 
-def _transcribe_file_with_whisper(wav_path: str, translate_to_english: bool = False) -> Tuple[List[SubtitleSegment], str]:
-    """Call Azure OpenAI Whisper to transcribe. Returns (segments, detected_lang)."""
-    client = _get_openai_client()
-    whisper_depl = os.getenv("AZURE_OPENAI_WHISPER_DEPLOYMENT", "whisper-1")
-    with open(wav_path, "rb") as f:
-        audio_bytes = f.read()
-    # Use verbose_json to get segments
-    resp = client.audio.transcriptions.create(
-        model=whisper_depl,
-        file=(os.path.basename(wav_path), audio_bytes),
-        response_format="verbose_json",
-        temperature=0,
-        translate=translate_to_english,
-    )
-    # Azure returns dict-like; normalize
-    data = resp if isinstance(resp, dict) else json.loads(resp.model_dump_json())
-    detected_language = data.get("language", "en")
-    segs = []
-    for s in data.get("segments", []):
-        segs.append(SubtitleSegment(start=float(s.get("start", 0.0)), end=float(s.get("end", 0.0)), text=s.get("text", "").strip()))
-    return segs, detected_language
+def _get_speech_services_config():
+    """Get Azure Speech Services configuration."""
+    if speechsdk is None:
+        raise RuntimeError("azure-cognitiveservices-speech package not installed")
+    
+    subscription_key = os.getenv("AZURE_SPEECH_SERVICES_KEY")
+    region = os.getenv("AZURE_SPEECH_SERVICES_REGION")
+    
+    if not subscription_key or not region:
+        raise RuntimeError("Missing AZURE_SPEECH_SERVICES_KEY or AZURE_SPEECH_SERVICES_REGION")
+    
+    return speechsdk.SpeechConfig(subscription=subscription_key, region=region)
+
+
+def _transcribe_file_with_speech_services(wav_path: str, translate_to_english: bool = False) -> Tuple[List[SubtitleSegment], str]:
+    """Call Azure AI Speech Services for batch transcription. Returns (segments, detected_lang)."""
+    speech_config = _get_speech_services_config()
+    
+    # Configure for batch transcription with detailed output
+    speech_config.output_format = speechsdk.OutputFormat.Detailed
+    speech_config.request_word_level_timestamps()
+    
+    # Audio configuration
+    audio_config = speechsdk.audio.AudioConfig(filename=wav_path)
+    
+    # Create speech recognizer
+    if translate_to_english:
+        # Use speech translation if needed
+        translation_config = speechsdk.translation.SpeechTranslationConfig(
+            subscription=speech_config.subscription_key, 
+            region=speech_config.region
+        )
+        translation_config.add_target_language("en")
+        recognizer = speechsdk.translation.TranslationRecognizer(
+            translation_config=translation_config, 
+            audio_config=audio_config
+        )
+    else:
+        recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    
+    # Perform recognition
+    result = recognizer.recognize_once()
+    
+    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+        # Parse the detailed result to extract segments with timestamps
+        segments = []
+        if hasattr(result, 'json') and result.json:
+            json_result = json.loads(result.json)
+            if 'NBest' in json_result and json_result['NBest']:
+                words = json_result['NBest'][0].get('Words', [])
+                if words:
+                    # Group words into segments (roughly every 5-10 seconds)
+                    current_text = ""
+                    start_time = 0
+                    last_end_time = 0
+                    
+                    for i, word in enumerate(words):
+                        if not current_text:
+                            start_time = word.get('Offset', 0) / 10000000  # Convert to seconds
+                        
+                        current_text += word.get('Word', '') + " "
+                        last_end_time = (word.get('Offset', 0) + word.get('Duration', 0)) / 10000000
+                        
+                        # Create segment every ~5 seconds or at end
+                        if (last_end_time - start_time >= 5.0) or (i == len(words) - 1):
+                            segments.append(SubtitleSegment(
+                                start=start_time,
+                                end=last_end_time,
+                                text=current_text.strip()
+                            ))
+                            current_text = ""
+                else:
+                    # Fallback: single segment with full text
+                    segments.append(SubtitleSegment(
+                        start=0.0,
+                        end=result.duration.total_seconds() if hasattr(result, 'duration') else 10.0,
+                        text=result.text
+                    ))
+        else:
+            # Fallback: single segment
+            segments.append(SubtitleSegment(
+                start=0.0,
+                end=10.0,  # Default duration
+                text=result.text
+            ))
+        
+        # Detect language (Speech Services doesn't return this directly, assume English)
+        detected_language = "en"
+        return segments, detected_language
+        
+    elif result.reason == speechsdk.ResultReason.NoMatch:
+        return [], "en"
+    else:
+        error_details = result.error_details if hasattr(result, 'error_details') else "Unknown error"
+        raise RuntimeError(f"Speech recognition failed: {error_details}")
 
 
 def _cleanup_segments_with_llm(segments: List[SubtitleSegment]) -> List[SubtitleSegment]:
     if not segments:
         return segments
     client = _get_openai_client()
-    chat_depl = os.getenv("AZURE_OPENAI_CLEANUP_DEPLOYMENT", "gpt-4o-mini")
+    chat_depl = os.getenv("AZURE_OPENAI_CLEANUP_DEPLOYMENT", "gpt-4.1-nano")
     # Prepare a compact JSON payload for the model
     payload = [{"start": s.start, "end": s.end, "text": s.text} for s in segments]
     content = json.dumps(payload, ensure_ascii=False)
@@ -151,14 +231,17 @@ def _translate_segments(segments: List[SubtitleSegment], to_lang: str) -> List[S
 
 
 def transcribe_and_translate_file(wav_path: str, sr: int, target_langs: List[str]) -> SubtitleBundle:
-    # Whisper: if requested English translation, set translate flag
+    """Main transcription function using Azure AI Speech Services."""
+    # Speech Services: if requested English translation, set translate flag
     translate_direct = False
     if len(target_langs) == 1 and target_langs[0].lower() == "en":
         translate_direct = True
-    segs, detected_lang = _transcribe_file_with_whisper(wav_path, translate_to_english=translate_direct)
+    
+    segs, detected_lang = _transcribe_file_with_speech_services(wav_path, translate_to_english=translate_direct)
     cleaned = _cleanup_segments_with_llm(segs)
     bundle = SubtitleBundle(primary_lang=("en" if translate_direct else detected_lang))
     bundle.segments_by_lang[bundle.primary_lang] = cleaned
+    
     # Additional translations
     for lang in target_langs:
         lc = lang.lower()
@@ -172,7 +255,7 @@ def transcribe_and_translate_file(wav_path: str, sr: int, target_langs: List[str
 # Streaming mode: buffer management would be handled by caller; here we provide a chunk method
 
 def transcribe_and_translate_chunk(processed_chunk_bytes: bytes, sr: int, target_langs: List[str], state: Optional[dict] = None) -> 'SubtitleDelta':
-    # Build a small WAV in-memory for Whisper chunking
+    # Build a small WAV in-memory for Speech Services processing
     bio = io.BytesIO()
     sf.write(bio, sf.read(io.BytesIO(processed_chunk_bytes))[0] if False else [], sr)  # placeholder to keep type hints
     # In practice, the caller should provide chunk PCM; here we assume the chunk has been persisted separately.

@@ -222,7 +222,7 @@ module.exports = async function (context, req) {
         }
 
     // Pricing util returns cost in USD (float, 2 decimals). Convert to integer cents for storage consistency.
-    const actualCostUsd = calculateProcessingCost(actualFileSizeBytes);
+    const actualCostUsd = calculateProcessingCost(actualFileSizeBytes, languagesRequested);
     const actualCost = Math.round(actualCostUsd * 100); // store in cents
 
         // Initialize optimized Cosmos client with retry-aware configuration

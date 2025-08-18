@@ -7,7 +7,7 @@
       "route": "/api/webhook-stripe", 
       "allowedRoles": ["anonymous"],
       "headers": {
-        "Access-Control-Allow-Origin": "https://white-hill-074a3d510.2.azurestaticapps.net",
+        "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "*"
       }

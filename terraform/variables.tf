@@ -84,6 +84,18 @@ variable "queue_name" {
 }
 
 # AI configuration
+variable "speech_services_endpoint" {
+  description = "Azure AI Speech Services endpoint"
+  type        = string
+  default     = ""
+}
+
+variable "speech_services_region" {
+  description = "Azure AI Speech Services region"
+  type        = string
+  default     = ""
+}
+
 variable "openai_endpoint" {
   description = "Azure OpenAI endpoint"
   type        = string
@@ -96,24 +108,6 @@ variable "openai_api_version" {
   default     = "2024-02-15-preview"
 }
 
-variable "openai_whisper_deployment" {
-  description = "Azure OpenAI Whisper deployment name"
-  type        = string
-  default     = ""
-}
-
-variable "openai_whisper_model_name" {
-  description = "Azure OpenAI Whisper model name (e.g., 'whisper' or 'gpt-4o-transcribe' depending on region availability)"
-  type        = string
-  default     = ""
-}
-
-variable "openai_whisper_model_version" {
-  description = "Azure OpenAI Whisper model version"
-  type        = string
-  default     = ""
-}
-
 variable "openai_chat_deployment" {
   description = "Azure OpenAI chat deployment for cleanup"
   type        = string
@@ -121,7 +115,7 @@ variable "openai_chat_deployment" {
 }
 
 variable "openai_chat_model_name" {
-  description = "Azure OpenAI chat model name for cleanup (e.g., 'gpt-4o-mini')"
+  description = "Azure OpenAI chat model name for cleanup (e.g., 'gpt-4.1-nano')"
   type        = string
   default     = ""
 }
@@ -134,6 +128,12 @@ variable "openai_chat_model_version" {
 
 variable "openai_api_key" {
   description = "Azure OpenAI API key"
+  type        = string
+  sensitive   = true
+}
+
+variable "speech_services_key" {
+  description = "Azure AI Speech Services key"
   type        = string
   sensitive   = true
 }

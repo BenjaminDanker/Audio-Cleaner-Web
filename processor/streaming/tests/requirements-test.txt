@@ -1,0 +1,6 @@
+# Test dependencies for streaming service
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+httpx>=0.24.0  # For TestClient
+fastapi>=0.100.0
+numpy>=1.20.0
