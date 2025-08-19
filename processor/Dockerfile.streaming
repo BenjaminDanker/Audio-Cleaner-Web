@@ -16,8 +16,8 @@ COPY requirements.txt .
 COPY streaming/requirements.txt ./streaming/
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir -r streaming/requirements.txt
+RUN pip install  -r requirements.txt
+RUN pip install  -r streaming/requirements.txt
 
 # Install uvicorn for serving FastAPI
 RUN pip install --no-cache-dir uvicorn[standard]==0.24.0
