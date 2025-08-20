@@ -226,22 +226,30 @@ resource "azurerm_cognitive_account" "speech_services" {
   tags = var.tags
 }
 
-# Azure OpenAI account (for GPT-4.1-nano cleanup only)
+# Azure OpenAI account (for GPT-4.1-nano cleanup only) - Import existing resource
 resource "azurerm_cognitive_account" "openai" {
-  name                = "aoai-${local.project_name}-${local.resource_suffix}"
-  location            = azurerm_resource_group.main.location
+  name                = "openai-${local.project_name}-${local.resource_suffix}"  # Existing resource name
+  location            = "northcentralus"              # Existing resource location
   resource_group_name = azurerm_resource_group.main.name
   kind                = "OpenAI"
   sku_name            = "S0"
   public_network_access_enabled = true
+  custom_subdomain_name = "openai-${local.project_name}-${local.resource_suffix}"
 
-  tags = var.tags
+  network_acls {
+    default_action = "Allow"
+    ip_rules       = []
+  }
+
+  tags = {
+    Service = "OpenAI"
+  }
 }
 
-// Note: AzureRM provider does not expose a data source to read Cognitive Services keys.
-// Provide OpenAI and Speech Services keys via variables/secrets instead of reading from the resource.
+// Note: Using existing Azure OpenAI resource instead of creating new one
+// Provide OpenAI endpoint and key via variables
 
-# Chat model deployment for transcript cleanup (no more Whisper deployment needed)
+# Chat model deployment for transcript cleanup
 resource "azurerm_cognitive_deployment" "openai_chat" {
   count                = length(var.openai_chat_deployment) > 0 && length(var.openai_chat_model_name) > 0 ? 1 : 0
   name                 = var.openai_chat_deployment
@@ -306,7 +314,7 @@ resource "azurerm_static_web_app" "main" {
   "STREAMING_CONTAINER_APP_NAME"          = azurerm_container_app.streaming.name
   "MIN_STREAMING_BALANCE"                 = "1.0"
   # Azure OpenAI (cleanup only) + Speech Services + Translator
-  "AZURE_OPENAI_ENDPOINT"                 = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
+  "AZURE_OPENAI_ENDPOINT"                 = azurerm_cognitive_account.openai.endpoint
   "AZURE_OPENAI_API_VERSION"              = var.openai_api_version
   "AZURE_OPENAI_CLEANUP_DEPLOYMENT"       = var.openai_chat_deployment
   "AZURE_SPEECH_SERVICES_REGION"          = azurerm_resource_group.main.location
@@ -456,7 +464,7 @@ resource "azurerm_container_app" "processor" {
       # Azure OpenAI env for cleanup only
       env {
         name  = "AZURE_OPENAI_ENDPOINT"
-        value = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
+        value = azurerm_cognitive_account.openai.endpoint
       }
       env {
         name  = "AZURE_OPENAI_API_VERSION"
@@ -602,7 +610,7 @@ resource "azurerm_container_app" "streaming" {
       name   = "streaming"
       image  = "${azurerm_container_registry.main.login_server}/${var.streaming_image_name}:${var.streaming_image_tag}"
       cpu    = 1.0
-      memory = "1.5Gi"
+      memory = "2.0Gi"
 
       # Azure Speech Services + OpenAI (cleanup) + Translator for streaming
       env {
@@ -621,7 +629,7 @@ resource "azurerm_container_app" "streaming" {
       # Azure OpenAI env for cleanup only
       env {
         name  = "AZURE_OPENAI_ENDPOINT"
-        value = length(var.openai_endpoint) > 0 ? var.openai_endpoint : azurerm_cognitive_account.openai.endpoint
+        value = azurerm_cognitive_account.openai.endpoint
       }
       env {
         name  = "AZURE_OPENAI_API_VERSION"
