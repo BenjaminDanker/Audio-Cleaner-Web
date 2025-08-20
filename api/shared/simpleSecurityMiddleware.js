@@ -6,6 +6,7 @@
 const { CosmosClient } = require('@azure/cosmos');
 const crypto = require('crypto');
 const AzureSDKConfig = require('./azureSDKConfig');
+const MinimalLogger = require('./minimalLogger');
 
 class SimpleSecurityMiddleware {
     constructor(cosmosConnectionString) {
@@ -14,6 +15,8 @@ class SimpleSecurityMiddleware {
                            cosmosConnectionString.includes('AccountEndpoint')) 
                            ? AzureSDKConfig.createCosmosClient(cosmosConnectionString) : null;
         this.initialized = false;
+        this.logger = null; // Will be set when context is available
+        
         // Load API keys from env for lightweight validation without Cosmos (non-production only)
         // In production, disable env-based API keys to avoid accidental bypass
         if ((process.env.NODE_ENV || '').toLowerCase() !== 'production') {
@@ -32,7 +35,22 @@ class SimpleSecurityMiddleware {
      * Simple security check - basic auth validation only
      */
     async checkSecurity(context, req, options = {}) {
+        // Initialize logger with context
+        if (context && !this.logger) {
+            this.logger = new MinimalLogger(context).getLogger();
+        }
+        
+        const sessionId = `sec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        
         try {
+            this.logger?.logInfo('security-middleware', 'Starting security check', 'security', {
+                sessionId,
+                method: req.method,
+                url: req.url,
+                requireAuth: options.requireAuth,
+                allowApiKey: options.allowApiKey
+            });
+            
             let userInfo = null;
             let authMethod = null;
             
@@ -43,8 +61,18 @@ class SimpleSecurityMiddleware {
                 const apiKey = allowApiKey ? this.getApiKey(req) : null;
                 
                 if (apiKey) {
+                    this.logger?.logInfo('security-middleware', 'API key authentication attempt', 'security', {
+                        sessionId,
+                        hasApiKey: true,
+                        apiKeyLength: apiKey.length
+                    });
+                    
                     const keyValidation = await this.validateApiKey(apiKey);
                     if (!keyValidation) {
+                        this.logger?.logError('security-middleware', 'Invalid API key provided', 'security', {
+                            sessionId,
+                            apiKeyLength: apiKey.length
+                        });
                         return { allowed: false, status: 401, body: { error: 'Invalid API key' } };
                     }
                     
@@ -52,14 +80,32 @@ class SimpleSecurityMiddleware {
                     if (typeof keyValidation === 'object' && keyValidation.userId) {
                         userInfo = { userId: keyValidation.userId, keyId: keyValidation.keyId };
                         authMethod = 'apikey';
+                        this.logger?.logInfo('security-middleware', 'API key authentication successful (Cosmos)', 'security', {
+                            sessionId,
+                            userId: keyValidation.userId,
+                            authMethod
+                        });
                     } else {
                         // Environment API key - no user info available
                         userInfo = null;
                         authMethod = 'apikey';
+                        this.logger?.logInfo('security-middleware', 'API key authentication successful (env)', 'security', {
+                            sessionId,
+                            authMethod
+                        });
                     }
                 } else {
+                    this.logger?.logInfo('security-middleware', 'SWA authentication attempt', 'security', {
+                        sessionId,
+                        hasClientPrincipal: !!req.headers['x-ms-client-principal']
+                    });
+                    
                     const authCheck = this.validateAuthentication(req);
                     if (!authCheck.valid) {
+                        this.logger?.logError('security-middleware', 'SWA authentication failed', 'security', {
+                            sessionId,
+                            error: authCheck.error
+                        });
                         return {
                             allowed: false,
                             status: 401,
@@ -68,8 +114,23 @@ class SimpleSecurityMiddleware {
                     }
                     userInfo = this.getUserInfo(req);
                     authMethod = 'swa';
+                    this.logger?.logInfo('security-middleware', 'SWA authentication successful', 'security', {
+                        sessionId,
+                        userId: userInfo?.userId,
+                        authMethod
+                    });
                 }
+            } else {
+                this.logger?.logInfo('security-middleware', 'No authentication required', 'security', {
+                    sessionId
+                });
             }
+
+            this.logger?.logInfo('security-middleware', 'Security check completed successfully', 'security', {
+                sessionId,
+                authMethod,
+                hasUserInfo: !!userInfo
+            });
 
             return {
                 allowed: true,
@@ -78,6 +139,13 @@ class SimpleSecurityMiddleware {
             };
 
         } catch (error) {
+            this.logger?.logError('security-middleware', 'Security check error', 'security', {
+                sessionId,
+                error: error.message,
+                stack: error.stack
+            });
+            
+            // Fallback to context logging if logger fails
             if (context) {
                 context.log.error('Security check error:', error.message);
             }
@@ -112,23 +180,53 @@ class SimpleSecurityMiddleware {
      * @returns {boolean|object} - false if invalid, true if valid env key, or {userId, keyId} if Cosmos key
      */
     async validateApiKey(apiKey) {
-        if (!apiKey) return false;
-    if (this.localApiKeys && this.localApiKeys.size > 0 && this.localApiKeys.has(apiKey)) return true;
+        if (!apiKey) {
+            this.logger?.logError('validateApiKey', 'No API key provided', 'security');
+            return false;
+        }
+        
+        // Check environment keys first
+        if (this.localApiKeys && this.localApiKeys.size > 0 && this.localApiKeys.has(apiKey)) {
+            this.logger?.logInfo('validateApiKey', 'API key validated against environment keys', 'security', {
+                envKeysCount: this.localApiKeys.size
+            });
+            return true;
+        }
         
         // Check if API key contains user identification (format: userId_randomKey)
-        if (!this.cosmosClient) return false; // No DB configured, only env keys allowed
+        if (!this.cosmosClient) {
+            this.logger?.logError('validateApiKey', 'No Cosmos client configured and API key not in env keys', 'security', {
+                hasCosmosClient: false,
+                envKeysCount: this.localApiKeys?.size || 0
+            });
+            return false; // No DB configured, only env keys allowed
+        }
         
         try {
             // Parse API key format: userId_randomKey
             const parts = apiKey.split('_');
             if (parts.length !== 2) {
+                this.logger?.logError('validateApiKey', 'Invalid API key format', 'security', {
+                    partsCount: parts.length,
+                    expectedFormat: 'userId_randomKey'
+                });
                 return false; // Invalid format
             }
             
             const [userId, keyPart] = parts;
             if (!userId || !keyPart || keyPart.length < 32) {
+                this.logger?.logError('validateApiKey', 'Invalid API key components', 'security', {
+                    hasUserId: !!userId,
+                    keyPartLength: keyPart?.length || 0,
+                    minKeyLength: 32
+                });
                 return false; // Invalid user ID or key too short
             }
+            
+            this.logger?.logInfo('validateApiKey', 'Attempting Cosmos API key validation', 'security', {
+                userId,
+                keyPartLength: keyPart.length
+            });
             
             const db = this.cosmosClient.database(process.env.COSMOS_DB_NAME || 'app');
             const container = db.container('accounts');
@@ -137,19 +235,34 @@ class SimpleSecurityMiddleware {
             // Only check the specific user's account - prevents cross-user access
             const { resource: account } = await container.item(userId, userId).read();
             if (!account || !account.apiKeyHash) {
+                this.logger?.logError('validateApiKey', 'User account not found or no API key hash', 'security', {
+                    userId,
+                    accountExists: !!account,
+                    hasApiKeyHash: !!(account?.apiKeyHash)
+                });
                 return false; // User not found or no API key set
             }
             
             // Compare hash against this specific user's stored hash only
             // Use constant-time comparison to prevent timing attacks
             if (this.constantTimeEquals(account.apiKeyHash, hash)) {
+                this.logger?.logInfo('validateApiKey', 'Cosmos API key validation successful', 'security', {
+                    userId
+                });
                 return {
                     userId: userId
                 };
             }
             
+            this.logger?.logError('validateApiKey', 'API key hash mismatch', 'security', {
+                userId
+            });
             return false;
-        } catch {
+        } catch (error) {
+            this.logger?.logError('validateApiKey', 'Cosmos API key validation error', 'security', {
+                error: error.message,
+                stack: error.stack
+            });
             return false;
         }
     }
@@ -176,13 +289,23 @@ class SimpleSecurityMiddleware {
         const clientPrincipal = req.headers['x-ms-client-principal'];
         
         if (!clientPrincipal) {
+            this.logger?.logError('validateAuthentication', 'No x-ms-client-principal header', 'security');
             return { valid: false, error: 'No authentication' };
         }
 
         try {
             const principal = JSON.parse(Buffer.from(clientPrincipal, 'base64').toString());
+            this.logger?.logInfo('validateAuthentication', 'Successfully parsed client principal', 'security', {
+                hasUserId: !!principal.userId,
+                hasUserDetails: !!principal.userDetails,
+                identityProvider: principal.identityProvider
+            });
             return { valid: true, principal };
         } catch (error) {
+            this.logger?.logError('validateAuthentication', 'Failed to parse client principal', 'security', {
+                error: error.message,
+                clientPrincipalLength: clientPrincipal.length
+            });
             return { valid: false, error: 'Invalid authentication' };
         }
     }
@@ -194,15 +317,26 @@ class SimpleSecurityMiddleware {
         try {
             const clientPrincipal = req.headers['x-ms-client-principal'];
             if (!clientPrincipal) {
+                this.logger?.logError('getUserInfo', 'No x-ms-client-principal header', 'security');
                 return null;
             }
             
             const principal = JSON.parse(Buffer.from(clientPrincipal, 'base64').toString());
-            return {
+            const userInfo = {
                 userId: principal.userId || principal.userDetails,
                 email: principal.userDetails || principal.userId
             };
-        } catch {
+            
+            this.logger?.logInfo('getUserInfo', 'Successfully extracted user info', 'security', {
+                hasUserId: !!userInfo.userId,
+                hasEmail: !!userInfo.email
+            });
+            
+            return userInfo;
+        } catch (error) {
+            this.logger?.logError('getUserInfo', 'Failed to extract user info', 'security', {
+                error: error.message
+            });
             return null;
         }
     }
