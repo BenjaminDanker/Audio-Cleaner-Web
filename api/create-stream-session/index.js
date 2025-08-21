@@ -198,11 +198,21 @@ async function triggerStreamingScale(context) {
       return { success: false, error }
     }
 
-    // Use managed identity to authenticate with Azure
-    const { DefaultAzureCredential } = require('@azure/identity')
+    // Use service principal to authenticate with Azure (SWA doesn't support managed identity)
+    const { ClientSecretCredential } = require('@azure/identity')
     const { ContainerAppsAPIClient } = require('@azure/arm-appcontainers')
     
-    const credential = new DefaultAzureCredential()
+    const spClientId = process.env.SP_CLIENT_ID
+    const spClientSecret = process.env.SP_CLIENT_SECRET
+    const spTenantId = process.env.SP_TENANT_ID
+    
+    if (!spClientId || !spClientSecret || !spTenantId) {
+      const error = 'Service principal credentials missing for Container Apps scaling'
+      context.log.error(error)
+      return { success: false, error }
+    }
+    
+    const credential = new ClientSecretCredential(spTenantId, spClientId, spClientSecret)
     const client = new ContainerAppsAPIClient(credential, subscriptionId)
 
     // Get current container app configuration

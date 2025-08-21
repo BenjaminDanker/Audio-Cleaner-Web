@@ -179,3 +179,22 @@ variable "stream_session_signing_key" {
   type        = string
   sensitive   = true
 }
+
+# Service Principal for API Functions to manage Container Apps
+variable "sp_client_id" {
+  description = "Service Principal Client ID for Container Apps management"
+  type        = string
+  sensitive   = true
+}
+
+variable "sp_client_secret" {
+  description = "Service Principal Client Secret for Container Apps management"
+  type        = string
+  sensitive   = true
+}
+
+variable "sp_tenant_id" {
+  description = "Service Principal Tenant ID for Container Apps management"
+  type        = string
+  sensitive   = true
+}

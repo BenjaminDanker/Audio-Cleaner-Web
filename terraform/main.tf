@@ -287,54 +287,70 @@ resource "azurerm_static_web_app" "main" {
   sku_tier            = "Standard"
   sku_size            = "Standard"
 
-  identity {
-    type = "SystemAssigned"
-  }
-
   app_settings = {
-  "AZURE_STORAGE_CONNECTION_STRING"       = azurerm_storage_account.main.primary_connection_string
-  "AZURE_SERVICE_BUS_CONNECTION_STRING"   = azurerm_servicebus_namespace.main.default_primary_connection_string
-  "COSMOS_CONNECTION_STRING"              = azurerm_cosmosdb_account.main.primary_sql_connection_string
-  "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
-  "STRIPE_SECRET_KEY"                     = var.stripe_secret_key
-  "STRIPE_PUBLIC_KEY"                     = var.stripe_public_key
-  "STRIPE_WEBHOOK_SECRET"                 = var.stripe_webhook_secret
-  "FRONTEND_URL"                          = var.frontend_url
-  "STRIPE_TOPUP_PRICE_ID"                 = var.stripe_topup_price_id
-  "UPLOADS_CONTAINER_NAME"                = var.uploads_container_name
-  "PROCESSED_CONTAINER_NAME"              = var.processed_container_name
-  "QUEUE_NAME"                            = var.queue_name
-  # Streaming configuration - API Keys are managed per-user in Cosmos DB
-  "STREAMING_ENDPOINT"                    = "https://${azurerm_container_app.streaming.ingress[0].fqdn}"
-  "STREAM_SESSION_SIGNING_KEY"            = var.stream_session_signing_key
-  "COSMOS_DB_NAME"                        = azurerm_cosmosdb_sql_database.main.name
-  # Container scaling configuration
-  "AZURE_SUBSCRIPTION_ID"                 = data.azurerm_subscription.current.subscription_id
-  "AZURE_RESOURCE_GROUP_NAME"             = azurerm_resource_group.main.name
-  "STREAMING_CONTAINER_APP_NAME"          = azurerm_container_app.streaming.name
-  "MIN_STREAMING_BALANCE"                 = "1.0"
-  # Azure OpenAI (cleanup only) + Speech Services + Translator
-  "AZURE_OPENAI_ENDPOINT"                 = azurerm_cognitive_account.openai.endpoint
-  "AZURE_OPENAI_API_VERSION"              = var.openai_api_version
-  "AZURE_OPENAI_CLEANUP_DEPLOYMENT"       = var.openai_chat_deployment
-  "AZURE_SPEECH_SERVICES_REGION"          = azurerm_resource_group.main.location
-  "USE_SPEECH_SERVICES"                   = "true"
-  "AZURE_TRANSLATOR_REGION"               = var.translator_region
-  "AZURE_TRANSLATOR_ENDPOINT"             = "https://api.cognitive.microsofttranslator.com"
+    # Basic frontend configuration
+    "FRONTEND_URL"                          = var.frontend_url
+    
+    # API backend configuration - only what API needs
+    "AZURE_STORAGE_CONNECTION_STRING"       = azurerm_storage_account.main.primary_connection_string
+    "AZURE_SERVICE_BUS_CONNECTION_STRING"   = azurerm_servicebus_namespace.main.default_primary_connection_string
+    "COSMOS_CONNECTION_STRING"              = azurerm_cosmosdb_account.main.primary_sql_connection_string
+    "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.main.connection_string
+    "COSMOS_DB_NAME"                        = azurerm_cosmosdb_sql_database.main.name
+    
+    # Payment configuration
+    "STRIPE_SECRET_KEY"                     = var.stripe_secret_key
+    "STRIPE_PUBLIC_KEY"                     = var.stripe_public_key
+    "STRIPE_WEBHOOK_SECRET"                 = var.stripe_webhook_secret
+    "STRIPE_TOPUP_PRICE_ID"                 = var.stripe_topup_price_id
+    
+    # Storage configuration
+    "UPLOADS_CONTAINER_NAME"                = var.uploads_container_name
+    "PROCESSED_CONTAINER_NAME"              = var.processed_container_name
+    "QUEUE_NAME"                            = var.queue_name
+    
+    # Streaming configuration
+    "STREAMING_ENDPOINT"                    = "https://${azurerm_container_app.streaming.ingress[0].fqdn}"
+    "STREAM_SESSION_SIGNING_KEY"            = var.stream_session_signing_key
+    "MIN_STREAMING_BALANCE"                 = "1.0"
+    
+    # Container Apps management - Service Principal for API functions
+    "AZURE_SUBSCRIPTION_ID"                 = data.azurerm_subscription.current.subscription_id
+    "AZURE_RESOURCE_GROUP_NAME"             = azurerm_resource_group.main.name
+    "STREAMING_CONTAINER_APP_NAME"          = azurerm_container_app.streaming.name
+    "SP_CLIENT_ID"                          = var.sp_client_id
+    "SP_CLIENT_SECRET"                      = var.sp_client_secret
+    "SP_TENANT_ID"                          = var.sp_tenant_id
+    
+    # Azure AI Services - for API functions only
+    "AZURE_OPENAI_ENDPOINT"                 = azurerm_cognitive_account.openai.endpoint
+    "AZURE_OPENAI_API_KEY"                  = var.openai_api_key
+    "AZURE_OPENAI_API_VERSION"              = var.openai_api_version
+    "AZURE_OPENAI_CLEANUP_DEPLOYMENT"       = var.openai_chat_deployment
+    "AZURE_SPEECH_SERVICES_REGION"          = azurerm_resource_group.main.location
+    "USE_SPEECH_SERVICES"                   = "true"
+    "AZURE_TRANSLATOR_REGION"               = var.translator_region
+    "AZURE_TRANSLATOR_KEY"                  = var.translator_key
+    "AZURE_TRANSLATOR_ENDPOINT"             = "https://api.cognitive.microsofttranslator.com"
   }
 
   tags = var.tags
 }
 
-# Role assignment for Static Web App to manage Container Apps
-resource "azurerm_role_assignment" "swa_container_contributor" {
-  scope                = azurerm_resource_group.main.id
-  role_definition_name = "Contributor"
-  principal_id         = azurerm_static_web_app.main.identity[0].principal_id
-}
-
 # Get current client configuration
 data "azurerm_client_config" "current" {}
+
+# Data source to get the service principal object ID
+data "azuread_service_principal" "container_apps_sp" {
+  client_id = var.sp_client_id
+}
+
+# Role assignment for Service Principal to manage Container Apps
+resource "azurerm_role_assignment" "sp_container_apps_contributor" {
+  scope                = azurerm_resource_group.main.id
+  role_definition_name = "Container Apps Contributor"
+  principal_id         = data.azuread_service_principal.container_apps_sp.object_id
+}
 
 // Azure Container Registry for storing processor image
 resource "azurerm_container_registry" "main" {

@@ -56,62 +56,17 @@ class SimpleSecurityMiddleware {
             
             // Simple auth check
             if (options.requireAuth !== false) {
-                // Allow either SWA auth or API key auth (for non-browser clients like OBS companion)
+                // Prefer SWA auth for signed-in users; only fall back to API key for anonymous clients
                 const allowApiKey = options.allowApiKey !== false; // default true
-                const apiKey = allowApiKey ? this.getApiKey(req) : null;
-                
-                if (apiKey) {
-                    this.logger?.logInfo('security-middleware', 'API key authentication attempt', 'security', {
-                        sessionId,
-                        hasApiKey: true,
-                        apiKeyLength: apiKey.length
-                    });
-                    
-                    const keyValidation = await this.validateApiKey(apiKey);
-                    if (!keyValidation) {
-                        this.logger?.logError('security-middleware', 'Invalid API key provided', 'security', {
-                            sessionId,
-                            apiKeyLength: apiKey.length
-                        });
-                        return { allowed: false, status: 401, body: { error: 'Invalid API key' } };
-                    }
-                    
-                    // Handle both boolean (env keys) and object (Cosmos keys) returns
-                    if (typeof keyValidation === 'object' && keyValidation.userId) {
-                        userInfo = { userId: keyValidation.userId, keyId: keyValidation.keyId };
-                        authMethod = 'apikey';
-                        this.logger?.logInfo('security-middleware', 'API key authentication successful (Cosmos)', 'security', {
-                            sessionId,
-                            userId: keyValidation.userId,
-                            authMethod
-                        });
-                    } else {
-                        // Environment API key - no user info available
-                        userInfo = null;
-                        authMethod = 'apikey';
-                        this.logger?.logInfo('security-middleware', 'API key authentication successful (env)', 'security', {
-                            sessionId,
-                            authMethod
-                        });
-                    }
-                } else {
-                    this.logger?.logInfo('security-middleware', 'SWA authentication attempt', 'security', {
-                        sessionId,
-                        hasClientPrincipal: !!req.headers['x-ms-client-principal']
-                    });
-                    
-                    const authCheck = this.validateAuthentication(req);
-                    if (!authCheck.valid) {
-                        this.logger?.logError('security-middleware', 'SWA authentication failed', 'security', {
-                            sessionId,
-                            error: authCheck.error
-                        });
-                        return {
-                            allowed: false,
-                            status: 401,
-                            body: { error: 'Authentication required' }
-                        };
-                    }
+
+                // 1) Try SWA authentication first
+                this.logger?.logInfo('security-middleware', 'SWA authentication attempt', 'security', {
+                    sessionId,
+                    hasClientPrincipal: !!req.headers['x-ms-client-principal']
+                });
+
+                const authCheck = this.validateAuthentication(req);
+                if (authCheck.valid) {
                     userInfo = this.getUserInfo(req);
                     authMethod = 'swa';
                     this.logger?.logInfo('security-middleware', 'SWA authentication successful', 'security', {
@@ -119,6 +74,72 @@ class SimpleSecurityMiddleware {
                         userId: userInfo?.userId,
                         authMethod
                     });
+                } else {
+                    // 2) SWA not present/invalid — evaluate API key only for anonymous access
+                    this.logger?.logInfo('security-middleware', 'SWA auth not valid; evaluating API key fallback', 'security', {
+                        sessionId,
+                        error: authCheck.error,
+                        allowApiKey
+                    });
+
+                    if (allowApiKey) {
+                        const apiKey = this.getApiKey(req);
+                        if (apiKey) {
+                            this.logger?.logInfo('security-middleware', 'API key authentication attempt', 'security', {
+                                sessionId,
+                                hasApiKey: true,
+                                apiKeyLength: apiKey.length
+                            });
+
+                            const keyValidation = await this.validateApiKey(apiKey);
+                            if (!keyValidation) {
+                                this.logger?.logError('security-middleware', 'Invalid API key provided', 'security', {
+                                    sessionId,
+                                    apiKeyLength: apiKey.length
+                                });
+                                return { allowed: false, status: 401, body: { error: 'Invalid API key' } };
+                            }
+
+                            // Handle both boolean (env keys) and object (Cosmos keys) returns
+                            if (typeof keyValidation === 'object' && keyValidation.userId) {
+                                userInfo = { userId: keyValidation.userId, keyId: keyValidation.keyId };
+                                authMethod = 'apikey';
+                                this.logger?.logInfo('security-middleware', 'API key authentication successful (Cosmos)', 'security', {
+                                    sessionId,
+                                    userId: keyValidation.userId,
+                                    authMethod
+                                });
+                            } else {
+                                // Environment API key - no user info available
+                                userInfo = null;
+                                authMethod = 'apikey';
+                                this.logger?.logInfo('security-middleware', 'API key authentication successful (env)', 'security', {
+                                    sessionId,
+                                    authMethod
+                                });
+                            }
+                        } else {
+                            // Neither SWA nor API key present
+                            this.logger?.logError('security-middleware', 'No authentication provided', 'security', {
+                                sessionId
+                            });
+                            return {
+                                allowed: false,
+                                status: 401,
+                                body: { error: 'Authentication required' }
+                            };
+                        }
+                    } else {
+                        // API key path disabled and SWA invalid
+                        this.logger?.logError('security-middleware', 'Authentication required and API key disabled', 'security', {
+                            sessionId
+                        });
+                        return {
+                            allowed: false,
+                            status: 401,
+                            body: { error: 'Authentication required' }
+                        };
+                    }
                 }
             } else {
                 this.logger?.logInfo('security-middleware', 'No authentication required', 'security', {

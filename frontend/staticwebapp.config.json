@@ -5,21 +5,11 @@
     { "route": "/dashboard", "allowedRoles": ["authenticated"] },
     { 
       "route": "/api/webhook-stripe", 
-      "allowedRoles": ["anonymous"],
-      "headers": {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "*"
-      }
+      "allowedRoles": ["anonymous"]
     },
     { 
       "route": "/api/*", 
-      "allowedRoles": ["authenticated"],
-      "headers": {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "*"
-      }
+      "allowedRoles": ["authenticated"]
     }
   ],
 
