@@ -2,7 +2,18 @@
 """Clarity pipeline diagnostics tool (local).
 
 Runs the same stages as audio_clarity_pipeline step-by-step, writes a WAV after
-each stage, and prints metrics so you can objectively verify changes.
+each stage, and prints metrics so you ca        entry = {
+            "name": name,
+            "rms_dbfs": _dbfs(rms),
+            "peak_dbfs": _dbfs_peak(peak),
+            "spectral_low": low,
+            "spectral_high": high,
+            "spectral_high_minus_low_db": _dbfs(max(high,1e-12)) - _dbfs(max(low,1e-12)),
+            "noise_floor_proxy": noise,
+            "snr_proxy_db": _dbfs(rms / max(noise, 1e-12)),
+            "lufs": lufs,
+            "ess_ratio_5k9k_to_300_3k": ess_ratio(sig, fs),
+        }y verify changes.
 
 Usage (Windows PowerShell):
   python .\processor\tools\clarity_diagnostics.py -i path\to\audio_or_video.ext -o .\diag_out \
@@ -26,6 +37,7 @@ import time
 import shutil
 
 import numpy as np
+import torch
 
 
 def _add_paths():
@@ -52,6 +64,7 @@ from shared.ai.audio_clarity_pipeline import (  # type: ignore
     _apply_limiter,
 )
 from shared.ai.audio_denoise_dfnet import _get_enhancer  # type: ignore
+from df.enhance import enhance  # type: ignore
 
 try:
     import soundfile as sf
@@ -82,7 +95,13 @@ def _rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(x)) + 1e-12))
 
 
+def _dbfs_peak(val: float) -> float:
+    # Only for *peak* on a normalized [-1, 1] waveform
+    v = max(min(val, 1.0), 1e-12)
+    return 20.0 * math.log10(v)
+
 def _dbfs(val: float) -> float:
+    # Generic dB for arbitrary linear magnitudes/ratios (no clamp!)
     return 20.0 * math.log10(max(val, 1e-12))
 
 
@@ -102,6 +121,13 @@ def _noise_floor_proxy(x: np.ndarray) -> float:
     return float(np.percentile(np.abs(x), 10))
 
 
+def ess_ratio(x: np.ndarray, fs: int, lo: int = 5500, hi: int = 9000, voice_lo: int = 300, voice_hi: int = 3500) -> float:
+    """Compute ess_ratio for backward compatibility - returns just the ratio."""
+    from shared.ai.audio_clarity_pipeline import _ess_ratio  # type: ignore
+    ratio, _, _ = _ess_ratio(x, fs, lo, hi, voice_lo, voice_hi)
+    return ratio
+
+
 def _loudness_lufs(x: np.ndarray, fs: int) -> float | None:
     if pyln is None:
         return None
@@ -119,8 +145,8 @@ def _write_wav(path: Path, x: np.ndarray, fs: int):
 def _extract_or_read(input_path: Path, work: Path, target_sr: int) -> Tuple[np.ndarray, int, Path, float]:
     """Return mono f32 audio at target_sr and path used as source for diagnostics, plus duration (ms)."""
     t0 = time.perf_counter()
-    if MediaExtractor is not None and (shutil.which("ffmpeg") or os.environ.get("FFMPEG_PATH")):
-        # Normalize via extractor to match production path
+    if MediaExtractor is not None:
+        # Normalize via extractor (uses bundled FFmpeg via imageio_ffmpeg)
         try:
             extr = MediaExtractor(target_sr)
             res = extr.extract(str(input_path), str(work))
@@ -147,9 +173,16 @@ def _extract_or_read(input_path: Path, work: Path, target_sr: int) -> Tuple[np.n
 
 def run_diagnostics(input_file: Path, out_dir: Path, params: ClarityParams) -> Dict:
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Pre-initialize enhancer (including model loading) before any timing
     enh = _get_enhancer()
     fs = enh.sample_rate
-
+    
+    # Warm up the model with a tiny dummy array to ensure it's fully loaded
+    dummy = torch.zeros((1, 1000), dtype=torch.float32)
+    with torch.no_grad():
+        _ = enhance(enh.model, enh.df_state, dummy, atten_lim_db=30)
+    
     # Stage: extraction/normalization
     x, sr, src_path, extract_ms = _extract_or_read(input_file, out_dir, fs)
 
@@ -163,7 +196,7 @@ def run_diagnostics(input_file: Path, out_dir: Path, params: ClarityParams) -> D
 
     total_start = time.perf_counter()
 
-    def stage(name: str, sig: np.ndarray, duration_ms: float | None = None) -> np.ndarray:
+    def stage(name: str, sig: np.ndarray, proc_ms: float | None = None, io_ms: float | None = None) -> np.ndarray:
         rms = _rms(sig)
         peak = float(np.max(np.abs(sig)))
         low, high = _spectral_bands(sig, fs)
@@ -180,9 +213,14 @@ def run_diagnostics(input_file: Path, out_dir: Path, params: ClarityParams) -> D
             "noise_floor_proxy": noise,
             "snr_proxy_db": snr_proxy,
             "lufs": lufs,
+            "ess_ratio_5k9k_to_300_3k": ess_ratio(sig, fs),
         }
-        if duration_ms is not None:
-            entry["duration_ms"] = duration_ms
+        # Back-compat: duration_ms remains the processing time
+        if proc_ms is not None:
+            entry["duration_ms"] = proc_ms
+            entry["proc_ms"] = proc_ms
+        if io_ms is not None:
+            entry["io_ms"] = io_ms
         report["stages"].append(entry)
         _write_wav(out_dir / f"{len(report['stages']):02d}_{name}.wav", sig, fs)
         return sig
@@ -198,45 +236,105 @@ def run_diagnostics(input_file: Path, out_dir: Path, params: ClarityParams) -> D
     if x_enh.ndim > 1:
         x_enh = x_enh.squeeze(0)
     x = x_enh.detach().cpu().numpy().astype(np.float32, copy=False)
-    x = stage("denoise_dfnet", x, (time.perf_counter() - t0) * 1000.0)
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("denoise_dfnet", x, proc_ms=proc_ms, io_ms=None)
+    io_ms = (time.perf_counter() - t_io) * 1000.0
+    report["stages"][-1]["io_ms"] = io_ms
 
-    # 2) Dereverb
-    t0 = time.perf_counter()
-    x = _dereverb_spectral_subtraction(x, fs, params.dereverb_strength)
-    x = stage("dereverb", x, (time.perf_counter() - t0) * 1000.0)
-
-    # 3) Noise gate
+    # 2) Noise gate
     from shared.ai.audio_clarity_pipeline import StreamState  # type: ignore
     st = StreamState()
     t0 = time.perf_counter()
     x = _apply_noise_gate(x, fs, params.gate_threshold_db, params.gate_ratio, params.gate_attack_ms, params.gate_release_ms, st)
-    x = stage("noise_gate", x, (time.perf_counter() - t0) * 1000.0)
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("noise_gate", x, proc_ms=proc_ms, io_ms=None)
+    report["stages"][-1]["io_ms"] = (time.perf_counter() - t_io) * 1000.0
 
-    # 4) EQ: HPF + high-shelf
+    # 3) EQ: HPF + high-shelf
     t0 = time.perf_counter()
     b, a = _butter_highpass(params.highpass_hz, fs, order=2)
     from scipy.signal import lfilter  # type: ignore
     x = lfilter(b, a, x)
     x = _simple_high_shelf(x, fs, params.shelf_freq_hz, params.shelf_gain_db)
-    x = stage("eq_tilt", x, (time.perf_counter() - t0) * 1000.0)
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("eq_tilt", x, proc_ms=proc_ms, io_ms=None)
+    report["stages"][-1]["io_ms"] = (time.perf_counter() - t_io) * 1000.0
 
-    # 5) Compressor
-    t0 = time.perf_counter()
-    x = _apply_compressor(x, fs, params.comp_threshold_db, params.comp_ratio, params.comp_attack_ms, params.comp_release_ms, params.comp_makeup_db, st)
-    x = stage("compressor", x, (time.perf_counter() - t0) * 1000.0)
-
-    # 6) Loudness normalize
+    # 4) Loudness normalize BEFORE compression (fixed threshold behavior)
     t0 = time.perf_counter()
     from shared.ai.audio_clarity_pipeline import _loudness_normalize_file  # type: ignore
     x = _loudness_normalize_file(x, fs, params.lufs_target, params.limit_ceiling_dbfs)
-    x = stage("loudness_normalize", x, (time.perf_counter() - t0) * 1000.0)
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("loudness_normalize", x, proc_ms=proc_ms, io_ms=None)
+    report["stages"][-1]["io_ms"] = (time.perf_counter() - t_io) * 1000.0
 
-    # 7) Final limiter after normalization
+    # 5) Compressor AFTER normalization with fixed dialog settings
+    t0 = time.perf_counter()
+    # Compute and log GR from detector; then apply compressor with same settings
+    from shared.ai.audio_clarity_pipeline import _compressor_gain_trace  # type: ignore
+    env, gr_s, gain = _compressor_gain_trace(
+        x, fs,
+        thr_db=float(params.comp_threshold_db),
+        ratio=float(params.comp_ratio),
+    )
+    # Gain reduction in dB (negative numbers) using smoothed GR trace
+    gr_db = gr_s.astype(np.float32, copy=False)
+    # Compute positive "reduction" from the smoothed GR trace
+    reduction_db = -gr_db  # positive numbers = amount of reduction
+    
+    # Use reduction values for all stats (positive = amount of reduction)
+    avg_gr_db = float(np.percentile(reduction_db, 50))  # median reduction
+    max_gr_db = float(np.max(reduction_db))             # deepest reduction
+    x = _apply_compressor(
+        x, fs,
+        thr_db=float(params.comp_threshold_db),
+        ratio=float(params.comp_ratio),
+        attack_ms=float(params.comp_attack_ms),
+        release_ms=float(params.comp_release_ms),
+        makeup_db=float(params.comp_makeup_db),
+        state=st,
+    )
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("compressor", x, proc_ms=proc_ms, io_ms=None)
+    report["stages"][-1]["avg_gr_db"] = avg_gr_db
+    report["stages"][-1]["max_gr_db"] = max_gr_db
+    # Also log percentiles of reduction (positive numbers, dB of reduction)
+    p50, p90, p99 = np.percentile(reduction_db, [50, 90, 99])
+    report["stages"][-1]["comp_gr_db_p50"] = float(p50)
+    report["stages"][-1]["comp_gr_db_p90"] = float(p90)
+    report["stages"][-1]["comp_gr_db_p99"] = float(p99)
+    report["stages"][-1]["comp_gr_db_min"] = float(np.min(reduction_db))  # usually 0
+    report["stages"][-1]["comp_gr_db_max"] = float(np.max(reduction_db))  # deepest
+    report["stages"][-1]["io_ms"] = (time.perf_counter() - t_io) * 1000.0
+
+    # 6) Dynamic presence notch after compressor (driven by ess_ratio)
+    t0 = time.perf_counter()
+    from shared.ai.audio_clarity_pipeline import _apply_dynamic_presence_notch  # type: ignore
+    x, applied_depth_db = _apply_dynamic_presence_notch(x, fs)
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("presence_notch_dyn", x, proc_ms=proc_ms, io_ms=None)
+    report["stages"][-1]["applied_depth_db"] = applied_depth_db
+    report["stages"][-1]["ess_ratio_after_notch"] = report["stages"][-1]["ess_ratio_5k9k_to_300_3k"]
+    report["stages"][-1]["io_ms"] = (time.perf_counter() - t_io) * 1000.0
+
+    # 7) Final limiter
     t0 = time.perf_counter()
     x = _apply_limiter(x, params.limit_ceiling_dbfs)
-    x = stage("limiter", x, (time.perf_counter() - t0) * 1000.0)
+    proc_ms = (time.perf_counter() - t0) * 1000.0
+    t_io = time.perf_counter()
+    x = stage("limiter", x, proc_ms=proc_ms, io_ms=None)
+    report["stages"][-1]["io_ms"] = (time.perf_counter() - t_io) * 1000.0
 
-    report["total_time_ms"] = (time.perf_counter() - total_start) * 1000.0
+    # Totals
+    report["total_wall_ms"] = (time.perf_counter() - total_start) * 1000.0
+    # Sum processing-only times
+    report["total_proc_ms"] = sum(float(s.get("proc_ms", s.get("duration_ms", 0.0))) for s in report["stages"]) + float(extract_ms)
 
     # Final metrics JSON
     with open(out_dir / "metrics.json", "w", encoding="utf-8") as f:
@@ -251,19 +349,20 @@ def main():
     ap.add_argument("-o", "--outdir", default="./diag_out", help="Output directory for stage WAVs and metrics.json")
     # Parameter overrides
     ap.add_argument("--denoise-atten", type=int, default=30)
-    ap.add_argument("--dereverb-strength", type=float, default=0.15)
-    ap.add_argument("--gate-threshold-db", type=float, default=-48.0)
-    ap.add_argument("--gate-ratio", type=float, default=0.2)
+    ap.add_argument("--dereverb-strength", type=float, default=0.0, help="Deprecated; DFNet3 post-filter handles mild dereverb. Default off.")
+    ap.add_argument("--gate-threshold-db", type=float, default=-55.0)
+    ap.add_argument("--gate-ratio", type=float, default=0.1)
     ap.add_argument("--gate-attack-ms", type=float, default=5.0)
     ap.add_argument("--gate-release-ms", type=float, default=50.0)
     ap.add_argument("--highpass-hz", type=float, default=150.0)
     ap.add_argument("--shelf-freq-hz", type=float, default=3500.0)
-    ap.add_argument("--shelf-gain-db", type=float, default=3.0)
-    ap.add_argument("--comp-threshold-db", type=float, default=-18.0)
-    ap.add_argument("--comp-ratio", type=float, default=3.0)
-    ap.add_argument("--comp-attack-ms", type=float, default=5.0)
-    ap.add_argument("--comp-release-ms", type=float, default=100.0)
-    ap.add_argument("--comp-makeup-db", type=float, default=3.0)
+    ap.add_argument("--shelf-gain-db", type=float, default=0.0)
+    # De-esser removed
+    ap.add_argument("--comp-threshold-db", type=float, default=-25.0)
+    ap.add_argument("--comp-ratio", type=float, default=2.0)
+    ap.add_argument("--comp-attack-ms", type=float, default=2.0)
+    ap.add_argument("--comp-release-ms", type=float, default=60.0)
+    ap.add_argument("--comp-makeup-db", type=float, default=0.0)
     ap.add_argument("--limit-ceiling-dbfs", type=float, default=-1.0)
     ap.add_argument("--lufs-target", type=float, default=-14.0)
 
@@ -281,6 +380,7 @@ def main():
         highpass_hz=args.highpass_hz,
         shelf_freq_hz=args.shelf_freq_hz,
         shelf_gain_db=args.shelf_gain_db,
+    # de-esser removed
         comp_threshold_db=args.comp_threshold_db,
         comp_ratio=args.comp_ratio,
         comp_attack_ms=args.comp_attack_ms,
