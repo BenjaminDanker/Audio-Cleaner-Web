@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY shared/ ./shared/
 COPY batch/ ./batch/
+COPY models/ ./models/
 
 # Minimal environment variable setup (runtime will inject secrets)
 ENV PYTHONPATH=/app

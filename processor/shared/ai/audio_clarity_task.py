@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Optional
 
 from ai.base import MediaTask, MediaTaskContext, registry, ProgressCallback
-from media_extractor import MediaExtractor, MediaType
 from .audio_denoise_dfnet import resolve_models_root  # for SR consistency via DFNet state
 from .audio_clarity_pipeline import process_file as run_clarity
 
@@ -23,12 +22,15 @@ class ClarityTask(MediaTask):
         self._sample_rate = 48000  # default; will be refined after first extraction
 
     def process(self, input_path: str, ctx: MediaTaskContext, progress_cb: Optional[ProgressCallback] = None) -> str:
-        # Extract and run clarity pipeline to wav
+        # Detect media and run clarity pipeline to wav. Let the clarity pipeline perform extraction to avoid
+        # double-extracting and potential input==output path collisions.
         if self._extractor is None:
-            # Use DFNet's configured sample rate indirectly by inspecting models root via resolve_models_root
-            # MediaExtractor requires a target SR; we set after first extraction
-            # Here we'll just initialize with a common rate; extract will resample
-            self._extractor = MediaExtractor(self._sample_rate)
+            # Initialize extractor for media type detection lazily; clarity pipeline will handle actual extraction
+            try:
+                from media_extractor import MediaExtractor  # type: ignore
+                self._extractor = MediaExtractor(self._sample_rate)
+            except Exception:
+                self._extractor = None
         if progress_cb:
             try:
                 import asyncio
@@ -40,7 +42,18 @@ class ClarityTask(MediaTask):
                 loop.call_soon_threadsafe(asyncio.create_task, p(10))
             except Exception:
                 pass
-        extraction = self._extractor.extract(input_path, ctx.work_dir)
+        # Only detect media type and original extension here
+        # Try to detect via extractor; fall back to extension heuristic
+        VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+        original_ext = Path(input_path).suffix.lower()
+        media_type = None
+        if self._extractor is not None:
+            try:
+                media_type = self._extractor.detect_media_type(input_path)
+            except Exception:
+                media_type = None
+        if media_type is None:
+            media_type = "video" if original_ext in VIDEO_EXTS else "audio"
         if progress_cb:
             try:
                 import asyncio
@@ -51,11 +64,18 @@ class ClarityTask(MediaTask):
                 asyncio.get_event_loop().call_soon_threadsafe(asyncio.create_task, p2(30))
             except Exception:
                 pass
-        wav_out, sr = run_clarity(extraction.extracted_wav_path, ctx.work_dir, params=ctx.extra or {})
+        # Run full clarity pipeline; it will extract/normalize as needed
+        wav_out, sr = run_clarity(input_path, ctx.work_dir, params=ctx.extra or {})
         self._sample_rate = sr
-        if extraction.media_type == MediaType.AUDIO:
-            return self._finalize_audio(wav_out, extraction.original_extension, ctx)
-        return self._finalize_video(wav_out, extraction.source_path, extraction.original_extension, ctx)
+        # Compare against string fallback as well
+        try:
+            from media_extractor import MediaType  # type: ignore
+            is_audio = (media_type == MediaType.AUDIO)
+        except Exception:
+            is_audio = (media_type == "audio")
+        if is_audio:
+            return self._finalize_audio(wav_out, original_ext, ctx)
+        return self._finalize_video(wav_out, input_path, original_ext, ctx)
 
     # Finalization mirrors DenoiseDFNetTask but without progress mapping here
     def _finalize_audio(self, enhanced_wav: str, ext: str, ctx: MediaTaskContext) -> str:

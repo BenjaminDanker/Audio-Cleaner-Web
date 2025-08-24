@@ -34,13 +34,17 @@ function calculateProcessingCost(fileSizeInBytes, languagesRequested = []) {
     const estimatedMinutes = Math.max(1, fileSizeInBytes / (1024 * 1024));
     const estimatedHours = estimatedMinutes / 60;
     
-    // Add Azure service costs
-    totalCost += estimatedHours * SPEECH_SERVICES_COST_PER_HOUR; // Azure AI Speech Services batch
-    totalCost += estimatedMinutes * CLEANUP_COST_PER_MINUTE; // GPT-4.1-nano cleanup
-    
-    // Translation cost for additional languages (first language is transcribed, not translated)
-    const additionalLanguages = Math.max(0, (languagesRequested?.length || 1) - 1);
-    totalCost += additionalLanguages * TRANSLATOR_COST_PER_MINUTE_PER_LANG * estimatedMinutes;
+    // If no languages selected, skip subtitle-related costs (transcription/cleanup/translation)
+    const hasSubtitles = Array.isArray(languagesRequested) && languagesRequested.length > 0;
+    if (hasSubtitles) {
+        // Add Azure service costs
+        totalCost += estimatedHours * SPEECH_SERVICES_COST_PER_HOUR; // Azure AI Speech Services batch
+        totalCost += estimatedMinutes * CLEANUP_COST_PER_MINUTE; // GPT-4.1-nano cleanup
+        
+        // Translation cost applies per selected language (including the first)
+        const translationLanguages = languagesRequested?.length || 0;
+        totalCost += translationLanguages * TRANSLATOR_COST_PER_MINUTE_PER_LANG * estimatedMinutes;
+    }
     
     // Apply minimum charge
     totalCost = Math.max(MIN_CHARGE, totalCost);
@@ -59,16 +63,17 @@ function getCostBreakdown(fileSizeInBytes, languagesRequested = []) {
     const fileSizeInGB = fileSizeInBytes / (1024 * 1024 * 1024);
     const estimatedMinutes = Math.max(1, fileSizeInBytes / (1024 * 1024));
     const estimatedHours = estimatedMinutes / 60;
-    const additionalLanguages = Math.max(0, (languagesRequested?.length || 1) - 1);
+    const hasSubtitles = Array.isArray(languagesRequested) && languagesRequested.length > 0;
+    const translationLanguages = hasSubtitles ? (languagesRequested?.length || 0) : 0;
     
     return {
         baseCost: fileSizeInGB * COST_PER_GB,
-        speechServicesCost: estimatedHours * SPEECH_SERVICES_COST_PER_HOUR,
-        cleanupCost: estimatedMinutes * CLEANUP_COST_PER_MINUTE,
-        translationCost: additionalLanguages * TRANSLATOR_COST_PER_MINUTE_PER_LANG * estimatedMinutes,
+    speechServicesCost: hasSubtitles ? (estimatedHours * SPEECH_SERVICES_COST_PER_HOUR) : 0,
+    cleanupCost: hasSubtitles ? (estimatedMinutes * CLEANUP_COST_PER_MINUTE) : 0,
+    translationCost: hasSubtitles ? (translationLanguages * TRANSLATOR_COST_PER_MINUTE_PER_LANG * estimatedMinutes) : 0,
         totalCost: calculateProcessingCost(fileSizeInBytes, languagesRequested),
-        estimatedMinutes: estimatedMinutes,
-        additionalLanguages: additionalLanguages
+    estimatedMinutes: estimatedMinutes,
+    translationLanguages: translationLanguages
     };
 }
 

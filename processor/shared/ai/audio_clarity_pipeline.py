@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple
 import os
 
 import numpy as np
+import torch
 import soundfile as sf
 try:
     from scipy.signal import butter, lfilter
@@ -246,13 +247,20 @@ def _dereverb_spectral_subtraction(x: np.ndarray, fs: int, strength: float = 0.1
     return out[: len(x)]
 
 
-def _loudness_normalize_file(y: np.ndarray, fs: int, target_lufs: float) -> np.ndarray:
+def _loudness_normalize_file(y: np.ndarray, fs: int, target_lufs: float, ceiling_dbfs: Optional[float] = None) -> np.ndarray:
     try:
         import pyloudnorm as pyln  # lazy import
         meter = pyln.Meter(fs)  # EBU R128
         loudness = meter.integrated_loudness(y.astype(np.float32))
         loudness = float(loudness)
         gain_db = target_lufs - loudness
+        # Respect ceiling if provided by capping gain to avoid predicted peak overs
+        if ceiling_dbfs is not None:
+            peak = float(np.max(np.abs(y)) + 1e-12)
+            peak_dbfs = _lin_to_db(peak)
+            predicted_peak_dbfs = peak_dbfs + gain_db
+            if predicted_peak_dbfs > ceiling_dbfs:
+                gain_db = ceiling_dbfs - peak_dbfs
         return y * _db_to_lin(gain_db)
     except Exception:
         # fallback: simple RMS normalization roughly toward target
@@ -260,6 +268,12 @@ def _loudness_normalize_file(y: np.ndarray, fs: int, target_lufs: float) -> np.n
         target_rms = _db_to_lin(target_lufs) * 0.5  # crude mapping
         if rms > 0:
             y = y * (target_rms / rms)
+        if ceiling_dbfs is not None:
+            # Ensure ceiling by scaling if needed
+            peak = float(np.max(np.abs(y)) + 1e-12)
+            peak_dbfs = _lin_to_db(peak)
+            if peak_dbfs > ceiling_dbfs:
+                y = y * _db_to_lin(ceiling_dbfs - peak_dbfs)
         return y
 
 
@@ -292,8 +306,18 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
     x = _ensure_mono_f32(x)
     # Actual enhance
     from df.enhance import enhance  # type: ignore
-
-    x = enhance(enhancer.model, enhancer.df_state, x, atten_lim_db=enhancer.clamp_atten(p.denoise_atten_db))
+    # DFNet expects [C, N] (2D tensor). Add channel dim, run, then squeeze back.
+    if isinstance(x, np.ndarray):
+        x_t = torch.from_numpy(x.astype(np.float32, copy=False))
+    else:
+        x_t = torch.tensor(x, dtype=torch.float32)
+    if x_t.ndim == 1:
+        x_t = x_t.unsqueeze(0)  # [1, N]
+    x_t = x_t.contiguous()
+    x_enh = enhance(enhancer.model, enhancer.df_state, x_t, atten_lim_db=enhancer.clamp_atten(p.denoise_atten_db))
+    if x_enh.ndim > 1:
+        x_enh = x_enh.squeeze(0)
+    x = x_enh.detach().cpu().numpy().astype(np.float32, copy=False)
 
     # 3) Dereverb
     x = _dereverb_spectral_subtraction(x, sr, p.dereverb_strength)
@@ -307,10 +331,10 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
     x = _simple_high_shelf(x, sr, p.shelf_freq_hz, p.shelf_gain_db)
     # 6) Compression/Leveler
     x = _apply_compressor(x, sr, p.comp_threshold_db, p.comp_ratio, p.comp_attack_ms, p.comp_release_ms, p.comp_makeup_db, st)
-    # 7) Limiter
+    # 7) Loudness normalization (-14 LUFS by default) with ceiling awareness
+    x = _loudness_normalize_file(x, sr, p.lufs_target, p.limit_ceiling_dbfs)
+    # 8) Final limiter to enforce ceiling post-normalization
     x = _apply_limiter(x, p.limit_ceiling_dbfs)
-    # 8) Loudness normalization (-14 LUFS by default)
-    x = _loudness_normalize_file(x, sr, p.lufs_target)
 
     out_wav = os.path.join(work_dir, "clarity_output.wav")
     sf.write(out_wav, x, sr, subtype="PCM_16")
@@ -333,8 +357,18 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     x = _ensure_mono_f32(chunk_mono_f32)
     from df.enhance import enhance  # type: ignore
 
-    # 1) Denoise on chunk (DFNet keeps internal state)
-    x = enhance(enhancer.model, enhancer.df_state, x, atten_lim_db=enhancer.clamp_atten(p.denoise_atten_db))
+    # 1) Denoise on chunk (DFNet keeps internal state). Convert to [1, N] torch and back.
+    if isinstance(x, np.ndarray):
+        x_t = torch.from_numpy(x.astype(np.float32, copy=False))
+    else:
+        x_t = torch.tensor(x, dtype=torch.float32)
+    if x_t.ndim == 1:
+        x_t = x_t.unsqueeze(0)
+    x_t = x_t.contiguous()
+    x_enh = enhance(enhancer.model, enhancer.df_state, x_t, atten_lim_db=enhancer.clamp_atten(p.denoise_atten_db))
+    if x_enh.ndim > 1:
+        x_enh = x_enh.squeeze(0)
+    x = x_enh.detach().cpu().numpy().astype(np.float32, copy=False)
     # 2) Dereverb (lightweight)
     x = _dereverb_spectral_subtraction(x, sr, p.dereverb_strength)
     # 3) Gate
@@ -345,9 +379,9 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     x = _simple_high_shelf(x, sr, p.shelf_freq_hz, p.shelf_gain_db)
     # 5) Compressor
     x = _apply_compressor(x, sr, p.comp_threshold_db, p.comp_ratio, p.comp_attack_ms, p.comp_release_ms, p.comp_makeup_db, state)
-    # 6) Limiter
-    x = _apply_limiter(x, p.limit_ceiling_dbfs)
-    # 7) Loudness normalization (optional in streaming for latency)
+    # 6) Loudness normalization (optional in streaming for latency)
     if p.normalize_streaming:
-        x = _loudness_normalize_file(x, sr, p.lufs_target)
+        x = _loudness_normalize_file(x, sr, p.lufs_target, p.limit_ceiling_dbfs)
+    # 7) Final limiter to enforce ceiling post-normalization
+    x = _apply_limiter(x, p.limit_ceiling_dbfs)
     return x.astype(np.float32, copy=False), state

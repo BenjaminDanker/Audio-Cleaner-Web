@@ -36,8 +36,9 @@ class SessionState:
         self._asr_stride_seconds = float(os.getenv("STREAM_ASR_STRIDE_SECONDS", "2"))
         
         # Credit policy
-        self._base_cents_per_min = float(os.getenv("STREAM_BASE_CENTS_PER_MINUTE", "10"))
-        self._extra_lang_cents_per_min = float(os.getenv("STREAM_EXTRA_LANG_CENTS_PER_MINUTE", "5"))
+        # Defaults aligned with processor/shared/pricing.py
+        self._base_cents_per_min = float(os.getenv("STREAM_BASE_CENTS_PER_MINUTE", "15"))
+        self._extra_lang_cents_per_min = float(os.getenv("STREAM_EXTRA_LANG_CENTS_PER_MINUTE", "8"))
         self._low_credits_grace_sec = float(os.getenv("STREAM_LOW_CREDITS_GRACE_SECONDS", "8"))
         self._low_sent = False
         self._stop_sent = False

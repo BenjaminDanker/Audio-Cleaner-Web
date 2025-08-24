@@ -25,6 +25,7 @@ RUN pip install --no-cache-dir uvicorn[standard]==0.24.0
 # Copy application code
 COPY shared/ ./shared/
 COPY streaming/ ./streaming/
+COPY models/ ./models/
 
 # Set Python path to include shared modules
 ENV PYTHONPATH=/app

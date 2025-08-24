@@ -82,6 +82,10 @@ class MediaExtractor:
         ext = Path(source_path).suffix.lower()
         # Always normalize to PCM 16-bit mono wav at target sample rate (model expectation)
         out_wav = os.path.join(temp_dir, "model_input.wav")
+        # If the source is already the intended output path, avoid in-place transcode
+        # by choosing a different filename. Some ffmpeg builds error when input == output.
+        if os.path.abspath(source_path) == os.path.abspath(out_wav):
+            out_wav = os.path.join(temp_dir, "model_input_norm.wav")
         cmd = [
             self.ffmpeg,
             "-y",

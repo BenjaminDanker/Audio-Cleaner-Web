@@ -314,7 +314,7 @@ const VideoUpload = ({ onJobCreated }) => {
   const [activeUploadId, setActiveUploadId] = useState(null) // Track active upload to prevent races
   const [estimatedCost, setEstimatedCost] = useState(null)
   const [isCalculatingCost, setIsCalculatingCost] = useState(false)
-  const [selectedLanguages, setSelectedLanguages] = useState(['en'])
+  const [selectedLanguages, setSelectedLanguages] = useState([])
   const fileInputRef = useRef(null)
   const activeUploadRef = useRef(null) // More reliable tracking using ref
 
@@ -613,9 +613,9 @@ const VideoUpload = ({ onJobCreated }) => {
       <h2>Upload Audio or Video for Cleaning</h2>
 
       <div className="language-options" style={{ marginBottom: 12 }}>
-        <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Subtitles / Translations</label>
+        <label style={{ display: 'block', fontWeight: 600, marginBottom: 6 }}>Subtitles / Translations (optional)</label>
         <p style={{ marginTop: 0, marginBottom: 8, fontSize: 12, color: '#666' }}>
-          Select one or more languages for subtitles. English counts as the primary language; each additional language may cost extra credits.
+          Leave all unchecked to skip subtitles and only denoise the audio. Select one or more languages to generate subtitles. English counts as the primary language; each additional language may cost extra credits.
         </p>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {AVAILABLE_LANGUAGES.map((lang) => (

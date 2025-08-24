@@ -35,13 +35,17 @@ export const calculateJobCost = (fileSizeBytes, selectedLanguages = []) => {
   const estimatedMinutes = Math.max(1, fileSizeBytes / (1024 * 1024))
   const estimatedHours = estimatedMinutes / 60
   
-  // Add Azure service costs
-  totalCost += estimatedHours * PRICING_CONFIG.SPEECH_SERVICES_COST_PER_HOUR // Azure AI Speech Services batch
-  totalCost += estimatedMinutes * PRICING_CONFIG.CLEANUP_COST_PER_MINUTE // GPT-4.1-nano cleanup
-  
-  // Translation cost for additional languages (first language is transcribed, not translated)
-  const additionalLanguages = Math.max(0, (selectedLanguages?.length || 1) - 1)
-  totalCost += additionalLanguages * PRICING_CONFIG.TRANSLATOR_COST_PER_MINUTE_PER_LANG * estimatedMinutes
+  // If no languages selected, skip transcription/cleanup/translation costs
+  const hasSubtitles = Array.isArray(selectedLanguages) && selectedLanguages.length > 0
+  if (hasSubtitles) {
+    // Add Azure service costs for subtitles
+    totalCost += estimatedHours * PRICING_CONFIG.SPEECH_SERVICES_COST_PER_HOUR // Azure AI Speech Services batch
+    totalCost += estimatedMinutes * PRICING_CONFIG.CLEANUP_COST_PER_MINUTE // GPT-4.1-nano cleanup
+    
+    // Translation cost applies per selected language (including the first)
+    const translationLanguages = selectedLanguages?.length || 0
+    totalCost += translationLanguages * PRICING_CONFIG.TRANSLATOR_COST_PER_MINUTE_PER_LANG * estimatedMinutes
+  }
   
   // Apply minimum charge
   totalCost = Math.max(PRICING_CONFIG.MIN_CHARGE, totalCost)

@@ -29,8 +29,9 @@ async def tick_credits_and_maybe_signal(st: 'SessionState') -> None:
     """Deduct credits for processed audio and signal low/zero balance."""
     try:
         # Calculate effective rate per minute
-        add_langs = max(0, len([l for l in st.langs if l != 'orig']) - 0)
-        rate_cpm = st._base_cents_per_min + (add_langs * st._extra_lang_cents_per_min)
+        # Translation cost applies per selected language (including the first)
+        lang_count = len([l for l in st.langs if isinstance(l, str)])
+        rate_cpm = st._base_cents_per_min + (lang_count * st._extra_lang_cents_per_min)
         
         # Deduct every ~5s of processed audio to reduce write pressure
         if st.processed_seconds - st.last_deducted_seconds >= 5.0:
