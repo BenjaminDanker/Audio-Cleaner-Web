@@ -182,8 +182,16 @@ async def _process_audio_chunk(st: SessionState, audio_data: bytes) -> None:
     if st.paused_due_to_billing or st.paused_by_client:
         return
         
+    # Build debug params from environment to allow stage WAV dumping
+    debug_save = os.getenv("DEBUG_SAVE_STAGES", "0").lower() in ("1", "true", "yes")
+    debug_dir = os.getenv("DEBUG_STAGES_DIR")
+    params = {
+        "debug_save_stages": debug_save,
+        "debug_stages_dir": debug_dir,
+    }
+
     # Process audio through clarity pipeline
-    y, st.proc_state = process_stream_chunk(x, st.sr, st.proc_state, params=None)
+    y, st.proc_state = process_stream_chunk(x, st.sr, st.proc_state, params=params)
     st.processed_seconds += float(y.shape[0]) / float(st.sr)
     
     # Send processed audio back as binary

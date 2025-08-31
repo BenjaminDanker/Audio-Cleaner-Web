@@ -9,12 +9,20 @@ services:
     env_file:
       - ./.env.cloud
     environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
+      PYTHONPATH: /app
+      PYTHONUNBUFFERED: "1"
+      STREAM_SESSION_SIGNING_KEY: dev-signing-key-for-local-testing-only
+      DISABLE_BILLING: "1"
+      COSMOS_CONNECTION_STRING: ""
+      DEBUG_SAVE_STAGES: "1"
+      DEBUG_STAGES_DIR: /app/stream_stages
     volumes:
       # Mount source code for hot-reload style iteration; remove for prod-like testing
       - ./shared:/app/shared
       - ./streaming:/app/streaming
+      - type: bind
+        source: ./stream_stages
+        target: /app/stream_stages
     restart: unless-stopped
     networks:
       - audio-cleaner-dev

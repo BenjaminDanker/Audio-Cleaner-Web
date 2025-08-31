@@ -166,11 +166,16 @@ if __name__ == "__main__":
     
     # Validate required environment variables
     required_vars = [
-        "STREAM_SESSION_SIGNING_KEY",
-        "AZURE_OPENAI_ENDPOINT", 
-        "AZURE_OPENAI_API_KEY",
-        "COSMOS_CONNECTION_STRING"
+        "STREAM_SESSION_SIGNING_KEY"
     ]
+    
+    # Optional for dev testing
+    if os.getenv("DISABLE_BILLING") != "1":
+        required_vars.extend([
+            "AZURE_OPENAI_ENDPOINT", 
+            "AZURE_OPENAI_API_KEY",
+            "COSMOS_CONNECTION_STRING"
+        ])
     
     missing_vars = [var for var in required_vars if not os.getenv(var)]
     if missing_vars:

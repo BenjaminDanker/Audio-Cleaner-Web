@@ -21,13 +21,20 @@ def _get_cosmos_containers():
     if str(shared_dir) not in sys.path:
         sys.path.append(str(shared_dir))
     
-    from clients import get_container
+    # Import inside function so module load doesn't fail if azure libs missing in some contexts
+    try:
+        from clients import get_container  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(f"clients module unavailable: {e}")
     return get_container('accounts'), get_container('transactions')
 
 
 async def tick_credits_and_maybe_signal(st: 'SessionState') -> None:
     """Deduct credits for processed audio and signal low/zero balance."""
     try:
+        # Dev mode: disable billing if requested
+        if os.getenv("DISABLE_BILLING", "0") == "1":
+            return
         # Calculate effective rate per minute
         # Translation cost applies per selected language (including the first)
         lang_count = len([l for l in st.langs if isinstance(l, str)])
@@ -92,6 +99,19 @@ async def tick_credits_and_maybe_signal(st: 'SessionState') -> None:
 async def probe_billing_and_update_state(st: 'SessionState') -> None:
     """Probe billing system availability and update session state."""
     try:
+        # Dev mode: when disabled, ensure not paused by billing
+        if os.getenv("DISABLE_BILLING", "0") == "1":
+            if st.paused_due_to_billing:
+                st.paused_due_to_billing = False
+                if st.ws and not st._resume_notified:
+                    st._resume_notified = True
+                    st._pause_notified = False
+                    try:
+                        await st.ws.send_text(json.dumps({"type": "RESUMED_BILLING"}))
+                    except Exception:
+                        pass
+            return
+
         now = time.time()
         # Probe at most every 5 seconds to avoid hammering
         if now - float(st._billing_last_probe or 0.0) < 5.0:
@@ -99,7 +119,7 @@ async def probe_billing_and_update_state(st: 'SessionState') -> None:
             
         st._billing_last_probe = now
         conn = os.getenv("COSMOS_CONNECTION_STRING")
-        
+            
         if not conn:
             st.paused_due_to_billing = True
             if st.ws and not st._pause_notified:

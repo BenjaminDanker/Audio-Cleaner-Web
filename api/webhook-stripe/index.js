@@ -8,11 +8,26 @@ const { CosmosClient } = require('@azure/cosmos');
 const MinimalLogger = require('../shared/minimalLogger');
 const AzureSDKConfig = require('../shared/azureSDKConfig');
 
-// Initialize Cosmos DB client with optimized configuration
-const cosmosClient = AzureSDKConfig.createCosmosClient(process.env.COSMOS_CONNECTION_STRING);
-const database = cosmosClient.database(process.env.COSMOS_DB_NAME || 'app');
-const accountsContainer = database.container('accounts');
-const transactionsContainer = database.container('transactions');
+// Lazy Cosmos initialization to avoid crashing local dev when not configured
+function getCosmosContainers(logger) {
+  const cs = process.env.COSMOS_CONNECTION_STRING;
+  if (!cs) {
+    // Use console as a fallback if logger not ready
+    try { logger?.logWarning('webhook-stripe', 'COSMOS_CONNECTION_STRING not set; skipping persistence for webhook', 'system', {}); } catch {}
+    return null;
+  }
+  try {
+    const client = AzureSDKConfig.createCosmosClient(cs);
+    const database = client.database(process.env.COSMOS_DB_NAME || 'app');
+    return {
+      accounts: database.container('accounts'),
+      transactions: database.container('transactions'),
+    };
+  } catch (e) {
+    try { logger?.logError('webhook-stripe', 'Failed to init Cosmos client', 'system', { error: e.message }); } catch {}
+    return null;
+  }
+}
 
 const app = express();
 
@@ -184,6 +199,11 @@ async function handleCheckoutSessionCompleted(session, eventId, logger, sessionI
   });
 
   try {
+    const containers = getCosmosContainers(logger);
+    if (!containers) {
+      logger.logWarning('webhook-stripe', 'Cosmos not configured; skipping account credit persistence', 'system', { sessionId });
+      return;
+    }
     if (!session || !session.metadata) {
       logger.logWarning('webhook-stripe', 'Missing session metadata - skipping', 'system', {
         sessionId,
@@ -235,7 +255,7 @@ async function handleCheckoutSessionCompleted(session, eventId, logger, sessionI
       ]
     };
     
-    const { resources: existing } = await transactionsContainer.items.query(querySpec, { partitionKey: userId }).fetchAll();
+  const { resources: existing } = await containers.transactions.items.query(querySpec, { partitionKey: userId }).fetchAll();
     if (existing && existing.length > 0) {
       logger.logWarning('webhook-stripe', 'Duplicate payment intent detected - skipping credit', 'system', {
         sessionId,
@@ -252,9 +272,9 @@ async function handleCheckoutSessionCompleted(session, eventId, logger, sessionI
       amountCents: actualAmount
     });
     
-    await updateAccountBalance(userId, actualAmount, logger, sessionId);
+  await updateAccountBalance(userId, actualAmount, logger, sessionId);
 
-    await createTransaction({
+  await createTransaction({
       userId,
       type: 'payment',
       amount: actualAmount,
@@ -302,10 +322,15 @@ async function handlePaymentFailed(paymentIntent, logger, sessionId) {
 
 async function updateAccountBalance(userId, amount, logger, sessionId) {
     try {
+        const containers = getCosmosContainers(logger);
+        if (!containers) {
+          logger.logWarning('webhook-stripe', 'Cosmos not configured; skip updateAccountBalance', 'system', { sessionId });
+          return;
+        }
         // Get existing account or create new one
         let account;
         try {
-            const { resource } = await accountsContainer.item(userId, userId).read();
+            const { resource } = await containers.accounts.item(userId, userId).read();
             account = resource;
             
             logger.logDebug('webhook-stripe', 'Found existing account', 'system', {
@@ -336,9 +361,9 @@ async function updateAccountBalance(userId, amount, logger, sessionId) {
         
         // Save updated account
         if (account.id) {
-            await accountsContainer.item(account.id, account.userId).replace(account);
+            await containers.accounts.item(account.id, account.userId).replace(account);
         } else {
-            await accountsContainer.items.create(account);
+            await containers.accounts.items.create(account);
         }
         
         logger.logInfo('webhook-stripe', 'Account balance updated', 'system', {
@@ -357,6 +382,11 @@ async function updateAccountBalance(userId, amount, logger, sessionId) {
 
 async function createTransaction(transactionData, logger, sessionId) {
     try {
+        const containers = getCosmosContainers(logger);
+        if (!containers) {
+          logger.logWarning('webhook-stripe', 'Cosmos not configured; skip createTransaction', 'system', { sessionId });
+          return;
+        }
         const transaction = {
             id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             userId: transactionData.userId,
@@ -368,7 +398,7 @@ async function createTransaction(transactionData, logger, sessionId) {
             createdAt: new Date().toISOString()
         };
         
-        await transactionsContainer.items.create(transaction);
+        await containers.transactions.items.create(transaction);
         logger.logInfo('webhook-stripe', 'Transaction created', 'system', {
           sessionId,
           transactionId: transaction.id,

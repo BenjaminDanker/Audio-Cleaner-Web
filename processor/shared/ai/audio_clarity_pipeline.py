@@ -89,13 +89,89 @@ def _ensure_mono_f32(x: np.ndarray) -> np.ndarray:
     return x.astype(np.float32, copy=False)
 
 
+def _make_dir(path: str) -> None:
+    try:
+        os.makedirs(path, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _dump_stage(y: np.ndarray, fs: int, stages_dir: Optional[str], idx: int, name: str, enabled: bool) -> None:
+    """Write a stage WAV to stages_dir as NN_name.wav when enabled."""
+    if not enabled or not stages_dir:
+        return
+    _make_dir(stages_dir)
+    fname = f"{idx:02d}_{name}.wav"
+    path = os.path.join(stages_dir, fname)
+    try:
+        sf.write(path, y.astype(np.float32, copy=False), fs, subtype="PCM_16")
+    except Exception:
+        # Best-effort; don't fail pipeline on debug dump errors
+        pass
+
+
+def _dump_stream_stage(y: np.ndarray, fs: int, state: "StreamState", idx: int, name: str, enabled: bool) -> None:
+    """Dump per-chunk stage WAVs into debug dir, grouped by ordered stage folder."""
+    if not enabled or not state.debug_dir:
+        return
+    stage_dir = os.path.join(state.debug_dir, f"{idx:02d}_{name}")
+    _make_dir(stage_dir)
+    fname = f"{state.chunk_index:05d}.wav"
+    path = os.path.join(stage_dir, fname)
+    try:
+        sf.write(path, y.astype(np.float32, copy=False), fs, subtype="PCM_16")
+    except Exception:
+        pass
+
+
+def _moving_rms(x: np.ndarray, fs: int, win_ms: float) -> np.ndarray:
+    """Fast moving RMS using convolution. Returns same-length envelope."""
+    win_len = max(1, int((win_ms * 0.001) * fs))
+    if win_len > len(x):
+        win_len = max(1, len(x))
+    w = np.ones(win_len, dtype=np.float32) / float(win_len)
+    env = np.convolve((x.astype(np.float32) ** 2), w, mode="same")
+    return np.sqrt(env + 1e-12).astype(np.float32)
+
+
+def _apply_denoise_gain_comp(orig: np.ndarray, denoised: np.ndarray, fs: int, *, hp_hz: float, thr_db: float, win_ms: float, max_boost_db: float, min_voice_ratio: float = 0.05) -> Tuple[np.ndarray, float]:
+    """Estimate a single scalar gain to match speech-level RMS of denoised to original.
+
+    - High-pass to voice band edge to avoid DC/rumble bias
+    - Compute moving RMS envelopes
+    - Select frames where original env > threshold (speech-active)
+    - Use median(orig_env / den_env) as ratio; cap boost to max_boost_db; never attenuate
+    - If too few speech frames, return identity
+    """
+    if len(orig) != len(denoised) or len(orig) == 0:
+        return denoised, 0.0
+    # HPF both
+    b, a = _butter_highpass(hp_hz, fs, order=2)
+    o = lfilter(b, a, orig.astype(np.float32, copy=False))
+    d = lfilter(b, a, denoised.astype(np.float32, copy=False))
+    # Envelopes
+    env_o = _moving_rms(o, fs, win_ms)
+    env_d = _moving_rms(d, fs, win_ms)
+    thr_lin = _db_to_lin(thr_db)
+    mask = env_o > thr_lin
+    voice_ratio = float(np.mean(mask)) if env_o.size else 0.0
+    if voice_ratio < float(min_voice_ratio):
+        return denoised, 0.0
+    ratios = env_o[mask] / np.maximum(env_d[mask], 1e-6)
+    # Robust central tendency
+    r = float(np.median(np.clip(ratios, 1e-6, 1e6)))
+    gain_db = max(0.0, min(max_boost_db, 20.0 * np.log10(r)))
+    g = _db_to_lin(gain_db)
+    return (denoised * g).astype(np.float32, copy=False), float(gain_db)
+
+
 # ---------------------------- Parameters ----------------------------
 
 
 @dataclass
 class ClarityParams:
     # Denoise
-    denoise_atten_db: Optional[int] = 30
+    denoise_atten_db: Optional[int] = 50
 
     # Dereverb (disabled by default; kept for backward compatibility)
     dereverb_strength: float = 0.0  # 0..1, spectral floor subtraction amount
@@ -111,8 +187,6 @@ class ClarityParams:
     shelf_freq_hz: float = 3500.0
     shelf_gain_db: float = 0.0
 
-    # De-esser: removed
-
     # Compressor
     comp_threshold_db: float = -25.0
     comp_ratio: float = 2.0
@@ -126,6 +200,18 @@ class ClarityParams:
     # Loudness normalization (file mode only by default)
     lufs_target: float = -14.0
     normalize_streaming: bool = False  # avoid LUFS on every chunk; apply optionally
+
+    # Debug: dump intermediate stage WAVs
+    debug_save_stages: bool = True
+    debug_stages_dir: Optional[str] = None  # defaults: work_dir/stages (file), ./stream_stages (stream)
+
+    # Post-denoise gain compensation (speech-aware, single scalar)
+    denoise_gain_comp: bool = True
+    denoise_gain_max_db: float = 12.0
+    denoise_gain_ref_db: float = -45.0
+    denoise_gain_win_ms: float = 50.0
+    denoise_gain_hp_hz: float = 150.0
+    denoise_min_voice_ratio: float = 0.05
 
 
 # ---------------------------- Stateful processing helpers ----------------------------
@@ -142,6 +228,11 @@ class StreamState:
 
     # DeepFilter state is stored in enhancer df_state; we reuse the singleton enhancer
     # No explicit fields needed here for DFNet
+
+    # Debug streaming stage dumping
+    debug_save_stages: bool = False
+    debug_dir: Optional[str] = None
+    chunk_index: int = 0
 
 
 def _butter_highpass(cutoff: float, fs: int, order: int = 2):
@@ -532,6 +623,11 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
     wav_path = extraction.extracted_wav_path
     audio, sr = sf.read(wav_path, dtype="float32")
     x = _ensure_mono_f32(audio)
+    orig_mono = x.copy()
+
+    # Prepare debug stages dir
+    stages_dir = p.debug_stages_dir or os.path.join(work_dir, "stages")
+    _dump_stage(x, sr, stages_dir, 0, "original", p.debug_save_stages)
 
     # 2) Denoise (DeepFilterNet)
     x = _ensure_mono_f32(x)
@@ -559,22 +655,55 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
         x_enh = x_enh.squeeze(0)
     # Direct numpy conversion without extra copy
     x = x_enh.detach().cpu().numpy()
+    _dump_stage(x, sr, stages_dir, 1, "denoised", p.debug_save_stages)
+
+    # 2) Post-denoise gain compensation (speech-aware, single scalar)
+    if p.denoise_gain_comp:
+        x, boost_db = _apply_denoise_gain_comp(
+            orig_mono, x, sr,
+            hp_hz=float(p.denoise_gain_hp_hz),
+            thr_db=float(p.denoise_gain_ref_db),
+            win_ms=float(p.denoise_gain_win_ms),
+            max_boost_db=float(p.denoise_gain_max_db),
+            min_voice_ratio=float(p.denoise_min_voice_ratio),
+        )
+    else:
+        boost_db = 0.0
+    _dump_stage(x, sr, stages_dir, 2, "denoise_boost", p.debug_save_stages)
+
+    # Optional light dereverb
+    stage_idx = 3
+    if p.dereverb_strength > 0.0:
+        x = _dereverb_spectral_subtraction(x, sr, strength=float(p.dereverb_strength))
+        _dump_stage(x, sr, stages_dir, stage_idx, "dereverb", p.debug_save_stages)
+        stage_idx += 1
 
     st = StreamState()
-    # 3) Noise Gate
-    x = _apply_noise_gate(x, sr, p.gate_threshold_db, p.gate_ratio, p.gate_attack_ms, p.gate_release_ms, st)
-    # 4) EQ tilt
+    # EQ
     b, a = _butter_highpass(p.highpass_hz, sr, order=2)
     x = lfilter(b, a, x)
     x = _simple_high_shelf(x, sr, p.shelf_freq_hz, p.shelf_gain_db)
-    # 5) Loudness normalization (-14 LUFS by default) with ceiling awareness
+    _dump_stage(x, sr, stages_dir, stage_idx, "eq", p.debug_save_stages)
+    stage_idx += 1
+    # Loudness normalization (-14 LUFS by default) with ceiling awareness
     x = _loudness_normalize_file(x, sr, p.lufs_target, p.limit_ceiling_dbfs)
-    # 6) Compression/Leveler AFTER normalization (fixed threshold behavior)
+    _dump_stage(x, sr, stages_dir, stage_idx, "loudness_norm", p.debug_save_stages)
+    stage_idx += 1
+    # Compression/Leveler AFTER normalization (fixed threshold behavior)
     x = _apply_compressor(x, sr, p.comp_threshold_db, p.comp_ratio, p.comp_attack_ms, p.comp_release_ms, p.comp_makeup_db, st)
-    # Dynamic presence notch before limiter, driven by ess_ratio
-    x, _ = _apply_dynamic_presence_notch(x, sr)
-    # 7) Final limiter to enforce ceiling post-normalization
+    _dump_stage(x, sr, stages_dir, stage_idx, "compressor", p.debug_save_stages)
+    stage_idx += 1
+    # Dynamic presence notch
+    x, notch_db = _apply_dynamic_presence_notch(x, sr)
+    _dump_stage(x, sr, stages_dir, stage_idx, "presence_notch", p.debug_save_stages)
+    stage_idx += 1
+    # Limiter to enforce ceiling
     x = _apply_limiter(x, p.limit_ceiling_dbfs)
+    _dump_stage(x, sr, stages_dir, stage_idx, "limiter", p.debug_save_stages)
+    stage_idx += 1
+    # Gate at the very end
+    x = _apply_noise_gate(x, sr, p.gate_threshold_db, p.gate_ratio, p.gate_attack_ms, p.gate_release_ms, st)
+    _dump_stage(x, sr, stages_dir, stage_idx, "gate", p.debug_save_stages)
 
     out_wav = os.path.join(work_dir, "clarity_output.wav")
     sf.write(out_wav, x, sr, subtype="PCM_16")
@@ -597,6 +726,16 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     x = _ensure_mono_f32(chunk_mono_f32)
     from df.enhance import enhance  # type: ignore
 
+    # Setup debug stream dumping
+    p_debug = bool(getattr(p, "debug_save_stages", False))
+    if p_debug and not state.debug_dir:
+        # default to ./stream_stages relative to CWD if not provided
+        state.debug_dir = p.debug_stages_dir or os.path.abspath(os.path.join(os.getcwd(), "stream_stages"))
+        state.debug_save_stages = True
+        _make_dir(state.debug_dir)
+    # Original
+    _dump_stream_stage(x, sr, state, 0, "original", state.debug_save_stages)
+
     # 1) Denoise on chunk (DFNet keeps internal state). Convert to [1, N] torch and back.
     # Optimize: avoid unnecessary copies and use the most direct path
     if isinstance(x, np.ndarray):
@@ -614,19 +753,41 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     if x_enh.ndim > 1:
         x_enh = x_enh.squeeze(0)
     x = x_enh.detach().cpu().numpy()
-    # 2) Gate
-    x = _apply_noise_gate(x, sr, p.gate_threshold_db, p.gate_ratio, p.gate_attack_ms, p.gate_release_ms, state)
+    _dump_stream_stage(x, sr, state, 1, "denoised", state.debug_save_stages)
+
+    # 2) Post-denoise gain compensation
+    if p.denoise_gain_comp:
+        x, _ = _apply_denoise_gain_comp(
+            _ensure_mono_f32(chunk_mono_f32), x, sr,
+            hp_hz=float(p.denoise_gain_hp_hz),
+            thr_db=float(p.denoise_gain_ref_db),
+            win_ms=float(p.denoise_gain_win_ms),
+            max_boost_db=float(p.denoise_gain_max_db),
+            min_voice_ratio=float(p.denoise_min_voice_ratio),
+        )
+    _dump_stream_stage(x, sr, state, 2, "denoise_boost", state.debug_save_stages)
     # 3) EQ
     b, a = _butter_highpass(p.highpass_hz, sr, order=2)
     x = lfilter(b, a, x)
     x = _simple_high_shelf(x, sr, p.shelf_freq_hz, p.shelf_gain_db)
+    _dump_stream_stage(x, sr, state, 3, "eq", state.debug_save_stages)
     # 4) Loudness normalization (optional in streaming for latency)
     if p.normalize_streaming:
         x = _loudness_normalize_file(x, sr, p.lufs_target, p.limit_ceiling_dbfs)
-    # 5) Compressor (with gentle HF-tilted sidechain), placed after optional normalization
+        _dump_stream_stage(x, sr, state, 4, "loudness_norm", state.debug_save_stages)
+    # 4) Compressor (with gentle HF-tilted sidechain)
     x = _apply_compressor(x, sr, p.comp_threshold_db, p.comp_ratio, p.comp_attack_ms, p.comp_release_ms, p.comp_makeup_db, state)
-    # Dynamic presence notch
+    _dump_stream_stage(x, sr, state, 5, "compressor", state.debug_save_stages)
+    # 5) Dynamic presence notch
     x, _ = _apply_dynamic_presence_notch(x, sr)
-    # 6) Final limiter to enforce ceiling post-normalization
+    _dump_stream_stage(x, sr, state, 6, "presence_notch", state.debug_save_stages)
+    # 6) Limiter
     x = _apply_limiter(x, p.limit_ceiling_dbfs)
+    _dump_stream_stage(x, sr, state, 7, "limiter", state.debug_save_stages)
+    # 7) Gate at the very end
+    x = _apply_noise_gate(x, sr, p.gate_threshold_db, p.gate_ratio, p.gate_attack_ms, p.gate_release_ms, state)
+    _dump_stream_stage(x, sr, state, 8, "gate", state.debug_save_stages)
+    # Advance chunk index once per call
+    if state.debug_save_stages:
+        state.chunk_index += 1
     return x.astype(np.float32, copy=False), state

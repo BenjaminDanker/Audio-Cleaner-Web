@@ -125,3 +125,4 @@ terraform.tfvars
 /.github
 
 processor/tools/diag_out/
+*.wav
