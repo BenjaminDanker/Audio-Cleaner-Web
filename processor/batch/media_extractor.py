@@ -6,8 +6,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-import imageio_ffmpeg  # type: ignore
-
 logger = logging.getLogger(__name__)
 
 FFMPEG_TIMEOUT_S = 300
@@ -45,7 +43,9 @@ class MediaExtractor:
     """
 
     def __init__(self, target_sample_rate: int):
-        self.ffmpeg = shutil.which("ffmpeg") or imageio_ffmpeg.get_ffmpeg_exe()
+        self.ffmpeg = shutil.which("ffmpeg")
+        if not self.ffmpeg:
+            raise RuntimeError("ffmpeg not found in PATH. Please install ffmpeg.")
         self.ffprobe = shutil.which("ffprobe")  # optional; fallback to extension logic
         self.target_sample_rate = target_sample_rate
 

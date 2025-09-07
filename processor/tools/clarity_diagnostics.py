@@ -146,7 +146,7 @@ def _extract_or_read(input_path: Path, work: Path, target_sr: int) -> Tuple[np.n
     """Return mono f32 audio at target_sr and path used as source for diagnostics, plus duration (ms)."""
     t0 = time.perf_counter()
     if MediaExtractor is not None:
-        # Normalize via extractor (uses bundled FFmpeg via imageio_ffmpeg)
+        # Normalize via extractor (uses system FFmpeg)
         try:
             extr = MediaExtractor(target_sr)
             res = extr.extract(str(input_path), str(work))

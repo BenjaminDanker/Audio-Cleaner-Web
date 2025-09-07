@@ -23,16 +23,13 @@ def ensure_dependencies():
     required_packages = [
         "pytest>=7.0.0",
         "pytest-asyncio>=0.21.0", 
-        "numpy>=1.20.0",
-        "imageio-ffmpeg>=0.4.0"
+        "numpy>=1.20.0"
     ]
     
     for package in required_packages:
         try:
             import importlib
             pkg_name = package.split(">=")[0].split("==")[0].replace("-", "_")
-            if pkg_name == "imageio_ffmpeg":
-                pkg_name = "imageio_ffmpeg"
             importlib.import_module(pkg_name)
             print(f"  ✅ {pkg_name}")
         except ImportError:

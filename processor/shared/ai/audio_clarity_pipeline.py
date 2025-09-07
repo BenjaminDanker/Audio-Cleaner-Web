@@ -78,15 +78,26 @@ def _get_global_enhancer():
 
 
 def _get_global_vad():
-    """Get singleton Silero VAD model."""
+    """Get singleton Silero VAD model from local path."""
     global _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS
     if _GLOBAL_VAD_MODEL is None:
         import torch
-        _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS = torch.hub.load(
-            repo_or_dir='snakers4/silero-vad', 
-            model='silero_vad',
-            force_reload=False
-        )
+        from pathlib import Path
+        
+        # Try to load from local path first
+        base_dir = Path(__file__).parent.parent.parent
+        root = getattr(__import__('sys'), "_MEIPASS", str(base_dir))
+        local_vad_path = os.path.join(root, "models/silero-vad/hub/hub/snakers4_silero-vad_master")
+        
+        if os.path.exists(local_vad_path):
+            # Load from local path
+            _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS = torch.hub.load(
+                repo_or_dir=local_vad_path,
+                model='silero_vad',
+                source='local'
+            )
+        else:
+            raise ModuleNotFoundError("silvero folder not found")
     return _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS
 
 
