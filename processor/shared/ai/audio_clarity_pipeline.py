@@ -2,11 +2,10 @@
 
 Stages (in order):
  1) Denoise (DeepFilterNet3 wrapper)
- 2) Noise Gate (level-based attenuation between words)
+ 2) VAD Gate (Silero VAD-based speech detection)
  3) EQ Tilt (HPF ~150 Hz + optional gentle high-shelf)
  4) Compression/Leveler (fast attack, moderate ratio)
- 5) Loudness normalization (-14 LUFS target, file mode by default)
- 6) Limiter (ceiling -1 dBFS)
+ 5) Limiter (ceiling -1 dBFS)
 
 Interfaces:
     - process_file(in_path, work_dir, params) -> (processed_wav_path, sample_rate)
@@ -14,6 +13,7 @@ Interfaces:
 
 Notes:
     - All DSP is CPU-friendly (NumPy + SciPy). DeepFilterNet runs on CPU via torch cpu wheels.
+    - Silero VAD provides intelligent speech/non-speech detection for gating.
     - Keep per-2s chunk latency small by using lightweight vectorized operations and reusing state.
 """
 from __future__ import annotations
@@ -26,11 +26,12 @@ import numpy as np
 import torch
 import soundfile as sf
 try:
-    from scipy.signal import butter, lfilter
+    from scipy.signal import butter, lfilter, resample
     from scipy.ndimage import uniform_filter1d
 except Exception:  # pragma: no cover - optional dependency during dev
     butter = None  # type: ignore
     uniform_filter1d = None  # type: ignore
+    resample = None  # type: ignore
     def lfilter(b, a, x):  # type: ignore
         return x
 
@@ -38,6 +39,10 @@ from df.enhance import enhance, init_df, load_audio, save_audio  # type: ignore
 
 # Global enhancer for streaming (no media_extractor dependency)
 _GLOBAL_ENHANCER = None
+
+# Global Silero VAD model for streaming
+_GLOBAL_VAD_MODEL = None
+_GLOBAL_VAD_UTILS = None
 
 def _get_global_enhancer():
     """Get singleton enhancer without media_extractor dependency."""
@@ -70,6 +75,19 @@ def _get_global_enhancer():
         
         _GLOBAL_ENHANCER = SimpleEnhancer(model, df_state)
     return _GLOBAL_ENHANCER
+
+
+def _get_global_vad():
+    """Get singleton Silero VAD model."""
+    global _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS
+    if _GLOBAL_VAD_MODEL is None:
+        import torch
+        _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS = torch.hub.load(
+            repo_or_dir='snakers4/silero-vad', 
+            model='silero_vad',
+            force_reload=False
+        )
+    return _GLOBAL_VAD_MODEL, _GLOBAL_VAD_UTILS
 
 
 # ---------------------------- Utilities ----------------------------
@@ -176,11 +194,13 @@ class ClarityParams:
     # Dereverb (disabled by default; kept for backward compatibility)
     dereverb_strength: float = 0.0  # 0..1, spectral floor subtraction amount
 
-    # Noise gate
-    gate_threshold_db: float = -55.0
-    gate_ratio: float = 0.1  # linear attenuation when below threshold
-    gate_attack_ms: float = 5.0
-    gate_release_ms: float = 50.0
+    # VAD gate (using Silero VAD instead of level-based gate)
+    vad_enabled: bool = True  # Can disable VAD entirely
+    vad_threshold: float = 0.5  # VAD confidence threshold (0-1) - reasonable threshold
+    vad_min_speech_duration_ms: int = 100   # Reasonable speech detection time
+    vad_min_silence_duration_ms: int = 500  # Reasonable silence time before closing gate
+    vad_speech_pad_ms: int = 200  # Reasonable padding around speech
+    vad_attenuation_ratio: float = 0.1  # More significant reduction (90% attenuation)
 
     # EQ tilt
     highpass_hz: float = 150.0
@@ -197,16 +217,11 @@ class ClarityParams:
     # Limiter
     limit_ceiling_dbfs: float = -1.0
 
-    # Loudness normalization (file mode only by default)
-    lufs_target: float = -14.0
-    normalize_streaming: bool = False  # avoid LUFS on every chunk; apply optionally
-
     # Debug: dump intermediate stage WAVs
     debug_save_stages: bool = True
     debug_stages_dir: Optional[str] = None  # defaults: work_dir/stages (file), ./stream_stages (stream)
 
     # Post-denoise gain compensation (speech-aware, single scalar)
-    denoise_gain_comp: bool = True
     denoise_gain_max_db: float = 12.0
     denoise_gain_ref_db: float = -45.0
     denoise_gain_win_ms: float = 50.0
@@ -224,7 +239,12 @@ class StreamState:
     comp_env: float = 0.0
     # Current applied gate gain (smoothed) to avoid zipper/popping when toggling
     gate_gain: float = 1.0
-    # (de-esser removed)
+    
+    # VAD state
+    vad_speech_frames: int = 0  # consecutive frames of detected speech
+    vad_silence_frames: int = 0  # consecutive frames of detected silence
+    vad_is_speech_active: bool = False  # current gate state
+    vad_window_buffer: Optional[np.ndarray] = None  # buffer for VAD window processing
 
     # DeepFilter state is stored in enhancer df_state; we reuse the singleton enhancer
     # No explicit fields needed here for DFNet
@@ -374,46 +394,118 @@ def _butter_lowpass(cutoff: float, fs: int, order: int = 1):
     return b, a
 
 
-def _apply_noise_gate(x: np.ndarray, fs: int, thr_db: float, ratio: float, attack_ms: float, release_ms: float, state: StreamState) -> np.ndarray:
-    """Fast, pop-free gate using moving RMS and smoothed gain (vectorized).
-
-    - Envelope: moving RMS over ~10 ms window (no Python loops)
-    - Target gain: 1.0 above threshold, `ratio` below
-    - Gain smoothing: one-pole IIR with time constant ~= release_ms
+def _apply_vad_gate(x: np.ndarray, fs: int, threshold: float, min_speech_ms: int, 
+                   min_silence_ms: int, pad_ms: int, ratio: float, state: StreamState) -> np.ndarray:
+    """VAD-based gate using Silero VAD for speech detection.
+    
+    - Uses Silero VAD to detect speech vs non-speech
+    - Much more conservative approach - biased toward keeping audio
+    - Applies hysteresis with minimum durations to avoid rapid switching
+    - Smooth gain transitions to avoid clicks/pops
+    - Maintains state across chunks for streaming consistency
     """
     if ratio >= 0.999:
         return x  # effectively bypass
-
-    # Moving RMS envelope (~10 ms)
-    win_len = max(1, int(0.01 * fs))
-    if win_len > len(x):
-        win_len = max(1, len(x))
-    w = np.ones(win_len, dtype=np.float32) / float(win_len)
-    # Compute moving average of squared signal, then sqrt to get RMS
-    # Pad to maintain 'same' length
-    x2 = x.astype(np.float32, copy=False) ** 2
-    env = np.convolve(x2, w, mode="same")
-    env = np.sqrt(env + 1e-12)
-
-    # Target gain based on threshold
-    thr_lin = _db_to_lin(thr_db)
-    tgt = np.where(env < thr_lin, float(ratio), 1.0).astype(np.float32, copy=False)
-
-    # Smooth gain with one-pole low-pass (vectorized). Prefer slower opening (release_ms)
-    # y[n] = (1-alpha)*x[n] + alpha*y[n-1]
-    alpha = float(np.exp(-1.0 / (max(release_ms, 1e-3) * 0.001 * fs)))
-    b = np.array([1.0 - alpha], dtype=np.float32)
-    a = np.array([1.0, -alpha], dtype=np.float32)
-
-    from scipy.signal import lfilter  # type: ignore
-    y = lfilter(b, a, tgt)
-    # Blend first sample with previous state to maintain continuity
-    y[0] = (1.0 - alpha) * tgt[0] + alpha * float(state.gate_gain)
-
-    out = x * y.astype(np.float32, copy=False)
-    # Update state with last values
-    state.gate_env = float(env[-1]) if env.size else state.gate_env
-    state.gate_gain = float(y[-1]) if y.size else state.gate_gain
+    
+    vad_model, utils = _get_global_vad()
+    
+    # Silero VAD expects 16kHz, so we may need to resample for analysis
+    vad_sr = 16000
+    if fs != vad_sr and resample is not None:
+        # Simple linear interpolation resampling for VAD analysis only
+        x_vad = resample(x, int(len(x) * vad_sr / fs))
+    else:
+        x_vad = x.copy()
+    
+    # Convert to tensor for VAD
+    x_tensor = torch.from_numpy(x_vad.astype(np.float32))
+    
+    # Get VAD probabilities - Silero VAD processes in chunks
+    vad_window_size = 512  # samples at 16kHz (~32ms windows)
+    speech_probs = []
+    
+    # Process in overlapping windows for smooth detection
+    hop_size = vad_window_size // 4  # More overlap for smoother detection
+    for i in range(0, len(x_tensor) - vad_window_size + 1, hop_size):
+        window = x_tensor[i:i + vad_window_size]
+        if len(window) == vad_window_size:
+            prob = vad_model(window, vad_sr).item()
+            speech_probs.append(prob)
+        else:
+            # Handle last partial window
+            if len(window) > 0:
+                speech_probs.append(speech_probs[-1] if speech_probs else 0.5)  # Default to speech
+    
+    if not speech_probs:
+        speech_probs = [0.5]  # Default to speech if no analysis possible
+    
+    # Much more conservative decision making
+    # Use a lower effective threshold and bias toward speech
+    effective_threshold = max(threshold - 0.1, 0.2)  # Lower threshold
+    
+    # Consider it speech if ANY significant portion shows speech
+    speech_ratio = np.mean([p > effective_threshold for p in speech_probs])
+    overall_speech_confidence = np.max(speech_probs)  # Peak confidence
+    
+    # Multiple criteria for speech detection (OR logic - any can trigger speech)
+    current_decision = (
+        speech_ratio > 0.3 or  # 30% of windows show speech, OR
+        overall_speech_confidence > threshold or  # Peak confidence exceeds threshold, OR
+        np.mean(speech_probs) > effective_threshold  # Average confidence is decent
+    )
+    
+    # Update state counters with bias toward speech
+    if current_decision:  # speech detected
+        state.vad_speech_frames += 1
+        state.vad_silence_frames = 0
+        # Quick to open gate
+        if state.vad_speech_frames >= max(1, min_speech_ms // 50):  # Much faster opening
+            state.vad_is_speech_active = True
+    else:  # silence detected
+        state.vad_silence_frames += 1
+        state.vad_speech_frames = 0
+        # Slow to close gate
+        frames_per_ms = vad_sr / 1000.0 / hop_size
+        required_silence_frames = max(5, int(min_silence_ms * frames_per_ms))
+        if state.vad_silence_frames >= required_silence_frames:
+            state.vad_is_speech_active = False
+    
+    # Create gain envelope - much more conservative
+    # Default to speech (gain = 1.0) unless very confident it's silence
+    if state.vad_is_speech_active or current_decision:
+        # Speech mode - apply minimal attenuation or none
+        base_gain = 1.0
+    else:
+        # Only attenuate during confirmed long silences
+        base_gain = ratio
+    
+    # Create smooth gain envelope
+    gain_envelope = np.full(len(x), base_gain, dtype=np.float32)
+    
+    # Add very generous padding around ANY potential speech
+    if pad_ms > 0 and base_gain < 1.0:
+        # If we're attenuating, add lots of padding to be safe
+        pad_samples = int(pad_ms * 0.001 * fs)
+        
+        # Look for any frames that might be speech and pad them generously
+        frame_size = len(x) // max(1, len(speech_probs))
+        for i, prob in enumerate(speech_probs):
+            if prob > effective_threshold:  # Any hint of speech
+                start_idx = max(0, i * frame_size - pad_samples)
+                end_idx = min(len(x), (i + 1) * frame_size + pad_samples)
+                gain_envelope[start_idx:end_idx] = 1.0  # Full gain around speech
+    
+    # Very gentle smoothing to avoid artifacts
+    alpha = 0.99  # Very slow changes
+    for i in range(1, len(gain_envelope)):
+        gain_envelope[i] = alpha * gain_envelope[i-1] + (1 - alpha) * gain_envelope[i]
+    
+    # Apply gain
+    out = x * gain_envelope
+    
+    # Update state for continuity
+    state.gate_gain = float(gain_envelope[-1]) if len(gain_envelope) > 0 else state.gate_gain
+    
     return out
 
 
@@ -577,36 +669,6 @@ def _dereverb_spectral_subtraction(x: np.ndarray, fs: int, strength: float = 0.1
     return out[: len(x)]
 
 
-def _loudness_normalize_file(y: np.ndarray, fs: int, target_lufs: float, ceiling_dbfs: Optional[float] = None) -> np.ndarray:
-    try:
-        import pyloudnorm as pyln  # lazy import
-        meter = pyln.Meter(fs)  # EBU R128
-        loudness = meter.integrated_loudness(y.astype(np.float32))
-        loudness = float(loudness)
-        gain_db = target_lufs - loudness
-        # Respect ceiling if provided by capping gain to avoid predicted peak overs
-        if ceiling_dbfs is not None:
-            peak = float(np.max(np.abs(y)) + 1e-12)
-            peak_dbfs = _lin_to_db(peak)
-            predicted_peak_dbfs = peak_dbfs + gain_db
-            if predicted_peak_dbfs > ceiling_dbfs:
-                gain_db = ceiling_dbfs - peak_dbfs
-        return y * _db_to_lin(gain_db)
-    except Exception:
-        # fallback: simple RMS normalization roughly toward target
-        rms = np.sqrt(np.mean(y**2) + 1e-12)
-        target_rms = _db_to_lin(target_lufs) * 0.5  # crude mapping
-        if rms > 0:
-            y = y * (target_rms / rms)
-        if ceiling_dbfs is not None:
-            # Ensure ceiling by scaling if needed
-            peak = float(np.max(np.abs(y)) + 1e-12)
-            peak_dbfs = _lin_to_db(peak)
-            if peak_dbfs > ceiling_dbfs:
-                y = y * _db_to_lin(ceiling_dbfs - peak_dbfs)
-        return y
-
-
 # ---------------------------- Public APIs ----------------------------
 
 
@@ -615,7 +677,11 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
     p = ClarityParams(**(params or {}))
     
     # For file processing, we need the full extractor - lazy import to avoid circular dependency
-    from .audio_denoise_dfnet import _get_enhancer_and_extractor
+    try:
+        from .audio_denoise_dfnet import _get_enhancer_and_extractor
+    except ImportError:
+        # Fallback for direct script execution
+        from processor.shared.ai.audio_denoise_dfnet import _get_enhancer_and_extractor
     enhancer, extractor = _get_enhancer_and_extractor()
 
     # 1) Extract to mono wav at model SR
@@ -657,18 +723,15 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
     x = x_enh.detach().cpu().numpy()
     _dump_stage(x, sr, stages_dir, 1, "denoised", p.debug_save_stages)
 
-    # 2) Post-denoise gain compensation (speech-aware, single scalar)
-    if p.denoise_gain_comp:
-        x, boost_db = _apply_denoise_gain_comp(
-            orig_mono, x, sr,
-            hp_hz=float(p.denoise_gain_hp_hz),
-            thr_db=float(p.denoise_gain_ref_db),
-            win_ms=float(p.denoise_gain_win_ms),
-            max_boost_db=float(p.denoise_gain_max_db),
-            min_voice_ratio=float(p.denoise_min_voice_ratio),
-        )
-    else:
-        boost_db = 0.0
+    # Post-denoise gain compensation (speech-aware, single scalar)
+    x, boost_db = _apply_denoise_gain_comp(
+        orig_mono, x, sr,
+        hp_hz=float(p.denoise_gain_hp_hz),
+        thr_db=float(p.denoise_gain_ref_db),
+        win_ms=float(p.denoise_gain_win_ms),
+        max_boost_db=float(p.denoise_gain_max_db),
+        min_voice_ratio=float(p.denoise_min_voice_ratio),
+    )
     _dump_stage(x, sr, stages_dir, 2, "denoise_boost", p.debug_save_stages)
 
     # Optional light dereverb
@@ -679,31 +742,38 @@ def process_file(in_path: str, work_dir: str, params: Optional[Dict[str, Any]] =
         stage_idx += 1
 
     st = StreamState()
-    # EQ
+    
+    # VAD gate - moved to position 2 in optimized order
+    if p.vad_enabled:
+        x = _apply_vad_gate(x, sr, p.vad_threshold, p.vad_min_speech_duration_ms, 
+                           p.vad_min_silence_duration_ms, p.vad_speech_pad_ms, 
+                           p.vad_attenuation_ratio, st)
+        _dump_stage(x, sr, stages_dir, stage_idx, "vad_gate", p.debug_save_stages)
+    else:
+        _dump_stage(x, sr, stages_dir, stage_idx, "vad_disabled", p.debug_save_stages)
+    stage_idx += 1
+    
+    # EQ - position 3 in optimized order
     b, a = _butter_highpass(p.highpass_hz, sr, order=2)
     x = lfilter(b, a, x)
     x = _simple_high_shelf(x, sr, p.shelf_freq_hz, p.shelf_gain_db)
     _dump_stage(x, sr, stages_dir, stage_idx, "eq", p.debug_save_stages)
     stage_idx += 1
-    # Loudness normalization (-14 LUFS by default) with ceiling awareness
-    x = _loudness_normalize_file(x, sr, p.lufs_target, p.limit_ceiling_dbfs)
-    _dump_stage(x, sr, stages_dir, stage_idx, "loudness_norm", p.debug_save_stages)
-    stage_idx += 1
-    # Compression/Leveler AFTER normalization (fixed threshold behavior)
+    
+    # Compression/Leveler - position 4 in optimized order
     x = _apply_compressor(x, sr, p.comp_threshold_db, p.comp_ratio, p.comp_attack_ms, p.comp_release_ms, p.comp_makeup_db, st)
     _dump_stage(x, sr, stages_dir, stage_idx, "compressor", p.debug_save_stages)
     stage_idx += 1
+    
     # Dynamic presence notch
     x, notch_db = _apply_dynamic_presence_notch(x, sr)
     _dump_stage(x, sr, stages_dir, stage_idx, "presence_notch", p.debug_save_stages)
     stage_idx += 1
-    # Limiter to enforce ceiling
+    
+    # Limiter - position 5 in optimized order (final step)
     x = _apply_limiter(x, p.limit_ceiling_dbfs)
     _dump_stage(x, sr, stages_dir, stage_idx, "limiter", p.debug_save_stages)
     stage_idx += 1
-    # Gate at the very end
-    x = _apply_noise_gate(x, sr, p.gate_threshold_db, p.gate_ratio, p.gate_attack_ms, p.gate_release_ms, st)
-    _dump_stage(x, sr, stages_dir, stage_idx, "gate", p.debug_save_stages)
 
     out_wav = os.path.join(work_dir, "clarity_output.wav")
     sf.write(out_wav, x, sr, subtype="PCM_16")
@@ -756,37 +826,43 @@ def process_stream_chunk(chunk_mono_f32: np.ndarray, sr: int, state: Optional[St
     _dump_stream_stage(x, sr, state, 1, "denoised", state.debug_save_stages)
 
     # 2) Post-denoise gain compensation
-    if p.denoise_gain_comp:
-        x, _ = _apply_denoise_gain_comp(
-            _ensure_mono_f32(chunk_mono_f32), x, sr,
-            hp_hz=float(p.denoise_gain_hp_hz),
-            thr_db=float(p.denoise_gain_ref_db),
-            win_ms=float(p.denoise_gain_win_ms),
-            max_boost_db=float(p.denoise_gain_max_db),
-            min_voice_ratio=float(p.denoise_min_voice_ratio),
-        )
+    x, _ = _apply_denoise_gain_comp(
+        _ensure_mono_f32(chunk_mono_f32), x, sr,
+        hp_hz=float(p.denoise_gain_hp_hz),
+        thr_db=float(p.denoise_gain_ref_db),
+        win_ms=float(p.denoise_gain_win_ms),
+        max_boost_db=float(p.denoise_gain_max_db),
+        min_voice_ratio=float(p.denoise_min_voice_ratio),
+    )
     _dump_stream_stage(x, sr, state, 2, "denoise_boost", state.debug_save_stages)
-    # 3) EQ
+    
+    # 3) VAD gate - position 2 in optimized order
+    if p.vad_enabled:
+        x = _apply_vad_gate(x, sr, p.vad_threshold, p.vad_min_speech_duration_ms, 
+                           p.vad_min_silence_duration_ms, p.vad_speech_pad_ms, 
+                           p.vad_attenuation_ratio, state)
+        _dump_stream_stage(x, sr, state, 3, "vad_gate", state.debug_save_stages)
+    else:
+        _dump_stream_stage(x, sr, state, 3, "vad_disabled", state.debug_save_stages)
+    
+    # 4) EQ - position 3 in optimized order
     b, a = _butter_highpass(p.highpass_hz, sr, order=2)
     x = lfilter(b, a, x)
     x = _simple_high_shelf(x, sr, p.shelf_freq_hz, p.shelf_gain_db)
-    _dump_stream_stage(x, sr, state, 3, "eq", state.debug_save_stages)
-    # 4) Loudness normalization (optional in streaming for latency)
-    if p.normalize_streaming:
-        x = _loudness_normalize_file(x, sr, p.lufs_target, p.limit_ceiling_dbfs)
-        _dump_stream_stage(x, sr, state, 4, "loudness_norm", state.debug_save_stages)
-    # 4) Compressor (with gentle HF-tilted sidechain)
+    _dump_stream_stage(x, sr, state, 4, "eq", state.debug_save_stages)
+    
+    # 5) Compressor - position 4 in optimized order
     x = _apply_compressor(x, sr, p.comp_threshold_db, p.comp_ratio, p.comp_attack_ms, p.comp_release_ms, p.comp_makeup_db, state)
     _dump_stream_stage(x, sr, state, 5, "compressor", state.debug_save_stages)
-    # 5) Dynamic presence notch
+    
+    # 6) Dynamic presence notch
     x, _ = _apply_dynamic_presence_notch(x, sr)
     _dump_stream_stage(x, sr, state, 6, "presence_notch", state.debug_save_stages)
-    # 6) Limiter
+    
+    # 7) Limiter - final step
     x = _apply_limiter(x, p.limit_ceiling_dbfs)
     _dump_stream_stage(x, sr, state, 7, "limiter", state.debug_save_stages)
-    # 7) Gate at the very end
-    x = _apply_noise_gate(x, sr, p.gate_threshold_db, p.gate_ratio, p.gate_attack_ms, p.gate_release_ms, state)
-    _dump_stream_stage(x, sr, state, 8, "gate", state.debug_save_stages)
+    
     # Advance chunk index once per call
     if state.debug_save_stages:
         state.chunk_index += 1

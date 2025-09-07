@@ -95,7 +95,10 @@ def _get_enhancer_and_extractor():
     if _ENHANCER is None:
         _ENHANCER = _get_enhancer()
     if _EXTRACTOR is None:
-        from media_extractor import MediaExtractor  # type: ignore
+        try:
+            from media_extractor import MediaExtractor  # type: ignore
+        except ImportError:
+            from processor.batch.media_extractor import MediaExtractor
         _EXTRACTOR = MediaExtractor(_ENHANCER.sample_rate)
     return _ENHANCER, _EXTRACTOR
 
