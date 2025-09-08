@@ -28,9 +28,9 @@ import tempfile
 import soundfile as sf
 
 try:
-    from openai import OpenAI  # type: ignore
+    from openai import AzureOpenAI  # type: ignore
 except Exception:  # pragma: no cover - dependency optional in dev
-    OpenAI = None  # type: ignore
+    AzureOpenAI = None  # type: ignore
 
 try:
     import azure.cognitiveservices.speech as speechsdk  # type: ignore
@@ -67,14 +67,14 @@ SYSTEM_CLEAN_PROMPT = (
 
 
 def _get_openai_client():
-    if OpenAI is None:
+    if AzureOpenAI is None:
         raise RuntimeError("openai package not installed; add 'openai' to requirements")
     endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
     api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01")
     if not endpoint or not api_key:
         raise RuntimeError("Missing AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_API_KEY")
-    client = OpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version)
+    client = AzureOpenAI(azure_endpoint=endpoint, api_key=api_key, api_version=api_version)
     return client
 
 
