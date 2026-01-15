@@ -1,7 +1,5 @@
 # 🎵 Audio Cleaner Web
 
-[![Build Status](https://github.com/BenjaminDanker/Audio-Cleaner-Web/actions/workflows/ci.yml/badge.svg)](https://github.com/BenjaminDanker/Audio-Cleaner-Web/actions)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)  [![Version](https://img.shields.io/github/v/release/BenjaminDanker/Audio-Cleaner-Web)](https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases)
-
 AI-powered video noise reduction in the cloud. Upload a video and receive a version with crystal-clear audio using state-of-the-art DeepFilterNet3.
 
 ## Table of Contents
