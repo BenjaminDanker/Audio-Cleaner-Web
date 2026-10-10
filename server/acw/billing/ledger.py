@@ -210,9 +210,9 @@ def capture_hold(
         c.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (held, user_id))
         charge = amount_micros
         if charge > held:
+            # The released hold is now part of `available` again.
             row = _user_row(c, user_id)
-            available = row["balance_micros"] - row["held_micros"]
-            charge = held + min(charge - held, available)
+            charge = min(charge, row["balance_micros"] - row["held_micros"])
         if charge > 0:
             _apply(
                 c,
