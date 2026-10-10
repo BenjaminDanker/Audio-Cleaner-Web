@@ -15,6 +15,8 @@ Client sends one text message within 15 s:
  "captions": "local" | "premium" | null,
  "language": "en" | null,
  "sampleRate": 48000,
+ "codec": "opus" | "pcm_s16le",
+ "opusBitrate": 96000,
  "attenLimDb": 100,
  "client": "obs-audio-cleaner/0.1.0"}
 ```
@@ -35,12 +37,19 @@ or `{"type":"error","code":...,"message":...}` and closes. Codes:
 ```
 offset size  field
 0      1     version = 1
-1      1     codec: 1 = pcm_s16le, 2 = f32le
+1      1     codec: 1 = pcm_s16le, 2 = f32le, 3 = opus
 2      2     flags = 0 (reserved)
 4      4     seq: u32 frame counter (little endian)
 8      8     ts_us: u64 client timestamp (opaque, echoed back)
-16     ...   mono 48 kHz samples
+16     ...   mono 48 kHz samples, or exactly one Opus packet (codec 3)
 ```
+
+- **Opus (recommended):** each frame is one 20 ms Opus packet (48 kHz mono,
+  any bitrate; 48-64 kbps is plenty for the uplink). The server answers with
+  one Opus packet per frame (`opusBitrate`, default 96 kbps, 24-160 kbps).
+  That is ~60 kbps instead of ~770 kbps of PCM in each direction, which
+  matters for both the streamer's upload and ours. Opus adds ~6.5 ms codec
+  delay each way.
 
 - Frames must hold 10-100 ms of audio in 10 ms steps (480 × k samples). 20 ms
   (960 samples) is recommended.

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from ..config import get_settings
 from . import protocol as P
-from .engine import DENOISE_TIERS, LiveChain, UtteranceCaptioner
+from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner
 
 log = logging.getLogger("acw.stream.worker")
 MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "24"))
@@ -65,19 +65,33 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
 
         pump = asyncio.create_task(pump_events())
 
-        def work(seq: int, x):
+        opus: OpusCodec | None = None
+        tap_pcm = bool(cfg.get("tap_pcm"))
+
+        def work(seq: int, kind: int, data):
+            nonlocal opus
+            if kind == P.CODEC_OPUS:
+                if opus is None:
+                    opus = OpusCodec(int(cfg.get("opus_bitrate", 96_000)))
+                x = opus.decode(data)
+            else:
+                x = data
             y = chain.process(x)
             if captioner is not None:
                 captioner.feed(y)
-            return seq, y
+            out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
+            tap = P.pack_audio(seq, y) if (tap_pcm and kind == P.CODEC_OPUS) else None
+            return out, tap
 
         try:
             while True:
                 kind, payload = await P.read_msg(reader)
                 if kind == P.MSG_AUDIO:
-                    seq, x = P.unpack_audio(payload)
-                    seq, y = await loop.run_in_executor(executor, work, seq, x)
-                    await P.send_msg(writer, P.MSG_AUDIO, P.pack_audio(seq, y))
+                    seq, akind, data = P.unpack_audio(payload)
+                    out, tap = await loop.run_in_executor(executor, work, seq, akind, data)
+                    await P.send_msg(writer, P.MSG_AUDIO, out)
+                    if tap is not None:
+                        await P.send_msg(writer, P.MSG_TAP, tap)
                 elif kind == P.MSG_CONFIG:
                     c = json.loads(payload)
                     if "atten_lim_db" in c:

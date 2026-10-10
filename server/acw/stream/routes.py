@@ -214,6 +214,8 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         worker_cfg = dict(sess.cfg)
         if captions != "local":
             worker_cfg["captions"] = None
+        worker_cfg["tap_pcm"] = captions == "premium"
+        worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
         await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
         kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
         ready = json.loads(payload)
@@ -253,14 +255,17 @@ async def _run(sess: Session) -> None:
         while True:
             kind, payload = await P.read_msg(sess.reader)
             if kind == P.MSG_AUDIO:
-                seq, y = P.unpack_audio(payload)
+                seq, akind, y = P.unpack_audio(payload)
                 meta = sess.frames.pop(seq, None)
                 if meta is None:
                     continue
                 codec, ts = meta
                 await ws.send_bytes(P.encode_frame(codec, seq, ts, y))
-                if sess.premium is not None:
+                if sess.premium is not None and akind == P.IPC_F32:
                     await sess.premium.feed(y)
+            elif kind == P.MSG_TAP:
+                if sess.premium is not None:
+                    await sess.premium.feed(P.unpack_audio(payload)[2])
             elif kind == P.MSG_EVENT:
                 try:
                     await ws.send_text(payload.decode())
@@ -286,12 +291,20 @@ async def _run(sess: Session) -> None:
                 break
             if msg.get("bytes") is not None:
                 try:
-                    codec, seq, ts, x = P.decode_frame(msg["bytes"])
+                    codec, seq, ts = P.frame_header(msg["bytes"])
+                    if codec == P.CODEC_OPUS:
+                        # Opaque here; decoded only inside the sandboxed worker.
+                        pkt = P.opus_payload(msg["bytes"])
+                        dur = P.OPUS_FRAME / P.SAMPLE_RATE
+                        ipc = P.pack_opus(seq, pkt)
+                    else:
+                        codec, seq, ts, x = P.decode_frame(msg["bytes"])
+                        dur = len(x) / P.SAMPLE_RATE
+                        ipc = P.pack_audio(seq, x)
                 except P.ProtocolError as e:
                     await _send_json(ws, {"type": "error", "code": "bad_frame", "message": str(e)})
                     sess.end_reason = "protocol_error"
                     break
-                dur = len(x) / P.SAMPLE_RATE
                 if not sess.paced(dur):
                     await _send_json(ws, {"type": "error", "code": "too_fast", "message": "Audio must be sent in real time."})
                     sess.end_reason = "too_fast"
@@ -306,7 +319,7 @@ async def _run(sess: Session) -> None:
                 sess.frames[seq] = (codec, ts)
                 while len(sess.frames) > 500:
                     sess.frames.popitem(last=False)
-                await P.send_msg(sess.writer, P.MSG_AUDIO, P.pack_audio(seq, x))
+                await P.send_msg(sess.writer, P.MSG_AUDIO, ipc)
             elif msg.get("text") is not None:
                 if len(msg["text"]) > 2048:
                     continue

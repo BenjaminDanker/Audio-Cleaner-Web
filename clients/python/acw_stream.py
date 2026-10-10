@@ -38,14 +38,26 @@ async def run(args) -> int:
         from scipy.signal import resample_poly
 
         x = resample_poly(x, SR, sr).astype(np.float32)
+    if args.codec == "opus":
+        import av
+
+        args.frame_ms = 20
+        enc = av.CodecContext.create("libopus", "w")
+        enc.sample_rate, enc.layout, enc.format, enc.bit_rate = SR, "mono", "s16", args.bitrate
+        enc.options = {"application": "audio", "frame_duration": "20"}
+        enc.open()
+        dec = av.CodecContext.create("opus", "r")
+        dec.sample_rate, dec.layout = SR, "mono"
     frame = SR * args.frame_ms // 1000
     out = np.zeros(len(x) + frame, dtype=np.float32)
     rtts: list[float] = []
+    bytes_up = [0]
     sent_at: dict[int, float] = {}
     async with connect(args.url, additional_headers={"Authorization": f"Bearer {key}"}, max_size=2**20) as ws:
         await ws.send(json.dumps({
             "type": "start", "version": 1, "denoise": args.denoise or None, "captions": args.captions or None,
-            "language": args.language, "sampleRate": SR, "client": "acw-reference/0.1",
+            "language": args.language, "sampleRate": SR, "client": "acw-reference/0.2",
+            "codec": args.codec, "opusBitrate": args.bitrate,
         }))
         ready = json.loads(await ws.recv())
         print("server:", ready)
@@ -55,8 +67,14 @@ async def run(args) -> int:
         async def receiver():
             async for msg in ws:
                 if isinstance(msg, bytes):
-                    _v, _c, _f, seq, ts = HEADER.unpack_from(msg)
-                    y = np.frombuffer(msg, dtype="<i2", offset=HEADER.size).astype(np.float32) / 32768
+                    _v, codec, _f, seq, ts = HEADER.unpack_from(msg)
+                    if codec == 3:
+                        frames = dec.decode(av.Packet(msg[HEADER.size:]))
+                        y = np.concatenate([f.to_ndarray().reshape(-1) for f in frames]) if frames else np.zeros(frame, np.float32)
+                        if y.dtype != np.float32:
+                            y = y.astype(np.float32) / 32768
+                    else:
+                        y = np.frombuffer(msg, dtype="<i2", offset=HEADER.size).astype(np.float32) / 32768
                     start = seq * frame
                     out[start:start + len(y)] = y[: max(0, len(out) - start)]
                     if seq in sent_at:
@@ -74,9 +92,17 @@ async def run(args) -> int:
             # real-time pacing
             due = t0 + seq * args.frame_ms / 1000
             await asyncio.sleep(max(0, due - time.perf_counter()))
-            pcm = (np.clip(x[i:i + frame], -1, 1) * 32767).astype("<i2").tobytes()
+            pcm16 = (np.clip(x[i:i + frame], -1, 1) * 32767).astype("<i2")
+            if args.codec == "opus":
+                f = av.AudioFrame.from_ndarray(pcm16.reshape(1, -1), format="s16", layout="mono")
+                f.sample_rate, f.pts = SR, i
+                payload, codec_id = b"".join(bytes(p) for p in enc.encode(f)), 3
+                bytes_up[0] += len(payload)
+            else:
+                payload, codec_id = pcm16.tobytes(), 1
+                bytes_up[0] += len(payload)
             sent_at[seq] = time.perf_counter()
-            await ws.send(HEADER.pack(1, 1, 0, seq, int(time.time() * 1e6)) + pcm)
+            await ws.send(HEADER.pack(1, codec_id, 0, seq, int(time.time() * 1e6)) + payload)
         await asyncio.sleep(args.tail)
         await ws.send(json.dumps({"type": "stop"}))
         try:
@@ -87,7 +113,8 @@ async def run(args) -> int:
         sf.write(args.out, out[: len(x)], SR)
     if rtts:
         r = np.array(rtts)
-        print(f"frames {len(r)}  round trip ms: median {np.median(r):.1f}  p95 {np.percentile(r, 95):.1f}  max {r.max():.1f}")
+        print(f"frames {len(r)}  round trip ms: median {np.median(r):.1f}  p95 {np.percentile(r, 95):.1f}  max {r.max():.1f}"
+              f"  uplink {bytes_up[0] * 8 / (len(x) / SR) / 1000:.0f} kbps")
     return 0
 
 
@@ -100,6 +127,8 @@ def main() -> None:
     ap.add_argument("--captions", default="")
     ap.add_argument("--language")
     ap.add_argument("--frame-ms", type=int, default=20)
+    ap.add_argument("--codec", choices=["pcm_s16le", "opus"], default="pcm_s16le")
+    ap.add_argument("--bitrate", type=int, default=64000, help="Opus bitrate (uplink; also requested for the downlink)")
     ap.add_argument("--tail", type=float, default=1.5, help="seconds to keep listening before sending stop")
     sys.exit(asyncio.run(run(ap.parse_args())))
 

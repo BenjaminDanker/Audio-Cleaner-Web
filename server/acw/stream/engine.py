@@ -57,6 +57,47 @@ class LiveChain:
             self.df.close()
 
 
+class OpusCodec:
+    """Per-session Opus decoder (client uplink) and encoder (cleaned audio
+    back). Runs only in the sandboxed stream worker: the uplink bitstream is
+    untrusted."""
+
+    def __init__(self, bitrate: int = 96_000):
+        import av
+
+        self._av = av
+        self.dec = av.CodecContext.create("opus", "r")
+        self.dec.sample_rate = SAMPLE_RATE
+        self.dec.layout = "mono"
+        self.enc = av.CodecContext.create("libopus", "w")
+        self.enc.sample_rate = SAMPLE_RATE
+        self.enc.layout = "mono"
+        self.enc.format = "s16"
+        self.enc.bit_rate = int(min(max(bitrate, 24_000), 160_000))
+        self.enc.options = {"application": "audio", "frame_duration": "20", "vbr": "on"}
+        self.enc.open()
+        self.pts = 0
+
+    def decode(self, pkt: bytes) -> np.ndarray:
+        frames = self.dec.decode(self._av.Packet(pkt))
+        if not frames:
+            return np.zeros(960, np.float32)
+        x = np.concatenate([f.to_ndarray().reshape(-1) for f in frames])
+        if x.dtype != np.float32:
+            x = x.astype(np.float32) / (32768.0 if x.dtype == np.int16 else 1.0)
+        if len(x) != 960:
+            raise ValueError("opus packets must be 20 ms")
+        return x
+
+    def encode(self, y: np.ndarray) -> bytes:
+        pcm = (np.clip(y, -1.0, 1.0) * 32767.0).astype(np.int16).reshape(1, -1)
+        frame = self._av.AudioFrame.from_ndarray(pcm, format="s16", layout="mono")
+        frame.sample_rate = SAMPLE_RATE
+        frame.pts = self.pts
+        self.pts += pcm.shape[1]
+        return b"".join(bytes(p) for p in self.enc.encode(frame))
+
+
 class _SharedWhisper:
     """One model shared by all sessions in this process."""
 

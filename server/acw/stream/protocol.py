@@ -4,7 +4,7 @@ Client <-> web (WebSocket, docs/streaming-protocol.md):
   text   JSON control messages (start, ready, caption, balance, stop, ...)
   binary 16-byte header + audio payload
          u8  version (1)
-         u8  codec   (1 = pcm_s16le, 2 = f32le)
+         u8  codec   (1 = pcm_s16le, 2 = f32le, 3 = opus: one 20 ms packet)
          u16 flags   (reserved, 0)
          u32 seq     (client frame counter, echoed back)
          u64 ts_us   (client timestamp, echoed back for RTT measurement)
@@ -24,7 +24,10 @@ import numpy as np
 VERSION = 1
 CODEC_S16 = 1
 CODEC_F32 = 2
-CODECS = {"pcm_s16le": CODEC_S16, "f32le": CODEC_F32}
+CODEC_OPUS = 3
+CODECS = {"pcm_s16le": CODEC_S16, "f32le": CODEC_F32, "opus": CODEC_OPUS}
+OPUS_FRAME = 960  # 20 ms; Opus frames are opaque until the sandboxed worker decodes them
+MAX_OPUS_PACKET = 1275
 HEADER = struct.Struct("<BBHIQ")
 SAMPLE_RATE = 48_000
 HOP = 480
@@ -33,6 +36,22 @@ MAX_FRAME_SAMPLES = HOP * 10  # 100 ms
 
 class ProtocolError(ValueError):
     pass
+
+
+def frame_header(data: bytes) -> tuple[int, int, int]:
+    if len(data) < HEADER.size:
+        raise ProtocolError("frame too short")
+    version, codec, _flags, seq, ts = HEADER.unpack_from(data)
+    if version != VERSION:
+        raise ProtocolError("unsupported frame version")
+    return codec, seq, ts
+
+
+def opus_payload(data: bytes) -> bytes:
+    pkt = bytes(memoryview(data)[HEADER.size:])
+    if not 1 <= len(pkt) <= MAX_OPUS_PACKET:
+        raise ProtocolError("bad opus packet")
+    return pkt
 
 
 def decode_frame(data: bytes) -> tuple[int, int, int, np.ndarray]:
@@ -62,7 +81,9 @@ def decode_frame(data: bytes) -> tuple[int, int, int, np.ndarray]:
 
 
 def encode_frame(codec: int, seq: int, ts: int, y: np.ndarray) -> bytes:
-    if codec == CODEC_S16:
+    if codec == CODEC_OPUS:
+        payload = bytes(y)  # already an Opus packet
+    elif codec == CODEC_S16:
         payload = (np.clip(y, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
     else:
         payload = y.astype("<f4").tobytes()
@@ -76,6 +97,7 @@ MSG_AUDIO = b"A"
 MSG_CONFIG = b"C"
 MSG_EVENT = b"T"
 MSG_END = b"E"
+MSG_TAP = b"P"  # worker -> web: cleaned f32 audio for premium captions when the client uses Opus
 _IPC = struct.Struct("<cI")
 MAX_IPC = 4 * 1024 * 1024
 
@@ -93,13 +115,23 @@ async def read_msg(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
     return kind, await reader.readexactly(n)
 
 
+# IPC audio: u32 seq + u8 kind + data; kind 0 = f32 samples, 3 = Opus packet.
+IPC_F32 = 0
+
+
 def pack_audio(seq: int, x: np.ndarray) -> bytes:
-    return struct.pack("<I", seq) + x.astype("<f4").tobytes()
+    return struct.pack("<IB", seq, IPC_F32) + x.astype("<f4").tobytes()
 
 
-def unpack_audio(payload: bytes) -> tuple[int, np.ndarray]:
-    (seq,) = struct.unpack_from("<I", payload)
-    return seq, np.frombuffer(payload, dtype="<f4", offset=4).copy()
+def pack_opus(seq: int, pkt: bytes) -> bytes:
+    return struct.pack("<IB", seq, CODEC_OPUS) + pkt
+
+
+def unpack_audio(payload: bytes) -> tuple[int, int, np.ndarray | bytes]:
+    seq, kind = struct.unpack_from("<IB", payload)
+    if kind == CODEC_OPUS:
+        return seq, kind, bytes(payload[5:])
+    return seq, IPC_F32, np.frombuffer(payload, dtype="<f4", offset=5).copy()
 
 
 def pack_json(obj: dict) -> bytes:
