@@ -1,7 +1,5 @@
 # 🎵 Audio Cleaner Web
 
-[![Build Status](https://github.com/BenjaminDanker/Audio-Cleaner-Web/actions/workflows/ci.yml/badge.svg)](https://github.com/BenjaminDanker/Audio-Cleaner-Web/actions)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)  [![Version](https://img.shields.io/github/v/release/BenjaminDanker/Audio-Cleaner-Web)](https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases)
-
 AI-powered video noise reduction in the cloud. Upload a video and receive a version with crystal-clear audio using state-of-the-art DeepFilterNet3.
 
 ## Table of Contents
@@ -63,11 +61,11 @@ Audio-Cleaner-Web/
 
 ```mermaid
 graph LR
-  F[Frontend (React)] -->|API calls| A[Azure Functions]
-  A --> B[Service Bus]
-  B --> C[AI Processor (Container App)]
-  C --> D[Blob Storage]
-  A --> E[Cosmos DB]
+  F["Frontend<br/>(React + Vite)"] -->|API calls| A["Azure Functions"]
+  A --> B["Service Bus Queue"]
+  B --> C["AI Processor<br/>(Container App)"]
+  C --> D["Blob Storage"]
+  A --> E["Cosmos DB"]
 ```
 
 - Frontend & API scale to zero when idle
