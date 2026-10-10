@@ -109,3 +109,13 @@ def test_reload_failure_disables_after_three(monkeypatch):
         stripe_service._record_reload_failure(f"p{i}", uid, "card_declined")
     u = db.one("SELECT auto_reload_enabled, auto_reload_failures, auto_reload_in_flight FROM users WHERE id = ?", (uid,))
     assert (u["auto_reload_enabled"], u["auto_reload_failures"], u["auto_reload_in_flight"]) == (0, 3, 0)
+
+
+def test_checkout_for_other_session_is_not_credited(client, user_with_pending_payment, fake_pi):
+    uid = user_with_pending_payment
+    ev = checkout_completed(uid)
+    ev["data"]["object"]["id"] = "cs_someone_else"
+    ev["data"]["object"]["amount_total"] = 99_999_99  # amounts from events are never trusted
+    body, sig = signed(ev)
+    assert client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig}).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 0

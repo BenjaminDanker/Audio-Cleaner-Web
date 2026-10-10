@@ -117,7 +117,19 @@ def billing_portal_url(user_id: str) -> str:
 
 # ------------------------------------------------------------------ crediting
 
-def _credit_payment(payment_id: str, user_id: str, amount_cents: int, pi_id: str | None, charge_id: str | None, pm_id: str | None, save_pm: bool) -> None:
+def _credit_payment(
+    payment_id: str,
+    user_id: str,
+    *,
+    checkout_session: str | None,
+    pi_id: str | None,
+    charge_id: str | None,
+    pm_id: str | None,
+    save_pm: bool,
+) -> None:
+    """Credit the USD amount *we* priced, once, if the Stripe object matches
+    our payment row. Never trust amounts from the event: with Adaptive Pricing
+    they can be in the customer's currency."""
     with db.tx() as c:
         p = c.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
         if p is None or p["user_id"] != user_id:
@@ -125,8 +137,13 @@ def _credit_payment(payment_id: str, user_id: str, amount_cents: int, pi_id: str
             return
         if p["status"] == "succeeded":
             return
-        if amount_cents != p["amount_cents"]:
-            log.warning("payment %s amount mismatch: expected %s got %s", payment_id, p["amount_cents"], amount_cents)
+        if checkout_session is not None and p["stripe_checkout_session"] != checkout_session:
+            log.error("payment %s: checkout session mismatch", payment_id)
+            return
+        if checkout_session is None and p["stripe_payment_intent"] not in (None, pi_id):
+            log.error("payment %s: payment intent mismatch", payment_id)
+            return
+        amount_cents = int(p["amount_cents"])
         ledger.credit(
             user_id,
             amount_cents * MICROS_PER_CENT,
@@ -165,15 +182,22 @@ def _handle_checkout_completed(session: dict) -> None:
         pm_id = pi.payment_method if isinstance(pi.payment_method, str) else getattr(pi.payment_method, "id", None)
         charge_id = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
         save_pm = pi.setup_future_usage == "off_session"
-    _credit_payment(payment_id, user_id, int(session.get("amount_total") or 0), pi_id, charge_id, pm_id, save_pm)
+    _credit_payment(
+        payment_id, user_id, checkout_session=session.get("id"), pi_id=pi_id, charge_id=charge_id, pm_id=pm_id, save_pm=save_pm
+    )
 
 
 def _handle_pi_succeeded(pi: dict) -> None:
     meta = pi.get("metadata") or {}
     if meta.get("acw_kind") != "auto_reload":
         return  # checkout payments are credited from checkout.session.completed
-    charge = pi.get("latest_charge")
-    _credit_payment(meta["acw_payment_id"], meta["acw_user_id"], int(pi["amount_received"]), pi["id"], charge, None, False)
+    if pi.get("currency") != "usd":
+        log.error("auto-reload %s in unexpected currency %s", pi.get("id"), pi.get("currency"))
+        return
+    _credit_payment(
+        meta["acw_payment_id"], meta["acw_user_id"], checkout_session=None, pi_id=pi["id"],
+        charge_id=pi.get("latest_charge"), pm_id=None, save_pm=False,
+    )
 
 
 def _record_reload_failure(payment_id: str, user_id: str, code: str | None) -> None:
@@ -387,7 +411,7 @@ def run_auto_reload(user_id: str) -> str:
     db.execute("UPDATE payments SET stripe_payment_intent = ?, updated_at = ? WHERE id = ?", (pi.id, db.now(), payment_id))
     if pi.status == "succeeded":
         charge = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
-        _credit_payment(payment_id, user_id, int(pi.amount_received), pi.id, charge, None, False)
+        _credit_payment(payment_id, user_id, checkout_session=None, pi_id=pi.id, charge_id=charge, pm_id=None, save_pm=False)
         return "succeeded"
     return pi.status
 
