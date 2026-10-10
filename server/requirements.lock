@@ -44,8 +44,8 @@ stripe==16.0.0
 tokenizers==0.23.3
 tqdm==4.70.1
 truststore==0.10.4
-typing-inspection==0.4.4
 typing_extensions==4.16.0
+typing-inspection==0.4.4
 urllib3==2.8.0
 uvicorn==0.54.0
 uvloop==0.23.0
