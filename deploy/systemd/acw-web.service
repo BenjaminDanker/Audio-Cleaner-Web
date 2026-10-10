@@ -1,0 +1,29 @@
+[Unit]
+Description=Audio Cleaner web/API (127.0.0.1:8790)
+After=network-online.target acw-stream.service
+Wants=acw-stream.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+EnvironmentFile=%h/audio-cleaner/secrets/acw.env
+ExecStart=%h/audio-cleaner/venv/bin/uvicorn acw.app:app --host 127.0.0.1 --port 8790 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
+    --timeout-keep-alive 30 --ws-max-size 1048576 --limit-concurrency 500
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @sandbox
+SystemCallErrorNumber=EPERM
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=3G
+TasksMax=300
+
+[Install]
+WantedBy=default.target

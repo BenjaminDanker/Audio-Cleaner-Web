@@ -1,0 +1,44 @@
+    # ---- Audio Cleaner (/audio) --------------------------------------------
+    # API + live WebSocket: SSH reverse tunnel from primary-ram (127.0.0.1:18790).
+    # Static site (incl. the free in-browser denoiser) is served from this VPS,
+    # so the free tier never touches the home connection.
+    redir /audio /audio/ 308
+
+    handle /audio/api/* {
+        request_body {
+            max_size 4GB
+        }
+        reverse_proxy 127.0.0.1:18790 {
+            header_up -X-Real-IP
+            flush_interval -1
+            transport http {
+                dial_timeout 5s
+                response_header_timeout 2m
+            }
+        }
+    }
+
+    handle /audio/* {
+        root * /var/www
+        header {
+            Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+            Strict-Transport-Security "max-age=31536000"
+            X-Content-Type-Options "nosniff"
+            X-Frame-Options "DENY"
+            Referrer-Policy "strict-origin-when-cross-origin"
+            Cross-Origin-Opener-Policy "same-origin"
+            Permissions-Policy "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)"
+            -Server
+        }
+        @immutable path /audio/assets/*
+        header @immutable Cache-Control "public, max-age=31536000, immutable"
+        @dfn path /audio/dfn/*
+        header @dfn Cache-Control "public, max-age=604800"
+        @html path /audio/ /audio/index.html
+        header @html Cache-Control "no-cache"
+        try_files {path} /audio/index.html
+        file_server {
+            precompressed zstd gzip
+        }
+    }
+    # -------------------------------------------------------------------------

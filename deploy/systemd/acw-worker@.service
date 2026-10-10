@@ -1,0 +1,29 @@
+[Unit]
+Description=Audio Cleaner file-job worker %i (no network)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+EnvironmentFile=%h/audio-cleaner/secrets/acw-worker.env
+ExecStart=%h/audio-cleaner/venv/bin/python -m acw.worker.main
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @sandbox
+SystemCallErrorNumber=EPERM
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX
+# Batch work yields to live audio and the game servers.
+Nice=10
+CPUWeight=50
+IOWeight=50
+MemoryMax=14G
+TasksMax=200
+
+[Install]
+WantedBy=default.target

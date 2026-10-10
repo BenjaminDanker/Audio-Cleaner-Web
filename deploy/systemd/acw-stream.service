@@ -1,0 +1,27 @@
+[Unit]
+Description=Audio Cleaner live DSP worker (Unix socket only)
+
+[Service]
+Type=simple
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+EnvironmentFile=%h/audio-cleaner/secrets/acw-worker.env
+ExecStart=%h/audio-cleaner/venv/bin/python -m acw.stream.worker
+Restart=always
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @sandbox
+SystemCallErrorNumber=EPERM
+SystemCallFilter=~@privileged
+# No network at all: it only talks to acw-web over a Unix socket.
+RestrictAddressFamilies=AF_UNIX
+# Live audio beats batch jobs (and plays fair with the Minecraft servers).
+CPUWeight=300
+MemoryMax=6G
+TasksMax=400
+
+[Install]
+WantedBy=default.target
