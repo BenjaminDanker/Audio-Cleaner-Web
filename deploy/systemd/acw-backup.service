@@ -1,0 +1,13 @@
+[Unit]
+Description=Audio Cleaner database snapshot (balances, payments, jobs metadata)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+EnvironmentFile=%h/audio-cleaner/secrets/acw-worker.env
+# Different physical disk from the live DB (NVMe -> HDD).
+ExecStart=%h/audio-cleaner/venv/bin/python -m acw.admin backup /mnt/mc-storage/audio-cleaner-backups --keep 30
+Nice=15
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes

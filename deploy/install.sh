@@ -41,8 +41,9 @@ chmod 600 "$H/secrets/"*.env
 # 6. systemd user units
 U="$HOME/.config/systemd/user"
 mkdir -p "$U"
-install -m 644 "$REPO"/deploy/systemd/*.service "$U/"
+install -m 644 "$REPO"/deploy/systemd/*.service "$REPO"/deploy/systemd/*.timer "$U/"
 systemctl --user daemon-reload
+systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
 WORKERS="${ACW_WORKERS:-2}"
 UNITS="acw-stream.service acw-web.service acw-tunnel.service"
 for i in $(seq 1 "$WORKERS"); do UNITS="$UNITS acw-worker@$i.service"; done

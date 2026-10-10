@@ -6,6 +6,7 @@
   user EMAIL                     show balance, status, recent activity
   suspend EMAIL REASON / unsuspend EMAIL
   stats                          totals for the last 30 days
+  backup DIR [--keep N]          consistent gzip'd DB snapshot, keeps the newest N
 """
 from __future__ import annotations
 
@@ -42,6 +43,9 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("unsuspend")
     p.add_argument("email")
     sub.add_parser("stats")
+    p = sub.add_parser("backup")
+    p.add_argument("dir")
+    p.add_argument("--keep", type=int, default=30)
     a = ap.parse_args(argv)
     db.init_db()
 
@@ -80,6 +84,29 @@ def main(argv: list[str] | None = None) -> None:
         db.execute("UPDATE users SET status = 'active' WHERE id = ?", (u["id"],))
         db.audit("admin-cli", "unsuspend", user_id=u["id"])
         print("active")
+    elif a.cmd == "backup":
+        import gzip
+        import os
+        import shutil
+        import sqlite3
+        from pathlib import Path
+
+        out_dir = Path(a.dir)
+        out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        tmp = out_dir / f".acw-{stamp}.sqlite3"
+        dst = sqlite3.connect(str(tmp))
+        db.conn().backup(dst)  # online, consistent snapshot
+        dst.close()
+        final = out_dir / f"acw-{stamp}.sqlite3.gz"
+        with open(tmp, "rb") as src, gzip.open(final, "wb", compresslevel=6) as gz:
+            shutil.copyfileobj(src, gz)
+        os.chmod(final, 0o600)
+        tmp.unlink()
+        backups = sorted(out_dir.glob("acw-*.sqlite3.gz"))
+        for old in backups[: max(0, len(backups) - a.keep)]:
+            old.unlink()
+        print(final)
     elif a.cmd == "stats":
         since = db.now() - 30 * 86400
         print("users", db.one("SELECT COUNT(*) n FROM users")["n"])

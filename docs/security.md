@@ -79,5 +79,6 @@ also removes the shared-UID risk with the Minecraft servers.
   `command="/bin/false"`, so it can open a shell on the VPS. Worth adding.
 - No malware/CSAM scanning of uploads (audio-only product, files deleted quickly);
   revisit if video volume grows.
-- Backups: the SQLite DB holds customer balances; set up an encrypted off-box
-  copy (e.g. nightly `sqlite3 .backup` + age-encrypted upload) before taking real money.
+- Backups: a nightly snapshot goes to `/mnt/mc-storage/audio-cleaner-backups`
+  (another disk, 30 kept; `acw-backup.timer`). That does not survive losing
+  the machine; add an encrypted off-box copy before taking real money.
