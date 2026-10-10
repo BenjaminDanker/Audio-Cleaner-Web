@@ -1,0 +1,809 @@
+Port DeepFilterNet libDF (Rikorose/DeepFilterNet d375b2d) to tract 0.23.8 and fix quality/robustness.
+Apply with `git apply` on top of that commit (native/deepfilter/build.sh does this), together with
+the pinned native/deepfilter/Cargo.lock.
+
+  * tract-{core,onnx,pulse,hir} ^0.21.4 -> =0.23.8; API port in libDF/src/tract.rs (ndarray is
+    tract_core::ndarray = 0.17, plain tensor views, TValue = Arc<Tensor>, SimpleState::new(&plan),
+    symbols, with_outputs_by_name).
+  * features `capi` and `wasm` no longer force `default-model` (model passed at runtime);
+    `wasm` also enables getrandom 0.4's browser backend (pulled in by tract 0.23).
+  * capi.rs: df_create defaults to always-on stages; new df_create_with_params and df_last_error;
+    df_create* return NULL instead of panicking; df_process_frame catches panics.
+    New cargo profile `release-capi` (release-lto with panic=unwind) so that works.
+  * wasm.rs: df_create always-on stages; new df_create_with_params, df_process_frames (batch),
+    df_free; errors are thrown as JS errors; console_error_panic_hook installed.
+
+diff --git a/Cargo.toml b/Cargo.toml
+index 1019dbe..6e5588e 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -25,3 +25,9 @@ debug = false
+ lto = "fat"
+ strip = true
+ panic = "abort"
++
++# Profile for the C API shared library: like release-lto, but panics unwind so that the capi
++# entry points can catch them (catch_unwind) and report an error instead of aborting the host.
++[profile.release-capi]
++inherits = "release-lto"
++panic = "unwind"
+diff --git a/libDF/Cargo.toml b/libDF/Cargo.toml
+index c0f3271..f15663e 100644
+--- a/libDF/Cargo.toml
++++ b/libDF/Cargo.toml
+@@ -81,13 +81,13 @@ tract = [
+ default-model = [] # Include default DFN3 model
+ default-model-ll = [] # Include default DFN3 low latency model
+ nightly-features = []
+-capi = ["tract", "default-model", "dep:ndarray", "logging"]
++capi = ["tract", "dep:ndarray", "logging"]
+ wasm = [
+   "tract",
+-  "default-model",
+   "dep:ndarray",
+   "dep:wasm-bindgen",
+   "dep:getrandom",
++  "dep:getrandom04",
+   "dep:console_error_panic_hook",
+   "dep:js-sys",
+ ]
+@@ -120,14 +120,16 @@ claxon = { version = "^0.4", optional = true }
+ env_logger = { version = "0.11", optional = true }
+ clap = { version = "4.0", optional = true, features = ["derive"] }
+ rust-ini = { version = "^0.21", optional = true }
+-tract-core = { version = "^0.21.4", optional = true }
+-tract-onnx = { version = "^0.21.4", optional = true }
+-tract-pulse = { version = "^0.21.4", optional = true }
+-tract-hir = { version = "^0.21.4", optional = true }
++tract-core = { version = "=0.23.8", optional = true }
++tract-onnx = { version = "=0.23.8", optional = true }
++tract-pulse = { version = "=0.23.8", optional = true }
++tract-hir = { version = "=0.23.8", optional = true }
+ flate2 = { version = "1.0.24", optional = true }
+ tar = { version = "0.4.38", optional = true }
+ wasm-bindgen = { version = "0.2.87", optional = true }
+ getrandom = { version = "0.2", features = ["js"], optional = true }
++# tract 0.23 pulls rand 0.10 -> getrandom 0.4, whose browser backend must be enabled explicitly
++getrandom04 = { package = "getrandom", version = "0.4", features = ["wasm_js"], optional = true }
+ console_error_panic_hook = { version = "0.1.1", optional = true }
+ js-sys = { version = "0.3", optional = true }
+ 
+diff --git a/libDF/src/capi.rs b/libDF/src/capi.rs
+index 37f9afd..1649a99 100644
+--- a/libDF/src/capi.rs
++++ b/libDF/src/capi.rs
+@@ -1,10 +1,12 @@
+ use std::boxed::Box;
++use std::cell::RefCell;
+ use std::ffi::{c_char, c_float, c_uint, CStr, CString};
++use std::panic::{catch_unwind, AssertUnwindSafe};
+ use std::path::PathBuf;
+ use std::str::FromStr;
+ 
+ use crossbeam_channel::TryRecvError;
+-use ndarray::prelude::*;
++use tract_core::ndarray::prelude::*;
+ 
+ use crate::logging::*;
+ use crate::tract::*;
+@@ -14,29 +16,94 @@ pub struct DFState {
+     logger: Option<DfLogReceiver>,
+ }
+ 
++thread_local! {
++    static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
++}
++
++fn set_last_error(msg: impl AsRef<str>) {
++    // Interior NULs cannot be represented in a C string; drop them.
++    let msg = msg.as_ref().replace('\0', " ");
++    LAST_ERROR.with(|e| *e.borrow_mut() = CString::new(msg).ok());
++}
++
++/// Best-effort text of a caught panic payload.
++fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
++    if let Some(s) = p.downcast_ref::<&str>() {
++        (*s).to_string()
++    } else if let Some(s) = p.downcast_ref::<String>() {
++        s.clone()
++    } else {
++        "unknown panic".to_string()
++    }
++}
++
++/// Run `f`, turning both `Err` and (if the crate is built with `panic = "unwind"`) panics into
++/// `None` and recording the message for `df_last_error()`.
++fn guarded<T>(f: impl FnOnce() -> Result<T, String>) -> Option<T> {
++    match catch_unwind(AssertUnwindSafe(f)) {
++        Ok(Ok(v)) => Some(v),
++        Ok(Err(e)) => {
++            set_last_error(e);
++            None
++        }
++        Err(p) => {
++            set_last_error(format!("panic: {}", panic_message(&*p)));
++            None
++        }
++    }
++}
++
++/// Runtime parameters of a [`DFState`].
++struct CParams {
++    atten_lim: f32,
++    min_db_thresh: f32,
++    max_db_erb_thresh: f32,
++    max_db_df_thresh: f32,
++    post_filter_beta: f32,
++}
++impl Default for CParams {
++    /// Both enhancement stages (ERB gains + deep filter) run for every frame. libDF's own
++    /// defaults skip stages based on the local SNR estimate, which noticeably hurts quality.
++    fn default() -> Self {
++        CParams {
++            atten_lim: 100.,
++            min_db_thresh: f32::NEG_INFINITY,
++            max_db_erb_thresh: f32::INFINITY,
++            max_db_df_thresh: f32::INFINITY,
++            post_filter_beta: 0.,
++        }
++    }
++}
++
+ impl DFState {
+-    fn new(model_path: &str, channels: usize, atten_lim: f32, log_level: Option<&str>) -> Self {
++    fn new(
++        model_path: &str,
++        channels: usize,
++        p: &CParams,
++        log_level: Option<&str>,
++    ) -> Result<Self, String> {
++        if p.post_filter_beta.is_nan() || p.post_filter_beta < 0. {
++            return Err(format!("post_filter_beta must be >= 0, got {}", p.post_filter_beta));
++        }
+         let logger = if let Some(level) = log_level {
+-            let (logger, log_receiver) =
+-                DfLogger::build(log::Level::from_str(level).expect("Could not parse log level"));
++            let level = log::Level::from_str(level)
++                .map_err(|_| format!("Could not parse log level {level:?}"))?;
++            let (logger, log_receiver) = DfLogger::build(level);
+             init_logger(logger);
+             Some(log_receiver)
+         } else {
+             None
+         };
+-        let mut r_params = RuntimeParams::default_with_ch(channels); //channel
+-        r_params = r_params.with_atten_lim(atten_lim).with_thresholds(
+-            -15.0f32,  //min_db_thresh
+-            35.0f32,   //max_db_erb_thresh
+-            35.0f32,   //max_db_df_thresh
+-        );
+-        r_params = r_params.with_post_filter(0.0f32);  //post_filter_beta
+-        r_params = r_params.with_mask_reduce(ReduceMask::MAX);  //reduce_mask
+-        let df_params =
+-            DfParams::new(PathBuf::from(model_path)).expect("Could not load model from path");
+-        let m =
+-            DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime.");
+-        DFState { m, logger }
++        let r_params = RuntimeParams::default_with_ch(channels)
++            .with_atten_lim(p.atten_lim)
++            .with_thresholds(p.min_db_thresh, p.max_db_erb_thresh, p.max_db_df_thresh)
++            .with_post_filter(p.post_filter_beta)
++            .with_mask_reduce(ReduceMask::MAX);
++        let df_params = DfParams::new(PathBuf::from(model_path))
++            .map_err(|e| format!("Could not load model from path {model_path:?}: {e:#}"))?;
++        let m = DfTract::new(df_params, &r_params)
++            .map_err(|e| format!("Could not initialize DeepFilter runtime: {e:#}"))?;
++        Ok(DFState { m, logger })
+     }
+     /// Returns the next log message as String
+     fn get_next_log_message(&mut self) -> Option<String> {
+@@ -71,14 +138,45 @@ impl DFState {
+     }
+ }
+ 
+-/// Create a DeepFilterNet Model
++/// Shared implementation of `df_create` / `df_create_with_params`.
++unsafe fn create(
++    path: *const c_char,
++    params: CParams,
++    log_level: *const c_char,
++) -> *mut DFState {
++    LAST_ERROR.with(|e| *e.borrow_mut() = None);
++    guarded(|| {
++        if path.is_null() {
++            return Err("model path is NULL".to_string());
++        }
++        let path = CStr::from_ptr(path).to_str().map_err(|e| format!("model path: {e}"))?;
++        let log_level = if log_level.is_null() {
++            None
++        } else {
++            match CStr::from_ptr(log_level).to_str() {
++                Ok(a) => Some(a),
++                Err(e) => {
++                    eprintln!("Could not parse log_level {}", e);
++                    None
++                }
++            }
++        };
++        Ok(DFState::new(path, 1, &params, log_level)?.boxed())
++    })
++    .map_or(std::ptr::null_mut(), Box::into_raw)
++}
++
++/// Create a DeepFilterNet Model with default runtime parameters: both enhancement stages are
++/// always run (thresholds `-inf`, `+inf`, `+inf`) and the post filter is disabled.
+ ///
+ /// Args:
+ ///     - path: File path to a DeepFilterNet tar.gz onnx model
+ ///     - atten_lim: Attenuation limit in dB.
++///     - log_level: Optional (may be NULL) log level, e.g. "info".
+ ///
+ /// Returns:
+-///     - DF state doing the full processing: stft, DNN noise reduction, istft.
++///     - DF state doing the full processing: stft, DNN noise reduction, istft. NULL on failure,
++///       see `df_last_error()`.
+ #[no_mangle]
+ pub unsafe extern "C" fn df_create(
+     path: *const c_char,
+@@ -86,28 +184,58 @@ pub unsafe extern "C" fn df_create(
+     atten_lim: f32,
+     log_level: *const c_char,
+ ) -> *mut DFState {
+-    let c_str = CStr::from_ptr(path);
+-    let path = c_str.to_str().unwrap();
+-    let log_level = if log_level.is_null() {
+-        None
+-    } else {
+-        match CStr::from_ptr(log_level).to_str() {
+-            Ok(a) => Some(a),
+-            Err(e) => {
+-                eprintln!("Could not parse log_level {}", e);
+-                None
+-            }
+-        }
++    create(path, CParams { atten_lim, ..Default::default() }, log_level)
++}
++
++/// Create a DeepFilterNet Model with explicit runtime parameters.
++///
++/// Args:
++///     - path: File path to a DeepFilterNet tar.gz onnx model
++///     - atten_lim: Attenuation limit in dB (>= 100 disables the limit).
++///     - min_db_thresh: Frames with a local SNR below this are zeroed (stages skipped). Use
++///       `-inf` to never do that. libDF default: -10.
++///     - max_db_erb_thresh: Frames with a local SNR above this are passed through unprocessed.
++///       Use `+inf` to always run the ERB stage. libDF default: 30.
++///     - max_db_df_thresh: Frames with a local SNR above this skip the deep filtering stage.
++///       Use `+inf` to always run the DF stage. libDF default: 20.
++///     - post_filter_beta: Post filter attenuation (>= 0; 0 disables, suitable range 0.0-0.05).
++///     - log_level: Optional (may be NULL) log level, e.g. "info".
++///
++/// Returns:
++///     - DF state, or NULL on failure (bad arguments, model could not be loaded), see
++///       `df_last_error()`.
++#[no_mangle]
++pub unsafe extern "C" fn df_create_with_params(
++    path: *const c_char,
++    atten_lim: f32,
++    min_db_thresh: f32,
++    max_db_erb_thresh: f32,
++    max_db_df_thresh: f32,
++    post_filter_beta: f32,
++    log_level: *const c_char,
++) -> *mut DFState {
++    let params = CParams {
++        atten_lim,
++        min_db_thresh,
++        max_db_erb_thresh,
++        max_db_df_thresh,
++        post_filter_beta,
+     };
+-    let df = DFState::new(path, 1, atten_lim, log_level);
+-    Box::into_raw(df.boxed())
++    create(path, params, log_level)
++}
++
++/// Message describing the last failure of `df_create*` / `df_process_frame` on the calling
++/// thread, or NULL if there was none. The pointer is owned by the library and is only valid until
++/// the next call into it from the same thread; do not free it.
++#[no_mangle]
++pub unsafe extern "C" fn df_last_error() -> *const c_char {
++    LAST_ERROR.with(|e| e.borrow().as_ref().map_or(std::ptr::null(), |c| c.as_ptr()))
+ }
+ 
+ /// Get DeepFilterNet frame size in samples.
+ #[no_mangle]
+ pub unsafe extern "C" fn df_get_frame_length(st: *mut DFState) -> usize {
+-    let state = st.as_mut().expect("Invalid pointer");
+-    state.m.hop_size
++    st.as_ref().map_or(0, |state| state.m.hop_size)
+ }
+ 
+ /// Get the next log message. Must be freed via `df_free_log_msg(ptr)`
+@@ -156,18 +284,28 @@ pub unsafe extern "C" fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
+ ///     - output: Output buffer of length df_get_frame_length()
+ ///
+ /// Returns:
+-///     - Local SNR of the current frame.
++///     - Local SNR of the current frame. On failure (see `df_last_error()`) the input is copied to
++///       the output and NaN is returned.
+ #[no_mangle]
+ pub unsafe extern "C" fn df_process_frame(
+     st: *mut DFState,
+     input: *mut c_float,
+     output: *mut c_float,
+ ) -> c_float {
+-    let state = st.as_mut().expect("Invalid pointer");
+-    let input = ArrayView2::from_shape_ptr((1, state.m.hop_size), input);
+-    let output = ArrayViewMut2::from_shape_ptr((1, state.m.hop_size), output);
+-
+-    state.m.process(input, output).expect("Failed to process DF frame")
++    let Some(state) = st.as_mut() else {
++        set_last_error("df_process_frame: invalid state pointer");
++        return c_float::NAN;
++    };
++    let hop = state.m.hop_size;
++    let lsnr = guarded(|| {
++        let input = ArrayView2::from_shape_ptr((1, hop), input);
++        let output = ArrayViewMut2::from_shape_ptr((1, hop), output);
++        state.m.process(input, output).map_err(|e| format!("Failed to process DF frame: {e:#}"))
++    });
++    lsnr.unwrap_or_else(|| {
++        std::ptr::copy(input as *const c_float, output, hop);
++        c_float::NAN
++    })
+ }
+ 
+ /// Processes a filter bank sample and return raw gains and DF coefs.
+@@ -199,12 +337,12 @@ pub unsafe extern "C" fn df_process_frame_raw(
+     let mut out_coefs =
+         ArrayViewMut4::from_shape_ptr((1, state.m.df_order, state.m.nb_df, 2), *out_coefs_p);
+     if let Some(gains) = gains {
+-        out_gains.assign(&gains.to_array_view().unwrap());
++        out_gains.assign(&gains.to_plain_array_view().unwrap());
+     } else {
+         *out_gains_p = std::ptr::null_mut();
+     }
+     if let Some(coefs) = coefs {
+-        out_coefs.assign(&coefs.to_array_view().unwrap());
++        out_coefs.assign(&coefs.to_plain_array_view().unwrap());
+     } else {
+         *out_coefs_p = std::ptr::null_mut();
+     }
+@@ -249,5 +387,7 @@ pub unsafe extern "C" fn df_gain_size(st: *const DFState) -> DynArray {
+ /// Free a DeepFilterNet Model
+ #[no_mangle]
+ pub unsafe extern "C" fn df_free(model: *mut DFState) {
+-    let _ = Box::from_raw(model);
++    if !model.is_null() {
++        let _ = Box::from_raw(model);
++    }
+ }
+diff --git a/libDF/src/tract.rs b/libDF/src/tract.rs
+index b39a987..b929e26 100644
+--- a/libDF/src/tract.rs
++++ b/libDF/src/tract.rs
+@@ -7,9 +7,10 @@ use std::time::Instant;
+ use anyhow::{bail, Context, Result};
+ use flate2::read::GzDecoder;
+ use ini::Ini;
+-use ndarray::{prelude::*, Axis};
++use tract_core::ndarray::{prelude::*, Axis};
+ use tar::Archive;
+ use tract_core::internal::tract_itertools::izip;
++use tract_core::internal::SimpleState;
+ use tract_core::internal::tract_smallvec::alloc::collections::VecDeque;
+ use tract_core::ops;
+ use tract_core::prelude::*;
+@@ -192,7 +193,7 @@ impl Default for RuntimeParams {
+     }
+ }
+ 
+-pub type TractModel = TypedSimpleState<TypedModel, TypedSimplePlan<TypedModel>>;
++pub type TractModel = TypedSimpleState;
+ 
+ #[derive(Clone)]
+ pub struct DfTract {
+@@ -257,9 +258,9 @@ impl DfTract {
+         )?;
+         let df_dec =
+             init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch)?;
+-        let enc = SimpleState::new(enc.into_runnable()?)?;
+-        let erb_dec = SimpleState::new(erb_dec.into_runnable()?)?;
+-        let df_dec = SimpleState::new(df_dec.into_runnable()?)?;
++        let enc = SimpleState::new(&enc.into_runnable()?)?;
++        let erb_dec = SimpleState::new(&erb_dec.into_runnable()?)?;
++        let df_dec = SimpleState::new(&df_dec.into_runnable()?)?;
+         #[cfg(feature = "timings")]
+         let t1 = Instant::now();
+ 
+@@ -439,7 +440,7 @@ impl DfTract {
+     ///     - gains: Gain estimates of shape `[n_ch, 1, 1, n_erb]`.
+     ///     - coefs: Real-valued DF coefficients estimates of shape `[n_ch, 1, 1, n_erb, 2]`.
+     pub fn process_raw(&mut self) -> Result<(f32, Option<Tensor>, Option<Tensor>)> {
+-        let spec = self.spec_buf.to_array_view()?;
++        let spec = self.spec_buf.to_plain_array_view()?;
+         let ch = spec.len_of(Axis(0));
+ 
+         for (nsy_ch, mut erb_ch, mut cplx_ch, state) in izip!(
+@@ -457,12 +458,14 @@ impl DfTract {
+             );
+         }
+         // Run encoder
++        // tract >= 0.22: `TValue` is a shared `Arc<Tensor>`. Hand tract a deep copy (as it was in
++        // 0.21) so the feature buffers, which are written in-place above, are never aliased.
+         let mut enc_emb = self.enc.run(tvec!(
+-            self.erb_buf.clone(),
+-            TValue::from(self.cplx_buf.clone().into_tensor().permute_axes(&[0, 3, 1, 2])?)
++            TValue::from(Tensor::clone(&self.erb_buf)),
++            TValue::from(Tensor::clone(&self.cplx_buf).permute_axes(&[0, 3, 1, 2])?)
+         ))?;
+ 
+-        let &lsnr = enc_emb.pop().unwrap().to_scalar::<f32>()?;
++        let lsnr = *enc_emb.pop().unwrap().try_as_plain_ram()?.to_scalar::<f32>()?;
+         let c0 = enc_emb.pop().unwrap();
+         let emb = enc_emb.pop().unwrap();
+ 
+@@ -532,7 +535,7 @@ impl DfTract {
+         self.rolling_spec_buf_x.pop_front();
+         for (ns_ch, mut rbuf, state) in izip!(
+             noisy.axis_iter(Axis(0)),
+-            self.spec_buf.to_array_view_mut()?.axis_iter_mut(Axis(0)),
++            self.spec_buf.to_plain_array_view_mut()?.axis_iter_mut(Axis(0)),
+             self.df_states.iter_mut(),
+         ) {
+             let spec = as_slice_mut_complex(rbuf.as_slice_mut().unwrap());
+@@ -552,9 +555,9 @@ impl DfTract {
+             .rolling_spec_buf_y
+             .get_mut(self.df_order - 1)
+             .unwrap()
+-            .to_array_view_mut()?;
++            .to_plain_array_view_mut()?;
+         if let Some(gains) = gains {
+-            let mut gains = gains.into_array()?;
++            let mut gains = gains.into_plain_array()?;
+             if gains.shape()[0] < noisy.shape()[0] {
+                 // Mask was reduced to single channel
+                 let gain_slc = gains.as_slice_mut().unwrap();
+@@ -600,14 +603,14 @@ impl DfTract {
+             self.rolling_spec_buf_x
+                 .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
+                 .unwrap()
+-                .to_array_view::<f32>()
++                .to_plain_array_view::<f32>()
+                 .unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+         .unwrap();
+         let mut spec_enh = as_arrayview_mut_complex(
+-            self.spec_buf.to_array_view_mut::<f32>().unwrap(),
++            self.spec_buf.to_plain_array_view_mut::<f32>().unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+@@ -673,7 +676,7 @@ impl DfTract {
+ 
+     pub fn set_spec_buffer(&mut self, spec: ArrayView2<f32>) -> Result<()> {
+         debug_assert_eq!(self.spec_buf.shape(), spec.shape());
+-        let mut buf = self.spec_buf.to_array_view_mut()?.into_shape([self.ch, self.n_freqs])?;
++        let mut buf = self.spec_buf.to_plain_array_view_mut()?.into_shape_with_order([self.ch, self.n_freqs])?;
+         for (i_ch, mut b_ch) in spec.outer_iter().zip(buf.outer_iter_mut()) {
+             for (&i, b) in i_ch.iter().zip(b_ch.iter_mut()) {
+                 *b = i
+@@ -687,7 +690,7 @@ impl DfTract {
+             self.rolling_spec_buf_x
+                 .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
+                 .unwrap()
+-                .to_array_view::<f32>()
++                .to_plain_array_view::<f32>()
+                 .unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+@@ -696,7 +699,7 @@ impl DfTract {
+     }
+     pub fn get_spec_enh(&self) -> ArrayView2<Complex32> {
+         as_arrayview_complex(
+-            self.spec_buf.to_array_view::<f32>().unwrap(),
++            self.spec_buf.to_plain_array_view::<f32>().unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+@@ -704,7 +707,7 @@ impl DfTract {
+     }
+     pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<Complex32> {
+         as_arrayview_mut_complex(
+-            self.spec_buf.to_array_view_mut::<f32>().unwrap(),
++            self.spec_buf.to_plain_array_view_mut::<f32>().unwrap(),
+             &[self.ch, self.n_freqs],
+         )
+         .into_dimensionality::<Ix2>()
+@@ -738,16 +741,16 @@ fn df(
+     debug_assert_eq!(ch, spec_out.shape()[0]);
+     debug_assert!(spec.len() >= df_order);
+     let mut o_f: ArrayViewMut2<Complex32> =
+-        as_arrayview_mut_complex(spec_out.to_array_view_mut::<f32>()?, &[ch, n_freqs])
++        as_arrayview_mut_complex(spec_out.to_plain_array_view_mut::<f32>()?, &[ch, n_freqs])
+             .into_dimensionality()?;
+     // Zero relevant frequency bins of output
+     o_f.slice_mut(s![.., ..nb_df]).fill(Complex32::default());
+     let coefs_arr: ArrayView3<Complex32> =
+-        as_arrayview_complex(coefs.to_array_view::<f32>()?, &[ch, nb_df, df_order])
++        as_arrayview_complex(coefs.to_plain_array_view::<f32>()?, &[ch, nb_df, df_order])
+             .into_dimensionality()?;
+     // Transform spec to an complex array and iterate over time frames of spec and coefs
+     let spec_iter = spec.iter().map(|s| {
+-        as_arrayview_complex(s.to_array_view::<f32>().unwrap(), &[ch, n_freqs])
++        as_arrayview_complex(s.to_plain_array_view::<f32>().unwrap(), &[ch, n_freqs])
+             .into_dimensionality::<Ix2>()
+             .unwrap()
+     });
+@@ -772,7 +775,7 @@ fn init_encoder_impl(
+     n_ch: usize,
+ ) -> Result<TypedModel> {
+     log::debug!("Start init encoder.");
+-    let s = m.symbol_table.sym("S");
++    let s = m.symbols.sym("S");
+ 
+     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
+     let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
+@@ -788,7 +791,7 @@ fn init_encoder_impl(
+         .with_input_fact(0, feat_erb)?
+         .with_input_fact(1, feat_spec)?
+         .with_input_names(["feat_erb", "feat_spec"])?
+-        .with_output_names(["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"])?;
++        .with_outputs_by_name(["e0", "e1", "e2", "e3", "emb", "c0", "lsnr"])?;
+ 
+     m.analyse(true)?;
+     let mut m = m.into_typed()?;
+@@ -821,7 +824,7 @@ fn init_erb_decoder_impl(
+     mask_reduction: Option<ReduceMask>,
+ ) -> Result<TypedModel> {
+     log::debug!("Start init ERB decoder.");
+-    let s = m.symbol_table.sym("S");
++    let s = m.symbols.sym("S");
+ 
+     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
+     let layer_width = net_cfg.get("conv_ch").unwrap().parse::<usize>()?;
+@@ -854,7 +857,7 @@ fn init_erb_decoder_impl(
+         .with_input_fact(3, e1)?
+         .with_input_fact(4, e0)?
+         .with_input_names(["emb", "e3", "e2", "e1", "e0"])?;
+-    // .with_output_names([output_name])?;
++    // .with_outputs_by_name([output_name])?;
+ 
+     m.analyse(true)?;
+ 
+@@ -900,7 +903,7 @@ fn init_erb_decoder_impl(
+             _ => (),
+         }
+     }
+-    m = m.with_output_names(&[output_name])?;
++    m = m.with_outputs_by_name(&[output_name])?;
+ 
+     let m = m.into_optimized()?;
+ 
+@@ -934,7 +937,7 @@ fn init_df_decoder_impl(
+     n_ch: usize,
+ ) -> Result<TypedModel> {
+     log::debug!("Start init DF decoder.");
+-    let s = m.symbol_table.sym("S");
++    let s = m.symbols.sym("S");
+ 
+     let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
+     let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
+@@ -956,7 +959,7 @@ fn init_df_decoder_impl(
+         .with_input_fact(0, emb)?
+         .with_input_fact(1, c0)?
+         .with_input_names(["emb", "c0"])?
+-        .with_output_names(["coefs"])?;
++        .with_outputs_by_name(["coefs"])?;
+ 
+     m.analyse(true)?;
+     let mut m = m.into_typed()?;
+@@ -1067,14 +1070,11 @@ pub fn as_arrayview_mut_complex<'a>(
+     }
+ }
+ pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<f32> {
++    // tract >= 0.22: `TValue` always wraps an `Arc<Tensor>`. The buffers handled here are only
++    // ever shared with tract as deep copies, so the Arc is exclusive and writing is sound.
++    debug_assert!(x.is_exclusive());
+     unsafe {
+-        match x {
+-            TValue::Var(x) => {
+-                ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32)
+-            }
+-            TValue::Const(x) => {
+-                ArrayViewMutD::from_shape_ptr(x.shape(), x.as_ptr_unchecked::<f32>() as *mut f32)
+-            }
+-        }
++        let t = x.as_arc_tensor().expect("TValue always holds a tensor");
++        ArrayViewMutD::from_shape_ptr(t.shape(), t.as_ptr_unchecked::<f32>() as *mut f32)
+     }
+ }
+diff --git a/libDF/src/wasm.rs b/libDF/src/wasm.rs
+index 2e02095..b820540 100644
+--- a/libDF/src/wasm.rs
++++ b/libDF/src/wasm.rs
+@@ -1,43 +1,116 @@
+ use std::boxed::Box;
+ 
+-use ndarray::prelude::*;
++use tract_core::ndarray::prelude::*;
+ use wasm_bindgen::prelude::*;
+ 
+ use crate::tract::*;
+ 
++/// Route Rust panics to `console.error` (with message) instead of a bare `unreachable` trap.
++#[wasm_bindgen(start)]
++fn start() {
++    console_error_panic_hook::set_once();
++}
++
+ #[wasm_bindgen]
+ pub struct DFState(crate::tract::DfTract);
+ 
+ #[wasm_bindgen]
+ impl DFState {
+-    fn new(model_bytes: &[u8], channels: usize, atten_lim: f32) -> Self {
+-        let r_params = RuntimeParams::default_with_ch(channels).with_atten_lim(atten_lim);
+-        let df_params = DfParams::from_bytes(model_bytes).expect("Could not load model from path");
+-        let m =
+-            DfTract::new(df_params, &r_params).expect("Could not initialize DeepFilter runtime.");
+-        DFState(m)
++    fn new(
++        model_bytes: &[u8],
++        channels: usize,
++        atten_lim: f32,
++        min_db_thresh: f32,
++        max_db_erb_thresh: f32,
++        max_db_df_thresh: f32,
++        post_filter_beta: f32,
++    ) -> Result<Self, String> {
++        if post_filter_beta.is_nan() || post_filter_beta < 0. {
++            return Err(format!("post_filter_beta must be >= 0, got {post_filter_beta}"));
++        }
++        let r_params = RuntimeParams::default_with_ch(channels)
++            .with_atten_lim(atten_lim)
++            .with_thresholds(min_db_thresh, max_db_erb_thresh, max_db_df_thresh)
++            .with_post_filter(post_filter_beta);
++        let df_params = DfParams::from_bytes(model_bytes)
++            .map_err(|e| format!("Could not load model: {e:#}"))?;
++        let m = DfTract::new(df_params, &r_params)
++            .map_err(|e| format!("Could not initialize DeepFilter runtime: {e:#}"))?;
++        Ok(DFState(m))
+     }
+     fn boxed(self) -> Box<DFState> {
+         Box::new(self)
+     }
+ }
+ 
+-/// Create a DeepFilterNet Model
++/// Create a DeepFilterNet Model. Both enhancement stages (ERB gains + deep filter) always run:
++/// libDF's default local-SNR based stage skipping costs a lot of quality.
+ ///
+ /// Args:
+-///     - path: File path to a DeepFilterNet tar.gz onnx model
++///     - model_bytes: Contents of a DeepFilterNet tar.gz onnx model (not embedded in this build)
+ ///     - atten_lim: Attenuation limit in dB.
+ ///
+ /// Returns:
+-///     - DF state doing the full processing: stft, DNN noise reduction, istft.
++///     - DF state doing the full processing: stft, DNN noise reduction, istft. Throws on failure.
+ #[wasm_bindgen]
+ pub unsafe fn df_create(
+     model_bytes: &[u8],
+     // channels: usize,
+     atten_lim: f32,
+-) -> *mut DFState {
+-    let df = DFState::new(model_bytes, 1, atten_lim);
+-    Box::into_raw(df.boxed())
++) -> Result<*mut DFState, JsError> {
++    df_create_with_params(
++        model_bytes,
++        atten_lim,
++        f32::NEG_INFINITY,
++        f32::INFINITY,
++        f32::INFINITY,
++        0.,
++    )
++}
++
++/// Create a DeepFilterNet Model with explicit runtime parameters.
++///
++/// Args:
++///     - model_bytes: Contents of a DeepFilterNet tar.gz onnx model
++///     - atten_lim: Attenuation limit in dB (>= 100 disables the limit).
++///     - min_db_thresh: Frames with a local SNR below this are zeroed. `-Infinity` disables.
++///       libDF default: -10.
++///     - max_db_erb_thresh: Frames with a local SNR above this are passed through. `Infinity`
++///       always runs the ERB stage. libDF default: 30.
++///     - max_db_df_thresh: Frames with a local SNR above this skip deep filtering. `Infinity`
++///       always runs the DF stage. libDF default: 20.
++///     - post_filter_beta: Post filter attenuation (>= 0; 0 disables, suitable range 0.0-0.05).
++///
++/// Returns:
++///     - DF state. Throws on failure.
++#[wasm_bindgen]
++pub unsafe fn df_create_with_params(
++    model_bytes: &[u8],
++    atten_lim: f32,
++    min_db_thresh: f32,
++    max_db_erb_thresh: f32,
++    max_db_df_thresh: f32,
++    post_filter_beta: f32,
++) -> Result<*mut DFState, JsError> {
++    let df = DFState::new(
++        model_bytes,
++        1,
++        atten_lim,
++        min_db_thresh,
++        max_db_erb_thresh,
++        max_db_df_thresh,
++        post_filter_beta,
++    )
++    .map_err(|e| JsError::new(&e))?;
++    Ok(Box::into_raw(df.boxed()))
++}
++
++/// Free a DeepFilterNet Model created via df_create() / df_create_with_params().
++#[wasm_bindgen]
++pub unsafe fn df_free(st: *mut DFState) {
++    if !st.is_null() {
++        drop(Box::from_raw(st));
++    }
+ }
+ 
+ /// Get DeepFilterNet frame size in samples.
+@@ -72,10 +145,9 @@ pub unsafe fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
+ /// Args:
+ ///     - df_state: Created via df_create()
+ ///     - input: Input buffer of length df_get_frame_length()
+-///     - output: Output buffer of length df_get_frame_length()
+ ///
+ /// Returns:
+-///     - Local SNR of the current frame.
++///     - The enhanced frame, length df_get_frame_length().
+ #[wasm_bindgen]
+ pub unsafe fn df_process_frame(st: *mut DFState, input: &[f32]) -> js_sys::Float32Array {
+     let state = st.as_mut().expect("Invalid pointer");
+@@ -86,3 +158,39 @@ pub unsafe fn df_process_frame(st: *mut DFState, input: &[f32]) -> js_sys::Float
+     let _lsnr = state.0.process(input, output_view).expect("Failed to process DF frame");
+     js_sys::Float32Array::from(output.as_slice().unwrap())
+ }
++
++/// Processes N consecutive frames in one call, which avoids the JS<->wasm call overhead (and a
++/// per-frame allocation) of `df_process_frame`.
++///
++/// Args:
++///     - df_state: Created via df_create()
++///     - input: `N * df_get_frame_length()` samples, i.e. a whole number of frames.
++///
++/// Returns:
++///     - The enhanced samples, same length as `input`. Throws if the input length is not a
++///       multiple of the frame length or processing fails.
++#[wasm_bindgen]
++pub unsafe fn df_process_frames(
++    st: *mut DFState,
++    input: &[f32],
++) -> Result<js_sys::Float32Array, JsError> {
++    let state = st.as_mut().ok_or_else(|| JsError::new("Invalid pointer"))?;
++    let hop = state.0.hop_size;
++    if input.len() % hop != 0 {
++        return Err(JsError::new(&format!(
++            "input length {} is not a multiple of the frame length {hop}",
++            input.len()
++        )));
++    }
++    let mut output = vec![0f32; input.len()];
++    for (inp, out) in input.chunks_exact(hop).zip(output.chunks_exact_mut(hop)) {
++        let inp = ArrayView2::from_shape((1, hop), inp).map_err(|e| JsError::new(&e.to_string()))?;
++        let out =
++            ArrayViewMut2::from_shape((1, hop), out).map_err(|e| JsError::new(&e.to_string()))?;
++        state
++            .0
++            .process(inp, out)
++            .map_err(|e| JsError::new(&format!("Failed to process DF frame: {e:#}")))?;
++    }
++    Ok(js_sys::Float32Array::from(output.as_slice()))
++}
