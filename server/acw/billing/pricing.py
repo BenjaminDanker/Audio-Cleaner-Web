@@ -31,7 +31,8 @@ _RATE_LIST = [
     Rate("stream_denoise", "medium", "Live denoise - medium", 8_000, available=False),
     Rate("stream_denoise", "high", "Live denoise - high", 15_000, available=False),
     Rate("stream_captions", "local", "Live captions - standard (on-prem model)", 6_000),
-    Rate("stream_captions", "premium", "Live captions - premium (OpenAI realtime)", 20_000),
+    # OpenAI gpt-live-transcribe is $0.017/min of audio sent; we only send speech.
+    Rate("stream_captions", "premium", "Live captions - premium (OpenAI realtime)", 25_000),
 ]
 RATES: dict[tuple[str, str], Rate] = {(r.product, r.tier): r for r in _RATE_LIST}
 

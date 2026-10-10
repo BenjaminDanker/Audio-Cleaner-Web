@@ -41,9 +41,10 @@ DFN3 is a real-time model. Offline jobs can afford much more compute:
 
 ## 4. GTX 960 (Maxwell, sm_52, 2-4 GB)
 
-Blocked on the NVIDIA driver, which needs sudo:
-`sudo ubuntu-drivers install` or `nvidia-driver-580`. Check that the
-driver branch still supports Maxwell.
+Blocked on the NVIDIA driver, which needs sudo and a reboot:
+`sudo apt install nvidia-driver-580` (Ubuntu's recommended branch for the
+GM206, and the last NVIDIA branch with Maxwell support, so GPU work stays on
+CUDA 12.x).
 
 Constraints to verify:
 - Recent CUDA 13 / PyTorch builds dropped Maxwell. CUDA 12.x and the

@@ -28,7 +28,7 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ Product name and domain (the code says "Audio Cleaner"; it's one constant/string set)
 - ⬜ Prices (server/acw/billing/pricing.py; launch placeholders: Studio $0.60/h,
   transcription $0.24/h standard and $0.90/h premium, live denoise $0.24/h,
-  live captions $0.36/h standard and $1.20/h premium)
+  live captions $0.36/h standard and $1.50/h premium)
 - ⬜ Terms of Service + Privacy Policy reviewed by a lawyer (drafts in the site)
 - ⬜ Tax: Stripe Tax on; register UK VAT and EU non-Union OSS, or block those
   countries at first (docs/payments.md)
