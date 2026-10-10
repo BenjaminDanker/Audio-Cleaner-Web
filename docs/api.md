@@ -25,6 +25,8 @@ are `422 {"detail": "Invalid request.", "fields": [...]}`.
 | POST | `/api/auth/email` | `{email, turnstileToken?}` sends a magic link to `/login/verify#token=...` |
 | POST | `/api/auth/email/verify` | `{token}` (from the URL fragment) creates the session |
 | POST | `/api/auth/logout`, `/api/auth/logout-all` | |
+| GET | `/api/account/export` | JSON of everything stored about the user (download as a file) |
+| POST | `/api/account/delete` | `{confirm: "<the user's email>"}`; refuses while jobs run; remaining credit is forfeited (offer refunds first); signs out |
 
 Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.
 

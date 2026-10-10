@@ -144,3 +144,18 @@ def test_suspended_user_is_locked_out(client, signed_in):
     uid, h = signed_in
     db.execute("UPDATE users SET status = 'suspended' WHERE id = ?", (uid,))
     assert client.get("/api/jobs").status_code == 403
+
+
+def test_export_and_delete_account(client, signed_in):
+    uid, h = signed_in
+    ledger.credit(uid, 3_000_000, "grant", "t", "g")
+    data = client.get("/api/account/export").json()
+    assert data["user"]["email"] == "user@example.com" and data["ledger"]
+    assert client.post("/api/account/delete", json={"confirm": "wrong@example.com"}, headers=h).status_code == 400
+    assert client.post("/api/account/delete", json={"confirm": "USER@example.com"}, headers=h).status_code == 200
+    u = db.one("SELECT email, status, balance_micros FROM users WHERE id = ?", (uid,))
+    assert u["status"] == "deleted" and u["balance_micros"] == 0 and u["email"].endswith("@deleted.invalid")
+    assert client.get("/api/me").json()["signedIn"] is False
+    # the address can sign up again as a fresh account
+    uid2, _ = login(client, "user@example.com")
+    assert uid2 != uid

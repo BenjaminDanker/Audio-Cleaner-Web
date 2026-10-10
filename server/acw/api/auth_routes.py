@@ -340,3 +340,74 @@ def accept_tos(body: TosBody, request: Request, principal: auth.Principal = Depe
     )
     db.audit("user", "tos_accepted", user_id=principal.user_id, detail=auth.TOS_VERSION, ip=client_ip(request))
     return {"ok": True}
+
+
+@me_router.get("/account/export")
+def export_account(principal: auth.Principal = Depends(auth.require_session)) -> dict:
+    """Everything we hold about the signed-in user (GDPR/CCPA access request)."""
+    uid = principal.user_id
+    user = dict(db.one("SELECT * FROM users WHERE id = ?", (uid,)))
+    for k in ("stripe_customer_id", "default_payment_method"):
+        user[k] = bool(user[k])
+    tables = {
+        "identities": "SELECT provider, email, created_at FROM identities WHERE user_id = ?",
+        "sessions": "SELECT created_at, last_seen_at, expires_at, ip, user_agent FROM sessions WHERE user_id = ?",
+        "apiKeys": "SELECT name, prefix, scopes, created_at, last_used_at, revoked_at FROM api_keys WHERE user_id = ?",
+        "ledger": "SELECT amount_micros, kind, description, balance_after_micros, created_at FROM ledger WHERE user_id = ?",
+        "payments": "SELECT kind, status, amount_cents, refunded_cents, created_at FROM payments WHERE user_id = ?",
+        "jobs": "SELECT kind, tier, status, input_name, duration_seconds, cost_micros, created_at, finished_at FROM jobs WHERE user_id = ?",
+        "liveSessions": "SELECT denoise_tier, caption_tier, seconds, cost_micros, client_ip, started_at, ended_at FROM stream_sessions WHERE user_id = ?",
+        "auditLog": "SELECT actor, action, detail, ip, created_at FROM audit_log WHERE user_id = ?",
+    }
+    out = {"exportedAt": db.now(), "user": user}
+    for name, sql in tables.items():
+        out[name] = [dict(r) for r in db.all_rows(sql, (uid,))]
+    return out
+
+
+class DeleteBody(BaseModel):
+    confirm: str = Field(max_length=320)
+
+
+@me_router.post("/account/delete")
+def delete_account(body: DeleteBody, request: Request, response: Response,
+                   principal: auth.Principal = Depends(auth.require_session)) -> dict:
+    """Delete the account. Remaining credit is forfeited (the UI says so and
+    offers refunds first). Payment and ledger rows are kept, anonymized,
+    because tax and dispute rules require them."""
+    import shutil
+
+    from .. import jobs as jobs_mod
+
+    if body.confirm.strip().lower() != principal.email.lower():
+        raise HTTPException(status_code=400, detail="Type your email address to confirm.")
+    uid = principal.user_id
+    active = db.one(
+        "SELECT COUNT(*) n FROM jobs WHERE user_id = ? AND status IN ('uploading','queued','running','cloud_asr')", (uid,)
+    )["n"]
+    if active:
+        raise HTTPException(status_code=409, detail="Wait for your running jobs to finish first.")
+    for row in db.all_rows("SELECT id FROM jobs WHERE user_id = ?", (uid,)):
+        shutil.rmtree(jobs_mod.job_dir(row["id"]), ignore_errors=True)
+    with db.tx() as c:
+        ledger.release_all_holds(uid, c)
+        bal = c.execute("SELECT balance_micros FROM users WHERE id = ?", (uid,)).fetchone()["balance_micros"]
+        if bal > 0:
+            ledger.debit_available(uid, bal, "adjustment", "account", uid, "Forfeited on account deletion", allow_partial=True, c=c)
+        c.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        c.execute("DELETE FROM identities WHERE user_id = ?", (uid,))
+        c.execute("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?", (db.now(), uid))
+        c.execute("UPDATE jobs SET input_name = 'deleted', outputs_json = NULL, status = CASE WHEN status = 'done' THEN 'expired' ELSE status END WHERE user_id = ?", (uid,))
+        c.execute("UPDATE stream_sessions SET client_ip = NULL WHERE user_id = ?", (uid,))
+        c.execute("UPDATE audit_log SET ip = NULL WHERE user_id = ?", (uid,))
+        c.execute(
+            "UPDATE users SET email = ?, display_name = NULL, status = 'deleted', auto_reload_enabled = 0,"
+            " default_payment_method = NULL WHERE id = ?",
+            (f"deleted-{uid}@deleted.invalid", uid),
+        )
+        c.execute(
+            "INSERT INTO audit_log(user_id, actor, action, created_at) VALUES (?, 'user', 'account_deleted', ?)",
+            (uid, db.now()),
+        )
+    auth.clear_session_cookie(response)
+    return {"ok": True}
