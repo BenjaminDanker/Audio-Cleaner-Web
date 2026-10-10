@@ -1,250 +1,47 @@
-# 🎵 Audio Cleaner Web
+# Audio Cleaner
 
-AI-powered video noise reduction in the cloud. Upload a video and receive a version with crystal-clear audio using state-of-the-art DeepFilterNet3.
+Speech denoising and transcription, self-hosted.
 
-## Table of Contents
+- **Free in your browser**: DeepFilterNet3 compiled to WebAssembly. Files never leave the device.
+- **Studio clean** (pay as you go): server-side DeepFilterNet3 plus a clarity
+  chain (level match, high-pass, leveling, loudness, limiter). Video keeps its
+  picture; subtitles are embedded as a soft track.
+- **Live for streamers** (pay as you go): OBS plugin streams the mic to the
+  server and gets back cleaned audio (+30 ms model latency) and live captions
+  (CEA-608 into Twitch/YouTube).
+- **Transcription** (pay as you go, plus a free daily allowance): on-prem
+  Whisper or premium OpenAI. Outputs SRT, VTT and TXT.
 
-- [🎵 Audio Cleaner Web](#-audio-cleaner-web)
-  - [Table of Contents](#table-of-contents)
-  - [Features](#features)
-  - [Prerequisites](#prerequisites)
-  - [Project Structure](#project-structure)
-  - [Architecture](#architecture)
-  - [Installation \& Local Development](#installation--local-development)
-  - [Configuration](#configuration)
-  - [Usage](#usage)
-  - [Deployment](#deployment)
-    - [Deployment Prerequisites](#deployment-prerequisites)
-    - [Build and Deploy Steps](#build-and-deploy-steps)
-    - [Deployment Configuration](#deployment-configuration)
-    - [Quick Deployment (Alternative)](#quick-deployment-alternative)
-  - [Troubleshooting \& Tips](#troubleshooting--tips)
-  - [Contributing](#contributing)
-  - [License](#license)
+Prepaid credit, no subscription: top up from $10, optional auto-reload.
 
-## Features
+## Layout
 
-- Noise reduction for any video format via DeepFilterNet3 AI model
-- CPU-only speech clarity pipeline with optional subtitles/translations
-- Secure direct-to-blob uploads/downloads with time-limited SAS tokens
-- Serverless API (Azure Functions) and queue-based processing (Service Bus)
-- GitHub OAuth authentication and Stripe subscription management
-- Automatic cleanup of old files and cost-efficient scaling to zero
-- Live streaming via OBS companion using API key authentication
+| Path | What |
+|---|---|
+| `server/` | Python service (`acw` package): API, billing, job workers, live DSP |
+| `web/` | Website + browser denoiser (Vite/React) |
+| `obs-plugin/` | OBS Studio filter plugin (GPL-2.0-or-later) |
+| `clients/python/` | reference live-stream client |
+| `native/deepfilter/` | reproducible libDF build (server `.so` + browser `.wasm`) |
+| `deploy/` | systemd user units, install/publish scripts, VPS Caddy route |
+| `docs/` | [architecture](docs/architecture.md), [security](docs/security.md), [payments](docs/payments.md), [operations](docs/operations.md), [API](docs/api.md), [streaming protocol](docs/streaming-protocol.md), [research roadmap](docs/research-roadmap.md) |
 
-## Prerequisites
+## Development
 
-- Node.js (>=14.x) and npm
-- Azure Static Web Apps CLI (`npm install -g @azure/static-web-apps-cli`)
-- Azure Functions Core Tools (`npm install -g azure-functions-core-tools@4`)
-- Docker (for local AI processor)
-- Terraform (for infrastructure provisioning)
+```bash
+python3 -m venv ~/audio-cleaner/venv
+~/audio-cleaner/venv/bin/pip install -r server/requirements.lock pytest pytest-asyncio
+cd server && ~/audio-cleaner/venv/bin/python -m pytest -q
 
-## Project Structure
-
-```text
-Audio-Cleaner-Web/
-├── frontend/          # React + Vite UI
-├── api/               # Azure Functions (Node.js)
-│   ├── upload-file/   # Generate upload SAS URL
-│   ├── enqueue-job/   # Enqueue processing job
-│   ├── job-status/    # Poll job status
-│   ├── download-file/ # Generate download SAS URL
-│   └── shared/        # Utilities and middleware
-├── processor/         # Python AI service container
-│   ├── Dockerfile     # Container spec
-│   └── src/           # DeepFilterNet3 inference code
-└── terraform/         # Infrastructure as Code
+# run locally (needs ~/audio-cleaner/{bin,models}, see docs/operations.md)
+export ACW_DATA_DIR=~/audio-cleaner/dev/data
+python -m acw.stream.worker & python -m acw.worker.main &
+uvicorn acw.app:app --host 127.0.0.1 --port 8791
+python -m acw.admin login-link you@example.com
 ```
 
-## Architecture
+## Licences
 
-```mermaid
-graph LR
-  F["Frontend<br/>(React + Vite)"] -->|API calls| A["Azure Functions"]
-  A --> B["Service Bus Queue"]
-  B --> C["AI Processor<br/>(Container App)"]
-  C --> D["Blob Storage"]
-  A --> E["Cosmos DB"]
-```
-
-- Frontend & API scale to zero when idle
-- Processor: containerized AI runs per job
-- Storage & DB: secure, pay-per-use
-
-## Installation & Local Development
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/BenjaminDanker/Audio-Cleaner-Web.git
-   cd Audio-Cleaner-Web
-   ```
-
-2. Start frontend:
-
-   ```bash
-   cd frontend
-   npm install
-   npm run dev
-   ```
-
-3. Start API:
-
-   ```bash
-   cd ../api
-   npm install
-   npm run dev
-   ```
-
-4. Start AI processor:
-
-   ```bash
-   cd ../processor
-   docker compose -f docker-compose.dev.yml up
-   ```
-
-5. Launch full stack locally:
-
-   ```bash
-   npx swa start
-   ```
-
-6. Open <http://localhost:4280> in your browser.
-
-7. (Optional) Start streaming service for local dev:
-
-   ```bash
-   # In a Python venv
-   pip install -r processor/streaming/requirements.txt
-   uvicorn processor.streaming.app:app --reload --host 127.0.0.1 --port 8000
-   ```
-
-## Configuration
-
-1. Copy and fill local settings:
-
-   ```bash
-   cd api
-   cp local.settings.json.example local.settings.json
-   ```
-
-2. In `local.settings.json`, set:
-   - `AzureWebJobsStorage` (Blob Storage connection string)
-   - `SERVICE_BUS_CONNECTION` (Service Bus connection string)
-   - `COSMOS_DB_CONNECTION` (Cosmos DB connection string)
-   - `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`
-   - `STRIPE_SECRET_KEY`
-   - `STREAMING_API_KEY` (single key) or `STREAMING_API_KEYS` (comma-separated) for OBS/plugin auth
-
-3. Terraform variables:
-
-   Edit `terraform/terraform.tfvars` with your Azure subscription and resource group.
-
-## Usage
-
-1. Log in via GitHub on the frontend.
-2. Upload a video → frontend requests a SAS URL → upload to Blob Storage.
-3. Click **Process** → job enqueued on Service Bus.
-4. View processing status in real time.
-5. Download the processed video via SAS-protected URL.
-
-### Live Streaming (OBS Companion)
-
-1. Set an API key in your environment (and in Azure for production):
-
-   - `STREAMING_API_KEY` or `STREAMING_API_KEYS`
-
-2. Run the streaming service locally (see above) or deploy it.
-
-3. Use the reference companion in `obs-companion/`:
-
-   ```powershell
-   # PowerShell
-   $env:API_BASE = "http://localhost:4280/api"
-   $env:STREAMING_API_KEY = "<your_key>"
-   python obs-companion/obs_companion.py --sr 16000 --lang en
-   ```
-
-The website does not start streaming; OBS companion initiates sessions with the API key and streams audio over WebSocket.
-
-## Deployment
-
-### Deployment Prerequisites
-
-- Azure CLI installed and authenticated
-- Docker installed
-- Node.js and npm installed
-- Access to Azure Container Registry
-
-### Build and Deploy Steps
-
-1. **Provision infrastructure:**
-
-   ```bash
-   cd terraform
-   terraform init
-   terraform apply
-   ```
-
-2. **Build and push the processor container:**
-
-   ```bash
-   cd processor
-   az acr login --name <your-acr-name>
-   docker build -t audio-cleaner-processor:latest .
-   docker tag audio-cleaner-processor:latest <your-acr-name>.azurecr.io/audio-cleaner-processor:latest
-   docker push <your-acr-name>.azurecr.io/audio-cleaner-processor:latest
-   az acr manifest list-metadata --registry <your-acr-name> --name audio-cleaner-processor
-   az acr repository delete --name <your-acr-name> --image audio-cleaner-processor@sha256:aaaaa --yes
-   ```
-
-3. **Build the frontend:**
-
-   ```bash
-   cd frontend
-   npm run build
-   ```
-
-4. **Deploy the application:**
-
-   ```bash
-   cd $(git rev-parse --show-toplevel)
-   npx @azure/static-web-apps-cli deploy --resource-group <your-resource-group> --app-name <your-swa-name> --subscription-id <your-subscription-id> --tenant-id <your-tenant-id>
-   ```
-
-### Deployment Configuration
-
-- Set up your Azure Container Registry name in your deployment scripts
-- Configure environment variables for your specific Azure resources
-- Replace placeholders with your actual Azure resource names and IDs
-- Monitor services in the Azure portal as needed
-
-### Quick Deployment (Alternative)
-
-For convenience, you can create private deployment scripts with your actual resource names:
-
-1. Create `deploy.ps1` (Windows) or `deploy.sh` (Linux/Mac) with your actual Azure resource values
-2. Add these files to `.gitignore` to keep credentials private
-3. Run the script for one-command deployment
-
-**Note**: Never commit deployment scripts with real credentials to version control.
-
-## Troubleshooting & Tips
-
-- **Azure Functions errors**: run `func start --verbose` in the `api` directory.
-- **Blob access issues**: verify SAS token validity and storage CORS settings.
-- **Queue delays**: check Service Bus SKU and message metrics.
-- **Processor rebuild**: rerun `docker build` if model files change.
-
-## Contributing
-
-1. Fork the repository.
-2. Create a branch: `git checkout -b feature/your-feature`.
-3. Implement changes and add tests.
-4. Test end-to-end locally.
-5. Submit a pull request against `main`.
-
-## License
-
-Released under the MIT License. See [LICENSE](LICENSE) for details.
+Server and website: see `LICENSE`. OBS plugin: GPL-2.0-or-later. Third-party:
+DeepFilterNet (MIT/Apache-2.0), tract (MIT/Apache-2.0), FFmpeg (GPL build,
+run as a separate program), faster-whisper (MIT), Whisper weights (MIT).
