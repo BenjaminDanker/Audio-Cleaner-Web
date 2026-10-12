@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+#include "acw/protocol.hpp"
+
+#include "acw/common.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+#include <nlohmann/json.hpp>
+
+namespace acw {
+
+namespace {
+
+inline void put_u16(uint8_t *p, uint16_t v)
+{
+	p[0] = static_cast<uint8_t>(v & 0xff);
+	p[1] = static_cast<uint8_t>(v >> 8);
+}
+inline void put_u32(uint8_t *p, uint32_t v)
+{
+	for (int i = 0; i < 4; ++i)
+		p[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xff);
+}
+inline void put_u64(uint8_t *p, uint64_t v)
+{
+	for (int i = 0; i < 8; ++i)
+		p[i] = static_cast<uint8_t>((v >> (8 * i)) & 0xff);
+}
+inline uint32_t get_u32(const uint8_t *p)
+{
+	return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+	       (static_cast<uint32_t>(p[3]) << 24);
+}
+inline uint64_t get_u64(const uint8_t *p)
+{
+	uint64_t v = 0;
+	for (int i = 7; i >= 0; --i)
+		v = (v << 8) | p[i];
+	return v;
+}
+
+}  // namespace
+
+size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n, uint8_t *out)
+{
+	out[0] = kProtoVersion;
+	out[1] = kCodecS16;
+	put_u16(out + 2, 0);
+	put_u32(out + 4, seq);
+	put_u64(out + 8, ts_us);
+	uint8_t *p = out + kHeaderSize;
+	for (size_t i = 0; i < n; ++i) {
+		float x = pcm[i];
+		if (!(x == x))  // NaN guard
+			x = 0.0f;
+		x = std::min(1.0f, std::max(-1.0f, x));
+		const int v = static_cast<int>(std::lrintf(x * 32767.0f));
+		put_u16(p + 2 * i, static_cast<uint16_t>(static_cast<int16_t>(v)));
+	}
+	return kHeaderSize + 2 * n;
+}
+
+void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *out)
+{
+	out[0] = kProtoVersion;
+	out[1] = codec;
+	put_u16(out + 2, 0);
+	put_u32(out + 4, seq);
+	put_u64(out + 8, ts_us);
+}
+
+bool parse_frame_header(const uint8_t *data, size_t len, FrameHeader &hdr)
+{
+	if (len < kHeaderSize)
+		return false;
+	hdr.version = data[0];
+	hdr.codec = data[1];
+	hdr.flags = static_cast<uint16_t>(data[2] | (data[3] << 8));
+	hdr.seq = get_u32(data + 4);
+	hdr.ts_us = get_u64(data + 8);
+	return hdr.version == kProtoVersion;
+}
+
+bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out, size_t max_samples,
+		  size_t &n_samples)
+{
+	if (!parse_frame_header(data, len, hdr))
+		return false;
+	const uint8_t *p = data + kHeaderSize;
+	const size_t payload = len - kHeaderSize;
+	if (hdr.codec == kCodecS16) {
+		if (payload % 2)
+			return false;
+		n_samples = payload / 2;
+		if (n_samples > max_samples)
+			return false;
+		for (size_t i = 0; i < n_samples; ++i) {
+			const int16_t v = static_cast<int16_t>(static_cast<uint16_t>(p[2 * i] | (p[2 * i + 1] << 8)));
+			out[i] = static_cast<float>(v) * (1.0f / 32768.0f);
+		}
+		return true;
+	}
+	if (hdr.codec == kCodecF32) {
+		if (payload % 4)
+			return false;
+		n_samples = payload / 4;
+		if (n_samples > max_samples)
+			return false;
+		for (size_t i = 0; i < n_samples; ++i) {
+			const uint32_t u = get_u32(p + 4 * i);
+			float f;
+			static_assert(sizeof(f) == sizeof(u), "float must be 32 bit");
+			std::memcpy(&f, &u, sizeof(f));
+			out[i] = std::isfinite(f) ? f : 0.0f;
+		}
+		return true;
+	}
+	return false;
+}
+
+std::string make_start_message(const StartParams &p)
+{
+	using nlohmann::json;
+	json j;
+	j["type"] = "start";
+	j["version"] = 1;
+	j["denoise"] = p.denoise ? json("light") : json(nullptr);
+	if (p.captions == "local" || p.captions == "premium")
+		j["captions"] = p.captions;
+	else
+		j["captions"] = nullptr;
+	if (p.language.empty())
+		j["language"] = nullptr;
+	else
+		j["language"] = p.language;
+	j["sampleRate"] = kNetRate;
+	j["codec"] = p.codec;
+	if (p.codec == "opus" && p.opus_bitrate > 0)
+		j["opusBitrate"] = p.opus_bitrate;
+	j["attenLimDb"] = p.atten_lim_db;
+	j["client"] = p.client;
+	return j.dump();
+}
+
+std::string make_ping_message(uint64_t t)
+{
+	nlohmann::json j;
+	j["type"] = "ping";
+	j["t"] = t;
+	return j.dump();
+}
+
+std::string make_config_message(int atten_lim_db)
+{
+	nlohmann::json j;
+	j["type"] = "config";
+	j["attenLimDb"] = atten_lim_db;
+	return j.dump();
+}
+
+std::string make_stop_message()
+{
+	return "{\"type\":\"stop\"}";
+}
+
+bool parse_event(const std::string &text, Event &ev)
+{
+	using nlohmann::json;
+	json j = json::parse(text, nullptr, /*allow_exceptions=*/false);
+	if (!j.is_object())
+		return false;
+	auto str = [&](const char *k, std::string &dst) {
+		auto it = j.find(k);
+		if (it != j.end() && it->is_string())
+			dst = it->get<std::string>();
+	};
+	auto num = [&](const char *k, double &dst) {
+		auto it = j.find(k);
+		if (it != j.end() && it->is_number())
+			dst = it->get<double>();
+	};
+	auto integer = [&](const char *k, int &dst) {
+		auto it = j.find(k);
+		if (it != j.end() && it->is_number())
+			dst = static_cast<int>(it->get<double>());
+	};
+
+	std::string type;
+	str("type", type);
+	ev = Event{};
+	if (type == "ready") {
+		ev.type = EventType::Ready;
+		str("sessionId", ev.session_id);
+		num("modelLatencyMs", ev.model_latency_ms);
+		num("usdPerMinute", ev.usd_per_minute);
+		integer("hopSamples", ev.hop_samples);
+		integer("sampleRate", ev.sample_rate);
+		integer("maxSessionSeconds", ev.max_session_seconds);
+	} else if (type == "caption") {
+		ev.type = EventType::Caption;
+		str("text", ev.text);
+		auto it = j.find("final");
+		ev.is_final = it != j.end() && it->is_boolean() && it->get<bool>();
+		num("start", ev.start);
+		num("end", ev.end);
+		str("id", ev.caption_id);
+	} else if (type == "warning") {
+		ev.type = EventType::Warning;
+		str("code", ev.code);
+		str("message", ev.message);
+		integer("secondsLeft", ev.seconds_left);
+	} else if (type == "stopped") {
+		ev.type = EventType::Stopped;
+		str("reason", ev.code);
+	} else if (type == "error") {
+		ev.type = EventType::Error;
+		str("code", ev.code);
+		str("message", ev.message);
+	} else if (type == "pong") {
+		ev.type = EventType::Pong;
+		auto it = j.find("t");
+		if (it != j.end() && it->is_number_unsigned()) {
+			ev.pong_t = it->get<uint64_t>();
+			ev.has_pong_t = true;
+		}
+	} else {
+		ev.type = EventType::Unknown;
+	}
+	return true;
+}
+
+}  // namespace acw

@@ -1,0 +1,195 @@
+# Builds the Audio Cleaner OBS plugin for Windows x64, macOS (universal) and Ubuntu x86_64.
+#
+#
+# Structure follows obsproject/obs-plugintemplate (CMake presets, buildspec.json
+# pins OBS 31.1.1 and the obs-deps used to build libobs), without its zsh/pwsh
+# helper scripts. The module is built against libobs 31.1.1, the oldest release
+# we support: OBS refuses to load plugins built for a newer major version, but
+# loads plugins built for an older one.
+name: OBS plugin
+
+on:
+  push:
+    branches: [main, on-prem]
+    tags: ["obs-plugin-v*"]
+    paths: ["obs-plugin/**", ".github/workflows/obs-plugin.yml"]
+  pull_request:
+    paths: ["obs-plugin/**", ".github/workflows/obs-plugin.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: obs-plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CONFIG: RelWithDebInfo
+
+defaults:
+  run:
+    working-directory: obs-plugin
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Core library + unit tests, no OBS needed (fast feedback)
+  core-tests:
+    name: Core unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build libssl-dev
+      - name: Configure
+        run: cmake --preset core-tests -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
+      - name: Build
+        run: cmake --build --preset core-tests
+      - name: Unit tests
+        run: ctest --test-dir build_tests --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  linux:
+    name: Ubuntu x86_64
+    runs-on: ubuntu-24.04
+    needs: core-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build pkg-config jq curl ccache \
+            extra-cmake-modules libsimde-dev uthash-dev libjansson-dev zlib1g-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libx11-dev libx11-xcb-dev libxcb1-dev libxcb-xinput-dev libxcb-randr0-dev libxcb-shm0-dev \
+            libxcb-xfixes0-dev libxcb-composite0-dev libxcomposite-dev libxinerama-dev \
+            libgl1-mesa-dev libglvnd-dev libgles2-mesa-dev libegl-dev libwayland-dev libxkbcommon-dev \
+            libpci-dev libdrm-dev libudev-dev libcurl4-openssl-dev libmbedtls-dev libpulse-dev libssl-dev
+
+      # The template installs whatever libobs-dev the PPA currently offers (OBS 32+ today), which would
+      # stamp the module as built for a newer API. Build the pinned release instead (no Qt, no plugins).
+      - name: Build libobs (version pinned in buildspec.json)
+        run: |
+          ver=$(jq -r '.dependencies["obs-studio"].version' buildspec.json)
+          hash=$(jq -r '.dependencies["obs-studio"].hashes["linux-x86_64"]' buildspec.json)
+          curl -fsSL -o "$RUNNER_TEMP/obs.tar.gz" "https://github.com/obsproject/obs-studio/archive/refs/tags/${ver}.tar.gz"
+          echo "${hash}  $RUNNER_TEMP/obs.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/obs-src" && tar -xzf "$RUNNER_TEMP/obs.tar.gz" -C "$RUNNER_TEMP/obs-src" --strip-components=1
+          cmake -S "$RUNNER_TEMP/obs-src" -B "$RUNNER_TEMP/obs-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DOBS_CMAKE_VERSION=3.0.0 -DOBS_VERSION_OVERRIDE="${ver}" \
+            -DENABLE_PLUGINS=OFF -DENABLE_FRONTEND=OFF -DENABLE_UI=OFF -DENABLE_SCRIPTING=OFF \
+            -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/obs-prefix"
+          cmake --build "$RUNNER_TEMP/obs-build"
+          cmake --install "$RUNNER_TEMP/obs-build"
+
+      - name: Configure plugin
+        run: |
+          cmake --preset ubuntu-ci-x86_64 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/obs-prefix" -DCMAKE_INSTALL_PREFIX=/usr \
+            -DACW_BUILD_TESTS=ON
+      - name: Build plugin
+        run: cmake --build --preset ubuntu-ci-x86_64
+      - name: Unit tests
+        run: ctest --test-dir build_x86_64 --output-on-failure
+      - name: Check the module API version
+        run: |
+          # 0x1f01xxxx = libobs API 31.1.x
+          objdump -d --disassemble=obs_module_ver build_x86_64/audio-cleaner.so | grep -E 'mov +\$0x1f01' 
+
+      - name: Package
+        run: |
+          name=$(jq -r .name buildspec.json); version=$(jq -r .version buildspec.json)
+          cmake --install build_x86_64 --config "$CONFIG" --prefix "$PWD/release/$CONFIG"
+          cpack -G DEB --config build_x86_64/CPackConfig.cmake -B "$PWD/release"
+          tar -C "release/$CONFIG" -cJf "release/${name}-${version}-ubuntu-x86_64.tar.xz" .
+          ls -l release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-cleaner-ubuntu-x86_64
+          path: |
+            obs-plugin/release/*.deb
+            obs-plugin/release/*.tar.xz
+
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS universal
+    runs-on: macos-15
+    needs: core-tests
+    env:
+      # --- code signing: NOT IMPLEMENTED, placeholders only (see README "Signing") -------------
+      # Ad-hoc signature ("-") is used unless a Developer ID identity is provided.
+      CODESIGN_IDENT: "-"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+      - name: Configure (downloads OBS 31.1.1 sources + obs-deps pinned in buildspec.json)
+        run: cmake --preset macos-ci
+      - name: Build
+        run: |
+          name=$(jq -r .name buildspec.json)
+          cd build_macos
+          xcodebuild ONLY_ACTIVE_ARCH=NO -arch arm64 -arch x86_64 -project "${name}.xcodeproj" -target "${name}" \
+            -destination "generic/platform=macOS,name=Any Mac" -configuration "$CONFIG" -parallelizeTargets \
+            -hideShellScriptEnvironment build
+      - name: Install
+        run: cmake --install build_macos --config "$CONFIG" --prefix "$PWD/release/$CONFIG"
+
+      # TODO(signing): Apple Developer ID Application certificate + notarization.
+      #   1. import the .p12 from secrets into a temporary keychain (security create-keychain / import),
+      #   2. re-run the build with CODESIGN_IDENT="Developer ID Application: <Name> (<TEAMID>)" and CODESIGN_TEAM,
+      #   3. codesign --options runtime --timestamp release/*/audio-cleaner.plugin,
+      #   4. xcrun notarytool submit <zip> --apple-id ... --team-id ... --password ... --wait; xcrun stapler staple.
+      - name: Sign and notarize (placeholder, not implemented)
+        if: ${{ false }}
+        run: echo "see the README section on signing"
+
+      - name: Package
+        run: |
+          name=$(jq -r .name buildspec.json); version=$(jq -r .version buildspec.json)
+          cd "release/$CONFIG"
+          XZ_OPT=-T0 tar -cJf "../${name}-${version}-macos-universal.tar.xz" "${name}.plugin"
+          lipo -archs "${name}.plugin/Contents/MacOS/${name}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-cleaner-macos-universal
+          path: obs-plugin/release/*.tar.xz
+
+  # ---------------------------------------------------------------------------
+  windows:
+    name: Windows x64
+    runs-on: windows-2022
+    needs: core-tests
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: obs-plugin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (downloads OBS 31.1.1 sources + obs-deps pinned in buildspec.json)
+        run: cmake --preset windows-ci-x64
+      - name: Build
+        run: cmake --build --preset windows-ci-x64 --config $env:CONFIG --parallel -- /consoleLoggerParameters:Summary /noLogo
+      - name: Install
+        run: cmake --install build_x64 --config $env:CONFIG --prefix "$PWD/release/$env:CONFIG"
+
+      # TODO(signing): Authenticode. Sign release/*/obs-plugins/64bit/audio-cleaner.dll with signtool
+      # (or Azure Trusted Signing / a cloud HSM) and timestamp it:
+      #   signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p $env:PFX_PASSWORD <dll>
+      - name: Sign (placeholder, not implemented)
+        if: ${{ false }}
+        run: echo "see the README section on signing"
+
+      - name: Package
+        run: |
+          $spec = Get-Content buildspec.json -Raw | ConvertFrom-Json
+          $out = "release/$($spec.name)-$($spec.version)-windows-x64.zip"
+          Compress-Archive -Force -Path "release/$env:CONFIG/*" -DestinationPath $out
+          Get-Item $out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio-cleaner-windows-x64
+          path: obs-plugin/release/*.zip
