@@ -1,0 +1,29 @@
+{
+  "name": "audio-cleaner-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Audio Cleaner web frontend",
+  "scripts": {
+    "sync-dfn": "node scripts/sync-dfn.mjs",
+    "dev": "vite",
+    "build": "node scripts/sync-dfn.mjs --if-missing && vite build",
+    "preview": "vite preview",
+    "test:fixtures": "bash tests/make-fixtures.sh",
+    "test:e2e": "node tests/e2e.mjs",
+    "test:free": "node tests/free.mjs",
+    "test:live": "node tests/live.mjs",
+    "test:ui": "node tests/ui.mjs"
+  },
+  "dependencies": {
+    "mediabunny": "^1.61.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.30.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "playwright": "1.58.2",
+    "vite": "^6.4.4"
+  }
+}

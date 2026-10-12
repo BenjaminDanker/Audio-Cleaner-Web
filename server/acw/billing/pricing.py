@@ -1,7 +1,7 @@
 """Price list. Amounts are USD micros (1 USD = 1_000_000) per minute of audio.
 
 These are launch placeholders; change them here only. The public price page
-reads them through /api/pricing so the site never disagrees with billing.
+reads them through /api/billing/pricing so the site never disagrees with billing.
 """
 from __future__ import annotations
 

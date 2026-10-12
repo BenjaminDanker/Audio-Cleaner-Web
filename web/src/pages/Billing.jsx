@@ -1,0 +1,368 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
+import { api } from '../api.js';
+import { useAuth } from '../auth.jsx';
+import { balanceMoney, dateTime, money, moneyCents } from '../format.js';
+import { usePageTitle, usePricing } from '../hooks.js';
+
+// Only ever leave the site for Stripe-hosted pages.
+const STRIPE_HOSTS = ['checkout.stripe.com', 'billing.stripe.com'];
+function goStripe(url) {
+  const u = new URL(url);
+  if (u.protocol !== 'https:' || !STRIPE_HOSTS.includes(u.hostname)) throw Object.assign(new Error('Unexpected payment page address.'), { detail: 'Unexpected payment page address.' });
+  window.location.assign(u.href);
+}
+
+const REFUND_DAYS = 14;
+
+function dollarsToCents(text) {
+  const n = Number(String(text).replace(/[^0-9.]/g, ''));
+  return Number.isFinite(n) ? Math.round(n * 100) : NaN;
+}
+
+export default function Billing() {
+  usePageTitle('Billing');
+  const { balance, autoReload, refresh, ensureTos } = useAuth();
+  const { data: pricing } = usePricing();
+  const [params, setParams] = useSearchParams();
+  const [banner, setBanner] = useState(null);
+  const [history, setHistory] = useState(null);
+  const [histErr, setHistErr] = useState('');
+  const startBalance = useRef(null);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      setHistory(await api('billing/history'));
+      setHistErr('');
+    } catch (e) {
+      setHistErr(e.detail);
+    }
+  }, []);
+
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // ?checkout=success|cancel after returning from Stripe. The webhook may take a few seconds.
+  useEffect(() => {
+    const c = params.get('checkout');
+    if (!c) return undefined;
+    setParams({}, { replace: true });
+    if (c === 'cancel') {
+      setBanner({ kind: 'info', text: 'Checkout was canceled. You have not been charged.' });
+      return undefined;
+    }
+    if (c !== 'success') return undefined;
+    startBalance.current = balance?.available_micros ?? 0;
+    setBanner({ kind: 'info', text: 'Payment received. Updating your balance…', busy: true });
+    let tries = 0;
+    let stop = false;
+    const tick = async () => {
+      if (stop) return;
+      const me = await refresh();
+      tries += 1;
+      if (me?.balance && me.balance.available_micros > startBalance.current) {
+        setBanner({ kind: 'success', text: `Thank you! Your balance is now ${balanceMoney(me.balance.available_micros)}.` });
+        loadHistory();
+        return;
+      }
+      if (tries >= 10) {
+        setBanner({ kind: 'warn', text: 'Your payment went through, but the balance has not updated yet. It can take a minute. Refresh this page shortly.' });
+        return;
+      }
+      setTimeout(tick, 2000);
+    };
+    tick();
+    return () => { stop = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const unavailable = pricing && pricing.paymentsEnabled === false;
+  return (
+    <div className="container page stack-lg">
+      <header>
+        <h1 className="mb0">Billing</h1>
+        <p className="muted mb0">Prepaid credit. No subscription.</p>
+      </header>
+
+      {banner && (
+        <div className={`banner banner-${banner.kind}`} role="status" data-testid="checkout-banner">
+          {banner.busy && <span className="spinner" aria-hidden="true" />} {banner.text}
+        </div>
+      )}
+      {unavailable && <div className="banner banner-warn" role="status" data-testid="payments-off">Payments are not available yet. You will be able to add credit here soon.</div>}
+
+      <div className="grid grid-3">
+        <section className="card" aria-labelledby="b1"><h2 id="b1" className="mb0 small muted">Available</h2><div className="big-number" data-testid="available">{balanceMoney(balance?.available_micros ?? 0)}</div></section>
+        <section className="card" aria-labelledby="b2"><h2 id="b2" className="mb0 small muted">On hold</h2><div className="big-number" data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</div><div className="muted small">Reserved for jobs and live sessions in progress</div></section>
+        <section className="card" aria-labelledby="b3"><h2 id="b3" className="mb0 small muted">Total balance</h2><div className="big-number">{balanceMoney(balance?.balance_micros ?? 0)}</div></section>
+      </div>
+
+      <TopUp pricing={pricing} ensureTos={ensureTos} />
+      <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} ensureTos={ensureTos} unavailable={unavailable} />
+      <History history={history} error={histErr} reload={() => { loadHistory(); refresh(); }} />
+    </div>
+  );
+}
+
+function TopUp({ pricing, ensureTos }) {
+  const min = pricing?.topup?.minCents ?? 1000;
+  const max = pricing?.topup?.maxCents ?? 50000;
+  const presets = pricing?.topup?.presetsCents ?? [1000, 2000, 5000, 10000];
+  const [choice, setChoice] = useState('2000'); // preset cents or 'custom'
+  const [custom, setCustom] = useState('25');
+  const [saveCard, setSaveCard] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const cents = choice === 'custom' ? dollarsToCents(custom) : Number(choice);
+  const valid = Number.isInteger(cents) && cents >= min && cents <= max;
+
+  async function go(e) {
+    e.preventDefault();
+    if (!valid) return;
+    setError('');
+    if (!(await ensureTos())) {
+      setError('Please accept the Terms of Service to add credit.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const { url } = await api('billing/checkout', { method: 'POST', body: { amountCents: cents, saveCard } });
+      goStripe(url);
+    } catch (err) {
+      setError(err.status === 503 ? 'Payments are not available yet. Please try again later.' : err.detail);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="card stack" onSubmit={go} aria-labelledby="topup-h">
+      <h2 id="topup-h" className="mb0">Add credit</h2>
+      <fieldset className="field">
+        <legend className="label">Amount</legend>
+        <div className="choice-cards">
+          {presets.map((c) => (
+            <label className="choice" key={c}>
+              <input type="radio" name="amount" value={c} checked={choice === String(c)} onChange={() => setChoice(String(c))} />
+              <span><b>{moneyCents(c)}</b></span>
+            </label>
+          ))}
+          <label className="choice">
+            <input type="radio" name="amount" value="custom" checked={choice === 'custom'} onChange={() => setChoice('custom')} />
+            <span><b>Other amount</b><small>{moneyCents(min)} to {moneyCents(max)}</small></span>
+          </label>
+        </div>
+      </fieldset>
+      {choice === 'custom' && (
+        <div className="field">
+          <label htmlFor="custom-amt">Custom amount (USD)</label>
+          <div className="inline-input">$<input id="custom-amt" className="input input-money" inputMode="decimal" value={custom} onChange={(e) => setCustom(e.target.value)} aria-invalid={!valid} aria-describedby="custom-hint" /></div>
+          <span id="custom-hint" className={valid ? 'hint' : 'hint neg'}>Between {moneyCents(min)} and {moneyCents(max)}.</span>
+        </div>
+      )}
+      <label className="check">
+        <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} />
+        <span>Save my card for auto-reload <span className="muted small">(optional; you set the rules below and can turn it off any time)</span></span>
+      </label>
+      {error && <div className="banner banner-error" role="alert" data-testid="topup-error">{error}</div>}
+      <div className="row">
+        <button type="submit" className="btn btn-primary btn-lg" disabled={!valid || busy}>{busy ? 'Opening checkout…' : `Pay ${valid ? moneyCents(cents) : ''} with Stripe`}</button>
+        <span className="muted small">Payments are handled by Stripe. We never see your card number.</span>
+      </div>
+    </form>
+  );
+}
+
+function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
+  const min = pricing?.topup?.minCents ?? 1000;
+  const max = pricing?.topup?.maxCents ?? 50000;
+  const hasCard = !!autoReload?.hasCard;
+  const [threshold, setThreshold] = useState('5');
+  const [amount, setAmount] = useState('20');
+  const [cap, setCap] = useState('100');
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null);
+
+  useEffect(() => {
+    if (!autoReload || !autoReload.enabled) return; // keep sensible defaults until the user has configured it
+    const toD = (c) => String(c / 100);
+    if (autoReload.amountCents) setAmount(toD(autoReload.amountCents));
+    if (autoReload.monthlyCapCents) setCap(toD(autoReload.monthlyCapCents));
+    if (autoReload.thresholdMicros != null) setThreshold(toD(Math.round(autoReload.thresholdMicros / 10000)));
+  }, [autoReload?.enabled, autoReload?.amountCents, autoReload?.monthlyCapCents, autoReload?.thresholdMicros]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const t = dollarsToCents(threshold);
+  const a = dollarsToCents(amount);
+  const c = dollarsToCents(cap);
+  const problems = [];
+  if (!(t >= 0 && t <= max)) problems.push(`The threshold must be between $0 and ${moneyCents(max)}.`);
+  if (!(a >= min && a <= max)) problems.push(`The reload amount must be between ${moneyCents(min)} and ${moneyCents(max)}.`);
+  if (!(c >= min && c <= 200000)) problems.push(`The monthly cap must be between ${moneyCents(min)} and ${moneyCents(200000)}.`);
+  else if (a > c) problems.push('The monthly cap must be at least one reload.');
+  const valid = problems.length === 0;
+
+  async function save(enabled) {
+    setMsg(null);
+    if (enabled && !(await ensureTos())) return;
+    setBusy(enabled ? 'on' : 'off');
+    try {
+      await api('billing/auto-reload', {
+        method: 'POST',
+        body: {
+          enabled,
+          thresholdCents: Number.isFinite(t) ? t : 500,
+          amountCents: Number.isFinite(a) && a >= min ? a : 2000,
+          monthlyCapCents: Number.isFinite(c) && c >= min ? c : 10000,
+          consent: enabled ? consent : false,
+        },
+      });
+      await refresh();
+      setConsent(false);
+      setMsg({ kind: 'success', text: enabled ? 'Auto-reload is on.' : 'Auto-reload is off.' });
+    } catch (e) {
+      setMsg({ kind: 'error', text: e.detail });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function portal() {
+    setBusy('portal');
+    setMsg(null);
+    try {
+      const { url } = await api('billing/portal', { method: 'POST' });
+      goStripe(url);
+    } catch (e) {
+      setMsg({ kind: 'error', text: e.status === 503 ? 'Card management is not available yet.' : e.detail });
+      setBusy('');
+    }
+  }
+
+  const on = !!autoReload?.enabled;
+  const failures = autoReload?.failures || 0;
+  return (
+    <section className="card stack" aria-labelledby="ar-h">
+      <div className="row-between">
+        <h2 id="ar-h" className="mb0">Auto-reload</h2>
+        <span className={on ? 'badge badge-ok' : 'badge'} data-testid="ar-state">{on ? 'On' : 'Off'}</span>
+      </div>
+      <p className="muted mb0">Never run out mid-job: when your balance falls below a threshold, we charge your saved card automatically, up to a monthly cap you choose.</p>
+      {failures > 0 && (
+        <div className="banner banner-warn" role="alert" data-testid="ar-failures">
+          The last {failures} automatic reload{failures === 1 ? '' : 's'} failed{on ? '' : ', so auto-reload was paused'}. Check your card in Manage card, then save these settings again to resume.
+        </div>
+      )}
+      {!hasCard && <div className="banner banner-info">To use auto-reload, tick &ldquo;Save my card for auto-reload&rdquo; on your next top-up above.</div>}
+
+      <fieldset className="stack" disabled={!hasCard || !!busy}>
+        <legend className="sr-only">Auto-reload settings</legend>
+        <div className="form-grid">
+          <div className="field"><label htmlFor="ar-t">When my balance falls below</label><div className="inline-input">$<input id="ar-t" className="input input-money" inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} /></div></div>
+          <div className="field"><label htmlFor="ar-a">Charge my card</label><div className="inline-input">$<input id="ar-a" className="input input-money" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></div></div>
+          <div className="field"><label htmlFor="ar-c">Monthly limit</label><div className="inline-input">$<input id="ar-c" className="input input-money" inputMode="decimal" value={cap} onChange={(e) => setCap(e.target.value)} /></div></div>
+        </div>
+        {hasCard && problems.map((p) => <p key={p} className="hint neg mb0">{p}</p>)}
+        <label className="check">
+          <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} data-testid="ar-consent" />
+          <span data-testid="ar-consent-text">
+            I authorize Audio Cleaner to charge my saved card {valid ? moneyCents(a) : '<amount>'} whenever my balance falls below {valid ? moneyCents(t) : '<threshold>'}, up to {valid ? moneyCents(c) : '<cap>'} per calendar month, until I turn this off.
+          </span>
+        </label>
+        <div className="row">
+          <button type="button" className="btn btn-primary" disabled={!valid || !consent || unavailable} onClick={() => save(true)}>{on ? 'Update auto-reload' : 'Turn on auto-reload'}</button>
+          {on && <button type="button" className="btn btn-danger-outline" onClick={() => save(false)}>Turn off</button>}
+        </div>
+      </fieldset>
+      {msg && <div className={`banner banner-${msg.kind}`} role={msg.kind === 'error' ? 'alert' : 'status'}>{msg.text}</div>}
+      <div className="row">
+        <button type="button" className="btn btn-secondary" disabled={!!busy} onClick={portal}>Manage card and receipts</button>
+        <span className="muted small">Opens Stripe&apos;s secure customer portal.</span>
+      </div>
+    </section>
+  );
+}
+
+function History({ history, error, reload }) {
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState(null);
+  const [confirmId, setConfirmId] = useState(null);
+
+  async function refund(id) {
+    setBusy(id); setMsg(null);
+    try {
+      const r = await api('billing/refund', { method: 'POST', body: { paymentId: id } });
+      setMsg({ kind: 'success', text: `Refunded ${moneyCents(r.refundedCents)} to your card.` });
+      setConfirmId(null);
+      reload();
+    } catch (e) {
+      setMsg({ kind: 'error', text: e.status === 503 ? 'Refunds are not available yet.' : e.detail });
+    } finally {
+      setBusy('');
+    }
+  }
+  const nowS = Date.now() / 1000;
+  return (
+    <section className="stack" aria-labelledby="hist-h">
+      <h2 id="hist-h" className="mb0">History</h2>
+      {error && <div className="banner banner-error" role="alert">{error}</div>}
+      {msg && <div className={`banner banner-${msg.kind}`} role={msg.kind === 'error' ? 'alert' : 'status'}>{msg.text}</div>}
+      {!history && !error && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading…</p>}
+      {history && (
+        <>
+          <h3 className="mb0">Payments</h3>
+          {history.payments.length === 0 ? <p className="card muted mb0">No payments yet.</p> : (
+            <div className="table-wrap">
+              <table data-testid="payments">
+                <thead><tr><th>Date</th><th>Type</th><th>Status</th><th className="num">Amount</th><th className="num">Refunded</th><th><span className="sr-only">Actions</span></th></tr></thead>
+                <tbody>
+                  {history.payments.map((p) => {
+                    const eligible = p.status === 'succeeded' && nowS - p.created_at < REFUND_DAYS * 86400 && (p.refunded_cents || 0) < p.amount_cents;
+                    return (
+                      <tr key={p.id}>
+                        <td className="nowrap">{dateTime(p.created_at)}</td>
+                        <td>{p.kind === 'auto_reload' ? 'Auto-reload' : 'Top-up'}</td>
+                        <td><span className={p.status === 'succeeded' ? 'badge badge-ok' : p.status === 'failed' ? 'badge badge-bad' : 'badge'}>{p.status}</span></td>
+                        <td className="num">{moneyCents(p.amount_cents)}</td>
+                        <td className="num">{p.refunded_cents ? moneyCents(p.refunded_cents) : '—'}</td>
+                        <td className="right">
+                          {eligible && confirmId !== p.id && <button type="button" className="btn btn-secondary btn-sm" onClick={() => setConfirmId(p.id)}>Refund unused</button>}
+                          {eligible && confirmId === p.id && (
+                            <span className="row">
+                              <span className="small">Refund the unused part?</span>
+                              <button type="button" className="btn btn-danger btn-sm" disabled={busy === p.id} onClick={() => refund(p.id)}>{busy === p.id ? 'Refunding…' : 'Yes, refund'}</button>
+                              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirmId(null)}>No</button>
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="small muted mb0">Self-service refunds cover the unused part of a payment made in the last {REFUND_DAYS} days. See the <Link to="/terms">Terms</Link>.</p>
+          <h3 className="mb0">Credit ledger</h3>
+          {history.ledger.length === 0 ? <p className="card muted mb0">No activity yet.</p> : (
+            <div className="table-wrap">
+              <table data-testid="ledger">
+                <thead><tr><th>Date</th><th>Description</th><th>Type</th><th className="num">Amount</th><th className="num">Balance</th></tr></thead>
+                <tbody>
+                  {history.ledger.map((l) => (
+                    <tr key={l.id}>
+                      <td className="nowrap">{dateTime(l.created_at)}</td>
+                      <td>{l.description || '—'}</td>
+                      <td><span className="badge">{l.kind}</span></td>
+                      <td className={`num ${l.amount_micros >= 0 ? 'pos' : 'neg'}`}>{l.amount_micros >= 0 ? '+' : '−'}{money(Math.abs(l.amount_micros))}</td>
+                      <td className="num">{money(l.balance_after_micros)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
