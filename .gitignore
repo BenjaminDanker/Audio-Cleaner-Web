@@ -122,7 +122,6 @@ terraform.tfvars
 /deploy.ps1
 /docker-push.ps1
 
-/.github
 
 processor/tools/diag_out/
 *.wav
