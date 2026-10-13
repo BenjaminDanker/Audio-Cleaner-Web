@@ -5,8 +5,7 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 ## Infrastructure
 - ✅ Services on primary-ram (systemd user units, sandboxed workers, tunnel)
 - ✅ VPS tunnel key restricted to one port, no shell
-- ⬜ VPS Caddy `/audio` route: `ssh vps`, then `sudo bash ~/acw/install-audio-route.sh`
-- ⬜ Publish the site: `deploy/publish-web.sh` (after the route exists)
+- ✅ VPS Caddy `/audio` route, site published (https://mc-multi-world.space/audio/)
 - ⬜ Own domain or subdomain (DNS A record → 216.250.115.225), then set
   `ACW_PUBLIC_ORIGIN`/`ACW_BASE_PATH` and the Caddy site block. Separates
   cookies/origin from the pet-companion checkout pages.
@@ -15,13 +14,12 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ Uptime alert (e.g. the Pi curls `https://…/audio/api/health` every minute and pings you)
 
 ## Accounts and keys
-- ⬜ GitHub OAuth app + Google OAuth client (callback URLs in docs/operations.md)
+- ✅ Google OAuth client (GitHub sign-in dropped)
 - ⬜ SMTP provider for email sign-in links (optional, but most users expect email)
 - ⬜ Stripe: test mode first. Restricted key, webhook endpoint + events
   (docs/payments.md), customer portal enabled, statement descriptor,
   Radar rules (block high-risk, optionally EU/UK until VAT is registered).
-- ⬜ OpenAI: a dedicated project key with a monthly budget cap, set as
-  `OPENAI_API_KEY` in `~/audio-cleaner/secrets/acw.env`.
+- ✅ OpenAI key set (premium file + live captions verified in production)
 - ⬜ Cloudflare Turnstile keys (optional, for the email form)
 
 ## Business / legal
@@ -32,8 +30,7 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ Terms of Service + Privacy Policy reviewed by a lawyer (drafts in the site)
 - ⬜ Tax: Stripe Tax on; register UK VAT and EU non-Union OSS, or block those
   countries at first (docs/payments.md)
-- ⬜ Repo is **public** on GitHub with no licence. Decide: make it private, or
-  keep the server private and publish only the OBS plugin (GPL is required for it).
+- ✅ Licence: proprietary/all rights reserved (source visible), OBS plugin GPL-2.0-or-later
 
 ## Product
 - ✅ Free browser denoise (DFN3 WASM)

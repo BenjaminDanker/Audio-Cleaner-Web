@@ -1,0 +1,15 @@
+Copyright (c) 2025-2026 Benjamin Danker. All rights reserved.
+
+This repository is published for transparency. Unless a file or directory
+states otherwise, no licence is granted: you may view the source code, but
+you may not copy, modify, distribute, sublicense, host, or run it (in whole
+or in part, including as a network service) without prior written
+permission from the copyright holder.
+
+Exceptions:
+  * obs-plugin/ is licensed under the GNU General Public License v2.0 or
+    later (see obs-plugin/LICENSE), because it links against libobs.
+  * Third-party components keep their own licences (see the Licenses page of
+    the website and the notices next to each component).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

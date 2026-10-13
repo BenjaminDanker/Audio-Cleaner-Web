@@ -42,6 +42,7 @@ python -m acw.admin login-link you@example.com
 
 ## Licences
 
-Server and website: no licence chosen yet (all rights reserved). OBS plugin: GPL-2.0-or-later. Third-party:
+Everything except `obs-plugin/` is proprietary, all rights reserved (see `LICENSE`); the
+source is visible but not licensed for reuse. OBS plugin: GPL-2.0-or-later. Third-party:
 DeepFilterNet (MIT/Apache-2.0), tract (MIT/Apache-2.0), FFmpeg (GPL build,
 run as a separate program), faster-whisper (MIT), Whisper weights (MIT).
