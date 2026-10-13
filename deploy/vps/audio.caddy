@@ -20,8 +20,10 @@
 
     handle /audio/* {
         root * /var/www
+        # If Cloudflare Turnstile is enabled, add https://challenges.cloudflare.com
+        # to script-src and frame-src.
         header {
-            Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+            Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
             Strict-Transport-Security "max-age=31536000"
             X-Content-Type-Options "nosniff"
             X-Frame-Options "DENY"
@@ -34,7 +36,8 @@
         header @immutable Cache-Control "public, max-age=31536000, immutable"
         @dfn path /audio/dfn/*
         header @dfn Cache-Control "public, max-age=604800"
-        @html path /audio/ /audio/index.html
+        # Every app route serves index.html: never cache it, only hashed assets.
+        @html not path /audio/assets/* /audio/dfn/*
         header @html Cache-Control "no-cache"
         try_files {path} /audio/index.html
         file_server {

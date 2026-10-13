@@ -95,6 +95,6 @@ def test_suspended_account_cannot_hold():
 def test_pricing_rounds_up_to_whole_seconds():
     assert pricing.cost_micros("denoise", "standard", 60) == 10_000
     assert pricing.cost_micros("denoise", "standard", 0.2) == 167  # 1 s
-    assert pricing.job_cost_micros("denoise", "standard", None, 1) == pricing.MIN_JOB_CHARGE_MICROS
+    assert pricing.job_cost_micros("denoise", "standard", None, 1) == 167  # per second, no minimum
     with pytest.raises(pricing.PricingError):
         pricing.rate("stream_denoise", "high")  # not available yet

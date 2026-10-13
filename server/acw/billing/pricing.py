@@ -36,8 +36,8 @@ _RATE_LIST = [
 ]
 RATES: dict[tuple[str, str], Rate] = {(r.product, r.tier): r for r in _RATE_LIST}
 
-# Smallest charge for one file job, so a 2-second clip still covers overhead.
-MIN_JOB_CHARGE_MICROS = 10_000  # $0.01
+# No minimum: jobs are billed per second of audio (rounded up), as advertised.
+MIN_JOB_CHARGE_MICROS = 0
 
 # Top-up rules (cents). $10 minimum keeps Stripe's fixed fee and dispute
 # exposure reasonable (see docs/payments.md).
