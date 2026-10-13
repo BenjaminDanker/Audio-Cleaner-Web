@@ -20,8 +20,8 @@ are `422 {"detail": "Invalid request.", "fields": [...]}`.
 |---|---|---|
 | GET | `/api/me` | `{signedIn:false}` or `{signedIn, user:{id,email,displayName,isAdmin,status,tosAccepted,createdAt}, csrfToken, balance:{balance_micros,held_micros,available_micros}, autoReload:{enabled,thresholdMicros,amountCents,monthlyCapCents,hasCard,failures}}` |
 | POST | `/api/account/tos` | `{version}`: must equal the current terms version (see `TOS_VERSION`, currently `2026-10-10`) |
-| GET | `/api/auth/providers` | `{github:bool, google:bool, email:bool, turnstileSiteKey:str|null}` |
-| GET | `/api/auth/oauth/{github|google}/start` | browser navigation; ends at `/app` (or `/login?error=...`) |
+| GET | `/api/auth/providers` | `{google:bool, email:bool, turnstileSiteKey:str|null}` |
+| GET | `/api/auth/oauth/google/start` | browser navigation; ends at `/app` (or `/login?error=...`) |
 | POST | `/api/auth/email` | `{email, turnstileToken?}` sends a magic link to `/login/verify#token=...` |
 | POST | `/api/auth/email/verify` | `{token}` (from the URL fragment) creates the session |
 | POST | `/api/auth/logout`, `/api/auth/logout-all` | |

@@ -137,6 +137,7 @@ function TopUp({ pricing, ensureTos }) {
   return (
     <form className="card stack" onSubmit={go} aria-labelledby="topup-h">
       <h2 id="topup-h" className="mb0">Add credit</h2>
+      {pricing?.taxAddedAtCheckout && <p className="muted mb0">Sales tax or VAT is added at checkout where it applies; you receive the full amount as credit.</p>}
       <fieldset className="field">
         <legend className="label">Amount</legend>
         <div className="choice-cards">

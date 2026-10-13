@@ -1,4 +1,4 @@
-"""Sign-in: GitHub OAuth, Google OpenID Connect, email magic links.
+"""Sign-in: Google OpenID Connect and email magic links.
 
 OAuth flows use PKCE plus a state value that is both stored server-side and
 bound to the browser with a short-lived cookie, so a callback can only finish
@@ -36,11 +36,6 @@ OAUTH_COOKIE = "acw_oauth"
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
 
 PROVIDERS = {
-    "github": {
-        "authorize": "https://github.com/login/oauth/authorize",
-        "token": "https://github.com/login/oauth/access_token",
-        "scope": "read:user user:email",
-    },
     "google": {
         "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
         "token": "https://oauth2.googleapis.com/token",
@@ -51,8 +46,6 @@ PROVIDERS = {
 
 def _client(provider: str) -> tuple[str, str]:
     s = get_settings()
-    if provider == "github" and s.github_client_id and s.github_client_secret:
-        return s.github_client_id, s.github_client_secret
     if provider == "google" and s.google_client_id and s.google_client_secret:
         return s.google_client_id, s.google_client_secret
     raise HTTPException(status_code=404, detail="Sign-in provider not configured.")
@@ -81,7 +74,6 @@ def _app_redirect(path: str = "/") -> RedirectResponse:
 def providers() -> dict:
     s = get_settings()
     return {
-        "github": bool(s.github_client_id and s.github_client_secret),
         "google": bool(s.google_client_id and s.google_client_secret),
         "email": bool(s.smtp_host and s.smtp_from),
         "turnstileSiteKey": s.turnstile_site_key,
@@ -96,7 +88,7 @@ def oauth_start(provider: str, request: Request) -> RedirectResponse:
     client_id, _ = _client(provider)
     state = random_token(32)
     verifier, challenge = _pkce_pair()
-    nonce = random_token(16) if provider == "google" else None
+    nonce = random_token(16)
     now = db.now()
     db.execute(
         "INSERT INTO oauth_states(state_hash, provider, code_verifier, nonce, created_at, expires_at) VALUES (?,?,?,?,?,?)",
@@ -110,10 +102,7 @@ def oauth_start(provider: str, request: Request) -> RedirectResponse:
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
-    if provider == "google":
-        params.update({"response_type": "code", "nonce": nonce, "prompt": "select_account"})
-    else:
-        params["allow_signup"] = "true"
+    params.update({"response_type": "code", "nonce": nonce, "prompt": "select_account"})
     resp = RedirectResponse(f"{PROVIDERS[provider]['authorize']}?{urlencode(params)}", status_code=303)
     s = get_settings()
     resp.set_cookie(
@@ -134,17 +123,6 @@ def _jwt_payload(token: str) -> dict:
         raise ValueError("malformed id_token")
     pad = "=" * (-len(parts[1]) % 4)
     return json.loads(base64.urlsafe_b64decode(parts[1] + pad))
-
-
-async def _github_identity(http: httpx.AsyncClient, access_token: str) -> tuple[str, str, str | None]:
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json"}
-    user = (await http.get("https://api.github.com/user", headers=headers)).raise_for_status().json()
-    emails = (await http.get("https://api.github.com/user/emails", headers=headers)).raise_for_status().json()
-    verified = [e for e in emails if e.get("verified")]
-    primary = next((e for e in verified if e.get("primary")), None) or (verified[0] if verified else None)
-    if primary is None:
-        raise HTTPException(status_code=400, detail="Your GitHub account has no verified email address.")
-    return str(user["id"]), primary["email"], user.get("name") or user.get("login")
 
 
 def _google_identity(token_json: dict, client_id: str, nonce: str | None) -> tuple[str, str, str | None]:
@@ -186,8 +164,7 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
         "redirect_uri": _redirect_uri(provider),
         "code_verifier": row["code_verifier"],
     }
-    if provider == "google":
-        data["grant_type"] = "authorization_code"
+    data["grant_type"] = "authorization_code"
     try:
         async with httpx.AsyncClient(timeout=15) as http:
             tok = await http.post(PROVIDERS[provider]["token"], data=data, headers={"Accept": "application/json"})
@@ -195,10 +172,7 @@ async def oauth_callback(provider: str, request: Request, code: str = "", state:
             token_json = tok.json()
             if "error" in token_json:
                 raise HTTPException(status_code=400, detail="Sign-in was rejected by the provider.")
-            if provider == "github":
-                sub, email, name = await _github_identity(http, token_json["access_token"])
-            else:
-                sub, email, name = _google_identity(token_json, client_id, row["nonce"])
+            sub, email, name = _google_identity(token_json, client_id, row["nonce"])
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001

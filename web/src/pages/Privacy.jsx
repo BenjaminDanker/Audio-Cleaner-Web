@@ -28,7 +28,7 @@ export default function Privacy() {
 
       <h2 id="collect">3. What we collect</h2>
       <ul>
-        <li><b>Account:</b> email address, your name if the sign-in provider shares it, and an identifier from GitHub or Google if you use them to sign in.</li>
+        <li><b>Account:</b> email address, your name if the sign-in provider shares it, and an identifier from Google if you use it to sign in.</li>
         <li><b>Billing:</b> amounts, dates and status of payments; a Stripe customer reference; your credit ledger. Card details are collected and stored by Stripe, never by us.</li>
         <li><b>Usage:</b> for each job its file name, size, duration, chosen options, status and cost; for live sessions their length and cost; API key names, prefixes and last-used times (the keys themselves are stored only as one-way hashes).</li>
         <li><b>Security logs:</b> IP address and browser type, used for sign-in sessions, abuse prevention and rate limiting.</li>
@@ -53,7 +53,7 @@ export default function Privacy() {
           <tbody>
             <tr><td>Stripe</td><td>Payments, saved cards, receipts, refunds</td><td>Email, payment details, amounts</td></tr>
             <tr><td>OpenAI</td><td>Premium transcription and premium live captions only</td><td>The audio you choose to send</td></tr>
-            <tr><td>GitHub / Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
+            <tr><td>Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
             <tr><td>Cloudflare (Turnstile)</td><td>Bot check on the email sign-in form, when enabled</td><td>A challenge token and your IP address</td></tr>
             <tr><td>Email delivery provider [placeholder]</td><td>Sign-in links</td><td>Your email address and the message</td></tr>
             <tr><td>Hosting [placeholder]</td><td>Running the website and servers</td><td>Technical traffic data</td></tr>

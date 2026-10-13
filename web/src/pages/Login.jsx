@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { api, oauthStartUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { IconGithub, IconGoogle, IconMail } from '../components/Icons.jsx';
+import { IconGoogle, IconMail } from '../components/Icons.jsx';
 import Turnstile from '../components/Turnstile.jsx';
 import { usePageTitle } from '../hooks.js';
 
@@ -50,7 +50,7 @@ export default function Login() {
     }
   }
 
-  const none = providers && !providers.github && !providers.google && !providers.email;
+  const none = providers && !providers.google && !providers.email;
   const needToken = providers?.turnstileSiteKey && !token;
   return (
     <div className="container page">
@@ -64,13 +64,12 @@ export default function Login() {
         {!providers && !loadErr && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading…</p>}
         {none && <div className="banner banner-warn">Sign-in is not configured on this server yet.</div>}
 
-        {(providers?.github || providers?.google) && (
+        {providers?.google && (
           <div className="stack">
-            {providers.github && <a className="btn btn-oauth" href={oauthStartUrl('github')}><IconGithub width={20} height={20} /> Continue with GitHub</a>}
             {providers.google && <a className="btn btn-oauth" href={oauthStartUrl('google')}><IconGoogle width={20} height={20} /> Continue with Google</a>}
           </div>
         )}
-        {(providers?.github || providers?.google) && providers?.email && <div className="divider">or</div>}
+        {providers?.google && providers?.email && <div className="divider">or</div>}
 
         {providers?.email && !sent && (
           <form className="stack" onSubmit={submit} noValidate>

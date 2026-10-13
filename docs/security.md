@@ -44,7 +44,6 @@ also removes the shared-UID risk with the Minecraft servers.
   magic-link endpoints require same Origin (prevents login CSRF).
 - OAuth: PKCE + state stored server-side and bound to the browser by a
   short-lived cookie; Google `nonce`/`aud`/`iss`/`email_verified` checked;
-  GitHub uses verified primary email only.
 - API keys: `acw_` + 256-bit random, hashed at rest, shown once, scoped
   (`stream`, `jobs`), cannot touch billing/keys/account.
 - WebSocket: API key, or session cookie + exact Origin match (no cross-site

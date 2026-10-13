@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from .. import auth, db
 from ..billing import ledger, pricing, stripe_service
 from ..billing.pricing import MICROS_PER_CENT
+from ..config import get_settings
 from ..security import client_ip, enforce
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ def get_pricing() -> dict:
         },
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
         "paymentsEnabled": stripe_service.enabled(),
+        "taxAddedAtCheckout": get_settings().stripe_automatic_tax,
     }
 
 

@@ -53,7 +53,6 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
    silver, validates (reverts on failure), and reloads.
 2. **Sign-in providers**: create OAuth apps with these callbacks and put the
    ids/secrets in `~/audio-cleaner/secrets/acw.env`:
-   - GitHub: `https://mc-multi-world.space/audio/api/auth/oauth/github/callback`
    - Google: `https://mc-multi-world.space/audio/api/auth/oauth/google/callback`
    (Email links need SMTP: any transactional provider.)
 3. **Stripe** (test mode first): restricted key + webhook (see payments.md) into `acw.env`.

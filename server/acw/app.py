@@ -66,6 +66,8 @@ async def _housekeeping_loop() -> None:
             if stripe_service.enabled():
                 for user_id in stripe_service.users_needing_reload():
                     await asyncio.to_thread(stripe_service.run_auto_reload, user_id)
+                for payment_id in stripe_service.pending_tax_transactions():
+                    await asyncio.to_thread(stripe_service._record_tax_transaction, payment_id)
         except Exception:  # noqa: BLE001
             log.exception("housekeeping failed")
 

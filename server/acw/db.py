@@ -142,7 +142,10 @@ CREATE TABLE IF NOT EXISTS payments (
     stripe_checkout_session TEXT UNIQUE,
     stripe_payment_intent TEXT UNIQUE,
     stripe_charge TEXT,
-    refunded_cents INTEGER NOT NULL DEFAULT 0,
+    refunded_cents INTEGER NOT NULL DEFAULT 0,          -- credit cents refunded (pre-tax)
+    tax_cents INTEGER NOT NULL DEFAULT 0,               -- tax charged on top of amount_cents
+    tax_calculation TEXT,
+    tax_transaction TEXT,
     failure_code TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
@@ -279,9 +282,21 @@ def tx(immediate: bool = True) -> Iterator[sqlite3.Connection]:
         c.execute("COMMIT")
 
 
+# Columns added after the first deployment: (table, column, DDL).
+MIGRATIONS = [
+    ("payments", "tax_cents", "ALTER TABLE payments ADD COLUMN tax_cents INTEGER NOT NULL DEFAULT 0"),
+    ("payments", "tax_calculation", "ALTER TABLE payments ADD COLUMN tax_calculation TEXT"),
+    ("payments", "tax_transaction", "ALTER TABLE payments ADD COLUMN tax_transaction TEXT"),
+]
+
+
 def init_db() -> None:
     c = conn()
     c.executescript(SCHEMA)
+    for table, column, ddl in MIGRATIONS:
+        cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            c.execute(ddl)
     c.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO NOTHING",
         (str(SCHEMA_VERSION),),

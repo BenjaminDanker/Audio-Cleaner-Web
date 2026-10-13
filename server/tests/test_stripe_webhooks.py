@@ -119,3 +119,20 @@ def test_checkout_for_other_session_is_not_credited(client, user_with_pending_pa
     body, sig = signed(ev)
     assert client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig}).status_code == 200
     assert ledger.balance(uid)["balance_micros"] == 0
+
+
+def test_tax_split_on_refunds(client, user_with_pending_payment, fake_pi):
+    """With tax on top, refunds only ever remove the pre-tax credit share."""
+    uid = user_with_pending_payment
+    ev = checkout_completed(uid)  # $20 credit + $4 VAT
+    ev["data"]["object"]["total_details"] = {"amount_tax": 400}
+    body, sig = signed(ev)
+    client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    assert ledger.balance(uid)["balance_micros"] == 20_000_000
+    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 1200,
+              "refunds": {"object": "list", "data": [{"id": "re_9", "object": "refund", "amount": 1200, "status": "succeeded"}]}}
+    body, sig = signed(event("charge.refunded", charge, "evt_tx"))
+    client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    assert ledger.balance(uid)["balance_micros"] == 10_000_000  # $12 gross = $10 credit + $2 tax
+    assert stripe_service.tax_part(1000, 2000, 400) == 200
+    assert stripe_service.credit_part(2400, 2000, 400) == 2000

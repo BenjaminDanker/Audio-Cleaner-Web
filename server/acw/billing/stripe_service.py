@@ -70,8 +70,20 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
     }
     if save_card:
         pi_data["setup_future_usage"] = "off_session"
+    tax_params: dict = {}
+    if settings.stripe_automatic_tax:
+        # Tax is added on top of the credit amount; the address (and an
+        # optional VAT ID for business reverse charge) is saved on the
+        # customer so off-session reloads can be taxed the same way.
+        tax_params = {
+            "automatic_tax": {"enabled": True},
+            "billing_address_collection": "required",
+            "customer_update": {"address": "auto", "name": "auto"},
+            "tax_id_collection": {"enabled": True},
+        }
     session = client().v1.checkout.sessions.create(
         params={
+            **tax_params,
             "mode": "payment",
             "customer": customer,
             "client_reference_id": user_id,
@@ -82,9 +94,11 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
                     "price_data": {
                         "currency": "usd",
                         "unit_amount": amount_cents,
+                        "tax_behavior": "exclusive",
                         "product_data": {
                             "name": "Audio Cleaner prepaid credit",
                             "description": "Usage credit for audio processing. Credit is not a gift card and has no cash value.",
+                            "tax_code": settings.stripe_tax_code,
                         },
                     },
                 }
@@ -182,6 +196,8 @@ def _handle_checkout_completed(session: dict) -> None:
         pm_id = pi.payment_method if isinstance(pi.payment_method, str) else getattr(pi.payment_method, "id", None)
         charge_id = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
         save_pm = pi.setup_future_usage == "off_session"
+    tax = int((session.get("total_details") or {}).get("amount_tax") or 0)
+    db.execute("UPDATE payments SET tax_cents = ? WHERE id = ? AND status = 'pending'", (tax, payment_id))
     _credit_payment(
         payment_id, user_id, checkout_session=session.get("id"), pi_id=pi_id, charge_id=charge_id, pm_id=pm_id, save_pm=save_pm
     )
@@ -198,6 +214,7 @@ def _handle_pi_succeeded(pi: dict) -> None:
         meta["acw_payment_id"], meta["acw_user_id"], checkout_session=None, pi_id=pi["id"],
         charge_id=pi.get("latest_charge"), pm_id=None, save_pm=False,
     )
+    _record_tax_transaction(meta["acw_payment_id"])
 
 
 def _record_reload_failure(payment_id: str, user_id: str, code: str | None) -> None:
@@ -241,23 +258,27 @@ def _handle_charge_refunded(charge: dict) -> None:
     refunds = (charge.get("refunds") or {}).get("data") or []
     if not refunds:
         refunds = [r for r in client().v1.refunds.list(params={"charge": charge["id"], "limit": 100}).data]
+    p = db.one("SELECT amount_cents, tax_cents FROM payments WHERE id = ?", (payment_id,))
     for r in refunds:
         r = r if isinstance(r, dict) else r.to_dict()
         if r.get("status") not in ("succeeded", "pending"):
             continue
+        credit_cents = credit_part(int(r["amount"]), p["amount_cents"], p["tax_cents"])
         ledger.debit_available(
             user_id,
-            int(r["amount"]) * MICROS_PER_CENT,
+            credit_cents * MICROS_PER_CENT,
             "refund",
             "stripe_refund",
             r["id"],
-            f"Refund ${int(r['amount']) / 100:.2f}",
+            f"Refund ${credit_cents / 100:.2f} credit",
             allow_partial=True,
         )
+    refunded = credit_part(int(charge.get("amount_refunded") or 0), p["amount_cents"], p["tax_cents"])
     db.execute(
-        "UPDATE payments SET refunded_cents = ?, status = CASE WHEN ? >= amount_cents THEN 'refunded' ELSE status END,"
+        "UPDATE payments SET refunded_cents = MAX(refunded_cents, ?),"
+        " status = CASE WHEN MAX(refunded_cents, ?) >= amount_cents THEN 'refunded' ELSE status END,"
         " updated_at = ? WHERE id = ?",
-        (int(charge.get("amount_refunded") or 0), int(charge.get("amount_refunded") or 0), db.now(), payment_id),
+        (refunded, refunded, db.now(), payment_id),
     )
 
 
@@ -385,10 +406,25 @@ def run_auto_reload(user_id: str) -> str:
             (month, spent + amount, user_id),
         )
         customer, pm = u["stripe_customer_id"], u["default_payment_method"]
+    total, tax, calc_id = amount, 0, None
+    if get_settings().stripe_automatic_tax:
+        try:
+            calc = client().v1.tax.calculations.create(params={
+                "currency": "usd",
+                "customer": customer,
+                "line_items": [{"amount": amount, "reference": payment_id, "quantity": 1,
+                                "tax_code": get_settings().stripe_tax_code, "tax_behavior": "exclusive"}],
+            })
+        except Exception as e:  # noqa: BLE001 - typically no saved address
+            log.warning("tax calculation for reload %s failed: %s", payment_id, e)
+            _record_reload_failure(payment_id, user_id, "tax_location")
+            return "failed:tax_location"
+        total, tax, calc_id = int(calc.amount_total), int(calc.tax_amount_exclusive), calc.id
+        db.execute("UPDATE payments SET tax_cents = ?, tax_calculation = ? WHERE id = ?", (tax, calc_id, payment_id))
     try:
         pi = client().v1.payment_intents.create(
             params={
-                "amount": amount,
+                "amount": total,
                 "currency": "usd",
                 "customer": customer,
                 "payment_method": pm,
@@ -412,6 +448,7 @@ def run_auto_reload(user_id: str) -> str:
     if pi.status == "succeeded":
         charge = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
         _credit_payment(payment_id, user_id, checkout_session=None, pi_id=pi.id, charge_id=charge, pm_id=None, save_pm=False)
+        _record_tax_transaction(payment_id)
         return "succeeded"
     return pi.status
 
@@ -427,16 +464,18 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
     refundable = min(p["amount_cents"] - p["refunded_cents"], bal["available_micros"] // MICROS_PER_CENT)
     if refundable <= 0:
         raise ValueError("No unused credit to refund from this payment.")
+    gross = refundable + tax_part(refundable, p["amount_cents"], p["tax_cents"])
     hold_id = ledger.create_hold(user_id, refundable * MICROS_PER_CENT, "refund", payment_id)
     try:
         refund = client().v1.refunds.create(
-            params={"charge": p["stripe_charge"], "amount": refundable, "reason": "requested_by_customer",
+            params={"charge": p["stripe_charge"], "amount": gross, "reason": "requested_by_customer",
                     "metadata": {"acw_user_id": user_id, "acw_payment_id": payment_id}},
             options={"idempotency_key": f"refund-{payment_id}-{refundable}-{p['refunded_cents']}"},
         )
     except Exception:
         ledger.release_hold(hold_id)
         raise
+    _reverse_tax(p, refund.id, gross)
     ledger.capture_hold(
         hold_id, refundable * MICROS_PER_CENT, f"Refund ${refundable / 100:.2f}",
         kind="refund", ref_type="stripe_refund", ref_id=refund.id,
@@ -447,3 +486,57 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
     )
     db.audit("user", "refund", user_id=user_id, detail=f"{payment_id}:{refundable}")
     return refundable
+
+
+# ------------------------------------------------------------------ tax helpers
+
+def tax_part(credit_cents: int, amount_cents: int, tax_cents: int) -> int:
+    """Tax that belongs to `credit_cents` of a payment (proportional)."""
+    if amount_cents <= 0 or tax_cents <= 0:
+        return 0
+    return round(credit_cents * tax_cents / amount_cents)
+
+
+def credit_part(gross_cents: int, amount_cents: int, tax_cents: int) -> int:
+    """Credit (pre-tax) share of a gross refund amount."""
+    total = amount_cents + tax_cents
+    if total <= 0:
+        return gross_cents
+    return min(amount_cents, round(gross_cents * amount_cents / total))
+
+
+def _record_tax_transaction(payment_id: str) -> None:
+    """Off-session reloads use the Tax Calculation API, so we must turn the
+    calculation into a transaction ourselves (Checkout does this itself)."""
+    p = db.one("SELECT tax_calculation, tax_transaction, status FROM payments WHERE id = ?", (payment_id,))
+    if p is None or not p["tax_calculation"] or p["tax_transaction"] or p["status"] != "succeeded":
+        return
+    try:
+        tx = client().v1.tax.transactions.create_from_calculation(
+            params={"calculation": p["tax_calculation"], "reference": payment_id},
+            options={"idempotency_key": f"taxtx-{payment_id}"},
+        )
+    except Exception:  # noqa: BLE001 - retried by the housekeeping loop
+        log.exception("recording tax transaction for %s failed", payment_id)
+        return
+    db.execute("UPDATE payments SET tax_transaction = ? WHERE id = ?", (tx.id, payment_id))
+
+
+def pending_tax_transactions() -> list[str]:
+    rows = db.all_rows(
+        "SELECT id FROM payments WHERE status = 'succeeded' AND tax_calculation IS NOT NULL AND tax_transaction IS NULL"
+    )
+    return [r["id"] for r in rows]
+
+
+def _reverse_tax(p, refund_id: str, gross_cents: int) -> None:
+    if not p["tax_transaction"] or not p["tax_cents"]:
+        return  # Checkout payments: Stripe tracks refunds itself
+    try:
+        client().v1.tax.transactions.create_reversal(
+            params={"mode": "partial", "original_transaction": p["tax_transaction"],
+                    "reference": f"refund-{refund_id}", "flat_amount": -gross_cents},
+            options={"idempotency_key": f"taxrev-{refund_id}"},
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("tax reversal for refund %s failed; reverse it in the Stripe dashboard", refund_id)

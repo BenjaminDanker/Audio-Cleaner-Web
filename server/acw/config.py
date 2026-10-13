@@ -56,8 +56,6 @@ class Settings:
     session_secret: bytes
     session_days: int
 
-    github_client_id: str | None
-    github_client_secret: str | None
     google_client_id: str | None
     google_client_secret: str | None
 
@@ -70,6 +68,8 @@ class Settings:
     stripe_secret_key: str | None
     stripe_webhook_secret: str | None
     stripe_statement_descriptor: str
+    stripe_automatic_tax: bool
+    stripe_tax_code: str
 
     openai_api_key: str | None
 
@@ -131,8 +131,6 @@ def get_settings() -> Settings:
         web_dist=Path(web_dist) if web_dist else None,
         session_secret=secret.encode(),
         session_days=_env_int("ACW_SESSION_DAYS", 30),
-        github_client_id=_env("GITHUB_CLIENT_ID"),
-        github_client_secret=_env("GITHUB_CLIENT_SECRET"),
         google_client_id=_env("GOOGLE_CLIENT_ID"),
         google_client_secret=_env("GOOGLE_CLIENT_SECRET"),
         smtp_host=_env("SMTP_HOST"),
@@ -143,6 +141,9 @@ def get_settings() -> Settings:
         stripe_secret_key=_env("STRIPE_SECRET_KEY"),
         stripe_webhook_secret=_env("STRIPE_WEBHOOK_SECRET"),
         stripe_statement_descriptor=_env("STRIPE_STATEMENT_DESCRIPTOR", "AUDIO CLEANER") or "AUDIO CLEANER",
+        stripe_automatic_tax=_env_bool("STRIPE_AUTOMATIC_TAX", False),
+        # Electronically supplied services; change if your tax advisor says otherwise.
+        stripe_tax_code=_env("STRIPE_TAX_CODE", "txcd_10000000") or "txcd_10000000",
         openai_api_key=_env("OPENAI_API_KEY"),
         turnstile_site_key=_env("TURNSTILE_SITE_KEY"),
         turnstile_secret=_env("TURNSTILE_SECRET"),

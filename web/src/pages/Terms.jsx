@@ -29,7 +29,7 @@ export default function Terms() {
       <h2 id="accounts">2. Accounts</h2>
       <ul>
         <li>You must be at least 16 years old (or the age of digital consent where you live) and able to enter a binding contract.</li>
-        <li>Sign in with GitHub, Google, or an email link. Keep your sign-in methods and API keys secret; you are responsible for what happens under your account.</li>
+        <li>Sign in with Google or an email link. Keep your sign-in methods and API keys secret; you are responsible for what happens under your account.</li>
         <li>One person, one account. Do not create accounts to evade limits, free allowances, or a suspension.</li>
         <li>Tell us promptly if you think your account or an API key has been compromised. You can revoke API keys on the Live page at any time.</li>
       </ul>
