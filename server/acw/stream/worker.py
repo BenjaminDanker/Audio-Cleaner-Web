@@ -23,12 +23,34 @@ from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner
 log = logging.getLogger("acw.stream.worker")
 MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "24"))
 WHISPER_LIVE_MODEL = os.environ.get("ACW_WHISPER_LIVE_MODEL", "small")
+# Admission control: live audio is real time, so a new session is refused rather
+# than letting every running session fall behind. Costs are measured CPU cores
+# per session (docs/research/denoise.md, docs/research/asr.md); the budget leaves
+# the rest of the 16 threads to file jobs and the other services on the host.
+LIVE_CPU_BUDGET = float(os.environ.get("ACW_LIVE_CPU_BUDGET", "7.0"))
+DENOISE_COST = {"light": 0.13, "low_latency": 0.32}
+# Local captions share one whisper pool (2 workers); each talking stream keeps
+# roughly a third of one worker busy, so they also have their own cap.
+CAPTIONS_LOCAL_COST = 0.35
+MAX_LOCAL_CAPTION_SESSIONS = int(os.environ.get("ACW_LIVE_MAX_LOCAL_CAPTIONS", "6"))
 _active = 0
+_load = 0.0
+_local_captions = 0
+
+
+def session_cost(cfg: dict) -> float:
+    cost = 0.02  # codec + framing
+    cost += DENOISE_COST.get(cfg.get("denoise") or "", 0.0)
+    if cfg.get("captions") == "local":
+        cost += CAPTIONS_LOCAL_COST
+    return cost
 
 
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    global _active
+    global _active, _load, _local_captions
     settings = get_settings()
+    cost = 0.0
+    local_captions = False
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-dsp")
     chain = captioner = None
@@ -39,9 +61,19 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         if kind != P.MSG_START:
             return
         cfg = json.loads(payload)
-        if _active > MAX_SESSIONS:
+        local_captions = cfg.get("captions") == "local"
+        if (
+            _active > MAX_SESSIONS
+            or _load + session_cost(cfg) > LIVE_CPU_BUDGET
+            or (local_captions and _local_captions >= MAX_LOCAL_CAPTION_SESSIONS)
+        ):
+            local_captions = False
+            log.warning("live capacity reached: %d sessions, %.2f cores", _active, _load)
             await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "capacity"}))
             return
+        cost = session_cost(cfg)
+        _load += cost
+        _local_captions += local_captions
         tier = cfg.get("denoise")
         if tier is not None and tier not in DENOISE_TIERS:
             await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "bad_tier"}))
@@ -112,6 +144,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         log.exception("stream session crashed")
     finally:
         _active -= 1
+        _load = max(0.0, _load - cost)
+        _local_captions -= local_captions
         if captioner is not None:
             captioner.close()
         if chain is not None:

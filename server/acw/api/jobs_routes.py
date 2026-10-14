@@ -109,7 +109,8 @@ def list_jobs(principal: auth.Principal = Depends(auth.require_scope("jobs"))) -
         "SELECT * FROM jobs WHERE user_id = ? AND status != 'expired' ORDER BY created_at DESC LIMIT 50",
         (principal.user_id,),
     )
-    return {"jobs": [jobs.public_job(dict(r)) for r in rows]}
+    queue = jobs.queued_ids()
+    return {"jobs": [jobs.public_job(dict(r), queue) for r in rows]}
 
 
 @router.get("/{job_id}")

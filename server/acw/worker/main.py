@@ -43,7 +43,7 @@ def claim(worker_id: str) -> dict | None:
     now = db.now()
     with db.tx() as c:
         row = c.execute(
-            "SELECT id FROM jobs WHERE status = 'queued' ORDER BY queued_at LIMIT 1"
+            f"SELECT j.id FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 1"
         ).fetchone()
         if row is None:
             return None

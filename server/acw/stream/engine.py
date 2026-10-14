@@ -167,8 +167,18 @@ class UtteranceCaptioner:
             if voiced >= self.MIN_UTTERANCE_S:
                 self._submit(audio, start)
 
+    # Utterances still waiting for a free model worker. Beyond this the oldest
+    # waiting one is dropped: a missing line is better than captions that lag
+    # further and further behind the stream.
+    MAX_WAITING = 2
+
     def _submit(self, audio: np.ndarray, start: float) -> None:
         self.pending = [f for f in self.pending if not f.done()]
+        waiting = [f for f in self.pending if not f.running()]
+        while len(waiting) >= self.MAX_WAITING:
+            if waiting.pop(0).cancel():
+                log.info("caption backlog: dropped an utterance")
+        self.pending = [f for f in self.pending if not f.cancelled()]
         self.pending.append(self.whisper.pool.submit(self._transcribe_safe, audio, start))
 
     def flush(self, timeout: float = 6.0) -> None:

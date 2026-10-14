@@ -219,6 +219,12 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
         kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
         ready = json.loads(payload)
+        if kind == P.MSG_EVENT and ready.get("code") == "capacity":
+            sess.end_reason = "capacity"
+            await _send_json(ws, {"type": "error", "code": "busy",
+                                  "message": "Live is full right now. Please try again in a few minutes."})
+            await ws.close(code=1013)
+            return sess
         if kind != P.MSG_EVENT or ready.get("type") != "ready":
             raise RuntimeError(f"worker refused: {ready}")
     except Exception:  # noqa: BLE001

@@ -30,7 +30,21 @@ ALLOWED_EXTS = {
 }
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")
-MAX_ACTIVE_JOBS_PER_USER = 5
+MAX_ACTIVE_JOBS_PER_USER = 3
+# Free jobs are refused (not queued) once this many jobs are waiting, so free
+# use can't push paid work into long waits.
+FREE_QUEUE_LIMIT = 6
+# Order in which workers take queued jobs: paid before free, then the user with
+# the fewest jobs already running (so one big batch can't block everyone), then
+# first come, first served.
+QUEUE_ORDER = (
+    "j.free, (SELECT COUNT(*) FROM jobs r WHERE r.user_id = j.user_id AND r.status IN ('running', 'cloud_asr')),"
+    " j.queued_at"
+)
+
+
+def queued_ids() -> list[str]:
+    return [r["id"] for r in db.all_rows(f"SELECT j.id FROM jobs j WHERE j.status = 'queued' ORDER BY {QUEUE_ORDER}")]
 
 
 class JobError(Exception):
@@ -140,6 +154,8 @@ def create_job(
     active = db.one("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE))
     if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
         raise JobError("You already have several jobs in progress; wait for one to finish.", 429)
+    if free and db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'")["n"] >= FREE_QUEUE_LIMIT:
+        raise JobError("Free transcription is busy right now. Please try again in a few minutes.", 503)
 
     job_id = db.new_id()
     params = {
@@ -213,10 +229,15 @@ def finish_failed(job: dict, message: str, status: str = "failed") -> None:
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
 
 
-def public_job(job: dict) -> dict:
+def public_job(job: dict, queue: list[str] | None = None) -> dict:
     outputs = json.loads(job["outputs_json"]) if job.get("outputs_json") else []
     params = json.loads(job["params_json"])
+    position = None
+    if job["status"] == "queued":
+        queue = queued_ids() if queue is None else queue
+        position = queue.index(job["id"]) + 1 if job["id"] in queue else None
     return {
+        "queuePosition": position,
         "id": job["id"],
         "kind": job["kind"],
         "tier": job["tier"],

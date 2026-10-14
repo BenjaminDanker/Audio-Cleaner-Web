@@ -174,28 +174,37 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     return result
 
 
+# Premium transcription returns plain text per request, so subtitle timing comes
+# from these speech segments: short enough that spreading a segment's time over
+# its words (captions.build_cues) stays close to the real timing.
+ASR_SEGMENT_MAX_S = 15.0
+ASR_MERGE_GAP_S = 0.4
+
+
 def _write_asr_chunks(ff, job_dir: Path, x16) -> None:
-    """Split 16 kHz speech into <=10 min pieces at quiet points, encode as mp3."""
-    import numpy as np
+    """Cut 16 kHz audio into speech segments of at most ASR_SEGMENT_MAX_S
+    (Silero VAD, bundled with faster-whisper) and encode each as mp3."""
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     chunk_dir = job_dir / "asr_chunks"
     chunk_dir.mkdir(exist_ok=True)
-    sr, target, search = 16000, 600 * 16000, 20 * 16000
-    win = int(0.3 * sr)
-    cuts, pos = [0], 0
-    while len(x16) - pos > target:
-        lo, hi = pos + target - search, min(pos + target, len(x16) - win)
-        seg = x16[lo:hi + win] ** 2
-        energy = np.convolve(seg, np.ones(win, dtype=np.float32), mode="valid")[: hi - lo]
-        cut = lo + int(np.argmin(energy)) + win // 2
-        cuts.append(cut)
-        pos = cut
-    cuts.append(len(x16))
+    sr = 16000
+    spans = get_speech_timestamps(
+        x16,
+        VadOptions(min_speech_duration_ms=250, min_silence_duration_ms=300, speech_pad_ms=150,
+                   max_speech_duration_s=ASR_SEGMENT_MAX_S),
+    )
+    merged: list[list[int]] = []
+    for span in spans:
+        a, b = int(span["start"]), int(span["end"])
+        if merged and a - merged[-1][1] < ASR_MERGE_GAP_S * sr and b - merged[-1][0] <= ASR_SEGMENT_MAX_S * sr:
+            merged[-1][1] = b
+        else:
+            merged.append([a, b])
     chunks = []
-    for i, (a, b) in enumerate(zip(cuts, cuts[1:])):
-        name = f"{i:03d}.mp3"
-        ff.write_audio(x16[a:b], sr, chunk_dir / f"{i:03d}", "mp3")
-        chunks.append({"file": name, "offset": a / sr, "seconds": (b - a) / sr})
+    for i, (a, b) in enumerate(merged):
+        ff.write_audio(x16[a:b], sr, chunk_dir / f"{i:04d}", "mp3")
+        chunks.append({"file": f"{i:04d}.mp3", "offset": a / sr, "seconds": (b - a) / sr})
     (chunk_dir / "index.json").write_text(json.dumps({"chunks": chunks}))
 
 

@@ -29,7 +29,7 @@
 | Desktop app (free) | user's computer: same `acw_common` pipeline as Studio clean, bundled libDF + LGPL FFmpeg | GitHub Releases bandwidth (free); update check hits a static JSON on the VPS |
 | Live (paid) | OBS plugin ⇄ acw-web ⇄ acw-stream; 20 ms frames, 30 ms model latency | CPU; ~0.1 core per stream |
 | Transcription standard (paid + free quota) | runner: faster-whisper large-v3-turbo int8 | CPU (RTF ≈ 0.45 at 8 threads on the 1700X) |
-| Transcription premium (paid) | runner makes ≤10 min mp3 chunks → acw-web sends to OpenAI `gpt-4o-transcribe-diarize` | OpenAI per-minute fee |
+| Transcription premium (paid) | runner cuts speech into ≤15 s VAD segments → acw-web sends them to OpenAI `gpt-transcribe` (text only; segment boundaries give subtitle timing) | OpenAI per-minute fee |
 | Live captions standard / premium | acw-stream utterance captioner (whisper small) / acw-web ⇄ OpenAI Realtime (`gpt-live-transcribe`) | CPU / OpenAI fee |
 
 ## Shared code

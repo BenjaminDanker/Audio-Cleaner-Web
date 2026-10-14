@@ -87,3 +87,27 @@ def test_garbage_upload_fails_cleanly_and_refunds(client, signed_in):
     assert "could not be read" in job["error"]
     assert ledger.balance(uid) == {"balance_micros": 1_000_000, "held_micros": 0, "available_micros": 1_000_000}
     assert not (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id).exists()
+
+
+def test_queue_order_paid_first_then_fair_per_user():
+    from acw import auth, db, jobs
+    from acw.worker.main import claim
+
+    a = auth.get_or_create_user("a@example.com")["id"]
+    b = auth.get_or_create_user("b@example.com")["id"]
+    now = db.now()
+
+    def add(job_id, user, free, t, status="queued"):
+        db.execute(
+            "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes, claimed_seconds,"
+            " est_cost_micros, created_at, queued_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, user, "transcribe", "local", free, status, '{"options": {}}', "x.wav", 1000, 10, 0, now, now + t),
+        )
+
+    add("free-early", b, 1, 0)
+    add("a-running", a, 0, 0, status="running")
+    add("a-second", a, 0, 1)
+    add("b-paid", b, 0, 2)
+    assert jobs.queued_ids() == ["b-paid", "a-second", "free-early"]
+    assert jobs.public_job(dict(db.one("SELECT * FROM jobs WHERE id = 'a-second'")))["queuePosition"] == 2
+    assert claim("w1")["id"] == "b-paid"
