@@ -27,9 +27,8 @@ _RATE_LIST = [
     Rate("transcribe", "local", "Transcription - standard (on-prem model)", 4_000),
     Rate("transcribe", "premium", "Transcription - premium (OpenAI)", 15_000),
     # Live streaming
-    Rate("stream_denoise", "light", "Live denoise - light (DeepFilterNet3)", 4_000),
-    Rate("stream_denoise", "medium", "Live denoise - medium", 8_000, available=False),
-    Rate("stream_denoise", "high", "Live denoise - high", 15_000, available=False),
+    Rate("stream_denoise", "light", "Live denoise - standard (DeepFilterNet3, 30 ms)", 4_000),
+    Rate("stream_denoise", "low_latency", "Live denoise - low latency (DeepFilterNet3-LL, 10 ms)", 8_000),
     Rate("stream_captions", "local", "Live captions - standard (on-prem model)", 6_000),
     # OpenAI gpt-live-transcribe is $0.017/min of audio sent; we only send speech.
     Rate("stream_captions", "premium", "Live captions - premium (OpenAI realtime)", 25_000),

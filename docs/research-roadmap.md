@@ -31,13 +31,13 @@ DFN3 is a real-time model. Offline jobs can afford much more compute:
 - Evaluate with DNSMOS / PESQ / SI-SDR on a fixed test set plus blind A/B listening.
   Keep DFN3 as a fallback tier.
 
-## 3. Live denoise tiers ("medium", "high")
+## 3. Live denoise tiers - done (see research/denoise.md)
 
-- DFN3 low-latency variant (`DeepFilterNet3_ll_onnx.tar.gz`, already
-  downloaded): ~2.8 ms per frame, lower algorithmic latency. It could be the
-  "low latency" option.
-- GTCRN / ultra-light models for cheap tiers; heavier causal models for "high".
-- Benchmark sessions per core and end-to-end added latency.
+- Shipped: `light` = DFN3 (30 ms, ~0.11 core/stream) and `low_latency` =
+  DFN3-LL (10 ms, ~0.28 core/stream, same quality). No causal candidate
+  (DPDFNet, GTCRN) beat DFN3, so there is no separate "high quality" live tier.
+- Studio clean stays DFN3 + clarity; an optional GPU hybrid
+  (MossFormerGAN-SE-16k below 7.5 kHz + DFN3) is pending a blind A/B listen.
 
 ## 4. GTX 960 (Maxwell, sm_52, 2-4 GB)
 

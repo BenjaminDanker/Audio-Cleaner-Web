@@ -7,9 +7,12 @@ split long files into overlapping segments.
 """
 from __future__ import annotations
 
+import configparser
 import ctypes
+import functools
 import math
 import sys
+import tarfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -17,7 +20,8 @@ from pathlib import Path
 import numpy as np
 
 SAMPLE_RATE = 48_000
-# The model outputs audio delayed by this many samples (STFT + lookahead).
+# DeepFilterNet3 outputs audio delayed by this many samples (STFT + 2 hops of
+# lookahead). Other models (e.g. the low-latency DFN3-LL): see model_delay().
 MODEL_DELAY = 1440
 
 # File name of the libDF C-API build per platform (see native/deepfilter/build.sh).
@@ -31,6 +35,20 @@ _CANCEL_CHECK_HOPS = 500
 
 class Cancelled(Exception):
     """Raised when the `cancel` event passed to a denoise call is set."""
+
+
+@functools.lru_cache(maxsize=8)
+def model_delay(model_path: str | Path) -> int:
+    """Output delay in samples of a libDF model tarball, from its config.ini:
+    the STFT overlap (fft_size - hop_size) plus the model's lookahead in hops."""
+    with tarfile.open(model_path) as tar:
+        member = next(m for m in tar.getmembers() if m.name.endswith("config.ini"))
+        cfg = configparser.ConfigParser()
+        cfg.read_string(tar.extractfile(member).read().decode())
+    df = cfg["df"]
+    hop = df.getint("hop_size")
+    lookahead = max(df.getint("df_lookahead", 0), cfg.getint("deepfilternet", "conv_lookahead", fallback=0))
+    return df.getint("fft_size") - hop + lookahead * hop
 _lib_lock = threading.Lock()
 _libs: dict[str, ctypes.CDLL] = {}
 
@@ -79,6 +97,7 @@ class DeepFilter:
             raise RuntimeError("could not load DeepFilterNet model")
         self._st = ctypes.c_void_p(st)
         self.hop = int(self._lib.df_get_frame_length(self._st))
+        self.delay = model_delay(str(model_path))
         self._in = np.zeros(self.hop, dtype=np.float32)
         self._out = np.zeros(self.hop, dtype=np.float32)
 
@@ -86,7 +105,7 @@ class DeepFilter:
         self._lib.df_set_atten_lim(self._st, float(db))
 
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, float]:
-        """One hop of float32 mono audio in, one hop out (delayed by MODEL_DELAY)."""
+        """One hop of float32 mono audio in, one hop out (delayed by `self.delay`)."""
         self._in[:] = frame
         lsnr = self._lib.df_process_frame(self._st, self._in.ctypes.data_as(_FP), self._out.ctypes.data_as(_FP))
         return self._out.copy(), float(lsnr)
@@ -121,13 +140,13 @@ def _denoise_contiguous(lib_path, model_path, x: np.ndarray, atten_lim_db: float
         raise Cancelled()
     df = DeepFilter(lib_path, model_path, atten_lim_db)
     try:
-        hop = df.hop
+        hop, delay = df.hop, df.delay
         n = len(x)
-        total = int(math.ceil((n + MODEL_DELAY) / hop)) * hop
+        total = int(math.ceil((n + delay) / hop)) * hop
         padded = np.zeros(total, dtype=np.float32)
         padded[:n] = x
         y = df.process(padded, cancel)
-        return y[MODEL_DELAY:MODEL_DELAY + n]
+        return y[delay:delay + n]
     finally:
         df.close()
 

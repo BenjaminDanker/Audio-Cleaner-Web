@@ -42,7 +42,7 @@ Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.
 | POST | `/api/billing/refund` | `{paymentId}` refunds unused credit from a payment < 14 days old |
 
 Products/tiers: `denoise/standard`, `transcribe/local`, `transcribe/premium`,
-`stream_denoise/light` (medium/high listed as unavailable), `stream_captions/local`, `stream_captions/premium`.
+`stream_denoise/light` (DFN3, 30 ms), `stream_denoise/low_latency` (DFN3-LL, 10 ms), `stream_captions/local`, `stream_captions/premium`.
 
 ## File jobs
 

@@ -501,6 +501,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		{
 			StartParams sp;
 			sp.denoise = cfg.denoise;
+			sp.low_latency = cfg.low_latency;
 			sp.captions = cfg.captions;
 			sp.language = cfg.language;
 			sp.atten_lim_db = cfg.atten_lim_db;

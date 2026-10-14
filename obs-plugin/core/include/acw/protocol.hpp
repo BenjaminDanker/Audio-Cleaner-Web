@@ -37,7 +37,8 @@ bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out,
 // JSON messages --------------------------------------------------------------
 
 struct StartParams {
-	bool denoise = true;                 // tier "light"
+	bool denoise = true;                 // tier "light", or "low_latency" when low_latency is set
+	bool low_latency = false;
 	std::string captions;                // "", "local" or "premium"
 	std::string language;                // "" = auto
 	int atten_lim_db = 100;

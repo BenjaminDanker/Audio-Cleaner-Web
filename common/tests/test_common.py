@@ -132,3 +132,11 @@ def test_cancel_stops_quickly():
     with pytest.raises(pipeline.Cancelled):
         pipeline.clean_audio(noisy, LIB, MODEL, threads=2, cancel=cancel)
     assert time.monotonic() - t0 < 5
+
+
+@pytest.mark.skipif(not MODEL.is_file(), reason="model not available")
+def test_model_delay_from_config():
+    assert dfn.model_delay(MODEL) == dfn.MODEL_DELAY == 1440
+    ll = MODEL.with_name("DeepFilterNet3_ll_onnx.tar.gz")
+    if ll.is_file():
+        assert dfn.model_delay(ll) == 480

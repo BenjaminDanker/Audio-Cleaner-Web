@@ -126,7 +126,7 @@ std::string make_start_message(const StartParams &p)
 	json j;
 	j["type"] = "start";
 	j["version"] = 1;
-	j["denoise"] = p.denoise ? json("light") : json(nullptr);
+	j["denoise"] = p.denoise ? json(p.low_latency ? "low_latency" : "light") : json(nullptr);
 	if (p.captions == "local" || p.captions == "premium")
 		j["captions"] = p.captions;
 	else

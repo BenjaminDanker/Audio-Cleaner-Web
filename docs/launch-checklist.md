@@ -45,6 +45,6 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ✅ Live denoise + live captions, server side + protocol (PCM and Opus)
 - ⬜ OBS plugin: Windows/macOS builds via CI need a GitHub repo with Actions;
   code signing (Apple Developer ID $99/yr, Windows Authenticode certificate)
-- 🔬 Studio clean needs a clearly better model than the free tier (it's DFN3 + polish today)
+- 🔬 Studio clean: benchmark found no clearly better model than DFN3 + polish; optional GPU hybrid pending a blind A/B (docs/research/denoise.md)
 - 🔬 Faster local transcription (Parakeet), GPU (needs the NVIDIA driver: sudo)
-- 🔬 Live "medium"/"high" denoise tiers
+- ✅ Live low-latency tier (DFN3-LL, 10 ms) next to the standard 30 ms tier

@@ -14,11 +14,13 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, resample_poly, sosfilt, sosfilt_zi
 
-from acw_common.dfn import MODEL_DELAY, DeepFilter
+from acw_common.dfn import DeepFilter
+
 from .protocol import HOP, SAMPLE_RATE
 
 log = logging.getLogger("acw.stream.engine")
-DENOISE_TIERS = {"light": "DeepFilterNet3_onnx.tar.gz"}
+# Same quality (see docs/research/denoise.md); low_latency trades ~2.6x CPU for 10 ms instead of 30 ms.
+DENOISE_TIERS = {"light": "DeepFilterNet3_onnx.tar.gz", "low_latency": "DeepFilterNet3_ll_onnx.tar.gz"}
 
 
 class LiveChain:
@@ -29,7 +31,7 @@ class LiveChain:
         self.gain = 1.0
         self.ceiling = 10 ** (-1.0 / 20)
         self.release = 10 ** (6.0 / 20 / 100)  # recover ~6 dB per second at 100 hops/s
-        self.latency_samples = MODEL_DELAY if self.df else 0
+        self.latency_samples = self.df.delay if self.df else 0
 
     def set_atten_lim(self, db: float) -> None:
         if self.df:

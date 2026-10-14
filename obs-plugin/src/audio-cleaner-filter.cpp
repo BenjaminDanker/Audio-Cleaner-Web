@@ -49,6 +49,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_API_KEY "api_key"
 #define S_SERVER_URL "server_url"
 #define S_DENOISE "denoise"
+#define S_LOW_LATENCY "low_latency_model"
 #define S_CAPTIONS "captions"
 #define S_LANGUAGE "language"
 #define S_STRENGTH "strength"
@@ -70,6 +71,7 @@ struct Settings {
 	std::string api_key;
 	std::string url = DEFAULT_URL;
 	bool denoise = true;
+	bool low_latency = false;      // DFN3-LL: 10 ms model latency instead of 30 ms, higher price
 	std::string captions = "off";  // off | local | premium
 	std::string language = "auto";
 	int strength = 100;            // attenuation limit in dB: 18 / 40 / 100
@@ -82,7 +84,8 @@ struct Settings {
 	// Changes that need a new session (the output delay D is fixed per session).
 	bool same_session_as(const Settings &o) const
 	{
-		return api_key == o.api_key && url == o.url && denoise == o.denoise && captions == o.captions &&
+		return api_key == o.api_key && url == o.url && denoise == o.denoise && low_latency == o.low_latency &&
+		       captions == o.captions &&
 		       language == o.language && latency_ms == o.latency_ms && codec == o.codec;
 	}
 };
@@ -115,6 +118,7 @@ Settings read_settings(obs_data_t *d)
 	if (s.url.empty())
 		s.url = DEFAULT_URL;
 	s.denoise = obs_data_get_bool(d, S_DENOISE);
+	s.low_latency = obs_data_get_bool(d, S_LOW_LATENCY);
 	s.captions = obs_data_get_string(d, S_CAPTIONS);
 	if (s.captions != "local" && s.captions != "premium")
 		s.captions = "off";
@@ -161,6 +165,8 @@ acw::Session *make_session(ac_filter *f)
 	cfg.url = s.url;
 	cfg.api_key = s.api_key;
 	cfg.denoise = s.denoise;
+	cfg.low_latency = s.low_latency;
+	cfg.model_latency_samples = s.low_latency ? 480 : 1440;
 	cfg.captions = s.captions == "off" ? "" : s.captions;
 	cfg.language = s.language == "auto" ? "" : s.language;
 	cfg.atten_lim_db = s.strength;
@@ -226,6 +232,7 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_string(d, S_API_KEY, "");
 	obs_data_set_default_string(d, S_SERVER_URL, DEFAULT_URL);
 	obs_data_set_default_bool(d, S_DENOISE, true);
+	obs_data_set_default_bool(d, S_LOW_LATENCY, false);
 	obs_data_set_default_string(d, S_CAPTIONS, "off");
 	obs_data_set_default_string(d, S_LANGUAGE, "auto");
 	obs_data_set_default_int(d, S_STRENGTH, 100);
@@ -381,6 +388,8 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_set_long_description(url, T_("AudioCleaner.ServerUrl.Long"));
 
 	obs_properties_add_bool(p, S_DENOISE, T_("AudioCleaner.Denoise"));
+	obs_property_t *ll = obs_properties_add_bool(p, S_LOW_LATENCY, T_("AudioCleaner.LowLatency"));
+	obs_property_set_long_description(ll, T_("AudioCleaner.LowLatency.Long"));
 
 	obs_property_t *strength = obs_properties_add_list(p, S_STRENGTH, T_("AudioCleaner.Strength"), OBS_COMBO_TYPE_LIST,
 							   OBS_COMBO_FORMAT_INT);

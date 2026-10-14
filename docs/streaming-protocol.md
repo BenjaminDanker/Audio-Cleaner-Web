@@ -11,7 +11,7 @@ Client sends one text message within 15 s:
 
 ```json
 {"type": "start", "version": 1,
- "denoise": "light" | null,
+ "denoise": "light" | "low_latency" | null,
  "captions": "local" | "premium" | null,
  "language": "en" | null,
  "sampleRate": 48000,
@@ -55,7 +55,7 @@ offset size  field
   (960 samples) is recommended.
 - The server returns exactly one frame per input frame, same `seq`/`ts_us`
   and the same number of samples, in the same codec. Processed audio is
-  delayed by `modelLatencyMs` (30 ms for `light`) inside the stream, so the
+  delayed by `modelLatencyMs` (30 ms for `light`, 10 ms for `low_latency`) inside the stream, so the
   client's total delay = network round trip + modelLatencyMs. Measure the
   round trip with `ts_us`.
 - When denoise is off (captions only) the audio comes back unchanged and

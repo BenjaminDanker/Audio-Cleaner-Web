@@ -22,7 +22,8 @@ enum class Codec {
 struct SessionConfig {
 	std::string url = "wss://mc-multi-world.space/audio/api/stream/ws";
 	std::string api_key;               // never logged
-	bool denoise = true;               // tier "light"
+	bool denoise = true;               // tier "light", or "low_latency" when low_latency is set
+	bool low_latency = false;          // DFN3-LL model: 10 ms instead of 30 ms
 	std::string captions;              // "", "local" or "premium"
 	std::string language;              // "" = auto
 	int atten_lim_db = 100;            // attenuation limit: 18 / 40 / 100
@@ -32,7 +33,7 @@ struct SessionConfig {
 	int host_rate = kNetRate;          // sample rate of the audio passed to process()
 	std::string client = "obs-audio-cleaner/0.1.0";
 	std::string ca_file;               // optional CA bundle path ("" = system trust store)
-	int model_latency_samples = 1440;  // expected; replaced by the server's ready message
+	int model_latency_samples = 1440;  // expected (480 for low_latency); replaced by the server's ready message
 };
 
 enum class SessionState { Idle, Connecting, Handshaking, Streaming, Backoff, Stopped };
