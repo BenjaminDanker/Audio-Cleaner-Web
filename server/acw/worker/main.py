@@ -17,6 +17,8 @@ import threading
 import time
 from pathlib import Path
 
+import acw_common
+
 from .. import db, jobs
 from ..billing import ledger, pricing
 from ..config import get_settings
@@ -88,7 +90,10 @@ class StageFailed(Exception):
 def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
     env = {
         "PATH": "/usr/bin:/bin",
-        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        # acw and acw_common share one directory when deployed, not in a checkout.
+        "PYTHONPATH": os.pathsep.join(
+            dict.fromkeys(str(Path(m.__file__).resolve().parents[i]) for m, i in ((sys.modules["acw"], 1), (acw_common, 1)))
+        ),
         "LANG": "C.UTF-8",
         "HOME": str(d),
         "HF_HUB_OFFLINE": "1",

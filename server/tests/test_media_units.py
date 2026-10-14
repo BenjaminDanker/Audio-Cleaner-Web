@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from .conftest import ROOT
+
 from acw import captions
 from acw.stream import protocol as P
 
@@ -45,7 +47,7 @@ def test_safe_stem():
 
 SANDBOX_PROBE = r"""
 import os, socket, sys
-sys.path.insert(0, sys.argv[2])
+sys.path[:0] = sys.argv[2].split(os.pathsep)
 from pathlib import Path
 from acw.worker.sandbox import confine
 confine(Path(sys.argv[1]), [], cpu_seconds=30, address_space_bytes=4 << 30, max_file_bytes=1 << 26)
@@ -72,7 +74,7 @@ def test_runner_sandbox_blocks_escape(tmp_path):
     if landlock_abi() < 4:
         pytest.skip("needs Landlock ABI 4")
     out = subprocess.run(
-        [sys.executable, "-c", SANDBOX_PROBE, str(tmp_path), str(Path(__file__).resolve().parents[1])],
+        [sys.executable, "-c", SANDBOX_PROBE, str(tmp_path), os.pathsep.join(str(p) for p in (ROOT / "server", ROOT / "common"))],
         capture_output=True, text=True, timeout=60,
     )
     assert out.returncode == 0, out.stderr

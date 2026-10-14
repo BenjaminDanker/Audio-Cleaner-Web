@@ -24,6 +24,8 @@ import resource
 import sys
 from pathlib import Path
 
+import acw_common
+
 # x86_64 / aarch64 share these syscall numbers (asm-generic)
 SYS_landlock_create_ruleset = 444
 SYS_landlock_add_rule = 445
@@ -167,6 +169,7 @@ def default_read_paths(extra: list[str | Path]) -> list[str | Path]:
         sys.base_prefix,
         sys.prefix,
         str(Path(__file__).resolve().parents[2]),  # the directory holding the acw package
+        str(Path(acw_common.__file__).resolve().parents[1]),  # ... and the shared package (same dir when deployed)
     ]
     paths.extend(extra)
     return paths

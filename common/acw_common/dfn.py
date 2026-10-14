@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ctypes
 import math
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,6 +19,10 @@ import numpy as np
 SAMPLE_RATE = 48_000
 # The model outputs audio delayed by this many samples (STFT + lookahead).
 MODEL_DELAY = 1440
+
+# File name of the libDF C-API build per platform (see native/deepfilter/build.sh).
+LIB_NAME = {"win32": "df.dll", "darwin": "libdf.dylib"}.get(sys.platform, "libdf.so")
+MODEL_FILE = "DeepFilterNet3_onnx.tar.gz"
 
 _FP = ctypes.POINTER(ctypes.c_float)
 _lib_lock = threading.Lock()

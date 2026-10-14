@@ -54,7 +54,7 @@ def main() -> int:
     os.chdir(job_dir)
     os.environ["OMP_NUM_THREADS"] = str(spec.get("threads", 2))
 
-    from acw.media.ffmpeg import MediaError
+    from acw_common.ffmpeg import MediaError
 
     try:
         if stage == "probe":
@@ -76,7 +76,7 @@ def main() -> int:
 # ---------------------------------------------------------------- stages
 
 def _ff(spec):
-    from acw.media.ffmpeg import FFmpeg
+    from acw_common.ffmpeg import FFmpeg
 
     return FFmpeg(Path(spec["bin_dir"]), threads=int(spec.get("threads", 2)))
 
@@ -84,7 +84,7 @@ def _ff(spec):
 def stage_probe(job_dir: Path, spec: dict) -> dict:
     p = _ff(spec).probe(job_dir / spec["input"])
     if p.duration > spec["max_seconds"] + 1:
-        from acw.media.ffmpeg import MediaError
+        from acw_common.ffmpeg import MediaError
 
         raise MediaError(f"This file is {p.duration / 60:.1f} minutes long; the limit is {spec['max_seconds'] / 60:.0f} minutes.")
     return {
@@ -100,7 +100,7 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
 def stage_main(job_dir: Path, spec: dict) -> dict:
     import numpy as np
 
-    from acw.dsp import clarity, dfn
+    from acw_common import pipeline
 
     ff = _ff(spec)
     src = job_dir / spec["input"]
@@ -116,30 +116,21 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     cleaned_path = None
     speech_16k = None
     if denoise:
-        channels = min(probe.audio_channels, 2)
         emit(stage="decoding", progress=2)
-        x = ff.decode(src, probe, dfn.SAMPLE_RATE, channels, spec["max_seconds"])
+        x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"])
         emit(stage="denoising", progress=5)
-        lib, model = spec["lib_path"], spec["dfn_model"]
         span = 70 if not transcribe else 45
-        per_ch = []
-        for ch in range(channels):
-            def prog(f, ch=ch):
-                emit(stage="denoising", progress=int(5 + span * (ch + f) / channels))
-
-            per_ch.append(
-                dfn.denoise_array(
-                    x[:, ch], lib, model,
-                    atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
-                    threads=threads, progress=prog,
-                )
-            )
-        y = np.stack(per_ch, axis=1)
-        emit(stage="polishing", progress=5 + span)
-        params = clarity.ClarityParams(loudness_lufs=opts.get("loudness_lufs", -16.0))
-        y = clarity.process(x, y, dfn.SAMPLE_RATE, params)
+        y = pipeline.clean_audio(
+            x, spec["lib_path"], spec["dfn_model"],
+            pipeline.CleanOptions(
+                atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
+                loudness_lufs=opts.get("loudness_lufs", -16.0),
+            ),
+            threads=threads,
+            progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(5 + span * f)),
+        )
         fmt = opts.get("audio_format", "wav")
-        cleaned_path = ff.write_audio(y if channels > 1 else y[:, 0], dfn.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
+        cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
         if transcribe:
             from scipy.signal import resample_poly

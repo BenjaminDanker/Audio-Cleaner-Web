@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import butter, resample_poly, sosfilt, sosfilt_zi
 
-from ..dsp.dfn import MODEL_DELAY, DeepFilter
+from acw_common.dfn import MODEL_DELAY, DeepFilter
 from .protocol import HOP, SAMPLE_RATE
 
 log = logging.getLogger("acw.stream.engine")

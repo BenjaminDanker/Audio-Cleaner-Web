@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[2]
+sys.path[:0] = [str(ROOT / "server"), str(ROOT / "common")]
 
 ORIGIN = "http://testserver"
 

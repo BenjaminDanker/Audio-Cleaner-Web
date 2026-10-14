@@ -1,4 +1,5 @@
-"""ffprobe/ffmpeg wrappers. Only ever called from the sandboxed job runner.
+"""ffprobe/ffmpeg wrappers, shared by the server's sandboxed job runner and
+the desktop app.
 
 Untrusted input is read with an explicit protocol whitelist (file only) so a
 crafted playlist/concat file cannot make ffmpeg open other paths or URLs.
@@ -6,6 +7,7 @@ crafted playlist/concat file cannot make ffmpeg open other paths or URLs.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,14 +48,22 @@ class ProbeResult:
     ext: str
 
 
+_EXE = ".exe" if os.name == "nt" else ""
+# Keep a windowed (no console) desktop app from flashing a console per call.
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
 class FFmpeg:
     def __init__(self, bin_dir: Path, threads: int = 2):
-        self.ffmpeg = str(bin_dir / "ffmpeg")
-        self.ffprobe = str(bin_dir / "ffprobe")
+        self.ffmpeg = str(bin_dir / f"ffmpeg{_EXE}")
+        self.ffprobe = str(bin_dir / f"ffprobe{_EXE}")
         self.threads = threads
 
-    def _run(self, args: list[str], timeout: float) -> subprocess.CompletedProcess:
-        return subprocess.run(args, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    def _run(self, args: list[str], timeout: float, input: bytes | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            args, capture_output=True, timeout=timeout, input=input,
+            stdin=subprocess.DEVNULL if input is None else None, **_NO_WINDOW,
+        )
 
     def probe(self, path: Path) -> ProbeResult:
         r = self._run(
@@ -116,16 +126,27 @@ class FFmpeg:
             self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", str(channels),
             "-i", "pipe:0", *codec_args, "-threads", str(self.threads), "-y", str(out),
         ]
-        p = subprocess.run(args, input=np.ascontiguousarray(x, dtype=np.float32).tobytes(), capture_output=True, timeout=3600)
+        p = self._run(args, timeout=3600, input=np.ascontiguousarray(x, dtype=np.float32).tobytes())
         if p.returncode != 0:
             raise RuntimeError(f"encode failed: {p.stderr[-500:]!r}")
         return out
 
     def mux_video(
-        self, video_src: Path, audio: Path | None, out: Path, subtitles: Path | None = None, sub_lang: str | None = None
+        self,
+        video_src: Path,
+        audio: Path | None,
+        out: Path,
+        subtitles: Path | None = None,
+        sub_lang: str | None = None,
+        keep_metadata: bool = False,
     ) -> Path:
         """Copy the video stream; replace the audio with `audio` (or keep the
-        source audio when None); optionally add a soft subtitle track."""
+        source audio when None); optionally add a soft subtitle track.
+
+        Metadata and chapters are dropped unless `keep_metadata` (the server
+        strips them for privacy; the desktop app keeps e.g. creation time).
+        Only the first video stream is kept, which also drops camera data
+        tracks such as Sony's "rtmd" that break some players."""
         ext = out.suffix.lower()
         if ext == ".webm":
             acodec, sub_codec = ["-c:a", "libopus", "-b:a", "160k"], "webvtt"
@@ -145,7 +166,8 @@ class FFmpeg:
             maps += ["-map", f"{2 if audio is not None else 1}:s:0", "-c:s", sub_codec]
             if sub_lang:
                 maps += ["-metadata:s:s:0", f"language={sub_lang}"]
-        args += maps + ["-c:v", "copy", "-map_metadata", "-1", "-map_chapters", "-1"]
+        args += maps + ["-c:v", "copy"]
+        args += ["-map_metadata", "0"] if keep_metadata else ["-map_metadata", "-1", "-map_chapters", "-1"]
         if ext in (".mp4", ".mov", ".m4v"):
             args += ["-movflags", "+faststart"]
         args += ["-threads", str(self.threads), "-y", str(out)]

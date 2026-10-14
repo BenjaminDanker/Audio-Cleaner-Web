@@ -16,6 +16,7 @@ chmod 700 "$H/data" "$H/secrets"
 
 # 2. Code: a copy, so editing the git checkout never changes production
 rsync -a --delete --exclude '__pycache__' "$REPO/server/acw/" "$H/app/acw/"
+rsync -a --delete --exclude '__pycache__' "$REPO/common/acw_common/" "$H/app/acw_common/"
 git -C "$REPO" rev-parse --short HEAD > "$H/app/VERSION"
 chmod -R go-rwx "$H/app"
 
