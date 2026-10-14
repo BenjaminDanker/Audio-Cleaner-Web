@@ -31,9 +31,19 @@ ALLOWED_EXTS = {
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")
 MAX_ACTIVE_JOBS_PER_USER = 3
-# Free jobs are refused (not queued) once this many jobs are waiting, so free
-# use can't push paid work into long waits.
-FREE_QUEUE_LIMIT = 6
+
+# What a job needs before a worker may start it (measured 2026-10-14, see
+# docs/operations.md). Decoded/cleaned audio are memory-mapped scratch files,
+# so RAM is flat per job and disk grows with length.
+GB = 1024**3
+JOB_MEM = int(1.5 * GB)
+LOCAL_ASR_MEM = int(2.5 * GB)
+SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
+# Wall-clock seconds per second of audio at 4 threads, for queue estimates.
+SPEED = {"denoise": 0.1, "transcribe_local": 0.5, "transcribe_premium": 0.08}
+# Never let our work take the host below these.
+MEM_RESERVE = 2 * GB
+DISK_RESERVE = 10 * GB
 # Order in which workers take queued jobs: paid before free, then the user with
 # the fewest jobs already running (so one big batch can't block everyone), then
 # first come, first served.
@@ -41,6 +51,34 @@ QUEUE_ORDER = (
     "j.free, (SELECT COUNT(*) FROM jobs r WHERE r.user_id = j.user_id AND r.status IN ('running', 'cloud_asr')),"
     " j.queued_at"
 )
+
+
+def scratch_bytes(kind: str, seconds: float, channels: int = 2) -> int:
+    if kind not in ("denoise", "denoise_transcribe"):
+        return 0
+    return int(seconds / 3600 * channels * SCRATCH_PER_HOUR_PER_CHANNEL)
+
+
+def job_needs(job: dict) -> tuple[int, int]:
+    """(memory, scratch disk) in bytes that `job`'s next stage needs."""
+    if job.get("next_stage") == "finalize":
+        return int(0.3 * GB), 0
+    params = json.loads(job["params_json"])
+    seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
+    mem = JOB_MEM + (LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" else 0)
+    return mem, scratch_bytes(job["kind"], seconds)
+
+
+def job_seconds(job: dict) -> float:
+    """Rough wall-clock time the whole job takes once started."""
+    params = json.loads(job["params_json"])
+    audio = float(job.get("duration_seconds") or job["claimed_seconds"])
+    t = 0.0
+    if job["kind"] in ("denoise", "denoise_transcribe"):
+        t += SPEED["denoise"] * audio
+    if params.get("transcribe_tier"):
+        t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
+    return t + 10
 
 
 def queued_ids() -> list[str]:
@@ -154,8 +192,12 @@ def create_job(
     active = db.one("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE))
     if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
         raise JobError("You already have several jobs in progress; wait for one to finish.", 429)
-    if free and db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'")["n"] >= FREE_QUEUE_LIMIT:
-        raise JobError("Free transcription is busy right now. Please try again in a few minutes.", 503)
+    # The one hard limit: the upload and its scratch files must fit on disk.
+    from . import hostload
+
+    disk_need = size_bytes + scratch_bytes(kind, claimed_seconds) + DISK_RESERVE
+    if hostload.get(settings.data_dir).snapshot().disk_free < disk_need:
+        raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
 
     job_id = db.new_id()
     params = {
@@ -229,15 +271,37 @@ def finish_failed(job: dict, message: str, status: str = "failed") -> None:
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
 
 
+def queue_wait_seconds(ahead: list[str]) -> int:
+    """Estimate until a job behind `ahead` starts: the work in front of it
+    (including what is running now) spread over the workers."""
+    rows = db.all_rows(
+        "SELECT * FROM jobs WHERE status IN ('running', 'cloud_asr')"
+        + (f" OR id IN ({','.join('?' * len(ahead))})" if ahead else ""),
+        tuple(ahead),
+    )
+    now = db.now()
+    work = 0.0
+    for r in rows:
+        r = dict(r)
+        left = job_seconds(r)
+        if r["status"] != "queued" and r.get("started_at"):
+            left = max(10.0, left - (now - r["started_at"]))
+        work += left
+    return int(work / max(1, get_settings().workers))
+
+
 def public_job(job: dict, queue: list[str] | None = None) -> dict:
     outputs = json.loads(job["outputs_json"]) if job.get("outputs_json") else []
     params = json.loads(job["params_json"])
-    position = None
+    position = eta = None
     if job["status"] == "queued":
         queue = queued_ids() if queue is None else queue
-        position = queue.index(job["id"]) + 1 if job["id"] in queue else None
+        if job["id"] in queue:
+            position = queue.index(job["id"]) + 1
+            eta = queue_wait_seconds(queue[: position - 1])
     return {
         "queuePosition": position,
+        "queueWaitSeconds": eta,
         "id": job["id"],
         "kind": job["kind"],
         "tier": job["tier"],

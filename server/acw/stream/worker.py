@@ -13,71 +13,110 @@ import json
 import logging
 import os
 import signal
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from .. import hostload
 from ..config import get_settings
 from . import protocol as P
-from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner
+from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner, caption_backlog_seconds
 
 log = logging.getLogger("acw.stream.worker")
-MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "24"))
 WHISPER_LIVE_MODEL = os.environ.get("ACW_WHISPER_LIVE_MODEL", "small")
-# Admission control: live audio is real time, so a new session is refused rather
-# than letting every running session fall behind. Costs are measured CPU cores
-# per session (docs/research/denoise.md, docs/research/asr.md); the budget leaves
-# the rest of the 16 threads to file jobs and the other services on the host.
-LIVE_CPU_BUDGET = float(os.environ.get("ACW_LIVE_CPU_BUDGET", "7.0"))
-DENOISE_COST = {"light": 0.13, "low_latency": 0.32}
-# Local captions share one whisper pool (2 workers); each talking stream keeps
-# roughly a third of one worker busy, so they also have their own cap.
-CAPTIONS_LOCAL_COST = 0.35
-MAX_LOCAL_CAPTION_SESSIONS = int(os.environ.get("ACW_LIVE_MAX_LOCAL_CAPTIONS", "6"))
+
+# Admission. Live audio is real time, so a session that doesn't fit right now
+# waits in line instead of slowing every running stream down. "Fits" is
+# measured on the host (acw.hostload): cores that normal-priority work could
+# use (niced file jobs yield), minus a reserve for the rest of the machine,
+# minus sessions admitted moments ago whose load doesn't show yet.
+LIVE_RESERVE_CORES = float(os.environ.get("ACW_LIVE_RESERVE_CORES", "2.0"))
+LIVE_MIN_MEMORY = 300 * 1024**2
+# Local captions share one model pool; new caption sessions wait while
+# utterances already queue for it longer than this.
+CAPTION_BACKLOG_S = 2.0
+MAX_WAIT_S = 15 * 60
+# One thread per session: a sanity bound, far above what the CPU allows.
+MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "200"))
+# Cores per session by denoise tier: starting values from the benchmarks,
+# then the running average of what sessions really use.
+_cost: dict[str | None, float] = {"light": 0.13, "low_latency": 0.32, None: 0.03}
+_recent: list[tuple[float, float]] = []  # (admitted at, estimated cores)
+_waiting: list[object] = []
 _active = 0
-_load = 0.0
-_local_captions = 0
+_monitor: hostload.HostLoad | None = None
 
 
-def session_cost(cfg: dict) -> float:
-    cost = 0.02  # codec + framing
-    cost += DENOISE_COST.get(cfg.get("denoise") or "", 0.0)
-    if cfg.get("captions") == "local":
-        cost += CAPTIONS_LOCAL_COST
-    return cost
+def _estimate(cfg: dict) -> float:
+    return _cost.get(cfg.get("denoise"), _cost["light"]) + 0.02
+
+
+def _fits(cfg: dict) -> bool:
+    if _active >= MAX_SESSIONS:
+        return False
+    if _monitor is None:
+        return True
+    snap = _monitor.snapshot()
+    now = time.monotonic()
+    _recent[:] = [r for r in _recent if now - r[0] < 10]
+    pending = sum(c for _, c in _recent)
+    if snap.memory_headroom < LIVE_MIN_MEMORY:
+        return False
+    if snap.cores_for_live - LIVE_RESERVE_CORES - pending < _estimate(cfg):
+        return False
+    return not (cfg.get("captions") == "local" and caption_backlog_seconds() > CAPTION_BACKLOG_S)
+
+
+async def _wait_for_room(cfg: dict, writer: asyncio.StreamWriter) -> bool:
+    """FIFO waiting line. Tells the client its place while it waits."""
+    token = object()
+    _waiting.append(token)
+    start = time.monotonic()
+    told, told_at = None, 0.0
+    try:
+        while True:
+            place = _waiting.index(token) + 1
+            if place == 1 and _fits(cfg):
+                _recent.append((time.monotonic(), _estimate(cfg)))
+                return True
+            if time.monotonic() - start > MAX_WAIT_S:
+                return False
+            if place != told or time.monotonic() - told_at > 10:
+                told, told_at = place, time.monotonic()
+                await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "queued", "position": place}))
+            await asyncio.sleep(1.0)
+    finally:
+        _waiting.remove(token)
+
+
+def _learn_cost(tier: str | None, cpu_s: float, audio_s: float) -> None:
+    if audio_s >= 10:
+        _cost[tier] += 0.1 * (cpu_s / audio_s - _cost[tier])
 
 
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    global _active, _load, _local_captions
+    global _active
     settings = get_settings()
-    cost = 0.0
-    local_captions = False
+    admitted = False
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-dsp")
     chain = captioner = None
     events: asyncio.Queue = asyncio.Queue(maxsize=200)
-    _active += 1
     try:
         kind, payload = await P.read_msg(reader)
         if kind != P.MSG_START:
             return
         cfg = json.loads(payload)
-        local_captions = cfg.get("captions") == "local"
-        if (
-            _active > MAX_SESSIONS
-            or _load + session_cost(cfg) > LIVE_CPU_BUDGET
-            or (local_captions and _local_captions >= MAX_LOCAL_CAPTION_SESSIONS)
-        ):
-            local_captions = False
-            log.warning("live capacity reached: %d sessions, %.2f cores", _active, _load)
-            await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "capacity"}))
-            return
-        cost = session_cost(cfg)
-        _load += cost
-        _local_captions += local_captions
         tier = cfg.get("denoise")
         if tier is not None and tier not in DENOISE_TIERS:
             await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "bad_tier"}))
             return
+        if not await _wait_for_room(cfg, writer):
+            log.warning("live session gave up waiting for room (%d running)", _active)
+            await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "capacity"}))
+            return
+        _active += 1
+        admitted = True
         chain = await loop.run_in_executor(
             executor, LiveChain, settings.bin_dir / "libdf.so", settings.models_dir, tier, float(cfg.get("atten_lim_db", 100.0))
         )
@@ -100,8 +139,11 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         opus: OpusCodec | None = None
         tap_pcm = bool(cfg.get("tap_pcm"))
 
+        cpu_s = audio_s = 0.0
+
         def work(seq: int, kind: int, data):
-            nonlocal opus
+            nonlocal opus, cpu_s, audio_s
+            t0 = time.thread_time()
             if kind == P.CODEC_OPUS:
                 if opus is None:
                     opus = OpusCodec(int(cfg.get("opus_bitrate", 96_000)))
@@ -113,6 +155,11 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 captioner.feed(y)
             out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
             tap = P.pack_audio(seq, y) if (tap_pcm and kind == P.CODEC_OPUS) else None
+            cpu_s += time.thread_time() - t0
+            audio_s += len(y) / P.SAMPLE_RATE
+            if audio_s >= 30:
+                _learn_cost(tier, cpu_s, audio_s)
+                cpu_s = audio_s = 0.0
             return out, tap
 
         try:
@@ -143,9 +190,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
     except Exception:  # noqa: BLE001
         log.exception("stream session crashed")
     finally:
-        _active -= 1
-        _load = max(0.0, _load - cost)
-        _local_captions -= local_captions
+        if admitted:
+            _active -= 1
         if captioner is not None:
             captioner.close()
         if chain is not None:
@@ -162,7 +208,9 @@ def _offer(q: asyncio.Queue, ev: dict) -> None:
 
 
 async def serve() -> None:
+    global _monitor
     settings = get_settings()
+    _monitor = hostload.get(settings.data_dir)  # opens its /proc files before the sandbox closes them off
     sock = settings.stream_worker_socket
     sock.parent.mkdir(parents=True, exist_ok=True)
     sock.unlink(missing_ok=True)

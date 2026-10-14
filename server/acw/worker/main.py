@@ -19,7 +19,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import db, jobs
+from .. import db, hostload, jobs
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -39,20 +39,61 @@ def _settings_extra() -> dict:
     }
 
 
-def claim(worker_id: str) -> dict | None:
+# A job joins others already running only if this many cores are idle.
+MIN_IDLE_CORES = 2.0
+MAX_JOB_THREADS = int(os.environ.get("ACW_JOB_THREADS_MAX", "6"))
+
+
+def admission(job: dict, snap: hostload.Snapshot, running: list[dict]) -> tuple[bool, str, int]:
+    """Whether `job` may start now, why not, and how many threads it gets.
+
+    Memory and disk must fit with a reserve left for the rest of the host.
+    CPU only decides when other jobs are already running: with nothing running
+    the queue always moves (niced, so it yields to everything else)."""
+    mem, disk = jobs.job_needs(job)
+    now = db.now()
+    # Jobs started in the last minute may not have allocated their memory yet.
+    mem += sum(jobs.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
+    if snap.memory_headroom - mem < jobs.MEM_RESERVE:
+        return False, f"memory: {snap.memory_headroom / jobs.GB:.1f} GB free, job needs {mem / jobs.GB:.1f} GB", 0
+    if snap.disk_free - disk < jobs.DISK_RESERVE:
+        return False, f"disk: {snap.disk_free / jobs.GB:.0f} GB free, job needs {disk / jobs.GB:.1f} GB", 0
+    if running and snap.idle_cores < MIN_IDLE_CORES:
+        return False, f"cpu: {snap.idle_cores:.1f} cores idle", 0
+    return True, "", max(2, min(MAX_JOB_THREADS, int(snap.idle_cores) - 1))
+
+
+_last_wait_log = 0.0
+
+
+def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
+    """Take the next queued job (jobs.QUEUE_ORDER) if the host has room for it.
+    The head of the queue waits rather than letting smaller jobs overtake it."""
+    global _last_wait_log
     now = db.now()
     with db.tx() as c:
         row = c.execute(
-            f"SELECT j.id FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 1"
+            f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 1"
         ).fetchone()
         if row is None:
             return None
+        threads = None
+        if load is not None:
+            running = [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
+            ok, why, threads = admission(dict(row), load.snapshot(), running)
+            if not ok:
+                if time.monotonic() - _last_wait_log > 60:
+                    _last_wait_log = time.monotonic()
+                    log.info("job %s waits for resources (%s)", row["id"], why)
+                return None
         c.execute(
             "UPDATE jobs SET status = 'running', worker_id = ?, heartbeat_at = ?, attempts = attempts + 1,"
             " started_at = COALESCE(started_at, ?) WHERE id = ?",
             (worker_id, now, now, row["id"]),
         )
-        return dict(c.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone())
+        job = dict(c.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone())
+        job["threads"] = threads
+        return job
 
 
 def _write_spec(job: dict, extra: dict) -> Path:
@@ -256,6 +297,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: _stop.set())
     signal.signal(signal.SIGINT, lambda *_: _stop.set())
     log.info("worker %s started", worker_id)
+    load = hostload.get(get_settings().data_dir)
     last_sweep = 0.0
     while not _stop.is_set():
         if time.monotonic() - last_sweep > 60:
@@ -264,12 +306,12 @@ def main() -> None:
                 jobs.sweep()
             except Exception:  # noqa: BLE001
                 log.exception("sweep failed")
-        job = claim(worker_id)
+        job = claim(worker_id, load)
         if job is None:
-            _stop.wait(1.0)
+            _stop.wait(2.0)
             continue
-        log.info("job %s (%s) claimed", job["id"], job["kind"])
-        process(job, extra)
+        log.info("job %s (%s) claimed with %s threads", job["id"], job["kind"], job["threads"])
+        process(job, {**extra, "threads": job["threads"] or extra["threads"]})
 
 
 if __name__ == "__main__":

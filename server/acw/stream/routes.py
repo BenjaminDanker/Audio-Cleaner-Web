@@ -151,6 +151,47 @@ async def stream_ws(ws: WebSocket) -> None:
             await _finish(sess)
 
 
+def _drop_worker(sess: "Session") -> None:
+    """Close the worker connection of a session that won't run."""
+    if sess.writer is not None:
+        sess.writer.close()
+        sess.writer = None
+
+
+async def _await_ready(ws: WebSocket, sess: "Session") -> tuple[int | None, dict]:
+    """Read the worker's answer to `start`, relaying waiting-line updates to the
+    client. Returns (None, {}) if the client leaves while waiting."""
+    client = asyncio.create_task(ws.receive())
+    try:
+        while True:
+            read = asyncio.ensure_future(P.read_msg(sess.reader))
+            while True:
+                done, _ = await asyncio.wait({read, client}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
+                if client not in done:
+                    break
+                if client.result().get("type") == "websocket.disconnect":
+                    read.cancel()
+                    return None, {}
+                client = asyncio.create_task(ws.receive())  # nothing to act on before `ready`
+                if read.done():
+                    break
+            if not read.done():
+                read.cancel()
+                raise TimeoutError("stream worker did not answer")
+            kind, payload = read.result()
+            msg = json.loads(payload)
+            if kind != P.MSG_EVENT or msg.get("type") != "queued":
+                return kind, msg
+            try:
+                await _send_json(ws, {"type": "queued", "position": int(msg.get("position", 1)),
+                                      "message": "Live is busy, you're in line. This starts by itself."})
+            except Exception:  # noqa: BLE001 - client went away mid-send
+                return None, {}
+    finally:
+        if not client.done():
+            client.cancel()
+
+
 async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session | None:
     try:
         raw = await asyncio.wait_for(ws.receive_text(), timeout=START_TIMEOUT)
@@ -217,12 +258,19 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         worker_cfg["tap_pcm"] = captions == "premium"
         worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
         await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
-        kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
-        ready = json.loads(payload)
+        # The worker may first put the session in its waiting line ("queued"
+        # events, every <=10 s; it gives up by itself after 15 minutes). Watch
+        # the client meanwhile so someone who leaves doesn't hold the line.
+        kind, ready = await _await_ready(ws, sess)
+        if kind is None:
+            sess.end_reason = "client_closed"
+            _drop_worker(sess)
+            return sess
         if kind == P.MSG_EVENT and ready.get("code") == "capacity":
             sess.end_reason = "capacity"
+            _drop_worker(sess)
             await _send_json(ws, {"type": "error", "code": "busy",
-                                  "message": "Live is full right now. Please try again in a few minutes."})
+                                  "message": "Live has been full for a while. Please try again later."})
             await ws.close(code=1013)
             return sess
         if kind != P.MSG_EVENT or ready.get("type") != "ready":
@@ -230,6 +278,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
     except Exception:  # noqa: BLE001
         log.exception("stream worker unavailable")
         sess.end_reason = "worker_unavailable"
+        _drop_worker(sess)
         await _send_json(ws, {"type": "error", "code": "unavailable", "message": "Live processing is busy or offline, try again soon."})
         await ws.close(code=1013)
         return sess

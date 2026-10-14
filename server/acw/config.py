@@ -79,6 +79,7 @@ class Settings:
     admin_emails: list[str] = field(default_factory=list)
 
     max_upload_bytes: int = 4 * 1024**3
+    workers: int = 3  # file-job worker units (ACW_WORKERS), used for queue estimates
     job_output_ttl_hours: int = 24
     stream_worker_socket: Path | None = None
 
@@ -149,6 +150,7 @@ def get_settings() -> Settings:
         turnstile_secret=_env("TURNSTILE_SECRET"),
         admin_emails=[e.lower() for e in _env_list("ACW_ADMIN_EMAILS")],
         max_upload_bytes=_env_int("ACW_MAX_UPLOAD_BYTES", 4 * 1024**3),
+        workers=_env_int("ACW_WORKERS", 3),
         job_output_ttl_hours=_env_int("ACW_JOB_OUTPUT_TTL_HOURS", 24),
         stream_worker_socket=Path(_env("ACW_STREAM_SOCKET", str(data_dir / "stream.sock"))),
     )

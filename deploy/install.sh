@@ -45,7 +45,7 @@ mkdir -p "$U"
 install -m 644 "$REPO"/deploy/systemd/*.service "$REPO"/deploy/systemd/*.timer "$REPO"/deploy/systemd/*.slice "$U/"
 systemctl --user daemon-reload
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
-WORKERS="${ACW_WORKERS:-2}"
+WORKERS="${ACW_WORKERS:-3}"
 UNITS="acw-stream.service acw-web.service acw-tunnel.service"
 for i in $(seq 1 "$WORKERS"); do UNITS="$UNITS acw-worker@$i.service"; done
 systemctl --user enable $UNITS >/dev/null 2>&1

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -110,6 +111,22 @@ class _SharedWhisper:
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="live-asr")
 
 
+_caption_wait = 0.0  # EWMA of how long utterances wait for a free model worker
+_caption_wait_at = 0.0
+
+
+def _note_caption_wait(seconds: float) -> None:
+    global _caption_wait, _caption_wait_at
+    _caption_wait += 0.3 * (seconds - _caption_wait)
+    _caption_wait_at = time.monotonic()
+
+
+def caption_backlog_seconds() -> float:
+    """Recent queueing delay of the shared caption model (decays when idle)."""
+    idle = time.monotonic() - _caption_wait_at
+    return _caption_wait * max(0.0, 1 - idle / 30)
+
+
 _whisper: _SharedWhisper | None = None
 _whisper_lock = threading.Lock()
 
@@ -173,13 +190,18 @@ class UtteranceCaptioner:
     MAX_WAITING = 2
 
     def _submit(self, audio: np.ndarray, start: float) -> None:
+        submitted = time.monotonic()
         self.pending = [f for f in self.pending if not f.done()]
         waiting = [f for f in self.pending if not f.running()]
         while len(waiting) >= self.MAX_WAITING:
             if waiting.pop(0).cancel():
                 log.info("caption backlog: dropped an utterance")
         self.pending = [f for f in self.pending if not f.cancelled()]
-        self.pending.append(self.whisper.pool.submit(self._transcribe_safe, audio, start))
+        self.pending.append(self.whisper.pool.submit(self._timed, submitted, audio, start))
+
+    def _timed(self, submitted: float, audio: np.ndarray, start: float) -> None:
+        _note_caption_wait(time.monotonic() - submitted)
+        self._transcribe_safe(audio, start)
 
     def flush(self, timeout: float = 6.0) -> None:
         """Transcribe whatever is buffered and wait for outstanding work."""

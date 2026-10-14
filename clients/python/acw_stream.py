@@ -60,6 +60,9 @@ async def run(args) -> int:
             "codec": args.codec, "opusBitrate": args.bitrate,
         }))
         ready = json.loads(await ws.recv())
+        while ready.get("type") == "queued":  # server busy: wait in line, it starts by itself
+            print(f"waiting in line, position {ready.get('position')}")
+            ready = json.loads(await ws.recv())
         print("server:", ready)
         if ready.get("type") != "ready":
             return 1
