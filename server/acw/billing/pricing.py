@@ -21,17 +21,18 @@ class Rate:
     available: bool = True
 
 
+# Labels are shown to customers: describe what they get, never how it's made.
 _RATE_LIST = [
     # File processing
-    Rate("denoise", "standard", "Studio clean (DeepFilterNet3 + clarity chain)", 10_000),
-    Rate("transcribe", "local", "Transcription - standard (on-prem model)", 4_000),
-    Rate("transcribe", "premium", "Transcription - premium (OpenAI)", 15_000),
+    Rate("denoise", "standard", "Studio clean", 10_000),
+    Rate("transcribe", "local", "Transcription", 4_000),
+    Rate("transcribe", "premium", "Transcription, premium accuracy", 15_000),
     # Live streaming
-    Rate("stream_denoise", "light", "Live denoise - standard (DeepFilterNet3, 30 ms)", 4_000),
-    Rate("stream_denoise", "low_latency", "Live denoise - low latency (DeepFilterNet3-LL, 10 ms)", 8_000),
-    Rate("stream_captions", "local", "Live captions - standard (on-prem model)", 6_000),
-    # OpenAI gpt-live-transcribe is $0.017/min of audio sent; we only send speech.
-    Rate("stream_captions", "premium", "Live captions - premium (OpenAI realtime)", 25_000),
+    Rate("stream_denoise", "light", "Live noise removal", 4_000),
+    Rate("stream_denoise", "low_latency", "Live noise removal, low latency", 8_000),
+    Rate("stream_captions", "local", "Live captions", 6_000),
+    # The premium caption engine bills per minute of audio sent; we only send speech.
+    Rate("stream_captions", "premium", "Live captions, premium accuracy", 25_000),
 ]
 RATES: dict[tuple[str, str], Rate] = {(r.product, r.tier): r for r in _RATE_LIST}
 
