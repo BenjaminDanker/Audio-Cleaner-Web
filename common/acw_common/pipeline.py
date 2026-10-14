@@ -7,6 +7,7 @@ like the same file cleaned on the website.
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from . import clarity, dfn
+from .dfn import Cancelled
 from .ffmpeg import FFmpeg, ProbeResult
 
 SAMPLE_RATE = dfn.SAMPLE_RATE
@@ -40,10 +42,12 @@ def clean_audio(
     *,
     threads: int = 2,
     progress: Progress | None = None,
+    cancel: threading.Event | None = None,
 ) -> np.ndarray:
     """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
 
-    `progress` gets a fraction in [0, 1]; denoising is ~95% of the work."""
+    `progress` gets a fraction in [0, 1]; denoising is ~95% of the work.
+    Setting `cancel` aborts with `Cancelled`."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
@@ -56,9 +60,13 @@ def clean_audio(
                 progress(0.95 * (ch + f) / channels)
 
         per_ch.append(
-            dfn.denoise_array(x[:, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog)
+            dfn.denoise_array(
+                x[:, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel
+            )
         )
     y = np.stack(per_ch, axis=1)
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
     if opts.polish:
         y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
     if progress:
@@ -69,6 +77,9 @@ def clean_audio(
 def decode_for_clean(ff: FFmpeg, src: Path, probe: ProbeResult, max_seconds: float) -> np.ndarray:
     """Decode the first audio track at SAMPLE_RATE, keeping stereo (downmixing more)."""
     return ff.decode(src, probe, SAMPLE_RATE, min(probe.audio_channels, MAX_CHANNELS), max_seconds)
+
+
+__all__ = ["SAMPLE_RATE", "CleanOptions", "Cancelled", "clean_audio", "decode_for_clean", "as_output"]
 
 
 def as_output(y: np.ndarray) -> np.ndarray:

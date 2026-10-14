@@ -118,3 +118,17 @@ def test_mux_keeps_or_strips_metadata(tmp_path):
                               capture_output=True, text=True).stdout.strip()
         assert (tags == "hello") == keep
         assert ff.probe(out).has_video
+
+
+@needs_dfn
+def test_cancel_stops_quickly():
+    import threading
+    import time
+
+    _, noisy = voiced_noise(seconds=120.0)
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    t0 = time.monotonic()
+    with pytest.raises(pipeline.Cancelled):
+        pipeline.clean_audio(noisy, LIB, MODEL, threads=2, cancel=cancel)
+    assert time.monotonic() - t0 < 5

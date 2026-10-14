@@ -25,6 +25,12 @@ LIB_NAME = {"win32": "df.dll", "darwin": "libdf.dylib"}.get(sys.platform, "libdf
 MODEL_FILE = "DeepFilterNet3_onnx.tar.gz"
 
 _FP = ctypes.POINTER(ctypes.c_float)
+# How often (in hops, 10 ms each) a running segment checks for cancellation.
+_CANCEL_CHECK_HOPS = 500
+
+
+class Cancelled(Exception):
+    """Raised when the `cancel` event passed to a denoise call is set."""
 _lib_lock = threading.Lock()
 _libs: dict[str, ctypes.CDLL] = {}
 
@@ -85,13 +91,16 @@ class DeepFilter:
         lsnr = self._lib.df_process_frame(self._st, self._in.ctypes.data_as(_FP), self._out.ctypes.data_as(_FP))
         return self._out.copy(), float(lsnr)
 
-    def process(self, x: np.ndarray) -> np.ndarray:
+    def process(self, x: np.ndarray, cancel: threading.Event | None = None) -> np.ndarray:
         """Run a whole buffer (len multiple of hop) through the stateful model."""
         x = np.ascontiguousarray(x, dtype=np.float32)
         out = np.empty_like(x)
         hop = self.hop
         fn, st = self._lib.df_process_frame, self._st
+        check = hop * _CANCEL_CHECK_HOPS
         for i in range(0, len(x), hop):
+            if cancel is not None and i % check == 0 and cancel.is_set():
+                raise Cancelled()
             fn(st, x[i:i + hop].ctypes.data_as(_FP), out[i:i + hop].ctypes.data_as(_FP))
         return out
 
@@ -107,7 +116,9 @@ class DeepFilter:
             pass
 
 
-def _denoise_contiguous(lib_path, model_path, x: np.ndarray, atten_lim_db: float) -> np.ndarray:
+def _denoise_contiguous(lib_path, model_path, x: np.ndarray, atten_lim_db: float, cancel=None) -> np.ndarray:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
     df = DeepFilter(lib_path, model_path, atten_lim_db)
     try:
         hop = df.hop
@@ -115,7 +126,7 @@ def _denoise_contiguous(lib_path, model_path, x: np.ndarray, atten_lim_db: float
         total = int(math.ceil((n + MODEL_DELAY) / hop)) * hop
         padded = np.zeros(total, dtype=np.float32)
         padded[:n] = x
-        y = df.process(padded)
+        y = df.process(padded, cancel)
         return y[MODEL_DELAY:MODEL_DELAY + n]
     finally:
         df.close()
@@ -131,16 +142,19 @@ def denoise_array(
     segment_seconds: float = 60.0,
     overlap_seconds: float = 2.0,
     progress=None,
+    cancel: threading.Event | None = None,
 ) -> np.ndarray:
     """Denoise mono 48 kHz float32 audio. Long inputs are cut into segments
     with `overlap_seconds` of warm-up context on each side, processed in
-    parallel, and joined with a short equal-power crossfade."""
+    parallel, and joined with a short equal-power crossfade.
+
+    Setting `cancel` makes the call raise `Cancelled` within ~5 s of audio."""
     x = np.ascontiguousarray(x, dtype=np.float32)
     n = len(x)
     seg = int(segment_seconds * SAMPLE_RATE)
     ov = int(overlap_seconds * SAMPLE_RATE)
     if n <= seg + 2 * ov or threads <= 1:
-        out = _denoise_contiguous(lib_path, model_path, x, atten_lim_db)
+        out = _denoise_contiguous(lib_path, model_path, x, atten_lim_db, cancel)
         if progress:
             progress(1.0)
         return out
@@ -154,7 +168,7 @@ def denoise_array(
         nonlocal done
         s, e = bounds[i]
         lo, hi = max(0, s - ov), min(n, e + ov)
-        y = _denoise_contiguous(lib_path, model_path, x[lo:hi], atten_lim_db)
+        y = _denoise_contiguous(lib_path, model_path, x[lo:hi], atten_lim_db, cancel)
         results[i] = y
         with lock:
             done += 1
