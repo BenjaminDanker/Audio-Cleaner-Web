@@ -162,24 +162,31 @@ def denoise_array(
     overlap_seconds: float = 2.0,
     progress=None,
     cancel: threading.Event | None = None,
+    out: np.ndarray | None = None,
 ) -> np.ndarray:
     """Denoise mono 48 kHz float32 audio. Long inputs are cut into segments
     with `overlap_seconds` of warm-up context on each side, processed in
     parallel, and joined with a short equal-power crossfade.
 
-    Setting `cancel` makes the call raise `Cancelled` within ~5 s of audio."""
-    x = np.ascontiguousarray(x, dtype=np.float32)
+    Results go straight into `out` (any writable 1-D float32 array or view of
+    len(x), e.g. a column of a memory-mapped file), so memory use doesn't grow
+    with the length of the input. Setting `cancel` makes the call raise
+    `Cancelled` within ~5 s of audio."""
     n = len(x)
+    if out is None:
+        out = np.empty(n, dtype=np.float32)
     seg = int(segment_seconds * SAMPLE_RATE)
     ov = int(overlap_seconds * SAMPLE_RATE)
     if n <= seg + 2 * ov or threads <= 1:
-        out = _denoise_contiguous(lib_path, model_path, x, atten_lim_db, cancel)
+        out[:] = _denoise_contiguous(lib_path, model_path, np.ascontiguousarray(x, dtype=np.float32), atten_lim_db, cancel)
         if progress:
             progress(1.0)
         return out
 
     bounds = [(s, min(s + seg, n)) for s in range(0, n, seg)]
-    results: list[np.ndarray | None] = [None] * len(bounds)
+    fade = min(int(0.05 * SAMPLE_RATE), ov)  # 50 ms crossfade inside the warm overlap
+    heads: dict[int, np.ndarray] = {}  # first `fade` samples of segment i (i > 0), blended below
+    tails: dict[int, np.ndarray] = {}  # `fade` samples segment i produced past its end
     done = 0
     lock = threading.Lock()
 
@@ -187,9 +194,15 @@ def denoise_array(
         nonlocal done
         s, e = bounds[i]
         lo, hi = max(0, s - ov), min(n, e + ov)
-        y = _denoise_contiguous(lib_path, model_path, x[lo:hi], atten_lim_db, cancel)
-        results[i] = y
+        y = _denoise_contiguous(lib_path, model_path, np.ascontiguousarray(x[lo:hi], dtype=np.float32), atten_lim_db, cancel)
+        core = y[s - lo:e - lo]
+        head = fade if i > 0 else 0
+        out[s + head:e] = core[head:]
         with lock:
+            if head:
+                heads[i] = core[:head].copy()
+            if i + 1 < len(bounds):
+                tails[i] = y[e - lo:e - lo + fade].copy()
             done += 1
             if progress:
                 progress(done / len(bounds))
@@ -197,23 +210,9 @@ def denoise_array(
     with ThreadPoolExecutor(max_workers=threads) as pool:
         list(pool.map(work, range(len(bounds))))
 
-    out = np.zeros(n, dtype=np.float32)
-    fade = min(int(0.05 * SAMPLE_RATE), ov)  # 50 ms crossfade inside the warm overlap
-    ramp = np.sin(np.linspace(0, np.pi / 2, fade, dtype=np.float32)) ** 2 if fade else None
-    for i, (s, e) in enumerate(bounds):
-        lo = max(0, s - ov)
-        y = results[i]
-        assert y is not None
-        core = y[s - lo:s - lo + (e - s)]
-        if i == 0 or ramp is None:
-            out[s:e] = core
-            continue
-        # Blend the first `fade` samples of this segment with the previous
-        # segment's tail, which extends past `s` inside its own overlap.
-        prev_s, _prev_e = bounds[i - 1]
-        prev_lo = max(0, prev_s - ov)
-        prev = results[i - 1]
-        tail = prev[s - prev_lo:s - prev_lo + fade]
-        out[s:s + fade] = tail * (1 - ramp) + core[:fade] * ramp
-        out[s + fade:e] = core[fade:]
+    if fade:
+        ramp = np.sin(np.linspace(0, np.pi / 2, fade, dtype=np.float32)) ** 2
+        for i in range(1, len(bounds)):
+            s = bounds[i][0]
+            out[s:s + fade] = tails[i - 1] * (1 - ramp) + heads[i] * ramp
     return out

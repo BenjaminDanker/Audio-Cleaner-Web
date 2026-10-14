@@ -98,8 +98,6 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
 
 
 def stage_main(job_dir: Path, spec: dict) -> dict:
-    import numpy as np
-
     from acw_common import pipeline
 
     ff = _ff(spec)
@@ -117,7 +115,9 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     speech_16k = None
     if denoise:
         emit(stage="decoding", progress=2)
-        x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"])
+        # Decoded and cleaned audio live in memory-mapped files in the job
+        # directory, so RAM use doesn't grow with the length of the upload.
+        x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
         emit(stage="denoising", progress=5)
         span = 70 if not transcribe else 45
         y = pipeline.clean_audio(
@@ -128,22 +128,21 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             ),
             threads=threads,
             progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(5 + span * f)),
+            out=pipeline.output_buffer(x, job_dir),
         )
         fmt = opts.get("audio_format", "wav")
         cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
-        if transcribe:
-            from scipy.signal import resample_poly
-
-            # Transcribe the original: every ASR model tested scores worse on
-            # denoised speech (docs/research/asr.md).
-            speech_16k = resample_poly(x.mean(axis=1), 1, 3).astype(np.float32)
         del x, y
+        for scratch in ("decoded.f32", "cleaned.npy"):
+            (job_dir / scratch).unlink(missing_ok=True)
 
     needs_cloud = False
     if transcribe:
         if speech_16k is None:
-            emit(stage="decoding", progress=3)
+            # The original, not the cleaned audio: every ASR model tested scores
+            # worse on denoised speech (docs/research/asr.md).
+            emit(stage="decoding", progress=3 if not denoise else 48)
             speech_16k = ff.decode(src, probe, 16000, 1, spec["max_seconds"])[:, 0]
         if spec["transcribe_tier"] == "premium":
             emit(stage="preparing transcription", progress=80)

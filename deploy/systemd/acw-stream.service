@@ -2,6 +2,7 @@
 Description=Audio Cleaner live DSP worker (Unix socket only)
 
 [Service]
+Slice=acw.slice
 Type=simple
 WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app
@@ -20,7 +21,8 @@ SystemCallFilter=~@privileged
 RestrictAddressFamilies=AF_UNIX
 # Live audio beats batch jobs (and plays fair with the Minecraft servers).
 CPUWeight=300
-MemoryMax=6G
+MemoryHigh=3G
+MemoryMax=4G
 TasksMax=400
 
 [Install]

@@ -4,6 +4,7 @@ After=network-online.target acw-stream.service
 Wants=acw-stream.service
 
 [Service]
+Slice=acw.slice
 Type=simple
 WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app
@@ -22,7 +23,7 @@ SystemCallFilter=@system-service @sandbox
 SystemCallErrorNumber=EPERM
 SystemCallFilter=~@privileged
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-MemoryMax=3G
+MemoryMax=2G
 TasksMax=300
 
 [Install]

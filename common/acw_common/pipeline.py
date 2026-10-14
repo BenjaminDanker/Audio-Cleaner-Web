@@ -43,28 +43,29 @@ def clean_audio(
     threads: int = 2,
     progress: Progress | None = None,
     cancel: threading.Event | None = None,
+    out: np.ndarray | None = None,
 ) -> np.ndarray:
     """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
 
     `progress` gets a fraction in [0, 1]; denoising is ~95% of the work.
-    Setting `cancel` aborts with `Cancelled`."""
+    Setting `cancel` aborts with `Cancelled`. The result is written into `out`
+    when given (same shape, float32; e.g. a memory-mapped file, so long inputs
+    need little RAM), otherwise into a new array."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
         x = x[:, None]
     channels = x.shape[1]
-    per_ch = []
+    y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
     for ch in range(channels):
         def prog(f: float, ch: int = ch) -> None:
             if progress:
                 progress(0.95 * (ch + f) / channels)
 
-        per_ch.append(
-            dfn.denoise_array(
-                x[:, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel
-            )
+        dfn.denoise_array(
+            x[:, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel,
+            out=y[:, ch],
         )
-    y = np.stack(per_ch, axis=1)
     if cancel is not None and cancel.is_set():
         raise Cancelled()
     if opts.polish:
@@ -74,12 +75,27 @@ def clean_audio(
     return y
 
 
-def decode_for_clean(ff: FFmpeg, src: Path, probe: ProbeResult, max_seconds: float) -> np.ndarray:
-    """Decode the first audio track at SAMPLE_RATE, keeping stereo (downmixing more)."""
-    return ff.decode(src, probe, SAMPLE_RATE, min(probe.audio_channels, MAX_CHANNELS), max_seconds)
+def decode_for_clean(
+    ff: FFmpeg, src: Path, probe: ProbeResult, max_seconds: float, work_dir: Path | None = None
+) -> np.ndarray:
+    """Decode the first audio track at SAMPLE_RATE, keeping stereo (downmixing more).
+
+    With `work_dir`, the samples go to a raw file there and come back
+    memory-mapped (read-only), so RAM use stays flat for long files."""
+    channels = min(probe.audio_channels, MAX_CHANNELS)
+    if work_dir is None:
+        return ff.decode(src, probe, SAMPLE_RATE, channels, max_seconds)
+    return ff.decode_to_file(src, probe, SAMPLE_RATE, channels, max_seconds, Path(work_dir) / "decoded.f32")
 
 
-__all__ = ["SAMPLE_RATE", "CleanOptions", "Cancelled", "clean_audio", "decode_for_clean", "as_output"]
+def output_buffer(like: np.ndarray, work_dir: Path | None = None) -> np.ndarray:
+    """A float32 array shaped like `like`: memory-mapped in `work_dir` when given."""
+    if work_dir is None:
+        return np.empty(like.shape, dtype=np.float32)
+    return np.lib.format.open_memmap(Path(work_dir) / "cleaned.npy", mode="w+", dtype=np.float32, shape=like.shape)
+
+
+__all__ = ["SAMPLE_RATE", "CleanOptions", "Cancelled", "clean_audio", "decode_for_clean", "output_buffer", "as_output"]
 
 
 def as_output(y: np.ndarray) -> np.ndarray:

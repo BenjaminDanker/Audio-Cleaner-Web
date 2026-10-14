@@ -2,6 +2,7 @@
 Description=Audio Cleaner file-job worker %i (no network)
 
 [Service]
+Slice=acw.slice
 Type=simple
 WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app
@@ -22,7 +23,8 @@ RestrictAddressFamilies=AF_UNIX
 Nice=10
 CPUWeight=50
 IOWeight=50
-MemoryMax=14G
+MemoryHigh=4G
+MemoryMax=5G
 TasksMax=200
 
 [Install]

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,21 +105,66 @@ class FFmpeg:
         )
 
     def decode(self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float) -> np.ndarray:
-        """Decode the first audio track to float32 (samples, channels)."""
+        """Decode the first audio track to float32 (samples, channels).
+
+        Reads straight into one buffer sized from the probed duration (grown if
+        the stream turns out longer), so a long file is held in memory once."""
         args = [
             self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-i", str(path),
             "-map", f"0:{probe.audio_index}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
             "-ac", str(channels), "-ar", str(sr), "-f", "f32le", "-threads", str(self.threads), "pipe:1",
         ]
-        r = self._run(args, timeout=max_seconds + 600)
-        if r.returncode != 0:
+        frame = 4 * channels
+        buf = bytearray(int(min(probe.duration, max_seconds) * sr + sr) * frame)
+        used = 0
+        with tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err, **_NO_WINDOW)
+            try:
+                view = memoryview(buf)
+                while True:
+                    if used == len(buf):
+                        view.release()
+                        buf.extend(bytes(len(buf) // 4 + frame * sr))
+                        view = memoryview(buf)
+                    got = proc.stdout.readinto(view[used:])
+                    if not got:
+                        break
+                    used += got
+                view.release()
+                proc.wait(timeout=max_seconds + 600)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                proc.stdout.close()
+        if proc.returncode != 0:
             raise MediaError("Decoding the audio failed.")
-        x = np.frombuffer(r.stdout, dtype=np.float32)
-        if x.size < channels * sr // 10:
+        used -= used % frame
+        if used < frame * sr // 10:
             raise MediaError("The audio track is empty.")
-        return x.reshape(-1, channels).copy()
+        del buf[used:]
+        return np.frombuffer(buf, dtype=np.float32).reshape(-1, channels)
+
+    def decode_to_file(
+        self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float, raw: Path
+    ) -> np.ndarray:
+        """Like decode(), but FFmpeg writes the samples to `raw` and they come back
+        memory-mapped (read-only) instead of being held in RAM."""
+        args = [
+            self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-i", str(path),
+            "-map", f"0:{probe.audio_index}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
+            "-ac", str(channels), "-ar", str(sr), "-f", "f32le", "-threads", str(self.threads), "-y", str(raw),
+        ]
+        if self._run(args, timeout=max_seconds + 600).returncode != 0:
+            raise MediaError("Decoding the audio failed.")
+        size = raw.stat().st_size // (4 * channels)
+        if size < sr // 10:
+            raise MediaError("The audio track is empty.")
+        return np.memmap(raw, dtype=np.float32, mode="r", shape=(size, channels))
 
     def write_audio(self, x: np.ndarray, sr: int, out: Path, fmt: str) -> Path:
+        """Encode float32 audio to `out` (suffix set by `fmt`), streaming it to
+        FFmpeg in blocks so a long (or memory-mapped) input is never copied whole."""
         ext, codec_args = AUDIO_FORMATS[fmt]
         out = out.with_suffix(ext)
         channels = 1 if x.ndim == 1 else x.shape[1]
@@ -126,9 +172,24 @@ class FFmpeg:
             self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", str(channels),
             "-i", "pipe:0", *codec_args, "-threads", str(self.threads), "-y", str(out),
         ]
-        p = self._run(args, timeout=3600, input=np.ascontiguousarray(x, dtype=np.float32).tobytes())
-        if p.returncode != 0:
-            raise RuntimeError(f"encode failed: {p.stderr[-500:]!r}")
+        block = sr * 10
+        with tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err, **_NO_WINDOW)
+            try:
+                for s in range(0, len(x), block):
+                    proc.stdin.write(np.ascontiguousarray(x[s:s + block], dtype=np.float32).tobytes())
+                proc.stdin.close()
+                proc.wait(timeout=3600)
+            except (BrokenPipeError, OSError):
+                proc.kill()
+                proc.wait()
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+            if proc.returncode != 0:
+                err.seek(0)
+                raise RuntimeError(f"encode failed: {err.read()[-500:]!r}")
         return out
 
     def mux_video(

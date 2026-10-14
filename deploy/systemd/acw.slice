@@ -1,0 +1,12 @@
+# All Audio Cleaner services share this budget so they can never crowd out the
+# other services on the host (the Minecraft servers start on demand and need
+# their RAM). File jobs work through memory-mapped scratch files, so their RAM
+# use is bounded (~2 GB per job for any length; local transcription adds the
+# model, ~2 GB); see docs/operations.md.
+[Unit]
+Description=Audio Cleaner services
+
+[Slice]
+MemoryHigh=11G
+MemoryMax=12G
+CPUWeight=80

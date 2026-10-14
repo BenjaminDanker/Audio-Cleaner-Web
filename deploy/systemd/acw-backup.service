@@ -2,6 +2,7 @@
 Description=Audio Cleaner database snapshot (balances, payments, jobs metadata)
 
 [Service]
+Slice=acw.slice
 Type=oneshot
 WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app

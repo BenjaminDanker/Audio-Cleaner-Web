@@ -77,7 +77,7 @@ def test_premium_transcription_stage_machine(client, signed_in, monkeypatch):
 def test_garbage_upload_fails_cleanly_and_refunds(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 1_000_000, "grant", "t", "g")
-    data = os.urandom(200_000)
+    data = b"this is not a media file\n" * 8000  # random bytes sometimes probe as mp3
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "x.mp4",
                                        "sizeBytes": len(data), "durationSeconds": 60}, headers=h)
     job_id = r.json()["id"]

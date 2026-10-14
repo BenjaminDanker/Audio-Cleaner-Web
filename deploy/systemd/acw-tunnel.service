@@ -3,6 +3,7 @@ Description=Audio Cleaner reverse tunnel to the VPS (VPS 127.0.0.1:18790 -> 127.
 After=network-online.target
 
 [Service]
+Slice=acw.slice
 Type=simple
 # -F none: ignore ~/.ssh/config (its "vps" host disables forwardings).
 # The key is restricted on the VPS to this single listen port, no shell.

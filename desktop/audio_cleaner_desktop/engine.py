@@ -36,10 +36,10 @@ OUTPUT_AUDIO_FORMATS = ("wav", "flac", "m4a", "opus")
 AUDIO_CHOICES = ("same", *OUTPUT_AUDIO_FORMATS)
 
 MAX_SECONDS = 6 * 3600
-# The whole file is held in memory as float32 (roughly 0.4 GB per hour and channel once
-# the intermediate copies are counted), so the UI warns about very long files.
+# Audio is processed through memory-mapped scratch files (~0.7 GB of disk per
+# hour and channel, twice), so long files need free disk space rather than RAM.
 LONG_FILE_SECONDS = 3 * 3600
-GB_PER_HOUR_PER_CHANNEL = 0.4
+GB_PER_HOUR_PER_CHANNEL = 1.4
 
 _SAME_AS_INPUT = {
     ".wav": "wav", ".flac": "flac", ".aiff": "wav", ".aif": "wav", ".aifc": "wav",
@@ -91,7 +91,8 @@ def probe(path: Path | str, ff: FFmpeg | None = None) -> ProbeResult:
     return result
 
 
-def estimated_memory_gb(duration: float, channels: int) -> float:
+def estimated_scratch_gb(duration: float, channels: int) -> float:
+    """Temporary disk space a job needs next to its output."""
     return duration / 3600 * min(channels, pipeline.MAX_CHANNELS) * GB_PER_HOUR_PER_CHANNEL
 
 
@@ -172,21 +173,26 @@ def process_file(
         raise MediaError(f"Cannot write to the folder {dest_dir}: {e.strerror or e}") from e
 
     try:
-        _check_cancel(cancel)
-        x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS)
-        report(_DECODE_SHARE)
-        y = pipeline.clean_audio(
-            x,
-            resources.libdf_path(),
-            resources.model_path(),
-            pipeline.CleanOptions(atten_lim_db=options.atten_lim_db, polish=options.polish),
-            threads=worker_threads(),
-            progress=lambda f: report(_DECODE_SHARE + _CLEAN_SHARE * f),
-            cancel=cancel,
-        )
-        del x
-        _check_cancel(cancel)
-        _write(ff, src, pipeline.as_output(y), info, options, tmp_out)
+        # Decoded and cleaned audio are memory-mapped scratch files next to the
+        # output (same disk; never a RAM-backed /tmp), so RAM use stays flat.
+        with tempfile.TemporaryDirectory(dir=dest_dir, prefix=".acw-work-") as work:
+            _check_cancel(cancel)
+            x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=Path(work))
+            report(_DECODE_SHARE)
+            y = pipeline.clean_audio(
+                x,
+                resources.libdf_path(),
+                resources.model_path(),
+                pipeline.CleanOptions(atten_lim_db=options.atten_lim_db, polish=options.polish),
+                threads=worker_threads(),
+                progress=lambda f: report(_DECODE_SHARE + _CLEAN_SHARE * f),
+                cancel=cancel,
+                out=pipeline.output_buffer(x, Path(work)),
+            )
+            _check_cancel(cancel)
+            _write(ff, src, pipeline.as_output(y), info, options, tmp_out)
+            # Windows can't delete a file that is still mapped.
+            del x, y
         _check_cancel(cancel)
         final = unique_output(dest_dir, src.stem, ext)
         os.replace(tmp_out, final)

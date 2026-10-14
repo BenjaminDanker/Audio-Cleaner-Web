@@ -74,7 +74,7 @@ def _write_spec(job: dict, extra: dict) -> Path:
         "max_seconds": max_seconds,
         # Generous ceilings; the wall-clock timeout below is the real limit.
         "cpu_seconds": int(max_seconds * 6 + 1800),
-        "address_space_bytes": 24 * 1024**3,
+        "address_space_bytes": 32 * 1024**3,  # memory-mapped scratch files count here, not in RAM
         "max_file_bytes": 16 * 1024**3,
     }
     (d / "spec.json").write_text(json.dumps(spec))

@@ -42,7 +42,7 @@ chmod 600 "$H/secrets/"*.env
 # 6. systemd user units
 U="$HOME/.config/systemd/user"
 mkdir -p "$U"
-install -m 644 "$REPO"/deploy/systemd/*.service "$REPO"/deploy/systemd/*.timer "$U/"
+install -m 644 "$REPO"/deploy/systemd/*.service "$REPO"/deploy/systemd/*.timer "$REPO"/deploy/systemd/*.slice "$U/"
 systemctl --user daemon-reload
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
 WORKERS="${ACW_WORKERS:-2}"
