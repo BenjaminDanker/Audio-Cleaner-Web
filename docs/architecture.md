@@ -26,10 +26,23 @@
 |---|---|---|
 | Free browser denoise | user's browser (DFN3 WASM, Web Worker) | VPS egress for ~8 MB of assets per new visitor (wasm 3.9 MB gz + model 8 MB) |
 | Studio clean (paid) | acw-worker → runner: decode → DFN3 (threaded segments) → clarity chain (level match, HPF, compressor, loudness, limiter) → encode / remux | CPU on primary-ram |
+| Desktop app (free) | user's computer: same `acw_common` pipeline as Studio clean, bundled libDF + LGPL FFmpeg | GitHub Releases bandwidth (free); update check hits a static JSON on the VPS |
 | Live (paid) | OBS plugin ⇄ acw-web ⇄ acw-stream; 20 ms frames, 30 ms model latency | CPU; ~0.1 core per stream |
 | Transcription standard (paid + free quota) | runner: faster-whisper large-v3-turbo int8 | CPU (RTF ≈ 0.45 at 8 threads on the 1700X) |
 | Transcription premium (paid) | runner makes ≤10 min mp3 chunks → acw-web sends to OpenAI `gpt-4o-transcribe-diarize` | OpenAI per-minute fee |
 | Live captions standard / premium | acw-stream utterance captioner (whisper small) / acw-web ⇄ OpenAI Realtime (`gpt-live-transcribe`) | CPU / OpenAI fee |
+
+## Shared code
+
+`common/acw_common` holds everything both the server and the desktop app run:
+the libDF ctypes engine (`dfn`), the clarity chain (`clarity`), the FFmpeg
+wrappers (`ffmpeg`) and the Studio-clean chain built from them (`pipeline`).
+The server's runner and live engine import it; `deploy/install.sh` copies it
+next to `acw` in `~/audio-cleaner/app`, and the sandboxed runner gets both on
+its `PYTHONPATH` and in its Landlock read set. A change to the chain therefore
+ships to the website and the next desktop release alike. Native builds are
+shared too: `native/deepfilter/build.sh` produces the server `.so`, the desktop
+`.dylib`/`.dll` and the browser `.wasm` from one pinned libDF.
 
 ## Data flow and retention
 
