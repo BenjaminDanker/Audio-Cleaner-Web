@@ -104,7 +104,7 @@ if (want('studio')) {
     await dlg.getByRole('checkbox').check();
     await dlg.getByRole('button', { name: 'Accept and continue' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    const card = await waitJob('noisy.wav');
+    const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
     if (status !== 'done') throw new Error('status ' + status + ' ' + (await card.innerText()));
     await page.screenshot({ path: join(SHOTS, 'studio-done.png'), fullPage: true });
@@ -162,7 +162,7 @@ if (want('transcribe')) {
     await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
     await page.getByRole('button', { name: 'Start free transcription' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    const card = await waitJob('noisy.wav', 300000);
+    const card = await waitJob('noisy.', 300000);
     const st = await card.getAttribute('data-status');
     if (st !== 'done') throw new Error(st + ' ' + (await card.innerText()));
     const names = await card.locator('.oname').allInnerTexts();
@@ -178,23 +178,28 @@ if (want('transcribe')) {
 }
 
 if (want('billing')) {
-  await check('billing: renders, checkout 503 -> friendly message', async () => {
+  await check('billing: payments off -> Pay, refund and card buttons are disabled with an explanation', async () => {
     await gotoApp('/app/billing');
     await page.waitForSelector('[data-testid=payments-off]');
-    await page.getByRole('button', { name: /^Pay / }).click();
-    const err = await page.getByTestId('topup-error').innerText({ timeout: 10000 });
-    if (!/not available yet/i.test(err)) throw new Error(err);
+    const pay = page.getByRole('button', { name: /^Pay / });
+    if (!(await pay.isDisabled())) throw new Error('Pay button should be disabled while payments are off');
+    const note = await page.getByTestId('topup-off').innerText();
+    if (!/not available yet/i.test(note)) throw new Error(note);
+    if ((await pay.getAttribute('aria-describedby')) !== 'topup-off') throw new Error('Pay button is not described by the note');
+    if (!(await page.getByRole('button', { name: 'Manage card and receipts' }).isDisabled())) throw new Error('card portal button enabled');
     await page.screenshot({ path: join(SHOTS, 'billing.png'), fullPage: true });
-    return err;
+    return note;
   });
   await check('billing: custom amount validation + auto-reload text + ledger', async () => {
     await page.locator('label:has(input[value=custom])').click();
+    const hint = page.locator('#custom-hint');
     await page.getByLabel('Custom amount (USD)').fill('5');
-    if (!(await page.getByRole('button', { name: /^Pay/ }).isDisabled())) throw new Error('should be disabled under $10');
+    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid under $10');
     await page.getByLabel('Custom amount (USD)').fill('600');
-    if (!(await page.getByRole('button', { name: /^Pay/ }).isDisabled())) throw new Error('should be disabled over $500');
+    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid over $500');
     await page.getByLabel('Custom amount (USD)').fill('25');
-    if (await page.getByRole('button', { name: /^Pay/ }).isDisabled()) throw new Error('should be enabled');
+    if (/neg/.test(await hint.getAttribute('class'))) throw new Error('$25 should be valid');
+    if (!(await page.getByRole('button', { name: /^Pay/ }).isDisabled())) throw new Error('still disabled while payments are off');
     const text = await page.getByTestId('ar-consent-text').innerText();
     if (!/I authorize Audio Cleaner to charge my saved card \$20\.00 whenever my balance falls below \$5\.00, up to \$100\.00 per calendar month, until I turn this off\./.test(text)) throw new Error(text);
     const rows = await page.locator('[data-testid=ledger] tbody tr').count();
@@ -258,6 +263,9 @@ if (want('account')) {
     await p2.getByLabel(/Type your email/).fill(mail);
     await btn.click();
     await p2.waitForURL(/\/audio\/?$/, { timeout: 10000 });
+    await p2.getByTestId('account-deleted').waitFor({ timeout: 10000 });
+    await p2.getByText('Your account has been deleted.').waitFor();
+    await p2.waitForFunction(() => document.querySelector('.site-header a[href$="/login"]'), null, { timeout: 10000 }); // header now shows "Sign in"
     await p2.goto(`${BASE}/app`);
     await p2.waitForURL(/\/login$/);
     await ctx2.close();

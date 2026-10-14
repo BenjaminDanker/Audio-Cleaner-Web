@@ -2,6 +2,7 @@
 
 import { api, uploadBlob } from './api.js';
 import { extractAudio } from './media/extract.js';
+import { compressForUpload } from './media/flac.js';
 
 export const ACTIVE = new Set(['uploading', 'queued', 'running', 'cloud_asr', 'canceling']);
 
@@ -43,10 +44,12 @@ export function kindLabel(job) {
 
 /**
  * Create a job and upload its input. For video inputs the audio track is extracted in the browser first so only
- * the audio is uploaded (falls back to uploading the whole file).
- * @returns {Promise<{id:string, estCostMicros:number, extracted:boolean, uploadBytes:number, originalBytes:number, uploadName:string}>}
+ * the audio is uploaded (falls back to uploading the whole file). Uncompressed WAV/AIFF audio is losslessly encoded to
+ * FLAC first (falls back to the original). The declared filename and sizeBytes always describe what is uploaded.
+ * @returns {Promise<{id:string, estCostMicros:number, extracted:boolean, compressed:{from:number,to:number}|null,
+ *   uploadBytes:number, originalBytes:number, uploadName:string}>}
  */
-export async function submitJob({ file, info, body, onStage, onProgress, signal }) {
+export async function submitJob({ file, info, body, onStage, onProgress, onCompressed, signal }) {
   let blob = file;
   let name = file.name;
   let extracted = false;
@@ -66,6 +69,25 @@ export async function submitJob({ file, info, body, onStage, onProgress, signal 
       // fall back to uploading the whole file
     }
   }
+  let compressed = null;
+  if (!info?.hasVideo || extracted) {
+    try {
+      const out = await compressForUpload(blob, {
+        name, signal,
+        onStart: () => onStage?.('compress'),
+        onProgress: (p) => onProgress?.({ phase: 'compress', frac: p }),
+      });
+      if (out) {
+        compressed = { from: blob.size, to: out.bytesOut };
+        onCompressed?.(compressed);
+        blob = out.blob;
+        name = out.filename;
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError' || signal?.aborted) throw e;
+      // keep the uncompressed file
+    }
+  }
   if (signal?.aborted) throw new DOMException('Canceled', 'AbortError');
   onStage?.('create');
   const created = await api('jobs', {
@@ -79,5 +101,5 @@ export async function submitJob({ file, info, body, onStage, onProgress, signal 
     api(`jobs/${created.id}/cancel`, { method: 'POST', redirectOn401: false }).catch(() => {});
     throw e;
   }
-  return { id: created.id, estCostMicros: created.estCostMicros, extracted, uploadBytes: blob.size, originalBytes: file.size, uploadName: name };
+  return { id: created.id, estCostMicros: created.estCostMicros, extracted, compressed, uploadBytes: blob.size, originalBytes: file.size, uploadName: name };
 }

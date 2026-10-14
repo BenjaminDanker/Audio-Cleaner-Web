@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
-import { balanceMoney, bytes, clock, extension, human, money } from '../format.js';
+import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money } from '../format.js';
 import { estimateMicros, usePricing } from '../hooks.js';
 import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, submitJob } from '../jobs.js';
 import { probeMedia } from '../media/mb.js';
@@ -18,6 +18,8 @@ const KINDS = [
   { id: 'transcribe', title: 'Transcription', sub: 'Text and subtitles' },
   { id: 'denoise_transcribe', title: 'Both', sub: 'Clean first, then transcribe the clean audio' },
 ];
+
+const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
 
 function defaultAudioFormat(file, info) {
   if (!info?.hasVideo) return 'wav';
@@ -46,6 +48,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   const [language, setLanguage] = useState('');
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(null); // {phase, frac, loaded, total}
+  const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const abort = useRef(null);
@@ -99,6 +102,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
     setError('');
     setResult(null);
     setStep({ phase: 'create', frac: 0 });
+    setCompressedInfo(null);
     const ctl = new AbortController();
     abort.current = ctl;
     const body = {
@@ -120,6 +124,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
         file, info, body, signal: ctl.signal,
         onStage: (s) => setStep((p) => ({ ...p, phase: s, frac: 0 })),
         onProgress: (p) => setStep(p),
+        onCompressed: setCompressedInfo,
       });
       setResult(out);
       onSubmitted?.(out, { file, info, extracted: out.extracted });
@@ -234,7 +239,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
           {!free && duration && est != null && (
             <p className="mb0" data-testid="estimate">
               <b>Estimated cost: {money(est)}</b>{' '}
-              <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean ${money(breakdown[0])} + transcription ${money(breakdown[1])})` : ''}. You are only charged for what is processed.</span>
+              <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean ${money(breakdown[0])} + transcription ${money(breakdown[1])})` : ''}. You are only charged for what is processed. {BILLING_NOTE}</span>
             </p>
           )}
           {free && <p className="mb0 muted small">Free: counts against your daily allowance{pricing?.free ? ` of ${Math.round(pricing.free.transcribeSecondsPerDay / 60)} minutes` : ''}. Longer files and the premium model are in <Link to="/app">Studio</Link>.</p>}
@@ -247,6 +252,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
           <div className="row-between">
             <strong>
               {step.phase === 'extract' && 'Extracting the audio from your video…'}
+              {step.phase === 'compress' && 'Compressing for upload…'}
               {step.phase === 'create' && 'Creating job…'}
               {step.phase === 'upload' && 'Uploading…'}
             </strong>
@@ -256,6 +262,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
             </span>
           </div>
           <progress className="bar" max={100} value={pct ?? undefined} aria-label="Upload progress" />
+          {compressedInfo && <p className="small muted mb0" data-testid="compressed-note">{compressedNote(compressedInfo)}</p>}
           <div><button type="button" className="btn btn-secondary btn-sm" onClick={() => abort.current?.abort()}>Cancel</button></div>
         </div>
       )}
@@ -263,7 +270,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
       {error && <div className="banner banner-error" role="alert">{error}</div>}
       {result && !busy && (
         <div className="banner banner-success" role="status" data-testid="submitted">
-          Job started.{result.extracted ? ` Only the audio was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''} Follow it below.
+          Job started.{result.extracted ? ` Only the audio was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''}{result.compressed ? ` ${compressedNote(result.compressed)}.` : ''} Follow it below.
         </div>
       )}
 

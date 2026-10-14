@@ -1,6 +1,8 @@
 // Lazy mediabunny loader + probing helpers. mediabunny (MPL-2.0) is code-split: it is only downloaded
 // when someone actually picks a file.
 
+import { sniffPcm } from './flac.js';
+
 let mbPromise = null;
 
 export function loadMediabunny() {
@@ -74,6 +76,17 @@ export async function probeMedia(file) {
     input.dispose();
   } catch {
     /* not a container mediabunny understands; fall back to the browser */
+  }
+  if (!info.duration) {
+    // Plain PCM WAV/AIFF that the container reader did not describe (AIFF, for instance): the header says it all.
+    const pcm = await sniffPcm(file);
+    if (pcm) {
+      info.duration = pcm.frames / pcm.rate;
+      info.hasAudio = true;
+      info.channels = pcm.channels;
+      info.sampleRate = pcm.rate;
+      info.audioCodec = `pcm-s${pcm.bits}${pcm.bigEndian ? 'be' : ''}`;
+    }
   }
   if (!info.duration) info.duration = await elementDuration(file);
   if (info.duration == null && !info.viaMediabunny) info.hasAudio = null;

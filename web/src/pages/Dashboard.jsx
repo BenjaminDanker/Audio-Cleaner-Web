@@ -52,7 +52,7 @@ export default function Dashboard() {
           <ul className="mb0">
             <li>Uploading a video? Only its <b>audio track</b> is uploaded. Your browser puts the cleaned audio back into the video afterwards.</li>
             <li>Uploaded files are deleted when processing ends. Results are kept for <b>24 hours</b>.</li>
-            <li>You pay for what is processed. A failed or canceled job costs nothing.</li>
+            <li>You pay for what is processed. Billed per second of audio, no minimum charge. A failed or canceled job costs nothing.</li>
           </ul>
         </section>
       </div>

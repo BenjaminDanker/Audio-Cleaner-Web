@@ -1,5 +1,6 @@
-import { useEffect, useMemo } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { useAuth } from '../auth.jsx';
 import { IconBroadcast, IconLock, IconSparkle, IconText, IconWave } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
@@ -51,10 +52,31 @@ const FAQ = [
   ['When is the OBS plugin available?', 'It is in development. You can already create API keys and try live denoise and captions from your browser on the Live page.'],
 ];
 
+/**
+ * One-time notice passed through router state, e.g. after account deletion. The state is cleared from the history entry
+ * right away so a reload or a later visit does not show it again. After a deletion the auth state is refreshed here, once
+ * this page (which needs no sign-in) is showing.
+ */
+function useOneTimeNotice() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { refresh } = useAuth();
+  const [notice, setNotice] = useState(() => location.state?.notice || null);
+  useEffect(() => {
+    if (!location.state?.notice) return;
+    setNotice(location.state.notice);
+    if (location.state.notice === 'account-deleted') refresh();
+    navigate({ pathname: location.pathname, search: location.search, hash: location.hash }, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return [notice, () => setNotice(null)];
+}
+
 export default function Landing() {
   usePageTitle('');
   const { hash } = useLocation();
   const { data: pricing } = usePricing();
+  const [notice, dismissNotice] = useOneTimeNotice();
   useEffect(() => {
     if (hash) setTimeout(() => document.querySelector(hash)?.scrollIntoView(), 50);
   }, [hash]);
@@ -63,6 +85,14 @@ export default function Landing() {
   const live = findRate(pricing, 'stream_denoise', 'light');
   return (
     <>
+      {notice === 'account-deleted' && (
+        <div className="container notice-row">
+          <div className="banner banner-success row-between" role="status" data-testid="account-deleted">
+            <span>Your account has been deleted.</span>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={dismissNotice}>Dismiss</button>
+          </div>
+        </div>
+      )}
       <section className="hero">
         <div className="container hero-grid">
           <div>

@@ -19,8 +19,53 @@ function peak(f32) {
 }
 
 /**
- * @param {{denoise: boolean, captions: 'local'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
+ * Folds one `{"type":"caption", text, final, id?}` event from the server into the list of caption lines.
+ * - Premium captions (OpenAI) stream partial captions with an `id`, then a final one with the same `id`: the line with
+ *   that id is updated in place (partial -> final), so text never jumps or duplicates.
+ * - Standard captions have no `id`: there is at most one id-less partial at the end of the list, replaced by the next
+ *   partial and dropped when the id-less final arrives (which is appended).
+ * Returns a new array of `{key, id, text, final}` (at most `max` lines, oldest dropped); `key` is stable for React.
+ */
+let captionKey = 0;
+export function applyCaption(items, ev, max = 200) {
+  const text = String(ev.text ?? '').trim();
+  const final = !!ev.final;
+  const id = ev.id != null && ev.id !== '' ? `id:${ev.id}` : null;
+  const idlessPartial = (x) => !x.id && !x.final;
+  let next;
+  if (id) {
+    const i = items.findIndex((x) => x.id === id);
+    if (!text) {
+      if (!final || i < 0) return items; // empty partial: nothing to show; empty final: closes (removes) its partial
+      next = items.filter((x) => x.id !== id);
+    } else if (i >= 0) {
+      if (items[i].final && !final) return items; // a late partial must not reopen a finished line
+      next = items.slice();
+      next[i] = { ...items[i], text, final };
+    } else {
+      next = [...items, { key: ++captionKey, id, text, final }];
+    }
+  } else if (final) {
+    const rest = items.filter((x) => !idlessPartial(x));
+    next = text ? [...rest, { key: ++captionKey, id: null, text, final: true }] : rest;
+  } else {
+    const i = items.findIndex(idlessPartial);
+    if (!text) return i < 0 ? items : items.filter((x) => !idlessPartial(x));
+    if (i >= 0) {
+      next = items.slice();
+      next[i] = { ...items[i], text };
+    } else {
+      next = [...items, { key: ++captionKey, id: null, text, final: false }];
+    }
+  }
+  return next.length > max ? next.slice(-max) : next;
+}
+
+/**
+ * @param {{denoise: boolean, captions: 'local'|'premium'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
  *   onEvent: (ev:object)=>void, onStats:(s:object)=>void}} opts
+ *   Server events reach `onEvent` as parsed JSON ('ready', 'caption', 'warning', 'stopped', 'error', plus a local 'closed');
+ *   feed 'caption' events to applyCaption().
  */
 export async function startLive(opts) {
   const { onEvent, onStats } = opts;

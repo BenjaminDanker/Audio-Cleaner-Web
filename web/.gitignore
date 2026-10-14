@@ -2,6 +2,8 @@ node_modules/
 dist/
 # DeepFilterNet wasm + model are copied in by `npm run sync-dfn` (~22 MB); not committed.
 public/dfn/
+# Licence texts of shipped packages are copied in by `npm run sync-licenses` (part of `npm run build`).
+public/licenses/
 .env.local
 test-results/
 playwright-report/

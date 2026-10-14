@@ -6,14 +6,13 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
 {
   const { browser, page, logs } = await launch();
-  await check('login: GitHub/Google buttons + email form + Turnstile (mocked providers)', async () => {
+  await check('login: Google button + email form + Turnstile (mocked providers)', async () => {
     await page.route('**/api/auth/providers', (r) => r.fulfill({ json: { github: true, google: true, email: true, turnstileSiteKey: '1x00000000000000000000AA' } }));
     let posted = null;
     await page.route('**/api/auth/email', (r) => { posted = r.request().postDataJSON(); return r.fulfill({ json: { ok: true } }); });
     await page.goto(`${BASE}/login`);
-    const gh = await page.getByRole('link', { name: /GitHub/ }).getAttribute('href');
     const go = await page.getByRole('link', { name: /Google/ }).getAttribute('href');
-    if (gh !== '/audio/api/auth/oauth/github/start' || go !== '/audio/api/auth/oauth/google/start') throw new Error(gh + ' ' + go);
+    if (go !== '/audio/api/auth/oauth/google/start') throw new Error(go);
     const btn = page.getByRole('button', { name: /Email me/ });
     await page.getByLabel('Email address').fill('someone@example.com');
     await page.waitForFunction(() => !document.querySelector('button[type=submit]').disabled, null, { timeout: 20000 });
@@ -101,6 +100,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
   });
   await check('keyboard: tab reaches skip link first, then nav', async () => {
     await page.goto(`${BASE}/`);
+    await page.waitForSelector('.skip-link'); // pressing Tab before React has rendered finds nothing to focus
     await page.keyboard.press('Tab');
     const first = await page.evaluate(() => document.activeElement.textContent);
     if (!/Skip to content/.test(first)) throw new Error(first);
@@ -142,6 +142,14 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     const rms = Number(await page.locator('[data-testid=result]').getAttribute('data-rms'));
     if (rms < 0.001) throw new Error('silent under CSP');
     await signIn(page, EMAIL);
+    // pages added/changed for production QA: no inline style attributes or scripts may be needed anywhere
+    for (const p of ['/app', '/app/billing', '/app/account', '/licenses', '/terms', '/privacy', '/transcribe']) {
+      await page.goto(`${BASE}${p}`); await page.waitForSelector('main h1'); await page.waitForTimeout(300);
+    }
+    await page.setViewportSize({ width: 360, height: 800 });
+    await page.goto(`${BASE}/app/billing`); await page.waitForSelector('main h1');
+    await page.getByRole('button', { name: 'Menu' }).click();
+    await page.setViewportSize({ width: 1280, height: 900 });
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-start').click();
     await page.waitForFunction(() => Number(document.querySelector('[data-testid=live-stats]')?.getAttribute('data-recv')) > 30, null, { timeout: 30000 });

@@ -1,5 +1,8 @@
 // Number/time/money formatting helpers. Money is stored as micros (1 USD = 1,000,000).
 
+/** Billing rule, as the server applies it (server/acw/billing/pricing.py, MIN_JOB_CHARGE_MICROS = 0). */
+export const BILLING_NOTE = 'Billed per second of audio, no minimum charge.';
+
 const usd2 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' });
 const usd4 = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 4, maximumFractionDigits: 4 });
 

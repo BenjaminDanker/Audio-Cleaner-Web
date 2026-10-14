@@ -1,4 +1,4 @@
-import { moneyUsd, rate } from '../format.js';
+import { BILLING_NOTE, moneyUsd, rate } from '../format.js';
 import { usePricing } from '../hooks.js';
 
 const GROUPS = [
@@ -18,24 +18,27 @@ export default function PriceTable() {
     return <div className="banner banner-warn" role="alert">Prices could not be loaded right now ({error || 'unknown error'}). Please reload the page in a moment.</div>;
   }
   return (
-    <div className="table-wrap">
-      <table>
-        <caption className="sr-only">Prices per minute and per hour of audio</caption>
-        <thead>
-          <tr><th scope="col">Service</th><th scope="col" className="num">Per minute</th><th scope="col" className="num">Per hour</th><th scope="col">Status</th></tr>
-        </thead>
-        <tbody>
-          <tr className="group"><th scope="rowgroup" colSpan={4}>{GROUPS[0].title}</th></tr>
-          <tr>
-            <th scope="row">Browser denoise (DeepFilterNet3)</th>
-            <td className="num">Free</td><td className="num">Free</td>
-            <td><span className="badge badge-free">Free forever</span></td>
-          </tr>
-          {GROUPS.slice(1).map((g) => (
-            <GroupRows key={g.title} group={g} rates={data.rates} free={data.free} />
-          ))}
-        </tbody>
-      </table>
+    <div className="stack">
+      <div className="table-wrap">
+        <table>
+          <caption className="sr-only">Prices per minute and per hour of audio</caption>
+          <thead>
+            <tr><th scope="col">Service</th><th scope="col" className="num">Per minute</th><th scope="col" className="num">Per hour</th><th scope="col">Status</th></tr>
+          </thead>
+          <tbody>
+            <tr className="group"><th scope="rowgroup" colSpan={4}>{GROUPS[0].title}</th></tr>
+            <tr>
+              <th scope="row">Browser denoise (DeepFilterNet3)</th>
+              <td className="num">Free</td><td className="num">Free</td>
+              <td><span className="badge badge-free">Free forever</span></td>
+            </tr>
+            {GROUPS.slice(1).map((g) => (
+              <GroupRows key={g.title} group={g} rates={data.rates} free={data.free} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="small muted mb0" data-testid="billing-note">{BILLING_NOTE}</p>
     </div>
   );
 }

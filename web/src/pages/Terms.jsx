@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import Legal from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
+import { operatorLine, SITE } from '../site.js';
 
 const SECTIONS = [
   ['about', 'About these terms'],
@@ -20,10 +21,14 @@ const SECTIONS = [
 
 export default function Terms() {
   usePageTitle('Terms of Service');
+  const operator = operatorLine() || 'the operator of this site';
+  const jurisdiction = SITE.jurisdiction.trim();
+  const email = SITE.supportEmail.trim();
+  const address = SITE.legalAddress.trim();
   return (
     <Legal title="Terms of Service" sections={SECTIONS}>
       <h2 id="about">1. About these terms</h2>
-      <p>These terms govern your use of Audio Cleaner (the &ldquo;Service&rdquo;), operated by [OPERATOR LEGAL NAME, ADDRESS] (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free browser tool runs on your own device and needs no account.</p>
+      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free browser tool runs on your own device and needs no account.</p>
       <p>We may update these terms. When we do, the version date changes and we will ask you to accept the new version before you can use paid features again. Your continued use of the free browser tool is not conditional on this.</p>
 
       <h2 id="accounts">2. Accounts</h2>
@@ -55,7 +60,7 @@ export default function Terms() {
 
       <h2 id="autoreload">5. Auto-reload</h2>
       <p>Auto-reload is optional and off unless you turn it on. If you turn it on you authorize us (through Stripe) to charge your saved card the reload amount you chose whenever your balance falls below the threshold you chose, up to the monthly limit you chose per calendar month, until you turn it off. The exact wording you confirm on the Billing page is:</p>
-      <blockquote><p>&ldquo;I authorize Audio Cleaner to charge my saved card &lt;amount&gt; whenever my balance falls below &lt;threshold&gt;, up to &lt;cap&gt; per calendar month, until I turn this off.&rdquo;</p></blockquote>
+      <blockquote><p>&ldquo;I authorize {SITE.name} to charge my saved card &lt;amount&gt; whenever my balance falls below &lt;threshold&gt;, up to &lt;cap&gt; per calendar month, until I turn this off.&rdquo;</p></blockquote>
       <ul>
         <li>You can change or turn off auto-reload at any time on the Billing page; this stops future reloads. You can also remove your saved card through the card manager.</li>
         <li>If an automatic charge fails, we may retry a limited number of times and then pause auto-reload and tell you on the Billing page.</li>
@@ -100,8 +105,14 @@ export default function Terms() {
       <p>You can stop using the Service at any time and ask us to delete your account. We can suspend or end your access if you breach these terms, if required by law, or to protect the Service or other users. On termination without breach by you, we will refund unused credit on request; credit is forfeited as described in section 4 where the account is closed for fraud, chargebacks or serious breach.</p>
 
       <h2 id="law">13. Governing law and contact</h2>
-      <p>These terms are governed by the laws of [JURISDICTION — to be confirmed], and the courts of [VENUE — to be confirmed] have exclusive jurisdiction, without affecting any mandatory consumer rights you have in your country of residence. If a provision is unenforceable, the rest stays in force. These terms are the whole agreement between you and us about the Service.</p>
-      <p>Contact: [support@example.com — placeholder], [postal address — placeholder].</p>
+      <p>
+        These terms are governed by the laws of {jurisdiction || 'the place where the operator is established'}, and the courts {jurisdiction ? <>of {jurisdiction}</> : 'there'} have exclusive jurisdiction, without affecting any mandatory consumer rights you have in your country of residence. If a provision is unenforceable, the rest stays in force. These terms are the whole agreement between you and us about the Service.
+      </p>
+      {(email || address) && (
+        <p>
+          Contact: {email && <a href={`mailto:${email}`}>{email}</a>}{email && address ? ', ' : ''}{address}
+        </p>
+      )}
     </Legal>
   );
 }

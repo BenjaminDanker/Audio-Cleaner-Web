@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
@@ -14,8 +14,16 @@ export default function Account() {
   const [busy, setBusy] = useState('');
   const [confirm, setConfirm] = useState('');
   const [delErr, setDelErr] = useState('');
+  const delAlert = useRef(null);
 
   const emailOk = !!user && confirm.trim().toLowerCase() === user.email.toLowerCase();
+
+  // The reason for a refused deletion (for example 409 "Wait for your running jobs to finish first.") must not go unnoticed.
+  useEffect(() => {
+    if (!delErr || !delAlert.current) return;
+    delAlert.current.scrollIntoView({ block: 'center' });
+    delAlert.current.focus({ preventScroll: true });
+  }, [delErr]);
 
   async function signOutEverywhere() {
     setBusy('all'); setMsg(null);
@@ -48,12 +56,14 @@ export default function Account() {
     setBusy('delete'); setDelErr('');
     try {
       await api('account/delete', { method: 'POST', body: { confirm: confirm.trim() } });
-      await refresh();
-      navigate('/', { replace: true });
     } catch (err) {
-      setDelErr(err.detail);
+      setDelErr(err.detail || 'The account could not be deleted. Please try again.');
       setBusy('');
+      return;
     }
+    // The session is gone on the server. Leave the signed-in area first (with a one-time notice for the landing page);
+    // only then refresh the auth state, otherwise the auth guard on this page would bounce us to /login.
+    navigate('/', { replace: true, state: { notice: 'account-deleted' } });
   }
 
   return (
@@ -96,9 +106,9 @@ export default function Account() {
         <form className="stack" onSubmit={deleteAccount}>
           <div className="field">
             <label htmlFor="del-confirm">Type your email address ({user?.email}) to confirm</label>
-            <input id="del-confirm" className="input" type="email" autoComplete="off" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder={user?.email} />
+            <input id="del-confirm" className="input" type="email" autoComplete="off" value={confirm} onChange={(e) => { setConfirm(e.target.value); setDelErr(''); }} placeholder={user?.email} />
           </div>
-          {delErr && <div className="banner banner-error" role="alert" data-testid="delete-error">{delErr}</div>}
+          {delErr && <div className="banner banner-error" role="alert" tabIndex={-1} ref={delAlert} data-testid="delete-error"><b>Your account was not deleted.</b> {delErr}</div>}
           <div><button type="submit" className="btn btn-danger" disabled={!emailOk || !!busy}>{busy === 'delete' ? 'Deleting…' : 'Delete my account'}</button></div>
         </form>
       </section>

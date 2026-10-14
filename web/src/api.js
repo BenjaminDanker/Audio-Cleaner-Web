@@ -17,6 +17,29 @@ export function onUnauthorized(fn) {
   unauthorizedHandler = fn;
 }
 
+// ---- API availability -------------------------------------------------------------------------------------
+// Only /api/me and /api/billing/pricing are watched (every page asks for them). A network error or HTTP 502/503/504
+// there means the paid backend is down; other 5xx/4xx mean it is up. (503 elsewhere is meaningful, e.g. "payments
+// are not available yet", so other endpoints must not flip this.)
+const downBy = { me: false, pricing: false };
+const offlineListeners = new Set();
+const DOWN_STATUS = new Set([502, 503, 504]);
+
+function reportDown(key, down) {
+  if (downBy[key] === down) return;
+  downBy[key] = down;
+  offlineListeners.forEach((fn) => fn());
+}
+
+/** For useSyncExternalStore: `apiOffline.subscribe`, `apiOffline.get`. */
+export const apiOffline = {
+  subscribe(fn) {
+    offlineListeners.add(fn);
+    return () => offlineListeners.delete(fn);
+  },
+  get: () => downBy.me || downBy.pricing,
+};
+
 export class ApiError extends Error {
   constructor(message, status, fields) {
     super(message);
@@ -44,7 +67,14 @@ function errorFrom(res, data) {
 }
 
 export async function fetchMe() {
-  const res = await fetch(`${API}me`, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+  let res;
+  try {
+    res = await fetch(`${API}me`, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+  } catch (e) {
+    if (e?.name !== 'AbortError') reportDown('me', true);
+    throw e;
+  }
+  reportDown('me', DOWN_STATUS.has(res.status));
   const data = await parse(res);
   if (!res.ok) throw errorFrom(res, data);
   setCsrfToken(data?.csrfToken);
@@ -70,8 +100,10 @@ export async function api(path, { method = 'GET', body, signal, redirectOn401 = 
     });
   } catch (e) {
     if (e?.name === 'AbortError') throw e;
+    if (path === 'billing/pricing') reportDown('pricing', true);
     throw new ApiError('Could not reach the server. Check your connection and try again.', 0);
   }
+  if (path === 'billing/pricing') reportDown('pricing', DOWN_STATUS.has(res.status));
   const data = await parse(res);
   if (res.ok) return data;
   if (res.status === 403 && !_retried && /csrf/i.test(data?.detail || '')) {

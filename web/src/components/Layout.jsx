@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { apiOffline } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney } from '../format.js';
+import { loadPricing } from '../hooks.js';
+import { SITE } from '../site.js';
 import { IconMenu, Logo } from './Icons.jsx';
 
 function AccountMenu() {
@@ -53,9 +56,9 @@ function Header() {
   return (
     <header className="site-header">
       <div className="container header-inner">
-        <Link to="/" className="brand" aria-label="Audio Cleaner home">
+        <Link to="/" className="brand" aria-label={`${SITE.name} home`}>
           <Logo />
-          <span>Audio Cleaner</span>
+          <span>{SITE.name}</span>
         </Link>
         <nav className="nav" id="main-nav" data-open={open} aria-label="Main">
           <NavLink to="/free">Free denoise</NavLink>
@@ -81,14 +84,40 @@ function Header() {
   );
 }
 
+/** Site-wide notice while the paid backend is unreachable. The free browser tool never depends on it. */
+function OfflineBanner() {
+  const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
+  const { refresh } = useAuth();
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => { if (!offline) setDismissed(false); }, [offline]); // a later outage shows the notice again
+  useEffect(() => {
+    if (!offline) return undefined;
+    // Re-check both watched endpoints; the banner clears itself as soon as they answer again.
+    const id = setInterval(() => { refresh(); loadPricing().catch(() => {}); }, 30000);
+    return () => clearInterval(id);
+  }, [offline, refresh]);
+  if (!offline || dismissed) return null;
+  return (
+    <div className="offline-banner" role="status" data-testid="api-offline">
+      <div className="container row-between">
+        <span>Paid services are temporarily offline. The free browser tool still works.</span>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDismissed(true)}>Dismiss</button>
+      </div>
+    </div>
+  );
+}
+
 function Footer() {
+  const email = SITE.supportEmail.trim();
+  const legalName = SITE.legalName.trim();
   return (
     <footer className="site-footer">
       <div className="container footer-grid">
         <div>
-          <Link to="/" className="brand"><Logo size={26} /><span>Audio Cleaner</span></Link>
+          <Link to="/" className="brand"><Logo size={26} /><span>{SITE.name}</span></Link>
           <p className="muted small mt0">Clean voice recordings in your browser, in the studio, or live. Your files stay yours.</p>
-          <p className="muted small">Contact: <span>support@example.com</span> (placeholder)</p>
+          {email && <p className="muted small">Contact: <a href={`mailto:${email}`}>{email}</a></p>}
+          {legalName && <p className="muted small">&copy; {new Date().getFullYear()} {legalName}</p>}
         </div>
         <div>
           <h4>Product</h4>
@@ -129,6 +158,7 @@ export default function Layout() {
     <>
       <a className="skip-link" href="#main">Skip to content</a>
       <Header />
+      <OfflineBanner />
       <main id="main" ref={main} tabIndex={-1}>
         <Outlet />
       </main>

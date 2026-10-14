@@ -6,7 +6,7 @@ import { IconBroadcast } from '../components/Icons.jsx';
 import { balanceMoney, clock, dateTime, rate, moneyUsd } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
-import { startLive } from '../live/session.js';
+import { applyCaption, startLive } from '../live/session.js';
 
 export default function Live() {
   usePageTitle('Live & API keys');
@@ -209,28 +209,32 @@ function LiveDemo({ pricing }) {
   const [error, setError] = useState('');
   const [info, setInfo] = useState(null);
   const [stats, setStats] = useState(null);
-  const [lines, setLines] = useState([]);
-  const [partial, setPartial] = useState('');
-  const [warning, setWarning] = useState('');
+  const [lines, setLines] = useState([]); // caption lines {key, id, text, final}; partials are updated in place by id
+  const [warning, setWarning] = useState(null); // {text, credit}
   const [stopped, setStopped] = useState('');
   const session = useRef(null);
   const logRef = useRef(null);
 
+  // Price of exactly what is selected: stream_denoise/light + stream_captions/<tier> from /api/billing/pricing.
   const den = findRate(pricing, 'stream_denoise', 'light');
-  const cap = findRate(pricing, 'stream_captions', 'local');
-  const perMin = (denoise && den ? den.usdPerMinute : 0) + (captions && cap ? cap.usdPerMinute : 0);
+  const capRates = { local: findRate(pricing, 'stream_captions', 'local'), premium: findRate(pricing, 'stream_captions', 'premium') };
+  const cap = captions ? capRates[captions] : null;
+  const perMin = (denoise && den ? den.usdPerMinute : 0) + (cap ? cap.usdPerMinute : 0);
+  const priceKnown = !!pricing && (!denoise || !!den) && (!captions || !!cap);
+  const offered = (!denoise || den?.available !== false) && (!captions || cap?.available !== false);
+  const premiumListed = capRates.premium?.available !== false;
   const mediaOk = !!(navigator.mediaDevices?.getUserMedia && window.AudioWorklet && window.WebSocket);
 
   useEffect(() => () => session.current?.stop(), []);
-  useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); }, [lines, partial]);
+  useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); }, [lines]);
 
   const onEvent = useCallback((ev) => {
     if (ev.type === 'ready') setInfo(ev);
     else if (ev.type === 'caption') {
-      if (ev.final) { setLines((l) => [...l.slice(-199), ev.text]); setPartial(''); } else setPartial(ev.text);
+      setLines((l) => applyCaption(l, ev));
     } else if (ev.type === 'warning') {
-      if (ev.code === 'low_balance') setWarning(`Your balance covers about ${Math.max(0, Math.round(ev.secondsLeft))} more seconds. Add credit to keep going.`);
-      else setWarning(ev.message || 'Warning from the live service.');
+      if (ev.code === 'low_balance') setWarning({ text: `Your balance covers about ${Math.max(0, Math.round(ev.secondsLeft))} more seconds. Add credit to keep going.`, credit: true });
+      else setWarning({ text: ev.message || 'Warning from the live service.', credit: false });
     } else if (ev.type === 'stopped') {
       setStopped(ev.reason === 'insufficient_funds' ? 'The session stopped because your balance ran out.' : ev.reason === 'max_duration' ? 'The session reached its maximum length.' : 'The session stopped.');
     } else if (ev.type === 'error') {
@@ -243,7 +247,7 @@ function LiveDemo({ pricing }) {
   }, [refresh]);
 
   async function start() {
-    setError(''); setWarning(''); setStopped(''); setLines([]); setPartial(''); setStats(null); setInfo(null);
+    setError(''); setWarning(null); setStopped(''); setLines([]); setStats(null); setInfo(null);
     if (!(await ensureTos())) { setError('Please accept the Terms of Service to use live processing.'); return; }
     setState('starting');
     try {
@@ -272,19 +276,33 @@ function LiveDemo({ pricing }) {
     <section className="card stack" aria-labelledby="demo-h">
       <h2 id="demo-h" className="mb0">Test in your browser</h2>
       <p className="muted mb0">Speak into your microphone and hear the live result, the same service the OBS plugin uses.</p>
-      <div className="banner banner-warn"><b>This uses credit.</b> {perMin > 0 ? `About ${rate(perMin)} per minute with your current choices.` : 'Choose at least one option.'} Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Use headphones</b> to avoid feedback.</div>
+      <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Use headphones</b> to avoid feedback.</div>
+      <p className="mb0" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
+        {!pricing && <span className="muted">Loading prices…</span>}
+        {pricing && perMin <= 0 && priceKnown && <span className="muted">Choose at least one option.</span>}
+        {pricing && !priceKnown && <span className="muted">The price for this combination is not available.</span>}
+        {pricing && priceKnown && perMin > 0 && (
+          <>
+            <b>Your choice costs {rate(perMin)} per minute</b> <span className="muted">({moneyUsd(perMin * 60)} per hour
+            {denoise && den ? `; denoise ${rate(den.usdPerMinute)}` : ''}{cap ? `${denoise && den ? ' + ' : '; '}${captions === 'premium' ? 'premium' : 'standard'} captions ${rate(cap.usdPerMinute)}` : ''}).
+            {' '}A session reserves about five minutes ({moneyUsd(perMin * 5)}) up front and releases what it does not use.</span>
+          </>
+        )}
+      </p>
       {!mediaOk && <div className="banner banner-error" role="alert">This browser does not support the features the live test needs (microphone, AudioWorklet, WebSocket).</div>}
 
       <div className="form-grid">
         <fieldset className="field" disabled={busy}>
           <legend className="label">Process</legend>
-          <label className="check"><input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} /><span>Remove noise (light)</span></label>
+          <label className="check"><input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} /><span>Remove noise (light){den ? <span className="muted small"> {rate(den.usdPerMinute)}/min</span> : null}</span></label>
           <div className="field">
             <label htmlFor="live-cap">Captions</label>
             <select id="live-cap" className="select" value={captions} onChange={(e) => setCaptions(e.target.value)}>
               <option value="">None</option>
-              <option value="local">Standard (on-prem model)</option>
+              <option value="local" disabled={capRates.local?.available === false}>Standard (on-prem model){capRates.local ? ` · +${rate(capRates.local.usdPerMinute)}/min` : ''}</option>
+              {(!pricing || capRates.premium) && <option value="premium" disabled={!premiumListed}>Premium (OpenAI){capRates.premium ? ` · +${rate(capRates.premium.usdPerMinute)}/min` : ''}{premiumListed ? '' : ' · coming soon'}</option>}
             </select>
+            {captions === 'premium' && <span className="hint" data-testid="premium-note">Premium captions send your cleaned audio to OpenAI, our sub-processor, and show text as it is spoken. Higher accuracy, higher price.</span>}
           </div>
         </fieldset>
         <fieldset className="field" disabled={state === 'starting'}>
@@ -312,13 +330,13 @@ function LiveDemo({ pricing }) {
       </div>
 
       <div className="row">
-        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || !mediaOk || (!denoise && !captions)} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
+        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={busy || !mediaOk || (!denoise && !captions) || !priceKnown || !offered} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
         {(live || state === 'stopping') && <button type="button" className="btn btn-danger btn-lg" onClick={stop} disabled={state === 'stopping'} data-testid="live-stop">{state === 'stopping' ? 'Stopping…' : 'Stop'}</button>}
         {live && <span className="badge badge-ok" role="status">Live</span>}
       </div>
 
       {error && <div className="banner banner-error" role="alert" data-testid="live-error">{error} {/balance|credit|reserves/i.test(error) && <Link to="/app/billing">Add credit</Link>}</div>}
-      {warning && <div className="banner banner-warn" role="alert">{warning} <Link to="/app/billing">Add credit</Link></div>}
+      {warning && <div className="banner banner-warn" role="alert">{warning.text} {warning.credit && <Link to="/app/billing">Add credit</Link>}</div>}
       {stopped && <div className="banner banner-info" role="status">{stopped}</div>}
 
       {(live || stats) && (
@@ -348,9 +366,10 @@ function LiveDemo({ pricing }) {
         <div className="stack">
           <b id="cap-h">Live captions</b>
           <div className="caption-log" ref={logRef} role="log" aria-live="polite" aria-labelledby="cap-h" data-testid="captions">
-            {lines.length === 0 && !partial && <p className="muted">{live ? 'Speak, and captions appear here a moment after each pause.' : 'Captions appear here while the test runs.'}</p>}
-            {lines.map((l, i) => <p key={i} data-testid="caption-line">{l}</p>)}
-            {partial && <p className="partial">{partial}</p>}
+            {lines.length === 0 && <p className="muted">{live ? (captions === 'premium' ? 'Speak, and captions appear here as you talk.' : 'Speak, and captions appear here a moment after each pause.') : 'Captions appear here while the test runs.'}</p>}
+            {lines.map((l) => (l.final
+              ? <p key={l.key} data-testid="caption-line">{l.text}</p>
+              : <p key={l.key} className="partial" aria-hidden="true" data-testid="caption-partial">{l.text}</p>))}
           </div>
         </div>
       )}

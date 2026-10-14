@@ -134,13 +134,21 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .menu-panel .menu-email { padding: 8px 12px; font-size: 0.82rem; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 4px; overflow-wrap: anywhere; }
 
 @media (max-width: 860px) {
-  .btn.nav-toggle { display: inline-flex; margin-left: auto; order: 3; }
-  .header-right { margin-left: 0; order: 2; }
-  .brand { order: 1; margin-right: auto; }
-  .nav { display: none; order: 4; flex-basis: 100%; flex-direction: column; align-items: stretch; margin: 0 0 12px; }
+  /* Brand, account controls and the menu toggle always share ONE row; the nav opens as a panel under the header. */
+  .header-inner { flex-wrap: nowrap; gap: 8px; }
+  .brand { order: 1; margin-right: auto; min-width: 0; flex: 0 1 auto; }
+  .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-right { margin-left: 0; order: 2; flex: none; gap: 8px; }
+  .btn.nav-toggle { display: inline-flex; order: 3; flex: none; padding-inline: 10px; }
+  .nav { display: none; position: absolute; left: 0; right: 0; top: 100%; flex-direction: column; align-items: stretch; gap: 2px; margin: 0; padding: 8px 16px 12px; background: var(--surface); border-bottom: 1px solid var(--border); box-shadow: var(--shadow-lg); }
   .nav[data-open="true"] { display: flex; }
-  .header-inner { flex-wrap: wrap; }
   .menu > summary span.email { display: none; }
+}
+@media (max-width: 480px) {
+  .brand { gap: 8px; font-size: 1.02rem; }
+  .balance-chip { padding: 5px 9px; font-size: 0.85rem; }
+  .menu > summary { padding: 4px 6px; }
+  .header-right .btn-sm { padding-inline: 10px; }
 }
 
 /* ---------- Buttons ---------- */
@@ -173,6 +181,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .banner-warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
 .banner-error { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .banner-success { background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
+.offline-banner { background: var(--warn-soft); border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); padding-block: 6px; font-size: 0.92rem; }
+.notice-row { padding-block: 14px 0; }
 .draft-banner { background: var(--warn-soft); color: var(--text); border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); padding: 10px 16px; text-align: center; font-weight: 600; }
 .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.02em; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
 .badge-free { background: var(--success-soft); color: var(--success); border-color: transparent; }
@@ -323,6 +333,8 @@ dialog.modal h2 { margin-top: 0; }
 .prose .toc { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 14px 18px; margin-bottom: 1.5em; }
 .prose .toc ol { margin: 0; columns: 2; column-gap: 28px; }
 @media (max-width: 560px) { .prose .toc ol { columns: 1; } }
+/* licence page */
+.prose ul.plain { list-style: none; padding-left: 0; margin: 0; }
 pre.license { white-space: pre-wrap; font-family: var(--mono); font-size: 0.8rem; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; max-height: 320px; overflow: auto; }
 
 /* ---------- Footer ---------- */

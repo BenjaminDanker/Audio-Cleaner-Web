@@ -1,32 +1,52 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { api } from './api.js';
+import { SITE } from './site.js';
 
 export function usePageTitle(title) {
   useEffect(() => {
-    document.title = title ? `${title} · Audio Cleaner` : 'Audio Cleaner';
+    document.title = title ? `${title} · ${SITE.name}` : SITE.name;
   }, [title]);
 }
 
+// One shared price-list store: every consumer sees the same data, and a failed load can be retried later
+// (loadPricing() is called again on the next mount and by the "API offline" banner's re-check).
 let pricingPromise = null;
-let pricingCache = null;
+let pricingState = { data: null, error: null, loading: true };
+const pricingListeners = new Set();
+const setPricing = (next) => {
+  pricingState = next;
+  pricingListeners.forEach((fn) => fn());
+};
+const subscribePricing = (fn) => {
+  pricingListeners.add(fn);
+  return () => pricingListeners.delete(fn);
+};
+const getPricing = () => pricingState;
 
-/** Public price list (cached for the lifetime of the page). */
+export function loadPricing() {
+  if (pricingState.data) return Promise.resolve(pricingState.data);
+  if (!pricingPromise) {
+    pricingPromise = api('billing/pricing', { redirectOn401: false }).then(
+      (d) => {
+        pricingPromise = null;
+        setPricing({ data: d, error: null, loading: false });
+        return d;
+      },
+      (e) => {
+        pricingPromise = null; // allow retry
+        setPricing({ data: null, error: e.detail || 'Could not load prices.', loading: false });
+        throw e;
+      },
+    );
+  }
+  return pricingPromise;
+}
+
+/** Public price list (loaded once per page, shared). */
 export function usePricing() {
-  const [state, setState] = useState({ data: pricingCache, error: null, loading: !pricingCache });
+  const state = useSyncExternalStore(subscribePricing, getPricing);
   useEffect(() => {
-    if (pricingCache) return undefined;
-    let alive = true;
-    if (!pricingPromise) pricingPromise = api('billing/pricing', { redirectOn401: false });
-    pricingPromise
-      .then((d) => {
-        pricingCache = d;
-        if (alive) setState({ data: d, error: null, loading: false });
-      })
-      .catch((e) => {
-        pricingPromise = null; // allow retry on next mount
-        if (alive) setState({ data: null, error: e.detail || 'Could not load prices.', loading: false });
-      });
-    return () => { alive = false; };
+    if (!pricingState.data) loadPricing().catch(() => {});
   }, []);
   return state;
 }
@@ -35,7 +55,7 @@ export function findRate(pricing, product, tier) {
   return pricing?.rates?.find((r) => r.product === product && r.tier === tier) || null;
 }
 
-/** Cost estimate in micros, mirrors server/acw/billing/pricing.py (per started second, $0.01 minimum). */
+/** Cost estimate in micros, mirrors server/acw/billing/pricing.py (per started second of audio, no minimum charge). */
 export function estimateMicros(pricing, { kind, denoiseTier = 'standard', transcribeTier = 'standard', seconds }) {
   if (!pricing || !seconds) return null;
   const secs = Math.max(0, Math.ceil(seconds));
@@ -47,7 +67,7 @@ export function estimateMicros(pricing, { kind, denoiseTier = 'standard', transc
   let total = 0;
   if (kind === 'denoise' || kind === 'denoise_transcribe') total += cost('denoise', denoiseTier);
   if (kind === 'transcribe' || kind === 'denoise_transcribe') total += cost('transcribe', transcribeTier === 'premium' ? 'premium' : 'local');
-  return total ? Math.max(total, 10000) : 0;
+  return total;
 }
 
 /** Re-render every `ms` (for countdowns). */

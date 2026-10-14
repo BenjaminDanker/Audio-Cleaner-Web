@@ -4,6 +4,7 @@ import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney, dateTime, money, moneyCents } from '../format.js';
 import { usePageTitle, usePricing } from '../hooks.js';
+import { SITE } from '../site.js';
 
 // Only ever leave the site for Stripe-hosted pages.
 const STRIPE_HOSTS = ['checkout.stripe.com', 'billing.stripe.com'];
@@ -96,14 +97,14 @@ export default function Billing() {
         <section className="card" aria-labelledby="b3"><h2 id="b3" className="mb0 small muted">Total balance</h2><div className="big-number">{balanceMoney(balance?.balance_micros ?? 0)}</div></section>
       </div>
 
-      <TopUp pricing={pricing} ensureTos={ensureTos} />
+      <TopUp pricing={pricing} ensureTos={ensureTos} unavailable={unavailable} />
       <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} ensureTos={ensureTos} unavailable={unavailable} />
-      <History history={history} error={histErr} reload={() => { loadHistory(); refresh(); }} />
+      <History history={history} error={histErr} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
     </div>
   );
 }
 
-function TopUp({ pricing, ensureTos }) {
+function TopUp({ pricing, ensureTos, unavailable }) {
   const min = pricing?.topup?.minCents ?? 1000;
   const max = pricing?.topup?.maxCents ?? 50000;
   const presets = pricing?.topup?.presetsCents ?? [1000, 2000, 5000, 10000];
@@ -118,7 +119,7 @@ function TopUp({ pricing, ensureTos }) {
 
   async function go(e) {
     e.preventDefault();
-    if (!valid) return;
+    if (!valid || unavailable) return;
     setError('');
     if (!(await ensureTos())) {
       setError('Please accept the Terms of Service to add credit.');
@@ -166,9 +167,10 @@ function TopUp({ pricing, ensureTos }) {
       </label>
       {error && <div className="banner banner-error" role="alert" data-testid="topup-error">{error}</div>}
       <div className="row">
-        <button type="submit" className="btn btn-primary btn-lg" disabled={!valid || busy}>{busy ? 'Opening checkout…' : `Pay ${valid ? moneyCents(cents) : ''} with Stripe`}</button>
+        <button type="submit" className="btn btn-primary btn-lg" disabled={!valid || busy || unavailable} aria-describedby={unavailable ? 'topup-off' : undefined}>{busy ? 'Opening checkout…' : `Pay ${valid ? moneyCents(cents) : ''} with Stripe`}</button>
         <span className="muted small">Payments are handled by Stripe. We never see your card number.</span>
       </div>
+      {unavailable && <p id="topup-off" className="hint mb0" data-testid="topup-off">Adding credit is switched off for now, because payments are not available yet. This button will work as soon as they are.</p>}
     </form>
   );
 }
@@ -266,7 +268,7 @@ function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
         <label className="check">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} data-testid="ar-consent" />
           <span data-testid="ar-consent-text">
-            I authorize Audio Cleaner to charge my saved card {valid ? moneyCents(a) : '<amount>'} whenever my balance falls below {valid ? moneyCents(t) : '<threshold>'}, up to {valid ? moneyCents(c) : '<cap>'} per calendar month, until I turn this off.
+            I authorize {SITE.name} to charge my saved card {valid ? moneyCents(a) : '<amount>'} whenever my balance falls below {valid ? moneyCents(t) : '<threshold>'}, up to {valid ? moneyCents(c) : '<cap>'} per calendar month, until I turn this off.
           </span>
         </label>
         <div className="row">
@@ -276,14 +278,14 @@ function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
       </fieldset>
       {msg && <div className={`banner banner-${msg.kind}`} role={msg.kind === 'error' ? 'alert' : 'status'}>{msg.text}</div>}
       <div className="row">
-        <button type="button" className="btn btn-secondary" disabled={!!busy} onClick={portal}>Manage card and receipts</button>
-        <span className="muted small">Opens Stripe&apos;s secure customer portal.</span>
+        <button type="button" className="btn btn-secondary" disabled={!!busy || unavailable} onClick={portal}>Manage card and receipts</button>
+        <span className="muted small">{unavailable ? 'Not available while payments are off.' : 'Opens Stripe\u2019s secure customer portal.'}</span>
       </div>
     </section>
   );
 }
 
-function History({ history, error, reload }) {
+function History({ history, error, reload, unavailable }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState(null);
   const [confirmId, setConfirmId] = useState(null);
@@ -326,11 +328,11 @@ function History({ history, error, reload }) {
                         <td className="num">{moneyCents(p.amount_cents)}</td>
                         <td className="num">{p.refunded_cents ? moneyCents(p.refunded_cents) : '—'}</td>
                         <td className="right">
-                          {eligible && confirmId !== p.id && <button type="button" className="btn btn-secondary btn-sm" onClick={() => setConfirmId(p.id)}>Refund unused</button>}
+                          {eligible && confirmId !== p.id && <button type="button" className="btn btn-secondary btn-sm" disabled={unavailable} aria-describedby={unavailable ? 'refund-off' : undefined} onClick={() => setConfirmId(p.id)}>Refund unused</button>}
                           {eligible && confirmId === p.id && (
                             <span className="row">
                               <span className="small">Refund the unused part?</span>
-                              <button type="button" className="btn btn-danger btn-sm" disabled={busy === p.id} onClick={() => refund(p.id)}>{busy === p.id ? 'Refunding…' : 'Yes, refund'}</button>
+                              <button type="button" className="btn btn-danger btn-sm" disabled={busy === p.id || unavailable} onClick={() => refund(p.id)}>{busy === p.id ? 'Refunding…' : 'Yes, refund'}</button>
                               <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirmId(null)}>No</button>
                             </span>
                           )}
@@ -342,6 +344,7 @@ function History({ history, error, reload }) {
               </table>
             </div>
           )}
+          {unavailable && <p id="refund-off" className="hint mb0" data-testid="refund-off">Refunds are switched off for now, because payments are not available yet. The refund buttons will work again as soon as they are.</p>}
           <p className="small muted mb0">Self-service refunds cover the unused part of a payment made in the last {REFUND_DAYS} days. See the <Link to="/terms">Terms</Link>.</p>
           <h3 className="mb0">Credit ledger</h3>
           {history.ledger.length === 0 ? <p className="card muted mb0">No activity yet.</p> : (

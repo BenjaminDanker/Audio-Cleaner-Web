@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 import Legal from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
+import { operatorLine, SITE } from '../site.js';
 
 const SECTIONS = [
   ['who', 'Who we are'],
@@ -18,10 +19,12 @@ const SECTIONS = [
 
 export default function Privacy() {
   usePageTitle('Privacy Policy');
+  const operator = operatorLine() || 'the operator of this site';
+  const email = SITE.supportEmail.trim();
   return (
     <Legal title="Privacy Policy" sections={SECTIONS}>
       <h2 id="who">1. Who we are</h2>
-      <p>Audio Cleaner is operated by [OPERATOR LEGAL NAME, ADDRESS], the controller of your personal data for the account-based services. Contact: [privacy@example.com — placeholder]. The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
+      <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{email && <> Contact: <a href={`mailto:${email}`}>{email}</a>.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
 
       <h2 id="browser">2. The free browser tool</h2>
       <p>The free tool at <Link to="/free">/free</Link> processes your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise-reduction model and the public price list, none of which contain your data.</p>
@@ -55,8 +58,8 @@ export default function Privacy() {
             <tr><td>OpenAI</td><td>Premium transcription and premium live captions only</td><td>The audio you choose to send</td></tr>
             <tr><td>Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
             <tr><td>Cloudflare (Turnstile)</td><td>Bot check on the email sign-in form, when enabled</td><td>A challenge token and your IP address</td></tr>
-            <tr><td>Email delivery provider [placeholder]</td><td>Sign-in links</td><td>Your email address and the message</td></tr>
-            <tr><td>Hosting [placeholder]</td><td>Running the website and servers</td><td>Technical traffic data</td></tr>
+            <tr><td>Email delivery provider</td><td>Sign-in links</td><td>Your email address and the message</td></tr>
+            <tr><td>Hosting provider</td><td>Running the website and servers</td><td>Technical traffic data</td></tr>
           </tbody>
         </table>
       </div>

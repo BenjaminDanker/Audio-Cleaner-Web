@@ -6,14 +6,20 @@
   "description": "Audio Cleaner web frontend",
   "scripts": {
     "sync-dfn": "node scripts/sync-dfn.mjs",
+    "sync-licenses": "node scripts/sync-licenses.mjs",
+    "gen-rust-licenses": "node scripts/gen-rust-licenses.mjs",
+    "predev": "node scripts/sync-licenses.mjs",
     "dev": "vite",
-    "build": "node scripts/sync-dfn.mjs --if-missing && vite build",
+    "build": "node scripts/sync-dfn.mjs --if-missing && node scripts/sync-licenses.mjs && vite build",
     "preview": "vite preview",
     "test:fixtures": "bash tests/make-fixtures.sh",
     "test:e2e": "node tests/e2e.mjs",
     "test:free": "node tests/free.mjs",
     "test:live": "node tests/live.mjs",
-    "test:ui": "node tests/ui.mjs"
+    "test:ui": "node tests/ui.mjs",
+    "test:flac": "node tests/flac.mjs",
+    "test:qa": "node tests/qa-fixes.mjs",
+    "test:offline": "node tests/offline.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.61.3",
