@@ -9,6 +9,7 @@ const SECTIONS = [
   ['collect', 'What we collect'],
   ['files', 'Your files and transcripts'],
   ['live', 'Live audio'],
+  ['desktop', 'The desktop app'],
   ['subprocessors', 'Sub-processors'],
   ['cookies', 'Cookies and tracking'],
   ['retention', 'How long we keep things'],
@@ -49,7 +50,11 @@ export default function Privacy() {
       <h2 id="live">5. Live audio</h2>
       <p>Live audio is streamed to our servers, processed in memory and returned to you. It is <b>not stored</b>. Captions are delivered to you as they are produced and are not saved. If you choose premium live captions, the audio is sent to OpenAI for that purpose.</p>
 
-      <h2 id="subprocessors">6. Sub-processors and recipients</h2>
+      <h2 id="desktop">6. The desktop app</h2>
+      <p>The free desktop app for Windows and macOS (<Link to="/desktop">/desktop</Link>) processes your files on your own computer. They are <b>never uploaded</b> and no server call carries your content. The app stores its settings and a local log on your computer; we do not receive them. We use <b>no analytics and no telemetry</b>.</p>
+      <p>Once a day the app fetches one small public file from our server to check whether an update is available. You can turn this check off in Settings. Like any web request, it reveals your IP address and the app version and operating system (in the user agent) to our server logs, which we keep as described under &ldquo;How long we keep things&rdquo; below.</p>
+
+      <h2 id="subprocessors">7. Sub-processors and recipients</h2>
       <div className="table-wrap">
         <table>
           <thead><tr><th>Who</th><th>Why</th><th>What they receive</th></tr></thead>
@@ -65,10 +70,10 @@ export default function Privacy() {
       </div>
       <p>We do not sell personal data and do not share it for advertising.</p>
 
-      <h2 id="cookies">7. Cookies and tracking</h2>
+      <h2 id="cookies">8. Cookies and tracking</h2>
       <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie during GitHub/Google sign-in). We use <b>no analytics, advertising trackers, third-party fonts, CDNs or social widgets</b>. The only third-party script is Cloudflare Turnstile, loaded only on the sign-in page when enabled.</p>
 
-      <h2 id="retention">8. How long we keep things</h2>
+      <h2 id="retention">9. How long we keep things</h2>
       <ul>
         <li>Account data: while your account exists, then deleted on request unless we must keep it by law.</li>
         <li>Payment and ledger records: as long as tax and accounting law requires [period to be confirmed].</li>
@@ -76,13 +81,13 @@ export default function Privacy() {
         <li>Uploaded files and results: as described in section 4.</li>
       </ul>
 
-      <h2 id="rights">9. Your rights</h2>
+      <h2 id="rights">10. Your rights</h2>
       <p>Depending on where you live (for example under the GDPR/UK GDPR or CCPA) you may have the right to access, correct, delete or export your data, to object to or restrict some processing, and to complain to your data protection authority. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, email us and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
 
-      <h2 id="security">10. Security</h2>
+      <h2 id="security">11. Security</h2>
       <p>Connections use TLS. Session tokens, sign-in links and API keys are stored only as hashes. Billing and key management need a signed-in browser session, and state-changing requests are protected against cross-site request forgery. No system is perfectly secure; tell us if you find a problem.</p>
 
-      <h2 id="other">11. Children, transfers and changes</h2>
+      <h2 id="other">12. Children, transfers and changes</h2>
       <p>The Service is not intended for children under 16. If data is transferred outside your country we rely on appropriate safeguards [to be confirmed]. We will post changes to this policy here with a new version date and, for material changes, notify account holders.</p>
     </Legal>
   );

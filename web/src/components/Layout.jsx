@@ -65,6 +65,7 @@ function Header() {
           <NavLink to="/app" end>Studio</NavLink>
           <NavLink to="/transcribe">Transcribe</NavLink>
           <NavLink to="/app/live">Live</NavLink>
+          <NavLink to="/desktop">Desktop app</NavLink>
           <Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link>
         </nav>
         <div className="header-right">
@@ -126,6 +127,7 @@ function Footer() {
             <li><Link to="/app">Studio clean</Link></li>
             <li><Link to="/transcribe">Free transcription</Link></li>
             <li><Link to="/app/live">Live for streamers</Link></li>
+            <li><Link to="/desktop">Desktop app</Link></li>
             <li><Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link></li>
           </ul>
         </div>

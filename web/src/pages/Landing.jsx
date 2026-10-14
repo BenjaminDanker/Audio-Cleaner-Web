@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
-import { IconBroadcast, IconLock, IconSparkle, IconText, IconWave } from '../components/Icons.jsx';
+import { IconBroadcast, IconDownload, IconLock, IconSparkle, IconText, IconWave } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { moneyCents, moneyUsd } from '../format.js';
@@ -141,6 +141,19 @@ export default function Landing() {
               <span className="spacer" />
               <Link to="/transcribe" className="btn btn-secondary">Transcribe</Link>
             </article>
+          </div>
+        </div>
+      </section>
+
+      <section className="section tight" id="desktop">
+        <div className="container">
+          <div className="card promo">
+            <div className="icon" aria-hidden="true"><IconDownload /></div>
+            <div className="promo-text">
+              <h2 className="mb0">Prefer an app? Get the free desktop version.</h2>
+              <p className="muted mb0">Audio Cleaner for Windows and macOS runs the Studio clean chain on your own computer: drop in a batch of audio or video files, nothing is uploaded, and it works offline.</p>
+            </div>
+            <Link to="/desktop" className="btn btn-secondary">About the desktop app</Link>
           </div>
         </div>
       </section>

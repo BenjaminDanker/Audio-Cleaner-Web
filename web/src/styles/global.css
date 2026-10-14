@@ -133,7 +133,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .menu-panel a:hover, .menu-panel button:hover { background: var(--surface-2); }
 .menu-panel .menu-email { padding: 8px 12px; font-size: 0.82rem; color: var(--muted); border-bottom: 1px solid var(--border); margin-bottom: 4px; overflow-wrap: anywhere; }
 
-@media (max-width: 860px) {
+/* Six nav links, the balance chip and the account menu share one row: links never wrap, the brand keeps its size, and a long
+   e-mail address in the account menu is the one thing that gives way (ellipsis, down to just the avatar). */
+.brand { flex: none; }
+.nav a { white-space: nowrap; }
+.header-right, .menu, .menu > summary { min-width: 0; }
+@media (min-width: 1121px) and (max-width: 1240px) {
+  .nav { margin-left: 4px; gap: 2px; }
+  .nav a { padding-inline: 9px; }
+}
+
+@media (max-width: 1120px) {
   /* Brand, account controls and the menu toggle always share ONE row; the nav opens as a panel under the header. */
   .header-inner { flex-wrap: nowrap; gap: 8px; }
   .brand { order: 1; margin-right: auto; min-width: 0; flex: 0 1 auto; }
@@ -358,3 +368,31 @@ blockquote { margin: 0 0 1em; padding: 4px 16px; border-left: 4px solid var(--br
 .prose summary { cursor: pointer; font-weight: 650; }
 .danger-zone { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
 .danger-zone h2 { color: var(--danger); }
+
+/* ---------- Desktop app page + landing promo ---------- */
+.eyebrow { margin: 0 0 0.7em; font-size: 0.8rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--link); }
+.section.tight { padding-block: 0 56px; }
+.promo { display: flex; align-items: center; gap: 20px; }
+.promo .icon { flex: none; width: 52px; height: 52px; border-radius: 14px; display: grid; place-items: center; background: var(--brand-soft); color: var(--link); }
+.promo-text { flex: 1 1 280px; min-width: 0; display: grid; gap: 6px; }
+.promo-text h2 { font-size: clamp(1.15rem, 1vw + 1rem, 1.4rem); }
+.promo .btn { flex: none; }
+@media (max-width: 700px) { .promo { flex-direction: column; align-items: flex-start; } }
+.desk-art { width: 100%; height: auto; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); padding: 12px; }
+.desk-win { fill: var(--surface-2); stroke: var(--border); }
+.desk-rule { stroke: var(--border); }
+.desk-dot { fill: var(--border); }
+.desk-drop { fill: var(--brand-soft); stroke: var(--brand); stroke-width: 1.5; stroke-dasharray: 6 5; }
+.desk-row { fill: var(--surface); stroke: var(--border); }
+.desk-track { fill: var(--surface-2); }
+.desk-fill { fill: var(--brand); }
+.desk-seg { fill: var(--surface); stroke: var(--border); }
+.desk-seg-on { fill: var(--brand); }
+.desk-label { fill: var(--link); font-size: 14px; font-weight: 700; font-family: var(--font); }
+.desk-text { fill: var(--text); font-size: 12px; font-weight: 600; font-family: var(--font); }
+.desk-text-on { fill: var(--brand-contrast); }
+.dl-card { display: flex; flex-direction: column; gap: 10px; }
+.dl-card[data-recommended="true"] { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand), var(--shadow); }
+.dl-card .btn { align-self: flex-start; }
+.dl-card .spacer { flex: 1; }
+.desk-scope { margin-top: 24px; }

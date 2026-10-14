@@ -5,6 +5,7 @@ import Layout from './components/Layout.jsx';
 import Landing from './pages/Landing.jsx';
 
 const Free = lazy(() => import('./pages/Free.jsx'));
+const Desktop = lazy(() => import('./pages/Desktop.jsx'));
 const Login = lazy(() => import('./pages/Login.jsx'));
 const LoginVerify = lazy(() => import('./pages/LoginVerify.jsx'));
 const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
@@ -36,6 +37,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<Landing />} />
           <Route path="free" element={<Free />} />
+          <Route path="desktop" element={<Desktop />} />
           <Route path="login" element={<Login />} />
           <Route path="login/verify" element={<LoginVerify />} />
           <Route path="app" element={<RequireAuth><Dashboard /></RequireAuth>} />
