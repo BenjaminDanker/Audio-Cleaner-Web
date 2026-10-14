@@ -13,91 +13,71 @@ import json
 import logging
 import os
 import signal
-import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from .. import hostload
+from .. import cpusplit, hostload
 from ..config import get_settings
 from . import protocol as P
-from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner, caption_backlog_seconds
+from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner
 
 log = logging.getLogger("acw.stream.worker")
 WHISPER_LIVE_MODEL = os.environ.get("ACW_WHISPER_LIVE_MODEL", "small")
 
-# Admission. Live audio is real time, so a session that doesn't fit right now
-# waits in line instead of slowing every running stream down. "Fits" is
-# measured on the host (acw.hostload): cores that normal-priority work could
-# use (niced file jobs yield), minus a reserve for the rest of the machine,
-# minus sessions admitted moments ago whose load doesn't show yet.
-LIVE_RESERVE_CORES = float(os.environ.get("ACW_LIVE_RESERVE_CORES", "2.0"))
+# Capacity, measured on this machine (docs/operations.md): with live audio on
+# its own physical cores (acw.cpusplit), about LIVE_UNITS standard denoise
+# sessions keep every frame fast; a low-latency session costs ~3 of them. The
+# capacity shrinks with other load measured on those cores (e.g. game servers).
+# When full, a new session is refused and told what is still available rather
+# than slowing everyone down. Sessions that only send audio to the external
+# caption service run no model here and are never limited.
+LIVE_UNITS = float(os.environ.get("ACW_LIVE_UNITS", "12"))
+UNITS = {"light": 1.0, "low_latency": 3.0}
+# Local captions share one CPU model that keeps up with about this many talkers.
+MAX_LOCAL_CAPTIONS = int(os.environ.get("ACW_LIVE_MAX_LOCAL_CAPTIONS", "3"))
 LIVE_MIN_MEMORY = 300 * 1024**2
-# Local captions share one model pool; new caption sessions wait while
-# utterances already queue for it longer than this.
-CAPTION_BACKLOG_S = 2.0
-MAX_WAIT_S = 15 * 60
-# One thread per session: a sanity bound, far above what the CPU allows.
-MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "200"))
-# Cores per session by denoise tier: starting values from the benchmarks,
-# then the running average of what sessions really use.
-_cost: dict[str | None, float] = {"light": 0.13, "low_latency": 0.32, None: 0.03}
-_recent: list[tuple[float, float]] = []  # (admitted at, estimated cores)
-_waiting: list[object] = []
+MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "200"))  # thread sanity bound
+_units = 0.0
+_local_captions = 0
 _active = 0
 _monitor: hostload.HostLoad | None = None
 
 
-def _estimate(cfg: dict) -> float:
-    return _cost.get(cfg.get("denoise"), _cost["light"]) + 0.02
-
-
-def _fits(cfg: dict) -> bool:
-    if _active >= MAX_SESSIONS:
-        return False
+def capacity_units() -> float:
     if _monitor is None:
-        return True
+        return LIVE_UNITS
     snap = _monitor.snapshot()
-    now = time.monotonic()
-    _recent[:] = [r for r in _recent if now - r[0] < 10]
-    pending = sum(c for _, c in _recent)
-    if snap.memory_headroom < LIVE_MIN_MEMORY:
-        return False
-    if snap.cores_for_live - LIVE_RESERVE_CORES - pending < _estimate(cfg):
-        return False
-    return not (cfg.get("captions") == "local" and caption_backlog_seconds() > CAPTION_BACKLOG_S)
+    live = cpusplit.live_cpus()
+    other = max(0.0, sum(snap.busy_per_cpu[c] for c in live if c < len(snap.busy_per_cpu)) - snap.own_cores)
+    return LIVE_UNITS * max(0.0, 1.0 - other / max(1, cpusplit.live_core_count()))
 
 
-async def _wait_for_room(cfg: dict, writer: asyncio.StreamWriter) -> bool:
-    """FIFO waiting line. Tells the client its place while it waits."""
-    token = object()
-    _waiting.append(token)
-    start = time.monotonic()
-    told, told_at = None, 0.0
-    try:
-        while True:
-            place = _waiting.index(token) + 1
-            if place == 1 and _fits(cfg):
-                _recent.append((time.monotonic(), _estimate(cfg)))
-                return True
-            if time.monotonic() - start > MAX_WAIT_S:
-                return False
-            if place != told or time.monotonic() - told_at > 10:
-                told, told_at = place, time.monotonic()
-                await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "queued", "position": place}))
-            await asyncio.sleep(1.0)
-    finally:
-        _waiting.remove(token)
-
-
-def _learn_cost(tier: str | None, cpu_s: float, audio_s: float) -> None:
-    if audio_s >= 10:
-        _cost[tier] += 0.1 * (cpu_s / audio_s - _cost[tier])
+def admit(cfg: dict) -> tuple[bool, list[dict]]:
+    """(admitted, options that would still fit if not)."""
+    units = UNITS.get(cfg.get("denoise") or "", 0.0)
+    local_captions = cfg.get("captions") == "local"
+    if _active >= MAX_SESSIONS or (_monitor is not None and _monitor.snapshot().memory_headroom < LIVE_MIN_MEMORY):
+        return False, []
+    if not units and not local_captions:
+        return True, []
+    cap = capacity_units()
+    denoise_ok = _units + units <= cap
+    captions_ok = not local_captions or _local_captions < MAX_LOCAL_CAPTIONS
+    if denoise_ok and captions_ok:
+        return True, []
+    options: list[dict] = []
+    if not denoise_ok and units > UNITS["light"] and _units + UNITS["light"] <= cap:
+        options.append({"denoise": "light"})
+    if local_captions or not denoise_ok:
+        options.append({"captions": "premium"})
+    return False, options
 
 
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    global _active
+    global _active, _units, _local_captions
     settings = get_settings()
     admitted = False
+    units, local_captions = 0.0, False
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-dsp")
     chain = captioner = None
@@ -111,11 +91,16 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         if tier is not None and tier not in DENOISE_TIERS:
             await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "bad_tier"}))
             return
-        if not await _wait_for_room(cfg, writer):
-            log.warning("live session gave up waiting for room (%d running)", _active)
-            await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "capacity"}))
+        ok, options = admit(cfg)
+        if not ok:
+            log.warning("live full: %d sessions, %.1f units in use, %d local caption sessions", _active, _units, _local_captions)
+            await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "full", "available": options}))
             return
+        units = UNITS.get(cfg.get("denoise") or "", 0.0)
+        local_captions = cfg.get("captions") == "local"
         _active += 1
+        _units += units
+        _local_captions += local_captions
         admitted = True
         chain = await loop.run_in_executor(
             executor, LiveChain, settings.bin_dir / "libdf.so", settings.models_dir, tier, float(cfg.get("atten_lim_db", 100.0))
@@ -139,11 +124,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         opus: OpusCodec | None = None
         tap_pcm = bool(cfg.get("tap_pcm"))
 
-        cpu_s = audio_s = 0.0
-
         def work(seq: int, kind: int, data):
-            nonlocal opus, cpu_s, audio_s
-            t0 = time.thread_time()
+            nonlocal opus
             if kind == P.CODEC_OPUS:
                 if opus is None:
                     opus = OpusCodec(int(cfg.get("opus_bitrate", 96_000)))
@@ -155,11 +137,6 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 captioner.feed(y)
             out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
             tap = P.pack_audio(seq, y) if (tap_pcm and kind == P.CODEC_OPUS) else None
-            cpu_s += time.thread_time() - t0
-            audio_s += len(y) / P.SAMPLE_RATE
-            if audio_s >= 30:
-                _learn_cost(tier, cpu_s, audio_s)
-                cpu_s = audio_s = 0.0
             return out, tap
 
         try:
@@ -192,6 +169,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
     finally:
         if admitted:
             _active -= 1
+            _units -= units
+            _local_captions -= local_captions
         if captioner is not None:
             captioner.close()
         if chain is not None:
@@ -210,6 +189,10 @@ def _offer(q: asyncio.Queue, ev: dict) -> None:
 async def serve() -> None:
     global _monitor
     settings = get_settings()
+    # Live audio gets its own physical cores (file jobs move off them while
+    # sessions run); threads created from here on inherit this.
+    os.sched_setaffinity(0, cpusplit.live_cpus())
+    cpusplit.physical_cores()  # read the topology before the sandbox
     _monitor = hostload.get(settings.data_dir)  # opens its /proc files before the sandbox closes them off
     sock = settings.stream_worker_socket
     sock.parent.mkdir(parents=True, exist_ok=True)

@@ -8,7 +8,7 @@ import pytest
 
 from .conftest import ROOT
 
-from acw import captions
+from acw_common import captions
 from acw.stream import protocol as P
 
 

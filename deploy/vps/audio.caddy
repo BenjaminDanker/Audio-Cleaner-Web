@@ -44,4 +44,17 @@
             precompressed zstd gzip
         }
     }
+    # Home server or tunnel down: answer API calls with a clear maintenance
+    # status instead of a bare 502. The site itself is served from this VPS,
+    # so it keeps loading; it shows a maintenance notice and the free browser
+    # tools keep working.
+    handle_errors 502 503 504 {
+        @audio_api path /audio/api/*
+        handle @audio_api {
+            header Content-Type application/json
+            header Cache-Control no-store
+            header Retry-After 60
+            respond `{"detail":"maintenance","message":"Audio Cleaner is taking a short break. Free tools in your browser still work."}` 503
+        }
+    }
     # -------------------------------------------------------------------------

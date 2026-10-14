@@ -19,7 +19,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import db, hostload, jobs
+from .. import cpusplit, db, hostload, jobs
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -162,9 +162,18 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
     deadline = time.monotonic() + timeout
     last_update = 0.0
 
+    data_dir = get_settings().data_dir
+    pinned: set[int] | None = None
+
     def watchdog() -> None:
+        nonlocal pinned
         beat = 0.0
         while proc.poll() is None:
+            # Off the live-audio cores while live sessions run (acw.cpusplit).
+            want = cpusplit.job_cpus() if cpusplit.live_active(data_dir) else cpusplit.all_cpus()
+            if want != pinned:
+                cpusplit.pin_tree(proc.pid, want)
+                pinned = want
             if time.monotonic() > deadline or _stop.is_set():
                 os.killpg(proc.pid, signal.SIGKILL)
                 return

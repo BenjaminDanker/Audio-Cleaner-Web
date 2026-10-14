@@ -143,10 +143,6 @@ static void test_protocol()
 	CHECK(s2.find("\"denoise\":null") != std::string::npos);
 	CHECK(s2.find("\"captions\":null") != std::string::npos);
 
-	Event qev;
-	CHECK(parse_event(R"({"type":"queued","position":3,"message":"in line"})", qev));
-	CHECK(qev.type == EventType::Queued && qev.position == 3 && qev.message == "in line");
-
 	Event ev;
 	CHECK(parse_event(R"({"type":"ready","sessionId":"abc","sampleRate":48000,"hopSamples":480,"modelLatencyMs":30.0,"usdPerMinute":0.01,"maxSessionSeconds":43200})", ev));
 	CHECK(ev.type == EventType::Ready && ev.session_id == "abc" && ev.model_latency_ms == 30.0 && ev.sample_rate == 48000);

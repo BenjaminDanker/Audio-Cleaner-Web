@@ -108,8 +108,6 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		bool opened = false;
 		bool closed = false;
 		bool ready = false;
-		int queue_position = 0;      // last `queued` event
-		uint64_t queue_updates = 0;  // count of `queued` events
 		int http_status = 0;
 		std::string reason;                // transport-level close/error text
 		std::string server_code, server_msg;  // `error` event
@@ -516,31 +514,13 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				return out;
 			}
 		}
-		// A busy server puts the session in line and sends `queued` updates at
-		// least every 10 s; keep waiting while they come (the server gives up
-		// after 15 minutes by itself).
-		{
-			uint64_t seen = 0;
-			const auto give_up = Clock::now() + std::chrono::minutes(16);
-			for (;;) {
-				int position = 0;
-				const bool woke = waits_for(*att, std::chrono::seconds(30), [&] {
-					position = att->queue_position;
-					return att->ready || att->closed || att->queue_updates != seen;
-				}, stop);
-				std::unique_lock<std::mutex> lk(att->mu);
-				if (!woke || att->ready || att->closed || Clock::now() >= give_up)
-					break;
-				seen = att->queue_updates;
-				lk.unlock();
-				set_state(SessionState::Handshaking, "live is busy, waiting in line (position " +
-									     std::to_string(position) + ")");
-			}
-		}
-		if (!att->ready) {
+		if (!waits_for(*att, std::chrono::seconds(30), [&] { return att->ready || att->closed; }, stop) ||
+		    !att->ready) {
 			out.reason = describe_failure(*att, "server did not answer the start message");
 			if (!att->server_code.empty()) {
-				out.min_wait_ms = is_fatal_code(att->server_code) ? 60000 : 15000;
+				// "full": the server has no room for this setup right now; the
+				// message lists what is still available. Retry slowly.
+				out.min_wait_ms = is_fatal_code(att->server_code) || att->server_code == "full" ? 60000 : 15000;
 				out.reason = "server: " + att->server_code + (att->server_msg.empty() ? "" : " - " + att->server_msg);
 			}
 			ws.stop();
@@ -750,13 +730,6 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			std::lock_guard<std::mutex> lk(att.mu);
 			att.ready_ev = ev;
 			att.ready = true;
-			att.cv.notify_all();
-			break;
-		}
-		case EventType::Queued: {
-			std::lock_guard<std::mutex> lk(att.mu);
-			att.queue_position = ev.position;
-			++att.queue_updates;
 			att.cv.notify_all();
 			break;
 		}

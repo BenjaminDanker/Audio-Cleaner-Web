@@ -21,17 +21,17 @@ Client sends one text message within 15 s:
  "client": "obs-audio-cleaner/0.1.0"}
 ```
 
-At least one of `denoise` / `captions` must be set. When live processing is
-busy the session waits in line first; meanwhile the server sends, at least every
-10 s,
+At least one of `denoise` / `captions` must be set. Live processing on our
+CPUs has a measured capacity; when the requested setup doesn't fit right now,
+the server refuses it and lists what would still work:
 
 ```json
-{"type": "queued", "position": 2, "message": "Live is busy, you're in line. This starts by itself."}
+{"type": "error", "code": "full", "available": [{"denoise": "light"}, {"captions": "premium"}],
+ "message": "Low-latency noise removal is full right now. Still available: standard noise removal, extra-accurate captions. Try again in a few minutes."}
 ```
 
-Keep the connection open (no audio yet); billing starts with `ready`. After
-15 minutes in line the server gives up with `{"type": "error", "code": "busy"}`.
-Then the server answers:
+Clients should retry no sooner than a minute later. `captions: "premium"`
+without denoise is never refused for capacity. Otherwise the server answers:
 
 ```json
 {"type": "ready", "sessionId": "...", "sampleRate": 48000, "hopSamples": 480,

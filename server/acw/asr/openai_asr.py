@@ -18,7 +18,7 @@ from pathlib import Path
 
 import httpx
 
-from ..captions import Segment, segments_to_json
+from acw_common.captions import Segment, segments_to_json
 from ..config import get_settings
 
 log = logging.getLogger(__name__)

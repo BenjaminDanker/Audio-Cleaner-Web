@@ -198,10 +198,6 @@ bool parse_event(const std::string &text, Event &ev)
 		integer("hopSamples", ev.hop_samples);
 		integer("sampleRate", ev.sample_rate);
 		integer("maxSessionSeconds", ev.max_session_seconds);
-	} else if (type == "queued") {
-		ev.type = EventType::Queued;
-		integer("position", ev.position);
-		str("message", ev.message);
 	} else if (type == "caption") {
 		ev.type = EventType::Caption;
 		str("text", ev.text);

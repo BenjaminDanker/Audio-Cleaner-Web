@@ -36,7 +36,7 @@ def _run_worker_once(expect_status):
 
 def test_premium_transcription_stage_machine(client, signed_in, monkeypatch):
     from acw.asr import openai_asr
-    from acw.captions import Segment
+    from acw_common.captions import Segment
 
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")

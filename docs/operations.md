@@ -93,11 +93,22 @@ per user; free jobs are refused while 6 or more jobs wait.
 - Local transcription (large-v3-turbo int8): ~0.45x real time on 8 threads.
   This is the bottleneck. Parakeet would be ~4.5x faster (research/asr.md).
 
-**Live.** Sessions are admitted by measured CPU cost against
-`ACW_LIVE_CPU_BUDGET` (default 7 cores): light denoise 0.13, low-latency 0.32,
-local captions +0.35 (and at most `ACW_LIVE_MAX_LOCAL_CAPTIONS`, default 6).
-`ACW_STREAM_MAX_SESSIONS` (24) is a hard cap on top. When full, a new session
-gets "Live is full right now" and running sessions are untouched. Typical
-mixes: ~45 light, ~20 low-latency, or 6 with local captions plus ~25 light.
-Local captions drop an utterance rather than fall behind when the shared model
-is busy.
+**Live.** Live audio runs on its own 5 physical cores (`acw.cpusplit`;
+`ACW_LIVE_PHYSICAL_CORES`); while any server-processed session runs, file
+jobs are re-pinned to the other 3 (hyper-thread siblings of a live core would
+otherwise halve its speed: one niced 6-thread job made 12 sessions lag 0.5 s).
+Capacity is measured, in standard-denoise units (`ACW_LIVE_UNITS`, default 12):
+benchmark 2026-10-14, 20 ms frames, frame round trip inside the server:
+
+| setup | idle box | with a 6-thread file job running |
+|---|---|---|
+| standard denoise | 18 sessions: p99 11 ms | 12: p99 13 ms; 14: p99 53 ms; 16: collapses (2 s) |
+| low-latency denoise | 6 sessions: p99 12 ms | 4: p99 23 ms; 5: collapses |
+
+So 12 units, low latency = 3 units. Other load measured on the live cores (game
+servers) shrinks the capacity proportionally. Local captions (whisper small,
+0.8x real time per utterance on 2 threads) keep up with ~3 talkers and lag
+5+ s; `ACW_LIVE_MAX_LOCAL_CAPTIONS=3` until the streaming model lands
+(research/asr.md). When full, a new session is refused with the options that
+still fit; sessions using only the external (extra-accurate) captions are never
+limited.

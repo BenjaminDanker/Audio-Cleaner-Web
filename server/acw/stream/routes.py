@@ -18,7 +18,7 @@ from collections import OrderedDict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, db
+from .. import auth, cpusplit, db
 from ..billing import ledger, pricing
 from ..config import get_settings
 from ..security import limiter
@@ -36,9 +36,11 @@ PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
 LOW_BALANCE_WARN_SECONDS = 300
 
 _live: dict[str, int] = {}  # user_id -> active sessions in this process
+_server_compute = 0  # running sessions that use the CPU models here (file jobs move off the live cores)
 
 
 async def startup() -> None:
+    cpusplit.set_live_sessions(get_settings().data_dir, 0)
     # Sessions left "active" by a previous process were never captured.
     for row in db.all_rows("SELECT id, hold_id, seconds FROM stream_sessions WHERE status = 'active'"):
         if row["hold_id"]:
@@ -135,9 +137,15 @@ async def stream_ws(ws: WebSocket) -> None:
         return
     _live[principal.user_id] = _live.get(principal.user_id, 0) + 1
     sess: Session | None = None
+    global _server_compute
+    computes = False
     try:
         sess = await _start(ws, principal, ip)
-        if sess is not None:
+        if sess is not None and sess.writer is not None:
+            computes = bool(sess.cfg.get("denoise")) or sess.cfg.get("captions") == "local"
+            if computes:
+                _server_compute += 1
+                cpusplit.set_live_sessions(get_settings().data_dir, _server_compute)
             await _run(sess)
     except WebSocketDisconnect:
         pass
@@ -146,6 +154,9 @@ async def stream_ws(ws: WebSocket) -> None:
         if sess:
             sess.end_reason = "server_error"
     finally:
+        if computes:
+            _server_compute -= 1
+            cpusplit.set_live_sessions(get_settings().data_dir, _server_compute)
         _live[principal.user_id] -= 1
         if sess is not None:
             await _finish(sess)
@@ -158,38 +169,23 @@ def _drop_worker(sess: "Session") -> None:
         sess.writer = None
 
 
-async def _await_ready(ws: WebSocket, sess: "Session") -> tuple[int | None, dict]:
-    """Read the worker's answer to `start`, relaying waiting-line updates to the
-    client. Returns (None, {}) if the client leaves while waiting."""
-    client = asyncio.create_task(ws.receive())
-    try:
-        while True:
-            read = asyncio.ensure_future(P.read_msg(sess.reader))
-            while True:
-                done, _ = await asyncio.wait({read, client}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
-                if client not in done:
-                    break
-                if client.result().get("type") == "websocket.disconnect":
-                    read.cancel()
-                    return None, {}
-                client = asyncio.create_task(ws.receive())  # nothing to act on before `ready`
-                if read.done():
-                    break
-            if not read.done():
-                read.cancel()
-                raise TimeoutError("stream worker did not answer")
-            kind, payload = read.result()
-            msg = json.loads(payload)
-            if kind != P.MSG_EVENT or msg.get("type") != "queued":
-                return kind, msg
-            try:
-                await _send_json(ws, {"type": "queued", "position": int(msg.get("position", 1)),
-                                      "message": "Live is busy, you're in line. This starts by itself."})
-            except Exception:  # noqa: BLE001 - client went away mid-send
-                return None, {}
-    finally:
-        if not client.done():
-            client.cancel()
+_OPTION_TEXT = {
+    ("denoise", "light"): "standard noise removal",
+    ("captions", "premium"): "extra-accurate captions",
+}
+
+
+def _full_message(cfg: dict, options: list[dict]) -> str:
+    wanted = []
+    if cfg.get("denoise"):
+        wanted.append("low-latency noise removal" if cfg["denoise"] == "low_latency" else "live noise removal")
+    if cfg.get("captions") == "local":
+        wanted.append("standard captions")
+    msg = f"{' and '.join(wanted).capitalize() or 'Live'} {'is' if len(wanted) < 2 else 'are'} full right now."
+    still = [_OPTION_TEXT[k] for o in options for k in o.items() if k in _OPTION_TEXT]
+    if still:
+        msg += " Still available: " + ", ".join(dict.fromkeys(still)) + "."
+    return msg + " Try again in a few minutes."
 
 
 async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session | None:
@@ -258,19 +254,14 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         worker_cfg["tap_pcm"] = captions == "premium"
         worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
         await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
-        # The worker may first put the session in its waiting line ("queued"
-        # events, every <=10 s; it gives up by itself after 15 minutes). Watch
-        # the client meanwhile so someone who leaves doesn't hold the line.
-        kind, ready = await _await_ready(ws, sess)
-        if kind is None:
-            sess.end_reason = "client_closed"
+        kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
+        ready = json.loads(payload)
+        if kind == P.MSG_EVENT and ready.get("code") == "full":
+            sess.end_reason = "full"
             _drop_worker(sess)
-            return sess
-        if kind == P.MSG_EVENT and ready.get("code") == "capacity":
-            sess.end_reason = "capacity"
-            _drop_worker(sess)
-            await _send_json(ws, {"type": "error", "code": "busy",
-                                  "message": "Live has been full for a while. Please try again later."})
+            options = ready.get("available") or []
+            await _send_json(ws, {"type": "error", "code": "full", "available": options,
+                                  "message": _full_message(worker_cfg, options)})
             await ws.close(code=1013)
             return sess
         if kind != P.MSG_EVENT or ready.get("type") != "ready":

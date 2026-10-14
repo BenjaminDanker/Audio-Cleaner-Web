@@ -52,7 +52,7 @@ std::string make_ping_message(uint64_t t);
 std::string make_config_message(int atten_lim_db);
 std::string make_stop_message();
 
-enum class EventType { Unknown, Ready, Queued, Caption, Warning, Stopped, Error, Pong };
+enum class EventType { Unknown, Ready, Caption, Warning, Stopped, Error, Pong };
 
 struct Event {
 	EventType type = EventType::Unknown;
@@ -63,8 +63,6 @@ struct Event {
 	int hop_samples = 0;
 	int sample_rate = 0;
 	int max_session_seconds = 0;
-	// queued (server busy; the session starts by itself when there is room)
-	int position = 0;
 	// caption
 	std::string text;
 	bool is_final = false;

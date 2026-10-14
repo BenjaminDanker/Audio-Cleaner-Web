@@ -149,20 +149,19 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             _write_asr_chunks(ff, job_dir, speech_16k)
             needs_cloud = True
         else:
-            from acw.asr import local
+            from acw_common import transcribe
 
             base = 50 if denoise else 5
             emit(stage="transcribing", progress=base)
-            segs, lang = local.transcribe(
-                speech_16k, Path(spec["models_dir"]),
-                model_name=spec.get("whisper_model", local.DEFAULT_MODEL),
+            segs, lang = transcribe.transcribe(
+                speech_16k, Path(spec["models_dir"]) / "whisper" / spec.get("whisper_model", "large-v3-turbo"),
                 language=opts.get("language"), threads=threads,
                 progress=lambda f: emit(stage="transcribing", progress=int(base + (90 - base) * f)),
             )
-            from acw.captions import segments_to_json
+            from acw_common.captions import segments_to_json
 
             (job_dir / "segments.json").write_text(
-                json.dumps({"language": lang, "engine": "faster-whisper", "segments": segments_to_json(segs)})
+                json.dumps({"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
             )
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
@@ -208,7 +207,7 @@ def _write_asr_chunks(ff, job_dir: Path, x16) -> None:
 
 
 def stage_finalize(job_dir: Path, spec: dict) -> dict:
-    from acw import captions
+    from acw_common import captions
 
     ff = _ff(spec)
     opts = spec["options"]
