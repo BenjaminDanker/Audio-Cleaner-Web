@@ -135,7 +135,9 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         if transcribe:
             from scipy.signal import resample_poly
 
-            speech_16k = resample_poly(y.mean(axis=1), 1, 3).astype(np.float32)
+            # Transcribe the original: every ASR model tested scores worse on
+            # denoised speech (docs/research/asr.md).
+            speech_16k = resample_poly(x.mean(axis=1), 1, 3).astype(np.float32)
         del x, y
 
     needs_cloud = False
