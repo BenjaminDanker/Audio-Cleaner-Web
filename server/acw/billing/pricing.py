@@ -26,13 +26,13 @@ _RATE_LIST = [
     # File processing
     Rate("denoise", "standard", "Studio clean", 10_000),
     Rate("transcribe", "local", "Transcription", 4_000),
-    Rate("transcribe", "premium", "Transcription, premium accuracy", 15_000),
+    Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Live streaming
     Rate("stream_denoise", "light", "Live noise removal", 4_000),
     Rate("stream_denoise", "low_latency", "Live noise removal, low latency", 8_000),
     Rate("stream_captions", "local", "Live captions", 6_000),
-    # The premium caption engine bills per minute of audio sent; we only send speech.
-    Rate("stream_captions", "premium", "Live captions, premium accuracy", 25_000),
+    # The extra-accurate caption engine bills per minute of audio sent; we only send speech.
+    Rate("stream_captions", "premium", "Live captions, extra accurate", 25_000),
 ]
 RATES: dict[tuple[str, str], Rate] = {(r.product, r.tier): r for r in _RATE_LIST}
 
