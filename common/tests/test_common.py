@@ -17,6 +17,8 @@ HOME = Path.home() / "audio-cleaner"
 LIB = Path(os.environ.get("ACW_LIBDF", HOME / "bin" / dfn.LIB_NAME))
 MODEL = Path(os.environ.get("ACW_DFN_MODEL", HOME / "models" / dfn.MODEL_FILE))
 FF_DIR = Path(os.environ.get("ACW_FFMPEG_DIR", HOME / "bin"))
+# Generates test videos (needs lavfi + a video encoder, which the desktop's minimal FFmpeg lacks).
+FIXTURE_FFMPEG = os.environ.get("ACW_FIXTURE_FFMPEG", str(FF_DIR / "ffmpeg"))
 SR = pipeline.SAMPLE_RATE
 
 needs_dfn = pytest.mark.skipif(not (LIB.is_file() and MODEL.is_file()), reason="libDF build/model not available")
@@ -105,7 +107,7 @@ def test_mux_keeps_or_strips_metadata(tmp_path):
     ff = FFmpeg(FF_DIR, threads=1)
     src = tmp_path / "in.mp4"
     subprocess.run(
-        [ff.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=2",
+        [FIXTURE_FFMPEG, "-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=10:duration=2",
          "-f", "lavfi", "-i", "sine=frequency=300:duration=2", "-c:v", "mpeg4", "-c:a", "aac",
          "-metadata", "title=hello", "-shortest", str(src)],
         check=True,

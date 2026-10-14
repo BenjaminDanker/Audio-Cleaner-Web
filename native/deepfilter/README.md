@@ -3,7 +3,8 @@
 Reproducible builds of [Rikorose/DeepFilterNet](https://github.com/Rikorose/DeepFilterNet)
 `libDF` (pinned to commit `d375b2d`) for
 
-* a native shared library `libdf.so` (C API, loaded from Python with `ctypes`), and
+* a native shared library (C API, loaded from Python with `ctypes`): `libdf.so` on Linux,
+  `libdf.dylib` on macOS, `df.dll` on Windows (the names `acw_common.dfn.LIB_NAME` expects), and
 * a WebAssembly module `df.js` + `df_bg.wasm` (wasm-bindgen `web` target, SIMD128) for browsers.
 
 Neither embeds the DFN3 model: pass `DeepFilterNet3_onnx.tar.gz` at runtime
@@ -38,13 +39,30 @@ Neither embeds the DFN3 model: pass `DeepFilterNet3_onnx.tar.gz` at runtime
 
 ```sh
 native/deepfilter/build.sh            # native + wasm
-native/deepfilter/build.sh native     # only libdf.so
+native/deepfilter/build.sh native     # only the native library (libdf.so / libdf.dylib / df.dll)
 native/deepfilter/build.sh wasm       # only df.js + df_bg.wasm
 BUILD_DIR=... OUT=... native/deepfilter/build.sh
 ```
 
 Defaults: `BUILD_DIR=~/audio-cleaner/src/deepfilter-build` (clone + `target/`),
 `OUT=$BUILD_DIR/out` (`libdf.so`, `wasm/{df.js,df_bg.wasm,*.d.ts,LICENSE-*}`, `SHA256SUMS`).
+
+### Other platforms (desktop app)
+
+The `native` target also runs on macOS and on Windows (Git Bash with the MSVC Rust toolchain);
+`.github/workflows/desktop.yml` builds it that way for the desktop installers.
+
+* The library is installed under the platform's name (`libdf.dylib`, `df.dll`) taken from
+  `target/release-capi/`; the checksum file uses `shasum -a 256` if `sha256sum` is missing.
+* `CARGO_BUILD_TARGET=<triple>` (e.g. `x86_64-apple-darwin` on an arm64 Mac) cross-compiles; the
+  script adds the rustup target if needed, reads the output from
+  `target/<triple>/release-capi/` and names the library after the triple.
+* On macOS `MACOSX_DEPLOYMENT_TARGET` defaults to `11.0`.
+* The clone is made with `core.autocrlf=false`, otherwise a CRLF checkout on Windows makes
+  `tract-0.23.patch` fail to apply (the repo's `.gitattributes` pins the patch, `Cargo.lock` and the
+  shell scripts to LF for the same reason).
+* Only Linux x86_64 is covered by the tests in this directory; the macOS and Windows builds are
+  produced and smoke-tested (`--selftest` of the frozen app) by CI.
 Needs rustup/cargo, git, network on the first run. The script adds the
 `wasm32-unknown-unknown` target and installs the pinned prebuilt `wasm-pack` 0.15.0 into
 `~/.cargo/bin` (sha256-checked) if missing; wasm-pack fetches wasm-bindgen and wasm-opt itself.
