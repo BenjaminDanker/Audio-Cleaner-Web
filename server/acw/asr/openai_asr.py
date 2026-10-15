@@ -53,7 +53,7 @@ async def _transcribe_one(http: httpx.AsyncClient, key: str, path: Path, languag
     return (r.json().get("text") or "").strip()
 
 
-async def transcribe_chunks(chunk_dir: Path, language: str | None = None) -> list[Segment]:
+async def transcribe_chunks(chunk_dir: Path, language: str | None = None, max_seconds: float | None = None) -> list[Segment]:
     key = get_settings().openai_api_key
     if not key:
         raise CloudASRError("premium transcription is not configured")
@@ -64,6 +64,9 @@ async def transcribe_chunks(chunk_dir: Path, language: str | None = None) -> lis
         if path.parent != chunk_dir or not path.is_file():
             raise CloudASRError("bad chunk index")
         paths.append(path)
+    # Each second sent costs us money: never send (much) more than the length the job is billed for.
+    if max_seconds is not None and sum(float(c["seconds"]) for c in chunks) > max_seconds:
+        raise CloudASRError("more speech than the billed length")
     gate = asyncio.Semaphore(CONCURRENCY)
 
     async def one(path: Path) -> str:
@@ -79,8 +82,9 @@ async def transcribe_chunks(chunk_dir: Path, language: str | None = None) -> lis
     ]
 
 
-async def run_for_job(job_dir: Path, language: str | None) -> None:
-    segs = await transcribe_chunks(job_dir / "asr_chunks", language)
+async def run_for_job(job_dir: Path, language: str | None, billed_seconds: float | None = None) -> None:
+    limit = {} if billed_seconds is None else {"max_seconds": billed_seconds * 1.05 + 1}
+    segs = await transcribe_chunks(job_dir / "asr_chunks", language, **limit)
     payload = {
         "language": language,
         "engine": "premium",

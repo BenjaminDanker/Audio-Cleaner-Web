@@ -11,9 +11,12 @@ longer has, and lets several jobs run at once without overdrawing.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 
 from .. import db
+
+log = logging.getLogger(__name__)
 
 
 class InsufficientFunds(Exception):
@@ -194,28 +197,31 @@ def capture_hold(
     kind: str = "usage",
     ref_type: str | None = None,
     ref_id: str | None = None,
+    c: sqlite3.Connection | None = None,
 ) -> int:
     """Charge up to the held amount and release the rest. Returns the amount charged.
 
     If the real cost exceeds the hold, the overage is taken from the available
     balance as far as it goes; whatever is still missing is written off (the
-    caller should have extended the hold first).
+    caller should have extended the hold first). With `c` it joins the caller's
+    transaction (e.g. the job's status change).
     """
     if amount_micros < 0:
         raise LedgerError("capture amount must be non-negative")
-    with db.tx() as c:
-        hold = _active_hold(c, hold_id)
+
+    def run(cc: sqlite3.Connection) -> int:
+        hold = _active_hold(cc, hold_id)
         user_id = hold["user_id"]
         held = hold["amount_micros"]
-        c.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (held, user_id))
+        cc.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (held, user_id))
         charge = amount_micros
         if charge > held:
             # The released hold is now part of `available` again.
-            row = _user_row(c, user_id)
+            row = _user_row(cc, user_id)
             charge = min(charge, row["balance_micros"] - row["held_micros"])
         if charge > 0:
             _apply(
-                c,
+                cc,
                 user_id,
                 -charge,
                 kind,
@@ -223,20 +229,32 @@ def capture_hold(
                 ref_id or hold["ref_id"],
                 description,
             )
-        c.execute(
+        cc.execute(
             "UPDATE holds SET status = 'captured', amount_micros = ?, closed_at = ? WHERE id = ?",
             (charge, db.now(), hold_id),
         )
         return charge
 
+    if c is not None:
+        return run(c)
+    with db.tx() as cc:
+        return run(cc)
 
-def release_hold(hold_id: str) -> None:
-    with db.tx() as c:
-        hold = c.execute("SELECT * FROM holds WHERE id = ?", (hold_id,)).fetchone()
+
+def release_hold(hold_id: str, *, c: sqlite3.Connection | None = None) -> None:
+    """Give a hold back. Does nothing if it is already closed. With `c` it joins the caller's transaction."""
+
+    def run(cc: sqlite3.Connection) -> None:
+        hold = cc.execute("SELECT * FROM holds WHERE id = ?", (hold_id,)).fetchone()
         if hold is None or hold["status"] != "active":
             return
-        c.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (hold["amount_micros"], hold["user_id"]))
-        c.execute("UPDATE holds SET status = 'released', closed_at = ? WHERE id = ?", (db.now(), hold_id))
+        cc.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (hold["amount_micros"], hold["user_id"]))
+        cc.execute("UPDATE holds SET status = 'released', closed_at = ? WHERE id = ?", (db.now(), hold_id))
+
+    if c is not None:
+        return run(c)
+    with db.tx() as cc:
+        return run(cc)
 
 
 def release_all_holds(user_id: str, c: sqlite3.Connection) -> None:
@@ -244,6 +262,47 @@ def release_all_holds(user_id: str, c: sqlite3.Connection) -> None:
     for h in holds:
         c.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (h["amount_micros"], user_id))
         c.execute("UPDATE holds SET status = 'released', closed_at = ? WHERE id = ?", (db.now(), h["id"]))
+
+
+# Holds that outlive their purpose, by what they were opened for. A hold is young for a moment
+# before the job or stream row it names exists, so "missing" only counts after a grace period.
+ORPHAN_GRACE_SECONDS = 120
+REFUND_HOLD_MAX_SECONDS = 600
+STREAM_HOLD_MAX_SECONDS = 13 * 3600  # longer than any session (stream.routes.MAX_SESSION_SECONDS)
+_reported_mismatches: set[tuple] = set()
+
+
+def reap_stale_holds() -> int:
+    """Release active holds nothing will ever close: for a finished (or missing) job, an ended (or missing)
+    live session, or a refund that took too long. Also logs when users.held_micros stops matching the sum of
+    the active holds. Returns how many holds it released."""
+    now = db.now()
+    stale = db.all_rows(
+        "SELECT h.id, h.ref_type, h.ref_id FROM holds h"
+        " LEFT JOIN jobs j ON h.ref_type = 'job' AND j.id = h.ref_id"
+        " LEFT JOIN stream_sessions s ON h.ref_type = 'stream' AND s.id = h.ref_id"
+        " WHERE h.status = 'active' AND ("
+        "  (h.ref_type = 'job' AND ((j.id IS NULL AND h.created_at < :orphan)"
+        "     OR j.status IN ('done', 'failed', 'canceled', 'expired')))"
+        "  OR (h.ref_type = 'stream' AND ((s.id IS NULL AND h.created_at < :orphan) OR s.status = 'ended'"
+        "     OR h.created_at < :stream_old))"
+        "  OR (h.ref_type = 'refund' AND h.created_at < :refund_old))",
+        {"orphan": now - ORPHAN_GRACE_SECONDS, "stream_old": now - STREAM_HOLD_MAX_SECONDS,
+         "refund_old": now - REFUND_HOLD_MAX_SECONDS},
+    )
+    for h in stale:
+        log.warning("releasing leaked %s hold %s (%s)", h["ref_type"], h["id"], h["ref_id"])
+        release_hold(h["id"])
+    for u in db.all_rows(
+        "SELECT u.id, u.held_micros, COALESCE(SUM(h.amount_micros), 0) AS active FROM users u"
+        " LEFT JOIN holds h ON h.user_id = u.id AND h.status = 'active' GROUP BY u.id"
+        " HAVING u.held_micros != COALESCE(SUM(h.amount_micros), 0)"
+    ):
+        key = (u["id"], u["held_micros"], u["active"])
+        if key not in _reported_mismatches:
+            _reported_mismatches.add(key)
+            log.error("user %s: held_micros %s != sum of active holds %s", u["id"], u["held_micros"], u["active"])
+    return len(stale)
 
 
 def history(user_id: str, limit: int = 100) -> list[dict]:

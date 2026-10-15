@@ -120,13 +120,8 @@ def cancel(job_id: str, principal: auth.Principal = Depends(auth.require_scope("
     job = _get_owned(job_id, principal)
     if job["status"] not in ("uploading", "queued"):
         raise HTTPException(status_code=409, detail="Only jobs that have not started can be canceled.")
-    with db.tx() as c:
-        n = c.execute(
-            "UPDATE jobs SET status = 'canceling' WHERE id = ? AND status IN ('uploading','queued')", (job_id,)
-        ).rowcount
-    if n:
-        # 'canceling' keeps workers from claiming it; finish_failed releases money.
-        jobs.finish_failed(job, "Canceled.", status="canceled")
+    # One transaction moves the status and releases the money; a worker can't claim the job in between.
+    jobs.finish_failed(job, "Canceled.", status="canceled", only_from=("uploading", "queued"))
     return {"ok": True}
 
 

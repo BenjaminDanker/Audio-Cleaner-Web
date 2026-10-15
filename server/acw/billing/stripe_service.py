@@ -388,7 +388,8 @@ def _handle_charge_refunded(charge: dict) -> None:
         if r.get("status") not in ("succeeded", "pending"):
             continue
         credit_cents = credit_part(int(r["amount"]), p["amount_cents"], p["tax_cents"])
-        ledger.debit_available(
+        seen = db.one("SELECT 1 FROM ledger WHERE kind = 'refund' AND ref_type = 'stripe_refund' AND ref_id = ?", (r["id"],))
+        taken = ledger.debit_available(
             user_id,
             credit_cents * MICROS_PER_CENT,
             "refund",
@@ -397,6 +398,10 @@ def _handle_charge_refunded(charge: dict) -> None:
             f"Refund ${credit_cents / 100:.2f} credit",
             allow_partial=True,
         )
+        # A refund the person asked for here is booked in full by refund_unused (its hold is what keeps
+        # this debit from finding the money); anything else that the balance couldn't cover is lost to us.
+        if not seen and taken < credit_cents * MICROS_PER_CENT and not (r.get("metadata") or {}).get("acw_user_id"):
+            _audit_once("refund_unrecovered", user_id, f"{payment_id}:{r['id']}:{credit_cents * MICROS_PER_CENT - taken} micros")
     refunded = credit_part(int(charge.get("amount_refunded") or 0), p["amount_cents"], p["tax_cents"])
     db.execute(
         "UPDATE payments SET refunded_cents = MAX(refunded_cents, ?),"
@@ -406,8 +411,16 @@ def _handle_charge_refunded(charge: dict) -> None:
     )
 
 
-def suspend_and_zero(user_id: str, reason: str, ref_id: str) -> None:
-    """Disputes: stop all spending and remove remaining credit."""
+def _audit_once(action: str, user_id: str, detail: str) -> None:
+    """Audit entry for money we could not get back (a webhook may be delivered again)."""
+    if db.one("SELECT 1 FROM audit_log WHERE action = ? AND user_id = ? AND detail = ?", (action, user_id, detail)) is None:
+        db.audit("stripe", action, user_id=user_id, detail=detail)
+        log.warning("%s for %s: %s", action, user_id, detail)
+
+
+def suspend_and_zero(user_id: str, reason: str, ref_id: str) -> int:
+    """Disputes: stop all spending and remove remaining credit. Returns the micros taken back."""
+    taken = 0
     with db.tx() as c:
         c.execute(
             "UPDATE users SET status = 'suspended', auto_reload_enabled = 0 WHERE id = ? AND status != 'deleted'",
@@ -416,22 +429,31 @@ def suspend_and_zero(user_id: str, reason: str, ref_id: str) -> None:
         ledger.release_all_holds(user_id, c)
         row = c.execute("SELECT balance_micros FROM users WHERE id = ?", (user_id,)).fetchone()
         if row["balance_micros"] > 0:
-            ledger.debit_available(user_id, row["balance_micros"], "dispute", "stripe_dispute", ref_id, reason, allow_partial=True, c=c)
+            taken = ledger.debit_available(user_id, row["balance_micros"], "dispute", "stripe_dispute", ref_id, reason, allow_partial=True, c=c)
         c.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
         c.execute(
             "INSERT INTO audit_log(user_id, actor, action, detail, created_at) VALUES (?, 'stripe', 'suspended', ?, ?)",
             (user_id, reason, db.now()),
         )
+    return taken
+
+
+def _note_unrecovered(action: str, payment, ref_id: str, taken_micros: int) -> None:
+    """The credit of a disputed payment that was already spent can't be taken back: record the shortfall."""
+    owed = (payment["amount_cents"] - payment["refunded_cents"]) * MICROS_PER_CENT
+    if taken_micros < owed:
+        _audit_once(action, payment["user_id"], f"{payment['id']}:{ref_id}:{owed - taken_micros} micros")
 
 
 def _handle_dispute_created(dispute: dict) -> None:
     charge_id = dispute.get("charge")
-    row = db.one("SELECT id, user_id FROM payments WHERE stripe_charge = ?", (charge_id,))
+    row = db.one("SELECT id, user_id, amount_cents, refunded_cents FROM payments WHERE stripe_charge = ?", (charge_id,))
     if row is None:
         log.error("dispute %s for unknown charge %s", dispute.get("id"), charge_id)
         return
     db.execute("UPDATE payments SET status = 'disputed', updated_at = ? WHERE id = ?", (db.now(), row["id"]))
-    suspend_and_zero(row["user_id"], f"dispute {dispute.get('reason')}", dispute["id"])
+    taken = suspend_and_zero(row["user_id"], f"dispute {dispute.get('reason')}", dispute["id"])
+    _note_unrecovered("dispute_unrecovered", row, dispute["id"], taken)
 
 
 def _handle_early_fraud_warning(efw: dict) -> None:
@@ -439,7 +461,8 @@ def _handle_early_fraud_warning(efw: dict) -> None:
     row = db.one("SELECT id, user_id, amount_cents, refunded_cents FROM payments WHERE stripe_charge = ?", (charge_id,))
     if row is None:
         return
-    suspend_and_zero(row["user_id"], "early fraud warning", efw["id"])
+    taken = suspend_and_zero(row["user_id"], "early fraud warning", efw["id"])
+    _note_unrecovered("efw_unrecovered", row, efw["id"], taken)
     remaining = row["amount_cents"] - row["refunded_cents"]
     if 0 < remaining <= EFW_AUTO_REFUND_MAX_CENTS:
         # Refunding before a dispute avoids the dispute fee and VAMP count.
@@ -495,8 +518,9 @@ def users_needing_reload() -> list[str]:
     rows = db.all_rows(
         "SELECT id FROM users WHERE status = 'active' AND auto_reload_enabled = 1 AND auto_reload_in_flight = 0"
         " AND default_payment_method IS NOT NULL AND stripe_customer_id IS NOT NULL"
-        " AND auto_reload_failures < ? AND balance_micros - held_micros < auto_reload_threshold_micros",
-        (AUTO_RELOAD_MAX_FAILURES,),
+        " AND auto_reload_failures < ? AND balance_micros - held_micros < auto_reload_threshold_micros"
+        " AND auto_reload_threshold_micros < auto_reload_amount_cents * ?",
+        (AUTO_RELOAD_MAX_FAILURES, MICROS_PER_CENT),
     )
     return [r["id"] for r in rows]
 
@@ -513,6 +537,8 @@ def run_auto_reload(user_id: str) -> str:
             or u["auto_reload_in_flight"]
             or not u["default_payment_method"]
             or u["balance_micros"] - u["held_micros"] >= u["auto_reload_threshold_micros"]
+            # a reload that doesn't lift the balance over the threshold would charge the card again and again
+            or u["auto_reload_threshold_micros"] >= u["auto_reload_amount_cents"] * MICROS_PER_CENT
         ):
             return "skip"
         spent = u["auto_reload_month_cents"] if u["auto_reload_month"] == month else 0
@@ -566,9 +592,9 @@ def run_auto_reload(user_id: str) -> str:
         code = getattr(e, "code", None) or "card_error"
         _record_reload_failure(payment_id, user_id, code)
         return f"failed:{code}"
-    except Exception:  # noqa: BLE001 - network etc.; leave pending for the webhook/sweeper
+    except Exception:  # noqa: BLE001 - network etc.: the PaymentIntent may exist (the request may even have
+        # gone through), so the reload stays in flight until reconcile() finds out what happened to it
         log.exception("auto-reload request for %s failed", user_id)
-        _record_reload_failure(payment_id, user_id, "api_error")
         return "error"
     db.execute("UPDATE payments SET stripe_payment_intent = ?, updated_at = ? WHERE id = ?", (pi.id, db.now(), payment_id))
     try:
@@ -617,21 +643,41 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
                     "metadata": {"acw_user_id": user_id, "acw_payment_id": payment_id}},
             options={"idempotency_key": f"refund-{payment_id}-{refundable}-{p['refunded_cents']}"},
         )
-    except Exception:
-        ledger.release_hold(hold_id)
-        raise
-    _reverse_tax(p, refund.id, gross)
-    ledger.capture_hold(
-        hold_id, refundable * MICROS_PER_CENT,
-        f"Refund ${to_card / 100:.2f}" + (f" (card fee ${fee / 100:.2f} kept)" if fee else ""),
-        kind="refund", ref_type="stripe_refund", ref_id=refund.id,
-    )
-    db.execute(
-        "UPDATE payments SET refunded_cents = refunded_cents + ?, updated_at = ? WHERE id = ?",
-        (refundable, db.now(), payment_id),
-    )
+        _reverse_tax(p, refund.id, gross)
+        _book_refund(
+            user_id, payment_id, hold_id, refund.id, refundable, p["refunded_cents"],
+            f"Refund ${to_card / 100:.2f}" + (f" (card fee ${fee / 100:.2f} kept)" if fee else ""),
+        )
+    finally:
+        ledger.release_hold(hold_id)  # a no-op once booked; frees the money if anything above failed
     db.audit("user", "refund", user_id=user_id, detail=f"{payment_id}:{refundable}:fee={fee}")
     return to_card
+
+
+def _book_refund(
+    user_id: str, payment_id: str, hold_id: str, refund_id: str, refundable_cents: int, previous_refunded: int, description: str
+) -> None:
+    """Take `refundable_cents` of credit for a refund Stripe has made, once, in one transaction with
+    closing the hold and counting it on the payment. The charge.refunded webhook may have booked the
+    part that went to the card already (and a double click comes through here twice): only what is
+    still missing is debited, so the fee part is never lost and nothing is taken twice."""
+    want = refundable_cents * MICROS_PER_CENT
+    with db.tx() as c:
+        done = c.execute(
+            "SELECT COUNT(*) AS n, COALESCE(-SUM(amount_micros), 0) AS micros FROM ledger"
+            " WHERE kind = 'refund' AND ref_type IN ('stripe_refund', 'stripe_refund_fee') AND ref_id = ?",
+            (refund_id,),
+        ).fetchone()
+        ledger.release_hold(hold_id, c=c)
+        if want > done["micros"]:
+            ledger.debit_available(
+                user_id, want - done["micros"], "refund", "stripe_refund_fee" if done["n"] else "stripe_refund", refund_id,
+                description, allow_partial=True, c=c,
+            )
+        c.execute(
+            "UPDATE payments SET refunded_cents = MAX(refunded_cents, ?), updated_at = ? WHERE id = ?",
+            (previous_refunded + refundable_cents, db.now(), payment_id),
+        )
 
 
 def card_fee_cents(p) -> int:
@@ -699,3 +745,124 @@ def _reverse_tax(p, refund_id: str, gross_cents: int) -> None:
         )
     except Exception:  # noqa: BLE001
         log.exception("tax reversal for refund %s failed; reverse it in the Stripe dashboard", refund_id)
+
+
+# ------------------------------------------------------------------ reconciliation
+
+# Webhooks are the normal way a payment reaches us; when one is lost (or keeps failing) these sweep up.
+PENDING_RECHECK_SECONDS = 10 * 60
+RELOAD_IN_FLIGHT_SECONDS = 30 * 60
+UNSETTLED_CANCEL_SECONDS = 24 * 3600
+
+
+def _to_dict(obj) -> dict:
+    return obj if isinstance(obj, dict) else obj.to_dict()
+
+
+def _fail_payment(payment_id: str, code: str) -> None:
+    db.execute(
+        "UPDATE payments SET status = 'failed', failure_code = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+        (code, db.now(), payment_id),
+    )
+
+
+def _reload_payment_intent(p) -> dict | None:
+    """The PaymentIntent of an auto-reload (its id may not have been saved if our request failed midway)."""
+    if p["stripe_payment_intent"]:
+        return _to_dict(client().v1.payment_intents.retrieve(p["stripe_payment_intent"]))
+    found = client().v1.payment_intents.search(params={"query": f"metadata['acw_payment_id']:'{p['id']}'"}).data
+    if not found:
+        return None
+    pi = _to_dict(found[0])
+    db.execute(
+        "UPDATE payments SET stripe_payment_intent = ? WHERE id = ? AND stripe_payment_intent IS NULL", (pi["id"], p["id"])
+    )
+    return pi
+
+
+def _reconcile_reload(p, age: int) -> None:
+    pi = _reload_payment_intent(p)
+    if pi is None:
+        if age >= RELOAD_IN_FLIGHT_SECONDS:  # the request never reached Stripe
+            _record_reload_failure(p["id"], p["user_id"], "no_payment_intent")
+        return
+    if pi.get("status") == "requires_capture":
+        _handle_pi_capturable(pi)
+        if db.one("SELECT status FROM payments WHERE id = ?", (p["id"],))["status"] != "pending":
+            return  # refused for its card's country
+        pi = _to_dict(client().v1.payment_intents.retrieve(pi["id"]))
+    status = pi.get("status")
+    if status == "succeeded":
+        _handle_pi_succeeded(pi)
+    elif status in ("canceled", "requires_payment_method"):
+        err = pi.get("last_payment_error") or {}
+        _record_reload_failure(p["id"], p["user_id"], err.get("decline_code") or err.get("code") or status)
+    elif status != "processing" and age >= RELOAD_IN_FLIGHT_SECONDS:
+        client().v1.payment_intents.cancel(
+            pi["id"], params={"cancellation_reason": "abandoned"}, options={"idempotency_key": f"stale-reload-cancel-{p['id']}"}
+        )
+        _record_reload_failure(p["id"], p["user_id"], "timeout")
+
+
+def _reconcile_checkout(p, age: int) -> None:
+    if not p["stripe_checkout_session"]:
+        if age >= 3600:  # the Checkout session was never created
+            _fail_payment(p["id"], "no_session")
+        return
+    session = _to_dict(client().v1.checkout.sessions.retrieve(p["stripe_checkout_session"]))
+    if session.get("status") == "expired":
+        _fail_payment(p["id"], "expired")
+    elif session.get("status") == "complete":
+        _handle_checkout_completed(session)  # the same handler as the webhook; safe to repeat
+
+
+def _give_up_unsettled(p) -> None:
+    """A payment that could not be settled for a day: cancel the card authorization so the customer's
+    money is released now instead of when it lapses. A payment that was charged but not credited is left
+    alone and recorded for the operator."""
+    pi_id = p["stripe_payment_intent"]
+    if not pi_id and p["stripe_checkout_session"]:
+        pi_id = _id_of(_get(client().v1.checkout.sessions.retrieve(p["stripe_checkout_session"]), "payment_intent"))
+    if pi_id:
+        pi = client().v1.payment_intents.retrieve(pi_id)
+        if _get(pi, "status") == "succeeded":
+            _audit_once("payment_uncredited", p["user_id"], f"{p['id']}:{pi_id}")
+            return
+        if _get(pi, "status") == "requires_capture":
+            client().v1.payment_intents.cancel(
+                pi_id, params={"cancellation_reason": "abandoned"}, options={"idempotency_key": f"unsettled-cancel-{p['id']}"}
+            )
+    if p["kind"] == "auto_reload":
+        _record_reload_failure(p["id"], p["user_id"], "unsettled")
+    else:
+        _fail_payment(p["id"], "unsettled")
+    log.error("payment %s could not be settled in a day; authorization cancelled", p["id"])
+
+
+def reconcile() -> int:
+    """Look at payments still pending after PENDING_RECHECK_SECONDS in Stripe and run the webhook handlers
+    on what is there; give up on authorizations that can't be settled after a day; expire auto-reload
+    flags nothing is waiting for. Returns how many payments it looked at."""
+    now = db.now()
+    rows = db.all_rows(
+        "SELECT * FROM payments WHERE status = 'pending' AND updated_at < ?", (now - PENDING_RECHECK_SECONDS,)
+    )
+    for row in rows:
+        p = dict(row)
+        age = now - p["created_at"]
+        # The next look is in PENDING_RECHECK_SECONDS, not on the next tick.
+        db.execute("UPDATE payments SET updated_at = ? WHERE id = ? AND status = 'pending'", (now, p["id"]))
+        try:
+            (_reconcile_reload if p["kind"] == "auto_reload" else _reconcile_checkout)(p, age)
+        except Exception:  # noqa: BLE001
+            log.exception("reconciling payment %s failed", p["id"])
+        try:
+            if age >= UNSETTLED_CANCEL_SECONDS and db.one("SELECT status FROM payments WHERE id = ?", (p["id"],))["status"] == "pending":
+                _give_up_unsettled(p)
+        except Exception:  # noqa: BLE001
+            log.exception("cancelling unsettled payment %s failed", p["id"])
+    db.execute(
+        "UPDATE users SET auto_reload_in_flight = 0 WHERE auto_reload_in_flight = 1 AND NOT EXISTS ("
+        " SELECT 1 FROM payments p WHERE p.user_id = users.id AND p.kind = 'auto_reload' AND p.status = 'pending')"
+    )
+    return len(rows)

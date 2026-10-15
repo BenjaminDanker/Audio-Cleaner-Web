@@ -83,13 +83,25 @@ def _ff(spec):
 
 
 def stage_probe(job_dir: Path, spec: dict) -> dict:
-    p = _ff(spec).probe(job_dir / spec["input"])
-    if p.duration > spec["max_seconds"] + 1:
-        from acw_common.ffmpeg import MediaError
+    from acw_common.ffmpeg import MediaError
 
-        raise MediaError(f"This file is {p.duration / 60:.1f} minutes long; the limit is {spec['max_seconds'] / 60:.0f} minutes.")
+    ff = _ff(spec)
+    p = ff.probe(job_dir / spec["input"])
+    limit = spec["max_seconds"]
+    # The header's length is only what the file claims; billing and limits use what actually decodes.
+    # Reading stops a minute past the limit, which is enough to tell the file is too long.
+    measured = ff.measure_duration(job_dir / spec["input"], p, limit + 60)
+    duration = max(p.duration, measured)
+    if duration > limit + 1:
+        if spec.get("denoise_tier") == "rebuild":
+            raise MediaError(
+                f"Voice rebuilding takes files up to {limit / 60:.0f} minutes; this one is longer. "
+                "Use the standard cleanup for longer files."
+            )
+        raise MediaError(f"This file is {duration / 60:.1f} minutes long; the limit is {limit / 60:.0f} minutes.")
     return {
-        "duration": p.duration,
+        "duration": duration,
+        "container_duration": p.duration,
         "has_video": p.has_video,
         "channels": p.audio_channels,
         "format": p.format_name,
@@ -98,10 +110,18 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
     }
 
 
+def decode_limit(spec: dict) -> float:
+    """Seconds of audio any decode may read: the length that was billed (the worker's measurement), with
+    a little slack for resampling, never more than the tier's limit."""
+    billed = spec.get("billed_seconds")
+    return spec["max_seconds"] if billed is None else min(spec["max_seconds"], billed * 1.02 + 2)
+
+
 def stage_main(job_dir: Path, spec: dict) -> dict:
     from acw_common import dpdfnet, pipeline
 
     ff = _ff(spec)
+    limit = decode_limit(spec)
     src = job_dir / spec["input"]
     probe = ff.probe(src)
     opts = spec["options"]
@@ -124,9 +144,9 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         else:
             # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
             emit(stage="removing echo", progress=2)
-            mic = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
+            mic = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
             x = pipeline.remove_echo(
-                ff, src, probe, mic, spec["max_seconds"], work_dir=job_dir,
+                ff, src, probe, mic, limit, work_dir=job_dir,
                 progress=lambda f: emit(stage="removing echo", progress=int(2 + 3 * f)),
             )
             del mic
@@ -137,7 +157,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         if x is not None:
             speech_16k = pipeline.to_speech_16k(x)
         else:
-            speech_16k = ff.decode(src, probe, 16000, 1, spec["max_seconds"])[:, 0]
+            speech_16k = ff.decode(src, probe, 16000, 1, limit)[:, 0]
         if spec["transcribe_tier"] == "premium":
             emit(stage="preparing transcription", progress=5)
             _write_asr_chunks(ff, job_dir, speech_16k)
@@ -175,7 +195,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         # Decoded and cleaned audio live in memory-mapped files in the job
         # directory, so RAM use doesn't grow with the length of the upload.
         if x is None:
-            x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
+            x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
         span = 85 - start
         emit(stage="denoising", progress=start + 2)
         used: dict = {}

@@ -52,6 +52,9 @@ FREE_TRANSCRIBE_MAX_FILE_SECONDS = 30 * 60
 
 # Hard limits
 MAX_JOB_SECONDS = 4 * 60 * 60
+# The voice-rebuilt tier needs ~7 CPU-seconds per second of stereo audio (docs/research/restore-sidon.md):
+# longer files would tie up the machine for hours and still risk timing out uncharged.
+MAX_REBUILD_SECONDS = 90 * 60
 # Streams reserve this many minutes ahead and top the hold up as they go.
 STREAM_HOLD_MINUTES = 5
 
@@ -67,18 +70,38 @@ def rate(product: str, tier: str) -> Rate:
     return r
 
 
-def cost_micros(product: str, tier: str, seconds: float) -> int:
+def max_job_seconds(denoise_tier: str | None) -> int:
+    """Longest file a job with this noise-removal tier accepts."""
+    return MAX_REBUILD_SECONDS if denoise_tier == "rebuild" else MAX_JOB_SECONDS
+
+
+def cost_micros(product: str, tier: str, seconds: float, micros_per_minute: int | None = None) -> int:
     """Price for `seconds` of audio, rounded up to the next whole second."""
     secs = max(0, math.ceil(seconds))
-    return math.ceil(rate(product, tier).micros_per_minute * secs / 60)
+    return math.ceil((rate(product, tier).micros_per_minute if micros_per_minute is None else micros_per_minute) * secs / 60)
 
 
-def job_cost_micros(kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float) -> int:
+def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None) -> dict[str, int]:
+    """Micros per minute of each part of a job at today's prices. Stored with the job, so a price
+    change never applies to a job that was already created."""
+    out: dict[str, int] = {}
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier:
+        out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
+    if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
+        out["transcribe"] = rate("transcribe", transcribe_tier).micros_per_minute
+    return out
+
+
+def job_cost_micros(
+    kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float, rates: dict[str, int] | None = None
+) -> int:
+    """`rates` (from job_rates) pins the prices; without it the current price list applies."""
+    rates = rates or {}
     total = 0
     if kind in ("denoise", "denoise_transcribe") and denoise_tier:
-        total += cost_micros("denoise", denoise_tier, seconds)
+        total += cost_micros("denoise", denoise_tier, seconds, rates.get("denoise"))
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
-        total += cost_micros("transcribe", transcribe_tier, seconds)
+        total += cost_micros("transcribe", transcribe_tier, seconds, rates.get("transcribe"))
     return max(total, MIN_JOB_CHARGE_MICROS) if total else 0
 
 

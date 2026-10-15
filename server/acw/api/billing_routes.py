@@ -40,6 +40,7 @@ def get_pricing() -> dict:
             "transcribeMaxFileSeconds": pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS,
         },
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
+        "maxRebuildSeconds": pricing.MAX_REBUILD_SECONDS,
         "paymentsEnabled": stripe_service.enabled(),
         "taxAddedAtCheckout": get_settings().stripe_automatic_tax,
     }
@@ -85,6 +86,8 @@ def set_auto_reload(body: AutoReloadBody, request: Request, principal: auth.Prin
             raise HTTPException(status_code=400, detail="Auto-reload needs your explicit authorization.")
         if not user["default_payment_method"]:
             raise HTTPException(status_code=400, detail="Save a card during a top-up first.")
+        if body.thresholdCents >= body.amountCents:
+            raise HTTPException(status_code=400, detail="The balance that triggers a reload must be lower than the reload amount.")
         if body.monthlyCapCents < body.amountCents:
             raise HTTPException(status_code=400, detail="Monthly cap must be at least one reload.")
     db.execute(

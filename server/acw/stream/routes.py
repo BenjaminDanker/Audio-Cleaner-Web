@@ -30,7 +30,9 @@ router = APIRouter(tags=["stream"])
 MAX_SESSIONS_PER_USER = 2
 MAX_SESSION_SECONDS = 12 * 3600
 START_TIMEOUT = 15
-IDLE_TIMEOUT = 30
+SILENCE_TIMEOUT = 30  # nothing at all from the client
+IDLE_TIMEOUT = 15 * 60  # no microphone audio (pings and echo-reference frames don't count)
+PERSIST_EVERY = 30  # seconds between saving the billed time (a restart then bills what was processed)
 PACE_BURST_SECONDS = 6.0
 PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
 LOW_BALANCE_WARN_SECONDS = 300
@@ -42,16 +44,27 @@ _live_units = 0.0  # capacity units of running sessions (file jobs move off the 
 async def startup() -> None:
     await asyncio.to_thread(cpusplit.units_per_core)  # calibrate once, off the event loop
     cpusplit.set_live_units(get_settings().data_dir, 0.0, cpusplit.units_per_core())
-    # Sessions left "active" by a previous process were never captured.
-    for row in db.all_rows("SELECT id, hold_id, seconds FROM stream_sessions WHERE status = 'active'"):
+    # Sessions left "active" by a previous process never reached _finish: bill the time that was saved
+    # (at most PERSIST_EVERY seconds behind), then close them.
+    for row in db.all_rows(
+        "SELECT id, hold_id, seconds, denoise_tier, caption_tier FROM stream_sessions WHERE status = 'active'"
+    ):
+        cost = 0
         if row["hold_id"]:
             try:
-                ledger.release_hold(row["hold_id"])
+                if row["seconds"] > 0:
+                    cost = ledger.capture_hold(
+                        row["hold_id"],
+                        _micros(_rate_micros_per_minute(row["denoise_tier"], row["caption_tier"]), row["seconds"]),
+                        f"Live session ({row['seconds'] / 60:.1f} min, cut short by a restart)",
+                    )
             except Exception:  # noqa: BLE001
-                log.exception("releasing stale stream hold")
+                log.exception("billing stale stream session")
+            finally:
+                ledger.release_hold(row["hold_id"])  # no-op once captured
         db.execute(
-            "UPDATE stream_sessions SET status = 'ended', end_reason = 'server_restart', ended_at = ? WHERE id = ?",
-            (db.now(), row["id"]),
+            "UPDATE stream_sessions SET status = 'ended', cost_micros = ?, end_reason = 'server_restart', ended_at = ? WHERE id = ?",
+            (cost, db.now(), row["id"]),
         )
 
 
@@ -68,6 +81,11 @@ def _rate_micros_per_minute(denoise: str | None, captions: str | None) -> int:
     return total
 
 
+def _micros(rate: int, seconds: float) -> int:
+    """Price of `seconds` of live audio at `rate` micros per minute (whole seconds, rounded up)."""
+    return math.ceil(rate * math.ceil(round(seconds, 6)) / 60)
+
+
 async def _send_json(ws: WebSocket, obj: dict) -> None:
     await ws.send_text(json.dumps(obj, separators=(",", ":")))
 
@@ -81,7 +99,8 @@ class Session:
         self.id = db.new_id()
         self.hold_id: str | None = None
         self.held_seconds = 0.0
-        self.seconds = 0.0
+        self.samples = 0  # of audio processed; counted as integers so the billed seconds are exact
+        self.started = time.monotonic()
         self.frames: OrderedDict[int, tuple[int, int]] = OrderedDict()
         self.pace = [[PACE_BURST_SECONDS, time.monotonic()] for _ in range(2)]  # mic, echo reference
         self.warned = False
@@ -91,8 +110,16 @@ class Session:
         self.worker_task: asyncio.Task | None = None
         self.premium = None
 
+    @property
+    def seconds(self) -> float:
+        return self.samples / P.SAMPLE_RATE
+
+    @seconds.setter
+    def seconds(self, value: float) -> None:
+        self.samples = round(value * P.SAMPLE_RATE)
+
     def micros_for(self, seconds: float) -> int:
-        return math.ceil(self.rate * math.ceil(seconds) / 60)
+        return _micros(self.rate, seconds)
 
     def open_hold(self) -> None:
         minutes = pricing.STREAM_HOLD_MINUTES
@@ -243,56 +270,62 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
     except ledger.LedgerError:
         await ws.close(code=1008)
         return None
-    db.execute(
-        "INSERT INTO stream_sessions(id, user_id, api_key_id, denoise_tier, caption_tier, status, hold_id, client_ip, started_at)"
-        " VALUES (?,?,?,?,?, 'active', ?,?,?)",
-        (sess.id, principal.user_id, principal.api_key_id, denoise, captions, sess.hold_id, ip[:64], db.now()),
-    )
+    # Whatever goes wrong from here (the client vanishing, the worker, the database), the hold is given back.
     try:
-        sess.reader, sess.writer = await asyncio.open_unix_connection(str(get_settings().stream_worker_socket))
-        worker_cfg = dict(sess.cfg)
-        if captions != "local":
-            worker_cfg["captions"] = None
-        worker_cfg["tap_pcm"] = captions == "premium"
-        worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
-        await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
-        kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
-        ready = json.loads(payload)
-        if kind == P.MSG_EVENT and ready.get("code") == "full":
-            sess.end_reason = "full"
+        db.execute(
+            "INSERT INTO stream_sessions(id, user_id, api_key_id, denoise_tier, caption_tier, status, hold_id, client_ip, started_at)"
+            " VALUES (?,?,?,?,?, 'active', ?,?,?)",
+            (sess.id, principal.user_id, principal.api_key_id, denoise, captions, sess.hold_id, ip[:64], db.now()),
+        )
+        try:
+            sess.reader, sess.writer = await asyncio.open_unix_connection(str(get_settings().stream_worker_socket))
+            worker_cfg = dict(sess.cfg)
+            if captions != "local":
+                worker_cfg["captions"] = None
+            worker_cfg["tap_pcm"] = captions == "premium"
+            worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
+            await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
+            kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
+            ready = json.loads(payload)
+            if kind == P.MSG_EVENT and ready.get("code") == "full":
+                sess.end_reason = "full"
+                _drop_worker(sess)
+                options = ready.get("available") or []
+                await _send_json(ws, {"type": "error", "code": "full", "available": options,
+                                      "message": _full_message(worker_cfg, options)})
+                await ws.close(code=1013)
+                return sess
+            if kind != P.MSG_EVENT or ready.get("type") != "ready":
+                raise RuntimeError(f"worker refused: {ready}")
+        except Exception:  # noqa: BLE001
+            log.exception("stream worker unavailable")
+            sess.end_reason = "worker_unavailable"
             _drop_worker(sess)
-            options = ready.get("available") or []
-            await _send_json(ws, {"type": "error", "code": "full", "available": options,
-                                  "message": _full_message(worker_cfg, options)})
+            await _send_json(ws, {"type": "error", "code": "unavailable", "message": "Live processing is busy or offline, try again soon."})
             await ws.close(code=1013)
             return sess
-        if kind != P.MSG_EVENT or ready.get("type") != "ready":
-            raise RuntimeError(f"worker refused: {ready}")
-    except Exception:  # noqa: BLE001
-        log.exception("stream worker unavailable")
-        sess.end_reason = "worker_unavailable"
-        _drop_worker(sess)
-        await _send_json(ws, {"type": "error", "code": "unavailable", "message": "Live processing is busy or offline, try again soon."})
-        await ws.close(code=1013)
-        return sess
-    if captions == "premium":
-        from .openai_live import PremiumCaptions
+        if captions == "premium":
+            from .openai_live import PremiumCaptions
 
-        sess.premium = PremiumCaptions(
-            language, lambda ev: asyncio.ensure_future(_send_json(ws, ev)), user_hint=principal.user_id
-        )
-        await sess.premium.connect()
-    await _send_json(ws, {
-        "type": "ready",
-        "sessionId": sess.id,
-        "sampleRate": P.SAMPLE_RATE,
-        "hopSamples": P.HOP,
-        "modelLatencyMs": round(ready.get("latencySamples", 0) * 1000 / P.SAMPLE_RATE, 1),
-        "usdPerMinute": rate / 1e6,
-        "maxSessionSeconds": MAX_SESSION_SECONDS,
-        **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
-    })
-    return sess
+            sess.premium = PremiumCaptions(
+                language, lambda ev: asyncio.ensure_future(_send_json(ws, ev)), user_hint=principal.user_id
+            )
+            await sess.premium.connect()
+        await _send_json(ws, {
+            "type": "ready",
+            "sessionId": sess.id,
+            "sampleRate": P.SAMPLE_RATE,
+            "hopSamples": P.HOP,
+            "modelLatencyMs": round(ready.get("latencySamples", 0) * 1000 / P.SAMPLE_RATE, 1),
+            "usdPerMinute": rate / 1e6,
+            "maxSessionSeconds": MAX_SESSION_SECONDS,
+            **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
+        })
+        return sess
+    except BaseException:
+        sess.end_reason = "start_failed"
+        await _finish(sess)
+        raise
 
 
 async def _run(sess: Session) -> None:
@@ -325,15 +358,33 @@ async def _run(sess: Session) -> None:
 
     worker_task = asyncio.create_task(from_worker())
     sess.worker_task = worker_task
+    last_mic = last_persist = time.monotonic()
     try:
         while True:
+            now = time.monotonic()
+            # Only microphone audio keeps a session alive: pings and echo-reference frames cost nothing
+            # to send, yet the session holds a worker slot and live cores.
+            idle_left = IDLE_TIMEOUT - (now - last_mic)
+            if idle_left <= 0:
+                sess.end_reason = "idle_timeout"
+                break
+            if now - sess.started >= MAX_SESSION_SECONDS:  # wall time too, not just audio received
+                sess.end_reason = "max_duration"
+                await _send_json(ws, {"type": "stopped", "reason": "max_duration"})
+                break
             try:
-                msg = await asyncio.wait_for(ws.receive(), timeout=IDLE_TIMEOUT)
+                msg = await asyncio.wait_for(ws.receive(), timeout=min(SILENCE_TIMEOUT, idle_left))
             except asyncio.TimeoutError:
                 sess.end_reason = "idle_timeout"
                 break
             if msg["type"] == "websocket.disconnect":
                 break
+            if time.monotonic() - last_persist >= PERSIST_EVERY:
+                last_persist = time.monotonic()
+                if not await _persist(sess):
+                    sess.end_reason = "account_closed"
+                    await _send_json(ws, {"type": "stopped", "reason": "account_closed"})
+                    break
             if worker_task.done():
                 sess.end_reason = "worker_lost"
                 await _send_json(ws, {"type": "error", "code": "worker_lost", "message": "Processing stopped unexpectedly."})
@@ -345,12 +396,13 @@ async def _run(sess: Session) -> None:
                     if codec == P.CODEC_OPUS:
                         # Opaque here; decoded only inside the sandboxed worker.
                         pkt = P.opus_payload(msg["bytes"])
-                        dur = P.OPUS_FRAME / P.SAMPLE_RATE
+                        n = P.OPUS_FRAME
                         ipc = P.pack_opus(seq, pkt)
                     else:
                         codec, seq, ts, x = P.decode_frame(msg["bytes"])
-                        dur = len(x) / P.SAMPLE_RATE
+                        n = len(x)
                         ipc = P.pack_audio(seq, x)
+                    dur = n / P.SAMPLE_RATE
                 except P.ProtocolError as e:
                     await _send_json(ws, {"type": "error", "code": "bad_frame", "message": str(e)})
                     sess.end_reason = "protocol_error"
@@ -363,7 +415,8 @@ async def _run(sess: Session) -> None:
                     if sess.cfg["echo_reference"]:
                         await P.send_msg(sess.writer, P.MSG_REF, ipc)
                     continue
-                sess.seconds += dur
+                last_mic = time.monotonic()
+                sess.samples += n
                 if sess.seconds >= MAX_SESSION_SECONDS:
                     sess.end_reason = "max_duration"
                     await _send_json(ws, {"type": "stopped", "reason": "max_duration"})
@@ -392,6 +445,18 @@ async def _run(sess: Session) -> None:
     finally:
         # Not cancelled here: _finish lets it drain the worker's last captions.
         pass
+
+
+async def _persist(sess: Session) -> bool:
+    """Save the time processed so far (a restart bills it, see startup) and check the account is still
+    open: suspension and deletion stop a running session. False when the session must end."""
+
+    def work() -> bool:
+        db.execute("UPDATE stream_sessions SET seconds = ? WHERE id = ?", (sess.seconds, sess.id))
+        row = db.one("SELECT status FROM users WHERE id = ?", (sess.p.user_id,))
+        return row is not None and row["status"] == "active"
+
+    return await asyncio.to_thread(work)
 
 
 async def _billing_tick(sess: Session) -> bool:
@@ -425,19 +490,25 @@ async def _finish(sess: Session) -> None:
                 sess.worker_task.cancel()
         sess.writer.close()
     if sess.premium is not None:
-        await sess.premium.close()
+        try:
+            await sess.premium.close()
+        except Exception:  # noqa: BLE001
+            log.exception("closing premium captions")
     cost = 0
-    if sess.hold_id:
-        cost = await asyncio.to_thread(
-            ledger.capture_hold, sess.hold_id, sess.micros_for(sess.seconds),
-            f"Live session ({sess.seconds / 60:.1f} min)",
-        ) if sess.seconds > 0 else 0
-        if sess.seconds <= 0:
-            await asyncio.to_thread(ledger.release_hold, sess.hold_id)
-    db.execute(
-        "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ? WHERE id = ?",
-        (sess.seconds, cost, sess.end_reason, db.now(), sess.id),
-    )
+    try:
+        if sess.hold_id and sess.seconds > 0:
+            cost = await asyncio.to_thread(
+                ledger.capture_hold, sess.hold_id, sess.micros_for(sess.seconds), f"Live session ({sess.seconds / 60:.1f} min)",
+            )
+    except Exception:  # noqa: BLE001 - e.g. the account was suspended and its holds released
+        log.exception("billing stream session %s", sess.id)
+    finally:
+        if sess.hold_id:
+            await asyncio.to_thread(ledger.release_hold, sess.hold_id)  # nothing left reserved, whatever happened
+        db.execute(
+            "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ? WHERE id = ?",
+            (sess.seconds, cost, sess.end_reason, db.now(), sess.id),
+        )
     try:
         await sess.ws.close()
     except Exception:  # noqa: BLE001

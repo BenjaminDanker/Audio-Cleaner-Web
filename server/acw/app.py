@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from . import alerts, auth, db, jobs
 from .api import auth_routes, billing_routes, jobs_routes, keys_routes
 from .asr import openai_asr
-from .billing import stripe_service
+from .billing import ledger, stripe_service
 from .config import get_settings
 from .security import API_CSP, SECURITY_HEADERS, client_ip, enforce
 from .stream import routes as stream_routes
@@ -40,7 +40,7 @@ async def _cloud_asr_loop() -> None:
                 continue
             lang = json.loads(job["params_json"])["options"].get("language")
             try:
-                await openai_asr.run_for_job(jobs.job_dir(job["id"]), lang)
+                await openai_asr.run_for_job(jobs.job_dir(job["id"]), lang, job["duration_seconds"] or job["claimed_seconds"])
             except Exception:  # noqa: BLE001
                 log.exception("cloud ASR failed for %s", job["id"])
                 jobs.finish_failed(job, "Extra accurate transcription failed; you were not charged.")
@@ -63,7 +63,9 @@ async def _housekeeping_loop() -> None:
                 " AND stage = 'cloud asr running' AND heartbeat_at < ?",
                 (db.now() - 1800,),
             )
+            await asyncio.to_thread(ledger.reap_stale_holds)  # money reserved by things that are over
             if stripe_service.enabled():
+                await asyncio.to_thread(stripe_service.reconcile)  # payments whose webhook never came
                 for user_id in stripe_service.users_needing_reload():
                     await asyncio.to_thread(stripe_service.run_auto_reload, user_id)
                 for payment_id in stripe_service.pending_tax_transactions():

@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 import acw_common
+from acw_common import restore
 
 from .. import cpusplit, db, hostload, jobs
 from ..billing import ledger, pricing
@@ -87,6 +88,10 @@ def _settings_extra() -> dict:
         "models_dir": str(s.models_dir),
     }
 
+
+# The probe reads the whole file once (a fast decode that measures its real length).
+PROBE_CPU_SECONDS = 3600
+PROBE_TIMEOUT = 900
 
 # A job joins others already running only if this many cores are idle.
 MIN_IDLE_CORES = 2.0
@@ -160,12 +165,17 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         return job
 
 
-def _write_spec(job: dict, extra: dict) -> Path:
+def _max_seconds(job: dict, params: dict) -> int:
+    return pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS if job["free"] else pricing.max_job_seconds(params["denoise_tier"])
+
+
+def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
+    """Write the runner's instructions. `billed` is the measured length of the audio (known after the
+    probe): the main stage never decodes more than that, and its CPU limit is sized from it and the tier."""
     d = jobs.job_dir(job["id"])
     params = json.loads(job["params_json"])
-    max_seconds = (
-        pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS if job["free"] else pricing.MAX_JOB_SECONDS
-    )
+    max_seconds = _max_seconds(job, params)
+    cpu_seconds = PROBE_CPU_SECONDS if billed is None else jobs.stage_limits(params["denoise_tier"], billed, max_seconds)[0]
     spec = {
         **extra,
         "job_id": job["id"],
@@ -177,10 +187,10 @@ def _write_spec(job: dict, extra: dict) -> Path:
         "output_stem": jobs.safe_stem(job["input_name"]),
         "options": params["options"],
         "max_seconds": max_seconds,
-        # Generous ceilings; the wall-clock timeout below is the real limit.
-        "cpu_seconds": int(max_seconds * 6 + 1800),
+        "cpu_seconds": cpu_seconds,  # generous; the wall-clock timeout is the real limit
         "address_space_bytes": 32 * 1024**3,  # memory-mapped scratch files count here, not in RAM
         "max_file_bytes": 16 * 1024**3,
+        **({"billed_seconds": billed} if billed is not None else {}),
     }
     (d / "spec.json").write_text(json.dumps(spec))
     return d
@@ -281,22 +291,35 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
     return res
 
 
+def _job_cost(job: dict, params: dict, seconds: float) -> int:
+    """What the job costs for `seconds` of audio, at the prices it was created with."""
+    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"))
+
+
 def _reprice(job: dict, duration: float) -> None:
     """Make the hold (or free allowance) match the real duration before the
     expensive work starts."""
     params = json.loads(job["params_json"])
     db.execute("UPDATE jobs SET duration_seconds = ? WHERE id = ?", (duration, job["id"]))
     if job["free"]:
-        delta = duration - job["claimed_seconds"]
-        if delta > 0:
-            day = params["free_day"]
-            row = db.one("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (job["user_id"], day))
-            if (row["seconds"] if row else 0) + delta > pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY + 30:
-                raise StageFailed("This file is longer than your remaining free minutes today.")
-        jobs.adjust_free(job["user_id"], params["free_day"], delta)
+        # claimed_seconds is what is reserved today; keep it in step with the allowance, so a retry of the
+        # job (new attempt, job loaded again) doesn't take the difference a second time.
+        with db.tx() as c:
+            claimed = c.execute("SELECT claimed_seconds FROM jobs WHERE id = ?", (job["id"],)).fetchone()["claimed_seconds"]
+            delta = duration - claimed
+            if delta > 0:
+                day = params["free_day"]
+                row = c.execute("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (job["user_id"], day)).fetchone()
+                if (row["seconds"] if row else 0) + delta > pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY + 30:
+                    raise StageFailed("This file is longer than your remaining free minutes today.")
+            c.execute("UPDATE jobs SET claimed_seconds = ? WHERE id = ?", (duration, job["id"]))
+            c.execute(
+                "UPDATE free_usage SET seconds = MAX(0, seconds + ?) WHERE user_id = ? AND day = ?",
+                (delta, job["user_id"], params["free_day"]),
+            )
         job["claimed_seconds"] = duration
         return
-    cost = pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], duration)
+    cost = _job_cost(job, params, duration)
     if cost > job["est_cost_micros"]:
         try:
             ledger.extend_hold(job["hold_id"], cost - job["est_cost_micros"])
@@ -316,10 +339,6 @@ def _complete(job: dict, d: Path, res: dict) -> None:
             outputs.append({**o, "bytes": p.stat().st_size})
     params = json.loads(job["params_json"])
     duration = float(job.get("duration_seconds") or job["claimed_seconds"])
-    cost = 0
-    if not job["free"] and job["hold_id"]:
-        cost = pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], duration)
-        cost = ledger.capture_hold(job["hold_id"], cost, f"{job['kind'].replace('_', ' + ')}: {job['input_name'][:60]} ({duration / 60:.1f} min)")
     keep = {o["file"] for o in outputs}
     for p in d.iterdir():
         if p.name not in keep:
@@ -330,26 +349,60 @@ def _complete(job: dict, d: Path, res: dict) -> None:
             else:
                 p.unlink(missing_ok=True)
     now = db.now()
-    db.execute(
-        "UPDATE jobs SET status = 'done', progress = 100, stage = 'done', outputs_json = ?, cost_micros = ?,"
-        " finished_at = ?, expires_at = ? WHERE id = ?",
-        (json.dumps(outputs), cost, now, now + get_settings().job_output_ttl_hours * 3600, job["id"]),
+    # Charging and finishing are one step: a job is never "done" without its charge, and a failure
+    # after the charge can't be reported as "not charged". Only a job that is still running completes.
+    with db.tx() as c:
+        n = c.execute(
+            "UPDATE jobs SET status = 'done', progress = 100, stage = 'done', outputs_json = ?, cost_micros = 0,"
+            " finished_at = ?, expires_at = ? WHERE id = ? AND status = 'running'",
+            (json.dumps(outputs), now, now + get_settings().job_output_ttl_hours * 3600, job["id"]),
+        ).rowcount
+        if not n:
+            log.warning("job %s is no longer running; not completing it", job["id"])
+            return
+        if not job["free"] and job["hold_id"]:
+            cost = ledger.capture_hold(
+                job["hold_id"], _job_cost(job, params, duration),
+                f"{job['kind'].replace('_', ' + ')}: {job['input_name'][:60]} ({duration / 60:.1f} min)", c=c,
+            )
+            c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
+
+
+def _use_available_tier(job: dict) -> dict:
+    """A voice-rebuilt job whose models are not installed would silently run the standard chain, so
+    it is billed as the standard tier (and says so) rather than charging for something it didn't get."""
+    params = json.loads(job["params_json"])
+    if params.get("denoise_tier") != "rebuild" or restore.available(get_settings().models_dir / "sidon"):
+        return job
+    params = jobs.update_params(
+        job["id"], denoise_tier="standard", rates={**params.get("rates", {}), "denoise": pricing.rate("denoise", "standard").micros_per_minute}
     )
+    tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
+    db.execute("UPDATE jobs SET tier = ? WHERE id = ?", (tier, job["id"]))
+    jobs.set_notice(job["id"], "Voice rebuilding isn't available right now, so this file was cleaned with the standard option and billed at its price.")
+    log.error("job %s asked for voice rebuilding but the models are missing; billing the standard tier", job["id"])
+    return {**job, "params_json": json.dumps(params), "tier": tier}
 
 
 def process(job: dict, extra: dict) -> None:
-    d = _write_spec(job, extra)
-    budget = pricing.MAX_JOB_SECONDS * 2 + 1800
     try:
+        if job["next_stage"] != "finalize":
+            job = _use_available_tier(job)
+        d = _write_spec(job, extra, job.get("duration_seconds"))
         if job["next_stage"] == "finalize":
             res = run_stage(job, d, "finalize", 1800)
             job["duration_seconds"] = db.one("SELECT duration_seconds FROM jobs WHERE id = ?", (job["id"],))["duration_seconds"]
             _complete(job, d, res)
             return
-        probe = run_stage(job, d, "probe", 120)
-        _reprice(job, float(probe["duration"]))
-        job["duration_seconds"] = float(probe["duration"])
-        res = run_stage(job, d, "main", min(budget, probe["duration"] * 3 + 1800))
+        probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
+        duration = float(probe["duration"])  # the longer of the header's and the measured length
+        _reprice(job, duration)
+        job["duration_seconds"] = duration
+        params = json.loads(job["params_json"])
+        jobs.update_params(job["id"], channels=min(int(probe.get("channels") or 1), 2))
+        d = _write_spec(job, extra, duration)
+        wall = jobs.stage_limits(params["denoise_tier"], duration, _max_seconds(job, params))[1]
+        res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
         if res.get("needs_cloud_asr"):

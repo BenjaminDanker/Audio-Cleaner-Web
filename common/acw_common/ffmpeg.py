@@ -120,6 +120,34 @@ class FFmpeg:
             audio_indices=tuple(int(s["index"]) for s in audio),
         )
 
+    def measure_duration(self, path: Path, probe: ProbeResult, max_seconds: float, track: int = 0) -> float:
+        """Length of an audio track as it really decodes, in seconds (at most `max_seconds`).
+
+        The duration in the container header is whatever the file's author wrote (a FLAC or Matroska
+        header can say 10 s over hours of audio), so anything billed or limited by length must use
+        max(probe.duration, this)."""
+        rate = 8000  # only the length matters: decode cheaply, discard the samples
+        args = [
+            self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-i", str(path),
+            "-map", f"0:{probe.stream_index(track)}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
+            "-ac", "1", "-ar", str(rate), "-f", "s16le", "-threads", str(self.threads), "pipe:1",
+        ]
+        size = 0
+        with tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err, **_NO_WINDOW)
+            try:
+                while chunk := proc.stdout.read(1 << 20):
+                    size += len(chunk)
+                proc.wait(timeout=600)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+                proc.stdout.close()
+        if proc.returncode != 0:
+            raise MediaError("Decoding the audio failed.")
+        return size / 2 / rate
+
     def decode(
         self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float, track: int = 0
     ) -> np.ndarray:

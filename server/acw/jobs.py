@@ -43,10 +43,23 @@ MAX_ACTIVE_JOBS_PER_USER = 3
 # so RAM is flat per job and disk grows with length.
 GB = 1024**3
 JOB_MEM = int(1.5 * GB)
+JOB_MEM_REBUILD = 3 * GB  # Sidon peaks at ~2.5 GB
 LOCAL_ASR_MEM = int(4.5 * GB)  # Parakeet fp32 (Whisper turbo needs ~2 GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
-# Wall-clock seconds per second of audio at 4 threads, for queue estimates.
-SPEED = {"denoise": 0.1, "transcribe_local": 0.12, "transcribe_premium": 0.08}
+# Wall-clock seconds per second of audio at 4 threads, for queue estimates. The denoise entries are per
+# channel for the heavier paths (stereo is cleaned channel by channel).
+SPEED = {
+    "denoise": 0.1,
+    "denoise_heavy": 0.2,  # DPDFNet-8 instead of DeepFilterNet3 (forced with noise=heavy)
+    "denoise_rebuild": 1.0,
+    "transcribe_local": 0.12,
+    "transcribe_premium": 0.08,
+}
+# Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
+# cleaning, highs restoration and local transcription) and wall-clock seconds per second of audio.
+CPU_PER_AUDIO_SECOND = {"standard": 8, "rebuild": 12}
+WALL_PER_AUDIO_SECOND = {"standard": 3, "rebuild": 4}
+STAGE_SLACK_SECONDS = 1800
 # Never let our work take the host below these.
 MEM_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
@@ -77,7 +90,9 @@ def job_needs(job: dict) -> tuple[int, int]:
         return int(0.3 * GB), 0
     params = json.loads(job["params_json"])
     seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
-    mem = JOB_MEM + (LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" else 0)
+    mem = (JOB_MEM_REBUILD if params.get("denoise_tier") == "rebuild" else JOB_MEM) + (
+        LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" else 0
+    )
     return mem, scratch_bytes(job["kind"], seconds, echo=params.get("options", {}).get("echo_reference_track", False))
 
 
@@ -87,10 +102,24 @@ def job_seconds(job: dict) -> float:
     audio = float(job.get("duration_seconds") or job["claimed_seconds"])
     t = 0.0
     if job["kind"] in ("denoise", "denoise_transcribe"):
-        t += SPEED["denoise"] * audio
+        if params.get("denoise_tier") == "rebuild":
+            t += SPEED["denoise_rebuild"] * audio * (params.get("channels") or 1)
+        elif params.get("options", {}).get("noise") == "heavy":
+            t += SPEED["denoise_heavy"] * audio * (params.get("channels") or 1)
+        else:
+            t += SPEED["denoise"] * audio
     if params.get("transcribe_tier"):
         t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
     return t + 10
+
+
+def stage_limits(denoise_tier: str | None, seconds: float, max_seconds: float) -> tuple[int, int]:
+    """(CPU-seconds, wall-clock seconds) the main stage of a job of `seconds` of audio may use."""
+    tier = "rebuild" if denoise_tier == "rebuild" else "standard"
+    wall = seconds * WALL_PER_AUDIO_SECOND[tier] + STAGE_SLACK_SECONDS
+    if tier == "standard":
+        wall = min(wall, max_seconds * 2 + STAGE_SLACK_SECONDS)
+    return int(seconds * CPU_PER_AUDIO_SECOND[tier] + STAGE_SLACK_SECONDS), int(wall)
 
 
 def queued_ids() -> list[str]:
@@ -214,6 +243,10 @@ def create_job(
         raise JobError(f"Files must be under {settings.max_upload_bytes // 1024**2} MB.", 413)
     if not 0.5 <= claimed_seconds <= pricing.MAX_JOB_SECONDS:
         raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
+    if denoise_tier == "rebuild" and kind != "transcribe" and claimed_seconds > pricing.MAX_REBUILD_SECONDS:
+        raise JobError(
+            f"Voice rebuilding takes files up to {pricing.MAX_REBUILD_SECONDS // 60} minutes; use the standard cleanup for longer files."
+        )
     if free and claimed_seconds > pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS:
         raise JobError(f"Free transcription is limited to {pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS // 60} minutes per file.")
     opts = validate_options(kind, denoise_tier, transcribe_tier, options, free)
@@ -235,7 +268,11 @@ def create_job(
         "input_ext": ext,
         "free_day": utc_day() if free else None,
     }
-    est = 0 if free else pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds)
+    # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
+    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"])
+    est = 0 if free else pricing.job_cost_micros(
+        kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"]
+    )
     hold_id = None
     if free:
         with db.tx() as c:
@@ -273,11 +310,24 @@ def input_path(job: dict) -> Path:
     return job_dir(job["id"]) / f"input{params['input_ext']}"
 
 
-def set_notice(job_id: str, notice: str) -> None:
-    """A note for the person about how the job was handled (shown with the job; not an error)."""
+def update_params(job_id: str, **changes) -> dict:
+    """Merge `changes` into a job's stored parameters; returns the result."""
     with db.tx() as c:
         row = c.execute("SELECT params_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
-        params = {**json.loads(row["params_json"]), "notice": notice}
+        params = {**json.loads(row["params_json"]), **changes}
+        c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(params), job_id))
+    return params
+
+
+def set_notice(job_id: str, notice: str) -> None:
+    """A note for the person about how the job was handled (shown with the job; not an error).
+    Adds to a note that is already there."""
+    with db.tx() as c:
+        row = c.execute("SELECT params_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        params = json.loads(row["params_json"])
+        if params.get("notice") and notice not in params["notice"]:
+            notice = f"{params['notice']} {notice}"
+        params["notice"] = notice
         c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(params), job_id))
 
 
@@ -289,21 +339,28 @@ def mark_uploaded(job_id: str) -> None:
     )
 
 
-def finish_failed(job: dict, message: str, status: str = "failed") -> None:
-    """Release money/quota and delete files. Safe to call twice."""
+def finish_failed(job: dict, message: str, status: str = "failed", only_from: tuple[str, ...] | None = None) -> None:
+    """Release money/quota and delete files. Safe to call twice. The status change, the hold and the free
+    allowance move in one transaction, so a crash can't leave money reserved for a finished job.
+    `only_from` limits it to jobs still in one of those states (cancel: not once a worker has started)."""
     with db.tx() as c:
-        cur = c.execute("SELECT status FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+        cur = c.execute("SELECT status, free, claimed_seconds, params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()
         if cur is None or cur["status"] in ("done", "failed", "canceled", "expired"):
+            return
+        if only_from is not None and cur["status"] not in only_from:
             return
         c.execute(
             "UPDATE jobs SET status = ?, error = ?, finished_at = ?, expires_at = ? WHERE id = ?",
             (status, message[:500], db.now(), db.now() + 86400, job["id"]),
         )
-    if job.get("hold_id"):
-        ledger.release_hold(job["hold_id"])
-    if job.get("free"):
-        params = json.loads(job["params_json"])
-        adjust_free(job["user_id"], params["free_day"], -float(job.get("duration_seconds") or job["claimed_seconds"]))
+        if job.get("hold_id"):
+            ledger.release_hold(job["hold_id"], c=c)
+        if cur["free"]:
+            # claimed_seconds is what is reserved: creation reserves it, the probe corrects it.
+            c.execute(
+                "UPDATE free_usage SET seconds = MAX(0, seconds - ?) WHERE user_id = ? AND day = ?",
+                (float(cur["claimed_seconds"]), job["user_id"], json.loads(cur["params_json"])["free_day"]),
+            )
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
 
 
@@ -364,6 +421,9 @@ def sweep() -> None:
     now = db.now()
     for job in db.all_rows("SELECT * FROM jobs WHERE status = 'uploading' AND expires_at <= ?", (now,)):
         finish_failed(dict(job), "Upload was not completed.", status="canceled")
+    # 'canceling' was a transient state of older versions of the cancel request.
+    for job in db.all_rows("SELECT * FROM jobs WHERE status = 'canceling'"):
+        finish_failed(dict(job), "Canceled.", status="canceled")
     for job in db.all_rows("SELECT id FROM jobs WHERE status = 'done' AND expires_at <= ?", (now,)):
         shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
         db.execute("UPDATE jobs SET status = 'expired', outputs_json = NULL WHERE id = ? AND status = 'done'", (job["id"],))
