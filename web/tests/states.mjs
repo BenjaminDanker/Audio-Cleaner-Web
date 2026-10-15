@@ -95,7 +95,7 @@ if (want('busy')) {
     const box = page.getByTestId('job-error');
     await box.waitFor({ timeout: 30000 });
     const t = await box.innerText();
-    if (!/short on storage space/.test(t) || !/little full/.test(t)) throw new Error(t);
+    if (!/short on storage space/.test(t) || /storage.*storage/s.test(t)) throw new Error(t); // the server's message, said once
     if ((await box.getAttribute('class')).includes('banner-error')) throw new Error('should be a calm warning, not an error banner');
     await page.screenshot({ path: join(SHOTS, 'storage-507.png') });
     return t.replace(/\s+/g, ' ');
