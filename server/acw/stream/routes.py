@@ -214,6 +214,11 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await _send_json(ws, {"type": "error", "code": "bad_config", "message": "48 kHz audio and a 2-3 letter language code."})
         await ws.close(code=1008)
         return None
+    if captions == "local" and language not in (None, "en"):
+        await _send_json(ws, {"type": "error", "code": "bad_config",
+                              "message": "Standard captions are English only. Extra-accurate captions work in other languages."})
+        await ws.close(code=1008)
+        return None
     try:
         rate = _rate_micros_per_minute(denoise, captions)
     except pricing.PricingError as e:

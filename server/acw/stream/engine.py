@@ -1,5 +1,5 @@
 """Per-session live DSP: DeepFilterNet3 + stateful high-pass + peak limiter,
-and an utterance-based local caption engine.
+and the streaming English caption engine.
 
 Everything here is frame-synchronous: `process()` takes N*480 samples and
 returns N*480 samples, delayed by `latency_samples` (model delay).
@@ -7,7 +7,9 @@ returns N*480 samples, delayed by `latency_samples` (model delay).
 from __future__ import annotations
 
 import logging
+import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -100,116 +102,152 @@ class OpusCodec:
         return b"".join(bytes(p) for p in self.enc.encode(frame))
 
 
-class _SharedWhisper:
-    """One model shared by all sessions in this process."""
+class _StreamingRecognizer:
+    """One streaming English recognizer (NeMo FastConformer transducer, 480 ms
+    chunks, int8, via sherpa-onnx) shared by every session in this process.
 
-    def __init__(self, path: Path, threads: int, workers: int):
-        from faster_whisper import WhisperModel
+    Session threads only queue audio; one decoder thread owns all model calls
+    and decodes every session that has a chunk ready in one batch. That keeps
+    the cost near 0.2 cores per talking stream (docs/research/asr.md)."""
 
-        self.model = WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=workers)
-        self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="live-asr")
+    INPUT_RATE = 16_000
+    TICK_S = 0.05
 
+    def __init__(self, model_dir: Path, threads: int):
+        import sherpa_onnx
 
-_whisper: _SharedWhisper | None = None
-_whisper_lock = threading.Lock()
-
-
-def shared_whisper(models_dir: Path, name: str, threads: int = 2, workers: int = 2) -> _SharedWhisper:
-    global _whisper
-    with _whisper_lock:
-        if _whisper is None:
-            _whisper = _SharedWhisper(models_dir / "whisper" / name, threads, workers)
-        return _whisper
-
-
-class UtteranceCaptioner:
-    """Cuts the (denoised) stream into utterances at pauses and transcribes
-    each one once. Cheap and robust; latency is roughly the utterance length
-    plus ~0.5-1 s. Interim results come from the premium (OpenAI) engine."""
-
-    SPEECH_DB = -45.0
-    END_SILENCE_S = 0.5
-    MAX_UTTERANCE_S = 7.0
-    MIN_UTTERANCE_S = 0.4
-
-    def __init__(self, models_dir: Path, model_name: str, language: str | None, emit):
-        self.whisper = shared_whisper(models_dir, model_name)
-        self.language = language
-        self.emit = emit
-        self.buf: list[np.ndarray] = []
-        self.buf_start = 0.0
-        self.silence = 0.0
-        self.voiced = 0.0
-        self.t = 0.0
-        self.prompt = ""
-        self.closed = False
-        self.pending: list = []
-
-    def feed(self, y: np.ndarray) -> None:
-        dur = len(y) / SAMPLE_RATE
-        rms = float(np.sqrt(np.mean(y * y) + 1e-12))
-        speaking = 20 * np.log10(rms) > self.SPEECH_DB
-        if speaking:
-            if not self.buf:
-                self.buf_start = self.t
-            self.silence = 0.0
-            self.voiced += dur
-            self.buf.append(y.copy())
-        elif self.buf:
-            self.silence += dur
-            self.buf.append(y.copy())
-        self.t += dur
-        length = sum(len(b) for b in self.buf) / SAMPLE_RATE
-        if self.buf and (self.silence >= self.END_SILENCE_S or length >= self.MAX_UTTERANCE_S):
-            audio, start = np.concatenate(self.buf), self.buf_start
-            voiced = self.voiced
-            self.buf, self.silence, self.voiced = [], 0.0, 0.0
-            if voiced >= self.MIN_UTTERANCE_S:
-                self._submit(audio, start)
-
-    # Utterances still waiting for a free model worker. Beyond this the oldest
-    # waiting one is dropped: a missing line is better than captions that lag
-    # further and further behind the stream.
-    MAX_WAITING = 2
-
-    def _submit(self, audio: np.ndarray, start: float) -> None:
-        self.pending = [f for f in self.pending if not f.done()]
-        waiting = [f for f in self.pending if not f.running()]
-        while len(waiting) >= self.MAX_WAITING:
-            if waiting.pop(0).cancel():
-                log.info("caption backlog: dropped an utterance")
-        self.pending = [f for f in self.pending if not f.cancelled()]
-        self.pending.append(self.whisper.pool.submit(self._transcribe_safe, audio, start))
-
-    def flush(self, timeout: float = 6.0) -> None:
-        """Transcribe whatever is buffered and wait for outstanding work."""
-        if self.buf and self.voiced >= self.MIN_UTTERANCE_S:
-            self._submit(np.concatenate(self.buf), self.buf_start)
-        self.buf, self.silence, self.voiced = [], 0.0, 0.0
-        from concurrent.futures import wait
-
-        wait(self.pending, timeout=timeout)
-
-    def _transcribe_safe(self, audio48: np.ndarray, start: float) -> None:
-        try:
-            self._transcribe(audio48, start)
-        except Exception:  # noqa: BLE001
-            log.exception("live caption transcription failed")
-
-    def _transcribe(self, audio48: np.ndarray, start: float) -> None:
-        if self.closed:
-            return
-        audio16 = resample_poly(audio48, 1, 3).astype(np.float32)
-        segs, info = self.whisper.model.transcribe(
-            audio16, language=self.language, beam_size=1, vad_filter=False,
-            condition_on_previous_text=False, initial_prompt=self.prompt[-200:] or None,
-            without_timestamps=True,
+        self.rec = sherpa_onnx.OnlineRecognizer.from_transducer(
+            tokens=str(model_dir / "tokens.txt"),
+            encoder=str(model_dir / "encoder.int8.onnx"),
+            decoder=str(model_dir / "decoder.int8.onnx"),
+            joiner=str(model_dir / "joiner.int8.onnx"),
+            num_threads=threads,
+            sample_rate=self.INPUT_RATE,
+            feature_dim=80,
+            decoding_method="greedy_search",
+            provider="cpu",
+            enable_endpoint_detection=True,
+            # Long silence with nothing said: reset. Shorter values cut off the
+            # first words, which are still in the model's pipeline.
+            rule1_min_trailing_silence=5.0,
+            rule2_min_trailing_silence=0.7,  # a pause after speech ends the line
+            rule3_min_utterance_length=12.0,  # long monologues still get lines
         )
-        text = " ".join(s.text.strip() for s in segs).strip()
-        if text and not self.closed:
-            self.prompt = (self.prompt + " " + text)[-400:]
-            self.emit({"type": "caption", "text": text, "final": True, "start": round(start, 3),
-                       "end": round(start + len(audio48) / SAMPLE_RATE, 3), "language": info.language})
+        self._lock = threading.Lock()
+        self._captioners: set[StreamingCaptioner] = set()
+        threading.Thread(target=self._loop, name="live-captions", daemon=True).start()
+
+    def add(self, c: "StreamingCaptioner") -> None:
+        with self._lock:
+            self._captioners.add(c)
+
+    def remove(self, c: "StreamingCaptioner") -> None:
+        """Returns once the decoder thread no longer touches `c`."""
+        with self._lock:
+            self._captioners.discard(c)
+
+    def _loop(self) -> None:
+        while True:
+            time.sleep(self.TICK_S)
+            with self._lock:  # held for the whole tick: add/remove wait for it
+                active = list(self._captioners)
+                for c in active:
+                    c._take_audio()
+                ready = [c for c in active if self.rec.is_ready(c.stream)]
+                while ready:
+                    try:
+                        self.rec.decode_streams([c.stream for c in ready])
+                    except Exception:  # noqa: BLE001 - one bad stream must not stop captions for everyone
+                        log.exception("caption decode failed")
+                        break
+                    ready = [c for c in ready if self.rec.is_ready(c.stream)]
+                for c in active:
+                    c._publish()
+
+
+_recognizer: _StreamingRecognizer | None = None
+_recognizer_lock = threading.Lock()
+
+
+def shared_recognizer(models_dir: Path, threads: int = 2) -> _StreamingRecognizer:
+    global _recognizer
+    with _recognizer_lock:
+        if _recognizer is None:
+            _recognizer = _StreamingRecognizer(models_dir / "captions-en", threads)
+        return _recognizer
+
+
+_PRONOUN_I = re.compile(r"\bi(?=$|\s|'(?:m|ve|ll|d)\b)")
+
+
+def _tidy(text: str) -> str:
+    """The model writes lowercase without punctuation: capitalise the line and "I"."""
+    text = _PRONOUN_I.sub("I", text.strip())
+    return text[:1].upper() + text[1:]
+
+
+class StreamingCaptioner:
+    """Live English captions for one session: a partial line while someone
+    talks, a final line at each pause. Fed the session's original (not
+    denoised) audio, which every recognizer we tested transcribes better."""
+
+    LANGUAGES = ("en",)
+
+    def __init__(self, models_dir: Path, emit):
+        self.engine = shared_recognizer(models_dir)
+        self.stream = self.engine.rec.create_stream()
+        self.emit = emit
+        self._pending: list[np.ndarray] = []
+        self._pending_lock = threading.Lock()
+        self._fed = 0  # 16 kHz samples given to the recognizer
+        self._line_start = 0  # sample where the current line began
+        self._last_text = ""
+        self._line = 0
+        self.closed = False
+        self.engine.add(self)
+
+    def feed(self, x48: np.ndarray) -> None:
+        with self._pending_lock:
+            self._pending.append(x48)
+
+    def _take_audio(self) -> None:  # decoder thread
+        with self._pending_lock:
+            chunks, self._pending = self._pending, []
+        if chunks:
+            x = resample_poly(np.concatenate(chunks), 1, 3).astype(np.float32)
+            self.stream.accept_waveform(_StreamingRecognizer.INPUT_RATE, x)
+            self._fed += len(x)
+
+    def _publish(self, final: bool = False) -> None:  # decoder thread
+        rec = self.engine.rec
+        text = _tidy(rec.get_result(self.stream))
+        endpoint = final or rec.is_endpoint(self.stream)
+        rate = _StreamingRecognizer.INPUT_RATE
+        if text and (endpoint or text != self._last_text) and not self.closed:
+            self.emit({"type": "caption", "id": f"l{self._line}", "text": text, "final": bool(endpoint),
+                       "start": round(self._line_start / rate, 3), "end": round(self._fed / rate, 3), "language": "en"})
+        self._last_text = text
+        if endpoint:
+            rec.reset(self.stream)
+            self._line_start, self._last_text = self._fed, ""
+            if text:
+                self._line += 1
+
+    def flush(self, timeout: float = 3.0) -> None:
+        """End of stream: decode what is left and emit it as a final line."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._pending_lock:
+                if not self._pending:
+                    break
+            time.sleep(_StreamingRecognizer.TICK_S)
+        self.engine.remove(self)
+        self._take_audio()
+        self.stream.input_finished()
+        while self.engine.rec.is_ready(self.stream):
+            self.engine.rec.decode_stream(self.stream)
+        self._publish(final=True)
 
     def close(self) -> None:
         self.closed = True
+        self.engine.remove(self)

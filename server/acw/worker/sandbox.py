@@ -164,6 +164,7 @@ def default_read_paths(extra: list[str | Path]) -> list[str | Path]:
         "/etc/localtime",
         "/etc/ssl/certs",
         "/sys/devices/system/cpu",
+        "/proc/cpuinfo",  # ONNX Runtime / CTranslate2 pick their SIMD kernels from it
         "/dev/urandom",
         "/dev/null",
         sys.base_prefix,

@@ -81,3 +81,25 @@ def test_runner_sandbox_blocks_escape(tmp_path):
     assert "allowed" not in out.stdout, out.stdout
     assert (tmp_path / "ok").exists()
     assert not os.path.exists("/tmp/acw-sandbox-escape")
+
+
+@pytest.mark.skipif(not (Path.home() / "audio-cleaner/models/captions-en/encoder.int8.onnx").is_file()
+                    or not os.environ.get("ACW_TEST_AUDIO"), reason="caption model or speech sample missing")
+def test_streaming_captions_keep_the_first_words():
+    import subprocess
+    import time
+
+    from acw.stream.engine import StreamingCaptioner
+
+    raw = subprocess.run([str(Path.home() / "audio-cleaner/bin/ffmpeg"), "-v", "error", "-i", os.environ["ACW_TEST_AUDIO"],
+                          "-ac", "1", "-ar", "48000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, np.float32)
+    events = []
+    c = StreamingCaptioner(Path.home() / "audio-cleaner/models", events.append)
+    for i in range(0, len(x), 960):
+        c.feed(x[i:i + 960])
+        time.sleep(0.002)
+    c.flush()
+    finals = [e["text"] for e in events if e["final"]]
+    assert finals and finals[0].startswith("We will not be held responsible"), finals
+    assert any(not e["final"] for e in events)  # partial lines while talking

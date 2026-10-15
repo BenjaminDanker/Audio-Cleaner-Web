@@ -25,7 +25,7 @@ for f in "$H/bin/ffmpeg" "$H/bin/ffprobe" "$H/bin/libdf.so" "$H/models/DeepFilte
   [ -e "$f" ] || { echo "missing $f (see docs/operations.md)" >&2; exit 1; }
 done
 [ -d "$H/models/whisper/large-v3-turbo" ] || echo "warning: whisper large-v3-turbo missing (local transcription will fail)" >&2
-[ -d "$H/models/whisper/small" ] || echo "warning: whisper small missing (local live captions will fail)" >&2
+[ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
 
 # 4. Config
 if [ ! -f "$H/secrets/acw.env" ]; then

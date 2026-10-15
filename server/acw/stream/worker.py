@@ -20,10 +20,9 @@ from pathlib import Path
 from .. import cpusplit, hostload
 from ..config import get_settings
 from . import protocol as P
-from .engine import DENOISE_TIERS, LiveChain, OpusCodec, UtteranceCaptioner
+from .engine import DENOISE_TIERS, LiveChain, OpusCodec, StreamingCaptioner
 
 log = logging.getLogger("acw.stream.worker")
-WHISPER_LIVE_MODEL = os.environ.get("ACW_WHISPER_LIVE_MODEL", "small")
 
 # Live audio comes first. It gets whole physical cores (acw.cpusplit), as many
 # as its sessions need, up to all but the few kept for file jobs; capacity is
@@ -117,7 +116,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 loop.call_soon_threadsafe(_offer, events, ev)
 
             captioner = await loop.run_in_executor(
-                executor, UtteranceCaptioner, settings.models_dir, WHISPER_LIVE_MODEL, cfg.get("language"), emit
+                executor, StreamingCaptioner, settings.models_dir, emit
             )
         await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "ready", "latencySamples": chain.latency_samples}))
 
@@ -141,7 +140,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 x = data
             y = chain.process(x)
             if captioner is not None:
-                captioner.feed(y)
+                captioner.feed(x)  # the original: recognizers do better on it than on denoised audio
             out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
             tap = P.pack_audio(seq, y) if (tap_pcm and kind == P.CODEC_OPUS) else None
             return out, tap
