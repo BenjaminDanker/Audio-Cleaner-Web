@@ -10,12 +10,18 @@
 # Every third-party action is pinned to a full commit SHA.
 name: Desktop app
 
-# Only when installers are actually wanted: a desktop-v* tag (builds and publishes a release), or the
-# "Run workflow" button (builds the installers as downloadable artifacts). A full build takes ~20-30 min
-# cold, much less once the FFmpeg/libDF caches exist, so it does not run on every push.
+# Builds the installers (as downloadable artifacts) whenever a push changes what goes into the app, so
+# website/server-only pushes never wait on it; a desktop-v* tag also publishes a GitHub Release; "Run
+# workflow" builds by hand. Cold ~20-30 min, much less once the FFmpeg/libDF caches exist.
 on:
   push:
+    branches: [main, on-prem]
     tags: ["desktop-v*"]
+    paths:
+      - "desktop/**"
+      - "common/**"
+      - "native/deepfilter/**"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
 concurrency:
