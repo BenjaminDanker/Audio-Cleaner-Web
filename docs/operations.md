@@ -74,24 +74,45 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
 More users never slow a running job down; they wait longer for a slot or are
 told the service is busy. Measured numbers, 2026-10-14:
 
-**Memory.** Every `acw-*` unit runs in `acw.slice` (MemoryHigh 11G, MemoryMax
-12G), so Audio Cleaner can't take RAM the Minecraft servers need.
+**Memory.** Every `acw-*` unit runs in `acw.slice`, capped at 40% of RAM
+(12 GB on this 31 GB box; set at install), so Audio Cleaner can't take RAM the
+Minecraft servers need.
 - File jobs keep decoded and cleaned audio in memory-mapped scratch files in the
   job directory, and the polish chain works in 10 s blocks. A 60-min stereo job
   runs under a hard 1.5 GB cap (it peaked at 6.9 GB for 30 min before this).
   Scratch disk: ~0.7 GB per hour and channel, twice.
-- Local transcription adds the Whisper model (~1.7 GB) and 16 kHz audio
-  (~0.23 GB per hour). Worker units: MemoryHigh 4G / MemoryMax 5G.
-- Live: one shared caption model (~0.5 GB) plus a few MB per session. Unit: 3G/4G.
+- Local transcription adds the model (Parakeet ~4.3 GB on CPU, ~1 GB with the
+  GPU; Whisper turbo ~1.7 GB) and 16 kHz audio (~0.23 GB per hour). CPU worker
+  units: MemoryHigh 6G / MemoryMax 7G.
+- Live: one shared caption model (~0.3 GB) plus a few MB per session. Unit: 3G/4G.
 
-**File jobs (Studio clean, transcription).** `ACW_WORKERS` workers (default 2),
-one job each, 4 threads each, `Nice=10`. Queue order: paid before free, then
-the user with the fewest jobs running, then first come first served
-(`jobs.QUEUE_ORDER`). The API reports `queuePosition`. Limits: 3 active jobs
-per user; free jobs are refused while 6 or more jobs wait.
+**File jobs (Studio clean, transcription).** One CPU worker per 3 physical
+cores (min 2, max 8; `ACW_WORKERS` overrides), plus the GPU worker when there
+is one. A worker takes the next job only when its measured needs fit (memory
+and scratch disk with a reserve for the host; idle cores among the CPUs jobs
+may use right now); with nothing running the queue always moves. Queue order:
+paid before free, then the user with the fewest jobs running, then first come
+first served. The API reports `queuePosition` and `queueWaitSeconds`.
 - Studio clean: ~0.1x real time with 4 threads (60 min stereo in ~6 min).
-- Local transcription (large-v3-turbo int8): ~0.45x real time on 8 threads.
-  This is the bottleneck. Parakeet would be ~4.5x faster (research/asr.md).
+- Local transcription: Parakeet TDT (English: v2; 24 European languages: v3)
+  at ~0.09x real time on 4 CPU threads, ~0.04x on the GTX 960; Whisper
+  large-v3-turbo (~0.45x) for every other language. Auto language: Whisper
+  small detects it from the first 30 s.
+
+**GPU worker (optional).** `deploy/setup-gpu.sh` builds `~/audio-cleaner/venv-gpu`
+(ONNX Runtime with CUDA, pinned for the GTX 960's sm_52), then
+`deploy/install.sh` enables `acw-worker-gpu`. It takes only local
+transcription jobs and runs Parakeet on the GPU (one at a time: the model
+needs ~3.7 of the 4 GB). While it is idle it refreshes
+`data/gpu-worker-idle`, and CPU workers leave transcription jobs to it. Its
+sandboxed runner may also open `/dev/nvidia*` and has no address-space limit
+(CUDA reserves huge virtual ranges).
+
+**Sized from the machine.** `deploy/install.sh` reads the core count and RAM:
+all services together may use `ACW_MEMORY_PERCENT` (default 40) of RAM
+(`acw.slice.d/size.conf`), file workers scale with cores, and live capacity
+scales with cores and the start-up speed calibration. Moving to a bigger
+machine needs no edits: run `deploy/install.sh` there.
 
 **Live comes first.** Live audio gets whole physical cores (`acw.cpusplit`):
 as many as its sessions need plus one spare, up to all but `ACW_MIN_JOB_CORES`

@@ -27,12 +27,61 @@ log = logging.getLogger("acw.worker")
 _stop = threading.Event()
 
 
+# The GPU worker (acw-worker-gpu, its own venv with CUDA ONNX Runtime) only
+# takes local transcription jobs and runs Parakeet on the GPU; the CPU workers
+# leave those to it while it is idle. See docs/operations.md.
+GPU_MODE = os.environ.get("ACW_WORKER_GPU") == "1"
+GPU_IDLE_FRESH_S = 6
+
+
+def _gpu_idle_marker() -> Path:
+    return get_settings().data_dir / "gpu-worker-idle"
+
+
+def gpu_worker_idle() -> bool:
+    try:
+        return time.time() - _gpu_idle_marker().stat().st_mtime < GPU_IDLE_FRESH_S
+    except OSError:
+        return False
+
+
+def is_local_transcription(job: dict) -> bool:
+    return json.loads(job["params_json"]).get("transcribe_tier") == "local" and job.get("next_stage") != "finalize"
+
+
+def _gpu_spec() -> dict:
+    """Sandbox additions the CUDA driver needs (found with strace under
+    Landlock): the GPU device files, driver info under /proc and /sys, and
+    this process's own /proc/self (it names its threads there, which it treats
+    as fatal if refused). Nothing about other processes."""
+    devices = sorted(str(p) for p in Path("/dev").glob("nvidia*") if not p.is_dir())
+    read = [p for p in ("/proc/driver/nvidia", "/proc/devices", "/proc/sys/vm/mmap_min_addr", "/sys/bus/pci",
+                        "/sys/devices", "/sys/module/nvidia", "/sys/module/nvidia_uvm", "/dev/char") if Path(p).exists()]
+    return {
+        "asr_device": "cuda",
+        "gpu_devices": [*devices, "/proc/self"],
+        "gpu_read": [*read, "/proc/self"],
+        "address_space_bytes": 0,
+    }
+
+
+def _cuda_library_path() -> str:
+    """CUDA/cuDNN come from pip wheels inside the GPU venv (site-packages/nvidia/*/lib)."""
+    import site
+
+    dirs = []
+    for sp in site.getsitepackages():
+        dirs += sorted(str(p) for p in Path(sp, "nvidia").glob("*/lib") if p.is_dir())
+    return os.pathsep.join(dirs)
+
+
 def _settings_extra() -> dict:
     s = get_settings()
     return {
         "threads": int(os.environ.get("ACW_JOB_THREADS", "4")),
         "whisper_model": os.environ.get("ACW_WHISPER_MODEL", "large-v3-turbo"),
         "lib_path": str(s.bin_dir / "libdf.so"),
+        **(_gpu_spec() if GPU_MODE else {}),
         "dfn_model": str(s.models_dir / "DeepFilterNet3_onnx.tar.gz"),
         "bin_dir": str(s.bin_dir),
         "models_dir": str(s.models_dir),
@@ -44,13 +93,17 @@ MIN_IDLE_CORES = 2.0
 MAX_JOB_THREADS = int(os.environ.get("ACW_JOB_THREADS_MAX", "6"))
 
 
-def admission(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set[int] | None = None) -> tuple[bool, str, int]:
+def admission(
+    job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set[int] | None = None, gpu: bool = False
+) -> tuple[bool, str, int]:
     """Whether `job` may start now, why not, and how many threads it gets.
 
     Memory and disk must fit with a reserve left for the rest of the host.
     CPU only decides when other jobs are already running: with nothing running
     the queue always moves (niced, so it yields to everything else)."""
     mem, disk = jobs.job_needs(job)
+    if gpu:  # the model lives in GPU memory
+        mem = min(mem, jobs.JOB_MEM + jobs.GB)
     now = db.now()
     # Jobs started in the last minute may not have allocated their memory yet.
     mem += sum(jobs.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
@@ -62,7 +115,7 @@ def admission(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set
     idle = snap.idle_cores
     if cpus is not None and snap.busy_per_cpu:
         idle = sum(1.0 - snap.busy_per_cpu[c] for c in cpus if c < len(snap.busy_per_cpu))
-    if running and idle < MIN_IDLE_CORES:
+    if running and idle < MIN_IDLE_CORES and not gpu:
         return False, f"cpu: {idle:.1f} job cores idle", 0
     return True, "", max(2, min(MAX_JOB_THREADS, int(idle) - 1))
 
@@ -76,17 +129,22 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
     global _last_wait_log
     now = db.now()
     with db.tx() as c:
-        row = c.execute(
-            f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 1"
-        ).fetchone()
-        if row is None:
+        rows = [dict(r) for r in c.execute(
+            f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 50"
+        ).fetchall()]
+        if GPU_MODE:
+            rows = [r for r in rows if is_local_transcription(r)]
+        elif gpu_worker_idle():
+            rows = [r for r in rows if not is_local_transcription(r)]  # the GPU worker takes these
+        if not rows:
             return None
+        row = rows[0]
         threads = None
         if load is not None:
             running = [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
             units, per_core = cpusplit.live_units(get_settings().data_dir)
             cpus = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
-            ok, why, threads = admission(dict(row), load.snapshot(), running, cpus)
+            ok, why, threads = admission(row, load.snapshot(), running, cpus, gpu=GPU_MODE)
             if not ok:
                 if time.monotonic() - _last_wait_log > 60:
                     _last_wait_log = time.monotonic()
@@ -146,6 +204,8 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         "HF_HUB_OFFLINE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    if GPU_MODE:
+        env["LD_LIBRARY_PATH"] = _cuda_library_path()
     result_file = d / f"result-{stage}.json"
     result_file.unlink(missing_ok=True)
     proc = subprocess.Popen(
@@ -324,8 +384,12 @@ def main() -> None:
                 log.exception("sweep failed")
         job = claim(worker_id, load)
         if job is None:
+            if GPU_MODE:
+                _gpu_idle_marker().touch()
             _stop.wait(2.0)
             continue
+        if GPU_MODE:
+            _gpu_idle_marker().unlink(missing_ok=True)
         log.info("job %s (%s) claimed with %s threads", job["id"], job["kind"], job["threads"])
         process(job, {**extra, "threads": job["threads"] or extra["threads"]})
 

@@ -146,7 +146,8 @@ def apply_landlock(read_paths: list[str | Path], write_paths: list[str | Path], 
 def apply_rlimits(cpu_seconds: int, address_space_bytes: int, max_file_bytes: int) -> None:
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 30))
-    resource.setrlimit(resource.RLIMIT_AS, (address_space_bytes, address_space_bytes))
+    if address_space_bytes > 0:  # 0: no limit (CUDA reserves far more address space than it uses)
+        resource.setrlimit(resource.RLIMIT_AS, (address_space_bytes, address_space_bytes))
     resource.setrlimit(resource.RLIMIT_FSIZE, (max_file_bytes, max_file_bytes))
     _libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
 
@@ -176,7 +177,16 @@ def default_read_paths(extra: list[str | Path]) -> list[str | Path]:
     return paths
 
 
-def confine(job_dir: Path, extra_read: list[str | Path], *, cpu_seconds: int, address_space_bytes: int, max_file_bytes: int) -> int:
-    abi = apply_landlock(default_read_paths(extra_read), [job_dir, "/dev/null"])
+def confine(
+    job_dir: Path,
+    extra_read: list[str | Path],
+    *,
+    cpu_seconds: int,
+    address_space_bytes: int,
+    max_file_bytes: int,
+    extra_write: list[str | Path] = (),
+) -> int:
+    """`extra_write`: e.g. the GPU device files for the GPU worker's runner."""
+    abi = apply_landlock(default_read_paths(extra_read), [job_dir, "/dev/null", *extra_write])
     apply_rlimits(cpu_seconds, address_space_bytes, max_file_bytes)
     return abi

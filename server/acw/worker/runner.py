@@ -46,10 +46,11 @@ def main() -> int:
 
     confine(
         job_dir,
-        [spec["bin_dir"], spec["models_dir"], spec["lib_path"]],
+        [spec["bin_dir"], spec["models_dir"], spec["lib_path"], *spec.get("gpu_read", [])],
         cpu_seconds=int(spec["cpu_seconds"]),
         address_space_bytes=int(spec["address_space_bytes"]),
         max_file_bytes=int(spec["max_file_bytes"]),
+        extra_write=spec.get("gpu_devices", []),
     )
     os.chdir(job_dir)
     os.environ["OMP_NUM_THREADS"] = str(spec.get("threads", 2))

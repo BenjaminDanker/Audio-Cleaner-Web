@@ -43,15 +43,36 @@ chmod 600 "$H/secrets/"*.env
 U="$HOME/.config/systemd/user"
 mkdir -p "$U"
 install -m 644 "$REPO"/deploy/systemd/*.service "$REPO"/deploy/systemd/*.timer "$REPO"/deploy/systemd/*.slice "$U/"
+
+# Sized from this machine, so a bigger CPU or more RAM is used without edits:
+# all Audio Cleaner services may use ACW_MEMORY_PERCENT of RAM (the rest stays
+# with the game servers and the system); one file worker per 3 physical cores.
+# Live audio capacity scales by itself (core count + start-up calibration).
+MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+PCT="${ACW_MEMORY_PERCENT:-40}"
+PHYS=$(lscpu -p=core,socket | grep -v '^#' | sort -u | wc -l)
+WORKERS="${ACW_WORKERS:-$(( PHYS / 3 < 2 ? 2 : (PHYS / 3 > 8 ? 8 : PHYS / 3) ))}"
+mkdir -p "$U/acw.slice.d" "$U/acw-web.service.d"
+printf '[Slice]\nMemoryHigh=%dK\nMemoryMax=%dK\n' $(( MEM_KB * (PCT - 3) / 100 )) $(( MEM_KB * PCT / 100 )) > "$U/acw.slice.d/size.conf"
+printf '[Service]\nEnvironment=ACW_WORKERS=%d\n' "$WORKERS" > "$U/acw-web.service.d/workers.conf"
+echo "host: $PHYS physical cores, $(( MEM_KB / 1048576 )) GB RAM -> $WORKERS file workers, ${PCT}% RAM cap"
+
 systemctl --user daemon-reload
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
-WORKERS="${ACW_WORKERS:-3}"
 UNITS="acw-stream.service acw-web.service acw-tunnel.service"
 for i in $(seq 1 "$WORKERS"); do UNITS="$UNITS acw-worker@$i.service"; done
+# Workers beyond the new count (moved to a smaller machine): stop them.
+for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-worker@$i.service" >/dev/null 2>&1 || true; done
+# GPU transcription worker: only with a working NVIDIA driver and deploy/setup-gpu.sh done.
+if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1 && [ -x "$H/venv-gpu/bin/python" ]; then
+  UNITS="$UNITS acw-worker-gpu.service"
+else
+  systemctl --user disable --now acw-worker-gpu.service >/dev/null 2>&1 || true
+fi
 systemctl --user enable $UNITS >/dev/null 2>&1
 if [ "${1:-}" != "--no-restart" ]; then
   systemctl --user restart $UNITS
   sleep 3
-  systemctl --user --no-pager --plain list-units 'acw-*' | sed -n '1,12p'
+  systemctl --user --no-pager --plain list-units 'acw-*' | sed -n '1,14p'
   curl -fsS http://127.0.0.1:8790/audio/api/health && echo " <- local health ok"
 fi

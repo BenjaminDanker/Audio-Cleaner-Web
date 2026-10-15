@@ -18,23 +18,33 @@ variable costs are OpenAI (extra-accurate tiers only) and Stripe's fees.
 
 CPU per minute of audio comes from our measurements (docs/operations.md,
 docs/research/*): Studio clean 23.5 CPU-s (stereo), local transcription
-143 CPU-s, live denoise 20 CPU-s (standard, under load) / 48 (low latency),
-local live captions ~36 CPU-s.
+22 CPU-s with Parakeet (143 with Whisper), live denoise 20 CPU-s (standard, under load) / 48 (low latency),
+standard live captions ~12 CPU-s.
 
-## Per minute of audio
+## Profit margin per minute of audio
 
-| Product | Price | Electricity | Other variable cost | Margin |
-|---|---|---|---|---|
-| Studio clean | $0.0100 | $0.00001 | - | ~100% |
-| Transcription (standard) | $0.0040 | $0.00007 | - | 98% |
-| Transcription, extra accurate | $0.0150 | <$0.00001 | OpenAI $0.0045 | 70% |
-| Live noise removal | $0.0040 | $0.00001 | - | ~100% |
-| Live noise removal, low latency | $0.0080 | $0.00002 | - | ~100% |
-| Live captions (standard) | $0.0060 | $0.00002 | - | ~100% |
-| Live captions, extra accurate | $0.0250 | <$0.00001 | OpenAI ≤ $0.017 | ≥ 32% |
+Variable costs only: electricity, OpenAI, and Stripe's card fee on the top-up
+that paid for the minute (2.9% + $0.30: 4.4% of a $20 top-up, 5.9% of $10).
+Not included: your time, the hardware itself, the VPS and domain you already
+pay for.
 
-Stripe then takes 5.9% of a $10 top-up (3.5% of $50), so the thinnest
-product, extra-accurate live captions, keeps at least ~26% after fees.
+| Product | Price | Electricity | OpenAI | Stripe ($20 top-up) | Net | Margin |
+|---|---|---|---|---|---|---|
+| Studio clean | $0.0100 | $0.00001 | - | $0.00044 | $0.00955 | 95% |
+| Transcription (standard, Parakeet/Whisper) | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
+| Transcription, extra accurate | $0.0150 | <$0.00001 | $0.0045 | $0.00066 | $0.00984 | 66% |
+| Live noise removal | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
+| Live noise removal, low latency | $0.0080 | $0.00002 | - | $0.00035 | $0.00763 | 95% |
+| Live captions (standard, English) | $0.0060 | $0.00001 | - | $0.00026 | $0.00573 | 95% |
+| Live captions, extra accurate | $0.0250 | <$0.00001 | ≤ $0.017 | $0.0011 | ≥ $0.0069 | ≥ 28% (worst case: talking non-stop; ~50-60% at a typical 50-70% speaking time, since silence isn't sent) |
+
+With $10 top-ups every margin drops by 1.5 points; with $50 top-ups it rises
+by 0.9. If Stripe Tax is switched on, subtract another 0.5 points.
+
+Electricity per minute of audio (wall power, upper bound): Studio clean
+23.5 CPU-s; standard transcription with Parakeet 22 CPU-s on the CPU, or ~2.4
+GPU-s at ~90 W on the GTX 960; live denoise ~20 CPU-s (standard) / ~48 (low
+latency); standard live captions ~12 CPU-s.
 
 ## Free products
 
@@ -42,16 +52,14 @@ product, extra-accurate live captions, keeps at least ~26% after fees.
 |---|---|
 | Browser denoise | Nothing per use (runs on the visitor's device). ~12 MB of VPS traffic per new visitor (cached for a year after). |
 | Free transcription (60 min/day per account) | ≤ $0.004 of electricity per account per day at full use. The real cost is queue time, so paid jobs go first. |
-| Desktop app | Nothing (runs on the user's computer). The update check is a tiny file on the VPS. |
+| Desktop app | Nothing (runs offline on the user's computer). |
 
 ## Fixed and risk items
 
-- **GPU idle draw: ~$1.30/month** (12 W around the clock) for a card production
-  doesn't use yet. It would earn its keep once the faster transcription model
-  (Parakeet, docs/research/asr.md) runs on it.
-- **Refunds:** Stripe keeps its fee, so refunding an unused $10 top-up costs us
-  $0.59. The 14-day refund window bounds this. Consider deducting the card fee
-  from refunds (state it in the Terms).
+- **GPU idle draw: ~$1.30/month** (12 W around the clock). It now runs
+  transcription jobs (acw-worker-gpu) whenever it is free.
+- **Refunds:** Stripe keeps its fee, so refunds now keep it too (deducted from
+  the first refund of a payment), so a refund costs us nothing.
 - **Disputes:** $15 each. Prepaid credit, 3-D Secure and the $10 minimum keep
   them rare (docs/payments.md).
 - **Abuse of the free tier** (many accounts) costs queue time, not money.
