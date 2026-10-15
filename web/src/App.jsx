@@ -1,5 +1,5 @@
 import { Suspense, useEffect } from 'react';
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation } from 'react-router';
 import { lazyRetry as lazy } from './lazy.js';
 import { forgetReturn, peekReturn, rememberReturn } from './returnTo.js';
 import { useAuth } from './auth.jsx';

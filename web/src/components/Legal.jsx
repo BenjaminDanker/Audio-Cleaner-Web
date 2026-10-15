@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { SITE } from '../site.js';
 
 export const LEGAL_VERSION = '2026-10-15';

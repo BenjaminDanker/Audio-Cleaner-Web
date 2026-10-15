@@ -141,17 +141,9 @@ export const COMPONENTS = [
     texts: [{ label: 'MIT licence', file: 'scheduler-LICENSE.txt', from: 'node_modules/scheduler/LICENSE' }],
   },
   {
-    name: 'React Router', by: 'Remix Software and contributors', license: 'MIT', pkg: 'react-router-dom', url: 'https://github.com/remix-run/react-router',
-    what: 'Page routing (react-router and react-router-dom).',
-    texts: [
-      { label: 'react-router: MIT licence', file: 'react-router-LICENSE.txt', from: 'node_modules/react-router/LICENSE.md' },
-      { label: 'react-router-dom: MIT licence', file: 'react-router-dom-LICENSE.txt', from: 'node_modules/react-router-dom/LICENSE.md' },
-    ],
-  },
-  {
-    name: '@remix-run/router', by: 'Remix Software and contributors', license: 'MIT', url: 'https://github.com/remix-run/react-router',
-    what: 'Routing core used by React Router.',
-    texts: [{ label: 'MIT licence', file: 'remix-run-router-LICENSE.txt', from: 'node_modules/@remix-run/router/LICENSE.md' }],
+    name: 'React Router', by: 'Remix Software and contributors', license: 'MIT', pkg: 'react-router', url: 'https://github.com/remix-run/react-router',
+    what: 'Page routing.',
+    texts: [{ label: 'MIT licence', file: 'react-router-LICENSE.txt', from: 'node_modules/react-router/LICENSE.md' }],
   },
   {
     name: 'Vite', by: 'Evan You, VoidZero and contributors', license: 'MIT', pkg: 'vite', url: 'https://github.com/vitejs/vite',

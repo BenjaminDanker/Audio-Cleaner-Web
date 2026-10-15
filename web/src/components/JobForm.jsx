@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money, moneyUsd, shownName } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';

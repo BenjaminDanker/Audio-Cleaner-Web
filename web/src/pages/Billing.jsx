@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney, dateTime, money, moneyCents } from '../format.js';

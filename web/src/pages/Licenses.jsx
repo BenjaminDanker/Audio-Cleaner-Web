@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import pkg from '../../package.json';
 import { COMPONENTS } from '../../scripts/license-list.mjs';
 import { usePageTitle } from '../hooks.js';

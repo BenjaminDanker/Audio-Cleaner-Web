@@ -1,4 +1,4 @@
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import Legal from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
 import { operatorLine, SITE } from '../site.js';

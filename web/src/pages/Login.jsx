@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link, Navigate, useLocation, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useSearchParams } from 'react-router';
 import { api, oauthStartUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { IconGoogle, IconMail } from '../components/Icons.jsx';

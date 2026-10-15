@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { Link, NavLink, Outlet, useLocation } from 'react-router';
 import { apiOffline, checkHealth } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney } from '../format.js';

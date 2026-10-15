@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { useAuth } from '../auth.jsx';
 import { IconBroadcast, IconSparkle, IconText, IconWave } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';

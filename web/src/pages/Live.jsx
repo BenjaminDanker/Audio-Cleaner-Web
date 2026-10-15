@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link } from 'react-router';
 import { api, streamUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { IconBroadcast } from '../components/Icons.jsx';
