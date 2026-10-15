@@ -4,19 +4,15 @@ import { useAuth } from '../auth.jsx';
 import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money, moneyUsd } from '../format.js';
 import { estimateMicros, findRate, usePricing } from '../hooks.js';
 import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, submitJob } from '../jobs.js';
-import { denoiserLoadState, preloadDenoiser, STRENGTHS as LOCAL_STRENGTHS, subscribeDenoiserLoad } from '../media/denoise.js';
+import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
 import { buildWav } from '../media/wav.js';
 import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
+import StrengthPicker from './StrengthPicker.jsx';
+import { strengthDb } from '../strengths.js';
 
-// Strengths for Clean & polish (done on our side).
-const STRENGTHS = [
-  { id: '18', label: 'Natural', db: 18 },
-  { id: '40', label: 'Strong', db: 40 },
-  { id: '100', label: 'Maximum', db: 100 },
-];
 
 const LONG_SECONDS = 2 * 3600; // in the browser, a recording this long takes a while
 const MAX_SECONDS = 6 * 3600; // and this is the most the browser will take
@@ -76,8 +72,8 @@ export default function JobForm({ onSubmitted }) {
   const [format, setFormat] = useState('wav');
   const [formatTouched, setFormatTouched] = useState(false);
   const [loudness, setLoudness] = useState('-16');
-  const [strength, setStrength] = useState('100'); // Clean & polish
-  const [localStrength, setLocalStrength] = useState('strong'); // in the browser
+  const [strength, setStrength] = useState('max'); // Clean & polish
+  const [localStrength, setLocalStrength] = useState('max'); // in the browser
   const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
   const [language, setLanguage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -204,7 +200,7 @@ export default function JobForm({ onSubmitted }) {
     setLocalRunning(true);
     setLocalProg({ done: 0, total: i?.duration || null, rate: 0, eta: null, elapsed: 0 });
     try {
-      const attenDb = LOCAL_STRENGTHS.find((s) => s.id === localStrength).db;
+      const attenDb = strengthDb(localStrength);
       const pcm = await denoiseFile(f, {
         attenDb, durationHint: i?.duration || null, signal, onProgress: setLocalProg, onStage: setLocalStage,
       });
@@ -231,7 +227,7 @@ export default function JobForm({ onSubmitted }) {
         embed_subtitles: !!(wantsText && embed && i?.hasVideo),
         language: language || null,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
-        atten_lim_db: STRENGTHS.find((s) => s.id === strength).db,
+        atten_lim_db: strengthDb(strength),
       },
     };
     try {
@@ -341,15 +337,7 @@ export default function JobForm({ onSubmitted }) {
 
             {wantsBrowser && (
               <div className="stack">
-                <div className="form-grid">
-                  <div className="field">
-                    <label htmlFor="lstrength">How much noise to remove</label>
-                    <select id="lstrength" className="select" value={localStrength} onChange={(e) => setLocalStrength(e.target.value)} disabled={busy}>
-                      {LOCAL_STRENGTHS.map((s) => <option key={s.id} value={s.id}>{s.label} ({s.db} dB)</option>)}
-                    </select>
-                    <span className="hint">{LOCAL_STRENGTHS.find((s) => s.id === localStrength).hint}</span>
-                  </div>
-                </div>
+                <StrengthPicker name="lstrength" value={localStrength} onChange={setLocalStrength} disabled={busy} />
                 {info.channels > 2 && <p className="small muted mb0">This file has {info.channels} channels; they will be mixed down to mono.</p>}
                 {info.duration > LONG_SECONDS && (
                   <div className="banner banner-warn">
@@ -362,13 +350,9 @@ export default function JobForm({ onSubmitted }) {
             )}
 
             {wantsPolish && (
+              <div className="stack">
+              <StrengthPicker name="strength" value={strength} onChange={setStrength} disabled={busy} />
               <div className="form-grid">
-                <div className="field">
-                  <label htmlFor="strength">How much noise to remove</label>
-                  <select id="strength" className="select" value={strength} onChange={(e) => setStrength(e.target.value)} disabled={busy}>
-                    {STRENGTHS.map((s) => <option key={s.id} value={s.id}>{s.label} ({s.db} dB)</option>)}
-                  </select>
-                </div>
                 <div className="field">
                   <label htmlFor="afmt">Cleaned audio format</label>
                   <select id="afmt" className="select" value={format} onChange={(e) => { setFormat(e.target.value); setFormatTouched(true); }} disabled={busy}>
@@ -381,6 +365,7 @@ export default function JobForm({ onSubmitted }) {
                     {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
                   </select>
                 </div>
+              </div>
               </div>
             )}
 

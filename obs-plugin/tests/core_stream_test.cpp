@@ -199,7 +199,7 @@ void usage()
 {
 	std::printf("usage: core_stream_test --in noisy.wav [--out out.wav] [--clean clean.wav] [--url URL] [--key-file F]\n"
 		    "       [--rate 48000|44100] [--delay-ms 80|150|250] [--denoise 0|1] [--captions local|premium]\n"
-		    "       [--language en] [--atten 18|40|100] [--codec opus|pcm] [--expect-fallback] [--seconds N]\n");
+		    "       [--language en] [--atten 12|24|40|100] [--codec opus|pcm] [--expect-fallback] [--seconds N]\n");
 }
 
 }  // namespace

@@ -233,16 +233,28 @@ jobs:
           version="$(jq -r .version obs-plugin/buildspec.json)"
           cd release
           ls -l
+          # One clearly named file per kind of computer (the build artifacts keep CMake/CPack's names).
           shopt -s nullglob
-          files=(*.zip *.tar.xz *.deb)
-          [ "${#files[@]}" -ge 4 ] || { echo "::error::expected the Windows, macOS and Ubuntu packages"; exit 1; }
-          sha256sum "${files[@]}" > SHA256SUMS
-          notes="Audio Cleaner OBS plugin $version for OBS 31.1 or newer: Windows x64 (zip), macOS universal (tar.xz) and Ubuntu x86_64 (deb or tar.xz). Built from ${GITHUB_SHA::7}. Not code-signed yet. Check a download against SHA256SUMS."
+          one() { local m=("$@"); [ "${#m[@]}" -eq 1 ] || { echo "::error::expected one file, got: ${m[*]}"; exit 1; }; echo "${m[0]}"; }
+          base="audio-cleaner-obs-plugin-$version"
+          mv "$(one *-windows-x64.zip)" "$base-windows.zip"
+          mv "$(one *-macos-universal.tar.xz)" "$base-mac.tar.xz"
+          mv "$(one *.deb)" "$base-ubuntu-debian.deb"
+          mv "$(one *-ubuntu-x86_64.tar.xz)" "$base-linux-other.tar.xz"
+          files=("$base-windows.zip" "$base-mac.tar.xz" "$base-ubuntu-debian.deb" "$base-linux-other.tar.xz")
+          notes="Audio Cleaner OBS plugin $version for OBS 31.1 or newer, built from ${GITHUB_SHA::7}. Not code-signed yet.
+
+          - Windows: $base-windows.zip
+          - Mac (Apple silicon and Intel in one file): $base-mac.tar.xz
+          - Ubuntu, Debian and Linux Mint: $base-ubuntu-debian.deb (install it like any .deb)
+          - Other Linux: $base-linux-other.tar.xz (copy the files into your OBS plugins folder)
+
+          Where each one goes is in obs-plugin/README.md."
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
-              --title "OBS plugin $version" --notes "$notes" "${files[@]}" SHA256SUMS
+              --title "OBS plugin $version" --notes "$notes" "${files[@]}"
           else
             gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
             gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "OBS plugin $version (latest build)" --notes "$notes" "${files[@]}" SHA256SUMS
+              --title "OBS plugin $version (latest build)" --notes "$notes" "${files[@]}"
           fi

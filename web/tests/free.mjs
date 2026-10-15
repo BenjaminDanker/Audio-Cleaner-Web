@@ -12,10 +12,10 @@ page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes(
 await signIn(page, EMAIL);
 apiCalls.length = 0;
 
-async function runFree(file, strengthLabel = 'Strong (40 dB)') {
+async function runFree(file, strengthLabel = 'Strong') {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, file)); // "Free, in your browser" is the default whenever the browser can open the file
-  await page.locator('#lstrength').selectOption({ label: strengthLabel });
+  await page.getByTestId('strength-lstrength').getByText(strengthLabel, { exact: true }).click();
   const t0 = Date.now();
   await page.getByRole('button', { name: 'Start - free' }).click();
   await page.waitForSelector('[data-testid=result]', { timeout: 180000 });

@@ -37,8 +37,9 @@ the checklist at the end).
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest`, and the
    installer (Inno Setup on Windows, `hdiutil` dmg on macOS). Website/server-only pushes skip it; "Run workflow"
    builds by hand (artifacts only, no release). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
-4. The `release` job attaches `AudioCleaner-Setup-x64.exe`, `AudioCleaner-macOS-arm64.dmg`,
-   `AudioCleaner-macOS-x86_64.dmg` and `SHA256SUMS` and marks the release as latest, so the link to share with
+4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.dmg`
+   and `AudioCleaner-<version>-Mac-Intel.dmg` (GitHub shows each file's SHA-256 itself, so there is no separate
+   checksum file) and marks the release as latest, so the link to share with
    friends is always `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest`. The app is not on the
    website and never contacts it.
 5. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a

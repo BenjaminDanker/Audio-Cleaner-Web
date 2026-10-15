@@ -402,18 +402,22 @@ jobs:
             title="Audio Cleaner $version (build $GITHUB_RUN_NUMBER)"
           fi
           cd release
-          for f in AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg; do
-            [ -f "$f" ] || { echo "::error::missing $f"; exit 1; }
-          done
-          sha256sum AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg > SHA256SUMS
-          cat SHA256SUMS
-          notes="Audio Cleaner $version for Windows (x64) and macOS 14+ (Apple silicon and Intel), built from ${GITHUB_SHA::7}. Check a download against SHA256SUMS."
+          # Friendlier names for the release page (the build artifacts keep the platform names).
+          mv AudioCleaner-Setup-x64.exe "AudioCleaner-$version-Windows.exe"
+          mv AudioCleaner-macOS-arm64.dmg "AudioCleaner-$version-Mac-Apple-silicon.dmg"
+          mv AudioCleaner-macOS-x86_64.dmg "AudioCleaner-$version-Mac-Intel.dmg"
+          files=("AudioCleaner-$version-Windows.exe" "AudioCleaner-$version-Mac-Apple-silicon.dmg" "AudioCleaner-$version-Mac-Intel.dmg")
+          notes="Audio Cleaner $version, built from ${GITHUB_SHA::7}.
+
+          - Windows 10 or 11: AudioCleaner-$version-Windows.exe
+          - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.dmg
+          - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.dmg
+
+          Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title "$title" --notes "$notes" \
-              AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg SHA256SUMS
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title "$title" --notes "$notes" "${files[@]}"
           else
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest --title "$title" --notes "$notes" \
-              AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg SHA256SUMS
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest --title "$title" --notes "$notes" "${files[@]}"
           fi
 
       - name: Keep only the newest 5 automatic releases

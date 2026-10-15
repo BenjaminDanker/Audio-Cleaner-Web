@@ -8,6 +8,8 @@ import { balanceMoney, clock, dateTime, rate, moneyUsd } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
 import { applyCaption, startLive } from '../live/session.js';
+import StrengthPicker from '../components/StrengthPicker.jsx';
+import { strengthDb } from '../strengths.js';
 
 export default function Live() {
   usePageTitle('Live & API keys');
@@ -183,7 +185,6 @@ function ApiKeys() {
 
 /* ------------------------------------------------------------------ browser demo */
 
-const STRENGTH = [['18', 'Natural (18 dB)'], ['40', 'Strong (40 dB)'], ['100', 'Maximum (100 dB)']];
 const ERROR_TEXT = {
   insufficient_funds: null, // the server's message is clear
   tos: 'Please agree to the Terms of Service first.',
@@ -227,7 +228,7 @@ function LiveDemo({ pricing }) {
   const [denoise, setDenoise] = useState(true);
   const [captions, setCaptions] = useState('local'); // '' | 'local' (standard, English only) | 'premium' (extra accurate, any language)
   const [language, setLanguage] = useState('');
-  const [strength, setStrength] = useState('100');
+  const [strength, setStrength] = useState('max');
   const [monitor, setMonitor] = useState('processed');
   const [state, setState] = useState('idle'); // idle | starting | live | stopping
   const [error, setError] = useState('');
@@ -279,7 +280,7 @@ function LiveDemo({ pricing }) {
       session.current = await startLive({
         denoise: cfg.denoise, captions: cfg.captions || null,
         language: cfg.captions === 'premium' ? language || null : null, // standard captions are English; the language only matters for extra accurate
-        attenDb: Number(strength), monitor,
+        attenDb: strengthDb(strength), monitor,
         onEvent, onStats: setStats,
       });
       setState('live');
@@ -328,13 +329,11 @@ function LiveDemo({ pricing }) {
             <input type="checkbox" checked={denoise} disabled={busy} onChange={(e) => setDenoise(e.target.checked)} />
             <span>Remove noise from my voice<span className="hint block">{den ? `${moneyUsd(den.usdPerHour)} an hour` : 'Takes out hiss, hum and room noise.'}</span></span>
           </label>
-          <div className="field">
-            <label htmlFor="live-str">How much noise to remove</label>
-            <select id="live-str" className="select" value={strength} onChange={(e) => { setStrength(e.target.value); session.current?.setAtten(Number(e.target.value)); }} disabled={!denoise || state === 'starting'}>
-              {STRENGTH.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-            </select>
-            <span className="hint">More takes out more background sound, but can touch your voice too. You can change it while you talk.</span>
-          </div>
+          <StrengthPicker
+            name="live-str" value={strength} disabled={!denoise || state === 'starting'}
+            onChange={(id) => { setStrength(id); session.current?.setAtten(strengthDb(id)); }}
+          />
+          <span className="hint">You can change it while you talk.</span>
         </Group>
 
         <Group id="grp-captions" title="Captions">

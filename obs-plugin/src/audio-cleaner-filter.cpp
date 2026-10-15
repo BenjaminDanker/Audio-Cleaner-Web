@@ -72,7 +72,7 @@ struct Settings {
 	bool denoise = true;
 	std::string captions = "off";  // off | local | premium
 	std::string language = "auto";
-	int strength = 100;            // attenuation limit in dB: 18 / 40 / 100
+	int strength = 100;            // attenuation limit in dB: 12 / 24 / 40 / 100 (same levels as the website and desktop app)
 	int latency_ms = 150;          // 80 / 150 / 250
 	std::string codec = "opus";    // opus | pcm
 	bool send_captions = false;
@@ -384,9 +384,11 @@ obs_properties_t *filter_properties(void *data)
 
 	obs_property_t *strength = obs_properties_add_list(p, S_STRENGTH, T_("AudioCleaner.Strength"), OBS_COMBO_TYPE_LIST,
 							   OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Gentle"), 18);
-	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Medium"), 40);
-	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Full"), 100);
+	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Gentle"), 12);
+	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Balanced"), 24);
+	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Strong"), 40);
+	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Maximum"), 100);
+	obs_property_set_long_description(strength, T_("AudioCleaner.Strength.Long"));
 
 	obs_property_t *cap = obs_properties_add_list(p, S_CAPTIONS, T_("AudioCleaner.Captions"), OBS_COMBO_TYPE_LIST,
 						      OBS_COMBO_FORMAT_STRING);

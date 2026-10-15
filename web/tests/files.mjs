@@ -129,6 +129,32 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'ok';
   });
 
+  await check('noise strength: the same four buttons as the desktop app (Gentle, Balanced, Strong, Maximum), Maximum to start with; Clean & polish with Gentle sends 12 dB; Live has the same four', async () => {
+    const labels = async (name) => page.getByTestId(`strength-${name}`).locator('.seg span').allInnerTexts();
+    const four = JSON.stringify(['Gentle', 'Balanced', 'Strong', 'Maximum']);
+    if (JSON.stringify(await labels('lstrength')) !== four) throw new Error('browser: ' + JSON.stringify(await labels('lstrength')));
+    if (!(await radio('lstrength', 'max').isChecked())) throw new Error('browser: Maximum should be picked first');
+    await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } })); // enough for the estimate; the job itself is stopped by the test
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'polish');
+    if (JSON.stringify(await labels('strength')) !== four) throw new Error('polish: ' + JSON.stringify(await labels('strength')));
+    await page.getByTestId('strength-strength').getByText('Gentle', { exact: true }).click();
+    if (!/room sound/.test(await page.getByTestId('strength-strength').innerText())) throw new Error('no hint for Gentle');
+    posts.length = 0;
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    await page.unroute('**/api/me');
+    const sent = posts.at(-1)?.options?.atten_lim_db;
+    if (sent !== 12) throw new Error('atten_lim_db sent: ' + sent);
+    await page.goto(`${BASE}/app/live`);
+    await page.getByTestId('strength-live-str').waitFor();
+    if (JSON.stringify(await labels('live-str')) !== four) throw new Error('live: ' + JSON.stringify(await labels('live-str')));
+    await freshApp();
+    await choose('noisy.wav'); // the next checks continue with a WAV in the form
+    return 'Gentle -> 12 dB';
+  });
+
   await check('subtitles only + Free on a short file: "Free: uses N of your M free minutes left today", Start - free, sends free:true, needs no credit', async () => {
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'free');

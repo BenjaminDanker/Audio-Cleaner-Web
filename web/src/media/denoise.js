@@ -2,11 +2,7 @@
 
 const BASE = import.meta.env.BASE_URL;
 
-export const STRENGTHS = [
-  { id: 'natural', label: 'Natural', db: 18, hint: 'Keeps some room tone. Gentlest.' },
-  { id: 'strong', label: 'Strong', db: 40, hint: 'Best for most voices.' },
-  { id: 'maximum', label: 'Maximum', db: 100, hint: 'Removes as much noise as possible.' },
-];
+export { STRENGTHS } from '../strengths.js';
 
 function dfnBase() {
   return new URL(`${BASE}dfn/`, location.href).href;
