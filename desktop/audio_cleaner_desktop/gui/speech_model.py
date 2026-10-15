@@ -1,5 +1,6 @@
-"""The one-time download of the speech model for subtitles: a background download with progress, and the
-line under the Subtitles setting that offers it, shows it running, or says what went wrong."""
+"""The one-time download of a model (the speech model for subtitles, the one that restores highs, the one that
+rebuilds the voice): a background download with progress, and the line under the setting that offers it, shows
+it running, or says what went wrong."""
 from __future__ import annotations
 
 import logging
@@ -27,7 +28,7 @@ class SpeechModelDownloader(QObject):
 
     def __init__(self, parent: QObject | None = None, model: models.SpeechModel | None = None):
         super().__init__(parent)
-        self.model = model or resources.SPEECH_MODEL  # any catalog model (also the one that restores highs)
+        self.model = model or resources.SPEECH_MODEL  # any catalog model
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
         self.last_error = ""
@@ -42,6 +43,8 @@ class SpeechModelDownloader(QObject):
             return resources.speech_ready()  # also counts the test model when run from source
         if self.model is resources.HIGHS_MODEL:
             return resources.highs_model_dir() is not None
+        if self.model is resources.VOICE_MODEL:
+            return resources.voice_model_dir() is not None
         return models.is_installed(self.model)
 
     def start(self) -> None:

@@ -64,30 +64,48 @@ _HANN = scipy.signal.get_window("hann", WIN, fftbins=True).astype(np.float32)  #
 # --------------------------------------------------------------------------------------------------------
 # Bandwidth detection
 # --------------------------------------------------------------------------------------------------------
+_LTAS_CHUNK = 1024  # frames per FFT batch while measuring (about 8 MB of audio at a time)
+
+
+def _read_frames(x: np.ndarray, first: np.ndarray, n_fft: int) -> np.ndarray:
+    """The frames of `x` starting at the sample positions `first`, as float32 (k, n_fft). `x` is (n,) or
+    (n, ch) (channels are averaged); only these samples are read, so `x` may be a memory map."""
+    frames = np.asarray(x[first[:, None] + np.arange(n_fft)], dtype=np.float32)
+    if frames.ndim == 3:
+        frames = frames[:, :, 0] if frames.shape[2] == 1 else frames.mean(axis=2)
+    return frames
+
+
 def _ltas_db(x: np.ndarray, sr: int, max_frames: int = 6000):
-    """Long-term average power spectrum (dB) over the active frames of mono `x`, bin spacing sr/2048 Hz."""
+    """Long-term average power spectrum (dB) over the active frames of `x` (mono, or (n, ch) with the channels
+    averaged), bin spacing sr/2048 Hz. Works block by block on the frames it samples, so the whole signal is
+    never copied or averaged in memory."""
     n_fft, hop = 2048, 1024
     if len(x) < n_fft * 4:
         return None
     n = 1 + (len(x) - n_fft) // hop
     idx = np.arange(n) if n <= max_frames * 4 else np.linspace(0, n - 1, max_frames * 4).astype(int)
     win = np.hanning(n_fft).astype(np.float32)
-    frames = np.lib.stride_tricks.as_strided(
-        x, (n, n_fft), (x.strides[0] * hop, x.strides[0]), writeable=False)[idx]
-    power = np.abs(scipy.fft.rfft(frames * win, axis=1)) ** 2
-    f = np.arange(power.shape[1]) * sr / n_fft
+    f = np.arange(n_fft // 2 + 1) * sr / n_fft
     speech = (f >= 150) & (f <= 3500)
-    e = power[:, speech].sum(axis=1)
+
+    def power(frame_ids: np.ndarray) -> np.ndarray:
+        return np.abs(scipy.fft.rfft(_read_frames(x, frame_ids * hop, n_fft) * win, axis=1)) ** 2
+
+    e = np.concatenate([power(idx[i:i + _LTAS_CHUNK])[:, speech].sum(axis=1) for i in range(0, len(idx), _LTAS_CHUNK)])
     if e.max() <= 0:
         return None
     # active = clearly above the quiet frames and not far below the loud ones (speech, not the gaps)
     thr = max(np.percentile(e, 60), e.max() * 1e-4)
-    act = e >= thr
-    if act.sum() < 8:
+    act = np.flatnonzero(e >= thr)
+    if len(act) < 8:
         return None
-    if act.sum() > max_frames:
-        act = np.where(act)[0][np.linspace(0, act.sum() - 1, max_frames).astype(int)]
-    ltas = power[act].mean(axis=0)
+    if len(act) > max_frames:
+        act = act[np.linspace(0, len(act) - 1, max_frames).astype(int)]
+    total = np.zeros(len(f), dtype=np.float64)
+    for i in range(0, len(act), _LTAS_CHUNK):
+        total += power(idx[act[i:i + _LTAS_CHUNK]]).sum(axis=0, dtype=np.float64)
+    ltas = total / len(act)
     return f, 10 * np.log10(ltas + 1e-20)
 
 
@@ -99,13 +117,13 @@ def effective_bandwidth(x: np.ndarray, sr: int = SAMPLE_RATE) -> float:
     there, accepted only if it really is a cliff: the level just below the edge is >= CLIFF_DB above the
     level one octave-third higher (natural speech roll-off, noisy or dark recordings fall by < 12 dB there).
     Anything else (no edge, shallow slope, silence, too little speech) gives sr/2, which keeps normal
-    recordings out of the extension. `x` is (n,) or (n, ch); channels are averaged, so call it per channel
-    for tracks with different content.
+    recordings out of the extension. `x` is (n,) or (n, ch), also a memory map of any length: it is read
+    block by block, never copied. Channels are averaged, so call it per channel for tracks with different
+    content.
     """
-    x = np.asarray(x, dtype=np.float32)
-    if x.ndim == 2:
-        x = x.mean(axis=1)
-    x = np.ascontiguousarray(x)
+    x = np.asarray(x)
+    if x.ndim == 2 and x.shape[1] == 1:
+        x = x[:, 0]
     nyq = sr / 2
     r = _ltas_db(x, sr)
     if r is None:
@@ -146,6 +164,12 @@ def pick_model(bandwidth_hz: float) -> str | None:
 # --------------------------------------------------------------------------------------------------------
 _session_lock = threading.Lock()
 _sessions: dict[tuple[str, int], object] = {}
+
+
+def unload() -> None:
+    """Drop the cached model session (about 120 MB of RAM)."""
+    with _session_lock:
+        _sessions.clear()
 
 
 def _session(path: str, threads: int):
@@ -280,9 +304,9 @@ def extend(x: np.ndarray, model_dir: str | Path, threads: int = 4, progress=None
     total = n * ch
     done = 0
     block = max(HOP * 100, int(block_seconds * SAMPLE_RATE) // HOP * HOP)
-    shared = np.shares_memory(out, x)
+    shared = out is x or np.shares_memory(out, x)
     for c in range(ch):
-        xc = xs[:, c].copy() if shared else xs[:, c]  # writing into x itself must not alter later context
+        xc = xs[:, c]
         name = model
         bw = effective_bandwidth(xc)
         if name is None:
@@ -297,11 +321,17 @@ def extend(x: np.ndarray, model_dir: str | Path, threads: int = 4, progress=None
         fill_hz = bw if bw < 0.92 * lr_rate / 2 else None
         w_orig = _ramp(lr_rate, cross)
         sess = _session(str(model_path(model_dir, name)), threads)
+        tail = None  # when writing into x itself: its original samples just before the block (the left context)
         for s in range(0, n, block):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
             e = min(s + block, n)
-            blk = _slice(xc, s - CONTEXT, e + CONTEXT)
+            if tail is not None:
+                blk = np.concatenate([tail, _slice(xc, s, e + CONTEXT)])
+            else:
+                blk = _slice(xc, s - CONTEXT, e + CONTEXT)
+            if shared and e < n:
+                tail = np.array(xc[e - CONTEXT:e], dtype=np.float32)
             y = _run_block(sess, blk, lr_rate, w_orig, fill_hz)
             os_[s:e, c] = y[CONTEXT:CONTEXT + (e - s)]
             done += e - s

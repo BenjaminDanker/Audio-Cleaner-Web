@@ -100,8 +100,19 @@ class JobQueue(QObject):
     def set_machine(self, cores: int | None, ram_gb: float | None) -> None:
         self._cores, self._ram_gb = cores, ram_gb
 
-    def limit(self, subtitles: bool) -> int:
-        return sysinfo.max_parallel(self._parallel, subtitles, cores=self._cores, ram_gb=self._ram_gb)
+    def limit(self, subtitles: bool, rebuild_voice: bool = False, echo_track: bool = False) -> int:
+        """Files to run at once given what the jobs do (each of these makes a job need more memory)."""
+        return sysinfo.max_parallel(
+            self._parallel, subtitles, cores=self._cores, ram_gb=self._ram_gb, rebuild_voice=rebuild_voice,
+            echo_track=echo_track,
+        )
+
+    def limit_for(self, jobs: list[Job]) -> int:
+        return self.limit(
+            any(j.options.subtitles != "off" for j in jobs),
+            any(j.options.rebuild_voice for j in jobs),
+            any(j.options.echo_track for j in jobs),
+        )
 
     # -- queue --------------------------------------------------------------
 
@@ -155,19 +166,28 @@ class JobQueue(QObject):
             self.itemCancelled.emit(job.id)
         self._check_idle()
 
-    def shutdown(self) -> None:
-        """Cancel everything and wait for the threads."""
+    def stopping(self, job_id: int) -> bool:
+        """True once a running file was asked to stop (it still finishes its current step)."""
+        thread = self._running.get(job_id)
+        return thread is not None and thread.cancel.is_set()
+
+    def shutdown(self, timeout_ms: int | None = None) -> bool:
+        """Cancel everything and wait for the threads (at most `timeout_ms` each when given). Returns whether
+        they all ended."""
         self.cancel_all()
+        ended = True
         for thread in list(self._running.values()):
-            thread.wait()
-        self._running.clear()
+            ended = (thread.wait(timeout_ms) if timeout_ms is not None else thread.wait()) and ended
+        if ended:
+            self._running.clear()
+        return ended
 
     # -- internals ----------------------------------------------------------
 
     def _pump(self) -> None:
         while self._active and self._pending:
             running = [t.job for t in self._running.values()]
-            limit = self.limit(any(j.options.subtitles != "off" for j in [*self._pending, *running]))
+            limit = self.limit_for([*self._pending, *running])
             if len(self._running) >= limit:
                 return
             job = self._pending.pop(0)

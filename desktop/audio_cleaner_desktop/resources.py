@@ -11,8 +11,8 @@ From source the same layout is read from $ACW_DESKTOP_VENDOR (default
 desktop/vendor, filled by the packaging scripts). On Linux, missing pieces fall
 back to the server layout in ~/audio-cleaner/{bin,models}.
 
-The speech model is not in the installer (it is 1.6 GB): the app downloads it the first time
-subtitles are wanted. Runs from source (tests, CI) may use the small test model that
+The models for subtitles, restoring highs and rebuilding the voice are not in the app (2.6 GB): the installer
+downloads them during setup, and Settings offers the download again when that failed. Runs from source (tests, CI) may use the small test model that
 prepare_vendor.py puts in vendor/test-models/ instead.
 """
 from __future__ import annotations
@@ -20,8 +20,6 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-
-from acw_common import dfn
 
 from . import models
 
@@ -58,7 +56,7 @@ HIGHS_MODEL = models.SpeechModel(
     id="restore-highs",
     title="Model that restores missing highs",
     description="AP-BWE: brings back the high frequencies of phone calls and other band-limited recordings.",
-    licence="AP-BWE by Ye-Xin Lu et al. (MIT code and weights)",
+    licence="AP-BWE by Ye-Xin Lu et al. (MIT code and weights), trained on VCTK (CC BY 4.0)",
     files=tuple(
         models.ModelFile(f"{name}to48k.onnx", f"{_MODELS_RELEASE}{name}to48k.onnx", 119093242, sha)
         for name, sha in (
@@ -77,7 +75,7 @@ VOICE_MODEL = models.SpeechModel(
     id="rebuild-voice",
     title="Model that rebuilds the voice",
     description="Sidon: removes room echo and noise and restores dull sound by rebuilding the voice.",
-    licence="Sidon by Nakata, Saito, Ueda and Saruwatari (MIT); w2v-BERT 2.0 by Meta (MIT)",
+    licence="Sidon by Wataru Nakata, Yuki Saito and the sarulab-speech group (MIT), with w2v-BERT 2.0 by Meta (MIT); trained on FLEURS-R and LibriTTS-R (CC BY 4.0)",
     files=(
         models.ModelFile("sidon_fe.onnx", _MODELS_RELEASE + "sidon_fe.onnx", 397857704,
                          "76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75"),
@@ -116,10 +114,14 @@ def _locate(vendor_sub: str, fallback_sub: str, *names: str) -> Path:
 
 
 def libdf_path() -> Path:
+    from acw_common import dfn  # numpy is only needed once the app runs, not to read the model catalog
+
     return _locate("native", "bin", dfn.LIB_NAME) / dfn.LIB_NAME
 
 
 def model_path() -> Path:
+    from acw_common import dfn
+
     return _locate("models", "models", dfn.MODEL_FILE) / dfn.MODEL_FILE
 
 
@@ -190,6 +192,8 @@ def licenses_dir() -> Path:
 def check() -> list[str]:
     """File names of shipped components that are missing (empty when all present). The speech model is
     not one of them: it is downloaded when subtitles are first wanted (speech_ready())."""
+    from acw_common import dfn
+
     missing = []
     if not libdf_path().is_file():
         missing.append(dfn.LIB_NAME)

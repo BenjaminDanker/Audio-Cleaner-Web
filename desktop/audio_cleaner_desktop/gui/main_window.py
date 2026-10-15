@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import threading
 import time
 from collections.abc import Iterable
 from pathlib import Path
@@ -17,8 +18,8 @@ from PySide6.QtWidgets import (
 
 from acw_common.ffmpeg import MediaError
 
-from .. import __version__, config, engine, resources
-from . import media, queue_view, shell
+from .. import __version__, config, engine, resources, sysinfo
+from . import media, queue_view, shell, tips
 from .about import AboutDialog
 from .history import DONE, FAILED, Entry, HistoryStore
 from .history_view import HistoryPage, format_spent, settings_dict
@@ -36,7 +37,9 @@ log = logging.getLogger(__name__)
 SETTINGS_SHARE = 0.34  # of the window width
 SETTINGS_MIN_WIDTH = 340
 SETTINGS_MAX_WIDTH = 520
-SCRATCH_SAFETY = 1.1
+SCRATCH_SAFETY = engine.SCRATCH_SAFETY
+SWEEP_DELAY_MS = 3000  # leftovers of an earlier run are swept this long after the window opens
+QUIT_WAIT_MS = 2500  # how long quitting waits for running files to stop before giving up on them
 
 
 def data_dir() -> Path:
@@ -53,6 +56,22 @@ def log_dir() -> Path:
 
 class _ProbeSignals(QObject):
     done = Signal(int, object, str)  # id, ProbeResult | None, error message
+
+
+class _SweepTask(QRunnable):
+    """Removes the scratch files an earlier run left behind (it crashed or was killed), off the window's thread."""
+
+    def __init__(self, folders: list[Path]):
+        super().__init__()
+        self._folders = folders
+
+    def run(self) -> None:
+        try:
+            removed = engine.sweep_leftovers(self._folders)
+            if removed:
+                log.info("removed %d leftover scratch items", removed)
+        except Exception:  # noqa: BLE001 - housekeeping must never bother the user
+            log.exception("sweeping leftovers failed")
 
 
 class _ProbeTask(QRunnable):
@@ -89,7 +108,7 @@ class MainWindow(QMainWindow):
     ):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(900, 520)
         self.setAcceptDrops(True)
         self._qs = settings if settings is not None else QSettings()
         self.prefs = Preferences(self._qs)
@@ -107,6 +126,9 @@ class MainWindow(QMainWindow):
         self._missing = resources.check()
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(2)
+        self._awake = sysinfo.SleepInhibitor()
+        self._history_stale = False
+        self._closing = False
 
         self._build_menus()
         self._build_ui()
@@ -119,6 +141,7 @@ class MainWindow(QMainWindow):
         self._fit_settings()
         self.add_paths(files)
         self._refresh_state()
+        QTimer.singleShot(SWEEP_DELAY_MS, self._sweep_leftovers)
 
     # -- construction -------------------------------------------------------
 
@@ -203,11 +226,14 @@ class MainWindow(QMainWindow):
 
         self.speech_download = SpeechModelDownloader(self)
         self.highs_download = SpeechModelDownloader(self, resources.HIGHS_MODEL)
-        for dl in (self.speech_download, self.highs_download):
+        self.voice_download = SpeechModelDownloader(self, resources.VOICE_MODEL)
+        for dl in self._downloaders():
             dl.finished.connect(lambda ok, message, dl=dl: self._model_download_finished(dl, ok, message))
             dl.progress.connect(lambda done, total, dl=dl: self._model_queue and self._model_queue[0] is dl
                                 and self._show_model_progress(done, total))
-        self.settings_panel = SettingsPanel(self.prefs, self.speech_download, highs_downloader=self.highs_download)
+        self.settings_panel = SettingsPanel(
+            self.prefs, self.speech_download, highs_downloader=self.highs_download, voice_downloader=self.voice_download,
+        )
         self._settings_scroll = scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -250,7 +276,7 @@ class MainWindow(QMainWindow):
         self.primary.clicked.connect(self._primary_clicked)
         self.clear_button.clicked.connect(self.clear_finished)
         self.settings_panel.changed.connect(self._settings_changed)
-        self.tabs.currentChanged.connect(lambda i: i == 1 and self.history_page.refresh())
+        self.tabs.currentChanged.connect(self._tab_changed)
 
         q = self.queue
         q.itemStarted.connect(self._on_started)
@@ -262,7 +288,19 @@ class MainWindow(QMainWindow):
 
         for keys in ("Ctrl+Return", "Ctrl+Enter"):
             QShortcut(QKeySequence(keys), self, activated=self.start)
-        QShortcut(QKeySequence("Esc"), self, activated=self.request_cancel_all)
+        QShortcut(QKeySequence("Esc"), self, activated=self._escape)
+
+    def _escape(self) -> None:
+        """Esc stops the cleaning, unless it is meant for something else: closing a help text, or clearing the
+        History search."""
+        if tips.is_showing() or self.tabs.currentIndex() != 0:
+            return
+        self.request_cancel_all()
+
+    def _tab_changed(self, index: int) -> None:
+        if index == 1 and self._history_stale:
+            self._history_stale = False
+            self.history_page.refresh()
 
     # -- adding files ---------------------------------------------------------
 
@@ -298,7 +336,7 @@ class MainWindow(QMainWindow):
             self._items[item.id] = item
             row = FileRow(item)
             row.removeRequested.connect(self.remove_item)
-            row.cancelRequested.connect(self.queue.cancel)
+            row.cancelRequested.connect(self._stop_item)
             row.previewRequested.connect(self.show_preview)
             row.revealRequested.connect(self._reveal)
             row.againRequested.connect(self.clean_again)
@@ -340,27 +378,37 @@ class MainWindow(QMainWindow):
     def _take_place_of_previous(self, item: FileItem, paths: list[Path]) -> tuple[list[Path], bool]:
         """After "Clean again": give each new file the name of the earlier result of the same type, once that
         earlier file is safely in the Recycle Bin / Trash. Files that were changed since, or that can't be
-        moved to the bin, are left alone and the new file keeps its own name."""
+        moved to the bin, are left alone and the new file keeps its own name. When the results now go to another
+        folder, the earlier ones stay where they are. An earlier subtitle file the new run did not write again
+        goes to the bin with the earlier result it belonged to."""
         replaced = False
         out = []
         for new in paths:
             target = next((p for p in item.replaces if p.suffix.lower() == new.suffix.lower()), None)
-            if target is not None:
+            if target is not None and target.parent == new.parent:
                 item.replaces.pop(target)
-                try:
-                    st = target.stat()
-                    unchanged = (st.st_size, st.st_mtime_ns) == item.made.get(target)
-                except OSError:
-                    unchanged = False
-                if unchanged and target != new and shell.move_to_trash(target):
+                if self._unchanged(item, target) and target != new and shell.move_to_trash(target):
+                    replaced = True  # the earlier version is safe in the bin, whatever happens to the name
                     try:
                         os.replace(new, target)
-                        new, replaced = target, True
+                        new = target
                     except OSError:
                         log.warning("could not rename %s to %s", new, target, exc_info=True)
             out.append(new)
+        if replaced:
+            for stale in [p for p in item.replaces if p.suffix.lower() in (".srt", ".vtt", ".txt")]:
+                if self._unchanged(item, stale):
+                    shell.move_to_trash(stale)
         item.replaces = {}
         return out, replaced
+
+    @staticmethod
+    def _unchanged(item: FileItem, path: Path) -> bool:
+        try:
+            st = path.stat()
+            return (st.st_size, st.st_mtime_ns) == item.made.get(path)
+        except OSError:
+            return False
 
     def _enqueue(self, item: FileItem) -> None:
         item.options = self.prefs.job_options()
@@ -388,7 +436,9 @@ class MainWindow(QMainWindow):
     def start(self) -> None:
         if self._missing or self.queue.busy:
             return
-        if self.prefs.subtitles != "off" and not self.speech_download.ready and not self._ask_for_speech_model():
+        if self.prefs.subtitles != "off" and not self.speech_download.ready and not self._ask_for_model(self.speech_download):
+            return
+        if self.prefs.rebuild_voice and not self.voice_download.ready and not self._ask_for_model(self.voice_download):
             return
         self._batch_started = time.monotonic()
         self._batch_done = self._batch_failed = 0
@@ -398,22 +448,25 @@ class MainWindow(QMainWindow):
         self.queue.start()
         self._refresh_state()
 
-    def _ask_for_speech_model(self) -> bool:
-        """Subtitles are on but the speech model is not here: setup downloads it, so this only happens when
-        that download failed (offline during setup). Offers to download it now; returns False (nothing is
-        started now)."""
-        if self.speech_download.running:
+    def _ask_for_model(self, downloader: SpeechModelDownloader) -> bool:
+        """A model that a setting needs is not here: setup downloads them, so this only happens when that
+        download failed (offline during setup). Offers to download it now; returns False (nothing is started
+        now)."""
+        voice = downloader is self.voice_download
+        what = "The model that rebuilds the voice" if voice else "The speech model for subtitles"
+        off = "turn Rebuild the voice off" if voice else "turn subtitles off"
+        if downloader.running:
             QMessageBox.information(
                 self, config.APP_NAME,
-                "The speech model for subtitles is still downloading (the progress is shown at the top). Start "
-                "again when it is done, or turn subtitles off to clean the files now.",
+                f"{what} is still downloading (the progress is shown at the top). Start again when it is done, "
+                f"or {off} to clean the files now.",
             )
             return False
         box = QMessageBox(
             QMessageBox.Icon.Question, config.APP_NAME,
-            "The speech model for subtitles was not installed, probably because the download during setup did not "
-            f"work. Download it now ({size_text(self.speech_download.model.size)})?\n\n"
-            "You can start cleaning when it is done, or turn subtitles off to clean the files right away.",
+            f"{what} was not installed, probably because the download during setup did not work. Download it now "
+            f"({size_text(downloader.model.size)})?\n\n"
+            f"You can start cleaning when it is done, or {off} to clean the files right away.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self,
         )
         box.button(QMessageBox.StandardButton.Yes).setText("Download")
@@ -422,12 +475,15 @@ class MainWindow(QMainWindow):
             self.fetch_models()
         return False
 
+    def _downloaders(self) -> tuple[SpeechModelDownloader, ...]:
+        return self.speech_download, self.highs_download, self.voice_download
+
     def fetch_models(self) -> None:
         """Download every model that is not here yet, one after the other (setup normally installed them; this
         finishes a download that failed there). Noise removal works meanwhile."""
         if self._missing:
             return
-        self._model_queue = [d for d in (self.speech_download, self.highs_download) if not d.ready]
+        self._model_queue = [d for d in self._downloaders() if not d.ready]
         self._next_model()
 
     def _next_model(self) -> None:
@@ -446,8 +502,8 @@ class MainWindow(QMainWindow):
         left = sum(d.model.size for d in getattr(self, "_model_queue", [])) or total
         pct = int(100 * done / max(1, total))
         self.banner_models.show_message(
-            f"Getting everything ready: downloading the models for subtitles and phone-quality recordings "
-            f"({size_text(left)} in all, once; {pct}% of the current one). Noise removal works already.",
+            f"Getting everything ready: downloading the models for subtitles, phone-quality recordings and "
+            f"rebuilding voices ({size_text(left)} in all, once; {pct}% of the current one). Noise removal works already.",
             "info",
         )
 
@@ -465,7 +521,7 @@ class MainWindow(QMainWindow):
             self._next_model()
         else:
             self.banner_models.hide()
-            self._notify(config.APP_NAME, "Everything is ready: subtitles and phone-quality restoring work now.")
+            self._notify(config.APP_NAME, "Everything is ready: subtitles, restoring highs and rebuilding voices work now.")
         self._refresh_state()
 
     def _primary_clicked(self) -> None:
@@ -479,6 +535,21 @@ class MainWindow(QMainWindow):
             return
         if self._confirm("Stop cleaning?", "Files that are still being cleaned will be discarded. Finished files are kept."):
             self.queue.cancel_all()
+            for item_id in self.queue.running_ids():
+                self._mark_stopping(item_id)
+            self._refresh_state()
+
+    def _stop_item(self, item_id: int) -> None:
+        self.queue.cancel(item_id)
+        self._mark_stopping(item_id)
+        self._refresh_state()
+
+    def _mark_stopping(self, item_id: int) -> None:
+        """Say so at once: a file finishes its current step before it stops."""
+        item = self._items.get(item_id)
+        if item is not None and item.state == RUNNING:
+            item.stopping = True
+            self._refresh_row(item)
 
     def _confirm(self, title: str, text: str) -> bool:
         box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
@@ -508,7 +579,8 @@ class MainWindow(QMainWindow):
     def _on_started(self, item_id: int) -> None:
         item = self._items.get(item_id)
         if item is not None:
-            item.state, item.progress, item.started_at = RUNNING, 0.0, time.monotonic()
+            item.state, item.progress, item.started_at, item.stopping = RUNNING, 0.0, time.monotonic(), False
+            self._awake.acquire()
             self._refresh_row(item)
             self._refresh_state()
 
@@ -528,7 +600,7 @@ class MainWindow(QMainWindow):
         if previewing and item.replaces:
             self.preview.release()
         paths, replaced = self._take_place_of_previous(item, result.paths) if item.replaces else (result.paths, False)
-        item.state, item.progress, item.outputs = ITEM_DONE, 1.0, paths
+        item.state, item.progress, item.outputs, item.stopping = ITEM_DONE, 1.0, paths, False
         item.duration, item.has_video = result.duration, result.has_video
         item.made = {}
         for p in paths:
@@ -557,7 +629,7 @@ class MainWindow(QMainWindow):
         self._queued.discard(item_id)
         if item is None:
             return
-        item.state, item.message = ITEM_FAILED, message
+        item.state, item.message, item.stopping = ITEM_FAILED, message, False
         self._batch_failed += 1
         self._record(item, FAILED, message, [])
         self._refresh_row(item)
@@ -567,11 +639,13 @@ class MainWindow(QMainWindow):
         item = self._items.get(item_id)
         self._queued.discard(item_id)
         if item is not None:
-            item.state, item.progress = CANCELLED, 0.0
+            item.state, item.progress, item.stopping = CANCELLED, 0.0, False
             self._refresh_row(item)
             self._refresh_state()
 
     def _on_idle(self) -> None:
+        self._awake.release()
+        engine.release_memory()  # an idle app does not keep the models in memory
         self._refresh_state()
         done, failed = self._batch_done, self._batch_failed
         if (done or failed) and not self.isActiveWindow():
@@ -595,7 +669,10 @@ class MainWindow(QMainWindow):
             name=item.path.name, source=str(item.path), duration=item.duration, has_video=item.has_video,
             settings=settings_dict(options), seconds_taken=elapsed, outputs=outputs, status=status, message=message,
         ))
-        self.history_page.refresh()
+        if self.tabs.currentIndex() == 1:
+            self.history_page.refresh()
+        else:
+            self._history_stale = True  # drawn when the tab is opened
 
     # -- preview / reveal -----------------------------------------------------
 
@@ -636,10 +713,13 @@ class MainWindow(QMainWindow):
         self.clear_button.setEnabled(finished)
 
         if busy:
-            self.primary.setText("Cancel all")
+            stopping = not self.queue.pending_ids() and all(
+                self._items[i].stopping for i in self.queue.running_ids() if i in self._items
+            )
+            self.primary.setText("Stopping..." if stopping else "Cancel all")
             set_property(self.primary, "mode", "cancel")
             self.primary.setToolTip("Stop cleaning. Files that are finished are kept (Esc)")
-            self.primary.setEnabled(True)
+            self.primary.setEnabled(not stopping)
         else:
             self.primary.setText("Clean " + _plural(waiting, "file", "files") if waiting else "Clean")
             set_property(self.primary, "mode", "")
@@ -693,22 +773,33 @@ class MainWindow(QMainWindow):
             if item.state == WAITING and item.duration:
                 folder = out_dir or item.path.parent
                 by_folder.setdefault(folder, []).append(engine.estimated_scratch_gb(item.duration, item.channels))
-        at_once = self.queue.limit(subtitles)
+        at_once = self.queue.limit(subtitles, self.prefs.rebuild_voice, self.prefs.echo_track)
+        scratch = engine.scratch_root()  # where the work files go on Windows and macOS, while it has room
         for folder, needs in by_folder.items():
             need = sum(sorted(needs, reverse=True)[:at_once]) * SCRATCH_SAFETY
-            probe = folder
-            while not probe.exists() and probe != probe.parent:
-                probe = probe.parent
-            try:
-                free = shutil.disk_usage(probe).free / 1e9
-            except OSError:
+            free = self._free_gb(folder)
+            if free is None:
                 continue
+            if scratch is not None:
+                free_scratch = self._free_gb(scratch)
+                if free_scratch is not None and free_scratch >= need:
+                    continue
             if free < need:
                 return (
                     f"There may not be enough free space for the temporary files in {folder}: about {need:.1f} GB is needed "
                     f"while cleaning and {free:.1f} GB is free. Free up some space or choose another folder to save to."
                 )
         return ""
+
+    @staticmethod
+    def _free_gb(folder: Path) -> float | None:
+        probe = folder
+        while not probe.exists() and probe != probe.parent:
+            probe = probe.parent
+        try:
+            return shutil.disk_usage(probe).free / 1e9
+        except OSError:
+            return None
 
     # -- window events ------------------------------------------------------------
 
@@ -765,15 +856,37 @@ class MainWindow(QMainWindow):
         ):
             event.ignore()
             return
-        self.queue.shutdown()
-        for dl in (self.speech_download, self.highs_download):
+        self._closing = True
+        self._pool.clear()  # probes still waiting in line are not needed any more
+        for dl in self._downloaders():
             dl.cancel()  # resumes from where it stopped next time
-        for dl in (self.speech_download, self.highs_download):
-            dl.wait(5)
-        self._pool.waitForDone()
+        for signal in (self.queue.itemFinished, self.queue.itemFailed, self.queue.itemCancelled, self.queue.idle):
+            try:
+                signal.disconnect()  # nothing may reach the history once it is closed
+            except (RuntimeError, TypeError):
+                pass
+        stopped = self.queue.shutdown(QUIT_WAIT_MS)
+        for dl in self._downloaders():
+            dl.wait(0.5)
+        self._pool.waitForDone(QUIT_WAIT_MS)
+        self._awake.release()
         if self.preview is not None:
             self.preview.stop()
         self._qs.setValue("geometry", self.saveGeometry())
+        self._qs.sync()
         self.history.close()
         super().closeEvent(event)
+        if not stopped:
+            # A file is in the middle of a step that does not stop quickly. Leave without waiting for it: what it
+            # left in the scratch folder is swept away the next time the app starts.
+            logging.shutdown()
+            os._exit(0)
 
+    def _sweep_leftovers(self) -> None:
+        if self._closing:
+            return
+        folders = [*self.history.recent_folders()]
+        out = self.prefs.output_dir()
+        if out is not None:
+            folders.append(out)
+        self._pool.start(_SweepTask(folders))

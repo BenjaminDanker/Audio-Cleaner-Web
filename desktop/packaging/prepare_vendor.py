@@ -405,6 +405,18 @@ def pyinstaller_notice(n: Notices) -> None:
 def cleanup_model_notices(n: Notices) -> None:
     n.add_file("DPDFNet-Apache-2.0.txt", SUPPLEMENTAL / "Apache-2.0.txt",
                "DPDFNet-8 by Ceva (Apache-2.0, https://github.com/ceva-ip/DPDFNet): the noise remover for heavy noise")
+    n.add_file("AP-BWE-MIT.txt", SUPPLEMENTAL / "AP-BWE-MIT.txt",
+               "AP-BWE by Ye-Xin Lu et al. (MIT code and weights): the model that restores missing highs, downloaded once")
+    n.add_file("Sidon-MIT.txt", SUPPLEMENTAL / "Sidon-MIT.txt",
+               "Sidon by Nakata, Saito and the sarulab-speech group (MIT): the model that rebuilds the voice, downloaded once")
+    n.add_file("w2v-BERT-2.0-MIT.txt", SUPPLEMENTAL / "w2v-BERT-2.0-MIT.txt",
+               "w2v-BERT 2.0 by Meta (MIT): the speech encoder inside Sidon")
+    n.add_file("Training-data-attribution.txt", SUPPLEMENTAL / "Training-data-attribution.txt",
+               "VCTK, FLEURS-R and LibriTTS-R (CC BY 4.0): the data the downloaded models learned from")
+    n.add_file("WebRTC-AEC3-BSD.txt", SUPPLEMENTAL / "WebRTC-AEC3-BSD.txt",
+               "WebRTC (BSD-3-Clause): the echo canceller for 'Remove speaker echo'")
+    n.add_file("LiveKit-Apache-2.0.txt", SUPPLEMENTAL / "LiveKit-Apache-2.0.txt",
+               "LiveKit Python SDK (Apache-2.0): carries the echo canceller")
     from importlib.util import find_spec  # noqa: PLC0415
 
     spec = find_spec("livekit.rtc")
@@ -416,9 +428,11 @@ def cleanup_model_notices(n: Notices) -> None:
 
 
 def whisper_notices(n: Notices) -> None:
+    # The Dropbox CTranslate2 conversion (model card: license mit) has no licence text or copyright line of its own;
+    # the conversion only changes the file format of OpenAI's weights, so OpenAI's text is the one that applies.
     n.add_file("Whisper-MIT.txt", SUPPLEMENTAL / "Whisper-MIT.txt",
-               "OpenAI Whisper large-v3-turbo (MIT): the subtitle speech model, downloaded when subtitles are first "
-               "wanted (CTranslate2 conversion by Dropbox, MIT); faster-whisper (MIT) runs it")
+               "OpenAI Whisper large-v3-turbo (MIT): the subtitle speech model, downloaded during setup "
+               "(CTranslate2 conversion by Dropbox, MIT); faster-whisper (MIT) runs it")
     n.add_file("SileroVAD-MIT.txt", SUPPLEMENTAL / "SileroVAD-MIT.txt", "Silero VAD (MIT): the voice activity model inside faster-whisper")
 
 

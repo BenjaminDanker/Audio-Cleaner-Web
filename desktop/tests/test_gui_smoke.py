@@ -28,7 +28,7 @@ def window(qapp, tmp_path):
 
 def test_window_opens_with_the_empty_state(window):
     assert window.windowTitle() == "Audio Cleaner"
-    assert window.minimumWidth() >= 900 and window.minimumHeight() >= 600
+    assert window.minimumWidth() >= 900 and window.minimumHeight() >= 520
     assert not window.primary.isEnabled()
     assert window.tabs.tabText(0) == "Clean" and window.tabs.tabText(1) == "History"
     assert not window.view.isVisible()
@@ -53,6 +53,8 @@ def test_clean_a_file_end_to_end(window, speech_wav, tmp_path):
 
     rate, samples = wavfile.read(speech_wav, mmap=True)
     assert entries[0].duration == pytest.approx(len(samples) / rate, abs=0.5)
+    assert window.history_page._stats["files"].value.text() == "0"  # not drawn while the tab is hidden
+    window.tabs.setCurrentIndex(1)
     assert window.history_page._stats["files"].value.text() == "1"
 
 

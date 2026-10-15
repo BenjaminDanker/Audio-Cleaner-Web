@@ -1,10 +1,11 @@
 """Small reusable widgets."""
 from __future__ import annotations
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QProxyStyle, QPushButton, QSizePolicy, QSlider, QStyle, QToolButton, QWidget,
+    QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QProxyStyle, QPushButton, QSizePolicy, QSlider, QStyle,
+    QStyleOptionButton, QStylePainter, QToolButton, QWidget,
 )
 
 from . import icons
@@ -69,6 +70,62 @@ class IconButton(QToolButton):
         if event.type() == QEvent.Type.PaletteChange:
             self.set_icon(self._icon_name)
         super().changeEvent(event)
+
+
+class WrapCheck(QCheckBox):
+    """A check box whose text wraps onto more lines instead of widening its column. The box sits at the first line."""
+
+    def __init__(self, text: str = "", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._label = QLabel(text, self)
+        self._label.setWordWrap(True)
+        self._label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        policy = self.sizePolicy()
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+        if text:
+            self.setAccessibleName(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+        self._label.setText(text)
+        self.setAccessibleName(text)
+        self.updateGeometry()
+
+    def text(self) -> str:
+        return self._label.text()
+
+    def _indent(self) -> int:
+        style = self.style()
+        return style.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth) + style.pixelMetric(QStyle.PixelMetric.PM_CheckBoxLabelSpacing) + 2
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return max(self.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorHeight), self._label.heightForWidth(max(1, width - self._indent()))) + 2
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._indent() + self._label.sizeHint().width(), self.heightForWidth(self.width() or 240))
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(self._indent() + 120, self.heightForWidth(self._indent() + 120))
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        indent = self._indent()
+        self._label.setGeometry(indent, 0, max(1, self.width() - indent), self._label.heightForWidth(max(1, self.width() - indent)))
+
+    def changeEvent(self, event) -> None:  # noqa: N802
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.EnabledChange:
+            self._label.setEnabled(self.isEnabled())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        option.text = ""
+        option.rect = QRect(0, 0, self.width(), self.style().pixelMetric(QStyle.PixelMetric.PM_IndicatorHeight) + 2)
+        QStylePainter(self).drawControl(QStyle.ControlElement.CE_CheckBox, option)
 
 
 class _Segment(QPushButton):

@@ -153,3 +153,39 @@ def test_stereo_progress_cancel_inplace(full):
     ev.set()
     with pytest.raises(bwe.Cancelled):
         bwe.extend(left, MODEL_DIR, threads=1, cancel=ev)
+
+
+def test_bandwidth_of_a_two_channel_memory_map_matches_the_mono_mix(tmp_path):
+    """Read block by block from the file: no mono copy of the whole recording is made."""
+    mono = ss.sosfilt(ss.butter(8, 3_400, fs=SR, output="sos"), speech_like(40)).astype(np.float32)
+    st = np.stack([mono, 0.5 * mono[::-1]], axis=1)
+    mm = np.memmap(tmp_path / "x.f32", dtype=np.float32, mode="w+", shape=st.shape)
+    mm[:] = st
+    assert bwe.effective_bandwidth(mm) == bwe.effective_bandwidth(st) == bwe.effective_bandwidth(st.mean(axis=1))
+    assert bwe.pick_model(bwe.effective_bandwidth(mm)) is not None
+    assert bwe.effective_bandwidth(mono[:, None]) == bwe.effective_bandwidth(mono)  # one channel, 2-D
+
+
+def test_bandwidth_does_not_copy_the_signal(tmp_path, monkeypatch):
+    seen = []
+    real = np.asarray
+
+    def spy(a, *args, **kwargs):
+        out = real(a, *args, **kwargs)
+        seen.append(out.size)
+        return out
+
+    mm = np.memmap(tmp_path / "y.f32", dtype=np.float32, mode="w+", shape=(SR * 60, 2))
+    mm[:] = speech_like(60)[:, None]
+    monkeypatch.setattr(bwe.np, "asarray", spy)
+    bwe.effective_bandwidth(mm)
+    assert max(seen) <= mm.size  # wrapping the map is fine; no array bigger than the input is ever made
+
+
+@needs_models
+def test_extending_in_place_matches_extending_a_copy():
+    st = np.stack([lowpass(speech_like(14), 3_400), lowpass(speech_like(14, seed=3), 3_400)], axis=1).astype(np.float32)
+    expected = bwe.extend(st, MODEL_DIR, threads=2, block_seconds=2)
+    inplace = st.copy()
+    result = bwe.extend(inplace, MODEL_DIR, threads=2, out=inplace, block_seconds=2)
+    assert result is inplace and np.array_equal(result, expected)

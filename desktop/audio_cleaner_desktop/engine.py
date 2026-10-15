@@ -11,7 +11,10 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -26,7 +29,7 @@ import numpy as np
 from acw_common import captions, pipeline, transcribe
 from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult
 
-from . import resources
+from . import models, resources
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +80,11 @@ _WAV_MAX_BYTES = 3.9e9
 _SPEECH_RATE = transcribe.SAMPLE_RATE
 _PIECE_SECONDS = 300
 _PIECE_SEARCH_SECONDS = 30
+
+SCRATCH_SAFETY = 1.1  # free space wanted in the scratch folder, as a share more than the estimate
+STALE_SECONDS = 24 * 3600  # leftovers of a crashed run older than this are swept away
+_WORK_PREFIX = ".acw-work-"
+_LEFTOVER_FILE = re.compile(r"^\.acw-[0-9a-f]{32}\.[A-Za-z0-9]{1,5}$")
 
 Progress = Callable[[float], None]
 
@@ -136,17 +144,88 @@ def worker_threads() -> int:
     return max(1, min(4, (os.cpu_count() or 2) - 1))
 
 
-def ffmpeg(threads: int | None = None) -> FFmpeg:
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
+class _CancellableFFmpeg(FFmpeg):
+    """FFmpeg whose programs are stopped the moment the job is cancelled, instead of running to their end
+    (decoding or rebuilding a long video can take minutes). Encoding goes through write_audio, which is
+    stopped by the audio it is fed (see _CancelOnRead)."""
+
+    def __init__(self, bin_dir, threads: int, cancel: threading.Event):
+        super().__init__(bin_dir, threads)
+        self._cancel = cancel
+
+    def _run(self, args, timeout, input=None):
+        if input is not None:
+            return super()._run(args, timeout, input)
+        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_NO_WINDOW)
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                try:
+                    out, err = proc.communicate(timeout=0.2)
+                    return subprocess.CompletedProcess(args, proc.returncode, out, err)
+                except subprocess.TimeoutExpired:
+                    if self._cancel.is_set():
+                        raise Cancelled() from None
+                    if time.monotonic() > deadline:
+                        raise
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+
+class _CancelOnRead:
+    """The cleaned audio as write_audio reads it block by block: cancelling stops the encoding at the next block."""
+
+    def __init__(self, audio: np.ndarray, cancel: threading.Event):
+        self._audio, self._cancel = audio, cancel
+        self.ndim, self.shape = audio.ndim, audio.shape
+
+    def __len__(self) -> int:
+        return len(self._audio)
+
+    def __getitem__(self, key):
+        _check_cancel(self._cancel)
+        return self._audio[key]
+
+
+def ffmpeg(threads: int | None = None, cancel: threading.Event | None = None) -> FFmpeg:
+    if cancel is not None:
+        return _CancellableFFmpeg(resources.ffmpeg_dir(), threads or worker_threads(), cancel)
     return FFmpeg(resources.ffmpeg_dir(), threads or worker_threads())
+
+
+WINDOWS_PATH_LIMIT = 259  # characters; the FFmpeg programs can't open longer paths
+_PATH_ROOM = 70  # the work folder, the temporary result and a "-cleaned (2)" take this much more than the folder
+
+
+def check_path_length(src: Path, dest_dir: Path | None = None, *, windows: bool | None = None) -> None:
+    """Windows: say so plainly when a path is too long for the programs that read and write the audio, instead
+    of the generic "could not be read"."""
+    if not (os.name == "nt" if windows is None else windows):
+        return
+    if len(str(src)) > WINDOWS_PATH_LIMIT:
+        raise MediaError("The path of this file is too long (over 259 characters). Move it to a folder with a shorter path.")
+    if dest_dir is not None and len(str(dest_dir)) + _PATH_ROOM + len(src.name) > WINDOWS_PATH_LIMIT:
+        raise MediaError("The folder for the result has a path that is too long. Choose a folder with a shorter path.")
 
 
 def probe(path: Path | str, ff: FFmpeg | None = None) -> ProbeResult:
     """Read a file's basic facts. Raises MediaError with a message fit for the user."""
     if not Path(path).is_file():
         raise MediaError("This file was not found.")
+    check_path_length(Path(path))
     result = (ff or ffmpeg()).probe(Path(path))
     if result.duration > MAX_SECONDS:
         raise MediaError(f"This file is longer than {MAX_SECONDS // 3600} hours, which is the limit.")
+    if result.has_video and result.video_codec == "flv1":
+        raise MediaError(
+            "This video uses an old Flash video format that can't be put back together with new sound. "
+            "Convert it to MP4 first, then clean that."
+        )
     return result
 
 
@@ -181,6 +260,128 @@ def unique_output(directory: Path, stem: str, ext: str, companion: str = "") -> 
         if not candidate.exists() and not (companion and candidate.with_suffix(companion).exists()):
             return candidate
         n += 1
+
+
+def claim_output(directory: Path, stem: str, ext: str, companion: str = "") -> Path:
+    """Like unique_output(), but the name is taken for good: an empty file is created under it (and under the
+    companion name), so a job running at the same time can't pick the same name. The caller replaces the
+    placeholder with the result, or removes it."""
+    n = 1
+    while True:
+        candidate = directory / (f"{stem}-cleaned{ext}" if n == 1 else f"{stem}-cleaned ({n}){ext}")
+        n += 1
+        mine: list[Path] = []
+        try:
+            for path in (candidate, *([candidate.with_suffix(companion)] if companion else [])):
+                os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666))
+                mine.append(path)
+            return candidate
+        except FileExistsError:
+            for path in mine:
+                path.unlink(missing_ok=True)
+
+
+def scratch_root() -> Path | None:
+    """Where the temporary work files go: the app's own data folder on Windows and macOS, not the folder of the
+    result, which is often synced to the cloud or on a slow drive. None means next to the result (Linux, where
+    the temporary folder is memory). $ACW_DESKTOP_SCRATCH overrides it."""
+    env = os.environ.get("ACW_DESKTOP_SCRATCH")
+    if env:
+        return Path(env)
+    if sys.platform in ("win32", "darwin"):
+        return models.app_data_dir() / "scratch"
+    return None
+
+
+def _work_parent(dest_dir: Path, need_gb: float) -> Path:
+    """The folder for this job's work folder: the scratch folder when it has the room, else next to the result."""
+    root = scratch_root()
+    if root is not None:
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            if shutil.disk_usage(root).free / 1e9 >= need_gb * SCRATCH_SAFETY:
+                return root
+        except OSError:
+            pass
+    return dest_dir
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _remove_quietly(path: Path) -> None:
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def sweep_leftovers(folders=(), *, now: float | None = None) -> int:
+    """Remove what a crashed or killed run left behind: everything in the scratch folder whose process is gone,
+    and ".acw-work-*" folders and ".acw-<id>.<ext>" files older than a day in `folders` (the folders results
+    were written to). Never touches anything else. Returns how many items were removed."""
+    now = time.time() if now is None else now
+    removed = 0
+    root = scratch_root()
+    if root is not None and root.is_dir():
+        for entry in root.iterdir():
+            match = re.match(rf"^{re.escape(_WORK_PREFIX)}(\d+)-", entry.name)
+            if match and _pid_alive(int(match.group(1))):
+                continue  # a job of another Audio Cleaner window or the command line, still running
+            if not match and _age(entry, now) < STALE_SECONDS:
+                continue
+            _remove_quietly(entry)
+            removed += 1
+    for folder in dict.fromkeys(Path(f) for f in folders):
+        try:
+            entries = list(folder.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if (entry.name.startswith(_WORK_PREFIX) and entry.is_dir()) or _LEFTOVER_FILE.match(entry.name):
+                if _age(entry, now) >= STALE_SECONDS:
+                    _remove_quietly(entry)
+                    removed += 1
+    return removed
+
+
+def _age(path: Path, now: float) -> float:
+    try:
+        return now - path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def release_memory() -> None:
+    """Let go of the models kept in memory between files (the speech model, Sidon, AP-BWE, DPDFNet): the
+    window calls this when the queue runs dry, so an idle app does not hold gigabytes."""
+    from acw_common import bwe, dpdfnet, restore
+
+    transcribe.unload()
+    restore.unload()
+    bwe.unload()
+    dpdfnet.unload()
+    gc.collect()
 
 
 class _Report:
@@ -249,12 +450,13 @@ def _transcribe(
     if model is None:
         raise MediaError("Subtitles need the speech model, which isn't downloaded yet. Download it in Settings, then try again.")
     try:
+        loaded = transcribe.load_model(model, threads)  # once for all the pieces of this file
         for a, b in _piece_bounds(audio):
             piece = np.ascontiguousarray(audio[a:b, 0])
             done = a / len(audio)
             share = (b - a) / len(audio)
             found, language = transcribe.transcribe(
-                piece, model, language=language, threads=threads,
+                piece, model, language=language, threads=threads, model=loaded,
                 progress=lambda f, done=done, share=share: progress(done + share * f), cancel=cancel,
             )
             segments += _shifted(found, a / _SPEECH_RATE)
@@ -267,10 +469,10 @@ def _transcribe(
     return segments, language or "en"
 
 
-def _subtitle_text(kind: str, segments: list[captions.Segment]) -> str:
+def _subtitle_text(kind: str, segments: list[captions.Segment], language: str | None = None) -> str:
     if kind == "txt":
-        return captions.to_text(segments)
-    cues = captions.build_cues(segments)
+        return captions.to_text(segments, language)
+    cues = captions.build_cues(segments, language)
     return captions.to_vtt(cues) if kind == "vtt" else captions.to_srt(cues)
 
 
@@ -308,10 +510,11 @@ def process(
     cancel = cancel or threading.Event()
     report = _Report(progress)
     threads = threads or worker_threads()
-    ff = ffmpeg(threads)
+    ff = ffmpeg(threads, cancel)
 
     info = probe(src, ff)
     dest_dir = Path(out_dir) if out_dir is not None else src.absolute().parent
+    check_path_length(src, dest_dir)
     ext = output_extension(info, options)
     tmp_out = dest_dir / f".acw-{uuid.uuid4().hex}{ext}"
     try:
@@ -330,10 +533,16 @@ def process(
 
     sub_tmp = None
     x = y = None
+    claimed: list[Path] = []
     try:
-        # Decoded and cleaned audio are memory-mapped scratch files next to the
-        # output (same disk; never a RAM-backed /tmp), so RAM use stays flat.
-        work = Path(tempfile.mkdtemp(dir=dest_dir, prefix=".acw-work-"))
+        # Decoded and cleaned audio are memory-mapped scratch files, so RAM use stays flat. On Windows and macOS
+        # they go to the app's own data folder (the result's folder is often synced to the cloud, and a USB
+        # stick or network share would make the work slow); where that is too full, and on Linux (whose
+        # temporary folder is memory), next to the result.
+        work = Path(tempfile.mkdtemp(
+            dir=_work_parent(dest_dir, estimated_scratch_gb(info.duration, info.audio_channels)),
+            prefix=f"{_WORK_PREFIX}{os.getpid()}-",
+        ))
         try:
             _check_cancel(cancel)
             notice = None
@@ -353,7 +562,7 @@ def process(
             has_text = any(s.text.strip() for s in segments)
             if has_text and sub_kind != "off":
                 sub_tmp = work / f"subtitles{_SUBTITLE_SUFFIX[sub_kind]}"
-                sub_tmp.write_text(_subtitle_text(sub_kind, segments), encoding="utf-8")
+                sub_tmp.write_text(_subtitle_text(sub_kind, segments, language), encoding="utf-8")
 
             if x is None:
                 x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
@@ -378,23 +587,31 @@ def process(
             )
             if options.rebuild_voice and used.get("noise") != "rebuilt":
                 notice = "; ".join(filter(None, [notice, "the model that rebuilds the voice is not installed, so it was "
-                                                 "cleaned the usual way"]))
+                                                 "cleaned the usual way. Download it in Settings to rebuild voices"]))
             if used.get("highs"):
                 notice = "; ".join(filter(None, [notice, "missing highs restored"]))
             elif options.restore_highs and resources.highs_model_dir() is None and _sounds_band_limited(x):
-                notice = "; ".join(filter(None, [notice, "sounds like a phone recording; its highs can be restored once "
-                                                 "the model for that has finished downloading"]))
+                notice = "; ".join(filter(None, [notice, "sounds like a phone recording. Download the model that "
+                                                 "restores highs in Settings to improve it"]))
+            if info.audio_tracks > 1:
+                others = info.audio_tracks - 1
+                notice = "; ".join(filter(None, [notice, "only the first audio track was cleaned; " + (
+                    "the other one wasn't kept in the result" if others == 1 else
+                    f"the other {others} weren't kept in the result")]))
             _check_cancel(cancel)
-            _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language)
+            _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,
+                   work=work, cancel=cancel)
             # Windows can't delete a file that is still mapped.
             x = y = None
             _check_cancel(cancel)
             sidecar = sub_tmp is not None and not embed
-            final = unique_output(dest_dir, src.stem, ext, _SUBTITLE_SUFFIX[sub_kind] if sidecar else "")
+            final = claim_output(dest_dir, src.stem, ext, _SUBTITLE_SUFFIX[sub_kind] if sidecar else "")
             sub_final = final.with_suffix(_SUBTITLE_SUFFIX[sub_kind]) if sidecar else None
+            claimed = [final, *([sub_final] if sub_final else [])]
             os.replace(tmp_out, final)
             if sub_final is not None:
                 os.replace(sub_tmp, sub_final)
+            claimed = []
         except BaseException as e:
             # A cancelled or failed job's traceback still holds the memory-mapped scratch arrays
             # (in clean_audio's frames); Windows can't delete a file that is still mapped.
@@ -406,6 +623,12 @@ def process(
             _remove_work_dir(work)
     finally:
         tmp_out.unlink(missing_ok=True)
+        for placeholder in claimed:  # a name taken but never filled (the job failed in between)
+            try:
+                if placeholder.stat().st_size == 0:
+                    placeholder.unlink()
+            except OSError:
+                pass
     report(1.0)
     return JobResult(
         final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language,
@@ -416,9 +639,7 @@ def process(
 def _sounds_band_limited(x: np.ndarray) -> bool:
     from acw_common import bwe
 
-    x = np.asarray(x)
-    return bwe.pick_model(bwe.effective_bandwidth(x[:, 0] if x.ndim == 2 and x.shape[1] == 1 else
-                                                  (x.mean(axis=1) if x.ndim == 2 else x))) is not None
+    return bwe.pick_model(bwe.effective_bandwidth(x)) is not None  # read block by block, however long x is
 
 
 def _remove_work_dir(work: Path) -> None:
@@ -440,14 +661,16 @@ def _remove_work_dir(work: Path) -> None:
 
 def _write(
     ff: FFmpeg, src: Path, audio: np.ndarray, info: ProbeResult, options: JobOptions, target: Path,
-    subtitles: Path | None, language: str | None,
+    subtitles: Path | None, language: str | None, *, work: Path, cancel: threading.Event | None = None,
 ) -> None:
+    if cancel is not None:
+        audio = _CancelOnRead(audio, cancel)
     try:
         if info.has_video:
-            with tempfile.TemporaryDirectory(prefix="acw-") as tmp:
-                cleaned = ff.write_audio(audio, pipeline.SAMPLE_RATE, Path(tmp) / "cleaned", "flac")
-                iso3 = LANGUAGES.get(language or "", ("", ""))[1] or None
-                ff.mux_video(src, cleaned, target, subtitles=subtitles, sub_lang=iso3, keep_metadata=True)
+            # The cleaned sound is written to the job's work folder first (up to several GB for a long video).
+            cleaned = ff.write_audio(audio, pipeline.SAMPLE_RATE, work / "cleaned", "flac")
+            iso3 = LANGUAGES.get(language or "", ("", ""))[1] or None
+            ff.mux_video(src, cleaned, target, subtitles=subtitles, sub_lang=iso3, keep_metadata=True)
         else:
             ff.write_audio(audio, pipeline.SAMPLE_RATE, target, _audio_format(info, options))
     except RuntimeError as e:

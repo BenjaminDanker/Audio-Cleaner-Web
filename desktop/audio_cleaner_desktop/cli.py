@@ -5,6 +5,7 @@ import signal
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -12,15 +13,15 @@ import numpy as np
 from acw_common import pipeline
 from acw_common.ffmpeg import MediaError
 
-from . import engine, resources
+from . import engine, resources, sysinfo
 
 
 class _ProgressLine:
     """Rewrites one line on a terminal; prints a line every 10% otherwise (logs, CI)."""
 
-    def __init__(self, label: str):
+    def __init__(self, label: str, tty: bool | None = None):
         self._label = label
-        self._tty = sys.stdout.isatty()
+        self._tty = sys.stdout.isatty() if tty is None else tty
         self._last = -1
 
     def __call__(self, fraction: float) -> None:
@@ -36,24 +37,35 @@ class _ProgressLine:
             print("\r" + " " * (len(self._label) + 7) + "\r", end="")
 
 
-def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> int:
-    """Clean each input in turn. Returns 0 when all succeed, 1 when any fails, 130 on Ctrl+C."""
+def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, parallel: int = 1) -> int:
+    """Clean each input. Returns 0 when all succeed, 1 when any fails, 130 on Ctrl+C. `parallel` is the number
+    of files cleaned at once (1-4, or 0 for Automatic), never more than the memory allows."""
     missing = resources.check()
     if missing:
         print("Missing components: " + ", ".join(missing), file=sys.stderr)
         return 1
     if options.subtitles != "off" and not resources.speech_ready():
         print("Subtitles need the speech model. Download it first: open Audio Cleaner, Settings, Subtitles "
-              "(or run with --download-speech-model).", file=sys.stderr)
+              "(or run with --download-models).", file=sys.stderr)
+        return 1
+    if options.rebuild_voice and resources.voice_model_dir() is None:
+        print("Rebuilding the voice needs its model. Download it first: open Audio Cleaner, Settings, Extra cleanup "
+              "(or run with --download-models).", file=sys.stderr)
         return 1
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
-    failures = 0
-    for n, name in enumerate(inputs, 1):
+    sysinfo.lower_priority()
+    at_once = min(len(inputs), sysinfo.max_parallel(
+        parallel, options.subtitles != "off", rebuild_voice=options.rebuild_voice, echo_track=options.echo_track))
+    threads = sysinfo.threads_per_job(at_once)
+    print_lock = threading.Lock()
+
+    def one(n: int, name: str) -> int:
+        """0 done, 1 failed, 130 cancelled."""
         label = f"[{n}/{len(inputs)}] {Path(name).name}"
-        line = _ProgressLine(label)
+        line = _ProgressLine(label, tty=False if at_once > 1 else None)
         try:
-            result = engine.process(name, options, out_dir=out_dir, progress=line, cancel=cancel)
+            result = engine.process(name, options, out_dir=out_dir, progress=line, cancel=cancel, threads=threads)
         except engine.Cancelled:
             line.finish()
             print(f"{label}  cancelled", file=sys.stderr)
@@ -61,37 +73,55 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> i
         except (MediaError, OSError) as e:
             line.finish()
             print(f"{label}  failed: {e}", file=sys.stderr)
-            failures += 1
-        else:
-            line.finish()
-            print(f"{label}  ->  " + ", ".join(str(p) for p in result.paths))
-    return 1 if failures else 0
+            return 1
+        line.finish()
+        note = f"  ({result.notice})" if result.notice else ""
+        with print_lock:
+            print(f"{label}  ->  " + ", ".join(str(p) for p in result.paths) + note)
+        return 0
+
+    if at_once <= 1:
+        failures = 0
+        for n, name in enumerate(inputs, 1):
+            code = one(n, name)
+            if code == 130:
+                return 130
+            failures += code
+        return 1 if failures else 0
+    with ThreadPoolExecutor(max_workers=at_once) as pool:
+        codes = list(pool.map(lambda item: one(*item), enumerate(inputs, 1)))
+    if 130 in codes:
+        return 130
+    return 1 if 1 in codes else 0
 
 
-def download_speech_model() -> int:
-    """Download (or finish downloading) the speech model, with a progress line."""
+def download_models() -> int:
+    """Download (or finish downloading) the models for subtitles, restoring highs and rebuilding the voice,
+    with a progress line each."""
     from . import models
 
-    model = resources.SPEECH_MODEL
-    if models.is_installed(model):
-        print(f"The speech model is already there: {models.location(model)}")
-        return 0
-    line = _ProgressLine(f"Downloading the speech model ({model.size / 1e9:.1f} GB)")
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
-    try:
-        path = models.download(model, progress=lambda done, total: line(done / total), cancel=cancel)
-    except models.Cancelled:
-        line.finish()
-        print("Stopped. Run it again to continue where it left off.", file=sys.stderr)
-        return 130
-    except models.DownloadError as e:
-        line.finish()
-        print(str(e), file=sys.stderr)
-        return 1
-    line.finish()
-    print(f"Done: {path}")
-    return 0
+    worst = 0
+    for model in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
+        if models.is_installed(model):
+            print(f"{model.title}: already there ({models.location(model)})")
+            continue
+        line = _ProgressLine(f"Downloading: {model.title} ({model.size / 1e9:.1f} GB)")
+        try:
+            path = models.download(model, progress=lambda done, total: line(done / total), cancel=cancel)
+        except models.Cancelled:
+            line.finish()
+            print("Stopped. Run it again to continue where it left off.", file=sys.stderr)
+            return 130
+        except models.DownloadError as e:
+            line.finish()
+            print(f"{model.title}: {e}", file=sys.stderr)
+            worst = 1
+        else:
+            line.finish()
+            print(f"{model.title}: done ({path})")
+    return worst
 
 
 def _check_speech_runtime() -> None:
@@ -110,9 +140,85 @@ def _check_speech_runtime() -> None:
         WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=1, num_workers=1)
 
 
-def selftest() -> int:
+def _check_models() -> list[str]:
+    """One second of audio through each model the app runs next to the always-installed ones. The noise
+    removers for heavy noise ship with the app (an error when they are missing from a frozen build); the
+    downloaded ones are only checked where they are installed. Returns what was skipped."""
+    from acw_common import aec, bwe, restore
+
+    sr = pipeline.SAMPLE_RATE
+    t = np.arange(sr) / sr
+    rng = np.random.default_rng(1)
+    x = (0.2 * np.sin(2 * np.pi * 220 * t) + 0.03 * rng.standard_normal(t.size)).astype(np.float32)
+    skipped = []
+
+    heavy = resources.heavy_noise_model_path()
+    if heavy.is_file():
+        y = pipeline.clean_audio(
+            x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="heavy", polish=False),
+            threads=1, heavy_model_path=heavy,
+        )
+        if y.shape != (x.size, 1) or not np.isfinite(y).all():
+            raise RuntimeError("the heavy-noise remover returned unexpected audio")
+    elif getattr(sys, "frozen", False):
+        raise RuntimeError(f"missing component: {heavy.name}")
+    else:
+        skipped.append("heavy-noise remover")
+
+    echo = aec.cancel_echo(x, np.roll(x, 480))
+    if echo.shape != x.shape or not np.isfinite(echo).all():
+        raise RuntimeError("the echo canceller returned unexpected audio")
+
+    highs = resources.highs_model_dir()
+    if highs is not None and bwe.available(highs):
+        y = bwe.extend(x, highs, threads=1, model="8k")
+        if y.shape != x.shape or not np.isfinite(y).all():
+            raise RuntimeError("the model that restores highs returned unexpected audio")
+    else:
+        skipped.append("highs model")
+
+    voice = resources.voice_model_dir()
+    if voice is not None and restore.available(voice):
+        y = restore.restore(x, voice, threads=1)
+        if not np.isfinite(y).all() or abs(len(y) - len(x)) > sr // 10:
+            raise RuntimeError("the model that rebuilds the voice returned unexpected audio")
+        restore.unload()
+    else:
+        skipped.append("voice model")
+    return skipped
+
+
+def _check_gui() -> None:
+    """The window, the preview and the About box can be built (a missing Qt plugin or data file shows here)."""
+    from PySide6.QtCore import QSettings
+
+    from .gui.about import AboutDialog, notice_files
+    from .gui.app import create_application
+    from .gui.main_window import MainWindow
+    from .gui.player import PreviewPane
+
+    app = create_application(["audio-cleaner-selftest"])
+    with tempfile.TemporaryDirectory(prefix="acw-selftest-") as tmp:
+        window = MainWindow([], settings=QSettings(str(Path(tmp) / "settings.ini"), QSettings.Format.IniFormat),
+                            history_path=Path(tmp) / "history.sqlite3")
+        try:
+            window.show()
+            pane = PreviewPane()
+            about = AboutDialog(window)
+            app.processEvents()
+            if getattr(sys, "frozen", False) and not notice_files():
+                raise RuntimeError("the licence notices are missing")
+            pane.deleteLater()
+            about.deleteLater()
+        finally:
+            window.queue.shutdown()
+            window.history.close()
+
+
+def selftest(gui: bool = False) -> int:
     """Denoise 3 s of noisy tone and round-trip it through FFmpeg, using the resolved native pieces,
-    and load the subtitle engine."""
+    load the subtitle engine, run a second through the other models that are there and, with `gui`, build the
+    window."""
     try:
         missing = resources.check()
         if missing:
@@ -132,8 +238,13 @@ def selftest() -> int:
         if abs(info.duration - 3.0) > 0.2 or info.audio_channels != 1 or decoded.size < 2.8 * sr:
             raise RuntimeError(f"FFmpeg round-trip mismatch (duration {info.duration:.2f} s)")
         _check_speech_runtime()
+        skipped = _check_models()
+        if gui:
+            _check_gui()
     except Exception as e:  # noqa: BLE001 - any failure is a failed selftest
         print(f"selftest failed: {e}")
         return 1
+    if skipped:
+        print("not checked (not installed): " + ", ".join(skipped))
     print("selftest ok")
     return 0

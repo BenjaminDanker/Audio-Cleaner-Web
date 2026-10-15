@@ -57,6 +57,12 @@ def _close(p: QPainter, c: QColor) -> None:
     p.drawLine(QPointF(17, 7), QPointF(7, 17))
 
 
+def _stop(p: QPainter, c: QColor) -> None:
+    """A filled square: stop the file that is being cleaned (the cross takes a file off the list)."""
+    _fill(p, c)
+    p.drawRoundedRect(QRectF(6.5, 6.5, 11, 11), 1.6, 1.6)
+
+
 def _plus(p: QPainter, c: QColor) -> None:
     _stroke(p, c, 2.2)
     p.drawLine(QPointF(12, 5.5), QPointF(12, 18.5))
@@ -112,7 +118,7 @@ def _again(p: QPainter, c: QColor) -> None:
 
 
 _DRAWERS: dict[str, Drawer] = {
-    "play": _play, "pause": _pause, "folder": _folder, "close": _close, "plus": _plus,
+    "play": _play, "pause": _pause, "folder": _folder, "close": _close, "stop": _stop, "plus": _plus,
     "upload": _upload, "waveform": _waveform, "info": _info, "up": _up, "down": _down, "trash": _trash,
     "again": _again,
 }

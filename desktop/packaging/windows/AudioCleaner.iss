@@ -2,11 +2,13 @@
 ;
 ;   iscc /DAppVersion=2.0.0 /DSourceDir=C:\path\to\dist\AudioCleaner [/DOutputDir=C:\out] [/DIconFile=C:\path\icon.ico]
 ;        [/DModelsInclude=C:\path\models.iss] AudioCleaner.iss
-;   (models.iss from installer_models.py: setup then downloads the models; without it they come on first start)
+;   (models.iss from installer_models.py: setup then downloads the models, 2.6 GB. Without it nothing is downloaded
+;   during setup; the app then offers the downloads in Settings.)
 ;
 ; SourceDir is the PyInstaller output folder (the one that contains AudioCleaner.exe and _internal\).
 ; Installs per user by default (no administrator prompt); the "Install for all users" choice on the first
-; page switches to Program Files. Settings and history live in the user profile and are left alone by the uninstaller.
+; page switches to Program Files. Settings, history and models the app downloaded itself live in the user profile; the
+; uninstaller asks whether to remove them too (and leaves them when the uninstall is silent).
 
 #ifndef AppVersion
   #error Pass /DAppVersion=x.y.z
@@ -62,7 +64,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
-; The models (speech model for subtitles, highs restoration): downloaded during setup, see installer_models.py.
+; The models (subtitles, highs restoration, rebuilding the voice): downloaded during setup, see installer_models.py.
 #ifdef ModelsInclude
   #include ModelsInclude
 #endif
@@ -73,3 +75,22 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+{ The models and history the app made in the user's profile are not part of the install log: ask before removing them. }
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Data: String;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+  Data := ExpandConstant('{localappdata}\Audio Cleaner\Audio Cleaner');
+  if UninstallSilent or not DirExists(Data) then
+    Exit;
+  if MsgBox('Also remove the models Audio Cleaner downloaded (up to 2.6 GB), your history and your settings?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+  begin
+    DelTree(Data, True, True, True);
+    RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Audio Cleaner');
+  end;
+end;

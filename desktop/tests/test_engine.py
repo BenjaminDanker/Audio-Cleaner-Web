@@ -319,7 +319,7 @@ def test_echo_removed_using_the_second_audio_track(tmp_path):
     assert len([s for s in ffprobe_json(two)["streams"] if s["codec_type"] == "audio"]) == 2
     out = engine.process(two, engine.JobOptions(echo_track=True, polish=False, strength="gentle", audio_format="wav"),
                               out_dir=tmp_path / "out")
-    assert out.notice is None
+    assert out.notice == "only the first audio track was cleaned; the other one wasn't kept in the result"
     rate, y = wavfile.read(out.output)
     scale = {np.dtype(np.int16): 2.0**15, np.dtype(np.int32): 2.0**31}.get(y.dtype, 1.0)
     y = y.astype(np.float32) / scale

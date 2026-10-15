@@ -16,8 +16,9 @@ including the right to modify those components and to reverse engineer the Softw
 
 3. Open source components
 The Software contains third-party open source components, among them Qt (LGPL v3), FFmpeg (LGPL v2.1), DeepFilterNet
-(MIT / Apache 2.0), OpenAI Whisper (MIT) and others. They are licensed under their own terms, which are listed in the
-About window and in the "licenses" folder of the installation, and not under this agreement. Where those licences give
+(MIT / Apache 2.0), DPDFNet (Apache 2.0), WebRTC (BSD) and others. Setup also downloads models that the Software runs:
+OpenAI Whisper (MIT), AP-BWE (MIT), Sidon (MIT) and Meta's w2v-BERT 2.0 (MIT). They are licensed under their own terms,
+which are listed in the About window and in the "licenses" folder of the installation, and not under this agreement. Where those licences give
 you rights, for example to replace the Qt or FFmpeg files with your own builds, they apply.
 
 4. Your files

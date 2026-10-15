@@ -1,9 +1,11 @@
-# Builds the Audio Cleaner desktop app: installer for Windows x64, disk images for macOS arm64 and x86_64.
+# Builds the Audio Cleaner desktop app: installer for Windows x64, installer packages (.pkg) for macOS arm64 and x86_64.
 #
 # Stages: FFmpeg (LGPL-only, built from source) and libDF (DeepFilterNet's C library) per platform, then the
-# app per platform (tests, PyInstaller, frozen --selftest, installer: Inno Setup / .pkg). Push a tag desktop-vX.Y.Z whose
-# version matches audio_cleaner_desktop.__version__ to publish a GitHub Release with the three installers and
-# SHA256SUMS. Signing is optional and only happens when the secrets exist (docs/desktop.md lists them):
+# app per platform (tests, PyInstaller, frozen --selftest incl. the window, installer: Inno Setup / .pkg; Windows
+# also installs and uninstalls it once). A separate job checks that every model the installers download is where the
+# catalog says (it can fail on its own without stopping the builds). Push a tag desktop-vX.Y.Z whose
+# version matches audio_cleaner_desktop.__version__ to publish a GitHub Release with the three installers
+# (GitHub shows each file's SHA-256). Signing is optional and only happens when the secrets exist (docs/desktop.md lists them):
 #   macOS    MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD (+ APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD to notarize)
 #   Windows  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
 #            AZURE_SIGNING_PROFILE (Azure Artifact Signing)
@@ -21,6 +23,7 @@ on:
       - "desktop/**"
       - "common/**"
       - "native/deepfilter/**"
+      - "deploy/fetch-dpdfnet.sh"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
@@ -36,6 +39,23 @@ defaults:
     shell: bash
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # The models the installers download (resources.py): HEAD every URL and compare the size with the catalog. Fails
+  # when a file is missing (e.g. the models-v1 release was not uploaded) or differs. Nothing needs this job, so a
+  # red result here does not stop the builds or the release; look at it before announcing a build.
+  model-urls:
+    name: Model downloads exist
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Check every model URL against the catalog
+        run: python desktop/packaging/check_model_urls.py
+
   # ---------------------------------------------------------------------------
   # LGPL-only FFmpeg + libopus + LAME, static, from pinned source tarballs (desktop/packaging/build_ffmpeg.sh).
   # The Windows build is cross-compiled with mingw-w64 on Linux.
@@ -211,6 +231,19 @@ jobs:
       - name: Tests (common + desktop, headless)
         run: python -m pytest -q common/tests desktop/tests
 
+      - name: Models for the frozen selftest (restoring highs, rebuilding the voice)
+        # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime. The speech model is left
+        # out (1.6 GB). Does not fail the build when the release with the models is not there yet: the
+        # "Model downloads exist" job reports that.
+        continue-on-error: true
+        run: |
+          ACW_DESKTOP_MODELS="$RUNNER_TEMP/acw-models" python - <<'PY'
+          from audio_cleaner_desktop import models, resources
+          for m in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
+              models.download(m)
+          PY
+          echo "ACW_DESKTOP_MODELS=$RUNNER_TEMP/acw-models" >> "$GITHUB_ENV"
+
       - name: Icons
         run: python desktop/packaging/make_icons.py build/icons
 
@@ -223,12 +256,35 @@ jobs:
         shell: pwsh
         run: |
           # The exe is windowed: without a console it writes to audio-cleaner-cli.log in the temp folder.
+          # --gui also builds the window, the preview and the About box, which finds a missing Qt plugin.
           $log = Join-Path $env:TEMP 'audio-cleaner-cli.log'
           Remove-Item $log -ErrorAction SilentlyContinue
-          $p = Start-Process -FilePath 'dist\AudioCleaner\AudioCleaner.exe' -ArgumentList '--selftest' -Wait -PassThru
+          $p = Start-Process -FilePath 'dist\AudioCleaner\AudioCleaner.exe' -ArgumentList '--selftest', '--gui' -Wait -PassThru
           if (Test-Path $log) { Get-Content $log }
           if ($p.ExitCode -ne 0) { throw "selftest exited with code $($p.ExitCode)" }
           if ((Test-Path $log) -and -not (Select-String -Path $log -Pattern 'selftest ok' -Quiet)) { throw 'selftest did not report ok' }
+
+      - name: Frozen selftest and a cleaned file under a non-ASCII profile name (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Profile folders with accents or CJK letters are common; the native libraries must cope with them.
+          $profile_ = Join-Path $env:RUNNER_TEMP ('Zo' + [char]0xEB + ' ' + [char]0x9332 + [char]0x97F3)
+          New-Item -ItemType Directory -Force -Path "$profile_\AppData\Local\Temp", "$profile_\in" | Out-Null
+          python -c "import sys, numpy as np; from scipy.io import wavfile; t=np.arange(48000*4)/48000; x=0.2*np.sin(2*np.pi*220*t)+0.03*np.random.default_rng(0).standard_normal(t.size); wavfile.write(sys.argv[1], 48000, (x*32767).astype(np.int16))" "$profile_\in\talk.wav"
+          $env:USERPROFILE = $profile_
+          $env:LOCALAPPDATA = "$profile_\AppData\Local"
+          $env:TEMP = "$profile_\AppData\Local\Temp"
+          $env:TMP = $env:TEMP
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'dist\AudioCleaner\AudioCleaner.exe'
+          $log = Join-Path $env:TEMP 'audio-cleaner-cli.log'
+          foreach ($args_ in @(@('--selftest', '--gui'), @('--cli', ('"{0}"' -f "$profile_\in\talk.wav")))) {
+            Remove-Item $log -ErrorAction SilentlyContinue
+            $p = Start-Process -FilePath $exe -ArgumentList $args_ -Wait -PassThru
+            if (Test-Path $log) { Get-Content $log }
+            if ($p.ExitCode -ne 0) { throw "AudioCleaner $args_ exited with code $($p.ExitCode)" }
+          }
+          if (-not (Test-Path "$profile_\in\talk-cleaned.wav")) { throw 'the cleaned file was not written' }
 
       - name: Sign the program files (Windows)
         if: runner.os == 'Windows' && env.WIN_SIGNING == 'true'
@@ -241,8 +297,8 @@ jobs:
           signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_SIGNING_PROFILE }}
           files-folder: ${{ github.workspace }}\dist\AudioCleaner
-          files-folder-filter: exe,dll
-          files-folder-depth: 3
+          files-folder-filter: exe,dll,pyd
+          files-folder-depth: 8
           files-folder-recurse: true
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -259,11 +315,11 @@ jobs:
             }
           }
           if (-not $iscc) {
-            choco install innosetup --no-progress -y
+            choco install innosetup --version=6.7.1 --no-progress -y
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
           $ws = $env:GITHUB_WORKSPACE
-          # Setup downloads the models (speech, highs) itself: the list comes from the app's catalog.
+          # Setup downloads the models (speech, highs, voice) itself: the list comes from the app's catalog.
           python desktop\packaging\installer_models.py "$ws\build\models.iss"
           if ($LASTEXITCODE -ne 0) { throw "installer_models.py failed ($LASTEXITCODE)" }
           & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$ws\dist\AudioCleaner" "/DOutputDir=$ws\build\installer" `
@@ -287,6 +343,26 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
+      - name: Install, start and uninstall the installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # A silent install skips the model download page, so this checks the installer itself: the files, the
+          # installed program, the uninstaller. Models are never downloaded here.
+          $dir = Join-Path $env:RUNNER_TEMP 'acw-installed'
+          $setup = Join-Path $env:GITHUB_WORKSPACE 'out\AudioCleaner-Setup-x64.exe'
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$dir", "/LOG=$env:RUNNER_TEMP\setup.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup.log"; throw "setup exited with code $($p.ExitCode)" }
+          $log = Join-Path $env:TEMP 'audio-cleaner-cli.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath "$dir\AudioCleaner.exe" -ArgumentList '--selftest', '--gui' -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { throw "the installed program's selftest exited with code $($p.ExitCode)" }
+          $p = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the uninstaller exited with code $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          if (Test-Path "$dir\AudioCleaner.exe") { throw 'the uninstaller left the program behind' }
+
       - name: Upload installer
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -301,7 +377,7 @@ jobs:
         run: |
           exe="dist/Audio Cleaner.app/Contents/MacOS/AudioCleaner"
           "$exe" --version
-          "$exe" --selftest | tee selftest.log
+          "$exe" --selftest --gui | tee selftest.log
           grep -q "selftest ok" selftest.log
 
       - name: Import the signing certificate (macOS)
@@ -343,7 +419,7 @@ jobs:
           arch="${{ matrix.platform }}"; arch="${arch#macos-}"
           mkdir -p out
           python desktop/packaging/installer_models.py --mac build/pkg-scripts
-          bash desktop/packaging/macos/make_pkg.sh "dist/Audio Cleaner.app" "out/AudioCleaner-macOS-$arch.pkg" \
+          PKG_ARCH="$([ "$arch" = arm64 ] && echo arm64 || echo x86_64)" bash desktop/packaging/macos/make_pkg.sh "dist/Audio Cleaner.app" "out/AudioCleaner-macOS-$arch.pkg" \
             "$APP_VERSION" build/pkg-scripts
           echo "PKG=out/AudioCleaner-macOS-$arch.pkg" >> "$GITHUB_ENV"
 
@@ -412,8 +488,10 @@ jobs:
           - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
-          Setup downloads the models for subtitles and phone-quality recordings (about 2.1 GB, once), so keep the
-          internet on while it installs. After that everything works offline.
+          Setup downloads the models (about 2.6 GB in all, once), so keep the internet on while it installs; on a Mac
+          it can take several minutes. They are Whisper large-v3-turbo for subtitles (1.6 GB), AP-BWE for restoring the
+          highs of phone-quality recordings (0.5 GB) and Sidon for rebuilding voices (0.5 GB). After that everything
+          works offline. If a download fails, the app still works and offers it in Settings.
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           if [ "$GITHUB_REF_TYPE" = tag ]; then

@@ -114,7 +114,7 @@ Step 'frozen selftest'
 # The exe is windowed: without a console it writes audio-cleaner-cli.log in the temp folder.
 $log = Join-Path $env:TEMP 'audio-cleaner-cli.log'
 Remove-Item $log -ErrorAction SilentlyContinue
-$p = Start-Process -FilePath "$dist\AudioCleaner\AudioCleaner.exe" -ArgumentList '--selftest' -Wait -PassThru
+$p = Start-Process -FilePath "$dist\AudioCleaner\AudioCleaner.exe" -ArgumentList '--selftest', '--gui' -Wait -PassThru
 if (Test-Path $log) { Get-Content $log }
 if ($p.ExitCode -ne 0) { throw "selftest exited with code $($p.ExitCode)" }
 if ((Test-Path $log) -and -not (Select-String -Path $log -Pattern 'selftest ok' -Quiet)) { throw 'selftest did not report ok' }
@@ -123,6 +123,8 @@ Step 'installer'
 $version = (& $vpy -c "from audio_cleaner_desktop import __version__ as v; print(v, end='')")
 $out = Join-Path $work 'out'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
-Run $iscc @("/DAppVersion=$version", "/DSourceDir=$dist\AudioCleaner", "/DOutputDir=$out", "/DIconFile=$icons\icon.ico", 'desktop\packaging\windows\AudioCleaner.iss')
+# Setup downloads the models (2.6 GB): the list is generated from the app's catalog (needs no numpy).
+Run $vpy @('desktop\packaging\installer_models.py', "$work\models.iss")
+Run $iscc @("/DAppVersion=$version", "/DSourceDir=$dist\AudioCleaner", "/DOutputDir=$out", "/DIconFile=$icons\icon.ico", "/DModelsInclude=$work\models.iss", 'desktop\packaging\windows\AudioCleaner.iss')
 Copy-Item "$out\AudioCleaner-Setup-$version-x64.exe" "$out\AudioCleaner-Setup-x64.exe" -Force
 Step "done: $out\AudioCleaner-Setup-x64.exe"

@@ -59,6 +59,9 @@ def settings_dict(options: engine.JobOptions) -> dict:
     }
 
 
+PAGE_SIZE = 50  # rows drawn at first, and added by each "Show more"
+
+
 class _Stat(QFrame):
     def __init__(self, caption: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -178,14 +181,25 @@ class HistoryPage(QWidget):
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(150)
-        self._debounce.timeout.connect(self.refresh)
+        self._debounce.timeout.connect(self._search_changed)
         self._search.textChanged.connect(lambda _: self._debounce.start())
+        self._shown = PAGE_SIZE
+        self.refresh()
+
+    def _search_changed(self) -> None:
+        self._shown = PAGE_SIZE
+        self.refresh()
+
+    def _show_more(self) -> None:
+        self._shown += PAGE_SIZE
         self.refresh()
 
     def refresh(self) -> None:
+        """Rebuild the list: the newest PAGE_SIZE entries (more on request), not all of them at once."""
         totals = self._store.totals()
         self._show_totals(totals)
-        entries = self._store.search(self._search.text())
+        found = self._store.search(self._search.text(), self._shown + 1)
+        entries, more = found[: self._shown], len(found) > self._shown
         holder = QWidget()
         holder.setObjectName("RowHolder")
         rows = QVBoxLayout(holder)
@@ -193,6 +207,11 @@ class HistoryPage(QWidget):
         rows.setSpacing(2)
         for entry in entries:
             rows.addWidget(_HistoryRow(entry, self))
+        if more:
+            button = QPushButton("Show more")
+            button.setToolTip("Show older entries")
+            button.clicked.connect(self._show_more)
+            rows.addWidget(button, 0, Qt.AlignmentFlag.AlignCenter)
         rows.addStretch(1)
         old = self._scroll.takeWidget()
         if old is not None:

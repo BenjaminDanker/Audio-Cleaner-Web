@@ -7,12 +7,12 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .. import __version__, config
-from . import tips
+from .. import __version__, config, sysinfo
+from . import single_instance, tips
 from .main_window import MainWindow, log_dir
 from .theme import ThemeWatcher
 
@@ -47,9 +47,24 @@ def _install_excepthook(log_path: Path) -> None:
     sys.excepthook = hook
 
 
-def create_application(argv: list[str]) -> QApplication:
+class Application(QApplication):
+    """Passes on the files the system hands to the running app: on a Mac, dropping files on the Dock icon,
+    "Open With" and double-clicking a file arrive as an event, not on the command line."""
+
+    fileOpened = Signal(str)
+
+    def event(self, event: QEvent) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.FileOpen:
+            path = event.file()
+            if path:
+                self.fileOpened.emit(path)
+            return True
+        return super().event(event)
+
+
+def create_application(argv: list[str]) -> Application:
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    app = QApplication(argv)
+    app = Application(argv)
     app.setOrganizationName(config.ORG_NAME)
     app.setOrganizationDomain(config.ORG_DOMAIN)
     app.setApplicationName(config.APP_NAME)
@@ -61,10 +76,30 @@ def create_application(argv: list[str]) -> QApplication:
     return app
 
 
+def bring_forward(window: MainWindow, paths: list[str]) -> None:
+    """Show the window to the user and queue the files another start handed over."""
+    if paths:
+        window.add_paths(paths)
+    if window.isMinimized():
+        window.showNormal()
+    window.raise_()
+    window.activateWindow()
+    QApplication.alert(window, 0)
+
+
 def run(files: list[str]) -> int:
     app = create_application(sys.argv[:1])
+    name = single_instance.server_name()
+    if single_instance.forward(name, [str(Path(f).absolute()) for f in files]):
+        return 0  # Audio Cleaner is already open: it got the files
     _install_excepthook(setup_logging())
+    sysinfo.lower_priority()
     ThemeWatcher(app)
     window = MainWindow(files)
+    server = single_instance.InstanceServer(name, app)
+    if not server.listen():
+        log.warning("could not listen for other starts of the app")
+    server.received.connect(lambda paths: bring_forward(window, paths))
+    app.fileOpened.connect(lambda path: bring_forward(window, [path]))
     window.show()
     return app.exec()

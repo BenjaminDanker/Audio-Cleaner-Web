@@ -73,7 +73,7 @@ rm -rf "$WORK/dist"
 APP="$WORK/dist/Audio Cleaner.app"
 
 echo "== frozen selftest"
-"$APP/Contents/MacOS/AudioCleaner" --selftest | tee "$WORK/selftest.log"
+"$APP/Contents/MacOS/AudioCleaner" --selftest --gui | tee "$WORK/selftest.log"
 grep -q "selftest ok" "$WORK/selftest.log"
 
 if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
@@ -84,12 +84,9 @@ else
   echo "(no MACOS_SIGN_IDENTITY: the app is not signed; Gatekeeper will ask the user to confirm)"
 fi
 
-echo "== disk image"
+echo "== installer package (its setup downloads the models)"
 mkdir -p "$WORK/out"
-DMG="$WORK/out/AudioCleaner-macOS-$ARCH.dmg"
-bash desktop/packaging/macos/make_dmg.sh "$APP" "$DMG"
-if [ -n "${MACOS_SIGN_IDENTITY:-}" ]; then
-  codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$DMG"
-  if [ -n "${NOTARY_PROFILE:-}${APPLE_ID:-}" ]; then bash desktop/packaging/macos/notarize.sh "$DMG"; fi
-fi
-echo "== done: $DMG"
+PKG="$WORK/out/AudioCleaner-macOS-$ARCH.pkg"
+"$PY" desktop/packaging/installer_models.py --mac "$WORK/pkg-scripts"
+PKG_ARCH="$ARCH" bash desktop/packaging/macos/make_pkg.sh "$APP" "$PKG" "$("$PY" -c "from audio_cleaner_desktop import __version__ as v; print(v, end='')")" "$WORK/pkg-scripts"
+echo "== done: $PKG"

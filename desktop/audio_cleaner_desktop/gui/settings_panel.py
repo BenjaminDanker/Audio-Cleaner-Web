@@ -6,18 +6,19 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from .. import engine, resources
+from .. import engine, resources, sysinfo
 from . import tips
 from .preferences import Preferences
 from .speech_model import SpeechModelDownloader, SpeechModelPanel
-from .widgets import ElidedLabel, IconButton, Segmented
+from .widgets import ElidedLabel, IconButton, Segmented, WrapCheck
 
 STRENGTH_LABELS = [("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Maximum")]
+# The same wording as the website's Clean & polish form.
 LOUDNESS_LABELS = {
-    "podcast": "Podcast: -16 LUFS", "youtube": "YouTube and streaming: -14 LUFS", "broadcast": "TV and radio: -23 LUFS",
-    "keep": "Keep the original level",
+    "podcast": "Podcast (\u221216 LUFS)", "youtube": "YouTube (\u221214 LUFS)", "broadcast": "Broadcast (\u221223 LUFS)",
+    "keep": "Keep original loudness",
 }
-LOUDNESS_SHORT = {"podcast": "podcast", "youtube": "YouTube", "broadcast": "TV and radio", "keep": "original level"}
+LOUDNESS_SHORT = {"podcast": "podcast", "youtube": "YouTube", "broadcast": "broadcast", "keep": "original loudness"}
 NOISE_LABELS = {"auto": "Automatic", "light": "Light noise", "heavy": "Heavy noise"}
 SUBTITLE_LABELS = {
     "off": "No subtitles", "srt": "SRT file", "vtt": "VTT file", "txt": "Text transcript", "embed": "Inside the video",
@@ -72,12 +73,14 @@ class SettingsPanel(QFrame):
     changed = Signal()
 
     def __init__(self, prefs: Preferences, downloader: SpeechModelDownloader | None = None, parent: QWidget | None = None,
-                 highs_downloader: SpeechModelDownloader | None = None):
+                 highs_downloader: SpeechModelDownloader | None = None,
+                 voice_downloader: SpeechModelDownloader | None = None):
         super().__init__(parent)
         self.setObjectName("Card")
         self._prefs = prefs
         self.downloader = downloader or SpeechModelDownloader(self)
         self.highs_downloader = highs_downloader or SpeechModelDownloader(self, resources.HIGHS_MODEL)
+        self.voice_downloader = voice_downloader or SpeechModelDownloader(self, resources.VOICE_MODEL)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(16)
@@ -154,10 +157,11 @@ class SettingsPanel(QFrame):
 
         self._highs = QCheckBox("Restore missing highs (phone-quality recordings)")
         self._highs.setToolTip("For phone calls and other recordings that sound dull or muffled")
-        self._echo = QCheckBox("Remove speaker echo using a second audio track")
+        self._echo = WrapCheck("Remove speaker echo using the second audio track (your desktop sound)")
         self._echo.setToolTip("For recordings with your desktop sound on a second audio track")
-        self._rebuild = QCheckBox("Rebuild the voice (for echoey rooms; slow)")
-        self._rebuild.setToolTip("Also removes room echo. Noise reduction and Background noise do not apply then.")
+        self._rebuild = WrapCheck("Rebuild the voice (for echoey rooms)")
+        self._rebuild.setToolTip("Also removes room echo and brings back dull sound. It takes several times longer. "
+                                 "Noise reduction and Background noise do not apply then.")
         extra_row = _Row(
             "Extra cleanup",
             "Restore missing highs: phone calls, voice messages, old or low-quality recordings have lost their high "
@@ -182,6 +186,11 @@ class SettingsPanel(QFrame):
         self.highs_downloader.changed.connect(self._refresh_enabled)
         extra_row.layout_.addWidget(self._echo)
         extra_row.layout_.addWidget(self._rebuild)
+        self.voice_panel = SpeechModelPanel(
+            self.voice_downloader, need="Rebuilding the voice needs an extra model", what="the model that rebuilds the voice",
+        )
+        extra_row.layout_.addWidget(self.voice_panel)
+        self.voice_downloader.changed.connect(self._refresh_enabled)
         layout.addWidget(extra_row)
 
         self._where = Segmented([("next", "Next to original"), ("folder", "Choose folder")])
@@ -222,7 +231,9 @@ class SettingsPanel(QFrame):
         layout.addWidget(_Row(
             "Files at once",
             "Cleaning several files at the same time finishes a batch sooner, but each file takes a bit longer and "
-            "uses more memory.\n\n"
+            f"uses more memory: about {sysinfo.job_memory_gb():.1f} GB for each file at once, "
+            f"{sysinfo.job_memory_gb(subtitles=True):.1f} GB with subtitles and "
+            f"{sysinfo.job_memory_gb(rebuild_voice=True):.1f} GB with Rebuild the voice.\n\n"
             "Automatic picks a number that suits your computer, and never more than its memory allows.",
             self._parallel,
         ))
@@ -286,7 +297,7 @@ class SettingsPanel(QFrame):
         """Height with every optional line showing (subtitle language, output folder), so the window can be
         sized once to fit them all."""
         spacing = self.layout().spacing() // 2 + 6
-        optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel)
+        optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel, self.voice_panel)
         extra = sum(w.sizeHint().height() + spacing for w in optional if w.isHidden())
         return self.sizeHint().height() + extra
 
@@ -301,6 +312,8 @@ class SettingsPanel(QFrame):
         self.speech_panel.setVisible(dl.running or bool(dl.last_error) or (wants_subs and not dl.ready))
         hd = self.highs_downloader
         self.highs_panel.setVisible(hd.running or bool(hd.last_error) or (self._highs.isChecked() and not hd.ready))
+        vd = self.voice_downloader
+        self.voice_panel.setVisible(vd.running or bool(vd.last_error) or (rebuilt and not vd.ready))
         folder_mode = self._where.value() == "folder"
         self._folder_box.setVisible(folder_mode)
         self._folder.setText(self._prefs.output_folder)

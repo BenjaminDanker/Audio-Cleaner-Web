@@ -19,6 +19,11 @@ QT_NOTICE = (
 )
 
 
+def downloaded_models():
+    """The models that setup downloads (or Settings does), in the order the app lists them."""
+    return (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
+
+
 def notice_files() -> list[Path]:
     folder = resources.licenses_dir()
     if not folder.is_dir():
@@ -55,6 +60,14 @@ class AboutDialog(QDialog):
         qt = QLabel(QT_NOTICE)
         qt.setWordWrap(True)
         layout.addWidget(qt)
+
+        models_title = QLabel("Downloaded models")
+        models_title.setObjectName("CardTitle")
+        layout.addWidget(models_title)
+        models_text = QLabel("\n".join(f"\u2022 {m.title}: {m.licence}" for m in downloaded_models()))
+        models_text.setWordWrap(True)
+        models_text.setToolTip("These models are downloaded during setup, not part of the installer. Their licence texts are listed below.")
+        layout.addWidget(models_text)
 
         title = QLabel("Third-party notices")
         title.setObjectName("CardTitle")

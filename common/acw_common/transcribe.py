@@ -11,6 +11,7 @@ nothing is downloaded here. Segments come with word timings for captions.
 """
 from __future__ import annotations
 
+import gc
 import threading
 from pathlib import Path
 
@@ -37,11 +38,43 @@ def pick_engine(language: str | None) -> str:
     return "whisper"
 
 
-def detect_language(audio_16k: np.ndarray, whisper_model_path: Path, threads: int = 4) -> str:
+_cache_lock = threading.Lock()
+_cached: dict[tuple[str, int, str], object] = {}
+
+
+def load_model(model_path: Path, threads: int = 4, device: str = "cpu"):
+    """The Whisper model in `model_path`, loaded once and kept (keyed by path, threads and device; only one is
+    ever kept) so a long recording that is transcribed in pieces reads the 1.6 GB file once. Pass it to
+    `transcribe(model=...)`. `unload()` drops it."""
+    from faster_whisper import WhisperModel
+
+    if not Path(model_path).exists():
+        raise RuntimeError(f"transcription model not found: {model_path}")
+    key = (str(Path(model_path).resolve()), int(threads), device)
+    with _cache_lock:
+        model = _cached.get(key)
+        if model is None:
+            _cached.clear()
+            gc.collect()
+            model = _cached[key] = WhisperModel(
+                str(model_path), device=device, compute_type="int8", cpu_threads=threads, num_workers=1
+            )
+        return model
+
+
+def unload() -> None:
+    """Drop the cached Whisper model (about 1.3 GB of RAM)."""
+    with _cache_lock:
+        _cached.clear()
+    gc.collect()
+
+
+def detect_language(audio_16k: np.ndarray, whisper_model_path: Path, threads: int = 4, model=None) -> str:
     """Spoken language of the first 30 s, by a small Whisper model."""
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(str(whisper_model_path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
+    if model is None:
+        model = WhisperModel(str(whisper_model_path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
     language, _prob, _all = model.detect_language(audio_16k[: 30 * SAMPLE_RATE].astype(np.float32, copy=False))
     return language
 
@@ -113,13 +146,16 @@ def transcribe(
     threads: int = 4,
     progress=None,
     cancel: threading.Event | None = None,
+    model=None,
 ) -> tuple[list[Segment], str]:
-    """Returns (segments with word timings, detected language)."""
+    """Returns (segments with word timings, detected language). `model` is an already loaded Whisper model
+    (`load_model`); without it the model in `model_path` is loaded for this call only."""
     from faster_whisper import WhisperModel
 
     if not Path(model_path).exists():
         raise RuntimeError(f"transcription model not found: {model_path}")
-    model = WhisperModel(str(model_path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
+    if model is None:
+        model = WhisperModel(str(model_path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
     total = len(audio_16k) / SAMPLE_RATE
     segs_iter, info = model.transcribe(
         audio_16k.astype(np.float32, copy=False),

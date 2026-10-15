@@ -127,6 +127,11 @@ def install(app: QApplication) -> TipPopup:
     return _popup
 
 
+def is_showing() -> bool:
+    """True while a help text or tooltip is on screen (Esc closes that, and nothing else)."""
+    return _popup is not None and _popup.isVisible()
+
+
 def pin(text: str, owner: QWidget) -> None:
     """Show `text` next to `owner` until the next click or key (the "?" buttons)."""
     popup = _popup or install(QApplication.instance())

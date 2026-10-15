@@ -45,6 +45,7 @@ class FileItem:
     # "Clean again" puts the new result in their place once it is finished (the old one goes to the bin).
     made: dict[Path, tuple[int, int]] = field(default_factory=dict)
     replaces: dict[Path, tuple[int, int]] = field(default_factory=dict)
+    stopping: bool = False  # asked to stop; the file finishes its current step first
 
 
 class DropZone(QFrame):
@@ -190,7 +191,7 @@ class FileRow(QFrame):
             "again",
             f"Clean again with the current settings.\nThe new result replaces this one; the earlier version goes to the {shell.TRASH_NAME}.",
         )
-        self._stop = IconButton("close", "Stop cleaning this file")
+        self._stop = IconButton("stop", "Stop cleaning this file")
         self._remove = IconButton("close", "Take this file off the list (the file itself stays)")
         self._buttons = (self._up, self._down, self._preview, self._reveal, self._again, self._stop, self._remove)
         actions = QWidget()
@@ -218,7 +219,7 @@ class FileRow(QFrame):
 
         text, style = {
             WAITING: ("Waiting", ""),
-            RUNNING: (f"Cleaning {int(item.progress * 100)}%", "cleaning"),
+            RUNNING: ("Stopping...", "warn") if item.stopping else (f"Cleaning {int(item.progress * 100)}%", "cleaning"),
             DONE: ("Done", "done"),
             FAILED: ("Failed", "failed"),
             CANCELLED: ("Cancelled", "warn"),
@@ -237,6 +238,7 @@ class FileRow(QFrame):
         self._up.setVisible(state == WAITING)
         self._down.setVisible(state == WAITING)
         self._stop.setVisible(state == RUNNING)
+        self._stop.setEnabled(not item.stopping)
         self._preview.setVisible(state in (WAITING, DONE))
         self._reveal.setVisible(state == DONE)
         self._again.setVisible(state in (DONE, FAILED, CANCELLED))

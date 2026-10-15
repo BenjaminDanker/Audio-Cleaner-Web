@@ -70,6 +70,12 @@ _lock = threading.Lock()
 _models: dict[str, tuple] = {}
 
 
+def unload() -> None:
+    """Drop the cached model sessions."""
+    with _lock:
+        _models.clear()
+
+
 def _load(path: str):
     """One shared InferenceSession per model file (run() is thread-safe) and its initial state."""
     import onnxruntime as ort

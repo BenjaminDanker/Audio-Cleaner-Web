@@ -72,15 +72,23 @@ class HistoryStore:
         self._db.commit()
         return int(cur.lastrowid)
 
-    def search(self, text: str = "") -> list[Entry]:
-        """Newest first; `text` matches file names and messages."""
+    def search(self, text: str = "", limit: int = LIST_LIMIT) -> list[Entry]:
+        """Newest first (at most `limit`); `text` matches file names and messages."""
         like = "%" + text.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         rows = self._db.execute(
             "SELECT * FROM history WHERE name LIKE ? ESCAPE '\\' OR message LIKE ? ESCAPE '\\'"
             " ORDER BY finished_at DESC, id DESC LIMIT ?",
-            (like, like, LIST_LIMIT),
+            (like, like, min(limit, LIST_LIMIT)),
         )
         return [_entry(r) for r in rows]
+
+    def recent_folders(self, limit: int = 200) -> list[Path]:
+        """The folders of the latest entries' originals and results: where the app has written files."""
+        folders: dict[Path, None] = {}
+        for r in self._db.execute("SELECT source, outputs FROM history ORDER BY finished_at DESC, id DESC LIMIT ?", (limit,)):
+            for name in (r["source"], *json.loads(r["outputs"])):
+                folders[Path(name).parent] = None
+        return list(folders)
 
     def delete(self, entry_ids: Iterable[int]) -> None:
         self._db.executemany("DELETE FROM history WHERE id = ?", [(i,) for i in entry_ids])

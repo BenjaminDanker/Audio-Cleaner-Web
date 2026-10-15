@@ -38,8 +38,9 @@ binaries = []
 for f in sorted(need(VENDOR / "native").iterdir()):
     binaries.append((str(f), "native"))  # libdf.*, ffmpeg[.exe], ffprobe[.exe] -> <app>/native/
 
-# Only the two small noise models ship (DeepFilterNet3 8 MB, DPDFNet-8 15 MB); the speech model is
-# downloaded by the app (models.py), so the installer stays small. Refuse to bundle anything else.
+# Only the two small noise models ship (DeepFilterNet3 8 MB, DPDFNet-8 15 MB); the other models (subtitles,
+# restoring highs, rebuilding the voice: 2.6 GB) are downloaded by the installer's setup (installer_models.py)
+# or by the app (models.py), so the installer stays small. Refuse to bundle anything else.
 _shipped = sorted(p.name for p in need(VENDOR / "models").iterdir())
 if _shipped != ["DeepFilterNet3_onnx.tar.gz", "dpdfnet8_48khz_hr.onnx"]:
     raise SystemExit(f"audio_cleaner.spec: vendor/models must only hold the two noise models, found {_shipped}")
@@ -173,5 +174,13 @@ if sys.platform == "darwin":
             "LSMinimumSystemVersion": "14.0",  # PySide6 6.12 and onnxruntime 1.31 wheels need macOS 14
             "LSApplicationCategoryType": "public.app-category.video",
             "NSHumanReadableCopyright": "Copyright (c) 2026 Benjamin Danker",
+            # "Open With" and dropping files on the Dock icon: Finder only offers the app for these types.
+            # Alternate rank: Audio Cleaner is offered but never becomes the default player.
+            "CFBundleDocumentTypes": [{
+                "CFBundleTypeName": "Audio and video files",
+                "CFBundleTypeRole": "Viewer",
+                "LSHandlerRank": "Alternate",
+                "LSItemContentTypes": ["public.audio", "public.movie"],
+            }],
         },
     )

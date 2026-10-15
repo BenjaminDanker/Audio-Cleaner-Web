@@ -92,6 +92,9 @@ def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, 
         assert started == ["whisper-large-v3-turbo", "restore-highs"]
         w.highs_download._fake_ready = True
         w._model_download_finished(w.highs_download, True, "")
+        assert started == ["whisper-large-v3-turbo", "restore-highs", "rebuild-voice"]
+        w.voice_download._fake_ready = True
+        w._model_download_finished(w.voice_download, True, "")
         assert not w.banner_models.isVisible()
         # a failed download says so and offers to try again
         w._model_queue = [w.highs_download]
@@ -105,6 +108,39 @@ def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, 
         w.add_paths([src])
         w.start()
         assert shown and "was not installed" in shown[-1] and not w.queue.active
+    finally:
+        w.queue.shutdown()
+        w.history.close()
+        w._pool.waitForDone()
+
+
+def test_rebuilding_the_voice_offers_its_download_and_start_asks_instead_of_downgrading(qapp, tmp_path, monkeypatch):
+    from audio_cleaner_desktop import engine
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id != "rebuild-voice"))
+    started = []
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", lambda self: started.append(self.model.id))
+    shown = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
+    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db")
+    try:
+        w.show()
+        panel = w.settings_panel
+        assert not panel.voice_panel.isVisible()  # not ticked: nothing to ask
+        panel._rebuild.setChecked(True)
+        assert panel.voice_panel.isVisible() and "Rebuilding the voice needs an extra model" in panel.voice_panel._text.text()
+        panel.voice_panel._button.click()
+        assert started == ["rebuild-voice"]
+        started.clear()
+        src = tmp_path / "a.wav"
+        src.write_bytes(b"RIFF")
+        w.add_paths([src])
+        w.start()  # asks, offers the download, starts nothing
+        assert shown and "model that rebuilds the voice was not installed" in shown[-1] and not w.queue.active
+        assert started == ["rebuild-voice"]
+        assert "rebuilding voices" in w.banner_models._label.text()
     finally:
         w.queue.shutdown()
         w.history.close()

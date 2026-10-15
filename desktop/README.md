@@ -2,13 +2,15 @@
 
 A free, offline app that removes background noise from the voice in video and audio files, and can write
 subtitles. It runs the shared cleaning pipeline (`../common/acw_common`) in a PySide6 window.
-Nothing is uploaded: the noise model, the speech model and FFmpeg all ship inside the app.
+Nothing is uploaded: the noise models and FFmpeg ship inside the app, and the installer downloads the three larger
+models (subtitles, restoring highs, rebuilding voices: 2.6 GB in all) once during setup.
 
 - `audio_cleaner_desktop/engine.py` cleans one file (no Qt; used by the window and the command line)
 - `audio_cleaner_desktop/gui/` the window: queue, settings, preview, history, About
 - `audio_cleaner_desktop/cli.py` the `--cli` and `--selftest` modes
 - `vendor/` native pieces for running from source (git-ignored, filled by the packaging scripts):
-  `native/{libdf, ffmpeg, ffprobe}`, `models/DeepFilterNet3_onnx.tar.gz`, `models/whisper-small/`, `licenses/`.
+  `native/{libdf, ffmpeg, ffprobe}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr.onnx}`, `licenses/`, and a
+  small speech model for the tests in `test-models/whisper-small/`.
   On Linux, missing pieces fall back to `~/audio-cleaner/{bin,models}`.
 
 Building and shipping installers is described in [`../docs/desktop.md`](../docs/desktop.md).
@@ -28,7 +30,8 @@ From the repository root, with `PYTHONPATH=desktop:common`:
 ```sh
 python -m audio_cleaner_desktop                       # the window; FILE... are queued
 python -m audio_cleaner_desktop --cli in.mp4 -o out/  # no window (see --help for the options)
-python -m audio_cleaner_desktop --selftest            # checks the bundled native pieces
+python -m audio_cleaner_desktop --selftest [--gui]    # checks the bundled native pieces (--gui: and the window)
+python -m audio_cleaner_desktop --download-models     # the three models, from a terminal
 ```
 
 ## Tests

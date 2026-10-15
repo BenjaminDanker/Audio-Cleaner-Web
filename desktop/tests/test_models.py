@@ -123,3 +123,55 @@ def test_models_live_in_the_app_data_folder(monkeypatch, tmp_path):
     path = models.models_dir()
     assert path.parts[-3:] == ("Audio Cleaner", "Audio Cleaner", "models")
     assert isinstance(path, Path)
+
+
+def _frozen_installer_dir(monkeypatch, tmp_path):
+    """Pretend setup installed models in tmp_path/app/models/<id>."""
+    monkeypatch.setattr(models, "installer_dir", lambda model: tmp_path / "app" / "models" / model.id)
+
+
+def test_the_installers_copy_counts_with_its_marker_and_without_one_for_older_installs(server, monkeypatch, tmp_path):
+    m = _model(server, {"a.bin": b"one", "sub/b.json": b"{}"})
+    _frozen_installer_dir(monkeypatch, tmp_path)
+    d = models.installer_dir(m)
+    (d / "sub").mkdir(parents=True)
+    (d / "a.bin").write_bytes(b"one")
+    (d / "sub" / "b.json").write_bytes(b"{}")
+    assert models.location(m) == d  # an install from before the marker existed: sizes are all there is
+    (d / ".complete").write_text("\n".join(f.sha256 for f in m.files), encoding="utf-8")
+    assert models.location(m) == d
+    (d / ".complete").write_text("0" * 64, encoding="utf-8")  # made for another version of the model
+    assert models.location(m) is None
+
+
+def test_files_setup_installed_are_reused_instead_of_downloaded_again(server, monkeypatch, tmp_path):
+    m = _model(server, {"a.bin": b"a" * 100_000, "b.bin": b"b" * 50_000})
+    _frozen_installer_dir(monkeypatch, tmp_path)
+    d = models.installer_dir(m)
+    d.mkdir(parents=True)
+    (d / "a.bin").write_bytes(b"a" * 100_000)  # setup got this far
+    assert models.location(m) is None and models.missing_bytes(m) == 50_000
+    _RangeHandler.requests.clear()
+    path = models.download(m)
+    assert _RangeHandler.requests == ["/b.bin"] and (path / "a.bin").read_bytes() == b"a" * 100_000
+    assert models.location(m) == path
+
+
+def test_a_damaged_installer_copy_is_not_reused(server, monkeypatch, tmp_path):
+    m = _model(server, {"a.bin": b"a" * 1000, "b.bin": b"b"})
+    _frozen_installer_dir(monkeypatch, tmp_path)
+    d = models.installer_dir(m)
+    d.mkdir(parents=True)
+    (d / "a.bin").write_bytes(b"x" * 1000)  # right size, wrong content
+    _RangeHandler.requests.clear()
+    models.download(m)
+    assert sorted(_RangeHandler.requests) == ["/a.bin", "/b.bin"] and (models.model_dir(m) / "a.bin").read_bytes() == b"a" * 1000
+
+
+def test_a_redirect_to_plain_http_is_refused():
+    handler = models._HttpsRedirects()
+    request = models.urllib.request.Request("https://example.org/model.bin")
+    with pytest.raises(models.DownloadError, match="not secure"):
+        handler.redirect_request(request, None, 302, "Found", {}, "http://evil.example/model.bin")
+    ok = handler.redirect_request(request, None, 302, "Found", {}, "https://cdn.example.org/model.bin")
+    assert ok is not None and ok.full_url == "https://cdn.example.org/model.bin"
