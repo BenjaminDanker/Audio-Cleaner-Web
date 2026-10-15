@@ -112,47 +112,22 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     transcribe = spec["kind"] in ("transcribe", "denoise_transcribe")
     t0 = time.time()
 
-    cleaned_path = None
-    speech_16k = None
-    if denoise:
-        emit(stage="decoding", progress=2)
-        # Decoded and cleaned audio live in memory-mapped files in the job
-        # directory, so RAM use doesn't grow with the length of the upload.
-        x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
-        emit(stage="denoising", progress=5)
-        span = 70 if not transcribe else 45
-        y = pipeline.clean_audio(
-            x, spec["lib_path"], spec["dfn_model"],
-            pipeline.CleanOptions(
-                atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
-                loudness_lufs=opts.get("loudness_lufs", -16.0),
-            ),
-            threads=threads,
-            progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(5 + span * f)),
-            out=pipeline.output_buffer(x, job_dir),
-        )
-        fmt = opts.get("audio_format", "wav")
-        cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
-        outputs.append({"file": cleaned_path.name, "kind": "audio"})
-        del x, y
-        for scratch in ("decoded.f32", "cleaned.npy"):
-            (job_dir / scratch).unlink(missing_ok=True)
-
     needs_cloud = False
+    cleaned_path = None
+    asr_end = 45 if denoise else 90  # progress when transcription is done
     if transcribe:
-        if speech_16k is None:
-            # The original, not the cleaned audio: every ASR model tested scores
-            # worse on denoised speech (docs/research/asr.md).
-            emit(stage="decoding", progress=3 if not denoise else 48)
-            speech_16k = ff.decode(src, probe, 16000, 1, spec["max_seconds"])[:, 0]
+        # Transcribe first, from the original audio: every recogniser we tested
+        # scores worse on denoised speech (docs/research/asr.md).
+        emit(stage="decoding", progress=2)
+        speech_16k = ff.decode(src, probe, 16000, 1, spec["max_seconds"])[:, 0]
         if spec["transcribe_tier"] == "premium":
-            emit(stage="preparing transcription", progress=80)
+            emit(stage="preparing transcription", progress=5)
             _write_asr_chunks(ff, job_dir, speech_16k)
             needs_cloud = True
         else:
             from acw_common import transcribe
 
-            base = 50 if denoise else 5
+            base = 5
             emit(stage="transcribing", progress=base)
             models = Path(spec["models_dir"])
             lang = opts.get("language")
@@ -160,7 +135,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 emit(stage="detecting language", progress=base)
                 lang = transcribe.detect_language(speech_16k, models / "whisper" / "small", threads)
             engine = transcribe.pick_engine(lang)
-            report = lambda f: emit(stage="transcribing", progress=int(base + (90 - base) * f))  # noqa: E731
+            report = lambda f: emit(stage="transcribing", progress=int(base + (asr_end - base) * f))  # noqa: E731
             if engine.startswith("parakeet"):
                 segs = transcribe.transcribe_parakeet(
                     speech_16k, models / engine, models / "silero-vad",
@@ -176,6 +151,31 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             (job_dir / "segments.json").write_text(
                 json.dumps({"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
             )
+    if denoise:
+        start = asr_end if transcribe else 2
+        emit(stage="decoding", progress=start)
+        # Decoded and cleaned audio live in memory-mapped files in the job
+        # directory, so RAM use doesn't grow with the length of the upload.
+        x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
+        span = 85 - start
+        emit(stage="denoising", progress=start + 2)
+        y = pipeline.clean_audio(
+            x, spec["lib_path"], spec["dfn_model"],
+            pipeline.CleanOptions(
+                atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
+                loudness_lufs=opts.get("loudness_lufs", -16.0),
+            ),
+            threads=threads,
+            progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(start + 2 + span * f)),
+            out=pipeline.output_buffer(x, job_dir),
+        )
+        fmt = opts.get("audio_format", "wav")
+        cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
+        outputs.append({"file": cleaned_path.name, "kind": "audio"})
+        del x, y
+        for scratch in ("decoded.f32", "cleaned.npy"):
+            (job_dir / scratch).unlink(missing_ok=True)
+
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
     )
