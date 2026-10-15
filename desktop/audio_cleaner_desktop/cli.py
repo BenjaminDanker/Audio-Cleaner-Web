@@ -49,7 +49,7 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> i
         label = f"[{n}/{len(inputs)}] {Path(name).name}"
         line = _ProgressLine(label)
         try:
-            out = engine.process_file(name, options, out_dir=out_dir, progress=line, cancel=cancel)
+            result = engine.process(name, options, out_dir=out_dir, progress=line, cancel=cancel)
         except engine.Cancelled:
             line.finish()
             print(f"{label}  cancelled", file=sys.stderr)
@@ -60,7 +60,7 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> i
             failures += 1
         else:
             line.finish()
-            print(f"{label}  ->  {out}")
+            print(f"{label}  ->  " + ", ".join(str(p) for p in result.paths))
     return 1 if failures else 0
 
 

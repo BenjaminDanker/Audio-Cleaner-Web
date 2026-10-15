@@ -92,6 +92,11 @@ QLabel#Badge {{
 }}
 QLabel#Badge[kind="video"] {{ background: {t.brand}; color: white; }}
 
+QFrame#Row {{ background: transparent; border-radius: 10px; }}
+QFrame#Row:hover {{ background: {t.hover.name()}; }}
+QWidget#RowHolder {{ background: transparent; }}
+QLabel#Small[state="failed"] {{ font-weight: 400; }}
+
 QListWidget {{ background: transparent; border: none; outline: none; }}
 QListWidget::item {{ border-radius: 8px; margin: 1px 0; }}
 QListWidget::item:hover {{ background: {t.hover.name()}; }}
@@ -121,15 +126,21 @@ QPushButton#Link:hover {{ color: {t.brand_hover}; background: transparent; }}
 QPushButton#Link:focus {{ border: 1px solid {t.brand}; padding: 1px 3px; }}
 
 QPushButton#Segment {{
-    background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 0; padding: 6px 12px; margin-left: -1px;
+    background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 0; padding: 6px 6px; margin-left: -1px;
 }}
 QPushButton#Segment[pos="first"] {{ border-top-left-radius: 8px; border-bottom-left-radius: 8px; margin-left: 0; }}
 QPushButton#Segment[pos="last"] {{ border-top-right-radius: 8px; border-bottom-right-radius: 8px; }}
-QPushButton#Segment:checked {{ background: {t.brand}; border-color: {t.brand}; color: white; font-weight: 600; }}
+QPushButton#Segment:checked {{ background: {t.brand}; border-color: {t.brand}; color: white; }}
 QPushButton#Segment:checked:hover {{ background: {t.brand_hover}; }}
-QPushButton#Segment:focus {{ border: 2px solid {t.text.name()}; padding: 5px 11px; }}
+QPushButton#Segment:focus {{ border: 2px solid {t.text.name()}; padding: 5px 5px; }}
 QPushButton#Segment:disabled {{ color: {t.muted.name()}; background: transparent; }}
 QPushButton#Segment:checked:disabled {{ background: {t.border.name()}; border-color: {t.border.name()}; }}
+
+QLineEdit {{
+    background: {t.surface.name()}; color: {t.text.name()}; border: 1px solid {t.border.name()}; border-radius: 8px;
+    padding: 6px 10px; selection-background-color: {t.brand}; selection-color: white;
+}}
+QLineEdit:focus {{ border: 2px solid {t.brand}; padding: 5px 9px; }}
 
 QComboBox {{
     background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 8px; padding: 5px 10px; min-height: 1.3em;
@@ -158,7 +169,13 @@ QFrame#Banner[kind="warn"] {{ border-color: {t.warn}; background: {t.warn_soft};
 QFrame#Preview {{ background: {"#05070b" if t.dark else "#10131a"}; border-radius: 8px; border: none; }}
 QFrame#Preview QLabel {{ color: #aab3c5; }}
 
-QTabWidget::pane {{ border: 1px solid {t.border.name()}; border-radius: 8px; top: -1px; }}
+QTabWidget::pane {{ border: none; border-top: 1px solid {t.border.name()}; }}
+QTabBar {{ background: transparent; }}
+QTabBar::tab {{ background: transparent; color: {t.muted.name()}; padding: 8px 18px; margin-right: 6px; border: none; border-bottom: 2px solid transparent; }}
+QTabBar::tab:hover {{ color: {t.text.name()}; }}
+QTabBar::tab:selected {{ color: {t.text.name()}; font-weight: 600; border-bottom: 2px solid {t.brand}; }}
+QTabBar::tab:focus {{ background: {t.hover.name()}; }}
+QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QPlainTextEdit, QListWidget#Licenses {{ background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 8px; }}
 """
 
@@ -197,6 +214,6 @@ class ThemeWatcher(QObject):
         self._app.setStyleSheet(stylesheet(theme))
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
-        if event.type() == QEvent.Type.ApplicationPaletteChange and obj is self._app:
+        if event.type() in (QEvent.Type.ApplicationPaletteChange, QEvent.Type.ApplicationFontChange) and obj is self._app:
             self.apply()
         return False

@@ -77,9 +77,36 @@ def _waveform(p: QPainter, c: QColor) -> None:
         p.drawRoundedRect(QRectF(1.2 + i * 2.4, 12 - h / 2, 1.4, h), 0.7, 0.7)
 
 
+def _info(p: QPainter, c: QColor) -> None:
+    _stroke(p, c, 1.7)
+    p.drawEllipse(QRectF(3.5, 3.5, 17, 17))
+    _fill(p, c)
+    p.drawEllipse(QRectF(11, 7.2, 2, 2))
+    p.drawRoundedRect(QRectF(11, 10.8, 2, 6.2), 1, 1)
+
+
+def _up(p: QPainter, c: QColor) -> None:
+    _stroke(p, c, 2.0)
+    p.drawPolyline(QPolygonF([QPointF(6.5, 14.5), QPointF(12, 9), QPointF(17.5, 14.5)]))
+
+
+def _down(p: QPainter, c: QColor) -> None:
+    _stroke(p, c, 2.0)
+    p.drawPolyline(QPolygonF([QPointF(6.5, 9.5), QPointF(12, 15), QPointF(17.5, 9.5)]))
+
+
+def _trash(p: QPainter, c: QColor) -> None:
+    _stroke(p, c, 1.8)
+    p.drawLine(QPointF(4.5, 7), QPointF(19.5, 7))
+    p.drawLine(QPointF(9.5, 7), QPointF(9.5, 4.8))
+    p.drawLine(QPointF(9.5, 4.8), QPointF(14.5, 4.8))
+    p.drawLine(QPointF(14.5, 4.8), QPointF(14.5, 7))
+    p.drawPolyline(QPolygonF([QPointF(6.5, 7), QPointF(7.5, 19.5), QPointF(16.5, 19.5), QPointF(17.5, 7)]))
+
+
 _DRAWERS: dict[str, Drawer] = {
     "play": _play, "pause": _pause, "folder": _folder, "close": _close, "plus": _plus,
-    "upload": _upload, "waveform": _waveform,
+    "upload": _upload, "waveform": _waveform, "info": _info, "up": _up, "down": _down, "trash": _trash,
 }
 
 

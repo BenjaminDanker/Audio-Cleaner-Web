@@ -4,7 +4,7 @@ import argparse
 import sys
 
 from . import __version__, config
-from .engine import AUDIO_CHOICES, STRENGTHS, JobOptions
+from .engine import AUDIO_CHOICES, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTHS, SUBTITLE_MODES, JobOptions
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,6 +23,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--audio-format", choices=list(AUDIO_CHOICES), default="same",
         help="format for audio files (video keeps its container); default: same as input",
+    )
+    p.add_argument(
+        "--loudness", choices=list(LOUDNESS_TARGETS), default=DEFAULT_LOUDNESS,
+        help="loudness target of the polish step: podcast -16 LUFS, youtube -14, broadcast -23, keep (default: podcast)",
+    )
+    p.add_argument(
+        "--subtitles", choices=list(SUBTITLE_MODES), default="off",
+        help="also write subtitles: srt, vtt, txt (next to the result) or embed (into a video; audio files get an srt)",
+    )
+    p.add_argument(
+        "--language", choices=["auto", *LANGUAGES], default="auto",
+        help="language spoken for the subtitles (default: auto-detect)",
     )
     return p
 
@@ -47,7 +59,10 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--cli needs at least one input file")
         from . import cli
 
-        options = JobOptions(strength=args.strength, polish=not args.no_polish, audio_format=args.audio_format)
+        options = JobOptions(
+            strength=args.strength, polish=not args.no_polish, audio_format=args.audio_format,
+            loudness=args.loudness, subtitles=args.subtitles, language=args.language,
+        )
         return cli.run(args.files, args.output_dir, options)
 
     from .gui.app import run

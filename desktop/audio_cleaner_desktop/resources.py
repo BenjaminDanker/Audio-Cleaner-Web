@@ -1,14 +1,17 @@
-"""Locate the native pieces the app ships: libDF, the DeepFilterNet3 model, FFmpeg.
+"""Locate the native pieces the app ships: libDF, the noise model, the speech model, FFmpeg.
 
 Frozen (PyInstaller) builds find everything under sys._MEIPASS:
 
     native/{df.dll|libdf.dylib|libdf.so, ffmpeg[.exe], ffprobe[.exe]}
     models/DeepFilterNet3_onnx.tar.gz
+    models/whisper-small/{model.bin,config.json,tokenizer.json,vocabulary.txt}
     licenses/
 
 From source the same layout is read from $ACW_DESKTOP_VENDOR (default
 desktop/vendor, filled by the packaging scripts). On Linux, missing pieces fall
 back to the server layout in ~/audio-cleaner/{bin,models}.
+
+Nothing is downloaded at run time: the speech model for subtitles ships with the app.
 """
 from __future__ import annotations
 
@@ -21,6 +24,8 @@ from acw_common import dfn
 _EXE = ".exe" if os.name == "nt" else ""
 _FFMPEG = f"ffmpeg{_EXE}"
 _FFPROBE = f"ffprobe{_EXE}"
+WHISPER_DIR = "whisper-small"
+_WHISPER_FILES = ("model.bin", "config.json", "tokenizer.json")
 
 
 def _vendor_root() -> Path:
@@ -62,6 +67,16 @@ def ffmpeg_dir() -> Path:
     return _locate("native", "bin", _FFMPEG, _FFPROBE)
 
 
+def whisper_model_path() -> Path:
+    """Directory of the bundled speech model (faster-whisper "small", int8)."""
+    vendor = _vendor_root() / "models" / WHISPER_DIR
+    fallback = _dev_fallback()
+    for d in (vendor, *([fallback / "models" / "whisper" / "small"] if fallback else [])):
+        if all((d / n).is_file() for n in _WHISPER_FILES):
+            return d
+    return vendor
+
+
 def licenses_dir() -> Path:
     return _vendor_root() / "licenses"
 
@@ -73,6 +88,8 @@ def check() -> list[str]:
         missing.append(dfn.LIB_NAME)
     if not model_path().is_file():
         missing.append(dfn.MODEL_FILE)
+    if not all((whisper_model_path() / n).is_file() for n in _WHISPER_FILES):
+        missing.append(f"{WHISPER_DIR}/")
     ff = ffmpeg_dir()
     missing += [n for n in (_FFMPEG, _FFPROBE) if not (ff / n).is_file()]
     return missing

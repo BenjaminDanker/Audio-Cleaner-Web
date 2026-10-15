@@ -55,7 +55,7 @@ MUXERS="mp4,mov,ipod,matroska,webm,wav,flac,ogg,opus,null,mp3,pcm_s16le,pcm_s24l
 PROTOCOLS="file,pipe"
 # Audio decoders that are LGPL and common; pcm_*/adpcm_* are added from configure's own list below.
 DECODERS="aac,aac_latm,mp1,mp1float,mp2,mp2float,mp3,mp3float,mp3adu,mp3adufloat,opus,vorbis,flac,alac,ac3,eac3,dca,truehd,mlp,wmav1,wmav2,wmapro,wmalossless,amrnb,amrwb,speex,gsm,gsm_ms,subrip,srt,webvtt,movtext,ass,ssa"
-ENCODERS="aac,flac,pcm_s16le,pcm_s24le,pcm_f32le,libopus,mov_text,srt,subrip,webvtt"
+ENCODERS="aac,flac,pcm_s16le,pcm_s24le,pcm_f32le,libopus,movtext,srt,subrip,webvtt"
 # Graph plumbing + what -ac/-ar/-t and the CLI need (ffmpeg_select in configure adds a few video ones).
 FILTERS="abuffer,abuffersink,buffer,buffersink,aresample,aformat,anull,atrim,format,null,trim,asetpts,setpts,volume,pan,apad"
 
