@@ -90,7 +90,12 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
   const posts = [];
   // Record every job creation and stop it there with an error, so no job is made (except in the real runs further down).
   let passThrough = false;
+  let forceEcho = false; // a real run where the form (rightly) never asks for echo removal: add it on the way out
   await page.route('**/api/jobs', (r) => {
+    if (r.request().method() === 'POST' && passThrough && forceEcho) {
+      const body = r.request().postDataJSON();
+      return r.continue({ postData: JSON.stringify({ ...body, options: { ...body.options, echo_reference_track: true } }) });
+    }
     if (r.request().method() !== 'POST' || passThrough) return r.continue();
     posts.push(r.request().postDataJSON());
     return r.fulfill({ status: 400, json: { detail: 'Stopped by the test.' } });
@@ -129,7 +134,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'ok';
   });
 
-  await check('noise strength: the same four buttons as the desktop app (Gentle, Balanced, Strong, Maximum), Maximum to start with; Clean & polish with Gentle sends 12 dB; Live has the same four', async () => {
+  await check('noise strength: the same four buttons as the desktop app (Gentle, Balanced, Strong, Maximum), Maximum to start with; Clean & polish with Gentle sends 12 dB, Background noise defaults to Automatic and Heavy is sent; Live has the same four', async () => {
     const labels = async (name) => page.getByTestId(`strength-${name}`).locator('.seg span').allInnerTexts();
     const four = JSON.stringify(['Gentle', 'Balanced', 'Strong', 'Maximum']);
     if (JSON.stringify(await labels('lstrength')) !== four) throw new Error('browser: ' + JSON.stringify(await labels('lstrength')));
@@ -147,6 +152,13 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await page.unroute('**/api/me');
     const sent = posts.at(-1)?.options?.atten_lim_db;
     if (sent !== 12) throw new Error('atten_lim_db sent: ' + sent);
+    if (posts.at(-1)?.options?.noise !== 'auto') throw new Error('noise should default to auto: ' + posts.at(-1)?.options?.noise);
+    await page.locator('#noisekind').selectOption('heavy');
+    if (!/café|traffic/.test(await page.locator('#noisekind').locator('xpath=..').innerText())) throw new Error('no hint for Heavy noise');
+    posts.length = 0;
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    if (posts.at(-1)?.options?.noise !== 'heavy') throw new Error('noise sent: ' + posts.at(-1)?.options?.noise);
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('strength-live-str').waitFor();
     if (JSON.stringify(await labels('live-str')) !== four) throw new Error('live: ' + JSON.stringify(await labels('live-str')));
@@ -286,6 +298,57 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'ok';
   });
 
+  await check('two audio tracks (mic + desktop sound): the echo box appears only for Clean & polish; free cleanup says it cannot do it; one-track files never see it', async () => {
+    await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
+    const box = page.getByRole('checkbox', { name: /Remove speaker echo using the second audio track \(your desktop sound\)/ });
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'polish');
+    if (await box.count()) throw new Error('echo box offered for a one-track file');
+    await page.getByRole('button', { name: 'Remove' }).click();
+    for (const f of ['echo2.mp4', 'echo2.mka']) {
+      await choose(f);
+      if (!(await radio('noise', 'browser').isChecked())) throw new Error(`${f}: free cleanup should be the starting choice`);
+      const note = (await page.getByTestId('echo-browser-note').innerText()).replace(/\s+/g, ' ');
+      if (!/second audio track[\s\S]*needs Clean & polish[\s\S]*free cleanup in your browser can.t do it/.test(note)) throw new Error('note: ' + note);
+      if (await box.count()) throw new Error(`${f}: the echo box shows for free cleanup`);
+      await pick(page, 'noise', 'polish');
+      await box.waitFor();
+      if (await box.isChecked()) throw new Error('echo box should start unticked');
+      if (!/OBS can record your mic and your desktop audio on separate tracks/.test(await page.locator('label.check:has(input[name=echo])').innerText())) throw new Error('hint missing');
+      if (await page.getByTestId('echo-browser-note').count()) throw new Error('browser note still shown for Clean & polish');
+      if (f === 'echo2.mp4') await page.screenshot({ path: join(SHOTS, 'cleanup-echo.png'), fullPage: true });
+      await page.getByRole('button', { name: 'Remove' }).click();
+    }
+    const text = await page.locator('main').innerText();
+    if (/AEC|WebRTC|LiveKit|echo cancel/i.test(text)) throw new Error('internals on the page');
+    return 'ok';
+  });
+
+  await check('echo box ticked: the job asks for echo_reference_track, and a video goes up as ONE small file that keeps both audio tracks (.mka); unticked or free cleanup sends false', async () => {
+    const box = page.getByRole('checkbox', { name: /Remove speaker echo/ });
+    const size = (await import('node:fs')).statSync(join(FILES, 'echo2.mp4')).size;
+    await choose('echo2.mp4');
+    await pick(page, 'noise', 'polish');
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    let b = posts.at(-1);
+    if (b.options.echo_reference_track !== false) throw new Error('unticked should send false: ' + JSON.stringify(b.options));
+    await box.check();
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    b = posts.at(-1);
+    if (b.kind !== 'denoise' || b.options.echo_reference_track !== true) throw new Error(JSON.stringify(b));
+    if (!/\.mka$/.test(b.filename) || b.sizeBytes >= size) throw new Error(`upload: ${b.filename} ${b.sizeBytes} (original ${size})`);
+    await pick(page, 'noise', 'browser'); // ticked, then switched away from Clean & polish: not sent
+    await pick(page, 'subs', 'standard');
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    if (posts.at(-1).options.echo_reference_track !== false) throw new Error('echo requested without Clean & polish');
+    await page.unroute('**/api/me');
+    return `${b.filename}, ${b.sizeBytes} bytes of ${size}`;
+  });
+
   await check('a real free job: Free badge on the card, and the free minutes left go down afterwards', async () => {
     passThrough = true;
     await freshApp();
@@ -327,6 +390,45 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
       await page.waitForTimeout(1000);
     }
     throw new Error('job did not finish');
+  });
+
+  await check('a real two-track job with echo removal: the server finds both tracks (no "only one track" note) and finishes', async () => {
+    passThrough = true;
+    admin('grant', EMAIL, '5', 'files test: echo');
+    await freshApp();
+    await choose('echo2.mp4');
+    await pick(page, 'noise', 'polish');
+    await page.getByRole('checkbox', { name: /Remove speaker echo/ }).check();
+    await start().click();
+    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+    const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
+    for (let i = 0; i < 90; i++) {
+      const j = await apiCall(page, 'GET', `jobs/${id}`);
+      if (j.body?.status === 'done') {
+        if (j.body.options.echo_reference_track !== true || j.body.notice) throw new Error(JSON.stringify(j.body));
+        if (!j.body.outputs.some((o) => /-cleaned\.\w+$/.test(o.name))) throw new Error(JSON.stringify(j.body.outputs));
+        await page.screenshot({ path: join(SHOTS, 'cleanup-echo-done.png'), fullPage: true });
+        return `done: ${j.body.outputs.map((o) => o.name).join(', ')}`;
+      }
+      if (['failed', 'canceled'].includes(j.body?.status)) throw new Error(JSON.stringify(j.body));
+      await page.waitForTimeout(1000);
+    }
+    throw new Error('job did not finish');
+  });
+
+  await check('echo removal asked for a one-track file: the job still finishes, and its card says there was no second track to use', async () => {
+    forceEcho = true;
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'polish');
+    await start().click();
+    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+    const notice = page.locator('[data-testid=job]').first().getByTestId('job-notice');
+    await notice.waitFor({ timeout: 90000 });
+    forceEcho = false;
+    const t = (await notice.innerText()).trim();
+    if (!/only one audio track/.test(t)) throw new Error(t);
+    return t;
   });
 
   await browser.close();

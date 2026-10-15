@@ -42,7 +42,14 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 ## Product
 - ✅ Free browser denoise (DFN3 WASM)
 - ✅ Studio clean, transcription (standard/premium, free quota), subtitles (soft subs + SRT/VTT/TXT)
+- ✅ Recordings: noise remover chosen per file (Background noise: Automatic / Light / Heavy; DeepFilterNet3 or
+  DPDFNet-8, docs/research/denoise-2026-10.md addendum); missing highs of phone-quality recordings restored (AP-BWE)
+- ⬜ Desktop: upload the four AP-BWE ONNX models (~/audio-cleaner/models/ap-bwe/*to48k.onnx) to a GitHub release
+  tagged `models-v1` (not "latest"); the desktop app downloads them from there (resources.HIGHS_MODEL)
+- ✅ Echo removal for recordings with a second audio track (desktop sound), included in Studio clean (option `echo_reference_track`, docs/api.md)
 - ✅ Live denoise + live captions, server side + protocol (PCM and Opus)
+- ✅ Live echo cancellation (speakers' sound removed from the mic; no extra price): OBS plugin sends the Desktop Audio as a
+  reference, the browser uses its own; server AEC ~2 % of a core per stream (docs/streaming-protocol.md section 5)
 - ⬜ OBS plugin: Windows/macOS builds via CI need a GitHub repo with Actions;
   code signing (Apple Developer ID $99/yr, Windows Authenticode certificate)
 - 🔬 Studio clean: benchmark found no clearly better model than DFN3 + polish; optional GPU hybrid pending a blind A/B (docs/research/denoise.md)

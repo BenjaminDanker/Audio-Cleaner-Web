@@ -13,6 +13,10 @@ $FF -v error -y -i "$SRC" -c:a wmav2 noisy.wma  # browsers cannot open it themse
 $FF -v error -y -f lavfi -i testsrc=size=320x240:rate=25 -i "$SRC" -shortest -c:v mpeg4 -c:a ac3 -b:a 192k noisy.avi  # same, video
 $FF -v error -y -f lavfi -i testsrc2=size=640x360:rate=25 -i "$SRC" -map 0:v -map 1:a -c:v libx264 -preset ultrafast -c:a aac -shortest test.mp4
 $FF -v error -y -f lavfi -i testsrc2=size=320x180:rate=25 -i "$SRC" -map 0:v -map 1:a -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -c:a libopus -shortest test.webm
+# Two audio tracks, as OBS writes them: the mic (voice + the speakers heard back, 40 ms late) and the desktop sound the speakers played.
+SPK=${E2E_SPEAKER_WAV:-$(dirname "$SRC")/clean_freesound_33711.wav}
+$FF -v error -y -f lavfi -i testsrc2=size=320x180:rate=25 -i "$SRC" -i "$SPK" -filter_complex "[2:a]aresample=48000,asplit[s1][s2];[s1]adelay=40,volume=0.5[e];[1:a]aresample=48000[v];[v][e]amix=inputs=2:normalize=0:duration=first[mic]" -map 0:v -map "[mic]" -map "[s2]" -c:v libx264 -preset ultrafast -c:a aac -shortest echo2.mp4
+$FF -v error -y -i echo2.mp4 -map 0:a -c:a flac echo2.mka  # audio only, same two tracks
 echo "not audio at all" > bad.txt
 head -c 300000 /dev/urandom > garbage.mp3
 $FF -v error -y -stream_loop 56 -i stereo44.wav -c:a libmp3lame -b:a 128k long10min.mp3

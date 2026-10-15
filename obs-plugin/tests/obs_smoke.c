@@ -2,13 +2,14 @@
  * obs_smoke: headless libobs host that loads the built module and exercises the
  * "Audio Cleaner (cloud)" filter through the real OBS filter chain.
  *
- *   obs_smoke <audio-cleaner.so> <plugin data dir> <ws url> <key file> <input.wav (48k mono s16)> [out.wav]
+ *   obs_smoke <audio-cleaner.so> <plugin data dir> <ws url> <key file> <input.wav (48k mono s16)> [out.wav [speakers.wav]]
  *
  * It starts libobs with an audio output, creates an audio input source with the
  * filter attached, feeds the WAV in real time in 10 ms packets (like a capture
  * device), records the mixed output and reports: module API version, property
  * list, the timestamp back-dating (output vs. input timeline), level, and the
- * filter status text. Not a unit test; needs a running server.
+ * filter status text. With speakers.wav it also plays that file on the Desktop Audio channel, so the
+ * filter's echo cancellation (reference taken from that source) runs. Not a unit test; needs a running server.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -158,7 +159,7 @@ static double rms(const float *x, size_t a, size_t b)
 int main(int argc, char **argv)
 {
 	if (argc < 6) {
-		fprintf(stderr, "usage: %s <module.so> <data dir> <ws url> <key file> <in.wav> [out.wav]\n", argv[0]);
+		fprintf(stderr, "usage: %s <module.so> <data dir> <ws url> <key file> <in.wav> [out.wav [speakers.wav]]\n", argv[0]);
 		return 2;
 	}
 	const char *module_path = argv[1], *data_dir = argv[2], *url = argv[3], *key_file = argv[4], *wav = argv[5];
@@ -181,6 +182,13 @@ int main(int argc, char **argv)
 	const int rate = 48000;
 	if (in_n > (size_t)rate * 8)
 		in_n = (size_t)rate * 8;
+
+	size_t spk_n = 0;
+	float *spk = argc > 7 ? read_wav(argv[7], &spk_n) : NULL;
+	if (argc > 7 && !spk) {
+		fprintf(stderr, "cannot read speakers wav\n");
+		return 2;
+	}
 
 	base_set_log_handler(log_handler, NULL);
 	printf("libobs %s\n", obs_get_version_string());
@@ -226,6 +234,13 @@ int main(int argc, char **argv)
 	si.destroy = smoke_destroy;
 	obs_register_source(&si);
 	obs_source_t *input = obs_source_create("smoke_input", "mic", NULL, NULL);
+	/* what the speakers play: the default echo reference is the source on output channel 1 */
+	obs_source_t *desktop = NULL;
+	if (spk) {
+		desktop = obs_source_create("smoke_input", "Desktop Audio", NULL, NULL);
+		obs_set_output_source(1, desktop);
+		obs_source_set_audio_active(desktop, true);
+	}
 
 	obs_data_t *fs = obs_data_create();
 	obs_data_set_string(fs, "api_key", key);
@@ -265,6 +280,11 @@ int main(int argc, char **argv)
 		a.format = AUDIO_FORMAT_FLOAT;
 		a.samples_per_sec = (uint32_t)rate;
 		a.timestamp = t0 + (uint64_t)((double)pos / rate * 1e9); /* capture time of the first sample */
+		if (desktop && pos + pkt <= spk_n) {
+			a.data[0] = (const uint8_t *)(spk + pos);
+			obs_source_output_audio(desktop, &a);
+			a.data[0] = (const uint8_t *)(in + pos);
+		}
 		obs_source_output_audio(input, &a);
 	}
 	os_sleep_ms(1500);
@@ -334,6 +354,10 @@ int main(int argc, char **argv)
 	obs_source_filter_remove(input, filter);
 	obs_source_release(filter);
 	obs_source_release(input);
+	if (desktop) {
+		obs_set_output_source(1, NULL);
+		obs_source_release(desktop);
+	}
 	obs_set_output_source(0, NULL);
 	obs_shutdown();
 	printf("shutdown ok; leaked objects: %ld\n", bnum_allocs());

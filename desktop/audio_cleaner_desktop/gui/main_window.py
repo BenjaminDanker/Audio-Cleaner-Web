@@ -26,6 +26,7 @@ from .player import PreviewPane
 from .preferences import Preferences
 from .queue_view import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING, WAITING, FileItem, FileRow, QueueView
 from .settings_panel import SettingsPanel
+from .speech_model import SpeechModelDownloader, size_text
 from .theme import set_property
 from .widgets import Banner
 from .worker import Job, JobQueue
@@ -168,8 +169,12 @@ class MainWindow(QMainWindow):
 
         self.banner_missing = Banner()
         self.banner_disk = Banner()
+        self.banner_models = Banner()
+        self.banner_models.action.connect(self.fetch_models)
+        self._model_queue: list[SpeechModelDownloader] = []
         layout.addWidget(self.banner_missing)
         layout.addWidget(self.banner_disk)
+        layout.addWidget(self.banner_models)
         if self._missing:
             self.banner_missing.show_message(
                 "Audio Cleaner is missing some of its own files (" + ", ".join(self._missing) + "). "
@@ -196,7 +201,13 @@ class MainWindow(QMainWindow):
         self._left = left
         body.addLayout(left, 1)
 
-        self.settings_panel = SettingsPanel(self.prefs)
+        self.speech_download = SpeechModelDownloader(self)
+        self.highs_download = SpeechModelDownloader(self, resources.HIGHS_MODEL)
+        for dl in (self.speech_download, self.highs_download):
+            dl.finished.connect(lambda ok, message, dl=dl: self._model_download_finished(dl, ok, message))
+            dl.progress.connect(lambda done, total, dl=dl: self._model_queue and self._model_queue[0] is dl
+                                and self._show_model_progress(done, total))
+        self.settings_panel = SettingsPanel(self.prefs, self.speech_download, highs_downloader=self.highs_download)
         self._settings_scroll = scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -377,12 +388,84 @@ class MainWindow(QMainWindow):
     def start(self) -> None:
         if self._missing or self.queue.busy:
             return
+        if self.prefs.subtitles != "off" and not self.speech_download.ready and not self._ask_for_speech_model():
+            return
         self._batch_started = time.monotonic()
         self._batch_done = self._batch_failed = 0
         for row in self.view.rows():
             if row.item.state == WAITING:
                 self._enqueue(row.item)
         self.queue.start()
+        self._refresh_state()
+
+    def _ask_for_speech_model(self) -> bool:
+        """Subtitles are on but the speech model is not here: setup downloads it, so this only happens when
+        that download failed (offline during setup). Offers to download it now; returns False (nothing is
+        started now)."""
+        if self.speech_download.running:
+            QMessageBox.information(
+                self, config.APP_NAME,
+                "The speech model for subtitles is still downloading (the progress is shown at the top). Start "
+                "again when it is done, or turn subtitles off to clean the files now.",
+            )
+            return False
+        box = QMessageBox(
+            QMessageBox.Icon.Question, config.APP_NAME,
+            "The speech model for subtitles was not installed, probably because the download during setup did not "
+            f"work. Download it now ({size_text(self.speech_download.model.size)})?\n\n"
+            "You can start cleaning when it is done, or turn subtitles off to clean the files right away.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self,
+        )
+        box.button(QMessageBox.StandardButton.Yes).setText("Download")
+        box.button(QMessageBox.StandardButton.No).setText("Not now")
+        if box.exec() == QMessageBox.StandardButton.Yes:
+            self.fetch_models()
+        return False
+
+    def fetch_models(self) -> None:
+        """Download every model that is not here yet, one after the other (setup normally installed them; this
+        finishes a download that failed there). Noise removal works meanwhile."""
+        if self._missing:
+            return
+        self._model_queue = [d for d in (self.speech_download, self.highs_download) if not d.ready]
+        self._next_model()
+
+    def _next_model(self) -> None:
+        queue = getattr(self, "_model_queue", [])
+        while queue and queue[0].ready:
+            queue.pop(0)
+        if not queue:
+            self.banner_models.hide()
+            return
+        dl = queue[0]
+        if not dl.running:
+            dl.start()
+        self._show_model_progress(0, dl.model.size)
+
+    def _show_model_progress(self, done: int, total: int) -> None:
+        left = sum(d.model.size for d in getattr(self, "_model_queue", [])) or total
+        pct = int(100 * done / max(1, total))
+        self.banner_models.show_message(
+            f"Getting everything ready: downloading the models for subtitles and phone-quality recordings "
+            f"({size_text(left)} in all, once; {pct}% of the current one). Noise removal works already.",
+            "info",
+        )
+
+    def _model_download_finished(self, downloader: SpeechModelDownloader, ok: bool, message: str) -> None:
+        queue = getattr(self, "_model_queue", [])
+        if not ok:
+            if message:  # not a cancel on quit
+                self.banner_models.show_message(
+                    f"A model could not be downloaded: {message}", "warn", action_text="Try again",
+                )
+            return
+        if queue and queue[0] is downloader:
+            queue.pop(0)
+        if queue:
+            self._next_model()
+        else:
+            self.banner_models.hide()
+            self._notify(config.APP_NAME, "Everything is ready: subtitles and phone-quality restoring work now.")
         self._refresh_state()
 
     def _primary_clicked(self) -> None:
@@ -459,6 +542,8 @@ class MainWindow(QMainWindow):
             notes.append(f"the earlier version is in the {shell.TRASH_NAME}")
         if item.options and item.options.subtitles != "off" and result.subtitles is None and not result.embedded:
             notes.append("no speech found for subtitles")
+        if result.notice:
+            notes.append(result.notice)
         item.message = "; ".join(notes)
         self._batch_done += 1
         self._record(item, DONE, "", [str(p) for p in paths])
@@ -681,6 +766,10 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.queue.shutdown()
+        for dl in (self.speech_download, self.highs_download):
+            dl.cancel()  # resumes from where it stopped next time
+        for dl in (self.speech_download, self.highs_download):
+            dl.wait(5)
         self._pool.waitForDone()
         if self.preview is not None:
             self.preview.stop()

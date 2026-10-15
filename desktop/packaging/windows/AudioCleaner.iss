@@ -1,6 +1,8 @@
 ; Inno Setup 6 script for the Audio Cleaner installer.
 ;
-;   iscc /DAppVersion=2.0.0 /DSourceDir=C:\path\to\dist\AudioCleaner [/DOutputDir=C:\out] [/DIconFile=C:\path\icon.ico] AudioCleaner.iss
+;   iscc /DAppVersion=2.0.0 /DSourceDir=C:\path\to\dist\AudioCleaner [/DOutputDir=C:\out] [/DIconFile=C:\path\icon.ico]
+;        [/DModelsInclude=C:\path\models.iss] AudioCleaner.iss
+;   (models.iss from installer_models.py: setup then downloads the models; without it they come on first start)
 ;
 ; SourceDir is the PyInstaller output folder (the one that contains AudioCleaner.exe and _internal\).
 ; Installs per user by default (no administrator prompt); the "Install for all users" choice on the first
@@ -59,6 +61,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+
+; The models (speech model for subtitles, highs restoration): downloaded during setup, see installer_models.py.
+#ifdef ModelsInclude
+  #include ModelsInclude
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"

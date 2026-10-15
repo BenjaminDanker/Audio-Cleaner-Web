@@ -43,11 +43,11 @@ inline uint64_t get_u64(const uint8_t *p)
 
 }  // namespace
 
-size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n, uint8_t *out)
+size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n, uint8_t *out, uint16_t flags)
 {
 	out[0] = kProtoVersion;
 	out[1] = kCodecS16;
-	put_u16(out + 2, 0);
+	put_u16(out + 2, flags);
 	put_u32(out + 4, seq);
 	put_u64(out + 8, ts_us);
 	uint8_t *p = out + kHeaderSize;
@@ -62,11 +62,11 @@ size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n
 	return kHeaderSize + 2 * n;
 }
 
-void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *out)
+void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *out, uint16_t flags)
 {
 	out[0] = kProtoVersion;
 	out[1] = codec;
-	put_u16(out + 2, 0);
+	put_u16(out + 2, flags);
 	put_u32(out + 4, seq);
 	put_u64(out + 8, ts_us);
 }
@@ -140,6 +140,8 @@ std::string make_start_message(const StartParams &p)
 	if (p.codec == "opus" && p.opus_bitrate > 0)
 		j["opusBitrate"] = p.opus_bitrate;
 	j["attenLimDb"] = p.atten_lim_db;
+	if (p.echo_reference)
+		j["echoReference"] = true;
 	j["client"] = p.client;
 	return j.dump();
 }
@@ -198,6 +200,8 @@ bool parse_event(const std::string &text, Event &ev)
 		integer("hopSamples", ev.hop_samples);
 		integer("sampleRate", ev.sample_rate);
 		integer("maxSessionSeconds", ev.max_session_seconds);
+		if (auto it = j.find("echoReference"); it != j.end() && it->is_boolean())
+			ev.echo_reference = it->get<bool>();
 	} else if (type == "caption") {
 		ev.type = EventType::Caption;
 		str("text", ev.text);

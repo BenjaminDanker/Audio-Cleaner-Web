@@ -334,6 +334,7 @@ function LiveDemo({ pricing }) {
             onChange={(id) => { setStrength(id); session.current?.setAtten(strengthDb(id)); }}
           />
           <span className="hint">You can change it while you talk.</span>
+          <span className="hint">Echo from your speakers is removed automatically. With headphones you don't need it.</span>
         </Group>
 
         <Group id="grp-captions" title="Captions">

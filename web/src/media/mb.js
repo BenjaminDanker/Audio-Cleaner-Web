@@ -45,12 +45,13 @@ export function elementDuration(file, timeoutMs = 8000) {
  * Inspect a file. Never throws; unknown fields are null/false.
  * @returns {Promise<{duration:number|null, hasVideo:boolean, hasAudio:boolean|null, audioCodec:string|null,
  *   videoCodec:string|null, channels:number|null, sampleRate:number|null, canDecode:boolean|null, viaMediabunny:boolean,
- *   viaLibav:boolean}>}  viaLibav: only libav.js (src/media/libav.js) can decode the audio here; the picture can't be kept.
+ *   viaLibav:boolean, audioTracks:number}>}  audioTracks: how many audio tracks the file holds (OBS can record mic and
+ *   desktop sound as two). viaLibav: only libav.js (src/media/libav.js) can decode the audio here; the picture can't be kept.
  */
 export async function probeMedia(file) {
   const info = {
     duration: null, hasVideo: false, hasAudio: null, audioCodec: null, videoCodec: null,
-    channels: null, sampleRate: null, canDecode: null, viaMediabunny: false, viaLibav: false,
+    channels: null, sampleRate: null, canDecode: null, viaMediabunny: false, viaLibav: false, audioTracks: 0,
   };
   try {
     const { input } = await openInput(file);
@@ -58,6 +59,7 @@ export async function probeMedia(file) {
     info.viaMediabunny = true;
     info.hasVideo = !!vTrack;
     info.hasAudio = !!aTrack;
+    info.audioTracks = (await input.getAudioTracks()).length;
     if (vTrack) info.videoCodec = await vTrack.getCodec();
     if (aTrack) {
       info.audioCodec = await aTrack.getCodec();
@@ -85,6 +87,7 @@ export async function probeMedia(file) {
     if (l?.hasAudio) {
       Object.assign(info, { hasAudio: true, hasVideo: info.hasVideo || l.hasVideo, channels: l.channels || info.channels, sampleRate: l.sampleRate || info.sampleRate });
       if (l.duration) info.duration = l.duration;
+      info.audioTracks = l.audioTracks;
       info.canDecode = true;
       info.viaMediabunny = false; // decoding (and any upload) goes through the file as a whole
       info.viaLibav = true;
@@ -98,6 +101,7 @@ export async function probeMedia(file) {
       info.hasAudio = true;
       info.channels = pcm.channels;
       info.sampleRate = pcm.rate;
+      info.audioTracks = 1;
       info.audioCodec = `pcm-s${pcm.bits}${pcm.bigEndian ? 'be' : ''}`;
     }
   }

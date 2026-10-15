@@ -97,7 +97,7 @@ export async function* libavFrames(file, { signal } = {}) {
   }
 }
 
-/** What libav.js can tell about a file the browser can't read: {duration, hasAudio, hasVideo, channels, sampleRate}, or null. */
+/** What libav.js can tell about a file the browser can't read: {duration, hasAudio, hasVideo, audioTracks, channels, sampleRate}, or null. */
 export async function libavProbe(file) {
   if (!DIR) return null;
   let libav;
@@ -121,6 +121,7 @@ export async function libavProbe(file) {
       duration: us > 0 && Number.isFinite(us) ? us / 1e6 : null, // AV_TIME_BASE units; unknown is a huge negative number
       hasAudio: !!a,
       hasVideo: v,
+      audioTracks: streams.filter((s) => s.codec_type === libav.AVMEDIA_TYPE_AUDIO).length,
       channels: a ? await libav.AVCodecParameters_ch_layout_nb_channels(a.codecpar) : null,
       sampleRate: a ? await libav.AVCodecParameters_sample_rate(a.codecpar) : null,
     };

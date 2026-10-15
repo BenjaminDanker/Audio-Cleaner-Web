@@ -22,6 +22,13 @@ export const LOUDNESS = [
   { id: 'keep', label: 'Keep original loudness', value: null },
 ];
 
+// Background noise in the recording: "auto" measures it and picks the noise remover that suits it.
+export const NOISE = [
+  { id: 'auto', label: 'Automatic', hint: 'We measure how noisy the recording is and pick the best way to clean it.' },
+  { id: 'light', label: 'Light noise', hint: 'Hiss, hum, a quiet room or a fan. Keeps the voice the most natural.' },
+  { id: 'heavy', label: 'Heavy noise', hint: 'A café, traffic, a crowd, wind: noise almost as loud as the voice.' },
+];
+
 export const AUDIO_FORMATS = [
   { id: 'wav', label: 'WAV (lossless)' },
   { id: 'flac', label: 'FLAC (lossless, smaller)' },
@@ -65,7 +72,8 @@ export function kindLabel(job) {
 
 /**
  * Create a job and upload its input. For video inputs the audio track is extracted in the browser first so only
- * the audio is uploaded (falls back to uploading the whole file). Uncompressed WAV/AIFF audio is losslessly encoded to
+ * the audio is uploaded (falls back to uploading the whole file). With options.echo_reference_track the first two
+ * audio tracks are kept (a file with only one has nothing to extract and goes up whole). Uncompressed WAV/AIFF audio is losslessly encoded to
  * FLAC first (falls back to the original). The declared filename and sizeBytes always describe what is uploaded.
  * @returns {Promise<{id:string, estCostMicros:number, extracted:boolean, compressed:{from:number,to:number}|null,
  *   uploadBytes:number, originalBytes:number, uploadName:string}>}
@@ -80,7 +88,8 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   if (!wantsEmbed && info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
     onStage?.('extract');
     try {
-      const out = await extractAudio(file, { onProgress: (p) => onProgress?.({ phase: 'extract', frac: p }), signal });
+      // Echo removal needs the desktop sound too: keep the first two audio tracks, not just the first.
+      const out = await extractAudio(file, { tracks: options.echo_reference_track ? 2 : 1, onProgress: (p) => onProgress?.({ phase: 'extract', frac: p }), signal });
       if (out && out.blob.size < file.size * 0.9) {
         blob = out.blob;
         name = out.filename;

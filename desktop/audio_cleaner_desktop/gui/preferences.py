@@ -44,6 +44,9 @@ class Preferences:
     loudness = _Setting(engine.DEFAULT_LOUDNESS, engine.LOUDNESS_TARGETS)
     subtitles = _Setting("off", engine.SUBTITLE_MODES)
     language = _Setting("auto", ("auto", *engine.LANGUAGES))
+    noise = _Setting("auto", ("auto", "light", "heavy"))
+    echo_track = _Setting(False)
+    restore_highs = _Setting(True)
     audio_format = _Setting("same", engine.AUDIO_CHOICES)
     parallel = _Setting(0, range(5))  # files at once; 0 = Auto
     output_mode = _Setting("next", ("next", "folder"))
@@ -56,7 +59,8 @@ class Preferences:
     def job_options(self) -> engine.JobOptions:
         return engine.JobOptions(
             strength=self.strength, polish=self.polish, audio_format=self.audio_format, loudness=self.loudness,
-            subtitles=self.subtitles, language=self.language,
+            subtitles=self.subtitles, language=self.language, noise=self.noise, echo_track=self.echo_track,
+            restore_highs=self.restore_highs,
         )
 
     def output_dir(self) -> Path | None:

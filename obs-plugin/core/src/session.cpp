@@ -60,6 +60,8 @@ struct Frame {
 	uint32_t seq = 0;
 	uint64_t ts_us = 0;
 	float pcm[kFrameSamples] = {};
+	float ref[kFrameSamples] = {};  // what the speakers played meanwhile (echo cancellation)
+	bool has_ref = false;           // ... and it is not silence
 };
 
 constexpr size_t kMaxBlock = 2048;           // host-rate samples handled per inner step
@@ -147,6 +149,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	uint32_t next_seq = 0;
 	SpscQueue<Frame> queue{kQueueFrames};
 	std::atomic<bool> streaming{false};
+	std::atomic<bool> echo_active{false};  // the server accepted the echo reference
 	std::atomic<uint64_t> last_process_us{0};
 
 	// ---- thread control ----------------------------------------------------
@@ -316,6 +319,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			fill = 0;
 			cur.seq = next_seq++;
 			cur.ts_us = now_us();
+			cur.has_ref = cfg.reference && cfg.reference->pull(cur.ref, kFrameSamples);  // also keeps its clock moving
 			counters.captured.fetch_add(1, std::memory_order_relaxed);
 			if (!streaming.load(std::memory_order_acquire))
 				continue;  // not connected: nothing to send (original audio is played)
@@ -507,6 +511,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			sp.codec = use_opus ? "opus" : "pcm_s16le";
 			sp.opus_bitrate = use_opus ? cfg.opus_bitrate : 0;
 			sp.client = cfg.client;
+			sp.echo_reference = cfg.reference != nullptr;
 			if (!ws.sendText(make_start_message(sp)).success) {
 				out.reason = "could not send start message";
 				ws.stop();
@@ -526,6 +531,10 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			return out;
 		}
 		const Event ready = att->ready_ev;
+		const bool send_ref = cfg.reference && ready.echo_reference;
+		echo_active.store(send_ref);
+		if (cfg.reference && !send_ref)
+			log(LogLevel::Warning, "the server does not offer echo cancellation: continuing without it");
 		if (ready.sample_rate != 0 && ready.sample_rate != kNetRate) {
 			out.reason = "server sample rate " + std::to_string(ready.sample_rate) + " is not supported";
 			out.min_wait_ms = 60000;
@@ -567,6 +576,9 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		std::unique_ptr<OpusEnc> enc;
 		if (use_opus)
 			enc = std::make_unique<OpusEnc>(cfg.opus_bitrate);  // fresh state for every connection
+		std::unique_ptr<OpusEnc> ref_enc;  // the reference is a stream of its own
+		if (use_opus && send_ref)
+			ref_enc = std::make_unique<OpusEnc>(cfg.opus_bitrate);
 
 		while (!stopping()) {
 			{
@@ -585,30 +597,44 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 					queue.pop();
 					continue;
 				}
-				uint8_t *txp = reinterpret_cast<uint8_t *>(&tx[0]);
-				size_t len = 0;
-				if (enc) {
-					const int n = enc->encode(f->pcm, txp + kHeaderSize, static_cast<int>(kMaxOpusPacket));
-					if (n <= 0) {
-						counters.dropped.fetch_add(1, std::memory_order_relaxed);
-						queue.pop();
-						continue;
-					}
-					encode_frame_header(kCodecOpus, f->seq, f->ts_us, txp);
-					len = kHeaderSize + static_cast<size_t>(n);
-				} else {
-					len = encode_frame_s16(f->seq, f->ts_us, f->pcm, kFrameSamples, txp);
+				// Encodes one frame into `tx`: its length, or 0 when the encoder failed.
+				auto encode = [&](OpusEnc *e, const float *pcm, uint16_t flags) -> size_t {
+					uint8_t *txp = reinterpret_cast<uint8_t *>(&tx[0]);
+					if (!e)
+						return encode_frame_s16(f->seq, f->ts_us, pcm, kFrameSamples, txp, flags);
+					const int n = e->encode(pcm, txp + kHeaderSize, static_cast<int>(kMaxOpusPacket));
+					if (n <= 0)
+						return 0;
+					encode_frame_header(kCodecOpus, f->seq, f->ts_us, txp, flags);
+					return kHeaderSize + static_cast<size_t>(n);
+				};
+				auto send = [&](size_t len) -> bool {
+					const size_t cap = tx.size();
+					tx.resize(len);
+					const bool ok = ws.sendBinary(tx).success;
+					tx.resize(cap);
+					if (ok)
+						counters.tx_bytes.fetch_add(len, std::memory_order_relaxed);
+					return ok;
+				};
+				// The reference goes first, so the server has it when the microphone frame arrives.
+				if (send_ref && f->has_ref) {
+					const size_t rlen = encode(ref_enc.get(), f->ref, kFlagReference);
+					if (rlen && send(rlen))
+						counters.reference_sent.fetch_add(1, std::memory_order_relaxed);
+				}
+				const size_t len = encode(enc.get(), f->pcm, 0);
+				if (!len) {
+					counters.dropped.fetch_add(1, std::memory_order_relaxed);
+					queue.pop();
+					continue;
 				}
 				if (static_cast<int64_t>(f->seq) >= att->first_valid_seq.load(std::memory_order_relaxed))
 					store.mark_sent(f->seq);
-				const size_t cap = tx.size();
-				tx.resize(len);
-				if (ws.sendBinary(tx).success) {
+				if (send(len))
 					counters.sent.fetch_add(1, std::memory_order_relaxed);
-					counters.tx_bytes.fetch_add(len, std::memory_order_relaxed);
-				} else
+				else
 					counters.dropped.fetch_add(1, std::memory_order_relaxed);
-				tx.resize(cap);
 				queue.pop();
 			}
 
@@ -637,6 +663,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			cv.wait_for(lk, std::chrono::milliseconds(4), [&] { return stopping() || queue.front() != nullptr; });
 		}
 		streaming.store(false, std::memory_order_release);
+		echo_active.store(false);
 		out.streamed_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_start).count());
 
 		if (stopping()) {
@@ -931,6 +958,8 @@ SessionSnapshot Session::snapshot() const
 	}
 	s.insecure = d.insecure;
 	s.codec = d.use_opus ? "opus" : "pcm_s16le";
+	s.echo_requested = d.cfg.reference != nullptr;
+	s.echo_active = d.echo_active.load();
 	s.passthrough_only = !d.supported;
 	s.delay_ms = d.supported ? d.delay_sec * 1000.0 : 0.0;
 	s.captured = d.counters.captured.load();
@@ -979,6 +1008,8 @@ std::string Session::status_line() const
 		std::snprintf(buf, sizeof buf, " | delay %.0f ms", s.delay_ms);
 		out += buf;
 	}
+	if (s.echo_active)
+		out += " | echo cancellation on";
 	if (s.state == SessionState::Streaming || s.captured > 0) {
 		out += " | frames ok " + std::to_string(s.used) + ", late " + std::to_string(s.late) + ", passthrough " +
 		       std::to_string(s.passthrough);

@@ -1,8 +1,21 @@
 # Audio Cleaner for desktop
 
-The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code). It works fully
-offline: the noise model, the subtitle (speech) model and FFmpeg ship inside the installer. Nothing is downloaded or
-uploaded at run time.
+The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code).
+The installer carries the app, FFmpeg and the two noise models (DeepFilterNet3, and DPDFNet-8 for heavy noise), so
+noise removal works offline straight after installing. Two larger models are downloaded by setup itself (the
+installer is small; the Windows installer's download page and the Mac .pkg's postinstall script check every file's
+SHA-256, keep files a previous install left in place, and are generated from the app's catalog by
+`packaging/installer_models.py`):
+
+- the speech model for subtitles, Whisper large-v3-turbo (1.6 GB, from Hugging Face, `resources.SPEECH_MODEL`);
+- the model that restores the highs of phone-quality recordings, AP-BWE (4 x 119 MB ONNX, from this repository's
+  `models-v1` release, `resources.HIGHS_MODEL`).
+
+They go to `{app}\models\<id>` on Windows and `/Library/Application Support/Audio Cleaner/models/<id>` on a Mac
+(`models.installer_dir`). If a download fails during setup (offline), setup still finishes; Settings then shows a
+Download button for what is missing (`models.py`: pinned, resumable, verified, into the app's data folder), and
+`AudioCleaner --download-speech-model` does the speech model from a terminal. Nothing is ever uploaded. The Mac
+download is a `.pkg` (not a disk image) because a disk image has no setup step to download in.
 
 Runs on Windows 10/11 (x64) and macOS 14 Sonoma or newer, on Apple silicon or Intel (PySide6 6.12 and the
 onnxruntime wheels set that floor; Intel Macs use onnxruntime 1.23.2, the last release with Intel Mac wheels).
@@ -35,10 +48,10 @@ the checklist at the end).
    never deleted by the cleanup.
 3. `.github/workflows/desktop.yml` builds, per platform: FFmpeg (LGPL, from pinned source tarballs; Windows is
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest`, and the
-   installer (Inno Setup on Windows, `hdiutil` dmg on macOS). Website/server-only pushes skip it; "Run workflow"
+   installer (Inno Setup on Windows, a `pkgbuild` .pkg on macOS; both download the models during setup). Website/server-only pushes skip it; "Run workflow"
    builds by hand (artifacts only, no release). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
-4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.dmg`
-   and `AudioCleaner-<version>-Mac-Intel.dmg` (GitHub shows each file's SHA-256 itself, so there is no separate
+4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
+   and `AudioCleaner-<version>-Mac-Intel.pkg` (GitHub shows each file's SHA-256 itself, so there is no separate
    checksum file) and marks the release as latest, so the link to share with
    friends is always `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest`. The app is not on the
    website and never contacts it.
@@ -58,7 +71,7 @@ Prices and eligibility from `docs/research/desktop-packaging.md` (researched Oct
 Signing never runs for pull requests. With the secrets present the workflow signs the Windows program files and the
 installer, and on macOS signs every Mach-O file inside out with the hardened runtime
 (`desktop/packaging/macos/sign_app.sh`, entitlements in `macos/entitlements.plist`), notarizes and staples the app
-and the dmg (`macos/notarize.sh`). Unverified until the first signed run: the Azure inputs follow the action's
+and the app inside the .pkg (`macos/notarize.sh`; signing the .pkg itself needs a "Developer ID Installer" certificate, not wired in yet). Unverified until the first signed run: the Azure inputs follow the action's
 `action.yml` (v2.0.0); the macOS flow is the standard `codesign` / `notarytool` / `stapler` sequence.
 
 ### What users see without signing
@@ -118,7 +131,7 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    subtitle engine (CTranslate2, Silero VAD, the bundled model), so a missing shared library or data file fails here.
 6. **Installer**: Windows `iscc /DAppVersion=2.0.0 /DSourceDir=dist\AudioCleaner desktop\packaging\windows\AudioCleaner.iss`
    (per-user install by default, asks for elevation only if the user picks all users; Start menu, optional desktop
-   icon, uninstaller, `EULA.txt`). macOS `desktop/packaging/macos/make_dmg.sh "dist/Audio Cleaner.app" out.dmg`.
+   icon, uninstaller, `EULA.txt`). macOS `desktop/packaging/macos/make_pkg.sh "dist/Audio Cleaner.app" out.pkg VERSION`.
 
 ### Packaging notes worth knowing
 

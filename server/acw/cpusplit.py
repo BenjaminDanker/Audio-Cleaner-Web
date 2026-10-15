@@ -39,6 +39,7 @@ def physical_cores() -> list[list[int]]:
 # Capacity is counted in "units": one standard live-denoise session = 1.
 UNITS = {"light": 1.0}
 CAPTIONS_LOCAL_UNITS = 0.7  # streaming English caption model
+ECHO_UNITS = 0.2  # echo cancellation: 0.020 cores per stream next to 0.096 for the denoiser (2026-10-15)
 # Units one physical core carries with good latency while file jobs run on the
 # other cores: 12 units on 5 cores, measured 2026-10-14 on the Ryzen 7 1700X.
 # Other CPUs: scaled at start-up by calibrate_units_per_core().
@@ -47,7 +48,8 @@ REFERENCE_FRAME_COST = 0.110  # cores one standard session used single-threaded 
 
 
 def session_units(cfg: dict) -> float:
-    return UNITS.get(cfg.get("denoise") or "", 0.0) + (CAPTIONS_LOCAL_UNITS if cfg.get("captions") == "local" else 0.0)
+    return (UNITS.get(cfg.get("denoise") or "", 0.0) + (CAPTIONS_LOCAL_UNITS if cfg.get("captions") == "local" else 0.0)
+            + (ECHO_UNITS if cfg.get("echo_reference") else 0.0))
 
 
 def min_job_cores() -> int:

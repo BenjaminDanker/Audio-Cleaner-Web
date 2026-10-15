@@ -19,6 +19,7 @@ constexpr uint8_t kCodecS16 = 1;
 constexpr uint8_t kCodecF32 = 2;
 constexpr uint8_t kCodecOpus = 3;  // exactly one 20 ms Opus packet per frame
 constexpr size_t kHeaderSize = 16;
+constexpr uint16_t kFlagReference = 1;  // frame flags bit 0: echo reference (what the speakers play), not microphone audio
 
 // Latency presets (fixed output delay D, chosen at session start).
 enum class LatencyPreset { Low = 80, Balanced = 150, Safe = 250 };

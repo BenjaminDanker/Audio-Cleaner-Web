@@ -42,6 +42,10 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> i
     if missing:
         print("Missing components: " + ", ".join(missing), file=sys.stderr)
         return 1
+    if options.subtitles != "off" and not resources.speech_ready():
+        print("Subtitles need the speech model. Download it first: open Audio Cleaner, Settings, Subtitles "
+              "(or run with --download-speech-model).", file=sys.stderr)
+        return 1
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     failures = 0
@@ -64,9 +68,36 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> i
     return 1 if failures else 0
 
 
+def download_speech_model() -> int:
+    """Download (or finish downloading) the speech model, with a progress line."""
+    from . import models
+
+    model = resources.SPEECH_MODEL
+    if models.is_installed(model):
+        print(f"The speech model is already there: {models.location(model)}")
+        return 0
+    line = _ProgressLine(f"Downloading the speech model ({model.size / 1e9:.1f} GB)")
+    cancel = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: cancel.set())
+    try:
+        path = models.download(model, progress=lambda done, total: line(done / total), cancel=cancel)
+    except models.Cancelled:
+        line.finish()
+        print("Stopped. Run it again to continue where it left off.", file=sys.stderr)
+        return 130
+    except models.DownloadError as e:
+        line.finish()
+        print(str(e), file=sys.stderr)
+        return 1
+    line.finish()
+    print(f"Done: {path}")
+    return 0
+
+
 def _check_speech_runtime() -> None:
-    """The subtitle engine: faster-whisper, CTranslate2's native library, the Silero VAD model (onnxruntime)
-    and the bundled speech model all load. Catches missing shared libraries or data files in a frozen build."""
+    """The subtitle engine: faster-whisper, CTranslate2's native library and the Silero VAD model
+    (onnxruntime) load, and so does the speech model when it has been downloaded. Catches missing
+    shared libraries or data files in a frozen build."""
     import ctranslate2
     from faster_whisper import WhisperModel
     from faster_whisper.vad import get_vad_model
@@ -74,7 +105,9 @@ def _check_speech_runtime() -> None:
     if "int8" not in ctranslate2.get_supported_compute_types("cpu"):
         raise RuntimeError("CTranslate2 cannot run int8 models on this CPU")
     get_vad_model()
-    WhisperModel(str(resources.whisper_model_path()), device="cpu", compute_type="int8", cpu_threads=1, num_workers=1)
+    path = resources.whisper_model_path()
+    if path is not None:
+        WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=1, num_workers=1)
 
 
 def selftest() -> int:

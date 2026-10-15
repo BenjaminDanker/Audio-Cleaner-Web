@@ -1,7 +1,7 @@
 # Builds the Audio Cleaner desktop app: installer for Windows x64, disk images for macOS arm64 and x86_64.
 #
 # Stages: FFmpeg (LGPL-only, built from source) and libDF (DeepFilterNet's C library) per platform, then the
-# app per platform (tests, PyInstaller, frozen --selftest, installer / dmg). Push a tag desktop-vX.Y.Z whose
+# app per platform (tests, PyInstaller, frozen --selftest, installer: Inno Setup / .pkg). Push a tag desktop-vX.Y.Z whose
 # version matches audio_cleaner_desktop.__version__ to publish a GitHub Release with the three installers and
 # SHA256SUMS. Signing is optional and only happens when the secrets exist (docs/desktop.md lists them):
 #   macOS    MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD (+ APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD to notarize)
@@ -194,12 +194,16 @@ jobs:
           path: .hf-cache
           key: whisper-small-${{ hashFiles('desktop/packaging/prepare_vendor.py') }}
 
+      - name: Heavy-noise model (DPDFNet-8, pinned and verified)
+        run: bash deploy/fetch-dpdfnet.sh build/dpdfnet
+
       - name: Assemble the vendor directory (native pieces, models, licence notices)
         run: |
           python desktop/packaging/prepare_vendor.py \
             --libdf "build/libdf/${{ matrix.lib }}" \
             --ffmpeg-dir build/ffmpeg \
             --model build/libdf/DeepFilterNet3_onnx.tar.gz \
+            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr.onnx \
             --deepfilter-notices build/libdf \
             --download-whisper \
             --out desktop/vendor
@@ -259,8 +263,11 @@ jobs:
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
           $ws = $env:GITHUB_WORKSPACE
+          # Setup downloads the models (speech, highs) itself: the list comes from the app's catalog.
+          python desktop\packaging\installer_models.py "$ws\build\models.iss"
+          if ($LASTEXITCODE -ne 0) { throw "installer_models.py failed ($LASTEXITCODE)" }
           & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$ws\dist\AudioCleaner" "/DOutputDir=$ws\build\installer" `
-            "/DIconFile=$ws\build\icons\icon.ico" "$ws\desktop\packaging\windows\AudioCleaner.iss"
+            "/DIconFile=$ws\build\icons\icon.ico" "/DModelsInclude=$ws\build\models.iss" "$ws\desktop\packaging\windows\AudioCleaner.iss"
           if ($LASTEXITCODE -ne 0) { throw "iscc failed ($LASTEXITCODE)" }
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item "build\installer\AudioCleaner-Setup-$env:APP_VERSION-x64.exe" out\AudioCleaner-Setup-x64.exe
@@ -330,29 +337,21 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: bash desktop/packaging/macos/notarize.sh "dist/Audio Cleaner.app"
 
-      - name: Disk image (macOS)
+      - name: Installer package (macOS; its setup step downloads the models)
         if: runner.os == 'macOS'
         run: |
           arch="${{ matrix.platform }}"; arch="${arch#macos-}"
           mkdir -p out
-          bash desktop/packaging/macos/make_dmg.sh "dist/Audio Cleaner.app" "out/AudioCleaner-macOS-$arch.dmg"
-          echo "DMG=out/AudioCleaner-macOS-$arch.dmg" >> "$GITHUB_ENV"
+          python desktop/packaging/installer_models.py --mac build/pkg-scripts
+          bash desktop/packaging/macos/make_pkg.sh "dist/Audio Cleaner.app" "out/AudioCleaner-macOS-$arch.pkg" \
+            "$APP_VERSION" build/pkg-scripts
+          echo "PKG=out/AudioCleaner-macOS-$arch.pkg" >> "$GITHUB_ENV"
 
-      - name: Sign and notarize the disk image (macOS)
-        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-        run: |
-          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$DMG"
-          if [ "$MAC_NOTARIZE" = true ]; then bash desktop/packaging/macos/notarize.sh "$DMG"; fi
-
-      - name: Upload disk image
+      - name: Upload installer package
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          path: ${{ env.DMG }}
+          path: ${{ env.PKG }}
           archive: false
           if-no-files-found: error
 
@@ -404,14 +403,17 @@ jobs:
           cd release
           # Friendlier names for the release page (the build artifacts keep the platform names).
           mv AudioCleaner-Setup-x64.exe "AudioCleaner-$version-Windows.exe"
-          mv AudioCleaner-macOS-arm64.dmg "AudioCleaner-$version-Mac-Apple-silicon.dmg"
-          mv AudioCleaner-macOS-x86_64.dmg "AudioCleaner-$version-Mac-Intel.dmg"
-          files=("AudioCleaner-$version-Windows.exe" "AudioCleaner-$version-Mac-Apple-silicon.dmg" "AudioCleaner-$version-Mac-Intel.dmg")
+          mv AudioCleaner-macOS-arm64.pkg "AudioCleaner-$version-Mac-Apple-silicon.pkg"
+          mv AudioCleaner-macOS-x86_64.pkg "AudioCleaner-$version-Mac-Intel.pkg"
+          files=("AudioCleaner-$version-Windows.exe" "AudioCleaner-$version-Mac-Apple-silicon.pkg" "AudioCleaner-$version-Mac-Intel.pkg")
           notes="Audio Cleaner $version, built from ${GITHUB_SHA::7}.
 
           - Windows 10 or 11: AudioCleaner-$version-Windows.exe
-          - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.dmg
-          - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.dmg
+          - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
+          - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
+
+          Setup downloads the models for subtitles and phone-quality recordings (about 2.1 GB, once), so keep the
+          internet on while it installs. After that everything works offline.
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           if [ "$GITHUB_REF_TYPE" = tag ]; then

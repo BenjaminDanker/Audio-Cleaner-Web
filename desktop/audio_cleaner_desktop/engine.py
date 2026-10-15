@@ -89,8 +89,13 @@ class JobOptions:
     loudness: str = DEFAULT_LOUDNESS
     subtitles: str = "off"
     language: str = "auto"
+    noise: str = "auto"  # pipeline.NOISE_PROFILES: measured per file, or forced light / heavy
+    echo_track: bool = False  # remove speaker echo using the file's second audio track (when it has one)
+    restore_highs: bool = True  # bring back the highs of phone-quality recordings (needs HIGHS_MODEL)
 
     def __post_init__(self) -> None:
+        if self.noise not in pipeline.NOISE_PROFILES:
+            raise ValueError(f"unknown noise setting {self.noise!r}")
         if self.strength not in STRENGTHS:
             raise ValueError(f"unknown strength {self.strength!r}")
         if self.audio_format not in AUDIO_CHOICES:
@@ -119,6 +124,7 @@ class JobResult:
     subtitles: Path | None = None  # the .srt/.vtt/.txt file written next to `output`
     embedded: bool = False  # subtitles went into the video
     language: str | None = None  # language the speech was transcribed in
+    notice: str | None = None  # something the user should know about how the file was cleaned
 
     @property
     def paths(self) -> list[Path]:
@@ -228,13 +234,19 @@ def _shifted(segments: list[captions.Segment], offset: float) -> list[captions.S
 
 def _transcribe(
     ff: FFmpeg, src: Path, info: ProbeResult, work: Path, options: JobOptions, threads: int,
-    progress: Progress, cancel: threading.Event,
+    progress: Progress, cancel: threading.Event, echo_free: np.ndarray | None = None,
 ) -> tuple[list[captions.Segment], str]:
-    """Transcribe the original audio (more accurate than the cleaned one)."""
-    audio = ff.decode_to_file(src, info, _SPEECH_RATE, 1, MAX_SECONDS, work / "speech.f32")
+    """Transcribe the original audio (more accurate than the cleaned one), or the echo-free mic track
+    when the speaker echo was removed first."""
+    if echo_free is not None:
+        audio = pipeline.to_speech_16k(echo_free)[:, None]
+    else:
+        audio = ff.decode_to_file(src, info, _SPEECH_RATE, 1, MAX_SECONDS, work / "speech.f32")
     language = None if options.language == "auto" else options.language
     segments: list[captions.Segment] = []
     model = resources.whisper_model_path()
+    if model is None:
+        raise MediaError("Subtitles need the speech model, which isn't downloaded yet. Download it in Settings, then try again.")
     try:
         for a, b in _piece_bounds(audio):
             piece = np.ascontiguousarray(audio[a:b, 0])
@@ -323,10 +335,18 @@ def process(
         work = Path(tempfile.mkdtemp(dir=dest_dir, prefix=".acw-work-"))
         try:
             _check_cancel(cancel)
+            notice = None
+            if options.echo_track:
+                if info.audio_tracks >= 2:
+                    mic = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
+                    x = pipeline.remove_echo(ff, src, info, mic, MAX_SECONDS, work_dir=work, cancel=cancel)
+                    mic = None
+                else:
+                    notice = "only one audio track, so no speaker echo was removed"
             segments, language = [], None
             if want_subs:
                 segments, language = _transcribe(
-                    ff, src, info, work, options, threads, report.span(0.0, transcribe_end), cancel
+                    ff, src, info, work, options, threads, report.span(0.0, transcribe_end), cancel, echo_free=x
                 )
                 _check_cancel(cancel)
             has_text = any(s.text.strip() for s in segments)
@@ -334,20 +354,31 @@ def process(
                 sub_tmp = work / f"subtitles{_SUBTITLE_SUFFIX[sub_kind]}"
                 sub_tmp.write_text(_subtitle_text(sub_kind, segments), encoding="utf-8")
 
-            x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
+            if x is None:
+                x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
             report(decode_end)
+            used: dict = {}
             y = pipeline.clean_audio(
                 x,
                 resources.libdf_path(),
                 resources.model_path(),
                 pipeline.CleanOptions(
-                    atten_lim_db=options.atten_lim_db, polish=options.polish, loudness_lufs=options.loudness_lufs
+                    atten_lim_db=options.atten_lim_db, polish=options.polish, loudness_lufs=options.loudness_lufs,
+                    noise=options.noise, restore_highs=options.restore_highs,
                 ),
                 threads=threads,
                 progress=report.span(decode_end, clean_end),
                 cancel=cancel,
                 out=pipeline.output_buffer(x, work),
+                heavy_model_path=resources.heavy_noise_model_path(),
+                bwe_model_dir=resources.highs_model_dir(),
+                report=used,
             )
+            if used.get("highs"):
+                notice = "; ".join(filter(None, [notice, "missing highs restored"]))
+            elif options.restore_highs and resources.highs_model_dir() is None and _sounds_band_limited(x):
+                notice = "; ".join(filter(None, [notice, "sounds like a phone recording; its highs can be restored once "
+                                                 "the model for that has finished downloading"]))
             _check_cancel(cancel)
             _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language)
             # Windows can't delete a file that is still mapped.
@@ -372,8 +403,17 @@ def process(
         tmp_out.unlink(missing_ok=True)
     report(1.0)
     return JobResult(
-        final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language
+        final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language,
+        notice=notice,
     )
+
+
+def _sounds_band_limited(x: np.ndarray) -> bool:
+    from acw_common import bwe
+
+    x = np.asarray(x)
+    return bwe.pick_model(bwe.effective_bandwidth(x[:, 0] if x.ndim == 2 and x.shape[1] == 1 else
+                                                  (x.mean(axis=1) if x.ndim == 2 else x))) is not None
 
 
 def _remove_work_dir(work: Path) -> None:

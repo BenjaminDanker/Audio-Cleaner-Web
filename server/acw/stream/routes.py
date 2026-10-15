@@ -83,8 +83,7 @@ class Session:
         self.held_seconds = 0.0
         self.seconds = 0.0
         self.frames: OrderedDict[int, tuple[int, int]] = OrderedDict()
-        self.pace_tokens = PACE_BURST_SECONDS
-        self.pace_last = time.monotonic()
+        self.pace = [[PACE_BURST_SECONDS, time.monotonic()] for _ in range(2)]  # mic, echo reference
         self.warned = False
         self.next_extend_try = 0.0
         self.end_reason = "client_closed"
@@ -108,13 +107,14 @@ class Session:
         self.held_seconds += 60.0
         return True
 
-    def paced(self, seconds: float) -> bool:
+    def paced(self, seconds: float, reference: bool = False) -> bool:
+        bucket = self.pace[reference]
         now = time.monotonic()
-        self.pace_tokens = min(PACE_BURST_SECONDS, self.pace_tokens + (now - self.pace_last) * PACE_RATE)
-        self.pace_last = now
-        if self.pace_tokens < seconds:
+        bucket[0] = min(PACE_BURST_SECONDS, bucket[0] + (now - bucket[1]) * PACE_RATE)
+        bucket[1] = now
+        if bucket[0] < seconds:
             return False
-        self.pace_tokens -= seconds
+        bucket[0] -= seconds
         return True
 
 
@@ -230,7 +230,8 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         return None
 
     sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language,
-                                   "atten_lim_db": float(cfg.get("attenLimDb", 100.0))}, rate)
+                                   "atten_lim_db": float(cfg.get("attenLimDb", 100.0)),
+                                   "echo_reference": cfg.get("echoReference") is True}, rate)
     try:
         sess.open_hold()
     except ledger.InsufficientFunds as e:
@@ -289,6 +290,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         "modelLatencyMs": round(ready.get("latencySamples", 0) * 1000 / P.SAMPLE_RATE, 1),
         "usdPerMinute": rate / 1e6,
         "maxSessionSeconds": MAX_SESSION_SECONDS,
+        **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
     })
     return sess
 
@@ -338,7 +340,8 @@ async def _run(sess: Session) -> None:
                 break
             if msg.get("bytes") is not None:
                 try:
-                    codec, seq, ts = P.frame_header(msg["bytes"])
+                    codec, seq, ts, flags = P.frame_header(msg["bytes"])
+                    reference = bool(flags & P.FLAG_REFERENCE)
                     if codec == P.CODEC_OPUS:
                         # Opaque here; decoded only inside the sandboxed worker.
                         pkt = P.opus_payload(msg["bytes"])
@@ -352,10 +355,14 @@ async def _run(sess: Session) -> None:
                     await _send_json(ws, {"type": "error", "code": "bad_frame", "message": str(e)})
                     sess.end_reason = "protocol_error"
                     break
-                if not sess.paced(dur):
+                if not sess.paced(dur, reference):
                     await _send_json(ws, {"type": "error", "code": "too_fast", "message": "Audio must be sent in real time."})
                     sess.end_reason = "too_fast"
                     break
+                if reference:  # what the speakers played: no reply, no billing; ignored unless the session asked for it
+                    if sess.cfg["echo_reference"]:
+                        await P.send_msg(sess.writer, P.MSG_REF, ipc)
+                    continue
                 sess.seconds += dur
                 if sess.seconds >= MAX_SESSION_SECONDS:
                     sess.end_reason = "max_duration"

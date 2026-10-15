@@ -60,8 +60,17 @@ Products/tiers: `denoise/standard`, `transcribe/local`, `transcribe/premium`,
     "free": false,
     "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
                 "language": "en" | null, "output_video": true, "embed_subtitles": true,
-                "loudness_lufs": -16 | null, "atten_lim_db": 100}}
+                "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
+                "noise": "auto|light|heavy"}}
    ```
+   `noise` (default `"auto"`) picks the noise remover: `light` = DeepFilterNet3, `heavy` = DPDFNet-8 (better
+   when the noise is nearly as loud as the voice), `auto` = measured per file (`pipeline.HEAVY_BELOW_DB`).
+   Band-limited recordings (phone calls, low-bitrate files) also get their missing highs restored (AP-BWE);
+   full-band recordings are never changed, and the job's `notice` says when it happened.
+   `echo_reference_track` (default `false`, must be a boolean) removes speaker echo from the first audio track
+   (the mic) using the file's second audio track (the desktop/speaker sound, as OBS can record it), before the
+   noise removal; the subtitles are then written from the echo-free recording. It is included in the price.
+   A file with a single audio track is processed normally and the job's `notice` says so.
    `free:true` is only allowed for `kind:"transcribe"` with `transcribeTier:"local"`
    (daily allowance, 30 min/file). Paid jobs need accepted terms. Returns
    `{id, estCostMicros, uploadUrl}`; 402 if the balance can't cover the estimate.
@@ -69,7 +78,8 @@ Products/tiers: `denoise/standard`, `transcribe/local`, `transcribe/premium`,
 2. `PUT /api/jobs/{id}/input` with the raw file bytes as the body (`Content-Length`
    must equal `sizeBytes`). Use XHR for upload progress.
 3. Poll `GET /api/jobs/{id}` every 1-2 s:
-   `{id,kind,tier,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,outputs:[{name,kind,bytes}],createdAt,finishedAt,expiresAt}`
+   `{id,kind,tier,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,notice,outputs:[{name,kind,bytes}],createdAt,finishedAt,expiresAt}`
+   (`notice`: a plain-words note about how the file was handled, or `null`; not an error).
    status: `uploading → queued → running → (cloud_asr) → done | failed | canceled | expired`.
 4. Download `GET /api/jobs/{id}/outputs/{name}` (attachment). Output kinds:
    `audio`, `video`, `captions`, `transcript`, `segments`. Outputs are deleted after 24 h.
@@ -87,6 +97,8 @@ only time the full key is shown); `DELETE /api/keys/{id}`.
 
 WebSocket `GET /api/stream/ws`, see [streaming-protocol.md](streaming-protocol.md).
 Browsers may connect with the session cookie (same-origin only).
+The `start` message may set `echoReference: true` to send what the speakers play next to the
+microphone, so the server cancels the echo (included in the price; protocol section 5).
 
 ## Webhooks
 

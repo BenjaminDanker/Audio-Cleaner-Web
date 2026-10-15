@@ -5,11 +5,15 @@ Client <-> web (WebSocket, docs/streaming-protocol.md):
   binary 16-byte header + audio payload
          u8  version (1)
          u8  codec   (1 = pcm_s16le, 2 = f32le, 3 = opus: one 20 ms packet)
-         u16 flags   (reserved, 0)
+         u16 flags   (bit 0: echo-reference frame, see below; others 0)
          u32 seq     (client frame counter, echoed back)
          u64 ts_us   (client timestamp, echoed back for RTT measurement)
   Audio is 48 kHz mono and each frame is a whole number of 10 ms hops
   (480 samples); responses carry the same number of samples per frame.
+  Echo reference: with "echoReference" in the start message, a client may send
+  what its speakers play as extra frames with flags bit 0 set, same codec and
+  the same seq as the mic frame they belong to, sent before it. They get no
+  reply and are not billed.
 
 Web <-> stream worker (Unix socket): u8 type + u32 length + payload.
 """
@@ -32,19 +36,21 @@ HEADER = struct.Struct("<BBHIQ")
 SAMPLE_RATE = 48_000
 HOP = 480
 MAX_FRAME_SAMPLES = HOP * 10  # 100 ms
+FLAG_REFERENCE = 1
 
 
 class ProtocolError(ValueError):
     pass
 
 
-def frame_header(data: bytes) -> tuple[int, int, int]:
+def frame_header(data: bytes) -> tuple[int, int, int, int]:
+    """(codec, seq, ts_us, flags)"""
     if len(data) < HEADER.size:
         raise ProtocolError("frame too short")
-    version, codec, _flags, seq, ts = HEADER.unpack_from(data)
+    version, codec, flags, seq, ts = HEADER.unpack_from(data)
     if version != VERSION:
         raise ProtocolError("unsupported frame version")
-    return codec, seq, ts
+    return codec, seq, ts, flags
 
 
 def opus_payload(data: bytes) -> bytes:
@@ -97,6 +103,7 @@ MSG_AUDIO = b"A"
 MSG_CONFIG = b"C"
 MSG_EVENT = b"T"
 MSG_END = b"E"
+MSG_REF = b"R"  # web -> worker: echo-reference audio for a mic frame (same payload as MSG_AUDIO)
 MSG_TAP = b"P"  # worker -> web: cleaned f32 audio for premium captions when the client uses Opus
 _IPC = struct.Struct("<cI")
 MAX_IPC = 4 * 1024 * 1024

@@ -27,6 +27,12 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
 * **API key** - create a dedicated key with only the `stream` scope on the website.
 * **Server URL** - default `wss://mc-multi-world.space/audio/api/stream/ws`.
 * **Remove background noise** (tier "light"), **Noise reduction strength** (attenuation limit 18 / 40 / 100 dB, changeable live).
+* **Echo cancellation** - the source that plays through your speakers, default *Desktop Audio*; *None* turns it off.
+  The filter listens to that source and sends its sound along with the microphone, so the service can remove the speakers'
+  sound from the microphone (a game or a call playing twice). Not needed with headphones (choose *None*: it saves about
+  65 kbps of upload). It is included in the price. A muted source counts as silent; if the source does not exist yet
+  (OBS still loading) the filter keeps looking for it, and the status line says "waiting for the speaker source".
+  With *Remove background noise* off only the captions are echo-free, the audio itself is not altered.
 * **Captions** - off / standard (local model) / premium, **language** (`auto` or an ISO code), **Send captions to the stream**
   (final captions only, split into <= 32 character lines, paced, stale ones dropped; only while streaming).
 * **Latency preset** - Low 80 ms, Balanced 150 ms, Safe 250 ms. Fixed for the whole session; changing it restarts the session.
@@ -41,13 +47,15 @@ With denoise off (captions only) the audio is not delayed at all.
 The filter outputs the input delayed by a fixed D (the preset) and **back-dates the output timestamp by D**, so OBS
 keeps audio and video in sync (OBS adds audio buffering automatically). *Monitoring* of that source is delayed by D.
 If a processed frame misses its deadline, or the connection is down, the delayed *original* audio is played
-(5 ms cross-fade), so the audio never stops. Rule of thumb for the RTT budget: `D - 30 ms (model) - 6.5 ms (Opus) - 25 ms (framing)`:
-Low leaves ~12 ms with Opus (LAN/nearby server only), Balanced ~85 ms, Safe ~185 ms. OBS at 44.1 kHz is resampled
+(5 ms cross-fade), so the audio never stops. Rule of thumb for the RTT budget: `D - 30 ms (model) - 6.5 ms (Opus) - 25 ms (framing)`
+(and `- 9 ms` with echo cancellation, which delays the audio that much):
+Low leaves ~12 ms with Opus (LAN/nearby server only; ~3 ms with echo cancellation), Balanced ~85 ms (~76), Safe ~185 ms (~176). OBS at 44.1 kHz is resampled
 (linear-phase polyphase, 44.1 <-> 48 kHz); other rates are passed through unchanged with a status warning.
 The filter is mono: channels are averaged and the result is written to all channels.
 
 ### Privacy and security
 
+* With echo cancellation, the sound of the chosen speaker source leaves your machine too, with the same encryption and billing.
 * Audio of the filtered source leaves your machine (encrypted with TLS) and is processed on the server; it is billed per second.
   Muting a source in OBS does not stop streaming - disable the filter.
 * **OBS stores filter settings, including the API key, unencrypted in the scene collection JSON.** Use a dedicated key with only
@@ -73,7 +81,7 @@ Windows builds mbedTLS (reads the Windows root store); macOS uses SecureTranspor
 `-DACW_USE_OPUS=OFF` builds without Opus (PCM only).
 
 Layout: `core/` OBS-independent library `acw_core` (SPSC rings, reframer, resampler, protocol, WebSocket thread, output stage,
-caption pacer); `src/` thin OBS glue; `tests/` unit tests, `core_stream_test` (live server) and `obs_smoke` (headless libobs host).
+echo reference buffer, caption pacer); `src/` thin OBS glue; `tests/` unit tests, `core_stream_test` (live server) and `obs_smoke` (headless libobs host).
 CI: `.github-workflows/build.yml` (move to `.github/workflows/`); the Linux job builds the pinned libobs from source.
 
 ### Signing (not implemented)

@@ -144,6 +144,7 @@ export default function JobCard({ job, upload, local, onChanged }) {
               </li>
             ))}
           </ul>
+          {job.notice && <p className="banner banner-info small mb0" role="status" data-testid="job-notice">{job.notice}</p>}
           {showRemux && <RemuxPanel job={job} local={local} />}
           {hasVideoOut && <p className="small muted mb0">The video file above already has the clean sound in it.</p>}
           <div className="row-between">

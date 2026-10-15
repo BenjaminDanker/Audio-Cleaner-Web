@@ -32,6 +32,12 @@ def format_spent(seconds: float) -> str:
 
 def describe_settings(s: dict, has_video: bool) -> str:
     parts = [dict(STRENGTH_LABELS).get(s.get("strength"), "Maximum") + " noise reduction"]
+    if s.get("noise", "auto") != "auto":
+        parts.append(f"for {s['noise']} noise")
+    if s.get("echo_track"):
+        parts.append("speaker echo removed")
+    if s.get("restore_highs") is False:
+        parts.append("highs not restored")
     if s.get("polish", True):
         parts.append("polished (" + LOUDNESS_SHORT.get(s.get("loudness"), "podcast") + ")")
     if not has_video and s.get("audio_format", "same") != "same":
@@ -45,6 +51,7 @@ def settings_dict(options: engine.JobOptions) -> dict:
     return {
         "strength": options.strength, "polish": options.polish, "loudness": options.loudness,
         "audio_format": options.audio_format, "subtitles": options.subtitles, "language": options.language,
+        "noise": options.noise, "echo_track": options.echo_track, "restore_highs": options.restore_highs,
     }
 
 

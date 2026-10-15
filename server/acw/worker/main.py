@@ -350,6 +350,8 @@ def process(job: dict, extra: dict) -> None:
         _reprice(job, float(probe["duration"]))
         job["duration_seconds"] = float(probe["duration"])
         res = run_stage(job, d, "main", min(budget, probe["duration"] * 3 + 1800))
+        if res.get("notice"):
+            jobs.set_notice(job["id"], res["notice"])
         if res.get("needs_cloud_asr"):
             db.execute(
                 "UPDATE jobs SET status = 'cloud_asr', stage = 'transcribing (premium)', progress = 85,"

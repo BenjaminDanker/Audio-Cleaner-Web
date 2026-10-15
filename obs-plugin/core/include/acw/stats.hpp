@@ -10,6 +10,7 @@ namespace acw {
 struct Counters {
 	std::atomic<uint64_t> captured{0};          // 20 ms frames assembled from the input
 	std::atomic<uint64_t> sent{0};              // frames sent to the server
+	std::atomic<uint64_t> reference_sent{0};    // echo-reference frames sent (silent ones are not)
 	std::atomic<uint64_t> received{0};          // frames received back (valid, in time or not)
 	std::atomic<uint64_t> used{0};              // output blocks played from processed audio
 	std::atomic<uint64_t> late{0};              // sent, but the reply missed its deadline or never came

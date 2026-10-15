@@ -1,5 +1,5 @@
 // Browser live-denoise demo client for GET /api/stream/ws (docs/streaming-protocol.md).
-// mic (48 kHz mono, all browser DSP off) -> capture worklet (20 ms frames) -> WebSocket (pcm_s16le + 16-byte header)
+// mic (48 kHz mono, the browser removes speaker echo; its noise suppression and auto gain are off) -> capture worklet (20 ms frames) -> WebSocket (pcm_s16le + 16-byte header)
 // <- processed frames -> playback worklet (jitter buffer) -> speakers
 
 import { streamUrl } from '../api.js';
@@ -113,7 +113,7 @@ export async function startLive(opts) {
 
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, sampleRate: 48000, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: false, autoGainControl: false },
     });
     ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     if (ctx.sampleRate !== 48000) throw new Error('Your browser can\'t run audio at 48 kHz, which live needs.');

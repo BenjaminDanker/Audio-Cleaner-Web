@@ -6,9 +6,10 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
-from .. import engine
+from .. import engine, resources
 from . import tips
 from .preferences import Preferences
+from .speech_model import SpeechModelDownloader, SpeechModelPanel
 from .widgets import ElidedLabel, IconButton, Segmented
 
 STRENGTH_LABELS = [("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Maximum")]
@@ -17,6 +18,7 @@ LOUDNESS_LABELS = {
     "keep": "Keep the original level",
 }
 LOUDNESS_SHORT = {"podcast": "podcast", "youtube": "YouTube", "broadcast": "TV and radio", "keep": "original level"}
+NOISE_LABELS = {"auto": "Automatic", "light": "Light noise", "heavy": "Heavy noise"}
 SUBTITLE_LABELS = {
     "off": "No subtitles", "srt": "SRT file", "vtt": "VTT file", "txt": "Text transcript", "embed": "Inside the video",
 }
@@ -69,10 +71,13 @@ def _select(box: QComboBox, key: object) -> None:
 class SettingsPanel(QFrame):
     changed = Signal()
 
-    def __init__(self, prefs: Preferences, parent: QWidget | None = None):
+    def __init__(self, prefs: Preferences, downloader: SpeechModelDownloader | None = None, parent: QWidget | None = None,
+                 highs_downloader: SpeechModelDownloader | None = None):
         super().__init__(parent)
         self.setObjectName("Card")
         self._prefs = prefs
+        self.downloader = downloader or SpeechModelDownloader(self)
+        self.highs_downloader = highs_downloader or SpeechModelDownloader(self, resources.HIGHS_MODEL)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(16)
@@ -91,6 +96,16 @@ class SettingsPanel(QFrame):
             "\u2022 Maximum: removes as much as it can. Best for noisy places.\n\n"
             "Not sure? Maximum works well for most voice recordings. Try Gentle if the voice starts to sound thin.",
             self._strength,
+        ))
+
+        self._noise = _combo(NOISE_LABELS, "What kind of background noise the recording has. Automatic measures it.")
+        layout.addWidget(_Row(
+            "Background noise",
+            "Audio Cleaner has two ways of removing noise, each best at its own kind of recording.\n\n"
+            "\u2022 Automatic: measures each file and picks for you\n"
+            "\u2022 Light noise: hiss, hum, a quiet room or a fan. Keeps the voice the most natural.\n"
+            "\u2022 Heavy noise: a caf\u00e9, traffic, a crowd or wind, with noise almost as loud as the voice",
+            self._noise,
         ))
 
         polish_row = _Row(
@@ -132,7 +147,35 @@ class SettingsPanel(QFrame):
             self._subtitles,
         )
         sub_row.layout_.addWidget(self._language)
+        self.speech_panel = SpeechModelPanel(self.downloader)
+        sub_row.layout_.addWidget(self.speech_panel)
+        self.downloader.changed.connect(self._refresh_enabled)
         layout.addWidget(sub_row)
+
+        self._highs = QCheckBox("Restore missing highs (phone-quality recordings)")
+        self._highs.setToolTip("For phone calls and other recordings that sound dull or muffled")
+        self._echo = QCheckBox("Remove speaker echo using a second audio track")
+        self._echo.setToolTip("For recordings with your desktop sound on a second audio track")
+        extra_row = _Row(
+            "Extra cleanup",
+            "Restore missing highs: phone calls, voice messages, old or low-quality recordings have lost their high "
+            "frequencies, which makes them sound dull and muffled. Audio Cleaner brings them back, only for "
+            "recordings that really are missing them; normal recordings are never changed. It needs an extra model, "
+            "downloaded once.\n\n"
+            "Remove speaker echo: if your speakers' sound got into your microphone (a game, a call, music), Audio "
+            "Cleaner can remove it, but only when the recording also has that speaker sound on its own audio track. "
+            "OBS can record that: in Settings > Output (Output Mode: Advanced) > Recording, tick audio tracks 1 "
+            "and 2; then in Edit > Advanced Audio Properties put your mic on track 1 only and Desktop Audio on "
+            "track 2 only. Files with one audio track are cleaned as usual.",
+        )
+        extra_row.layout_.addWidget(self._highs)
+        self.highs_panel = SpeechModelPanel(
+            self.highs_downloader, need="Restoring the highs needs an extra model", what="the model that restores highs",
+        )
+        extra_row.layout_.addWidget(self.highs_panel)
+        self.highs_downloader.changed.connect(self._refresh_enabled)
+        extra_row.layout_.addWidget(self._echo)
+        layout.addWidget(extra_row)
 
         self._where = Segmented([("next", "Next to original"), ("folder", "Choose folder")])
         self._where.setToolTip("Where the cleaned files are saved")
@@ -182,6 +225,9 @@ class SettingsPanel(QFrame):
         self._strength.changed.connect(lambda v: self._store("strength", v))
         self._polish.toggled.connect(lambda v: self._store("polish", v))
         self._loudness.currentIndexChanged.connect(lambda _: self._store("loudness", self._loudness.currentData()))
+        self._noise.currentIndexChanged.connect(lambda _: self._store("noise", self._noise.currentData()))
+        self._echo.toggled.connect(lambda v: self._store("echo_track", v))
+        self._highs.toggled.connect(lambda v: self._store("restore_highs", v))
         self._subtitles.currentIndexChanged.connect(lambda _: self._store("subtitles", self._subtitles.currentData()))
         self._language.currentIndexChanged.connect(lambda _: self._store("language", self._language.currentData()))
         self._format.currentIndexChanged.connect(lambda _: self._store("audio_format", self._format.currentData()))
@@ -193,6 +239,9 @@ class SettingsPanel(QFrame):
         self._strength.set_value(p.strength)
         self._polish.setChecked(p.polish)
         _select(self._loudness, p.loudness)
+        _select(self._noise, p.noise)
+        self._echo.setChecked(p.echo_track)
+        self._highs.setChecked(p.restore_highs)
         _select(self._subtitles, p.subtitles)
         _select(self._language, p.language)
         _select(self._format, p.audio_format)
@@ -228,12 +277,18 @@ class SettingsPanel(QFrame):
         """Height with every optional line showing (subtitle language, output folder), so the window can be
         sized once to fit them all."""
         spacing = self.layout().spacing() // 2 + 6
-        extra = sum(w.sizeHint().height() + spacing for w in (self._language, self._folder_box) if w.isHidden())
+        optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel)
+        extra = sum(w.sizeHint().height() + spacing for w in optional if w.isHidden())
         return self.sizeHint().height() + extra
 
     def _refresh_enabled(self) -> None:
         self._loudness.setEnabled(self._polish.isChecked())
-        self._language.setVisible(self._subtitles.currentData() != "off")
+        wants_subs = self._subtitles.currentData() != "off"
+        self._language.setVisible(wants_subs)
+        dl = self.downloader
+        self.speech_panel.setVisible(dl.running or bool(dl.last_error) or (wants_subs and not dl.ready))
+        hd = self.highs_downloader
+        self.highs_panel.setVisible(hd.running or bool(hd.last_error) or (self._highs.isChecked() and not hd.ready))
         folder_mode = self._where.value() == "folder"
         self._folder_box.setVisible(folder_mode)
         self._folder.setText(self._prefs.output_folder)

@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money, moneyUsd } from '../format.js';
 import { estimateMicros, findRate, usePricing } from '../hooks.js';
-import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, submitJob } from '../jobs.js';
+import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
@@ -69,9 +69,11 @@ export default function JobForm({ onSubmitted }) {
   const [subs, setSubs] = useState('off'); // 'off' | 'free' | 'standard' | 'accurate'
   const [keepVideo, setKeepVideo] = useState(true);
   const [embed, setEmbed] = useState(false);
+  const [echo, setEcho] = useState(false); // Clean & polish: remove speaker echo using the second audio track
   const [format, setFormat] = useState('wav');
   const [formatTouched, setFormatTouched] = useState(false);
   const [loudness, setLoudness] = useState('-16');
+  const [noiseKind, setNoiseKind] = useState('auto');
   const [strength, setStrength] = useState('max'); // Clean & polish
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
   const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
@@ -110,6 +112,7 @@ export default function JobForm({ onSubmitted }) {
   const kind = wantsPolish && wantsText ? 'denoise_transcribe' : wantsPolish ? 'denoise' : wantsText ? 'transcribe' : null;
   const free = subs === 'free' && !wantsPolish;
   const isVideo = !!info?.hasVideo;
+  const hasSecondTrack = (info?.audioTracks || 0) >= 2; // OBS and others can record mic and desktop sound as two tracks
 
   // Some formats (WMA, AMR, AVI, MPEG...) the browser can't read, but the server can. Then the length is a rough
   // guess from the file size (128 kbit/s) until the server measures it; the price is corrected to the real length.
@@ -165,6 +168,7 @@ export default function JobForm({ onSubmitted }) {
     setError('');
     setFormatTouched(false);
     setEmbed(false);
+    setEcho(false);
     setKeepVideo(true);
     setSubs('off');
     setNoise('off');
@@ -227,7 +231,9 @@ export default function JobForm({ onSubmitted }) {
         embed_subtitles: !!(wantsText && embed && i?.hasVideo),
         language: language || null,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
+        noise: noiseKind,
         atten_lim_db: strengthDb(strength),
+        echo_reference_track: !!(wantsPolish && echo && hasSecondTrack),
       },
     };
     try {
@@ -354,6 +360,13 @@ export default function JobForm({ onSubmitted }) {
               <StrengthPicker name="strength" value={strength} onChange={setStrength} disabled={busy} />
               <div className="form-grid">
                 <div className="field">
+                  <label htmlFor="noisekind">Background noise</label>
+                  <select id="noisekind" className="select" value={noiseKind} onChange={(e) => setNoiseKind(e.target.value)} disabled={busy}>
+                    {NOISE.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
+                  </select>
+                  <span className="hint">{NOISE.find((n) => n.id === noiseKind).hint}</span>
+                </div>
+                <div className="field">
                   <label htmlFor="afmt">Cleaned audio format</label>
                   <select id="afmt" className="select" value={format} onChange={(e) => { setFormat(e.target.value); setFormatTouched(true); }} disabled={busy}>
                     {AUDIO_FORMATS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
@@ -366,8 +379,19 @@ export default function JobForm({ onSubmitted }) {
                   </select>
                 </div>
               </div>
+              {hasSecondTrack && (
+                <label className="check">
+                  <input type="checkbox" name="echo" checked={echo} onChange={(e) => setEcho(e.target.checked)} disabled={busy} />
+                  <span>
+                    Remove speaker echo using the second audio track (your desktop sound)
+                    <span className="hint block">OBS can record your mic and your desktop audio on separate tracks. Put the mic on track 1 and the desktop sound on track 2.</span>
+                  </span>
+                </label>
+              )}
               </div>
             )}
+
+            {hasSecondTrack && wantsBrowser && <p className="small muted mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Clean &amp; polish; the free cleanup in your browser can&rsquo;t do it.</p>}
 
             {isVideo && wantsBrowser && info.viaLibav && <p className="small muted mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Clean &amp; polish gives you the whole video back.</p>}
             {isVideo && noise !== 'off' && !(wantsBrowser && info.viaLibav) && (

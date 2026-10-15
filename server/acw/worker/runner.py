@@ -99,7 +99,7 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
 
 
 def stage_main(job_dir: Path, spec: dict) -> dict:
-    from acw_common import pipeline
+    from acw_common import dpdfnet, pipeline
 
     ff = _ff(spec)
     src = job_dir / spec["input"]
@@ -114,12 +114,30 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
 
     needs_cloud = False
     cleaned_path = None
+    notice = None
+    noise_used = None  # which noise remover ran ("light" | "heavy"), for the record
     asr_end = 45 if denoise else 90  # progress when transcription is done
+    x = None  # the decoded audio, echo-free when the second track was used
+    if opts.get("echo_reference_track"):
+        if probe.audio_tracks < 2:
+            notice = "This file has only one audio track, so there was no desktop sound to remove echo with. It was processed without echo removal."
+        else:
+            # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
+            emit(stage="removing echo", progress=2)
+            mic = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
+            x = pipeline.remove_echo(
+                ff, src, probe, mic, spec["max_seconds"], work_dir=job_dir,
+                progress=lambda f: emit(stage="removing echo", progress=int(2 + 3 * f)),
+            )
+            del mic
     if transcribe:
         # Transcribe first, from the original audio: every recogniser we tested
         # scores worse on denoised speech (docs/research/asr.md).
-        emit(stage="decoding", progress=2)
-        speech_16k = ff.decode(src, probe, 16000, 1, spec["max_seconds"])[:, 0]
+        emit(stage="decoding", progress=5 if x is not None else 2)
+        if x is not None:
+            speech_16k = pipeline.to_speech_16k(x)
+        else:
+            speech_16k = ff.decode(src, probe, 16000, 1, spec["max_seconds"])[:, 0]
         if spec["transcribe_tier"] == "premium":
             emit(stage="preparing transcription", progress=5)
             _write_asr_chunks(ff, job_dir, speech_16k)
@@ -152,34 +170,45 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 json.dumps({"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
             )
     if denoise:
-        start = asr_end if transcribe else 2
+        start = asr_end if transcribe else (5 if x is not None else 2)
         emit(stage="decoding", progress=start)
         # Decoded and cleaned audio live in memory-mapped files in the job
         # directory, so RAM use doesn't grow with the length of the upload.
-        x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
+        if x is None:
+            x = pipeline.decode_for_clean(ff, src, probe, spec["max_seconds"], work_dir=job_dir)
         span = 85 - start
         emit(stage="denoising", progress=start + 2)
+        used: dict = {}
         y = pipeline.clean_audio(
             x, spec["lib_path"], spec["dfn_model"],
             pipeline.CleanOptions(
                 atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
                 loudness_lufs=opts.get("loudness_lufs", -16.0),
+                noise=opts.get("noise", "auto"),
             ),
             threads=threads,
             progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(start + 2 + span * f)),
             out=pipeline.output_buffer(x, job_dir),
+            heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
+            bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
+            report=used,
         )
+        noise_used = used.get("noise")
+        if used.get("highs"):
+            restored = "This sounded like a phone or low-quality recording, so its missing high frequencies were restored."
+            notice = f"{notice} {restored}" if notice else restored
         fmt = opts.get("audio_format", "wav")
         cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
         del x, y
-        for scratch in ("decoded.f32", "cleaned.npy"):
+        for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy"):
             (job_dir / scratch).unlink(missing_ok=True)
 
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
     )
-    result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0}
+    result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
+              "noise": noise_used}
     if not needs_cloud:
         result.update(stage_finalize(job_dir, spec))
     return result

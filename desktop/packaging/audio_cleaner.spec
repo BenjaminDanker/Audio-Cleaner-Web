@@ -38,6 +38,12 @@ binaries = []
 for f in sorted(need(VENDOR / "native").iterdir()):
     binaries.append((str(f), "native"))  # libdf.*, ffmpeg[.exe], ffprobe[.exe] -> <app>/native/
 
+# Only the two small noise models ship (DeepFilterNet3 8 MB, DPDFNet-8 15 MB); the speech model is
+# downloaded by the app (models.py), so the installer stays small. Refuse to bundle anything else.
+_shipped = sorted(p.name for p in need(VENDOR / "models").iterdir())
+if _shipped != ["DeepFilterNet3_onnx.tar.gz", "dpdfnet8_48khz_hr.onnx"]:
+    raise SystemExit(f"audio_cleaner.spec: vendor/models must only hold the two noise models, found {_shipped}")
+
 datas = [
     (str(need(VENDOR / "models")), "models"),
     (str(need(VENDOR / "licenses")), "licenses"),
@@ -53,6 +59,7 @@ datas += ct2_datas
 binaries += ct2_binaries
 hiddenimports += ct2_hidden
 binaries += collect_dynamic_libs("onnxruntime")
+binaries += collect_dynamic_libs("livekit")  # its native library carries WebRTC's echo canceller (acw_common.aec)
 
 # Qt modules the app does not use. Nothing imports them; excluding keeps the hooks from pulling them
 # (and their GPL-only third-party parts) in if the build environment has PySide6_Addons installed.

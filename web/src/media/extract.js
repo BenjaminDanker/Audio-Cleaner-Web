@@ -16,18 +16,25 @@ function planFor(mb, codec) {
   }
 }
 
+// Codecs a Matroska audio file can hold as they are; any other audio track is decoded to 16-bit PCM.
+const MKA_CODECS = new Set(['aac', 'opus', 'vorbis', 'mp3', 'flac']);
+const needsDecode = (codec) => !MKA_CODECS.has(codec) && !(codec && codec.startsWith('pcm-'));
+
 /**
+ * `tracks: 2` keeps the first two audio tracks (mic and desktop sound, for echo removal) in one Matroska audio file.
  * @returns {Promise<{blob: Blob, filename: string, codec: string, reencoded: boolean} | null>}
  *   null when extraction is not possible (caller uploads the original file instead).
  */
-export async function extractAudio(file, { onProgress, signal } = {}) {
+export async function extractAudio(file, { tracks = 1, onProgress, signal } = {}) {
   const mb = await loadMediabunny();
   const { input } = await openInput(file);
   try {
     const track = await input.getPrimaryAudioTrack();
     if (!track) return null;
     const codec = await track.getCodec();
-    let plan = planFor(mb, codec);
+    const multi = tracks > 1;
+    if (multi && (await input.getAudioTracks()).length < tracks) return null;
+    let plan = multi ? { format: () => new mb.MkvOutputFormat(), ext: '.mka', mime: 'audio/x-matroska' } : planFor(mb, codec);
     let reencode = false;
     if (!plan) {
       // exotic codec (AC-3, DTS, ...): decode to 16-bit PCM if this browser can
@@ -39,12 +46,14 @@ export async function extractAudio(file, { onProgress, signal } = {}) {
     const conv = await mb.Conversion.init({
       input,
       output,
-      tracks: 'primary',
+      tracks: multi ? 'all' : 'primary',
       video: { discard: true },
-      audio: reencode ? { codec: 'pcm-s16' } : undefined,
+      audio: multi
+        ? async (t, n) => (n > tracks ? { discard: true } : needsDecode(await t.getCodec()) ? { codec: 'pcm-s16' } : undefined)
+        : reencode ? { codec: 'pcm-s16' } : undefined,
       showWarnings: false,
     });
-    if (!conv.isValid || conv.utilizedTracks.length === 0) return null;
+    if (!conv.isValid || conv.utilizedTracks.length < tracks) return null; // both tracks or nothing: one would be no use
     conv.onProgress = (p) => onProgress?.(p);
     if (signal) signal.addEventListener('abort', () => conv.cancel(), { once: true });
     await conv.execute();

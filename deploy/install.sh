@@ -28,6 +28,9 @@ for f in "$H/bin/ffmpeg" "$H/bin/ffprobe" "$H/bin/libdf.so" "$H/models/DeepFilte
 done
 [ -d "$H/models/whisper/large-v3-turbo" ] || echo "warning: whisper large-v3-turbo missing (local transcription will fail)" >&2
 [ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
+# Heavy-noise model for recordings (small; pinned + verified). Without it heavy noise falls back to DeepFilterNet3.
+bash "$REPO/deploy/fetch-dpdfnet.sh" "$H/models/dpdfnet" || echo "warning: DPDFNet model download failed (heavy-noise recordings use DeepFilterNet3)" >&2
+[ -f "$H/models/ap-bwe/8kto48k.onnx" ] || echo "warning: AP-BWE models missing in $H/models/ap-bwe (tools/export_apbwe_onnx.py); band-limited recordings are not extended" >&2
 
 # 4. Config
 if [ ! -f "$H/secrets/acw.env" ]; then

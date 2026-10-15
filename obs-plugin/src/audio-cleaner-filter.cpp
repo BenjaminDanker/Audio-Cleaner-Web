@@ -23,6 +23,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * amount D. The output timestamp is back-dated by D so OBS keeps audio and
  * video in sync.
  *
+ * Echo cancellation: the filter can also listen to another source (usually Desktop
+ * Audio: what the speakers play) through an audio capture callback and send that
+ * to the service as the echo reference, so the speakers' sound is taken out of the
+ * microphone. The reference crosses to the audio thread in a lock-free buffer.
+ *
  * filter_audio() never blocks: it copies samples into acw_core's lock-free
  * rings and reads the delayed output from them. Everything slow (network, TLS,
  * Opus, reconnects) happens on acw_core's own threads.
@@ -34,6 +39,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include "caption-output.h"
 
+#include "acw/reference.hpp"
 #include "acw/session.hpp"
 
 #include <algorithm>
@@ -55,10 +61,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_LATENCY "latency_ms"
 #define S_CODEC "codec"
 #define S_SEND_CAPTIONS "send_captions"
+#define S_ECHO_SOURCE "echo_source"
 #define S_STATUS "status"
 #define S_REFRESH "refresh_status"
 
 #define DEFAULT_URL "wss://mc-multi-world.space/audio/api/stream/ws"
+#define ECHO_DESKTOP "@desktop"  // the Desktop Audio source (output channel 1); "" = no echo cancellation
 
 #define T_(s) obs_module_text(s)
 
@@ -76,6 +84,7 @@ struct Settings {
 	int latency_ms = 150;          // 80 / 150 / 250
 	std::string codec = "opus";    // opus | pcm
 	bool send_captions = false;
+	std::string echo_source = ECHO_DESKTOP;  // name of the source that plays through the speakers
 
 	bool configured() const { return !api_key.empty() && (denoise || captions != "off"); }
 
@@ -83,8 +92,15 @@ struct Settings {
 	bool same_session_as(const Settings &o) const
 	{
 		return api_key == o.api_key && url == o.url && denoise == o.denoise && captions == o.captions &&
-		       language == o.language && latency_ms == o.latency_ms && codec == o.codec;
+		       language == o.language && latency_ms == o.latency_ms && codec == o.codec &&
+		       echo_source.empty() == o.echo_source.empty();  // which source it is does not matter to the session
 	}
+};
+
+// What the capture callback of the echo source needs. Freed only once libobs can no longer call it.
+struct ref_tap {
+	std::shared_ptr<acw::ReferenceBuffer> buffer;
+	std::vector<float> mono;  // scratch for the downmix (callback thread only)
 };
 
 struct ac_filter {
@@ -102,6 +118,13 @@ struct ac_filter {
 	std::vector<acw::Session *> graveyard;  // sessions that could not be freed safely yet
 
 	std::vector<float> mono;  // preallocated scratch for the downmix
+
+	// Echo reference: the buffer lives as long as the filter, sessions and the tap share it.
+	std::shared_ptr<acw::ReferenceBuffer> reference;
+	obs_weak_source_t *ref_weak = nullptr;  // the source we listen to (weak: never keeps it alive)
+	ref_tap *tap = nullptr;
+	std::string ref_name;                   // echo_source the tap was set up for
+	float retry_s = 0.0f;
 
 	// "Send captions to stream" can be toggled without restarting the session.
 	std::shared_ptr<std::atomic<bool>> forward = std::make_shared<std::atomic<bool>>(false);
@@ -127,6 +150,7 @@ Settings read_settings(obs_data_t *d)
 		s.latency_ms = 150;
 	s.codec = obs_data_get_string(d, S_CODEC) == std::string("pcm") ? "pcm" : "opus";
 	s.send_captions = obs_data_get_bool(d, S_SEND_CAPTIONS);
+	s.echo_source = obs_data_get_string(d, S_ECHO_SOURCE);
 	return s;
 }
 
@@ -167,6 +191,8 @@ acw::Session *make_session(ac_filter *f)
 	cfg.delay_ms = s.latency_ms;
 	cfg.codec = s.codec == "pcm" ? acw::Codec::Pcm16 : acw::Codec::Opus;
 	cfg.host_rate = static_cast<int>(f->sample_rate);
+	if (!s.echo_source.empty())
+		cfg.reference = f->reference;
 	cfg.client = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
 
 	f->forward->store(s.send_captions);
@@ -178,6 +204,101 @@ acw::Session *make_session(ac_filter *f)
 				caption_output_push(ev.text.c_str());
 		},
 		log_cb);
+}
+
+// ---------------------------------------------------------------------------
+// echo reference
+
+// Runs on whichever thread delivers the source's audio. OBS audio is planar float at the OBS rate.
+void reference_audio_cb(void *param, obs_source_t *, const struct audio_data *audio, bool muted)
+{
+	auto *t = static_cast<ref_tap *>(param);
+	if (muted || audio->frames == 0)
+		return;  // a muted source is not playing: no reference
+	size_t nch = 0;
+	const float *planes[MAX_AV_PLANES];
+	for (size_t c = 0; c < MAX_AV_PLANES && audio->data[c]; ++c)
+		planes[nch++] = reinterpret_cast<const float *>(audio->data[c]);
+	if (nch == 0)
+		return;
+	const float inv = 1.0f / static_cast<float>(nch);
+	for (size_t done = 0; done < audio->frames;) {
+		const size_t n = std::min<size_t>(audio->frames - done, kMaxBlock);
+		float *mono = t->mono.data();
+		for (size_t i = 0; i < n; ++i) {
+			float acc = planes[0][done + i];
+			for (size_t c = 1; c < nch; ++c)
+				acc += planes[c][done + i];
+			mono[i] = acc * inv;
+		}
+		t->buffer->push(mono, n);
+		done += n;
+	}
+}
+
+// Stops listening to the echo source. Called with the lock held.
+void detach_reference(ac_filter *f)
+{
+	if (!f->ref_weak)
+		return;
+	if (obs_source_t *src = obs_weak_source_get_source(f->ref_weak)) {
+		// Returns once a running callback has finished: the tap can go.
+		obs_source_remove_audio_capture_callback(src, reference_audio_cb, f->tap);
+		obs_source_release(src);
+		delete f->tap;
+	}
+	// else: the source is being destroyed, and libobs may still call the callback for a moment.
+	// The tap (a few KB) is left behind rather than risk a call into freed memory.
+	obs_weak_source_release(f->ref_weak);
+	f->ref_weak = nullptr;
+	f->tap = nullptr;
+}
+
+// Makes the listening match the settings: the chosen source, or none. Called with the lock held;
+// also repeated about once a second (filter_tick) because the source may not exist yet when the
+// scene is loading, or may be recreated.
+void update_reference(ac_filter *f)
+{
+	const std::string &want = f->settings.echo_source;
+	if (!f->enabled || !f->reference || want.empty()) {
+		detach_reference(f);
+		return;
+	}
+	if (f->ref_weak && f->ref_name == want && !obs_weak_source_expired(f->ref_weak))
+		return;
+	detach_reference(f);
+
+	obs_source_t *src = nullptr;
+	if (want == ECHO_DESKTOP) {
+		src = obs_get_output_source(1);  // Desktop Audio
+	} else {
+		src = obs_get_source_by_name(want.c_str());
+	}
+	if (!src)
+		return;
+	if (src == obs_filter_get_parent(f->context)) {  // a source cannot be its own speakers
+		obs_source_release(src);
+		return;
+	}
+	f->tap = new ref_tap{f->reference, std::vector<float>(kMaxBlock, 0.0f)};
+	f->ref_weak = obs_source_get_weak_source(src);
+	f->ref_name = want;
+	obs_source_add_audio_capture_callback(src, reference_audio_cb, f->tap);
+	obs_source_release(src);
+}
+
+// Graphics thread, every frame: retry the listening about once a second.
+void filter_tick(void *data, float seconds)
+{
+	auto *f = static_cast<ac_filter *>(data);
+	f->retry_s += seconds;
+	if (f->retry_s < 1.0f)
+		return;
+	std::unique_lock<std::mutex> lk(f->mu, std::try_to_lock);
+	if (!lk.owns_lock())
+		return;
+	f->retry_s = 0.0f;
+	update_reference(f);
 }
 
 // Stops and frees a session that is no longer reachable through f->session.
@@ -203,6 +324,7 @@ void rebuild_session(ac_filter *f)
 	acw::Session *fresh = make_session(f);
 	acw::Session *old = f->session.exchange(fresh);
 	retire_session(f, old);
+	update_reference(f);
 }
 
 void on_enable_signal(void *data, calldata_t *cd)
@@ -232,6 +354,7 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_int(d, S_LATENCY, 150);
 	obs_data_set_default_string(d, S_CODEC, "opus");
 	obs_data_set_default_bool(d, S_SEND_CAPTIONS, false);
+	obs_data_set_default_string(d, S_ECHO_SOURCE, ECHO_DESKTOP);
 }
 
 void *filter_create(obs_data_t *settings, obs_source_t *source)
@@ -245,6 +368,8 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 		f->sample_rate = audio_output_get_sample_rate(audio);
 		f->channels = audio_output_get_channels(audio);
 	}
+	if (f->sample_rate >= 8000 && f->sample_rate <= 48000)  // the rates the sessions support
+		f->reference = std::make_shared<acw::ReferenceBuffer>(static_cast<int>(f->sample_rate));
 
 	{
 		std::lock_guard<std::mutex> lk(f->mu);
@@ -256,6 +381,7 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 		rebuild_session(f);
 	}
 	signal_handler_connect(obs_source_get_signal_handler(source), "enable", on_enable_signal, f);
+	obs_add_tick_callback(filter_tick, f);
 	return f;
 }
 
@@ -263,6 +389,7 @@ void filter_destroy(void *data)
 {
 	auto *f = static_cast<ac_filter *>(data);
 	signal_handler_disconnect(obs_source_get_signal_handler(f->context), "enable", on_enable_signal, f);
+	obs_remove_tick_callback(filter_tick, f);  // waits for a tick in progress
 	{
 		std::lock_guard<std::mutex> lk(f->mu);
 		f->enabled = false;
@@ -293,6 +420,7 @@ void filter_update(void *data, obs_data_t *settings)
 			s->set_atten_lim_db(next.strength);
 	}
 	f->forward->store(next.send_captions);
+	update_reference(f);  // a different echo source
 }
 
 // ---------------------------------------------------------------------------
@@ -357,7 +485,10 @@ std::string status_text(ac_filter *f)
 	acw::Session *s = f->session.load();
 	if (!s)
 		return "Not running";
-	return s->status_line();
+	std::string line = s->status_line();
+	if (!f->settings.echo_source.empty() && !f->ref_weak)
+		line += " | echo cancellation: waiting for the speaker source";
+	return line;
 }
 
 bool refresh_status_clicked(obs_properties_t *props, obs_property_t *, void *data)
@@ -367,6 +498,27 @@ bool refresh_status_clicked(obs_properties_t *props, obs_property_t *, void *dat
 		if (obs_property_t *st = obs_properties_get(props, S_STATUS))
 			obs_property_set_description(st, status_text(f).c_str());
 	return true;  // redraw the dialog with the new text
+}
+
+struct echo_list_ctx {
+	obs_property_t *list;
+	obs_source_t *self;     // the filtered source: it cannot be its own speakers
+	obs_source_t *desktop;  // offered as "Desktop Audio" already
+	std::string current;    // the saved choice, kept in the list even when that source is missing
+	bool found = false;
+};
+
+bool add_audio_source(void *param, obs_source_t *src)
+{
+	auto *c = static_cast<echo_list_ctx *>(param);
+	if (obs_source_get_type(src) != OBS_SOURCE_TYPE_INPUT || !(obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO))
+		return true;
+	if (src == c->self || src == c->desktop)
+		return true;
+	const char *name = obs_source_get_name(src);
+	obs_property_list_add_string(c->list, name, name);
+	c->found = c->found || c->current == name;
+	return true;
 }
 
 obs_properties_t *filter_properties(void *data)
@@ -389,6 +541,23 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Strong"), 40);
 	obs_property_list_add_int(strength, T_("AudioCleaner.Strength.Maximum"), 100);
 	obs_property_set_long_description(strength, T_("AudioCleaner.Strength.Long"));
+
+	obs_property_t *echo = obs_properties_add_list(p, S_ECHO_SOURCE, T_("AudioCleaner.Echo"), OBS_COMBO_TYPE_LIST,
+						       OBS_COMBO_FORMAT_STRING);
+	obs_property_set_long_description(echo, T_("AudioCleaner.Echo.Long"));
+	obs_property_list_add_string(echo, T_("AudioCleaner.Echo.None"), "");
+	obs_property_list_add_string(echo, T_("AudioCleaner.Echo.Desktop"), ECHO_DESKTOP);
+	{
+		echo_list_ctx ctx{echo, f ? obs_filter_get_parent(f->context) : nullptr, obs_get_output_source(1), {}};
+		if (f) {
+			std::lock_guard<std::mutex> lk(f->mu);
+			ctx.current = f->settings.echo_source;
+		}
+		obs_enum_sources(add_audio_source, &ctx);
+		if (!ctx.found && !ctx.current.empty() && ctx.current != ECHO_DESKTOP)
+			obs_property_list_add_string(echo, ctx.current.c_str(), ctx.current.c_str());
+		obs_source_release(ctx.desktop);  // null-safe
+	}
 
 	obs_property_t *cap = obs_properties_add_list(p, S_CAPTIONS, T_("AudioCleaner.Captions"), OBS_COMBO_TYPE_LIST,
 						      OBS_COMBO_FORMAT_STRING);

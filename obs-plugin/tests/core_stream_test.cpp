@@ -12,6 +12,7 @@
 // never printed.
 #include "acw/session.hpp"
 
+#include "acw/reference.hpp"
 #include "acw/resampler.hpp"
 
 #include <algorithm>
@@ -181,7 +182,7 @@ double lag_estimate(const std::vector<float> &ref, const std::vector<float> &sig
 struct Args {
 	std::string url = "ws://127.0.0.1:8791/api/stream/ws";
 	std::string key_file = "~/audio-cleaner/dev/key";
-	std::string in, out, clean;
+	std::string in, out, clean, reference;
 	std::string captions = "";
 	std::string language;
 	std::string codec = "opus";
@@ -199,7 +200,8 @@ void usage()
 {
 	std::printf("usage: core_stream_test --in noisy.wav [--out out.wav] [--clean clean.wav] [--url URL] [--key-file F]\n"
 		    "       [--rate 48000|44100] [--delay-ms 80|150|250] [--denoise 0|1] [--captions local|premium]\n"
-		    "       [--language en] [--atten 12|24|40|100] [--codec opus|pcm] [--expect-fallback] [--seconds N]\n");
+		    "       [--language en] [--atten 12|24|40|100] [--codec opus|pcm] [--expect-fallback] [--seconds N]\n"
+		    "       [--reference speakers.wav]   what the speakers play: asks the server to cancel the echo\n");
 }
 
 }  // namespace
@@ -226,6 +228,8 @@ int main(int argc, char **argv)
 			a.out = expand_home(val());
 		else if (k == "--clean")
 			a.clean = expand_home(val());
+		else if (k == "--reference")
+			a.reference = expand_home(val());
 		else if (k == "--captions")
 			a.captions = val();
 		else if (k == "--language")
@@ -288,7 +292,27 @@ int main(int argc, char **argv)
 		in = o;
 	}
 
+	// Echo reference at the host rate, played in step with the input.
+	std::vector<float> ref;
+	std::shared_ptr<ReferenceBuffer> reference;
+	if (!a.reference.empty()) {
+		Wav w;
+		if (!read_wav(a.reference, w)) {
+			std::fprintf(stderr, "cannot read %s\n", a.reference.c_str());
+			return 2;
+		}
+		ref = w.mono;
+		if (w.rate != a.rate) {
+			RationalResampler r(w.rate, a.rate);
+			std::vector<float> o(r.max_output(ref.size()));
+			o.resize(r.process(ref.data(), ref.size(), o.data()));
+			ref = o;
+		}
+		reference = std::make_shared<ReferenceBuffer>(a.rate);
+	}
+
 	SessionConfig cfg;
+	cfg.reference = reference;
 	cfg.url = a.url;
 	cfg.api_key = read_key(a.key_file);
 	cfg.denoise = a.denoise;
@@ -339,6 +363,17 @@ int main(int argc, char **argv)
 
 	session.start();
 	const auto t0 = Clock::now();
+	// The reference arrives on a thread of its own, in 10 ms chunks, like the capture callback of another source.
+	std::atomic<bool> feeding{true};
+	std::thread ref_thread;
+	if (reference && a.realtime) {
+		ref_thread = std::thread([&] {
+			for (size_t i = 0; feeding && i * base < ref.size(); ++i) {
+				std::this_thread::sleep_until(t0 + std::chrono::milliseconds(10 * (i + 1)));
+				reference->push(&ref[i * base], std::min(base, ref.size() - i * base));
+			}
+		});
+	}
 	size_t pos = 0, k = 0;
 	double worst_us = 0, sum_us = 0;
 	size_t calls = 0;
@@ -348,6 +383,8 @@ int main(int argc, char **argv)
 		if (a.realtime)
 			std::this_thread::sleep_until(t0 + std::chrono::duration_cast<Clock::duration>(
 								 std::chrono::duration<double>(static_cast<double>(pos) / a.rate)));
+		if (reference && !a.realtime && pos <= ref.size())
+			reference->push(&ref[pos - m], m);
 		const auto c0 = Clock::now();
 		session.process(&out[pos - m], m);
 		const double us = std::chrono::duration<double, std::micro>(Clock::now() - c0).count();
@@ -356,6 +393,9 @@ int main(int argc, char **argv)
 		++calls;
 	}
 	const double wall = std::chrono::duration<double>(Clock::now() - t0).count();
+	feeding = false;
+	if (ref_thread.joinable())
+		ref_thread.join();
 
 	const SessionSnapshot snap = session.snapshot();
 	std::printf("\nfed %zu samples in %.2f s wall time; session state: %s\n", fed.size(), wall, to_string(snap.state));

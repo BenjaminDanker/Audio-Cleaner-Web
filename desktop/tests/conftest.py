@@ -25,20 +25,24 @@ SPEECH_SAMPLE = Path.home() / "audio-cleaner" / "dev" / "live_opus.wav"
 FULL_FFMPEG = Path(os.environ.get("ACW_FULL_FFMPEG", Path.home() / "audio-cleaner" / "bin" / "ffmpeg"))
 
 _MISSING = resources.check()
+_SPEECH = resources.speech_ready()
 NATIVE_MARK = "native"
+SPEECH_MARK = "speech"
 
 
 def pytest_collection_modifyitems(config, items):
-    if not _MISSING:
-        return
-    skip = pytest.mark.skip(reason="missing native components: " + ", ".join(_MISSING))
+    native = pytest.mark.skip(reason="missing native components: " + ", ".join(_MISSING))
+    speech = pytest.mark.skip(reason="no speech model (prepare_vendor.py --download-whisper puts a test model in vendor/test-models)")
     for item in items:
-        if NATIVE_MARK in item.keywords:
-            item.add_marker(skip)
+        if _MISSING and NATIVE_MARK in item.keywords:
+            item.add_marker(native)
+        elif not _SPEECH and SPEECH_MARK in item.keywords:
+            item.add_marker(speech)
 
 
 def pytest_configure(config):
     config.addinivalue_line("markers", f"{NATIVE_MARK}: needs the bundled libDF, models and FFmpeg")
+    config.addinivalue_line("markers", f"{SPEECH_MARK}: also needs a speech model for subtitles")
 
 
 def run_ffmpeg(binary: Path, *args: str) -> None:

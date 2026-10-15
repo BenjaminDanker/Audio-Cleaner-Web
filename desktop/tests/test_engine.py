@@ -82,9 +82,18 @@ def test_segments_are_shifted_by_the_piece_offset():
 # -- the real pipeline -------------------------------------------------------------
 
 @pytest.mark.native
-def test_whisper_model_is_bundled():
+@pytest.mark.speech
+def test_a_speech_model_is_found_from_source():
     assert (resources.whisper_model_path() / "model.bin").is_file()
-    assert resources.check() == []
+    assert resources.check() == [] and resources.speech_ready()
+
+
+def test_the_speech_model_is_not_required_to_start_and_never_comes_from_the_bundle(monkeypatch, tmp_path):
+    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "none"))
+    monkeypatch.setattr(resources.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(resources.sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert resources.whisper_model_path() is None and not resources.speech_ready()
+    assert all("whisper" not in m for m in resources.check())
 
 
 @pytest.mark.native
@@ -201,6 +210,7 @@ def test_loudness_presets_set_the_level(speech_wav, has_real_speech, tmp_path):
 
 
 @pytest.mark.native
+@pytest.mark.speech
 def test_srt_next_to_the_cleaned_audio(speech_wav, has_real_speech, tmp_path):
     if not has_real_speech:
         pytest.skip("needs the real speech sample")
@@ -213,6 +223,7 @@ def test_srt_next_to_the_cleaned_audio(speech_wav, has_real_speech, tmp_path):
 
 
 @pytest.mark.native
+@pytest.mark.speech
 def test_vtt_and_text_transcripts(speech_wav, has_real_speech, tmp_path):
     if not has_real_speech:
         pytest.skip("needs the real speech sample")
@@ -224,6 +235,7 @@ def test_vtt_and_text_transcripts(speech_wav, has_real_speech, tmp_path):
 
 
 @pytest.mark.native
+@pytest.mark.speech
 def test_subtitles_embedded_in_a_video(mp4_file, has_real_speech, tmp_path):
     if not has_real_speech:
         pytest.skip("needs the real speech sample")
@@ -237,6 +249,7 @@ def test_subtitles_embedded_in_a_video(mp4_file, has_real_speech, tmp_path):
 
 
 @pytest.mark.native
+@pytest.mark.speech
 def test_embed_on_an_audio_file_writes_an_srt(speech_wav, has_real_speech, tmp_path):
     if not has_real_speech:
         pytest.skip("needs the real speech sample")
@@ -245,6 +258,7 @@ def test_embed_on_an_audio_file_writes_an_srt(speech_wav, has_real_speech, tmp_p
 
 
 @pytest.mark.native
+@pytest.mark.speech
 def test_silence_gets_no_subtitle_file(tmp_path):
     silent = tmp_path / "silent.wav"
     from scipy.io import wavfile
@@ -253,3 +267,63 @@ def test_silence_gets_no_subtitle_file(tmp_path):
     result = engine.process(silent, engine.JobOptions(subtitles="srt"), out_dir=tmp_path / "out")
     assert result.subtitles is None and not result.embedded
     assert [p.name for p in (tmp_path / "out").iterdir()] == ["silent-cleaned.wav"]
+
+
+def test_noise_and_echo_options_are_checked():
+    assert engine.JobOptions().noise == "auto" and not engine.JobOptions().echo_track
+    for value in ("auto", "light", "heavy"):
+        assert engine.JobOptions(noise=value).noise == value
+    with pytest.raises(ValueError, match="noise"):
+        engine.JobOptions(noise="loud")
+
+
+@pytest.mark.native
+def test_echo_option_on_a_one_track_file_cleans_it_and_says_so(speech_wav, tmp_path):
+    result = engine.process(speech_wav, engine.JobOptions(echo_track=True, noise="light"), out_dir=tmp_path)
+    assert result.output.is_file() and result.notice == "only one audio track, so no speaker echo was removed"
+
+
+@pytest.mark.native
+def test_heavy_noise_setting_runs_the_heavy_noise_model(speech_wav, tmp_path, monkeypatch):
+    from acw_common import pipeline
+
+    if not resources.heavy_noise_model_path().is_file():
+        pytest.skip("no heavy-noise model in vendor/models")
+    used = []
+    real = pipeline.dpdfnet.denoise_array
+    monkeypatch.setattr(pipeline.dpdfnet, "denoise_array", lambda *a, **k: used.append(1) or real(*a, **k))
+    result = engine.process(speech_wav, engine.JobOptions(noise="heavy"), out_dir=tmp_path)
+    assert result.output.is_file() and used
+
+
+@pytest.mark.native
+def test_echo_removed_using_the_second_audio_track(tmp_path):
+    import subprocess
+
+    from conftest import bundled_ffmpeg, ffprobe_json
+
+    # mic = voice-like tone + the speaker sound 20 ms later; track 2 = the speaker sound
+    sr = 48000
+    t = np.arange(sr * 8) / sr
+    rng = np.random.default_rng(3)
+    speaker = (0.2 * rng.standard_normal(t.size)).astype(np.float32)
+    voice = (0.2 * np.sin(2 * np.pi * 220 * t) * (t > 5)).astype(np.float32)
+    mic = voice + 0.6 * np.concatenate([np.zeros(960, np.float32), speaker[:-960]])
+    from scipy.io import wavfile
+
+    wavfile.write(tmp_path / "mic.wav", sr, (mic * 32767).astype(np.int16))
+    wavfile.write(tmp_path / "spk.wav", sr, (speaker * 32767).astype(np.int16))
+    two = tmp_path / "twotrack.mkv"
+    subprocess.run([str(bundled_ffmpeg()), "-v", "error", "-y", "-i", str(tmp_path / "mic.wav"), "-i", str(tmp_path / "spk.wav"),
+                    "-map", "0:a", "-map", "1:a", "-c:a", "flac", "-f", "matroska", str(two)], check=True)
+    assert len([s for s in ffprobe_json(two)["streams"] if s["codec_type"] == "audio"]) == 2
+    out = engine.process(two, engine.JobOptions(echo_track=True, polish=False, strength="gentle", audio_format="wav"),
+                              out_dir=tmp_path / "out")
+    assert out.notice is None
+    rate, y = wavfile.read(out.output)
+    scale = {np.dtype(np.int16): 2.0**15, np.dtype(np.int32): 2.0**31}.get(y.dtype, 1.0)
+    y = y.astype(np.float32) / scale
+    y = y if y.ndim == 1 else y.mean(axis=1)
+    def level(a): return 10 * np.log10(np.mean(a**2) + 1e-12)
+    echo_only = slice(sr * 2, sr * 4)  # before the voice starts, after the canceller has adapted
+    assert level(mic[echo_only]) - level(y[echo_only]) > 20

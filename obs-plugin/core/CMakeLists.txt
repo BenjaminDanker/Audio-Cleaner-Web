@@ -10,6 +10,7 @@ add_library(
   src/opus_codec.cpp
   src/output_stage.cpp
   src/protocol.cpp
+  src/reference.cpp
   src/resampler.cpp
   src/session.cpp
 )

@@ -20,11 +20,11 @@ struct FrameHeader {
 // Binary audio frames --------------------------------------------------------
 
 // Writes header + pcm_s16le payload; `out` must hold kHeaderSize + 2 * n bytes.
-// Returns the number of bytes written.
-size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n, uint8_t *out);
+// Returns the number of bytes written. `flags`: kFlagReference for an echo-reference frame.
+size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n, uint8_t *out, uint16_t flags = 0);
 
 // Writes only the 16-byte header (any codec, e.g. Opus where the payload follows).
-void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *out);
+void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *out, uint16_t flags = 0);
 
 // Parses the 16-byte header; false when too short or the version is unknown.
 bool parse_frame_header(const uint8_t *data, size_t len, FrameHeader &hdr);
@@ -44,6 +44,7 @@ struct StartParams {
 	std::string codec = "pcm_s16le";     // "opus" or "pcm_s16le"
 	int opus_bitrate = 0;                // downlink bitrate requested from the server (opus only; 0 = server default)
 	std::string client;                  // e.g. "obs-audio-cleaner/0.1.0"
+	bool echo_reference = false;         // we will send what the speakers play so the server can cancel the echo
 };
 
 std::string make_start_message(const StartParams &p);
@@ -62,6 +63,7 @@ struct Event {
 	int hop_samples = 0;
 	int sample_rate = 0;
 	int max_session_seconds = 0;
+	bool echo_reference = false;  // the server will use the reference frames
 	// caption
 	std::string text;
 	bool is_final = false;

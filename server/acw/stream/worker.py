@@ -14,13 +14,18 @@ import logging
 import os
 import signal
 import threading
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import numpy as np
+
+from acw_common.aec import DELAY_SAMPLES as AEC_DELAY, EchoCanceller
 
 from .. import cpusplit, hostload
 from ..config import get_settings
 from . import protocol as P
-from .engine import DENOISE_TIERS, LiveChain, OpusCodec, StreamingCaptioner
+from .engine import DENOISE_TIERS, LiveChain, OpusCodec, StreamingCaptioner, fit
 
 log = logging.getLogger("acw.stream.worker")
 
@@ -31,6 +36,7 @@ log = logging.getLogger("acw.stream.worker")
 # new session is refused and told what still fits. Sessions that only send
 # audio to the external caption service run no model here: never limited.
 LIVE_MIN_MEMORY = 300 * 1024**2
+MAX_PENDING_REFS = 50  # reference frames kept for mic frames that haven't arrived (1 s)
 MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "500"))  # thread sanity bound
 _units = 0.0
 _active = 0
@@ -52,8 +58,8 @@ def admit(cfg: dict) -> tuple[bool, list[dict]]:
     units = cpusplit.session_units(cfg)
     if _active >= MAX_SESSIONS or (_monitor is not None and _monitor.snapshot().memory_headroom < LIVE_MIN_MEMORY):
         return False, []
-    if not units:
-        return True, []
+    if not cpusplit.session_units({**cfg, "echo_reference": False}):
+        return True, []  # only external captions: echo cancellation alone is never worth refusing
     cap = capacity_units()
     if _units + units <= cap:
         return True, []
@@ -85,7 +91,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
     units = 0.0
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-dsp")
-    chain = captioner = None
+    chain = captioner = aec = None
     events: asyncio.Queue = asyncio.Queue(maxsize=200)
     try:
         kind, payload = await P.read_msg(reader)
@@ -116,7 +122,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             captioner = await loop.run_in_executor(
                 executor, StreamingCaptioner, settings.models_dir, emit
             )
-        await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "ready", "latencySamples": chain.latency_samples}))
+        if cfg.get("echo_reference"):
+            aec = await loop.run_in_executor(executor, EchoCanceller)
+        latency = chain.latency_samples + (AEC_DELAY if aec else 0)
+        await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "ready", "latencySamples": latency}))
 
         async def pump_events() -> None:
             while True:
@@ -126,7 +135,19 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         pump = asyncio.create_task(pump_events())
 
         opus: OpusCodec | None = None
+        ref_opus: OpusCodec | None = None
+        refs: OrderedDict[int, np.ndarray] = OrderedDict()  # echo reference by mic frame seq, until its mic frame comes
         tap_pcm = bool(cfg.get("tap_pcm"))
+
+        def take_reference(seq: int, kind: int, data) -> None:
+            nonlocal ref_opus
+            if kind == P.CODEC_OPUS:
+                if ref_opus is None:
+                    ref_opus = OpusCodec(encoder=False)
+                data = ref_opus.decode(data)
+            refs[seq] = data
+            while len(refs) > MAX_PENDING_REFS:
+                refs.popitem(last=False)
 
         def work(seq: int, kind: int, data):
             nonlocal opus
@@ -136,9 +157,11 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 x = opus.decode(data)
             else:
                 x = data
+            if aec is not None:  # a missing (or late) reference counts as silence
+                x = aec.process(x, fit(refs.pop(seq, None), len(x)))
             y = chain.process(x)
             if captioner is not None:
-                captioner.feed(x)  # the original: recognizers do better on it than on denoised audio
+                captioner.feed(x)  # the original (echo removed): recognizers do better on it than on denoised audio
             out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
             tap = P.pack_audio(seq, y) if (tap_pcm and kind == P.CODEC_OPUS) else None
             return out, tap
@@ -152,6 +175,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                     await P.send_msg(writer, P.MSG_AUDIO, out)
                     if tap is not None:
                         await P.send_msg(writer, P.MSG_TAP, tap)
+                elif kind == P.MSG_REF:
+                    if aec is not None:
+                        seq, akind, data = P.unpack_audio(payload)
+                        await loop.run_in_executor(executor, take_reference, seq, akind, data)
                 elif kind == P.MSG_CONFIG:
                     c = json.loads(payload)
                     if "atten_lim_db" in c:

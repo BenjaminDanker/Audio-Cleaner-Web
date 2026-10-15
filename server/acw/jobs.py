@@ -59,10 +59,16 @@ QUEUE_ORDER = (
 )
 
 
-def scratch_bytes(kind: str, seconds: float, channels: int = 2) -> int:
-    if kind not in ("denoise", "denoise_transcribe"):
+def scratch_bytes(kind: str, seconds: float, channels: int = 2, echo: bool = False) -> int:
+    denoise = kind in ("denoise", "denoise_transcribe")
+    if not (denoise or echo):
         return 0
-    return int(seconds / 3600 * channels * SCRATCH_PER_HOUR_PER_CHANNEL)
+    # Whole-file buffers, each a half "channel-hour": decoded + cleaned per channel; echo removal adds its
+    # result per channel and the mono reference (without denoising it also needs the decoded mic).
+    buffers = 2 * channels if denoise else 0
+    if echo:
+        buffers += (channels if denoise else 2 * channels) + 1
+    return int(seconds / 3600 * buffers / 2 * SCRATCH_PER_HOUR_PER_CHANNEL)
 
 
 def job_needs(job: dict) -> tuple[int, int]:
@@ -72,7 +78,7 @@ def job_needs(job: dict) -> tuple[int, int]:
     params = json.loads(job["params_json"])
     seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
     mem = JOB_MEM + (LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" else 0)
-    return mem, scratch_bytes(job["kind"], seconds)
+    return mem, scratch_bytes(job["kind"], seconds, echo=params.get("options", {}).get("echo_reference_track", False))
 
 
 def job_seconds(job: dict) -> float:
@@ -148,6 +154,16 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     out["loudness_lufs"] = lufs
     atten = float(options.get("atten_lim_db", 100.0))
     out["atten_lim_db"] = min(max(atten, 6.0), 100.0)
+    # Cancel the speaker echo in the first audio track using the second (desktop sound); ignored for one-track files.
+    echo = options.get("echo_reference_track", False)
+    if not isinstance(echo, bool):
+        raise JobError("echo_reference_track must be true or false")
+    out["echo_reference_track"] = echo
+    # Which noise remover: measured per recording ("auto"), or forced for light / heavy background noise.
+    noise = options.get("noise", "auto")
+    if noise not in ("auto", "light", "heavy"):
+        raise JobError("noise must be auto, light or heavy")
+    out["noise"] = noise
     return out
 
 
@@ -207,7 +223,7 @@ def create_job(
     # The one hard limit: the upload and its scratch files must fit on disk.
     from . import hostload
 
-    disk_need = size_bytes + scratch_bytes(kind, claimed_seconds) + DISK_RESERVE
+    disk_need = size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"]) + DISK_RESERVE
     if hostload.get(settings.data_dir).snapshot().disk_free < disk_need:
         raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
 
@@ -255,6 +271,14 @@ def create_job(
 def input_path(job: dict) -> Path:
     params = json.loads(job["params_json"])
     return job_dir(job["id"]) / f"input{params['input_ext']}"
+
+
+def set_notice(job_id: str, notice: str) -> None:
+    """A note for the person about how the job was handled (shown with the job; not an error)."""
+    with db.tx() as c:
+        row = c.execute("SELECT params_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        params = {**json.loads(row["params_json"]), "notice": notice}
+        c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(params), job_id))
 
 
 def mark_uploaded(job_id: str) -> None:
@@ -327,6 +351,7 @@ def public_job(job: dict, queue: list[str] | None = None) -> dict:
         "estCostMicros": job["est_cost_micros"],
         "costMicros": job["cost_micros"],
         "options": params["options"],
+        "notice": params.get("notice"),
         "outputs": [{"name": o["file"], "kind": o["kind"], "bytes": o.get("bytes")} for o in outputs],
         "createdAt": job["created_at"],
         "finishedAt": job["finished_at"],

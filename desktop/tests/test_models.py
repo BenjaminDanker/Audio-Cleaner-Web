@@ -1,0 +1,125 @@
+"""Downloading speech models: pinned files, resume, verification, nothing half-done is ever used."""
+from __future__ import annotations
+
+import hashlib
+import http.server
+import threading
+from pathlib import Path
+
+import pytest
+
+from audio_cleaner_desktop import models
+
+
+class _RangeHandler(http.server.BaseHTTPRequestHandler):
+    files: dict[str, bytes] = {}
+    requests: list[str] = []
+
+    def do_GET(self):  # noqa: N802
+        body = self.files.get(self.path)
+        self.requests.append(f"{self.path} {self.headers.get('Range', '')}".strip())
+        if body is None:
+            self.send_error(404)
+            return
+        start = 0
+        rng = self.headers.get("Range")
+        if rng and rng.startswith("bytes="):
+            start = int(rng[6:].split("-")[0])
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+        else:
+            self.send_response(200)
+        self.send_header("Content-Length", str(len(body) - start))
+        self.end_headers()
+        self.wfile.write(body[start:])
+
+    def log_message(self, *_args):
+        pass
+
+
+@pytest.fixture
+def server(monkeypatch, tmp_path):
+    _RangeHandler.files, _RangeHandler.requests = {}, []
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RangeHandler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
+    # the local test server is plain http (the real catalog is https only)
+    monkeypatch.setattr(models, "_ssl_context", lambda: None)
+    yield f"http://127.0.0.1:{httpd.server_address[1]}"
+    httpd.shutdown()
+
+
+def _model(base: str, payloads: dict[str, bytes], sha_override: dict[str, str] | None = None) -> models.SpeechModel:
+    for name, data in payloads.items():
+        _RangeHandler.files[f"/{name}"] = data
+    files = tuple(
+        models.ModelFile(name, f"{base}/{name}", len(data), (sha_override or {}).get(name, hashlib.sha256(data).hexdigest()))
+        for name, data in payloads.items()
+    )
+    return models.SpeechModel("test-model", "Test", "for tests", "MIT", files)
+
+
+def test_download_verifies_and_installs(server):
+    m = _model(server, {"a.bin": b"a" * 3_000_000, "sub/b.json": b"{}"})
+    seen = []
+    assert not models.is_installed(m) and models.missing_bytes(m) == m.size
+    path = models.download(m, progress=lambda done, total: seen.append((done, total)))
+    assert models.is_installed(m) and path == models.model_dir(m)
+    assert (path / "a.bin").read_bytes() == b"a" * 3_000_000 and (path / "sub" / "b.json").read_bytes() == b"{}"
+    assert seen[-1] == (m.size, m.size) and all(t == m.size for _, t in seen)
+    assert not (models.models_dir() / "test-model.partial").exists()
+    assert models.download(m) == path and len(_RangeHandler.requests) == 2  # already there: nothing fetched
+
+
+def test_an_interrupted_download_resumes(server):
+    data = bytes(range(256)) * 20_000
+    m = _model(server, {"big.bin": data})
+    part = models.models_dir() / "test-model.partial"
+    part.mkdir(parents=True)
+    (part / "big.bin.part").write_bytes(data[:1_000_000])
+    assert models.missing_bytes(m) == len(data) - 1_000_000
+    models.download(m)
+    assert models.is_installed(m) and (models.model_dir(m) / "big.bin").read_bytes() == data
+    assert _RangeHandler.requests == ["/big.bin bytes=1000000-"]
+
+
+def test_a_file_that_does_not_match_is_never_used(server):
+    m = _model(server, {"model.bin": b"tampered"}, sha_override={"model.bin": "0" * 64})
+    with pytest.raises(models.DownloadError, match="did not download correctly"):
+        models.download(m)
+    assert not models.is_installed(m)
+    assert not (models.models_dir() / "test-model.partial" / "model.bin.part").exists()  # starts clean next time
+
+
+def test_cancel_and_network_errors(server):
+    m = _model(server, {"x.bin": b"x" * 5_000_000})
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(models.Cancelled):
+        models.download(m, cancel=cancel)
+    assert not models.is_installed(m)
+    gone = models.SpeechModel("gone", "Gone", "", "MIT", (models.ModelFile("g.bin", f"{server}/missing", 10, "0" * 64),))
+    with pytest.raises(models.DownloadError, match="Try again"):
+        models.download(gone)
+
+
+def test_not_enough_disk_space_is_said_up_front(server, monkeypatch):
+    m = _model(server, {"x.bin": b"x" * 1000})
+    monkeypatch.setattr(models.shutil, "disk_usage", lambda _p: type("U", (), {"free": 10})())
+    with pytest.raises(models.DownloadError, match="Not enough free disk space"):
+        models.download(m)
+
+
+def test_an_older_catalog_entry_does_not_count_as_installed(server):
+    m = _model(server, {"a.bin": b"one"})
+    models.download(m)
+    newer = models.SpeechModel(m.id, m.title, m.description, m.licence,
+                               (models.ModelFile("a.bin", m.files[0].url, 3, hashlib.sha256(b"two").hexdigest()),))
+    assert models.is_installed(m) and not models.is_installed(newer)
+
+
+def test_models_live_in_the_app_data_folder(monkeypatch, tmp_path):
+    monkeypatch.delenv("ACW_DESKTOP_MODELS", raising=False)
+    path = models.models_dir()
+    assert path.parts[-3:] == ("Audio Cleaner", "Audio Cleaner", "models")
+    assert isinstance(path, Path)

@@ -1,17 +1,19 @@
-"""Locate the native pieces the app ships: libDF, the noise model, the speech model, FFmpeg.
+"""Locate the pieces the app needs: libDF, the noise model, FFmpeg (shipped) and the speech model
+for subtitles (downloaded once, see models.py).
 
-Frozen (PyInstaller) builds find everything under sys._MEIPASS:
+Frozen (PyInstaller) builds find the shipped pieces under sys._MEIPASS:
 
     native/{df.dll|libdf.dylib|libdf.so, ffmpeg[.exe], ffprobe[.exe]}
     models/DeepFilterNet3_onnx.tar.gz
-    models/whisper-small/{model.bin,config.json,tokenizer.json,vocabulary.txt}
     licenses/
 
 From source the same layout is read from $ACW_DESKTOP_VENDOR (default
 desktop/vendor, filled by the packaging scripts). On Linux, missing pieces fall
 back to the server layout in ~/audio-cleaner/{bin,models}.
 
-Nothing is downloaded at run time: the speech model for subtitles ships with the app.
+The speech model is not in the installer (it is 1.6 GB): the app downloads it the first time
+subtitles are wanted. Runs from source (tests, CI) may use the small test model that
+prepare_vendor.py puts in vendor/test-models/ instead.
 """
 from __future__ import annotations
 
@@ -21,11 +23,53 @@ from pathlib import Path
 
 from acw_common import dfn
 
+from . import models
+
 _EXE = ".exe" if os.name == "nt" else ""
 _FFMPEG = f"ffmpeg{_EXE}"
 _FFPROBE = f"ffprobe{_EXE}"
-WHISPER_DIR = "whisper-small"
 _WHISPER_FILES = ("model.bin", "config.json", "tokenizer.json")
+
+_TURBO = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/"
+SPEECH_MODEL = models.SpeechModel(
+    id="whisper-large-v3-turbo",
+    title="Speech model for subtitles",
+    description="Whisper large-v3-turbo: about 100 languages, runs on this computer.",
+    licence="OpenAI Whisper large-v3-turbo (MIT), CTranslate2 conversion by Dropbox (MIT)",
+    files=(
+        models.ModelFile("model.bin", _TURBO + "model.bin", 1617884929,
+                         "e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da"),
+        models.ModelFile("config.json", _TURBO + "config.json", 2263,
+                         "b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e"),
+        models.ModelFile("preprocessor_config.json", _TURBO + "preprocessor_config.json", 340,
+                         "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"),
+        models.ModelFile("tokenizer.json", _TURBO + "tokenizer.json", 2710337,
+                         "297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd"),
+        models.ModelFile("vocabulary.json", _TURBO + "vocabulary.json", 1068114,
+                         "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"),
+    ),
+)
+models.register(SPEECH_MODEL)
+
+# AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by tools/export_apbwe_onnx.py
+# and published once on this repository's "models-v1" release.
+_MODELS_RELEASE = "https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v1/"
+HIGHS_MODEL = models.SpeechModel(
+    id="restore-highs",
+    title="Model that restores missing highs",
+    description="AP-BWE: brings back the high frequencies of phone calls and other band-limited recordings.",
+    licence="AP-BWE by Ye-Xin Lu et al. (MIT code and weights)",
+    files=tuple(
+        models.ModelFile(f"{name}to48k.onnx", f"{_MODELS_RELEASE}{name}to48k.onnx", 119093242, sha)
+        for name, sha in (
+            ("8k", "788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3"),
+            ("12k", "eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618"),
+            ("16k", "ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44"),
+            ("24k", "e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55"),
+        )
+    ),
+)
+models.register(HIGHS_MODEL)
 
 
 def _vendor_root() -> Path:
@@ -63,18 +107,51 @@ def model_path() -> Path:
     return _locate("models", "models", dfn.MODEL_FILE) / dfn.MODEL_FILE
 
 
+def heavy_noise_model_path() -> Path:
+    """DPDFNet-8 (48 kHz), the noise remover for recordings with heavy background noise. When it is
+    missing, heavy noise falls back to DeepFilterNet3 (pipeline.clean_audio)."""
+    from acw_common import dpdfnet
+
+    return _locate("models", "models/dpdfnet", dpdfnet.MODEL_FILE) / dpdfnet.MODEL_FILE
+
+
 def ffmpeg_dir() -> Path:
     return _locate("native", "bin", _FFMPEG, _FFPROBE)
 
 
-def whisper_model_path() -> Path:
-    """Directory of the bundled speech model (faster-whisper "small", int8)."""
-    vendor = _vendor_root() / "models" / WHISPER_DIR
+def whisper_model_path() -> Path | None:
+    """Directory of the speech model for subtitles, or None until it has been downloaded.
+    From source, the small test model (vendor/test-models) or the server's models also count."""
+    found = models.location(SPEECH_MODEL)
+    if found is not None:
+        return found
+    if getattr(sys, "frozen", False):
+        return None
+    candidates = [_vendor_root() / "test-models" / "whisper-small"]
     fallback = _dev_fallback()
-    for d in (vendor, *([fallback / "models" / "whisper" / "small"] if fallback else [])):
+    if fallback is not None:
+        candidates += [fallback / "models" / "whisper" / "large-v3-turbo", fallback / "models" / "whisper" / "small"]
+    for d in candidates:
         if all((d / n).is_file() for n in _WHISPER_FILES):
             return d
-    return vendor
+    return None
+
+
+def highs_model_dir() -> Path | None:
+    """Folder of the AP-BWE models once downloaded (or the server's copy when run from source), else None."""
+    from acw_common import bwe
+
+    found = models.location(HIGHS_MODEL)
+    if found is not None:
+        return found
+    fallback = _dev_fallback()
+    if fallback is not None and bwe.available(fallback / "models" / "ap-bwe"):
+        return fallback / "models" / "ap-bwe"
+    return None
+
+
+def speech_ready() -> bool:
+    return whisper_model_path() is not None
 
 
 def licenses_dir() -> Path:
@@ -82,14 +159,13 @@ def licenses_dir() -> Path:
 
 
 def check() -> list[str]:
-    """File names of required components that are missing (empty when all present)."""
+    """File names of shipped components that are missing (empty when all present). The speech model is
+    not one of them: it is downloaded when subtitles are first wanted (speech_ready())."""
     missing = []
     if not libdf_path().is_file():
         missing.append(dfn.LIB_NAME)
     if not model_path().is_file():
         missing.append(dfn.MODEL_FILE)
-    if not all((whisper_model_path() / n).is_file() for n in _WHISPER_FILES):
-        missing.append(f"{WHISPER_DIR}/")
     ff = ffmpeg_dir()
     missing += [n for n in (_FFMPEG, _FFPROBE) if not (ff / n).is_file()]
     return missing

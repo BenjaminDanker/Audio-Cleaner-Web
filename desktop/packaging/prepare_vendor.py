@@ -3,8 +3,9 @@
 
     vendor/native/{libdf.so|libdf.dylib|df.dll, ffmpeg[.exe], ffprobe[.exe]}
     vendor/models/DeepFilterNet3_onnx.tar.gz
-    vendor/models/whisper-small/{model.bin, config.json, tokenizer.json, vocabulary.txt}
     vendor/licenses/...   notices of everything that ends up in the bundle (shown in the About dialog)
+    vendor/test-models/whisper-small/...   a small speech model for the tests only: NOT bundled (the app
+                          downloads its speech model when subtitles are first wanted, see models.py)
 
     python prepare_vendor.py --libdf PATH --ffmpeg-dir DIR --model PATH
         [--whisper-model DIR | --download-whisper] [--deepfilter-src DIR | --deepfilter-notices DIR]
@@ -39,10 +40,14 @@ DESKTOP = HERE.parent
 SUPPLEMENTAL = HERE / "licenses"
 
 DFN_MODEL_SHA256 = "c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616"
+# Heavy-noise model (DPDFNet-8 48 kHz, Apache-2.0): fetched by deploy/fetch-dpdfnet.sh (same pin).
+DPDFNET_FILE = "dpdfnet8_48khz_hr.onnx"
+DPDFNET_SHA256 = "7b3afbb260a08fe9af3d16e3bda992971be1e7e951d1dee7c2d235f5c43f5631"
 LIB_NAMES = ("libdf.so", "libdf.dylib", "df.dll")
 FFMPEG_NOTICES = ("COPYING.LGPLv2.1", "FFmpeg-LICENSE.md", "ffmpeg-buildinfo.txt", "lame-COPYING", "opus-COPYING")
 
-# Subtitle model: Systran/faster-whisper-small (CTranslate2 conversion of OpenAI Whisper small, MIT).
+# Speech model for the tests (the app itself downloads large-v3-turbo, resources.SPEECH_MODEL):
+# Systran/faster-whisper-small (CTranslate2 conversion of OpenAI Whisper small, MIT).
 WHISPER_REPO = "Systran/faster-whisper-small"
 WHISPER_REVISION = "536b0662742c02347bc0e980a01041f333bce120"
 WHISPER_FILES = {
@@ -56,7 +61,7 @@ WHISPER_DIR_NAME = "whisper-small"
 # Distributions whose notices are collected (plus everything they require at run time).
 PYTHON_ROOTS = [
     "PySide6_Essentials", "PySide6_Addons", "shiboken6", "numpy", "scipy", "pyloudnorm", "faster-whisper", "ctranslate2",
-    "tokenizers", "huggingface_hub", "onnxruntime",
+    "tokenizers", "huggingface_hub", "onnxruntime", "livekit",
 ]
 OPTIONAL_ROOTS = ["future"]  # older pyloudnorm releases need it
 # Installed but not shipped: PyAV carries GPL builds of x264/x265, so the frozen app uses a stub instead
@@ -68,6 +73,7 @@ SUPPLEMENT = {
     "tokenizers": "Apache-2.0.txt",
     "hf-xet": "Apache-2.0.txt",
     "flatbuffers": "Apache-2.0.txt",
+    "livekit": "Apache-2.0.txt",
 }
 QT_DISTS = {"pyside6-essentials", "pyside6-addons", "shiboken6"}  # covered by the Qt notice and LGPL-3.0.txt
 
@@ -117,15 +123,22 @@ def copy_native(libdf: Path, ffmpeg_dir: Path, out: Path) -> None:
             (native / n).chmod(0o755)
 
 
-def copy_models(model: Path, whisper_dir: Path | None, download: bool, out: Path) -> None:
+def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: bool, out: Path) -> None:
     need_file(model, "DeepFilterNet3 model")
     if sha256_of(model) != DFN_MODEL_SHA256:
         fail(f"{model} is not the expected DeepFilterNet3_onnx.tar.gz (sha256 mismatch)")
+    need_file(dpdfnet, "DPDFNet-8 model (deploy/fetch-dpdfnet.sh)")
+    if sha256_of(dpdfnet) != DPDFNET_SHA256:
+        fail(f"{dpdfnet} is not the expected {DPDFNET_FILE} (sha256 mismatch)")
     models = out / "models"
     models.mkdir(parents=True, exist_ok=True)
     shutil.copy2(model, models / "DeepFilterNet3_onnx.tar.gz")
+    shutil.copy2(dpdfnet, models / DPDFNET_FILE)
 
-    target = models / WHISPER_DIR_NAME
+    target = out / "test-models" / WHISPER_DIR_NAME
+    stale = models / WHISPER_DIR_NAME  # older vendor layout: it must not end up in the bundle
+    if stale.exists():
+        shutil.rmtree(stale)
     if download:
         try:
             from huggingface_hub import snapshot_download
@@ -389,9 +402,23 @@ def pyinstaller_notice(n: Notices) -> None:
     )
 
 
+def cleanup_model_notices(n: Notices) -> None:
+    n.add_file("DPDFNet-Apache-2.0.txt", SUPPLEMENTAL / "Apache-2.0.txt",
+               "DPDFNet-8 by Ceva (Apache-2.0, https://github.com/ceva-ip/DPDFNet): the noise remover for heavy noise")
+    from importlib.util import find_spec  # noqa: PLC0415
+
+    spec = find_spec("livekit.rtc")
+    native = Path(spec.origin).parent / "resources" / "LICENSE.md" if spec and spec.origin else None
+    if native is None or not native.is_file():
+        fail("livekit's third-party notices (livekit/rtc/resources/LICENSE.md) not found: pip install -r requirements.lock")
+    n.add_file("livekit-native-notices.md", native,
+               "LiveKit's native library: WebRTC's echo canceller (BSD-3-Clause) and its other parts, with their licences")
+
+
 def whisper_notices(n: Notices) -> None:
     n.add_file("Whisper-MIT.txt", SUPPLEMENTAL / "Whisper-MIT.txt",
-               f"OpenAI Whisper (MIT): the subtitle speech model, as converted by {WHISPER_REPO}")
+               "OpenAI Whisper large-v3-turbo (MIT): the subtitle speech model, downloaded when subtitles are first "
+               "wanted (CTranslate2 conversion by Dropbox, MIT); faster-whisper (MIT) runs it")
     n.add_file("SileroVAD-MIT.txt", SUPPLEMENTAL / "SileroVAD-MIT.txt", "Silero VAD (MIT): the voice activity model inside faster-whisper")
 
 
@@ -446,6 +473,8 @@ def main() -> int:
     ap.add_argument("--libdf", type=Path, help="libdf.so / libdf.dylib / df.dll from native/deepfilter/build.sh")
     ap.add_argument("--ffmpeg-dir", type=Path, help="output directory of desktop/packaging/build_ffmpeg.sh")
     ap.add_argument("--model", type=Path, help="DeepFilterNet3_onnx.tar.gz")
+    ap.add_argument("--dpdfnet", type=Path, default=Path.home() / "audio-cleaner" / "models" / "dpdfnet" / DPDFNET_FILE,
+                    help=f"{DPDFNET_FILE} (deploy/fetch-dpdfnet.sh; default: %(default)s)")
     ap.add_argument("--whisper-model", type=Path, default=Path.home() / "audio-cleaner" / "models" / "whisper" / "small",
                     help="directory of Systran/faster-whisper-small (default: %(default)s)")
     ap.add_argument("--download-whisper", action="store_true", help=f"download {WHISPER_REPO}@{WHISPER_REVISION[:8]} with huggingface_hub (CI)")
@@ -472,7 +501,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     print(f"vendor directory: {out}")
     copy_native(a.libdf, a.ffmpeg_dir, out)
-    copy_models(a.model, a.whisper_model, a.download_whisper, out)
+    copy_models(a.model, a.dpdfnet, a.whisper_model, a.download_whisper, out)
     n = Notices(out)
     ffmpeg_notices(n, a.ffmpeg_dir)
     if a.deepfilter_notices:
@@ -485,6 +514,7 @@ def main() -> int:
     python_licence(n)
     pyinstaller_notice(n)
     whisper_notices(n)
+    cleanup_model_notices(n)
     qt_notices(n)
     write_readme(n)
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())

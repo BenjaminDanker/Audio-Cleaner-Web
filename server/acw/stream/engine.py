@@ -61,18 +61,28 @@ class LiveChain:
             self.df.close()
 
 
+def fit(x: np.ndarray | None, n: int) -> np.ndarray:
+    """`x` cut or zero-padded to n samples (None = silence)."""
+    if x is None:
+        return np.zeros(n, np.float32)
+    return x[:n] if len(x) >= n else np.pad(x, (0, n - len(x)))
+
+
 class OpusCodec:
     """Per-session Opus decoder (client uplink) and encoder (cleaned audio
     back). Runs only in the sandboxed stream worker: the uplink bitstream is
     untrusted."""
 
-    def __init__(self, bitrate: int = 96_000):
+    def __init__(self, bitrate: int = 96_000, encoder: bool = True):
         import av
 
         self._av = av
         self.dec = av.CodecContext.create("opus", "r")
         self.dec.sample_rate = SAMPLE_RATE
         self.dec.layout = "mono"
+        self.pts = 0
+        if not encoder:  # e.g. the echo reference: decoded only
+            return
         self.enc = av.CodecContext.create("libopus", "w")
         self.enc.sample_rate = SAMPLE_RATE
         self.enc.layout = "mono"
@@ -80,7 +90,6 @@ class OpusCodec:
         self.enc.bit_rate = int(min(max(bitrate, 24_000), 160_000))
         self.enc.options = {"application": "audio", "frame_duration": "20", "vbr": "on"}
         self.enc.open()
-        self.pts = 0
 
     def decode(self, pkt: bytes) -> np.ndarray:
         frames = self.dec.decode(self._av.Packet(pkt))

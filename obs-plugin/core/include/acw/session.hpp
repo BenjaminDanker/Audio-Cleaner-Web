@@ -4,6 +4,7 @@
 #pragma once
 
 #include "acw/common.hpp"
+#include "acw/reference.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -33,6 +34,9 @@ struct SessionConfig {
 	std::string client = "obs-audio-cleaner/0.1.0";
 	std::string ca_file;               // optional CA bundle path ("" = system trust store)
 	int model_latency_samples = 1440;  // expected; replaced by the server's ready message
+	// Echo cancellation: what the speakers play (the owner pushes to it, at host_rate).
+	// Set = ask the server to remove that echo from the audio; sent next to each microphone frame.
+	std::shared_ptr<ReferenceBuffer> reference;
 };
 
 enum class SessionState { Idle, Connecting, Handshaking, Streaming, Backoff, Stopped };
@@ -46,6 +50,8 @@ struct SessionSnapshot {
 	bool insecure = false;         // ws:// URL
 	bool passthrough_only = false; // unsupported configuration: audio is not altered
 	std::string codec;             // codec actually in use: "opus" or "pcm_s16le"
+	bool echo_requested = false;   // an echo reference is configured
+	bool echo_active = false;      // ... and the server accepted it
 	double delay_ms = 0;           // total delay applied to the audio (0 when captions only)
 	double model_latency_ms = 0;
 	double usd_per_minute = 0;

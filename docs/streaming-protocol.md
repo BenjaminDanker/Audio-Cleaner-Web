@@ -18,8 +18,11 @@ Client sends one text message within 15 s:
  "codec": "opus" | "pcm_s16le",
  "opusBitrate": 96000,
  "attenLimDb": 100,
+ "echoReference": true,
  "client": "obs-audio-cleaner/0.1.0"}
 ```
+
+`echoReference` is optional (default false); see section 5.
 
 At least one of `denoise` / `captions` must be set. Live processing on our
 CPUs has a measured capacity; when the requested setup doesn't fit right now,
@@ -35,8 +38,13 @@ without denoise is never refused for capacity. Otherwise the server answers:
 
 ```json
 {"type": "ready", "sessionId": "...", "sampleRate": 48000, "hopSamples": 480,
- "modelLatencyMs": 30.0, "usdPerMinute": 0.01, "maxSessionSeconds": 43200}
+ "modelLatencyMs": 30.0, "usdPerMinute": 0.01, "maxSessionSeconds": 43200,
+ "echoReference": true}
 ```
+
+`echoReference` is only present (true) when the start message asked for it and
+the server will use it. `modelLatencyMs` includes the delay of echo
+cancellation (9 ms) in that case.
 
 or `{"type":"error","code":...,"message":...}` and closes. Codes:
 `insufficient_funds`, `tos`, `bad_config`, `bad_tier`, `too_many_sessions`,
@@ -48,7 +56,7 @@ or `{"type":"error","code":...,"message":...}` and closes. Codes:
 offset size  field
 0      1     version = 1
 1      1     codec: 1 = pcm_s16le, 2 = f32le, 3 = opus
-2      2     flags = 0 (reserved)
+2      2     flags: bit 0 = echo reference (section 5), other bits 0 (reserved)
 4      4     seq: u32 frame counter (little endian)
 8      8     ts_us: u64 client timestamp (opaque, echoed back)
 16     ...   mono 48 kHz samples, or exactly one Opus packet (codec 3)
@@ -101,6 +109,35 @@ The server closes the socket after 30 s without any message. On `stop` it
 flushes outstanding captions, then closes. Billing covers processed audio
 seconds only (rounded up to the second at the end of the session).
 
+## 5. Echo cancellation (optional)
+
+When the user plays sound through speakers, the microphone picks it up again.
+A client that knows what the speakers play (the "reference": the desktop audio
+in OBS) can send it along, and the server removes that sound from the
+microphone before noise removal and before captions hear the audio. It is
+included in the price of live processing. Clients that never send a reference
+behave exactly as described above.
+
+- Put `"echoReference": true` in `start`. Only send reference frames when the
+  `ready` message contains `"echoReference": true`; an older server ignores the
+  field and would treat reference frames as microphone audio.
+- A reference frame is an ordinary audio frame (section 2) with flags bit 0
+  set. It uses the same codec as the microphone frames (an Opus client encodes
+  the reference with its own Opus encoder: the stream is separate) and the same
+  `seq` as the microphone frame it belongs to, and is sent before it. Both
+  cover the same moment of the same 48 kHz timeline, 20 ms each; a constant
+  offset of tens of milliseconds is fine, the server finds the delay itself
+  (the reference must not come later than the echo it causes).
+- The server answers microphone frames only: no reply to reference frames, and
+  they are neither counted as processed audio nor billed. They are paced like
+  microphone frames (real time).
+- A reference frame that is missing or comes after its microphone frame counts
+  as silence for that frame, so a client may skip frames that are all zeros.
+  The server keeps 1 s of reference at most.
+- Cancellation adapts within a few seconds of the first reference audio.
+- Browsers: use the browser's own echo cancellation instead
+  (`getUserMedia({audio: {echoCancellation: true}})`); no reference is needed.
+
 ## Client requirements (OBS plugin)
 
 - Never block the audio thread: ring buffers in and out, network on a worker.
@@ -111,6 +148,10 @@ seconds only (rounded up to the second at the end of the session).
 - Reconnect with exponential backoff + jitter; pass audio through while
   disconnected.
 - Show status: connected, RTT, D, late/dropped frames, balance warnings.
+- Echo cancellation: capture the chosen source (default Desktop Audio) with an
+  audio capture callback, downmix to mono, resample to 48 kHz and keep it in a
+  lock-free buffer; the audio thread cuts one reference frame per microphone
+  frame from it. Skip silent frames. Budget 9 ms more for D.
 - Captions: forward `final` captions to `obs_output_output_caption_text2`
   on the streaming output, paced (≤ 32 chars per line, don't queue a
   backlog), or to a text source.

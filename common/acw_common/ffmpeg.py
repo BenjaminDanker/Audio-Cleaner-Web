@@ -48,6 +48,20 @@ class ProbeResult:
     has_video: bool
     video_codec: str | None
     ext: str
+    # Stream indices of every audio track, in file order (audio_index is the first).
+    audio_indices: tuple[int, ...] = ()
+
+    @property
+    def audio_tracks(self) -> int:
+        return max(1, len(self.audio_indices))
+
+    def stream_index(self, track: int) -> int:
+        """FFmpeg stream index of the `track`-th audio track (0 = the first)."""
+        if track == 0:
+            return self.audio_index
+        if not 0 < track < len(self.audio_indices):
+            raise MediaError("This file does not have that audio track.")
+        return self.audio_indices[track]
 
 
 _EXE = ".exe" if os.name == "nt" else ""
@@ -103,16 +117,19 @@ class FFmpeg:
             has_video=bool(video),
             video_codec=video[0].get("codec_name") if video else None,
             ext=path.suffix.lower(),
+            audio_indices=tuple(int(s["index"]) for s in audio),
         )
 
-    def decode(self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float) -> np.ndarray:
-        """Decode the first audio track to float32 (samples, channels).
+    def decode(
+        self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float, track: int = 0
+    ) -> np.ndarray:
+        """Decode an audio track (the first by default) to float32 (samples, channels).
 
         Reads straight into one buffer sized from the probed duration (grown if
         the stream turns out longer), so a long file is held in memory once."""
         args = [
             self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-i", str(path),
-            "-map", f"0:{probe.audio_index}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
+            "-map", f"0:{probe.stream_index(track)}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
             "-ac", str(channels), "-ar", str(sr), "-f", "f32le", "-threads", str(self.threads), "pipe:1",
         ]
         frame = 4 * channels
@@ -147,13 +164,13 @@ class FFmpeg:
         return np.frombuffer(buf, dtype=np.float32).reshape(-1, channels)
 
     def decode_to_file(
-        self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float, raw: Path
+        self, path: Path, probe: ProbeResult, sr: int, channels: int, max_seconds: float, raw: Path, track: int = 0
     ) -> np.ndarray:
         """Like decode(), but FFmpeg writes the samples to `raw` and they come back
         memory-mapped (read-only) instead of being held in RAM."""
         args = [
             self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-i", str(path),
-            "-map", f"0:{probe.audio_index}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
+            "-map", f"0:{probe.stream_index(track)}", "-vn", "-sn", "-dn", "-t", str(max_seconds),
             "-ac", str(channels), "-ar", str(sr), "-f", "f32le", "-threads", str(self.threads), "-y", str(raw),
         ]
         if self._run(args, timeout=max_seconds + 600).returncode != 0:

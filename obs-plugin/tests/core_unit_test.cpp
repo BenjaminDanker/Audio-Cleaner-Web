@@ -5,6 +5,7 @@
 #include "acw/opus_codec.hpp"
 #include "acw/output_stage.hpp"
 #include "acw/protocol.hpp"
+#include "acw/reference.hpp"
 #include "acw/resampler.hpp"
 #include "acw/session.hpp"
 #include "acw/spsc.hpp"
@@ -133,7 +134,15 @@ static void test_protocol()
 	uint8_t hdr[kHeaderSize];
 	encode_frame_header(kCodecOpus, 7, 99, hdr);
 	FrameHeader oh;
-	CHECK(parse_frame_header(hdr, sizeof hdr, oh) && oh.codec == 3 && oh.seq == 7 && oh.ts_us == 99);
+	CHECK(parse_frame_header(hdr, sizeof hdr, oh) && oh.codec == 3 && oh.seq == 7 && oh.ts_us == 99 && oh.flags == 0);
+	// echo reference: flags bit 0, nothing else changes; the start message only mentions it when asked for
+	encode_frame_header(kCodecOpus, 7, 99, hdr, kFlagReference);
+	CHECK(parse_frame_header(hdr, sizeof hdr, oh) && oh.flags == 1 && oh.codec == 3 && oh.seq == 7);
+	CHECK(encode_frame_s16(5, 6, pcm.data(), pcm.size(), buf.data(), kFlagReference) == len && buf[2] == 1 && buf[3] == 0);
+	CHECK(decode_frame(buf.data(), len, h, out.data(), out.size(), n) && h.flags == kFlagReference && n == 960);
+	CHECK(s.find("echoReference") == std::string::npos && so.find("echoReference") == std::string::npos);
+	sp.echo_reference = true;
+	CHECK(make_start_message(sp).find("\"echoReference\":true") != std::string::npos);
 	sp.denoise = false;
 	sp.captions = "";
 	const std::string s2 = make_start_message(sp);
@@ -143,6 +152,9 @@ static void test_protocol()
 	Event ev;
 	CHECK(parse_event(R"({"type":"ready","sessionId":"abc","sampleRate":48000,"hopSamples":480,"modelLatencyMs":30.0,"usdPerMinute":0.01,"maxSessionSeconds":43200})", ev));
 	CHECK(ev.type == EventType::Ready && ev.session_id == "abc" && ev.model_latency_ms == 30.0 && ev.sample_rate == 48000);
+	CHECK(!ev.echo_reference);  // an older server does not mention it
+	CHECK(parse_event(R"({"type":"ready","sessionId":"abc","sampleRate":48000,"modelLatencyMs":39.0,"echoReference":true})", ev));
+	CHECK(ev.type == EventType::Ready && ev.echo_reference && ev.model_latency_ms == 39.0);
 	CHECK(parse_event(R"({"type":"caption","text":"héllo 😀","final":true,"start":1.5,"end":2.5})", ev));
 	CHECK(ev.type == EventType::Caption && ev.is_final && ev.text == "h\xc3\xa9llo \xf0\x9f\x98\x80" && ev.end == 2.5);
 	CHECK(parse_event(R"({"type":"caption","text":"par","final":false,"id":"item_1"})", ev));
@@ -541,6 +553,66 @@ static void test_session_passthrough(int rate, int delay_ms)
 	CHECK(snap.state == SessionState::Idle);
 }
 
+static void test_reference_buffer()
+{
+	std::printf("echo reference buffer\n");
+	// A counter pushed in irregular chunks comes out as the same counter, whole blocks, no holes.
+	ReferenceBuffer rb(48000);
+	std::vector<float> block(960);
+	CHECK(!rb.pull(block.data(), 960));  // nothing yet: silence
+	for (float v : block)
+		CHECK(v == 0.0f);
+	float next = 1.0f;
+	const size_t chunks[] = {480, 441, 519, 300, 660, 1};  // 10 ms-ish ticks; two ticks make one 20 ms block
+	float last = 0;
+	int blocks = 0;
+	bool contiguous = true;
+	for (int tick = 0; tick < 400; ++tick) {
+		std::vector<float> x(chunks[tick % 6]);
+		for (float &v : x)
+			v = next++;
+		rb.push(x.data(), x.size());
+		if (tick % 2 == 0 || !rb.pull(block.data(), 960))
+			continue;
+		if (last != 0 && block[0] != last + 1)
+			contiguous = false;
+		for (size_t i = 1; i < block.size(); ++i)
+			contiguous = contiguous && block[i] == block[i - 1] + 1;
+		last = block.back();
+		++blocks;
+	}
+	CHECK(contiguous && blocks > 100);
+	// Far behind (a long pause on the reading side): it jumps to the newest audio, a little behind it.
+	std::vector<float> big(48000, 0.5f);
+	for (size_t i = 0; i < big.size(); ++i)
+		big[i] = next++;
+	rb.push(big.data(), big.size());
+	CHECK(rb.pull(block.data(), 960));
+	CHECK(block[0] > next - 3000 && block[959] < next - 480);
+	// Silence is reported as silence, other sample rates are converted to 48 kHz.
+	ReferenceBuffer quiet(48000);
+	std::vector<float> zeros(4800, 0.0f);
+	quiet.push(zeros.data(), zeros.size());
+	CHECK(!quiet.pull(block.data(), 960));
+	ReferenceBuffer rb44(44100);
+	std::vector<float> tone(44100);
+	for (size_t i = 0; i < tone.size(); ++i)
+		tone[i] = 0.5f * std::sin(0.05f * static_cast<float>(i));
+	rb44.push(tone.data(), tone.size());
+	int got = 0;
+	double e = 0;
+	for (int tick = 0; tick < 200; ++tick) {  // a second of 10 ms ticks, a block every other tick
+		rb44.push(tone.data() + (tick % 100) * 441, 441);
+		if (tick % 2 == 1 && rb44.pull(block.data(), 960) && tick > 20) {
+			++got;
+			for (float v : block)
+				e += static_cast<double>(v) * v;
+		}
+	}
+	CHECK(got >= 85 && got <= 90);  // two seconds, minus the first 0.4
+	CHECK_NEAR(std::sqrt(e / (got * 960.0)), 0.5 / std::sqrt(2.0), 0.03);
+}
+
 static void test_session_config()
 {
 	std::printf("session configuration\n");
@@ -597,6 +669,7 @@ int main()
 	test_session_passthrough(48000, 150);
 	test_session_passthrough(44100, 150);
 	test_session_passthrough(44100, 80);
+	test_reference_buffer();
 	test_session_config();
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures ? 1 : 0;
