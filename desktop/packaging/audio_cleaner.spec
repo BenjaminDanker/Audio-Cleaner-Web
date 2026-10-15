@@ -163,7 +163,7 @@ if sys.platform == "darwin":
             "CFBundleShortVersionString": __version__,
             "CFBundleVersion": __version__,
             "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "11.0",
+            "LSMinimumSystemVersion": "14.0",  # PySide6 6.12 and onnxruntime 1.31 wheels need macOS 14
             "LSApplicationCategoryType": "public.app-category.video",
             "NSHumanReadableCopyright": "Copyright (c) 2026 Benjamin Danker",
         },

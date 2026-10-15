@@ -4,6 +4,9 @@ The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in 
 offline: the noise model, the subtitle (speech) model and FFmpeg ship inside the installer. Nothing is downloaded or
 uploaded at run time.
 
+Runs on Windows 10/11 (x64) and macOS 14 Sonoma or newer, on Apple silicon or Intel (PySide6 6.12 and the
+onnxruntime wheels set that floor; Intel Macs use onnxruntime 1.23.2, the last release with Intel Mac wheels).
+
 ```
 common/acw_common/        cleaning pipeline shared with the server (DeepFilterNet via libDF, FFmpeg wrapper, loudness,
                           captions, transcription)
