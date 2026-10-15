@@ -80,6 +80,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"; rm -f "$NEED"' EXIT
 
 while read -r kind flags sha size target rest || [ -n "${kind:-}" ]; do
+  rest="${rest%$'\r'}"; target="${target%$'\r'}"  # a Windows checkout may end lines with CR
   case "${kind:-}" in ''|'#'*|archive) continue ;; esac
   case "$target" in /*|*..*) echo "bad target in the lock: $target" >&2; exit 2 ;; esac
   selected "$target" || continue
@@ -127,6 +128,7 @@ if [ -s "$NEED" ]; then
     line="$(awk -v n="$name" '$1 == "archive" && $5 == n { print; exit }' "$LOCK")"
     [ -n "$line" ] || { echo "the lock has members of archive '$name' but no archive line for it" >&2; exit 2; }
     read -r _ _ a_sha a_size _ a_url <<< "$line"
+    a_url="${a_url%$'\r'}"
     base="${a_url##*/}"
     arc=""
     for cand in ${ARCHIVES[@]+"${ARCHIVES[@]}"}; do [ "${cand##*/}" = "$base" ] && arc="$cand"; done

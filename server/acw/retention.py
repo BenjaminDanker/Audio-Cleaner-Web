@@ -52,7 +52,7 @@ AUDIT_WITH_MONEY = (
     "payment_uncredited", "dispute_unrecovered", "efw_unrecovered", "grant", "account_deleted",
 )
 
-_last = 0.0
+_last: float | None = None  # monotonic time of the last sweep (None: not yet since start)
 _USAGE_DESC = re.compile(r"^(?P<label>[^:]+): .* (?P<mins>\(\d+(?:\.\d+)?\s*min\))$", re.S)
 _LEGACY_LABELS = {
     "denoise": "Clean & polish",
@@ -204,7 +204,7 @@ def maintain_storage(now: int | None = None, *, hour: int | None = None) -> str 
 
 def sweep() -> None:
     global _last
-    if time.monotonic() - _last < 3600:
+    if _last is not None and time.monotonic() - _last < 3600:
         return
     _last = time.monotonic()
     done = run()

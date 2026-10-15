@@ -253,7 +253,7 @@ def test_sweep_runs_hourly_and_survives_a_failing_compaction(monkeypatch):
     calls = []
     monkeypatch.setattr(retention, "run", lambda: calls.append("run") or {})
     monkeypatch.setattr(retention, "maintain_storage", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(retention, "_last", 0.0)
+    monkeypatch.setattr(retention, "_last", None)
     retention.sweep()
     retention.sweep()
     assert calls == ["run"]

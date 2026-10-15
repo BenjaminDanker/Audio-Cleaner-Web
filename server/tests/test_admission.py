@@ -90,9 +90,11 @@ def test_live_capacity_shrinks_with_other_load_on_live_cores(monkeypatch):
     assert worker.capacity_units() < cpusplit.max_live_cores() * 2.4 * 0.5
 
 
-def test_live_cores_grow_with_load_and_jobs_keep_the_rest():
+def test_live_cores_grow_with_load_and_jobs_keep_the_rest(monkeypatch):
     from acw import cpusplit
 
+    # an 8-core / 16-thread CPU, whatever machine runs the test (CI runners have 2 cores)
+    monkeypatch.setattr(cpusplit, "physical_cores", lambda: [[i, i + 8] for i in range(8)])
     phys = len(cpusplit.physical_cores())
     assert cpusplit.live_cores_for(0, 2.4) == 0
     assert cpusplit.live_cores_for(1, 2.4) == 2  # one needed + one spare

@@ -135,13 +135,13 @@ def test_mac_postinstall_downloads_safely(tmp_path):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_mac_postinstall_writes_the_marker_only_for_complete_models(tmp_path):
-    """Run the script's `finish` against a pretend model folder (GNU stat stands in for BSD stat)."""
+    """Run the script's `finish` against a pretend model folder (a portable stat stands in for BSD stat)."""
     text = installer_models.render_mac().replace(installer_models.MAC_MODELS, str(tmp_path / "models"))
     lines = text.splitlines()
     start = lines.index("need_archive=0")
     end = next(i for i, ln in enumerate(lines) if ln.startswith("finish "))
     lines = [ln for ln in lines[:start] if not ln.startswith("fetch ")] + [ln for ln in lines[end:] if not ln.startswith("chmod -R")]
-    prelude = 'stat() { command stat -c%s "$2"; }\n'
+    prelude = 'stat() { wc -c < "$2" | tr -d " "; }\n'
     script = tmp_path / "run.sh"
     script.write_text(prelude + "\n".join(lines), encoding="utf-8")
     voice = resources.VOICE_MODEL
@@ -193,8 +193,8 @@ def test_mac_postinstall_downloads_unpacks_and_cleans_up(tmp_path):
     text = installer_models.render_mac(catalog).replace(installer_models.MAC_MODELS, str(root)).replace(
         "/var/log/audio-cleaner-install.log", str(tmp_path / "log.txt"))
     prelude = f"""
-stat() {{ command stat -c%s "$2"; }}
-shasum() {{ sha256sum "$3"; }}
+stat() {{ wc -c < "$2" | tr -d " "; }}
+shasum() {{ "{sys.executable}" -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), sys.argv[1])' "$3"; }}
 curl() {{ local out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done; cp "{tmp_path}/served.zip" "$out"; }}
 ditto() {{ "{sys.executable}" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$3" "$4"; }}
 """
@@ -418,7 +418,7 @@ def test_mac_scripts_are_written_together_and_the_package_uses_them(tmp_path):
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_mac_postinstall_skips_complete_models_and_refetches_stale_or_partial_ones(tmp_path):
     """Run the generated script with a curl that fails the test if it is called, over complete, stale and partial
-    installs (GNU stat stands in for BSD stat)."""
+    installs (a portable stat stands in for BSD stat)."""
     blob, members, catalog = _tiny_catalog("https://example.invalid/tiny.zip")
     root = tmp_path / "models"
     text = installer_models.render_mac(catalog).replace(installer_models.MAC_MODELS, str(root)).replace(
@@ -426,8 +426,8 @@ def test_mac_postinstall_skips_complete_models_and_refetches_stale_or_partial_on
     served = tmp_path / "served.zip"
     served.write_bytes(blob)
     prelude = f"""
-stat() {{ command stat -c%s "$2"; }}
-shasum() {{ sha256sum "$3"; }}
+stat() {{ wc -c < "$2" | tr -d " "; }}
+shasum() {{ "{sys.executable}" -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest(), sys.argv[1])' "$3"; }}
 curl() {{ echo called >> "{tmp_path}/curl-calls"; local out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done; cp "{served}" "$out"; }}
 ditto() {{ "{sys.executable}" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$3" "$4"; }}
 """

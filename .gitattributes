@@ -2,3 +2,4 @@
 *.sh text eol=lf
 native/deepfilter/*.patch text eol=lf
 native/deepfilter/Cargo.lock text eol=lf
+deploy/models.lock text eol=lf
