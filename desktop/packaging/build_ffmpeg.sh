@@ -6,7 +6,9 @@
 #   platform  linux-x86_64    native (used for local verification of the Linux bundle)
 #             macos-arm64     native, on an arm64 Mac
 #             macos-x86_64    native, on an Intel Mac
-#             windows-x86_64  cross-compiled on Linux (Ubuntu: apt install mingw-w64 nasm)
+#             windows-x86_64  on Windows: natively in an MSYS2 "MINGW64" shell (build_windows.ps1 does this;
+#                             pacman -S mingw-w64-x86_64-{gcc,pkgconf,nasm} make diffutils),
+#                             or cross-compiled on Linux (Ubuntu: apt install mingw-w64 nasm)
 #
 # Output (<out_dir>): ffmpeg[.exe], ffprobe[.exe] (statically linked against libavcodec/format/..,
 # libopus and LAME; no ffmpeg DLLs), ffmpeg-buildinfo.txt (versions, source URLs, sha256s, the full
@@ -98,14 +100,26 @@ case "$PLATFORM" in
     [ "$want" = x86_64 ] && X86=1
     ;;
   windows-x86_64)
-    [ "$HOST_OS" = Linux ] || { echo "$PLATFORM is cross-compiled; run it on Linux with mingw-w64" >&2; exit 1; }
-    CROSS_PREFIX=x86_64-w64-mingw32-
+    case "$HOST_OS" in
+      Linux)
+        CROSS_PREFIX=x86_64-w64-mingw32-
+        command -v "${CROSS_PREFIX}gcc" >/dev/null 2>&1 || { echo "${CROSS_PREFIX}gcc not found (apt install mingw-w64)" >&2; exit 1; }
+        ;;
+      MINGW64_NT*)
+        # MSYS2 MINGW64 shell: gcc is already the x86_64 mingw-w64 compiler.
+        command -v gcc >/dev/null 2>&1 || { echo "gcc not found (pacman -S mingw-w64-x86_64-gcc)" >&2; exit 1; }
+        ;;
+      *)
+        echo "$PLATFORM is built in an MSYS2 MINGW64 shell on Windows, or cross-compiled on Linux with mingw-w64" >&2
+        exit 1
+        ;;
+    esac
     EXE=.exe
-    command -v "${CROSS_PREFIX}gcc" >/dev/null 2>&1 || { echo "${CROSS_PREFIX}gcc not found (apt install mingw-w64)" >&2; exit 1; }
     # -static: libgcc/winpthread end up in the exe, so the app ships no runtime DLLs of ours.
     # w32threads instead of pthreads keeps libwinpthread out of the picture altogether.
-    FF_PLATFORM_ARGS+=(--arch=x86_64 --target-os=mingw32 "--cross-prefix=${CROSS_PREFIX}" --disable-pthreads --enable-w32threads
+    FF_PLATFORM_ARGS+=(--arch=x86_64 --target-os=mingw32 --disable-pthreads --enable-w32threads
       "--extra-ldflags=-static -static-libgcc")
+    [ -n "$CROSS_PREFIX" ] && FF_PLATFORM_ARGS+=("--cross-prefix=${CROSS_PREFIX}")
     DEP_HOST_ARGS+=(--host=x86_64-w64-mingw32 --disable-stack-protector)
     X86=1
     ;;
@@ -266,7 +280,7 @@ if grep -qE '^#define CONFIG_(GPL|VERSION3|NONFREE) 1' "$WORK/build/ffmpeg/confi
   echo "GPL/version3/nonfree is enabled in config.h - refusing" >&2
   exit 1
 fi
-if [ -z "$CROSS_PREFIX" ]; then
+if [ "$EXE" != ".exe" ]; then
   version_out="$("$OUT/ffmpeg" -hide_banner -version)"
   echo "$version_out" | head -n 3
   if echo "$version_out" | grep -qE -- '--enable-(gpl|version3|nonfree)'; then
@@ -313,6 +327,16 @@ if [ -z "$CROSS_PREFIX" ]; then
   esac
 else
   OBJDUMP="${CROSS_PREFIX}objdump"
+  if [ "$HOST_OS" != Linux ]; then # native MSYS2: the programs can run here
+    "$OUT/ffmpeg.exe" -hide_banner -L | head -n 4 | tr '\n' ' ' | grep -q 'GNU Lesser General Public License' \
+      || { echo "ffmpeg -L does not report the LGPL" >&2; exit 1; }
+    if "$OUT/ffmpeg.exe" -hide_banner -version | grep -qE -- '--enable-(gpl|version3|nonfree)'; then
+      echo "built ffmpeg reports a GPL/nonfree configuration" >&2
+      exit 1
+    fi
+    head -c 384000 /dev/zero | "$OUT/ffmpeg.exe" -nostdin -hide_banner -v error -f f32le -ar 48000 -ac 1 -i pipe:0 -c:a flac -y "$WORK/t.flac"
+    "$OUT/ffprobe.exe" -v error -show_entries format=format_name,duration -of csv=p=0 "$WORK/t.flac" | head -n 1
+  fi
   dlls="$("$OBJDUMP" -p "$OUT/ffmpeg.exe" "$OUT/ffprobe.exe" | awk '/DLL Name:/ {print tolower($3)}' | sort -u)"
   echo "imported DLLs: $(echo $dlls)"
   # Only Windows system DLLs may be imported (no libgcc/winpthread/libopus/... of ours).

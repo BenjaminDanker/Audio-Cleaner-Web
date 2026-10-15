@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Hardened-runtime entitlements for the notarized Audio Cleaner.app. Kept minimal on purpose.
+
+    Needed by this bundle:
+      com.apple.security.cs.disable-library-validation
+        Under the hardened runtime the app may only load libraries signed by Apple or by the same team. CI
+        re-signs every Mach-O file in the bundle with our identity, so the shipped app would run without this
+        entitlement. It is kept because the LGPL requires users to be able to replace Qt (and FFmpeg, libdf)
+        with their own builds: a replaced, differently signed Qt library would otherwise be refused and the
+        app would not start. If you decide that replaceability on macOS is not needed, delete the key
+        and test a notarized build.
+
+    Deliberately NOT included:
+      com.apple.security.cs.allow-jit, allow-unsigned-executable-memory, allow-dyld-environment-variables
+        Python, NumPy, CTranslate2 and ONNX Runtime run without a JIT. Add them only if the frozen app crashes
+        on a notarized build with a code-signing / memory-protection error in the crash log.
+      com.apple.security.app-sandbox
+        The app reads and writes files the user picks anywhere on disk and starts ffmpeg as a child program;
+        it is distributed outside the Mac App Store, where the sandbox is optional.
+      Audio input / camera
+        The app only processes files; it never records.
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

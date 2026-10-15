@@ -64,8 +64,22 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions) -> i
     return 1 if failures else 0
 
 
+def _check_speech_runtime() -> None:
+    """The subtitle engine: faster-whisper, CTranslate2's native library, the Silero VAD model (onnxruntime)
+    and the bundled speech model all load. Catches missing shared libraries or data files in a frozen build."""
+    import ctranslate2
+    from faster_whisper import WhisperModel
+    from faster_whisper.vad import get_vad_model
+
+    if "int8" not in ctranslate2.get_supported_compute_types("cpu"):
+        raise RuntimeError("CTranslate2 cannot run int8 models on this CPU")
+    get_vad_model()
+    WhisperModel(str(resources.whisper_model_path()), device="cpu", compute_type="int8", cpu_threads=1, num_workers=1)
+
+
 def selftest() -> int:
-    """Denoise 3 s of noisy tone and round-trip it through FFmpeg, using the resolved native pieces."""
+    """Denoise 3 s of noisy tone and round-trip it through FFmpeg, using the resolved native pieces,
+    and load the subtitle engine."""
     try:
         missing = resources.check()
         if missing:
@@ -84,6 +98,7 @@ def selftest() -> int:
             decoded = ff.decode(out, info, sr, 1, 10)
         if abs(info.duration - 3.0) > 0.2 or info.audio_channels != 1 or decoded.size < 2.8 * sr:
             raise RuntimeError(f"FFmpeg round-trip mismatch (duration {info.duration:.2f} s)")
+        _check_speech_runtime()
     except Exception as e:  # noqa: BLE001 - any failure is a failed selftest
         print(f"selftest failed: {e}")
         return 1

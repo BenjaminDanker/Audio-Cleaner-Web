@@ -1,0 +1,395 @@
+# Builds the Audio Cleaner desktop app: installer for Windows x64, disk images for macOS arm64 and x86_64.
+#
+# Stages: FFmpeg (LGPL-only, built from source) and libDF (DeepFilterNet's C library) per platform, then the
+# app per platform (tests, PyInstaller, frozen --selftest, installer / dmg). Push a tag desktop-vX.Y.Z whose
+# version matches audio_cleaner_desktop.__version__ to publish a GitHub Release with the three installers and
+# SHA256SUMS. Signing is optional and only happens when the secrets exist (docs/desktop.md lists them):
+#   macOS    MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD (+ APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD to notarize)
+#   Windows  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
+#            AZURE_SIGNING_PROFILE (Azure Artifact Signing)
+# Every third-party action is pinned to a full commit SHA.
+name: Desktop app
+
+on:
+  push:
+    branches: [main, on-prem]
+    tags: ["desktop-v*"]
+    paths:
+      - "desktop/**"
+      - "common/**"
+      - "native/deepfilter/**"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "common/**"
+      - "native/deepfilter/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # LGPL-only FFmpeg + libopus + LAME, static, from pinned source tarballs (desktop/packaging/build_ffmpeg.sh).
+  # The Windows build is cross-compiled with mingw-w64 on Linux.
+  ffmpeg:
+    name: FFmpeg ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x86_64, os: ubuntu-24.04 }
+          - { platform: macos-arm64, os: macos-15 }
+          - { platform: macos-x86_64, os: macos-15-intel }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Cache the build
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ffmpeg-out
+          key: ffmpeg-${{ matrix.platform }}-${{ hashFiles('desktop/packaging/build_ffmpeg.sh') }}
+
+      - name: Install build tools (Linux, mingw-w64 cross compiler)
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mingw-w64 nasm pkg-config make xz-utils curl
+
+      - name: Install build tools (macOS)
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'macOS'
+        run: |
+          brew install pkgconf
+          if [ "$(uname -m)" = x86_64 ]; then brew install nasm; fi
+
+      - name: Build FFmpeg
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          REQUIRE_ASM: "1"
+        run: bash desktop/packaging/build_ffmpeg.sh "${{ matrix.platform }}" ffmpeg-out
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ffmpeg-${{ matrix.platform }}
+          path: ffmpeg-out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # DeepFilterNet libDF C library (native/deepfilter/build.sh) + the DFN3 model from the same checkout
+  # + the licence notices that need the Rust toolchain (crate list).
+  libdf:
+    name: libDF ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x86_64, os: windows-2025, lib: df.dll, rust_target: x86_64-pc-windows-msvc }
+          - { platform: macos-arm64, os: macos-15, lib: libdf.dylib, rust_target: aarch64-apple-darwin }
+          - { platform: macos-x86_64, os: macos-15-intel, lib: libdf.dylib, rust_target: x86_64-apple-darwin }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache cargo
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/dfn-build/target
+          key: libdf-${{ matrix.platform }}-${{ hashFiles('native/deepfilter/Cargo.lock', 'native/deepfilter/tract-0.23.patch', 'native/deepfilter/build.sh') }}
+          restore-keys: libdf-${{ matrix.platform }}-
+
+      - name: Build libDF
+        run: |
+          export BUILD_DIR="$HOME/dfn-build" OUT="$HOME/dfn-out"
+          bash native/deepfilter/build.sh native
+          mkdir -p libdf-out
+          cp "$OUT/${{ matrix.lib }}" libdf-out/
+          cp "$BUILD_DIR/models/DeepFilterNet3_onnx.tar.gz" libdf-out/
+
+      - name: Licence notices (Rust crates, DeepFilterNet)
+        run: |
+          src="$HOME/dfn-build"
+          if command -v cygpath >/dev/null 2>&1; then src="$(cygpath -m "$src")"; fi
+          python desktop/packaging/prepare_vendor.py --write-deepfilter-notices libdf-out \
+            --deepfilter-src "$src" --rust-target "${{ matrix.rust_target }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: libdf-${{ matrix.platform }}
+          path: libdf-out
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  app:
+    name: App ${{ matrix.platform }}
+    needs: [ffmpeg, libdf]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x86_64, os: windows-2025, lib: df.dll, rust_target: x86_64-pc-windows-msvc, pathsep: ";" }
+          - { platform: macos-arm64, os: macos-15, lib: libdf.dylib, rust_target: aarch64-apple-darwin, pathsep: ":" }
+          - { platform: macos-x86_64, os: macos-15-intel, lib: libdf.dylib, rust_target: x86_64-apple-darwin, pathsep: ":" }
+    env:
+      PYTHONPATH: ${{ github.workspace }}/desktop${{ matrix.pathsep }}${{ github.workspace }}/common
+      ACW_DESKTOP_VENDOR: ${{ github.workspace }}/desktop/vendor
+      ACW_ICON_DIR: ${{ github.workspace }}/build/icons
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      QT_QPA_PLATFORM: offscreen
+      # Signing is optional: these are 'true' only when the secrets exist (never for pull requests).
+      MAC_SIGNING: ${{ secrets.MACOS_CERT_P12_BASE64 != '' && github.event_name != 'pull_request' }}
+      MAC_NOTARIZE: ${{ secrets.MACOS_CERT_P12_BASE64 != '' && secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_PASSWORD != '' && github.event_name != 'pull_request' }}
+      WIN_SIGNING: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_SIGNING_ACCOUNT != '' && github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: desktop/requirements.lock
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ffmpeg-${{ matrix.platform }}
+          path: build/ffmpeg
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: libdf-${{ matrix.platform }}
+          path: build/libdf
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r desktop/requirements.lock pyinstaller==6.22.3 pillow==12.3.0 pytest==9.1.1
+
+      - name: Version
+        run: |
+          version="$(python -c "from audio_cleaner_desktop import __version__ as v; print(v, end='')")"
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "desktop-v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the app version $version (expected desktop-v$version)"
+            exit 1
+          fi
+
+      - name: Cache the subtitle model download
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .hf-cache
+          key: whisper-small-${{ hashFiles('desktop/packaging/prepare_vendor.py') }}
+
+      - name: Assemble the vendor directory (native pieces, models, licence notices)
+        run: |
+          python desktop/packaging/prepare_vendor.py \
+            --libdf "build/libdf/${{ matrix.lib }}" \
+            --ffmpeg-dir build/ffmpeg \
+            --model build/libdf/DeepFilterNet3_onnx.tar.gz \
+            --deepfilter-notices build/libdf \
+            --download-whisper \
+            --out desktop/vendor
+
+      - name: Tests (common + desktop, headless)
+        run: python -m pytest -q common/tests desktop/tests
+
+      - name: Icons
+        run: python desktop/packaging/make_icons.py build/icons
+
+      - name: PyInstaller
+        run: pyinstaller desktop/packaging/audio_cleaner.spec --distpath dist --workpath build/pyinstaller --noconfirm
+
+      # ----- Windows ----------------------------------------------------------------------------
+      - name: Frozen selftest (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The exe is windowed: without a console it writes to audio-cleaner-cli.log in the temp folder.
+          $log = Join-Path $env:TEMP 'audio-cleaner-cli.log'
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath 'dist\AudioCleaner\AudioCleaner.exe' -ArgumentList '--selftest' -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { throw "selftest exited with code $($p.ExitCode)" }
+          if ((Test-Path $log) -and -not (Select-String -Path $log -Pattern 'selftest ok' -Quiet)) { throw 'selftest did not report ok' }
+
+      - name: Sign the program files (Windows)
+        if: runner.os == 'Windows' && env.WIN_SIGNING == 'true'
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\AudioCleaner
+          files-folder-filter: exe,dll
+          files-folder-depth: 3
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            foreach ($p in "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") {
+              if (Test-Path $p) { $iscc = $p; break }
+            }
+          }
+          if (-not $iscc) {
+            choco install innosetup --no-progress -y
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          $ws = $env:GITHUB_WORKSPACE
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$ws\dist\AudioCleaner" "/DOutputDir=$ws\build\installer" `
+            "/DIconFile=$ws\build\icons\icon.ico" "$ws\desktop\packaging\windows\AudioCleaner.iss"
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed ($LASTEXITCODE)" }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "build\installer\AudioCleaner-Setup-$env:APP_VERSION-x64.exe" out\AudioCleaner-Setup-x64.exe
+
+      - name: Sign the installer (Windows)
+        if: runner.os == 'Windows' && env.WIN_SIGNING == 'true'
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\out\AudioCleaner-Setup-x64.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Upload installer
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: out/AudioCleaner-Setup-x64.exe
+          archive: false
+          if-no-files-found: error
+
+      # ----- macOS ------------------------------------------------------------------------------
+      - name: Frozen selftest and version (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          exe="dist/Audio Cleaner.app/Contents/MacOS/AudioCleaner"
+          "$exe" --version
+          "$exe" --selftest | tee selftest.log
+          grep -q "selftest ok" selftest.log
+
+      - name: Import the signing certificate (macOS)
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/signing.keychain-db"
+          kcpw="$(uuidgen)"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          printf '%s' "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" >/dev/null
+          security list-keychains -d user -s "$kc" login.keychain-db
+          identity="$(security find-identity -v -p codesigning "$kc" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -n 1)"
+          [ -n "$identity" ] || { echo "::error::no 'Developer ID Application' identity in the certificate"; exit 1; }
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+
+      - name: Sign the app (macOS)
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
+        run: bash desktop/packaging/macos/sign_app.sh "dist/Audio Cleaner.app" "$MACOS_SIGN_IDENTITY"
+
+      - name: Notarize the app (macOS)
+        if: runner.os == 'macOS' && env.MAC_NOTARIZE == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash desktop/packaging/macos/notarize.sh "dist/Audio Cleaner.app"
+
+      - name: Disk image (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          arch="${{ matrix.platform }}"; arch="${arch#macos-}"
+          mkdir -p out
+          bash desktop/packaging/macos/make_dmg.sh "dist/Audio Cleaner.app" "out/AudioCleaner-macOS-$arch.dmg"
+          echo "DMG=out/AudioCleaner-macOS-$arch.dmg" >> "$GITHUB_ENV"
+
+      - name: Sign and notarize the disk image (macOS)
+        if: runner.os == 'macOS' && env.MAC_SIGNING == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$DMG"
+          if [ "$MAC_NOTARIZE" = true ]; then bash desktop/packaging/macos/notarize.sh "$DMG"; fi
+
+      - name: Upload disk image
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ env.DMG }}
+          archive: false
+          if-no-files-found: error
+
+      - name: Remove the signing keychain (macOS)
+        if: always() && runner.os == 'macOS' && env.SIGNING_KEYCHAIN != ''
+        run: security delete-keychain "$SIGNING_KEYCHAIN" || true
+
+  # ---------------------------------------------------------------------------
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: app
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: AudioCleaner-*
+          merge-multiple: true
+          path: release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          for f in AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg; do
+            [ -f "$f" ] || { echo "::error::missing $f"; exit 1; }
+          done
+          sha256sum AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg > SHA256SUMS
+          cat SHA256SUMS
+          version="${GITHUB_REF_NAME#desktop-v}"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Audio Cleaner $version" \
+            --notes "Audio Cleaner $version for Windows (x64) and macOS (Apple silicon and Intel). Check a download against SHA256SUMS." \
+            AudioCleaner-Setup-x64.exe AudioCleaner-macOS-arm64.dmg AudioCleaner-macOS-x86_64.dmg SHA256SUMS
