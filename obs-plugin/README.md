@@ -9,7 +9,9 @@ Built against libobs 31.1.1; works with OBS 31 and newer (OBS refuses plugins bu
 
 ## Install
 
-Download the package for your platform from the CI artifacts and unpack:
+Download the package for your platform from the newest build,
+https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/tag/obs-plugin-latest (every push that changes
+`obs-plugin/` replaces it; an `obs-plugin-v<version>` tag publishes a permanent release), and unpack:
 
 | Platform | Location |
 |---|---|

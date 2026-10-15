@@ -193,3 +193,56 @@ jobs:
         with:
           name: audio-cleaner-windows-x64
           path: obs-plugin/release/*.zip
+
+  # ---------------------------------------------------------------------------
+  # Every successful build of main / on-prem replaces the "obs-plugin-latest" pre-release, so
+  # https://github.com/<repo>/releases/tag/obs-plugin-latest always has the newest plugin. It is a
+  # pre-release and never marked latest (the repository's releases/latest link belongs to the
+  # desktop app). A hand-made obs-plugin-v<version> tag publishes a permanent release instead.
+  release:
+    name: GitHub Release
+    if: >-
+      startsWith(github.ref, 'refs/tags/obs-plugin-v') ||
+      (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/on-prem'))
+    needs: [core-tests, linux, macos, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    concurrency:
+      group: obs-plugin-release
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: obs-plugin/buildspec.json
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: audio-cleaner-*
+          merge-multiple: true
+          path: release
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(jq -r .version obs-plugin/buildspec.json)"
+          cd release
+          ls -l
+          shopt -s nullglob
+          files=(*.zip *.tar.xz *.deb)
+          [ "${#files[@]}" -ge 4 ] || { echo "::error::expected the Windows, macOS and Ubuntu packages"; exit 1; }
+          sha256sum "${files[@]}" > SHA256SUMS
+          notes="Audio Cleaner OBS plugin $version for OBS 31.1 or newer: Windows x64 (zip), macOS universal (tar.xz) and Ubuntu x86_64 (deb or tar.xz). Built from ${GITHUB_SHA::7}. Not code-signed yet. Check a download against SHA256SUMS."
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+              --title "OBS plugin $version" --notes "$notes" "${files[@]}" SHA256SUMS
+          else
+            gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+            gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "OBS plugin $version (latest build)" --notes "$notes" "${files[@]}" SHA256SUMS
+          fi
