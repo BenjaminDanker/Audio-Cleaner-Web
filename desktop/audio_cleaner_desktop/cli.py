@@ -215,6 +215,18 @@ def _check_gui() -> None:
             window.history.close()
 
 
+def _check_windows_quiet() -> None:
+    """Windows: `platform` must be able to ask WMI itself (else it runs `cmd /c ver`), and programs libraries start
+    must not get a console window."""
+    if sys.platform != "win32":
+        return
+    import _wmi  # noqa: F401 - bundled on purpose (hidden import in audio_cleaner.spec)
+    import subprocess
+
+    if not getattr(subprocess.Popen.__init__, "_acw_quiet_popen", False):
+        raise RuntimeError("subprocess.Popen is not set to start programs without a console window")
+
+
 def selftest(gui: bool = False) -> int:
     """Denoise 3 s of noisy tone and round-trip it through FFmpeg, using the resolved native pieces,
     load the subtitle engine, run a second through the other models that are there and, with `gui`, build the
@@ -237,6 +249,7 @@ def selftest(gui: bool = False) -> int:
             decoded = ff.decode(out, info, sr, 1, 10)
         if abs(info.duration - 3.0) > 0.2 or info.audio_channels != 1 or decoded.size < 2.8 * sr:
             raise RuntimeError(f"FFmpeg round-trip mismatch (duration {info.duration:.2f} s)")
+        _check_windows_quiet()
         _check_speech_runtime()
         skipped = _check_models()
         if gui:

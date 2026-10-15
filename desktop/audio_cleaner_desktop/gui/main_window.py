@@ -139,8 +139,14 @@ class MainWindow(QMainWindow):
         else:
             self.resize(1080, 720)
         self._fit_settings()
-        self.add_paths(files)
+        queued = self.add_paths(files)
         self._refresh_state()
+        try:  # open on the tab the app was closed on, unless files were just given (they are on the Clean tab)
+            tab = int(self._qs.value("tab", 0))
+        except (TypeError, ValueError):
+            tab = 0
+        if not queued and 0 < tab < self.tabs.count():
+            self.tabs.setCurrentIndex(tab)
         QTimer.singleShot(SWEEP_DELAY_MS, self._sweep_leftovers)
 
     # -- construction -------------------------------------------------------
@@ -873,6 +879,7 @@ class MainWindow(QMainWindow):
         if self.preview is not None:
             self.preview.stop()
         self._qs.setValue("geometry", self.saveGeometry())
+        self._qs.setValue("tab", self.tabs.currentIndex())
         self._qs.sync()
         self.history.close()
         super().closeEvent(event)

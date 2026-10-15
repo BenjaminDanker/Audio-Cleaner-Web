@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Packs "Audio Cleaner.app" into an installer package (.pkg) that installs it into /Applications and,
-# during setup, downloads the models (postinstall from installer_models.py --mac). The package is wrapped
+# during setup, downloads the models (postinstall from installer_models.py --mac); its preinstall script removes an
+# installed copy first, so running the package again is a clean in-place update. The package is wrapped
 # with productbuild --distribution (macos/distribution.py): it refuses macOS older than 14, shows the
 # licence agreement and a welcome text that says setup downloads about 2.5 GB.
 #
@@ -30,10 +31,15 @@ if [ -z "${4:-}" ]; then
   python3 "$HERE/../installer_models.py" --mac "$SCRIPTS"
 fi
 [ -x "$SCRIPTS/postinstall" ] || { echo "no postinstall script in $SCRIPTS" >&2; exit 1; }
+# preinstall removes the installed "Audio Cleaner.app" first, so an update replaces the app completely
+[ -x "$SCRIPTS/preinstall" ] || { echo "no preinstall script in $SCRIPTS" >&2; exit 1; }
 
 # Always install into /Applications (not wherever an older copy happens to be).
 pkgbuild --analyze --root "$WORK/root" "$WORK/component.plist"
 plutil -replace 0.BundleIsRelocatable -bool false "$WORK/component.plist"
+# Never skip the bundle because a same or newer version is installed (re-running setup, or going back to an older
+# build): the preinstall script has removed the old one anyway.
+plutil -replace 0.BundleIsVersionChecked -bool false "$WORK/component.plist"
 
 mkdir -p "$(dirname "$OUT")" "$WORK/pkgs"
 rm -f "$OUT"

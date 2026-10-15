@@ -363,6 +363,19 @@ jobs:
           $p = Start-Process -FilePath "$dir\AudioCleaner.exe" -ArgumentList '--selftest', '--gui' -Wait -PassThru
           if (Test-Path $log) { Get-Content $log }
           if ($p.ExitCode -ne 0) { throw "the installed program's selftest exited with code $($p.ExitCode)" }
+          # Running setup again is an in-place update: no /DIR this time (it reuses the folder), a file that an older
+          # version would have left in _internal is gone afterwards, and the models folder is untouched.
+          Set-Content "$dir\_internal\left-by-an-older-version.txt" 'x'
+          New-Item -ItemType Directory -Force -Path "$dir\models\keep" | Out-Null
+          Set-Content "$dir\models\keep\downloaded.bin" 'x'
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/LOG=$env:RUNNER_TEMP\setup2.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup2.log"; throw "the second setup exited with code $($p.ExitCode)" }
+          if (Test-Path "$dir\_internal\left-by-an-older-version.txt") { throw 'an update left a file of the older version behind' }
+          if (-not (Test-Path "$dir\models\keep\downloaded.bin")) { throw 'an update removed the models folder' }
+          Remove-Item $log -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath "$dir\AudioCleaner.exe" -ArgumentList '--selftest', '--gui' -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log }
+          if ($p.ExitCode -ne 0) { throw "the updated program's selftest exited with code $($p.ExitCode)" }
           $p = Start-Process -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "the uninstaller exited with code $($p.ExitCode)" }
           Start-Sleep -Seconds 3
@@ -427,6 +440,12 @@ jobs:
           PKG_ARCH="$([ "$arch" = arm64 ] && echo arm64 || echo x86_64)" bash desktop/packaging/macos/make_pkg.sh "dist/Audio Cleaner.app" "out/AudioCleaner-macOS-$arch.pkg" \
             "$APP_VERSION" build/pkg-scripts
           echo "PKG=out/AudioCleaner-macOS-$arch.pkg" >> "$GITHUB_ENV"
+          # The package must carry both setup scripts: preinstall removes the installed app (an update replaces it
+          # completely), postinstall downloads the models that are missing.
+          pkgutil --expand-full "out/AudioCleaner-macOS-$arch.pkg" "$RUNNER_TEMP/pkg-check"
+          for script in preinstall postinstall; do
+            test -x "$RUNNER_TEMP/pkg-check/AudioCleaner-component.pkg/Scripts/$script" || { echo "::error::the package has no $script script"; exit 1; }
+          done
 
       - name: Upload installer package
         if: runner.os == 'macOS'

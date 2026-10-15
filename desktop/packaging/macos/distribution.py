@@ -27,7 +27,9 @@ def welcome_text(models_gb: float) -> str:
         f"While it installs, setup downloads about {models_gb:.1f} GB of models (for subtitles, phone-quality "
         "recordings and rebuilding voices). That can take several minutes, and the installer may seem to stand "
         "still meanwhile. Please keep your internet connection on until it says it is done.\n\n"
-        "If a download does not work, the app is installed anyway and offers the missing models in Settings.\n"
+        "If a download does not work, the app is installed anyway and offers the missing models in Settings.\n\n"
+        "Already installed? Just run this installer again: it replaces the app with this version, keeps your "
+        "settings, history and downloaded models, and does not download the models again.\n"
     )
 
 

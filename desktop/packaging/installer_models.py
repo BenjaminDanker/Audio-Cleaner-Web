@@ -2,7 +2,7 @@
 """Make the installers download the models during setup.
 
     python installer_models.py OUT.iss                Windows: Inno Setup include (iscc /DModelsInclude=OUT.iss)
-    python installer_models.py --mac SCRIPTS_DIR      macOS: the .pkg's postinstall script (make_pkg.sh)
+    python installer_models.py --mac SCRIPTS_DIR      macOS: the .pkg's preinstall and postinstall scripts (make_pkg.sh)
     python installer_models.py --total-gb             size of all the downloads in GB (for the texts)
 
 Generated from the app's own catalog (resources.SPEECH_MODEL, HIGHS_MODEL, VOICE_MODEL; read without importing
@@ -19,6 +19,12 @@ there gets a .complete marker with the hashes of its files, which the app compar
 (models.location). On a Mac the .pkg's postinstall script does the same into
 /Library/Application Support/Audio Cleaner/models/<id>/ (models.installer_dir), unpacking with ditto. If a download
 fails (offline), setup still finishes; the app then offers the missing download in Settings.
+
+Running setup again over an installed app (same or newer version) downloads nothing that is already complete: a model
+whose files are all there with the right sizes is left alone (and its marker rewritten); a marker that names other
+hashes than this catalog (a model of another version) makes setup forget that model's files and fetch it again; a
+partial earlier install is completed (individual files one by one, the archive again if any of its files is missing
+or has the wrong size). Nothing in the models folder is ever deleted otherwise.
 """
 from __future__ import annotations
 
@@ -89,6 +95,17 @@ def render(catalog=CATALOG) -> str:
         )
         fetches.append(f"    FetchModel({_pascal(f.url)}, {_pascal(tmp)}, {_pascal(f.sha256)}, {_pascal(full)}, {f.size});")
     markers = []
+    stale = []
+    for m in catalog:
+        marker_path = _pascal("{app}" + BS + "models" + BS + m.id + BS + ".complete")
+        expected = "#10".join(_pascal(f.sha256) for f in m.files)
+        drops = "\n".join(
+            f"    DeleteFile(ExpandConstant({_pascal(_app_path(m, f))}));" for f in m.files
+        )
+        stale.append(
+            f"  if not MarkerAgrees(ExpandConstant({marker_path}), {expected}) then\n  begin\n{drops}\n"
+            f"    DeleteFile(ExpandConstant({marker_path}));\n  end;"
+        )
     for m in catalog:
         ready = " and ".join(f"ModelFileReady(ExpandConstant({_pascal(_app_path(m, f))}), {f.size})" for f in m.files)
         hashes = "#10".join(_pascal(f.sha256) for f in m.files)
@@ -240,6 +257,31 @@ begin
   Result := FileSize64(Path, Got) and (Got = Size);
 end;
 
+{{ A model's .complete marker lists the hashes of the files it was installed from. No marker (an install from before
+  the marker existed, or nothing installed): the sizes decide. A marker that lists other hashes belongs to another
+  version of the model. }}
+function MarkerAgrees(const Marker, Expected: String): Boolean;
+var
+  Got: AnsiString;
+  Content: String;
+begin
+  Result := True;
+  if not FileExists(Marker) then
+    Exit;
+  Result := False;
+  if not LoadStringFromFile(Marker, Got) then
+    Exit;
+  Content := Trim(String(Got));
+  StringChangeEx(Content, #13, '', True);
+  Result := (Content = Expected);
+end;
+
+{{ Models of another version are removed first, so that everything below fetches them again. }}
+procedure ForgetStaleModels;
+begin
+{chr(10).join(stale)}
+end;
+
 procedure InitializeWizard;
 begin
   ModelDownloads := CreateDownloadPage('Downloading Audio Cleaner''s models',
@@ -279,9 +321,10 @@ begin
   Result := True;
   if CurPageID <> wpReady then
     Exit;
+  ForgetStaleModels;
   Need := ModelsStillNeeded;
   if Need = 0 then
-    Exit;
+    Exit;  {{ everything is installed already (an update): nothing to download }}
   {{ The downloads wait in the temporary folder until the files are installed. }}
   if GetSpaceOnDisk64(ExpandConstant('{{tmp}}'), Free, Total) and (Free < Need + 200000000) then
   begin
@@ -319,15 +362,18 @@ end;
 
 
 MAC_MODELS = "/Library/Application Support/Audio Cleaner/models"
+APP_BUNDLE = "Audio Cleaner.app"
 
 
 def render_mac(catalog=CATALOG) -> str:
     archive = _archive(catalog)
     fetches = [f'fetch "{f.url}" "{MAC_MODELS}/{m.id}/{f.path}" {f.size} {f.sha256}' for m, f in _plain(catalog)]
     finishes = []
+    forgets = []
     for m in catalog:
         specs = " ".join(f'"{f.sha256}:{f.size}:{f.path}"' for f in m.files)
         finishes.append(f'finish "{MAC_MODELS}/{m.id}" {specs}')
+        forgets.append(f'forget_stale "{MAC_MODELS}/{m.id}" {specs}')
     archive_block = ""
     if archive is not None:
         archived = _archived(catalog)
@@ -394,6 +440,16 @@ place() {{  # place SRC DEST SIZE: move an unpacked file to its place when it ha
     echo "not unpacked correctly: $src" >>"$LOG"; failed=1
   fi
 }}
+forget_stale() {{  # forget_stale DIR SHA:SIZE:PATH...  a .complete marker naming other hashes: another version's files go
+  local dir="$1" spec rel want got
+  shift
+  [ -f "$dir/.complete" ] || return 0   # no marker (an older install, or none yet): the sizes decide
+  want="$(for spec in "$@"; do echo "${{spec%%:*}}"; done)"
+  got="$(cat "$dir/.complete")"
+  [ "$got" = "$want" ] && return 0
+  for spec in "$@"; do rel="${{spec#*:*:}}"; rm -f "$dir/$rel"; done
+  rm -f "$dir/.complete"
+}}
 finish() {{  # finish DIR SHA:SIZE:PATH...  writes DIR/.complete when every file is there with its size
   local dir="$1" ok=1 spec rel size marker=""
   shift
@@ -403,10 +459,32 @@ finish() {{  # finish DIR SHA:SIZE:PATH...  writes DIR/.complete when every file
   done
   if [ "$ok" = 1 ]; then printf '%s' "$marker" > "$dir/.complete"; chmod 644 "$dir/.complete"; fi
 }}
+{chr(10).join(forgets)}
 {chr(10).join(fetches)}
 {archive_block}{chr(10).join(finishes)}
 chmod -R a+rX "{MAC_MODELS}" 2>/dev/null
 [ "$failed" = 0 ] || echo "some models are missing; Audio Cleaner offers them in Settings" >>"$LOG"
+exit 0
+"""
+
+
+def render_mac_preinstall() -> str:
+    """The .pkg's preinstall script: the installer replaces the app bundle completely, so an update cannot leave
+    files of the old version inside it. Removes that one folder (never the models or anything else)."""
+    return f"""#!/bin/bash
+# preinstall of the Audio Cleaner .pkg: remove the installed app so that the new one replaces it completely
+# (nothing of an older version stays inside the bundle). Only this one folder is removed: the models in
+# /Library/Application Support/Audio Cleaner, the settings and the history are not touched.
+# Generated by desktop/packaging/installer_models.py: do not edit by hand. Runs as root during setup.
+# $3 is the volume the package is installed on ("/" for the startup disk).
+LOG=/var/log/audio-cleaner-install.log
+VOLUME="${{3:-/}}"
+[ -d "$VOLUME" ] || VOLUME=/
+APP="${{VOLUME%/}}/Applications/{APP_BUNDLE}"
+if [ -d "$APP" ] && [ ! -L "$APP" ]; then
+  echo "removing the installed $APP before the update" >>"$LOG"
+  rm -rf "$APP" >>"$LOG" 2>&1 || echo "could not remove $APP" >>"$LOG"
+fi
 exit 0
 """
 
@@ -422,6 +500,9 @@ def main() -> int:
         script = out / "postinstall"
         script.write_text(render_mac(), encoding="utf-8")
         script.chmod(0o755)
+        pre = out / "preinstall"
+        pre.write_text(render_mac_preinstall(), encoding="utf-8")
+        pre.chmod(0o755)
         return 0
     if len(args) != 1:
         print(__doc__, file=sys.stderr)

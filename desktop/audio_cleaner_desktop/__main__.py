@@ -4,8 +4,12 @@ import argparse
 import os
 import sys
 
-from . import __version__, config
-from .engine import AUDIO_CHOICES, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTHS, SUBTITLE_MODES, JobOptions
+from . import quiet_popen
+
+quiet_popen.install()  # first, before the heavier imports below (the frozen app does this in packaging/launcher.py)
+
+from . import __version__, config  # noqa: E402
+from .engine import AUDIO_CHOICES, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTHS, SUBTITLE_MODES, JobOptions  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     # The app only goes online to download a model when asked to: keep the libraries it uses from doing so.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    if sys.platform == "win32":
+        quiet_popen.warm_platform_info()  # `platform` is asked at import time by onnxruntime: answer it off the main thread
     parser = build_parser()
     args = parser.parse_intermixed_args(argv)
 

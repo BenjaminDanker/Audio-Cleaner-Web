@@ -10,6 +10,11 @@
 ; Installs per user by default (no administrator prompt); the "Install for all users" choice on the first
 ; page switches to Program Files. Settings, history and models the app downloaded itself live in the user profile; the
 ; uninstaller asks whether to remove them too (and leaves them when the uninstall is silent).
+;
+; Running setup again (same or newer version) updates in place: it reuses the previous install's folder and mode (per
+; user or all users), closes the running app, deletes the old program files (_internal) before copying the new ones,
+; and downloads no model that is already complete in {app}\models (installer_models.py). {app}\models, the settings
+; (registry), the history and the models the app downloaded itself are never touched by an update.
 
 #ifndef AppVersion
   #error Pass /DAppVersion=x.y.z
@@ -27,6 +32,10 @@
 [Setup]
 ; Never change AppId: it is how upgrades and the uninstaller recognise this product.
 AppId={{6F0D1A52-3C41-4B7E-9A68-2D5E8B7C41F3}
+; An update installs where the previous setup installed (folder, per user or all users) without asking again.
+; These are Inno's defaults; they are written out so that nobody switches them off by accident.
+UsePreviousAppDir=yes
+UsePreviousPrivileges=yes
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
@@ -61,6 +70,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[InstallDelete]
+; Everything the build puts in the program folder besides the exe is in _internal (PyInstaller 6): delete it before the new
+; files are copied, so files an older version had and this one does not cannot linger (and cannot be loaded by mistake).
+; NEVER add {app}\models here: that folder holds the downloaded models (it is not {app}\_internal\models, the two
+; small noise models that ship inside the program).
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion

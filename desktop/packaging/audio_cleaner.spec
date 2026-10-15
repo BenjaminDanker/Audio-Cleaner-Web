@@ -52,6 +52,10 @@ datas = [
     (str(DESKTOP / "audio_cleaner_desktop" / "assets"), "audio_cleaner_desktop/assets"),
 ]
 hiddenimports = []
+if sys.platform == "win32":
+    # `platform` imports _wmi inside a try: block; keep it, or platform.uname() (onnxruntime and truststore ask for it
+    # at import time) falls back to running `cmd /c ver`, which flashes a console window.
+    hiddenimports.append("_wmi")
 
 # faster-whisper: the Silero VAD model (assets/silero_vad_v6.onnx); CTranslate2: its shared libraries.
 datas += collect_data_files("faster_whisper")

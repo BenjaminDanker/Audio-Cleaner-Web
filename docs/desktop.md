@@ -220,7 +220,40 @@ to 2 GiB each.
   licence text. New Python packages that end up in the bundle need an entry check in `prepare_vendor.py`.
 * Not legal advice; confirm the Qt/LGPL points with counsel (see `docs/research/desktop-packaging.md`).
 
+## Updating
+
+To update, just run the new setup (the .exe or the .pkg) over the installed app. There is nothing to uninstall first;
+it is the same install, done again, and the models are not downloaded again.
+
+* **Windows.** Setup closes the running app, reuses the folder and the mode (per user or for all users) of the previous
+  install (`UsePreviousAppDir`/`UsePreviousPrivileges`; the `AppId` never changes), deletes the old program files
+  (`[InstallDelete]` removes `{app}\_internal`, so nothing of an older version lingers) and copies the new ones.
+  `{app}\models` is never deleted by an update. The model step looks at what is installed: a model whose files are all
+  there with the right sizes (and a `.complete` marker that matches the catalog) is not downloaded again; with every
+  model complete setup does not even show the download page. A model from an earlier, partial install is finished:
+  single files one by one, the archive again if any of its files is missing or has the wrong size; a model whose marker
+  names other hashes than this catalog is removed and fetched again. A silent setup (`/VERYSILENT`) never downloads
+  models, as before.
+* **macOS.** The .pkg replaces `/Applications/Audio Cleaner.app` completely: its preinstall script removes the old bundle
+  (that one folder and nothing else) before the new one is laid down, so no file of an older version can stay inside it,
+  and the component is not skipped for being "the same or an older version". Its postinstall script skips the archive
+  and the Whisper files when they are complete, as on Windows. Quit the app before installing.
+* **What an update keeps.** The settings (every option in the settings panel, the window size and position, the tab
+  last used), the history and everything the app downloaded itself are outside the program folder: the settings are in
+  the registry (`HKEY_CURRENT_USER\Software\Audio Cleaner`) or the macOS preferences, the history and the app's own
+  model downloads in `%LOCALAPPDATA%\Audio Cleaner\Audio Cleaner` or `~/Library/Application Support/Audio Cleaner`.
+  The models setup installed stay in `{app}\models` or `/Library/Application Support/Audio Cleaner/models`.
+* **In CI.** The Windows job installs, installs again over the first install (checking that a stale file in
+  `_internal` is gone and a file in `models` is still there), runs the frozen selftest and uninstalls.
+
 ## Things worth knowing
+
+* **No console window flashes on Windows.** The app has no console, so every console program started by a library would
+  get a window of its own for a moment (Python's `platform` module runs `cmd /c ver` when its WMI query fails, and
+  onnxruntime asks `platform` at import time). `audio_cleaner_desktop/quiet_popen.py` makes `CREATE_NO_WINDOW` the
+  default of every `subprocess.Popen` (and so `run`, `check_output`, `os.popen`) on Windows; `packaging/launcher.py`
+  installs it before anything else is imported. Callers that pass their own console flag, and Explorer, are left alone.
+  `_wmi` is a hidden import of the spec, so `platform` finds it, and `--selftest` checks both on Windows.
 
 * **Uninstalling.** Windows: the uninstaller removes the program and the models setup installed, and asks whether to
   remove the models the app downloaded itself, the history and the settings (`%LOCALAPPDATA%\Audio Cleaner`); a
