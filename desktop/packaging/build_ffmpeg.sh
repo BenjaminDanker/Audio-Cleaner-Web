@@ -119,7 +119,9 @@ case "$PLATFORM" in
     # w32threads instead of pthreads keeps libwinpthread out of the picture altogether.
     FF_PLATFORM_ARGS+=(--arch=x86_64 --target-os=mingw32 --disable-pthreads --enable-w32threads
       "--extra-ldflags=-static -static-libgcc")
-    [ -n "$CROSS_PREFIX" ] && FF_PLATFORM_ARGS+=("--cross-prefix=${CROSS_PREFIX}")
+    # Cross builds: FFmpeg would look for x86_64-w64-mingw32-pkg-config (not in Ubuntu's mingw-w64);
+    # the host pkg-config is right here, as PKG_CONFIG_LIBDIR only ever points at our own libopus.
+    [ -n "$CROSS_PREFIX" ] && FF_PLATFORM_ARGS+=("--cross-prefix=${CROSS_PREFIX}" --pkg-config=pkg-config)
     DEP_HOST_ARGS+=(--host=x86_64-w64-mingw32 --disable-stack-protector)
     X86=1
     ;;

@@ -27,9 +27,9 @@ the checklist at the end).
    exact `__version__`; the workflow refuses a mismatch.
 3. `.github/workflows/desktop.yml` builds, per platform: FFmpeg (LGPL, from pinned source tarballs; Windows is
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest`, and the
-   installer (Inno Setup on Windows, `hdiutil` dmg on macOS). Pushes to `main` / `on-prem` touching `desktop/`,
-   `common/`, `native/deepfilter/` and pull requests build everything without publishing; run it by hand with
-   "Run workflow" to get the installers as artifacts.
+   installer (Inno Setup on Windows, `hdiutil` dmg on macOS). It runs only for a `desktop-v*` tag or by hand
+   ("Run workflow" on the Actions page, which builds the installers as downloadable artifacts without publishing),
+   never on ordinary pushes: a cold build takes 20-30 minutes, less once the FFmpeg and libDF caches exist.
 4. On a `desktop-v*` tag the `release` job creates a GitHub Release with `AudioCleaner-Setup-x64.exe`,
    `AudioCleaner-macOS-arm64.dmg`, `AudioCleaner-macOS-x86_64.dmg` and `SHA256SUMS`. Share the release link
    (`releases/latest`) with friends. The app is not on the website and never contacts it.

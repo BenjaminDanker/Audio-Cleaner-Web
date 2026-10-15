@@ -131,4 +131,6 @@ fi
 
 ( cd "$OUT" && find . -type f ! -name SHA256SUMS | sort | xargs "${SHA256[@]}" > SHA256SUMS )
 echo "== done. outputs in $OUT:"
-ls -l "$OUT" "$OUT/wasm" 2>/dev/null | sed 's/^/   /'
+# (the wasm folder only exists when it was built; ls of a missing path would fail the whole build)
+for d in "$OUT" "$OUT/wasm"; do [ -d "$d" ] && ls -l "$d" | sed 's/^/   /'; done
+true
