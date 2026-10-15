@@ -8,10 +8,14 @@ or into the video as a soft track.
 """
 from __future__ import annotations
 
+import gc
 import logging
 import os
+import shutil
 import tempfile
 import threading
+import time
+import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -312,11 +316,12 @@ def process(
     clean_end = 0.9
 
     sub_tmp = None
+    x = y = None
     try:
         # Decoded and cleaned audio are memory-mapped scratch files next to the
         # output (same disk; never a RAM-backed /tmp), so RAM use stays flat.
-        with tempfile.TemporaryDirectory(dir=dest_dir, prefix=".acw-work-") as work_name:
-            work = Path(work_name)
+        work = Path(tempfile.mkdtemp(dir=dest_dir, prefix=".acw-work-"))
+        try:
             _check_cancel(cancel)
             segments, language = [], None
             if want_subs:
@@ -346,7 +351,7 @@ def process(
             _check_cancel(cancel)
             _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language)
             # Windows can't delete a file that is still mapped.
-            del x, y
+            x = y = None
             _check_cancel(cancel)
             sidecar = sub_tmp is not None and not embed
             final = unique_output(dest_dir, src.stem, ext, _SUBTITLE_SUFFIX[sub_kind] if sidecar else "")
@@ -354,12 +359,38 @@ def process(
             os.replace(tmp_out, final)
             if sub_final is not None:
                 os.replace(sub_tmp, sub_final)
+        except BaseException as e:
+            # A cancelled or failed job's traceback still holds the memory-mapped scratch arrays
+            # (in clean_audio's frames); Windows can't delete a file that is still mapped.
+            x = y = None
+            traceback.clear_frames(e.__traceback__)
+            raise
+        finally:
+            x = y = None
+            _remove_work_dir(work)
     finally:
         tmp_out.unlink(missing_ok=True)
     report(1.0)
     return JobResult(
         final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language
     )
+
+
+def _remove_work_dir(work: Path) -> None:
+    """Delete the scratch folder. On Windows a mapping can outlive its last Python reference for a
+    moment (until the garbage collector runs), so retry briefly; never mask the job's own error."""
+    for attempt in range(5):
+        try:
+            shutil.rmtree(work)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            gc.collect()
+            time.sleep(0.1 * (attempt + 1))
+    shutil.rmtree(work, ignore_errors=True)
+    if work.exists():
+        log.warning("could not remove the scratch folder %s", work)
 
 
 def _write(

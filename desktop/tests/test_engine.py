@@ -145,6 +145,35 @@ def test_cancel_leaves_nothing_behind(speech_wav, tmp_path):
 
 
 @pytest.mark.native
+def test_cancel_while_cleaning_releases_the_scratch_files_first(speech_wav, tmp_path, monkeypatch):
+    """Windows can't delete a memory-mapped file: when the scratch folder is removed after a cancel
+    in the middle of cleaning, nothing in it may still be mapped (checked via /proc on Linux)."""
+    maps = Path("/proc/self/maps")
+    if not maps.is_file():
+        pytest.skip("needs /proc/self/maps")
+    src = tmp_path / "talk.wav"
+    src.write_bytes(speech_wav.read_bytes())
+    cancel = threading.Event()
+    still_mapped = []
+    remove = engine._remove_work_dir
+
+    def checked_remove(work):
+        still_mapped.extend(line for line in maps.read_text().splitlines() if str(work) in line)
+        remove(work)
+
+    monkeypatch.setattr(engine, "_remove_work_dir", checked_remove)
+
+    def stop_while_cleaning(fraction: float) -> None:
+        if fraction > 0.2:  # past decoding: the decoded and cleaned arrays are mapped now
+            cancel.set()
+
+    with pytest.raises(engine.Cancelled):
+        engine.process_file(src, progress=stop_while_cleaning, cancel=cancel)
+    assert still_mapped == []
+    assert [p.name for p in tmp_path.iterdir()] == ["talk.wav"]
+
+
+@pytest.mark.native
 def test_unreadable_files_give_a_plain_message(tmp_path):
     garbage = tmp_path / "noise.wav"
     garbage.write_bytes(np.random.default_rng(0).bytes(5000))
@@ -156,13 +185,17 @@ def test_unreadable_files_give_a_plain_message(tmp_path):
 
 
 @pytest.mark.native
-def test_loudness_presets_set_the_level(speech_wav, tmp_path):
+def test_loudness_presets_set_the_level(speech_wav, has_real_speech, tmp_path):
     levels = {
         name: loudness_of(engine.process_file(speech_wav, engine.JobOptions(loudness=name), out_dir=tmp_path / name))
         for name in ("podcast", "youtube", "broadcast")
     }
-    assert levels["youtube"] - levels["podcast"] == pytest.approx(2.0, abs=1.0)
-    assert levels["podcast"] - levels["broadcast"] == pytest.approx(7.0, abs=1.5)
+    assert levels["youtube"] > levels["podcast"] > levels["broadcast"]
+    if has_real_speech:
+        # The level is set from the speech in a recording; the stand-in tones used where the dev
+        # sample is missing (CI) only keep the order, so only real speech is held to the targets.
+        assert levels["youtube"] - levels["podcast"] == pytest.approx(2.0, abs=1.0)
+        assert levels["podcast"] - levels["broadcast"] == pytest.approx(7.0, abs=1.5)
     kept = loudness_of(engine.process_file(speech_wav, engine.JobOptions(loudness="keep"), out_dir=tmp_path / "keep"))
     assert abs(kept - levels["podcast"]) > 0.1 or abs(kept - -16.0) > 0.1  # not forced to the podcast target
 

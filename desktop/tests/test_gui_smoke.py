@@ -49,7 +49,10 @@ def test_clean_a_file_end_to_end(window, speech_wav, tmp_path):
     assert window.status.text() == "1 file cleaned"
     entries = window.history.search()
     assert len(entries) == 1 and entries[0].status == "done" and entries[0].outputs == [str(item.outputs[0])]
-    assert entries[0].duration == pytest.approx(10.6, abs=0.5)
+    from scipy.io import wavfile
+
+    rate, samples = wavfile.read(speech_wav, mmap=True)
+    assert entries[0].duration == pytest.approx(len(samples) / rate, abs=0.5)
     assert window.history_page._stats["files"].value.text() == "1"
 
 
