@@ -145,6 +145,12 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     return out
 
 
+def free_seconds_left(user_id: str) -> int:
+    """Free standard transcription left today (UTC)."""
+    row = db.one("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (user_id, utc_day()))
+    return int(max(0.0, pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY - (row["seconds"] if row else 0.0)))
+
+
 def _reserve_free(c, user_id: str, seconds: float) -> None:
     day = utc_day()
     row = c.execute("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (user_id, day)).fetchone()

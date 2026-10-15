@@ -24,7 +24,7 @@ class Rate:
 # Labels are shown to customers: describe what they get, never how it's made.
 _RATE_LIST = [
     # File processing
-    Rate("denoise", "standard", "Studio clean", 10_000),
+    Rate("denoise", "standard", "Clean & polish", 10_000),
     Rate("transcribe", "local", "Transcription", 4_000),
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Live streaming

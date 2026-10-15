@@ -34,8 +34,15 @@
         }
         @immutable path /audio/assets/*
         header @immutable Cache-Control "public, max-age=31536000, immutable"
+        # The free in-browser tool's engine and model: only for signed-in
+        # browsers (the home server checks the session and a daily cap per
+        # account, so bots can't keep downloading the model). The files
+        # themselves are still served from here.
         @dfn path /audio/dfn/*
-        header @dfn Cache-Control "public, max-age=604800"
+        forward_auth @dfn 127.0.0.1:18790 {
+            uri /audio/api/auth/asset-check
+        }
+        header @dfn Cache-Control "private, max-age=604800"
         # Every app route serves index.html: never cache it, only hashed assets.
         @html not path /audio/assets/* /audio/dfn/*
         header @html Cache-Control "no-cache"
@@ -46,15 +53,14 @@
     }
     # Home server or tunnel down: answer API calls with a clear maintenance
     # status instead of a bare 502. The site itself is served from this VPS,
-    # so it keeps loading; it shows a maintenance notice and the free browser
-    # tools keep working.
+    # so it keeps loading and shows a maintenance notice.
     handle_errors 502 503 504 {
         @audio_api path /audio/api/*
         handle @audio_api {
             header Content-Type application/json
             header Cache-Control no-store
             header Retry-After 60
-            respond `{"detail":"maintenance","message":"Audio Cleaner is taking a short break. Free tools in your browser still work."}` 503
+            respond `{"detail":"maintenance","message":"Audio Cleaner is taking a short break. Please try again in a little while."}` 503
         }
     }
     # -------------------------------------------------------------------------

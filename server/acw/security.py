@@ -97,6 +97,7 @@ LIMITS = {
     "job_create": (20, 20 / 3600),
     "upload": (30, 30 / 3600),
     "checkout": (10, 10 / 3600),
+    "asset_fetch": (300, 300 / 86400),  # free-tool files per account per day (api/auth_routes.asset_check)
     "stream_start": (20, 20 / 3600),
     "key_create": (10, 10 / 3600),
 }

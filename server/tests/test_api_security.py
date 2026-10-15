@@ -159,3 +159,19 @@ def test_export_and_delete_account(client, signed_in):
     # the address can sign up again as a fresh account
     uid2, _ = login(client, "user@example.com")
     assert uid2 != uid
+
+
+def test_free_tool_assets_need_a_signed_in_browser(client):
+    from acw.security import limiter
+
+    assert client.get("/api/auth/asset-check").status_code == 401
+    _uid, h = login(client, "assets@example.com")
+    assert client.get("/api/auth/asset-check", headers=h).status_code == 204
+    for _ in range(400):
+        r = client.get("/api/auth/asset-check", headers=h)
+        if r.status_code == 429:
+            break
+    assert r.status_code == 429  # daily cap per account
+    limiter.reset()
+    me = client.get("/api/me", headers=h).json()
+    assert me["freeTranscribeSecondsLeft"] == 3600

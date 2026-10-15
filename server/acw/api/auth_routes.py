@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from .. import auth, db
+from .. import auth, db, jobs
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, consteq, enforce, random_token, sha256_hex
@@ -270,6 +270,19 @@ def logout_all(response: Response, principal: auth.Principal = Depends(auth.requ
 me_router = APIRouter(prefix="/api", tags=["account"])
 
 
+# The free in-browser tool's files (the noise-removal engine and model) are
+# served by Caddy on the VPS, which first asks this endpoint (forward_auth):
+# signed-in browsers only, and a daily cap per account so nobody scripts
+# downloads of the model. A visit fetches ~4 files; the browser caches them.
+ASSET_FETCHES_PER_DAY = 300
+
+
+@me_router.get("/auth/asset-check", include_in_schema=False)
+def asset_check(principal: auth.Principal = Depends(auth.require_session)) -> Response:
+    enforce("asset_fetch", principal.user_id)
+    return Response(status_code=204)
+
+
 @me_router.get("/me")
 def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> dict:
     if principal is None:
@@ -289,6 +302,7 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
         },
         "csrfToken": principal.csrf_token,
         "balance": bal,
+        "freeTranscribeSecondsLeft": jobs.free_seconds_left(principal.user_id),
         "autoReload": {
             "enabled": bool(user["auto_reload_enabled"]),
             "thresholdMicros": user["auto_reload_threshold_micros"],
