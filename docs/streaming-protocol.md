@@ -5,6 +5,15 @@ One WebSocket per live source: `wss://<host><base>/api/stream/ws`.
 Authenticate with `Authorization: Bearer acw_...` (API key with the `stream`
 scope). Browsers on the site itself can use the session cookie instead.
 
+A handshake the server refuses is answered with an HTTP status, before the upgrade (a client library that only
+sees "403" is running against a server that cannot send a denial response):
+
+| Status | Meaning |
+|---|---|
+| 401 | no credentials, or the API key is wrong or revoked, or the browser session is gone |
+| 403 | the account is suspended, or the key lacks the `stream` scope |
+| 429 | too many connection attempts, or too many live sessions started this hour (60 per account, 90 per network; failed starts count). `Retry-After` says how many seconds to wait |
+
 ## 1. Start
 
 Client sends one text message within 15 s:
@@ -33,8 +42,8 @@ the server refuses it and lists what would still work:
  "message": "Live noise removal is full right now. Still available: extra-accurate captions. Try again in a few minutes."}
 ```
 
-Clients should retry no sooner than a minute later. `captions: "premium"`
-without denoise is never refused for capacity. Otherwise the server answers:
+Clients should retry no sooner than a minute later (`retryAfterSeconds`, see the error list below).
+`captions: "premium"` without denoise is never refused for capacity. Otherwise the server answers:
 
 ```json
 {"type": "ready", "sessionId": "...", "sampleRate": 48000, "hopSamples": 480,
@@ -46,9 +55,24 @@ without denoise is never refused for capacity. Otherwise the server answers:
 the server will use it. `modelLatencyMs` includes the delay of echo
 cancellation (9 ms) in that case.
 
-or `{"type":"error","code":...,"message":...}` and closes. Codes:
-`insufficient_funds`, `tos`, `bad_config`, `bad_tier`, `too_many_sessions`,
-`unavailable`, `nothing_enabled`, `bad_start`.
+or `{"type":"error","code":...,"message":...}` and closes. Every error event may carry **`retryAfterSeconds`**
+(an integer): do not try again sooner. Codes:
+
+| Code | Meaning |
+|---|---|
+| `bad_start` | no valid `start` message within 15 s |
+| `bad_config` | an unusable setting: not 48 kHz, a language code that is not 2-3 letters, a noise strength that is not a number, or `captions: "local"` with a language other than English (**Standard captions are English only**; extra-accurate captions work in other languages) |
+| `bad_tier` | an option we do not offer |
+| `nothing_enabled` | neither `denoise` nor `captions` is set |
+| `insufficient_funds` | the credit set aside up front (5 minutes) is more than the available balance |
+| `tos` | the current Terms have not been accepted |
+| `too_many_sessions` | two live sessions per account (six per network) are already running. A session of yours that has been silent for 10 s is taken to be dropped and is replaced instead. `retryAfterSeconds` 30 |
+| `full` | live capacity is used up right now; `available` lists what still fits. `retryAfterSeconds` 60 |
+| `restarting` | the service is being updated: new sessions are refused for a minute or so. `retryAfterSeconds` 60 |
+| `unavailable` | live processing is busy or offline (or extra-accurate captions are not available). `retryAfterSeconds` 30 (300 for captions) |
+| `bad_frame` | (during the session) a binary frame the server could not read: wrong header, size or codec. The session ends |
+| `too_fast` | (during the session) audio arrived faster than real time (bursts up to 6 s are tolerated). The session ends |
+| `worker_lost` | (during the session) the processing side stopped unexpectedly. The session ends; start again |
 
 ## 2. Audio frames (binary, both directions)
 
@@ -88,10 +112,17 @@ offset size  field
 {"type": "caption", "text": "partial words", "final": false, "id": "item_..."}   // premium only
 {"type": "warning", "code": "low_balance", "secondsLeft": 180, "availableMicros": 0}
 {"type": "warning", "code": "captions_unavailable", "message": "..."}
-{"type": "stopped", "reason": "insufficient_funds" | "max_duration"}
+{"type": "stopped", "reason": "insufficient_funds" | "max_duration" | "idle_timeout" | "account_closed"}
 {"type": "error", "code": "...", "message": "..."}
 {"type": "pong", "t": ..., "seconds": 123.4}
 ```
+
+`stopped` is the last thing the server sends before it closes the socket: `insufficient_funds` (the balance cannot
+cover the next minute), `max_duration` (12 hours), `idle_timeout` (**no microphone audio for 2 minutes**: pings
+and echo-reference frames do not count; a muted microphone must keep sending frames, silent ones are fine, as
+the OBS plugin and the website do) and `account_closed` (the account was suspended or deleted, the API key
+was revoked, or the browser session ended; checked every 30 s). A session replaced by a newer one of the same
+account (see `too_many_sessions`) is closed with WebSocket code 1001 and no event.
 
 `start`/`end` are seconds of audio since the session started. Local captions
 arrive once per utterance (~1-3 s after the speaker pauses); premium captions
@@ -105,7 +136,8 @@ also stream partial text.
 {"type": "stop"}
 ```
 
-The server closes the socket after 30 s without any message. On `stop` it
+The server closes the socket after 30 s without any message (see `idle_timeout` above for what keeps a
+session alive beyond that). On `stop` it
 flushes outstanding captions, then closes. Billing covers processed audio
 seconds only (rounded up to the second at the end of the session).
 

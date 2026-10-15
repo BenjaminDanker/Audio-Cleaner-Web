@@ -11,6 +11,7 @@ seconds of the daily allowance the same way.
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import unicodedata
@@ -46,20 +47,32 @@ JOB_MEM = int(1.5 * GB)
 JOB_MEM_REBUILD = 3 * GB  # Sidon peaks at ~2.5 GB
 LOCAL_ASR_MEM = int(4.5 * GB)  # Parakeet fp32 (Whisper turbo needs ~2 GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
-# Wall-clock seconds per second of audio at 4 threads, for queue estimates. The denoise entries are per
-# channel for the heavier paths (stereo is cleaned channel by channel).
+# Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
+# monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
+# remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
+# reports its choice the estimate sits in between), the voice rebuild instead of both, restoring highs
+# (phone-quality recordings only, so only a small allowance), echo removal, and transcription.
 SPEED = {
-    "denoise": 0.1,
-    "denoise_heavy": 0.2,  # DPDFNet-8 instead of DeepFilterNet3 (forced with noise=heavy)
-    "denoise_rebuild": 1.0,
+    "denoise_light": 0.05,
+    "denoise_auto": 0.15,
+    "denoise_heavy": 0.33,
+    "denoise_rebuild": 0.9,
+    "highs": 0.02,
+    "echo": 0.03,
     "transcribe_local": 0.12,
     "transcribe_premium": 0.08,
 }
+MODEL_LOAD_SECONDS = 20  # every stage starts a fresh sandboxed process that loads its models
 # Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
 # cleaning, highs restoration and local transcription) and wall-clock seconds per second of audio.
 CPU_PER_AUDIO_SECOND = {"standard": 8, "rebuild": 12}
 WALL_PER_AUDIO_SECOND = {"standard": 3, "rebuild": 4}
 STAGE_SLACK_SECONDS = 1800
+# An upload that has not finished this long after its last bytes arrived is canceled (the clock restarts while data flows).
+UPLOAD_WINDOW_SECONDS = 3600
+# A free job's file can't be bigger than a generous bitrate (12 Mbit/s) allows for its claimed length.
+FREE_BYTES_PER_SECOND = 1_500_000
+FREE_BYTES_SLACK = 25_000_000
 # Never let our work take the host below these.
 MEM_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
@@ -97,20 +110,29 @@ def job_needs(job: dict) -> tuple[int, int]:
 
 
 def job_seconds(job: dict) -> float:
-    """Rough wall-clock time the whole job takes once started."""
+    """Rough wall-clock time the whole job takes once started, from the work it will do."""
     params = json.loads(job["params_json"])
     audio = float(job.get("duration_seconds") or job["claimed_seconds"])
+    channels = max(1, min(2, int(params.get("channels") or 2)))
+    opts = params.get("options", {})
     t = 0.0
     if job["kind"] in ("denoise", "denoise_transcribe"):
         if params.get("denoise_tier") == "rebuild":
-            t += SPEED["denoise_rebuild"] * audio * (params.get("channels") or 1)
-        elif params.get("options", {}).get("noise") == "heavy":
-            t += SPEED["denoise_heavy"] * audio * (params.get("channels") or 1)
+            t += SPEED["denoise_rebuild"] * audio * channels
         else:
-            t += SPEED["denoise"] * audio
+            profile = params.get("noise_profile") or opts.get("noise", "auto")
+            t += (SPEED["denoise_" + profile] if profile in ("light", "heavy") else SPEED["denoise_auto"]) * audio * channels
+            t += SPEED["highs"] * audio * channels
+    if opts.get("echo_reference_track"):
+        t += SPEED["echo"] * audio * channels
     if params.get("transcribe_tier"):
         t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
-    return t + 10
+    return t + MODEL_LOAD_SECONDS
+
+
+def is_rebuild(job: dict) -> bool:
+    """A voice-rebuild job that still has its heavy stage ahead (or is in it)."""
+    return job.get("next_stage") != "finalize" and json.loads(job["params_json"]).get("denoise_tier") == "rebuild"
 
 
 def stage_limits(denoise_tier: str | None, seconds: float, max_seconds: float) -> tuple[int, int]:
@@ -127,9 +149,15 @@ def queued_ids() -> list[str]:
 
 
 class JobError(Exception):
-    def __init__(self, message: str, status: int = 400):
+    def __init__(self, message: str, status: int = 400, retry_after: int | None = None):
         super().__init__(message)
         self.status = status
+        self.retry_after = retry_after  # seconds, sent as Retry-After with a 429
+
+
+def seconds_until_utc_midnight() -> int:
+    now = datetime.now(timezone.utc)
+    return max(1, 86400 - (now.hour * 3600 + now.minute * 60 + now.second))
 
 
 def utc_day() -> str:
@@ -140,6 +168,32 @@ def job_dir(job_id: str) -> Path:
     if not re.fullmatch(r"[0-9a-f]{32}", job_id):
         raise JobError("bad job id", 404)
     return get_settings().jobs_dir / job_id
+
+
+def clean_display_name(raw: str | None) -> str | None:
+    """A name to show people instead of the upload's file name (which can be a re-encoded copy): path removed,
+    control, bidirectional and zero-width characters dropped, whitespace collapsed, at most 120 characters."""
+    if not raw:
+        return None
+    s = unicodedata.normalize("NFC", str(raw)).replace("\\", "/").rsplit("/", 1)[-1]
+    s = "".join(ch for ch in s if unicodedata.category(ch)[0] != "C")  # Cc, Cf (bidi, zero-width), Cs, Co, Cn
+    s = " ".join(s.split())[:120].strip()
+    return s or None
+
+
+def display_name(job: dict) -> str:
+    """What people see for this job's file."""
+    return json.loads(job["params_json"]).get("display_name") or job["input_name"]
+
+
+def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None) -> str:
+    """Customer-facing name of what a job does (the same words as the price list)."""
+    parts = []
+    if kind in ("denoise", "denoise_transcribe"):
+        parts.append("Clean & polish, voice rebuilt" if denoise_tier == "rebuild" else "Clean & polish")
+    if kind in ("transcribe", "denoise_transcribe"):
+        parts.append("Subtitles & transcript" + (", extra accurate" if transcribe_tier == "premium" else ""))
+    return " + ".join(parts)
 
 
 def safe_stem(filename: str) -> str:
@@ -181,7 +235,12 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
         if not -30.0 <= lufs <= -9.0:
             raise JobError("loudness target must be between -30 and -9 LUFS")
     out["loudness_lufs"] = lufs
-    atten = float(options.get("atten_lim_db", 100.0))
+    try:
+        atten = float(options.get("atten_lim_db", 100.0))
+    except (TypeError, ValueError):
+        raise JobError("noise strength must be a number")
+    if not math.isfinite(atten):
+        raise JobError("noise strength must be a number")
     out["atten_lim_db"] = min(max(atten, 6.0), 100.0)
     # Cancel the speaker echo in the first audio track using the second (desktop sound); ignored for one-track files.
     echo = options.get("echo_reference_track", False)
@@ -209,6 +268,10 @@ def _reserve_free(c, user_id: str, seconds: float) -> None:
     if used + seconds > pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY:
         left = max(0, pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY - used) / 60
         raise JobError(f"Daily free transcription limit reached ({left:.0f} min left today).", 402)
+    total = c.execute("SELECT COALESCE(SUM(seconds), 0) AS s FROM free_usage WHERE day = ?", (day,)).fetchone()["s"]
+    if total + seconds > pricing.FREE_GLOBAL_SECONDS_PER_DAY:
+        raise JobError("Free transcription is very busy today. Try again tomorrow, or use a paid job.", 429,
+                       retry_after=seconds_until_utc_midnight())
     c.execute(
         "INSERT INTO free_usage(user_id, day, seconds) VALUES (?,?,?)"
         " ON CONFLICT(user_id, day) DO UPDATE SET seconds = seconds + excluded.seconds",
@@ -234,6 +297,7 @@ def create_job(
     claimed_seconds: float,
     options: dict,
     free: bool,
+    display_name: str | None = None,
 ) -> dict:
     settings = get_settings()
     ext = Path(filename).suffix.lower()
@@ -252,12 +316,19 @@ def create_job(
     opts = validate_options(kind, denoise_tier, transcribe_tier, options, free)
     active = db.one("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE))
     if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
-        raise JobError("You already have several jobs in progress; wait for one to finish.", 429)
-    # The one hard limit: the upload and its scratch files must fit on disk.
+        raise JobError("You already have several jobs in progress; wait for one to finish.", 429, retry_after=60)
+    if free and size_bytes > claimed_seconds * FREE_BYTES_PER_SECOND + FREE_BYTES_SLACK:
+        raise JobError(
+            "This file is much larger than a recording of that length should be. Free transcription takes files up to about "
+            "12 Mbit/s; compress the video first."
+        )
+    # The one hard limit: the upload and its scratch files must fit on disk, on top of what other uploads
+    # that are still arriving have been promised (checked again when the job is stored).
     from . import hostload
 
     disk_need = size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"]) + DISK_RESERVE
-    if hostload.get(settings.data_dir).snapshot().disk_free < disk_need:
+    disk_free = hostload.get(settings.data_dir).snapshot().disk_free
+    if disk_free < disk_need:
         raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
 
     job_id = db.new_id()
@@ -266,6 +337,7 @@ def create_job(
         "denoise_tier": denoise_tier if kind != "transcribe" else None,
         "transcribe_tier": transcribe_tier if kind != "denoise" else None,
         "input_ext": ext,
+        "display_name": clean_display_name(display_name),
         "free_day": utc_day() if free else None,
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
@@ -289,14 +361,20 @@ def create_job(
     try:
         d = job_dir(job_id)
         d.mkdir(parents=True, mode=0o700)
-        db.execute(
-            "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes,"
-            " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at)"
-            " VALUES (?,?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?)",
-            (job_id, user_id, kind, tier, 1 if free else 0, json.dumps(params), filename[:200], size_bytes,
-             claimed_seconds, hold_id, est, now, now + 3600),
-        )
+        with db.tx() as c:
+            # Bytes promised to uploads that are still arriving are not free space any more.
+            promised = c.execute("SELECT COALESCE(SUM(input_bytes), 0) AS n FROM jobs WHERE status = 'uploading'").fetchone()["n"]
+            if disk_free - promised < disk_need:
+                raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
+            c.execute(
+                "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes,"
+                " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at)"
+                " VALUES (?,?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?)",
+                (job_id, user_id, kind, tier, 1 if free else 0, json.dumps(params), filename[:200], size_bytes,
+                 claimed_seconds, hold_id, est, now, now + UPLOAD_WINDOW_SECONDS),
+            )
     except Exception:
+        shutil.rmtree(job_dir(job_id), ignore_errors=True)
         if hold_id:
             ledger.release_hold(hold_id)
         if free:
@@ -364,6 +442,31 @@ def finish_failed(job: dict, message: str, status: str = "failed", only_from: tu
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
 
 
+def requeue(job: dict) -> None:
+    """Put a running job back in the queue untouched: the attempt it used is given back, its upload stays and
+    its scratch files go (the stage starts again from the upload; after cloud transcription it keeps the
+    segments and chunks it needs)."""
+    with db.tx() as c:
+        n = c.execute(
+            "UPDATE jobs SET status = 'queued', worker_id = NULL, attempts = MAX(0, attempts - 1), progress = 0, stage = NULL,"
+            " queued_at = ? WHERE id = ? AND status = 'running'",
+            (db.now(), job["id"]),
+        ).rowcount
+    if not n:
+        return
+    d = job_dir(job["id"])
+    if job.get("next_stage") == "finalize":
+        return  # finalize only reads what the earlier stages left
+    keep = f"input{json.loads(job['params_json'])['input_ext']}"
+    for p in d.iterdir():
+        if p.name == keep:
+            continue
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+
+
 def queue_wait_seconds(ahead: list[str]) -> int:
     """Estimate until a job behind `ahead` starts: the work in front of it
     (including what is running now) spread over the workers."""
@@ -403,7 +506,8 @@ def public_job(job: dict, queue: list[str] | None = None) -> dict:
         "stage": job["stage"],
         "progress": job["progress"],
         "error": job["error"],
-        "inputName": job["input_name"],
+        "inputName": params.get("display_name") or job["input_name"],
+        "label": job_label(job["kind"], params.get("denoise_tier"), params.get("transcribe_tier")),
         "durationSeconds": job["duration_seconds"] or job["claimed_seconds"],
         "estCostMicros": job["est_cost_micros"],
         "costMicros": job["cost_micros"],

@@ -13,7 +13,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -144,80 +143,15 @@ def worker_threads() -> int:
     return max(1, min(4, (os.cpu_count() or 2) - 1))
 
 
-_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-
-
-class _CancellableFFmpeg(FFmpeg):
-    """FFmpeg whose programs are stopped the moment the job is cancelled, instead of running to their end
-    (decoding or rebuilding a long video can take minutes). Encoding goes through write_audio, which is
-    stopped by the audio it is fed (see _CancelOnRead)."""
-
-    def __init__(self, bin_dir, threads: int, cancel: threading.Event):
-        super().__init__(bin_dir, threads)
-        self._cancel = cancel
-
-    def _run(self, args, timeout, input=None):
-        if input is not None:
-            return super()._run(args, timeout, input)
-        proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_NO_WINDOW)
-        deadline = time.monotonic() + timeout
-        try:
-            while True:
-                try:
-                    out, err = proc.communicate(timeout=0.2)
-                    return subprocess.CompletedProcess(args, proc.returncode, out, err)
-                except subprocess.TimeoutExpired:
-                    if self._cancel.is_set():
-                        raise Cancelled() from None
-                    if time.monotonic() > deadline:
-                        raise
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.communicate()
-
-
-class _CancelOnRead:
-    """The cleaned audio as write_audio reads it block by block: cancelling stops the encoding at the next block."""
-
-    def __init__(self, audio: np.ndarray, cancel: threading.Event):
-        self._audio, self._cancel = audio, cancel
-        self.ndim, self.shape = audio.ndim, audio.shape
-
-    def __len__(self) -> int:
-        return len(self._audio)
-
-    def __getitem__(self, key):
-        _check_cancel(self._cancel)
-        return self._audio[key]
-
-
 def ffmpeg(threads: int | None = None, cancel: threading.Event | None = None) -> FFmpeg:
-    if cancel is not None:
-        return _CancellableFFmpeg(resources.ffmpeg_dir(), threads or worker_threads(), cancel)
-    return FFmpeg(resources.ffmpeg_dir(), threads or worker_threads())
-
-
-WINDOWS_PATH_LIMIT = 259  # characters; the FFmpeg programs can't open longer paths
-_PATH_ROOM = 70  # the work folder, the temporary result and a "-cleaned (2)" take this much more than the folder
-
-
-def check_path_length(src: Path, dest_dir: Path | None = None, *, windows: bool | None = None) -> None:
-    """Windows: say so plainly when a path is too long for the programs that read and write the audio, instead
-    of the generic "could not be read"."""
-    if not (os.name == "nt" if windows is None else windows):
-        return
-    if len(str(src)) > WINDOWS_PATH_LIMIT:
-        raise MediaError("The path of this file is too long (over 259 characters). Move it to a folder with a shorter path.")
-    if dest_dir is not None and len(str(dest_dir)) + _PATH_ROOM + len(src.name) > WINDOWS_PATH_LIMIT:
-        raise MediaError("The folder for the result has a path that is too long. Choose a folder with a shorter path.")
+    """The FFmpeg programs; setting `cancel` stops whatever is running at once (raises Cancelled)."""
+    return FFmpeg(resources.ffmpeg_dir(), threads or worker_threads(), cancel=cancel)
 
 
 def probe(path: Path | str, ff: FFmpeg | None = None) -> ProbeResult:
     """Read a file's basic facts. Raises MediaError with a message fit for the user."""
     if not Path(path).is_file():
         raise MediaError("This file was not found.")
-    check_path_length(Path(path))
     result = (ff or ffmpeg()).probe(Path(path))
     if result.duration > MAX_SECONDS:
         raise MediaError(f"This file is longer than {MAX_SECONDS // 3600} hours, which is the limit.")
@@ -514,7 +448,6 @@ def process(
 
     info = probe(src, ff)
     dest_dir = Path(out_dir) if out_dir is not None else src.absolute().parent
-    check_path_length(src, dest_dir)
     ext = output_extension(info, options)
     tmp_out = dest_dir / f".acw-{uuid.uuid4().hex}{ext}"
     try:
@@ -593,14 +526,11 @@ def process(
             elif options.restore_highs and resources.highs_model_dir() is None and _sounds_band_limited(x):
                 notice = "; ".join(filter(None, [notice, "sounds like a phone recording. Download the model that "
                                                  "restores highs in Settings to improve it"]))
-            if info.audio_tracks > 1:
-                others = info.audio_tracks - 1
-                notice = "; ".join(filter(None, [notice, "only the first audio track was cleaned; " + (
-                    "the other one wasn't kept in the result" if others == 1 else
-                    f"the other {others} weren't kept in the result")]))
             _check_cancel(cancel)
-            _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,
-                   work=work, cancel=cancel)
+            kept = _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,
+                          work=work)
+            if info.audio_tracks > 1:
+                notice = "; ".join(filter(None, [notice, _other_tracks_notice(info.audio_tracks - 1, kept.get("audio_kept", 0))]))
             # Windows can't delete a file that is still mapped.
             x = y = None
             _check_cancel(cancel)
@@ -659,20 +589,31 @@ def _remove_work_dir(work: Path) -> None:
         log.warning("could not remove the scratch folder %s", work)
 
 
+def _other_tracks_notice(others: int, kept: int) -> str:
+    """Only the first audio track is cleaned. The others come along unchanged in a video, when the file type can hold them."""
+    many = "the other one" if others == 1 else f"the other {others}"
+    if kept >= others:
+        return f"only the first audio track was cleaned; {many} {'was' if others == 1 else 'were'} kept as it was"
+    if kept == 0:
+        return f"only the first audio track was cleaned; {many} {'wasn' if others == 1 else 'weren'}'t kept in the result"
+    return f"only the first audio track was cleaned; {kept} of the other {others} were kept as they were, the rest couldn't be kept in this file type"
+
+
 def _write(
     ff: FFmpeg, src: Path, audio: np.ndarray, info: ProbeResult, options: JobOptions, target: Path,
-    subtitles: Path | None, language: str | None, *, work: Path, cancel: threading.Event | None = None,
-) -> None:
-    if cancel is not None:
-        audio = _CancelOnRead(audio, cancel)
+    subtitles: Path | None, language: str | None, *, work: Path,
+) -> dict:
+    """Write the result. Returns what the video keeps of the source (see FFmpeg.mux_video's report)."""
+    kept: dict = {}
     try:
         if info.has_video:
             # The cleaned sound is written to the job's work folder first (up to several GB for a long video).
             cleaned = ff.write_audio(audio, pipeline.SAMPLE_RATE, work / "cleaned", "flac")
             iso3 = LANGUAGES.get(language or "", ("", ""))[1] or None
-            ff.mux_video(src, cleaned, target, subtitles=subtitles, sub_lang=iso3, keep_metadata=True)
+            ff.mux_video(src, cleaned, target, subtitles=subtitles, sub_lang=iso3, keep_metadata=True, report=kept)
         else:
             ff.write_audio(audio, pipeline.SAMPLE_RATE, target, _audio_format(info, options))
     except RuntimeError as e:
         log.error("encoding failed: %s", e)
         raise MediaError("Saving the cleaned audio failed.") from e
+    return kept

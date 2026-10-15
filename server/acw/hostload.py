@@ -88,14 +88,29 @@ def _slice_dir() -> Path | None:
     return d if d.name.endswith(".slice") and d.name != "user.slice" else None
 
 
-def _slice_headroom(fds: tuple[int, int] | None) -> int | None:
+def _inactive_file(fd: int | None) -> int:
+    """Bytes of reclaimable file cache in the slice (memory.stat): counted in memory.current, but the kernel
+    gives them back at once, so they are not "used" for admission."""
+    if fd is None:
+        return 0
+    try:
+        for line in _read(fd).splitlines():
+            if line.startswith("inactive_file "):
+                return int(line.split()[1])
+    except (OSError, ValueError):
+        pass
+    return 0
+
+
+def _slice_headroom(fds: tuple[int, int, int | None] | None) -> int | None:
     if fds is None:
         return None
     try:
         limit = _read(fds[0]).strip()
         if limit == "max":
             return None
-        return max(0, int(limit) - int(_read(fds[1])))
+        used = max(0, int(_read(fds[1])) - _inactive_file(fds[2]))
+        return max(0, int(limit) - used)
     except (OSError, ValueError):
         return None
 
@@ -107,7 +122,13 @@ class HostLoad:
         self._data = os.open(data_dir, os.O_RDONLY | os.O_DIRECTORY)
         d = _slice_dir()
         try:
-            self._slice = (os.open(d / "memory.max", os.O_RDONLY), os.open(d / "memory.current", os.O_RDONLY)) if d else None
+            self._slice = None
+            if d:
+                try:
+                    stat_fd = os.open(d / "memory.stat", os.O_RDONLY)
+                except OSError:
+                    stat_fd = None
+                self._slice = (os.open(d / "memory.max", os.O_RDONLY), os.open(d / "memory.current", os.O_RDONLY), stat_fd)
         except OSError:
             self._slice = None
         self._cores = os.cpu_count() or 1

@@ -1,5 +1,5 @@
 [Unit]
-Description=Audio Cleaner database snapshot (balances, payments, jobs metadata)
+Description=Audio Cleaner database snapshot (balances, payments, jobs metadata), checked after writing
 OnFailure=acw-alert@%n.service
 
 [Service]
@@ -8,8 +8,11 @@ Type=oneshot
 WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app
 EnvironmentFile=%h/audio-cleaner/secrets/acw-worker.env
+# Optional encrypted copy off this machine: ACW_BACKUP_OFFBOX and a key or passphrase file (acw/backup.py). Absent: local only.
+EnvironmentFile=-%h/audio-cleaner/secrets/backup.env
 # Different physical disk from the live DB (NVMe -> HDD).
 ExecStart=%h/audio-cleaner/venv/bin/python -m acw.admin backup /mnt/mc-storage/audio-cleaner-backups --keep 30
 Nice=15
-RestrictAddressFamilies=AF_UNIX
+# Network only for the optional off-machine copy (rsync over ssh); nothing connects out when ACW_BACKUP_OFFBOX is unset.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 NoNewPrivileges=yes

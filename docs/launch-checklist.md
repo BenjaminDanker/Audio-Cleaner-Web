@@ -1,6 +1,6 @@
 # Launch checklist
 
-Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
+Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
 
 ## Infrastructure
 - ✅ Services on primary-ram (systemd user units, sandboxed workers, tunnel)
@@ -10,11 +10,17 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
   `ACW_PUBLIC_ORIGIN`/`ACW_BASE_PATH` and the Caddy site block. Separates
   cookies/origin from the pet-companion checkout pages.
 - ⬜ Optional hardening with sudo: dedicated `audiocleaner` system user + system units (docs/security.md)
-- ⬜ Off-box encrypted DB backup (nightly local snapshot to the HDD is ✅)
+- ⬜ Off-box encrypted DB backup: built in and verified in tests, switched off until you create
+  `~/audio-cleaner/secrets/backup.env` (docs/operations.md, "Backups"). The nightly snapshot to the HDD is ✅ and is now
+  checked after writing (integrity + ledger sums). ⬜ Drill the restore once (same section).
+- ⬜ Push the branch and keep `on-prem` fast-forwarded from `desktop-merge`; deploy only from `~/repos/Audio-Cleaner-Web`
+  (install.sh refuses a checkout that is not a descendant of what runs)
+- ⬜ Journal retention (one sudo command, docs/operations.md "Log retention"): the Privacy Policy promises 90 days
 - ⬜ Uptime alert (e.g. the Pi curls `https://…/audio/api/health` every minute and pings you)
 
 - ⬜ Re-run `sudo bash ~/acw/install-audio-route.sh` on the VPS after Caddy snippet changes
-  (2026-10-13: stricter CSP, no-cache on all app routes)
+  (2026-10-13: stricter CSP, no-cache on all app routes; 2026-10-15: request body limits and timeouts, plus the global
+  `servers { timeouts { read_header 10s } }` option, see docs/operations.md "One-time setup")
 - ⬜ Router: enable SQM / fq_codel (cake) on the home link. Big downloads in the house
   otherwise add 200-500 ms to live-stream latency (measured during research downloads).
 
@@ -26,10 +32,13 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
   (docs/payments.md), customer portal enabled, statement descriptor,
   ✅ done 2026-10-15 (live; no Radar rule needed: authorize-first country check). Radar: switch to Lite before 2027-01-21.
 - ✅ OpenAI key set (premium file + live captions verified in production)
-- ⬜ Cloudflare Turnstile keys (optional, for the email form)
+- ⬜ Cloudflare Turnstile keys (optional, for the email form). Without them email sign-in has no bot check (3 mails per address and 6 per network per hour). To enable: keys in acw.env, and the three CSP additions that are commented in deploy/vps/audio.caddy
 
 ## Business / legal
-- ⬜ Fill `web/src/site.js`: support email, legal name/address, jurisdiction (shown in footer/Terms/Privacy)
+- ⬜ Fill `web/src/site.js`: support email, legal name/address, jurisdiction (shown in footer/Terms/Privacy).
+  The Privacy Policy no longer has placeholders (retention periods and transfers are written out: 7 years payments,
+  12 months file names, 90 days addresses, 30 days backups; processed in the United States); with an empty
+  `supportEmail` it points people at the Account page, so set the address when you have one.
 - ⬜ Product name and domain (the code says "Audio Cleaner"; it's one constant/string set)
 - ⬜ Prices (server/acw/billing/pricing.py; launch placeholders: Studio $0.60/h,
   transcription $0.24/h standard and $0.90/h premium, live denoise $0.24/h,

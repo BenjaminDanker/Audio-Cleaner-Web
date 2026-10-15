@@ -14,7 +14,7 @@ import pytest
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
-from acw_common.ffmpeg import MediaError
+from acw_common.ffmpeg import FFmpeg, MediaError
 from audio_cleaner_desktop import engine, models, sysinfo
 from audio_cleaner_desktop.gui import history_view, main_window, shell, single_instance, tips
 from audio_cleaner_desktop.gui.history import DONE, Entry, HistoryStore
@@ -115,7 +115,7 @@ def test_claimed_names_are_never_handed_out_twice(tmp_path):
 
 def test_cancel_kills_a_running_ffmpeg_program_at_once():
     cancel = threading.Event()
-    ff = engine._CancellableFFmpeg(Path("."), 1, cancel)
+    ff = FFmpeg(Path("."), 1, cancel=cancel)
     threading.Timer(0.5, cancel.set).start()
     started = time.monotonic()
     with pytest.raises(engine.Cancelled):
@@ -124,22 +124,46 @@ def test_cancel_kills_a_running_ffmpeg_program_at_once():
 
 
 def test_programs_run_normally_when_not_cancelled():
-    ff = engine._CancellableFFmpeg(Path("."), 1, threading.Event())
+    ff = FFmpeg(Path("."), 1, cancel=threading.Event())
     r = ff._run([sys.executable, "-c", "import sys; sys.stdout.write('hi'); sys.exit(3)"], timeout=60)
     assert r.returncode == 3 and r.stdout == b"hi"
     with pytest.raises(subprocess.TimeoutExpired):
         ff._run([sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5)
 
 
-def test_encoding_stops_when_cancelled():
+@pytest.mark.skipif(os.name == "nt", reason="uses a shell script as a stand-in for ffmpeg")
+def test_encoding_stops_when_cancelled(tmp_path):
     import numpy as np
 
+    fake = tmp_path / "ffmpeg"
+    fake.write_text("#!/bin/sh\nexec sleep 60\n")  # never reads its input: the writer blocks once the pipe is full
+    fake.chmod(0o755)
     cancel = threading.Event()
-    audio = engine._CancelOnRead(np.zeros((48000 * 30, 1), np.float32), cancel)
-    assert len(audio) == 48000 * 30 and audio.shape[1] == 1 and audio[0:10].shape == (10, 1)
+    ff = FFmpeg(tmp_path, 1, cancel=cancel)
+    threading.Timer(0.5, cancel.set).start()
+    started = time.monotonic()
+    with pytest.raises(engine.Cancelled):
+        ff.write_audio(np.zeros((48000 * 60, 1), np.float32), 48000, tmp_path / "out", "wav")
+    assert time.monotonic() - started < 10
+
+
+def test_decoding_stops_when_cancelled(tmp_path):
+    cancel = threading.Event()
+    ff = FFmpeg(Path("."), 1, cancel=cancel)
     cancel.set()
     with pytest.raises(engine.Cancelled):
-        audio[0:10]
+        ff._run([sys.executable, "-c", "pass"], timeout=60)
+
+
+def test_long_windows_paths_get_the_extended_prefix(monkeypatch):
+    from acw_common import ffmpeg as ffmod
+
+    monkeypatch.setattr(ffmod.sys, "platform", "win32")
+    assert ffmod.path_arg("C:\\Users\\me\\a.wav") == "\\\\?\\C:\\Users\\me\\a.wav"
+    assert ffmod.path_arg("\\\\?\\C:\\x.wav") == "\\\\?\\C:\\x.wav"
+    assert ffmod.path_arg("\\\\server\\share\\a.wav") == "\\\\?\\UNC\\server\\share\\a.wav"
+    monkeypatch.setattr(ffmod.sys, "platform", "linux")
+    assert ffmod.path_arg(Path("/tmp/a.wav")) == "/tmp/a.wav"
 
 
 # -- messages -------------------------------------------------------------------------------------------------
@@ -150,16 +174,6 @@ def test_old_flash_video_is_refused_with_a_plain_message(tmp_path, monkeypatch):
     ff = SimpleNamespace(probe=lambda p: SimpleNamespace(duration=10.0, has_video=True, video_codec="flv1"))
     with pytest.raises(MediaError, match="old Flash video format"):
         engine.probe(f, ff)
-
-
-def test_long_windows_paths_are_explained():
-    short, long_ = Path("C:/Users/me/a.wav"), Path("C:/" + "d/" * 140 + "a.wav")
-    engine.check_path_length(short, short.parent, windows=True)
-    with pytest.raises(MediaError, match="too long"):
-        engine.check_path_length(long_, None, windows=True)
-    with pytest.raises(MediaError, match="folder for the result"):
-        engine.check_path_length(short, Path("C:/" + "d/" * 125), windows=True)
-    engine.check_path_length(long_, long_.parent, windows=False)
 
 
 # -- power, priority, memory -----------------------------------------------------------------------------------

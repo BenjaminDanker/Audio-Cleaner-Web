@@ -305,6 +305,25 @@ def reap_stale_holds() -> int:
     return len(stale)
 
 
+def invariant_problems() -> dict:
+    """How many accounts break the money rules right now: balance != sum of ledger entries, or held != sum of
+    active holds. Both should always be 0."""
+    bad_balance = db.one(
+        "SELECT COUNT(*) AS n FROM users u WHERE u.balance_micros != COALESCE((SELECT SUM(amount_micros) FROM ledger l WHERE l.user_id = u.id), 0)"
+    )["n"]
+    bad_held = db.one(
+        "SELECT COUNT(*) AS n FROM users u WHERE u.held_micros != COALESCE((SELECT SUM(amount_micros) FROM holds h"
+        " WHERE h.user_id = u.id AND h.status = 'active'), 0)"
+    )["n"]
+    return {"balance_mismatch": bad_balance, "held_mismatch": bad_held}
+
+
+_KIND_LABELS = {
+    "topup": "Top-up", "grant": "Credit added", "refund": "Refund", "dispute": "Payment dispute",
+    "adjustment": "Adjustment", "usage": "Usage",
+}
+
+
 def history(user_id: str, limit: int = 100) -> list[dict]:
     rows = db.all_rows(
         "SELECT id, amount_micros, kind, ref_type, ref_id, description, balance_after_micros, created_at"
@@ -312,3 +331,51 @@ def history(user_id: str, limit: int = 100) -> list[dict]:
         (user_id, limit),
     )
     return [dict(r) for r in rows]
+
+
+def history_page(user_id: str, limit: int = 100) -> tuple[list[dict], bool]:
+    """The newest `limit` entries with customer-facing fields added, and whether older ones exist. Besides the
+    raw columns every entry has `label` (what it was, in the words of the price list); usage entries also have
+    `product` (clean | transcript | clean_transcript | live), `tier`, `minutes` and `displayName` (the file's
+    name as the person chose it)."""
+    from .. import jobs  # noqa: PLC0415 - jobs imports this module
+
+    rows = history(user_id, limit + 1)
+    more = len(rows) > limit
+    rows = rows[:limit]
+    job_ids = [r["ref_id"] for r in rows if r["kind"] == "usage" and r["ref_type"] == "job" and r["ref_id"]]
+    stream_ids = [r["ref_id"] for r in rows if r["kind"] == "usage" and r["ref_type"] == "stream" and r["ref_id"]]
+    job_rows = {
+        r["id"]: r for r in db.all_rows(
+            f"SELECT id, kind, params_json, input_name, duration_seconds FROM jobs WHERE id IN ({','.join('?' * len(job_ids))})", tuple(job_ids)
+        )
+    } if job_ids else {}
+    stream_rows = {
+        r["id"]: r for r in db.all_rows(
+            f"SELECT id, denoise_tier, caption_tier, seconds FROM stream_sessions WHERE id IN ({','.join('?' * len(stream_ids))})", tuple(stream_ids)
+        )
+    } if stream_ids else {}
+    import json
+
+    for r in rows:
+        r["label"] = _KIND_LABELS.get(r["kind"], r["kind"].capitalize())
+        j = job_rows.get(r["ref_id"]) if r["ref_type"] == "job" else None
+        s = stream_rows.get(r["ref_id"]) if r["ref_type"] == "stream" else None
+        if j is not None:
+            p = json.loads(j["params_json"])
+            r["label"] = jobs.job_label(j["kind"], p.get("denoise_tier"), p.get("transcribe_tier"))
+            r["product"] = {"denoise": "clean", "transcribe": "transcript", "denoise_transcribe": "clean_transcript"}.get(j["kind"])
+            r["tier"] = p.get("denoise_tier") or p.get("transcribe_tier")
+            r["minutes"] = round((j["duration_seconds"] or 0) / 60, 1)
+            r["displayName"] = p.get("display_name") or j["input_name"]
+        elif s is not None:
+            parts = []
+            if s["denoise_tier"]:
+                parts.append("Live noise removal")
+            if s["caption_tier"]:
+                parts.append("Live captions" + (", extra accurate" if s["caption_tier"] == "premium" else ""))
+            r["label"] = " + ".join(parts) or "Live session"
+            r["product"] = "live"
+            r["tier"] = s["denoise_tier"] or s["caption_tier"]
+            r["minutes"] = round((s["seconds"] or 0) / 60, 1)
+    return rows, more

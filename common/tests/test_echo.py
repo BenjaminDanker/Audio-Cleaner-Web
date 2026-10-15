@@ -84,6 +84,25 @@ def test_second_track_cancels_the_echo_and_keeps_the_voice(ff, tmp_path):
 
 
 @needs_ff
+def test_the_result_lines_up_in_time_with_the_recording(ff, tmp_path):
+    """The canceller delays its output by 9 ms; the result is shifted back so subtitles and video stay in step."""
+    n = int(8 * SR)
+    mic = np.zeros(n, np.float32)
+    at = int(4 * SR) + 123
+    burst = (0.4 * np.hanning(960) * np.sin(2 * np.pi * 2000 * np.arange(960) / SR)).astype(np.float32)
+    mic[at:at + 960] = burst
+    far = np.zeros(n, np.float32)  # nothing playing: the burst is the only thing to find
+    src = make_file(ff, tmp_path / "click.mkv", [mic, far])
+    probe = ff.probe(src)
+    x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=tmp_path)
+    y = pipeline.remove_echo(ff, src, probe, x, 60, work_dir=tmp_path)
+    assert y.shape == x.shape
+    peak = int(np.argmax(np.abs(y[:, 0])))
+    assert abs(peak - (at + 480)) < 100  # the burst's centre is where it was (it came out 432 samples late before)
+    assert np.abs(y[-300:, 0]).max() < 1e-3  # the end is padded with silence, the length is unchanged
+
+
+@needs_ff
 def test_block_boundaries_do_not_change_the_result(ff, tmp_path, monkeypatch):
     mic, far, _ = room_recording()
     src = make_file(ff, tmp_path / "rec.mkv", [mic, far])

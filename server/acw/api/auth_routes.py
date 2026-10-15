@@ -13,10 +13,11 @@ import json
 import logging
 import re
 import smtplib
+import ssl
 from email.message import EmailMessage
+from email.utils import parseaddr
 from urllib.parse import urlencode
 
-import anyio
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
@@ -25,7 +26,7 @@ from pydantic import BaseModel, Field
 from .. import auth, db, jobs
 from ..billing import ledger
 from ..config import get_settings
-from ..security import client_ip, consteq, enforce, random_token, sha256_hex
+from ..security import client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex
 from .turnstile import verify_turnstile
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,32 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 OAUTH_STATE_TTL = 600
 OAUTH_COOKIE = "acw_oauth"
 EMAIL_RE = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,63}$")
+# Characters that make a mail library see more than one recipient or a display name ("a,b@x" mails both).
+_EMAIL_BAD = set(',;<>"()[]\\:')
+BIG_MAIL_DOMAINS = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com", "icloud.com",
+                    "me.com", "aol.com", "proton.me", "protonmail.com", "msn.com"}
+
+
+def clean_email(raw: str) -> str | None:
+    """The address if it is one plain mailbox (lower-cased), else None. Stricter than the mail library:
+    one '@', no list/quote/comment characters, no controls, and a parse round trip must give it back."""
+    email = raw.strip().lower()
+    if len(email) > 254 or email.count("@") != 1 or not EMAIL_RE.match(email):
+        return None
+    if any(ch in _EMAIL_BAD or ord(ch) < 33 or ord(ch) == 127 for ch in email):
+        return None
+    if parseaddr(email) != ("", email):
+        return None
+    return email
+
+
+def canonical_email(email: str) -> str:
+    """The mailbox the address really reaches, for rate limits: no +tag, and no dots at Gmail."""
+    local, _, domain = email.partition("@")
+    local = local.split("+", 1)[0]
+    if domain in ("gmail.com", "googlemail.com"):
+        local, domain = local.replace(".", ""), "gmail.com"
+    return f"{local}@{domain}"
 
 PROVIDERS = {
     "google": {
@@ -84,7 +111,7 @@ def providers() -> dict:
 def oauth_start(provider: str, request: Request) -> RedirectResponse:
     if provider not in PROVIDERS:
         raise HTTPException(status_code=404, detail="Unknown provider.")
-    enforce("auth", client_ip(request))
+    enforce("auth", client_net(client_ip(request)))
     client_id, _ = _client(provider)
     state = random_token(32)
     verifier, challenge = _pkce_pair()
@@ -199,8 +226,8 @@ def _send_mail(to: str, subject: str, body: str) -> None:
     msg["To"] = to
     msg["Subject"] = subject
     msg.set_content(body)
-    with smtplib.SMTP(s.smtp_host, s.smtp_port, timeout=20) as smtp:
-        smtp.starttls()
+    with smtplib.SMTP(s.smtp_host, s.smtp_port, timeout=12) as smtp:
+        smtp.starttls(context=ssl.create_default_context())
         if s.smtp_user:
             smtp.login(s.smtp_user, s.smtp_password or "")
         smtp.send_message(msg)
@@ -213,12 +240,15 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
     if not (s.smtp_host and s.smtp_from):
         raise HTTPException(status_code=404, detail="Email sign-in is not enabled.")
     ip = client_ip(request)
-    enforce("email_link", f"ip:{ip}")
-    email = body.email.strip().lower()
-    if not EMAIL_RE.match(email):
+    enforce("email_link", f"ip:{client_net(ip)}")
+    email = clean_email(body.email)
+    if email is None:
         raise HTTPException(status_code=400, detail="Enter a valid email address.")
     await verify_turnstile(body.turnstileToken, ip)
-    enforce("email_link", f"addr:{email}")
+    canon = canonical_email(email)
+    enforce("email_addr", canon)
+    if canon.partition("@")[2] not in BIG_MAIL_DOMAINS:
+        enforce("email_domain", canon.partition("@")[2])
     token = auth.create_login_token(email, "email_login", ip)
     link = s.url(f"/login/verify#token={token}")
     text = (
@@ -226,7 +256,7 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
         f"{link}\n\nIf you did not ask for this, ignore this email."
     )
     try:
-        await anyio.to_thread.run_sync(_send_mail, email, "Your Audio Cleaner sign-in link", text)
+        await run_outbound(_send_mail, email, "Your Audio Cleaner sign-in link", text)
     except Exception:  # noqa: BLE001
         log.exception("sending login email failed")
         raise HTTPException(status_code=502, detail="Could not send the email right now.")
@@ -241,7 +271,7 @@ class TokenBody(BaseModel):
 @router.post("/email/verify")
 def email_verify(body: TokenBody, request: Request, response: Response) -> dict:
     _require_same_origin(request)
-    enforce("auth", client_ip(request))
+    enforce("auth", client_net(client_ip(request)))
     email = auth.consume_login_token(body.token)
     if email is None:
         raise HTTPException(status_code=400, detail="This sign-in link is invalid or expired.")
@@ -382,10 +412,17 @@ def delete_account(body: DeleteBody, request: Request, response: Response,
         bal = c.execute("SELECT balance_micros FROM users WHERE id = ?", (uid,)).fetchone()["balance_micros"]
         if bal > 0:
             ledger.debit_available(uid, bal, "adjustment", "account", uid, "Forfeited on account deletion", allow_partial=True, c=c)
+        used = c.execute("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (uid, jobs_mod.utc_day())).fetchone()
+        if used and used["seconds"] > 0:
+            c.execute(
+                "INSERT INTO deleted_emails(email_hash, day, free_seconds) VALUES (?,?,?)"
+                " ON CONFLICT(email_hash) DO UPDATE SET day = excluded.day, free_seconds = excluded.free_seconds",
+                (sha256_hex(principal.email.lower()), jobs_mod.utc_day(), used["seconds"]),
+            )
         c.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
         c.execute("DELETE FROM identities WHERE user_id = ?", (uid,))
         c.execute("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?", (db.now(), uid))
-        c.execute("UPDATE jobs SET input_name = 'deleted', outputs_json = NULL, status = CASE WHEN status = 'done' THEN 'expired' ELSE status END WHERE user_id = ?", (uid,))
+        c.execute("UPDATE jobs SET input_name = 'deleted', params_json = json_remove(params_json, '$.display_name'), outputs_json = NULL, status = CASE WHEN status = 'done' THEN 'expired' ELSE status END WHERE user_id = ?", (uid,))
         c.execute("UPDATE stream_sessions SET client_ip = NULL WHERE user_id = ?", (uid,))
         c.execute("UPDATE audit_log SET ip = NULL WHERE user_id = ?", (uid,))
         c.execute(

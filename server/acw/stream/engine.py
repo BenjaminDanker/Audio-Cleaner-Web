@@ -10,7 +10,6 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -158,20 +157,39 @@ class _StreamingRecognizer:
     def _loop(self) -> None:
         while True:
             time.sleep(self.TICK_S)
-            with self._lock:  # held for the whole tick: add/remove wait for it
-                active = list(self._captioners)
-                for c in active:
-                    c._take_audio()
-                ready = [c for c in active if self.rec.is_ready(c.stream)]
-                while ready:
-                    try:
-                        self.rec.decode_streams([c.stream for c in ready])
-                    except Exception:  # noqa: BLE001 - one bad stream must not stop captions for everyone
-                        log.exception("caption decode failed")
-                        break
-                    ready = [c for c in ready if self.rec.is_ready(c.stream)]
-                for c in active:
-                    c._publish()
+            try:
+                self._tick()
+            except Exception:  # noqa: BLE001 - the shared thread must never end: it serves every session
+                log.exception("caption tick failed")
+
+    def _try(self, c: "StreamingCaptioner", what: str, fn, default=None):
+        """One captioner's step. A captioner that fails is closed (its session goes on without captions)
+        instead of stopping captions for everyone."""
+        if c not in self._captioners:
+            return default
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            log.exception("caption %s failed; closing that session's captions", what)
+            c.closed = True
+            self._captioners.discard(c)
+            return default
+
+    def _tick(self) -> None:
+        with self._lock:  # held for the whole tick: add/remove wait for it
+            active = list(self._captioners)
+            for c in active:
+                self._try(c, "audio", c._take_audio)
+            ready = [c for c in active if self._try(c, "state", lambda c=c: self.rec.is_ready(c.stream), False)]
+            while ready:
+                try:
+                    self.rec.decode_streams([c.stream for c in ready])
+                except Exception:  # noqa: BLE001 - one bad stream must not stop captions for everyone
+                    log.exception("caption decode failed")
+                    break
+                ready = [c for c in ready if self._try(c, "state", lambda c=c: self.rec.is_ready(c.stream), False)]
+            for c in active:
+                self._try(c, "publish", c._publish)
 
 
 _recognizer: _StreamingRecognizer | None = None

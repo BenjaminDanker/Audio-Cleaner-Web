@@ -17,11 +17,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import alerts, db, jobs
+from . import alerts, db, health, jobs
+from .billing import ledger
 from .config import get_settings
 
 log = logging.getLogger("acw.monitor")
@@ -359,6 +360,94 @@ def check_backup(directory: Path = BACKUP_DIR, now: float | None = None) -> list
     )]
 
 
+def check_backup_result(directory: Path = BACKUP_DIR) -> list[Finding]:
+    """The last snapshot was written, is not empty, passed SQLite's integrity check and its ledger sums."""
+    try:
+        status = json.loads((directory / "backup-status.json").read_text())
+    except (OSError, ValueError):
+        return [Finding("backup_bad", False, "Database backup failed its check")]  # no status yet: staleness covers it
+    problems = []
+    if not status.get("bytes"):
+        problems.append("the snapshot is empty")
+    if status.get("integrity") != "ok":
+        problems.append(f"SQLite integrity check: {status.get('integrity')}")
+    if status.get("ledger") != "ok":
+        problems.append(f"ledger check: {status.get('ledger')}")
+    if status.get("error"):
+        problems.append(str(status["error"])[:200])
+    bad = bool(problems)
+    return [Finding(
+        "backup_bad", bad, "Database backup failed its check",
+        "The newest snapshot (" + str(status.get("file")) + ") is not good: " + "; ".join(problems) + ".\n"
+        "Check: journalctl --user -u acw-backup -n 40 --no-pager; python -m acw.admin check-money\n",
+    )]
+
+
+def check_stuck_states(now: int) -> list[Finding]:
+    out: list[Finding] = []
+    n = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'cloud_asr' AND COALESCE(heartbeat_at, queued_at, created_at) < ?", (now - 1800,))["n"]
+    out.append(Finding("cloud_asr_stuck", n > 0, "Extra-accurate transcription is stuck",
+                       f"{n} job(s) have been waiting on the OpenAI transcription for over 30 minutes (outage, quota or a bug).\n"
+                       "Check: journalctl --user -u acw-web | grep -i 'cloud ASR'\n"))
+    up = db.one("SELECT COUNT(*) AS n, COALESCE(SUM(input_bytes), 0) AS b FROM jobs WHERE status = 'uploading'")
+    out.append(Finding("uploads_piling", up["n"] > 15 or up["b"] > 40 * GB, "Many uploads in progress",
+                       f"{up['n']} uploads are in progress ({_fmt_gb(up['b'])} promised). Disk space and the home link are shared with live audio.\n"))
+    holds = db.one("SELECT COUNT(*) AS n FROM holds WHERE status = 'active' AND ref_type != 'refund' AND created_at < ?", (now - 6 * 3600,))["n"]
+    out.append(Finding("holds_old", holds > 0, "Credit has been held for hours",
+                       f"{holds} hold(s) have been active for over 6 hours (a job or live session that is over should have released them).\n"
+                       "They are released by the housekeeping sweep; if this persists, look at acw-web logs.\n"))
+    rows = db.one(
+        "SELECT SUM(status = 'failed') AS failed, SUM(status IN ('done', 'expired')) AS ok FROM jobs WHERE finished_at > ?", (now - 86400,)
+    )
+    failed, ok = int(rows["failed"] or 0), int(rows["ok"] or 0)
+    out.append(Finding("jobs_failing", failed + ok >= 10 and failed / (failed + ok) > 0.3, "Many file jobs are failing",
+                       f"{failed} of the {failed + ok} file jobs that ended in the last 24 hours failed.\n"
+                       "Check: journalctl --user -u 'acw-worker@*' --since '-1d' | grep -i 'died\\|crashed'\n"))
+    ev = db.one("SELECT COUNT(*) AS n FROM stripe_events WHERE processed_at IS NULL AND received_at < ?", (now - 600,))["n"]
+    out.append(Finding("stripe_events_unprocessed", ev > 0, "Stripe events were received but not processed",
+                       f"{ev} Stripe event(s) older than 10 minutes were stored without being handled: a payment may not be credited.\n"
+                       "Check: journalctl --user -u acw-web | grep -i webhook\n"))
+    pend = db.one(
+        "SELECT COUNT(*) AS n FROM payments WHERE status = 'pending' AND ((kind = 'auto_reload' AND created_at < ?) OR created_at < ?)",
+        (now - 3600, now - 26 * 3600),
+    )["n"]
+    out.append(Finding("payments_pending", pend > 0, "Payments are stuck as pending",
+                       f"{pend} payment(s) are still pending long after they should have settled (auto top-ups: 1 hour, checkouts: 26 hours).\n"))
+    return out
+
+
+def check_money() -> list[Finding]:
+    p = ledger.invariant_problems()
+    bad = any(p.values())
+    return [Finding("ledger_invariant", bad, "Balances do not match the ledger",
+                    f"{p['balance_mismatch']} account(s) have a balance different from the sum of their ledger entries and "
+                    f"{p['held_mismatch']} have a held amount different from their active holds.\n"
+                    "Check: python -m acw.admin check-money; do not restart anything until you have looked.\n", confirm=1)]
+
+
+def check_installation(now: int) -> list[Finding]:
+    out: list[Finding] = []
+    missing = health.missing_files()
+    out.append(Finding("files_missing", bool(missing), "Model or program files are missing",
+                       "Missing under ~/audio-cleaner: " + ", ".join(missing[:12]) + ".\nJobs that need them fail or fall back.\n"))
+    out.append(Finding("stream_socket", not health.stream_worker_ok(), "The live audio worker does not answer",
+                       "Connecting to the live worker's socket failed: live sessions cannot start.\n"
+                       "Check: systemctl --user status acw-stream; journalctl --user -u acw-stream -n 60 --no-pager\n", confirm=2))
+    age = health.gpu_worker_age()
+    running = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'running'")["n"]
+    states = {}
+    try:
+        states = unit_states(["acw-worker-gpu.service"])
+    except Exception:  # noqa: BLE001
+        pass
+    gpu_unit_active = states.get("acw-worker-gpu.service", {}).get("ActiveState") == "active"
+    out.append(Finding("gpu_worker_silent", gpu_unit_active and age is not None and age > 45 * 60 and running == 0,
+                       "The GPU transcription worker is not reporting in",
+                       "The GPU worker is running but has not marked itself idle for over 45 minutes while nothing else is running; "
+                       "CPU workers are taking the transcription jobs it should.\nCheck: journalctl --user -u acw-worker-gpu -n 60 --no-pager\n"))
+    return out
+
+
 # --- driver -----------------------------------------------------------------
 
 def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[bool, str]] = http_ok) -> list[Finding]:
@@ -398,6 +487,10 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
     guarded("resources", resources)
     guarded("live_full", check_full)
     guarded("backup", check_backup)
+    guarded("backup_result", check_backup_result)
+    guarded("stuck_states", lambda: check_stuck_states(now))
+    guarded("money", check_money)
+    guarded("installation", lambda: check_installation(now))
 
     for f in findings:
         try:

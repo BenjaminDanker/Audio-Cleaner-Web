@@ -94,9 +94,12 @@ class Settings:
 
     @property
     def session_cookie_name(self) -> str:
-        # __Host- would force Path=/, which on a shared host would also send the
-        # cookie to unrelated apps; __Secure- still pins it to HTTPS.
-        return "__Secure-acw_session" if self.production else "acw_session"
+        # On a host of its own (no base path) the __Host- prefix applies: Secure, Path=/, no Domain, and no
+        # sibling subdomain can set or replace it. Sharing a host under a path (today: /audio) needs
+        # __Secure-, because __Host- would force Path=/ and send the cookie to the other apps there.
+        if not self.production:
+            return "acw_session"
+        return "__Host-acw_session" if not self.base_path else "__Secure-acw_session"
 
     def url(self, path: str) -> str:
         if not path.startswith("/"):

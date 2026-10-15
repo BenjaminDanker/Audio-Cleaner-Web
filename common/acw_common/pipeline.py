@@ -24,7 +24,7 @@ import numpy as np
 from scipy.signal import resample_poly
 
 from . import bwe, clarity, dfn, dpdfnet, restore
-from .aec import EchoCanceller
+from .aec import DELAY_SAMPLES as AEC_DELAY_SAMPLES, EchoCanceller
 from .dfn import Cancelled
 from .ffmpeg import FFmpeg, ProbeResult
 
@@ -134,7 +134,7 @@ def clean_audio(
         profile = "light"
     highs = None  # the AP-BWE generator for a band-limited recording, measured on the original
     if opts.restore_highs and bwe_model_dir is not None and bwe.available(bwe_model_dir):
-        highs = bwe.pick_model(bwe.effective_bandwidth(x[:, 0] if channels == 1 else x.mean(axis=1)))
+        highs = bwe.pick_model(bwe.effective_bandwidth(x))
     if report is not None:
         report["noise"] = profile
         report["highs"] = highs
@@ -220,16 +220,25 @@ def remove_echo(
     for ch in range(channels):
         aec = EchoCanceller()
         done = 0
+        skip = AEC_DELAY_SAMPLES  # the canceller delays the signal by this much: drop it, so the result lines up in time
+
+        def put(part: np.ndarray) -> None:
+            nonlocal done, skip
+            if skip:
+                k = min(skip, len(part))
+                part, skip = part[k:], skip - k
+            part = part[:n - done]
+            out[done:done + len(part), ch] = part
+            done += len(part)
+
         for a in range(0, n, ECHO_BLOCK):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            got = aec.process(mic[a:a + ECHO_BLOCK, ch], ref[a:a + ECHO_BLOCK])
-            out[done:done + len(got), ch] = got
-            done += len(got)
+            put(aec.process(mic[a:a + ECHO_BLOCK, ch], ref[a:a + ECHO_BLOCK]))
             if progress:
                 progress((ch + min(a + ECHO_BLOCK, n) / n) / channels)
-        rest = aec.flush()
-        out[done:done + len(rest), ch] = rest
+        put(aec.flush())
+        out[done:, ch] = 0.0  # the end is padded with silence: the length is unchanged
     return out
 
 

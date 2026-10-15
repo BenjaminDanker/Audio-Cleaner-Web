@@ -6,7 +6,12 @@
   user EMAIL                     show balance, status, recent activity
   suspend EMAIL REASON / unsuspend EMAIL
   stats                          totals for the last 30 days
-  backup DIR [--keep N]          consistent gzip'd DB snapshot, keeps the newest N
+  activity                       what is running now (file jobs, live sessions)
+  live-count                     number of live sessions running now
+  check-money                    balances and holds against the ledger (exit 1 on a mismatch)
+  verify-backup FILE             integrity + ledger check of a .sqlite3.gz backup
+  backup DIR [--keep N]          consistent gzip'd DB snapshot, checked after writing; keeps the newest N
+                                 (optional encrypted copy off the machine: see acw/backup.py)
 """
 from __future__ import annotations
 
@@ -43,6 +48,11 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("unsuspend")
     p.add_argument("email")
     sub.add_parser("stats")
+    sub.add_parser("activity", help="print what is running now: file jobs and live sessions")
+    sub.add_parser("live-count", help="print the number of live sessions running now")
+    sub.add_parser("check-money", help="verify balances and holds against the ledger")
+    p = sub.add_parser("verify-backup", help="check a backup file (.sqlite3.gz): integrity and ledger sums")
+    p.add_argument("file")
     p = sub.add_parser("backup")
     p.add_argument("dir")
     p.add_argument("--keep", type=int, default=30)
@@ -85,28 +95,35 @@ def main(argv: list[str] | None = None) -> None:
         db.audit("admin-cli", "unsuspend", user_id=u["id"])
         print("active")
     elif a.cmd == "backup":
-        import gzip
-        import os
-        import shutil
-        import sqlite3
         from pathlib import Path
 
-        out_dir = Path(a.dir)
-        out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        tmp = out_dir / f".acw-{stamp}.sqlite3"
-        dst = sqlite3.connect(str(tmp))
-        db.conn().backup(dst)  # online, consistent snapshot
-        dst.close()
-        final = out_dir / f"acw-{stamp}.sqlite3.gz"
-        with open(tmp, "rb") as src, gzip.open(final, "wb", compresslevel=6) as gz:
-            shutil.copyfileobj(src, gz)
-        os.chmod(final, 0o600)
-        tmp.unlink()
-        backups = sorted(out_dir.glob("acw-*.sqlite3.gz"))
-        for old in backups[: max(0, len(backups) - a.keep)]:
-            old.unlink()
-        print(final)
+        from . import backup
+
+        try:
+            print(backup.run(Path(a.dir), a.keep))
+        except backup.BackupError as e:
+            sys.exit(f"backup problem: {e}")
+    elif a.cmd == "activity":
+        rows = {r["status"]: r["n"] for r in db.all_rows(
+            "SELECT status, COUNT(*) AS n FROM jobs WHERE status IN ('uploading', 'queued', 'running', 'cloud_asr') GROUP BY status")}
+        live = db.one("SELECT COUNT(*) AS n FROM stream_sessions WHERE status = 'active'")["n"]
+        print("file jobs: " + (", ".join(f"{n} {s}" for s, n in sorted(rows.items())) or "none") + f"; live sessions: {live}")
+    elif a.cmd == "live-count":
+        print(db.one("SELECT COUNT(*) AS n FROM stream_sessions WHERE status = 'active'")["n"])
+    elif a.cmd == "check-money":
+        problems = ledger.invariant_problems()
+        print(problems)
+        if any(problems.values()):
+            sys.exit(1)
+    elif a.cmd == "verify-backup":
+        from pathlib import Path
+
+        from . import backup
+
+        result = backup.verify(Path(a.file))
+        print(result)
+        if result["integrity"] != "ok" or result["ledger"] != "ok":
+            sys.exit(1)
     elif a.cmd == "stats":
         since = db.now() - 30 * 86400
         print("users", db.one("SELECT COUNT(*) n FROM users")["n"])

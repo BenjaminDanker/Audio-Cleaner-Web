@@ -266,6 +266,7 @@ def test_live_full_and_backup_checks(tmp_path):
 def test_run_end_to_end_mails_once_and_resolves(mail, monkeypatch):
     monkeypatch.setattr(monitor, "expected_units", lambda: [])
     monkeypatch.setattr(monitor, "check_backup", lambda: [])
+    monkeypatch.setattr(monitor, "check_installation", lambda now: [])  # no models, workers or sockets in a test run
     gb = 1024**3
     state = {"free": 5 * gb}
     monkeypatch.setattr(monitor.shutil, "disk_usage", lambda p: type("U", (), {"free": state["free"]})())

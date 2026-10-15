@@ -11,64 +11,117 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import alerts, auth, db, jobs
+from . import alerts, auth, db, jobs, retention
+from . import health as health_checks
 from .api import auth_routes, billing_routes, jobs_routes, keys_routes
 from .asr import openai_asr
 from .billing import ledger, stripe_service
+from .bodylimit import AccessLogMiddleware, BodyLimitMiddleware
 from .config import get_settings
-from .security import API_CSP, SECURITY_HEADERS, client_ip, enforce
+from .security import API_CSP, SECURITY_HEADERS, client_ip, client_net, enforce
 from .stream import routes as stream_routes
 
 log = logging.getLogger("acw")
 
 
+PREMIUM_JOBS_AT_ONCE = 2
+_cloud_tasks: set[asyncio.Task] = set()
+
+
+def _claim_cloud_jobs(limit: int) -> list[dict]:
+    claimed = []
+    for job in db.all_rows("SELECT * FROM jobs WHERE status = 'cloud_asr' AND stage != 'Transcribing' ORDER BY queued_at LIMIT ?", (limit,)):
+        job = dict(job)
+        n = db.execute(
+            "UPDATE jobs SET stage = 'Transcribing', heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr' AND stage != 'Transcribing'",
+            (db.now(), job["id"]),
+        ).rowcount
+        if n:
+            claimed.append(job)
+    return claimed
+
+
+def _cloud_done(job: dict) -> None:
+    db.execute(
+        "UPDATE jobs SET status = 'queued', next_stage = 'finalize', stage = 'Finishing', progress = 90,"
+        " queued_at = ? WHERE id = ? AND status = 'cloud_asr'",
+        (db.now(), job["id"]),
+    )
+
+
+def _beat(job_id: str) -> None:
+    db.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr'", (db.now(), job_id))
+
+
+async def _run_cloud_job(job: dict) -> None:
+    """Extra-accurate transcription of one job. Segments already transcribed are kept on disk, so a restart
+    or a failed attempt doesn't pay for them twice."""
+
+    async def heartbeat() -> None:
+        while True:
+            await asyncio.sleep(60)
+            await asyncio.to_thread(_beat, job["id"])
+
+    beat = asyncio.create_task(heartbeat())
+    try:
+        lang = json.loads(job["params_json"])["options"].get("language")
+        await openai_asr.run_for_job(jobs.job_dir(job["id"]), lang, job["duration_seconds"] or job["claimed_seconds"])
+        await asyncio.to_thread(_cloud_done, job)
+    except Exception:  # noqa: BLE001
+        log.exception("cloud ASR failed for %s", job["id"])
+        await asyncio.to_thread(jobs.finish_failed, job, "Extra accurate transcription failed; you were not charged.")
+    finally:
+        beat.cancel()
+
+
 async def _cloud_asr_loop() -> None:
     while True:
         await asyncio.sleep(3)
-        for job in db.all_rows("SELECT * FROM jobs WHERE status = 'cloud_asr' AND stage != 'cloud asr running'"):
-            job = dict(job)
-            n = db.execute(
-                "UPDATE jobs SET stage = 'cloud asr running', heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr'"
-                " AND stage != 'cloud asr running'",
-                (db.now(), job["id"]),
-            ).rowcount
-            if not n:
-                continue
-            lang = json.loads(job["params_json"])["options"].get("language")
-            try:
-                await openai_asr.run_for_job(jobs.job_dir(job["id"]), lang, job["duration_seconds"] or job["claimed_seconds"])
-            except Exception:  # noqa: BLE001
-                log.exception("cloud ASR failed for %s", job["id"])
-                jobs.finish_failed(job, "Extra accurate transcription failed; you were not charged.")
-                continue
-            db.execute(
-                "UPDATE jobs SET status = 'queued', next_stage = 'finalize', stage = 'finishing', progress = 90,"
-                " queued_at = ? WHERE id = ? AND status = 'cloud_asr'",
-                (db.now(), job["id"]),
-            )
+        try:
+            _cloud_tasks.difference_update({t for t in _cloud_tasks if t.done()})
+            free = PREMIUM_JOBS_AT_ONCE - len(_cloud_tasks)
+            if free > 0:
+                for job in await asyncio.to_thread(_claim_cloud_jobs, free):
+                    t = asyncio.create_task(_run_cloud_job(job))
+                    _cloud_tasks.add(t)
+        except Exception:  # noqa: BLE001
+            log.exception("cloud ASR loop failed")
+
+
+def _housekeeping() -> None:
+    steps = (
+        auth.purge_expired,
+        # Cloud ASR that never finished (process restart mid-request): retry.
+        lambda: db.execute(
+            "UPDATE jobs SET stage = 'Waiting to transcribe' WHERE status = 'cloud_asr'"
+            " AND stage = 'Transcribing' AND heartbeat_at < ?",
+            (db.now() - 600,),
+        ),
+        ledger.reap_stale_holds,  # money reserved by things that are over
+        stream_routes.close_orphans,  # live sessions nothing is running any more
+        retention.sweep,  # privacy retention (docs/operations.md)
+    )
+    for step in steps:
+        try:
+            step()
+        except Exception:  # noqa: BLE001
+            log.exception("housekeeping step failed")
 
 
 async def _housekeeping_loop() -> None:
     while True:
         await asyncio.sleep(30)
         try:
-            auth.purge_expired()
-            # Cloud ASR that never finished (process restart mid-request): retry.
-            db.execute(
-                "UPDATE jobs SET stage = 'transcribing (premium)' WHERE status = 'cloud_asr'"
-                " AND stage = 'cloud asr running' AND heartbeat_at < ?",
-                (db.now() - 1800,),
-            )
-            await asyncio.to_thread(ledger.reap_stale_holds)  # money reserved by things that are over
+            await asyncio.to_thread(_housekeeping)
             if stripe_service.enabled():
                 await asyncio.to_thread(stripe_service.reconcile)  # payments whose webhook never came
-                for user_id in stripe_service.users_needing_reload():
+                for user_id in await asyncio.to_thread(stripe_service.users_needing_reload):
                     await asyncio.to_thread(stripe_service.run_auto_reload, user_id)
-                for payment_id in stripe_service.pending_tax_transactions():
+                for payment_id in await asyncio.to_thread(stripe_service.pending_tax_transactions):
                     await asyncio.to_thread(stripe_service._record_tax_transaction, payment_id)
         except Exception:  # noqa: BLE001
             log.exception("housekeeping failed")
@@ -77,6 +130,8 @@ async def _housekeeping_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    # A previous process died while transcribing: pick those jobs up again right away (finished segments are kept).
+    db.execute("UPDATE jobs SET stage = 'Waiting to transcribe' WHERE status = 'cloud_asr' AND stage = 'Transcribing'")
     try:
         await asyncio.to_thread(alerts.web_started)  # mails if the last run ended uncleanly
     except Exception:  # noqa: BLE001
@@ -111,9 +166,9 @@ def create_app() -> FastAPI:
         path = request.url.path
         if path.startswith(settings.base_path + "/api/") and not path.endswith("/stripe/webhook"):
             try:
-                enforce("api", client_ip(request))
+                enforce("api", client_net(client_ip(request)))
             except HTTPException as e:
-                return JSONResponse({"detail": e.detail}, status_code=e.status_code)
+                return JSONResponse({"detail": e.detail}, status_code=e.status_code, headers=e.headers)
         response: Response = await call_next(request)
         for k, v in SECURITY_HEADERS.items():
             response.headers.setdefault(k, v)
@@ -124,6 +179,10 @@ def create_app() -> FastAPI:
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
         return response
 
+    # Outermost first: log every request (without query strings), then refuse oversized bodies before anything buffers them.
+    app.add_middleware(BodyLimitMiddleware, base_path=settings.base_path)
+    app.add_middleware(AccessLogMiddleware)
+
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError):
         # Don't echo submitted values back.
@@ -131,9 +190,15 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": "Invalid request.", "fields": fields}, status_code=422)
 
     @app.get("/api/health")
-    def health() -> dict:
+    def health(request: Request, deep: int = 0, principal: auth.Principal | None = Depends(auth.optional_principal)) -> dict:
         db.one("SELECT 1")
-        return {"ok": True}
+        if not deep:
+            return {"ok": True}
+        # Details about the machine: from this machine itself (no proxy header: not via the tunnel) or an admin.
+        local = request.client is not None and request.client.host in ("127.0.0.1", "::1") and "x-forwarded-for" not in request.headers
+        if not (local or (principal is not None and principal.is_admin and principal.via == "session")):
+            return {"ok": True}
+        return health_checks.deep()
 
     for r in (
         auth_routes.router,

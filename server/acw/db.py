@@ -6,13 +6,14 @@ across the web process and the workers.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
 
 from .config import get_settings
 
@@ -226,6 +227,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS audit_user ON audit_log(user_id, id);
+
+-- A deleted account's free usage for the day, kept by hash of the address, so signing up again with the same
+-- address doesn't give a fresh daily allowance. Removed the next day.
+CREATE TABLE IF NOT EXISTS deleted_emails (
+    email_hash TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    free_seconds REAL NOT NULL
+);
 """
 
 _local = threading.local()
@@ -244,9 +253,15 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), timeout=30, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA synchronous=FULL")  # a payment acknowledged to Stripe survives a power cut
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
+    # Owner only, whatever the directory's mode (the WAL and shared-memory files appear with the first write).
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            os.chmod(str(path) + suffix, 0o600)
+        except OSError:
+            pass
     return conn
 
 
@@ -330,7 +345,3 @@ def audit(actor: str, action: str, user_id: str | None = None, detail: str | Non
         "INSERT INTO audit_log(user_id, actor, action, detail, ip, created_at) VALUES (?,?,?,?,?,?)",
         (user_id, actor, action, detail, ip, now()),
     )
-
-
-def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return dict(row) if row is not None else None

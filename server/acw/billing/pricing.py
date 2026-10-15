@@ -49,6 +49,8 @@ TOPUP_PRESETS_CENTS = [1_000, 2_000, 5_000, 10_000]
 # Free tier
 FREE_TRANSCRIBE_SECONDS_PER_DAY = 60 * 60
 FREE_TRANSCRIBE_MAX_FILE_SECONDS = 30 * 60
+# All accounts together: free transcription is a courtesy, never allowed to crowd out paying work.
+FREE_GLOBAL_SECONDS_PER_DAY = 150 * 60 * 60
 
 # Hard limits
 MAX_JOB_SECONDS = 4 * 60 * 60

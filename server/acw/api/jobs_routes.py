@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import stat
+import time
 
+import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .. import auth, db, jobs
-from ..security import client_ip, enforce
+from ..config import get_settings
+from ..security import client_ip, client_net, enforce, uploads
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -28,6 +33,7 @@ class CreateJob(BaseModel):
     sizeBytes: int = Field(gt=0)
     durationSeconds: float = Field(gt=0)
     free: bool = False
+    displayName: str | None = Field(default=None, max_length=300)
     options: dict = Field(default_factory=dict)
 
 
@@ -43,7 +49,7 @@ def _get_owned(job_id: str, principal: auth.Principal) -> dict:
 @router.post("")
 def create(body: CreateJob, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
     enforce("job_create", principal.user_id)
-    enforce("job_create", f"ip:{client_ip(request)}")
+    enforce("job_create", f"ip:{client_net(client_ip(request))}")
     auth.accept_terms(principal.user_id, "continued use", client_ip(request))
     if len(json.dumps(body.options)) > 2000:
         raise HTTPException(status_code=400, detail="options too large")
@@ -58,23 +64,51 @@ def create(body: CreateJob, request: Request, principal: auth.Principal = Depend
             claimed_seconds=body.durationSeconds,
             options=body.options,
             free=body.free,
+            display_name=body.displayName,
         )
     except jobs.JobError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
+        raise HTTPException(status_code=e.status, detail=str(e), headers={"Retry-After": str(e.retry_after or 60)} if e.status == 429 else None)
     except ValueError as e:  # pricing errors
         raise HTTPException(status_code=400, detail=str(e))
     return {**created, "uploadUrl": f"api/jobs/{created['id']}/input"}
 
 
-@router.put("/{job_id}/input")
-async def upload(job_id: str, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
+# An upload that sends nothing for this long is abandoned (it would hold a connection and its disk space).
+UPLOAD_IDLE_SECONDS = 30
+UPLOAD_WRITE_BLOCK = 1024 * 1024  # chunks are collected to this size, then written off the event loop
+UPLOAD_CHECK_EVERY = 256 * 1024 * 1024  # re-check free disk space this often while bytes arrive
+UPLOAD_KEEPALIVE_EVERY = 60  # seconds between pushing the upload's expiry back while bytes keep coming
+
+
+def _begin_upload(job_id: str, principal: auth.Principal) -> dict:
     enforce("upload", principal.user_id)
     job = _get_owned(job_id, principal)
     if job["status"] != "uploading":
         raise HTTPException(status_code=409, detail="This job is not waiting for an upload.")
+    return job
+
+
+def _finish_upload(job_id: str, received: int) -> None:
+    db.execute("UPDATE jobs SET received_bytes = ? WHERE id = ?", (received, job_id))
+    jobs.mark_uploaded(job_id)
+
+
+def _still_uploading(job_id: str) -> bool:
+    """Called while bytes arrive: pushes the expiry back (a slow link may need hours) and says whether the job
+    is still waiting for its upload (it was not canceled or swept)."""
+    n = db.execute(
+        "UPDATE jobs SET expires_at = ? WHERE id = ? AND status = 'uploading'", (db.now() + jobs.UPLOAD_WINDOW_SECONDS, job_id)
+    ).rowcount
+    return bool(n)
+
+
+@router.put("/{job_id}/input")
+async def upload(job_id: str, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
+    # Every database and disk call below runs off the event loop: it also carries live audio.
+    job = await anyio.to_thread.run_sync(_begin_upload, job_id, principal)
     declared = job["input_bytes"]
     length = request.headers.get("content-length")
-    if length is None or int(length) != declared:
+    if length is None or not length.isdigit() or int(length) != declared:
         raise HTTPException(status_code=411, detail="Content-Length must match the declared file size.")
     path = jobs.input_path(job)
     received = 0
@@ -82,22 +116,70 @@ async def upload(job_id: str, request: Request, principal: auth.Principal = Depe
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         raise HTTPException(status_code=409, detail="Upload already in progress.")
+    data_dir = get_settings().data_dir
+    user_throttle = uploads.for_user(principal.user_id)
+    pending: list[bytes] = []
+    pending_n = 0
+    last_check = last_keepalive = time.monotonic()
+    checked_at = 0
+    stream = request.stream().__aiter__()
     try:
         with os.fdopen(fd, "wb") as f:
-            async for chunk in request.stream():
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(stream.__anext__(), UPLOAD_IDLE_SECONDS)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    raise HTTPException(status_code=408, detail="The upload stalled; please try again.")
+                if not chunk:
+                    continue
                 received += len(chunk)
                 if received > declared:
                     raise HTTPException(status_code=413, detail="Upload is larger than declared.")
-                f.write(chunk)
+                await uploads.take(user_throttle, len(chunk))
+                pending.append(chunk)
+                pending_n += len(chunk)
+                if pending_n >= UPLOAD_WRITE_BLOCK:
+                    await anyio.to_thread.run_sync(f.write, b"".join(pending))
+                    pending, pending_n = [], 0
+                if received - checked_at >= UPLOAD_CHECK_EVERY:
+                    checked_at = received
+                    free = await anyio.to_thread.run_sync(_disk_free, data_dir)
+                    if free < jobs.DISK_RESERVE // 2:
+                        raise HTTPException(status_code=507, detail="We're short on storage space right now. Please try again a bit later.")
+                if time.monotonic() - last_keepalive >= UPLOAD_KEEPALIVE_EVERY:
+                    last_keepalive = time.monotonic()
+                    if not await anyio.to_thread.run_sync(_still_uploading, job_id):
+                        raise HTTPException(status_code=409, detail="This upload was canceled.")
+            if pending:
+                await anyio.to_thread.run_sync(f.write, b"".join(pending))
     except BaseException:
         path.unlink(missing_ok=True)
         raise
     if received != declared:
         path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Upload was incomplete, try again.")
-    db.execute("UPDATE jobs SET received_bytes = ? WHERE id = ?", (received, job_id))
-    jobs.mark_uploaded(job_id)
+    await anyio.to_thread.run_sync(_finish_upload, job_id, received)
     return {"ok": True}
+
+
+def _is_plain_file(path) -> bool:
+    """A regular file on the job directory's own device, never a link: outputs are made by the sandboxed runner."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        return stat.S_ISREG(st.st_mode) and st.st_dev == os.stat(path.parent).st_dev
+    finally:
+        os.close(fd)
+
+
+def _disk_free(path) -> int:
+    st = os.statvfs(path)
+    return st.f_bavail * st.f_frsize
 
 
 @router.get("")
@@ -147,7 +229,7 @@ def download(job_id: str, name: str, principal: auth.Principal = Depends(auth.re
     if name not in {o["file"] for o in outputs}:
         raise HTTPException(status_code=404, detail="Not found.")
     path = jobs.job_dir(job_id) / name
-    if path.parent != jobs.job_dir(job_id) or not path.is_file():
+    if path.parent != jobs.job_dir(job_id) or not _is_plain_file(path):
         raise HTTPException(status_code=404, detail="Not found.")
     return FileResponse(
         path,

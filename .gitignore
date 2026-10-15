@@ -44,25 +44,6 @@ build/
 .env.test.local
 .env.production.local
 
-# Azure
-.azure/
-*.log
-local.settings.json
-local.settings.cloud.json
-
-# Local development cloud configuration
-processor/.env.cloud
-
-# Development
-video/
-*.mp4
-*.avi
-*.mov
-*.mkv
-temp/
-uploads/
-downloads/
-
 # IDE
 .vscode/settings.json
 .vscode/launch.json
@@ -108,22 +89,6 @@ stripe-cli.log
 *.key
 *.crt
 
-# Terraform
-*.tfstate
-*.tfstate.*
-.terraform/
-.terraform.lock.hcl
-terraform.tfvars
-*.tfplan
-
-.fake
-
-# Deployment scripts
-/deploy.ps1
-/docker-push.ps1
-
-
-processor/tools/diag_out/
 *.wav
 # on-prem
 server/.pytest_cache/

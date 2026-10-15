@@ -51,6 +51,7 @@ def main() -> int:
         address_space_bytes=int(spec["address_space_bytes"]),
         max_file_bytes=int(spec["max_file_bytes"]),
         extra_write=spec.get("gpu_devices", []),
+        unix_sockets=bool(spec.get("gpu_devices")),
     )
     os.chdir(job_dir)
     os.environ["OMP_NUM_THREADS"] = str(spec.get("threads", 2))
@@ -79,7 +80,7 @@ def main() -> int:
 def _ff(spec):
     from acw_common.ffmpeg import FFmpeg
 
-    return FFmpeg(Path(spec["bin_dir"]), threads=int(spec.get("threads", 2)))
+    return FFmpeg(Path(spec["bin_dir"]), threads=int(spec.get("threads", 2)), force_demuxer=True)
 
 
 def stage_probe(job_dir: Path, spec: dict) -> dict:
@@ -143,37 +144,37 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             notice = "This file has only one audio track, so there was no desktop sound to remove echo with. It was processed without echo removal."
         else:
             # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
-            emit(stage="removing echo", progress=2)
+            emit(stage="Removing echo", progress=2)
             mic = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
             x = pipeline.remove_echo(
                 ff, src, probe, mic, limit, work_dir=job_dir,
-                progress=lambda f: emit(stage="removing echo", progress=int(2 + 3 * f)),
+                progress=lambda f: emit(stage="Removing echo", progress=int(2 + 3 * f)),
             )
             del mic
     if transcribe:
         # Transcribe first, from the original audio: every recogniser we tested
         # scores worse on denoised speech (docs/research/asr.md).
-        emit(stage="decoding", progress=5 if x is not None else 2)
+        emit(stage="Decoding", progress=5 if x is not None else 2)
         if x is not None:
             speech_16k = pipeline.to_speech_16k(x)
         else:
             speech_16k = ff.decode(src, probe, 16000, 1, limit)[:, 0]
         if spec["transcribe_tier"] == "premium":
-            emit(stage="preparing transcription", progress=5)
+            emit(stage="Preparing", progress=5)
             _write_asr_chunks(ff, job_dir, speech_16k)
             needs_cloud = True
         else:
             from acw_common import transcribe
 
             base = 5
-            emit(stage="transcribing", progress=base)
+            emit(stage="Transcribing", progress=base)
             models = Path(spec["models_dir"])
             lang = opts.get("language")
             if lang is None:
-                emit(stage="detecting language", progress=base)
+                emit(stage="Detecting language", progress=base)
                 lang = transcribe.detect_language(speech_16k, models / "whisper" / "small", threads)
             engine = transcribe.pick_engine(lang)
-            report = lambda f: emit(stage="transcribing", progress=int(base + (asr_end - base) * f))  # noqa: E731
+            report = lambda f: emit(stage="Transcribing", progress=int(base + (asr_end - base) * f))  # noqa: E731
             if engine.startswith("parakeet"):
                 segs = transcribe.transcribe_parakeet(
                     speech_16k, models / engine, models / "silero-vad",
@@ -191,24 +192,28 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             )
     if denoise:
         start = asr_end if transcribe else (5 if x is not None else 2)
-        emit(stage="decoding", progress=start)
+        emit(stage="Decoding", progress=start)
         # Decoded and cleaned audio live in memory-mapped files in the job
         # directory, so RAM use doesn't grow with the length of the upload.
         if x is None:
             x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
         span = 85 - start
-        emit(stage="denoising", progress=start + 2)
+        rebuild = spec.get("denoise_tier") == "rebuild"
+        # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
+        # time estimate on it; clean_audio then uses the same choice.
+        profile = opts.get("noise", "auto") if rebuild else pipeline.choose_noise_profile(x, opts.get("noise", "auto"))
+        emit(stage="Cleaning", progress=start + 2, **({} if rebuild else {"noise": profile}))
         used: dict = {}
         y = pipeline.clean_audio(
             x, spec["lib_path"], spec["dfn_model"],
             pipeline.CleanOptions(
                 atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
                 loudness_lufs=opts.get("loudness_lufs", -16.0),
-                noise=opts.get("noise", "auto"),
-                restore_voice=spec.get("denoise_tier") == "rebuild",
+                noise=profile,
+                restore_voice=rebuild,
             ),
             threads=threads,
-            progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(start + 2 + span * f)),
+            progress=lambda f: emit(stage="Cleaning" if f < 0.95 else "Polishing", progress=int(start + 2 + span * f)),
             out=pipeline.output_buffer(x, job_dir),
             heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
             bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
@@ -282,7 +287,7 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
     language = None
     seg_path = job_dir / "segments.json"
     if seg_path.exists():
-        emit(stage="writing captions", progress=92)
+        emit(stage="Writing captions", progress=92)
         data = json.loads(seg_path.read_text())
         language = data.get("language")
         segs = captions.segments_from_json(data["segments"])
@@ -307,7 +312,7 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
     if state["has_video"] and opts.get("output_video", True):
         cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None
         if cleaned is not None or (subtitle_file is not None and opts.get("embed_subtitles", True)):
-            emit(stage="rebuilding video", progress=95)
+            emit(stage="Rebuilding video", progress=95)
             # Other containers (AVI, WMV, FLV, MPEG, ...) go to MKV: it holds any video codec we copy.
             ext = spec["input_ext"] if spec["input_ext"] in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else ".mkv"
             out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned'}{ext}"
@@ -319,7 +324,7 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
                 sub_lang=_iso639_2(language),
             )
             outputs.append({"file": out.name, "kind": "video"})
-    emit(stage="done", progress=100)
+    emit(stage="Done", progress=100)
     return {"outputs": outputs, "language": language}
 
 

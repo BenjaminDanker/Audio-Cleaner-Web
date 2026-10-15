@@ -104,7 +104,7 @@ MSG_CONFIG = b"C"
 MSG_EVENT = b"T"
 MSG_END = b"E"
 MSG_REF = b"R"  # web -> worker: echo-reference audio for a mic frame (same payload as MSG_AUDIO)
-MSG_TAP = b"P"  # worker -> web: cleaned f32 audio for premium captions when the client uses Opus
+MSG_TAP = b"P"  # worker -> web: the echo-free original (f32, before noise removal) for extra-accurate captions
 _IPC = struct.Struct("<cI")
 MAX_IPC = 4 * 1024 * 1024
 

@@ -27,6 +27,8 @@ from .security import (
 
 TOS_VERSION = "2026-10-10"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+# A browser that has not been seen for this long must sign in again (the session also has a fixed life).
+SESSION_IDLE_SECONDS = 14 * 86400
 
 
 @dataclass
@@ -59,11 +61,22 @@ def get_or_create_user(email: str, display_name: str | None = None) -> dict:
                 "INSERT INTO audit_log(user_id, actor, action, created_at) VALUES (?, 'system', 'user_created', ?)",
                 (user_id, db.now()),
             )
+            tomb = c.execute("SELECT day, free_seconds FROM deleted_emails WHERE email_hash = ?", (sha256_hex(email),)).fetchone()
+            if tomb is not None and tomb["day"] == _utc_day():
+                # Signing up again after deleting the account: today's free usage comes along.
+                c.execute("INSERT INTO free_usage(user_id, day, seconds) VALUES (?,?,?)", (user_id, tomb["day"], tomb["free_seconds"]))
             row = c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        elif email in settings.admin_emails and not row["is_admin"]:
-            c.execute("UPDATE users SET is_admin = 1 WHERE id = ?", (row["id"],))
+        elif (email in settings.admin_emails) != bool(row["is_admin"]):
+            # The list in the environment is the only source of admin rights: add and remove follow it.
+            c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if email in settings.admin_emails else 0, row["id"]))
             row = c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
     return dict(row)
+
+
+def _utc_day() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def link_identity(provider: str, provider_user_id: str, email: str, display_name: str | None) -> dict:
@@ -154,7 +167,7 @@ def _principal_from_cookie(token: str | None) -> Principal | None:
         (h,),
     )
     now = db.now()
-    if row is None or row["expires_at"] <= now:
+    if row is None or row["expires_at"] <= now or now - row["last_seen_at"] > SESSION_IDLE_SECONDS:
         return None
     if now - row["last_seen_at"] > 300:
         db.execute("UPDATE sessions SET last_seen_at = ? WHERE id_hash = ?", (now, h))
@@ -242,12 +255,6 @@ def require_session(principal: Principal = Depends(require_user)) -> Principal:
     return principal
 
 
-def require_admin(principal: Principal = Depends(require_session)) -> Principal:
-    if not principal.is_admin:
-        raise HTTPException(status_code=404, detail="Not found.")
-    return principal
-
-
 def require_scope(scope: str):
     def dep(principal: Principal = Depends(require_user)) -> Principal:
         if "*" not in principal.scopes and scope not in principal.scopes:
@@ -304,3 +311,4 @@ def purge_expired() -> None:
     db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
     db.execute("DELETE FROM login_tokens WHERE expires_at <= ?", (now - 86400,))
     db.execute("DELETE FROM oauth_states WHERE expires_at <= ?", (now,))
+    db.execute("DELETE FROM deleted_emails WHERE day < ?", (_utc_day(),))

@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -130,36 +132,60 @@ _last_wait_log = 0.0
 
 def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
     """Take the next queued job (jobs.QUEUE_ORDER) if the host has room for it.
-    The head of the queue waits rather than letting smaller jobs overtake it."""
+    The head of the queue waits rather than letting smaller jobs overtake it. At most one voice-rebuild job
+    runs at a time (it uses several cores for hours): further ones wait without holding up the rest.
+
+    The host is measured outside the database's write lock (a snapshot can sleep); the lock is only taken to
+    check once more with fresh facts and to take the job."""
     global _last_wait_log
     now = db.now()
+    rows = [dict(r) for r in db.all_rows(
+        f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 50"
+    )]
+    if GPU_MODE:
+        rows = [r for r in rows if is_local_transcription(r)]
+    elif gpu_worker_idle():
+        rows = [r for r in rows if not is_local_transcription(r)]  # the GPU worker takes these
+    if not rows:
+        return None
+    snap = cpus = None
+    if load is not None:
+        snap = load.snapshot()
+        units, per_core = cpusplit.live_units(get_settings().data_dir)
+        cpus = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
+
+    def running_jobs(c) -> list[dict]:
+        return [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
+
+    def pick(running: list[dict]) -> tuple[dict | None, str, int | None]:
+        candidates = rows
+        if any(jobs.is_rebuild(r) for r in running):
+            candidates = [r for r in rows if not jobs.is_rebuild(r)]
+        if not candidates:
+            return None, "another voice rebuild is running", None
+        row = candidates[0]
+        if snap is None:
+            return row, "", None
+        ok, why, threads = admission(row, snap, running, cpus, gpu=GPU_MODE)
+        return (row, "", threads) if ok else (None, why, None)
+
+    row, why, _ = pick(running_jobs(db.conn()))
+    if row is None:
+        if why and time.monotonic() - _last_wait_log > 60:
+            _last_wait_log = time.monotonic()
+            log.info("jobs wait (%s)", why)
+        return None
     with db.tx() as c:
-        rows = [dict(r) for r in c.execute(
-            f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 50"
-        ).fetchall()]
-        if GPU_MODE:
-            rows = [r for r in rows if is_local_transcription(r)]
-        elif gpu_worker_idle():
-            rows = [r for r in rows if not is_local_transcription(r)]  # the GPU worker takes these
-        if not rows:
+        row, why, threads = pick(running_jobs(c))  # same facts, current list of running jobs
+        if row is None:
             return None
-        row = rows[0]
-        threads = None
-        if load is not None:
-            running = [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
-            units, per_core = cpusplit.live_units(get_settings().data_dir)
-            cpus = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
-            ok, why, threads = admission(row, load.snapshot(), running, cpus, gpu=GPU_MODE)
-            if not ok:
-                if time.monotonic() - _last_wait_log > 60:
-                    _last_wait_log = time.monotonic()
-                    log.info("job %s waits for resources (%s)", row["id"], why)
-                return None
-        c.execute(
+        n = c.execute(
             "UPDATE jobs SET status = 'running', worker_id = ?, heartbeat_at = ?, attempts = attempts + 1,"
-            " started_at = COALESCE(started_at, ?) WHERE id = ?",
+            " started_at = COALESCE(started_at, ?) WHERE id = ? AND status = 'queued'",
             (worker_id, now, now, row["id"]),
-        )
+        ).rowcount
+        if not n:
+            return None  # another worker took it
         job = dict(c.execute("SELECT * FROM jobs WHERE id = ?", (row["id"],)).fetchone())
         job["threads"] = threads
         return job
@@ -184,7 +210,7 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         "transcribe_tier": params["transcribe_tier"],
         "input": f"input{params['input_ext']}",
         "input_ext": params["input_ext"],
-        "output_stem": jobs.safe_stem(job["input_name"]),
+        "output_stem": jobs.safe_stem(jobs.display_name(job)),
         "options": params["options"],
         "max_seconds": max_seconds,
         "cpu_seconds": cpu_seconds,  # generous; the wall-clock timeout is the real limit
@@ -194,6 +220,10 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
     }
     (d / "spec.json").write_text(json.dumps(spec))
     return d
+
+
+class Interrupted(Exception):
+    """The worker is stopping (a restart or a deploy): the job goes back in the queue instead of failing."""
 
 
 class StageFailed(Exception):
@@ -268,26 +298,70 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
             msg = json.loads(raw)
         except ValueError:
             continue
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("noise") in ("light", "heavy") and job.get("noise_profile") != msg["noise"]:
+            # Which noise remover the recording got: the time estimate follows it.
+            job["noise_profile"] = msg["noise"]
+            jobs.update_params(job["id"], noise_profile=msg["noise"])
         now = time.monotonic()
         if now - last_update >= 1.0 or msg.get("progress") == 100:
             last_update = now
+            try:
+                progress = max(0, min(100, int(msg.get("progress", 0))))
+            except (TypeError, ValueError, OverflowError):
+                progress = 0
             db.execute(
                 "UPDATE jobs SET progress = ?, stage = ?, heartbeat_at = ? WHERE id = ?",
-                (max(0, min(100, int(msg.get("progress", 0)))), str(msg.get("stage", ""))[:40], db.now(), job["id"]),
+                (progress, str(msg.get("stage", ""))[:40], db.now(), job["id"]),
             )
     proc.wait()
+    if _stop.is_set() and not result_file.exists():
+        raise Interrupted()
     if not result_file.exists():
         tail = b"".join(stderr_tail).decode(errors="replace")[-2000:]
         log.error("job %s stage %s died rc=%s: %s", job["id"], stage, proc.returncode, tail)
         if time.monotonic() > deadline:
             raise StageFailed("Processing took too long and was stopped; you were not charged.")
         raise StageFailed("Processing failed; you were not charged.", f"rc={proc.returncode}")
-    res = json.loads(result_file.read_text())
+    res = _read_result(result_file)
     if not res.get("ok"):
         if res.get("user_error"):
             raise StageFailed(res["user_error"])
         log.error("job %s stage %s error: %s", job["id"], stage, res.get("error"))
         raise StageFailed("Processing failed; you were not charged.", res.get("error"))
+    return res
+
+
+RESULT_MAX_BYTES = 1_000_000
+OUTPUT_KINDS = {"audio", "captions", "transcript", "segments", "video"}
+
+
+def _read_result(path: Path) -> dict:
+    """The runner's result file. The runner is sandboxed but is the part that handles untrusted input, so what it
+    writes is checked: a regular file (never a link) of sane size, holding a JSON object of the expected shape."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > RESULT_MAX_BYTES:
+                raise ValueError("bad result file")
+            res = json.loads(f.read(RESULT_MAX_BYTES + 1))
+    except (OSError, ValueError) as e:
+        raise StageFailed("Processing failed; you were not charged.", f"unreadable result: {e}")
+    if not isinstance(res, dict) or not isinstance(res.get("ok"), bool):
+        raise StageFailed("Processing failed; you were not charged.", "malformed result")
+    if res["ok"]:
+        outs = res.get("outputs", [])
+        if not isinstance(outs, list) or len(outs) > 50 or not all(
+            isinstance(o, dict) and isinstance(o.get("file"), str) and isinstance(o.get("kind"), str) for o in outs
+        ):
+            raise StageFailed("Processing failed; you were not charged.", "malformed outputs")
+        for key in ("notice", "noise", "language"):
+            if res.get(key) is not None and not isinstance(res[key], str):
+                raise StageFailed("Processing failed; you were not charged.", f"malformed {key}")
+    elif res.get("user_error") is not None and not isinstance(res["user_error"], str):
+        res["user_error"] = None
     return res
 
 
@@ -333,10 +407,17 @@ def _reprice(job: dict, duration: float) -> None:
 
 def _complete(job: dict, d: Path, res: dict) -> None:
     outputs = []
+    dev = os.stat(d).st_dev
     for o in res.get("outputs", []):
-        p = d / o["file"]
-        if p.parent == d and p.is_file():
-            outputs.append({**o, "bytes": p.stat().st_size})
+        name = o["file"]
+        if "/" in name or name.startswith(".") or name in {x["file"] for x in outputs}:
+            continue
+        try:
+            st = os.lstat(d / name)  # lstat: a link planted by the runner is not an output
+        except OSError:
+            continue
+        if stat.S_ISREG(st.st_mode) and st.st_dev == dev and o["kind"] in OUTPUT_KINDS:
+            outputs.append({"file": name, "kind": o["kind"], "bytes": st.st_size})
     params = json.loads(job["params_json"])
     duration = float(job.get("duration_seconds") or job["claimed_seconds"])
     keep = {o["file"] for o in outputs}
@@ -353,7 +434,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
     # after the charge can't be reported as "not charged". Only a job that is still running completes.
     with db.tx() as c:
         n = c.execute(
-            "UPDATE jobs SET status = 'done', progress = 100, stage = 'done', outputs_json = ?, cost_micros = 0,"
+            "UPDATE jobs SET status = 'done', progress = 100, stage = 'Done', outputs_json = ?, cost_micros = 0,"
             " finished_at = ?, expires_at = ? WHERE id = ? AND status = 'running'",
             (json.dumps(outputs), now, now + get_settings().job_output_ttl_hours * 3600, job["id"]),
         ).rowcount
@@ -363,9 +444,25 @@ def _complete(job: dict, d: Path, res: dict) -> None:
         if not job["free"] and job["hold_id"]:
             cost = ledger.capture_hold(
                 job["hold_id"], _job_cost(job, params, duration),
-                f"{job['kind'].replace('_', ' + ')}: {job['input_name'][:60]} ({duration / 60:.1f} min)", c=c,
+                f"{jobs.job_label(job['kind'], params['denoise_tier'], params['transcribe_tier'])}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
+
+
+def _bill_as_standard(job: dict, notice: str) -> dict:
+    """A voice-rebuilt job that did not get the rebuild is priced as the standard tier, at the standard tier's
+    price as it was when the job was created, and says so. The job record is updated and returned."""
+    params = json.loads(job["params_json"])
+    params = jobs.update_params(
+        job["id"], denoise_tier="standard", rates={**params.get("rates", {}), "denoise": pricing.rate("denoise", "standard").micros_per_minute}
+    )
+    tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
+    db.execute("UPDATE jobs SET tier = ? WHERE id = ?", (tier, job["id"]))
+    jobs.set_notice(job["id"], notice)
+    return {**job, "params_json": json.dumps(params), "tier": tier}
+
+
+NO_REBUILD_NOTICE = "Voice rebuilding wasn't available for this file, so it was cleaned with the standard option and billed at its price."
 
 
 def _use_available_tier(job: dict) -> dict:
@@ -374,14 +471,8 @@ def _use_available_tier(job: dict) -> dict:
     params = json.loads(job["params_json"])
     if params.get("denoise_tier") != "rebuild" or restore.available(get_settings().models_dir / "sidon"):
         return job
-    params = jobs.update_params(
-        job["id"], denoise_tier="standard", rates={**params.get("rates", {}), "denoise": pricing.rate("denoise", "standard").micros_per_minute}
-    )
-    tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
-    db.execute("UPDATE jobs SET tier = ? WHERE id = ?", (tier, job["id"]))
-    jobs.set_notice(job["id"], "Voice rebuilding isn't available right now, so this file was cleaned with the standard option and billed at its price.")
     log.error("job %s asked for voice rebuilding but the models are missing; billing the standard tier", job["id"])
-    return {**job, "params_json": json.dumps(params), "tier": tier}
+    return _bill_as_standard(job, NO_REBUILD_NOTICE)
 
 
 def process(job: dict, extra: dict) -> None:
@@ -395,24 +486,38 @@ def process(job: dict, extra: dict) -> None:
             _complete(job, d, res)
             return
         probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
-        duration = float(probe["duration"])  # the longer of the header's and the measured length
+        try:
+            duration = float(probe["duration"])  # the longer of the header's and the measured length
+            channels = min(max(int(probe.get("channels") or 1), 1), 2)
+        except (KeyError, TypeError, ValueError):
+            raise StageFailed("Processing failed; you were not charged.", "malformed probe result")
+        if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, json.loads(job["params_json"])) + 61):
+            raise StageFailed("Processing failed; you were not charged.", "implausible duration")
         _reprice(job, duration)
         job["duration_seconds"] = duration
         params = json.loads(job["params_json"])
-        jobs.update_params(job["id"], channels=min(int(probe.get("channels") or 1), 2))
+        jobs.update_params(job["id"], channels=channels)
         d = _write_spec(job, extra, duration)
         wall = jobs.stage_limits(params["denoise_tier"], duration, _max_seconds(job, params))[1]
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
+        if params.get("denoise_tier") == "rebuild" and job["kind"] != "transcribe" and res.get("noise") != "rebuilt":
+            # The rebuild did not run (the models vanished, or the chain fell back): never charge its price.
+            log.error("job %s asked for voice rebuilding but it did not run (%s); billing the standard tier", job["id"], res.get("noise"))
+            job = _bill_as_standard(job, NO_REBUILD_NOTICE)
         if res.get("needs_cloud_asr"):
             db.execute(
-                "UPDATE jobs SET status = 'cloud_asr', stage = 'transcribing (premium)', progress = 85,"
+                "UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', progress = 85,"
                 " heartbeat_at = ? WHERE id = ?",
                 (db.now(), job["id"]),
             )
             return
         _complete(job, d, res)
+    except Interrupted:
+        # Stopped by a restart or deploy, not a failure: back in the queue with the upload kept, no attempt used.
+        log.info("job %s put back in the queue (worker stopping)", job["id"])
+        jobs.requeue(job)
     except StageFailed as e:
         jobs.finish_failed(job, e.user_message)
     except Exception:  # noqa: BLE001

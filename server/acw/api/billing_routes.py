@@ -10,7 +10,7 @@ from .. import auth, db
 from ..billing import ledger, pricing, stripe_service
 from ..billing.pricing import MICROS_PER_CENT
 from ..config import get_settings
-from ..security import client_ip, enforce
+from ..security import client_ip, client_net, enforce, run_outbound
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/billing", tags=["billing"])
@@ -40,6 +40,7 @@ def get_pricing() -> dict:
             "transcribeMaxFileSeconds": pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS,
         },
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
+        "maxUploadBytes": get_settings().max_upload_bytes,
         "maxRebuildSeconds": pricing.MAX_REBUILD_SECONDS,
         "paymentsEnabled": stripe_service.enabled(),
         "taxAddedAtCheckout": get_settings().stripe_automatic_tax,
@@ -56,8 +57,8 @@ async def checkout(body: CheckoutBody, request: Request, principal: auth.Princip
     _require_stripe()
     _require_tos(principal)
     enforce("checkout", principal.user_id)
-    enforce("checkout", f"ip:{client_ip(request)}")
-    url = await anyio.to_thread.run_sync(stripe_service.create_checkout, principal.user_id, body.amountCents, body.saveCard)
+    enforce("checkout", f"ip:{client_net(client_ip(request))}")
+    url = await run_outbound(stripe_service.create_checkout, principal.user_id, body.amountCents, body.saveCard)
     db.audit("user", "checkout_started", user_id=principal.user_id, detail=str(body.amountCents), ip=client_ip(request))
     return {"url": url}
 
@@ -66,7 +67,7 @@ async def checkout(body: CheckoutBody, request: Request, principal: auth.Princip
 async def portal(principal: auth.Principal = Depends(auth.require_session)) -> dict:
     _require_stripe()
     enforce("checkout", principal.user_id)
-    return {"url": await anyio.to_thread.run_sync(stripe_service.billing_portal_url, principal.user_id)}
+    return {"url": await run_outbound(stripe_service.billing_portal_url, principal.user_id)}
 
 
 class AutoReloadBody(BaseModel):
@@ -122,9 +123,11 @@ def history(principal: auth.Principal = Depends(auth.require_session)) -> dict:
         " WHERE user_id = ? AND status != 'pending' ORDER BY created_at DESC LIMIT 100",
         (principal.user_id,),
     )
+    entries, more = ledger.history_page(principal.user_id)
     return {
         "balance": ledger.balance(principal.user_id),
-        "ledger": ledger.history(principal.user_id),
+        "ledger": entries,
+        "ledgerHasMore": more,
         "payments": [dict(p) for p in payments],
     }
 
@@ -138,7 +141,7 @@ async def refund(body: RefundBody, request: Request, principal: auth.Principal =
     _require_stripe()
     enforce("checkout", principal.user_id)
     try:
-        cents = await anyio.to_thread.run_sync(stripe_service.refund_unused, principal.user_id, body.paymentId)
+        cents = await run_outbound(stripe_service.refund_unused, principal.user_id, body.paymentId)
     except (ValueError, ledger.InsufficientFunds) as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"refundedCents": cents}
@@ -149,7 +152,8 @@ webhook_router = APIRouter(tags=["billing"])
 
 @webhook_router.post("/api/stripe/webhook")
 async def stripe_webhook(request: Request) -> dict:
-    payload = await request.body()
+    enforce("webhook", client_net(client_ip(request)))
+    payload = await request.body()  # BodyLimitMiddleware has already capped it at 1 MB while reading
     if len(payload) > 1_000_000:
         raise HTTPException(status_code=413, detail="too large")
     try:

@@ -1,7 +1,7 @@
 """Premium live captions through the OpenAI Realtime API (transcription session).
 
-Fed with the *denoised* 48 kHz stream; downsampled statefully to 24 kHz PCM16
-as the API expects. Turns are committed by our own pause detector (the
+Fed with the echo-free 48 kHz original (before noise removal, like every other caption path: recognisers
+score worse on denoised speech); downsampled statefully to 24 kHz PCM16 as the API expects. Turns are committed by our own pause detector (the
 transcription model does not do server-side VAD). Interim text arrives as
 deltas and is forwarded as non-final captions.
 

@@ -21,34 +21,52 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from .. import auth, cpusplit, db
 from ..billing import ledger, pricing
 from ..config import get_settings
-from ..security import limiter
+from ..security import LIMITS, client_net, limiter
 from . import protocol as P
 
 log = logging.getLogger("acw.stream")
 router = APIRouter(tags=["stream"])
 
 MAX_SESSIONS_PER_USER = 2
+MAX_SESSIONS_PER_IP = 6  # across accounts
 MAX_SESSION_SECONDS = 12 * 3600
 START_TIMEOUT = 15
 SILENCE_TIMEOUT = 30  # nothing at all from the client
-IDLE_TIMEOUT = 15 * 60  # no microphone audio (pings and echo-reference frames don't count)
+IDLE_TIMEOUT = 2 * 60  # no microphone audio (pings and echo-reference frames don't count); both clients keep sending frames while muted
 PERSIST_EVERY = 30  # seconds between saving the billed time (a restart then bills what was processed)
 PACE_BURST_SECONDS = 6.0
 PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
 LOW_BALANCE_WARN_SECONDS = 300
 
 _live: dict[str, int] = {}  # user_id -> active sessions in this process
+_live_ip: dict[str, int] = {}  # client address -> active sessions in this process
+_live_ids: set[str] = set()  # ids of the sessions this process is running (the rest "active" in the database are orphans)
 _live_units = 0.0  # capacity units of running sessions (file jobs move off the cores they need)
+
+
+def drain_requested() -> bool:
+    """The flag file data/drain exists: new sessions are refused so running ones can end before a restart."""
+    return (get_settings().data_dir / "drain").exists()
 
 
 async def startup() -> None:
     await asyncio.to_thread(cpusplit.units_per_core)  # calibrate once, off the event loop
     cpusplit.set_live_units(get_settings().data_dir, 0.0, cpusplit.units_per_core())
-    # Sessions left "active" by a previous process never reached _finish: bill the time that was saved
-    # (at most PERSIST_EVERY seconds behind), then close them.
+    # Sessions left "active" by a previous process never reached _finish.
+    await asyncio.to_thread(close_orphans, 0, "server_restart")
+
+
+def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
+    """Bill the time that was saved (at most PERSIST_EVERY seconds behind) and close "active" sessions that
+    no live handler in this process owns: left by a restart, or by a handler that died without finishing.
+    Sessions started less than `min_age` seconds ago are left alone (their handler may still be setting up)."""
+    n = 0
     for row in db.all_rows(
-        "SELECT id, hold_id, seconds, denoise_tier, caption_tier FROM stream_sessions WHERE status = 'active'"
+        "SELECT id, hold_id, seconds, denoise_tier, caption_tier FROM stream_sessions WHERE status = 'active' AND started_at <= ?",
+        (db.now() - min_age,),
     ):
+        if row["id"] in _live_ids:
+            continue
         cost = 0
         if row["hold_id"]:
             try:
@@ -56,16 +74,18 @@ async def startup() -> None:
                     cost = ledger.capture_hold(
                         row["hold_id"],
                         _micros(_rate_micros_per_minute(row["denoise_tier"], row["caption_tier"]), row["seconds"]),
-                        f"Live session ({row['seconds'] / 60:.1f} min, cut short by a restart)",
+                        f"Live session ({row['seconds'] / 60:.1f} min, cut short)",
                     )
             except Exception:  # noqa: BLE001
                 log.exception("billing stale stream session")
             finally:
                 ledger.release_hold(row["hold_id"])  # no-op once captured
         db.execute(
-            "UPDATE stream_sessions SET status = 'ended', cost_micros = ?, end_reason = 'server_restart', ended_at = ? WHERE id = ?",
-            (cost, db.now(), row["id"]),
+            "UPDATE stream_sessions SET status = 'ended', cost_micros = ?, end_reason = ?, ended_at = ? WHERE id = ? AND status = 'active'",
+            (cost, reason, db.now(), row["id"]),
         )
+        n += 1
+    return n
 
 
 async def shutdown() -> None:
@@ -79,6 +99,15 @@ def _rate_micros_per_minute(denoise: str | None, captions: str | None) -> int:
     if captions:
         total += pricing.rate("stream_captions", captions).micros_per_minute
     return total
+
+
+def _atten(value) -> float | None:
+    """Noise-strength limit in dB, 6 to 100; None when it isn't a finite number."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return min(max(v, 6.0), 100.0) if math.isfinite(v) else None
 
 
 def _micros(rate: int, seconds: float) -> int:
@@ -107,6 +136,7 @@ class Session:
         self.next_extend_try = 0.0
         self.end_reason = "client_closed"
         self.reader = self.writer = None
+        self.last_rx = time.monotonic()  # when the client last sent anything
         self.worker_task: asyncio.Task | None = None
         self.premium = None
 
@@ -145,25 +175,90 @@ class Session:
         return True
 
 
+# A session that has sent nothing for this long, while its owner asks for another one at the limit, is taken to be a
+# dropped connection the server has not noticed yet (a vanished network, a crashed client) and is replaced.
+STALE_SESSION_SECONDS = 10.0
+_open: dict[str, list["Session"]] = {}  # user_id -> sessions this process is running
+
+
+async def _deny(ws: WebSocket, status: int, message: str, retry_after: int | None = None) -> None:
+    """Refuse the handshake with a real HTTP status (401 sign-in, 403 not allowed, 429 too often) where the
+    server supports it; otherwise the plain 403 of a refused upgrade."""
+    from fastapi.responses import JSONResponse
+
+    try:
+        await ws.send_denial_response(JSONResponse(
+            {"detail": message}, status_code=status, headers={"Retry-After": str(retry_after)} if retry_after else None,
+        ))
+    except Exception:  # noqa: BLE001 - no denial-response support in this server: close the handshake
+        await ws.close(code=1008)
+
+
+async def _refuse(ws: WebSocket, code: str, message: str, retry_after: int | None = None, close: int = 1008) -> None:
+    ev = {"type": "error", "code": code, "message": message}
+    if retry_after:
+        ev["retryAfterSeconds"] = retry_after
+    await _send_json(ws, ev)
+    await ws.close(code=close)
+
+
+async def _evict_stale(user_id: str) -> bool:
+    """Free a slot for `user_id` by ending their stalest silent session. True if one was ended."""
+    now = time.monotonic()
+    stale = [x for x in _open.get(user_id, []) if now - x.last_rx > STALE_SESSION_SECONDS]
+    if not stale:
+        return False
+    victim = max(stale, key=lambda x: now - x.last_rx)
+    victim.end_reason = "replaced"
+    try:
+        await victim.ws.close(code=1001)
+    except Exception:  # noqa: BLE001 - its socket is gone, which is the point
+        pass
+    for _ in range(30):  # its handler notices, bills what it processed and releases the slot
+        if _live.get(user_id, 0) < MAX_SESSIONS_PER_USER:
+            return True
+        await asyncio.sleep(0.1)
+    return _live.get(user_id, 0) < MAX_SESSIONS_PER_USER
+
+
 @router.websocket("/api/stream/ws")
 async def stream_ws(ws: WebSocket) -> None:
-    principal = auth.websocket_principal(ws)
-    if principal is None or principal.status != "active":
-        await ws.close(code=1008)
+    ip = (ws.headers.get("x-forwarded-for") or (ws.client.host if ws.client else "")).split(",")[-1].strip()[:64]
+    net = client_net(ip)
+    # Per address, before any database work: bogus handshakes must stay cheap.
+    if not limiter.hit(f"ws_handshake:{net}", *LIMITS["ws_handshake"]):
+        await _deny(ws, 429, "Too many connection attempts. Try again in a minute.", 60)
+        return
+    principal = await asyncio.to_thread(auth.websocket_principal, ws)  # database lookup: not on the event loop
+    if principal is None:
+        await _deny(ws, 401, "Sign-in required, or the API key is wrong or revoked.")
+        return
+    if principal.status != "active":
+        await _deny(ws, 403, "This account is suspended.")
         return
     if "*" not in principal.scopes and "stream" not in principal.scopes:
-        await ws.close(code=1008)
+        await _deny(ws, 403, "This API key does not have the 'stream' scope.")
         return
-    ip = (ws.headers.get("x-forwarded-for") or (ws.client.host if ws.client else "")).split(",")[-1].strip()
-    if not limiter.hit(f"stream_start:{principal.user_id}", 20, 20 / 3600) or not limiter.hit(f"stream_start_ip:{ip}", 30, 30 / 3600):
-        await ws.close(code=1008)
-        return
+    # Starts are counted whether or not they succeed (a broken client in a loop is the case to stop), so the
+    # limit is generous: an hour of one start per minute, with room for a restart storm.
+    for key, limit in ((f"stream_start:{principal.user_id}", LIMITS["stream_start"]), (f"stream_start_ip:{net}", LIMITS["stream_start_ip"])):
+        if not limiter.hit(key, *limit):
+            wait = limiter.retry_after(key, limit[1])
+            await _deny(ws, 429, "Too many live sessions started this hour. Try again later.", wait)
+            return
     await ws.accept()
-    if _live.get(principal.user_id, 0) >= MAX_SESSIONS_PER_USER:
-        await _send_json(ws, {"type": "error", "code": "too_many_sessions", "message": "Two live sessions at most per account."})
-        await ws.close(code=1008)
+    if drain_requested():
+        # A deploy is waiting for sessions to end (deploy/drain.sh): no new ones start.
+        await _refuse(ws, "restarting", "Live audio is restarting for an update. Please try again in a minute.", 60, 1013)
+        return
+    if _live.get(principal.user_id, 0) >= MAX_SESSIONS_PER_USER and not await _evict_stale(principal.user_id):
+        await _refuse(ws, "too_many_sessions", "Two live sessions at most per account.", 30)
+        return
+    if _live_ip.get(net, 0) >= MAX_SESSIONS_PER_IP:
+        await _refuse(ws, "too_many_sessions", "Too many live sessions from this network.", 30)
         return
     _live[principal.user_id] = _live.get(principal.user_id, 0) + 1
+    _live_ip[net] = _live_ip.get(net, 0) + 1
     sess: Session | None = None
     global _live_units
     units = 0.0
@@ -186,6 +281,7 @@ async def stream_ws(ws: WebSocket) -> None:
             _live_units = max(0.0, _live_units - units)
             cpusplit.set_live_units(get_settings().data_dir, _live_units, cpusplit.units_per_core())
         _live[principal.user_id] -= 1
+        _live_ip[net] = max(0, _live_ip.get(net, 1) - 1)
         if sess is not None:
             await _finish(sess)
 
@@ -226,7 +322,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
     if not isinstance(cfg, dict) or cfg.get("type") != "start" or len(raw) > 4096:
         await ws.close(code=1008)
         return None
-    auth.accept_terms(principal.user_id, "continued use", ip)
+    await asyncio.to_thread(auth.accept_terms, principal.user_id, "continued use", ip)
     denoise = cfg.get("denoise")
     captions = cfg.get("captions")
     language = cfg.get("language")
@@ -252,27 +348,40 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await ws.close(code=1008)
         return None
     if captions == "premium" and not get_settings().openai_api_key:
-        await _send_json(ws, {"type": "error", "code": "unavailable", "message": "Premium captions are not available right now."})
+        await _send_json(ws, {"type": "error", "code": "unavailable", "retryAfterSeconds": 300,
+                              "message": "Premium captions are not available right now."})
         await ws.close(code=1008)
         return None
 
+    atten = _atten(cfg.get("attenLimDb", 100.0))
+    if atten is None or not all(v is None or isinstance(v, str) for v in (denoise, captions)):
+        await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Check the noise strength and the options you chose."})
+        await ws.close(code=1008)
+        return None
     sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language,
-                                   "atten_lim_db": float(cfg.get("attenLimDb", 100.0)),
+                                   "atten_lim_db": atten,
                                    "echo_reference": cfg.get("echoReference") is True}, rate)
+    # Whatever goes wrong from here (the client vanishing, the worker, the database), _finish gives the hold back.
+    _live_ids.add(sess.id)
+    _open.setdefault(principal.user_id, []).append(sess)
     try:
-        sess.open_hold()
-    except ledger.InsufficientFunds as e:
-        await _send_json(ws, {"type": "error", "code": "insufficient_funds",
-                              "message": f"Live processing reserves {pricing.STREAM_HOLD_MINUTES} minutes up front "
-                                         f"(${rate * pricing.STREAM_HOLD_MINUTES / 1e6:.2f}); available ${e.available / 1e6:.2f}."})
-        await ws.close(code=1008)
-        return None
-    except ledger.LedgerError:
-        await ws.close(code=1008)
-        return None
-    # Whatever goes wrong from here (the client vanishing, the worker, the database), the hold is given back.
-    try:
-        db.execute(
+        try:
+            await asyncio.to_thread(sess.open_hold)
+        except ledger.InsufficientFunds as e:
+            _live_ids.discard(sess.id)
+            _open.get(principal.user_id, []).remove(sess)
+            await _send_json(ws, {"type": "error", "code": "insufficient_funds",
+                                  "message": f"Live processing reserves {pricing.STREAM_HOLD_MINUTES} minutes up front "
+                                             f"(${rate * pricing.STREAM_HOLD_MINUTES / 1e6:.2f}); available ${e.available / 1e6:.2f}."})
+            await ws.close(code=1008)
+            return None
+        except ledger.LedgerError:
+            _live_ids.discard(sess.id)
+            _open.get(principal.user_id, []).remove(sess)
+            await ws.close(code=1008)
+            return None
+        await asyncio.to_thread(
+            db.execute,
             "INSERT INTO stream_sessions(id, user_id, api_key_id, denoise_tier, caption_tier, status, hold_id, client_ip, started_at)"
             " VALUES (?,?,?,?,?, 'active', ?,?,?)",
             (sess.id, principal.user_id, principal.api_key_id, denoise, captions, sess.hold_id, ip[:64], db.now()),
@@ -291,7 +400,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
                 sess.end_reason = "full"
                 _drop_worker(sess)
                 options = ready.get("available") or []
-                await _send_json(ws, {"type": "error", "code": "full", "available": options,
+                await _send_json(ws, {"type": "error", "code": "full", "available": options, "retryAfterSeconds": 60,
                                       "message": _full_message(worker_cfg, options)})
                 await ws.close(code=1013)
                 return sess
@@ -301,7 +410,8 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             log.exception("stream worker unavailable")
             sess.end_reason = "worker_unavailable"
             _drop_worker(sess)
-            await _send_json(ws, {"type": "error", "code": "unavailable", "message": "Live processing is busy or offline, try again soon."})
+            await _send_json(ws, {"type": "error", "code": "unavailable", "retryAfterSeconds": 30,
+                                  "message": "Live processing is busy or offline, try again soon."})
             await ws.close(code=1013)
             return sess
         if captions == "premium":
@@ -343,9 +453,9 @@ async def _run(sess: Session) -> None:
                     continue
                 codec, ts = meta
                 await ws.send_bytes(P.encode_frame(codec, seq, ts, y))
-                if sess.premium is not None and akind == P.IPC_F32:
-                    await sess.premium.feed(y)
             elif kind == P.MSG_TAP:
+                # Extra-accurate captions listen to the echo-free original (before noise removal), like every
+                # other caption path: recognisers score worse on denoised speech. The worker sends it as a tap.
                 if sess.premium is not None:
                     await sess.premium.feed(P.unpack_audio(payload)[2])
             elif kind == P.MSG_EVENT:
@@ -367,6 +477,7 @@ async def _run(sess: Session) -> None:
             idle_left = IDLE_TIMEOUT - (now - last_mic)
             if idle_left <= 0:
                 sess.end_reason = "idle_timeout"
+                await _send_stopped(ws, "idle_timeout")
                 break
             if now - sess.started >= MAX_SESSION_SECONDS:  # wall time too, not just audio received
                 sess.end_reason = "max_duration"
@@ -376,7 +487,9 @@ async def _run(sess: Session) -> None:
                 msg = await asyncio.wait_for(ws.receive(), timeout=min(SILENCE_TIMEOUT, idle_left))
             except asyncio.TimeoutError:
                 sess.end_reason = "idle_timeout"
+                await _send_stopped(ws, "idle_timeout")
                 break
+            sess.last_rx = time.monotonic()
             if msg["type"] == "websocket.disconnect":
                 break
             if time.monotonic() - last_persist >= PERSIST_EVERY:
@@ -441,9 +554,18 @@ async def _run(sess: Session) -> None:
                     sess.end_reason = "client_stop"
                     break
                 elif t == "config" and "attenLimDb" in c:
-                    await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"atten_lim_db": float(c["attenLimDb"])}))
+                    atten = _atten(c["attenLimDb"])
+                    if atten is not None:
+                        await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"atten_lim_db": atten}))
     finally:
         # Not cancelled here: _finish lets it drain the worker's last captions.
+        pass
+
+
+async def _send_stopped(ws: WebSocket, reason: str) -> None:
+    try:
+        await _send_json(ws, {"type": "stopped", "reason": reason})
+    except Exception:  # noqa: BLE001 - the client may be gone already
         pass
 
 
@@ -454,7 +576,19 @@ async def _persist(sess: Session) -> bool:
     def work() -> bool:
         db.execute("UPDATE stream_sessions SET seconds = ? WHERE id = ?", (sess.seconds, sess.id))
         row = db.one("SELECT status FROM users WHERE id = ?", (sess.p.user_id,))
-        return row is not None and row["status"] == "active"
+        if row is None or row["status"] != "active":
+            return False
+        # The key or browser session this stream was started with must still be valid.
+        api_key_id, session_hash = getattr(sess.p, "api_key_id", None), getattr(sess.p, "session_hash", None)
+        if api_key_id:
+            key = db.one("SELECT revoked_at FROM api_keys WHERE id = ?", (api_key_id,))
+            if key is None or key["revoked_at"] is not None:
+                return False
+        elif session_hash:
+            ses = db.one("SELECT expires_at FROM sessions WHERE id_hash = ?", (session_hash,))
+            if ses is None or ses["expires_at"] <= db.now():
+                return False
+        return True
 
     return await asyncio.to_thread(work)
 
@@ -467,7 +601,7 @@ async def _billing_tick(sess: Session) -> bool:
             sess.next_extend_try = time.monotonic() + 10
             if not sess.warned:
                 sess.warned = True
-                bal = ledger.balance(sess.p.user_id)
+                bal = await asyncio.to_thread(ledger.balance, sess.p.user_id)
                 await _send_json(sess.ws, {"type": "warning", "code": "low_balance",
                                            "message": "Your balance is running out; live processing will stop soon.",
                                            "secondsLeft": int(remaining), "availableMicros": bal["available_micros"]})
@@ -479,6 +613,16 @@ async def _billing_tick(sess: Session) -> bool:
 
 
 async def _finish(sess: Session) -> None:
+    try:
+        await _finish_inner(sess)
+    finally:
+        _live_ids.discard(sess.id)
+        mine = _open.get(sess.p.user_id, [])
+        if sess in mine:
+            mine.remove(sess)
+
+
+async def _finish_inner(sess: Session) -> None:
     if sess.writer is not None:
         try:
             await P.send_msg(sess.writer, P.MSG_END, b"")
@@ -505,7 +649,8 @@ async def _finish(sess: Session) -> None:
     finally:
         if sess.hold_id:
             await asyncio.to_thread(ledger.release_hold, sess.hold_id)  # nothing left reserved, whatever happened
-        db.execute(
+        await asyncio.to_thread(
+            db.execute,
             "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ? WHERE id = ?",
             (sess.seconds, cost, sess.end_reason, db.now(), sess.id),
         )

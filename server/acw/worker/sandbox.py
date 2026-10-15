@@ -10,8 +10,11 @@ before reading anything:
     ABI >= 4 also forbids TCP bind/connect.
   * no_new_privs, resource limits (CPU seconds, address space, file size,
     no core dumps).
-  * The worker's systemd unit adds a seccomp filter that only allows AF_UNIX
-    sockets (see deploy/systemd), which also covers UDP.
+  * a seccomp filter (apply_seccomp) that refuses every way of opening or using a socket: Landlock does not
+    govern Unix-domain sockets before ABI 9, so without it a compromised decoder could reach the user's D-Bus,
+    the live stream worker or any abstract socket. The unit's own filter additionally allows only AF_UNIX.
+    The GPU runner keeps the ability to create, bind and listen on Unix sockets (the CUDA driver serves one of
+    its own) but cannot connect to any socket or send to an address. socketpair() is allowed for both: DeepFilterNet's runtime needs it.
 
 Children (ffmpeg) inherit all of it.
 """
@@ -57,10 +60,9 @@ NET_BIND_TCP = 1 << 0  # ABI 4
 NET_CONNECT_TCP = 1 << 1
 
 READ = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR
-WRITE = (
-    FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_DIR | FS_MAKE_REG
-    | FS_MAKE_SYM | FS_MAKE_FIFO | FS_MAKE_SOCK
-)
+# No links, pipes or sockets can be created in the job directory: the web and worker processes (not sandboxed)
+# read what the runner leaves there, and none of it needs any of those.
+WRITE = FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_DIR | FS_MAKE_REG
 
 
 class SandboxError(RuntimeError):
@@ -152,6 +154,115 @@ def apply_rlimits(cpu_seconds: int, address_space_bytes: int, max_file_bytes: in
     _libc.prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)
 
 
+# ---------------------------------------------------------------- seccomp
+
+PR_SET_SECCOMP = 22
+SECCOMP_MODE_FILTER = 2
+SECCOMP_RET_ALLOW = 0x7FFF0000
+SECCOMP_RET_KILL_PROCESS = 0x80000000
+SECCOMP_RET_ERRNO = 0x00050000
+AUDIT_ARCH_X86_64 = 0xC000003E
+AUDIT_ARCH_AARCH64 = 0xC00000B7
+AF_UNIX = 1
+EPERM = 1
+ENOENT = 2
+
+# name -> syscall number, per architecture
+SYSCALLS = {
+    AUDIT_ARCH_X86_64: {
+        "socket": 41, "connect": 42, "accept": 43, "sendto": 44, "sendmsg": 46, "bind": 49, "listen": 50,
+        "socketpair": 53, "ptrace": 101, "accept4": 288, "sendmmsg": 307, "process_vm_readv": 310,
+        "process_vm_writev": 311, "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+        "pidfd_getfd": 438,
+    },
+    AUDIT_ARCH_AARCH64: {
+        "socket": 198, "socketpair": 199, "bind": 200, "listen": 201, "accept": 202, "connect": 203,
+        "sendto": 206, "sendmsg": 211, "ptrace": 117, "accept4": 242, "sendmmsg": 269, "process_vm_readv": 270,
+        "process_vm_writev": 271, "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
+        "pidfd_getfd": 438,
+    },
+}
+# Refused for every runner. io_uring can open and use sockets by itself, so it goes too; ptrace, process_vm_*
+# and pidfd_getfd would let a compromised runner reach into other processes of the same user.
+ALWAYS_DENIED = ("ptrace", "process_vm_readv", "process_vm_writev", "pidfd_getfd", "io_uring_setup", "io_uring_enter",
+                 "io_uring_register")
+# CPU runner: no way to get a socket that could reach anything. socketpair() stays: the connected pair it makes
+# leads nowhere (DeepFilterNet's Rust runtime builds one for its signal handling and aborts without it).
+NO_SOCKETS = ("socket", "connect", "bind", "listen", "accept", "accept4", "sendto", "sendmmsg")
+# GPU runner: the CUDA driver serves an abstract Unix socket of its own ("cuda-uvmfd-...": bind, listen) and
+# does not start without it, so those stay allowed. Reaching anything else is not: connect() answers "no such
+# file" (what the driver sees for the MPS control socket when MPS isn't running) and sending to an address fails.
+NO_SOCKET_REACH = ("sendto", "sendmmsg")
+CONNECT_ANSWERS_ENOENT = ("connect",)
+
+# classic BPF
+_BPF_LD_W_ABS = 0x20
+_BPF_JEQ_K = 0x15
+_BPF_RET_K = 0x06
+_SECCOMP_DATA_NR = 0
+_SECCOMP_DATA_ARCH = 4
+_SECCOMP_DATA_ARG0 = 16  # low 32 bits (little-endian)
+
+
+class _SockFilter(ctypes.Structure):
+    _fields_ = [("code", ctypes.c_uint16), ("jt", ctypes.c_uint8), ("jf", ctypes.c_uint8), ("k", ctypes.c_uint32)]
+
+
+class _SockFprog(ctypes.Structure):
+    _fields_ = [("len", ctypes.c_uint16), ("filter", ctypes.POINTER(_SockFilter))]
+
+
+def seccomp_program(arch: int, *, unix_sockets: bool = False) -> list[tuple[int, int, int, int]]:
+    """The filter as (code, jt, jf, k) rows for `arch`: a syscall on the deny list fails with EPERM, anything else
+    runs; a call from another architecture (the 32-bit compat entry) ends the process. With `unix_sockets`
+    socket() is allowed for AF_UNIX only and the calls that reach another socket stay refused."""
+    nums = SYSCALLS[arch]
+    denied = list(ALWAYS_DENIED) + list(NO_SOCKET_REACH if unix_sockets else NO_SOCKETS)
+    errno = SECCOMP_RET_ERRNO | EPERM
+    prog: list[tuple[int, int, int, int]] = [
+        (_BPF_LD_W_ABS, 0, 0, _SECCOMP_DATA_ARCH),
+        (_BPF_JEQ_K, 1, 0, arch),
+        (_BPF_RET_K, 0, 0, SECCOMP_RET_KILL_PROCESS),
+        (_BPF_LD_W_ABS, 0, 0, _SECCOMP_DATA_NR),
+    ]
+    for name in denied:
+        prog += [(_BPF_JEQ_K, 0, 1, nums[name]), (_BPF_RET_K, 0, 0, errno)]
+    if unix_sockets:
+        for name in CONNECT_ANSWERS_ENOENT:
+            prog += [(_BPF_JEQ_K, 0, 1, nums[name]), (_BPF_RET_K, 0, 0, SECCOMP_RET_ERRNO | ENOENT)]
+    if unix_sockets:  # socket(domain, ...): only AF_UNIX
+        prog += [
+            (_BPF_JEQ_K, 0, 4, nums["socket"]),
+            (_BPF_LD_W_ABS, 0, 0, _SECCOMP_DATA_ARG0),
+            (_BPF_JEQ_K, 0, 1, AF_UNIX),
+            (_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW),
+            (_BPF_RET_K, 0, 0, errno),
+        ]
+    prog.append((_BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW))
+    return prog
+
+
+def apply_seccomp(*, unix_sockets: bool = False, required: bool = True) -> bool:
+    """Install the filter on this process and its children (needs no_new_privs, which apply_landlock sets)."""
+    import platform
+
+    arch = {"x86_64": AUDIT_ARCH_X86_64, "aarch64": AUDIT_ARCH_AARCH64}.get(platform.machine())
+    if arch is None:
+        if required:
+            raise SandboxError(f"no seccomp filter for {platform.machine()}")
+        return False
+    rows = seccomp_program(arch, unix_sockets=unix_sockets)
+    filters = (_SockFilter * len(rows))(*[_SockFilter(*r) for r in rows])
+    prog = _SockFprog(len(rows), filters)
+    if _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        raise SandboxError("prctl(NO_NEW_PRIVS) failed")
+    if _libc.prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, ctypes.byref(prog), 0, 0) != 0:
+        if required:
+            raise SandboxError(f"seccomp filter failed: errno {ctypes.get_errno()}")
+        return False
+    return True
+
+
 def default_read_paths(extra: list[str | Path]) -> list[str | Path]:
     """Read-only view: system libraries, the Python runtime, our code, binaries
     and models. Deliberately excludes $HOME (except what is listed), /proc,
@@ -185,8 +296,11 @@ def confine(
     address_space_bytes: int,
     max_file_bytes: int,
     extra_write: list[str | Path] = (),
+    unix_sockets: bool = False,
 ) -> int:
-    """`extra_write`: e.g. the GPU device files for the GPU worker's runner."""
+    """`extra_write`: e.g. the GPU device files for the GPU worker's runner; `unix_sockets`: the GPU runner may
+    create Unix sockets and serve them (not connect to any or send to an address)."""
     abi = apply_landlock(default_read_paths(extra_read), [job_dir, "/dev/null", *extra_write])
     apply_rlimits(cpu_seconds, address_space_bytes, max_file_bytes)
+    apply_seccomp(unix_sockets=unix_sockets)
     return abi

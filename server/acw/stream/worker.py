@@ -16,7 +16,6 @@ import signal
 import threading
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import numpy as np
 
@@ -163,7 +162,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             if captioner is not None:
                 captioner.feed(x)  # the original (echo removed): recognizers do better on it than on denoised audio
             out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
-            tap = P.pack_audio(seq, y) if (tap_pcm and kind == P.CODEC_OPUS) else None
+            tap = P.pack_audio(seq, x) if tap_pcm else None  # extra-accurate captions hear the original, not the denoised audio
             return out, tap
 
         try:
@@ -195,6 +194,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             pump.cancel()
     except (asyncio.IncompleteReadError, ConnectionError):
         pass
+    except ValueError as e:  # e.g. an Opus packet that isn't 20 ms: that session ends, quietly
+        log.warning("stream session ended: %s", e)
     except Exception:  # noqa: BLE001
         log.exception("stream session crashed")
     finally:
@@ -203,7 +204,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
             _units = max(0.0, _units - units)
             _repin()
         if captioner is not None:
-            captioner.close()
+            executor.submit(captioner.close)  # waits for the recogniser's current tick: not on the event loop
         if chain is not None:
             executor.submit(chain.close)
         executor.shutdown(wait=False)
@@ -233,7 +234,7 @@ async def serve() -> None:
     os.umask(old)
     from ..worker.sandbox import apply_landlock, default_read_paths
 
-    abi = apply_landlock(default_read_paths([settings.bin_dir, settings.models_dir]), ["/dev/null"], required=False)
+    abi = apply_landlock(default_read_paths([settings.bin_dir, settings.models_dir]), ["/dev/null"], required=settings.production)  # production fails closed
     log.info("stream worker listening on %s (landlock abi %s)", sock, abi)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

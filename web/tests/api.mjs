@@ -27,7 +27,8 @@ await check('api: server down -> friendly error not a crash', async () => {
   await page.route('**/api/billing/history', (r) => r.abort());
   await signIn(page, `e2e-api2-${Date.now()}@example.com`).catch(() => {});
   await page.goto(`${BASE}/app/billing`);
-  await page.getByText(/Could not reach the server/).waitFor({ timeout: 10000 });
+  // A request that cannot reach the server shows the "right back" panel (it re-checks by itself), never a blank page.
+  await page.getByText(/right back|Could not reach Audio Cleaner/).first().waitFor({ timeout: 10000 });
   return 'ok';
 });
 console.log('LOGS:\n' + logs.join('\n'));

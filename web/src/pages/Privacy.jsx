@@ -72,19 +72,21 @@ export default function Privacy() {
       <h2 id="retention">8. How long we keep things</h2>
       <ul>
         <li>Account data: while your account exists, then deleted on request unless we must keep it by law.</li>
-        <li>Payment and ledger records: as long as tax and accounting law requires [period to be confirmed].</li>
-        <li>Job records (metadata only, no content): [period to be confirmed]. Security logs: [period to be confirmed].</li>
+        <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email).</li>
+        <li>Job records (metadata only, no content): file names are removed after 12 months; the rest of the record (length, options, cost) is kept as part of the ledger.</li>
+        <li>Security logs, including IP addresses and browser types of sign-ins and live sessions: 90 days.</li>
+        <li>Backups of our database: kept for 30 days, so data you deleted can remain in a backup until it expires.</li>
         <li>Uploaded files and results: as described in section 4.</li>
       </ul>
 
       <h2 id="rights">9. Your rights</h2>
-      <p>Depending on where you live (for example under the CCPA) you may have the right to access, correct, delete or export your data, and to object to or restrict some processing. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, email us and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
+      <p>Depending on where you live (for example under the CCPA) you may have the right to access, correct, delete or export your data, and to object to or restrict some processing. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, {email ? <>email us at <a href={`mailto:${email}`}>{email}</a></> : <>use the <Link to="/app/account">Account page</Link></>} and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
 
       <h2 id="security">10. Security</h2>
       <p>Connections use TLS. Session tokens, sign-in links and API keys are stored only as hashes. Billing and key management need a signed-in browser session, and state-changing requests are protected against cross-site request forgery. No system is perfectly secure; tell us if you find a problem.</p>
 
       <h2 id="other">11. Children, transfers and changes</h2>
-      <p>The Service is not intended for children under 16. If data is transferred outside your country we rely on appropriate safeguards [to be confirmed]. We will post changes to this policy here with a new version date and, for material changes, notify account holders.</p>
+      <p>The Service is not intended for children under 16. Your data is processed in the United States. We do not offer the Service in the EU/EEA, the UK or Switzerland, so we do not transfer the data of people there. We will post changes to this policy here with a new version date and, for material changes, notify account holders.</p>
     </Legal>
   );
 }

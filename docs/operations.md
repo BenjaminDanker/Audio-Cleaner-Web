@@ -4,12 +4,14 @@
 
 ```
 ~/audio-cleaner/
-  app/        deployed code (copy of server/acw, see app/VERSION)
-  venv/       Python 3.12 virtualenv (server/requirements.lock)
+  app/        deployed code (copies of server/acw and common/acw_common, see app/VERSION)
+  app.prev/   the previous copy of the code: deploy/rollback.sh brings it back
+  venv/       Python 3.12 virtualenv (server/requirements.lock); venv-gpu/ for the GPU worker (deploy/setup-gpu.sh)
   bin/        ffmpeg, ffprobe (BtbN static n8.1, sha256-verified), libdf.so
-  models/     DeepFilterNet3_onnx.tar.gz, whisper/{large-v3-turbo,small}
+  models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, ap-bwe/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
+              silero-vad/, whisper/{large-v3-turbo,small}
   wasm/       df.js + df_bg.wasm for the browser build
-  data/       acw.sqlite3, jobs/, stream.sock          (0700)
+  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha   (0700)
   secrets/    acw.env (web, secrets), acw-worker.env   (0700, files 0600)
   src/        build trees (DeepFilterNet, deepfilter-build) - safe to delete
   dev/        local dev instance (dev.sh) - safe to delete
@@ -17,12 +19,35 @@
 
 ## Deploy / update
 
+Always deploy from `~/repos/Audio-Cleaner-Web`, branch `on-prem` (fast-forward it from `desktop-merge`; the
+script refuses another history, so an old checkout can't overwrite newer code):
+
 ```bash
-cd ~/repos/Audio-Cleaner-Web && git pull
-deploy/install.sh                 # deps, code copy, units, restart, health check
-ACW_WORKERS=3 deploy/install.sh   # change the number of file-job workers
-deploy/publish-web.sh             # build the site and rsync it to the VPS
+cd ~/repos/Audio-Cleaner-Web && git checkout on-prem && git merge --ff-only desktop-merge   # or pull
+deploy/install.sh                      # check, back up, copy, restart what changed, verify, publish the site if web/ changed
+deploy/install.sh --wait-live          # stop new live sessions and wait (up to 10 min) for the running ones first
+deploy/install.sh --wait-live=1800     # ... or for as long as you say
+deploy/install.sh --no-restart         # copy everything, restart nothing
+ACW_WORKERS=3 deploy/install.sh        # change the number of file-job workers
+deploy/rollback.sh                     # put the previous code back (run again to undo)
+deploy/drain.sh on|off|status|wait     # refuse new live sessions by hand (e.g. before a long maintenance)
+deploy/publish-web.sh                  # build the site and rsync it to the VPS (install.sh does it when web/ changed)
 ```
+
+What `install.sh` does, in order: prints the commit and what is running now (file jobs, live sessions);
+**refuses** (unless `--force`) when the working tree has uncommitted changes, when the commit is not a
+descendant of the deployed `app/VERSION`, or when live sessions are running and the web or live worker would be
+restarted; checks that every Python file parses; takes a database snapshot (`data/backups`, verified like the
+nightly one; a failing snapshot stops the deploy); installs the locked packages only when `requirements.lock`
+changed; keeps the old code as `app.prev` and copies the new; runs `init-db`; installs changed unit files; then
+restarts **only what changed**: the web process and file workers when the code or packages changed, the live worker
+only when code it uses changed, a unit whose own unit file changed. The SSH tunnel is never restarted for a code change.
+Finally it polls (up to 30 s) until every unit is active and `/api/health?deep=1` is ok, and tells you to run
+`deploy/rollback.sh` if not. A file worker that is stopped puts its job back in the queue with the upload kept
+and no attempt used, so a deploy fails no jobs. (The first deploy of this behaviour still stops workers that run
+the older code: check the "running now" line and wait for jobs to finish.)
+
+Rollback keeps units, packages and the database as they are; schema changes are additive.
 
 ## Services (user units, linger on)
 
@@ -44,6 +69,9 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
 ../venv/bin/python -m acw.admin user someone@example.com
 ../venv/bin/python -m acw.admin suspend someone@example.com "reason"
 ../venv/bin/python -m acw.admin stats
+../venv/bin/python -m acw.admin activity       # file jobs and live sessions running now
+../venv/bin/python -m acw.admin check-money    # balances and holds against the ledger (exit 1 on a mismatch)
+../venv/bin/python -m acw.admin verify-backup FILE.sqlite3.gz
 ```
 
 ## Alerts
@@ -99,6 +127,17 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 | Swap growing (`swap_growing`) | at least 512 MB of swap in use and up 256 MB or more over 30 minutes | |
 | Live sessions refused (`live_full`) | more than 10 stream sessions ended with `end_reason = 'full'` in the last hour (counted from `stream_sessions`; `ACW_ALERT_FULL_THRESHOLD` changes the 10) | |
 | Backup overdue (`backup_stale`) | the newest snapshot in `/mnt/mc-storage/audio-cleaner-backups` (`ACW_BACKUP_DIR`) is older than 36 h, or none is found (disk not mounted) | |
+| Backup failed its check (`backup_bad`) | `backup-status.json` next to the snapshots says the file is empty, failed SQLite's integrity check, or its ledger sums do not match, or the off-machine copy failed | the backup unit fails too |
+| Balances do not match the ledger (`ledger_invariant`) | an account's balance differs from the sum of its ledger entries, or its held amount from its active holds | look before restarting anything; `acw.admin check-money` |
+| Extra-accurate transcription stuck (`cloud_asr_stuck`) | a job has waited on the OpenAI transcription for over 30 minutes | |
+| Many uploads (`uploads_piling`) | more than 15 uploads in progress, or more than 40 GB promised | |
+| Credit held for hours (`holds_old`) | a hold has been active for over 6 hours | housekeeping releases leaked ones; if it persists, look at acw-web |
+| Many jobs failing (`jobs_failing`) | over 30 % of the last 24 h's finished jobs failed (at least 10) | |
+| Stripe events not processed (`stripe_events_unprocessed`) | an event older than 10 minutes was stored without being handled | a payment may be uncredited |
+| Payments pending (`payments_pending`) | an auto top-up pending over 1 h, or a checkout over 26 h | |
+| Files missing (`files_missing`) | a model or program under `~/audio-cleaner/{models,bin}` is not there | |
+| Live worker silent (`stream_socket`) | connecting to the live worker's socket fails twice in a row | |
+| GPU worker silent (`gpu_worker_silent`) | its unit is active but it has not marked itself idle for 45 minutes while nothing runs | CPU workers then take its jobs |
 | OpenAI quota / billing (`openai:quota`) | OpenAI answers `insufficient_quota` or a billing error | mail shows only HTTP status and OpenAI's error type/code |
 | OpenAI key rejected (`openai:auth`) | HTTP 401/403 | |
 | OpenAI server errors (`openai:5xx`) | 3 or more 5xx in 5 minutes (either premium path) | |
@@ -108,13 +147,92 @@ Thresholds are constants at the top of `server/acw/monitor.py`.
 
 Limits: the monitor runs on this machine, so a power cut, network loss or a dead
 `systemd --user` manager sends nothing. For that, point an outside monitor (for
-example UptimeRobot, free) at `https://mc-multi-world.space/audio/api/health`.
+example UptimeRobot, free) at `https://mc-multi-world.space/audio/api/health`
+(that URL answers only `{"ok":true}`; the detailed check `?deep=1` works from this machine and for admins).
+
+## Backups
+
+Every night (`acw-backup.timer`, 04:17) `python -m acw.admin backup` writes a consistent snapshot of the database to
+`/mnt/mc-storage/audio-cleaner-backups` (another disk; 30 kept), then **checks it**: the file is unzipped to a
+scratch copy, `PRAGMA integrity_check` must say `ok`, and every account's balance must equal the sum of its ledger
+entries and its held amount the sum of its active holds. A snapshot that fails is renamed `*.bad`, the unit fails (you
+get a mail) and `backup-status.json` records why (the monitor reads it). `deploy/install.sh` takes the same kind of
+snapshot into `data/backups` before every deploy.
+
+**Off the machine (switched off until you configure it).** Create `~/audio-cleaner/secrets/backup.env` (0600):
+
+```
+ACW_BACKUP_OFFBOX=user@host:/path/to/backups/       # an rsync destination (ssh key login, no password)
+ACW_BACKUP_PASSPHRASE_FILE=/home/silver/audio-cleaner/secrets/backup.pass   # a file holding a long passphrase (gpg --symmetric, AES256)
+# or, with `age` installed:  ACW_BACKUP_AGE_RECIPIENT=age1...   (a public key; keep the private key elsewhere)
+```
+
+Each nightly snapshot is then encrypted and copied; the unit fails if that does not work. The remote end keeps
+everything it is given (prune it there). Also worth copying once, by hand, because the database does not hold them:
+`secrets/` (the passphrase file belongs somewhere other than the backup target) and `models/` (9 GB, partly converted by hand).
+After setting it up, run `systemctl --user start acw-backup.service` and look at `journalctl --user -u acw-backup -n 20`.
+
+**Restore** (the database only; everything else is code and models):
+
+```bash
+cd ~/audio-cleaner/app && set -a && . ../secrets/acw-worker.env && set +a
+# 1. pick a snapshot and check it first (an encrypted off-machine copy: gpg --decrypt -o x.sqlite3.gz x.sqlite3.gz.gpg)
+ls -1 /mnt/mc-storage/audio-cleaner-backups | tail
+../venv/bin/python -m acw.admin verify-backup /mnt/mc-storage/audio-cleaner-backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz
+# 2. stop everything that writes (the tunnel can stay: the site shows its maintenance message)
+systemctl --user stop acw-web 'acw-worker@*' acw-worker-gpu acw-stream acw-monitor.timer acw-backup.timer
+# 3. keep what is there, put the snapshot in place
+cd ~/audio-cleaner/data && mkdir -p ../data-before-restore && cp -a acw.sqlite3* ../data-before-restore/ && rm -f acw.sqlite3 acw.sqlite3-wal acw.sqlite3-shm
+gunzip -c /mnt/mc-storage/audio-cleaner-backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz > acw.sqlite3 && chmod 600 acw.sqlite3
+# 4. schema (additive), then the money check, then start
+cd ~/audio-cleaner/app && ../venv/bin/python -m acw.admin init-db && ../venv/bin/python -m acw.admin check-money
+systemctl --user start acw-stream acw-web 'acw-worker@1' 'acw-worker@2' acw-monitor.timer acw-backup.timer   # and the other workers
+```
+
+Jobs that were in flight are re-queued or failed by the normal sweeps; stripe events that were missed are picked up
+by the reconcile loop, and Stripe re-sends events it did not get an answer for. Drill it once on a copy (restore into a
+scratch `ACW_DATA_DIR`, run `check-money`) before you need it.
+
+## Log retention
+
+Client addresses are in the user journal (the app's access log line has them; query strings are left out). The
+Privacy Policy says 90 days. The journal rotates by size today; to also cap its age (one-time, needs sudo, applies to the
+whole machine's journal):
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d && printf '[Journal]\nMaxRetentionSec=90day\n' | sudo tee /etc/systemd/journald.conf.d/acw-retention.conf && sudo systemctl restart systemd-journald
+```
+
+`deploy/install.sh` reminds you until that file or a `MaxRetentionSec` exists. The database side runs by itself:
+`acw/retention.py` (from the housekeeping loop, hourly) removes IP addresses from live sessions, the audit log and
+sessions after 90 days and job file names after 12 months. Ledger and payment records stay 7 years.
+
+## Moving to a domain of its own
+
+Only configuration changes (the shared host `mc-multi-world.space/audio` is the weak point, see security.md):
+
+1. DNS: an A record for the new name to the VPS (216.250.115.225); a Caddy site block for it with the contents of
+   `deploy/vps/audio.caddy` but **without** the `/audio` prefix (routes at `/`, root `/var/www/audio`, same CSP).
+2. `~/audio-cleaner/secrets/acw.env` and `acw-worker.env`: `ACW_PUBLIC_ORIGIN=https://new.name`, `ACW_BASE_PATH=` (empty).
+   The session cookie then becomes `__Host-acw_session` (Secure, `Path=/`, no Domain) by itself; everybody signs in again.
+3. Google OAuth client: add `https://new.name/api/auth/oauth/google/callback`; Stripe webhook endpoint
+   `https://new.name/api/stripe/webhook` (keep the old one until events stop arriving there); Stripe return URLs follow the origin.
+4. Website: build with `VITE_BASE=/` (publish-web.sh uses `/audio/` today; change it there), the health URLs in
+   `monitor.py`/`publish-web.sh`, `deploy/systemd/acw-tunnel.service` stays as it is.
+5. Keep a redirect from the old `/audio/*` for a while, and note that OBS plugin builds carry the server address
+   (`obs-plugin/src/audio-cleaner-filter.cpp`, `core/include/acw/session.hpp`): keep the old host answering until users have updated.
+6. `deploy/install.sh`, then check `/api/health` on the new name.
 
 ## One-time setup still needed (needs you)
 
 1. **VPS Caddy route** (sudo): `ssh vps` then `sudo bash ~/acw/install-audio-route.sh`.
    Adds `/audio` before the 404 catch-all, creates `/var/www/audio` owned by
    silver, validates (reverts on failure), and reloads.
+   Re-run it (after `scp deploy/vps/audio.caddy deploy/vps/install-audio-route.sh vps:~/acw/`) whenever the
+   snippet changes. The current one caps request bodies (64 KB; 4 GB only for the upload route; 1 MB for the
+   Stripe webhook) and needs Caddy 2.8 or newer (`request_body` `read_timeout`). Once, add to the **global options**
+   block at the top of `/etc/caddy/Caddyfile`: `servers { timeouts { read_header 10s } }`, then `sudo caddy validate` and reload.
+   Turnstile's three CSP additions are written in the snippet, commented out.
 2. **Sign-in providers**: create OAuth apps with these callbacks and put the
    ids/secrets in `~/audio-cleaner/secrets/acw.env`:
    - Google: `https://mc-multi-world.space/audio/api/auth/oauth/google/callback`
@@ -142,8 +260,10 @@ told the service is busy. Measured numbers, 2026-10-14:
 (12 GB on this 31 GB box; set at install), so Audio Cleaner can't take RAM the
 Minecraft servers need.
 - File jobs keep decoded and cleaned audio in memory-mapped scratch files in the
-  job directory, and the polish chain works in 10 s blocks. A 60-min stereo job
-  runs under a hard 1.5 GB cap (it peaked at 6.9 GB for 30 min before this).
+  job directory, and the polish chain works in 10 s blocks. Admission reserves 1.5 GB per job (3 GB for the
+  voice-rebuild tier): an estimate used to decide when a job may start (`jobs.JOB_MEM`), not a limit. The real
+  ceilings are the worker unit's MemoryMax (7 GB) and the runner's address-space limit (32 GB, memory-mapped
+  scratch files included). Admission counts memory the way the kernel does: file cache in the slice is not "used".
   Scratch disk: ~0.7 GB per hour and channel, twice.
 - Local transcription adds the model (Parakeet ~4.3 GB on CPU, ~1 GB with the
   GPU; Whisper turbo ~1.7 GB) and 16 kHz audio (~0.23 GB per hour). CPU worker
@@ -157,7 +277,11 @@ and scratch disk with a reserve for the host; idle cores among the CPUs jobs
 may use right now); with nothing running the queue always moves. Queue order:
 paid before free, then the user with the fewest jobs running, then first come
 first served. The API reports `queuePosition` and `queueWaitSeconds`.
-- Studio clean: ~0.1x real time with 4 threads (60 min stereo in ~6 min).
+- Studio clean, per channel at 4 threads (stereo is cleaned channel by channel, so double these for stereo):
+  DeepFilterNet3 ~0.05x real time, DPDFNet-8 (heavy noise) ~0.33x, voice rebuilt ~0.9x (3 GB, one such job at a
+  time, files up to 90 minutes), highs restoration and echo removal a few percent more. These are the numbers in
+  `jobs.SPEED`: they drive the queue estimate and the slow-job alert, and the runner tells the worker which
+  noise remover a file got so the estimate follows it.
 - Local transcription: Parakeet TDT (English: v2; 24 European languages: v3)
   at ~0.09x real time on 4 CPU threads, ~0.04x on the GTX 960; Whisper
   large-v3-turbo (~0.45x) for every other language. Auto language: Whisper

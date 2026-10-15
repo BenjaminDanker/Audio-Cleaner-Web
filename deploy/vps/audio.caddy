@@ -4,24 +4,69 @@
     # so the free tier never touches the home connection.
     redir /audio /audio/ 308
 
+    # Request bodies: only a file upload may be big. Everything else is small JSON, so it gets 64 KB and has
+    # to arrive within 20 s (the app enforces the same limits again). The Stripe webhook gets 1 MB.
+    # One-time, in the GLOBAL OPTIONS block at the top of /etc/caddy/Caddyfile (not here), so a client that
+    # opens a connection and never finishes its headers is dropped:
+    #     servers {
+    #         timeouts {
+    #             read_header 10s
+    #         }
+    #     }
     handle /audio/api/* {
-        request_body {
-            max_size 4GB
+        @upload path_regexp ^/audio/api/jobs/[0-9a-f]{32}/input$
+        @webhook path /audio/api/stripe/webhook
+        handle @upload {
+            request_body {
+                max_size 4GB
+            }
+            reverse_proxy 127.0.0.1:18790 {
+                header_up -X-Real-IP
+                flush_interval -1
+                transport http {
+                    dial_timeout 5s
+                    response_header_timeout 2m
+                }
+            }
         }
-        reverse_proxy 127.0.0.1:18790 {
-            header_up -X-Real-IP
-            flush_interval -1
-            transport http {
-                dial_timeout 5s
-                response_header_timeout 2m
+        handle @webhook {
+            request_body {
+                max_size 1MB
+                read_timeout 20s
+            }
+            reverse_proxy 127.0.0.1:18790 {
+                header_up -X-Real-IP
+                flush_interval -1
+                transport http {
+                    dial_timeout 5s
+                    response_header_timeout 2m
+                }
+            }
+        }
+        handle {
+            request_body {
+                max_size 64KB
+                read_timeout 20s
+            }
+            reverse_proxy 127.0.0.1:18790 {
+                header_up -X-Real-IP
+                flush_interval -1
+                transport http {
+                    dial_timeout 5s
+                    response_header_timeout 2m
+                }
             }
         }
     }
 
     handle /audio/* {
         root * /var/www
-        # If Cloudflare Turnstile is enabled, add https://challenges.cloudflare.com
-        # to script-src and frame-src.
+        # Turnstile (human check on email sign-in) is NOT enabled. To enable it, set TURNSTILE_SITE_KEY and
+        # TURNSTILE_SECRET in acw.env and change these three directives in the Content-Security-Policy below:
+        #     script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com;
+        #     frame-src https://challenges.cloudflare.com;
+        #     connect-src 'self' https://challenges.cloudflare.com;
+        # (frame-src is not in the policy yet: add it; without it default-src 'self' blocks the widget's frame.)
         header {
             Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
             Strict-Transport-Security "max-age=31536000"
@@ -46,7 +91,10 @@
         # Every app route serves index.html: never cache it, only hashed assets.
         @html not path /audio/assets/* /audio/dfn/*
         header @html Cache-Control "no-cache"
-        try_files {path} /audio/index.html
+        # App routes (/audio/app, /audio/login, ...) get index.html; a missing hashed script, a missing file under
+        # assets/ dfn/ releases/ is a real 404, so a tab on an old page can tell it must reload.
+        @spa not path /audio/assets/* /audio/dfn/* /audio/releases/*
+        try_files @spa {path} /audio/index.html
         file_server {
             precompressed zstd gzip
         }

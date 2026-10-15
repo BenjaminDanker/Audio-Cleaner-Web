@@ -7,6 +7,7 @@ Stripe object id so replays are harmless. See docs/payments.md for the policy.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 
 import stripe
@@ -119,7 +120,8 @@ def client() -> stripe.StripeClient:
     key = get_settings().stripe_secret_key
     if not key:
         raise BillingUnavailable("Stripe is not configured")
-    return stripe.StripeClient(key, max_network_retries=2)
+    # 25 s per attempt (the library's default is 80): a slow Stripe must not tie up our threads for minutes.
+    return stripe.StripeClient(key, max_network_retries=2, http_client=stripe.RequestsClient(timeout=25))
 
 
 def enabled() -> bool:
@@ -489,23 +491,27 @@ HANDLERS = {
 }
 
 
+_webhook_lock = threading.Lock()
+
+
 def handle_webhook(payload: bytes, sig_header: str | None) -> str:
     secret = get_settings().stripe_webhook_secret
     if not secret:
         raise BillingUnavailable("webhook secret not configured")
     event = client().construct_event(payload, sig_header, secret)  # raises on bad signature
     handler = HANDLERS.get(event.type)
-    seen = db.one("SELECT processed_at FROM stripe_events WHERE id = ?", (event.id,))
-    if seen is not None and seen["processed_at"] is not None:
-        return "duplicate"
-    db.execute(
-        "INSERT INTO stripe_events(id, type, received_at) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING",
-        (event.id, event.type, db.now()),
-    )
-    if handler is not None:
-        handler(event.data.object.to_dict())
-    db.execute("UPDATE stripe_events SET processed_at = ? WHERE id = ?", (db.now(), event.id))
-    return "ok" if handler else "ignored"
+    with _webhook_lock:  # one delivery at a time, so a duplicate arriving together with the original waits and sees it done
+        seen = db.one("SELECT processed_at FROM stripe_events WHERE id = ?", (event.id,))
+        if seen is not None and seen["processed_at"] is not None:
+            return "duplicate"
+        db.execute(
+            "INSERT INTO stripe_events(id, type, received_at) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING",
+            (event.id, event.type, db.now()),
+        )
+        if handler is not None:
+            handler(event.data.object.to_dict())
+        db.execute("UPDATE stripe_events SET processed_at = ? WHERE id = ?", (db.now(), event.id))
+        return "ok" if handler else "ignored"
 
 
 # ------------------------------------------------------------------ auto-reload
