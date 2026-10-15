@@ -173,8 +173,8 @@ class UploadBandwidth:
     megabytes per second)."""
 
     def __init__(self) -> None:
-        self.total = Throttle(float(os.environ.get("ACW_UPLOAD_MBPS_TOTAL", "12")) * 1e6)
-        self.per_user = float(os.environ.get("ACW_UPLOAD_MBPS_USER", "6")) * 1e6
+        self.total = Throttle(float(os.environ.get("ACW_UPLOAD_MBPS_TOTAL", "8")) * 1e6)
+        self.per_user = float(os.environ.get("ACW_UPLOAD_MBPS_USER", "5")) * 1e6
         self._users: dict[str, Throttle] = {}
 
     def for_user(self, user_id: str) -> Throttle:
@@ -199,7 +199,7 @@ class DownloadBandwidth:
     of the measured upload speed leaves room (docs/operations.md)."""
 
     def __init__(self) -> None:
-        rate = float(os.environ.get("ACW_DOWNLOAD_MBPS_TOTAL", "4")) * 1e6
+        rate = float(os.environ.get("ACW_DOWNLOAD_MBPS_TOTAL", "6")) * 1e6
         self.total = Throttle(rate) if rate > 0 else None
 
     async def take(self, n: int) -> None:

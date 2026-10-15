@@ -6,7 +6,7 @@ for Audio Cleaner:
 1. Serves the **static website** from `/var/www/audio` (~30 MB: the app, the
    free browser denoiser and its model). Kept here on purpose: new visitors
    download ~12 MB, and serving that from home would compete with live audio
-   and Minecraft on the ~52 Mbit/s home uplink.
+   and Minecraft on the home connection (1 Gbit/s both ways; the VPS link itself carries about 73 Mbit/s inbound and 92 Mbit/s outbound, measured 2026-10-15).
 2. **Forwards** `/audio/api/*` (and the live WebSocket) to the home server
    through SSH reverse tunnels that primary-ram opens:
    VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), and for job uploads and result downloads

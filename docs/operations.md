@@ -83,8 +83,8 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ACW_DOWNLOAD_MBPS_TOTAL` | `4` | megabytes per second for all result downloads together (0 = no cap). Downloads leave over the home uplink, which also carries the live audio replies, so this must leave room: **about 70 % of the uplink speed you measured** (the home line is about 52 Mbit/s = 6.5 MB/s, so 4 to 4.5) |
-| `ACW_UPLOAD_MBPS_TOTAL` / `ACW_UPLOAD_MBPS_USER` | `12` / `6` | megabytes per second for all uploads / per account (uploads arrive over the home downlink) |
+| `ACW_DOWNLOAD_MBPS_TOTAL` | `6` | megabytes per second for all result downloads together (0 = no cap). Measured 2026-10-15: the home line is 1 Gbit/s both ways, but the VPS's own connection is the bottleneck: home->VPS about 9 MB/s (73 Mbit/s, even with 3 parallel streams), VPS->home about 11 MB/s. Downloads and the live audio replies share that home->VPS path, so this stays at about 70 % of it |
+| `ACW_UPLOAD_MBPS_TOTAL` / `ACW_UPLOAD_MBPS_USER` | `8` / `5` | megabytes per second for all uploads / per account (uploads come VPS->home, about 11 MB/s measured; 70 % leaves room for live audio) |
 
 **Rollout, in this order** (each step is safe on its own; nothing is applied by the repository):
 
