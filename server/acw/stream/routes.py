@@ -36,11 +36,12 @@ PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
 LOW_BALANCE_WARN_SECONDS = 300
 
 _live: dict[str, int] = {}  # user_id -> active sessions in this process
-_server_compute = 0  # running sessions that use the CPU models here (file jobs move off the live cores)
+_live_units = 0.0  # capacity units of running sessions (file jobs move off the cores they need)
 
 
 async def startup() -> None:
-    cpusplit.set_live_sessions(get_settings().data_dir, 0)
+    await asyncio.to_thread(cpusplit.units_per_core)  # calibrate once, off the event loop
+    cpusplit.set_live_units(get_settings().data_dir, 0.0, cpusplit.units_per_core())
     # Sessions left "active" by a previous process were never captured.
     for row in db.all_rows("SELECT id, hold_id, seconds FROM stream_sessions WHERE status = 'active'"):
         if row["hold_id"]:
@@ -137,15 +138,15 @@ async def stream_ws(ws: WebSocket) -> None:
         return
     _live[principal.user_id] = _live.get(principal.user_id, 0) + 1
     sess: Session | None = None
-    global _server_compute
-    computes = False
+    global _live_units
+    units = 0.0
     try:
         sess = await _start(ws, principal, ip)
         if sess is not None and sess.writer is not None:
-            computes = bool(sess.cfg.get("denoise")) or sess.cfg.get("captions") == "local"
-            if computes:
-                _server_compute += 1
-                cpusplit.set_live_sessions(get_settings().data_dir, _server_compute)
+            units = cpusplit.session_units(sess.cfg)
+            if units:
+                _live_units += units
+                cpusplit.set_live_units(get_settings().data_dir, _live_units, cpusplit.units_per_core())
             await _run(sess)
     except WebSocketDisconnect:
         pass
@@ -154,9 +155,9 @@ async def stream_ws(ws: WebSocket) -> None:
         if sess:
             sess.end_reason = "server_error"
     finally:
-        if computes:
-            _server_compute -= 1
-            cpusplit.set_live_sessions(get_settings().data_dir, _server_compute)
+        if units:
+            _live_units = max(0.0, _live_units - units)
+            cpusplit.set_live_units(get_settings().data_dir, _live_units, cpusplit.units_per_core())
         _live[principal.user_id] -= 1
         if sess is not None:
             await _finish(sess)

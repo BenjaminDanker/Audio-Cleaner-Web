@@ -51,19 +51,21 @@ def test_live_counts_niced_work_as_available():
 
 
 def test_live_refuses_with_what_still_fits(monkeypatch):
+    from acw import cpusplit
     from acw.stream import worker
 
     monkeypatch.setattr(worker, "_monitor", None)
-    monkeypatch.setattr(worker, "LIVE_UNITS", 13.0)
-    monkeypatch.setattr(worker, "_units", 11.0)
-    monkeypatch.setattr(worker, "_local_captions", 3)
+    monkeypatch.setattr(cpusplit, "units_per_core", lambda: 2.4)
+    cap = worker.capacity_units()
+    assert cap == cpusplit.max_live_cores() * 2.4
+    monkeypatch.setattr(worker, "_units", cap - 1.5)
     assert worker.admit({"denoise": "light"}) == (True, [])
     ok, options = worker.admit({"denoise": "low_latency"})
-    assert not ok and {"denoise": "light"} in options and {"captions": "premium"} in options
-    ok, options = worker.admit({"denoise": None, "captions": "local"})
-    assert not ok and options == [{"captions": "premium"}]
+    assert not ok and {"denoise": "light"} in options and {"denoise": None, "captions": "premium"} in options
+    ok, options = worker.admit({"denoise": "light", "captions": "local"})
+    assert not ok and {"captions": "premium"} in options  # same denoise, external captions fit
     # External captions only: no model runs here, never limited.
-    monkeypatch.setattr(worker, "_units", 100.0)
+    monkeypatch.setattr(worker, "_units", 1000.0)
     assert worker.admit({"denoise": None, "captions": "premium"}) == (True, [])
 
 
@@ -71,35 +73,46 @@ def test_live_capacity_shrinks_with_other_load_on_live_cores(monkeypatch):
     from acw import cpusplit
     from acw.stream import worker
 
+    monkeypatch.setattr(cpusplit, "units_per_core", lambda: 2.4)
     live = sorted(cpusplit.live_cpus())
-    per = [0.0] * 16
+    per = [0.0] * (max(cpusplit.all_cpus()) + 1)
     for c in live[: len(live) // 2]:
         per[c] = 1.0  # e.g. a game server busy on half the live CPUs
 
     class Monitor:
         def snapshot(self):
-            return hostload.Snapshot(cores=16, busy_cores=8, nice_cores=0, mem_available=20 * GB, slice_headroom=None,
-                                     disk_free=100 * GB, busy_per_cpu=tuple(per), own_cores=0.0)
+            return hostload.Snapshot(cores=len(per), busy_cores=8, nice_cores=0, mem_available=20 * GB,
+                                     slice_headroom=None, disk_free=100 * GB, busy_per_cpu=tuple(per), own_cores=0.0)
 
     monkeypatch.setattr(worker, "_monitor", Monitor())
-    assert worker.capacity_units() < worker.LIVE_UNITS * 0.5
+    assert worker.capacity_units() < cpusplit.max_live_cores() * 2.4 * 0.5
 
 
-def test_cpu_split_partitions_physical_cores():
+def test_live_cores_grow_with_load_and_jobs_keep_the_rest():
     from acw import cpusplit
 
-    live, jobs_ = cpusplit.live_cpus(), cpusplit.job_cpus()
-    assert live and jobs_ and not (live & jobs_)
-    assert live | jobs_ == cpusplit.all_cpus()
-    for core in cpusplit.physical_cores():  # hyper-thread siblings stay together
-        assert set(core) <= live or set(core) <= jobs_
+    phys = len(cpusplit.physical_cores())
+    assert cpusplit.live_cores_for(0, 2.4) == 0
+    assert cpusplit.live_cores_for(1, 2.4) == 2  # one needed + one spare
+    assert cpusplit.live_cores_for(1000, 2.4) == phys - cpusplit.min_job_cores()
+    for units in (0.5, 5, 12, 1000):
+        live, jobs_ = cpusplit.live_cpus(units, 2.4), cpusplit.job_cpus(units, 2.4)
+        assert live and jobs_ and not (live & jobs_) and live | jobs_ == cpusplit.all_cpus()
+        for core in cpusplit.physical_cores():  # hyper-thread siblings stay together
+            assert set(core) <= live or set(core) <= jobs_
 
 
 def test_live_marker_round_trip(tmp_path):
     from acw import cpusplit
 
-    assert not cpusplit.live_active(tmp_path)
-    cpusplit.set_live_sessions(tmp_path, 2)
-    assert cpusplit.live_active(tmp_path)
-    cpusplit.set_live_sessions(tmp_path, 0)
-    assert not cpusplit.live_active(tmp_path)
+    assert cpusplit.live_units(tmp_path) == (0.0, cpusplit.REFERENCE_UNITS_PER_CORE)
+    cpusplit.set_live_units(tmp_path, 4.0, 2.1)
+    assert cpusplit.live_units(tmp_path) == (4.0, 2.1)
+
+
+def test_job_threads_follow_idle_job_cores():
+    per = [1.0] * 4 + [0.0] * 12
+    s = snap(idle=12)
+    s = hostload.Snapshot(**{**s.__dict__, "busy_per_cpu": tuple(per)})
+    ok, _, threads = admission(job(), s, [], cpus={0, 1, 2, 3, 4, 5})  # 4 of 6 job CPUs busy
+    assert ok and threads == 2

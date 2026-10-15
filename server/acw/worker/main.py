@@ -44,7 +44,7 @@ MIN_IDLE_CORES = 2.0
 MAX_JOB_THREADS = int(os.environ.get("ACW_JOB_THREADS_MAX", "6"))
 
 
-def admission(job: dict, snap: hostload.Snapshot, running: list[dict]) -> tuple[bool, str, int]:
+def admission(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set[int] | None = None) -> tuple[bool, str, int]:
     """Whether `job` may start now, why not, and how many threads it gets.
 
     Memory and disk must fit with a reserve left for the rest of the host.
@@ -58,9 +58,13 @@ def admission(job: dict, snap: hostload.Snapshot, running: list[dict]) -> tuple[
         return False, f"memory: {snap.memory_headroom / jobs.GB:.1f} GB free, job needs {mem / jobs.GB:.1f} GB", 0
     if snap.disk_free - disk < jobs.DISK_RESERVE:
         return False, f"disk: {snap.disk_free / jobs.GB:.0f} GB free, job needs {disk / jobs.GB:.1f} GB", 0
-    if running and snap.idle_cores < MIN_IDLE_CORES:
-        return False, f"cpu: {snap.idle_cores:.1f} cores idle", 0
-    return True, "", max(2, min(MAX_JOB_THREADS, int(snap.idle_cores) - 1))
+    # Idle CPU among the cores jobs may use now (live audio may have taken some).
+    idle = snap.idle_cores
+    if cpus is not None and snap.busy_per_cpu:
+        idle = sum(1.0 - snap.busy_per_cpu[c] for c in cpus if c < len(snap.busy_per_cpu))
+    if running and idle < MIN_IDLE_CORES:
+        return False, f"cpu: {idle:.1f} job cores idle", 0
+    return True, "", max(2, min(MAX_JOB_THREADS, int(idle) - 1))
 
 
 _last_wait_log = 0.0
@@ -80,7 +84,9 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         threads = None
         if load is not None:
             running = [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
-            ok, why, threads = admission(dict(row), load.snapshot(), running)
+            units, per_core = cpusplit.live_units(get_settings().data_dir)
+            cpus = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
+            ok, why, threads = admission(dict(row), load.snapshot(), running, cpus)
             if not ok:
                 if time.monotonic() - _last_wait_log > 60:
                     _last_wait_log = time.monotonic()
@@ -170,7 +176,8 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         beat = 0.0
         while proc.poll() is None:
             # Off the live-audio cores while live sessions run (acw.cpusplit).
-            want = cpusplit.job_cpus() if cpusplit.live_active(data_dir) else cpusplit.all_cpus()
+            units, per_core = cpusplit.live_units(data_dir)
+            want = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
             if want != pinned:
                 cpusplit.pin_tree(proc.pid, want)
                 pinned = want

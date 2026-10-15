@@ -93,22 +93,29 @@ per user; free jobs are refused while 6 or more jobs wait.
 - Local transcription (large-v3-turbo int8): ~0.45x real time on 8 threads.
   This is the bottleneck. Parakeet would be ~4.5x faster (research/asr.md).
 
-**Live.** Live audio runs on its own 5 physical cores (`acw.cpusplit`;
-`ACW_LIVE_PHYSICAL_CORES`); while any server-processed session runs, file
-jobs are re-pinned to the other 3 (hyper-thread siblings of a live core would
-otherwise halve its speed: one niced 6-thread job made 12 sessions lag 0.5 s).
-Capacity is measured, in standard-denoise units (`ACW_LIVE_UNITS`, default 12):
-benchmark 2026-10-14, 20 ms frames, frame round trip inside the server:
+**Live comes first.** Live audio gets whole physical cores (`acw.cpusplit`):
+as many as its sessions need plus one spare, up to all but `ACW_MIN_JOB_CORES`
+(default 1 per 8 cores) which file jobs always keep. File jobs are re-pinned
+to whatever is left, every second, so they slow down instead of slowing live
+audio (a job thread on a live core's other hyper-thread halves its speed: one
+niced 6-thread job made 12 sessions lag 0.5 s before this split).
 
-| setup | idle box | with a 6-thread file job running |
+Capacity is in units (standard denoise = 1, low latency = 3.6, local captions
+= 0.7): live cores x units per core, where units per core is calibrated at
+start-up from how fast this CPU runs the model (2.68 on the 1700X; reference
+2.4 at 0.110 cores per session; override `ACW_LIVE_UNITS_PER_CORE`), shrunk
+by other load measured on the live cores. On this machine: 7 live cores x 2.68
+= ~18.8 units. Benchmark with a 6-thread file job squeezed onto the last core,
+20 ms frames, round trip inside the server:
+
+| sessions | p50 | p99 |
 |---|---|---|
-| standard denoise | 18 sessions: p99 11 ms | 12: p99 13 ms; 14: p99 53 ms; 16: collapses (2 s) |
-| low-latency denoise | 6 sessions: p99 12 ms | 4: p99 23 ms; 5: collapses |
+| 16 standard | 9 ms | 13 ms |
+| 18 standard | 7 ms | 13 ms |
+| 5 low latency | 12 ms | 16 ms |
+| 6 low latency (refused now) | 34 ms | 288 ms |
 
-So 12 units, low latency = 3 units. Other load measured on the live cores (game
-servers) shrinks the capacity proportionally. Local captions (whisper small,
-0.8x real time per utterance on 2 threads) keep up with ~3 talkers and lag
-5+ s; `ACW_LIVE_MAX_LOCAL_CAPTIONS=3` until the streaming model lands
-(research/asr.md). When full, a new session is refused with the options that
-still fit; sessions using only the external (extra-accurate) captions are never
-limited.
+When full, a new session is refused with the options that still fit;
+sessions that only use the external (extra-accurate) captions are never
+limited. On a bigger CPU all of this scales by itself (cores from the
+topology, speed from the calibration).
