@@ -49,8 +49,12 @@ jobs:
       - name: Install the locked packages and the test tools
         run: |
           python -m pip install --upgrade pip
-          pip install -r server/requirements.lock
+          # Every file is checked against the sha256 recorded in the lock (deploy/hash_lock.py).
+          pip install --require-hashes -r server/requirements.lock
           pip install "pytest>=8" "pytest-asyncio>=0.23"
+
+      - name: Package lock files are well formed (hashes present)
+        run: python deploy/hash_lock.py --verify server/requirements.lock deploy/requirements-gpu.lock
 
       - name: Server tests
         run: cd server && python -m pytest -q

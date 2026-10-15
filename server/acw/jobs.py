@@ -18,7 +18,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import db
+from . import db, metrics
 from .billing import ledger, pricing
 from .config import get_settings
 
@@ -440,6 +440,7 @@ def finish_failed(job: dict, message: str, status: str = "failed", only_from: tu
                 (float(cur["claimed_seconds"]), job["user_id"], json.loads(cur["params_json"])["free_day"]),
             )
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
+    metrics.job_ended(job["id"])
 
 
 def requeue(job: dict) -> None:

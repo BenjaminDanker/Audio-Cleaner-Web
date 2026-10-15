@@ -22,7 +22,7 @@ from pathlib import Path
 import acw_common
 from acw_common import restore
 
-from .. import cpusplit, db, hostload, jobs
+from .. import cpusplit, db, hostload, jobs, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -49,7 +49,14 @@ def gpu_worker_idle() -> bool:
 
 
 def is_local_transcription(job: dict) -> bool:
-    return json.loads(job["params_json"]).get("transcribe_tier") == "local" and job.get("next_stage") != "finalize"
+    """A job the GPU worker takes. Not one with echo removal: the GPU venv has no echo canceller, so the CPU
+    workers keep those."""
+    params = json.loads(job["params_json"])
+    return (
+        params.get("transcribe_tier") == "local"
+        and not params.get("options", {}).get("echo_reference_track")
+        and job.get("next_stage") != "finalize"
+    )
 
 
 def _gpu_spec() -> dict:
@@ -181,8 +188,10 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
             return None
         n = c.execute(
             "UPDATE jobs SET status = 'running', worker_id = ?, heartbeat_at = ?, attempts = attempts + 1,"
-            " started_at = COALESCE(started_at, ?) WHERE id = ? AND status = 'queued'",
-            (worker_id, now, now, row["id"]),
+            " started_at = COALESCE(started_at, ?),"
+            " wait_seconds = COALESCE(wait_seconds, MAX(0, ? - COALESCE(queued_at, created_at)))"
+            " WHERE id = ? AND status = 'queued'",
+            (worker_id, now, now, now, row["id"]),
         ).rowcount
         if not n:
             return None  # another worker took it
@@ -447,6 +456,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
                 f"{jobs.job_label(job['kind'], params['denoise_tier'], params['transcribe_tier'])}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
+    metrics.job_ended(job["id"])
 
 
 def _bill_as_standard(job: dict, notice: str) -> dict:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put the previous copy of the code back (deploy/install.sh keeps it as ~/audio-cleaner/app.prev).
 #   deploy/rollback.sh [--wait-live[=SECS]] [--force]
-# Swaps app and app.prev, restarts the web process, the file workers and the live worker, and checks them.
+# Swaps app and app.prev, restarts the web process, the bulk-transfer process, the file workers and the live worker, and checks them.
 # Only code goes back: units, packages and the database stay as they are (schema changes are additive, the
 # previous code ignores new tables and columns). Running it again swaps forward again.
 set -euo pipefail
@@ -45,13 +45,17 @@ mv "$H/app.prev" "$H/app"
 mv "$H/app.rollback-tmp" "$H/app.prev"
 
 UNITS="acw-stream.service acw-web.service"
+# A copy of the code from before the bulk-transfer process existed has no acw/bulk_app.py to start.
+[ -f "$H/app/acw/bulk_app.py" ] && UNITS="$UNITS acw-bulk.service"
 for unit in $(systemctl --user list-units --plain --no-legend 'acw-worker@*.service' 'acw-worker-gpu.service' | awk '{print $1}'); do
   UNITS="$UNITS $unit"
 done
 # shellcheck disable=SC2086
 systemctl --user restart $UNITS
+BULK_TUNNEL=""
+systemctl --user is-enabled --quiet acw-tunnel-bulk.service 2>/dev/null && BULK_TUNNEL="acw-tunnel-bulk.service"
 # shellcheck disable=SC2086
-if check_running $UNITS acw-tunnel.service; then
+if check_running $UNITS acw-tunnel.service $BULK_TUNNEL; then
   echo "rolled back to $(cat "$H/app/VERSION" 2>/dev/null || echo unknown); run again to undo"
 else
   echo "the rolled-back code did not come up cleanly either; look at: journalctl --user -u acw-web -n 80" >&2

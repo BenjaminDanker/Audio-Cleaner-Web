@@ -1,0 +1,83 @@
+# Audio Cleaner: every model and program file production uses, with where it comes from (DEP-01).
+#
+# Read by deploy/fetch-models.sh, which downloads what is missing or wrong, verifies the sha256 of every file and
+# never touches a correct one (deploy/fetch-models.sh --check only verifies). Targets are relative to
+# ~/audio-cleaner (ACW_HOME). Columns are separated by whitespace; the last column runs to the end of the line.
+#
+#   kind     flags     sha256   size     target                         source / note
+#   file     -|optional  ...   bytes    models/x/y.onnx                URL (Hugging Face: pinned to one commit)
+#   archive  -|optional  ...   bytes    NAME                           URL of an archive some `member` lines come from
+#   member   -|optional  ...   bytes    bin/ffmpeg                     NAME:path/inside/the/archive
+#   local    -|optional  ...   bytes    bin/libdf.so                   NOTE: cannot be downloaded (built or converted here)
+#
+# optional: not needed to run the product; checked when present, fetched only with --with-optional.
+# local: files that cannot be traced to a download: --check verifies that they exist and match (a different hash
+#   is reported as "changed", not as an error: a rebuild legitimately differs); nothing fetches them.
+# To change a pin: download the new file, run sha256sum on it, and replace the URL, sha256 and size here.
+#   Keep Hugging Face URLs on a commit id, never "main".
+#
+# Sources (all verified byte for byte against the files in production on 2026-10-15):
+#   DeepFilterNet3        github.com/Rikorose/DeepFilterNet, the commit libDF is built from (native/deepfilter/build.sh)
+#   DPDFNet-8             Ceva-IP/DPDFNet, Apache-2.0
+#   Whisper large-v3-turbo, small   CTranslate2 conversions (faster-whisper): dropbox-dash/faster-whisper-large-v3-turbo
+#                         (renamed from mobiuslabsgmbh/...), Systran/faster-whisper-small
+#   Parakeet TDT v2, v3   istupakov/parakeet-tdt-0.6b-v{2,3}-onnx (onnx-asr layout), CC-BY-4.0
+#   Silero VAD            istupakov/silero-vad-onnx (what onnx-asr downloads), MIT
+#   Live captions         csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8
+#   AP-BWE, Sidon ONNX    our conversions (tools/export_apbwe_onnx.py, tools/convert_sidon_onnx.py), published as the
+#                         models-v1 release archive; the Sidon TorchScript files come from sarulab-speech/sidon-v0.1
+#   FFmpeg / FFprobe      BtbN/FFmpeg-Builds autobuild-2026-10-09-14-16 (n8.1.3-16-ge0a878dd70, GPL, static).
+#                         BtbN prunes old daily builds: if this URL ever 404s, take a build that is still there,
+#                         replace the btbn-ffmpeg archive line and the two bin/ lines, and mirror the tarball in our own release.
+#
+archive  -         5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce  908538132 models-v1                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v1/AudioCleaner-models-v1.zip
+archive  -         968255015cc65dd999a7eddf8016be89a8a1bbef063ea7d3e9c3a229b0f6faaf  150350364 btbn-ffmpeg                                          https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1.tar.xz
+
+
+file     -         c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616    7983136 models/DeepFilterNet3_onnx.tar.gz                    https://github.com/Rikorose/DeepFilterNet/raw/d375b2d8309e0935d165700c91da9de862a99c31/models/DeepFilterNet3_onnx.tar.gz
+file     -         4f04431988472f8c7b815f942aa6901976929c9e22353029681fcdb262da0164    3955864 models/captions-en/decoder.int8.onnx                 https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/decoder.int8.onnx
+file     -         100c5616929a131b5b3c8c8ab0d83aaba2cdcae163acd8d190b4e5ffa5f7d051  131507603 models/captions-en/encoder.int8.onnx                 https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/encoder.int8.onnx
+file     -         d2d8e7290a6a8245a83ed211aa0dd8cdf8effb8a7c64fe392399561111b52f30    1408182 models/captions-en/joiner.int8.onnx                  https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/joiner.int8.onnx
+file     -         618dc110fc2213886b52e063ff42329bbdf37a266ca7705184090fa5f39f3131      11896 models/captions-en/tokens.txt                        https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/tokens.txt
+file     -         7b3afbb260a08fe9af3d16e3bda992971be1e7e951d1dee7c2d235f5c43f5631   14857107 models/dpdfnet/dpdfnet8_48khz_hr.onnx                https://huggingface.co/Ceva-IP/DPDFNet/resolve/dd6818d00f50c836fed43a6243ebe49116de5964/onnx/dpdfnet8_48khz_hr.onnx
+file     -         666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466         97 models/parakeet-v2/config.json                       https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/config.json
+file     -         cbb52a07bd70ab5b67f8439d4b3cd8704b18467b4430bcacb5adabe154b8d191   35792059 models/parakeet-v2/decoder_joint-model.onnx          https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/decoder_joint-model.onnx
+file     -         3987bcd28175d829d12888a996a84e8f62a0e374d9ffd640662c1515adc679d3   41770866 models/parakeet-v2/encoder-model.onnx                https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.onnx
+file     -         4dab7362d4874d85965045b1e41b2d61dd2cc0fb25671a7f6b3dc47bf120cc41 2435420160 models/parakeet-v2/encoder-model.onnx.data           https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.onnx.data
+file     -         a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f     139764 models/parakeet-v2/nemo128.onnx                      https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/nemo128.onnx
+file     -         ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d       9384 models/parakeet-v2/vocab.txt                         https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/vocab.txt
+file     -         666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466         97 models/parakeet-v3/config.json                       https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/config.json
+file     -         e978ddf6688527182c10fde2eb4b83068421648985ef23f7a86be732be8706c1   72520893 models/parakeet-v3/decoder_joint-model.onnx          https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/decoder_joint-model.onnx
+file     -         98a74b21b4cc0017c1e7030319a4a96f4a9506e50f0708f3a516d02a77c96bb1   41770866 models/parakeet-v3/encoder-model.onnx                https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.onnx
+file     -         9a22d372c51455c34f13405da2520baefb7125bd16981397561423ed32d24f36 2435420160 models/parakeet-v3/encoder-model.onnx.data           https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.onnx.data
+file     -         a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f     139764 models/parakeet-v3/nemo128.onnx                      https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx
+file     -         d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d      93939 models/parakeet-v3/vocab.txt                         https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt
+file     optional  34dcc80fab75bd1336369ba5b2063f6da475887aa824db94b495c4059c5fdea4  209824877 models/sidon/decoder_cpu.pt                          https://huggingface.co/sarulab-speech/sidon-v0.1/resolve/b3b02d8bbd55fdbc410e6e46e76ef95ace4fbf52/decoder_cpu.pt
+file     optional  fd9abc906a9048b3c047bd3d246a25f6485d09c2d6bb85e098f527f844efc019  795498929 models/sidon/feature_extractor_cpu.pt                https://huggingface.co/sarulab-speech/sidon-v0.1/resolve/b3b02d8bbd55fdbc410e6e46e76ef95ace4fbf52/feature_extractor_cpu.pt
+file     -         2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b       1075 models/silero-vad/LICENSE.txt                        https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/LICENSE.txt
+file     -         1094039d370c82889582ba739a3d1caac5754c8b3a17a66a534200c9f72086e2         30 models/silero-vad/config.json                        https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/config.json
+file     -         1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3    2327524 models/silero-vad/silero_vad.onnx                    https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/silero_vad.onnx
+file     -         b0253ea6c0d3bea6b1e19e91a02acfd3b53f4467362efcb5a3e6b16c9b3a9b7e       2263 models/whisper/large-v3-turbo/config.json            https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/config.json
+file     -         e76620f83d5f5b69efd3d87e3dc180c1bd21df9fbebacfd4335e5e1efcc018da 1617884929 models/whisper/large-v3-turbo/model.bin              https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/model.bin
+file     -         7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711        340 models/whisper/large-v3-turbo/preprocessor_config.json https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/preprocessor_config.json
+file     -         297b13372ac43916285644fb9687add3cc62ee2a1adb60da3dc25cc94c1871fd    2710337 models/whisper/large-v3-turbo/tokenizer.json         https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/tokenizer.json
+file     -         c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1    1068114 models/whisper/large-v3-turbo/vocabulary.json        https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/vocabulary.json
+file     -         b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828       2370 models/whisper/small/config.json                     https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/config.json
+file     -         3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671  483546902 models/whisper/small/model.bin                       https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin
+file     -         fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab    2203239 models/whisper/small/tokenizer.json                  https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json
+file     -         34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913     459861 models/whisper/small/vocabulary.txt                  https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt
+
+member   -         329540e2635d1cceebf9ecb716b15e6bdfa434d43b8467138c946ecccc099890  172328840 bin/ffmpeg                                           btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffmpeg
+member   -         94ec62142287906e2c17711b06f1fbe4fd2a2632e241f2786b6cd6ef4ee5c7a2  172095304 bin/ffprobe                                          btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffprobe
+member   -         eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618  119093242 models/ap-bwe/12kto48k.onnx                          models-v1:ap-bwe/12kto48k.onnx
+member   -         ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44  119093242 models/ap-bwe/16kto48k.onnx                          models-v1:ap-bwe/16kto48k.onnx
+member   -         e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55  119093242 models/ap-bwe/24kto48k.onnx                          models-v1:ap-bwe/24kto48k.onnx
+member   -         788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3  119093242 models/ap-bwe/8kto48k.onnx                           models-v1:ap-bwe/8kto48k.onnx
+member   -         08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4  104975475 models/sidon/sidon_dec.onnx                          models-v1:sidon/sidon_dec.onnx
+member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75  397857704 models/sidon/sidon_fe.onnx                           models-v1:sidon/sidon_fe.onnx
+
+local    optional  f4dd2f350f3d41dee721567b7d5c351cb7122c27be9b8fc110ad7cf721e62b1f   15361376 bin/libdf-tract021.so                                older libDF build (tract 0.21), only used by native/deepfilter/test_native.py to compare outputs
+local    -         764418ed84586b22214d5544a3bb5b45c96e86b0ce5b79460b87bc7866d7130d   25392568 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte
+local    optional  3c34fa7296eef1121f76b4a0ed7c066706d53ac3c2bc7248e4f57132e469cf3b  276861944 models/sidon/sidon_fe_q8.onnx                        int8 variant of the Sidon feature extractor, made by tools/convert_sidon_onnx.py; not in models-v1; the product runs without it
+local    optional  d99358ebe4081f13c0ba12cb79e9d77bc9707dfda9ad4151d5ef5f2afaee4caa      15013 wasm/df.js                                           browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
+local    optional  8ed0596104271ff3503d79ae1571b4e5674d20f32982d0781b80c70f1c4ac4c1   14028025 wasm/df_bg.wasm                                      browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh

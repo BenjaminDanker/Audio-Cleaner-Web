@@ -8,8 +8,10 @@ for Audio Cleaner:
    download ~12 MB, and serving that from home would compete with live audio
    and Minecraft on the ~52 Mbit/s home uplink.
 2. **Forwards** `/audio/api/*` (and the live WebSocket) to the home server
-   through an SSH reverse tunnel that primary-ram opens:
-   VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit).
+   through SSH reverse tunnels that primary-ram opens:
+   VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), and for job uploads and result downloads
+   VPS `127.0.0.1:18794` → primary-ram `127.0.0.1:8794` (`acw-tunnel-bulk` unit, its own connection and process so
+   big transfers do not delay live audio; Caddy falls back to 18790 when it is down: docs/operations.md, "Bulk transfers").
 
 Nothing else of ours is on the VPS: no data, no secrets. When the home server
 or tunnel is down, Caddy answers API calls with a 503 maintenance JSON
@@ -40,11 +42,11 @@ repo) with a site block for the domain that ends in the catch-all
 
 1. On primary-ram, point the `vps` SSH alias (`~/.ssh/config`) and
    `deploy/systemd/acw-tunnel.service` (`silver@<new IP>`) at the new host.
-2. On the new VPS, allow the tunnel key to open exactly one listening port and
+2. On the new VPS, allow the tunnel key to open exactly two listening ports and
    nothing else. Append this line to `~/.ssh/authorized_keys` (the public key is
    `~/.ssh/acw_tunnel.pub` on primary-ram):
 
-       restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 <contents of acw_tunnel.pub> acw-tunnel@primary-ram
+       restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 <contents of acw_tunnel.pub> acw-tunnel@primary-ram
 
 3. From primary-ram, copy the route files and accept the new host key once:
 

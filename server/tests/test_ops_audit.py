@@ -1073,3 +1073,15 @@ def test_a_dropped_session_is_replaced_instead_of_refusing_the_user():
         assert asyncio.run(routes._evict_stale(uid)) is False
     finally:
         routes._open.clear()
+
+
+def test_gpu_worker_leaves_echo_jobs_to_the_cpu_workers():
+    import json
+
+    from acw.worker.main import is_local_transcription
+
+    def job(**opts):
+        return {"params_json": json.dumps({"transcribe_tier": "local", "options": opts}), "next_stage": None}
+
+    assert is_local_transcription(job())
+    assert not is_local_transcription(job(echo_reference_track=True))

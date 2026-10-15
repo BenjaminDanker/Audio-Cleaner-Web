@@ -18,7 +18,7 @@ from collections import OrderedDict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, cpusplit, db
+from .. import auth, cpusplit, db, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
@@ -84,6 +84,7 @@ def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
             "UPDATE stream_sessions SET status = 'ended', cost_micros = ?, end_reason = ?, ended_at = ? WHERE id = ? AND status = 'active'",
             (cost, reason, db.now(), row["id"]),
         )
+        metrics.live_ended(row["id"])
         n += 1
     return n
 
@@ -130,7 +131,8 @@ class Session:
         self.held_seconds = 0.0
         self.samples = 0  # of audio processed; counted as integers so the billed seconds are exact
         self.started = time.monotonic()
-        self.frames: OrderedDict[int, tuple[int, int]] = OrderedDict()
+        self.frames: OrderedDict[int, tuple[int, int, float]] = OrderedDict()  # seq -> (codec, timestamp, sent at)
+        self.frame_stats = metrics.FrameStats()
         self.pace = [[PACE_BURST_SECONDS, time.monotonic()] for _ in range(2)]  # mic, echo reference
         self.warned = False
         self.next_extend_try = 0.0
@@ -451,7 +453,8 @@ async def _run(sess: Session) -> None:
                 meta = sess.frames.pop(seq, None)
                 if meta is None:
                     continue
-                codec, ts = meta
+                codec, ts, sent_at = meta
+                sess.frame_stats.answer(time.monotonic() - sent_at)
                 await ws.send_bytes(P.encode_frame(codec, seq, ts, y))
             elif kind == P.MSG_TAP:
                 # Extra-accurate captions listen to the echo-free original (before noise removal), like every
@@ -536,7 +539,8 @@ async def _run(sess: Session) -> None:
                     break
                 if not await _billing_tick(sess):
                     break
-                sess.frames[seq] = (codec, ts)
+                sess.frames[seq] = (codec, ts, time.monotonic())
+                sess.frame_stats.sent += 1
                 while len(sess.frames) > 500:
                     sess.frames.popitem(last=False)
                 await P.send_msg(sess.writer, P.MSG_AUDIO, ipc)
@@ -649,11 +653,14 @@ async def _finish_inner(sess: Session) -> None:
     finally:
         if sess.hold_id:
             await asyncio.to_thread(ledger.release_hold, sess.hold_id)  # nothing left reserved, whatever happened
+        fs = sess.frame_stats
         await asyncio.to_thread(
             db.execute,
-            "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ? WHERE id = ?",
-            (sess.seconds, cost, sess.end_reason, db.now(), sess.id),
+            "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ?,"
+            " frames = ?, late_frames = ?, dropped_frames = ? WHERE id = ?",
+            (sess.seconds, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped, sess.id),
         )
+        await asyncio.to_thread(metrics.live_ended, sess.id, fs, time.monotonic() - sess.started)
     try:
         await sess.ws.close()
     except Exception:  # noqa: BLE001

@@ -11,9 +11,10 @@
 #   * the commit is not a descendant of the deployed one (app/VERSION): that would downgrade the service,
 #   * live sessions are running and the web or stream worker would restart (they cut every live session),
 #   * the database backup taken just before the change fails its checks.
-# It restarts only what changed: the web process and the file workers when the application code or the
-# locked packages changed, the live worker only when code it uses changed, and a unit whose unit file changed.
-# The SSH tunnel is never restarted for a code change. A stopping file worker puts its job back in the queue.
+# It restarts only what changed: the web process, the bulk-transfer process (uploads/downloads, acw-bulk) and the
+# file workers when the application code or the locked packages changed, the live worker only when code it uses
+# changed, and a unit whose unit file changed. The SSH tunnels are never restarted for a code change. A stopping
+# file worker puts its job back in the queue; a restarting acw-bulk ends the uploads that are in flight.
 # The previous copy of the code is kept as app.prev: deploy/rollback.sh brings it back.
 # Layout: ~/audio-cleaner/{app,app.prev,venv,bin,models,data,secrets}
 set -euo pipefail
@@ -30,7 +31,7 @@ for arg in "$@"; do
     --no-restart) RESTART=0 ;;
     --wait-live) WAIT_LIVE=600 ;;
     --wait-live=*) WAIT_LIVE="${arg#*=}" ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -80,9 +81,21 @@ changed_files() {  # changed_files SRC DST: paths (relative) rsync would add, ch
 }
 CHANGED_APP="$(changed_files "$REPO/server/acw/" "$H/app/acw/")"
 CHANGED_COMMON="$(changed_files "$REPO/common/acw_common/" "$H/app/acw_common/")"
-LOCK_SUM="$(sha256sum "$REPO/server/requirements.lock" | cut -d' ' -f1)"
+# The locked packages are the name==version pins: the --hash lines can change without any package changing, so a
+# change of hashes alone neither reinstalls nor restarts anything. When the recorded pin set differs, the
+# installed packages decide (so the first deploy after the lock gained hashes restarts nothing for that).
+lock_pins() { grep -E '^[A-Za-z0-9]' "$1" | sed -E 's/[ \\].*$//' | tr 'A-Z_.' 'a-z--' | sort; }
+LOCK_SUM="pins:$(lock_pins "$REPO/server/requirements.lock" | sha256sum | cut -d' ' -f1)"
 LOCK_CHANGED=0
-{ [ ! -x "$H/venv/bin/python" ] || [ "$LOCK_SUM" != "$(cat "$H/data/lock.sha" 2>/dev/null || true)" ]; } && LOCK_CHANGED=1
+if [ ! -x "$H/venv/bin/python" ]; then
+  LOCK_CHANGED=1
+elif [ "$LOCK_SUM" != "$(cat "$H/data/lock.sha" 2>/dev/null || true)" ]; then
+  if [ -n "$(comm -23 <(lock_pins "$REPO/server/requirements.lock") <("$H/venv/bin/python" -m pip freeze 2>/dev/null | sed -E 's/ .*//' | tr 'A-Z_.' 'a-z--' | sort))" ]; then
+    LOCK_CHANGED=1
+  else
+    echo "$LOCK_SUM" > "$H/data/lock.sha"  # same packages as before, only the recorded form changed
+  fi
+fi
 APP_CHANGED=0
 [ -n "$CHANGED_APP$CHANGED_COMMON" ] && APP_CHANGED=1
 STREAM_CHANGED=0
@@ -106,7 +119,13 @@ WORKERS_CONF="$(printf '[Service]\nEnvironment=ACW_WORKERS=%d\n' "$WORKERS")"
 GPU=0
 if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1 && [ -x "$H/venv-gpu/bin/python" ]; then GPU=1; fi
 
-UNITS="acw-stream.service acw-web.service acw-tunnel.service"
+UNITS="acw-stream.service acw-web.service acw-bulk.service acw-tunnel.service"
+# The bulk tunnel needs the VPS key to allow its port first (docs/operations.md, "Bulk transfers"), otherwise it
+# fails and alerts in a loop. So it is part of the deploy only once you enabled it (systemctl --user enable --now
+# acw-tunnel-bulk); from then on it is checked, restarted when its unit file changes and rolled back like the rest.
+BULK_TUNNEL=0
+systemctl --user is-enabled --quiet acw-tunnel-bulk.service 2>/dev/null && BULK_TUNNEL=1
+[ "$BULK_TUNNEL" = 1 ] && UNITS="$UNITS acw-tunnel-bulk.service"
 for i in $(seq 1 "$WORKERS"); do UNITS="$UNITS acw-worker@$i.service"; done
 [ "$GPU" = 1 ] && UNITS="$UNITS acw-worker-gpu.service"
 
@@ -118,6 +137,7 @@ add_restart() {
 }
 if [ "$APP_CHANGED" = 1 ] || [ "$LOCK_CHANGED" = 1 ]; then
   add_restart acw-web.service
+  add_restart acw-bulk.service
   for i in $(seq 1 "$WORKERS"); do add_restart "acw-worker@$i.service"; done
   [ "$GPU" = 1 ] && add_restart acw-worker-gpu.service
 fi
@@ -129,6 +149,7 @@ for f in "$REPO"/deploy/systemd/acw-*.service; do
     case "$name" in
       acw-worker@.service) for i in $(seq 1 "$WORKERS"); do add_restart "acw-worker@$i.service"; done ;;
       acw-alert@.service) ;;  # started on demand
+      acw-tunnel-bulk.service) [ "$BULK_TUNNEL" = 1 ] && add_restart "$name" ;;  # only once the VPS allows its port
       *) add_restart "$name" ;;
     esac
   fi
@@ -145,7 +166,7 @@ else
   echo "--no-restart: nothing is restarted"
 fi
 
-# ---- 3. Live sessions: a web or stream restart cuts all of them
+# ---- 3. Live sessions: a web, stream or main-tunnel restart cuts all of them (a bulk restart only ends uploads/downloads)
 DRAINING=0
 cleanup() { [ "$DRAINING" = 1 ] && drain_off; true; }
 trap cleanup EXIT
@@ -184,7 +205,7 @@ fi
 # ---- 5. Python packages (pinned); only when the lock changed, and without touching pip itself
 [ -x "$H/venv/bin/python" ] || python3 -m venv "$H/venv"
 if [ "$LOCK_CHANGED" = 1 ]; then
-  "$H/venv/bin/pip" install -q -r "$REPO/server/requirements.lock"
+  "$H/venv/bin/pip" install -q --require-hashes -r "$REPO/server/requirements.lock"
   echo "$LOCK_SUM" > "$H/data/lock.sha"
 fi
 
@@ -198,16 +219,18 @@ rsync -ac --delete --exclude '__pycache__' "$REPO/common/acw_common/" "$H/app/ac
 git -C "$REPO" rev-parse --short HEAD > "$H/app/VERSION"
 chmod -R go-rwx "$H/app"
 
-# ---- 7. Native pieces must exist (built by native/deepfilter/build.sh and fetched below)
+# ---- 7. Models and programs: every file in deploy/models.lock is present and has the recorded sha256
+# (downloads what is missing or wrong, never touches a correct file; FFmpeg and the models-v1 archive come from
+# the lock's pinned URLs, or from $ACW_ARCHIVE_DIR). libdf.so is built here (native/deepfilter/build.sh).
+bash "$REPO/deploy/fetch-models.sh" || echo "warning: some models or programs are missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2
 for f in "$H/bin/ffmpeg" "$H/bin/ffprobe" "$H/bin/libdf.so" "$H/models/DeepFilterNet3_onnx.tar.gz"; do
-  [ -e "$f" ] || { echo "missing $f (see docs/operations.md)" >&2; exit 1; }
+  [ -e "$f" ] || { echo "missing $f (deploy/fetch-models.sh, native/deepfilter/build.sh, docs/operations.md)" >&2; exit 1; }
 done
 [ -d "$H/models/whisper/large-v3-turbo" ] || echo "warning: whisper large-v3-turbo missing (local transcription will fail)" >&2
 [ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
-# Heavy-noise model for recordings (small; pinned + verified). Without it heavy noise falls back to DeepFilterNet3.
-bash "$REPO/deploy/fetch-dpdfnet.sh" "$H/models/dpdfnet" || echo "warning: DPDFNet model download failed (heavy-noise recordings use DeepFilterNet3)" >&2
-[ -f "$H/models/sidon/sidon_fe.onnx" ] || echo "warning: Sidon ONNX models missing in $H/models/sidon (docs/research/restore-sidon.md); voice-rebuild jobs are billed at the standard price and say so" >&2
-[ -f "$H/models/ap-bwe/8kto48k.onnx" ] || echo "warning: AP-BWE models missing in $H/models/ap-bwe (tools/export_apbwe_onnx.py); band-limited recordings are not extended" >&2
+[ -f "$H/models/dpdfnet/dpdfnet8_48khz_hr.onnx" ] || echo "warning: DPDFNet model missing (heavy-noise recordings use DeepFilterNet3)" >&2
+[ -f "$H/models/sidon/sidon_fe.onnx" ] || echo "warning: Sidon ONNX models missing in $H/models/sidon (models-v1 archive; docs/research/restore-sidon.md); voice-rebuild jobs are billed at the standard price and say so" >&2
+[ -f "$H/models/ap-bwe/8kto48k.onnx" ] || echo "warning: AP-BWE models missing in $H/models/ap-bwe (models-v1 archive; tools/export_apbwe_onnx.py); band-limited recordings are not extended" >&2
 
 # ---- 8. Config
 if [ ! -f "$H/secrets/acw.env" ]; then
@@ -233,6 +256,9 @@ done
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
 # Health monitor + email alerts (acw-alert@.service is started by OnFailure=, never enabled)
 systemctl --user enable --now acw-monitor.timer >/dev/null 2>&1
+if [ "$BULK_TUNNEL" = 0 ]; then
+  echo "note: acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'systemctl --user enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)" >&2
+fi
 # Workers beyond the new count (moved to a smaller machine): stop them.
 for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-worker@$i.service" >/dev/null 2>&1 || true; done
 [ "$GPU" = 1 ] || systemctl --user disable --now acw-worker-gpu.service >/dev/null 2>&1 || true

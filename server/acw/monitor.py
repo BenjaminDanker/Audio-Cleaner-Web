@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import alerts, db, health, jobs
+from . import alerts, db, health, jobs, metrics
 from .billing import ledger
 from .config import get_settings
 
@@ -262,6 +262,24 @@ def check_health(ok_fn: Callable[[str], tuple[bool, str]] = http_ok) -> list[Fin
     return findings
 
 
+def check_bulk(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Path | None = None) -> list[Finding]:
+    """The bulk-transfer process (uploads and downloads, acw-bulk) answers on its own port. Only checked where
+    that unit is enabled. Its tunnel is a unit like the others (service:acw-tunnel-bulk.service)."""
+    unit_dir = UNIT_DIR if unit_dir is None else unit_dir
+    if not (unit_dir / "default.target.wants" / "acw-bulk.service").exists():
+        return []
+    s = get_settings()
+    url = f"http://127.0.0.1:{os.environ.get('ACW_BULK_PORT', '8794')}{s.base_path}/api/health"
+    ok, why = ok_fn(url)
+    return [Finding(
+        "health_bulk", not ok, "Audio Cleaner upload/download process is not answering",
+        f"{url} failed ({why}). acw-bulk is down or stuck: uploads and result downloads fall back to the main process "
+        "once the VPS notices (a few seconds to a minute), or fail if the VPS is not set up for the fallback.\n"
+        "Check: systemctl --user status acw-bulk; journalctl --user -u acw-bulk -n 80 --no-pager\n",
+        confirm=2,
+    )]
+
+
 def check_queue(ctx: Callable[[], str]) -> list[Finding]:
     ids = jobs.queued_ids()
     now = db.now()
@@ -341,12 +359,17 @@ def check_full() -> list[Finding]:
     )]
 
 
+def newest_backup(directory: Path = BACKUP_DIR) -> float | None:
+    """Modification time of the newest snapshot, None when there is none (or the disk is not mounted)."""
+    try:
+        return max((p.stat().st_mtime for p in directory.glob("acw-*.sqlite3*")), default=None)
+    except OSError:
+        return None
+
+
 def check_backup(directory: Path = BACKUP_DIR, now: float | None = None) -> list[Finding]:
     now = time.time() if now is None else now
-    try:
-        newest = max((p.stat().st_mtime for p in directory.glob("acw-*.sqlite3*")), default=None)
-    except OSError:
-        newest = None
+    newest = newest_backup(directory)
     if newest is None:
         why = f"No database snapshot found in {directory} (is the backup disk mounted?)."
         bad = True
@@ -448,6 +471,37 @@ def check_installation(now: int) -> list[Finding]:
     return out
 
 
+# --- metrics file -----------------------------------------------------------
+
+def metrics_path() -> Path:
+    return get_settings().data_dir / "metrics.prom"
+
+
+def write_metrics(findings: list[Finding], states: dict[str, dict[str, str]], now: int | None = None,
+                  path: Path | None = None, backup_dir: Path | None = None) -> Path:
+    """data/metrics.prom in Prometheus text format, replaced atomically on every run. A file for a collector
+    (for example node_exporter's textfile directory) to read: there is no HTTP endpoint."""
+    settings = get_settings()
+    now = db.now() if now is None else now
+    path = metrics_path() if path is None else path
+    prom = metrics.Prom()
+    metrics.collect(prom, now=now, data_dir=settings.data_dir)
+    for unit, st in sorted(states.items()):
+        prom.add("acw_unit_active", "gauge", "1 when the systemd user unit is active.", 1 if st.get("ActiveState") == "active" else 0, unit=unit)
+    try:
+        prom.add("acw_disk_free_bytes", "gauge", "Free bytes on the volume holding the data directory.", shutil.disk_usage(settings.data_dir).free)
+    except OSError:
+        pass
+    newest = newest_backup(BACKUP_DIR if backup_dir is None else backup_dir)
+    prom.add("acw_backup_age_seconds", "gauge", "Age of the newest database snapshot (absent when there is none).",
+             None if newest is None else max(0, int(time.time() - newest)))
+    for f in findings:
+        prom.add("acw_check_problem", "gauge", "1 when the monitor check of this kind is failing.", 1 if f.bad else 0, kind=f.kind)
+    prom.add("acw_metrics_written_timestamp_seconds", "gauge", "When this file was written.", now)
+    metrics.write_prom(path, prom)
+    return path
+
+
 # --- driver -----------------------------------------------------------------
 
 def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[bool, str]] = http_ok) -> list[Finding]:
@@ -469,8 +523,11 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
         except Exception:  # noqa: BLE001
             log.exception("check %s failed", name)
 
+    unit_state: dict[str, dict[str, str]] = {}
+
     def services() -> list[Finding]:
         states = unit_states(expected_units())
+        unit_state.update(states)
         f, hist = check_services(states, _state_get("restarts", {}), now)
         _state_set("restarts", hist)
         return f
@@ -482,6 +539,7 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
 
     guarded("services", services)
     guarded("health", lambda: check_health(http))
+    guarded("bulk", lambda: check_bulk(http))
     guarded("queue", lambda: check_queue(host_ctx))
     guarded("slow_jobs", lambda: check_slow_jobs(host_ctx))
     guarded("resources", resources)
@@ -501,6 +559,10 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
         alerts.expire_stale("openai:", 30 * 60)
     except Exception:  # noqa: BLE001
         log.exception("openai alert expiry failed")
+    try:
+        write_metrics(findings, unit_state, now)
+    except Exception:  # noqa: BLE001
+        log.exception("could not write the metrics file")
     return findings
 
 

@@ -193,6 +193,23 @@ class UploadBandwidth:
 uploads = UploadBandwidth()
 
 
+class DownloadBandwidth:
+    """One cap for all result downloads of a process (ACW_DOWNLOAD_MBPS_TOTAL, megabytes per second; 0 = none).
+    The home uplink carries live audio replies as well, so downloads must not be able to fill it. About 70 %
+    of the measured upload speed leaves room (docs/operations.md)."""
+
+    def __init__(self) -> None:
+        rate = float(os.environ.get("ACW_DOWNLOAD_MBPS_TOTAL", "4")) * 1e6
+        self.total = Throttle(rate) if rate > 0 else None
+
+    async def take(self, n: int) -> None:
+        if self.total is not None:
+            await self.total.take(n)
+
+
+downloads = DownloadBandwidth()
+
+
 def client_net(ip: str) -> str:
     """Rate-limit key for an address: IPv6 addresses count per /64 (one subscriber holds billions of them)."""
     if ":" in ip:

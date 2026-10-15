@@ -5,7 +5,8 @@
   grant EMAIL USD REASON         add promotional/support credit
   user EMAIL                     show balance, status, recent activity
   suspend EMAIL REASON / unsuspend EMAIL
-  stats                          totals for the last 30 days
+  stats [--days N]               plain-text report for the last N days (default 30): jobs by tier, queue wait and run
+                                 time percentiles, failures, live sessions, free minutes, usage (read-only)
   activity                       what is running now (file jobs, live sessions)
   live-count                     number of live sessions running now
   check-money                    balances and holds against the ledger (exit 1 on a mismatch)
@@ -47,7 +48,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("reason")
     p = sub.add_parser("unsuspend")
     p.add_argument("email")
-    sub.add_parser("stats")
+    p = sub.add_parser("stats", help="plain-text report from the database (read-only)")
+    p.add_argument("--days", type=int, default=30, help="period in days (default 30)")
     sub.add_parser("activity", help="print what is running now: file jobs and live sessions")
     sub.add_parser("live-count", help="print the number of live sessions running now")
     sub.add_parser("check-money", help="verify balances and holds against the ledger")
@@ -125,12 +127,11 @@ def main(argv: list[str] | None = None) -> None:
         if result["integrity"] != "ok" or result["ledger"] != "ok":
             sys.exit(1)
     elif a.cmd == "stats":
-        since = db.now() - 30 * 86400
-        print("users", db.one("SELECT COUNT(*) n FROM users")["n"])
-        print("topups $", (db.one("SELECT COALESCE(SUM(amount_cents),0) s FROM payments WHERE status='succeeded' AND created_at>=?", (since,))["s"]) / 100)
-        print("usage $", -(db.one("SELECT COALESCE(SUM(amount_micros),0) s FROM ledger WHERE kind='usage' AND created_at>=?", (since,))["s"]) / 1e6)
-        print("jobs", dict(db.all_rows("SELECT status, COUNT(*) FROM jobs WHERE created_at>=? GROUP BY status", (since,))))
-        print("stream minutes", (db.one("SELECT COALESCE(SUM(seconds),0) s FROM stream_sessions WHERE started_at>=?", (since,))["s"]) / 60)
+        from . import stats
+
+        if not 1 <= a.days <= 3650:
+            sys.exit("--days must be between 1 and 3650")
+        print(stats.render(stats.report(a.days)))
 
 
 if __name__ == "__main__":

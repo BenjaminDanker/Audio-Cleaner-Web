@@ -7,19 +7,25 @@
  VPS 216.250.115.225 (Caddy, mc-multi-world.space)
    /audio/*        → static site from /var/www/audio (incl. free WASM denoiser)
    /audio/api/*    → 127.0.0.1:18790 ──────────────┐   request bodies capped (64 KB; 4 GB only for the upload route)
-   (other paths: Minecraft packs, pet-companion)    │ SSH reverse tunnel
-                                                    │ (key restricted to this one port)
- primary-ram (home LAN, nothing new listens on it)  ▼
-   acw-tunnel   ssh -R 18790 → 127.0.0.1:8790
-   acw-web      FastAPI/uvicorn on 127.0.0.1:8790 — auth, billing, jobs API,
-                live WebSocket relay, Stripe/OpenAI calls (only service with internet),
+   job uploads and result downloads                 │
+                   → 127.0.0.1:18794 (falls back    │ two SSH reverse tunnels, separate TCP connections
+                     to 18790 if down) ───────────┐ │ (key restricted to these two ports)
+   (other paths: Minecraft packs, pet-companion)  │ │
+ primary-ram (home LAN, nothing new listens on it)▼ ▼
+   acw-tunnel-bulk ssh -R 18794 → 127.0.0.1:8794   (IPQoS throughput)
+   acw-bulk     FastAPI/uvicorn on 127.0.0.1:8794 — only PUT /api/jobs/{id}/input and
+                GET /api/jobs/{id}/outputs/{name}; same auth, limits and caps as acw-web,
+                total download cap; no background loops (keeps big transfers off the live path)
+   acw-tunnel   ssh -R 18790 → 127.0.0.1:8790     (IPQoS lowdelay)
+   acw-web      FastAPI/uvicorn on 127.0.0.1:8790 — auth, billing, jobs API (also serves the
+                two bulk routes), live WebSocket relay, Stripe/OpenAI calls (only service with internet),
                 housekeeping (holds, orphaned sessions, retention), premium file transcription
    acw-stream   live DSP worker: echo canceller → DeepFilterNet3 → captions; Unix socket,
                 no network (seccomp AF_UNIX + Landlock)
    acw-worker@N file-job workers (no network); each job stage runs in a sandboxed runner
                 (Landlock + seccomp: no sockets, no links) that sees only its job directory
    acw-worker-gpu  optional: takes only local-transcription jobs and runs Parakeet on the GPU
-   acw-monitor  every 2 minutes: health, queue, money and backup checks → email
+   acw-monitor  every 2 minutes: health, queue, money and backup checks → email; writes data/metrics.prom
    SQLite       ~/audio-cleaner/data/acw.sqlite3 (WAL, synchronous=FULL), nightly checked backup
 ```
 
@@ -92,6 +98,20 @@ shared too: `native/deepfilter/build.sh` produces the server `.so`, the desktop
 Prepaid credit in micro-dollars. Holds reserve the estimated cost, captures
 charge the real cost. See [payments.md](payments.md). A job whose paid stage did not run (for example the voice
 rebuild) is billed as the tier it got and says so.
+
+## Observability
+
+One JSON log line per finished job and live session (`job_done`, `job_failed`, `live_session_end`), `python -m acw.admin stats
+[--days N]` for a plain-text report from the database, and a Prometheus text file `data/metrics.prom` rewritten by the
+monitor (no HTTP endpoint). Details and field lists: docs/operations.md, "Statistics and metrics".
+
+## Reproducible installation
+
+`deploy/models.lock` lists every model and program file (source, pinned revision, size, sha256) and
+`deploy/fetch-models.sh` downloads and verifies them; FFmpeg is a pinned BtbN build. `server/requirements.lock` and
+`deploy/requirements-gpu.lock` pin every Python package with the sha256 of every file PyPI lists
+(`pip install --require-hashes`). Only `libdf.so`, the browser build and a few optional conversions are built or made
+here (marked `local` in the lock).
 
 ## Why these choices
 

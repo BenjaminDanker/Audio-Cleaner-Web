@@ -1,0 +1,23 @@
+[Unit]
+Description=Audio Cleaner reverse tunnel for bulk transfers (VPS 127.0.0.1:18794 -> 127.0.0.1:8794)
+OnFailure=acw-alert@%n.service
+After=network-online.target
+
+[Service]
+Slice=acw.slice
+Type=simple
+# A second SSH connection of its own, so an upload or download in flight never queues in front of a live audio
+# packet in the main tunnel's TCP stream. IPQoS=throughput marks it as bulk traffic (the main tunnel is lowdelay),
+# for a router that prioritises by DSCP / smart queueing. Same key as the main tunnel; the VPS must allow this
+# port for that key first (docs/operations.md, "Bulk transfers"): install.sh enables this unit only after you have.
+# -F none: ignore ~/.ssh/config (its "vps" host disables forwardings).
+ExecStart=/usr/bin/ssh -F none -N -T -i %h/.ssh/acw_tunnel -o IdentitiesOnly=yes \
+    -o HostKeyAlias=vps -o StrictHostKeyChecking=yes -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
+    -o IPQoS=throughput \
+    -R 127.0.0.1:18794:127.0.0.1:8794 silver@216.250.115.225
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

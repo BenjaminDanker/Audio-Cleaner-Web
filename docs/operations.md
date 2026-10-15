@@ -6,12 +6,13 @@
 ~/audio-cleaner/
   app/        deployed code (copies of server/acw and common/acw_common, see app/VERSION)
   app.prev/   the previous copy of the code: deploy/rollback.sh brings it back
-  venv/       Python 3.12 virtualenv (server/requirements.lock); venv-gpu/ for the GPU worker (deploy/setup-gpu.sh)
-  bin/        ffmpeg, ffprobe (BtbN static n8.1, sha256-verified), libdf.so
+  venv/       Python 3.12 virtualenv (server/requirements.lock, installed with --require-hashes); venv-gpu/ for the GPU worker
+              (deploy/setup-gpu.sh, deploy/requirements-gpu.lock)
+  bin/        ffmpeg, ffprobe (BtbN static n8.1.3, pinned in deploy/models.lock), libdf.so (built here)
   models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, ap-bwe/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
-              silero-vad/, whisper/{large-v3-turbo,small}
+              silero-vad/, whisper/{large-v3-turbo,small}   (every file, its source and sha256: deploy/models.lock)
   wasm/       df.js + df_bg.wasm for the browser build
-  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha   (0700)
+  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha, metrics.prom   (0700)
   secrets/    acw.env (web, secrets), acw-worker.env   (0700, files 0600)
   src/        build trees (DeepFilterNet, deepfilter-build) - safe to delete
   dev/        local dev instance (dev.sh) - safe to delete
@@ -38,10 +39,13 @@ What `install.sh` does, in order: prints the commit and what is running now (fil
 **refuses** (unless `--force`) when the working tree has uncommitted changes, when the commit is not a
 descendant of the deployed `app/VERSION`, or when live sessions are running and the web or live worker would be
 restarted; checks that every Python file parses; takes a database snapshot (`data/backups`, verified like the
-nightly one; a failing snapshot stops the deploy); installs the locked packages only when `requirements.lock`
-changed; keeps the old code as `app.prev` and copies the new; runs `init-db`; installs changed unit files; then
-restarts **only what changed**: the web process and file workers when the code or packages changed, the live worker
-only when code it uses changed, a unit whose own unit file changed. The SSH tunnel is never restarted for a code change.
+nightly one; a failing snapshot stops the deploy); installs the locked packages (`pip install --require-hashes`) only when a pin
+changed; keeps the old code as `app.prev` and copies the new; runs `deploy/fetch-models.sh` (downloads and verifies what
+`deploy/models.lock` lists, never touching a correct file); runs `init-db`; installs changed unit files; then
+restarts **only what changed**: the web process, the bulk-transfer process (`acw-bulk`) and the file workers when the code or
+packages changed, the live worker only when code it uses changed, a unit whose own unit file changed. The SSH tunnels are
+never restarted for a code change. (Packages count as changed when a `name==version` pin differs from what is installed;
+a change of the `--hash` lines alone changes nothing.)
 Finally it polls (up to 30 s) until every unit is active and `/api/health?deep=1` is ok, and tells you to run
 `deploy/rollback.sh` if not. A file worker that is stopped puts its job back in the queue with the upload kept
 and no attempt used, so a deploy fails no jobs. (The first deploy of this behaviour still stops workers that run
@@ -57,8 +61,62 @@ journalctl --user -u acw-web -f
 systemctl --user restart acw-web
 ```
 
-`acw-tunnel` keeps `VPS 127.0.0.1:18790 → primary-ram 127.0.0.1:8790` up;
-check from the VPS with `curl -s 127.0.0.1:18790/audio/api/health`.
+Ports on primary-ram (all loopback) and how they reach the VPS:
+
+| Unit | Listens on (home) | VPS side | Carries |
+|---|---|---|---|
+| `acw-web` | `127.0.0.1:8790` | `127.0.0.1:18790` via `acw-tunnel` (`-o IPQoS=lowdelay`) | everything except the two bulk routes: sign-in, API, billing, the live WebSocket |
+| `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`) and result downloads (`GET /api/jobs/{id}/outputs/{name}`) only |
+
+Check from the VPS with `curl -s 127.0.0.1:18790/audio/api/health` and `curl -s 127.0.0.1:18794/audio/api/health`.
+
+## Bulk transfers (uploads and downloads on their own process and tunnel)
+
+Why: a 4 GB upload or a result download used to share one Python process, one SSH connection and the home uplink with
+the live audio WebSocket, so a big transfer could add latency to live sessions (head-of-line blocking in the tunnel's
+TCP stream, one event loop, one uplink queue). Now those two routes can run through `acw-bulk` (`acw/bulk_app.py`: the
+same route functions, authentication, body limits, upload caps and headers as the main app; it serves nothing else,
+runs no housekeeping, cloud transcription or live code) and their own SSH connection. The main process keeps serving
+the same two routes, so nothing breaks before the VPS is switched, and the VPS falls back to it when the bulk side is down.
+
+Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then `systemctl --user restart acw-bulk`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ACW_DOWNLOAD_MBPS_TOTAL` | `4` | megabytes per second for all result downloads together (0 = no cap). Downloads leave over the home uplink, which also carries the live audio replies, so this must leave room: **about 70 % of the uplink speed you measured** (the home line is about 52 Mbit/s = 6.5 MB/s, so 4 to 4.5) |
+| `ACW_UPLOAD_MBPS_TOTAL` / `ACW_UPLOAD_MBPS_USER` | `12` / `6` | megabytes per second for all uploads / per account (uploads arrive over the home downlink) |
+
+**Rollout, in this order** (each step is safe on its own; nothing is applied by the repository):
+
+1. **Home side.** `deploy/install.sh --wait-live` (the first deploy also restarts `acw-tunnel`, because its unit gained
+   `-o IPQoS=lowdelay`, and that cuts live sessions; later deploys never restart it). It starts `acw-bulk` and installs
+   `acw-tunnel-bulk` **without enabling it**. Check: `curl -s 127.0.0.1:8794/audio/api/health` answers
+   `{"ok":true,"process":"bulk"}`.
+2. **VPS key.** The tunnel key is restricted to the ports it may listen on. On the VPS, edit `~/.ssh/authorized_keys` and
+   change the line of the `acw_tunnel` key (keep the key itself and its comment) so it starts with
+
+       restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 AAAA... acw-tunnel@primary-ram
+
+   (one more `permitlisten`; sshd accepts several). Nothing else changes, and the main tunnel keeps working during the edit.
+3. **Bulk tunnel.** On primary-ram: `systemctl --user enable --now acw-tunnel-bulk`, then on the VPS
+   `curl -s 127.0.0.1:18794/audio/api/health`. From now on `deploy/install.sh`, `deploy/rollback.sh` and the monitor treat it
+   like the other units (`deploy/install.sh` prints a reminder until it is enabled).
+4. **Caddy.** `scp ~/repos/Audio-Cleaner-Web/deploy/vps/audio.caddy ~/repos/Audio-Cleaner-Web/deploy/vps/install-audio-route.sh vps:~/acw/`
+   then on the VPS `sudo bash ~/acw/install-audio-route.sh` (validates, reloads, keeps a backup, reverts on error). The upload
+   route (`.../input`, still 4 GB, no stall timeouts) and `.../outputs/...` now go to `127.0.0.1:18794` first and fall back to
+   `127.0.0.1:18790` (`lb_policy first`, a health check every 10 s, 30 s of avoidance after a failed connection), so a
+   stopped `acw-bulk` or `acw-tunnel-bulk` costs a few seconds, not an outage. This snippet no longer uses
+   `request_body { read_timeout }`, which Caddy's Caddyfile syntax does not have (the old snippet failed `caddy validate`):
+   the 20 s stall limit for small bodies is enforced by the app (`acw/bodylimit.py`).
+5. **Check.** Upload and download a file on the site; `journalctl --user -u acw-bulk -f` shows the `PUT .../input` and
+   `GET .../outputs/...` lines (client address, status, milliseconds), the main `acw-web` log shows none for them.
+
+Back out: on the VPS copy the newest `/etc/caddy/Caddyfile.backup.*` (the installer made it) over `/etc/caddy/Caddyfile`
+and `sudo systemctl reload caddy`; on primary-ram `systemctl --user disable --now acw-tunnel-bulk`. The main path never changed.
+
+The router: `IPQoS` marks the two SSH connections so a router that prioritises by DSCP or runs smart queueing (SQM,
+cake/fq_codel) can favour the live one. It does nothing without such a router; the separate connection and process are
+what helps in any case. Setting up SQM on the home router remains the best second step (docs/launch-checklist.md).
 
 ## Admin CLI
 
@@ -68,11 +126,45 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
 ../venv/bin/python -m acw.admin grant someone@example.com 5 "support credit"
 ../venv/bin/python -m acw.admin user someone@example.com
 ../venv/bin/python -m acw.admin suspend someone@example.com "reason"
-../venv/bin/python -m acw.admin stats
+../venv/bin/python -m acw.admin stats            # report for the last 30 days (see "Statistics and metrics")
+../venv/bin/python -m acw.admin stats --days 7
 ../venv/bin/python -m acw.admin activity       # file jobs and live sessions running now
 ../venv/bin/python -m acw.admin check-money    # balances and holds against the ledger (exit 1 on a mismatch)
 ../venv/bin/python -m acw.admin verify-backup FILE.sqlite3.gz
 ```
+
+## Statistics and metrics
+
+**`acw.admin stats [--days N]`** (default 30; read-only, a few SELECTs) prints a plain-text report from the database:
+file jobs by tier and final status with audio hours, p50/p95 queue wait and run time, the real-time factor (run seconds per
+audio second), in-progress jobs, the failure ratio and the five most common error messages; live sessions (count,
+minutes, end reasons, by tier, frames that were late or never came back); free-tier minutes used; usage charged (jobs and
+live) and top-ups paid. Percentiles are nearest-rank. "Queue wait" is the time until a worker first took the job (recorded
+in `jobs.wait_seconds`; older jobs fall back to `started_at - queued_at`), "run" is start to finish.
+
+**One JSON log line per finished job and live session** in the journal of the process that ended it (`acw-worker@N` for
+jobs, `acw-web` for live sessions); no user ids, addresses or file names:
+
+```bash
+journalctl --user --since -1d -o cat | grep '"event":"job_'           # job_done and job_failed
+journalctl --user --since -1d -o cat | grep '"event":"live_session_end"'
+```
+
+| Event | Fields |
+|---|---|
+| `job_done` | `job` `kind` `tier` `free` `status` `audio_s` `queue_wait_s` `run_s` `cost_micros` `noise` (`light`, `heavy`, `rebuilt`, `none`, `auto`) `attempts` `input_bytes` |
+| `job_failed` | the same, `status` = `failed` or `canceled`, plus `error` (first 200 characters) and `stage` |
+| `live_session_end` | `session` `denoise` `captions` `audio_s` `wall_s` `cost_micros` `end_reason` `frames` `late_frames` (answered more than 100 ms after it was sent) `dropped_frames` (never came back, including those in flight when the session ended) `worst_round_trip_ms` |
+
+**`data/metrics.prom`**: the monitor (`acw-monitor`, every 2 minutes) rewrites this Prometheus text file on each run
+(written next to it and renamed, so a reader never sees half a file). There is no HTTP endpoint; point a collector at the
+file (for example node_exporter's `--collector.textfile.directory=~/audio-cleaner/data` with a file name ending in
+`.prom`). Gauges: `acw_queue_length`, `acw_jobs_in_state{status}`, `acw_live_sessions`, `acw_live_units`,
+`acw_live_capacity_units`, `acw_jobs_finished_24h{status}`, `acw_queue_wait_p95_seconds_24h`, `acw_unit_active{unit}`,
+`acw_disk_free_bytes`, `acw_backup_age_seconds` (left out when there is no snapshot), `acw_check_problem{kind}` (1 while the
+monitor's check of that kind fails), `acw_metrics_written_timestamp_seconds`. Counters (derived from the database):
+`acw_jobs_finished_total{status}`, `acw_live_sessions_ended_total{end_reason}`, `acw_live_audio_seconds_total`,
+`acw_live_frames_total`, `acw_live_late_frames_total`, `acw_live_dropped_frames_total`, `acw_usage_micros_total`.
 
 ## Alerts
 
@@ -119,6 +211,7 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 | Restarting repeatedly (`restarts:<unit>`) | systemd auto-restarted the unit 2+ times in 30 minutes (`NRestarts`) | a manual `systemctl restart` does not count |
 | Back up after unclean stop (`web_unclean_stop`) | acw-web starts and the previous run did not record a clean shutdown (crash, kill, OOM, power loss) | at most 1 mail per hour |
 | API down locally (`health_local`) | `http://127.0.0.1:8790/audio/api/health` fails twice in a row | acw-web is down or stuck |
+| Upload/download process down (`health_bulk`) | only where `acw-bulk` is enabled: `http://127.0.0.1:8794/audio/api/health` fails twice in a row | uploads and downloads fall back to `acw-web` once the VPS notices (docs/operations.md, Bulk transfers); `acw-tunnel-bulk` is watched as a service like the other units |
 | Not reachable from the internet (`health_public`) | local health is fine but `https://mc-multi-world.space/audio/api/health` fails from this machine twice in a row | the problem is the tunnel, VPS or Caddy; skipped when the public origin is not https |
 | File queue long (`queue_long`) | the head job has waited over 20 min, or the last job's estimated wait (`jobs.queue_wait_seconds`) is over 45 min | the mail shows busy cores for Audio Cleaner vs everything else (with the busiest other process names, e.g. `java`) and memory, so you can see when the Minecraft servers are the cause |
 | Jobs abnormally slow (`jobs_slow`) | a running job, 10+ minutes in, is projected to take over 3x its `jobs.job_seconds` estimate | same host load breakdown |
@@ -230,7 +323,8 @@ Only configuration changes (the shared host `mc-multi-world.space/audio` is the 
    silver, validates (reverts on failure), and reloads.
    Re-run it (after `scp deploy/vps/audio.caddy deploy/vps/install-audio-route.sh vps:~/acw/`) whenever the
    snippet changes. The current one caps request bodies (64 KB; 4 GB only for the upload route; 1 MB for the
-   Stripe webhook) and needs Caddy 2.8 or newer (`request_body` `read_timeout`). Once, add to the **global options**
+   Stripe webhook), sends uploads and result downloads to the bulk tunnel first (see "Bulk transfers", which also
+   needs the tunnel key changed on the VPS first) and was validated with `caddy validate` on Caddy 2.11. Once, add to the **global options**
    block at the top of `/etc/caddy/Caddyfile`: `servers { timeouts { read_header 10s } }`, then `sudo caddy validate` and reload.
    Turnstile's three CSP additions are written in the snippet, commented out.
 2. **Sign-in providers**: create OAuth apps with these callbacks and put the
@@ -242,14 +336,34 @@ Only configuration changes (the shared host `mc-multi-world.space/audio` is the 
    Preferably a dedicated project key with a monthly budget cap.
 5. `systemctl --user restart acw-web` after editing `acw.env`.
 
-## Rebuilding native pieces
+## Rebuilding native pieces and models
 
-- libDF (server + WASM): `native/deepfilter/build.sh` (see its README).
-- ffmpeg: BtbN `ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz`; verify against
-  their `checksums.sha256`; copy `ffmpeg`, `ffprobe` to `~/audio-cleaner/bin/`.
-- Whisper models: `huggingface_hub.snapshot_download` of
-  `mobiuslabsgmbh/faster-whisper-large-v3-turbo` and `Systran/faster-whisper-small`
-  into `~/audio-cleaner/models/whisper/<name>`.
+`deploy/models.lock` lists every model and program file production uses: where it comes from (Hugging Face files on a
+pinned commit, a pinned DeepFilterNet commit, the `models-v1` release archive, a pinned FFmpeg build), its size and sha256.
+
+```bash
+deploy/fetch-models.sh --check -v      # verify only (changes nothing); exit 1 if a required file is missing or wrong
+deploy/fetch-models.sh                 # download what is missing or wrong, verify, never touch a correct file (install.sh runs this)
+deploy/fetch-models.sh --with-optional # also the TorchScript Sidon weights (research fallback, 1 GB)
+ACW_ARCHIVE_DIR=~/audio-cleaner-models-release deploy/fetch-models.sh   # use a local copy of the models-v1 zip
+```
+
+- **Not downloadable** (marked `local` in the lock): `bin/libdf.so` (build it: `native/deepfilter/build.sh`),
+  `bin/libdf-tract021.so` (older build used only by a native test), `models/sidon/sidon_fe_q8.onnx` (optional int8 variant:
+  `tools/convert_sidon_onnx.py`), `wasm/df.js` and `wasm/df_bg.wasm` (browser build, same script). `--check` reports them
+  missing if absent and "changed" (not an error) if a rebuild differs.
+- **AP-BWE and Sidon ONNX** come from the `models-v1` release archive of the Audio-Cleaner-Web repository (the conversions
+  `tools/export_apbwe_onnx.py` and `tools/convert_sidon_onnx.py` produced them). Until that release is published the
+  fetch fails for them; use the local zip (`ACW_ARCHIVE_DIR` above).
+- **FFmpeg**: BtbN `autobuild-2026-10-09-14-16`, `ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1.tar.xz`, the build that runs
+  today (verified: `ffmpeg` and `ffprobe` match byte for byte). BtbN removes old daily builds; when that URL stops
+  working, take a build that is still listed, update the `btbn-ffmpeg` archive line and the two `bin/` lines in the lock,
+  and keep a copy of the tarball in our own release.
+- **Changing a pin**: download the new file, `sha256sum` it, replace URL, sha256 and size in the lock, run `--check`.
+- **Python packages**: `server/requirements.lock` and `deploy/requirements-gpu.lock` carry the sha256 of every file PyPI
+  lists for each pinned version; pip installs them with `--require-hashes`. To change a version edit its `name==version`
+  line and run `python3 deploy/hash_lock.py server/requirements.lock` (add `--check` to compare with PyPI again,
+  `--verify` for an offline format check). Every dependency has to be listed (pip refuses otherwise).
 
 ## Capacity (Ryzen 7 1700X, 8C/16T, 31 GB, shared with Minecraft)
 

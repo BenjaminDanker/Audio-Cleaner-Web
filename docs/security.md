@@ -10,14 +10,16 @@ or secrets.
 |---|---|---|
 | `/audio/*` static | internet (VPS Caddy) | no server logic |
 | `/audio/api/*`, WebSocket | internet → VPS → SSH tunnel → 127.0.0.1:8790 | the only path into primary-ram |
+| uploads and result downloads | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same two routes the main process also serves; nothing else is routed there |
 | primary-ram LAN ports | unchanged | the app binds loopback only |
-| VPS → primary-ram | `127.0.0.1:18790` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitopen="127.0.0.1:1",command="/bin/false"` (verified: no shell, no other ports, no local forwards) |
+| VPS → primary-ram | `127.0.0.1:18790` and `127.0.0.1:18794` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false"` (the second `permitlisten` is added when the bulk tunnel is switched on, docs/operations.md; verified before for one port: no shell, no other ports, no local forwards) |
 
 ## Process isolation (no root needed)
 
 | Process | Network | Filesystem | Other |
 |---|---|---|---|
 | acw-web | loopback listen; outbound HTTPS (Stripe, OpenAI, OAuth, SMTP) | its data dir | seccomp `@system-service`, no `@privileged`, NoNewPrivileges, MemoryMax, `LimitNOFILE=8192` |
+| acw-bulk | loopback listen (8794); no outbound use | its data dir | same hardening as acw-web, MemoryMax 1G; only the upload and download routes, no background loops, no live code |
 | acw-worker@N | **none** (seccomp: AF_UNIX only) | DB + jobs dir | Nice 10, CPUWeight 50 |
 | job runner (per job) | **none**: seccomp refuses `socket`, `connect`, `bind`, `listen`, `accept`, `sendto`, `sendmmsg` (plus `io_uring`, `ptrace`, `process_vm_*`, `pidfd_getfd`), and Landlock denies TCP | **Landlock**: read-only system libs, venv, code, models, binaries; read-write only its job dir, where it can create files and directories but **not** links, pipes or sockets; no `$HOME`, no `/proc`, no DB, no secrets | RLIMIT_CPU/AS/FSIZE, no core dumps, `-protocol_whitelist file,pipe` for ffmpeg, container-format allowlist, and the demuxer is chosen from the file's magic bytes (one demuxer parses an upload, not all of them) |
 | acw-stream | **none** (AF_UNIX) | Landlock read-only after binding its socket (required in production: it refuses to start without it) | CPUWeight 300 |
@@ -67,8 +69,8 @@ also removes the shared-UID risk with the Minecraft servers.
   sign-in mails also per canonical mailbox (no `+tag`, Gmail dots ignored) and per small mail domain. Every 429 carries `Retry-After`.
   Each limit name has its own table, so a flood of made-up keys of one kind cannot push out the others.
 - Request bodies: 64 KB for everything but the upload route (1 MB for the Stripe webhook), counted while the
-  body arrives, with a 20 s stall limit (`acw/bodylimit.py`); Caddy enforces the same in front
-  (`deploy/vps/audio.caddy`). The access log omits query strings (sign-in codes, payment ids).
+  body arrives, with a 20 s stall limit (`acw/bodylimit.py`); Caddy caps the sizes in front
+  (`deploy/vps/audio.caddy`; its Caddyfile syntax has no per-body read timeout, so the stall limit is the app's). The access log omits query strings (sign-in codes, payment ids).
 - Upload: declared size enforced, streamed to disk, extension allowlist,
   filenames never used as paths (`input.<ext>`), outputs sanitized. An upload that sends nothing for 30 s is
   dropped; upload bandwidth is capped per account and overall; the declared bytes of uploads in progress are
@@ -105,6 +107,10 @@ also removes the shared-UID risk with the Minecraft servers.
 
 ## Known gaps / to do
 
+- Supply chain: Python packages are installed with `--require-hashes` (every file PyPI lists for each pinned version,
+  `deploy/hash_lock.py`), models and FFmpeg are pinned by commit/release and verified by sha256 (`deploy/models.lock`,
+  `deploy/fetch-models.sh`). `libdf.so` is built locally and only recorded.
+
 - Same Unix user as the Minecraft servers (see recommended hardening above).
 - Shared origin `mc-multi-world.space` with the pet-companion checkout pages:
   path-scoped cookies are not a security boundary against script on the same
@@ -119,8 +125,13 @@ also removes the shared-UID risk with the Minecraft servers.
   (another disk, 30 kept; `acw-backup.timer`) and is checked right after writing (SQLite integrity and ledger
   sums; the monitor mails when it fails). That does not survive losing the machine: the encrypted off-box copy is
   built in but switched off until you configure it (docs/operations.md, "Backups").
-- Uploads and live audio share one SSH tunnel and one Python process. Bandwidth caps and off-loop I/O limit the
-  effect; the real fix is a second tunnel and process for `/api/jobs/*/input` plus SQM on the home link. Follow-up, not built.
+- Uploads and live audio: **SEC-08 is done on the home side.** Uploads and result downloads run in their own process
+  (`acw-bulk`, `acw/bulk_app.py`: same authentication, body limits, upload caps and headers; a total download cap,
+  `ACW_DOWNLOAD_MBPS_TOTAL`, keeps downloads from filling the uplink the live replies use) and their own SSH connection
+  (`acw-tunnel-bulk`, IPQoS throughput; the main tunnel is lowdelay). It takes effect when the VPS key, the bulk tunnel
+  and the Caddy snippet are switched over (docs/operations.md, "Bulk transfers"; not applied by the repository); until
+  then the main process serves the same routes as before. Still open from SEC-08: SQM on the home router, a smaller
+  per-file cap for free jobs.
 - Logs: the user journal keeps client addresses until it rotates; set `MaxRetentionSec` once (docs/operations.md, "Log retention").
 - The `/audio/dfn/*` forward-auth gate relies on Caddy's path normalisation; test `//`, `%2e`, upper-case once on the VPS
   with the installed Caddy version (`curl -i https://mc-multi-world.space/audio//dfn/df.js` must not return the file without a session).

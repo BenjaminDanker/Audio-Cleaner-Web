@@ -1,11 +1,15 @@
     # ---- Audio Cleaner (/audio) --------------------------------------------
     # API + live WebSocket: SSH reverse tunnel from primary-ram (127.0.0.1:18790).
+    # Uploads and result downloads: their own tunnel and process (127.0.0.1:18794 -> acw-bulk), so a big transfer
+    # never queues in front of live audio; if that upstream is down they fall back to 18790 (the main process
+    # serves the same routes). Before using this file, the key must be allowed to listen on 18794 (docs/operations.md).
     # Static site (incl. the free in-browser denoiser) is served from this VPS,
     # so the free tier never touches the home connection.
     redir /audio /audio/ 308
 
-    # Request bodies: only a file upload may be big. Everything else is small JSON, so it gets 64 KB and has
-    # to arrive within 20 s (the app enforces the same limits again). The Stripe webhook gets 1 MB.
+    # Request bodies: only a file upload may be big. Everything else is small JSON, so it gets 64 KB (the app
+    # enforces the same limit again and drops a body that stalls for 20 s: acw/bodylimit.py; Caddy's Caddyfile has no
+    # per-body read timeout, `request_body { read_timeout }` exists only in its JSON config). The Stripe webhook gets 1 MB.
     # One-time, in the GLOBAL OPTIONS block at the top of /etc/caddy/Caddyfile (not here), so a client that
     # opens a connection and never finishes its headers is dropped:
     #     servers {
@@ -15,12 +19,40 @@
     #     }
     handle /audio/api/* {
         @upload path_regexp ^/audio/api/jobs/[0-9a-f]{32}/input$
+        @download path_regexp ^/audio/api/jobs/[0-9a-f]{32}/outputs/
         @webhook path /audio/api/stripe/webhook
         handle @upload {
             request_body {
                 max_size 4GB
             }
-            reverse_proxy 127.0.0.1:18790 {
+            reverse_proxy 127.0.0.1:18794 127.0.0.1:18790 {
+                lb_policy first
+                lb_try_duration 3s
+                lb_try_interval 250ms
+                fail_duration 30s
+                health_uri /audio/api/health
+                health_interval 10s
+                health_timeout 3s
+                header_up -X-Real-IP
+                flush_interval -1
+                transport http {
+                    dial_timeout 5s
+                    response_header_timeout 2m
+                }
+            }
+        }
+        handle @download {
+            request_body {
+                max_size 64KB
+            }
+            reverse_proxy 127.0.0.1:18794 127.0.0.1:18790 {
+                lb_policy first
+                lb_try_duration 3s
+                lb_try_interval 250ms
+                fail_duration 30s
+                health_uri /audio/api/health
+                health_interval 10s
+                health_timeout 3s
                 header_up -X-Real-IP
                 flush_interval -1
                 transport http {
@@ -32,7 +64,6 @@
         handle @webhook {
             request_body {
                 max_size 1MB
-                read_timeout 20s
             }
             reverse_proxy 127.0.0.1:18790 {
                 header_up -X-Real-IP
@@ -46,7 +77,6 @@
         handle {
             request_body {
                 max_size 64KB
-                read_timeout 20s
             }
             reverse_proxy 127.0.0.1:18790 {
                 header_up -X-Real-IP
