@@ -78,13 +78,16 @@ fi
 
 # ---- sources ---------------------------------------------------------------------------------
 if [ ! -d "$BUILD_DIR/.git" ]; then
-  mkdir -p "$(dirname "$BUILD_DIR")"
-  # core.autocrlf=false: on Windows a CRLF checkout would make tract-0.23.patch fail to apply.
-  git clone --quiet -c core.autocrlf=false "$UPSTREAM" "$BUILD_DIR"
+  # init + fetch rather than clone: the folder may already hold a restored cargo cache (CI's target/),
+  # and only the pinned commit is needed.
+  mkdir -p "$BUILD_DIR"
+  git -C "$BUILD_DIR" init --quiet
+  git -C "$BUILD_DIR" remote add origin "$UPSTREAM"
 fi
 cd "$BUILD_DIR"
+# core.autocrlf=false: on Windows a CRLF checkout would make tract-0.23.patch fail to apply.
 git config core.autocrlf false
-git cat-file -e "$COMMIT^{commit}" 2>/dev/null || git fetch --quiet origin
+git cat-file -e "$COMMIT^{commit}" 2>/dev/null || git fetch --quiet --depth 1 origin "$COMMIT"
 git checkout --quiet --force "$COMMIT"
 git reset --quiet --hard "$COMMIT" # drops a previous patch application (target/ is untracked, kept)
 git apply "$HERE/tract-0.23.patch"
