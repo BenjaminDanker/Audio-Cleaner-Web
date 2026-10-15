@@ -25,18 +25,22 @@ the checklist at the end).
 
 ## Release process (CI)
 
-1. Bump `__version__` in `desktop/audio_cleaner_desktop/__init__.py` (and `version` in `desktop/pyproject.toml`) and merge.
-2. Tag the commit: `git tag desktop-v2.0.0 && git push origin desktop-v2.0.0`. The tag must be `desktop-v` plus the
-   exact `__version__`; the workflow refuses a mismatch.
+1. Releases are automatic: every push to `main` / `on-prem` that changes `desktop/`, `common/`,
+   `native/deepfilter/` or the workflow builds and publishes a GitHub Release tagged
+   `desktop-v<__version__>-build.<run number>` (only the newest 5 such automatic releases are kept). Bump
+   `__version__` in `desktop/audio_cleaner_desktop/__init__.py` (and `version` in `desktop/pyproject.toml`) when the
+   app changes in a way friends should notice; the build number tells builds of one version apart.
+2. Optional, for a release that stays: tag the commit `git tag desktop-v2.0.0 && git push origin desktop-v2.0.0`.
+   The tag must be `desktop-v` plus the exact `__version__`; the workflow refuses a mismatch. Tagged releases are
+   never deleted by the cleanup.
 3. `.github/workflows/desktop.yml` builds, per platform: FFmpeg (LGPL, from pinned source tarballs; Windows is
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest`, and the
-   installer (Inno Setup on Windows, `hdiutil` dmg on macOS). It runs on pushes to `main` / `on-prem` that change
-   `desktop/`, `common/`, `native/deepfilter/` or the workflow (installers as downloadable artifacts, nothing
-   published), on a `desktop-v*` tag, and by hand ("Run workflow"). Website/server-only pushes skip it. A cold
-   build takes 20-30 minutes, less once the FFmpeg and libDF caches exist.
-4. On a `desktop-v*` tag the `release` job creates a GitHub Release with `AudioCleaner-Setup-x64.exe`,
-   `AudioCleaner-macOS-arm64.dmg`, `AudioCleaner-macOS-x86_64.dmg` and `SHA256SUMS`. Share the release link
-   (`releases/latest`) with friends. The app is not on the website and never contacts it.
+   installer (Inno Setup on Windows, `hdiutil` dmg on macOS). Website/server-only pushes skip it; "Run workflow"
+   builds by hand (artifacts only, no release). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
+4. The `release` job attaches `AudioCleaner-Setup-x64.exe`, `AudioCleaner-macOS-arm64.dmg`,
+   `AudioCleaner-macOS-x86_64.dmg` and `SHA256SUMS` and marks the release as latest, so the link to share with
+   friends is always `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest`. The app is not on the
+   website and never contacts it.
 5. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a
    noisy video, clean it, turn on subtitles, open About.
 
