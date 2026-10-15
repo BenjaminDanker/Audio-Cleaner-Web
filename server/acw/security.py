@@ -118,6 +118,10 @@ LIMITS = {
     "stream_start": (60, 60 / 3600),    # live starts per account per hour (failed starts count too)
     "stream_start_ip": (90, 90 / 3600),  # ... and per network
     "key_create": (10, 10 / 3600),
+    "contact_ip": (3, 3 / 3600),       # contact form messages per network per hour (api/contact_routes.py)
+    "contact_ip_day": (10, 10 / 86400),
+    "contact_email": (3, 3 / 3600),    # ... and per mailbox
+    "contact_email_day": (5, 5 / 86400),
     "webhook": (120, 5.0),             # Stripe delivers a handful per payment; this only stops floods
     "ws_handshake": (30, 0.5),         # live WebSocket attempts per IP, before any database work
 }

@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse
 
 from . import alerts, auth, db, httpstack, jobs, retention
 from . import health as health_checks
-from .api import auth_routes, billing_routes, jobs_routes, keys_routes
+from .api import auth_routes, billing_routes, contact_routes, jobs_routes, keys_routes
 from .asr import openai_asr
 from .billing import ledger, stripe_service
 from .config import get_settings
@@ -176,6 +176,7 @@ def create_app() -> FastAPI:
         auth_routes.me_router,
         billing_routes.router,
         billing_routes.webhook_router,
+        contact_routes.router,
         jobs_routes.router,
         keys_routes.router,
         stream_routes.router,

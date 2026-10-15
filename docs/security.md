@@ -66,7 +66,7 @@ also removes the shared-UID risk with the Minecraft servers.
   WebSocket hijacking).
 - Rate limits: per IP (IPv6 per /64) and per user for auth, email, uploads, job creation,
   checkout, stream starts and live WebSocket handshakes (before any database work); general API limit per IP;
-  sign-in mails also per canonical mailbox (no `+tag`, Gmail dots ignored) and per small mail domain. Every 429 carries `Retry-After`.
+  sign-in mails also per canonical mailbox (no `+tag`, Gmail dots ignored) and per small mail domain; the contact form per network, per mailbox and 100 a day for the site (`api/contact_routes.py`: same-origin, honeypot field, control characters and header injection stripped, plain-text mail, the owner's address never sent to a browser, message text not stored). Every 429 carries `Retry-After`.
   Each limit name has its own table, so a flood of made-up keys of one kind cannot push out the others.
 - Request bodies: 64 KB for everything but the upload route (1 MB for the Stripe webhook), counted while the
   body arrives, with a 20 s stall limit (`acw/bodylimit.py`); Caddy caps the sizes in front

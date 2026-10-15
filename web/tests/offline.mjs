@@ -1,5 +1,5 @@
 // "API offline" banner + maintenance panel (everything, the free browser tool included, needs the server to sign in).
-// Starts its own tiny static server (port 8794, override with OFFLINE_PORT) that serves web/dist under /audio/ and
+// Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist under /audio/ and
 // forwards /audio/api/* to a backend port it can switch at runtime: a dead port (what Caddy turns into HTTP 502, or a
 // reset connection), a fixed 502/503/504, or the real test backend on 8792 (tests/e2e.mjs setup) for the recovery check.
 // Usage: node tests/offline.mjs   (needs `npm run build`, fixtures, and the 8792 backend only for the recovery check)
@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { SHOTS, check, launch, summary } from './helpers.mjs';
 
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
-const PORT = Number(process.env.OFFLINE_PORT || 8794);
+const PORT = Number(process.env.OFFLINE_PORT || 8797);
 const REAL_BACKEND = Number(process.env.E2E_BACKEND_PORT || 8792);
 const DEAD_PORT = 9; // nothing listens here
 const OFF = `http://127.0.0.1:${PORT}/audio`;

@@ -11,6 +11,9 @@
   live-count                     number of live sessions running now
   check-money                    balances and holds against the ledger (exit 1 on a mismatch)
   verify-backup FILE             integrity + ledger check of a .sqlite3.gz backup
+  retention                      apply the retention rules now (the web process does it hourly) and print the counts
+  storage                        sizes of what grows: database, job files, data directory, backups
+  compact-money [--apply]        records older than 7 years: what would be removed (and, with --apply, remove it; yearly)
   backup DIR [--keep N]          consistent gzip'd DB snapshot, checked after writing; keeps the newest N
                                  (optional encrypted copy off the machine: see acw/backup.py)
 """
@@ -55,6 +58,10 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("check-money", help="verify balances and holds against the ledger")
     p = sub.add_parser("verify-backup", help="check a backup file (.sqlite3.gz): integrity and ledger sums")
     p.add_argument("file")
+    sub.add_parser("retention", help="apply the retention rules now and print how many rows each changed")
+    sub.add_parser("storage", help="sizes of the database, job files, data directory and backups")
+    p = sub.add_parser("compact-money", help="payment/ledger records older than 7 years: show, or with --apply remove (balances stay correct)")
+    p.add_argument("--apply", action="store_true")
     p = sub.add_parser("backup")
     p.add_argument("dir")
     p.add_argument("--keep", type=int, default=30)
@@ -126,6 +133,29 @@ def main(argv: list[str] | None = None) -> None:
         print(result)
         if result["integrity"] != "ok" or result["ledger"] != "ok":
             sys.exit(1)
+    elif a.cmd == "retention":
+        from . import retention
+
+        print(retention.run())
+    elif a.cmd == "storage":
+        from . import monitor, storage
+        from .config import get_settings
+
+        for k, v in storage.sizes(get_settings().data_dir, monitor.BACKUP_DIR).items():
+            print(f"{k:10s} {v / 1024**2:10.1f} MB")
+        print(f"alert limits: data {storage.data_limit() / 1024**3:.0f} GB (without jobs), backups {storage.backups_limit() / 1024**3:.0f} GB")
+    elif a.cmd == "compact-money":
+        from . import retention
+
+        before = retention.old_money_records()
+        print("older than 7 years:", before)
+        res = retention.compact_money(apply=a.apply)
+        print(("removed: " if a.apply else "would remove (add --apply to do it): "), res)
+        if a.apply:
+            problems = ledger.invariant_problems()
+            print("check-money:", problems)
+            if any(problems.values()):
+                sys.exit(1)
     elif a.cmd == "stats":
         from . import stats
 

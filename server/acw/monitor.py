@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import alerts, db, health, jobs, metrics
+from . import alerts, db, health, jobs, metrics, retention, storage
 from .billing import ledger
 from .config import get_settings
 
@@ -406,6 +406,33 @@ def check_backup_result(directory: Path = BACKUP_DIR) -> list[Finding]:
     )]
 
 
+def check_storage(data_dir: Path, backup_dir: Path = BACKUP_DIR) -> list[Finding]:
+    """The data directory (without job files) and the backup directory stay small; a leak shows up here early."""
+    s = storage.sizes(data_dir, backup_dir)
+    d_lim, b_lim = storage.data_limit(), storage.backups_limit()
+    return [
+        Finding("data_large", s["data"] > d_lim, f"The data directory is larger than expected ({_fmt_gb(s['data'])})",
+                f"{data_dir} without jobs/ holds {_fmt_gb(s['data'])} (alert above {_fmt_gb(d_lim)}; the database file and its log are "
+                f"{_fmt_gb(s['database'])}).\nSomething that should be bounded is growing: python -m acw.admin storage; "
+                "docs/operations.md, \"What grows and what bounds it\". ACW_DATA_ALERT_GB changes the limit.\n"),
+        Finding("backups_large", s["backups"] > b_lim, f"The backup directory is larger than expected ({_fmt_gb(s['backups'])})",
+                f"{backup_dir} holds {_fmt_gb(s['backups'])} (alert above {_fmt_gb(b_lim)}). Thirty nightly snapshots should be far smaller "
+                "than that: check the database size and for stray files in the folder (python -m acw.admin storage). "
+                "ACW_BACKUPS_ALERT_GB changes the limit.\n"),
+    ]
+
+
+def check_old_money(now: int) -> list[Finding]:
+    """Payment and ledger records are kept 7 years and never deleted by the program; this reminds the owner when
+    the first ones are older, so the yearly clean-up (acw.admin compact-money) gets done."""
+    old = retention.old_money_records(now - 30 * 86400)  # a month of grace after the 7 years
+    n = sum(old.values())
+    return [Finding("old_money_records", n > 0, "Payment records older than 7 years can be cleaned up",
+                    f"{old['ledger']} ledger rows, {old['payments']} payments and {old['audit_log']} audit rows are older than 7 years.\n"
+                    "Nothing is deleted automatically. When you are ready: python -m acw.admin compact-money (shows what it would do), "
+                    "then compact-money --apply. It keeps every balance correct. See docs/operations.md.\n", confirm=1)]
+
+
 def check_stuck_states(now: int) -> list[Finding]:
     out: list[Finding] = []
     n = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'cloud_asr' AND COALESCE(heartbeat_at, queued_at, created_at) < ?", (now - 1800,))["n"]
@@ -493,6 +520,12 @@ def write_metrics(findings: list[Finding], states: dict[str, dict[str, str]], no
     except OSError:
         pass
     newest = newest_backup(BACKUP_DIR if backup_dir is None else backup_dir)
+    try:
+        sz = storage.sizes(settings.data_dir, BACKUP_DIR if backup_dir is None else backup_dir)
+        for what, n in sz.items():
+            prom.add("acw_storage_bytes", "gauge", "Bytes used by the data directory (without jobs), the database, job files and the backups.", n, what=what)
+    except Exception:  # noqa: BLE001
+        log.exception("could not size the data directories")
     prom.add("acw_backup_age_seconds", "gauge", "Age of the newest database snapshot (absent when there is none).",
              None if newest is None else max(0, int(time.time() - newest)))
     for f in findings:
@@ -548,6 +581,8 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
     guarded("backup_result", check_backup_result)
     guarded("stuck_states", lambda: check_stuck_states(now))
     guarded("money", check_money)
+    guarded("storage", lambda: check_storage(settings.data_dir))
+    guarded("old_money", lambda: check_old_money(now))
     guarded("installation", lambda: check_installation(now))
 
     for f in findings:

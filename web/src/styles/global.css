@@ -395,3 +395,7 @@ blockquote { margin: 0 0 1em; padding: 4px 16px; border-left: 4px solid var(--br
 .maintenance { max-width: 640px; margin: 24px auto; padding: 36px 24px; }
 .offline-banner a { color: inherit; font-weight: 600; }
 .queue-note { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+
+/* Contact form: the message box, and the trap field that only programs fill in (kept out of sight, not display:none). */
+textarea.input { min-height: 140px; resize: vertical; line-height: 1.45; }
+.hp { position: absolute; left: -10000px; top: auto; width: 1px; height: 1px; overflow: hidden; }

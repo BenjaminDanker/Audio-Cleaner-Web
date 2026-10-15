@@ -131,6 +131,9 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
 ../venv/bin/python -m acw.admin activity       # file jobs and live sessions running now
 ../venv/bin/python -m acw.admin check-money    # balances and holds against the ledger (exit 1 on a mismatch)
 ../venv/bin/python -m acw.admin verify-backup FILE.sqlite3.gz
+../venv/bin/python -m acw.admin retention      # apply the retention rules now and print what each removed (the web process does it hourly)
+../venv/bin/python -m acw.admin storage        # sizes of the database, job files, data directory and backups
+../venv/bin/python -m acw.admin compact-money  # payment/ledger records older than 7 years: what it would remove (add --apply to do it)
 ```
 
 ## Statistics and metrics
@@ -222,6 +225,9 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 | Backup overdue (`backup_stale`) | the newest snapshot in `/mnt/mc-storage/audio-cleaner-backups` (`ACW_BACKUP_DIR`) is older than 36 h, or none is found (disk not mounted) | |
 | Backup failed its check (`backup_bad`) | `backup-status.json` next to the snapshots says the file is empty, failed SQLite's integrity check, or its ledger sums do not match, or the off-machine copy failed | the backup unit fails too |
 | Balances do not match the ledger (`ledger_invariant`) | an account's balance differs from the sum of its ledger entries, or its held amount from its active holds | look before restarting anything; `acw.admin check-money` |
+| Data directory large (`data_large`) | `~/audio-cleaner/data` without `jobs/` is over 5 GB (`ACW_DATA_ALERT_GB`) | something that should be bounded is growing: `acw.admin storage`, then "What grows and what bounds it" |
+| Backup folder large (`backups_large`) | `/mnt/mc-storage/audio-cleaner-backups` is over 20 GB (`ACW_BACKUPS_ALERT_GB`) | 30 snapshots are far smaller than that: look for stray files |
+| Old payment records (`old_money_records`) | ledger, payment or money-audit rows are more than 7 years and 30 days old | nothing is deleted by itself; run `acw.admin compact-money` (see "Payment records after 7 years") |
 | Extra-accurate transcription stuck (`cloud_asr_stuck`) | a job has waited on the OpenAI transcription for over 30 minutes | |
 | Many uploads (`uploads_piling`) | more than 15 uploads in progress, or more than 40 GB promised | |
 | Credit held for hours (`holds_old`) | a hold has been active for over 6 hours | housekeeping releases leaked ones; if it persists, look at acw-web |
@@ -242,6 +248,28 @@ Limits: the monitor runs on this machine, so a power cut, network loss or a dead
 `systemd --user` manager sends nothing. For that, point an outside monitor (for
 example UptimeRobot, free) at `https://mc-multi-world.space/audio/api/health`
 (that URL answers only `{"ok":true}`; the detailed check `?deep=1` works from this machine and for admins).
+
+## Contact form
+
+The site has no public email address. `/contact` (a form) sends its messages to the owner by mail, through the same SMTP
+account as the sign-in links and the alerts (`acw.alerts.send_contact_mail`). The recipient is `ACW_CONTACT_EMAIL` if set,
+otherwise the alert address `ACW_ALERT_EMAIL`; either can list several addresses separated by commas. Nothing to set
+when the alert address is the one you want. The address never reaches a browser: `/api/me` only says `contactForm: true`.
+
+- Needs `SMTP_*` and one of the two addresses. Without them `POST /api/contact` answers 404 and the site hides the Contact link
+  (and the legal pages stop pointing at it).
+- A message arrives as `[Audio Cleaner] <Topic>: <first words>` with `Reply-To` set to the sender, so Reply answers them. The
+  body says who wrote (name and address as typed), whether they were signed in (account email, id and status), and, when a job
+  number was given, what the job is (kind, status, error text). Plain text only; control characters and anything that could
+  start another mail header are stripped.
+- Limits: 3 per hour and 10 per day per network (IPv6 per /64), 3 per hour and 5 per day per mailbox (no `+tag`, Gmail dots
+  ignored), 100 per rolling day for the whole site (counted from the audit log, so a restart does not reset it; the form then says
+  to try again tomorrow, with a Retry-After). A hidden field that people never see makes bots look successful but sends nothing.
+  Same-origin requests only, and the usual CSRF token when signed in.
+- The text of a message is **not stored** anywhere (not in the database, not in the journal). The audit log keeps that a
+  message was sent (time, topic, account if signed in, network address for 90 days).
+- Check it: sign out, open `/audio/contact`, send a test, and look in the mailbox (spam folder first time: it comes from
+  your own SMTP account).
 
 ## Backups
 
@@ -296,9 +324,101 @@ whole machine's journal):
 sudo mkdir -p /etc/systemd/journald.conf.d && printf '[Journal]\nMaxRetentionSec=90day\n' | sudo tee /etc/systemd/journald.conf.d/acw-retention.conf && sudo systemctl restart systemd-journald
 ```
 
-`deploy/install.sh` reminds you until that file or a `MaxRetentionSec` exists. The database side runs by itself:
-`acw/retention.py` (from the housekeeping loop, hourly) removes IP addresses from live sessions, the audit log and
-sessions after 90 days and job file names after 12 months. Ledger and payment records stay 7 years.
+`deploy/install.sh` reminds you until that file or a `MaxRetentionSec` exists. The database side runs by itself, see the next
+section.
+
+## What grows and what bounds it
+
+Everything that can grow over the years has a bound, and the Privacy Policy (section 8, "How long we keep things") says the
+same numbers. The database rules live in `server/acw/retention.py` and run from the web process's housekeeping loop (at most
+hourly, small batches, idempotent); `acw.admin retention` runs them by hand and prints what each removed.
+
+**Database (SQLite, `data/acw.sqlite3`).** Sizes are what a row takes with its indexes (measured on the dev database), at the
+example load of 1000 file jobs and 50 hours of live audio a day (about 100 sessions).
+
+| Table | Rule | Bound at the example load |
+|---|---|---|
+| `jobs` | finished, failed, canceled and expired jobs deleted 12 months after they were created; file names blanked at 12 months (always before that, nothing is older); jobs still in progress are never touched | about 0.9 KB each, 365 000 rows: ~330 MB |
+| `stream_sessions` | ended sessions deleted after 12 months; network address blanked after 90 days | ~0.3 KB each, ~36 000 rows: ~10 MB |
+| `holds` | closed (captured or released) holds deleted after 12 months; active holds never | ~0.15 KB each: ~55 MB |
+| `ledger` | **kept 7 years**, never deleted by the sweep. The file name in a usage line's text is removed after 12 months (amount, kind and date stay). After 7 years: `acw.admin compact-money` (below) | ~0.18 KB per row, ~65 MB a year, ~460 MB at year 7 |
+| `payments` | kept 7 years (tax); settled rows older than that go with `compact-money` | tiny (one per top-up) |
+| `audit_log` | routine rows (`login`, `user_created`, `api_key_created`, `api_key_revoked`, `contact_sent`) deleted after 12 months; network addresses blanked after 90 days. Rows that are evidence for money or consent (`tos_accepted`, `checkout_started`, `auto_reload_*`, `refund*`, `grant`, `suspend*`, `payment_*`, `dispute_*`, `account_deleted`) are kept 7 years like the ledger. An action nobody classified is kept, and a test fails until it is classified | ~0.13 KB per row |
+| `sessions` | deleted when they expire (`auth.purge_expired`), and at the latest 30 days after expiry; address and browser type blanked after 90 days | ~0.4 KB, 30 days of logins |
+| `login_tokens`, `oauth_states` | deleted a day after they expire (used or not), at the latest after 30 days | negligible |
+| `stripe_events` | processed events deleted after 90 days (Stripe retries for about 3 days, so a repeat is always recognized); an unprocessed one after 12 months (the monitor alerts after 10 minutes) | ~0.1 KB each |
+| `free_usage` | one row per account and day, deleted after 60 days | negligible |
+| `deleted_emails` | deleted the next day | none |
+| `api_keys` | revoked keys deleted after 12 months; active keys are limited to 10 per account | negligible |
+| `identities`, `users` | one row per account, kept while the account exists. A deleted account stays as an anonymous row because ledger and payments point at it; `compact-money` removes it once nothing does. Growth is the number of sign-ups, which the sign-in rate limits bound | ~0.5 KB per account |
+| `alert_state`, `meta` | one row per alert kind / setting: a fixed set | none |
+
+Nothing else points at a `jobs`, `stream_sessions` or `holds` row by a foreign key, so deleting them cannot break anything;
+the credit history shows an old usage line from the ledger's own text when the job row is gone. The ledger's invariant
+(`balance = sum of entries`, `held = sum of active holds`) is untouched by every rule above; `tests/test_retention.py`
+checks each rule, that money rows survive them, and that `acw.admin check-money` still passes.
+
+Steady state at the example load: about 0.5 GB after the first year, then ~65 MB a year (the ledger), so under 1 GB at year 7.
+
+**The file itself.** SQLite keeps the space of deleted rows for itself, so the sweep also runs a `VACUUM` about once every 28 days
+(`retention.maintain_storage`): only between 02:00 and 03:59 machine time (the snapshot starts at 04:17), only when at least
+~8 MB or a quarter of the file is free inside it, never while a live session is running (it tries again the next hour, then the
+next night), and only when the disk has three times the file's size free. Writers wait for it (the busy timeout is 30 s; a
+VACUUM of a database this size takes a second or two). The write-ahead log is truncated afterwards. A few MB of free pages
+between vacuums is normal.
+
+**Payment records after 7 years (a yearly job for the owner, from 2033).** Money records are never deleted by the program:
+that is the safe choice, because deleting a ledger row would break `balance = sum of entries` (which the nightly backup check,
+the monitor and `check-money` all test). When records get older than 7 years the monitor mails `old_money_records` (after a month
+of grace). Then, once a year:
+
+```bash
+../venv/bin/python -m acw.admin compact-money          # shows what it would do
+../venv/bin/python -m acw.admin compact-money --apply  # ... does it, then runs the money check
+```
+
+For each account the leading run of ledger rows older than 7 years becomes one "balance carried forward" row (`kind=adjustment`,
+`ref_type=carry_forward`, same id and closing balance as the last row it replaces), so every balance and every later
+`balance_after` still adds up; a run that adds up to nothing is simply removed. A user whose rows do not add up is rolled back
+and reported. It also deletes settled payments and audit rows older than 7 years, and deleted accounts nothing points at any more.
+Take a backup first (`systemctl --user start acw-backup.service`).
+
+**Files and disks.**
+
+| Where | What grows | Bound |
+|---|---|---|
+| `data/jobs/` | uploads, intermediate files, results | the upload is deleted when processing ends, results after 24 h (`jobs.sweep`), leftovers of failed or canceled jobs after an hour; a deleted account's files at once. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve watch it |
+| `data/acw.sqlite3` and `-wal` | the database, see above | the table above; the log file stays ~4 MB (SQLite checkpoints it by itself) |
+| `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
+| `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`) | rewritten in place, fixed names | a few KB in all |
+| `/mnt/mc-storage/audio-cleaner-backups` | nightly snapshot, gzipped | the newest 30, plus at most 3 failed (`*.bad`) and `backup-status.json`; also pruned on a night when the backup fails. About a quarter of the database size each: ~250 MB x 30 = 7.5 GB at the worst example above. Not ours: a stray `Audio-Cleaner-desktop-repo.bundle` (16 MB) |
+| The off-machine copy (if set up) | one encrypted file a night | "the remote end keeps everything": prune it there (Backups) |
+| Journal (`journalctl --user`) | see below | size and age caps |
+| `/var/log/syslog` (rsyslog gets a copy of everything journald sees, `ForwardToSyslog=yes`) | the same lines, with client addresses | logrotate: weekly, 4 kept, so about five weeks (inside the 90 days); ~16 MB a week at the example load |
+| GitHub releases of the desktop app | installers | the newest 5 automatic ones (docs/desktop.md) |
+| `app.prev` | one previous copy of the code (1 MB) | replaced at every deploy |
+| `/var/www/audio` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
+| `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; the dev instance; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
+
+The monitor watches two sizes every 2 minutes and mails when `data/` without `jobs/` is over 5 GB (`data_large`) or the backup
+folder is over 20 GB (`backups_large`). At the example load the first stays around 1 GB (database, log, ten pre-deploy
+snapshots of ~0.25 GB each, so up to ~3.5 GB at year 7); raise `ACW_DATA_ALERT_GB` / `ACW_BACKUPS_ALERT_GB` in `acw.env` on
+purpose if real growth gets there. `python -m acw.admin storage` and the `acw_storage_bytes{what}` gauge in `metrics.prom`
+(database, data, jobs, backups) show the numbers.
+
+**Journal volume (`journalctl --user`, units `acw-*`).** Nothing is logged per audio frame or per WebSocket message. What is
+logged: one access-log line per HTTP request (client address, method, path without query, status, milliseconds; about 90
+bytes of text, median measured on this machine), one JSON line per finished job and per live session (300 to 500 bytes), a
+line when a worker claims a job, warnings and errors, and the monitor's one line every 2 minutes. The one chatty source used to
+be the job list a page asks for every 1.5 s while a job runs (1000 jobs a day, each watched for ~2 minutes: ~80 000 lines a day,
+most of the log); successful `GET /api/jobs` and health checks are no longer logged (errors and every other request
+still are). Per job that leaves roughly 12 lines (create, upload, a few downloads, page loads, the JSON line). A journal entry costs about 1 KB on disk with its metadata (the measured
+user journal here: 32 MB), so 1000 jobs and 50 h of live a day come to roughly 13 000 entries, **~13 MB a day, ~1.2 GB in 90
+days**. The caps that bound it, whatever the traffic: journald's default `SystemMaxUse` (10 % of the file system, at most
+**4 GB** for system and user journals together; here 23 GB would be 10 %, so 4 GB applies; `SystemKeepFree` 15 % does not bite),
+and the owner's `MaxRetentionSec=90day` (`/etc/systemd/journald.conf.d/acw-retention.conf`, in place on this machine). Even three
+times the example traffic (~40 MB a day) stays under 4 GB for the full 90 days; only beyond that the size cap, not the 90
+days, decides, which makes the logs shorter and never longer than the Privacy Policy says.
 
 ## Moving to a domain of its own
 
@@ -334,7 +454,9 @@ Only configuration changes (the shared host `mc-multi-world.space/audio` is the 
 3. **Stripe** (test mode first): restricted key + webhook (see payments.md) into `acw.env`.
 4. **OpenAI**: an `OPENAI_API_KEY` for premium transcription and captions.
    Preferably a dedicated project key with a monthly budget cap.
-5. `systemctl --user restart acw-web` after editing `acw.env`.
+5. **Contact form**: nothing to do when `ACW_ALERT_EMAIL` and `SMTP_*` are set (messages go to the alert address). Set
+   `ACW_CONTACT_EMAIL` only to send them somewhere else (see "Contact form").
+6. `systemctl --user restart acw-web` after editing `acw.env`.
 
 ## Rebuilding native pieces and models
 

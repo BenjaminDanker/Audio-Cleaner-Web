@@ -69,14 +69,9 @@ def configured() -> bool:
     return bool(recipients() and s.smtp_host and (s.smtp_from or s.smtp_user))
 
 
-def _smtp_send(subject: str, body: str) -> None:
-    """Deliver one mail through the configured SMTP account. Raises on failure."""
+def _smtp_send_message(msg: EmailMessage) -> None:
+    """Hand one finished message to the configured SMTP account. Raises on failure."""
     s = get_settings()
-    msg = EmailMessage()
-    msg["Subject"] = f"{SUBJECT_PREFIX} {subject}".replace("\n", " ")[:200]
-    msg["From"] = s.smtp_from or s.smtp_user
-    msg["To"] = ", ".join(recipients())
-    msg.set_content(body)
     ctx = ssl.create_default_context()
     if s.smtp_port == 465:
         smtp = smtplib.SMTP_SSL(s.smtp_host, s.smtp_port, timeout=20, context=ctx)
@@ -90,8 +85,44 @@ def _smtp_send(subject: str, body: str) -> None:
         smtp.send_message(msg)
 
 
+def _smtp_send(subject: str, body: str) -> None:
+    """Deliver one alert through the configured SMTP account. Raises on failure."""
+    s = get_settings()
+    msg = EmailMessage()
+    msg["Subject"] = f"{SUBJECT_PREFIX} {subject}".replace("\n", " ")[:200]
+    msg["From"] = s.smtp_from or s.smtp_user
+    msg["To"] = ", ".join(recipients())
+    msg.set_content(body)
+    _smtp_send_message(msg)
+
+
 # Indirection so tests can capture mail without a server.
 _deliver = _smtp_send
+_deliver_message = _smtp_send_message
+
+
+# ---- contact form (acw.api.contact_routes) ----------------------------------------------------------------------
+def contact_recipients() -> list[str]:
+    """Where messages from the contact form go: ACW_CONTACT_EMAIL, else the alert address(es). Never sent to a browser."""
+    raw = os.environ.get("ACW_CONTACT_EMAIL", "").strip() or os.environ.get("ACW_ALERT_EMAIL", "")
+    return [a for a in re.split(r"[,\s;]+", raw) if "@" in a]
+
+
+def contact_configured() -> bool:
+    s = get_settings()
+    return bool(contact_recipients() and s.smtp_host and (s.smtp_from or s.smtp_user))
+
+
+def send_contact_mail(subject: str, body: str, reply_to: str) -> None:
+    """Mail one contact-form message to the owner. Plain text; Reply-To is the visitor's address. Raises on failure."""
+    s = get_settings()
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = s.smtp_from or s.smtp_user
+    msg["To"] = ", ".join(contact_recipients())
+    msg["Reply-To"] = reply_to
+    msg.set_content(body)
+    _deliver_message(msg)
 
 
 def _footer(kind: str) -> str:

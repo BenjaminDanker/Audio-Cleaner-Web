@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 import pkg from '../../package.json';
 import { COMPONENTS } from '../../scripts/license-list.mjs';
+import { useAuth } from '../auth.jsx';
 import { usePageTitle } from '../hooks.js';
 import { SITE } from '../site.js';
 
@@ -9,6 +10,8 @@ const version = (name) => (name ? (pkg.dependencies[name] || pkg.devDependencies
 
 export default function Licenses() {
   usePageTitle('Open-source licences');
+  const { contact } = useAuth();
+  const email = SITE.supportEmail.trim();
   return (
     <div className="container page">
       <article className="prose">
@@ -37,6 +40,9 @@ export default function Licenses() {
           </table>
         </div>
         <p className="small muted">The DeepFilterNet model and WebAssembly module are served next to their licence files at <span className="mono">{BASE}dfn/</span>.</p>
+        {(contact || email) && (
+          <p className="small muted">Want the source code of one of these, as the licences allow? Ask {contact ? <>through the <Link to="/contact">contact form</Link></> : <>at <a href={`mailto:${email}`}>{email}</a></>} and we will send it.</p>
+        )}
         <p className="small muted">Back to <Link to="/">home</Link>.</p>
       </article>
     </div>

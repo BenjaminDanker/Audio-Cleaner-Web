@@ -64,9 +64,10 @@ await check('copy: public pages show no internals and none of the avoided words'
   bad.push(...(await scan(page, '/app/live'))); // signed out: lands on the sign-in page
   if (!/\/login/.test(page.url())) throw new Error('signed-out /app/live did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/login')));
+  bad.push(...(await scan(page, '/contact'))); // here mail is not set up, so the calm "not switched on" page (the form's own words: tests/contact.mjs)
   bad.push(...(await scan(page, '/nope')));
   if (bad.length) throw new Error(bad.join(' | '));
-  return '9 pages clean';
+  return '10 pages clean';
 });
 
 await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets]) and no empty contact links', async () => {

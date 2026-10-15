@@ -93,6 +93,7 @@ export default function Landing() {
   const tx = pricing?.free;
   const live = findRate(pricing, 'stream_denoise', 'light');
   const email = SITE.supportEmail.trim();
+  const { contact } = useAuth();
   return (
     <>
       {notice === 'account-deleted' && (
@@ -196,7 +197,8 @@ export default function Landing() {
               <details key={q}><summary>{q}</summary><div><p>{a}</p></div></details>
             ))}
           </div>
-          {email && <p className="center">Something else? <a href={`mailto:${email}`}>Just ask.</a></p>}
+          {contact ? <p className="center">Something else? <Link to="/contact">Just ask.</Link></p>
+            : email && <p className="center">Something else? <a href={`mailto:${email}`}>Just ask.</a></p>}
           <div className="center">
             <Link to="/app" className="btn btn-primary btn-lg">Try it on a file</Link>
           </div>

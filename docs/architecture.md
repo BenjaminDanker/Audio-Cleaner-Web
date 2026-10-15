@@ -90,8 +90,12 @@ shared too: `native/deepfilter/build.sh` produces the server `.so`, the desktop
 - Live audio is never written to disk. Captions are not stored.
 - The browser tier sends nothing to the server.
 - The database keeps accounts, ledger, payments, job metadata and an audit log. File names are removed
-  after 12 months, IP addresses (sessions, live sessions, audit log) after 90 days (`acw/retention.py`);
-  ledger and payment rows are kept 7 years; nightly backups are kept 30 days.
+  after 12 months, IP addresses (sessions, live sessions, audit log) after 90 days, job and live-session records,
+  closed holds and routine audit rows are deleted after 12 months, expired sign-in data after 30 days, processed Stripe
+  events after 90 days (`acw/retention.py`); ledger and payment rows are kept 7 years (then `acw.admin compact-money`, by
+  hand); nightly backups are kept 30 days. The file is compacted monthly. The full table of what grows and what bounds
+  it: [operations.md](operations.md#what-grows-and-what-bounds-it).
+- Contact-form messages are mailed to the owner and not stored (`api/contact_routes.py`).
 
 ## Money
 

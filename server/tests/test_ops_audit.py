@@ -827,7 +827,7 @@ def test_retention_removes_addresses_and_file_names_on_schedule():
     old = db.one("SELECT input_name, params_json FROM jobs WHERE id = ?", (old_job,))
     assert old["input_name"] == "" and "display_name" not in json.loads(old["params_json"])
     assert db.one("SELECT input_name FROM jobs WHERE id = ?", (new_job,))["input_name"] == "new.wav"
-    assert retention.run() == {"stream_ips": 0, "audit_ips": 0, "session_ips": 0, "job_names": 0}
+    assert not any(retention.run().values())  # a second run changes nothing
 
 
 # ---------------------------------------------------------------- monitor and deep health (OPS-03)

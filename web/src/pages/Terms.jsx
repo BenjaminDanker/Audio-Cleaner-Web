@@ -1,4 +1,5 @@
 import { Link } from 'react-router';
+import { useAuth } from '../auth.jsx';
 import Legal from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
 import { operatorLine, SITE } from '../site.js';
@@ -25,6 +26,7 @@ export default function Terms() {
   const jurisdiction = SITE.jurisdiction.trim();
   const email = SITE.supportEmail.trim();
   const address = SITE.legalAddress.trim();
+  const { contact } = useAuth();
   return (
     <Legal title="Terms of Service" sections={SECTIONS}>
       <h2 id="about">1. About these terms</h2>
@@ -109,9 +111,9 @@ export default function Terms() {
       <p>
         These terms are governed by the laws of {jurisdiction || 'the place where the operator is established'}, and the courts {jurisdiction ? <>of {jurisdiction}</> : 'there'} have exclusive jurisdiction, without affecting any mandatory consumer rights you have in your country of residence. If a provision is unenforceable, the rest stays in force. These terms are the whole agreement between you and us about the Service.
       </p>
-      {(email || address) && (
+      {(contact || email || address) && (
         <p>
-          Contact: {email && <a href={`mailto:${email}`}>{email}</a>}{email && address ? ', ' : ''}{address}
+          Contact: {contact && <>use the <Link to="/contact">contact form</Link></>}{contact && (email || address) ? ', or ' : ''}{email && <a href={`mailto:${email}`}>{email}</a>}{email && address ? ', ' : ''}{address}
         </p>
       )}
     </Legal>

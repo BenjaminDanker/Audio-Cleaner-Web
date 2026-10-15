@@ -1,4 +1,5 @@
 import { Link } from 'react-router';
+import { useAuth } from '../auth.jsx';
 import Legal from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
 import { operatorLine, SITE } from '../site.js';
@@ -21,10 +22,12 @@ export default function Privacy() {
   usePageTitle('Privacy Policy');
   const operator = operatorLine() || 'the operator of this site';
   const email = SITE.supportEmail.trim();
+  const { contact } = useAuth();
+  const form = contact ? <Link to="/contact">contact form</Link> : null;
   return (
     <Legal title="Privacy Policy" sections={SECTIONS}>
       <h2 id="who">1. Who we are</h2>
-      <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{email && <> Contact: <a href={`mailto:${email}`}>{email}</a>.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
+      <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{(form || email) && <> Contact: {form && <>use the {form}</>}{form && email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
       <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
 
       <h2 id="browser">2. Free noise removal in your browser</h2>
@@ -36,6 +39,7 @@ export default function Privacy() {
         <li><b>Billing:</b> amounts, dates and status of payments; a Stripe customer reference; your credit ledger. Card details are collected and stored by Stripe, never by us.</li>
         <li><b>Usage:</b> for each job its file name, size, duration, chosen options, status and cost; for live sessions their length and cost; API key names, prefixes and last-used times (the keys themselves are stored only as one-way hashes).</li>
         <li><b>Security logs:</b> IP address and browser type, used for sign-in sessions, abuse prevention and rate limiting.</li>
+        <li><b>Messages to us:</b> if you write through the contact form we receive your message, the email address you give, your name if you give one and, if you were signed in, which account it came from. It reaches us as an email and is <b>not saved in our database</b>; we only note that a message was sent.</li>
       </ul>
 
       <h2 id="files">4. Your files and transcripts</h2>
@@ -59,7 +63,7 @@ export default function Privacy() {
             <tr><td>A third-party speech-recognition provider</td><td>Extra accurate transcription and extra accurate live captions only, and only when you choose them</td><td>The audio you choose to send. It may be processed in the United States and is not used for training</td></tr>
             <tr><td>Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
             <tr><td>Cloudflare (Turnstile)</td><td>Bot check on the email sign-in form, when enabled</td><td>A challenge token and your IP address</td></tr>
-            <tr><td>Email delivery provider</td><td>Sign-in links</td><td>Your email address and the message</td></tr>
+            <tr><td>Email delivery provider</td><td>Sign-in links, and messages sent through the contact form</td><td>Your email address and the message</td></tr>
             <tr><td>Hosting provider</td><td>Running the website and servers</td><td>Technical traffic data</td></tr>
           </tbody>
         </table>
@@ -72,15 +76,17 @@ export default function Privacy() {
       <h2 id="retention">8. How long we keep things</h2>
       <ul>
         <li>Account data: while your account exists, then deleted on request unless we must keep it by law.</li>
-        <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email).</li>
-        <li>Job records (metadata only, no content): file names are removed after 12 months; the rest of the record (length, options, cost) is kept as part of the ledger.</li>
-        <li>Security logs, including IP addresses and browser types of sign-ins and live sessions: 90 days.</li>
+        <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email). Records that go with them, such as that you accepted the Terms, started a payment, turned automatic top-up on or off, or were refunded or credited, are kept just as long.</li>
+        <li>Job records and live-session records (metadata only, no content): deleted 12 months after the job or session. File names are removed from your credit history after 12 months; what you paid stays there as a line without the name (date, kind of work, length, amount) for the 7 years above.</li>
+        <li>Security logs, including IP addresses and browser types of sign-ins and live sessions: 90 days. The entries themselves (a sign-in, a key created, a contact message sent) are deleted after 12 months, without IP addresses after the first 90 days.</li>
+        <li>Sign-in sessions and sign-in links: deleted when they run out, and in any case within 30 days after that. Small bookkeeping rows: payment notification ids about 90 days, the counters for the free daily allowance 60 days.</li>
+        <li>Messages sent through the contact form: they are not in our database. The email we receive is kept for as long as we need it to answer you and deal with your request.</li>
         <li>Backups of our database: kept for 30 days, so data you deleted can remain in a backup until it expires.</li>
         <li>Uploaded files and results: as described in section 4.</li>
       </ul>
 
       <h2 id="rights">9. Your rights</h2>
-      <p>Depending on where you live (for example under the CCPA) you may have the right to access, correct, delete or export your data, and to object to or restrict some processing. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, {email ? <>email us at <a href={`mailto:${email}`}>{email}</a></> : <>use the <Link to="/app/account">Account page</Link></>} and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
+      <p>Depending on where you live (for example under the CCPA) you may have the right to access, correct, delete or export your data, and to object to or restrict some processing. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, {form || email ? <>{form && <>write to us through the {form} (choose &ldquo;Privacy or my data&rdquo;; the same form helps with refunds and billing questions)</>}{form && email && ', or '}{email && <>email us at <a href={`mailto:${email}`}>{email}</a></>}</> : <>use the <Link to="/app/account">Account page</Link></>} and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
 
       <h2 id="security">10. Security</h2>
       <p>Connections use TLS. Session tokens, sign-in links and API keys are stored only as hashes. Billing and key management need a signed-in browser session, and state-changing requests are protected against cross-site request forgery. No system is perfectly secure; tell us if you find a problem.</p>

@@ -16,6 +16,7 @@ const Account = lazy(() => import('./pages/Account.jsx'));
 const Terms = lazy(() => import('./pages/Terms.jsx'));
 const Privacy = lazy(() => import('./pages/Privacy.jsx'));
 const Licenses = lazy(() => import('./pages/Licenses.jsx'));
+const Contact = lazy(() => import('./pages/Contact.jsx'));
 const NotFound = lazy(() => import('./pages/NotFound.jsx'));
 
 function Loading() {
@@ -58,6 +59,7 @@ export default function App() {
           <Route path="terms" element={<Terms />} />
           <Route path="privacy" element={<Privacy />} />
           <Route path="licenses" element={<Licenses />} />
+          <Route path="contact" element={<Contact />} />
           <Route path="*" element={<NotFound />} />
         </Route>
       </Routes>

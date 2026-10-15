@@ -127,10 +127,18 @@ def _setup_access_log() -> None:
         access_log.propagate = False
 
 
+def _quiet(method: str, path: str, status: int) -> bool:
+    """Requests that succeed and say nothing new: health checks, and the job list a page asks for every 1.5 s while a
+    job runs (at 1000 jobs a day that one line would be most of the log). Errors and everything else are logged."""
+    if status == 200 and path.endswith("/api/health"):
+        return True
+    return method == "GET" and status < 400 and path.endswith("/api/jobs")
+
+
 class AccessLogMiddleware:
     """One line per request: client, method, path, status, milliseconds. The query string is left out on
     purpose: sign-in callbacks carry one-time codes there and payment return links carry ids. Run uvicorn
-    with --no-access-log (its own log line includes the query)."""
+    with --no-access-log (its own log line includes the query). Successful polling is left out (see `_quiet`)."""
 
     def __init__(self, app):
         self.app = app
@@ -153,7 +161,7 @@ class AccessLogMiddleware:
             await self.app(scope, receive, logged_send)
         finally:
             path = scope["path"]
-            if not (path.endswith("/api/health") and status == 200):
+            if not _quiet(scope["method"], path, status):
                 ip = ""
                 for k, v in scope["headers"]:
                     if k == b"x-forwarded-for":

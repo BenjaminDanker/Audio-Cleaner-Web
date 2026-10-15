@@ -23,7 +23,8 @@
     "test:copy": "node tests/copy.mjs",
     "test:states": "node tests/states.mjs",
     "test:files": "node tests/files.mjs",
-    "test:fixes": "node tests/fixes.mjs"
+    "test:fixes": "node tests/fixes.mjs",
+    "test:contact": "node tests/contact.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.61.3",

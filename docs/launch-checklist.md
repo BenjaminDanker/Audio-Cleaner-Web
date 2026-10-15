@@ -15,6 +15,8 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
   checked after writing (integrity + ledger sums). ⬜ Drill the restore once (same section).
 - ⬜ Push the branch and keep `on-prem` fast-forwarded from `desktop-merge`; deploy only from `~/repos/Audio-Cleaner-Web`
   (install.sh refuses a checkout that is not a descendant of what runs)
+- ⬜ Contact form: after the next deploy send a test message from `/audio/contact` (signed out) and check it arrives with a working
+  Reply (needs `ACW_ALERT_EMAIL` and `SMTP_*` in `acw.env`; `ACW_CONTACT_EMAIL` only to send somewhere else; docs/operations.md, "Contact form")
 - ⬜ Journal retention (one sudo command, docs/operations.md "Log retention"): the Privacy Policy promises 90 days
 - ⬜ Uptime alert (e.g. the Pi curls `https://…/audio/api/health` every minute and pings you)
 

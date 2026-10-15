@@ -1,5 +1,7 @@
 import { useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { api, outputUrl } from '../api.js';
+import { useAuth } from '../auth.jsx';
 import { saveBlob } from '../download.js';
 import { bytes, clock, dateTime, human, money, shownName, stem } from '../format.js';
 import { useNow } from '../hooks.js';
@@ -80,6 +82,7 @@ function RemuxPanel({ job, local }) {
 const withNotCharged = (text) => (/not charged|weren.t charged/i.test(text) ? text : `${text} You weren’t charged.`);
 
 export default function JobCard({ job, local, onChanged }) {
+  const { contact } = useAuth();
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -129,7 +132,12 @@ export default function JobCard({ job, local, onChanged }) {
         </div>
       )}
 
-      {job.status === 'failed' && <p className="banner banner-error mb0" role="alert">{withNotCharged(job.error || 'This one didn’t work out.')}</p>}
+      {job.status === 'failed' && (
+        <>
+          <p className="banner banner-error mb0" role="alert">{withNotCharged(job.error || 'This one didn’t work out.')}</p>
+          {contact && <p className="small muted mb0">Still stuck? <Link to={`/contact?topic=job&job=${job.id}`} data-testid="job-contact">Tell us about this job</Link>.</p>}
+        </>
+      )}
       {job.status === 'canceled' && <p className="muted mb0">{withNotCharged(job.error && job.error !== 'Canceled.' ? job.error : 'Canceled.')}</p>}
 
       {job.status === 'done' && (

@@ -23,7 +23,8 @@ You may replace the decoder with your own build: it is the three files under
 /audio/dfn/libav/ that the page loads.
 
 Written offer: for at least three years after we last served this build, we
-will send anyone who asks, through the contact address on the website, the
+will send anyone who asks, through the contact form on the website (the Contact
+page; choose "A question"), the
 complete corresponding source code (FFmpeg, libav.js and their dependencies as
 listed above) together with the exact build script we used, for no more than
 the cost of sending it.

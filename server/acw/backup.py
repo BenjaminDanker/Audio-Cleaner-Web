@@ -26,6 +26,7 @@ from pathlib import Path
 from . import db
 
 STATUS_FILE = "backup-status.json"
+KEEP_BAD = 3
 
 
 class BackupError(Exception):
@@ -99,6 +100,16 @@ def copy_offbox(gz: Path, dest: str) -> str:
     return enc.name
 
 
+def _prune(out_dir: Path, keep: int) -> None:
+    """Old snapshots go, also when tonight's failed (for instance the off-machine copy): a backup that fails every night
+    must not fill the disk. Failed snapshots (*.bad) are kept for a look, but only the newest few."""
+    backups = sorted(out_dir.glob("acw-*.sqlite3.gz"))
+    for old in backups[: max(0, len(backups) - keep)]:
+        old.unlink(missing_ok=True)
+    for old in sorted(out_dir.glob("acw-*.sqlite3.gz.bad"))[:-KEEP_BAD]:
+        old.unlink(missing_ok=True)
+
+
 def run(out_dir: Path, keep: int = 30) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
@@ -126,10 +137,9 @@ def run(out_dir: Path, keep: int = 30) -> Path:
         status["error"] = str(e)
         if status.get("integrity") != "ok" or status.get("ledger") != "ok":
             final.rename(final.with_name(final.name + ".bad"))  # kept for a look, never counted as a good backup
+        _prune(out_dir, keep)
         _write_status(out_dir, status)
         raise
     _write_status(out_dir, status)
-    backups = sorted(out_dir.glob("acw-*.sqlite3.gz"))
-    for old in backups[: max(0, len(backups) - keep)]:
-        old.unlink()
+    _prune(out_dir, keep)
     return final

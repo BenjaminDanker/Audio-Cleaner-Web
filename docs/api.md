@@ -30,7 +30,7 @@ live worker, stuck jobs, missing model files and the ledger check.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/me` | `{signedIn:false}` or `{signedIn, user:{id,email,displayName,isAdmin,status,tosAccepted,createdAt}, csrfToken, balance:{balance_micros,held_micros,available_micros}, autoReload:{enabled,thresholdMicros,amountCents,monthlyCapCents,hasCard,failures}}` |
+| GET | `/api/me` | `{signedIn:false, contactForm}` or `{signedIn, contactForm, user:{id,email,displayName,isAdmin,status,tosAccepted,createdAt}, csrfToken, balance:{balance_micros,held_micros,available_micros}, autoReload:{enabled,thresholdMicros,amountCents,monthlyCapCents,hasCard,failures}}` |
 | POST | `/api/account/tos` | `{version}`: must equal the current terms version (see `TOS_VERSION`, currently `2026-10-10`) |
 | GET | `/api/auth/providers` | `{google:bool, email:bool, turnstileSiteKey:str|null}` |
 | GET | `/api/auth/oauth/google/start` | browser navigation; ends at `/app` (or `/login?error=...`) |
@@ -38,6 +38,7 @@ live worker, stuck jobs, missing model files and the ledger check.
 | POST | `/api/auth/email/verify` | `{token}` (from the URL fragment) creates the session |
 | POST | `/api/auth/logout`, `/api/auth/logout-all` | |
 | GET | `/api/account/export` | JSON of everything stored about the user (download as a file) |
+| POST | `/api/contact` | works signed in or out (same-origin; the CSRF token when signed in). `{name?, email, topic: "question"\|"billing"\|"job"\|"privacy"\|"other", message (10 to 5000 characters), job? (32-hex job id), website? (leave empty: a hidden trap field for bots)}`. Mails the owner with Reply-To set to `email`; answers `{ok:true}`. The message is not stored. 400 bad email/message/job id, 404 when mail is not set up (`/api/me` has `contactForm:false`), 429 with `Retry-After` (3 an hour and 10 a day per network, 3 an hour and 5 a day per mailbox, 100 a day for the whole site), 503 when the mail could not be sent. The owner's address is never returned |
 | POST | `/api/account/delete` | `{confirm: "<the user's email>"}`; refuses while jobs run; remaining credit is forfeited (offer refunds first); signs out |
 
 Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from .. import auth, db, jobs
+from .. import alerts, auth, db, jobs
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex
@@ -259,7 +259,7 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
         await run_outbound(_send_mail, email, "Your Audio Cleaner sign-in link", text)
     except Exception:  # noqa: BLE001
         log.exception("sending login email failed")
-        raise HTTPException(status_code=502, detail="Could not send the email right now.")
+        raise HTTPException(status_code=503, detail="Could not send the email right now.")
     # Same response whether or not the account exists.
     return {"ok": True}
 
@@ -315,12 +315,15 @@ def asset_check(principal: auth.Principal = Depends(auth.require_session)) -> Re
 
 @me_router.get("/me")
 def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> dict:
+    # `contactForm`: whether /contact can send (mail is set up). Only a yes/no; the address stays on the server.
+    contact = alerts.contact_configured()
     if principal is None:
-        return {"signedIn": False}
+        return {"signedIn": False, "contactForm": contact}
     user = db.one("SELECT * FROM users WHERE id = ?", (principal.user_id,))
     bal = ledger.balance(principal.user_id)
     return {
         "signedIn": True,
+        "contactForm": contact,
         "user": {
             "id": user["id"],
             "email": user["email"],
