@@ -136,10 +136,22 @@ https://datatracker.ietf.org/ipr/1526/
 
 ## Mbed TLS 3.6.7 (Apache-2.0 OR GPL-2.0-or-later)
 
-Mbed TLS files are provided under a dual Apache-2.0 OR GPL-2.0-or-later licence;
-this project takes the GPL-2.0-or-later option. Licence texts and the copyright
-notices of the Mbed TLS contributors are in the upstream tarball
-(`LICENSE`, `tests/`, `library/`), https://github.com/Mbed-TLS/mbedtls/blob/mbedtls-3.6.7/LICENSE
+```
+Copyright The Mbed TLS Contributors
+
+Mbed TLS files are provided under a dual Apache-2.0 OR GPL-2.0-or-later
+license. This means that users may choose which of these licenses they take
+the code under.
+```
+
+This plugin takes the **GPL-2.0-or-later** option; its text is the `LICENSE` file shipped
+next to this one. The Apache-2.0 text, and the notices of the bundled parts of Mbed TLS, are in
+the upstream tarball: https://github.com/Mbed-TLS/mbedtls/blob/mbedtls-3.6.7/LICENSE
+
+Mbed TLS also contains, under `3rdparty/`, code from Project Everest (Apache-2.0, copyright
+the Project Everest contributors) and p256-m (Apache-2.0, Copyright Manuel Pégourié-Gonnard;
+Apache-2.0 OR GPL-2.0-or-later in Mbed TLS). The Everest code is Apache-2.0 only; the
+Apache-2.0 licence text is in the upstream `LICENSE` file linked above.
 
 ## OpenSSL 3.x (Apache-2.0)
 

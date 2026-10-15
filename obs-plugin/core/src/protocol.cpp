@@ -178,6 +178,8 @@ bool parse_event(const std::string &text, Event &ev)
 		if (it != j.end() && it->is_string())
 			dst = it->get<std::string>();
 	};
+	// Numbers from the network are never trusted: the session checks the doubles it uses (they may be
+	// infinite), integers are clamped here (casting an out-of-range double to int is undefined behaviour).
 	auto num = [&](const char *k, double &dst) {
 		auto it = j.find(k);
 		if (it != j.end() && it->is_number())
@@ -185,8 +187,11 @@ bool parse_event(const std::string &text, Event &ev)
 	};
 	auto integer = [&](const char *k, int &dst) {
 		auto it = j.find(k);
-		if (it != j.end() && it->is_number())
-			dst = static_cast<int>(it->get<double>());
+		if (it != j.end() && it->is_number()) {
+			const double v = it->get<double>();
+			if (std::isfinite(v))
+				dst = static_cast<int>(std::min(1e9, std::max(-1e9, v)));
+		}
 	};
 
 	std::string type;
@@ -222,6 +227,10 @@ bool parse_event(const std::string &text, Event &ev)
 		ev.type = EventType::Error;
 		str("code", ev.code);
 		str("message", ev.message);
+		int ra = 0;
+		integer("retryAfter", ra);  // seconds; the server may add it to any error
+		integer("retryAfterSeconds", ra);
+		ev.retry_after_s = std::min(3600, std::max(0, ra));
 	} else if (type == "pong") {
 		ev.type = EventType::Pong;
 		auto it = j.find("t");

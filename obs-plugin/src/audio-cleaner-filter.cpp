@@ -27,6 +27,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * Audio: what the speakers play) through an audio capture callback and send that
  * to the service as the echo reference, so the speakers' sound is taken out of the
  * microphone. The reference crosses to the audio thread in a lock-free buffer.
+ * libobs hands that callback the audio before the source's mute and volume are
+ * applied (the `muted` flag only says what OBS itself will do), so a source that is
+ * muted in the OBS mixer but still plays through the speakers keeps being sent.
  *
  * filter_audio() never blocks: it copies samples into acw_core's lock-free
  * rings and reads the delayed output from them. Everything slow (network, TLS,
@@ -44,8 +47,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -64,6 +69,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_ECHO_SOURCE "echo_source"
 #define S_STATUS "status"
 #define S_REFRESH "refresh_status"
+#define S_RETRY "retry_now"
+#define S_ADVANCED "advanced"
+#define S_DETAILS "details"
 
 #define DEFAULT_URL "wss://mc-multi-world.space/audio/api/stream/ws"
 #define ECHO_DESKTOP "@desktop"  // the Desktop Audio source (output channel 1); "" = no echo cancellation
@@ -74,25 +82,82 @@ namespace {
 
 constexpr size_t kMaxBlock = 4096;  // frames handled per inner step of filter_audio()
 
+// Languages offered for captions: ISO 639-1 code and the locale key of its name.
+struct LangEntry {
+	const char *code;
+	const char *key;
+};
+const LangEntry kLanguages[] = {
+	{"auto", "AudioCleaner.Language.auto"}, {"en", "AudioCleaner.Language.en"}, {"de", "AudioCleaner.Language.de"},
+	{"fr", "AudioCleaner.Language.fr"},     {"es", "AudioCleaner.Language.es"}, {"it", "AudioCleaner.Language.it"},
+	{"pt", "AudioCleaner.Language.pt"},     {"nl", "AudioCleaner.Language.nl"}, {"sv", "AudioCleaner.Language.sv"},
+	{"da", "AudioCleaner.Language.da"},     {"no", "AudioCleaner.Language.no"}, {"fi", "AudioCleaner.Language.fi"},
+	{"pl", "AudioCleaner.Language.pl"},     {"cs", "AudioCleaner.Language.cs"}, {"tr", "AudioCleaner.Language.tr"},
+	{"ru", "AudioCleaner.Language.ru"},     {"uk", "AudioCleaner.Language.uk"}, {"ar", "AudioCleaner.Language.ar"},
+	{"hi", "AudioCleaner.Language.hi"},     {"ja", "AudioCleaner.Language.ja"}, {"ko", "AudioCleaner.Language.ko"},
+	{"zh", "AudioCleaner.Language.zh"},
+};
+
+// The closed-caption format of a stream (CEA-608) can only show Latin letters: captions in these languages
+// can be made, but not added to the stream.
+bool language_fits_stream(const std::string &code)
+{
+	static const char *no[] = {"ru", "uk", "ar", "hi", "ja", "ko", "zh", "he", "el", "th", "bg", "sr", "fa", "bn", "ta", "te"};
+	for (const char *n : no)
+		if (code == n)
+			return false;
+	return true;
+}
+
+// "en-US", "DE", " fr_CA " -> "en", "de", "fr"; anything that is not a 2-3 letter code -> "auto".
+std::string normalise_language(const std::string &in)
+{
+	std::string out;
+	for (char ch : in) {
+		const unsigned char c = static_cast<unsigned char>(ch);
+		if (std::isspace(c))
+			continue;
+		if (!std::isalpha(c))
+			break;  // '-' or '_' starts the region
+		out += static_cast<char>(std::tolower(c));
+	}
+	if (out.size() < 2 || out.size() > 3)
+		return "auto";
+	return out;
+}
+
 struct Settings {
 	std::string api_key;
 	std::string url = DEFAULT_URL;
 	bool denoise = true;
-	std::string captions = "off";  // off | local | premium
+	std::string captions = "off";  // off | local (standard, English) | premium (extra accurate, any language)
 	std::string language = "auto";
 	int strength = 100;            // attenuation limit in dB: 12 / 24 / 40 / 100 (same levels as the website and desktop app)
 	int latency_ms = 150;          // 80 / 150 / 250
 	std::string codec = "opus";    // opus | pcm
-	bool send_captions = false;
+	bool send_captions = true;
 	std::string echo_source = ECHO_DESKTOP;  // name of the source that plays through the speakers
 
-	bool configured() const { return !api_key.empty() && (denoise || captions != "off"); }
+	// Standard captions are English only; the language setting belongs to the extra accurate ones.
+	std::string caption_language() const { return captions == "premium" ? language : std::string("auto"); }
+
+	// Captions only have a use when they go to the stream, and only then are they asked for (and billed).
+	bool captions_wanted() const { return captions != "off"; }
+	bool captions_fit_stream() const { return language_fits_stream(caption_language()); }
+	std::string effective_captions() const
+	{
+		return captions_wanted() && send_captions && captions_fit_stream() ? captions : std::string();
+	}
+
+	bool configured() const { return !api_key.empty() && (denoise || !effective_captions().empty()); }
 
 	// Changes that need a new session (the output delay D is fixed per session).
 	bool same_session_as(const Settings &o) const
 	{
-		return api_key == o.api_key && url == o.url && denoise == o.denoise && captions == o.captions &&
-		       language == o.language && latency_ms == o.latency_ms && codec == o.codec &&
+		const std::string cap = effective_captions();
+		return api_key == o.api_key && url == o.url && denoise == o.denoise && cap == o.effective_captions() &&
+		       (cap.empty() || caption_language() == o.caption_language()) && latency_ms == o.latency_ms &&
+		       codec == o.codec &&
 		       echo_source.empty() == o.echo_source.empty();  // which source it is does not matter to the session
 	}
 };
@@ -126,8 +191,13 @@ struct ac_filter {
 	std::string ref_name;                   // echo_source the tap was set up for
 	float retry_s = 0.0f;
 
-	// "Send captions to stream" can be toggled without restarting the session.
-	std::shared_ptr<std::atomic<bool>> forward = std::make_shared<std::atomic<bool>>(false);
+	// Taps of sources that were being destroyed when we let go of them: freed a little later, when libobs
+	// can no longer call them.
+	struct RetiredTap {
+		ref_tap *tap;
+		float age_s;
+	};
+	std::vector<RetiredTap> retired_taps;
 };
 
 Settings read_settings(obs_data_t *d)
@@ -141,9 +211,7 @@ Settings read_settings(obs_data_t *d)
 	s.captions = obs_data_get_string(d, S_CAPTIONS);
 	if (s.captions != "local" && s.captions != "premium")
 		s.captions = "off";
-	s.language = obs_data_get_string(d, S_LANGUAGE);
-	if (s.language.empty())
-		s.language = "auto";
+	s.language = normalise_language(obs_data_get_string(d, S_LANGUAGE));
 	s.strength = static_cast<int>(obs_data_get_int(d, S_STRENGTH));
 	s.latency_ms = static_cast<int>(obs_data_get_int(d, S_LATENCY));
 	if (s.latency_ms != 80 && s.latency_ms != 250)
@@ -174,7 +242,8 @@ void log_cb(acw::LogLevel lv, const std::string &msg)
 	obs_log(level, "%s", msg.c_str());
 }
 
-// Called with the lock held. Creates the (not yet started) session for the current settings.
+// Called with the lock held. Creates the session for the current settings and starts its network thread
+// (it only connects once audio flows, so this costs nothing while the filter is idle).
 acw::Session *make_session(ac_filter *f)
 {
 	const Settings &s = f->settings;
@@ -185,8 +254,8 @@ acw::Session *make_session(ac_filter *f)
 	cfg.url = s.url;
 	cfg.api_key = s.api_key;
 	cfg.denoise = s.denoise;
-	cfg.captions = s.captions == "off" ? "" : s.captions;
-	cfg.language = s.language == "auto" ? "" : s.language;
+	cfg.captions = s.effective_captions();
+	cfg.language = cfg.captions.empty() || s.caption_language() == "auto" ? "" : s.caption_language();
 	cfg.atten_lim_db = s.strength;
 	cfg.delay_ms = s.latency_ms;
 	cfg.codec = s.codec == "pcm" ? acw::Codec::Pcm16 : acw::Codec::Opus;
@@ -195,26 +264,24 @@ acw::Session *make_session(ac_filter *f)
 		cfg.reference = f->reference;
 	cfg.client = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
 
-	f->forward->store(s.send_captions);
-	std::shared_ptr<std::atomic<bool>> forward = f->forward;
-	return new acw::Session(
-		cfg,
-		[forward](const acw::CaptionEvent &ev) {
-			if (forward->load())
-				caption_output_push(ev.text.c_str());
-		},
-		log_cb);
+	auto *session = new acw::Session(
+		cfg, [](const acw::CaptionEvent &ev) { caption_output_push(ev.text.c_str()); }, log_cb);
+	session->start();
+	return session;
 }
 
 // ---------------------------------------------------------------------------
 // echo reference
 
 // Runs on whichever thread delivers the source's audio. OBS audio is planar float at the OBS rate.
-void reference_audio_cb(void *param, obs_source_t *, const struct audio_data *audio, bool muted)
+void reference_audio_cb(void *param, obs_source_t *, const struct audio_data *audio, bool /*muted*/)
 {
 	auto *t = static_cast<ref_tap *>(param);
-	if (muted || audio->frames == 0)
-		return;  // a muted source is not playing: no reference
+	// `muted` is ignored on purpose: it only says that OBS will not mix this source into the stream. The
+	// computer still plays it through the speakers (a common setup: Desktop Audio muted in the mixer so the
+	// game stays off the stream), and the microphone still hears it, so it is still the echo reference.
+	if (audio->frames == 0)
+		return;
 	size_t nch = 0;
 	const float *planes[MAX_AV_PLANES];
 	for (size_t c = 0; c < MAX_AV_PLANES && audio->data[c]; ++c)
@@ -246,17 +313,43 @@ void detach_reference(ac_filter *f)
 		obs_source_remove_audio_capture_callback(src, reference_audio_cb, f->tap);
 		obs_source_release(src);
 		delete f->tap;
+	} else if (f->tap) {
+		// The source is being destroyed, and libobs may still call the callback for a moment: free the tap
+		// a few seconds from now instead of risking a call into freed memory.
+		f->retired_taps.push_back({f->tap, 0.0f});
 	}
-	// else: the source is being destroyed, and libobs may still call the callback for a moment.
-	// The tap (a few KB) is left behind rather than risk a call into freed memory.
 	obs_weak_source_release(f->ref_weak);
 	f->ref_weak = nullptr;
 	f->tap = nullptr;
 }
 
+// Frees retired taps that are old enough. `all`: at shutdown, also the ones that are not (they are then
+// left behind rather than freed under a possibly running callback).
+void reap_retired_taps(ac_filter *f, float elapsed_s, bool all)
+{
+	for (auto it = f->retired_taps.begin(); it != f->retired_taps.end();) {
+		it->age_s += elapsed_s;
+		if (it->age_s >= 10.0f) {
+			delete it->tap;
+			it = f->retired_taps.erase(it);
+		} else if (all) {
+			it = f->retired_taps.erase(it);  // leaked on purpose
+		} else {
+			++it;
+		}
+	}
+}
+
+// The source the settings point at right now (a new reference), or null.
+obs_source_t *find_echo_source(const std::string &want)
+{
+	return want == ECHO_DESKTOP ? obs_get_output_source(1)  // Desktop Audio
+				    : obs_get_source_by_name(want.c_str());
+}
+
 // Makes the listening match the settings: the chosen source, or none. Called with the lock held;
 // also repeated about once a second (filter_tick) because the source may not exist yet when the
-// scene is loading, or may be recreated.
+// scene is loading, or may be recreated, renamed or replaced (another device chosen for Desktop Audio).
 void update_reference(ac_filter *f)
 {
 	const std::string &want = f->settings.echo_source;
@@ -264,16 +357,12 @@ void update_reference(ac_filter *f)
 		detach_reference(f);
 		return;
 	}
-	if (f->ref_weak && f->ref_name == want && !obs_weak_source_expired(f->ref_weak))
-		return;
-	detach_reference(f);
-
-	obs_source_t *src = nullptr;
-	if (want == ECHO_DESKTOP) {
-		src = obs_get_output_source(1);  // Desktop Audio
-	} else {
-		src = obs_get_source_by_name(want.c_str());
+	obs_source_t *src = find_echo_source(want);
+	if (f->ref_weak && f->ref_name == want && src && obs_weak_source_references_source(f->ref_weak, src)) {
+		obs_source_release(src);
+		return;  // still the same source
 	}
+	detach_reference(f);
 	if (!src)
 		return;
 	if (src == obs_filter_get_parent(f->context)) {  // a source cannot be its own speakers
@@ -287,6 +376,19 @@ void update_reference(ac_filter *f)
 	obs_source_release(src);
 }
 
+// Frees sessions that had to wait for the audio thread. Called with the lock held.
+void reap_graveyard(ac_filter *f)
+{
+	if (f->graveyard.empty() || f->in_audio.load(std::memory_order_seq_cst))
+		return;
+	// Not inside filter_audio() now, and every later call sees the newer session (seq_cst): safe to free.
+	for (acw::Session *old : f->graveyard) {
+		old->stop(0, 300);
+		delete old;
+	}
+	f->graveyard.clear();
+}
+
 // Graphics thread, every frame: retry the listening about once a second.
 void filter_tick(void *data, float seconds)
 {
@@ -297,21 +399,23 @@ void filter_tick(void *data, float seconds)
 	std::unique_lock<std::mutex> lk(f->mu, std::try_to_lock);
 	if (!lk.owns_lock())
 		return;
+	const float elapsed = f->retry_s;
 	f->retry_s = 0.0f;
 	update_reference(f);
+	reap_retired_taps(f, elapsed, false);
+	reap_graveyard(f);
 }
 
-// Stops and frees a session that is no longer reachable through f->session.
-// Waits (bounded) for an in-flight filter_audio() call that may still use it.
+// Ends a session that is no longer reachable through f->session. Called with the lock held.
+// The connection (and its billing) ends at once; the object is freed as soon as no filter_audio() call
+// that may still use it is running, immediately in practice.
 void retire_session(ac_filter *f, acw::Session *old)
 {
 	if (!old)
 		return;
-	for (int i = 0; i < 200 && f->in_audio.load(); ++i)
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	if (f->in_audio.load()) {
-		// The audio thread is still inside a call: do not free under its feet.
-		f->graveyard.push_back(old);
+	old->request_stop();
+	if (f->in_audio.load(std::memory_order_seq_cst)) {
+		f->graveyard.push_back(old);  // freed by the next tick
 		return;
 	}
 	old->stop(0, 300);
@@ -324,6 +428,7 @@ void rebuild_session(ac_filter *f)
 	acw::Session *fresh = make_session(f);
 	acw::Session *old = f->session.exchange(fresh);
 	retire_session(f, old);
+	reap_graveyard(f);
 	update_reference(f);
 }
 
@@ -353,7 +458,7 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_int(d, S_STRENGTH, 100);
 	obs_data_set_default_int(d, S_LATENCY, 150);
 	obs_data_set_default_string(d, S_CODEC, "opus");
-	obs_data_set_default_bool(d, S_SEND_CAPTIONS, false);
+	obs_data_set_default_bool(d, S_SEND_CAPTIONS, true);
 	obs_data_set_default_string(d, S_ECHO_SOURCE, ECHO_DESKTOP);
 }
 
@@ -395,10 +500,12 @@ void filter_destroy(void *data)
 		f->enabled = false;
 		rebuild_session(f);  // stops the session
 		for (acw::Session *s : f->graveyard) {
-			s->stop(0, 100);
+			s->stop(0, 300);
 			delete s;
 		}
 		f->graveyard.clear();
+		detach_reference(f);
+		reap_retired_taps(f, 0.0f, true);
 	}
 	delete f;
 }
@@ -419,7 +526,6 @@ void filter_update(void *data, obs_data_t *settings)
 		if (acw::Session *s = f->session.load())
 			s->set_atten_lim_db(next.strength);
 	}
-	f->forward->store(next.send_captions);
 	update_reference(f);  // a different echo source
 }
 
@@ -433,9 +539,6 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 	f->in_audio.store(true, std::memory_order_seq_cst);
 	acw::Session *s = f->session.load(std::memory_order_seq_cst);
 	if (s && audio->frames > 0) {
-		if (!s->started())
-			s->start();  // lazy start: only once the enabled filter really receives audio
-
 		float *planes[MAX_AV_PLANES];
 		size_t nch = 0;
 		for (size_t c = 0; c < MAX_AV_PLANES && audio->data[c]; ++c)
@@ -473,31 +576,85 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 // ---------------------------------------------------------------------------
 // properties
 
+// The plain-words status shown in the dialog. Called without the lock.
 std::string status_text(ac_filter *f)
 {
 	std::lock_guard<std::mutex> lk(f->mu);
+	const Settings &st = f->settings;
 	if (!f->enabled)
 		return T_("AudioCleaner.Status.Disabled");
-	if (f->settings.api_key.empty())
+	if (st.api_key.empty())
 		return T_("AudioCleaner.Status.NoKey");
-	if (!f->settings.configured())
+	if (!st.configured()) {
+		if (!st.denoise && st.captions_wanted() && !st.captions_fit_stream())
+			return T_("AudioCleaner.Status.CaptionsLanguage");
+		if (!st.denoise && st.captions_wanted() && !st.send_captions)
+			return T_("AudioCleaner.Status.CaptionsNotSent");
 		return T_("AudioCleaner.Status.NothingEnabled");
+	}
 	acw::Session *s = f->session.load();
 	if (!s)
-		return "Not running";
+		return T_("AudioCleaner.Status.NotRunning");
 	std::string line = s->status_line();
-	if (!f->settings.echo_source.empty() && !f->ref_weak)
-		line += " | echo cancellation: waiting for the speaker source";
+	if (st.captions_wanted() && !st.captions_fit_stream())
+		line += std::string(" ") + T_("AudioCleaner.Status.CaptionsLanguage");
+	else if (st.captions_wanted() && !st.send_captions)
+		line += std::string(" ") + T_("AudioCleaner.Status.CaptionsNotSent");
+	if (!st.echo_source.empty() && !f->ref_weak)
+		line += std::string(" ") + T_("AudioCleaner.Status.EchoWaiting");
 	return line;
+}
+
+std::string details_text(ac_filter *f)
+{
+	std::lock_guard<std::mutex> lk(f->mu);
+	acw::Session *s = f->session.load();
+	return s ? s->status_details() : std::string();
+}
+
+// Puts the current status into the dialog.
+void refresh_texts(ac_filter *f, obs_properties_t *props)
+{
+	if (obs_property_t *st = obs_properties_get(props, S_STATUS))
+		obs_property_set_description(st, status_text(f).c_str());
+	if (obs_property_t *adv = obs_properties_get(props, S_ADVANCED))
+		if (obs_properties_t *inner = obs_property_group_content(adv))
+			if (obs_property_t *d = obs_properties_get(inner, S_DETAILS))
+				obs_property_set_description(d, details_text(f).c_str());
 }
 
 bool refresh_status_clicked(obs_properties_t *props, obs_property_t *, void *data)
 {
-	auto *f = static_cast<ac_filter *>(data);
-	if (f)
-		if (obs_property_t *st = obs_properties_get(props, S_STATUS))
-			obs_property_set_description(st, status_text(f).c_str());
+	if (auto *f = static_cast<ac_filter *>(data))
+		refresh_texts(f, props);
 	return true;  // redraw the dialog with the new text
+}
+
+// After the user fixed what the server complained about (balance, terms, ...).
+bool retry_clicked(obs_properties_t *props, obs_property_t *, void *data)
+{
+	auto *f = static_cast<ac_filter *>(data);
+	if (!f)
+		return false;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);  // the session cannot be freed meanwhile
+		if (acw::Session *s = f->session.load())
+			s->retry_now();
+	}
+	refresh_texts(f, props);
+	return true;
+}
+
+// Which controls make sense follows the captions choice: extra accurate captions have a language to pick,
+// standard captions are English only. Sending to the stream only matters when there are captions.
+bool captions_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	const std::string mode = obs_data_get_string(settings, S_CAPTIONS);
+	if (obs_property_t *lang = obs_properties_get(props, S_LANGUAGE))
+		obs_property_set_enabled(lang, mode == "premium");
+	if (obs_property_t *send = obs_properties_get(props, S_SEND_CAPTIONS))
+		obs_property_set_enabled(send, mode == "local" || mode == "premium");
+	return true;
 }
 
 struct echo_list_ctx {
@@ -525,12 +682,14 @@ obs_properties_t *filter_properties(void *data)
 {
 	auto *f = static_cast<ac_filter *>(data);
 	obs_properties_t *p = obs_properties_create();
+	Settings cur;  // what is saved now, to set up the enabled state of the controls
+	if (f) {
+		std::lock_guard<std::mutex> lk(f->mu);
+		cur = f->settings;
+	}
 
 	obs_property_t *key = obs_properties_add_text(p, S_API_KEY, T_("AudioCleaner.ApiKey"), OBS_TEXT_PASSWORD);
 	obs_property_set_long_description(key, T_("AudioCleaner.ApiKey.Long"));
-
-	obs_property_t *url = obs_properties_add_text(p, S_SERVER_URL, T_("AudioCleaner.ServerUrl"), OBS_TEXT_DEFAULT);
-	obs_property_set_long_description(url, T_("AudioCleaner.ServerUrl.Long"));
 
 	obs_properties_add_bool(p, S_DENOISE, T_("AudioCleaner.Denoise"));
 
@@ -549,10 +708,7 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_list_add_string(echo, T_("AudioCleaner.Echo.Desktop"), ECHO_DESKTOP);
 	{
 		echo_list_ctx ctx{echo, f ? obs_filter_get_parent(f->context) : nullptr, obs_get_output_source(1), {}};
-		if (f) {
-			std::lock_guard<std::mutex> lk(f->mu);
-			ctx.current = f->settings.echo_source;
-		}
+		ctx.current = cur.echo_source;
 		obs_enum_sources(add_audio_source, &ctx);
 		if (!ctx.found && !ctx.current.empty() && ctx.current != ECHO_DESKTOP)
 			obs_property_list_add_string(echo, ctx.current.c_str(), ctx.current.c_str());
@@ -564,17 +720,24 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_list_add_string(cap, T_("AudioCleaner.Captions.Off"), "off");
 	obs_property_list_add_string(cap, T_("AudioCleaner.Captions.Local"), "local");
 	obs_property_list_add_string(cap, T_("AudioCleaner.Captions.Premium"), "premium");
+	obs_property_set_long_description(cap, T_("AudioCleaner.Captions.Long"));
+	obs_property_set_modified_callback(cap, captions_modified);
 
-	obs_property_t *lang = obs_properties_add_list(p, S_LANGUAGE, T_("AudioCleaner.Language"), OBS_COMBO_TYPE_EDITABLE,
+	obs_property_t *lang = obs_properties_add_list(p, S_LANGUAGE, T_("AudioCleaner.Language"), OBS_COMBO_TYPE_LIST,
 						       OBS_COMBO_FORMAT_STRING);
 	obs_property_set_long_description(lang, T_("AudioCleaner.Language.Long"));
-	static const char *langs[] = {"auto", "en", "de", "fr", "es", "it", "pt", "nl", "sv", "da", "no", "fi", "pl",
-				      "cs",   "ru", "uk", "tr", "ar", "hi", "ja", "ko", "zh"};
-	for (const char *l : langs)
-		obs_property_list_add_string(lang, l, l);
+	bool lang_known = false;
+	for (const LangEntry &l : kLanguages) {
+		obs_property_list_add_string(lang, T_(l.key), l.code);
+		lang_known = lang_known || cur.language == l.code;
+	}
+	if (!lang_known)  // a code from an older setting: keep it selectable
+		obs_property_list_add_string(lang, cur.language.c_str(), cur.language.c_str());
+	obs_property_set_enabled(lang, cur.captions == "premium");
 
 	obs_property_t *send = obs_properties_add_bool(p, S_SEND_CAPTIONS, T_("AudioCleaner.SendCaptions"));
 	obs_property_set_long_description(send, T_("AudioCleaner.SendCaptions.Long"));
+	obs_property_set_enabled(send, cur.captions_wanted());
 
 	obs_property_t *lat = obs_properties_add_list(p, S_LATENCY, T_("AudioCleaner.Latency"), OBS_COMBO_TYPE_LIST,
 						      OBS_COMBO_FORMAT_INT);
@@ -583,21 +746,36 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Balanced"), 150);
 	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Safe"), 250);
 
-	obs_property_t *codec = obs_properties_add_list(p, S_CODEC, T_("AudioCleaner.Codec"), OBS_COMBO_TYPE_LIST,
-							OBS_COMBO_FORMAT_STRING);
-	obs_property_list_add_string(codec, T_("AudioCleaner.Codec.Opus"), "opus");
-	obs_property_list_add_string(codec, T_("AudioCleaner.Codec.Pcm"), "pcm");
-
 	// Read-only status: for OBS_TEXT_INFO the dialog shows the description when the
 	// stored value is empty, so the text is never written to the scene file.
 	const std::string st = f ? status_text(f) : std::string();
 	obs_property_t *status = obs_properties_add_text(p, S_STATUS, st.c_str(), OBS_TEXT_INFO);
 	obs_property_text_set_info_word_wrap(status, true);
 	obs_properties_add_button2(p, S_REFRESH, T_("AudioCleaner.RefreshStatus"), refresh_status_clicked, f);
+	obs_properties_add_button2(p, S_RETRY, T_("AudioCleaner.RetryNow"), retry_clicked, f);
+
+	// Things most people never touch.
+	obs_properties_t *adv = obs_properties_create();
+	obs_property_t *url = obs_properties_add_text(adv, S_SERVER_URL, T_("AudioCleaner.ServerUrl"), OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(url, T_("AudioCleaner.ServerUrl.Long"));
+	obs_property_t *codec = obs_properties_add_list(adv, S_CODEC, T_("AudioCleaner.Codec"), OBS_COMBO_TYPE_LIST,
+							OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(codec, T_("AudioCleaner.Codec.Opus"), "opus");
+	obs_property_list_add_string(codec, T_("AudioCleaner.Codec.Pcm"), "pcm");
+	const std::string det = f ? details_text(f) : std::string();
+	obs_property_t *details = obs_properties_add_text(adv, S_DETAILS, det.c_str(), OBS_TEXT_INFO);
+	obs_property_text_set_info_word_wrap(details, true);
+	obs_properties_add_group(p, S_ADVANCED, T_("AudioCleaner.Advanced"), OBS_GROUP_NORMAL, adv);
 	return p;
 }
 
 }  // namespace
+
+// Called when the plugin unloads: lets network threads that had to be detached finish before the code goes.
+extern "C" void audio_cleaner_shutdown(void)
+{
+	acw::wait_for_background_threads(1500);
+}
 
 extern "C" void audio_cleaner_register_filter(void)
 {

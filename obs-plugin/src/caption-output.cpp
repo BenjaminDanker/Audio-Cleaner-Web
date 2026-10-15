@@ -22,16 +22,30 @@ namespace {
 std::mutex g_mu;
 std::unique_ptr<acw::CaptionPacer> g_pacer;
 
-// Runs on the pacer thread: one <= 32 character line at a time.
-void send_line(const std::string &line, double seconds)
-{
 #ifdef ACW_HAVE_FRONTEND_API
-	obs_output_t *output = obs_frontend_get_streaming_output();
+// Puts the line on `output` when it is running. Takes over the reference the frontend returned.
+void send_to(obs_output_t *output, const std::string &line, double seconds)
+{
 	if (!output)
 		return;
 	if (obs_output_active(output))
 		obs_output_output_caption_text2(output, line.c_str(), seconds);
-	obs_output_release(output);  // the frontend returns a new reference
+	obs_output_release(output);
+}
+#endif
+
+// Runs on the pacer thread: one <= 32 character line at a time, to the stream and to the recording.
+void send_line(const std::string &line, double seconds)
+{
+#ifdef ACW_HAVE_FRONTEND_API
+	obs_output_t *stream = obs_frontend_get_streaming_output();
+	obs_output_t *rec = obs_frontend_get_recording_output();
+	if (rec == stream && rec) {  // one output serving as both: do not caption it twice
+		obs_output_release(rec);
+		rec = nullptr;
+	}
+	send_to(stream, line, seconds);
+	send_to(rec, line, seconds);
 #else
 	(void)line;
 	(void)seconds;

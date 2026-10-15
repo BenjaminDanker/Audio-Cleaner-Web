@@ -9,7 +9,9 @@
  * device), records the mixed output and reports: module API version, property
  * list, the timestamp back-dating (output vs. input timeline), level, and the
  * filter status text. With speakers.wav it also plays that file on the Desktop Audio channel, so the
- * filter's echo cancellation (reference taken from that source) runs. Not a unit test; needs a running server.
+ * filter's echo cancellation (reference taken from that source) runs; SMOKE_MUTE_DESKTOP=1 mutes that source
+ * in OBS first (the reference must still arrive). Not a unit test; needs a running server
+ * (e.g. `core_loopback_test --serve`, which prints how many microphone and reference frames it gets).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -240,6 +242,9 @@ int main(int argc, char **argv)
 		desktop = obs_source_create("smoke_input", "Desktop Audio", NULL, NULL);
 		obs_set_output_source(1, desktop);
 		obs_source_set_audio_active(desktop, true);
+		/* SMOKE_MUTE_DESKTOP=1: muted in the OBS mixer, but still "playing": the reference must keep flowing */
+		if (getenv("SMOKE_MUTE_DESKTOP"))
+			obs_source_set_muted(desktop, true);
 	}
 
 	obs_data_t *fs = obs_data_create();

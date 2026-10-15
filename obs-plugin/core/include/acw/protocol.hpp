@@ -38,7 +38,7 @@ bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out,
 
 struct StartParams {
 	bool denoise = true;                 // tier "light"
-	std::string captions;                // "", "local" or "premium"
+	std::string captions;                // "", "local" (standard) or "premium" (extra accurate)
 	std::string language;                // "" = auto
 	int atten_lim_db = 100;
 	std::string codec = "pcm_s16le";     // "opus" or "pcm_s16le"
@@ -73,6 +73,7 @@ struct Event {
 	std::string code;      // warning/error code, or stopped.reason
 	std::string message;
 	int seconds_left = -1;
+	int retry_after_s = 0;  // optional hint on errors: do not retry sooner (0 = none)
 	// pong
 	uint64_t pong_t = 0;
 	bool has_pong_t = false;

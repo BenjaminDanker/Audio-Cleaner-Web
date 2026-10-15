@@ -167,6 +167,14 @@ static void test_protocol()
 	CHECK(ev.type == EventType::Error && ev.code == "tos");
 	CHECK(parse_event(R"({"type":"pong","t":123456,"seconds":4.2})", ev));
 	CHECK(ev.type == EventType::Pong && ev.has_pong_t && ev.pong_t == 123456);
+	// retry hints and hostile numbers
+	CHECK(parse_event(R"({"type":"error","code":"unavailable","message":"busy","retryAfterSeconds":90})", ev));
+	CHECK(ev.type == EventType::Error && ev.retry_after_s == 90);
+	CHECK(parse_event(R"({"type":"error","code":"x","retryAfter":99999999})", ev) && ev.retry_after_s == 3600);
+	CHECK(parse_event(R"({"type":"error","code":"x","retryAfter":-4})", ev) && ev.retry_after_s == 0);
+	CHECK(parse_event(R"({"type":"error","code":"x"})", ev) && ev.retry_after_s == 0);
+	CHECK(parse_event(R"({"type":"warning","code":"low_balance","secondsLeft":1e300})", ev));
+	CHECK(ev.seconds_left == 1000000000);
 	CHECK(!parse_event("not json", ev));
 	CHECK(parse_event(R"({"type":"something_new"})", ev) && ev.type == EventType::Unknown);
 }
@@ -294,6 +302,105 @@ static void test_caption_lines()
 			CHECK(s != "ignored");
 	}
 	p.stop();
+}
+
+static void test_caption_pacing()
+{
+	std::printf("caption conversion and pacing\n");
+	// Typographic characters become plain ones, accents the channel has stay, missing letters are folded.
+	CHECK(to_cea608("“It’s” – ok…") == "\"It's\" - ok...");
+	CHECK(to_cea608("café ñandú") == "café ñandú");
+	CHECK(to_cea608("Łódź Ść") == "Lódz Sc");  // Polish
+	CHECK(to_cea608("şiğır") == "sigir");                     // Turkish
+	CHECK(to_cea608("København æ") == "København ae");        // Danish
+	double lost = -1;
+	CHECK(to_cea608("hello", &lost) == "hello" && lost == 0.0);
+	to_cea608("Привет мир", &lost);  // Russian
+	CHECK(lost == 1.0);
+	to_cea608("你好", &lost);  // Chinese
+	CHECK(lost == 1.0);
+	to_cea608("ok 😀", &lost);  // one emoji among three characters
+	CHECK(lost > 0.3 && lost < 0.4);
+	CHECK(utf8_count("héllo 😀") == 7);
+
+	// A long caption is delivered whole and in order (it used to lose its beginning).
+	std::mutex m;
+	std::vector<std::string> sent;
+	CaptionPacer::Options o;
+	o.min_gap_seconds = 0.01;
+	o.chars_per_second = 5000;
+	std::string long_text;
+	for (int i = 0; i < 40; ++i)
+		long_text += "word" + std::to_string(100 + i) + " ";  // 8 lines of 32 characters or so
+	const size_t want_lines = split_caption_lines(long_text, 32).size();
+	CHECK(want_lines >= 8 && want_lines <= o.max_queue_lines);
+	{
+		CaptionPacer p(
+			[&](const std::string &line, double) {
+				std::lock_guard<std::mutex> lk(m);
+				sent.push_back(line);
+			},
+			o);
+		p.push(long_text);
+		std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		p.stop();
+		CHECK(p.dropped_lines() == 0);
+	}
+	{
+		std::lock_guard<std::mutex> lk(m);
+		CHECK(sent.size() == want_lines);
+		CHECK(!sent.empty() && sent.front().rfind("word100", 0) == 0);
+		std::string joined;
+		for (auto &l : sent)
+			joined += (joined.empty() ? "" : " ") + l;
+		CHECK(joined + " " == long_text);
+	}
+	// A new caption makes room by dropping older captions' lines, never its own.
+	sent.clear();
+	o.max_queue_lines = 4;
+	o.min_gap_seconds = 0.2;
+	o.chars_per_second = 1000;
+	{
+		CaptionPacer p(
+			[&](const std::string &line, double) {
+				std::lock_guard<std::mutex> lk(m);
+				sent.push_back(line);
+			},
+			o);
+		p.push("old one");
+		p.push("old two");
+		p.push("old three");
+		p.push("old four");
+		p.push("fresh one two three four five six seven eight nine ten eleven twelve");  // 3 lines
+		std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+		p.stop();
+	}
+	{
+		std::lock_guard<std::mutex> lk(m);
+		int fresh = 0;
+		for (auto &l : sent)
+			fresh += l.find("one two") != std::string::npos || l.find("ten") != std::string::npos ||
+				 l.find("three four") != std::string::npos;
+		CHECK(fresh >= 2);
+		std::string all;
+		for (auto &l : sent)
+			all += l + " ";
+		CHECK(all.find("twelve") != std::string::npos);
+	}
+	// Captions the channel cannot show at all are dropped, not sent as gibberish.
+	sent.clear();
+	{
+		CaptionPacer p(
+			[&](const std::string &line, double) {
+				std::lock_guard<std::mutex> lk(m);
+				sent.push_back(line);
+			});
+		p.push(u8"\u041f\u0440\u0438\u0432\u0435\u0442");
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		CHECK(p.dropped_lines() == 1 && p.sent_lines() == 0);
+		p.stop();
+	}
+	CHECK(sent.empty());
 }
 
 static void test_resampler()
@@ -613,6 +720,42 @@ static void test_reference_buffer()
 	CHECK_NEAR(std::sqrt(e / (got * 960.0)), 0.5 / std::sqrt(2.0), 0.03);
 }
 
+static void test_session_texts()
+{
+	std::printf("session texts and address rules\n");
+	CHECK(server_url_allowed("wss://mc-multi-world.space/audio/api/stream/ws"));
+	CHECK(server_url_allowed("ws://127.0.0.1:8791/api/stream/ws"));
+	CHECK(server_url_allowed("ws://localhost/x"));
+	CHECK(server_url_allowed("ws://[::1]:9/x"));
+	CHECK(server_url_allowed("ws://192.168.1.20/x") && server_url_allowed("ws://10.1.2.3:80/x"));
+	CHECK(server_url_allowed("ws://172.16.0.1/x") && server_url_allowed("ws://172.31.9.9/x"));
+	CHECK(server_url_allowed("ws://studio.local/x"));
+	CHECK(!server_url_allowed("ws://172.32.0.1/x") && !server_url_allowed("ws://172.15.0.1/x"));
+	CHECK(!server_url_allowed("ws://example.com/x") && !server_url_allowed("ws://8.8.8.8/x"));
+	CHECK(!server_url_allowed("ws://127.0.0.1.evil.example/x"));
+	CHECK(!server_url_allowed("ws://localhost@evil.example/x"));  // user info trick
+	CHECK(!server_url_allowed("http://127.0.0.1/x") && !server_url_allowed(""));
+	CHECK(std::string(latency_preset_name(80)) == "Low" && std::string(latency_preset_name(150)) == "Balanced" &&
+	      std::string(latency_preset_name(250)) == "Safe");
+
+	SessionConfig cfg;
+	cfg.api_key = "x";
+	cfg.url = "ws://example.com/x";
+	Session refused(cfg, nullptr, nullptr);
+	refused.start();
+	CHECK(refused.snapshot().state == SessionState::Stopped);
+	CHECK(refused.status_line().find("local network") != std::string::npos);
+
+	cfg.url = "ws://127.0.0.1:1/x";
+	Session idle(cfg, nullptr, nullptr);
+	CHECK(idle.status_line().rfind("Waiting for audio from OBS.", 0) == 0);
+	CHECK(idle.status_line().find("RTT") == std::string::npos);
+	CHECK(idle.status_details().find("idle") != std::string::npos);
+	// Nothing to retry unless blocked.
+	idle.retry_now();
+	CHECK(idle.snapshot().state == SessionState::Idle);
+}
+
 static void test_session_config()
 {
 	std::printf("session configuration\n");
@@ -664,6 +807,7 @@ int main()
 	test_opus();
 	test_backoff();
 	test_caption_lines();
+	test_caption_pacing();
 	test_resampler();
 	test_output_stage();
 	test_session_passthrough(48000, 150);
@@ -671,6 +815,7 @@ int main()
 	test_session_passthrough(44100, 80);
 	test_reference_buffer();
 	test_session_config();
+	test_session_texts();
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures ? 1 : 0;
 }

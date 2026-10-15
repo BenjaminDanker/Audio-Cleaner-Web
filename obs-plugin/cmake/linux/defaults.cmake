@@ -21,7 +21,16 @@ set(CPACK_GENERATOR "DEB")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "obs-studio (>= 31), libssl3 | libssl3t64")
 set(CPACK_DEBIAN_PACKAGE_SECTION "video")
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${PLUGIN_EMAIL}")
+set(
+  CPACK_DEBIAN_PACKAGE_DESCRIPTION
+  "Audio Cleaner (cloud) filter for OBS Studio\nRemoves background noise and echo from a microphone and can add live captions to the stream, using the Audio Cleaner online service (an account is needed).\nLicensed under GPL-2.0-or-later."
+)
+set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "${PLUGIN_WEBSITE}")
+if(PLUGIN_EMAIL)
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${PLUGIN_AUTHOR} <${PLUGIN_EMAIL}>")
+else()
+  set(CPACK_DEBIAN_PACKAGE_MAINTAINER "${PLUGIN_AUTHOR} (${PLUGIN_WEBSITE})")
+endif()
 set(CPACK_SET_DESTDIR ON)
 
 if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.25.0 OR NOT CMAKE_CROSSCOMPILING)

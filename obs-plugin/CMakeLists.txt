@@ -53,6 +53,10 @@ endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
 
+# Licence texts travel with every binary package (GPL and BSD notices must be passed on).
+target_add_resource(${CMAKE_PROJECT_NAME} "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+target_add_resource(${CMAKE_PROJECT_NAME} "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_LICENSES.md")
+
 if(ACW_BUILD_TESTS AND UNIX)
   # Headless libobs host that loads the module and drives the filter (needs a running server).
   add_executable(obs_smoke EXCLUDE_FROM_ALL tests/obs_smoke.c)

@@ -75,6 +75,8 @@ if(_acw_tls STREQUAL "mbedtls")
     URL https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2
     URL_HASH SHA256=a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    # Linked statically and privately: never part of `cmake --install` / the packages (needs CMake >= 3.28).
+    EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(acw_mbedtls)
   set(BUILD_SHARED_LIBS "${_acw_saved_shared}")
@@ -173,6 +175,9 @@ if(ACW_USE_OPUS)
     URL https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz
     URL_HASH SHA256=65c1d2f78b9f2fb20082c38cbe47c951ad5839345876e46941612ee87f9a7ce1
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    # Linked statically and privately: its install rules (libopus.a, include/opus) must not end up in the
+    # .deb / zip, where they would clash with the system's libopus-dev (needs CMake >= 3.28).
+    EXCLUDE_FROM_ALL
   )
   FetchContent_MakeAvailable(acw_opus)
   set(BUILD_SHARED_LIBS "${_acw_saved_shared_opus}")

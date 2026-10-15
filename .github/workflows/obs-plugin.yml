@@ -1,5 +1,6 @@
 # Builds the Audio Cleaner OBS plugin for Windows x64, macOS (universal) and Ubuntu x86_64.
 #
+# Third-party actions are pinned by commit SHA (the tag is in the comment); update them on purpose, not by accident.
 #
 # Structure follows obsproject/obs-plugintemplate (CMake presets, buildspec.json
 # pins OBS 31.1.1 and the obs-deps used to build libobs), without its zsh/pwsh
@@ -33,12 +34,13 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Core library + unit tests, no OBS needed (fast feedback)
+  # Core library + tests, no OBS needed (fast feedback): the offline unit tests and the loopback tests, where
+  # the real session talks to a fake server on 127.0.0.1 (handshake, errors, retries, late replies, garbage).
   core-tests:
-    name: Core unit tests
+    name: Core tests
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -47,8 +49,73 @@ jobs:
         run: cmake --preset core-tests -DCMAKE_COMPILE_WARNING_AS_ERROR=ON
       - name: Build
         run: cmake --build --preset core-tests
-      - name: Unit tests
+      - name: Unit and loopback tests
         run: ctest --test-dir build_tests --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # The same tests under AddressSanitizer + UBSan and under ThreadSanitizer. The network path is threaded
+  # (audio thread, network thread, the WebSocket library's threads, the UI thread), which is where races hide.
+  sanitizers:
+    name: Sanitizers (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: asan
+            name: ASan + UBSan
+            flags: -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=undefined
+          - id: tsan
+            name: TSan
+            flags: -fsanitize=thread -fno-omit-frame-pointer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ninja-build libssl-dev
+      - name: Let ThreadSanitizer start on this kernel
+        if: matrix.id == 'tsan'
+        # TSan cannot map its shadow memory with the runners' default address randomisation.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Configure
+        run: |
+          cmake -S . -B build_san -G Ninja -DACW_BUILD_PLUGIN=OFF -DACW_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_COMPILE_WARNING_AS_ERROR=ON \
+            "-DCMAKE_C_FLAGS=-O1 -g ${{ matrix.flags }}" "-DCMAKE_CXX_FLAGS=-O1 -g ${{ matrix.flags }}" \
+            "-DCMAKE_EXE_LINKER_FLAGS=${{ matrix.flags }}"
+      - name: Build
+        run: cmake --build build_san
+      - name: Unit and loopback tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build_san --output-on-failure
+
+  # ---------------------------------------------------------------------------
+  # The same tests with the compilers of the other two platforms. Informational for now: nobody has run
+  # them by hand there yet, so a failure does not hold back the release.
+  core-tests-portable:
+    name: Core tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    defaults:
+      run:
+        shell: bash
+        working-directory: obs-plugin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Configure
+        run: cmake -S . -B build_tests -DACW_BUILD_PLUGIN=OFF -DACW_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build_tests --config RelWithDebInfo --parallel
+      - name: Unit and loopback tests
+        run: ctest --test-dir build_tests -C RelWithDebInfo --output-on-failure
 
   # ---------------------------------------------------------------------------
   linux:
@@ -56,7 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: core-tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install build dependencies
         run: |
@@ -92,7 +159,7 @@ jobs:
             -DACW_BUILD_TESTS=ON
       - name: Build plugin
         run: cmake --build --preset ubuntu-ci-x86_64
-      - name: Unit tests
+      - name: Unit and loopback tests
         run: ctest --test-dir build_x86_64 --output-on-failure
       - name: Check the module API version
         run: |
@@ -102,11 +169,29 @@ jobs:
       - name: Package
         run: |
           name=$(jq -r .name buildspec.json); version=$(jq -r .version buildspec.json)
-          cmake --install build_x86_64 --config "$CONFIG" --prefix "$PWD/release/$CONFIG"
+          cmake --install build_x86_64 --config "$CONFIG" --strip --prefix "$PWD/release/$CONFIG"
           cpack -G DEB --config build_x86_64/CPackConfig.cmake -B "$PWD/release"
-          tar -C "release/$CONFIG" -cJf "release/${name}-${version}-ubuntu-x86_64.tar.xz" .
+          # "Other Linux": a ready plugin folder, to be unpacked into ~/.config/obs-studio/plugins/
+          stage=$(mktemp -d)
+          mkdir -p "$stage/$name/bin/64bit" "$stage/$name/data"
+          cp release/"$CONFIG"/lib/*/obs-plugins/"$name".so "$stage/$name/bin/64bit/"
+          cp -r release/"$CONFIG"/share/obs/obs-plugins/"$name"/. "$stage/$name/data/"
+          tar -C "$stage" -cJf "release/${name}-${version}-ubuntu-x86_64.tar.xz" "$name"
           ls -l release
-      - uses: actions/upload-artifact@v4
+      - name: Check the packages hold the plugin and nothing else
+        run: |
+          # No static libraries or headers of the bundled libraries, nothing that could clash with a system package.
+          name=$(jq -r .name buildspec.json)
+          for f in release/*.deb; do
+            bad=$(dpkg-deb -c "$f" | awk '$1 !~ /^d/ {print $6}' |
+              grep -Ev "^\./usr/(lib/[^/]+/obs-plugins/${name}\.so|share/obs/obs-plugins/${name}/(locale/en-US\.ini|LICENSE|THIRD_PARTY_LICENSES\.md))\$" || true)
+            [ -z "$bad" ] || { echo "::error::unexpected files in $f:"; echo "$bad"; exit 1; }
+            dpkg-deb -I "$f" | grep -E 'Maintainer|Description'
+          done
+          bad=$(tar -tJf release/*-ubuntu-x86_64.tar.xz | grep -v '/$' |
+            grep -Ev "^${name}/(bin/64bit/${name}\.so|data/(locale/en-US\.ini|LICENSE|THIRD_PARTY_LICENSES\.md))\$" || true)
+          [ -z "$bad" ] || { echo "::error::unexpected files in the tarball:"; echo "$bad"; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audio-cleaner-ubuntu-x86_64
           path: |
@@ -123,7 +208,7 @@ jobs:
       # Ad-hoc signature ("-") is used unless a Developer ID identity is provided.
       CODESIGN_IDENT: "-"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
       - name: Configure (downloads OBS 31.1.1 sources + obs-deps pinned in buildspec.json)
@@ -153,7 +238,7 @@ jobs:
           cd "release/$CONFIG"
           XZ_OPT=-T0 tar -cJf "../${name}-${version}-macos-universal.tar.xz" "${name}.plugin"
           lipo -archs "${name}.plugin/Contents/MacOS/${name}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audio-cleaner-macos-universal
           path: obs-plugin/release/*.tar.xz
@@ -168,7 +253,7 @@ jobs:
         shell: pwsh
         working-directory: obs-plugin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Configure (downloads OBS 31.1.1 sources + obs-deps pinned in buildspec.json)
         run: cmake --preset windows-ci-x64
       - name: Build
@@ -176,7 +261,7 @@ jobs:
       - name: Install
         run: cmake --install build_x64 --config $env:CONFIG --prefix "$PWD/release/$env:CONFIG"
 
-      # TODO(signing): Authenticode. Sign release/*/obs-plugins/64bit/audio-cleaner.dll with signtool
+      # TODO(signing): Authenticode. Sign release/*/audio-cleaner/bin/64bit/audio-cleaner.dll with signtool
       # (or Azure Trusted Signing / a cloud HSM) and timestamp it:
       #   signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f cert.pfx /p $env:PFX_PASSWORD <dll>
       - name: Sign (placeholder, not implemented)
@@ -189,7 +274,18 @@ jobs:
           $out = "release/$($spec.name)-$($spec.version)-windows-x64.zip"
           Compress-Archive -Force -Path "release/$env:CONFIG/*" -DestinationPath $out
           Get-Item $out
-      - uses: actions/upload-artifact@v4
+      - name: Check the package holds the plugin folder and nothing else
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Get-Item release/*-windows-x64.zip).FullName)
+          try {
+            $names = $zip.Entries | Where-Object { $_.Name -ne '' } | ForEach-Object { $_.FullName -replace '\\', '/' }
+          } finally { $zip.Dispose() }
+          $names | ForEach-Object { "  $_" }
+          $bad = $names | Where-Object { $_ -notmatch '^audio-cleaner/(bin/64bit/audio-cleaner\.(dll|pdb)|data/.+)$' }
+          if ($bad) { throw "unexpected files in the zip: $($bad -join ', ')" }
+          if (-not ($names -contains 'audio-cleaner/bin/64bit/audio-cleaner.dll')) { throw 'the dll is missing from the zip' }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audio-cleaner-windows-x64
           path: obs-plugin/release/*.zip
@@ -204,7 +300,7 @@ jobs:
     if: >-
       startsWith(github.ref, 'refs/tags/obs-plugin-v') ||
       (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/on-prem'))
-    needs: [core-tests, linux, macos, windows]
+    needs: [core-tests, sanitizers, linux, macos, windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -215,12 +311,12 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           sparse-checkout: obs-plugin/buildspec.json
           sparse-checkout-cone-mode: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: audio-cleaner-*
           merge-multiple: true
@@ -254,7 +350,25 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
               --title "OBS plugin $version" --notes "$notes" "${files[@]}"
           else
-            gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
-            gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "OBS plugin $version (latest build)" --notes "$notes" "${files[@]}"
+            title="OBS plugin $version (latest build)"
+            # Update the existing release in place, so the download links never 404 while it changes.
+            update_in_place() {
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/obs-plugin-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null || return 1
+              gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}" || return 1
+              gh release edit obs-plugin-latest --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease --latest=false || return 1
+              # Files of an older version number (they have it in their name) go away.
+              gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
+                while read -r asset; do
+                  printf '%s\n' "${files[@]}" | grep -qxF "$asset" ||
+                    gh release delete-asset obs-plugin-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
+                done
+            }
+            if gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && update_in_place; then
+              echo "updated obs-plugin-latest in place"
+            else
+              echo "creating obs-plugin-latest from scratch"
+              gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+              gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+                --title "$title" --notes "$notes" "${files[@]}"
+            fi
           fi

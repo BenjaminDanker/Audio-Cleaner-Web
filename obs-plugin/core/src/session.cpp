@@ -14,12 +14,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -42,6 +44,8 @@ const char *to_string(SessionState s)
 		return "reconnecting";
 	case SessionState::Stopped:
 		return "stopped";
+	case SessionState::Blocked:
+		return "blocked";
 	}
 	return "?";
 }
@@ -71,6 +75,12 @@ constexpr int kPingIntervalMs = 5000;
 constexpr int kRxWatchdogMs = 20000;
 constexpr int kIdleDisconnectMs = 10000;     // no audio from the host for this long: close the session
 constexpr size_t kRttRing = 8192;
+constexpr int kLateWindowS = 6;          // seconds over which late frames are counted
+constexpr uint64_t kLateMinFrames = 100;  // ... needs at least this many frames (2 s) before judging
+constexpr double kLateSetPct = 30.0;     // more than this many percent late: the link is too slow
+constexpr double kLateClearPct = 15.0;   // ... until it is below this again
+constexpr int kFramingMs = 25;           // 20 ms frame + 5 ms cross-fade: what the delay budget loses to framing
+constexpr int kOpusMinBitrate = 24000;   // the lowest the server accepts: enough when only captions are wanted
 
 bool is_secure_url(const std::string &u)
 {
@@ -80,6 +90,59 @@ bool is_plain_url(const std::string &u)
 {
 	return u.rfind("ws://", 0) == 0;
 }
+
+// Host part of a ws:// or wss:// URL (without port, brackets kept for IPv6).
+std::string url_host(const std::string &u)
+{
+	const size_t b = u.find("://");
+	if (b == std::string::npos)
+		return {};
+	size_t i = b + 3;
+	const size_t at = u.find('@', i);  // user info
+	const size_t slash = u.find_first_of("/?#", i);
+	if (at != std::string::npos && (slash == std::string::npos || at < slash))
+		i = at + 1;
+	size_t e = u.find_first_of("/?#", i);
+	std::string hp = u.substr(i, e == std::string::npos ? std::string::npos : e - i);
+	if (!hp.empty() && hp[0] == '[') {
+		const size_t rb = hp.find(']');
+		return rb == std::string::npos ? hp : hp.substr(0, rb + 1);
+	}
+	const size_t colon = hp.find(':');
+	return colon == std::string::npos ? hp : hp.substr(0, colon);
+}
+
+// Unencrypted connections are only acceptable to this computer or the local network.
+bool is_local_host(std::string h)
+{
+	for (char &c : h)
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	if (h == "localhost" || h == "[::1]")
+		return true;
+	if (h.size() > 6 && h.compare(h.size() - 6, 6, ".local") == 0)
+		return true;
+	// Dotted quad: four numbers 0-255 and nothing else.
+	int part[4] = {0, 0, 0, 0};
+	int idx = 0, digits = 0;
+	for (char ch : h) {
+		if (ch >= '0' && ch <= '9') {
+			part[idx] = part[idx] * 10 + (ch - '0');
+			if (++digits > 3 || part[idx] > 255)
+				return false;
+		} else if (ch == '.' && digits > 0 && idx < 3) {
+			++idx;
+			digits = 0;
+		} else {
+			return false;
+		}
+	}
+	if (idx != 3 || digits == 0)
+		return false;
+	const int a = part[0], b = part[1];
+	return a == 127 || a == 10 || (a == 192 && b == 168) || (a == 172 && b >= 16 && b <= 31) || (a == 169 && b == 254);
+}
+
+std::atomic<int> g_bg_threads{0};  // network threads that are running (detached ones included)
 
 #if defined(ACW_TLS_MBEDTLS) && !defined(_WIN32)
 // mbedTLS has no system trust store: use the distribution's CA bundle.
@@ -113,6 +176,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		int http_status = 0;
 		std::string reason;                // transport-level close/error text
 		std::string server_code, server_msg;  // `error` event
+		int retry_after_s = 0;             // ... and its optional retry hint
 		std::string stopped_reason;        // `stopped` event
 		Event ready_ev;
 		std::unique_ptr<OpusDec> opus_dec;  // used by the IX thread only
@@ -121,10 +185,13 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	};
 
 	struct Outcome {
-		std::string reason;
+		std::string reason;      // technical, for the log and the details line
+		std::string message;     // plain words for the user
 		int min_wait_ms = 0;
 		int streamed_ms = 0;
 		bool immediate = false;  // reconnect without waiting (server restarted the session)
+		bool give_up = false;    // only the user can fix this: stop retrying until retry_now()
+		bool slow = false;       // the server is limiting us (busy, too many sessions, rate limit): back off hard
 	};
 
 	SessionConfig cfg;
@@ -150,6 +217,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	SpscQueue<Frame> queue{kQueueFrames};
 	std::atomic<bool> streaming{false};
 	std::atomic<bool> echo_active{false};  // the server accepted the echo reference
+	std::atomic<int> atten_db{100};        // current attenuation limit (UI thread writes, network thread reads)
 	std::atomic<uint64_t> last_process_us{0};
 
 	// ---- thread control ----------------------------------------------------
@@ -163,11 +231,15 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	std::condition_variable done_cv;
 	bool net_done = false;
 	std::atomic<int> pending_atten{-1};
+	std::atomic<bool> retry_req{false};
+	std::atomic<bool> link_slow{false};
+	std::atomic<int> late_x10{0};  // recent share of late frames, in 0.1 %
 
 	// ---- status ------------------------------------------------------------
 	mutable std::mutex st_mu;
 	SessionState state = SessionState::Idle;
 	std::string detail;
+	std::string message;
 	std::string session_id;
 	double usd_per_minute = 0, model_latency_ms = 0;
 	int backoff_s = 0;
@@ -193,6 +265,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		if (cfg.host_rate < 8000 || cfg.host_rate > kNetRate)
 			supported = false;
 		cfg.atten_lim_db = std::min(100, std::max(6, cfg.atten_lim_db));
+		atten_db.store(cfg.atten_lim_db);
 
 		if (cfg.codec == Codec::Opus) {
 			OpusEnc probe(cfg.opus_bitrate);
@@ -220,7 +293,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			if (resampled)
 				delay_sec += up->group_delay_seconds() + down->group_delay_seconds();
 		}
-		set_state(SessionState::Idle, supported ? "waiting for audio" : "unsupported sample rate: audio passed through");
+		set_state(SessionState::Idle, supported ? "waiting for audio" : "unsupported sample rate: audio passed through",
+			  supported ? "Waiting for audio from OBS." : "");
 	}
 
 	~Impl() { ix::uninitNetSystem(); }
@@ -244,11 +318,12 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		cb_enabled = false;
 	}
 
-	void set_state(SessionState s, const std::string &d = std::string())
+	void set_state(SessionState s, const std::string &d = std::string(), const std::string &m = std::string())
 	{
 		std::lock_guard<std::mutex> lk(st_mu);
 		state = s;
 		detail = d;
+		message = m;
 		if (s != SessionState::Backoff)
 			backoff_s = 0;
 	}
@@ -268,8 +343,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 
 	void process(float *io, size_t n)
 	{
-		if (last_process_us.exchange(now_us(), std::memory_order_relaxed) == 0)
-			cv.notify_all();  // first audio: let the network thread connect right away
+		last_process_us.store(now_us(), std::memory_order_relaxed);  // the network thread polls this
 		if (!supported)
 			return;
 		while (n > 0) {
@@ -310,7 +384,9 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	{
 		while (n > 0) {
 			const size_t take = std::min(n, kFrameSamples - fill);
-			std::memcpy(cur.pcm + fill, x, take * sizeof(float));
+			float *dst = cur.pcm + fill;
+			for (size_t i = 0; i < take; ++i)  // a NaN/Inf from a misbehaving source must not reach the encoder
+				dst[i] = std::isfinite(x[i]) ? x[i] : 0.0f;
 			fill += take;
 			x += take;
 			n -= take;
@@ -329,8 +405,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				continue;
 			}
 			*slot = cur;
-			queue.commit();
-			cv.notify_one();
+			queue.commit();  // the network thread polls the queue (a few ms): no wake-up call from here
 		}
 	}
 
@@ -353,14 +428,64 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		return t != 0 && now_us() - t < 2'000'000;
 	}
 
+	// Blocked: waits until the user asks for another try (or the session is stopped).
+	void wait_for_retry()
+	{
+		std::unique_lock<std::mutex> lk(mu);
+		cv.wait(lk, [&] { return stopping() || retry_req.load(); });
+		retry_req.store(false);
+	}
+
+	// ---- late frames ---------------------------------------------------------------
+	// Once a second: how many of the frames decided in the last few seconds came back too late? A fixed
+	// delay D leaves the network a fixed time budget; beyond it every frame misses its deadline and the
+	// listener silently gets the unprocessed audio, so the user is told.
+	struct LateWindow {
+		uint64_t used[kLateWindowS + 1] = {}, late[kLateWindowS + 1] = {};
+		int n = 0;
+	};
+
+	void update_late_window(LateWindow &w)
+	{
+		constexpr int kN = kLateWindowS + 1;
+		w.used[w.n % kN] = counters.used.load(std::memory_order_relaxed);
+		w.late[w.n % kN] = counters.late.load(std::memory_order_relaxed);
+		++w.n;
+		const int back = std::min(w.n - 1, kLateWindowS);
+		if (back < 2)
+			return;
+		const int oldest = (w.n - 1 - back) % kN, newest = (w.n - 1) % kN;
+		const uint64_t du = w.used[newest] - w.used[oldest], dl = w.late[newest] - w.late[oldest];
+		if (du + dl < kLateMinFrames)
+			return;  // too few frames to judge (e.g. just connected)
+		const double pct = 100.0 * static_cast<double>(dl) / static_cast<double>(du + dl);
+		late_x10.store(static_cast<int>(pct * 10.0), std::memory_order_relaxed);
+		const bool slow = link_slow.load(std::memory_order_relaxed);
+		if (!slow && pct > kLateSetPct) {
+			link_slow.store(true, std::memory_order_relaxed);
+			log(LogLevel::Warning, "most processed audio is arriving too late for the " + std::string(latency_preset_name(cfg.delay_ms)) +
+						       " (" + std::to_string(cfg.delay_ms) + " ms) delay setting; the original audio is played instead");
+		} else if (slow && pct < kLateClearPct) {
+			link_slow.store(false, std::memory_order_relaxed);
+			log(LogLevel::Info, "processed audio is arriving in time again");
+		}
+	}
+
 	void net_main()
 	{
 		Backoff backoff(std::chrono::milliseconds(1000), std::chrono::milliseconds(60000));
+		// For refusals that come from limits on the server side (busy, two sessions at most, rate limit): each
+		// attempt counts against the account's hourly start allowance, so retry slowly.
+		Backoff slow_backoff(std::chrono::milliseconds(40000), std::chrono::milliseconds(300000));
 		bool first = true;
 		while (!stopping()) {
+			if (!supported) {  // nothing is sent for an unsupported sample rate: do not hold a session open
+				sleep_interruptible(std::chrono::milliseconds(500));
+				continue;
+			}
 			// Connect lazily: only once the host actually feeds audio.
 			if (!audio_is_flowing()) {
-				set_state(SessionState::Idle, "waiting for audio");
+				set_state(SessionState::Idle, "waiting for audio", "Waiting for audio from OBS.");
 				sleep_interruptible(std::chrono::milliseconds(100));
 				continue;
 			}
@@ -371,14 +496,26 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			Outcome out = run_attempt();
 			if (stopping())
 				break;
-			if (out.streamed_ms >= 30000)
+			if (out.streamed_ms >= 30000) {
 				backoff.reset();
-			std::chrono::milliseconds wait = out.immediate ? std::chrono::milliseconds(500) : backoff.next();
+				slow_backoff.reset();
+			}
+			if (out.give_up) {
+				set_state(SessionState::Blocked, out.reason, out.message);
+				log(LogLevel::Warning, out.message + " (" + out.reason + ") Not retrying until you press Try again or change a setting.");
+				wait_for_retry();
+				backoff.reset();
+				slow_backoff.reset();
+				continue;
+			}
+			std::chrono::milliseconds wait = out.immediate ? std::chrono::milliseconds(500)
+									: (out.slow ? slow_backoff.next() : backoff.next());
 			wait = std::max(wait, std::chrono::milliseconds(out.min_wait_ms));
 			{
 				std::lock_guard<std::mutex> lk(st_mu);
 				state = SessionState::Backoff;
 				detail = out.reason;
+				message = out.message;
 				backoff_s = static_cast<int>((wait.count() + 999) / 1000);
 			}
 			log(LogLevel::Warning, "connection lost (" + out.reason + "); retrying in " + std::to_string(backoff_s) +
@@ -386,7 +523,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			sleep_interruptible(wait);
 		}
 		streaming.store(false);
-		set_state(SessionState::Stopped, "stopped");
+		set_state(SessionState::Stopped, "stopped", "Stopped.");
 		{
 			std::lock_guard<std::mutex> lk(done_mu);
 			net_done = true;
@@ -407,10 +544,91 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		return true;
 	}
 
-	static bool is_fatal_code(const std::string &c)
+	std::string preset_text() const
 	{
-		return c == "insufficient_funds" || c == "tos" || c == "bad_config" || c == "bad_tier" ||
-		       c == "nothing_enabled" || c == "bad_start";
+		return std::string(latency_preset_name(cfg.delay_ms)) + " (" + std::to_string(cfg.delay_ms) + " ms)";
+	}
+
+	// What an `error` event (at start, or later) means for the user and for retrying.
+	// Permanent ones (only a changed setting or account fixes them) stop the retries; limits on the server
+	// side back off hard; the rest is retried with the normal backoff.
+	void classify_server_error(const std::string &code, const std::string &msg, int retry_after_s, Outcome &out) const
+	{
+		out.reason = "server: " + code + (msg.empty() ? "" : " - " + msg);
+		if (code == "insufficient_funds") {
+			out.give_up = true;
+			out.message = "There is not enough balance to start live processing." + (msg.empty() ? std::string() : " " + msg) +
+				      " Add balance on the website, then press Try again.";
+		} else if (code == "tos") {
+			out.give_up = true;
+			out.message = "Please accept the terms of service on the website, then press Try again.";
+		} else if (code == "bad_config") {
+			out.give_up = true;
+			out.message = "The server did not accept these settings." + (msg.empty() ? std::string() : " " + msg) +
+				      " Change them, then press Try again.";
+		} else if (code == "bad_tier") {
+			out.give_up = true;
+			out.message = "These settings are not available. Change them, then press Try again.";
+		} else if (code == "nothing_enabled") {
+			out.give_up = true;
+			out.message = "Turn on noise removal or captions, then press Try again.";
+		} else if (code == "bad_start") {
+			out.give_up = true;
+			out.message = "The server could not read this plugin's request. Please update the plugin.";
+		} else if (code == "too_many_sessions") {
+			out.slow = true;
+			out.min_wait_ms = 30000;
+			out.message = "Your account already has two live sessions running (other Audio Cleaner filters, or another "
+				      "computer). Close one of them; this one keeps trying.";
+		} else if (code == "full") {
+			out.slow = true;
+			out.min_wait_ms = 60000;
+			out.message = msg.empty() ? std::string("Live processing is full right now. Trying again in a few minutes.") : msg;
+		} else if (code == "unavailable") {
+			out.slow = true;
+			out.min_wait_ms = 30000;
+			out.message = "Live processing is busy or offline right now. Trying again soon.";
+		} else if (code == "too_fast") {
+			out.min_wait_ms = 5000;
+			out.message = "Audio was sent faster than real time (this can happen after the computer sleeps). Reconnecting.";
+		} else if (code == "worker_lost" || code == "bad_frame") {
+			out.min_wait_ms = 5000;
+			out.message = "Processing stopped unexpectedly on the server. Reconnecting.";
+		} else {
+			out.min_wait_ms = 5000;
+			out.message = "The server reported a problem" + (msg.empty() ? std::string(".") : ": " + msg) + " Reconnecting.";
+		}
+		out.min_wait_ms = std::max(out.min_wait_ms, retry_after_s * 1000);
+	}
+
+	// The WebSocket upgrade failed (HTTP status) or the connection could not be made at all.
+	void classify_connect_failure(int http_status, Outcome &out) const
+	{
+		if (http_status == 401) {
+			out.give_up = true;
+			out.message = "The server did not accept the API key. Check the key in this filter's settings, then press Try again.";
+		} else if (http_status == 403) {
+			// The server answers 403 for a key without the live scope, a suspended account and for too many
+			// recent sessions alike, so the text names all three and the retry is slow.
+			out.slow = true;
+			out.min_wait_ms = 120000;
+			out.message = "The server refused the connection. Check that the API key was made with \"OBS plugin and live\" "
+				      "ticked and that your account is active. If you connected many times in the last hour, this "
+				      "clears by itself in a few minutes.";
+		} else if (http_status == 429) {
+			out.slow = true;
+			out.min_wait_ms = 120000;
+			out.message = "Too many connection attempts. Waiting a few minutes before trying again.";
+		} else if (http_status >= 400 && http_status < 500 && http_status != 408 && http_status != 425) {
+			out.give_up = true;
+			out.message = "The server rejected the connection (error " + std::to_string(http_status) +
+				      "). Check the server address in the advanced settings, then press Try again.";
+		} else if (http_status >= 500) {
+			out.min_wait_ms = 5000;
+			out.message = "The server is having trouble (error " + std::to_string(http_status) + "). Trying again soon.";
+		} else {
+			out.message = "Could not reach the server. Check your internet connection.";
+		}
 	}
 
 	Outcome run_attempt()
@@ -418,7 +636,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		Outcome out;
 		auto att = std::make_shared<Attempt>();
 		att->last_rx_us.store(now_us());
-		set_state(SessionState::Connecting, "connecting to " + cfg.url);
+		set_state(SessionState::Connecting, "connecting to " + cfg.url, "Connecting...");
 
 		ix::WebSocket ws;
 		ws.setUrl(cfg.url);
@@ -489,31 +707,32 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		if (!waits_for(*att, std::chrono::seconds(15), [&] { return att->opened || att->closed; }, stop) ||
 		    !att->opened) {
 			out.reason = describe_failure(*att, "could not connect");
-			if (att->http_status == 401 || att->http_status == 403) {
-				out.min_wait_ms = 60000;
-				out.reason = "authentication failed (HTTP " + std::to_string(att->http_status) +
-					     "): check the API key and that it has the 'stream' scope";
-			} else if (att->http_status == 429) {
-				out.min_wait_ms = 60000;
+			int hs;
+			{
+				std::lock_guard<std::mutex> lk(att->mu);
+				hs = att->http_status;
 			}
+			classify_connect_failure(hs, out);
 			ws.stop();
 			return out;
 		}
 
 		// ---- start / ready --------------------------------------------------------
-		set_state(SessionState::Handshaking, "starting session");
+		set_state(SessionState::Handshaking, "starting session", "Connecting...");
 		{
 			StartParams sp;
 			sp.denoise = cfg.denoise;
 			sp.captions = cfg.captions;
 			sp.language = cfg.language;
-			sp.atten_lim_db = cfg.atten_lim_db;
+			sp.atten_lim_db = atten_db.load();
 			sp.codec = use_opus ? "opus" : "pcm_s16le";
-			sp.opus_bitrate = use_opus ? cfg.opus_bitrate : 0;
+			// Captions only: the returned audio is not used, so ask for the smallest stream.
+			sp.opus_bitrate = use_opus ? (cfg.denoise ? cfg.opus_bitrate : kOpusMinBitrate) : 0;
 			sp.client = cfg.client;
 			sp.echo_reference = cfg.reference != nullptr;
 			if (!ws.sendText(make_start_message(sp)).success) {
 				out.reason = "could not send start message";
+				out.message = "Could not send the start request. Trying again.";
 				ws.stop();
 				return out;
 			}
@@ -521,29 +740,59 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		if (!waits_for(*att, std::chrono::seconds(30), [&] { return att->ready || att->closed; }, stop) ||
 		    !att->ready) {
 			out.reason = describe_failure(*att, "server did not answer the start message");
-			if (!att->server_code.empty()) {
-				// "full": the server has no room for this setup right now; the
-				// message lists what is still available. Retry slowly.
-				out.min_wait_ms = is_fatal_code(att->server_code) || att->server_code == "full" ? 60000 : 15000;
-				out.reason = "server: " + att->server_code + (att->server_msg.empty() ? "" : " - " + att->server_msg);
+			std::string code, msg;
+			int retry_after = 0;
+			{
+				std::lock_guard<std::mutex> lk(att->mu);
+				code = att->server_code;
+				msg = att->server_msg;
+				retry_after = att->retry_after_s;
 			}
+			if (!code.empty())
+				classify_server_error(code, msg, retry_after, out);
+			else
+				out.message = "The server did not answer the start request. Trying again.";
 			ws.stop();
 			return out;
 		}
-		const Event ready = att->ready_ev;
+		Event ready;
+		{
+			std::lock_guard<std::mutex> lk(att->mu);
+			ready = att->ready_ev;
+		}
+		if (ready.sample_rate != 0 && ready.sample_rate != kNetRate) {
+			out.reason = "server sample rate " + std::to_string(ready.sample_rate) + " is not supported";
+			out.message = "This plugin and the server do not use the same audio format. Please update the plugin.";
+			out.give_up = true;
+			ws.stop();
+			return out;
+		}
+		// The numbers in `ready` decide the output timing: check them before they are used.
+		const double ml = ready.model_latency_ms;
+		if (!std::isfinite(ml) || ml < 0.0 || ml > 2000.0) {
+			out.reason = "invalid modelLatencyMs in the server's ready message";
+			out.message = "The server sent a reply this plugin does not understand. Trying again.";
+			out.min_wait_ms = 30000;
+			ws.stop();
+			return out;
+		}
+		const double total_latency_ms = ml + opus_extra_latency * 1000.0 / kNetRate;
+		if (cfg.denoise && static_cast<double>(cfg.delay_ms) - total_latency_ms - kFramingMs <= 0.0) {
+			// Even with a perfect network no processed frame could arrive in time.
+			out.reason = "model latency " + std::to_string(static_cast<int>(total_latency_ms)) + " ms does not fit the " +
+				     std::to_string(cfg.delay_ms) + " ms delay";
+			out.message = "The " + preset_text() + " delay setting is too short for this server. Choose a longer one in "
+				      "this filter's settings.";
+			out.give_up = true;
+			ws.stop();
+			return out;
+		}
 		const bool send_ref = cfg.reference && ready.echo_reference;
 		echo_active.store(send_ref);
 		if (cfg.reference && !send_ref)
 			log(LogLevel::Warning, "the server does not offer echo cancellation: continuing without it");
-		if (ready.sample_rate != 0 && ready.sample_rate != kNetRate) {
-			out.reason = "server sample rate " + std::to_string(ready.sample_rate) + " is not supported";
-			out.min_wait_ms = 60000;
-			ws.stop();
-			return out;
-		}
-		const int latency =
-			static_cast<int>(std::lround(ready.model_latency_ms * (kNetRate / 1000.0))) + opus_extra_latency;
-		const int warm_frames = static_cast<int>((latency + kFrameSamples - 1) / kFrameSamples);
+		const int latency = static_cast<int>(std::lround(ml * (kNetRate / 1000.0))) + opus_extra_latency;
+		const int warm_frames = (latency + static_cast<int>(kFrameSamples) - 1) / static_cast<int>(kFrameSamples);
 		if (stage && cfg.denoise)
 			stage->set_model_latency(latency);
 		{
@@ -570,6 +819,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 
 		const auto t_start = Clock::now();
 		auto last_ping = t_start;
+		auto last_window = t_start;
+		LateWindow window;
 		uint64_t last_frame_us = now_us();
 		bool first_frame = true;
 		std::string tx(kHeaderSize + std::max(2 * kFrameSamples, kMaxOpusPacket), '\0');
@@ -618,6 +869,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 					return ok;
 				};
 				// The reference goes first, so the server has it when the microphone frame arrives.
+				// (Silent reference frames are skipped; the microphone frames are never skipped, silent or
+				// not: they are what keeps the session alive on the server.)
 				if (send_ref && f->has_ref) {
 					const size_t rlen = encode(ref_enc.get(), f->ref, kFlagReference);
 					if (rlen && send(rlen))
@@ -643,27 +896,36 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				ws.sendText(make_ping_message(now_us()));
 				last_ping = now;
 			}
+			if (now - last_window >= std::chrono::seconds(1)) {
+				last_window = now;
+				if (cfg.denoise)
+					update_late_window(window);
+			}
 			const int atten = pending_atten.exchange(-1);
 			if (atten >= 0)
 				ws.sendText(make_config_message(atten));
 
 			if (now_us() - att->last_rx_us.load(std::memory_order_relaxed) > uint64_t(kRxWatchdogMs) * 1000) {
 				out.reason = "no data from the server for " + std::to_string(kRxWatchdogMs / 1000) + " s";
+				out.message = "The server stopped answering. Reconnecting.";
 				break;
 			}
 			if (now_us() - last_frame_us > uint64_t(kIdleDisconnectMs) * 1000 && !audio_is_flowing()) {
 				// The host stopped feeding audio (filter muted/disabled upstream): close quietly.
 				out.reason = "no audio from OBS";
+				out.message = "Waiting for audio from OBS.";
 				out.immediate = true;
 				out.min_wait_ms = 0;
 				break;
 			}
 
 			std::unique_lock<std::mutex> lk(mu);
-			cv.wait_for(lk, std::chrono::milliseconds(4), [&] { return stopping() || queue.front() != nullptr; });
+			cv.wait_for(lk, std::chrono::milliseconds(2), [&] { return stopping(); });
 		}
 		streaming.store(false, std::memory_order_release);
 		echo_active.store(false);
+		link_slow.store(false);
+		late_x10.store(0);
 		out.streamed_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_start).count());
 
 		if (stopping()) {
@@ -677,18 +939,37 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		}
 
 		if (out.reason.empty()) {
-			std::lock_guard<std::mutex> lk(att->mu);
-			if (!att->stopped_reason.empty()) {
-				out.reason = "server stopped the session: " + att->stopped_reason;
-				if (att->stopped_reason == "max_duration")
+			std::string stopped, code, msg, transport;
+			int retry_after = 0;
+			{
+				std::lock_guard<std::mutex> lk(att->mu);
+				stopped = att->stopped_reason;
+				code = att->server_code;
+				msg = att->server_msg;
+				retry_after = att->retry_after_s;
+				transport = att->reason;
+			}
+			if (!stopped.empty()) {
+				out.reason = "server stopped the session: " + stopped;
+				if (stopped == "max_duration") {
 					out.immediate = true;
-				else
+					out.message = "The session reached its time limit; starting a new one.";
+				} else if (stopped == "insufficient_funds") {
+					out.give_up = true;
+					out.message = "Your balance ran out, so live processing stopped. Add balance on the website, then press "
+						      "Try again.";
+				} else if (stopped == "account_closed") {
+					out.give_up = true;
+					out.message = "Your account is not active any more. Check it on the website, then press Try again.";
+				} else {
 					out.min_wait_ms = 120000;
-			} else if (!att->server_code.empty()) {
-				out.reason = "server: " + att->server_code + (att->server_msg.empty() ? "" : " - " + att->server_msg);
-				out.min_wait_ms = is_fatal_code(att->server_code) ? 60000 : 5000;
+					out.message = "The server ended the session. Trying again in a moment.";
+				}
+			} else if (!code.empty()) {
+				classify_server_error(code, msg, retry_after, out);
 			} else {
-				out.reason = att->reason.empty() ? "connection closed" : att->reason;
+				out.reason = transport.empty() ? "connection closed" : transport;
+				out.message = "The connection to the server was lost. Reconnecting.";
 			}
 		}
 		ws.stop();
@@ -716,7 +997,14 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			counters.bad_frames.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		if (h.codec == kCodecOpus) {
+		if (!cfg.denoise) {
+			// Captions only: the audio that comes back is not used, so it is not decoded either.
+			if (data.size() <= kHeaderSize) {
+				counters.bad_frames.fetch_add(1, std::memory_order_relaxed);
+				return;
+			}
+			n = kFrameSamples;
+		} else if (h.codec == kCodecOpus) {
 			const int got = att.opus_dec ? att.opus_dec->decode(bytes + kHeaderSize, static_cast<int>(data.size() - kHeaderSize),
 									     rx.data())
 						     : -1;
@@ -781,7 +1069,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				if (ev.seconds_left >= 0)
 					msg += " (about " + std::to_string(ev.seconds_left) + " s of live processing left)";
 			} else {
-				msg = ev.code + (ev.message.empty() ? "" : ": " + ev.message);
+				msg = ev.message.empty() ? ev.code : ev.message;
 				std::lock_guard<std::mutex> lk(st_mu);
 				warning = msg;
 			}
@@ -798,6 +1086,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			std::lock_guard<std::mutex> lk(att.mu);
 			att.server_code = ev.code;
 			att.server_msg = ev.message;
+			att.retry_after_s = ev.retry_after_s;
 			att.cv.notify_all();
 			break;
 		}
@@ -839,31 +1128,92 @@ void Session::start()
 	bool expected = false;
 	if (!d.started.compare_exchange_strong(expected, true))
 		return;
-	if (is_secure_url(d.cfg.url) == false && !is_plain_url(d.cfg.url)) {
-		d.set_state(SessionState::Stopped, "server URL must start with wss:// (or ws:// for local testing)");
+	auto refuse = [&](const std::string &detail, const std::string &message) {
+		d.set_state(SessionState::Stopped, detail, message);
+		d.log(LogLevel::Warning, message);
 		d.stop_req.store(true);
 		std::lock_guard<std::mutex> lk(d.done_mu);
 		d.net_done = true;
+	};
+	if (is_secure_url(d.cfg.url) == false && !is_plain_url(d.cfg.url)) {
+		refuse("server URL must start with wss://", "The server address must start with wss://. Check it in the advanced settings.");
+		return;
+	}
+	if (d.insecure && !is_local_host(url_host(d.cfg.url))) {
+		// The API key and the audio would cross the internet in clear text.
+		refuse("ws:// is only allowed for this computer or the local network",
+		       "Unencrypted ws:// addresses only work for this computer or your local network. Use a wss:// address.");
 		return;
 	}
 	if (d.cfg.api_key.empty()) {
-		d.set_state(SessionState::Stopped, "no API key configured");
-		d.stop_req.store(true);
-		std::lock_guard<std::mutex> lk(d.done_mu);
-		d.net_done = true;
+		refuse("no API key configured", "Enter an API key to start.");
 		return;
 	}
 	if (d.insecure)
 		d.log(LogLevel::Warning, "the server URL uses ws:// (unencrypted): the API key and audio travel in clear text; "
 					 "use this for local testing only");
+	g_bg_threads.fetch_add(1);
 	try {
 		auto self = impl_;
-		d.th = std::thread([self] { self->net_main(); });
+		d.th = std::thread([self]() mutable {
+			self->net_main();
+			self.reset();  // may free the session state: nothing of the plugin's data is touched after this
+			g_bg_threads.fetch_sub(1);
+		});
 	} catch (const std::exception &e) {
-		d.set_state(SessionState::Stopped, std::string("could not start network thread: ") + e.what());
+		g_bg_threads.fetch_sub(1);
+		d.set_state(SessionState::Stopped, std::string("could not start network thread: ") + e.what(),
+			    "Could not start the network thread.");
 		std::lock_guard<std::mutex> lk(d.done_mu);
 		d.net_done = true;
 	}
+}
+
+bool wait_for_background_threads(int ms)
+{
+	const auto deadline = Clock::now() + std::chrono::milliseconds(std::max(0, ms));
+	while (g_bg_threads.load() > 0 && Clock::now() < deadline)
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	return g_bg_threads.load() == 0;
+}
+
+bool server_url_allowed(const std::string &url)
+{
+	return is_secure_url(url) || (is_plain_url(url) && is_local_host(url_host(url)));
+}
+
+const char *latency_preset_name(int delay_ms)
+{
+	if (delay_ms <= 80)
+		return "Low";
+	if (delay_ms <= 150)
+		return "Balanced";
+	return "Safe";
+}
+
+void Session::request_stop()
+{
+	Impl &d = *impl_;
+	{
+		std::lock_guard<std::mutex> lk(d.mu);
+		d.stop_req.store(true, std::memory_order_release);
+	}
+	d.cv.notify_all();
+}
+
+void Session::retry_now()
+{
+	Impl &d = *impl_;
+	{
+		std::lock_guard<std::mutex> lk(d.st_mu);
+		if (d.state != SessionState::Blocked)
+			return;
+	}
+	{
+		std::lock_guard<std::mutex> lk(d.mu);
+		d.retry_req.store(true);
+	}
+	d.cv.notify_all();
 }
 
 void Session::stop(int flush_ms, int join_timeout_ms)
@@ -910,7 +1260,7 @@ double Session::delay_seconds() const
 void Session::set_atten_lim_db(int db)
 {
 	db = std::min(100, std::max(6, db));
-	impl_->cfg.atten_lim_db = db;  // used by the next (re)connect
+	impl_->atten_db.store(db);  // used by the next (re)connect
 	impl_->pending_atten.store(db);
 	impl_->cv.notify_all();
 }
@@ -935,6 +1285,7 @@ SessionSnapshot Session::snapshot() const
 		std::lock_guard<std::mutex> lk(d.st_mu);
 		s.state = d.state;
 		s.detail = d.detail;
+		s.message = d.message;
 		s.session_id = d.session_id;
 		s.usd_per_minute = d.usd_per_minute;
 		s.model_latency_ms = d.model_latency_ms;
@@ -974,61 +1325,98 @@ SessionSnapshot Session::snapshot() const
 	s.tx_bytes = d.counters.tx_bytes.load();
 	s.rx_bytes = d.counters.rx_bytes.load();
 	s.reconnects = d.counters.reconnects.load();
+	s.link_too_slow = d.link_slow.load();
+	s.late_percent = d.late_x10.load() / 10.0;
 	return s;
 }
 
 std::string Session::status_line() const
 {
+	const Impl &d = *impl_;
 	const SessionSnapshot s = snapshot();
-	char buf[64];
+	const bool cleaning = d.cfg.denoise && d.supported;
 	std::string out;
 	switch (s.state) {
 	case SessionState::Streaming:
-		out = "Connected";
-		if (s.rtt_last_ms > 0 || s.received > 0) {
-			std::snprintf(buf, sizeof buf, ", RTT %.0f ms (p95 %.0f)", s.rtt_avg_ms, s.rtt_p95_ms);
-			out += buf;
+		if (s.link_too_slow) {
+			out = "Your connection is too slow for the " + d.preset_text() +
+			      " delay setting, so your audio is not being cleaned.";
+			out += d.cfg.delay_ms < 250 ? " Choose a longer delay (Balanced or Safe) in this filter's settings."
+						    : " Check your internet connection.";
+		} else {
+			out = cleaning ? "Connected. Your audio is being cleaned." : "Connected.";
+			if (!d.cfg.captions.empty())
+				out += " Captions are running.";
 		}
+		if (s.echo_active)
+			out += " Echo cancellation is on.";
+		else if (s.echo_requested)
+			out += " Echo cancellation is not available on this server.";
 		break;
 	case SessionState::Backoff:
-		out = "Disconnected - audio passes through; retrying in " + std::to_string(s.backoff_seconds) + " s (" + s.detail + ")";
+		out = s.message.empty() ? s.detail : s.message;
+		if (cleaning)
+			out += " Your audio keeps playing without cleaning.";
+		out += " Trying again in " + std::to_string(s.backoff_seconds) + " s.";
+		break;
+	case SessionState::Blocked:
+		out = s.message.empty() ? s.detail : s.message;
 		break;
 	case SessionState::Connecting:
 	case SessionState::Handshaking:
 		out = "Connecting...";
 		break;
 	case SessionState::Idle:
-		out = s.detail.empty() ? "Idle" : "Idle (" + s.detail + ")";
+		out = s.message.empty() ? "Waiting for audio from OBS." : s.message;
 		break;
 	case SessionState::Stopped:
-		out = "Stopped (" + s.detail + ")";
+		out = s.message.empty() ? "Stopped." : s.message;
 		break;
 	}
+	if (s.low_balance) {
+		out += " Your balance is running low";
+		if (s.seconds_left >= 0)
+			out += " (about " + std::to_string((s.seconds_left + 59) / 60) + " min left)";
+		out += ".";
+	}
+	if (!s.warning.empty())
+		out += " " + s.warning;
+	if (s.insecure)
+		out += " Warning: this connection is not encrypted.";
+	if (s.passthrough_only)
+		out += " Your audio is not changed: OBS uses a sample rate this filter does not support.";
+	return out;
+}
+
+std::string Session::status_details() const
+{
+	const SessionSnapshot s = snapshot();
+	char buf[160];
+	std::string out = to_string(s.state);
+	if (!s.codec.empty())
+		out += ", " + s.codec;
 	if (s.delay_ms > 0) {
-		std::snprintf(buf, sizeof buf, " | delay %.0f ms", s.delay_ms);
+		std::snprintf(buf, sizeof buf, ", delay %.0f ms", s.delay_ms);
 		out += buf;
 	}
-	if (s.echo_active)
-		out += " | echo cancellation on";
+	if (s.state == SessionState::Streaming && (s.rtt_last_ms > 0 || s.received > 0)) {
+		std::snprintf(buf, sizeof buf, ", round trip %.0f ms (p95 %.0f)", s.rtt_avg_ms, s.rtt_p95_ms);
+		out += buf;
+	}
 	if (s.state == SessionState::Streaming || s.captured > 0) {
-		out += " | frames ok " + std::to_string(s.used) + ", late " + std::to_string(s.late) + ", passthrough " +
+		out += ", frames in time " + std::to_string(s.used) + ", late " + std::to_string(s.late) + ", unprocessed " +
 		       std::to_string(s.passthrough);
 		if (s.dropped)
 			out += ", dropped " + std::to_string(s.dropped);
+		if (s.late_percent > 0) {
+			std::snprintf(buf, sizeof buf, ", recently late %.0f%%", s.late_percent);
+			out += buf;
+		}
 	}
 	if (s.reconnects)
-		out += " | reconnects " + std::to_string(s.reconnects);
-	if (s.insecure)
-		out += " | WARNING: unencrypted ws:// connection";
-	if (s.low_balance) {
-		out += " | LOW BALANCE";
-		if (s.seconds_left >= 0)
-			out += " (~" + std::to_string(s.seconds_left) + " s left)";
-	}
-	if (!s.warning.empty())
-		out += " | " + s.warning;
-	if (s.passthrough_only)
-		out += " | audio not altered: unsupported sample rate";
+		out += ", reconnects " + std::to_string(s.reconnects);
+	if (!s.detail.empty() && s.state != SessionState::Streaming)
+		out += "; " + s.detail;
 	return out;
 }
 

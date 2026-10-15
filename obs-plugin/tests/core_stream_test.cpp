@@ -3,7 +3,7 @@
 // core_stream_test: drives acw_core exactly like the OBS filter does, against a
 // live server, in real time.
 //
-//   core_stream_test --url ws://127.0.0.1:8791/api/stream/ws --key-file ~/audio-cleaner/dev/key \
+//   core_stream_test --url ws://127.0.0.1:8791/api/stream/ws --key-file ~/audio-cleaner/dev/key
 //       --in noisy.wav --out cleaned.wav [--clean clean.wav] [--captions local] [--rate 44100] ...
 //
 // The audio is fed in OBS-like irregular packets (10 ms and 1024-sample ticks),

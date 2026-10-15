@@ -31,6 +31,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 /* audio-cleaner-filter.cpp */
 void audio_cleaner_register_filter(void);
+void audio_cleaner_shutdown(void);
 
 bool obs_module_load(void)
 {
@@ -43,5 +44,6 @@ bool obs_module_load(void)
 void obs_module_unload(void)
 {
 	caption_output_shutdown();
+	audio_cleaner_shutdown(); /* network threads that could not be joined in time must be gone before the code is */
 	obs_log(LOG_INFO, "plugin unloaded");
 }
