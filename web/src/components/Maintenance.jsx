@@ -26,7 +26,6 @@ export function MaintenancePanel() {
         <p className="mb0">In the meantime, the free tools still work.</p>
         <div className="row row-center">
           <Link to="/free" className="btn btn-primary">Clean a file in your browser</Link>
-          <Link to="/desktop" className="btn btn-secondary">Get the desktop app</Link>
           <button type="button" className="btn btn-ghost" onClick={again} disabled={checking}>{checking ? 'Checking…' : 'Check now'}</button>
         </div>
       </div>

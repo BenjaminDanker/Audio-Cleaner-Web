@@ -123,7 +123,6 @@ await check('free: the noise remover is fetched once, only on /free, and a stere
   const p = await ctx.newPage();
   await p.goto(`${BASE}/`); await p.waitForSelector('table tbody tr');
   await p.goto(`${BASE}/transcribe`); await p.waitForSelector('main h1');
-  await p.goto(`${BASE}/desktop`); await p.waitForSelector('main h1');
   await p.waitForTimeout(500);
   if (dfn.length) throw new Error('downloaded on another page: ' + dfn.join(', '));
   await p.goto(`${BASE}/free`);

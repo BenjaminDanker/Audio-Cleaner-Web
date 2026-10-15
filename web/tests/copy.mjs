@@ -55,7 +55,6 @@ await check('copy: public pages show no internals and none of the avoided words'
   bad.push(...(await scan(page, '/#pricing', 'table tbody tr')));
   bad.push(...(await scan(page, '/free')));
   bad.push(...(await scan(page, '/transcribe')));
-  bad.push(...(await scan(page, '/desktop')));
   bad.push(...(await scan(page, '/app/live'))); // signed out: lands on the sign-in page
   if (!/\/login/.test(page.url())) throw new Error('signed-out /app/live did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/login')));
