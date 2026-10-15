@@ -1,0 +1,31 @@
+# Speech-enhancement benchmark venv (Ubuntu 24.04, Python 3.12, GTX 960 / sm_52, driver 580).
+# Install torch/torchaudio from the cu126 index (the only current wheels that still ship sm_50 kernels,
+# which run on the sm_52 Maxwell card):
+#   pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu126
+# (torchaudio releases stop at 2.11; torch 2.12-2.14 cu126 wheels exist but have no matching torchaudio.)
+# then: pip install -r requirements.txt
+numpy==2.5.4
+scipy==1.18.1
+soundfile==0.14.0
+librosa==1.0.0
+pydub==0.25.1
+yamlargparse==1.31.1
+PyYAML==6.0.3
+einops==0.8.2
+rotary-embedding-torch==0.9.1
+torchinfo==1.8.0
+joblib==1.6.0
+onnxruntime==1.31.0
+pystoi==0.4.1
+pesq==0.0.4          # builds from sdist; needs gcc + python3-dev
+pyloudnorm==0.2.0
+resampy==0.4.3
+omegaconf==2.4.0
+rich==15.0.0
+matplotlib==3.11.2
+pandas==3.0.6
+tabulate==0.10.0
+celluloid==0.2.0
+ptflops==0.7.5
+psutil==7.2.2
+tqdm==4.70.1

@@ -3,7 +3,8 @@
 Which ASR engines should replace or sit next to production's
 faster-whisper large-v3-turbo (int8, CPU) for file transcription and live
 captions, on the Ryzen 7 1700X (8C/16T) and the GTX 960 (4 GB, sm_52).
-Scripts and raw results: `research/asr/` (untracked; `summarize.py` prints the tables).
+Scripts: `research/asr/`. Raw results (per-run JSON, logs, transcripts) are kept outside the repo in
+`~/audio-cleaner/research/keep/asr/results/` (link it to `research/asr/results` to rerun `summarize.py`, which prints the tables).
 
 ## 1. Bottom line
 

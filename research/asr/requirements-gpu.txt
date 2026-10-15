@@ -1,0 +1,24 @@
+# GTX 960 (sm_52) ONNX Runtime venv  (python3.12 -m venv ~/audio-cleaner/research/venv-gpu)
+# onnxruntime-gpu 1.19.2 is the last PyPI release whose CUDA provider contains SASS for sm_52
+# (1.21+ start at sm_60; 1.23.2 -> "no kernel image is available"; 1.31 is CUDA 13 which dropped Maxwell).
+# Install the wheel from PyPI:   pip install onnxruntime-gpu==1.19.2
+onnxruntime-gpu==1.19.2
+onnx-asr==0.12.0
+numpy==2.5.4
+scipy==1.18.1
+soundfile==0.14.0
+jiwer==4.0.0
+whisper-normalizer==0.1.15
+psutil==7.2.2
+nvidia-ml-py==13.615.71
+huggingface_hub==2.2.0
+# CUDA 12 runtime libs come from the pip wheels below (env_gpu.sh puts them on LD_LIBRARY_PATH) ...
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cufft-cu12==11.4.1.4
+nvidia-curand-cu12==10.3.10.19
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-nvjitlink-cu12==12.9.86
+# ... except cuDNN: 9.27.0.42 fails on Maxwell (cudnnSetDropoutDescriptor -> CUDNN_STATUS_EXECUTION_FAILED_CUDART).
+# 9.7.1.26 works (cuDNN 9.9+ deprecates pre-Turing GPUs):
+#   pip install --no-deps --target cudnn-alt/97 nvidia-cudnn-cu12==9.7.1.26

@@ -1,0 +1,22 @@
+# GTX 960 (sm_52) Whisper venv  (python3.12 -m venv ~/audio-cleaner/research/venv-ct2old)
+# ctranslate2 >= 4.0 wheels ship SASS only for sm_53/60/61/70/75/80/86 (+PTX 8.6): the GTX 960 (sm_52) fails with
+# "parallel_for failed: cudaErrorInvalidDevice". ctranslate2 3.24.0 (CUDA 11.2 build) still ships sm_35/50/53/60/61/...;
+# sm_50 SASS runs on sm_52. faster-whisper 0.10.1 is the last version that accepts ctranslate2 < 4.
+ctranslate2==3.24.0
+faster-whisper==0.10.1         # install with --no-deps (it pins av==10.* which has no py3.12 wheel; av 19 works for numpy input)
+av==19.0.1
+tokenizers==0.23.3
+onnxruntime==1.31.0            # CPU only, for faster-whisper's silero VAD
+huggingface_hub==2.2.0
+requests==2.34.2
+numpy==2.5.4
+scipy==1.18.1
+soundfile==0.14.0
+jiwer==4.0.0
+whisper-normalizer==0.1.15
+psutil==7.2.2
+nvidia-ml-py==13.615.71
+nvidia-cublas-cu11==11.11.3.6
+nvidia-cudnn-cu11==8.9.6.50
+nvidia-cuda-runtime-cu11==11.8.89
+nvidia-cuda-nvrtc-cu11==11.8.89

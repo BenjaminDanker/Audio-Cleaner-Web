@@ -1,0 +1,15 @@
+# Main research venv  (python3.12 -m venv ~/audio-cleaner/research/venv)  -- CPU benchmarks, sherpa-onnx streaming, data prep.
+# Also contains the CUDA-12 wheels and a ctranslate2 4.x that CANNOT use the GTX 960 (see requirements-gpu.txt).
+numpy==2.5.4
+scipy==1.18.1
+soundfile==0.14.0
+jiwer==4.0.0
+whisper-normalizer==0.1.15     # Whisper EnglishTextNormalizer / BasicTextNormalizer (MIT)
+psutil==7.2.2
+nvidia-ml-py==13.615.71
+huggingface_hub==2.2.0
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+onnx-asr==0.12.0               # MIT; NeMo Parakeet TDT/RNNT/CTC via ONNX Runtime, no NeMo/torch
+onnxruntime-gpu==1.23.2        # CPU EP is used here; its CUDA EP has no sm_52 kernels
+sherpa-onnx==1.13.8            # Apache-2.0; bundles its own CPU onnxruntime
