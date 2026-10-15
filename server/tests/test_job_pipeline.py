@@ -111,3 +111,22 @@ def test_queue_order_paid_first_then_fair_per_user():
     assert jobs.queued_ids() == ["b-paid", "a-second", "free-early"]
     assert jobs.public_job(dict(db.one("SELECT * FROM jobs WHERE id = 'a-second'")))["queuePosition"] == 2
     assert claim("w1")["id"] == "b-paid"
+
+
+def test_local_transcription_through_the_sandbox(client, signed_in):
+    """Auto language -> detected English -> Parakeet v2 in the Landlocked runner."""
+    if not (Path.home() / "audio-cleaner/models/parakeet-v2/encoder-model.onnx").is_file():
+        pytest.skip("Parakeet model not installed")
+    uid, h = signed_in
+    ledger.credit(uid, 2_000_000, "grant", "t", "g")
+    data = Path(SAMPLE).read_bytes()
+    r = client.post("/api/jobs", json={
+        "kind": "transcribe", "transcribeTier": "local", "filename": "talk.wav", "sizeBytes": len(data),
+        "durationSeconds": 10, "options": {"caption_formats": ["srt"]},
+    }, headers=h)
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    assert client.put(f"/api/jobs/{job_id}/input", content=data, headers=h).status_code == 200
+    _run_worker_once("done")
+    srt = client.get(f"/api/jobs/{job_id}/outputs/talk.srt", headers=h).text
+    assert "held responsible" in srt and "-->" in srt

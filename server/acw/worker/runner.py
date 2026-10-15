@@ -153,11 +153,23 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
 
             base = 50 if denoise else 5
             emit(stage="transcribing", progress=base)
-            segs, lang = transcribe.transcribe(
-                speech_16k, Path(spec["models_dir"]) / "whisper" / spec.get("whisper_model", "large-v3-turbo"),
-                language=opts.get("language"), threads=threads,
-                progress=lambda f: emit(stage="transcribing", progress=int(base + (90 - base) * f)),
-            )
+            models = Path(spec["models_dir"])
+            lang = opts.get("language")
+            if lang is None:
+                emit(stage="detecting language", progress=base)
+                lang = transcribe.detect_language(speech_16k, models / "whisper" / "small", threads)
+            engine = transcribe.pick_engine(lang)
+            report = lambda f: emit(stage="transcribing", progress=int(base + (90 - base) * f))  # noqa: E731
+            if engine.startswith("parakeet"):
+                segs = transcribe.transcribe_parakeet(
+                    speech_16k, models / engine, models / "silero-vad",
+                    device=spec.get("asr_device", "cpu"), threads=threads, progress=report,
+                )
+            else:
+                segs, lang = transcribe.transcribe(
+                    speech_16k, models / "whisper" / spec.get("whisper_model", "large-v3-turbo"),
+                    language=lang, threads=threads, progress=report,
+                )
             from acw_common.captions import segments_to_json
 
             (job_dir / "segments.json").write_text(

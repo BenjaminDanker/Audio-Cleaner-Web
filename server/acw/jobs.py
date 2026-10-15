@@ -37,10 +37,10 @@ MAX_ACTIVE_JOBS_PER_USER = 3
 # so RAM is flat per job and disk grows with length.
 GB = 1024**3
 JOB_MEM = int(1.5 * GB)
-LOCAL_ASR_MEM = int(2.5 * GB)
+LOCAL_ASR_MEM = int(4.5 * GB)  # Parakeet fp32 (Whisper turbo needs ~2 GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
 # Wall-clock seconds per second of audio at 4 threads, for queue estimates.
-SPEED = {"denoise": 0.1, "transcribe_local": 0.5, "transcribe_premium": 0.08}
+SPEED = {"denoise": 0.1, "transcribe_local": 0.12, "transcribe_premium": 0.08}
 # Never let our work take the host below these.
 MEM_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
