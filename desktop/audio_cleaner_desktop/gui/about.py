@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPlainTextEdit, QVBoxLayout, QWidget,
 )
 
 from .. import __version__, config, resources
@@ -47,14 +47,8 @@ class AboutDialog(QDialog):
         version = QLabel(f"Version {__version__}")
         version.setObjectName("Muted")
         rights = QLabel("Free to use \u00b7 \u00a9 2026 Benjamin Danker")
-        site = QPushButton(config.WEBSITE_URL)
-        site.setObjectName("Link")
-        site.setCursor(Qt.CursorShape.PointingHandCursor)
-        site.setToolTip("Open the website in your browser")
-        site.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(config.WEBSITE_URL)))
         for w in (name, version, rights):
             text.addWidget(w)
-        text.addWidget(site, 0, Qt.AlignmentFlag.AlignLeft)
         head.addLayout(text, 1)
         layout.addLayout(head)
 

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Install or update Audio Cleaner on primary-ram (no sudo needed).
-#   deploy/install.sh            # sync code, deps, units; restart services
+#   deploy/install.sh            # sync code, deps, units; restart services; publish the website if web/ changed
 #   deploy/install.sh --no-restart
+# One command deploys everything: the website (static files on the VPS) is rebuilt and uploaded
+# only when web/ differs from what was last published (deploy/publish-web.sh does that part).
 # Layout: ~/audio-cleaner/{app,venv,bin,models,data,secrets}
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -75,4 +77,15 @@ if [ "${1:-}" != "--no-restart" ]; then
   sleep 3
   systemctl --user --no-pager --plain list-units 'acw-*' | sed -n '1,14p'
   curl -fsS http://127.0.0.1:8790/audio/api/health && echo " <- local health ok"
+fi
+
+# 7. Website: publish only when web/ changed since the last publish.
+WEB_TREE=$(git -C "$REPO" rev-parse HEAD:web)
+if [ -n "$(git -C "$REPO" status --porcelain -- web)" ]; then
+  echo "web/ has uncommitted changes: not publishing the website (commit first, or run deploy/publish-web.sh)" >&2
+elif [ "$WEB_TREE" != "$(cat "$H/data/web-published" 2>/dev/null)" ]; then
+  echo "web/ changed since the last publish: publishing the website"
+  bash "$REPO/deploy/publish-web.sh"  # records the published web/ tree itself
+else
+  echo "website unchanged (already published)"
 fi

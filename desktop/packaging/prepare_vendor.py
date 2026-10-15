@@ -420,7 +420,7 @@ GPL-3.0.txt). Qt and PySide6 are linked dynamically: they are the separate libra
 folder (Qt6*.dll / libQt6*.so / QtCore etc. framework files, and the PySide6 / shiboken6 folders). You may replace
 them with your own build of Qt / PySide6 of a compatible version; the application will use the replacement.
 Source code of Qt for Python and Qt: https://download.qt.io/official_releases/QtForPython/ and https://code.qt.io .
-Written offer: if you cannot get the sources from there, write to the address on the product page and we will send
+Written offer: if you cannot get the sources from there, ask Benjamin Danker (who gave you this app), who will send
 you the complete corresponding source code of the Qt and PySide6 versions in this application, for three years
 after the version was released and for as long as we offer it. Qt is a registered trademark of The Qt Company Ltd.
 Qt's multimedia library also includes FFmpeg libraries (LGPL v2.1 or later, source: https://ffmpeg.org) that Qt
@@ -437,7 +437,6 @@ Index of this folder
 {rows}
 
 Python (PSF licence) and the Python packages are part of the bundled interpreter and libraries.
-Product page and contact: https://mc-multi-world.space/audio/desktop
 """
     (n.dir / "README.txt").write_text(text, encoding="utf-8")
 

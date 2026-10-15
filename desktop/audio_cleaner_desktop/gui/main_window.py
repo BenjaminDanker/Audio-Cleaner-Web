@@ -7,8 +7,8 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSettings, QStandardPaths, Qt, QThreadPool, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QDesktopServices, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
+from PySide6.QtCore import QObject, QRunnable, QSettings, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QScrollArea, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
@@ -136,9 +136,7 @@ class MainWindow(QMainWindow):
         about.triggered.connect(lambda: AboutDialog(self).exec())
         logs = QAction("Open &log folder", self)
         logs.triggered.connect(lambda: shell.open_path(log_dir()))
-        site = QAction("&Audio Cleaner online", self)
-        site.triggered.connect(self._open_website)
-        help_menu.addActions([about, logs, site])
+        help_menu.addActions([about, logs])
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -154,14 +152,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.history_page, "History")
 
         footer = QHBoxLayout()
-        link = QPushButton("Audio Cleaner online")
-        link.setObjectName("Link")
-        link.setCursor(Qt.CursorShape.PointingHandCursor)
-        link.setToolTip("Open the Audio Cleaner website in your browser. The app itself never goes online.")
-        link.clicked.connect(self._open_website)
         version = QLabel(f"Version {__version__}")
         version.setObjectName("Small")
-        footer.addWidget(link)
         footer.addStretch(1)
         footer.addWidget(version)
         outer.addLayout(footer)
@@ -606,5 +598,3 @@ class MainWindow(QMainWindow):
         self.history.close()
         super().closeEvent(event)
 
-    def _open_website(self) -> None:
-        QDesktopServices.openUrl(QUrl(config.WEBSITE_URL))

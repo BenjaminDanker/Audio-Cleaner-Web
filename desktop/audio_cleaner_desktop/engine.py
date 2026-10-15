@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 Cancelled = pipeline.Cancelled
 
 # Maximum noise attenuation per strength preset; "max" is DeepFilterNet's no-limit setting
-# and matches the website's default.
+# and matches Studio clean's default on the server (same pipeline).
 STRENGTHS: dict[str, float] = {"gentle": 12.0, "balanced": 24.0, "strong": 40.0, "max": 100.0}
 DEFAULT_STRENGTH = "max"
 OUTPUT_AUDIO_FORMATS = ("wav", "flac", "mp3", "m4a", "opus")

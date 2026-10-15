@@ -387,7 +387,7 @@ EOF
 No patches are applied to any of the three source trees.
 
 Corresponding source: the tarballs above are the complete corresponding source. If a link is
-ever unavailable, ask us (see the product page, https://mc-multi-world.space/audio/desktop) and
+ever unavailable, ask the person who gave you this app (Benjamin Danker) and
 we will provide the exact source archives for any version of this software we have distributed,
 for at least three years after our last distribution of that version.
 

@@ -1,7 +1,7 @@
 # Audio Cleaner for desktop
 
 A free, offline app that removes background noise from the voice in video and audio files, and can write
-subtitles. It is the same cleaning pipeline as the website (`../common/acw_common`) in a PySide6 window.
+subtitles. It runs the shared cleaning pipeline (`../common/acw_common`) in a PySide6 window.
 Nothing is uploaded: the noise model, the speech model and FFmpeg all ship inside the app.
 
 - `audio_cleaner_desktop/engine.py` cleans one file (no Qt; used by the window and the command line)

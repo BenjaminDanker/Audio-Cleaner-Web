@@ -1,7 +1,7 @@
 """Colours and the application style sheet.
 
 The base look is Qt's Fusion style in the system palette; the style sheet only adds
-the card layout and the brand accent (taken from the website's CSS), and is rebuilt
+the card layout and the accent colour, and is rebuilt
 when the system switches between light and dark.
 """
 from __future__ import annotations

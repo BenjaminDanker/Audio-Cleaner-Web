@@ -1,6 +1,6 @@
 # Audio Cleaner for desktop
 
-The desktop app is a PySide6 (Qt) window around the same cleaning pipeline the website's server uses. It works fully
+The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code). It works fully
 offline: the noise model, the subtitle (speech) model and FFmpeg ship inside the installer. Nothing is downloaded or
 uploaded at run time.
 
@@ -11,7 +11,7 @@ desktop/audio_cleaner_desktop/
     engine.py             cleans one file (no Qt)         gui/    the window      cli.py  --cli and --selftest
     resources.py          finds libDF, models, FFmpeg: sys._MEIPASS when frozen, desktop/vendor from source
 desktop/packaging/        everything that turns that into installers (below)
-native/deepfilter/        reproducible libDF build (also used by the website's WebAssembly build)
+native/deepfilter/        reproducible libDF build (shared infrastructure)
 .github/workflows/desktop.yml
 ```
 
@@ -31,13 +31,9 @@ the checklist at the end).
    `common/`, `native/deepfilter/` and pull requests build everything without publishing; run it by hand with
    "Run workflow" to get the installers as artifacts.
 4. On a `desktop-v*` tag the `release` job creates a GitHub Release with `AudioCleaner-Setup-x64.exe`,
-   `AudioCleaner-macOS-arm64.dmg`, `AudioCleaner-macOS-x86_64.dmg` and `SHA256SUMS`. These stable names are what the
-   website links to (`releases/latest/download/<name>` in `web/src/site.js`).
-5. Publish on the website: edit `web/public/releases/desktop.json` (`version`, `notes`; set `"available": true` for the
-   first release), commit, then run `deploy/publish-web.sh`. Until `available` is true the `/desktop` page says
-   "Coming soon". While the installers are unsigned keep `desktop.signed: false` in `web/src/site.js` (the page then
-   shows the first-launch note); set it to `true` only after signing is configured.
-6. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a
+   `AudioCleaner-macOS-arm64.dmg`, `AudioCleaner-macOS-x86_64.dmg` and `SHA256SUMS`. Share the release link
+   (`releases/latest`) with friends. The app is not on the website and never contacts it.
+5. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a
    noisy video, clean it, turn on subtitles, open About.
 
 Secrets are only read by the signing steps; without them every step is skipped and unsigned installers are produced.
@@ -113,7 +109,7 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    subtitle engine (CTranslate2, Silero VAD, the bundled model), so a missing shared library or data file fails here.
 6. **Installer**: Windows `iscc /DAppVersion=2.0.0 /DSourceDir=dist\AudioCleaner desktop\packaging\windows\AudioCleaner.iss`
    (per-user install by default, asks for elevation only if the user picks all users; Start menu, optional desktop
-   icon, uninstaller; `EULA.txt` is a template, see below). macOS `desktop/packaging/macos/make_dmg.sh "dist/Audio Cleaner.app" out.dmg`.
+   icon, uninstaller, `EULA.txt`). macOS `desktop/packaging/macos/make_dmg.sh "dist/Audio Cleaner.app" out.dmg`.
 
 ### Packaging notes worth knowing
 
@@ -144,16 +140,13 @@ GitHub Release assets may be up to 2 GiB each.
   `--enable-gpl`, `--enable-nonfree` or libx264/libfdk to the build.
 * Qt's multimedia plugin brings its own FFmpeg libraries (LGPL); they are separate files and covered by the Qt notice.
 * `EULA.txt` must keep the carve-outs for the open source components and must not forbid reverse engineering for
-  debugging replaced LGPL libraries. It is a template: have the owner (or a lawyer) fill the `[OWNER: ...]` blanks
-  (liability cap, governing law) and review it before the first public release. Mention FFmpeg in it and on the
-  download page (the website's `/desktop` page).
+  debugging replaced LGPL libraries. FFmpeg is named in it.
 * Re-run the licence collection (it runs in every build) after changing dependencies; it fails when a package has no
   licence text. New Python packages that end up in the bundle need an entry check in `prepare_vendor.py`.
 * Not legal advice; confirm the Qt/LGPL points with counsel (see `docs/research/desktop-packaging.md`).
 
 ## Owner to-do before the first release
 
-* Review `desktop/packaging/EULA.txt`; set the Apple and Azure secrets if you want signed installers.
+* Set the Apple and Azure secrets if you want signed installers (optional).
 * Push, run the workflow once via "Run workflow", and download the three artifacts to test on real machines. The
   Windows and macOS jobs have not been exercised yet.
-* Pick the support contact for the written offer (the licence files point to the product page).
