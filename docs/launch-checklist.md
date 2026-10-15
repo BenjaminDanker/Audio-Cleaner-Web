@@ -22,7 +22,7 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ Google OAuth client: add the exact redirect URI
   `https://mc-multi-world.space/audio/api/auth/oauth/google/callback` (QA hit `redirect_uri_mismatch`)
 - ⬜ SMTP provider for email sign-in links (optional, but most users expect email)
-- ⬜ Stripe: test mode first. Restricted key, webhook endpoint + events
+- ✅ Stripe: restricted key, webhook endpoint + events
   (docs/payments.md), customer portal enabled, statement descriptor,
   ✅ done 2026-10-15 (live; no Radar rule needed: authorize-first country check). Radar: switch to Lite before 2027-01-21.
 - ✅ OpenAI key set (premium file + live captions verified in production)
