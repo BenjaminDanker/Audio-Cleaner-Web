@@ -78,21 +78,28 @@ the $15 dispute fee dominate.
 registration (EU non-Union OSS, UK VAT) and EU/UK consumer-law duties, so
 **Stripe Tax for the EU/UK is not needed.** Two layers enforce it:
 
-1. **Server guard (built in).** When a payment succeeds, `stripe_service`
-   reads the card's issuing country. If it is in `BLOCKED_CARD_COUNTRIES`
-   (EU: AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO
-   SK SI ES SE; rest of EEA: IS LI NO; plus GB and CH), nothing is credited,
-   the payment is refunded in full (idempotent per payment), an audit record
-   `payment_refused_region` is written and auto-reload is switched off for
-   that user. Override the list with `ACW_BLOCKED_CARD_COUNTRIES`
-   (comma-separated ISO codes; `none` turns the guard off). Stripe keeps its
-   fee on a refund, so this is a backstop, not the main defence.
-2. **Stripe Radar rule (you add it in the dashboard).** So those cards are
-   declined *before* they are charged, add under Radar → Rules:
-   `Block if :card_country: in ('AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','IS','LI','NO','GB','CH')`.
-   (Radar rules need Radar for Fraud Teams on some plans; if it isn't
-   available, the server guard still applies.) The Terms and sign-up pages
-   should say the service is not available in those regions.
+1. **Authorize first, charge after the country check (built in).** Every
+   payment (Checkout top-ups and auto-reloads) is created with
+   `capture_method=manual`, so the card is only authorized. When the
+   authorization arrives (`checkout.session.completed`,
+   `payment_intent.amount_capturable_updated`, or the reload's own response),
+   `stripe_service._settle_authorized` reads the card's issuing country:
+   allowed -> the payment is captured and credited; in
+   `BLOCKED_CARD_COUNTRIES` (EU: AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT
+   LV LT LU MT NL PL PT RO SK SI ES SE; rest of EEA: IS LI NO; plus GB and CH)
+   -> the authorization is cancelled, so the card is never charged and no card
+   fee is paid. The payment is marked `refused_region` ("Not charged" on the
+   Billing page, with a banner after Checkout), an audit record
+   `payment_refused_region` is written and auto-reload is switched off for that
+   user. Override the list with `ACW_BLOCKED_CARD_COUNTRIES` (comma-separated
+   ISO codes; `none` turns the guard off). An authorization nobody captures
+   (every attempt failed) expires after about 7 days without a charge.
+2. **Backstop.** A blocked-country payment that was charged anyway (captured
+   before this existed) is refunded in full when it would be credited.
+
+No Radar rule is needed (custom rules need the paid Radar plan). The Terms,
+Privacy page and the landing FAQ say the service is not available in those
+regions and that such cards are not charged.
 
 As a US seller of digital services:
 - **US states**: economic-nexus thresholds are mostly $100k or 200
@@ -107,13 +114,17 @@ empty `ACW_BLOCKED_CARD_COUNTRIES` and remove the Radar rule.
 
 Endpoint `https://mc-multi-world.space/audio/api/stripe/webhook`, events:
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
-`payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`,
+`payment_intent.amount_capturable_updated`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`,
 `charge.dispute.created`, `radar.early_fraud_warning.created`,
 `payment_method.detached`.
 
-Use a restricted API key with write access to: Customers, Checkout Sessions,
-PaymentIntents, Refunds, Customer portal sessions; read access to Payment
-methods, Charges and Events.
+Use a restricted API key: Write for Checkout Sessions, Customers, Payment
+Intents, Charges and Refunds, Customer Portal; Read for Balance (the card fee
+kept on refunds); everything else None (add Tax Calculations, Transactions:
+Write only if Stripe Tax is switched on).
+
+Live setup done 2026-10-15: webhook `we_1UQfwPRxGAWCymT90oQHeB12` (9 events),
+portal configuration `bpc_1UQfwbRxGAWCymT93anjWxhJ` (the account default).
 
 ### With the Stripe CLI (test mode; add `--live` for live mode)
 
@@ -121,7 +132,7 @@ Webhook (the response shows `secret` once: that is `STRIPE_WEBHOOK_SECRET`;
 `api_version` matches the stripe-python version in requirements.lock):
 
 ```
-stripe post /v1/webhook_endpoints -d url=https://mc-multi-world.space/audio/api/stripe/webhook -d api_version=2026-09-30.endive -d "description=Audio Cleaner" -d "enabled_events[]=checkout.session.completed" -d "enabled_events[]=checkout.session.async_payment_succeeded" -d "enabled_events[]=payment_intent.succeeded" -d "enabled_events[]=payment_intent.payment_failed" -d "enabled_events[]=charge.refunded" -d "enabled_events[]=charge.dispute.created" -d "enabled_events[]=radar.early_fraud_warning.created" -d "enabled_events[]=payment_method.detached"
+stripe post /v1/webhook_endpoints -d url=https://mc-multi-world.space/audio/api/stripe/webhook -d api_version=2026-09-30.endive -d "description=Audio Cleaner" -d "enabled_events[]=checkout.session.completed" -d "enabled_events[]=checkout.session.async_payment_succeeded" -d "enabled_events[]=payment_intent.amount_capturable_updated" -d "enabled_events[]=payment_intent.succeeded" -d "enabled_events[]=payment_intent.payment_failed" -d "enabled_events[]=charge.refunded" -d "enabled_events[]=charge.dispute.created" -d "enabled_events[]=radar.early_fraud_warning.created" -d "enabled_events[]=payment_method.detached"
 ```
 
 Customer portal (only "update the saved card"; its `id` is `STRIPE_PORTAL_CONFIGURATION`,

@@ -25,7 +25,7 @@ export default function Privacy() {
     <Legal title="Privacy Policy" sections={SECTIONS}>
       <h2 id="who">1. Who we are</h2>
       <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{email && <> Contact: <a href={`mailto:${email}`}>{email}</a>.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
-      <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a payment is made with a card issued in one of those places, we refund it.</p>
+      <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
 
       <h2 id="browser">2. Free noise removal in your browser</h2>
       <p>The free noise removal on the <Link to="/app">Cleanup page</Link> processes your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover itself and the public price list, none of which contain your data.</p>

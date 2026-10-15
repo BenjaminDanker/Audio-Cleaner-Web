@@ -24,7 +24,7 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ SMTP provider for email sign-in links (optional, but most users expect email)
 - ⬜ Stripe: test mode first. Restricted key, webhook endpoint + events
   (docs/payments.md), customer portal enabled, statement descriptor,
-  Radar rules (block high-risk, and the EU/EEA/UK/CH card-country rule from docs/payments.md).
+  ✅ done 2026-10-15 (live; no Radar rule needed: authorize-first country check). Radar: switch to Lite before 2027-01-21.
 - ✅ OpenAI key set (premium file + live captions verified in production)
 - ⬜ Cloudflare Turnstile keys (optional, for the email form)
 
@@ -35,8 +35,8 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
   transcription $0.24/h standard and $0.90/h premium, live denoise $0.24/h,
   live captions $0.36/h standard and $1.50/h premium)
 - ⬜ Terms of Service + Privacy Policy reviewed by a lawyer (drafts in the site)
-- ✅ Not offered in EU/EEA/UK/CH (card-country guard + Radar rule; docs/payments.md).
-  ⬜ Add the Radar rule in the Stripe dashboard
+- ✅ Not offered in EU/EEA/UK/CH (authorize-first card-country check; docs/payments.md).
+  (no Radar rule needed: cards are authorized first and only charged after the country check)
 - ✅ Licence: proprietary/all rights reserved (source visible), OBS plugin GPL-2.0-or-later
 
 ## Product

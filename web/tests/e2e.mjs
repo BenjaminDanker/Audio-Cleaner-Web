@@ -232,6 +232,20 @@ if (want('billing')) {
     if (!/canceled/i.test(t)) throw new Error(t);
     return t;
   });
+  await check('billing: a card from a country we don\'t serve: "not charged" banner and status, never "Paid"', async () => {
+    await page.route('**/api/billing/history', async (route) => {
+      const res = await route.fetch();
+      const j = await res.json();
+      j.payments = [{ id: 'pay_refused', kind: 'checkout', status: 'refused_region', amount_cents: 1000, refunded_cents: 0, created_at: Math.floor(Date.now() / 1000) }, ...j.payments];
+      await route.fulfill({ response: res, json: j });
+    });
+    await page.goto(`${BASE}/app/billing?checkout=success&p=pay_refused`);
+    await page.getByTestId('checkout-banner').filter({ hasText: 'wasn’t charged' }).waitFor({ timeout: 15000 });
+    const badge = await page.getByTestId('pay-status').first().innerText();
+    await page.unroute('**/api/billing/history');
+    if (badge !== 'Not charged') throw new Error('status badge: ' + badge);
+    return (await page.getByTestId('checkout-banner').innerText()).replace(/\s+/g, ' ');
+  });
 }
 
 if (want('keys')) {

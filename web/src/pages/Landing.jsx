@@ -50,7 +50,7 @@ const FAQ = [
   ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
   ['How does paying work?', 'You add credit, then spend it by the minute of audio. No subscription. You can top up from $10, and switch on auto-reload (with a monthly limit you choose) if you like. Turn it off whenever you want.'],
   ['What happens to my files and my words?', 'Files you upload are deleted as soon as they are processed. Results stay for 24 hours so you can download them, then they are deleted too. Live audio is never stored. We don’t train anything on your audio or your transcripts.'],
-  ['Where is it available?', 'Audio Cleaner isn’t offered in the EU/EEA, the UK or Switzerland. If a card issued there is used by mistake, the payment is refunded automatically.'],
+  ['Where is it available?', 'Audio Cleaner isn’t offered in the EU/EEA, the UK or Switzerland. If a card issued there is used by mistake, the payment is cancelled and the card isn’t charged.'],
   ['Is there an OBS plugin?', 'Not yet, it’s on the way. Until then you can try live noise removal and captions right on the Live page, with your own microphone.'],
 ];
 

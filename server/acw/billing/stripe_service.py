@@ -21,8 +21,9 @@ log = logging.getLogger(__name__)
 AUTO_RELOAD_MAX_FAILURES = 3
 EFW_AUTO_REFUND_MAX_CENTS = 5_000
 
-# Not offered in the EU/EEA, UK or Switzerland (no VAT / consumer-law handling). Payments by
-# cards issued there are refunded in full instead of credited. Override with
+# Not offered in the EU/EEA, UK or Switzerland (no VAT / consumer-law handling). Every payment is
+# only authorized at first (capture_method=manual); a card issued there has its authorization
+# cancelled, so it is never charged and no card fee is paid. Override with
 # ACW_BLOCKED_CARD_COUNTRIES (comma-separated ISO codes; "none" disables the guard).
 BLOCKED_CARD_COUNTRIES = (
     "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE"  # EU
@@ -47,13 +48,44 @@ def _card_country(charge_id: str) -> str | None:
     return country.upper() if country else None
 
 
-def _refund_blocked_payment(payment_id: str, user_id: str, charge_id: str, country: str) -> None:
-    """Refund in full (idempotent), record it, and stop auto-reload for the user."""
-    client().v1.refunds.create(
-        params={"charge": charge_id, "reason": "requested_by_customer",
-                "metadata": {"acw_payment_id": payment_id, "acw_reason": "blocked_card_country"}},
-        options={"idempotency_key": f"blocked-country-{payment_id}"},
-    )
+def _get(obj, key: str):
+    """A field of a Stripe object or of an event's plain dict."""
+    return obj.get(key) if isinstance(obj, dict) else getattr(obj, key, None)
+
+
+def _id_of(ref) -> str | None:
+    """An id from an expandable field (either the id itself or the expanded object)."""
+    return ref if isinstance(ref, str) or ref is None else _get(ref, "id")
+
+
+def _settle_authorized(pi, payment_id: str, user_id: str):
+    """Payments are authorized first and charged only if the card was issued in a country we
+    serve: capture the authorization, or cancel it for a blocked country (the card is never
+    charged). Returns the PaymentIntent as it is now, or None when it was refused. Idempotent;
+    a failed Stripe call raises so the webhook is retried (an authorization lasts 7 days)."""
+    if _get(pi, "status") != "requires_capture":
+        return pi
+    row = db.one("SELECT user_id, status FROM payments WHERE id = ?", (payment_id,))
+    if row is None or row["user_id"] != user_id:
+        log.error("authorization %s: payment %s does not belong to user %s", _get(pi, "id"), payment_id, user_id)
+        return pi
+    if row["status"] == "refused_region":
+        return None
+    charge_id = _id_of(_get(pi, "latest_charge"))
+    country = _card_country(charge_id) if charge_id else None
+    if country in blocked_card_countries():
+        client().v1.payment_intents.cancel(
+            _get(pi, "id"), params={"cancellation_reason": "requested_by_customer"},
+            options={"idempotency_key": f"blocked-country-cancel-{payment_id}"},
+        )
+        _mark_refused(payment_id, user_id, charge_id, country)
+        log.warning("payment %s not charged: card issued in blocked country %s", payment_id, country)
+        return None
+    return client().v1.payment_intents.capture(_get(pi, "id"), options={"idempotency_key": f"capture-{payment_id}"})
+
+
+def _mark_refused(payment_id: str, user_id: str, charge_id: str | None, country: str) -> None:
+    """Record a payment refused for its card's country, and stop auto-reload for the user."""
     with db.tx() as c:
         c.execute(
             "UPDATE payments SET status = 'refused_region', stripe_charge = ?, failure_code = ?, updated_at = ?"
@@ -65,6 +97,17 @@ def _refund_blocked_payment(payment_id: str, user_id: str, charge_id: str, count
             "INSERT INTO audit_log(user_id, actor, action, detail, created_at) VALUES (?, 'stripe', 'payment_refused_region', ?, ?)",
             (user_id, f"{payment_id}:{charge_id}:{country}", db.now()),
         )
+
+
+def _refund_blocked_payment(payment_id: str, user_id: str, charge_id: str, country: str) -> None:
+    """Backstop for a blocked-country payment that was charged anyway (e.g. captured before
+    authorize-first existed): refund in full (idempotent) and record it."""
+    client().v1.refunds.create(
+        params={"charge": charge_id, "reason": "requested_by_customer",
+                "metadata": {"acw_payment_id": payment_id, "acw_reason": "blocked_card_country"}},
+        options={"idempotency_key": f"blocked-country-{payment_id}"},
+    )
+    _mark_refused(payment_id, user_id, charge_id, country)
     log.warning("payment %s refunded: card issued in blocked country %s", payment_id, country)
 
 
@@ -116,6 +159,8 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
     }
     if save_card:
         pi_data["setup_future_usage"] = "off_session"
+    # Authorize only; the webhook charges it once the card's issuing country is checked.
+    pi_data["capture_method"] = "manual"
     tax_params: dict = {}
     if settings.stripe_automatic_tax:
         # Tax is added on top of the credit amount; the address (and an
@@ -156,7 +201,7 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
             "metadata": {"acw_user_id": user_id, "acw_payment_id": payment_id},
             # Shown above the Pay button: paying is agreeing to the Terms.
             "custom_text": {"submit": {"message": f"By paying you agree to the [Terms of Service]({settings.url('/terms')})."}},
-            "success_url": settings.url("/app/billing?checkout=success"),
+            "success_url": settings.url(f"/app/billing?checkout=success&p={payment_id}"),
             "cancel_url": settings.url("/app/billing?checkout=cancel"),
             "expires_at": now + 60 * 60,
         },
@@ -241,20 +286,28 @@ def _credit_payment(
 
 
 def _handle_checkout_completed(session: dict) -> None:
-    if session.get("mode") != "payment" or session.get("payment_status") != "paid":
+    # An authorized (not yet charged) payment completes the session as "unpaid".
+    if session.get("mode") != "payment" or session.get("payment_status") not in ("paid", "unpaid"):
         return
     meta = session.get("metadata") or {}
     payment_id, user_id = meta.get("acw_payment_id"), meta.get("acw_user_id")
     if not payment_id or not user_id:
         return
+    p = db.one("SELECT stripe_checkout_session FROM payments WHERE id = ? AND user_id = ?", (payment_id, user_id))
+    if p is None or p["stripe_checkout_session"] != session.get("id"):
+        log.error("payment %s: checkout session mismatch", payment_id)
+        return
     pi_id = session.get("payment_intent")
     pm_id = charge_id = None
     save_pm = False
-    if pi_id:
-        pi = client().v1.payment_intents.retrieve(pi_id)
-        pm_id = pi.payment_method if isinstance(pi.payment_method, str) else getattr(pi.payment_method, "id", None)
-        charge_id = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
-        save_pm = pi.setup_future_usage == "off_session"
+    if not pi_id:
+        return
+    pi = _settle_authorized(client().v1.payment_intents.retrieve(pi_id), payment_id, user_id)
+    if pi is None or _get(pi, "status") != "succeeded":
+        return  # refused for its country, or not charged (yet)
+    pm_id = _id_of(_get(pi, "payment_method"))
+    charge_id = _id_of(_get(pi, "latest_charge"))
+    save_pm = _get(pi, "setup_future_usage") == "off_session"
     tax = int((session.get("total_details") or {}).get("amount_tax") or 0)
     db.execute("UPDATE payments SET tax_cents = ? WHERE id = ? AND status = 'pending'", (tax, payment_id))
     _credit_payment(
@@ -274,6 +327,16 @@ def _handle_pi_succeeded(pi: dict) -> None:
         charge_id=pi.get("latest_charge"), pm_id=None, save_pm=False,
     )
     _record_tax_transaction(meta["acw_payment_id"])
+
+
+def _handle_pi_capturable(pi: dict) -> None:
+    """An authorization is waiting: charge it or cancel it (also covers a reload whose own request
+    could not finish). Checkout payments are then credited from checkout.session.completed,
+    reloads from payment_intent.succeeded."""
+    meta = pi.get("metadata") or {}
+    if meta.get("acw_kind") not in ("checkout", "auto_reload") or not meta.get("acw_payment_id"):
+        return
+    _settle_authorized(pi, meta["acw_payment_id"], meta["acw_user_id"])
 
 
 def _record_reload_failure(payment_id: str, user_id: str, code: str | None) -> None:
@@ -393,6 +456,7 @@ def _handle_pm_detached(pm: dict) -> None:
 HANDLERS = {
     "checkout.session.completed": _handle_checkout_completed,
     "checkout.session.async_payment_succeeded": _handle_checkout_completed,
+    "payment_intent.amount_capturable_updated": _handle_pi_capturable,
     "payment_intent.succeeded": _handle_pi_succeeded,
     "payment_intent.payment_failed": _handle_pi_failed,
     "charge.refunded": _handle_charge_refunded,
@@ -491,6 +555,7 @@ def run_auto_reload(user_id: str) -> str:
                 "payment_method": pm,
                 "off_session": True,
                 "confirm": True,
+                "capture_method": "manual",  # charged by _settle_authorized after the country check
                 "description": "Audio Cleaner auto-reload",
                 "statement_descriptor_suffix": "RELOAD",
                 "metadata": {"acw_user_id": user_id, "acw_payment_id": payment_id, "acw_kind": "auto_reload"},
@@ -506,6 +571,13 @@ def run_auto_reload(user_id: str) -> str:
         _record_reload_failure(payment_id, user_id, "api_error")
         return "error"
     db.execute("UPDATE payments SET stripe_payment_intent = ?, updated_at = ? WHERE id = ?", (pi.id, db.now(), payment_id))
+    try:
+        pi = _settle_authorized(pi, payment_id, user_id)
+    except Exception:  # noqa: BLE001 - the amount_capturable_updated webhook retries it
+        log.exception("charging auto-reload %s failed; left for the webhook", payment_id)
+        return "error"
+    if pi is None:
+        return "refused_region"
     if pi.status == "succeeded":
         charge = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
         try:

@@ -68,12 +68,12 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (!/isn.t offered in the EU\/EEA, the UK or Switzerland/.test(faq)) throw new Error('availability answer missing');
     return 'ok';
   });
-  await check('Terms and Privacy say the service is not available in the EU/EEA, the UK or Switzerland, and that those cards are refunded', async () => {
+  await check('Terms and Privacy say the service is not available in the EU/EEA, the UK or Switzerland, and that those cards are not charged', async () => {
     for (const p of ['/terms', '/privacy']) {
       await page.goto(`${BASE}${p}`);
       const t = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
       if (!/not available to people in the (European Union or European Economic Area \(EU\/EEA\)|EU\/EEA), the (United Kingdom|UK) or Switzerland/.test(t)) throw new Error(p + ': availability sentence missing');
-      if (!/card issued in one of those places, we refund it/.test(t)) throw new Error(p + ': refund sentence missing');
+      if (!/card issued in one of those places is used, we cancel the payment before it is charged/.test(t)) throw new Error(p + ': not-charged sentence missing');
       if (/\/free\b/.test(await page.locator('main').innerHTML())) throw new Error(p + ' links to /free');
     }
     return 'ok';

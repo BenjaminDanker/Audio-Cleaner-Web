@@ -16,6 +16,12 @@ function goStripe(url) {
 
 const REFUND_DAYS = 14;
 
+const NOT_SERVED = 'Cards issued in the EU/EEA, the UK or Switzerland can’t be used, so this payment was cancelled and the card wasn’t charged.';
+const STATUS = {
+  succeeded: ['Paid', 'badge badge-ok'], pending: ['Processing', 'badge'], failed: ['Failed', 'badge badge-bad'],
+  refunded: ['Refunded', 'badge'], disputed: ['Disputed', 'badge badge-bad'], refused_region: ['Not charged', 'badge'],
+};
+
 /** The card processor keeps about 2.9% + 30 cents of every payment; the first refund of a payment takes that off. */
 const cardFeeCents = (paymentCents) => Math.ceil(paymentCents * 0.029 + 30);
 
@@ -55,6 +61,7 @@ export default function Billing() {
   // ?checkout=success|cancel after returning from Stripe. The webhook may take a few seconds.
   useEffect(() => {
     const c = params.get('checkout');
+    const paymentId = params.get('p'); // this payment's id (set by the server in the return address)
     if (!c) return undefined;
     setParams({}, { replace: true });
     if (c === 'cancel') {
@@ -63,13 +70,21 @@ export default function Billing() {
     }
     if (c !== 'success') return undefined;
     startBalance.current = balance?.available_micros ?? 0;
-    setBanner({ kind: 'info', text: 'Payment received. Updating your balance…', busy: true });
+    setBanner({ kind: 'info', text: 'Payment received. Checking it and updating your balance…', busy: true });
     let tries = 0;
     let stop = false;
     const tick = async () => {
       if (stop) return;
       const me = await refresh();
       tries += 1;
+      // Paying is "authorize, then charge once the card's country is checked": a card from a country we don't
+      // serve is cancelled, never credited, so look at this payment as well as the balance.
+      const mine = paymentId ? await api('billing/history').then((h) => h.payments?.find((x) => x.id === paymentId)).catch(() => null) : null;
+      if (mine?.status === 'refused_region') {
+        setBanner({ kind: 'warn', text: NOT_SERVED });
+        loadHistory();
+        return;
+      }
       if (me?.balance && me.balance.available_micros > startBalance.current) {
         setBanner({ kind: 'success', text: `Thank you! Your balance is now ${balanceMoney(me.balance.available_micros)}.` });
         loadHistory();
@@ -329,7 +344,7 @@ function History({ history, error, reload, unavailable, availableMicros }) {
                       <tr key={p.id}>
                         <td className="nowrap">{dateTime(p.created_at)}</td>
                         <td>{p.kind === 'auto_reload' ? 'Auto-reload' : 'Top-up'}</td>
-                        <td><span className={p.status === 'succeeded' ? 'badge badge-ok' : p.status === 'failed' ? 'badge badge-bad' : 'badge'}>{p.status}</span></td>
+                        <td><span className={(STATUS[p.status] || [p.status, 'badge'])[1]} title={p.status === 'refused_region' ? NOT_SERVED : undefined} data-testid="pay-status">{(STATUS[p.status] || [p.status])[0]}</span></td>
                         <td className="num">{moneyCents(p.amount_cents)}</td>
                         <td className="num">{p.refunded_cents ? moneyCents(p.refunded_cents) : '—'}</td>
                         <td className="right">
