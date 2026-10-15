@@ -236,7 +236,7 @@ if (want('live')) {
   const wav = join(FILES, 'noisy.wav');
   const { browser, page } = await freshPage(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${wav}`]);
   await signIn(page, EMAIL);
-  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-10' });
+  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-15' });
   await check('live: price of the chosen combination (denoise light + captions tier) comes from /api/billing/pricing', async () => {
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-price').waitFor();
@@ -329,7 +329,7 @@ if (want('flac')) {
   execFileSync(FFMPEG, ['-v', 'error', '-y', '-i', join(FILES, 'noisy.wav'), '-c:a', 'pcm_s16be', faiff]);
   const { browser, page, logs } = await freshPage();
   await signIn(page, EMAIL);
-  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-10' });
+  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-15' });
   // The size of every blob PUT through XMLHttpRequest (Playwright cannot see XHR blob bodies).
   await page.addInitScript(() => {
     window.__puts = [];

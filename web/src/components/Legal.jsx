@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom';
 import { SITE } from '../site.js';
 
-export const LEGAL_VERSION = '2026-10-10';
+export const LEGAL_VERSION = '2026-10-15';
 
 /** Wrapper for legal text: version and table of contents. */
 export default function Legal({ title, sections, children }) {

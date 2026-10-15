@@ -442,7 +442,7 @@ def test_rebuild_without_models_is_billed_as_standard(monkeypatch, tmp_path):
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     job, d = running_job(uid, denoise_tier="rebuild")
-    assert json.loads(job["params_json"])["rates"] == {"denoise": 20_000}
+    assert json.loads(job["params_json"])["rates"] == {"denoise": 30_000}
     job = W._use_available_tier(job)
     params = json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])
     assert params["denoise_tier"] == "standard" and params["rates"] == {"denoise": 10_000}

@@ -30,7 +30,7 @@ export default function Terms() {
       <h2 id="about">1. About these terms</h2>
       <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By signing in (which creates your account the first time) you agree to them, and buying credit or using a paid feature confirms it. If you do not agree, do not use the Service. The free noise removal runs on your own device; it needs a free account, but no credit.</p>
       <p><b>Where the Service is available.</b> The Service is not available to people in the European Union or European Economic Area (EU/EEA), the United Kingdom or Switzerland. Please do not create an account, buy credit or use the Service if you are there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
-      <p>We may update these terms. When we do, the version date changes and signed-in users see a notice on the website. Signing in or using the Service after the change means you accept the new version. If you do not accept it, stop using the Service; you can close your account and get your unused credit back as described under termination below.</p>
+      <p>We may update these terms. When we do, the version date changes and signed-in users see a notice on the website. Signing in or using the Service after the change means you accept the new version. If you do not accept it, stop using the Service; you can get back the unused part of a recent top-up with the self-service refund (section 4) and then close your account.</p>
 
       <h2 id="accounts">2. Accounts</h2>
       <ul>
@@ -94,16 +94,16 @@ export default function Terms() {
       <p>Download your results promptly: we cannot recover deleted files.</p>
 
       <h2 id="availability">9. Availability and changes</h2>
-      <p>We aim to keep the Service running but do not guarantee any uptime, speed or availability. It may be interrupted for maintenance, capacity or reasons beyond our control. Features, limits and free allowances may change. We may stop offering a feature with reasonable notice; unused credit then remains usable on other features or is refunded on request.</p>
+      <p>We aim to keep the Service running but do not guarantee any uptime, speed or availability. It may be interrupted for maintenance, capacity or reasons beyond our control. Features, limits and free allowances may change. We may stop offering a feature with reasonable notice; unused credit then remains usable on other features.</p>
 
       <h2 id="disclaimer">10. Disclaimers</h2>
       <p>The Service is provided &ldquo;as is&rdquo; and &ldquo;as available&rdquo;. Noise removal can alter or remove parts of a recording, and transcripts can contain errors. Check results before relying on them, and keep your originals. Do not rely on the Service for legal, medical, safety-critical or evidentiary purposes. To the extent the law allows we disclaim all warranties not expressly stated here.</p>
 
       <h2 id="liability">11. Limitation of liability</h2>
-      <p>To the maximum extent permitted by law, we are not liable for indirect, incidental, special or consequential damages, or for lost profits, revenue, data or goodwill. Our total liability for any claim relating to the Service is limited to the greater of the amount you paid us in the 12 months before the claim and [USD 50 — to be confirmed]. Nothing in these terms excludes liability that cannot be excluded by law, including for fraud or for death or personal injury caused by negligence, and consumers keep their statutory rights.</p>
+      <p>To the maximum extent permitted by law, we are not liable for indirect, incidental, special or consequential damages, or for lost profits, revenue, data or goodwill. Our total liability for any claim relating to the Service is limited to the greater of the amount you paid us in the 12 months before the claim and USD 100. Nothing in these terms excludes liability that cannot be excluded by law, including for fraud or for death or personal injury caused by negligence, and consumers keep their statutory rights.</p>
 
       <h2 id="termination">12. Suspension and termination</h2>
-      <p>You can stop using the Service at any time and ask us to delete your account. We can suspend or end your access if you breach these terms, if required by law, or to protect the Service or other users. On termination without breach by you, we will refund unused credit on request; credit is forfeited as described in section 4 where the account is closed for fraud, chargebacks or serious breach.</p>
+      <p>You can stop using the Service at any time and delete your account yourself on the Account page. Any credit left when you delete your account is forfeited, so if you want money back, use the self-service refund described in section 4 first. We can suspend or end your access if you breach these terms, if required by law, or to protect the Service or other users. If we end your access, or close the Service, without a breach by you, we refund your unused credit to the original payment method without you having to ask; credit is forfeited as described in section 4 where the account is closed for fraud, chargebacks or serious breach.</p>
 
       <h2 id="law">13. Governing law and contact</h2>
       <p>

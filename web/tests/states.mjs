@@ -71,7 +71,7 @@ if (want('busy')) {
   const { browser, page } = await freshPage([], { storageState: await signedInState() });
   await page.goto(`${BASE}/app`);
   await page.waitForSelector('main h1');
-  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-10' });
+  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-15' });
   const job = (id, extra) => ({ id, kind: 'denoise', free: false, status: 'queued', inputName: `${id}.wav`, createdAt: Math.floor(Date.now() / 1000), durationSeconds: 60, progress: 0, stage: null, outputs: [], costMicros: 0, expiresAt: null, queuePosition: null, queueWaitSeconds: null, ...extra });
   await check('queued job card: "In line: N ahead of you, about X min" / "You\'re next"', async () => {
     await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: [job('jq3', { queuePosition: 3, queueWaitSeconds: 300 }), job('jq1', { queuePosition: 1, queueWaitSeconds: 40 }), job('jq0', { queuePosition: 5, queueWaitSeconds: 5400 })] } }) : r.continue()));
@@ -143,7 +143,7 @@ if (want('livefull')) {
   const { browser, page } = await freshPage(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${wav}`], { storageState: await signedInState() });
   await page.goto(`${BASE}/app`);
   await page.waitForSelector('main h1');
-  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-10' });
+  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-15' });
   const starts = [];
   let mode = 'full';
   const mock = async () => page.routeWebSocket(/\/api\/stream\/ws/, (ws) => {
