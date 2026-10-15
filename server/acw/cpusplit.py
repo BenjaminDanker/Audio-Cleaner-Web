@@ -85,36 +85,65 @@ def all_cpus() -> set[int]:
 
 @lru_cache(maxsize=1)
 def units_per_core() -> float:
-    """Calibrated once per process (web and stream worker measure the same CPU)."""
+    """Calibrated once per CPU model and remembered in the data dir, so a
+    restart while the machine is busy doesn't measure (and keep) a lower value."""
+    import json
+
     from .config import get_settings
 
+    if os.environ.get("ACW_LIVE_UNITS_PER_CORE"):
+        return float(os.environ["ACW_LIVE_UNITS_PER_CORE"])
     s = get_settings()
+    cache = s.data_dir / "live-calibration.json"
+    cpu = _cpu_model()
     try:
-        return calibrate_units_per_core(s.bin_dir / "libdf.so", s.models_dir / "DeepFilterNet3_onnx.tar.gz")
+        saved = json.loads(cache.read_text())
+        if saved.get("cpu") == cpu:
+            return float(saved["units_per_core"])
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        value = calibrate_units_per_core(s.bin_dir / "libdf.so", s.models_dir / "DeepFilterNet3_onnx.tar.gz")
     except Exception:  # noqa: BLE001 - no model (tests, dev): assume the reference machine
         return REFERENCE_UNITS_PER_CORE
+    try:
+        cache.write_text(json.dumps({"cpu": cpu, "units_per_core": round(value, 3)}))
+    except OSError:
+        pass  # sandboxed process: the next unsandboxed one writes it
+    return value
 
 
-def calibrate_units_per_core(lib_path: Path, model_path: Path, seconds: float = 4.0) -> float:
-    """Scale the reference capacity by how fast this CPU runs one session's model."""
+def _cpu_model() -> str:
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return "unknown"
+
+
+def calibrate_units_per_core(lib_path: Path, model_path: Path, runs: int = 3, seconds: float = 2.0) -> float:
+    """Scale the reference capacity by how fast this CPU runs one session's
+    model: the best of a few short runs (others' load only ever slows it)."""
     import time
 
     import numpy as np
 
     from acw_common.dfn import DeepFilter
 
-    if os.environ.get("ACW_LIVE_UNITS_PER_CORE"):
-        return float(os.environ["ACW_LIVE_UNITS_PER_CORE"])
     df = DeepFilter(lib_path, model_path)
     try:
         x = (0.05 * np.random.default_rng(0).standard_normal(int(48_000 * seconds))).astype(np.float32)
         df.process(x[:48_000])  # warm up
-        t = time.thread_time()
-        df.process(x)
-        cost = (time.thread_time() - t) / seconds
+        costs = []
+        for _ in range(runs):
+            t = time.thread_time()
+            df.process(x)
+            costs.append((time.thread_time() - t) / seconds)
     finally:
         df.close()
-    return REFERENCE_UNITS_PER_CORE * REFERENCE_FRAME_COST / max(cost, 1e-3)
+    return REFERENCE_UNITS_PER_CORE * REFERENCE_FRAME_COST / max(min(costs), 1e-3)
 
 
 # --------------------------------------------------------------- live marker
