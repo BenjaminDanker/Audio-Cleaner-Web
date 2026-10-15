@@ -3,7 +3,8 @@
 A free, offline app that removes background noise from the voice in video and audio files, and can write
 subtitles. It runs the shared cleaning pipeline (`../common/acw_common`) in a PySide6 window.
 Nothing is uploaded: the noise models and FFmpeg ship inside the app, and the installer downloads the three larger
-models (subtitles, restoring highs, rebuilding voices: 2.6 GB in all) once during setup.
+models (subtitles, restoring highs, rebuilding voices: 2.5 GB in all: Whisper 1.6 GB plus one 0.9 GB archive that holds
+the other two) once during setup.
 
 - `audio_cleaner_desktop/engine.py` cleans one file (no Qt; used by the window and the command line)
 - `audio_cleaner_desktop/gui/` the window: queue, settings, preview, history, About
@@ -19,7 +20,7 @@ Building and shipping installers is described in [`../docs/desktop.md`](../docs/
 
 ```sh
 python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.lock pytest
+pip install --require-hashes -r requirements.lock -r requirements-build.lock   # every package pinned by hash (packaging/hash_lock.py)
 pip install ../common          # or: export PYTHONPATH=desktop:common from the repository root
 ```
 

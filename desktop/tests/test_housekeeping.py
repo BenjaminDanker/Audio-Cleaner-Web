@@ -436,6 +436,21 @@ def test_about_names_the_downloaded_models_and_their_licences(qapp):
     assert "Sidon" in text and "AP-BWE" in text
 
 
+def test_about_points_to_the_licence_texts_that_came_with_the_models(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QLabel
+
+    from audio_cleaner_desktop.gui.about import AboutDialog
+
+    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
+    def text() -> str:
+        dialog = AboutDialog()  # kept alive while its labels are read
+        return "\n".join(label.text() for label in dialog.findChildren(QLabel))
+
+    assert str(tmp_path) not in text()  # nothing downloaded yet
+    (tmp_path / "models" / "LICENSES").mkdir(parents=True)
+    assert str(tmp_path / "models" / "LICENSES") in text()
+
+
 def test_the_settings_use_the_websites_wording():
     from audio_cleaner_desktop.gui.settings_panel import LOUDNESS_LABELS
 

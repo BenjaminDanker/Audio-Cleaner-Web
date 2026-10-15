@@ -107,7 +107,7 @@ def download_models() -> int:
         if models.is_installed(model):
             print(f"{model.title}: already there ({models.location(model)})")
             continue
-        line = _ProgressLine(f"Downloading: {model.title} ({model.size / 1e9:.1f} GB)")
+        line = _ProgressLine(f"Downloading: {model.title} ({model.download_size / 1e9:.1f} GB)")
         try:
             path = models.download(model, progress=lambda done, total: line(done / total), cancel=cancel)
         except models.Cancelled:

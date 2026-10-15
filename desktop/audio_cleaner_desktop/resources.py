@@ -11,7 +11,7 @@ From source the same layout is read from $ACW_DESKTOP_VENDOR (default
 desktop/vendor, filled by the packaging scripts). On Linux, missing pieces fall
 back to the server layout in ~/audio-cleaner/{bin,models}.
 
-The models for subtitles, restoring highs and rebuilding the voice are not in the app (2.6 GB): the installer
+The models for subtitles, restoring highs and rebuilding the voice are not in the app (a 2.5 GB download): the installer
 downloads them during setup, and Settings offers the download again when that failed. Runs from source (tests, CI) may use the small test model that
 prepare_vendor.py puts in vendor/test-models/ instead.
 """
@@ -49,16 +49,36 @@ SPEECH_MODEL = models.SpeechModel(
 )
 models.register(SPEECH_MODEL)
 
-# AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by tools/export_apbwe_onnx.py
-# and published once on this repository's "models-v1" release.
+# The two ONNX models and their licence texts come in ONE zip archive on this repository's "models-v1" release:
+# AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by tools/export_apbwe_onnx.py, and
+# Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md). The archive holds
+#   README.txt, LICENSES/*, ap-bwe/{8k,12k,16k,24k}to48k.onnx, sidon/{sidon_fe,sidon_dec}.onnx
+# Each model keeps its own folder and checks; the downloaders unpack the members each model lists (models.py).
 _MODELS_RELEASE = "https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v1/"
+MODELS_ARCHIVE = models.ModelArchive(
+    name="AudioCleaner-models-v1.zip",
+    url=_MODELS_RELEASE + "AudioCleaner-models-v1.zip",
+    size=908538132,
+    sha256="5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce",
+    shared=tuple(
+        models.ModelFile(f"LICENSES/{name}", "", size, sha, member=f"LICENSES/{name}")
+        for name, size, sha in (
+            ("AP-BWE-MIT.txt", 1817, "f05afcdb387530db09c6eb21c429a9d3417197da54cbc8e69f08affc62fb9beb"),
+            ("AP-BWE-weights-LICENSE.txt", 175, "506d3a47a2c84814c8d6a84f0450a18fb9d67c03bb30d8b7e9d357d9540be2d3"),
+            ("Sidon-MIT.txt", 1722, "ba0678e7b808bfdf63e376a58586864a93e28345c7c6304fef743de9e1dbf15d"),
+            ("Training-data-attribution.txt", 1605, "19bb96ffa127f60569675f31e263df72bd683f8d7ed1f2382f9f78843dfab16d"),
+            ("w2v-BERT-2.0-MIT.txt", 1402, "5285eea4fed64499b8713ea99bf1aa947e6cf33c647ef8842b93adac9ce159bf"),
+        )
+    ),
+)
+
 HIGHS_MODEL = models.SpeechModel(
     id="restore-highs",
     title="Model that restores missing highs",
     description="AP-BWE: brings back the high frequencies of phone calls and other band-limited recordings.",
     licence="AP-BWE by Ye-Xin Lu et al. (MIT code and weights), trained on VCTK (CC BY 4.0)",
     files=tuple(
-        models.ModelFile(f"{name}to48k.onnx", f"{_MODELS_RELEASE}{name}to48k.onnx", 119093242, sha)
+        models.ModelFile(f"{name}to48k.onnx", "", 119093242, sha, member=f"ap-bwe/{name}to48k.onnx")
         for name, sha in (
             ("8k", "788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3"),
             ("12k", "eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618"),
@@ -66,22 +86,23 @@ HIGHS_MODEL = models.SpeechModel(
             ("24k", "e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55"),
         )
     ),
+    archive=MODELS_ARCHIVE,
 )
 models.register(HIGHS_MODEL)
 
-# Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md) and published
-# on the same release: the optional "rebuild the voice" step.
+# The optional "rebuild the voice" step.
 VOICE_MODEL = models.SpeechModel(
     id="rebuild-voice",
     title="Model that rebuilds the voice",
     description="Sidon: removes room echo and noise and restores dull sound by rebuilding the voice.",
     licence="Sidon by Wataru Nakata, Yuki Saito and the sarulab-speech group (MIT), with w2v-BERT 2.0 by Meta (MIT); trained on FLEURS-R and LibriTTS-R (CC BY 4.0)",
     files=(
-        models.ModelFile("sidon_fe.onnx", _MODELS_RELEASE + "sidon_fe.onnx", 397857704,
-                         "76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75"),
-        models.ModelFile("sidon_dec.onnx", _MODELS_RELEASE + "sidon_dec.onnx", 104975475,
-                         "08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4"),
+        models.ModelFile("sidon_fe.onnx", "", 397857704,
+                         "76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75", member="sidon/sidon_fe.onnx"),
+        models.ModelFile("sidon_dec.onnx", "", 104975475,
+                         "08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4", member="sidon/sidon_dec.onnx"),
     ),
+    archive=MODELS_ARCHIVE,
 )
 models.register(VOICE_MODEL)
 
@@ -187,6 +208,11 @@ def speech_ready() -> bool:
 
 def licenses_dir() -> Path:
     return _vendor_root() / "licenses"
+
+
+def model_licenses_dir() -> Path | None:
+    """The licence texts that came with the downloaded models (<models>/LICENSES), or None before they were."""
+    return models.licences_dir()
 
 
 def check() -> list[str]:

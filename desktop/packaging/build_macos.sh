@@ -51,7 +51,7 @@ echo "== Python environment"
 [ -x "$WORK/venv/bin/python" ] || "$PYTHON" -m venv "$WORK/venv"
 PY="$WORK/venv/bin/python"
 "$PY" -m pip install -q --upgrade pip
-"$PY" -m pip install -q -r desktop/requirements.lock pyinstaller==6.22.3 pillow==12.3.0 pytest==9.1.1
+"$PY" -m pip install -q --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
 
 echo "== vendor directory"
 export PYTHONPATH="$REPO/desktop:$REPO/common" ACW_DESKTOP_VENDOR="$WORK/vendor" ACW_ICON_DIR="$WORK/icons"

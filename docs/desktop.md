@@ -2,33 +2,49 @@
 
 The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code).
 The installer carries the app, FFmpeg and the two noise models (DeepFilterNet3, and DPDFNet-8 for heavy noise), so
-noise removal works offline straight after installing. Three larger models (2.6 GB in all) are downloaded by setup
+noise removal works offline straight after installing. Three larger models (2.5 GB in all) are downloaded by setup
 itself, and only by setup: the app never downloads anything on its own at start-up. The installer is small; the
 Windows installer's download page and the Mac .pkg's postinstall script check every file's SHA-256, keep files a
 previous install left in place, and are generated from the app's catalog by `packaging/installer_models.py`:
 
 - the speech model for subtitles, Whisper large-v3-turbo (1.6 GB, from Hugging Face, `resources.SPEECH_MODEL`);
-- the model that restores the highs of phone-quality recordings, AP-BWE (4 x 119 MB ONNX, from this repository's
-  `models-v1` release, `resources.HIGHS_MODEL`);
+- the model that restores the highs of phone-quality recordings, AP-BWE (4 x 119 MB ONNX, `resources.HIGHS_MODEL`);
 - the model that rebuilds the voice (optional "Rebuild the voice" setting: removes room echo too), Sidon
-  (503 MB ONNX, same release, `resources.VOICE_MODEL`).
+  (503 MB ONNX, `resources.VOICE_MODEL`).
+
+The last two come in ONE zip archive, `AudioCleaner-models-v1.zip` (0.9 GB, `resources.MODELS_ARCHIVE`) on this
+repository's `models-v1` release; it also holds a `README.txt` and the `LICENSES/` folder (AP-BWE, Sidon, w2v-BERT 2.0
+and training-data notices). Each of the two stays a model of its own in the catalog (own folder, own panel and checks,
+every file pinned by size and SHA-256), but downloading either installs both. Setup downloads the archive once (the
+download page checks its SHA-256), unpacks it, checks the size of every file, moves the files to their model folders,
+puts `LICENSES/` next to them (`{app}\models\LICENSES`, which About points to) and deletes the archive.
+On Windows the unpacking is `%SystemRoot%\System32\tar.exe -xf <zip> -C <folder>` (Windows 10 1803 and later, so on
+every supported Windows; if it were missing, setup skips the archive and shows the "open Audio Cleaner > Settings to
+finish the download" message). On a Mac the postinstall script uses `curl`, `shasum -a 256` and `ditto -x -k`. The
+app itself (`models.py`) streams the archive into `<models>/AudioCleaner-models-v1.partial/` (resumable, SHA-256
+checked), unpacks the members of both models member by member (never a whole file in memory, size and SHA-256 checked
+again), and deletes the archive; it needs about 1.9 GB free at the peak (archive plus unpacked), cancelling works
+during the download and the unpacking, and a copy that setup installed is reused instead (D-33).
 
 They go to `{app}\models\<id>` on Windows and `/Library/Application Support/Audio Cleaner/models/<id>` on a Mac
 (`models.installer_dir`); a model whose files are all there also gets a `.complete` marker (the hashes of its files),
-which the app compares with its catalog. Every file is tried on its own, so one failed download does not stop the
-others. If a download fails or is cancelled during setup (offline, no space on the temporary drive), setup still
+which the app compares with its catalog. The speech model's files are tried on their own, so one failed download does
+not stop the next. If a download fails or is cancelled during setup (offline, no space on the temporary drive), setup still
 finishes; Settings then shows a Download button for what is missing (and the banner at the top offers all of it;
 `models.py`: pinned, resumable, verified, into the app's data folder; files setup did install are reused),
 `AudioCleaner --download-models` does all three from a terminal, and starting a job that needs a missing model asks
 first. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image) because a disk image has no setup
 step to download in. The .pkg is wrapped with `productbuild --distribution` (`packaging/macos/distribution.py`): it
-refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.6 GB and takes minutes.
+refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.5 GB and takes minutes.
 
-**The `models-v1` release** (the six ONNX files) must exist before the installers can fetch them: upload them to a
-release tagged `models-v1` with `--latest=false` (otherwise it takes over `releases/latest` from the app), together
-with the licence texts `AP-BWE-MIT.txt`, `Sidon-MIT.txt`, `w2v-BERT-2.0-MIT.txt` and `Training-data-attribution.txt`
-(from `desktop/packaging/licenses/`). The "Model downloads exist" job in the workflow compares every catalog URL's
-size with the catalog and goes red when a file is missing; it does not block the builds.
+**The `models-v1` release** must hold the archive before the installers can fetch it: upload the one file
+`AudioCleaner-models-v1.zip` (908,538,132 bytes, sha256 `5592be63...81ce`; `README.txt`, `LICENSES/*`,
+`ap-bwe/{8k,12k,16k,24k}to48k.onnx`, `sidon/{sidon_fe,sidon_dec}.onnx`, deflate) to a release tagged `models-v1` with
+`--latest=false` (otherwise it takes over `releases/latest` from the app). Never replace the file under the same name
+with different content: the catalog pins its size and SHA-256 (change both in `resources.MODELS_ARCHIVE`, and the
+member sizes and hashes, when a new archive is published, preferably under a new tag such as `models-v2`). The
+"Model downloads exist" job in the workflow compares the archive's size (and the speech model files') with the catalog
+and goes red when it is missing; it does not block the builds.
 
 Runs on Windows 10/11 (x64) and macOS 14 Sonoma or newer, on Apple silicon or Intel (PySide6 6.12 and the
 onnxruntime wheels set that floor; Intel Macs use onnxruntime 1.23.2, the last release with Intel Mac wheels).
@@ -63,7 +79,7 @@ the checklist at the end).
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest --gui`
    (also builds the window and runs the noise models, echo canceller, AP-BWE and Sidon when their files are there),
    and the installer (Inno Setup 6.7.1 on Windows, a `productbuild` .pkg on macOS; both download the models during
-   setup). Windows also runs the frozen app under a non-ASCII profile folder and installs, starts and uninstalls the
+   setup; the ONNX models arrive as one archive). Windows also runs the frozen app under a non-ASCII profile folder and installs, starts and uninstalls the
    installer silently. A separate "Model downloads exist" job checks the catalog URLs. Website/server-only pushes skip it; "Run workflow"
    builds by hand (artifacts only, no release; a push that only changes `deploy/fetch-dpdfnet.sh` also builds). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
 4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
@@ -102,7 +118,7 @@ and the app inside the .pkg (`macos/notarize.sh`; signing the .pkg itself needs 
 
 ```sh
 python3.12 -m venv .venv && . .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r desktop/requirements.lock pytest
+pip install --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
 export PYTHONPATH=desktop:common                         # Windows (cmd): set PYTHONPATH=desktop;common
 python -m audio_cleaner_desktop                          # the window; --cli FILE... without a window; --selftest
 QT_QPA_PLATFORM=offscreen python -m pytest -q common/tests desktop/tests
@@ -141,7 +157,7 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
 4. **Icons**: `python desktop/packaging/make_icons.py OUT_DIR` (icon.ico, icon.icns from `assets/icon.png`).
 5. **Bundle**:
    ```sh
-   pip install -r desktop/requirements.lock pyinstaller==6.22.3 pillow
+   pip install --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
    ACW_DESKTOP_VENDOR=desktop/vendor ACW_ICON_DIR=OUT_DIR \
      PYTHONPATH=desktop:common pyinstaller desktop/packaging/audio_cleaner.spec --distpath dist --workpath build --noconfirm
    dist/AudioCleaner/AudioCleaner --selftest            # must print "selftest ok" (macOS: dist/Audio Cleaner.app/Contents/MacOS/AudioCleaner)
@@ -171,9 +187,12 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
 Measured on Linux (the Windows/macOS sizes will differ somewhat): the `AudioCleaner` folder is about 0.6 GB
 uncompressed. The two noise models are 23 MB (DeepFilterNet 8 MB, DPDFNet-8 15 MB); the rest is PySide6/Qt 140 MB,
 CTranslate2 137 MB (library and extension), SciPy and its OpenBLAS 71 MB, ONNX Runtime 30 MB, NumPy and its OpenBLAS
-41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.6 GB of models: Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
-Sidon 503 MB. Windows setup needs that much free space on the temporary drive until the files are installed (it
-checks first), and again on the install drive. Memory while cleaning, measured: 0.5 GB for a normal file, 1.7 GB with
+41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.5 GB of models: Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
+Sidon 503 MB (the last two come in one 0.9 GB archive, so the download is 2.5 GB in all and 2.6 GB on disk). Windows
+setup needs the 2.5 GB of free space on the temporary drive until the files are installed (it checks first), and the
+unpacked models on the install drive (the archive is unpacked there, then the files are moved: about 1 GB extra for a
+moment). The app's own download of the two ONNX models needs about 1.9 GB at the peak (archive plus unpacked). Memory
+while cleaning, measured: 0.5 GB for a normal file, 1.7 GB with
 subtitles, 2.6 GB with "Rebuild the voice" (`sysinfo.py` plans with these numbers). GitHub Release assets may be up
 to 2 GiB each.
 
@@ -193,7 +212,8 @@ to 2 GiB each.
   named in it.
 * The downloaded models carry notices too: `AP-BWE-MIT.txt` (code and weights), `Sidon-MIT.txt`,
   `w2v-BERT-2.0-MIT.txt` (Meta) and `Training-data-attribution.txt` (CC BY 4.0: VCTK, FLEURS-R, LibriTTS-R) ship in
-  `licenses/` and are shown in About, and the same files belong on the `models-v1` release next to the ONNX files.
+  `licenses/` and are shown in About, and the same files (plus `AP-BWE-weights-LICENSE.txt`) are in the `LICENSES/` folder of the models archive, which
+  setup and the app unpack next to the models.
   The Dropbox CTranslate2 conversion of Whisper has no licence text of its own (its card says MIT); OpenAI's
   `Whisper-MIT.txt` is the text that applies.
 * Re-run the licence collection (it runs in every build) after changing dependencies; it fails when a package has no
@@ -214,11 +234,27 @@ to 2 GiB each.
   a crashed run are swept at the next start.
 * Not done yet (needs the FFmpeg wrapper or more): extra audio tracks and existing subtitles of a video are not kept
   in the result (the row says so); paths longer than 259 characters on Windows are refused with a message; `unins000.exe`
-  is not signed; `requirements.lock` has no hashes.
+  is not signed.
+
+## Pinned Python packages
+
+`desktop/requirements.lock` (runtime) and `desktop/requirements-build.lock` (PyInstaller, Pillow, pytest and what they
+need) list every package as `name==version` followed by `--hash=sha256:...` lines for EVERY file PyPI has for that
+exact version (all wheels and the sdist), so one lock serves Windows, macOS arm64 and x86_64 and Linux; environment
+markers stay (e.g. onnxruntime 1.23.2 and its dependencies on Intel Macs, colorama on Windows). CI and the build scripts
+install with `pip install --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock`: pip then
+refuses a file with another hash, a package that is not listed, and an unpinned one. To change a version, edit it in the
+lock and run `python desktop/packaging/hash_lock.py` (rewrites the hashes from `pypi.org/pypi/<name>/<version>/json`;
+`--check` only compares and exits 1 on a difference). A package that is needed on only some platforms or Python
+versions must be listed with its marker; `pip install --require-hashes` on a platform that needs a dependency the lock
+does not list fails with "Hashes are required in --require-hashes mode" and names it. Nothing in the locks is outside
+PyPI; a package that was would need its own hashed line (see the docstring of `hash_lock.py`). pip itself is
+upgraded unpinned before the install (`python -m pip install --upgrade pip`).
 
 ## Owner to-do before the first release
 
-* Upload the `models-v1` release (see above) and check that the "Model downloads exist" job is green.
+* Upload the `models-v1` release (the single `AudioCleaner-models-v1.zip`, see above) and check that the "Model
+  downloads exist" job is green.
 
 * Set the Apple and Azure secrets if you want signed installers (optional).
 * Push, run the workflow once via "Run workflow", and download the three artifacts to test on real machines. The

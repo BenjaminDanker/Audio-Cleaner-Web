@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Check that every file of the model catalog (resources.py) can be downloaded and has the size the catalog says.
+"""Check that every download of the model catalog (resources.py) exists and has the size the catalog says: the
+speech model's files on Hugging Face and the one models archive (AudioCleaner-models-v1.zip) on the GitHub release.
 
     python check_model_urls.py
 
-For each file: HEAD, following redirects by hand, and compare the size (Hugging Face reports it as X-Linked-Size
+For each URL: HEAD, following redirects by hand, and compare the size (Hugging Face reports it as X-Linked-Size
 on the first answer, the CDN and GitHub as Content-Length at the end) with the catalog. Exits 1, listing every
-file that is missing or differs: a release asset that was not uploaded makes the installers' downloads fail, and
+download that is missing or differs: a release asset that was not uploaded makes the installers' downloads fail, and
 this is what finds out. (The SHA-256 is checked by the installers and the app when they download.)
 """
 from __future__ import annotations
@@ -72,8 +73,15 @@ def problems(model_files, head: Head = http_head) -> list[str]:
     return found
 
 
-def catalog_files():
-    return [(f.url, f.size) for m in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL) for f in m.files]
+def catalog_files(catalog=(resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)):
+    """(url, size) of everything that is downloaded: individual files, and each archive once."""
+    found: dict[str, int] = {}
+    for m in catalog:
+        if m.archive is not None:
+            found[m.archive.url] = m.archive.size
+        else:
+            found.update({f.url: f.size for f in m.files})
+    return list(found.items())
 
 
 def main() -> int:
@@ -81,7 +89,7 @@ def main() -> int:
     bad = problems(files)
     for line in bad:
         print(f"PROBLEM {line}")
-    print(f"{len(files) - len(bad)} of {len(files)} model files are as the catalog says")
+    print(f"{len(files) - len(bad)} of {len(files)} model downloads are as the catalog says")
     return 1 if bad else 0
 
 

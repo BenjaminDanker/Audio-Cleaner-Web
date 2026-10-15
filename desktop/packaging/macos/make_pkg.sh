@@ -2,7 +2,7 @@
 # Packs "Audio Cleaner.app" into an installer package (.pkg) that installs it into /Applications and,
 # during setup, downloads the models (postinstall from installer_models.py --mac). The package is wrapped
 # with productbuild --distribution (macos/distribution.py): it refuses macOS older than 14, shows the
-# licence agreement and a welcome text that says setup downloads about 2.6 GB.
+# licence agreement and a welcome text that says setup downloads about 2.5 GB.
 #
 #   make_pkg.sh "dist/Audio Cleaner.app" AudioCleaner-macOS-arm64.pkg VERSION [SCRIPTS_DIR]
 #

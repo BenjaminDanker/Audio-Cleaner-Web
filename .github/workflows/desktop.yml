@@ -40,8 +40,9 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # The models the installers download (resources.py): HEAD every URL and compare the size with the catalog. Fails
-  # when a file is missing (e.g. the models-v1 release was not uploaded) or differs. Nothing needs this job, so a
+  # The models the installers download (resources.py): HEAD the models archive (AudioCleaner-models-v1.zip on the
+  # models-v1 release) and the speech model's files and compare the sizes with the catalog. Fails when one is
+  # missing (e.g. the archive was not uploaded to the release) or differs. Nothing needs this job, so a
   # red result here does not stop the builds or the release; look at it before announcing a build.
   model-urls:
     name: Model downloads exist
@@ -53,7 +54,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check every model URL against the catalog
+      - name: Check the models archive and the speech model files against the catalog
         run: python desktop/packaging/check_model_urls.py
 
   # ---------------------------------------------------------------------------
@@ -183,7 +184,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: desktop/requirements.lock
+          cache-dependency-path: |
+            desktop/requirements.lock
+            desktop/requirements-build.lock
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -194,10 +197,12 @@ jobs:
           name: libdf-${{ matrix.platform }}
           path: build/libdf
 
-      - name: Install Python dependencies
+      - name: Install Python dependencies (every package pinned by hash)
+        # The two locks list each package with the sha256 of every file PyPI has for it (packaging/hash_lock.py
+        # regenerates them): pip refuses anything that does not match, or that is not listed.
         run: |
           python -m pip install --upgrade pip
-          pip install -r desktop/requirements.lock pyinstaller==6.22.3 pillow==12.3.0 pytest==9.1.1
+          pip install --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
 
       - name: Version
         run: |
@@ -232,8 +237,8 @@ jobs:
         run: python -m pytest -q common/tests desktop/tests
 
       - name: Models for the frozen selftest (restoring highs, rebuilding the voice)
-        # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime. The speech model is left
-        # out (1.6 GB). Does not fail the build when the release with the models is not there yet: the
+        # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime (one 0.9 GB archive, which
+        # the first download unpacks for both). The speech model is left out (1.6 GB). Does not fail the build when the release with the models is not there yet: the
         # "Model downloads exist" job reports that.
         continue-on-error: true
         run: |
@@ -488,10 +493,10 @@ jobs:
           - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
-          Setup downloads the models (about 2.6 GB in all, once), so keep the internet on while it installs; on a Mac
-          it can take several minutes. They are Whisper large-v3-turbo for subtitles (1.6 GB), AP-BWE for restoring the
-          highs of phone-quality recordings (0.5 GB) and Sidon for rebuilding voices (0.5 GB). After that everything
-          works offline. If a download fails, the app still works and offers it in Settings.
+          Setup downloads the models (about 2.5 GB in all, once), so keep the internet on while it installs; on a Mac
+          it can take several minutes. They are Whisper large-v3-turbo for subtitles (1.6 GB) and one archive with
+          AP-BWE for restoring the highs of phone-quality recordings and Sidon for rebuilding voices (0.9 GB), which
+          setup unpacks for you. After that everything works offline. If a download fails, the app still works and offers it in Settings.
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           if [ "$GITHUB_REF_TYPE" = tag ]; then

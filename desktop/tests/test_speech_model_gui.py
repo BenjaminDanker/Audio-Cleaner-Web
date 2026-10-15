@@ -145,3 +145,19 @@ def test_rebuilding_the_voice_offers_its_download_and_start_asks_instead_of_down
         w.queue.shutdown()
         w.history.close()
         w._pool.waitForDone()
+
+
+def test_the_two_onnx_models_offer_the_one_archive_download(qapp, tmp_path, monkeypatch):
+    """Restoring highs and rebuilding the voice come from one archive: both panels name its size, and the queue of
+    downloads counts it once."""
+    from audio_cleaner_desktop import resources
+
+    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
+    archive = resources.MODELS_ARCHIVE
+    assert resources.HIGHS_MODEL.archive == resources.VOICE_MODEL.archive == archive
+    assert resources.HIGHS_MODEL.download_size == resources.VOICE_MODEL.download_size == archive.size
+    for model in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
+        panel = speech_model.SpeechModelPanel(speech_model.SpeechModelDownloader(model=model))
+        assert speech_model.size_text(archive.size) in panel._text.text()  # 0.9 GB, not the 0.5 GB of the model itself
+    assert models.download_bytes([resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL]) == (
+        resources.SPEECH_MODEL.size + archive.size)

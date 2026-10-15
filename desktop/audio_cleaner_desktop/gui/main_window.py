@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 
 from acw_common.ffmpeg import MediaError
 
-from .. import __version__, config, engine, resources, sysinfo
+from .. import __version__, config, engine, models, resources, sysinfo
 from . import media, queue_view, shell, tips
 from .about import AboutDialog
 from .history import DONE, FAILED, Entry, HistoryStore
@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(
             QMessageBox.Icon.Question, config.APP_NAME,
             f"{what} was not installed, probably because the download during setup did not work. Download it now "
-            f"({size_text(downloader.model.size)})?\n\n"
+            f"({size_text(downloader.model.download_size)})?\n\n"
             f"You can start cleaning when it is done, or {off} to clean the files right away.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self,
         )
@@ -496,10 +496,10 @@ class MainWindow(QMainWindow):
         dl = queue[0]
         if not dl.running:
             dl.start()
-        self._show_model_progress(0, dl.model.size)
+        self._show_model_progress(0, dl.model.download_size)
 
     def _show_model_progress(self, done: int, total: int) -> None:
-        left = sum(d.model.size for d in getattr(self, "_model_queue", [])) or total
+        left = models.download_bytes([d.model for d in getattr(self, "_model_queue", [])]) or total
         pct = int(100 * done / max(1, total))
         self.banner_models.show_message(
             f"Getting everything ready: downloading the models for subtitles, phone-quality recordings and "
