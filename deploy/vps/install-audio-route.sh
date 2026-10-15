@@ -9,6 +9,10 @@ SNIPPET=/home/silver/acw/audio.caddy
 CF=/etc/caddy/Caddyfile
 [ -r "$SNIPPET" ] || { echo "missing $SNIPPET" >&2; exit 1; }
 install -d -o silver -g silver -m 0755 /var/www/audio
+# The backup is the file exactly as it was, before the old route is taken out: a failed validation puts it back.
+BACKUP="$CF.backup.$(date -u +%Y%m%d%H%M%S)"
+cp -a "$CF" "$BACKUP"
+trap 'echo "failed, restoring $BACKUP" >&2; cp -a "$BACKUP" "$CF"' ERR
 if grep -q 'Audio Cleaner (/audio)' "$CF"; then
   echo "route already present; replacing it"
   python3 - "$CF" <<'PY'
@@ -18,8 +22,6 @@ s = re.sub(r"\n    # ---- Audio Cleaner \(/audio\).*?# -{20,}\n", "\n", s, flags
 open(p, "w").write(s)
 PY
 fi
-BACKUP="$CF.backup.$(date -u +%Y%m%d%H%M%S)"
-cp -a "$CF" "$BACKUP"
 python3 - "$CF" "$SNIPPET" <<'PY'
 import sys
 cf, snip = sys.argv[1], sys.argv[2]
@@ -30,10 +32,22 @@ if marker not in s:
 s = s.replace(marker, block + "\n" + marker, 1)
 open(cf, "w").write(s)
 PY
+# Drop clients that open a connection and never finish their headers (global option). Added only when the file has
+# no global options block yet; with one, add `servers { timeouts { read_header 10s } }` to it by hand.
+if ! grep -qE '^[[:space:]]*read_header' "$CF"; then
+  if grep -qE '^\{' "$CF"; then
+    echo "note: add  servers { timeouts { read_header 10s } }  to the global options block at the top of $CF" >&2
+  else
+    printf '{\n    servers {\n        timeouts {\n            read_header 10s\n        }\n    }\n}\n\n' | cat - "$CF" > "$CF.new"
+    cat "$CF.new" > "$CF" && rm -f "$CF.new"
+  fi
+fi
 if ! caddy validate --config "$CF" --adapter caddyfile; then
+  trap - ERR
   echo "validation failed, restoring $BACKUP" >&2
   cp -a "$BACKUP" "$CF"
   exit 1
 fi
+trap - ERR
 systemctl reload caddy
 echo "ok: /audio route live (backup at $BACKUP)"

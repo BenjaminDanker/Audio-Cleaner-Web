@@ -10,7 +10,7 @@
     # Request bodies: only a file upload may be big. Everything else is small JSON, so it gets 64 KB (the app
     # enforces the same limit again and drops a body that stalls for 20 s: acw/bodylimit.py; Caddy's Caddyfile has no
     # per-body read timeout, `request_body { read_timeout }` exists only in its JSON config). The Stripe webhook gets 1 MB.
-    # One-time, in the GLOBAL OPTIONS block at the top of /etc/caddy/Caddyfile (not here), so a client that
+    # install-audio-route.sh also puts this in the GLOBAL OPTIONS block at the top of /etc/caddy/Caddyfile, so a client that
     # opens a connection and never finishes its headers is dropped:
     #     servers {
     #         timeouts {
@@ -18,10 +18,10 @@
     #         }
     #     }
     handle /audio/api/* {
-        @upload path_regexp ^/audio/api/jobs/[0-9a-f]{32}/input$
-        @download path_regexp ^/audio/api/jobs/[0-9a-f]{32}/outputs/
-        @webhook path /audio/api/stripe/webhook
-        handle @upload {
+        @acw_upload path_regexp ^/audio/api/jobs/[0-9a-f]{32}/input$
+        @acw_download path_regexp ^/audio/api/jobs/[0-9a-f]{32}/outputs/
+        @acw_webhook path /audio/api/stripe/webhook
+        handle @acw_upload {
             request_body {
                 max_size 4GB
             }
@@ -41,7 +41,7 @@
                 }
             }
         }
-        handle @download {
+        handle @acw_download {
             request_body {
                 max_size 64KB
             }
@@ -61,7 +61,7 @@
                 }
             }
         }
-        handle @webhook {
+        handle @acw_webhook {
             request_body {
                 max_size 1MB
             }
@@ -107,24 +107,24 @@
             Permissions-Policy "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)"
             -Server
         }
-        @immutable path /audio/assets/*
-        header @immutable Cache-Control "public, max-age=31536000, immutable"
+        @acw_immutable path /audio/assets/*
+        header @acw_immutable Cache-Control "public, max-age=31536000, immutable"
         # The free in-browser tool's engine and model: only for signed-in
         # browsers (the home server checks the session and a daily cap per
         # account, so bots can't keep downloading the model). The files
         # themselves are still served from here.
-        @dfn path /audio/dfn/*
-        forward_auth @dfn 127.0.0.1:18790 {
+        @acw_dfn path /audio/dfn/*
+        forward_auth @acw_dfn 127.0.0.1:18790 {
             uri /audio/api/auth/asset-check
         }
-        header @dfn Cache-Control "private, max-age=604800"
+        header @acw_dfn Cache-Control "private, max-age=604800"
         # Every app route serves index.html: never cache it, only hashed assets.
-        @html not path /audio/assets/* /audio/dfn/*
-        header @html Cache-Control "no-cache"
+        @acw_html not path /audio/assets/* /audio/dfn/*
+        header @acw_html Cache-Control "no-cache"
         # App routes (/audio/app, /audio/login, ...) get index.html; a missing hashed script, a missing file under
         # assets/ dfn/ releases/ is a real 404, so a tab on an old page can tell it must reload.
-        @spa not path /audio/assets/* /audio/dfn/* /audio/releases/*
-        try_files @spa {path} /audio/index.html
+        @acw_spa not path /audio/assets/* /audio/dfn/* /audio/releases/*
+        try_files @acw_spa {path} /audio/index.html
         file_server {
             precompressed zstd gzip
         }
@@ -133,8 +133,8 @@
     # status instead of a bare 502. The site itself is served from this VPS,
     # so it keeps loading and shows a maintenance notice.
     handle_errors 502 503 504 {
-        @audio_api path /audio/api/*
-        handle @audio_api {
+        @acw_api path /audio/api/*
+        handle @acw_api {
             header Content-Type application/json
             header Cache-Control no-store
             header Retry-After 60
