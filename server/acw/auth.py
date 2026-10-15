@@ -85,7 +85,21 @@ def link_identity(provider: str, provider_user_id: str, email: str, display_name
 
 # ---------------------------------------------------------------- sessions
 
+def accept_terms(user_id: str, how: str, ip: str | None = None) -> None:
+    """Record that the user agreed to the current Terms (version, time, IP, how):
+    by signing in (the sign-in page says so), or by continuing to use the
+    service after the Terms changed. Kept as consent evidence (disputes)."""
+    row = db.one("SELECT tos_version FROM users WHERE id = ?", (user_id,))
+    if row is None or row["tos_version"] == TOS_VERSION:
+        return
+    db.execute("UPDATE users SET tos_version = ?, tos_accepted_at = ? WHERE id = ?", (TOS_VERSION, db.now(), user_id))
+    db.audit("user", "tos_accepted", user_id=user_id, detail=f"{TOS_VERSION} ({how})", ip=ip)
+
+
 def create_session(response: Response, request: Request, user_id: str) -> None:
+    from .security import client_ip
+
+    accept_terms(user_id, "sign-in", client_ip(request))
     settings = get_settings()
     token = random_token(32)
     now = db.now()

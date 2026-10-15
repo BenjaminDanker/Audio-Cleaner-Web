@@ -154,6 +154,8 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
             # most cases and makes later off-session reloads less likely to fail.
             "payment_method_options": {"card": {"request_three_d_secure": "any"}},
             "metadata": {"acw_user_id": user_id, "acw_payment_id": payment_id},
+            # Shown above the Pay button: paying is agreeing to the Terms.
+            "custom_text": {"submit": {"message": f"By paying you agree to the [Terms of Service]({settings.url('/terms')})."}},
             "success_url": settings.url("/app/billing?checkout=success"),
             "cancel_url": settings.url("/app/billing?checkout=cancel"),
             "expires_at": now + 60 * 60,

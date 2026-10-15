@@ -89,12 +89,18 @@ def test_jobs_are_private_to_their_owner(client):
     assert client.put(f"/api/jobs/{job_id}/input", content=b"x" * 100, headers=h_b).status_code == 404
 
 
-def test_job_requires_funds_and_tos(client):
-    _, h = login(client, accept_tos=False)
+def test_signing_in_accepts_the_terms_and_records_it(client):
+    uid, h = login(client, accept_tos=False)
+    me = client.get("/api/me", headers=h).json()
+    assert me["user"]["tosAccepted"]  # the sign-in page says signing in means agreeing
+    assert db.one("SELECT count(*) AS n FROM audit_log WHERE user_id = ? AND action = 'tos_accepted'", (uid,))["n"] == 1
     body = {"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 100, "durationSeconds": 30}
-    assert client.post("/api/jobs", json=body, headers=h).status_code == 409
-    client.post("/api/account/tos", json={"version": auth.TOS_VERSION}, headers=h)
-    assert client.post("/api/jobs", json=body, headers=h).status_code == 402
+    assert client.post("/api/jobs", json=body, headers=h).status_code == 402  # no Terms step; just no credit
+    # A Terms update is accepted by continuing to use the service, and recorded again.
+    db.execute("UPDATE users SET tos_version = 'old' WHERE id = ?", (uid,))
+    client.post("/api/jobs", json=body, headers=h)
+    assert db.one("SELECT tos_version FROM users WHERE id = ?", (uid,))["tos_version"] == auth.TOS_VERSION
+    assert db.one("SELECT count(*) AS n FROM audit_log WHERE user_id = ? AND action = 'tos_accepted'", (uid,))["n"] == 2
 
 
 def test_upload_must_match_declared_size_and_cancel_refunds(client, signed_in):

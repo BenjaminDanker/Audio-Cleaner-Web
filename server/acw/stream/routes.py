@@ -199,11 +199,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
     if not isinstance(cfg, dict) or cfg.get("type") != "start" or len(raw) > 4096:
         await ws.close(code=1008)
         return None
-    user = db.one("SELECT tos_version FROM users WHERE id = ?", (principal.user_id,))
-    if user["tos_version"] != auth.TOS_VERSION:
-        await _send_json(ws, {"type": "error", "code": "tos", "message": "Accept the terms of service on the website first."})
-        await ws.close(code=1008)
-        return None
+    auth.accept_terms(principal.user_id, "continued use", ip)
     denoise = cfg.get("denoise")
     captions = cfg.get("captions")
     language = cfg.get("language")

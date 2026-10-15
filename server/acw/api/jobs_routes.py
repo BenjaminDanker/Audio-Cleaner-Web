@@ -44,10 +44,7 @@ def _get_owned(job_id: str, principal: auth.Principal) -> dict:
 def create(body: CreateJob, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
     enforce("job_create", principal.user_id)
     enforce("job_create", f"ip:{client_ip(request)}")
-    if not body.free:
-        row = db.one("SELECT tos_version FROM users WHERE id = ?", (principal.user_id,))
-        if row["tos_version"] != auth.TOS_VERSION:
-            raise HTTPException(status_code=409, detail="Accept the terms of service first.")
+    auth.accept_terms(principal.user_id, "continued use", client_ip(request))
     if len(json.dumps(body.options)) > 2000:
         raise HTTPException(status_code=400, detail="options too large")
     try:

@@ -17,9 +17,8 @@ router = APIRouter(prefix="/api/billing", tags=["billing"])
 
 
 def _require_tos(principal: auth.Principal) -> None:
-    row = db.one("SELECT tos_version FROM users WHERE id = ?", (principal.user_id,))
-    if row["tos_version"] != auth.TOS_VERSION:
-        raise HTTPException(status_code=409, detail="Accept the terms of service first.")
+    """Signing in means agreeing; using the service after a Terms update does too (recorded)."""
+    auth.accept_terms(principal.user_id, "continued use")
 
 
 def _require_stripe() -> None:
