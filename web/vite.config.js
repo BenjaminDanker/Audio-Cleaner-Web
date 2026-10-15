@@ -26,6 +26,28 @@ function libavDir() {
   return dirs.length === 1 ? dirs[0] : '';
 }
 
+// The public address of the site (no trailing slash), for the absolute links in index.html (canonical, social previews).
+// Set VITE_SITE_ORIGIN when building for another domain.
+function siteOrigin(env) {
+  return (process.env.VITE_SITE_ORIGIN || env.VITE_SITE_ORIGIN || 'https://mc-multi-world.space').replace(/\/+$/, '');
+}
+
+// Fills %SITE_ORIGIN% in index.html and writes robots.txt next to the app (under the base path). Crawlers only read
+// the robots.txt at the root of a domain, so the front door has to serve one there too (it is not part of this build).
+function sitePlugin(origin, base) {
+  return {
+    name: 'acw-site',
+    transformIndexHtml: (html) => html.replaceAll('%SITE_ORIGIN%', origin),
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'robots.txt',
+        source: ['User-agent: *', `Allow: ${base}`, `Disallow: ${base}app`, `Disallow: ${base}login`, `Disallow: ${base}api/`, ''].join('\n'),
+      });
+    },
+  };
+}
+
 // The app is served under VITE_BASE (default "/audio/", use "/" on a dedicated domain).
 // API calls go to `${BASE_URL}api/` on the same origin, so no CORS and cookie auth just works.
 export default defineConfig(({ mode }) => {
@@ -37,7 +59,7 @@ export default defineConfig(({ mode }) => {
 
   return {
     base,
-    plugins: [react()],
+    plugins: [react(), sitePlugin(siteOrigin(env), base)],
     define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()), __LIBAV_DIR__: JSON.stringify(libavDir()) },
     worker: { format: 'es' },
     build: {

@@ -10,7 +10,12 @@ let inflight = null;
 
 function takeToken() {
   const m = /[#&]token=([^&]+)/.exec(window.location.hash || '');
-  const token = m ? decodeURIComponent(m[1]) : null;
+  let token = null;
+  if (m) {
+    try {
+      token = decodeURIComponent(m[1]);
+    } catch { /* a link cut off in the middle of a %-code: treated like a link with no token */ }
+  }
   // Remove the secret from the address bar and browser history right away.
   window.history.replaceState(null, '', window.location.pathname + window.location.search);
   return token;

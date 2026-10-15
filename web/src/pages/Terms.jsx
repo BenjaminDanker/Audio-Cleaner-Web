@@ -47,11 +47,11 @@ export default function Terms() {
         <li><b>Transcription and subtitles.</b> Standard (done by us), or Extra accurate (the audio is sent to a third-party speech-recognition provider, see the Privacy Policy). A daily free allowance of Standard transcription may be offered; its size can change.</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed.</li>
       </ul>
-      <p>Prices are shown on the pricing page and before you start a job. We may change prices for future use; changes never apply to a job or live session that has already started.</p>
+      <p>Prices are shown in the pricing section of the home page and before you start a job. We may change prices for future use; changes never apply to a job or live session that has already started.</p>
 
       <h2 id="credit">4. Prepaid credit and payments</h2>
       <ul>
-        <li><b>How it works.</b> You buy credit in US dollars through Stripe (minimum top-up $10, maximum $500 at a time). Using the Service deducts credit at the posted rates. While a job or live session runs we reserve (&ldquo;hold&rdquo;) the estimated cost and release whatever is not used. Jobs that fail or are canceled before they start are not charged.</li>
+        <li><b>How it works.</b> You buy credit in US dollars through Stripe (minimum top-up $10, maximum $500 at a time). Using the Service deducts credit at the posted rates. While a job or live session runs we reserve (&ldquo;hold&rdquo;) the estimated cost and release whatever is not used. Jobs that fail or are canceled are not charged.</li>
         <li><b>No cash value.</b> Credit is a prepayment for the Service only. It is not money held on your behalf, not a deposit account, not a gift card or stored-value card, bears no interest, is not transferable, and cannot be exchanged for cash except as described below or where the law requires.</li>
         <li><b>Refunds.</b> You may ask for the unused part of a top-up to be refunded to the original payment method within 14 days of that payment (self-service on the Billing page). The first refund of a payment returns the unused credit minus the fee the card processor charged us for that payment (about 2.9% + $0.30 of the payment), because the processor does not give that fee back. The Billing page shows you the estimated amount before you confirm. After 14 days credit is non-refundable, except where applicable law gives you a right to a refund. Credit you have already used is not refundable.</li>
         <li><b>Forfeiture.</b> If you dispute a legitimate charge with your bank (chargeback), or we find fraud, payment abuse or a serious breach of these terms, we may cancel any remaining credit, suspend the account, and recover amounts owed.</li>
@@ -72,7 +72,7 @@ export default function Terms() {
       <p>You agree not to use the Service to:</p>
       <ul>
         <li>process, store or distribute content that is illegal where you live or where we operate, including child sexual abuse material, or content that you have no right to process;</li>
-        <li>record or process other people&apos;s voices in violation of their privacy rights or applicable wiretapping and consent laws;</li>
+        <li>record or process other people&rsquo;s voices in violation of their privacy rights or applicable wiretapping and consent laws;</li>
         <li>harass, threaten, defraud or impersonate anyone;</li>
         <li>attack, probe or overload the Service, bypass rate limits, free allowances or billing, or resell access without our written permission;</li>
         <li>reverse engineer the Service except where the law allows it, or use automated means other than our documented API keys.</li>

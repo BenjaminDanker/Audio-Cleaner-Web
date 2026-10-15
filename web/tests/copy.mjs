@@ -25,6 +25,8 @@ async function visibleText(page) {
     const parts = [document.title, document.body.innerText];
     for (const o of document.querySelectorAll('option')) parts.push(o.textContent);
     for (const d of document.querySelectorAll('details')) parts.push(d.textContent); // closed answers are not in innerText
+    // what a search result or a shared link shows
+    for (const m of document.querySelectorAll('meta[name=description],meta[property^="og:"],meta[name^="twitter:"]')) parts.push(m.getAttribute('content') || '');
     for (const e of document.querySelectorAll('[aria-label],[title],[placeholder],img[alt]')) {
       for (const a of ['aria-label', 'title', 'placeholder', 'alt']) if (e.getAttribute(a)) parts.push(e.getAttribute(a));
     }
@@ -65,6 +67,24 @@ await check('copy: public pages show no internals and none of the avoided words'
   bad.push(...(await scan(page, '/nope')));
   if (bad.length) throw new Error(bad.join(' | '));
   return '9 pages clean';
+});
+
+await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets]) and no empty contact links', async () => {
+  const bad = [];
+  for (const path of ['/terms', '/privacy']) {
+    await page.goto(`${BASE}${path}`);
+    await page.waitForSelector('main h1');
+    const text = await visibleText(page);
+    for (const re of [/to be confirmed/i, /\bTBD\b/, /\[[^\]\n]*\]/, /lorem ipsum/i, /\bundefined\b/, /\bnull\b/]) {
+      const m = re.exec(text);
+      if (m) bad.push(`${path}: "${m[0]}" in …${text.slice(Math.max(0, m.index - 50), m.index + 60).replace(/\s+/g, ' ')}…`);
+    }
+    for (const href of await page.locator('main a[href^="mailto:"], footer a[href^="mailto:"]').evaluateAll((as) => as.map((a) => a.getAttribute('href')))) {
+      if (!/^mailto:[^@\s]+@[^@\s]+\.[^@\s]+$/.test(href)) bad.push(`${path}: contact link ${href}`);
+    }
+  }
+  if (bad.length) throw new Error(bad.join(' | '));
+  return 'clean';
 });
 
 await check('landing: no "privacy promise" section; retention stays in the FAQ; Privacy and licences only in the footer', async () => {

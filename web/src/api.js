@@ -61,13 +61,39 @@ export async function checkHealth() {
 }
 
 export class ApiError extends Error {
-  constructor(message, status, fields) {
+  constructor(message, status, fields, retryAfter) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.detail = message;
     this.fields = fields;
+    this.retryAfter = retryAfter; // seconds the server asked us to wait (HTTP 429 with Retry-After), if it did
   }
+}
+
+/** "about 20 seconds", "about 12 minutes", "about 2 hours". */
+export function waitText(seconds) {
+  const s = Math.max(1, Math.round(seconds));
+  if (s < 90) return `${s} ${s === 1 ? 'second' : 'seconds'}`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `about ${m} minutes`;
+  const h = Math.round(s / 3600);
+  return `about ${h} ${h === 1 ? 'hour' : 'hours'}`;
+}
+
+/** The wait (seconds) from a Retry-After header: whole seconds, or an HTTP date. null when absent or unusable. */
+function retryAfterSeconds(value) {
+  if (!value) return null;
+  const n = Number(value);
+  if (Number.isFinite(n)) return n > 0 ? Math.min(n, 86400) : null;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? Math.min(Math.max(0, (t - Date.now()) / 1000), 86400) || null : null;
+}
+
+/** A "too many requests" answer says how long to wait, once, in plain words (the server's own message may already do so). */
+function withWait(detail, seconds) {
+  if (!seconds || /\b(try again|wait|minute|second|hour)/i.test(detail)) return detail;
+  return `${detail.replace(/[.!\s]+$/, '')}. Please try again in ${waitText(seconds)}.`;
 }
 
 async function parse(res) {
@@ -86,7 +112,12 @@ function errorFrom(res, data) {
     if (res.status === 507) detail = 'We are a bit short on storage space right now, so new files cannot be taken. Please try again in a little while.';
     else detail = res.status >= 500 ? 'Something went wrong on our side. Please try again in a moment.' : `Request failed (${res.status}).`;
   }
-  return new ApiError(detail, res.status, data?.fields);
+  let wait = null;
+  if (res.status === 429) {
+    wait = retryAfterSeconds(res.headers?.get?.('Retry-After'));
+    if (wait) detail = withWait(detail, wait);
+  }
+  return new ApiError(detail, res.status, data?.fields, wait);
 }
 
 export async function fetchMe() {
@@ -166,7 +197,8 @@ export function uploadBlob(url, blob, { onProgress, signal } = {}) {
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
       if (xhr.status === 401 && unauthorizedHandler) unauthorizedHandler();
       const detail = typeof data?.detail === 'string' ? data.detail : xhr.status === 507 ? 'We are a bit short on storage space right now. Please try again in a little while.' : `Upload failed (${xhr.status}).`;
-      reject(new ApiError(detail, xhr.status));
+      const wait = xhr.status === 429 ? retryAfterSeconds(xhr.getResponseHeader('Retry-After')) : null;
+      reject(new ApiError(wait ? withWait(detail, wait) : detail, xhr.status, undefined, wait));
     };
     xhr.onerror = () => reject(new ApiError('The upload was interrupted. Check your connection and try again.', 0));
     xhr.onabort = () => reject(new DOMException('Upload canceled', 'AbortError'));

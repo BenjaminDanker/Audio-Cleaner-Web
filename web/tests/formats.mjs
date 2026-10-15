@@ -15,7 +15,7 @@ async function runFree(file) {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, file));
   await page.locator('input[name=noise][value=browser]:checked').waitFor({ timeout: 30000 });
-  await page.getByRole('button', { name: 'Start - free' }).click();
+  await page.getByRole('button', { name: 'Start – free' }).click();
   const res = page.locator('[data-testid=result]');
   await res.waitFor({ timeout: 180000 });
   return { rms: Number(await res.getAttribute('data-rms')), frames: Number(await res.getAttribute('data-frames')), channels: Number(await res.getAttribute('data-channels')) };

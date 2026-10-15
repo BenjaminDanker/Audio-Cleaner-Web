@@ -93,7 +93,7 @@ if (want('busy')) {
     await dropFile(page, join(FILES, 'noisy.mp3'));
     await pick(page, 'noise', 'polish');
     await page.getByTestId('estimate').waitFor();
-    await page.getByRole('button', { name: /^Start - about/ }).click();
+    await page.getByRole('button', { name: /^Start – about/ }).click();
     const box = page.getByTestId('job-error');
     await box.waitFor({ timeout: 30000 });
     const t = await box.innerText();

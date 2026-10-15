@@ -1,0 +1,22 @@
+Training data of the downloaded models: attribution
+====================================================
+
+Audio Cleaner does not contain or distribute any of this data. The models it downloads learned from the data sets
+below, which are licensed under the Creative Commons Attribution 4.0 International licence (CC BY 4.0,
+https://creativecommons.org/licenses/by/4.0/). They are named here as that licence asks.
+
+AP-BWE (the model that restores missing highs, see AP-BWE-MIT.txt)
+  VCTK Corpus 0.92: Junichi Yamagishi, Christophe Veaux and Kirsten MacDonald, "CSTR VCTK Corpus: English
+  Multi-speaker Corpus for CSTR Voice Cloning Toolkit (version 0.92)", The Centre for Speech Technology Research
+  (CSTR), University of Edinburgh, 2019. https://doi.org/10.7488/ds/2645
+
+Sidon (the model that rebuilds the voice, see Sidon-MIT.txt)
+  FLEURS-R (huggingface.co/datasets/google/fleurs-r): Min Ma, Yuma Koizumi, Shigeki Karita, Heiga Zen, Jason Riesa,
+  Haruko Ishikawa and Michiel Bacchiani, "FLEURS-R: A Restored Multilingual Speech Corpus for Generation Tasks",
+  Interspeech 2024. Google.
+  LibriTTS-R (huggingface.co/datasets/parler-tts/libritts_r_filtered, a filtered copy): Yuma Koizumi, Heiga Zen,
+  Shigeki Karita, Yifan Ding, Kohei Yatabe, Nobuyuki Morioka, Michiel Bacchiani, Yu Zhang, Wei Han and Ankur
+  Bapna, "LibriTTS-R: A Restored Multi-Speaker Text-to-Speech Corpus", Interspeech 2023. Google.
+
+The data sets were used by the model authors to train the models; the models are separate works under the MIT
+licences in this folder. No endorsement by the authors of the data sets is implied.

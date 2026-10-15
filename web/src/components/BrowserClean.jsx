@@ -4,7 +4,7 @@ import { IconDownload } from './Icons.jsx';
 import { saveBlob } from '../download.js';
 import { clock, human, stem } from '../format.js';
 import { STAGE_LOADING } from '../media/pipeline.js';
-import { buildWav } from '../media/wav.js';
+import { buildWav, wavFits } from '../media/wav.js';
 
 // The two pieces of the in-browser noise removal that the Cleanup page shows: progress while it runs, and the result
 // (listen, then download). Nothing here uploads anything.
@@ -84,6 +84,7 @@ export function BrowserResult({ file, info, result, isVideo, keepVideo = true, o
   }
 
   const silent = pcm.rms < 1e-5;
+  const fits24 = wavFits(pcm.seconds, pcm.channels, 24); // a WAV file cannot hold more than about 4 GB
   return (
     <section className="card stack" aria-labelledby="res-h" data-testid="result" data-rms={pcm.rms.toFixed(6)} data-peak={pcm.peak.toFixed(4)} data-frames={pcm.frames} data-channels={pcm.channels}>
       <div className="row-between">
@@ -100,13 +101,14 @@ export function BrowserResult({ file, info, result, isVideo, keepVideo = true, o
       </p>
       <div className="row">
         <a className="btn btn-primary" href={url} download={`${base}-cleaned.wav`}><IconDownload width={18} height={18} /> Cleaned WAV (16-bit)</a>
-        <button type="button" className="btn btn-secondary" onClick={dl24} disabled={!!busy}>{busy === 'wav24' ? 'Preparing…' : 'WAV (24-bit)'}</button>
+        <button type="button" className="btn btn-secondary" onClick={dl24} disabled={!!busy || !fits24} title={fits24 ? undefined : 'Too long for a 24-bit WAV file (the format stops at 4 GB). The 16-bit WAV is available.'}>{busy === 'wav24' ? 'Preparing…' : 'WAV (24-bit)'}</button>
         {isVideo && keepVideo && (
           <button type="button" className="btn btn-secondary" onClick={dlVideo} disabled={!!busy || encoder === null} data-testid="dl-video">
             {busy === 'video' ? `Building video… ${Math.round(remuxProg * 100)}%` : 'Video with cleaned audio'}
           </button>
         )}
       </div>
+      {!fits24 && <p className="small muted mb0" data-testid="wav24-note">This recording is too long for a 24-bit WAV file (a WAV file can’t be bigger than 4 GB), so only the 16-bit WAV is offered.</p>}
       {isVideo && keepVideo && encoder === null && <p className="banner banner-info small mb0">This browser cannot encode AAC or Opus audio, so a rebuilt video is not available here. Download the cleaned WAV and combine it with your video, or try a Chromium-based browser.</p>}
       {isVideo && keepVideo && encoder && <p className="small muted mb0">The video picture is copied unchanged; only the audio is replaced ({encoder === 'aac' ? 'AAC' : 'Opus'}).</p>}
       {note && <p className="banner banner-info small mb0">{note}</p>}

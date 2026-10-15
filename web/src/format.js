@@ -71,8 +71,18 @@ export function dateTime(epochSeconds) {
   return new Date(epochSeconds * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
+// Characters that flip the reading direction or hide text ("evil\u202Egpj.wav" would read "evilwav.jpg").
+const BIDI = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
+export const stripBidi = (name) => String(name ?? '').replace(BIDI, '');
+
+/** A file name for showing on screen: direction-changing characters are replaced by a visible box, so nothing can disguise itself. */
+export function shownName(name) {
+  return String(name ?? '').replace(BIDI, '\u25A1');
+}
+
 export function stem(filename) {
-  const base = String(filename || 'audio').split(/[\\/]/).pop();
+  const base = stripBidi(filename || 'audio').split(/[\\/]/).pop();
   const i = base.lastIndexOf('.');
   return (i > 0 ? base.slice(0, i) : base) || 'audio';
 }

@@ -1,6 +1,7 @@
-import { lazy, Suspense } from 'react';
+import { Suspense, useEffect } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { rememberReturn, takeReturn } from './returnTo.js';
+import { lazyRetry as lazy } from './lazy.js';
+import { forgetReturn, peekReturn, rememberReturn } from './returnTo.js';
 import { useAuth } from './auth.jsx';
 import Layout from './components/Layout.jsx';
 import NeedsServer from './components/Maintenance.jsx';
@@ -29,7 +30,15 @@ function RequireAuth({ children }) {
     rememberReturn(loc.pathname);
     return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
   }
-  const back = takeReturn();
+  return <SignedIn>{children}</SignedIn>;
+}
+
+// Signed in: go to the page the visitor wanted before signing in (once), then forget it. Looking at it while drawing is
+// harmless; clearing it is done in an effect so a repeated draw (StrictMode) still sees it.
+function SignedIn({ children }) {
+  const loc = useLocation();
+  const back = peekReturn();
+  useEffect(() => { forgetReturn(); }, []);
   if (back && back !== loc.pathname) return <Navigate to={back} replace />;
   return children;
 }

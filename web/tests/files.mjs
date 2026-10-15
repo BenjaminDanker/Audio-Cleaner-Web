@@ -120,7 +120,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return `order: form < jobs < balance, tips`;
   });
 
-  await check('a file the browser can open (WAV): noise removal Off | Free, in your browser (picked) | Clean & polish; subtitles Off | Free (standard) | Standard | Extra accurate; Start - free', async () => {
+  await check('a file the browser can open (WAV): noise removal Off | Free, in your browser (picked) | Clean & polish; subtitles Off | Free (standard) | Standard | Extra accurate; Start – free', async () => {
     await choose('noisy.wav');
     const titles = async (g) => (await page.locator(`label.choice:has(input[name=${g}]) b`).allInnerTexts()).map((x) => x.replace(/\s*\u2713$/, ''));
     const n = await titles('noise'); const t = await titles('subs');
@@ -128,7 +128,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (JSON.stringify(t) !== JSON.stringify(['Off', 'Free (standard)', 'Standard', 'Extra accurate'])) throw new Error(JSON.stringify(t));
     for (const [g, v] of [['noise', 'off'], ['noise', 'browser'], ['noise', 'polish'], ['subs', 'free'], ['subs', 'standard'], ['subs', 'accurate']]) if (await radio(g, v).isDisabled()) throw new Error(`${g}/${v} disabled`);
     if (!(await radio('noise', 'browser').isChecked()) || !(await radio('subs', 'off').isChecked())) throw new Error('defaults: free noise removal on, subtitles off');
-    if ((await start().innerText()).trim() !== 'Start - free') throw new Error('label: ' + (await start().innerText()));
+    if ((await start().innerText()).trim() !== 'Start – free') throw new Error('label: ' + (await start().innerText()));
     if (!/Extra accurate[\s\S]*any language/.test(await card('subs', 'accurate').innerText())) throw new Error('"any language" missing on Extra accurate');
     await page.screenshot({ path: join(SHOTS, 'cleanup-options.png'), fullPage: true });
     return 'ok';
@@ -178,7 +178,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'Gentle -> 12 dB';
   });
 
-  await check('subtitles only + Free on a short file: "Free: uses N of your M free minutes left today", Start - free, sends free:true, needs no credit', async () => {
+  await check('subtitles only + Free on a short file: "Free: uses N of your M free minutes left today", Start – free, sends free:true, needs no credit', async () => {
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'free');
     const note = page.getByTestId('free-note');
@@ -186,7 +186,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     const t = await note.innerText();
     if (!/^Free: uses 1 of your 60 free minutes left today$/.test(t.trim())) throw new Error(t);
     if (await page.getByTestId('estimate').count()) throw new Error('a price is shown for a free job');
-    if ((await start().innerText()).trim() !== 'Start - free' || !(await start().isEnabled())) throw new Error('start: ' + (await start().innerText()));
+    if ((await start().innerText()).trim() !== 'Start – free' || !(await start().isEnabled())) throw new Error('start: ' + (await start().innerText()));
     await start().click();
     await page.getByTestId('job-error').waitFor();
     const b = posts.at(-1);
@@ -208,7 +208,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     const why = await card('subs', 'free').locator('small').innerText();
     if (!/can.t be added to Clean & polish/.test(why)) throw new Error('reason: ' + why);
     const label = (await start().innerText()).trim();
-    if (!/^Start - about \$0\.00\d+$/.test(label)) throw new Error('label: ' + label);
+    if (!/^Start – about \$0\.00\d+$/.test(label)) throw new Error('label: ' + label);
     await page.screenshot({ path: join(SHOTS, 'cleanup-both.png'), fullPage: true });
     await start().click();
     await page.getByTestId('job-error').waitFor();

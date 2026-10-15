@@ -20,7 +20,7 @@ export default function Live() {
         <IconBroadcast width={36} height={36} />
         <div>
           <h1 className="mb0">Live for streamers</h1>
-          <p className="muted mb0">Clean mic audio and live captions for OBS. You only pay while you're live.</p>
+          <p className="muted mb0">Clean mic audio and live captions for OBS. You only pay while you’re live.</p>
         </div>
       </header>
       <LivePrices />
@@ -54,7 +54,7 @@ function ObsSetup() {
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
       <div className="row"><button type="button" className="btn btn-secondary" disabled aria-disabled="true">Download plugin (coming soon)</button></div>
-      <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl().replace(/^ws/, 'ws')}</span></p>
+      <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>
     </section>
   );
 }
@@ -127,7 +127,7 @@ function ApiKeys() {
       <p className="muted mb0 small">Keys let programs (like the OBS plugin or your own scripts) use your balance, so treat them like passwords. You can have up to 10.</p>
       {fresh && (
         <div className="stack" data-testid="new-key">
-          <div className="banner banner-success"><b>Here's your new key.</b> Copy it now, because we only show it once.</div>
+          <div className="banner banner-success"><b>Here’s your new key.</b> Copy it now, because we only show it once.</div>
           <div className="key-box">
             <code data-testid="key-value">{fresh.key}</code>
             <button type="button" className="btn btn-primary btn-sm" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
@@ -295,7 +295,7 @@ function LiveDemo({ pricing }) {
           was: { denoise: cfg.denoise || null, captions: cfg.captions || '' },
         });
       } else if (e?.name === 'NotAllowedError') setError('Microphone access was blocked. Allow it in your browser and try again.');
-      else if (e?.name === 'NotFoundError') setError('We couldn\'t find a microphone.');
+      else if (e?.name === 'NotFoundError') setError('We couldn’t find a microphone.');
       else setError(ERROR_TEXT[e?.code] ?? e.message ?? 'Couldn\'t start.');
     }
   }
@@ -319,9 +319,9 @@ function LiveDemo({ pricing }) {
     <section className="card stack" aria-labelledby="demo-h">
       <h2 id="demo-h" className="mb0">Try it with your microphone</h2>
       <p className="muted mb0">Talk into your mic and hear the result as it happens. The OBS plugin works the same way.</p>
-      <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you'll get feedback.</div>
+      <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>
       <p className="mb0" data-testid="live-free-hint">Want to try without spending credit? Free noise removal and your free daily subtitle minutes are on the <Link to="/app">Cleanup page</Link>.</p>
-      {!mediaOk && <div className="banner banner-error" role="alert">This browser can't do what the live test needs (microphone, AudioWorklet, WebSocket). A current Chrome, Edge, Firefox or Safari will.</div>}
+      {!mediaOk && <div className="banner banner-error" role="alert">This browser can’t do what the live test needs (microphone, AudioWorklet, WebSocket). A current Chrome, Edge, Firefox or Safari will.</div>}
 
       <div className="opt-grid" data-testid="live-options">
         <Group id="grp-noise" title="Noise removal">
@@ -334,7 +334,7 @@ function LiveDemo({ pricing }) {
             onChange={(id) => { setStrength(id); session.current?.setAtten(strengthDb(id)); }}
           />
           <span className="hint">You can change it while you talk.</span>
-          <span className="hint">Echo from your speakers is removed automatically. With headphones you don't need it.</span>
+          <span className="hint">Echo from your speakers is removed automatically. With headphones you don’t need it.</span>
         </Group>
 
         <Group id="grp-captions" title="Captions">
@@ -384,12 +384,12 @@ function LiveDemo({ pricing }) {
       <p className="mb0" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
         {!pricing && <span className="muted">Loading prices…</span>}
         {pricing && perMin <= 0 && priceKnown && <span className="muted">Turn on noise removal or captions to start.</span>}
-        {pricing && !priceKnown && <span className="muted">We don't have a price for that combination.</span>}
+        {pricing && !priceKnown && <span className="muted">We don’t have a price for that combination.</span>}
         {pricing && priceKnown && perMin > 0 && (
           <>
             <b>Cost: {rate(perMin)} a minute</b> <span className="muted">({moneyUsd(perMin * 60)} an hour).
             {denoise && den && cap ? ` Noise removal ${rate(den.usdPerMinute)} + ${captions === 'premium' ? 'extra accurate' : 'standard'} captions ${rate(cap.usdPerMinute)} a minute.` : ''}
-            {' '}We set aside about five minutes ({moneyUsd(perMin * 5)}) when you start and give back whatever you don't use.</span>
+            {' '}We set aside about five minutes ({moneyUsd(perMin * 5)}) when you start and give back whatever you don’t use.</span>
           </>
         )}
       </p>

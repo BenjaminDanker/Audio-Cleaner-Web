@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Link, Navigate, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useLocation, useSearchParams } from 'react-router-dom';
 import { api, oauthStartUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { IconGoogle, IconMail } from '../components/Icons.jsx';
-import { takeReturn } from '../returnTo.js';
+import { forgetReturn, peekReturn } from '../returnTo.js';
 import Turnstile from '../components/Turnstile.jsx';
 import { usePageTitle } from '../hooks.js';
 
@@ -19,6 +19,7 @@ export default function Login() {
   usePageTitle('Sign in');
   const { ready, signedIn } = useAuth();
   const [params] = useSearchParams();
+  const loc = useLocation();
   const errCode = params.get('error');
   const [providers, setProviders] = useState(null);
   const [loadErr, setLoadErr] = useState('');
@@ -29,11 +30,17 @@ export default function Login() {
   const [error, setError] = useState('');
   const [resetKey, setResetKey] = useState(0);
 
+  // Only a visitor who was sent here by a page that needs sign-in is taken back to it afterwards; arriving here any
+  // other way forgets an old, unrelated target.
+  useEffect(() => {
+    if (!loc.state?.from) forgetReturn();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     api('auth/providers', { redirectOn401: false }).then(setProviders).catch((e) => setLoadErr(e.detail));
   }, []);
 
-  if (ready && signedIn) return <Navigate to={takeReturn() || '/app'} replace />;
+  if (ready && signedIn) return <Navigate to={peekReturn() || '/app'} replace />;
 
   async function submit(e) {
     e.preventDefault();

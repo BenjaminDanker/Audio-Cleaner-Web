@@ -13,9 +13,19 @@ await check('cleanup: a file that is not audio -> Free noise removal is greyed o
   await page.screenshot({ path: join(SHOTS, 'cleanup-garbage.png') });
   return t;
 });
-await check('cleanup: a text file -> same: greyed out with the reason', async () => {
+await check('cleanup: a tiny text file -> refused at once as too small to hold sound, no options with made-up numbers', async () => {
   await page.goto(`${BASE}/app`);
-  await dropFile(page, join(FILES, 'bad.txt'));
+  await page.setInputFiles('input[type=file]', join(FILES, 'bad.txt'));
+  const box = page.getByTestId('job-error');
+  await box.waitFor({ timeout: 5000 });
+  if (await page.getByTestId('start').count()) throw new Error('Start offered for a 17-byte file');
+  return await box.innerText();
+});
+await check('cleanup: a longer text file -> free noise removal greyed out with the reason', async () => {
+  await page.goto(`${BASE}/app`);
+  await page.waitForSelector('input[type=file]');
+  await page.setInputFiles('input[type=file]', { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('this is not audio\n'.repeat(400)) });
+  await page.getByTestId('start').waitFor({ timeout: 20000 });
   if (!(await radio('noise', 'browser').isDisabled())) throw new Error('free noise removal offered for a text file');
   return await page.locator('label.choice:has(input[name=noise][value=browser]) small').innerText();
 });
@@ -33,8 +43,8 @@ await check('subtitles only: a 10 min file is within the free limit, so it is fr
   await dropFile(page, join(FILES, 'long10min.mp3'));
   await pick(page, 'noise', 'off');
   await pick(page, 'subs', 'free');
-  await page.getByRole('button', { name: 'Start - free' }).waitFor();
-  const en = await page.getByRole('button', { name: 'Start - free' }).isEnabled();
+  await page.getByRole('button', { name: 'Start – free' }).waitFor();
+  const en = await page.getByRole('button', { name: 'Start – free' }).isEnabled();
   if (!en) throw new Error('start disabled for a free 10 min file');
   return 'start enabled for 10 min file';
 });

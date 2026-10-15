@@ -119,7 +119,7 @@ if (want('studio')) {
     await page.getByTestId('estimate').waitFor();
     const est = await page.getByTestId('estimate').innerText();
     if (!/\$0\.0[0-9]+/.test(est)) throw new Error('estimate: ' + est);
-    if (!/^Start - about \$0\.0/.test(await page.getByTestId('start').innerText())) throw new Error('start label: ' + await page.getByTestId('start').innerText());
+    if (!/^Start – about \$0\.0/.test(await page.getByTestId('start').innerText())) throw new Error('start label: ' + await page.getByTestId('start').innerText());
     await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
@@ -181,7 +181,7 @@ if (want('transcribe')) {
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'free');
     await page.getByTestId('free-note').waitFor();
-    await page.getByRole('button', { name: 'Start - free' }).click();
+    await page.getByRole('button', { name: 'Start – free' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.', 300000);
     const st = await card.getAttribute('data-status');

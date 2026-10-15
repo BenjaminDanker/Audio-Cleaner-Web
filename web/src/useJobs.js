@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import { ACTIVE } from './jobs.js';
 
-/** Job list for the signed-in user; polls each active job every 1.5 s (GET /api/jobs/{id}). */
+const POLL_MS = 1500;
+
+/**
+ * Job list for the signed-in user. While any job is active the list itself is fetched again every 1.5 s (one request,
+ * whatever the number of jobs; GET /api/jobs carries each job's status, stage and progress). If the server asks us to wait
+ * (HTTP 429, Retry-After) or cannot be reached, polling slows down instead of hammering it, and a short note says so. A
+ * sign-in that ran out (401) takes the visitor to the sign-in page like every other call.
+ */
 export function useJobs({ onFinished } = {}) {
   const [jobs, setJobs] = useState(null);
   const [error, setError] = useState('');
@@ -29,21 +36,35 @@ export function useJobs({ onFinished } = {}) {
     if (!hasActive) return undefined;
     let stop = false;
     let timer;
+    let failures = 0;
     const tick = async () => {
-      const active = (jobsRef.current || []).filter((j) => ACTIVE.has(j.status));
-      const updates = await Promise.all(active.map((j) => api(`jobs/${j.id}`, { redirectOn401: false }).catch(() => null)));
-      if (stop) return;
-      const byId = new Map(updates.filter(Boolean).map((j) => [j.id, j]));
-      const cur = jobsRef.current || [];
-      let ended = false;
-      const next = cur.map((j) => {
-        const n = byId.get(j.id);
-        if (n && ACTIVE.has(j.status) && !ACTIVE.has(n.status)) ended = true;
-        return n || j;
-      });
-      setJobs(next);
-      if (ended) finished.current?.();
-      timer = setTimeout(tick, 1500);
+      let wait = POLL_MS;
+      try {
+        const r = await api('jobs');
+        if (stop) return;
+        const before = jobsRef.current || [];
+        const now = new Map(r.jobs.map((j) => [j.id, j]));
+        const ended = before.some((j) => ACTIVE.has(j.status) && now.has(j.id) && !ACTIVE.has(now.get(j.id).status));
+        failures = 0;
+        setJobs(r.jobs);
+        setError('');
+        if (ended) finished.current?.();
+      } catch (e) {
+        if (stop || e?.name === 'AbortError') return;
+        if (e.status === 401) {
+          setError('Your sign-in ended. Please sign in again to see your jobs.');
+          return; // the api layer is already taking the visitor to the sign-in page
+        }
+        failures += 1;
+        if (e.status === 429) {
+          wait = Math.min(120_000, Math.max(5000, (e.retryAfter || 5) * 1000));
+          setError(e.detail || 'Lots of requests just now. Updates will be a little slower for a moment.');
+        } else {
+          wait = Math.min(15_000, POLL_MS * 2 ** Math.min(failures, 4));
+          if (failures >= 3) setError('We lost touch with the server for a moment. Still trying…');
+        }
+      }
+      if (!stop) timer = setTimeout(tick, wait);
     };
     timer = setTimeout(tick, 1000);
     return () => { stop = true; clearTimeout(timer); };

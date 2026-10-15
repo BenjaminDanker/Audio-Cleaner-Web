@@ -95,6 +95,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .stack-lg { display: flex; flex-direction: column; gap: 28px; }
 .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.row-center { justify-content: center; }
 .row-between { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
 .grow { flex: 1 1 auto; }
 .grid { display: grid; gap: 16px; }
@@ -358,7 +359,7 @@ pre.license { white-space: pre-wrap; font-family: var(--mono); font-size: 0.8rem
 /* ---------- Footer ---------- */
 .site-footer { border-top: 1px solid var(--border); background: var(--surface); padding-block: 36px; margin-top: 24px; font-size: 0.92rem; }
 .footer-grid { display: grid; gap: 24px; grid-template-columns: 1.4fr 1fr 1fr; }
-.footer-grid h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.7em; }
+.footer-grid .footer-h { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.7em; }
 .footer-grid ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
 .footer-grid a { color: var(--text); text-decoration: none; }
 .footer-grid a:hover { text-decoration: underline; }

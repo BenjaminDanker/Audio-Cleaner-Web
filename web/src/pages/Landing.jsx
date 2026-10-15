@@ -44,7 +44,7 @@ function HeroArt() {
 
 const FAQ = [
   ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. You do need a free account to use it, to keep bots away.'],
-  ['How fast is it?', 'Usually about one minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
+  ['How fast is it?', 'Usually a little over a minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
   ['What is Clean & polish for?', 'Longer recordings and finished files. We remove the noise, even out the voice and set the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],
   ['Which files work?', 'On the Cleanup page, almost any audio or video file: MP3, WAV, M4A/AAC, FLAC, OGG/Opus, WMA, AIFF, AMR, AC3, WavPack, MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG, MTS/M2TS, 3GP, MXF and more. Noise removal in your browser takes the common ones your browser can open (MP3, WAV, M4A, FLAC, OGG, MP4, MOV, WebM, MKV). With video, the picture is left alone and only the sound is swapped.'],
   ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
@@ -80,7 +80,14 @@ export default function Landing() {
   const { data: pricing } = usePricing();
   const [notice, dismissNotice] = useOneTimeNotice();
   useEffect(() => {
-    if (hash) setTimeout(() => document.querySelector(hash)?.scrollIntoView(), 50);
+    if (!hash) return undefined;
+    // By id, not as a CSS selector: "#1" or "#a b" in the address must not throw.
+    let id = hash.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch { /* keep the text as it is */ }
+    const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView(), 50);
+    return () => clearTimeout(timer);
   }, [hash]);
   const polish = findRate(pricing, 'denoise', 'standard');
   const tx = pricing?.free;

@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../auth.jsx';
-import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money, moneyUsd } from '../format.js';
-import { estimateMicros, findRate, usePricing } from '../hooks.js';
+import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money, moneyUsd, shownName } from '../format.js';
+import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
 import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
-import { buildWav } from '../media/wav.js';
+import { buildWav, wavFits } from '../media/wav.js';
 import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
@@ -17,7 +17,24 @@ import { strengthDb } from '../strengths.js';
 const LONG_SECONDS = 2 * 3600; // in the browser, a recording this long takes a while
 const MAX_SECONDS = 6 * 3600; // and this is the most the browser will take
 
+// The most a single upload can be, as the server's default allows it (the price list may say otherwise: maxUploadBytes).
+const DEFAULT_MAX_UPLOAD_BYTES = 4 * 1024 ** 3;
+const gigabytes = (n) => `${Math.round((n / 1024 ** 3) * 10) / 10} GB`;
+
+/** A file that cannot hold any sound: nothing to read, nothing to clean. */
+const TINY_FILE_BYTES = 100;
+
 const supported = typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined';
+
+/** Start fetching the noise remover (about 22 MB, once, low priority) once the free in-browser cleanup is on the table for a file.
+ *  Not for visitors whose browser asks to save data: for them it is fetched when cleaning starts. A failure is reported then. */
+function warmUpDenoiser() {
+  if (!supported || navigator.connection?.saveData) return;
+  preloadDenoiser().catch(() => {});
+}
+
+/** "Files must be under 4096 MB." -> "Files must be under 4 GB." */
+const inGigabytes = (text) => text.replace(/\b(\d{4,})\s*MB\b/g, (_, n) => gigabytes(Number(n) * 1024 ** 2));
 
 const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
 
@@ -37,6 +54,8 @@ function browserVerdict(info) {
   const readable = info.canDecode !== false && (info.viaMediabunny || info.viaLibav || info.duration != null);
   if (!readable) return { ok: false, why: `Your browser can’t open this file type. ${paid}` };
   if (info.duration && info.duration > MAX_SECONDS) return { ok: false, why: `This is longer than ${MAX_SECONDS / 3600} hours, which is too long for your browser. ${paid}` };
+  // The cleaned sound is offered as a WAV file, and a WAV file can't hold more than about 4 GB: say so now, not after hours of work.
+  if (info.duration && !wavFits(info.duration, info.channels >= 2 ? 2 : 1, 16)) return { ok: false, why: `The cleaned sound would be too big for one WAV file (4 GB). ${paid}` };
   return { ok: true, why: '' };
 }
 
@@ -59,7 +78,7 @@ function Choice({ name, value, current, onPick, disabled, title, hint, reason })
  */
 export default function JobForm({ onSubmitted }) {
   const { balance, refresh, freeSecondsLeft } = useAuth();
-  const { data: pricing } = usePricing();
+  const { data: pricing, error: pricingError } = usePricing();
   const load = useSyncExternalStore(subscribeDenoiserLoad, denoiserLoadState);
 
   const [file, setFile] = useState(null);
@@ -91,11 +110,6 @@ export default function JobForm({ onSubmitted }) {
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
 
-  // Start fetching the noise remover (about 22 MB, once, at low priority) as soon as this page opens, so it is usually
-  // ready by the time a file has been chosen. Nothing is downloaded on any other page.
-  useEffect(() => {
-    if (supported) preloadDenoiser().catch(() => {}); // a failure is reported when cleaning starts
-  }, []);
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => () => { if (localResult?.result?.url) URL.revokeObjectURL(localResult.result.url); }, [localResult]);
   useEffect(() => {
@@ -165,6 +179,14 @@ export default function JobForm({ onSubmitted }) {
   }, [pricing, kind, tier, duration, free, denoiseTier]);
 
   async function choose(f) {
+    if (f.size < TINY_FILE_BYTES) {
+      // Nothing to read in there: say so instead of offering options with made-up numbers.
+      setFile(null);
+      setInfo(null);
+      setResult(null);
+      setError(f.size === 0 ? 'That file is empty (0 bytes). Please pick another one.' : 'That file is too small to hold any sound. Please pick another one.');
+      return;
+    }
     setFile(f);
     setInfo(null);
     setResult(null);
@@ -178,13 +200,16 @@ export default function JobForm({ onSubmitted }) {
     setProbing(true);
     const i = await probeMedia(f);
     // The best choice that works for this file; a paid one is never switched on without the price being right there.
-    setNoise(browserVerdict(i).ok ? 'browser' : i.hasAudio === false ? 'off' : 'polish');
+    const canBrowser = browserVerdict(i).ok;
+    setNoise(canBrowser ? 'browser' : i.hasAudio === false ? 'off' : 'polish');
+    if (canBrowser) warmUpDenoiser();
     setInfo(i);
     setProbing(false);
   }
 
   function pickNoise(v) {
     setNoise(v);
+    if (v === 'browser') warmUpDenoiser();
     if (v === 'polish' && subs === 'free') setSubs('standard'); // free subtitles can't go with Clean & polish
   }
 
@@ -198,6 +223,11 @@ export default function JobForm({ onSubmitted }) {
   const problems = [];
   if (info?.hasAudio === false) problems.push('This file has no audio track.');
   if (kind && duration && maxJob && duration > maxJob) problems.push(`Files can be at most ${Math.floor(maxJob / 3600)} hours long.`);
+  const maxUpload = pricing?.maxUploadBytes || DEFAULT_MAX_UPLOAD_BYTES;
+  // A video's picture is not uploaded and uncompressed WAV/AIFF is packed smaller first; anything else goes up as it is.
+  const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
+  if (kind && file && file.size > maxUpload && !canShrink) problems.push(`This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.`);
+  if (kind && !free && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
   if (kind && !free && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
   if (info && !wantsBrowser && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
@@ -285,7 +315,7 @@ export default function JobForm({ onSubmitted }) {
     if (job.status === 'rejected' && job.reason?.name !== 'AbortError') {
       failed = true;
       const err = job.reason;
-      setError(err.detail || err.message || 'Could not start the job.');
+      setError(inGigabytes(err.detail || err.message || 'Could not start the job.'));
       setErrorKind(err?.status === 507 ? 'storage' : '');
     }
     if (kind) await refresh(); // the free minutes left (and the balance) change as soon as a job exists
@@ -300,19 +330,19 @@ export default function JobForm({ onSubmitted }) {
 
   const pct = step?.frac != null ? Math.round(step.frac * 100) : null;
   const left = Math.floor(freeLeft / 60);
-  const startLabel = !(wantsBrowser || kind) ? 'Start' : free || !kind ? 'Start - free' : est ? `Start - about ${money(est)}` : 'Start';
+  const startLabel = !(wantsBrowser || kind) ? 'Start' : free || !kind ? 'Start – free' : est ? `Start – about ${money(est)}` : 'Start';
   return (
     <>
       <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
         <h2 id="newjob-h" className="mb0">Add a file</h2>
 
         {!file && !busy && <FileDrop onFile={choose} accept={SERVER_FORMATS} hint="or click to pick one. Almost any audio or video file: MP3, WAV, M4A, FLAC, WMA, AMR, MP4, MOV, MKV, AVI, WMV, MPEG and more." />}
-        {probing && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Reading {file?.name}…</p>}
+        {probing && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Reading {shownName(file?.name)}…</p>}
 
         {file && info && (
           <div className="file-chip">
             <div className="grow">
-              <div className="name">{file.name}</div>
+              <div className="name">{shownName(file.name)}</div>
               <div className="meta">
                 {bytes(file.size)}
                 {duration ? ` · ${lengthUnknown ? 'about ' : ''}${clock(duration)}` : ''}
@@ -354,6 +384,7 @@ export default function JobForm({ onSubmitted }) {
                     Keep this tab open, or choose Clean &amp; polish for long files.
                   </div>
                 )}
+                {info.duration && !wavFits(info.duration, info.channels >= 2 ? 2 : 1, 24) && <p className="muted small mb0" data-testid="wav24-warn">For a recording this long, only the 16-bit WAV can be saved (a WAV file can’t be bigger than 4 GB).</p>}
                 {eta && <p className="muted small mb0" data-testid="eta">Should take about {human(eta)} on this device{loadLeft ? ' (including getting the noise remover ready)' : ''}.</p>}
               </div>
             )}
@@ -482,7 +513,12 @@ export default function JobForm({ onSubmitted }) {
               </p>
             )}
             {lengthUnknown && <p className="mb0 muted small" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}
-            {problems.map((p) => <div key={p} className="banner banner-warn" role="alert">{p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}</div>)}
+            {problems.map((p) => (
+              <div key={p} className="banner banner-warn" role="alert">
+                {p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}
+                {p.includes('load the prices') && <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPricing().catch(() => {})}>Try again</button>}
+              </div>
+            ))}
           </>
         )}
 

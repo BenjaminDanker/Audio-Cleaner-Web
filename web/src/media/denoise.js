@@ -10,14 +10,15 @@ function dfnBase() {
 
 // ---- one shared download ---------------------------------------------------------------------------------------
 // The noise remover is three files (df.js, df_bg.wasm, the model; about 22 MB together). They are fetched ONCE per page
-// load, in the background, as soon as the Cleanup page opens (nothing is downloaded on any other page). The wasm is
-// compiled once, the compiled Module and the model bytes are handed to every worker, so a stereo file (two workers)
-// never downloads or compiles anything twice. df.js is only warmed into the HTTP cache here: it is a module, so each
-// worker imports it by URL (a cache hit, about 15 kB).
+// load, in the background, as soon as a file has been chosen that the free in-browser cleanup can handle (see
+// JobForm; skipped when the browser asks to save data). Nothing is downloaded on any other page, and nothing before a
+// file is chosen. The wasm is compiled once, the compiled Module and the model bytes are handed to every worker, so a
+// stereo file (two workers) never downloads or compiles anything twice. df.js is only warmed into the HTTP cache here:
+// it is a module, so each worker imports it by URL (a cache hit, about 15 kB).
 //
-// Repeat visits: every URL carries ?v=<hash of the files> (__DFN_VERSION__), so the server can (and does) answer them
-// with `Cache-Control: public, max-age=31536000, immutable`, and a returning visitor gets all of it from the browser
-// cache without a network round trip.
+// Repeat visits: every URL carries ?v=<hash of the files> (__DFN_VERSION__), so a changed file is a new URL. The front
+// door (deploy/vps/audio.caddy) answers these files, for signed-in visitors only, with `Cache-Control: private,
+// max-age=604800`: a returning visitor gets them from the browser cache for a week, then the browser asks again.
 const V = `?v=${__DFN_VERSION__}`;
 // Decoded sizes of the three files; only the denominator of the progress readout (see vite.config.js).
 const SIZES = __DFN_SIZES__;

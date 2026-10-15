@@ -2,6 +2,7 @@
 
 import { api, uploadBlob } from './api.js';
 import { extractAudio } from './media/extract.js';
+import { shownName, stripBidi } from './format.js';
 import { compressForUpload } from './media/flac.js';
 
 export const ACTIVE = new Set(['uploading', 'queued', 'running', 'cloud_asr', 'canceling']);
@@ -42,6 +43,41 @@ export function statusLabel(status) {
     uploading: 'Uploading', queued: 'In line', running: 'Working on it', cloud_asr: 'Transcribing (extra accurate)', canceling: 'Canceling',
     done: 'Done', failed: 'Failed', canceled: 'Canceled', expired: 'Expired',
   }[status] || status;
+}
+
+// What the server calls the steps of a running job, in words for a visitor. Both the older lower-case names and the
+// newer ones are listed; anything not listed is not shown (the card falls back to the status). Keys are lower-case.
+const STAGES = {
+  'removing echo': 'Removing echo',
+  decoding: 'Opening your file',
+  preparing: 'Getting ready',
+  'preparing transcription': 'Getting ready to write the text',
+  denoising: 'Cleaning the sound',
+  cleaning: 'Cleaning the sound',
+  polishing: 'Polishing the voice',
+  'detecting language': 'Finding the language',
+  transcribing: 'Writing the transcript',
+  'transcribing (premium)': 'Writing the transcript',
+  'cloud asr running': 'Writing the transcript',
+  'waiting to transcribe': 'Writing the transcript',
+  'writing captions': 'Writing the captions',
+  'rebuilding video': 'Putting the video back together',
+  finishing: 'Finishing up',
+  done: 'Finishing up',
+};
+
+/**
+ * One short sentence for what a running job is doing, or '' when the server's step is unknown (never show it raw).
+ * "Cleaning the sound · 41%". The caller shows the status label instead when this is empty.
+ */
+export function stageText(job) {
+  const key = String(job?.stage || '').toLowerCase().replace(/\s*[·•]\s*\d+%?\s*$/, '').trim();
+  return STAGES[key] || '';
+}
+
+/** The name to show for a job: the file as the visitor chose it (the server's `displayName`, else this tab's own file), else the name on record. */
+export function jobTitle(job, local) {
+  return shownName(job.displayName || local?.file?.name || job.inputName || 'Untitled');
 }
 
 /** "5 min", "under a minute", "1 h 20 min" for a rough wait. */
@@ -124,7 +160,9 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   onStage?.('create');
   const created = await api('jobs', {
     method: 'POST',
-    body: { ...body, filename: name, sizeBytes: blob.size, durationSeconds: Math.max(0.5, body.durationSeconds), options },
+    // `filename` names what is uploaded (its extension tells the server how to read it); `displayName` is the file as the
+    // visitor chose it, which is what the job list shows.
+    body: { ...body, filename: name, displayName: stripBidi(file.name).slice(0, 200), sizeBytes: blob.size, durationSeconds: Math.max(0.5, body.durationSeconds), options },
   });
   onStage?.('upload');
   try {

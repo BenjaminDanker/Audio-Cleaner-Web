@@ -4,7 +4,9 @@ import { apiOffline, checkHealth } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney } from '../format.js';
 import { loadPricing } from '../hooks.js';
+import { forgetReturn } from '../returnTo.js';
 import { SITE } from '../site.js';
+import ErrorBoundary from './ErrorBoundary.jsx';
 import { IconMenu, Logo } from './Icons.jsx';
 
 function AccountMenu() {
@@ -28,12 +30,13 @@ function AccountMenu() {
       document.removeEventListener('keydown', onKey);
     };
   }, []);
-  const initial = (user.displayName || user.email || '?').trim().charAt(0).toUpperCase();
+  const shown = user.displayName || user.email;
+  const initial = (shown || '?').trim().charAt(0).toUpperCase();
   return (
     <details className="menu" ref={ref}>
-      <summary aria-label="Account menu">
+      <summary aria-label={`${shown}, account menu`}>
         <span className="avatar" aria-hidden="true">{initial}</span>
-        <span className="email">{user.displayName || user.email}</span>
+        <span className="email">{shown}</span>
       </summary>
       <div className="menu-panel">
         <div className="menu-email">{user.email}</div>
@@ -49,7 +52,7 @@ function AccountMenu() {
 }
 
 function Header() {
-  const { ready, signedIn, balance } = useAuth();
+  const { ready, known, signedIn, balance } = useAuth();
   const [open, setOpen] = useState(false);
   const loc = useLocation();
   useEffect(() => setOpen(false), [loc.pathname, loc.hash]);
@@ -72,7 +75,7 @@ function Header() {
             </Link>
           )}
           {ready && signedIn && <AccountMenu />}
-          {ready && !signedIn && <Link to="/login" className="btn btn-primary btn-sm">Sign in</Link>}
+          {ready && known && !signedIn && <Link to="/login" className="btn btn-primary btn-sm">Sign in</Link>}
         </div>
         <button type="button" className="btn btn-secondary btn-sm nav-toggle" aria-expanded={open} aria-controls="main-nav" onClick={() => setOpen((v) => !v)}>
           <IconMenu width={18} height={18} /> <span className="sr-only">Menu</span>
@@ -131,7 +134,7 @@ function Footer() {
           {legalName && <p className="muted small">&copy; {new Date().getFullYear()} {legalName}</p>}
         </div>
         <div>
-          <h4>Product</h4>
+          <h2 className="footer-h">Product</h2>
           <ul>
             <li><Link to="/app">Cleanup, subtitles</Link></li>
             <li><Link to="/app/live">Live for streamers</Link></li>
@@ -139,7 +142,7 @@ function Footer() {
           </ul>
         </div>
         <div>
-          <h4>Legal</h4>
+          <h2 className="footer-h">Legal</h2>
           <ul>
             <li><Link to="/terms">Terms of Service</Link></li>
             <li><Link to="/privacy">Privacy Policy</Link></li>
@@ -167,10 +170,39 @@ function TermsNotice() {
   );
 }
 
+// Scrollable tables (wide ones on a phone) must be reachable by keyboard and have a name. Done in one place, for every
+// page, because the wrapper is drawn by several of them: the name is the heading just above it.
+function useScrollableTables() {
+  useEffect(() => {
+    const fix = () => {
+      for (const w of document.querySelectorAll('.table-wrap:not([data-scroll-fixed])')) {
+        w.setAttribute('data-scroll-fixed', '');
+        w.setAttribute('tabindex', '0');
+        w.setAttribute('role', 'region');
+        const prev = w.previousElementSibling;
+        const label = prev && /^H[1-6]$/.test(prev.tagName) ? prev.textContent.trim() : '';
+        w.setAttribute('aria-label', label ? `${label} (table)` : 'Table');
+      }
+    };
+    fix();
+    let queued = 0;
+    const mo = new MutationObserver(() => {
+      if (!queued) queued = requestAnimationFrame(() => { queued = 0; fix(); }); // at most once per frame
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+    return () => { mo.disconnect(); if (queued) cancelAnimationFrame(queued); };
+  }, []);
+}
+
 export default function Layout() {
   const loc = useLocation();
   const main = useRef(null);
   const first = useRef(true);
+  useScrollableTables();
+  // A remembered "go here after signing in" only lives while the visitor stays on the sign-in path.
+  useEffect(() => {
+    if (!/^\/(login|app)(\/|$)/.test(loc.pathname)) forgetReturn();
+  }, [loc.pathname]);
   // After in-app navigation move focus to the page (keyboard and screen-reader users), unless there is a hash
   // target. Not on the initial load, so Tab still starts at the skip link.
   useEffect(() => {
@@ -186,7 +218,9 @@ export default function Layout() {
       <OfflineBanner />
       <TermsNotice />
       <main id="main" ref={main} tabIndex={-1}>
-        <Outlet />
+        <ErrorBoundary resetKey={loc.pathname}>
+          <Outlet />
+        </ErrorBoundary>
       </main>
       <Footer />
     </>

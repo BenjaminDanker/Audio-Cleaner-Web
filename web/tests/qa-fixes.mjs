@@ -387,7 +387,7 @@ if (want('flac')) {
       await dropFile(page, join(FILES, file));
       await pick(page, 'noise', 'polish');
       await page.getByTestId('estimate').waitFor();
-      await page.getByRole('button', { name: /^Start - about/ }).click();
+      await page.getByRole('button', { name: /^Start – about/ }).click();
       const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
       const m = /Compressed for upload: ([\d.]+ [KMG]?B) → ([\d.]+ [KMG]?B)/.exec(banner);
       if (!m) throw new Error('no compression note: ' + banner);
@@ -402,7 +402,9 @@ if (want('flac')) {
       const mine = jobs.body.jobs[0];
       const done = await waitDone(mine.id);
       if (done.status !== 'done') throw new Error('job ' + done.status + ' ' + (done.error || ''));
-      if (done.inputName !== `${stem}.flac`) throw new Error('server input name ' + done.inputName);
+      // the upload is the .flac; the job list shows the file the visitor chose
+      if (create.body.displayName !== file) throw new Error('declared display name ' + create.body.displayName);
+      if (done.inputName !== file) throw new Error('server input name ' + done.inputName);
       const viaFlac = await jobOutputHash(mine.id);
       const rawId = await rawJob(join(FILES, file));
       const rawDone = await waitDone(rawId);
@@ -421,7 +423,7 @@ if (want('flac')) {
     await dropFile(page, join(FILES, 'noisy.mp3'));
     await pick(page, 'noise', 'polish');
     await page.getByTestId('estimate').waitFor();
-    await page.getByRole('button', { name: /^Start - about/ }).click();
+    await page.getByRole('button', { name: /^Start – about/ }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
     if (/Compressed for upload/.test(banner)) throw new Error('mp3 was "compressed": ' + banner);
     const create = reqs.find((r) => r.kind === 'create');
@@ -436,12 +438,12 @@ if (want('flac')) {
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'free');
-    await page.getByRole('button', { name: 'Start - free' }).click();
+    await page.getByRole('button', { name: 'Start – free' }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
     if (!/Compressed for upload/.test(banner)) throw new Error(banner);
     const jobs = await apiCall(page, 'GET', 'jobs');
     const done = await waitDone(jobs.body.jobs[0].id);
-    if (done.status !== 'done' || done.inputName !== 'noisy.flac') throw new Error(done.status + ' ' + done.inputName + ' ' + (done.error || ''));
+    if (done.status !== 'done' || done.inputName !== 'noisy.wav') throw new Error(done.status + ' ' + done.inputName + ' ' + (done.error || ''));
     return banner;
   });
   console.log('LOGS:\n' + logs.join('\n'));

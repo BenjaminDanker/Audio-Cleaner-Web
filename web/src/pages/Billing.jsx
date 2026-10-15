@@ -3,6 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney, dateTime, money, moneyCents } from '../format.js';
+import { ledgerKind, ledgerText } from '../ledger.js';
 import { usePageTitle, usePricing } from '../hooks.js';
 import { SITE } from '../site.js';
 
@@ -32,8 +33,16 @@ function refundEstimate(p, availableMicros) {
   return { unused, fee, back: Math.max(0, unused - fee) };
 }
 
+/**
+ * "25", "$25", "12.50", "1,250.00" and "12,5" (comma as the decimal mark) are read; anything else (a minus sign,
+ * letters, "1.2.3") is NaN, so the form says it is not valid instead of guessing a different amount.
+ */
 function dollarsToCents(text) {
-  const n = Number(String(text).replace(/[^0-9.]/g, ''));
+  let t = String(text).trim().replace(/^\$\s*/, '').replace(/\s+/g, '');
+  if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(t)) t = t.replace(/,/g, '');
+  else if (/^\d+,\d{1,2}$/.test(t)) t = t.replace(',', '.');
+  if (!/^(\d+\.?\d*|\.\d+)$/.test(t)) return NaN;
+  const n = Number(t);
   return Number.isFinite(n) ? Math.round(n * 100) : NaN;
 }
 
@@ -85,8 +94,10 @@ export default function Billing() {
         loadHistory();
         return;
       }
-      if (me?.balance && me.balance.available_micros > startBalance.current) {
-        setBanner({ kind: 'success', text: `Thank you! Your balance is now ${balanceMoney(me.balance.available_micros)}.` });
+      // The payment may already be booked by the time we look (the card processor is usually faster than this page).
+      if (mine?.status === 'succeeded' || (me?.balance && me.balance.available_micros > startBalance.current)) {
+        const now = me?.balance?.available_micros;
+        setBanner({ kind: 'success', text: now != null ? `Thank you! Your balance is now ${balanceMoney(now)}.` : 'Thank you! Your payment went through.' });
         loadHistory();
         return;
       }
@@ -288,7 +299,7 @@ function AutoReload({ autoReload, pricing, refresh, unavailable }) {
         <label className="check">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} data-testid="ar-consent" />
           <span data-testid="ar-consent-text">
-            I authorize {SITE.name} to charge my saved card {valid ? moneyCents(a) : '<amount>'} whenever my balance falls below {valid ? moneyCents(t) : '<threshold>'}, up to {valid ? moneyCents(c) : '<cap>'} per calendar month, until I turn this off.
+            I authorize {SITE.name} to charge my saved card {valid ? moneyCents(a) : 'the amount I choose'} whenever my balance falls below {valid ? moneyCents(t) : 'the balance I choose'}, up to {valid ? moneyCents(c) : 'the monthly limit I choose'} per calendar month, until I turn this off.
           </span>
         </label>
         <div className="row">
@@ -382,8 +393,8 @@ function History({ history, error, reload, unavailable, availableMicros }) {
                   {history.ledger.map((l) => (
                     <tr key={l.id}>
                       <td className="nowrap">{dateTime(l.created_at)}</td>
-                      <td>{l.description || '—'}</td>
-                      <td><span className="badge">{l.kind}</span></td>
+                      <td>{ledgerText(l)}</td>
+                      <td><span className="badge">{ledgerKind(l)}</span></td>
                       <td className={`num ${l.amount_micros >= 0 ? 'pos' : 'neg'}`}>{l.amount_micros >= 0 ? '+' : '−'}{money(Math.abs(l.amount_micros))}</td>
                       <td className="num">{money(l.balance_after_micros)}</td>
                     </tr>
@@ -392,6 +403,7 @@ function History({ history, error, reload, unavailable, availableMicros }) {
               </table>
             </div>
           )}
+          {(history.ledgerHasMore ?? history.ledger.length >= 100) && <p className="small muted mb0">Showing your 100 most recent entries.</p>}
         </>
       )}
     </section>

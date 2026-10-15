@@ -142,7 +142,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await page.goto(`${BASE}/`); await page.waitForSelector('table');
     await page.goto(`${BASE}/app`);
     await dropFile(page, join(FILES, 'test.mp4'));
-    await page.getByRole('button', { name: 'Start - free' }).click();
+    await page.getByRole('button', { name: 'Start – free' }).click();
     await page.waitForSelector('[data-testid=result]', { timeout: 60000 });
     const rms = Number(await page.locator('[data-testid=result]').getAttribute('data-rms'));
     if (rms < 0.001) throw new Error('silent under CSP');

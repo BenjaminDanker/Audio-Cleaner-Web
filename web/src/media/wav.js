@@ -2,10 +2,18 @@
 
 export const SAMPLE_RATE = 48000;
 
+/** A WAV file stores its length in 32 bits: the sound data can't be bigger than this (about 4 GB). */
+export const WAV_MAX_DATA_BYTES = 0xfffffff0 - 44;
+
+/** Does `seconds` of 48 kHz audio in `channels` channels at `bits` bits fit in one WAV file? */
+export function wavFits(seconds, channels, bits, sampleRate = SAMPLE_RATE) {
+  return Math.ceil(seconds * sampleRate) * channels * (bits / 8) <= WAV_MAX_DATA_BYTES;
+}
+
 function header({ channels, sampleRate, bits, frames }) {
   const bytesPerSample = bits / 8;
   const dataLen = frames * channels * bytesPerSample;
-  if (dataLen > 0xfffffff0 - 44) throw new Error('This recording is too long for a single WAV file. Choose a shorter file.');
+  if (dataLen > WAV_MAX_DATA_BYTES) throw new Error('This recording is too long for a single WAV file. Choose a shorter file.');
   const buf = new ArrayBuffer(44);
   const v = new DataView(buf);
   const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };

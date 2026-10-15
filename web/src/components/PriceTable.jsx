@@ -13,6 +13,12 @@ const DESCRIPTIONS = {
   'stream_captions/premium': 'Live captions in other languages too, best for accents and specialist words',
 };
 
+// The server's names for two rows say "Transcription"; everywhere else on the site this is "Subtitles & transcripts".
+const LABELS = {
+  'transcribe/local': 'Subtitles & transcripts',
+  'transcribe/premium': 'Subtitles & transcripts, extra accurate',
+};
+
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
   { id: 'files', title: 'Files', products: ['denoise', 'transcribe'] },
@@ -74,7 +80,7 @@ function FreeRows({ title, free }) {
         <tr>
           <th scope="row">
             <span className="svc">Subtitles &amp; transcripts</span>
-            <span className="small muted desc">Standard quality, files up to {minutes(free.transcribeMaxFileSeconds)} minutes. After that, the Transcription price below.</span>
+            <span className="small muted desc">Standard quality, files up to {minutes(free.transcribeMaxFileSeconds)} minutes. After that, the Subtitles &amp; transcripts price below.</span>
           </th>
           <td className="num"><span className="price-main">Free</span><span className="small muted price-sub">{minutes(free.transcribeSecondsPerDay)} min every day</span></td>
         </tr>
@@ -95,7 +101,7 @@ function GroupRows({ group, rates }) {
         return (
           <tr key={`${r.product}/${r.tier}`}>
             <th scope="row">
-              <span className="svc">{r.label}</span>
+              <span className="svc">{LABELS[`${r.product}/${r.tier}`] || r.label}</span>
               {desc && <span className="small muted desc">{desc}</span>}
             </th>
             <td className="num">

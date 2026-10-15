@@ -7,7 +7,7 @@ await page.goto(`${BASE}/app`);
 await dropFile(page, join(FILES, file));
 console.log('meta:', await page.locator('.file-chip .meta').innerText(), '|', await page.getByTestId('eta').innerText().catch(() => ''));
 const t0 = Date.now();
-await page.getByRole('button', { name: 'Start - free' }).click();
+await page.getByRole('button', { name: 'Start – free' }).click();
 let maxHeap = 0;
 const timer = setInterval(async () => {
   try {

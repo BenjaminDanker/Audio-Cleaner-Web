@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
 import { api, outputUrl } from '../api.js';
 import { saveBlob } from '../download.js';
-import { bytes, clock, dateTime, extension, human, money, stem } from '../format.js';
+import { bytes, clock, dateTime, human, money, shownName, stem } from '../format.js';
 import { useNow } from '../hooks.js';
-import { ACTIVE, kindLabel, queueText, statusLabel } from '../jobs.js';
+import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel } from '../jobs.js';
 import { IconDownload } from './Icons.jsx';
 
 const OUT_LABEL = { audio: 'Cleaned audio', video: 'Video', captions: 'Captions', transcript: 'Transcript', segments: 'Segments' };
@@ -56,7 +56,7 @@ function RemuxPanel({ job, local }) {
       <div className="row">
         {file ? (
           <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => run(file)} data-testid="remux-btn">
-            {busy ? `Building video… ${Math.round(prog * 100)}%` : `Put cleaned audio into ${file.name}`}
+            {busy ? `Building video… ${Math.round(prog * 100)}%` : `Put cleaned audio into ${shownName(file.name)}`}
           </button>
         ) : (
           <>
@@ -79,9 +79,10 @@ function RemuxPanel({ job, local }) {
 /** Failed and canceled jobs cost nothing: say so once (the server's own messages often say it already). */
 const withNotCharged = (text) => (/not charged|weren.t charged/i.test(text) ? text : `${text} You weren’t charged.`);
 
-export default function JobCard({ job, upload, local, onChanged }) {
+export default function JobCard({ job, local, onChanged }) {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const active = ACTIVE.has(job.status);
   const canCancel = job.status === 'uploading' || job.status === 'queued';
   const hasVideoInput = local?.info?.hasVideo || /\.(mp4|mov|m4v|mkv|webm)$/i.test(job.inputName || '');
@@ -101,11 +102,13 @@ export default function JobCard({ job, upload, local, onChanged }) {
   }
 
   const pct = typeof job.progress === 'number' ? job.progress : 0;
+  const step = stageText(job); // '' when the server's step name is not one we know: then only the percentage is shown
+  const stepLine = step ? `${step}${pct ? ` · ${Math.round(pct)}%` : ''}` : pct ? `${Math.round(pct)}% done` : 'Just a moment…';
   return (
     <article className="card job" data-testid="job" data-status={job.status} data-job-id={job.id}>
       <div className="job-head">
         <div>
-          <div className="job-title">{job.inputName}</div>
+          <div className="job-title">{jobTitle(job, local)}</div>
           <div className="small muted">{kindLabel(job)} · {dateTime(job.createdAt)} · {clock(job.durationSeconds)}</div>
         </div>
         <span className="row">
@@ -114,12 +117,6 @@ export default function JobCard({ job, upload, local, onChanged }) {
         </span>
       </div>
 
-      {job.status === 'uploading' && upload && (
-        <div>
-          <progress className="bar" max={100} value={Math.round((upload.frac || 0) * 100)} aria-label="Upload progress" />
-          <p className="small muted mb0">Uploading {bytes(upload.loaded)} of {bytes(upload.total)}</p>
-        </div>
-      )}
       {job.status === 'queued' && (
         <p className="queue-note mb0" role="status" data-testid="queue-note">
           <span className="spinner" aria-hidden="true" /> {queueText(job) || 'In line, you’re up soon'}
@@ -127,8 +124,8 @@ export default function JobCard({ job, upload, local, onChanged }) {
       )}
       {(job.status === 'running' || job.status === 'cloud_asr') && (
         <div>
-          <progress className="bar" max={100} value={pct} aria-label={`Job progress, ${job.stage || statusLabel(job.status)}`} />
-          <p className="small muted mb0" role="status">{job.stage || statusLabel(job.status)}{pct ? ` · ${Math.round(pct)}%` : ''}</p>
+          <progress className="bar" max={100} value={pct} aria-label={`Job progress, ${step || statusLabel(job.status)}`} />
+          <p className="small muted mb0" role="status">{stepLine}</p>
         </div>
       )}
 
@@ -152,7 +149,15 @@ export default function JobCard({ job, upload, local, onChanged }) {
           {hasVideoOut && <p className="small muted mb0">The video file above already has the clean sound in it.</p>}
           <div className="row-between">
             <span className="small muted">Cost <b>{money(job.costMicros || 0)}</b> · <Countdown expiresAt={job.expiresAt} /></span>
-            <button type="button" className="btn btn-danger-outline btn-sm" disabled={busy} onClick={() => act(() => api(`jobs/${job.id}`, { method: 'DELETE' }))}>Delete now</button>
+            {confirmDelete ? (
+              <span className="row" data-testid="delete-confirm">
+                <span className="small">Delete these files now? They can’t be brought back.</span>
+                <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => act(() => api(`jobs/${job.id}`, { method: 'DELETE' }))}>Yes, delete</button>
+                <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirmDelete(false)}>Keep them</button>
+              </span>
+            ) : (
+              <button type="button" className="btn btn-danger-outline btn-sm" disabled={busy} onClick={() => setConfirmDelete(true)}>Delete now</button>
+            )}
           </div>
         </>
       )}
@@ -165,4 +170,3 @@ export default function JobCard({ job, upload, local, onChanged }) {
   );
 }
 
-export { extension };

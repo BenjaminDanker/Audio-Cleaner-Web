@@ -5,6 +5,9 @@ import { SITE } from './site.js';
 export function usePageTitle(title) {
   useEffect(() => {
     document.title = title ? `${title} · ${SITE.name}` : SITE.name;
+    // The address search engines should list for this page (the page file itself is the same for every route).
+    const link = document.querySelector('link[rel="canonical"]');
+    if (link) link.href = `${location.origin}${location.pathname}`;
   }, [title]);
 }
 

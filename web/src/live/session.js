@@ -143,11 +143,16 @@ export async function startLive(opts) {
           language: opts.language || null, sampleRate: 48000, attenLimDb: opts.attenDb, client: 'acw-web-demo/1.0',
         }));
       };
-      ws.onerror = () => { clearTimeout(timer); fail('Couldn\'t connect to live.'); };
+      ws.onerror = () => { clearTimeout(timer); fail('Couldn’t connect to live.'); };
       ws.onclose = (e) => { clearTimeout(timer); fail(e.code === 1008 ? 'Live said no to the connection. Are you signed in?' : 'The connection closed before live could start.'); };
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') return;
-        const m = JSON.parse(e.data);
+        let m;
+        try {
+          m = JSON.parse(e.data);
+        } catch {
+          return; // not one of ours
+        }
         if (m.type === 'ready') {
           clearTimeout(timer);
           ready = true;
