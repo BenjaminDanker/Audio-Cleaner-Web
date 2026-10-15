@@ -464,7 +464,13 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
     refundable = min(p["amount_cents"] - p["refunded_cents"], bal["available_micros"] // MICROS_PER_CENT)
     if refundable <= 0:
         raise ValueError("No unused credit to refund from this payment.")
-    gross = refundable + tax_part(refundable, p["amount_cents"], p["tax_cents"])
+    # Stripe keeps its processing fee when we refund, so it comes out of the
+    # first refund of a payment (stated in the Terms and on the Billing page).
+    fee = card_fee_cents(p) if p["refunded_cents"] == 0 else 0
+    if refundable <= fee:
+        raise ValueError(f"The unused credit (${refundable / 100:.2f}) doesn't cover the card fee (${fee / 100:.2f}).")
+    to_card = refundable - fee
+    gross = to_card + tax_part(to_card, p["amount_cents"], p["tax_cents"])
     hold_id = ledger.create_hold(user_id, refundable * MICROS_PER_CENT, "refund", payment_id)
     try:
         refund = client().v1.refunds.create(
@@ -477,15 +483,29 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
         raise
     _reverse_tax(p, refund.id, gross)
     ledger.capture_hold(
-        hold_id, refundable * MICROS_PER_CENT, f"Refund ${refundable / 100:.2f}",
+        hold_id, refundable * MICROS_PER_CENT,
+        f"Refund ${to_card / 100:.2f}" + (f" (card fee ${fee / 100:.2f} kept)" if fee else ""),
         kind="refund", ref_type="stripe_refund", ref_id=refund.id,
     )
     db.execute(
         "UPDATE payments SET refunded_cents = refunded_cents + ?, updated_at = ? WHERE id = ?",
         (refundable, db.now(), payment_id),
     )
-    db.audit("user", "refund", user_id=user_id, detail=f"{payment_id}:{refundable}")
-    return refundable
+    db.audit("user", "refund", user_id=user_id, detail=f"{payment_id}:{refundable}:fee={fee}")
+    return to_card
+
+
+def card_fee_cents(p) -> int:
+    """What Stripe charged us for this payment (its balance transaction), else
+    the standard US card rate (2.9% + 30c)."""
+    try:
+        charge = client().v1.charges.retrieve(p["stripe_charge"], params={"expand": ["balance_transaction"]})
+        bt = charge.balance_transaction
+        if bt is not None and getattr(bt, "currency", "usd") == "usd":
+            return int(bt.fee)
+    except Exception:  # noqa: BLE001
+        log.warning("could not read the Stripe fee for %s; using the standard rate", p["id"])
+    return round((p["amount_cents"] + p["tax_cents"]) * 0.029) + 30
 
 
 # ------------------------------------------------------------------ tax helpers

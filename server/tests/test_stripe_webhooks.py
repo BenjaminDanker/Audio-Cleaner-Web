@@ -136,3 +136,40 @@ def test_tax_split_on_refunds(client, user_with_pending_payment, fake_pi):
     assert ledger.balance(uid)["balance_micros"] == 10_000_000  # $12 gross = $10 credit + $2 tax
     assert stripe_service.tax_part(1000, 2000, 400) == 200
     assert stripe_service.credit_part(2400, 2000, 400) == 2000
+
+
+def test_self_service_refund_keeps_the_card_fee_once(monkeypatch):
+    from types import SimpleNamespace
+
+    from acw import auth, db
+    from acw.billing import ledger, stripe_service
+
+    uid = auth.get_or_create_user("fee@example.com")["id"]
+    now = db.now()
+    db.execute(
+        "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
+        " VALUES ('pay_fee', ?, 'checkout', 'succeeded', 1000, 0, 0, 'ch_fee', ?, ?)",
+        (uid, now, now),
+    )
+    ledger.credit(uid, 1000 * 10_000, "topup", "payment", "pay_fee")
+    refunds = []
+
+    class Fake:
+        class v1:
+            class charges:
+                @staticmethod
+                def retrieve(_id, params=None):
+                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=59, currency="usd"))
+
+            class refunds:
+                @staticmethod
+                def create(params=None, options=None):
+                    refunds.append(params["amount"])
+                    return SimpleNamespace(id=f"re_{len(refunds)}")
+
+    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
+    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
+    ledger.create_hold(uid, 600 * 10_000, "job", "j")  # $6 still spendable is held -> $4 unused
+    assert stripe_service.refund_unused(uid, "pay_fee") == 400 - 59
+    assert refunds == [341]
+    assert ledger.balance(uid)["balance_micros"] == 600 * 10_000  # all $4 of unused credit is gone
