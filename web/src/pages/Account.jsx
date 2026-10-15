@@ -102,7 +102,7 @@ export default function Account() {
           <p><b>Any credit you have left ({balanceMoney(balance?.balance_micros ?? 0)}) is lost</b> and can’t be brought back or refunded afterwards.</p>
           <p className="mb0">Want money back first? You can <Link to="/app/billing">ask for a refund of the unused part of a recent payment</Link> (the last 14 days) before you delete.</p>
         </div>
-        <p className="small muted mb0">You can’t delete while a job is uploading or running. Let it finish, or cancel it on the Files page.</p>
+        <p className="small muted mb0">You can’t delete while a job is uploading or running. Let it finish, or cancel it on the Cleanup page.</p>
         <form className="stack" onSubmit={deleteAccount}>
           <div className="field">
             <label htmlFor="del-confirm">Type your email address ({user?.email}) to confirm</label>

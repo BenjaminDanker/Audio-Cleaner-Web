@@ -30,7 +30,7 @@ export function MaintenancePanel() {
   );
 }
 
-/** Wraps pages that cannot work without the server (free cleanup, files, Live, Billing, Account, sign-in). */
+/** Wraps pages that cannot work without the server (Cleanup, Live, Billing, Account, sign-in). */
 export default function NeedsServer({ children }) {
   const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
   return offline ? <MaintenancePanel /> : children;

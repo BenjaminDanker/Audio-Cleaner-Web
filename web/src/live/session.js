@@ -62,7 +62,7 @@ export function applyCaption(items, ev, max = 200) {
 }
 
 /**
- * @param {{denoise: 'light'|'low_latency'|null (the chosen noise-removal tier id), captions: 'local'|'premium'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
+ * @param {{denoise: 'light'|null (the noise-removal tier id), captions: 'local'|'premium'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
  *   onEvent: (ev:object)=>void, onStats:(s:object)=>void}} opts
  *   Server events reach `onEvent` as parsed JSON ('ready', 'caption', 'warning', 'stopped', 'error', plus a local 'closed');
  *   feed 'caption' events to applyCaption().

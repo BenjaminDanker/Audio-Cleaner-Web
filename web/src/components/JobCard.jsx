@@ -82,7 +82,7 @@ export default function JobCard({ job, upload, local, onChanged }) {
   const active = ACTIVE.has(job.status);
   const canCancel = job.status === 'uploading' || job.status === 'queued';
   const hasVideoInput = local?.info?.hasVideo || /\.(mp4|mov|m4v|mkv|webm)$/i.test(job.inputName || '');
-  const showRemux = job.status === 'done' && (hasVideoInput && local?.extracted !== false) && !!job.outputs.find((o) => o.kind === 'audio') && !job.outputs.find((o) => o.kind === 'video');
+  const showRemux = job.status === 'done' && (hasVideoInput && local?.extracted !== false && local?.keepVideo !== false) && !!job.outputs.find((o) => o.kind === 'audio') && !job.outputs.find((o) => o.kind === 'video');
   const hasVideoOut = job.outputs.some((o) => o.kind === 'video');
 
   async function act(fn) {

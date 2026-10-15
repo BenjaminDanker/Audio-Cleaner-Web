@@ -56,3 +56,16 @@ export async function check(name, fn) {
   }
 }
 export const summary = () => results;
+
+// ---- the Cleanup page's options (drop a file, then pick what to do) ----
+/** Click one of the option cards: group 'noise' (off | browser | polish) or 'subs' (off | free | standard | accurate). */
+export async function pick(page, group, value) {
+  await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
+}
+/** Drop a file on the Cleanup page and wait until it has been looked at (the Start button shows up). */
+export async function dropFile(page, path) {
+  await page.setInputFiles('input[type=file]', path);
+  await page.getByTestId('start').waitFor({ timeout: 20000 });
+  await page.waitForTimeout(300);
+}
+export const startButton = (page) => page.getByTestId('start');

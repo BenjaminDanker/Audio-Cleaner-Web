@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 
 // Version string for the (unhashed) public/dfn files, appended as ?v= so they can be cached for a long time.
 function dfnVersion() {
@@ -19,6 +19,13 @@ function dfnSizes() {
   return { js: size('df.js'), wasm: size('df_bg.wasm'), model: size('DeepFilterNet3_onnx.tar.gz') };
 }
 
+// The versioned folder of the libav.js decoder (scripts/sync-dfn.mjs), or '' when it is not built.
+function libavDir() {
+  const p = new URL('./public/dfn/libav/', import.meta.url);
+  const dirs = existsSync(p) ? readdirSync(p) : [];
+  return dirs.length === 1 ? dirs[0] : '';
+}
+
 // The app is served under VITE_BASE (default "/audio/", use "/" on a dedicated domain).
 // API calls go to `${BASE_URL}api/` on the same origin, so no CORS and cookie auth just works.
 export default defineConfig(({ mode }) => {
@@ -31,7 +38,7 @@ export default defineConfig(({ mode }) => {
   return {
     base,
     plugins: [react()],
-    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()) },
+    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()), __LIBAV_DIR__: JSON.stringify(libavDir()) },
     worker: { format: 'es' },
     build: {
       target: 'es2022',

@@ -8,7 +8,6 @@ const DESCRIPTIONS = {
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
   'transcribe/premium': 'The same files, best for accents, noisy rooms and specialist words',
   'stream_denoise/light': 'Cleans up your mic while you talk',
-  'stream_denoise/low_latency': 'For tight setups: about 20 ms less delay',
   'stream_captions/local': 'Live captions in English',
   'stream_captions/premium': 'Live captions in other languages too, best for accents and specialist words',
 };

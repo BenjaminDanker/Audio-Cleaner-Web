@@ -37,7 +37,7 @@ function AccountMenu() {
       </summary>
       <div className="menu-panel">
         <div className="menu-email">{user.email}</div>
-        <Link to="/app" onClick={close}>Files</Link>
+        <Link to="/app" onClick={close}>Cleanup</Link>
         <Link to="/app/billing" onClick={close}>Billing</Link>
         <Link to="/app/live" onClick={close}>Live &amp; keys</Link>
         <Link to="/app/account" onClick={close}>Your account</Link>
@@ -61,8 +61,7 @@ function Header() {
           <span>{SITE.name}</span>
         </Link>
         <nav className="nav" id="main-nav" data-open={open} aria-label="Main">
-          <NavLink to="/free">Free cleanup</NavLink>
-          <NavLink to="/app" end>Files</NavLink>
+          <NavLink to="/app" end>Cleanup</NavLink>
           <NavLink to="/app/live">Live</NavLink>
           <Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link>
         </nav>
@@ -134,8 +133,7 @@ function Footer() {
         <div>
           <h4>Product</h4>
           <ul>
-            <li><Link to="/free">Free cleanup</Link></li>
-            <li><Link to="/app">Clean &amp; polish, subtitles</Link></li>
+            <li><Link to="/app">Cleanup, subtitles</Link></li>
             <li><Link to="/app/live">Live for streamers</Link></li>
             <li><Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link></li>
           </ul>

@@ -173,3 +173,11 @@ source. Exact source (also collected, with checksums, by `build.sh` in
 
 Patent encumbrance of some of these codecs (AC-3, E-AC-3, DTS, WMA, AMR, MPEG audio) is a
 separate question from copyright licensing; get it reviewed before shipping.
+
+## Keeping the source (LGPL)
+
+The website's licence notice (web/licenses-src/ffmpeg-libav-BUILD.txt) offers the complete source
+of this build for three years after it was last served. `$LIBAV_BUILD_DIR/sources/` holds all of it
+(source tarballs, our build scripts, SHA256SUMS): keep a copy for at least that long (also when you move to
+a newer build).
+

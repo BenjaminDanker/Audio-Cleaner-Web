@@ -46,10 +46,11 @@ const FAQ = [
   ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. You do need a free account to use it, to keep bots away.'],
   ['How fast is it?', 'Usually about one minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
   ['What is Clean & polish for?', 'Longer recordings and finished files. We remove the noise, even out the voice and set the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],
-  ['Which files work?', 'On the Files page, almost any audio or video file: MP3, WAV, M4A/AAC, FLAC, OGG/Opus, WMA, AIFF, AMR, AC3, WavPack, MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG, MTS/M2TS, 3GP, MXF and more. The free cleanup in your browser takes the common ones your browser can open (MP3, WAV, M4A, FLAC, OGG, MP4, MOV, WebM, MKV). With video, the picture is left alone and only the sound is swapped.'],
+  ['Which files work?', 'On the Cleanup page, almost any audio or video file: MP3, WAV, M4A/AAC, FLAC, OGG/Opus, WMA, AIFF, AMR, AC3, WavPack, MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG, MTS/M2TS, 3GP, MXF and more. Noise removal in your browser takes the common ones your browser can open (MP3, WAV, M4A, FLAC, OGG, MP4, MOV, WebM, MKV). With video, the picture is left alone and only the sound is swapped.'],
   ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
   ['How does paying work?', 'You add credit, then spend it by the minute of audio. No subscription. You can top up from $10, and switch on auto-reload (with a monthly limit you choose) if you like. Turn it off whenever you want.'],
   ['What happens to my files and my words?', 'Files you upload are deleted as soon as they are processed. Results stay for 24 hours so you can download them, then they are deleted too. Live audio is never stored. We don’t train anything on your audio or your transcripts.'],
+  ['Where is it available?', 'Audio Cleaner isn’t offered in the EU/EEA, the UK or Switzerland. If a card issued there is used by mistake, the payment is refunded automatically.'],
   ['Is there an OBS plugin?', 'Not yet, it’s on the way. Until then you can try live noise removal and captions right on the Live page, with your own microphone.'],
 ];
 
@@ -101,7 +102,7 @@ export default function Landing() {
             <h1>Clean up a recording. Free, right in your browser.</h1>
             <p className="lead">Take the hiss, hum and room noise out of podcasts, calls, lectures and videos. It all happens on your own device, so your file never leaves it.</p>
             <div className="row">
-              <Link to="/free" className="btn btn-primary btn-lg">Try it on a file</Link>
+              <Link to="/app" className="btn btn-primary btn-lg">Try it on a file</Link>
               <a href="#products" className="btn btn-secondary btn-lg">See what else we do</a>
             </div>
             <p className="muted small">Nothing is uploaded. No watermark.</p>
@@ -117,10 +118,10 @@ export default function Landing() {
           <div className="grid grid-4">
             <article className="card product-card">
               <div className="icon"><IconWave /></div>
-              <h3>Free cleanup <span className="badge badge-free">Free</span></h3>
-              <p>Drop in a file and get it back clean, right in your browser. Nothing is uploaded, and the only limit is how patient your computer is.</p>
+              <h3>Free, in your browser <span className="badge badge-free">Free</span></h3>
+              <p>Drop in a file on the Cleanup page and get it back clean, right in your browser. Nothing is uploaded, and the only limit is how patient your computer is.</p>
               <span className="spacer" />
-              <Link to="/free" className="btn btn-primary">Try it now</Link>
+              <Link to="/app" className="btn btn-primary">Try it now</Link>
             </article>
             <article className="card product-card">
               <div className="icon"><IconSparkle /></div>
@@ -152,7 +153,7 @@ export default function Landing() {
           <h2 className="section-title">How it works</h2>
           <p className="section-lead">Three steps, whichever way you go.</p>
           <ol className="steps">
-            <li><h3>Pick a way</h3><p>The free browser cleanup for quick jobs. Clean &amp; polish for long files, loudness and subtitles.</p></li>
+            <li><h3>Pick a way</h3><p>Free noise removal in your browser for quick jobs. Clean &amp; polish for long files, loudness and subtitles.</p></li>
             <li><h3>Drop in a file</h3><p>Audio or video. With video, only the sound is uploaded, so it stays small and quick.</p></li>
             <li><h3>Listen, then save</h3><p>Flip between the original and the clean version at the same spot. Then save the audio, or your video with the new sound.</p></li>
           </ol>
@@ -190,7 +191,7 @@ export default function Landing() {
           </div>
           {email && <p className="center">Something else? <a href={`mailto:${email}`}>Just ask.</a></p>}
           <div className="center">
-            <Link to="/free" className="btn btn-primary btn-lg">Try it on a file</Link>
+            <Link to="/app" className="btn btn-primary btn-lg">Try it on a file</Link>
           </div>
         </div>
       </section>

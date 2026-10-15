@@ -1,6 +1,6 @@
 // UI-level checks: login form variants (mocked providers), responsive overflow, a11y scan, strict CSP, dark mode.
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, signIn, summary } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
@@ -44,7 +44,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 {
   const { browser, page, logs } = await launch([], { viewport: { width: 360, height: 800 } });
   await signIn(page, EMAIL);
-  const pages = ['/', '/free', '/login', '/app', '/app/billing', '/app/live', '/app/account', '/terms', '/privacy', '/licenses', '/nope'];
+  const pages = ['/', '/login', '/app', '/app/billing', '/app/live', '/app/account', '/terms', '/privacy', '/licenses', '/nope'];
   await check('responsive 360px: no horizontal overflow on any page', async () => {
     const bad = [];
     for (const p of pages) {
@@ -64,7 +64,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
   await check('mobile nav toggle opens menu', async () => {
     await page.goto(`${BASE}/`);
     await page.getByRole('button', { name: 'Menu' }).click();
-    await page.getByRole('link', { name: 'Free cleanup' }).first().waitFor({ state: 'visible' });
+    await page.getByRole('link', { name: 'Cleanup', exact: true }).first().waitFor({ state: 'visible' });
     return 'ok';
   });
   await browser.close();
@@ -75,9 +75,10 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
   await signIn(page, EMAIL);
   await check('a11y scan: unlabeled controls / buttons / images, heading order, landmarks', async () => {
     const probs = [];
-    for (const p of ['/', '/free', '/login', '/app', '/app/billing', '/app/live', '/app/account', '/terms']) {
-      await page.goto(`${BASE}${p}`);
+    for (const p of ['/', '/login', '/app', '/app+file', '/app/billing', '/app/live', '/app/account', '/terms']) {
+      await page.goto(`${BASE}${p.replace('+file', '')}`);
       await page.waitForSelector('main h1');
+      if (p.endsWith('+file')) await dropFile(page, join(FILES, 'noisy.wav')); // the options that show up after a file is dropped
       await page.waitForTimeout(500);
       const r = await page.evaluate(() => {
         const out = [];
@@ -96,7 +97,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
       for (const x of r) probs.push(`${p}: ${x}`);
     }
     if (probs.length) throw new Error(probs.join(' | '));
-    return '9 pages clean';
+    return '8 pages clean';
   });
   await check('keyboard: tab reaches skip link first, then nav', async () => {
     await page.goto(`${BASE}/`);
@@ -115,8 +116,10 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await signIn(page, EMAIL);
     await page.goto(`${BASE}/`); await page.waitForSelector('table');
     await page.screenshot({ path: join(SHOTS, 'dark-landing.png') });
-    await page.goto(`${BASE}/free`); await page.waitForSelector('main h1');
-    await page.screenshot({ path: join(SHOTS, 'dark-free.png') });
+    await page.goto(`${BASE}/app`); await dropFile(page, join(FILES, 'noisy.wav'));
+    await page.screenshot({ path: join(SHOTS, 'dark-cleanup.png'), fullPage: true });
+    await page.goto(`${BASE}/app/live`); await page.waitForSelector('[data-testid=live-options]');
+    await page.screenshot({ path: join(SHOTS, 'dark-live.png'), fullPage: true });
     return 'saved';
   });
   await browser.close();
@@ -134,12 +137,12 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await route.fulfill({ response: res, headers: { ...res.headers(), 'content-security-policy': csp } });
   });
   page.on('console', (m) => { if (/Content Security Policy|violat/i.test(m.text())) viol.push(m.text().slice(0, 200)); });
-  await check('CSP: landing, free cleanup (wasm worker + mediabunny), files, live worklets all work', async () => {
+  await check('CSP: landing, free noise removal on the Cleanup page (wasm worker + mediabunny), live worklets all work', async () => {
     await signIn(page, EMAIL);
     await page.goto(`${BASE}/`); await page.waitForSelector('table');
-    await page.goto(`${BASE}/free`);
-    await page.setInputFiles('input[type=file]', join(FILES, 'test.mp4'));
-    await page.getByRole('button', { name: 'Clean audio' }).click();
+    await page.goto(`${BASE}/app`);
+    await dropFile(page, join(FILES, 'test.mp4'));
+    await page.getByRole('button', { name: 'Start - free' }).click();
     await page.waitForSelector('[data-testid=result]', { timeout: 60000 });
     const rms = Number(await page.locator('[data-testid=result]').getAttribute('data-rms'));
     if (rms < 0.001) throw new Error('silent under CSP');

@@ -1,12 +1,12 @@
 // States and small flows that need the local backend plus mocked answers: the price list (groups, per hour, phone width),
 // a file job waiting in line, "short on storage" (HTTP 507), refund estimate with the card fee, and live: capacity used up
-// ("full" with one-click alternatives), low latency, non-English language with standard captions, bad_config.
+// ("full" with one-click alternatives), the caption choices and the language picker (only for extra accurate), bad_config.
 // Needs the same local backend as tests/e2e.mjs (port 8792, see helpers.mjs) with `npm run build` output served by it.
 // Usage: node tests/states.mjs [section ...]   sections: prices busy refund livefull
 // Kept apart from qa-fixes.mjs on purpose: the backend rate-limits one IP's API calls and sign-ins, and the long
 // upload sections there use most of that budget.
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
 
 const only = process.argv.slice(2);
 const want = (s) => only.length === 0 || only.includes(s);
@@ -47,7 +47,7 @@ if (want('prices')) {
       await page.route('**/api/billing/pricing', async (r) => {
         const res = await r.fetch();
         const j = await res.json();
-        j.rates = j.rates.map((x) => (x.tier === 'low_latency' ? { ...x, available: false } : x));
+        j.rates = j.rates.map((x) => (x.product === 'stream_captions' && x.tier === 'premium' ? { ...x, available: false } : x));
         await r.fulfill({ response: res, json: j });
       });
       await page.goto(`${BASE}/#pricing`);
@@ -56,7 +56,7 @@ if (want('prices')) {
       const need = ['Free', 'Files', 'Live streaming', 'Clean & polish', '$0.60 / hour', '$0.01 / min', '$0.24 / hour', 'Noise removed, voice evened out and loudness set, ready to publish', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Noise removal in your browser', 'Subtitles & transcripts', '60 min every day', '$0.004 / min'];
       if (/account/i.test(t)) throw new Error('the price list should not talk about accounts: ' + t);
       for (const n of need) if (!t.includes(n)) throw new Error(`missing "${n}" in: ${t}`);
-      if (/Available|Coming soon|low latency/i.test(t)) throw new Error('should not show: ' + t);
+      if (/Available|Coming soon|low latency/i.test(t) || t.includes('Live captions, extra accurate')) throw new Error('should not show: ' + t);
       if (!(await page.locator('[data-testid=prices] thead').evaluate((e) => e.classList.contains('sr-only')))) throw new Error('a visible column header row (the status and per-minute columns are gone)');
       const w = await page.getByTestId('prices').evaluate((e) => { const wrap = e.parentElement; return { sw: wrap.scrollWidth, cw: wrap.clientWidth, page: document.documentElement.scrollWidth, iw: window.innerWidth }; });
       if (w.sw > w.cw + 1 || w.page > w.iw + 1) throw new Error('sideways scroll: ' + JSON.stringify(w));
@@ -90,9 +90,10 @@ if (want('busy')) {
     await page.route('**/api/jobs', (r) => (r.request().method() === 'POST' ? r.fulfill({ status: 507, json: { detail: 'We are short on storage space right now. Please try again in a little while.' } }) : r.continue()));
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('[data-testid=available]');
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.mp3'));
+    await dropFile(page, join(FILES, 'noisy.mp3'));
+    await pick(page, 'noise', 'polish');
     await page.getByTestId('estimate').waitFor();
-    await page.getByRole('button', { name: /Start job/ }).click();
+    await page.getByRole('button', { name: /^Start - about/ }).click();
     const box = page.getByTestId('job-error');
     await box.waitFor({ timeout: 30000 });
     const t = await box.innerText();
@@ -151,51 +152,55 @@ if (want('livefull')) {
       const j = JSON.parse(m);
       if (j.type === 'start') {
         starts.push(j);
-        if (mode === 'full' && j.denoise === 'low_latency') ws.send(JSON.stringify({ type: 'error', code: 'full', available: [{ denoise: 'light' }, { captions: 'premium' }], message: 'Live is busy right now. Standard noise removal or extra accurate captions are free.' }));
+        if (mode === 'full' && j.captions === 'premium') ws.send(JSON.stringify({ type: 'error', code: 'full', available: [{ captions: 'local' }, { denoise: null }], message: 'Live is busy right now. Standard captions or extra accurate captions on their own are free.' }));
         else ws.send(JSON.stringify({ type: 'ready', sessionId: 's1', sampleRate: 48000, hopSamples: 480, modelLatencyMs: 30, usdPerMinute: 0.004, maxSessionSeconds: 3600 }));
       } else if (j.type === 'stop') ws.close();
     });
   });
   await mock();
-  await check('live: low latency is offered; when live is full the message and one-click alternatives appear and retrying works', async () => {
+  const capCard = (v) => page.locator(`label.choice:has(input[name=live-captions][value=${v}])`);
+  await check('live: no low-latency option anywhere; when live is full the message and one-click alternatives appear and retrying works', async () => {
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-price').waitFor();
-    await page.locator('#live-cap').selectOption('');
-    await page.locator('#live-den').selectOption('low_latency');
+    if (/low.latency|20 ms/i.test(await page.locator('main').innerText()) || (await page.locator('#live-den').count())) throw new Error('low latency is still on the page');
+    await capCard('premium').click();
     await page.getByTestId('live-start').click();
     const box = page.getByTestId('live-full');
     await box.waitFor({ timeout: 20000 });
     const t = await box.innerText();
     if (!t.includes('Live is busy right now')) throw new Error(t);
     const opts = await page.getByTestId('live-full-option').allInnerTexts();
-    if (opts.length !== 2 || !/standard noise removal/i.test(opts[0]) || !/extra accurate captions/i.test(opts[1])) throw new Error(JSON.stringify(opts));
-    if (starts[0].denoise !== 'low_latency') throw new Error('first start: ' + JSON.stringify(starts[0]));
+    if (opts.length !== 2 || !/standard noise removal \+ standard captions/i.test(opts[0]) || !/extra accurate captions|without noise removal/i.test(opts[1])) throw new Error(JSON.stringify(opts));
+    if (starts[0].denoise !== 'light' || starts[0].captions !== 'premium') throw new Error('first start: ' + JSON.stringify(starts[0]));
     await page.getByTestId('live-full-option').first().click();
     await page.getByTestId('live-stop').waitFor({ timeout: 20000 });
     const second = starts[1];
-    if (second.denoise !== 'light' || second.captions !== null) throw new Error('retry start: ' + JSON.stringify(second));
+    if (second.denoise !== 'light' || second.captions !== 'local') throw new Error('retry start: ' + JSON.stringify(second));
     if (await page.getByTestId('live-full').count()) throw new Error('full notice still shown after the retry worked');
     await page.getByTestId('live-stop').click();
     await page.getByTestId('live-start').waitFor({ timeout: 15000 });
     return opts.join(' | ');
   });
-  await check('live: a non-English language with standard captions switches to extra accurate (one short line); standard stays blocked', async () => {
+  await check('live: the language picker only appears with Extra accurate (any language); Standard says English only and sends no language', async () => {
+    mode = 'ok';
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-price').waitFor();
-    await page.locator('#live-cap').selectOption('local');
+    if (await page.locator('#live-lang').count()) throw new Error('language picker shown for standard captions');
+    if (!/English only/.test(await capCard('local').innerText())) throw new Error('Standard card: ' + (await capCard('local').innerText()));
+    if (!/any language/i.test(await capCard('premium').innerText())) throw new Error('Extra accurate card: ' + (await capCard('premium').innerText()));
+    await page.getByTestId('live-start').click();
+    await page.getByTestId('live-stop').waitFor({ timeout: 20000 });
+    if (starts.at(-1).captions !== 'local' || starts.at(-1).language) throw new Error('standard start: ' + JSON.stringify(starts.at(-1)));
+    await page.getByTestId('live-stop').click();
+    await page.getByTestId('live-start').waitFor({ timeout: 15000 });
+    await capCard('premium').click();
     await page.locator('#live-lang').selectOption('fr');
-    if ((await page.locator('#live-cap').inputValue()) !== 'premium') throw new Error('captions not switched');
-    const note = await page.getByTestId('lang-note').innerText();
-    if (!/English only/.test(note) || note.length > 90) throw new Error(note);
-    await page.locator('#live-cap').selectOption('local');
-    await page.getByTestId('lang-needs-accurate').waitFor();
-    if (!(await page.getByTestId('live-start').isDisabled())) throw new Error('standard captions + French can be started');
-    await page.getByRole('button', { name: 'Use extra accurate' }).click();
-    if ((await page.locator('#live-cap').inputValue()) !== 'premium' || (await page.getByTestId('live-start').isDisabled())) throw new Error('did not recover');
-    await page.locator('#live-lang').selectOption('en');
-    await page.locator('#live-cap').selectOption('local');
-    if (await page.getByTestId('live-start').isDisabled()) throw new Error('English + standard should start');
-    return note;
+    await page.getByTestId('live-start').click();
+    await page.getByTestId('live-stop').waitFor({ timeout: 20000 });
+    if (starts.at(-1).captions !== 'premium' || starts.at(-1).language !== 'fr') throw new Error('extra accurate start: ' + JSON.stringify(starts.at(-1)));
+    await page.getByTestId('live-stop').click();
+    await page.getByTestId('live-start').waitFor({ timeout: 15000 });
+    return 'ok';
   });
   await check('live: a bad_config answer shows the server\'s message', async () => {
     await page.unroute(/\/api\/stream\/ws/);

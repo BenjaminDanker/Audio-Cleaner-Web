@@ -68,19 +68,19 @@ await check('offline banner is dismissible, stays dismissed while navigating, an
   await page.screenshot({ path: join(SHOTS, 'offline-banner.png') });
   await page.getByRole('button', { name: 'Dismiss' }).click();
   await banner.waitFor({ state: 'detached' });
-  await page.getByRole('link', { name: 'Free cleanup' }).first().click();
-  await page.waitForURL(/\/audio\/free$/);
+  await page.getByRole('link', { name: 'Cleanup', exact: true }).first().click();
+  await page.waitForURL(/\/audio\/app$/);
   await page.waitForTimeout(800);
   if (await page.getByTestId('api-offline').count()) throw new Error('banner came back after navigation');
   return `${Math.round(h)}px tall`;
 });
 
-await check('free cleanup needs the server now: with the API down it shows the calm panel, not the tool', async () => {
+await check('Cleanup needs the server: with the API down it shows the calm panel, not the tool', async () => {
   mode = 'dead-reset';
-  await page.goto(`${OFF}/free`);
+  await page.goto(`${OFF}/app`);
   await page.getByTestId('api-offline').waitFor();
   await page.getByTestId('maintenance').waitFor({ timeout: 10000 });
-  if (await page.locator('input[type=file]').count()) throw new Error('/free still offers a file picker while the server is down');
+  if (await page.locator('input[type=file]').count()) throw new Error('/app still offers a file picker while the server is down');
   return 'panel shown';
 });
 
@@ -91,7 +91,7 @@ await check('no banner while the API is up; paid pages degrade without crashing 
   await page.waitForTimeout(500);
   if (await page.getByTestId('api-offline').count()) throw new Error('banner shown although the API answers');
   mode = 'dead-502';
-  for (const p of ['/', '/free', '/login', '/app', '/app/billing', '/app/live', '/terms']) {
+  for (const p of ['/', '/login', '/app', '/app/billing', '/app/live', '/terms']) {
     await page.goto(`${OFF}${p}`);
     await page.waitForSelector('main h1, .loading-screen', { timeout: 10000 });
     await page.waitForTimeout(250);
@@ -109,9 +109,9 @@ await check('banner disappears by itself once the backend is back (re-checks /ap
   return 'recovered';
 });
 
-await check('maintenance: Free cleanup, Files, Live, Billing and Account show a calm "We\'ll be right back" panel instead of forms, with no claim that anything still works', async () => {
+await check('maintenance: Cleanup, Live, Billing and Account show a calm "We\'ll be right back" panel instead of forms, with no claim that anything still works', async () => {
   mode = 'maint';
-  for (const p of ['/free', '/app', '/app/live', '/app/billing', '/app/account']) {
+  for (const p of ['/app', '/app/live', '/app/billing', '/app/account']) {
     await page.goto(`${OFF}${p}`);
     const panel = page.getByTestId('maintenance');
     await panel.waitFor({ timeout: 10000 });
@@ -119,11 +119,11 @@ await check('maintenance: Free cleanup, Files, Live, Billing and Account show a 
     if (!/We.ll be right back/.test(text) || /still work/i.test(text)) throw new Error(`${p}: ${text}`);
     if (await page.locator('main input, main select, main form').count()) throw new Error(`${p}: a form is still on the page`);
     if (page.url().includes('/login')) throw new Error(`${p}: bounced to the sign-in page`);
-    if (await panel.locator('a[href$="/free"]').count()) throw new Error(`${p}: the panel still links to the free tool`);
+    if (await panel.locator('a[href$="/free"]').count()) throw new Error(`${p}: the panel still links to a free-cleanup page`);
     if (!(await panel.getByRole('button', { name: 'Check now' }).count())) throw new Error(`${p}: no Check now button`);
   }
   await page.screenshot({ path: join(SHOTS, 'maintenance.png') });
-  return 'panel on 5 pages';
+  return 'panel on 4 pages';
 });
 
 await check('maintenance: the panel goes away by itself when /api/health answers again', async () => {

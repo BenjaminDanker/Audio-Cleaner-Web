@@ -28,8 +28,9 @@ export default function Terms() {
   return (
     <Legal title="Terms of Service" sections={SECTIONS}>
       <h2 id="about">1. About these terms</h2>
-      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free browser tool runs on your own device; it needs a free account, but no credit.</p>
-      <p>We may update these terms. When we do, the version date changes and we will ask you to accept the new version before you can use paid features again. Your continued use of the free browser tool is not conditional on this.</p>
+      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free noise removal runs on your own device; it needs a free account, but no credit.</p>
+      <p><b>Where the Service is available.</b> The Service is not available to people in the European Union or European Economic Area (EU/EEA), the United Kingdom or Switzerland. Please do not create an account, buy credit or use the Service if you are there. If a payment is made with a card issued in one of those places, we refund it.</p>
+      <p>We may update these terms. When we do, the version date changes and we will ask you to accept the new version before you can use paid features again. Your continued use of the free noise removal is not conditional on this.</p>
 
       <h2 id="accounts">2. Accounts</h2>
       <ul>
@@ -41,8 +42,8 @@ export default function Terms() {
 
       <h2 id="services">3. The services</h2>
       <ul>
-        <li><b>Free cleanup.</b> Runs locally in your browser (you sign in to use it). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
-        <li><b>Clean &amp; polish.</b> Noise removal, voice levelling, loudness normalisation and related processing of files you upload.</li>
+        <li><b>Free noise removal.</b> Runs locally in your browser from the Cleanup page (you sign in to use it). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
+        <li><b>Clean &amp; polish.</b> Paid noise removal done on our side, voice levelling, loudness normalisation and related processing of files you upload.</li>
         <li><b>Transcription and subtitles.</b> Standard (done by us), or Extra accurate (the audio is sent to a third-party speech-recognition provider, see the Privacy Policy). A daily free allowance of Standard transcription may be offered; its size can change.</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed.</li>
       </ul>
@@ -84,7 +85,7 @@ export default function Terms() {
       <h2 id="data">8. Data handling</h2>
       <p>The <Link to="/privacy">Privacy Policy</Link> applies. In short:</p>
       <ul>
-        <li>The free browser tool processes files locally; nothing is uploaded.</li>
+        <li>The free noise removal processes files locally in your browser; nothing is uploaded.</li>
         <li>Files you upload are deleted when processing finishes. Results are deleted 24 hours after they are ready (or when you delete them).</li>
         <li>Live audio is processed in memory and is not stored.</li>
         <li>Extra accurate transcription and extra accurate live captions send the audio to a third-party speech-recognition provider, our sub-processor, only when you choose them. Standard transcription and standard live captions are done by us and the audio goes no further.</li>

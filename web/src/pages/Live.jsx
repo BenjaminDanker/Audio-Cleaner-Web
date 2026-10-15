@@ -46,7 +46,7 @@ function ObsSetup() {
     <section className="card stack" aria-labelledby="obs-h">
       <h2 id="obs-h" className="mb0">OBS plugin setup</h2>
       <ol className="ol-steps mb0">
-        <li>Create an API key on this page with the <b>stream</b> scope and copy it.</li>
+        <li>Create an API key on this page with <b>OBS plugin and live</b> switched on, and copy it.</li>
         <li>Install the Audio Cleaner OBS plugin. <span className="badge badge-soon">Coming soon</span></li>
         <li>In OBS, add the <b>Audio Cleaner</b> filter to your microphone source and paste the key.</li>
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
@@ -58,6 +58,8 @@ function ObsSetup() {
 }
 
 /* ------------------------------------------------------------------ API keys */
+
+const SCOPE_LABEL = { stream: 'OBS plugin and live', jobs: 'File API for scripts' };
 
 function ApiKeys() {
   const [keys, setKeys] = useState(null);
@@ -120,7 +122,7 @@ function ApiKeys() {
   return (
     <section className="card stack" aria-labelledby="keys-h">
       <h2 id="keys-h" className="mb0">API keys</h2>
-      <p className="muted mb0 small">Keys let programs (like the OBS plugin) use your balance, so treat them like passwords. You can have up to 10.</p>
+      <p className="muted mb0 small">Keys let programs (like the OBS plugin or your own scripts) use your balance, so treat them like passwords. You can have up to 10.</p>
       {fresh && (
         <div className="stack" data-testid="new-key">
           <div className="banner banner-success"><b>Here's your new key.</b> Copy it now, because we only show it once.</div>
@@ -136,10 +138,16 @@ function ApiKeys() {
           <input id="key-name" className="input" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} required />
         </div>
         <fieldset className="field">
-          <legend className="label">Allowed to</legend>
-          <div className="checks">
-            <label className="check"><input type="checkbox" checked={scopes.stream} onChange={(e) => setScopes({ ...scopes, stream: e.target.checked })} /><span>Stream (live)</span></label>
-            <label className="check"><input type="checkbox" checked={scopes.jobs} onChange={(e) => setScopes({ ...scopes, jobs: e.target.checked })} /><span>Jobs (files)</span></label>
+          <legend className="label">What can this key do?</legend>
+          <div className="stack-sm">
+            <label className="check">
+              <input type="checkbox" checked={scopes.stream} onChange={(e) => setScopes({ ...scopes, stream: e.target.checked })} />
+              <span><b>{SCOPE_LABEL.stream}</b><span className="hint block">Lets the OBS plugin and live captions use your balance while you stream.</span></span>
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={scopes.jobs} onChange={(e) => setScopes({ ...scopes, jobs: e.target.checked })} />
+              <span><b>{SCOPE_LABEL.jobs}</b><span className="hint block">Lets your own scripts send files in for noise removal and subtitles, charged like the Cleanup page.</span></span>
+            </label>
           </div>
         </fieldset>
         <div><button type="submit" className="btn btn-primary" disabled={busy || noScope || !name.trim()}>Create key</button></div>
@@ -154,7 +162,7 @@ function ApiKeys() {
               <span>
                 <span className="oname">{k.name}</span>{' '}
                 <span className="mono muted">{k.prefix}…</span>
-                <div className="small muted">{k.scopes.join(', ')} · created {dateTime(k.createdAt)} · {k.lastUsedAt ? `last used ${dateTime(k.lastUsedAt)}` : 'never used'}</div>
+                <div className="small muted">{k.scopes.map((x) => SCOPE_LABEL[x] || x).join(', ')} · created {dateTime(k.createdAt)} · {k.lastUsedAt ? `last used ${dateTime(k.lastUsedAt)}` : 'never used'}</div>
               </span>
               {confirm === k.id ? (
                 <span className="row">
@@ -179,9 +187,9 @@ const STRENGTH = [['18', 'Natural (18 dB)'], ['40', 'Strong (40 dB)'], ['100', '
 const ERROR_TEXT = {
   insufficient_funds: null, // the server's message is clear
   tos: 'Please agree to the Terms of Service first.',
-  bad_config: null, // e.g. standard captions with a language other than English: the server's message says what to change
+  bad_config: null, // the server's message says what to change
 };
-const DENOISE_NAME = { light: 'standard noise removal', low_latency: 'low-latency noise removal' };
+const DENOISE_NAME = { light: 'standard noise removal' };
 const CAPTION_NAME = { local: 'standard captions', premium: 'extra accurate captions' };
 
 /**
@@ -204,13 +212,21 @@ function optionLabel(opt, was) {
   return `Try ${parts.join(' + ')}${!next.denoise && was.denoise ? ' (without noise removal)' : ''}`;
 }
 
+/** One labelled group of controls in the test panel; all groups share a row and line up at the top. */
+function Group({ id, title, children }) {
+  return (
+    <div className="opt-group" role="group" aria-labelledby={id} data-testid={`group-${id.replace(/^grp-/, '')}`}>
+      <h3 id={id} className="opt-title">{title}</h3>
+      {children}
+    </div>
+  );
+}
+
 function LiveDemo({ pricing }) {
-  const { balance, ensureTos, refresh } = useAuth();
+  const { balance, refresh } = useAuth();
   const [denoise, setDenoise] = useState(true);
-  const [denoiseTier, setDenoiseTier] = useState('light'); // 'light' = standard, 'low_latency'
-  const [captions, setCaptions] = useState('local'); // '' | 'local' (standard, English only) | 'premium' (extra accurate)
+  const [captions, setCaptions] = useState('local'); // '' | 'local' (standard, English only) | 'premium' (extra accurate, any language)
   const [language, setLanguage] = useState('');
-  const [langNote, setLangNote] = useState('');
   const [strength, setStrength] = useState('100');
   const [monitor, setMonitor] = useState('processed');
   const [state, setState] = useState('idle'); // idle | starting | live | stopping
@@ -224,18 +240,14 @@ function LiveDemo({ pricing }) {
   const session = useRef(null);
   const logRef = useRef(null);
 
-  // Price of exactly what is selected: stream_denoise/<tier> + stream_captions/<tier> from /api/billing/pricing.
-  const den = findRate(pricing, 'stream_denoise', denoiseTier);
-  const lowLatency = findRate(pricing, 'stream_denoise', 'low_latency');
-  const lowLatencyListed = !!lowLatency && lowLatency.available !== false;
+  // Price of exactly what is selected: stream_denoise/light + stream_captions/<level> from /api/billing/pricing.
+  const den = findRate(pricing, 'stream_denoise', 'light');
   const capRates = { local: findRate(pricing, 'stream_captions', 'local'), premium: findRate(pricing, 'stream_captions', 'premium') };
   const cap = captions ? capRates[captions] : null;
   const perMin = (denoise && den ? den.usdPerMinute : 0) + (cap ? cap.usdPerMinute : 0);
   const priceKnown = !!pricing && (!denoise || !!den) && (!captions || !!cap);
   const offered = (!denoise || den?.available !== false) && (!captions || cap?.available !== false);
   const accurateListed = capRates.premium?.available !== false;
-  const nonEnglish = !!language && language !== 'en';
-  const needsAccurate = captions === 'local' && nonEnglish; // standard captions are English only
   const mediaOk = !!(navigator.mediaDevices?.getUserMedia && window.AudioWorklet && window.WebSocket);
 
   useEffect(() => () => session.current?.stop(), []);
@@ -259,24 +271,15 @@ function LiveDemo({ pricing }) {
     }
   }, [refresh]);
 
-  function changeLanguage(value) {
-    setLanguage(value);
-    setLangNote('');
-    // Standard captions only do English: suggest (switch to) extra accurate for anything else.
-    if (value && value !== 'en' && captions === 'local' && accurateListed) {
-      setCaptions('premium');
-      setLangNote('Standard captions are English only, so we switched to extra accurate.');
-    }
-  }
-
   /** cfg: {denoise: tier id | null, captions: '' | 'local' | 'premium'} (defaults to what is selected right now). */
-  async function start(cfg = { denoise: denoise ? denoiseTier : null, captions }) {
+  async function start(cfg = { denoise: denoise ? 'light' : null, captions }) {
     setError(''); setFull(null); setWarning(null); setStopped(''); setLines([]); setStats(null); setInfo(null);
-    if (!(await ensureTos())) { setError('Please agree to the Terms of Service first, then live can start.'); return; }
     setState('starting');
     try {
       session.current = await startLive({
-        denoise: cfg.denoise, captions: cfg.captions || null, language: language || null, attenDb: Number(strength), monitor,
+        denoise: cfg.denoise, captions: cfg.captions || null,
+        language: cfg.captions === 'premium' ? language || null : null, // standard captions are English; the language only matters for extra accurate
+        attenDb: Number(strength), monitor,
         onEvent, onStats: setStats,
       });
       setState('live');
@@ -299,7 +302,6 @@ function LiveDemo({ pricing }) {
   function tryOption(opt) {
     const cfg = applyOption(opt, full.was);
     setDenoise(!!cfg.denoise);
-    if (cfg.denoise) setDenoiseTier(cfg.denoise);
     setCaptions(cfg.captions);
     start(cfg);
   }
@@ -311,70 +313,63 @@ function LiveDemo({ pricing }) {
 
   const live = state === 'live';
   const busy = state !== 'idle';
-  const capLabel = (k, name, note) => `${name}${note ? ` (${note})` : ''}${capRates[k] ? ` · +${moneyUsd(capRates[k].usdPerHour)}/hour` : ''}`;
+  const perHour = (r) => (r ? ` · ${moneyUsd(r.usdPerHour)} an hour` : '');
   return (
     <section className="card stack" aria-labelledby="demo-h">
       <h2 id="demo-h" className="mb0">Try it with your microphone</h2>
       <p className="muted mb0">Talk into your mic and hear the result as it happens. The OBS plugin works the same way.</p>
       <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you'll get feedback.</div>
-      <p className="mb0" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
-        {!pricing && <span className="muted">Loading prices…</span>}
-        {pricing && perMin <= 0 && priceKnown && <span className="muted">Pick at least one thing to turn on.</span>}
-        {pricing && !priceKnown && <span className="muted">We don't have a price for that combination.</span>}
-        {pricing && priceKnown && perMin > 0 && (
-          <>
-            <b>This costs {rate(perMin)} per minute</b> <span className="muted">({moneyUsd(perMin * 60)} an hour
-            {denoise && den ? `; noise removal ${rate(den.usdPerMinute)}` : ''}{cap ? `${denoise && den ? ' + ' : '; '}${captions === 'premium' ? 'extra accurate' : 'standard'} captions ${rate(cap.usdPerMinute)}` : ''}).
-            {' '}We set aside about five minutes ({moneyUsd(perMin * 5)}) when you start and give back what you don't use.</span>
-          </>
-        )}
-      </p>
+      <p className="mb0" data-testid="live-free-hint">Want to try without spending credit? Free noise removal and your free daily subtitle minutes are on the <Link to="/app">Cleanup page</Link>.</p>
       {!mediaOk && <div className="banner banner-error" role="alert">This browser can't do what the live test needs (microphone, AudioWorklet, WebSocket). A current Chrome, Edge, Firefox or Safari will.</div>}
 
-      <div className="form-grid">
-        <fieldset className="field" disabled={busy}>
-          <legend className="label">Turn on</legend>
-          <label className="check"><input type="checkbox" checked={denoise} onChange={(e) => setDenoise(e.target.checked)} /><span>Remove noise{den ? <span className="muted small"> {moneyUsd(den.usdPerHour)}/hour</span> : null}</span></label>
-          {denoise && lowLatencyListed && (
-            <div className="field">
-              <label htmlFor="live-den">Noise removal style</label>
-              <select id="live-den" className="select" value={denoiseTier} onChange={(e) => setDenoiseTier(e.target.value)}>
-                <option value="light">Standard</option>
-                <option value="low_latency">{`Low latency (about 20 ms less delay) · ${moneyUsd(lowLatency.usdPerHour)}/hour`}</option>
-              </select>
-            </div>
-          )}
+      <div className="opt-grid" data-testid="live-options">
+        <Group id="grp-noise" title="Noise removal">
+          <label className="check">
+            <input type="checkbox" checked={denoise} disabled={busy} onChange={(e) => setDenoise(e.target.checked)} />
+            <span>Remove noise from my voice<span className="hint block">{den ? `${moneyUsd(den.usdPerHour)} an hour` : 'Takes out hiss, hum and room noise.'}</span></span>
+          </label>
           <div className="field">
-            <label htmlFor="live-cap">Captions</label>
-            <select id="live-cap" className="select" value={captions} onChange={(e) => { setCaptions(e.target.value); setLangNote(''); }}>
-              <option value="">None</option>
-              <option value="local" disabled={capRates.local?.available === false}>{capLabel('local', 'Standard', 'English only')}</option>
-              {(!pricing || capRates.premium) && <option value="premium" disabled={!accurateListed}>{capLabel('premium', 'Extra accurate')}{accurateListed ? '' : ' · coming soon'}</option>}
+            <label htmlFor="live-str">How much noise to remove</label>
+            <select id="live-str" className="select" value={strength} onChange={(e) => { setStrength(e.target.value); session.current?.setAtten(Number(e.target.value)); }} disabled={!denoise || state === 'starting'}>
+              {STRENGTH.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
-            {captions === 'premium' && <span className="hint" data-testid="premium-note">Extra accurate captions send your audio to a speech partner we work with, and show text as you speak. They work in other languages too. <Link to="/privacy">Privacy details</Link></span>}
-            {captions === 'local' && !needsAccurate && <span className="hint">Standard captions are English only.</span>}
-            {langNote && <span className="hint" role="status" data-testid="lang-note">{langNote}</span>}
-            {needsAccurate && (
-              <span className="hint neg" role="status" data-testid="lang-needs-accurate">
-                Standard captions are English only.{' '}
-                {accurateListed && <button type="button" className="btn btn-secondary btn-sm" onClick={() => { setCaptions('premium'); setLangNote(''); }}>Use extra accurate</button>}
-              </span>
+            <span className="hint">More takes out more background sound, but can touch your voice too. You can change it while you talk.</span>
+          </div>
+        </Group>
+
+        <Group id="grp-captions" title="Captions">
+          <div className="choice-stack" role="radiogroup" aria-labelledby="grp-captions">
+            <label className="choice">
+              <input type="radio" name="live-captions" value="" checked={captions === ''} disabled={busy} onChange={() => setCaptions('')} />
+              <span><b>Off</b><small>No captions</small></span>
+            </label>
+            <label className="choice">
+              <input type="radio" name="live-captions" value="local" checked={captions === 'local'} disabled={busy || capRates.local?.available === false} onChange={() => setCaptions('local')} />
+              <span><b>Standard</b><small>English only{perHour(capRates.local)}</small></span>
+            </label>
+            {(!pricing || capRates.premium) && (
+              <label className="choice">
+                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={busy || !accurateListed} onChange={() => setCaptions('premium')} />
+                <span><b>Extra accurate</b><small>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</small></span>
+              </label>
             )}
           </div>
-        </fieldset>
-        <fieldset className="field" disabled={state === 'starting'}>
-          <legend className="label">How strong</legend>
-          <select id="live-str" className="select" aria-label="Noise removal strength" value={strength} onChange={(e) => { setStrength(e.target.value); session.current?.setAtten(Number(e.target.value)); }} disabled={!denoise && !live}>
-            {STRENGTH.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-          </select>
-          <label htmlFor="live-lang" className="label">Caption language</label>
-          <select id="live-lang" className="select" value={language} onChange={(e) => changeLanguage(e.target.value)} disabled={busy}>
-            {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
-          </select>
-        </fieldset>
-        <fieldset className="field">
-          <legend className="label">You hear</legend>
-          <div className="seg" role="radiogroup" aria-label="Monitoring">
+          {captions === 'premium' && (
+            <>
+              <div className="field">
+                <label htmlFor="live-lang">Language you speak</label>
+                <select id="live-lang" className="select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
+                  {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+                </select>
+              </div>
+              <span className="hint" data-testid="premium-note">Extra accurate captions send your audio to a speech partner we work with, and show text as you speak. <Link to="/privacy">Privacy details</Link></span>
+            </>
+          )}
+          {captions === 'local' && <span className="hint">Standard captions are English only. For another language, choose Extra accurate.</span>}
+        </Group>
+
+        <Group id="grp-hear" title="You hear">
+          <div className="seg" role="radiogroup" aria-label="What you hear">
             {[['off', 'Nothing'], ['original', 'Original'], ['processed', 'Cleaned']].map(([v, l]) => (
               <label key={v}>
                 <input type="radio" name="monitor" value={v} checked={monitor === v} onChange={() => { setMonitor(v); session.current?.setMonitor(v); }} />
@@ -382,12 +377,25 @@ function LiveDemo({ pricing }) {
               </label>
             ))}
           </div>
-          <span className="hint">Switch while you talk to compare.</span>
-        </fieldset>
+          <span className="hint">Switch while you talk to compare your mic with the cleaned sound.</span>
+        </Group>
       </div>
 
+      <p className="mb0" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
+        {!pricing && <span className="muted">Loading prices…</span>}
+        {pricing && perMin <= 0 && priceKnown && <span className="muted">Turn on noise removal or captions to start.</span>}
+        {pricing && !priceKnown && <span className="muted">We don't have a price for that combination.</span>}
+        {pricing && priceKnown && perMin > 0 && (
+          <>
+            <b>Cost: {rate(perMin)} a minute</b> <span className="muted">({moneyUsd(perMin * 60)} an hour).
+            {denoise && den && cap ? ` Noise removal ${rate(den.usdPerMinute)} + ${captions === 'premium' ? 'extra accurate' : 'standard'} captions ${rate(cap.usdPerMinute)} a minute.` : ''}
+            {' '}We set aside about five minutes ({moneyUsd(perMin * 5)}) when you start and give back whatever you don't use.</span>
+          </>
+        )}
+      </p>
+
       <div className="row">
-        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => start()} disabled={busy || !mediaOk || (!denoise && !captions) || !priceKnown || !offered || needsAccurate} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
+        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => start()} disabled={busy || !mediaOk || (!denoise && !captions) || !priceKnown || !offered} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
         {(live || state === 'stopping') && <button type="button" className="btn btn-danger btn-lg" onClick={stop} disabled={state === 'stopping'} data-testid="live-stop">{state === 'stopping' ? 'Stopping…' : 'Stop'}</button>}
         {live && <span className="badge badge-ok" role="status">Live</span>}
       </div>

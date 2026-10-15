@@ -1,8 +1,10 @@
 import { writeFileSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
 
-const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free tool needs an account
+// Free noise removal in the browser (Cleanup page): output, downloads, A/B player, video, cancel, single engine download,
+// and the free + free combination (browser noise removal + a free subtitles job at the same time).
+const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free option needs an account
 
 const { browser, page, logs } = await launch();
 const apiCalls = [];
@@ -10,13 +12,12 @@ page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes(
 await signIn(page, EMAIL);
 apiCalls.length = 0;
 
-async function runFree(file, strengthLabel = 'Strong') {
-  await page.goto(`${BASE}/free`);
-  await page.setInputFiles('input[type=file]', join(FILES, file));
-  await page.getByRole('button', { name: 'Clean audio' }).waitFor({ timeout: 20000 });
-  await page.getByLabel(strengthLabel, { exact: false }).first().check().catch(() => {});
+async function runFree(file, strengthLabel = 'Strong (40 dB)') {
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, file)); // "Free, in your browser" is the default whenever the browser can open the file
+  await page.locator('#lstrength').selectOption({ label: strengthLabel });
   const t0 = Date.now();
-  await page.getByRole('button', { name: 'Clean audio' }).click();
+  await page.getByRole('button', { name: 'Start - free' }).click();
   await page.waitForSelector('[data-testid=result]', { timeout: 180000 });
   const res = page.locator('[data-testid=result]');
   return { ms: Date.now() - t0, rms: Number(await res.getAttribute('data-rms')), peak: Number(await res.getAttribute('data-peak')), frames: Number(await res.getAttribute('data-frames')), channels: Number(await res.getAttribute('data-channels')) };
@@ -31,8 +32,8 @@ await check('free: mono 48k wav denoised', async () => {
   return `frames=${r.frames} rms=${r.rms} peak=${r.peak} in ${r.ms} ms`;
 });
 
-await check('free: no server calls besides /api/me & /billing/pricing', async () => {
-  const odd = apiCalls.filter((c) => !/api\/me$|billing\/pricing$/.test(c));
+await check('free: nothing is sent to the server for the file (only /api/me, /billing/pricing and the job list are read)', async () => {
+  const odd = apiCalls.filter((c) => !/api\/me$|billing\/pricing$|^GET .*api\/jobs$/.test(c));
   if (odd.length) throw new Error(odd.join(', '));
   return apiCalls.join(', ');
 });
@@ -112,28 +113,29 @@ await check('free: webm video (opus)', async () => {
 });
 
 await check('free: cancel works', async () => {
-  await page.goto(`${BASE}/free`);
-  await page.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
-  await page.getByRole('button', { name: 'Clean audio' }).click();
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'stereo44.wav'));
+  await page.getByRole('button', { name: 'Start - free' }).click();
   await page.getByRole('button', { name: 'Cancel' }).click({ timeout: 20000 });
-  await page.getByRole('button', { name: 'Clean audio' }).waitFor({ timeout: 5000 });
+  await page.getByRole('button', { name: 'Start - free' }).waitFor({ timeout: 5000 });
   return 'back to ready state';
 });
 
-await check('free: the noise remover is fetched once, only on /free, and a stereo file (two workers) fetches nothing again', async () => {
+await check('free: the noise remover is fetched once, only when the Cleanup page opens, and a stereo file (two workers) fetches nothing again', async () => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const dfn = [];
   ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) dfn.push(u.pathname.split('/').pop()); });
   const p = await ctx.newPage();
   await signIn(p, EMAIL);
   await p.goto(`${BASE}/`); await p.waitForSelector('table tbody tr');
-  await p.goto(`${BASE}/app`); await p.waitForSelector('main h1');
+  await p.goto(`${BASE}/app/billing`); await p.waitForSelector('main h1');
+  await p.goto(`${BASE}/app/live`); await p.waitForSelector('main h1');
   await p.waitForTimeout(500);
   if (dfn.length) throw new Error('downloaded on another page: ' + dfn.join(', '));
-  await p.goto(`${BASE}/free`);
+  await p.goto(`${BASE}/app`);
   await p.waitForFunction(() => performance.getEntriesByType('resource').some((e) => e.name.includes('DeepFilterNet3_onnx')), null, { timeout: 15000 });
   await p.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
-  await p.getByRole('button', { name: 'Clean audio' }).click();
+  await p.getByRole('button', { name: 'Start - free' }).click();
   await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
   const count = (n) => dfn.filter((f) => f === n).length;
   if (count('df_bg.wasm') !== 1 || count('DeepFilterNet3_onnx.tar.gz') !== 1) throw new Error('downloads: ' + dfn.join(', '));
@@ -153,11 +155,11 @@ await check('free: starting before the download is done shows "Getting the noise
     await new Promise((r) => setTimeout(r, 6000)); // a slow connection
     await route.fulfill({ response: res });
   });
-  await p.goto(`${BASE}/free`);
+  await p.goto(`${BASE}/app`);
   await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-  await p.getByRole('button', { name: 'Clean audio' }).waitFor();
+  await p.getByRole('button', { name: 'Start - free' }).waitFor();
   const eta = await p.getByTestId('eta').innerText().catch(() => '');
-  await p.getByRole('button', { name: 'Clean audio' }).click();
+  await p.getByRole('button', { name: 'Start - free' }).click();
   await p.waitForFunction(() => /^Getting the noise remover ready/.test(document.querySelector('[data-testid=stage]')?.textContent || ''), null, { timeout: 15000 });
   const stage = await p.getByTestId('stage').innerText();
   if (!/^Getting the noise remover ready… [\d.]+ of [\d.]+ MB$/.test(stage)) throw new Error('stage: ' + stage);
@@ -165,6 +167,41 @@ await check('free: starting before the download is done shows "Getting the noise
   await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
   await ctx.close();
   return `${stage}; "${text}"; before starting: "${eta}"`;
+});
+
+await check('free + free: browser noise removal AND a free subtitles job at the same time (download appears, free job created)', async () => {
+  const posts = [];
+  await page.route('**/api/jobs', (r) => { if (r.request().method() === 'POST') posts.push(r.request().postDataJSON()); return r.continue(); });
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'noisy.wav'));
+  await pick(page, 'subs', 'free');
+  await page.getByTestId('free-note').waitFor();
+  const label = (await page.getByTestId('start').innerText()).trim();
+  if (label !== 'Start - free') throw new Error('label: ' + label);
+  await page.getByTestId('start').click();
+  await page.waitForSelector('[data-testid=result]', { timeout: 180000 });
+  await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+  const body = posts.at(-1);
+  if (!body || body.free !== true || body.kind !== 'transcribe' || body.transcribeTier !== 'local' || body.denoiseTier) throw new Error('job: ' + JSON.stringify(body));
+  await page.getByTestId('free-badge').first().waitFor();
+  const link = page.getByRole('link', { name: /Cleaned WAV/ });
+  const [dl] = await Promise.all([page.waitForEvent('download'), link.click()]);
+  await page.screenshot({ path: join(SHOTS, 'free-free-combo.png'), fullPage: true });
+  const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
+  await page.evaluate(async (id) => {
+    const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
+    await fetch(`/audio/api/jobs/${id}/cancel`, { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': me.csrfToken } });
+  }, id);
+  await page.unroute('**/api/jobs');
+  return `download ${dl.suggestedFilename()} + free job ${id}`;
+});
+
+await check('/free is gone: the not-found page, no redirect', async () => {
+  await page.goto(`${BASE}/free`);
+  await page.getByRole('heading', { name: /couldn.t find that page/ }).waitFor({ timeout: 10000 });
+  if (!/\/free$/.test(page.url())) throw new Error('redirected to ' + page.url());
+  if (await page.locator('a[href$="/free"]').count()) throw new Error('a link to /free is on the page');
+  return '404 page';
 });
 
 console.log('LOGS:\n' + logs.join('\n'));

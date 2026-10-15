@@ -14,6 +14,35 @@ page.on('websocket', (ws) => {
 
 await check('live: sign in', async () => { await signIn(page, EMAIL); return 'ok'; });
 
+await check('live: the test panel is three aligned groups (Noise removal, Captions, You hear); clear labels; no low latency; free-trial line links to Cleanup', async () => {
+  await page.goto(`${BASE}/app/live`);
+  await page.getByTestId('live-options').waitFor();
+  const boxes = {};
+  for (const [id, title, inside] of [['noise', 'Noise removal', ['How much noise to remove', 'Remove noise']], ['captions', 'Captions', ['Off', 'Standard', 'Extra accurate']], ['hear', 'You hear', ['Nothing', 'Original', 'Cleaned']]]) {
+    const g = page.getByTestId(`group-${id}`);
+    if ((await g.getByRole('heading', { level: 3 }).innerText()).trim() !== title) throw new Error(`group ${id}: heading`);
+    const t = await g.innerText();
+    for (const x of inside) if (!t.includes(x)) throw new Error(`group ${id} lacks "${x}"`);
+    boxes[id] = await g.boundingBox();
+  }
+  const [a, b, c] = [boxes.noise, boxes.captions, boxes.hear];
+  if (Math.abs(a.y - b.y) > 1 || Math.abs(b.y - c.y) > 1) throw new Error('group tops are not aligned: ' + JSON.stringify([a.y, b.y, c.y]));
+  if (Math.abs(a.height - b.height) > 1 || Math.abs(b.height - c.height) > 1) throw new Error('groups are not the same height');
+  if (!(a.x + a.width <= b.x + 1 && b.x + b.width <= c.x + 1)) throw new Error('groups overlap or are out of order');
+  const t = await page.locator('main').innerText();
+  if (/How strong|low.latency|Noise removal style|20 ms/i.test(t)) throw new Error('old wording is still on the page');
+  if (!t.includes('Want to try without spending credit? Free noise removal and your free daily subtitle minutes are on the Cleanup page.')) throw new Error('free-trial line missing');
+  const href = await page.getByTestId('live-free-hint').getByRole('link', { name: 'Cleanup page' }).getAttribute('href');
+  if (!/\/audio\/app$/.test(href)) throw new Error('link: ' + href);
+  await page.screenshot({ path: join(SHOTS, 'live-groups.png'), fullPage: true });
+  await page.setViewportSize({ width: 360, height: 800 });
+  const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, vw: window.innerWidth, tops: ['noise', 'captions', 'hear'].map((i) => document.querySelector(`[data-testid=group-${i}]`).getBoundingClientRect().top) }));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  if (m.sw > m.vw + 1) throw new Error('sideways scroll at 360px');
+  if (!(m.tops[0] < m.tops[1] && m.tops[1] < m.tops[2])) throw new Error('groups do not stack at 360px');
+  return `3 groups at y=${Math.round(a.y)}, ${Math.round(a.width)}/${Math.round(b.width)}/${Math.round(c.width)} px wide; stack on a phone`;
+});
+
 await check('live: demo with fake mic, denoise + local captions', async () => {
   await page.goto(`${BASE}/app/live`);
   await page.getByTestId('live-start').waitFor();

@@ -1,7 +1,9 @@
 // Decode any audio/video file to 48 kHz float32 PCM chunks (mono or stereo), streaming.
 //   1. mediabunny (WebCodecs): streams MP4/MOV/WebM/MKV/MP3/WAV/OGG/FLAC/AAC, never loads the whole file.
-//   2. Fallback: AudioContext.decodeAudioData + OfflineAudioContext (whole file in memory).
+//   2. libav.js (FFmpeg in WebAssembly, lazy-loaded): WMA, AVI, FLV, MPEG, AC-3, DTS, AMR, WavPack, ... streamed.
+//   3. Last resort: AudioContext.decodeAudioData + OfflineAudioContext (whole file in memory).
 
+import { libavAvailable, libavFrames } from './libav.js';
 import { openInput } from './mb.js';
 import { Resampler } from './resample.js';
 
@@ -123,6 +125,39 @@ async function* viaMediabunny(file, { signal }) {
   }
 }
 
+async function* viaLibav(file, opts) {
+  let channels = 1;
+  let rate = 0;
+  let resamplers = null;
+  let chunker = null;
+  for await (const ev of libavFrames(file, opts)) {
+    if (ev.type === 'info') {
+      channels = ev.srcChannels === 2 ? 2 : 1;
+      chunker = new Chunker(channels);
+      yield { type: 'info', channels, sourceRate: ev.sourceRate, srcChannels: ev.srcChannels };
+      continue;
+    }
+    if (!resamplers || rate !== ev.rate) {
+      if (resamplers) chunker.push(resamplers.map((r) => r.finish().slice()));
+      rate = ev.rate;
+      resamplers = Array.from({ length: channels }, () => new Resampler(rate, TARGET_RATE));
+    }
+    let mixed = ev.planes.slice(0, channels);
+    if (channels === 1 && ev.planes.length > 1) {
+      const n = ev.planes[0].length;
+      const m = new Float32Array(n);
+      for (const p of ev.planes) for (let i = 0; i < n; i++) m[i] += p[i];
+      const g = 1 / ev.planes.length;
+      for (let i = 0; i < n; i++) m[i] *= g;
+      mixed = [m];
+    }
+    chunker.push(mixed.map((p, c) => resamplers[c].process(p).slice()));
+    yield* [...chunker.drain()].map((chunk) => ({ type: 'chunk', chunk }));
+  }
+  if (resamplers) chunker.push(resamplers.map((r) => r.finish().slice()));
+  if (chunker) yield* [...chunker.drain(true)].map((chunk) => ({ type: 'chunk', chunk }));
+}
+
 async function* viaWebAudio(file, { signal }) {
   if (file.size > 1.5 * 1024 ** 3) throw new DecodeError('This file is too large to decode in this browser. Try a smaller file or extract the audio first.');
   const ab = await file.arrayBuffer();
@@ -167,7 +202,18 @@ export async function* decodeToChunks(file, opts = {}) {
     return;
   } catch (e) {
     if (e?.name === 'AbortError' || produced) throw e;
-    // Nothing decoded yet: try the browser's own decoder.
+    // Nothing decoded yet: try libav.js, then the browser's own decoder.
+  }
+  if (libavAvailable()) {
+    try {
+      for await (const ev of viaLibav(file, opts)) {
+        if (ev.type === 'chunk') produced = true;
+        yield ev;
+      }
+      return;
+    } catch (e) {
+      if (e?.name === 'AbortError' || produced) throw e;
+    }
   }
   yield* viaWebAudio(file, opts);
 }

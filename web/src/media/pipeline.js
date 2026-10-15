@@ -1,4 +1,4 @@
-// Decode -> denoise (workers) -> collect. Used by the /free page.
+// Decode -> denoise (workers) -> collect. Used by the Cleanup page.
 
 import { decodeToChunks, TARGET_RATE } from './decode.js';
 import { DenoiseEngine, denoiserLoadState } from './denoise.js';
@@ -6,7 +6,7 @@ import { interleave } from './wav.js';
 
 const MAX_IN_FLIGHT = 3;
 
-/** Stage text while the (one shared) noise-remover download is still running; Free.jsx shows its progress instead. */
+/** Stage text while the (one shared) noise-remover download is still running; the Cleanup page shows its progress instead. */
 export const STAGE_LOADING = 'Getting the noise remover ready…';
 
 /**

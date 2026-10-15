@@ -1,46 +1,42 @@
+// Files that cannot be used, and balances that are too low: every case says what is wrong, in plain words, and never crashes.
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
 const { browser, page, logs } = await launch();
 const mail = `e2e-poor-${Date.now()}@example.com`;
-await signIn(page, mail); // the free cleanup needs an account too
-await check('free: garbage file -> friendly error, no crash', async () => {
-  await page.goto(`${BASE}/free`);
-  await page.setInputFiles('input[type=file]', join(FILES, 'garbage.mp3'));
-  await page.getByRole('button', { name: 'Clean audio' }).click();
-  await page.getByRole('alert').filter({ hasText: /./ }).first().waitFor({ timeout: 30000 });
-  const t = await page.locator('main .banner-error').first().innerText();
-  await page.screenshot({ path: join(SHOTS, 'free-error.png') });
+await signIn(page, mail);
+const radio = (group, value) => page.locator(`input[name=${group}][value=${value}]`);
+await check('cleanup: a file that is not audio -> Free noise removal is greyed out with the reason, no crash', async () => {
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'garbage.mp3'));
+  if (!(await radio('noise', 'browser').isDisabled())) throw new Error('free noise removal offered for a file the browser cannot read');
+  const t = await page.locator('label.choice:has(input[name=noise][value=browser]) small').innerText();
+  await page.screenshot({ path: join(SHOTS, 'cleanup-garbage.png') });
   return t;
 });
-await check('free: text file -> friendly error', async () => {
-  await page.goto(`${BASE}/free`);
-  await page.setInputFiles('input[type=file]', join(FILES, 'bad.txt'));
-  await page.getByRole('button', { name: 'Clean audio' }).click();
-  await page.locator('main .banner-error').first().waitFor({ timeout: 30000 });
-  return await page.locator('main .banner-error').first().innerText();
-});
-await check('files: zero balance -> warning + disabled start, link to billing', async () => {
+await check('cleanup: a text file -> same: greyed out with the reason', async () => {
   await page.goto(`${BASE}/app`);
-  await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+  await dropFile(page, join(FILES, 'bad.txt'));
+  if (!(await radio('noise', 'browser').isDisabled())) throw new Error('free noise removal offered for a text file');
+  return await page.locator('label.choice:has(input[name=noise][value=browser]) small').innerText();
+});
+await check('cleanup: zero balance -> warning + disabled start, link to billing', async () => {
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'noisy.wav'));
+  await pick(page, 'noise', 'polish');
   await page.getByTestId('estimate').waitFor();
-  const w = await page.locator('main .banner-warn', { hasText: 'available balance' }).innerText();
-  if (!(await page.getByRole('button', { name: /Start job/ }).isDisabled())) throw new Error('start enabled');
+  const w = await page.locator('main .banner-warn', { hasText: 'your balance is' }).innerText();
+  if (!(await page.getByTestId('start').isDisabled())) throw new Error('start enabled');
   return w;
-});
-await check('files: unreadable file -> clear message', async () => {
-  await page.goto(`${BASE}/app`);
-  await page.setInputFiles('input[type=file]', join(FILES, 'bad.txt'));
-  await page.locator('main .banner-warn', { hasText: 'could not read' }).waitFor({ timeout: 15000 });
-  return 'ok';
 });
 await check('subtitles only: a 10 min file is within the free limit, so it is free and can start without credit', async () => {
   await page.goto(`${BASE}/app`);
-  await page.setInputFiles('input[type=file]', join(FILES, 'long10min.mp3'));
-  await page.locator('label.choice', { hasText: 'Clean & polish' }).click();
-  await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click();
-  await page.getByRole('button', { name: 'Start (free)' }).waitFor();
-  const en = await page.getByRole('button', { name: 'Start (free)' }).isEnabled();
-  return 'start enabled for 10 min file: ' + en;
+  await dropFile(page, join(FILES, 'long10min.mp3'));
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'free');
+  await page.getByRole('button', { name: 'Start - free' }).waitFor();
+  const en = await page.getByRole('button', { name: 'Start - free' }).isEnabled();
+  if (!en) throw new Error('start disabled for a free 10 min file');
+  return 'start enabled for 10 min file';
 });
 console.log('LOGS:\n' + logs.join('\n'));
 await browser.close();

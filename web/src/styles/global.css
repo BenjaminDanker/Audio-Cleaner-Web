@@ -277,6 +277,14 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .choice input:checked + span { border-color: var(--brand); background: var(--brand-soft); }
 .choice input[type="checkbox"]:checked + span b::after { content: " \2713"; color: var(--brand); }
 .choice input:focus-visible + span { outline: 3px solid var(--focus); outline-offset: 2px; }
+.choice input:disabled + span { cursor: not-allowed; background: var(--surface-2); border-style: dashed; }
+.choice input:disabled + span b { color: var(--muted); }
+.choice-stack { display: grid; gap: 8px; }
+.hint.block { display: block; font-weight: 400; }
+.stack-sm { display: flex; flex-direction: column; gap: 12px; }
+.opt-grid { display: grid; gap: 16px; align-items: stretch; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); }
+.opt-group { display: flex; flex-direction: column; gap: 14px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.opt-title { font-size: 1rem; margin: 0; }
 .form-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .inline-input { display: inline-flex; align-items: center; gap: 4px; }
 .inline-input .input { width: 96px; min-height: 36px; padding: 6px 10px; }

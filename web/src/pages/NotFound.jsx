@@ -10,7 +10,7 @@ export default function NotFound() {
       <p className="muted">The link might be old, or a letter slipped in.</p>
       <div className="row row-center">
         <Link to="/" className="btn btn-primary">Back to the start</Link>
-        <Link to="/free" className="btn btn-secondary">Try it on a file</Link>
+        <Link to="/app" className="btn btn-secondary">Try it on a file</Link>
       </div>
     </div>
   );

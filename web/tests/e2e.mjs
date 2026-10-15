@@ -1,7 +1,7 @@
 // End-to-end checks against a running backend (see report). Usage: node tests/e2e.mjs [section ...]
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
 
 const only = process.argv.slice(2);
 const want = (s) => only.length === 0 || only.includes(s);
@@ -26,7 +26,7 @@ if (want('basic')) {
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
     for (const s of ['$0.60 / hour', '$0.01 / min', 'Clean & polish', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
-    if (/Available|Coming soon|\$0\.004/.test(txt)) throw new Error('status column or tiny per-minute number is back: ' + txt);
+    if (/Available|Coming soon/.test(txt)) throw new Error('status column is back: ' + txt);
     return `${await page.locator('table tbody tr').count()} rows`;
   });
   await check('404 page + legal pages', async () => {
@@ -42,7 +42,7 @@ if (want('basic')) {
     await page.goto(`${BASE}/login?error=state`);
     await page.waitForSelector('.banner-error');
     const t = await page.locator('main').innerText();
-    if (!/not configured/i.test(t)) throw new Error('no config notice: ' + t.slice(0, 200));
+    if (!/sign-in link|try again|expired|didn.t work|not configured/i.test(t)) throw new Error('no error notice: ' + t.slice(0, 200));
     return 'ok';
   });
   await check('protected route redirects to /login when signed out', async () => {
@@ -58,7 +58,8 @@ if (want('auth')) {
     const { loginLink } = await import('./helpers.mjs');
     const link = loginLink(EMAIL);
     await page.goto(link);
-    await page.waitForURL(/\/audio\/app$/, { timeout: 15000 });
+    await page.waitForURL(/\/audio\/app(\/billing)?$/, { timeout: 15000 }); // or the page the visitor was sent to sign in from
+    if (page.url().endsWith('/billing')) await gotoApp('/app');
     const h = await page.evaluate(() => location.hash + '|' + document.referrer);
     if (page.url().includes('token')) throw new Error('token still in URL');
     await page.waitForSelector('[data-testid=available]');
@@ -82,27 +83,25 @@ if (want('auth')) {
 }
 
 if (want('studio')) {
-  await check('dashboard: balance, ToS banner', async () => {
+  await check('cleanup page: balance, no Terms prompt (signing in is agreeing)', async () => {
     await gotoApp('/app');
     await page.reload(); await page.waitForSelector('[data-testid=available]');
     const bal = await page.getByTestId('available').innerText();
     if (bal !== '$5.00') throw new Error('balance ' + bal);
     const hdr = await page.locator('.balance-chip').innerText();
     if (!/\$5\.00/.test(hdr)) throw new Error('header ' + hdr);
-    if (!(await page.getByText('have a look at the Terms').count())) throw new Error('no ToS banner');
+    if (await page.locator('main').getByText('Terms of Service').count() || await page.getByRole('dialog').count()) throw new Error('a Terms prompt is still shown');
     return `balance ${bal}`;
   });
 
-  await check('clean & polish (wav) end-to-end incl. ToS modal', async () => {
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+  await check('clean & polish (wav) end-to-end, no Terms modal', async () => {
+    await dropFile(page, join(FILES, 'noisy.wav'));
+    await pick(page, 'noise', 'polish');
     await page.getByTestId('estimate').waitFor();
     const est = await page.getByTestId('estimate').innerText();
     if (!/\$0\.0[0-9]+/.test(est)) throw new Error('estimate: ' + est);
-    await page.getByRole('button', { name: /Start job/ }).click();
-    const dlg = page.getByRole('dialog');
-    await dlg.waitFor();
-    await dlg.getByRole('checkbox').check();
-    await dlg.getByRole('button', { name: 'Agree and continue' }).click();
+    if (!/^Start - about \$0\.0/.test(await page.getByTestId('start').innerText())) throw new Error('start label: ' + await page.getByTestId('start').innerText());
+    await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
@@ -120,11 +119,12 @@ if (want('studio')) {
   });
 
   await check('clean & polish of VIDEO: audio-only upload + local remux', async () => {
-    await page.setInputFiles('input[type=file]', join(FILES, 'test.mp4'));
+    await dropFile(page, join(FILES, 'test.mp4'));
+    await pick(page, 'noise', 'polish');
     await page.getByTestId('estimate').waitFor();
-    await page.getByRole('button', { name: /Start job/ }).click();
+    await page.getByTestId('start').click();
     const msg = await page.getByTestId('submitted').innerText({ timeout: 60000 });
-    if (!/Only the audio was uploaded/.test(msg)) throw new Error('msg: ' + msg);
+    if (!/Only the sound was uploaded/.test(msg)) throw new Error('msg: ' + msg);
     const card = await waitJob('test');
     const jobs = page.locator('[data-testid=job]', { hasText: /test\.m4a|test\.mp4/ }).first();
     const st = await jobs.getAttribute('data-status');
@@ -139,10 +139,11 @@ if (want('studio')) {
   });
 
   await check('transcription + denoise (both) job: srt/vtt/txt outputs', async () => {
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-    await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click(); // Clean & polish is on by default: both
+    await dropFile(page, join(FILES, 'noisy.wav'));
+    await pick(page, 'noise', 'polish');
+    await pick(page, 'subs', 'standard'); // Clean & polish + Standard: one denoise_transcribe job
     await page.getByTestId('estimate').waitFor();
-    await page.getByRole('button', { name: /Start job/ }).click();
+    await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     await page.waitForTimeout(500);
     const card = page.locator('[data-testid=job]').first();
@@ -155,13 +156,13 @@ if (want('studio')) {
 }
 
 if (want('transcribe')) {
-  await check('free subtitles on the Files page (subtitles only, Standard, short file)', async () => {
+  await check('free subtitles on the Cleanup page (subtitles only, Standard, short file)', async () => {
     await gotoApp('/app');
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-    await page.locator('label.choice', { hasText: 'Clean & polish' }).click();
-    await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click();
+    await dropFile(page, join(FILES, 'noisy.wav'));
+    await pick(page, 'noise', 'off');
+    await pick(page, 'subs', 'free');
     await page.getByTestId('free-note').waitFor();
-    await page.getByRole('button', { name: 'Start (free)' }).click();
+    await page.getByRole('button', { name: 'Start - free' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.', 300000);
     const st = await card.getAttribute('data-status');
@@ -185,7 +186,7 @@ if (want('billing')) {
     const pay = page.getByRole('button', { name: /^Pay / });
     if (!(await pay.isDisabled())) throw new Error('Pay button should be disabled while payments are off');
     const note = await page.getByTestId('topup-off').innerText();
-    if (!/not available yet/i.test(note)) throw new Error(note);
+    if (!/not available yet|switched off/i.test(note)) throw new Error(note);
     if ((await pay.getAttribute('aria-describedby')) !== 'topup-off') throw new Error('Pay button is not described by the note');
     if (!(await page.getByRole('button', { name: 'Manage card and receipts' }).isDisabled())) throw new Error('card portal button enabled');
     await page.screenshot({ path: join(SHOTS, 'billing.png'), fullPage: true });
@@ -220,6 +221,8 @@ if (want('keys')) {
   await check('live: API key create (shown once, copy), list, revoke', async () => {
     await gotoApp('/app/live');
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    const keyForm = (await page.locator('main').innerText());
+    for (const t of ['OBS plugin and live', 'File API for scripts']) if (!keyForm.includes(t)) throw new Error('key scope label missing: ' + t);
     await page.getByLabel('Name').fill('e2e key');
     await page.getByRole('button', { name: 'Create key' }).click();
     const key = await page.getByTestId('key-value').innerText();

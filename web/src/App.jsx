@@ -6,10 +6,9 @@ import Layout from './components/Layout.jsx';
 import NeedsServer from './components/Maintenance.jsx';
 import Landing from './pages/Landing.jsx';
 
-const Free = lazy(() => import('./pages/Free.jsx'));
 const Login = lazy(() => import('./pages/Login.jsx'));
 const LoginVerify = lazy(() => import('./pages/LoginVerify.jsx'));
-const Dashboard = lazy(() => import('./pages/Dashboard.jsx'));
+const Cleanup = lazy(() => import('./pages/Cleanup.jsx'));
 const Billing = lazy(() => import('./pages/Billing.jsx'));
 const Live = lazy(() => import('./pages/Live.jsx'));
 const Account = lazy(() => import('./pages/Account.jsx'));
@@ -41,10 +40,9 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Landing />} />
-          <Route path="free" element={<NeedsServer><RequireAuth><Free /></RequireAuth></NeedsServer>} />
           <Route path="login" element={<NeedsServer><Login /></NeedsServer>} />
           <Route path="login/verify" element={<LoginVerify />} />
-          <Route path="app" element={<NeedsServer><RequireAuth><Dashboard /></RequireAuth></NeedsServer>} />
+          <Route path="app" element={<NeedsServer><RequireAuth><Cleanup /></RequireAuth></NeedsServer>} />
           <Route path="app/billing" element={<NeedsServer><RequireAuth><Billing /></RequireAuth></NeedsServer>} />
           <Route path="app/live" element={<NeedsServer><RequireAuth><Live /></RequireAuth></NeedsServer>} />
           <Route path="app/account" element={<NeedsServer><RequireAuth><Account /></RequireAuth></NeedsServer>} />

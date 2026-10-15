@@ -2,6 +2,7 @@
 // when someone actually picks a file.
 
 import { sniffPcm } from './flac.js';
+import { libavProbe } from './libav.js';
 
 let mbPromise = null;
 
@@ -43,12 +44,13 @@ export function elementDuration(file, timeoutMs = 8000) {
 /**
  * Inspect a file. Never throws; unknown fields are null/false.
  * @returns {Promise<{duration:number|null, hasVideo:boolean, hasAudio:boolean|null, audioCodec:string|null,
- *   videoCodec:string|null, channels:number|null, sampleRate:number|null, canDecode:boolean|null, viaMediabunny:boolean}>}
+ *   videoCodec:string|null, channels:number|null, sampleRate:number|null, canDecode:boolean|null, viaMediabunny:boolean,
+ *   viaLibav:boolean}>}  viaLibav: only libav.js (src/media/libav.js) can decode the audio here; the picture can't be kept.
  */
 export async function probeMedia(file) {
   const info = {
     duration: null, hasVideo: false, hasAudio: null, audioCodec: null, videoCodec: null,
-    channels: null, sampleRate: null, canDecode: null, viaMediabunny: false,
+    channels: null, sampleRate: null, canDecode: null, viaMediabunny: false, viaLibav: false,
   };
   try {
     const { input } = await openInput(file);
@@ -76,6 +78,17 @@ export async function probeMedia(file) {
     input.dispose();
   } catch {
     /* not a container mediabunny understands; fall back to the browser */
+  }
+  if (!info.viaMediabunny || info.canDecode === false) {
+    // A format the browser can't read (WMA, AVI, MPEG, AC-3, AMR, ...): ask the libav.js decoder, downloaded only now.
+    const l = await libavProbe(file);
+    if (l?.hasAudio) {
+      Object.assign(info, { hasAudio: true, hasVideo: info.hasVideo || l.hasVideo, channels: l.channels || info.channels, sampleRate: l.sampleRate || info.sampleRate });
+      if (l.duration) info.duration = l.duration;
+      info.canDecode = true;
+      info.viaMediabunny = false; // decoding (and any upload) goes through the file as a whole
+      info.viaLibav = true;
+    }
   }
   if (!info.duration) {
     // Plain PCM WAV/AIFF that the container reader did not describe (AIFF, for instance): the header says it all.

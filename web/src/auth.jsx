@@ -1,9 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, fetchMe, onUnauthorized } from './api.js';
-import TosModal from './components/TosModal.jsx';
-
-export const TOS_VERSION = '2026-10-10';
 
 const AuthContext = createContext(null);
 
@@ -14,8 +11,6 @@ export function useAuth() {
 export function AuthProvider({ children }) {
   const navigate = useNavigate();
   const [state, setState] = useState({ ready: false, signedIn: false, user: null, balance: null, autoReload: null, freeSecondsLeft: 0 });
-  const [tosOpen, setTosOpen] = useState(false);
-  const tosResolve = useRef(null);
   const stateRef = useRef(state);
   stateRef.current = state;
 
@@ -61,32 +56,11 @@ export function AuthProvider({ children }) {
     navigate('/', { replace: true });
   }, [apply, navigate]);
 
-  /** Resolves true once the current terms are accepted (opens the modal if needed). */
-  const ensureTos = useCallback(() => {
-    if (stateRef.current.user?.tosAccepted) return Promise.resolve(true);
-    return new Promise((resolve) => {
-      tosResolve.current = resolve;
-      setTosOpen(true);
-    });
-  }, []);
-
-  const closeTos = useCallback(
-    async (accepted) => {
-      if (accepted) await refresh();
-      setTosOpen(false);
-      const r = tosResolve.current;
-      tosResolve.current = null;
-      if (r) r(accepted);
-    },
-    [refresh],
-  );
-
-  const value = useMemo(() => ({ ...state, refresh, logout, ensureTos }), [state, refresh, logout, ensureTos]);
+  const value = useMemo(() => ({ ...state, refresh, logout }), [state, refresh, logout]);
 
   return (
     <AuthContext.Provider value={value}>
       {children}
-      {tosOpen && <TosModal onClose={closeTos} />}
     </AuthContext.Provider>
   );
 }

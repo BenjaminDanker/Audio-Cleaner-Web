@@ -1,13 +1,13 @@
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, launch } from './helpers.mjs';
+import { BASE, FILES, SHOTS, dropFile, launch, signIn } from './helpers.mjs';
 const file = process.argv[2] || 'long10min.mp3';
 const { browser, page, logs } = await launch(['--enable-precise-memory-info']);
-await page.goto(`${BASE}/free`);
-await page.setInputFiles('input[type=file]', join(FILES, file));
-await page.getByRole('button', { name: 'Clean audio' }).waitFor({ timeout: 60000 });
-console.log('meta:', await page.locator('.file-chip .meta').innerText(), '|', await page.locator('.card .muted.small', { hasText: 'Estimated time' }).innerText().catch(() => ''));
+await signIn(page, `long-${Date.now()}@example.com`);
+await page.goto(`${BASE}/app`);
+await dropFile(page, join(FILES, file));
+console.log('meta:', await page.locator('.file-chip .meta').innerText(), '|', await page.getByTestId('eta').innerText().catch(() => ''));
 const t0 = Date.now();
-await page.getByRole('button', { name: 'Clean audio' }).click();
+await page.getByRole('button', { name: 'Start - free' }).click();
 let maxHeap = 0;
 const timer = setInterval(async () => {
   try {

@@ -1,0 +1,193 @@
+FFmpeg audio decoder (libav.js build) used by this website
+==========================================================
+
+Some files your browser cannot read itself (for example WMA, AVI, FLV, MPEG,
+AC-3, DTS, AMR, WavPack) are decoded in your browser by FFmpeg, compiled to
+WebAssembly with libav.js. FFmpeg and libav.js are licensed under the GNU
+Lesser General Public License, version 2.1 or later (full text alongside this
+file). The build is LGPL-only: no GPL, non-free or version-3 parts, decoders
+and demuxers only. We did not modify FFmpeg or libav.js; we only chose which
+components to build.
+
+Source code
+-----------
+FFmpeg 9.0:   https://ffmpeg.org/releases/ffmpeg-9.0.tar.xz
+              (sha256 7f607a00dd0d28a729d5a4811205812eef01cf6ef6155025febb6f36a9062d52)
+libav.js:     https://github.com/Yahweasel/libav.js  tag v6.10.9.0
+              (commit c80e885c3461f7bb7ea565c9631b34243ae0dbf1)
+Emscripten:   emsdk 6.0.5
+zlib 1.3.2:   https://www.zlib.net/  (zlib licence)
+emfiberthreads 1.3: https://github.com/Yahweasel/emfiberthreads (0BSD licence)
+
+You may replace the decoder with your own build: it is the three files under
+/audio/dfn/libav/ that the page loads.
+
+Written offer: for at least three years after we last served this build, we
+will send anyone who asks, through the contact address on the website, the
+complete corresponding source code (FFmpeg, libav.js and their dependencies as
+listed above) together with the exact build script we used, for no more than
+the cost of sending it.
+
+FFmpeg configure options of this build
+--------------------------------------
+--enable-protocol=data --enable-protocol=file
+--enable-swresample --enable-filter=aresample
+--enable-zlib
+--enable-demuxer=asf
+--enable-demuxer=avi
+--enable-demuxer=flv
+--enable-demuxer=mpegps
+--enable-demuxer=mpegvideo
+--enable-demuxer=mpegts
+--enable-demuxer=au
+--enable-demuxer=caf
+--enable-demuxer=aiff
+--enable-decoder=pcm_s16be --enable-decoder=pcm_s24be
+--enable-decoder=pcm_f32be
+--enable-demuxer=mov
+--enable-demuxer=matroska
+--enable-demuxer=ogg
+--enable-decoder=pcm_s16le --enable-decoder=pcm_s24le
+--enable-demuxer=wav
+--enable-demuxer=w64
+--enable-decoder=wavpack
+--enable-demuxer=wv
+--enable-demuxer=ape
+--enable-demuxer=tta
+--enable-demuxer=mpc
+--enable-demuxer=mpc8
+--enable-demuxer=amr
+--enable-demuxer=amrnb
+--enable-demuxer=amrwb
+--enable-demuxer=ac3
+--enable-demuxer=eac3
+--enable-demuxer=dts
+--enable-demuxer=dtshd
+--enable-demuxer=mp3
+--enable-demuxer=aac
+--enable-demuxer=flac
+--enable-decoder=wmav1
+--enable-decoder=wmav2
+--enable-decoder=wmapro
+--enable-decoder=wmalossless
+--enable-decoder=ac3
+--enable-decoder=eac3
+--enable-decoder=dca
+--enable-decoder=ape
+--enable-decoder=tta
+--enable-decoder=wavpack
+--enable-decoder=mpc7
+--enable-decoder=mpc8
+--enable-decoder=amrnb
+--enable-decoder=amrwb
+--enable-decoder=mp1float
+--enable-decoder=mp2float
+--enable-decoder=mp3float
+--enable-decoder=aac
+--enable-decoder=aac_latm
+--enable-decoder=vorbis
+--enable-decoder=opus
+--enable-decoder=flac
+--enable-decoder=alac
+--enable-decoder=adpcm_4xm
+--enable-decoder=adpcm_adx
+--enable-decoder=adpcm_afc
+--enable-decoder=adpcm_agm
+--enable-decoder=adpcm_aica
+--enable-decoder=adpcm_argo
+--enable-decoder=adpcm_ct
+--enable-decoder=adpcm_dtk
+--enable-decoder=adpcm_ea
+--enable-decoder=adpcm_ea_maxis_xa
+--enable-decoder=adpcm_ea_r1
+--enable-decoder=adpcm_ea_r2
+--enable-decoder=adpcm_ea_r3
+--enable-decoder=adpcm_ea_xas
+--enable-decoder=adpcm_g722
+--enable-decoder=adpcm_g726
+--enable-decoder=adpcm_g726le
+--enable-decoder=adpcm_ima_acorn
+--enable-decoder=adpcm_ima_alp
+--enable-decoder=adpcm_ima_amv
+--enable-decoder=adpcm_ima_apc
+--enable-decoder=adpcm_ima_apm
+--enable-decoder=adpcm_ima_cunning
+--enable-decoder=adpcm_ima_dat4
+--enable-decoder=adpcm_ima_dk3
+--enable-decoder=adpcm_ima_dk4
+--enable-decoder=adpcm_ima_ea_eacs
+--enable-decoder=adpcm_ima_ea_sead
+--enable-decoder=adpcm_ima_iss
+--enable-decoder=adpcm_ima_moflex
+--enable-decoder=adpcm_ima_mtf
+--enable-decoder=adpcm_ima_oki
+--enable-decoder=adpcm_ima_qt
+--enable-decoder=adpcm_ima_rad
+--enable-decoder=adpcm_ima_smjpeg
+--enable-decoder=adpcm_ima_ssi
+--enable-decoder=adpcm_ima_wav
+--enable-decoder=adpcm_ima_ws
+--enable-decoder=adpcm_ima_xbox
+--enable-decoder=adpcm_ms
+--enable-decoder=adpcm_mtaf
+--enable-decoder=adpcm_psx
+--enable-decoder=adpcm_sanyo
+--enable-decoder=adpcm_sbpro_2
+--enable-decoder=adpcm_sbpro_3
+--enable-decoder=adpcm_sbpro_4
+--enable-decoder=adpcm_swf
+--enable-decoder=adpcm_thp
+--enable-decoder=adpcm_thp_le
+--enable-decoder=adpcm_vima
+--enable-decoder=adpcm_xa
+--enable-decoder=adpcm_xmd
+--enable-decoder=adpcm_yamaha
+--enable-decoder=adpcm_zork
+--enable-decoder=pcm_alaw
+--enable-decoder=pcm_bluray
+--enable-decoder=pcm_dvd
+--enable-decoder=pcm_f16le
+--enable-decoder=pcm_f24le
+--enable-decoder=pcm_f32be
+--enable-decoder=pcm_f32le
+--enable-decoder=pcm_f64be
+--enable-decoder=pcm_f64le
+--enable-decoder=pcm_lxf
+--enable-decoder=pcm_mulaw
+--enable-decoder=pcm_s16be
+--enable-decoder=pcm_s16be_planar
+--enable-decoder=pcm_s16le
+--enable-decoder=pcm_s16le_planar
+--enable-decoder=pcm_s24be
+--enable-decoder=pcm_s24daud
+--enable-decoder=pcm_s24le
+--enable-decoder=pcm_s24le_planar
+--enable-decoder=pcm_s32be
+--enable-decoder=pcm_s32le
+--enable-decoder=pcm_s32le_planar
+--enable-decoder=pcm_s64be
+--enable-decoder=pcm_s64le
+--enable-decoder=pcm_s8
+--enable-decoder=pcm_s8_planar
+--enable-decoder=pcm_sga
+--enable-decoder=pcm_u16be
+--enable-decoder=pcm_u16le
+--enable-decoder=pcm_u24be
+--enable-decoder=pcm_u24le
+--enable-decoder=pcm_u32be
+--enable-decoder=pcm_u32le
+--enable-decoder=pcm_u8
+--enable-decoder=pcm_vidc
+--enable-parser=aac
+--enable-parser=aac_latm
+--enable-parser=ac3
+--enable-parser=amr
+--enable-parser=dca
+--enable-parser=flac
+--enable-parser=mpegaudio
+--enable-parser=mpegvideo
+--enable-parser=opus
+--enable-parser=vorbis
+--enable-filter=aformat
+--enable-filter=anull
+--enable-filter=pan

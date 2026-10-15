@@ -1,9 +1,9 @@
 import { useRef, useState } from 'react';
 import { IconUpload } from './Icons.jsx';
 
-// What browsers can open themselves (the free in-browser tool).
+// What browsers can open themselves.
 export const BROWSER_FORMATS = 'audio/*,video/*,.mp3,.wav,.flac,.ogg,.oga,.opus,.m4a,.aac,.mp4,.m4v,.mov,.webm,.mkv,.aiff,.aif';
-// What the server reads (Files page): nearly anything FFmpeg understands. Keep in step with server/acw/jobs.py.
+// What the server reads (Cleanup page): nearly anything FFmpeg understands. Keep in step with server/acw/jobs.py.
 export const SERVER_FORMATS = `${BROWSER_FORMATS},.rf64,.w64,.mp2,.mpa,.m4b,.m4r,.spx,.wma,.aifc,.caf,.au,.snd,.amr,.ac3,.eac3,.dts,.mka,.wv,.ape,.tta,.mpc,.avi,.wmv,.asf,.flv,.f4v,.3gp,.3g2,.ts,.mts,.m2ts,.mpg,.mpeg,.vob,.mxf,.dv,.ogv,.rm,.rmvb`;
 
 /** Drag-and-drop / click-to-choose file picker. */

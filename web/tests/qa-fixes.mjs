@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, launch, loginLink, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, loginLink, pick, signIn, summary } from './helpers.mjs';
 
 const only = process.argv.slice(2);
 const want = (s) => only.length === 0 || only.includes(s);
@@ -80,7 +80,7 @@ if (want('licenses')) {
       const res = await page.request.get(new URL(l.href, BASE + '/').href);
       const body = await res.text();
       if (!res.ok() || body.length < 500) throw new Error(`${l.href}: ${res.status()} ${body.length} bytes`);
-      if (!/MIT|Apache|Mozilla Public|Permission is hereby granted|Creative Commons Attribution/.test(body.slice(0, 4000))) throw new Error(`${l.href}: does not look like a licence`);
+      if (!/MIT|Apache|Mozilla Public|Lesser General Public|Permission is hereby granted|Creative Commons Attribution/.test(body.slice(0, 4000))) throw new Error(`${l.href}: does not look like a licence`);
       if (/^\s*<!doctype html/i.test(body)) throw new Error(`${l.href}: got the SPA shell`);
       sizes.push(`${l.href.split('/').pop()}=${body.length}`);
     }
@@ -122,7 +122,7 @@ if (want('header')) {
           if (g.sw > g.vw + 1) probs.push(`${p}: horizontal overflow ${g.sw}>${g.vw}`);
         }
         await page.getByRole('button', { name: 'Menu' }).click();
-        await page.getByRole('link', { name: 'Free cleanup' }).first().waitFor({ state: 'visible' });
+        await page.getByRole('link', { name: 'Cleanup', exact: true }).first().waitFor({ state: 'visible' });
         const open = await page.evaluate(() => ({ header: document.querySelector('.site-header').getBoundingClientRect().height, nav: document.querySelector('#main-nav').getBoundingClientRect(), vw: window.innerWidth }));
         if (open.header > 72) probs.push(`menu open: header grew to ${open.header}px`);
         if (open.nav.right > open.vw + 1 || open.nav.left < -1) probs.push('menu panel overflows');
@@ -174,7 +174,8 @@ if (want('billing')) {
     if (landing !== 'Billed per second of audio, no minimum charge.') throw new Error(landing);
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('[data-testid=available]');
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+    await dropFile(page, join(FILES, 'noisy.wav'));
+    await pick(page, 'noise', 'polish');
     const est = await page.getByTestId('estimate').innerText();
     if (!/Billed per second of audio, no minimum charge\./.test(est)) throw new Error(est);
     const m = /Estimated cost: \$([0-9.]+)/.exec(est);
@@ -235,7 +236,7 @@ if (want('live')) {
   const wav = join(FILES, 'noisy.wav');
   const { browser, page } = await freshPage(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${wav}`]);
   await signIn(page, EMAIL);
-  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-10' }); // otherwise "Start test" opens the Terms dialog
+  await apiCall(page, 'POST', 'account/tos', { version: '2026-10-10' });
   await check('live: price of the chosen combination (denoise light + captions tier) comes from /api/billing/pricing', async () => {
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-price').waitFor();
@@ -247,7 +248,7 @@ if (want('live')) {
     const r = (p, t) => pricing.rates.find((x) => x.product === p && x.tier === t).usdPerMinute;
     const out = [];
     for (const [cap, den] of [['local', true], ['premium', true], ['premium', false], ['', true]]) {
-      await page.locator('#live-cap').selectOption(cap);
+      await page.locator(`label.choice:has(input[name=live-captions][value="${cap}"])`).click();
       const box = page.getByRole('checkbox', { name: /Remove noise/ });
       if ((await box.isChecked()) !== den) await box.setChecked(den);
       const want = (den ? r('stream_denoise', 'light') : 0) + (cap ? r('stream_captions', cap) : 0);
@@ -256,8 +257,8 @@ if (want('live')) {
       if (want > 0 && !got.text.includes(`$${want.toFixed(4)}`)) throw new Error(`${cap}/${den}: text lacks $${want.toFixed(4)}: ${got.text}`);
       out.push(`${cap || 'none'}${den ? '+denoise' : ''}=$${want.toFixed(4)}`);
     }
-    const opts = await page.locator('#live-cap option').allInnerTexts();
-    if (!opts.some((o) => /Extra accurate/.test(o))) throw new Error('no Extra accurate option: ' + opts.join('|'));
+    const opts = await page.locator('label.choice:has(input[name=live-captions])').allInnerTexts();
+    if (!opts.some((o) => /Extra accurate[\s\S]*any language/.test(o))) throw new Error('no Extra accurate option that says "any language": ' + opts.join('|'));
     return out.join(', ');
   });
   await check('live: premium captions stream partials by id and finalize them in place (mocked server)', async () => {
@@ -276,7 +277,7 @@ if (want('live')) {
       send.push((o) => ws.send(JSON.stringify({ type: 'caption', ...o })));
     });
     await page.goto(`${BASE}/app/live`);
-    await page.locator('#live-cap').selectOption('premium');
+    await page.locator('label.choice:has(input[name=live-captions][value=premium])').click();
     const box = page.getByRole('checkbox', { name: /Remove noise/ });
     if (!(await box.isChecked())) await box.check();
     await page.getByTestId('live-start').click();
@@ -383,9 +384,10 @@ if (want('flac')) {
       await page.goto(`${BASE}/app`);
       await page.waitForSelector('[data-testid=available]');
       await page.evaluate(() => { window.__puts.length = 0; });
-      await page.setInputFiles('input[type=file]', join(FILES, file));
+      await dropFile(page, join(FILES, file));
+      await pick(page, 'noise', 'polish');
       await page.getByTestId('estimate').waitFor();
-      await page.getByRole('button', { name: /Start job/ }).click();
+      await page.getByRole('button', { name: /^Start - about/ }).click();
       const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
       const m = /Compressed for upload: ([\d.]+ [KMG]?B) → ([\d.]+ [KMG]?B)/.exec(banner);
       if (!m) throw new Error('no compression note: ' + banner);
@@ -416,9 +418,10 @@ if (want('flac')) {
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('[data-testid=available]');
     await page.evaluate(() => { window.__puts.length = 0; });
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.mp3'));
+    await dropFile(page, join(FILES, 'noisy.mp3'));
+    await pick(page, 'noise', 'polish');
     await page.getByTestId('estimate').waitFor();
-    await page.getByRole('button', { name: /Start job/ }).click();
+    await page.getByRole('button', { name: /^Start - about/ }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
     if (/Compressed for upload/.test(banner)) throw new Error('mp3 was "compressed": ' + banner);
     const create = reqs.find((r) => r.kind === 'create');
@@ -430,10 +433,10 @@ if (want('flac')) {
     reqs.length = 0;
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('input[type=file]');
-    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-    await page.locator('label.choice', { hasText: 'Clean & polish' }).click();
-    await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click();
-    await page.getByRole('button', { name: 'Start (free)' }).click();
+    await dropFile(page, join(FILES, 'noisy.wav'));
+    await pick(page, 'noise', 'off');
+    await pick(page, 'subs', 'free');
+    await page.getByRole('button', { name: 'Start - free' }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
     if (!/Compressed for upload/.test(banner)) throw new Error(banner);
     const jobs = await apiCall(page, 'GET', 'jobs');

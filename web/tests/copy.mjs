@@ -5,7 +5,8 @@
 // (they must name the kind of sub-processor), and the invisible bits of the page source.
 // Needs `npm run build` served by the test backend on 127.0.0.1:8792 (see helpers.mjs); fixtures are not needed.
 // Usage: node tests/copy.mjs
-import { BASE, check, launch, signIn, summary } from './helpers.mjs';
+import { join } from 'node:path';
+import { BASE, FILES, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
@@ -55,14 +56,15 @@ await check('copy: public pages show no internals and none of the avoided words'
   bad.push(...(await scan(page, '/', 'table tbody tr')));
   bad.push(...(await scan(page, '/#pricing', 'table tbody tr')));
   bad.push(...(await scan(page, '/transcribe'))); // gone: the not-found page
-  bad.push(...(await scan(page, '/free'))); // signed out: lands on the sign-in page
-  if (!/\/login/.test(page.url())) throw new Error('signed-out /free did not go to /login: ' + page.url());
+  bad.push(...(await scan(page, '/free'))); // gone: the not-found page
+  bad.push(...(await scan(page, '/app'))); // signed out: lands on the sign-in page
+  if (!/\/login/.test(page.url())) throw new Error('signed-out /app did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/app/live'))); // signed out: lands on the sign-in page
   if (!/\/login/.test(page.url())) throw new Error('signed-out /app/live did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/login')));
   bad.push(...(await scan(page, '/nope')));
   if (bad.length) throw new Error(bad.join(' | '));
-  return '8 pages clean';
+  return '9 pages clean';
 });
 
 await check('landing: no "privacy promise" section; retention stays in the FAQ; Privacy and licences only in the footer', async () => {
@@ -77,12 +79,19 @@ await check('landing: no "privacy promise" section; retention stays in the FAQ; 
   return 'ok';
 });
 
-await check('copy: signed-in pages (Free cleanup, Files, Billing, Live, Account) show no internals', async () => {
+await check('copy: signed-in pages (Cleanup with a file dropped, Billing, Live, Account) show no internals', async () => {
   await signIn(page, EMAIL);
   const bad = [];
-  for (const p of ['/free', '/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
+  for (const p of ['/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
+  // the options that appear after a file is dropped (WAV, WMA via libav.js, and an unreadable file: free noise removal greyed out with its reason)
+  for (const f of ['noisy.wav', 'noisy.wma', 'garbage.mp3']) {
+    await page.goto(`${BASE}/app`);
+    await dropFile(page, join(FILES, f));
+    await pick(page, 'subs', 'accurate');
+    bad.push(...findings(await visibleText(page)).map((x) => `/app with ${f}: ${x}`));
+  }
   if (bad.length) throw new Error(bad.join(' | '));
-  return '5 pages clean';
+  return '4 pages + 3 option sets clean';
 });
 
 await browser.close();

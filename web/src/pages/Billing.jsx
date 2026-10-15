@@ -33,7 +33,7 @@ function dollarsToCents(text) {
 
 export default function Billing() {
   usePageTitle('Billing');
-  const { balance, autoReload, refresh, ensureTos } = useAuth();
+  const { balance, autoReload, refresh } = useAuth();
   const { data: pricing } = usePricing();
   const [params, setParams] = useSearchParams();
   const [banner, setBanner] = useState(null);
@@ -107,14 +107,14 @@ export default function Billing() {
         <section className="card" aria-labelledby="b3"><h2 id="b3" className="mb0 small muted">Total</h2><div className="big-number">{balanceMoney(balance?.balance_micros ?? 0)}</div></section>
       </div>
 
-      <TopUp pricing={pricing} ensureTos={ensureTos} unavailable={unavailable} />
-      <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} ensureTos={ensureTos} unavailable={unavailable} />
+      <TopUp pricing={pricing} unavailable={unavailable} />
+      <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} unavailable={unavailable} />
       <History history={history} error={histErr} availableMicros={balance?.available_micros ?? 0} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
     </div>
   );
 }
 
-function TopUp({ pricing, ensureTos, unavailable }) {
+function TopUp({ pricing, unavailable }) {
   const min = pricing?.topup?.minCents ?? 1000;
   const max = pricing?.topup?.maxCents ?? 50000;
   const presets = pricing?.topup?.presetsCents ?? [1000, 2000, 5000, 10000];
@@ -131,10 +131,6 @@ function TopUp({ pricing, ensureTos, unavailable }) {
     e.preventDefault();
     if (!valid || unavailable) return;
     setError('');
-    if (!(await ensureTos())) {
-      setError('Please agree to the Terms of Service first, then you can add credit.');
-      return;
-    }
     setBusy(true);
     try {
       const { url } = await api('billing/checkout', { method: 'POST', body: { amountCents: cents, saveCard } });
@@ -185,7 +181,7 @@ function TopUp({ pricing, ensureTos, unavailable }) {
   );
 }
 
-function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
+function AutoReload({ autoReload, pricing, refresh, unavailable }) {
   const min = pricing?.topup?.minCents ?? 1000;
   const max = pricing?.topup?.maxCents ?? 50000;
   const hasCard = !!autoReload?.hasCard;
@@ -216,7 +212,6 @@ function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
 
   async function save(enabled) {
     setMsg(null);
-    if (enabled && !(await ensureTos())) return;
     setBusy(enabled ? 'on' : 'off');
     try {
       await api('billing/auto-reload', {

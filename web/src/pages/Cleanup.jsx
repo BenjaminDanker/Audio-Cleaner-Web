@@ -7,9 +7,9 @@ import { balanceMoney } from '../format.js';
 import { usePageTitle } from '../hooks.js';
 import { useJobs } from '../useJobs.js';
 
-export default function Dashboard() {
-  usePageTitle('Your files');
-  const { user, balance, refresh, ensureTos } = useAuth();
+export default function Cleanup() {
+  usePageTitle('Cleanup');
+  const { balance, refresh } = useAuth();
   const localJobs = useRef(new Map()); // jobId -> {file, info, extracted} (this tab only)
   const { jobs, error, reload } = useJobs({ onFinished: refresh });
 
@@ -22,17 +22,23 @@ export default function Dashboard() {
     <div className="container page stack-lg">
       <header className="row-between">
         <div>
-          <h1 className="mb0">Your files</h1>
-          <p className="muted mb0">Clean &amp; polish recordings, and get subtitles and transcripts.</p>
+          <h1 className="mb0">Cleanup</h1>
+          <p className="muted mb0">Take the noise out of a recording, and get subtitles and a transcript. Drop a file and we&rsquo;ll show what you can do with it.</p>
         </div>
       </header>
 
-      {user && !user.tosAccepted && (
-        <div className="banner banner-warn row-between" role="status">
-          <span>Before your first job, please have a look at the Terms of Service.</span>
-          <button type="button" className="btn btn-primary btn-sm" onClick={ensureTos}>Take a look</button>
+      <JobForm onSubmitted={submitted} />
+
+      <section aria-labelledby="jobs-h" className="stack">
+        <div className="row-between">
+          <h2 id="jobs-h" className="mb0">Your jobs</h2>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={reload}>Refresh</button>
         </div>
-      )}
+        {error && <div className="banner banner-error" role="alert">{error}</div>}
+        {jobs === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading your jobs…</p>}
+        {jobs?.length === 0 && !error && <p className="card muted mb0">Nothing here yet. Drop a file above and it’ll show up.</p>}
+        {jobs?.map((j) => <JobCard key={j.id} job={j} local={localJobs.current.get(j.id)} onChanged={() => { reload(); refresh(); }} />)}
+      </section>
 
       <div className="grid grid-2">
         <section className="card stack" aria-labelledby="bal-h">
@@ -50,25 +56,13 @@ export default function Dashboard() {
         <section className="card stack" aria-labelledby="tips-h">
           <h2 id="tips-h" className="mb0">Good to know</h2>
           <ul className="mb0">
-            <li>Uploading a video? Only its <b>sound</b> is uploaded. Your browser puts the clean sound back into the video afterwards.</li>
+            <li>Free noise removal happens <b>in your browser</b>, so that file never leaves your device.</li>
+            <li>Uploading a video for us to work on? Only its <b>sound</b> is uploaded. Your browser puts the clean sound back into the video afterwards.</li>
             <li>Your upload is deleted as soon as it’s processed. Results stay for <b>24 hours</b>.</li>
             <li>You pay for what gets processed, by the second. A job that fails or is canceled costs nothing.</li>
           </ul>
         </section>
       </div>
-
-      <JobForm onSubmitted={submitted} />
-
-      <section aria-labelledby="jobs-h" className="stack">
-        <div className="row-between">
-          <h2 id="jobs-h" className="mb0">Your jobs</h2>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={reload}>Refresh</button>
-        </div>
-        {error && <div className="banner banner-error" role="alert">{error}</div>}
-        {jobs === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading your jobs…</p>}
-        {jobs?.length === 0 && !error && <p className="card muted mb0">Nothing here yet. Drop a file above and it’ll show up.</p>}
-        {jobs?.map((j) => <JobCard key={j.id} job={j} local={localJobs.current.get(j.id)} onChanged={() => { reload(); refresh(); }} />)}
-      </section>
     </div>
   );
 }

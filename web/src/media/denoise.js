@@ -14,7 +14,7 @@ function dfnBase() {
 
 // ---- one shared download ---------------------------------------------------------------------------------------
 // The noise remover is three files (df.js, df_bg.wasm, the model; about 22 MB together). They are fetched ONCE per page
-// load, in the background, as soon as the /free page opens (nothing is downloaded on any other page). The wasm is
+// load, in the background, as soon as the Cleanup page opens (nothing is downloaded on any other page). The wasm is
 // compiled once, the compiled Module and the model bytes are handed to every worker, so a stereo file (two workers)
 // never downloads or compiles anything twice. df.js is only warmed into the HTTP cache here: it is a module, so each
 // worker imports it by URL (a cache hit, about 15 kB).

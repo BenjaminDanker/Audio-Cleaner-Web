@@ -1,10 +1,16 @@
-// Copies the DeepFilterNet3 WebAssembly build + model into public/dfn/.
+// Copies the DeepFilterNet3 WebAssembly build + model into public/dfn/, and the libav.js decoder
+// (native/libav/build.sh) into public/dfn/libav/<content hash>/.
 //   npm run sync-dfn                  always copy
 //   node scripts/sync-dfn.mjs --if-missing   copy only when public/dfn is incomplete (used by `npm run build`)
 // Sources (override with env vars):
 //   DFN_WASM_DIR   default ~/audio-cleaner/wasm   (df.js, df_bg.wasm, LICENSE-*)
 //   DFN_MODEL      default ~/audio-cleaner/models/DeepFilterNet3_onnx.tar.gz
-import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+//   LIBAV_DIST     default ~/audio-cleaner/src/libav-build/dist (optional: without it, formats the browser
+//                  cannot read itself simply are not offered in the browser)
+// libav.js builds its own file URLs from the folder it is loaded from, so the folder name carries the
+// version (the files are cached for a week); vite.config.js reads the folder name.
+import { createHash } from 'node:crypto';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +28,26 @@ const files = [
   [model, 'DeepFilterNet3_onnx.tar.gz'],
 ];
 
-const complete = () => files.every(([, name]) => existsSync(join(out, name)));
+const libavDist = process.env.LIBAV_DIST || join(homedir(), 'audio-cleaner', 'src', 'libav-build', 'dist');
+const libavFiles = ['libav-acw-audio.mjs', 'libav-6.10.9.0-acw-audio.wasm.mjs', 'libav-6.10.9.0-acw-audio.wasm.wasm'];
+const libavOut = join(out, 'libav');
+
+function syncLibav() {
+  if (!libavFiles.every((f) => existsSync(join(libavDist, f)))) {
+    console.warn(`sync-dfn: no libav.js build in ${libavDist} (native/libav/build.sh); skipping it`);
+    return;
+  }
+  const h = createHash('sha1');
+  for (const f of libavFiles) h.update(readFileSync(join(libavDist, f)));
+  const dir = join(libavOut, h.digest('hex').slice(0, 10));
+  if (existsSync(libavOut)) for (const d of readdirSync(libavOut)) if (join(libavOut, d) !== dir) rmSync(join(libavOut, d), { recursive: true });
+  mkdirSync(dir, { recursive: true });
+  for (const f of libavFiles) copyFileSync(join(libavDist, f), join(dir, f));
+  console.log(`sync-dfn: libav.js -> public/dfn/libav/${dir.split('/').pop()}/`);
+}
+
+const libavPresent = () => existsSync(libavOut) && readdirSync(libavOut).length === 1;
+const complete = () => files.every(([, name]) => existsSync(join(out, name))) && (libavPresent() || !existsSync(libavDist));
 if (process.argv.includes('--if-missing') && complete()) {
   console.log('sync-dfn: public/dfn already complete');
   process.exit(0);
@@ -40,3 +65,4 @@ for (const [src, name] of files) {
   console.log(`sync-dfn: ${name}`);
 }
 console.log(`sync-dfn: copied ${(total / 1048576).toFixed(1)} MB to public/dfn/`);
+syncLibav();
