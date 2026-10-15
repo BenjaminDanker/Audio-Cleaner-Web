@@ -53,11 +53,11 @@ if (want('site')) {
     }
     await page.goto(`${BASE}/terms`);
     await page.waitForSelector('main h1');
-    if (!(await page.locator('.draft-banner').innerText()).includes('under legal review')) bad.push('terms: no draft banner');
+    if (await page.locator('.draft-banner').count() || /legal review|draft/i.test(await page.locator('main').innerText())) bad.push('terms: draft/review wording is back');
     if (!(await page.locator('main').innerText()).includes('operated by the operator of this site')) bad.push('terms: neutral operator wording missing');
     await page.goto(`${BASE}/privacy`);
     await page.waitForSelector('main h1');
-    if (!(await page.locator('.draft-banner').count())) bad.push('privacy: no draft banner');
+    if (/legal review|draft/i.test(await page.locator('main').innerText())) bad.push('privacy: draft/review wording is back');
     if (bad.length) throw new Error(bad.join(' | '));
     return 'clean';
   });

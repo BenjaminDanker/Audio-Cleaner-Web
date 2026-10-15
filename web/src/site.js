@@ -7,18 +7,14 @@
 //   legalAddress  postal address of that entity
 //   jurisdiction  governing law / venue for the Terms ("England and Wales", "the State of Delaware, USA")
 //
-// While legalName, legalAddress or jurisdiction is empty the legal pages show a "Draft - under legal review"
-// banner and use neutral wording ("the operator") instead of the missing detail.
+// An empty field is left out: the legal pages then use neutral wording ("the operator") instead.
 export const SITE = {
   name: 'Audio Cleaner',
   supportEmail: '',
   legalName: '',
   legalAddress: '',
-  jurisdiction: '',
+  jurisdiction: 'the United States',
 };
-
-/** True when every field the legal pages depend on has been filled in. */
-export const legalComplete = () => !!(SITE.legalName.trim() && SITE.legalAddress.trim() && SITE.jurisdiction.trim());
 
 /** "Example Ltd, 1 Main St" / "Example Ltd" / null when nothing is set. */
 export function operatorLine() {

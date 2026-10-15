@@ -33,7 +33,9 @@ if (want('basic')) {
     await page.goto(`${BASE}/nope`);
     if (!(await page.textContent('h1')).includes('find that page')) throw new Error('404 text');
     await page.goto(`${BASE}/terms`);
-    if (!(await page.locator('.draft-banner').innerText()).includes('under legal review')) throw new Error('no draft banner');
+    await page.waitForSelector('main h1');
+    if (/legal review|draft/i.test(await page.locator('main').innerText()) || await page.locator('.draft-banner').count()) throw new Error('draft/review wording on Terms');
+    if (!/laws of the United States/.test(await page.locator('main').innerText())) throw new Error('governing law missing');
     await page.goto(`${BASE}/privacy`); await page.waitForSelector('h1');
     await page.goto(`${BASE}/licenses`); await page.waitForSelector('table');
     return 'ok';

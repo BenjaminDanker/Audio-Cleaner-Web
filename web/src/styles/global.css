@@ -193,7 +193,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .banner-success { background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 40%, transparent); }
 .offline-banner { background: var(--warn-soft); border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); padding-block: 6px; font-size: 0.92rem; }
 .notice-row { padding-block: 14px 0; }
-.draft-banner { background: var(--warn-soft); color: var(--text); border-bottom: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); padding: 10px 16px; text-align: center; font-weight: 600; }
 .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.02em; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
 .badge-free { background: var(--success-soft); color: var(--success); border-color: transparent; }
 .badge-soon { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
