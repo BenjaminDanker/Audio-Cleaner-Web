@@ -74,3 +74,20 @@ def test_band_limited_recordings_get_their_highs_restored_full_band_ones_never(m
     pipeline.clean_audio(phone, "lib", "model", pipeline.CleanOptions(noise="light", polish=False, restore_highs=False),
                          bwe_model_dir=tmp_path, report=report)
     assert report["highs"] is None
+
+
+def test_restore_voice_replaces_noise_removal_and_highs_when_its_models_are_there(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(pipeline.dfn, "denoise_array", lambda x, *a, out=None, **k: calls.append("dfn") or out.__setitem__(slice(None), x))
+    monkeypatch.setattr(pipeline.restore, "restore", lambda x, d, **k: calls.append("sidon") or x.copy())
+    x = _speechlike(2, 10)
+    report: dict = {}
+    monkeypatch.setattr(pipeline.restore, "available", lambda d: False)
+    pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(restore_voice=True, noise="light", polish=False),
+                         restore_model_dir=tmp_path, report=report)
+    assert calls == ["dfn"] and report["noise"] == "light"  # no models: the usual chain
+    calls.clear()
+    monkeypatch.setattr(pipeline.restore, "available", lambda d: True)
+    y = pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(restore_voice=True, polish=False),
+                             restore_model_dir=tmp_path, report=report)
+    assert calls == ["sidon"] and report == {"noise": "rebuilt", "highs": None} and y.shape == (len(x), 1)

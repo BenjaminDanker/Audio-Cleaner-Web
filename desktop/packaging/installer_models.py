@@ -21,7 +21,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).res
 
 from audio_cleaner_desktop import resources  # noqa: E402
 
-CATALOG = (resources.SPEECH_MODEL, resources.HIGHS_MODEL)
+CATALOG = (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
 
 
 def _pascal(text: str) -> str:
@@ -65,7 +65,7 @@ end;
 procedure InitializeWizard;
 begin
   ModelDownloads := CreateDownloadPage('Downloading Audio Cleaner''s models',
-    'The speech model for subtitles and the model that restores phone-quality recordings ({total / 1e9:.1f} GB, once). '
+    'The models for subtitles, phone-quality recordings and rebuilding voices ({total / 1e9:.1f} GB, once). '
     + 'After this, everything works offline.', nil);
 end;
 

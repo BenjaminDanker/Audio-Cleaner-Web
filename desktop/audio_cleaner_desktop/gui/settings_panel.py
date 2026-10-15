@@ -156,6 +156,8 @@ class SettingsPanel(QFrame):
         self._highs.setToolTip("For phone calls and other recordings that sound dull or muffled")
         self._echo = QCheckBox("Remove speaker echo using a second audio track")
         self._echo.setToolTip("For recordings with your desktop sound on a second audio track")
+        self._rebuild = QCheckBox("Rebuild the voice (for echoey rooms; slow)")
+        self._rebuild.setToolTip("Also removes room echo. Noise reduction and Background noise do not apply then.")
         extra_row = _Row(
             "Extra cleanup",
             "Restore missing highs: phone calls, voice messages, old or low-quality recordings have lost their high "
@@ -166,7 +168,11 @@ class SettingsPanel(QFrame):
             "Cleaner can remove it, but only when the recording also has that speaker sound on its own audio track. "
             "OBS can record that: in Settings > Output (Output Mode: Advanced) > Recording, tick audio tracks 1 "
             "and 2; then in Edit > Advanced Audio Properties put your mic on track 1 only and Desktop Audio on "
-            "track 2 only. Files with one audio track are cleaned as usual.",
+            "track 2 only. Files with one audio track are cleaned as usual.\n\n"
+            "Rebuild the voice: instead of filtering the noise out, Audio Cleaner rebuilds the voice, which also "
+            "removes room echo and brings back dull sound. It takes several times longer, and on very echoey "
+            "recordings it can change a word, so listen before you publish. The Noise reduction and Background "
+            "noise settings do not apply to it.",
         )
         extra_row.layout_.addWidget(self._highs)
         self.highs_panel = SpeechModelPanel(
@@ -175,6 +181,7 @@ class SettingsPanel(QFrame):
         extra_row.layout_.addWidget(self.highs_panel)
         self.highs_downloader.changed.connect(self._refresh_enabled)
         extra_row.layout_.addWidget(self._echo)
+        extra_row.layout_.addWidget(self._rebuild)
         layout.addWidget(extra_row)
 
         self._where = Segmented([("next", "Next to original"), ("folder", "Choose folder")])
@@ -228,6 +235,7 @@ class SettingsPanel(QFrame):
         self._noise.currentIndexChanged.connect(lambda _: self._store("noise", self._noise.currentData()))
         self._echo.toggled.connect(lambda v: self._store("echo_track", v))
         self._highs.toggled.connect(lambda v: self._store("restore_highs", v))
+        self._rebuild.toggled.connect(lambda v: self._store("rebuild_voice", v))
         self._subtitles.currentIndexChanged.connect(lambda _: self._store("subtitles", self._subtitles.currentData()))
         self._language.currentIndexChanged.connect(lambda _: self._store("language", self._language.currentData()))
         self._format.currentIndexChanged.connect(lambda _: self._store("audio_format", self._format.currentData()))
@@ -242,6 +250,7 @@ class SettingsPanel(QFrame):
         _select(self._noise, p.noise)
         self._echo.setChecked(p.echo_track)
         self._highs.setChecked(p.restore_highs)
+        self._rebuild.setChecked(p.rebuild_voice)
         _select(self._subtitles, p.subtitles)
         _select(self._language, p.language)
         _select(self._format, p.audio_format)
@@ -283,6 +292,9 @@ class SettingsPanel(QFrame):
 
     def _refresh_enabled(self) -> None:
         self._loudness.setEnabled(self._polish.isChecked())
+        rebuilt = self._rebuild.isChecked()
+        self._strength.setEnabled(not rebuilt)
+        self._noise.setEnabled(not rebuilt)
         wants_subs = self._subtitles.currentData() != "off"
         self._language.setVisible(wants_subs)
         dl = self.downloader

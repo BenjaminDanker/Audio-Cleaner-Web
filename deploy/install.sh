@@ -30,6 +30,7 @@ done
 [ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
 # Heavy-noise model for recordings (small; pinned + verified). Without it heavy noise falls back to DeepFilterNet3.
 bash "$REPO/deploy/fetch-dpdfnet.sh" "$H/models/dpdfnet" || echo "warning: DPDFNet model download failed (heavy-noise recordings use DeepFilterNet3)" >&2
+[ -f "$H/models/sidon/sidon_fe.onnx" ] || echo "warning: Sidon ONNX models missing in $H/models/sidon (docs/research/restore-sidon.md); the voice-rebuild tier falls back to the usual chain" >&2
 [ -f "$H/models/ap-bwe/8kto48k.onnx" ] || echo "warning: AP-BWE models missing in $H/models/ap-bwe (tools/export_apbwe_onnx.py); band-limited recordings are not extended" >&2
 
 # 4. Config

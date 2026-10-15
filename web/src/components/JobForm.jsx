@@ -74,6 +74,7 @@ export default function JobForm({ onSubmitted }) {
   const [formatTouched, setFormatTouched] = useState(false);
   const [loudness, setLoudness] = useState('-16');
   const [noiseKind, setNoiseKind] = useState('auto');
+  const [rebuild, setRebuild] = useState(false); // Clean & polish, voice rebuilt (its own price)
   const [strength, setStrength] = useState('max'); // Clean & polish
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
   const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
@@ -123,6 +124,8 @@ export default function JobForm({ onSubmitted }) {
   const freeDay = pricing?.free?.transcribeSecondsPerDay;
   const freeLeft = freeSecondsLeft || 0;
   const polishRate = findRate(pricing, 'denoise', 'standard');
+  const rebuildRate = findRate(pricing, 'denoise', 'rebuild');
+  const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
 
   // Free subtitles: only for a file within the per-file limit and today's free minutes, and not together with Clean & polish.
@@ -154,12 +157,12 @@ export default function JobForm({ onSubmitted }) {
   const est = useMemo(() => {
     if (!kind) return 0;
     if (free) return 0;
-    return estimateMicros(pricing, { kind, transcribeTier: tier, seconds: duration });
-  }, [pricing, kind, tier, duration, free]);
+    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration });
+  }, [pricing, kind, tier, duration, free, denoiseTier]);
   const breakdown = useMemo(() => {
     if (free || kind !== 'denoise_transcribe' || !duration) return null;
-    return [estimateMicros(pricing, { kind: 'denoise', seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration })];
-  }, [pricing, kind, tier, duration, free]);
+    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration })];
+  }, [pricing, kind, tier, duration, free, denoiseTier]);
 
   async function choose(f) {
     setFile(f);
@@ -221,7 +224,7 @@ export default function JobForm({ onSubmitted }) {
     setStep({ phase: 'create', frac: 0 });
     const body = {
       kind,
-      denoiseTier: wantsPolish ? 'standard' : null,
+      denoiseTier: wantsPolish ? denoiseTier : null,
       transcribeTier: wantsText ? tier : null,
       durationSeconds: duration || 1,
       free,
@@ -357,8 +360,20 @@ export default function JobForm({ onSubmitted }) {
 
             {wantsPolish && (
               <div className="stack">
-              <StrengthPicker name="strength" value={strength} onChange={setStrength} disabled={busy} />
+              {rebuildRate && (
+                <label className="check">
+                  <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => setRebuild(e.target.checked)} disabled={busy} />
+                  <span>Rebuild the voice (for echoey rooms)
+                    <span className="hint block" data-testid="rebuild-hint">
+                      Also removes room echo and brings back dull, muffled sound. Slower, {moneyUsd(rebuildRate.usdPerHour)} an hour.
+                      On very echoey recordings it can change a word, so listen before you publish.
+                    </span>
+                  </span>
+                </label>
+              )}
+              {!(rebuild && rebuildRate) && <StrengthPicker name="strength" value={strength} onChange={setStrength} disabled={busy} />}
               <div className="form-grid">
+                {!(rebuild && rebuildRate) && (
                 <div className="field">
                   <label htmlFor="noisekind">Background noise</label>
                   <select id="noisekind" className="select" value={noiseKind} onChange={(e) => setNoiseKind(e.target.value)} disabled={busy}>
@@ -366,6 +381,7 @@ export default function JobForm({ onSubmitted }) {
                   </select>
                   <span className="hint">{NOISE.find((n) => n.id === noiseKind).hint}</span>
                 </div>
+                )}
                 <div className="field">
                   <label htmlFor="afmt">Cleaned audio format</label>
                   <select id="afmt" className="select" value={format} onChange={(e) => { setFormat(e.target.value); setFormatTouched(true); }} disabled={busy}>

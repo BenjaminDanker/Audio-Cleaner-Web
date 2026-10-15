@@ -5,6 +5,7 @@ import { usePricing } from '../hooks.js';
 // prices themselves come from the server (GET /api/billing/pricing), so they can never disagree with the bill.
 const DESCRIPTIONS = {
   'denoise/standard': 'Noise removed, voice evened out and loudness set, ready to publish',
+  'denoise/rebuild': 'For echoey rooms: the voice is rebuilt, which also removes room echo and restores dull sound',
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
   'transcribe/premium': 'The same files, best for accents, noisy rooms and specialist words',
   'stream_denoise/light': 'Cleans up your mic while you talk',

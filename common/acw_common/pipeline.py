@@ -3,6 +3,10 @@
     decode (48 kHz, mono or stereo) -> [echo removal with a second track] -> noise removal per channel
         -> [restore missing highs, for band-limited (phone-quality) recordings] -> clarity chain
 
+With restore_voice (off by default) Sidon rebuilds the voice instead of the noise removal and highs steps:
+it also removes room echo and restores missing highs, but it is ~30x the CPU of DeepFilterNet3 and on very
+echoey recordings it can change a word (docs/research/restore-sidon.md).
+
 Noise removal uses DeepFilterNet3, or DPDFNet-8 for recordings with heavy background noise, where it does
 clearly better (DeepFilterNet3 is better on lighter noise). "auto" measures the recording and picks.
 
@@ -19,7 +23,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import resample_poly
 
-from . import bwe, clarity, dfn, dpdfnet
+from . import bwe, clarity, dfn, dpdfnet, restore
 from .aec import EchoCanceller
 from .dfn import Cancelled
 from .ffmpeg import FFmpeg, ProbeResult
@@ -52,6 +56,9 @@ class CleanOptions:
     # Regenerate the highs of band-limited recordings (phone calls, low-bitrate files) with AP-BWE; full-band
     # recordings are never touched. Needs the models (bwe_model_dir).
     restore_highs: bool = True
+    # Rebuild the voice with Sidon (noise, room echo and missing highs in one; slow; the strength setting
+    # does not apply). Needs the models (restore_model_dir); without them the usual chain runs.
+    restore_voice: bool = False
 
 
 def noise_estimate_db(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> float:
@@ -91,6 +98,7 @@ def clean_audio(
     heavy_model_path: str | Path | None = None,
     report: dict | None = None,
     bwe_model_dir: str | Path | None = None,
+    restore_model_dir: str | Path | None = None,
 ) -> np.ndarray:
     """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
 
@@ -100,12 +108,26 @@ def clean_audio(
     need little RAM), otherwise into a new array. `heavy_model_path` is the
     DPDFNet-8 model (default: dpdfnet.default_model_path()); without it heavy noise
     falls back to DeepFilterNet3. `bwe_model_dir` holds the AP-BWE models for restore_highs (skipped
-    without them). `report`, when given, gets {"noise": "light"|"heavy", "highs": None|"8k".."24k"}."""
+    without them). `restore_model_dir` holds Sidon's ONNX files for restore_voice. `report`, when given,
+    gets {"noise": "light"|"heavy"|"rebuilt", "highs": None|"8k".."24k"}."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
         x = x[:, None]
     channels = x.shape[1]
+    if opts.restore_voice and restore_model_dir is not None and restore.available(restore_model_dir):
+        if report is not None:
+            report.update(noise="rebuilt", highs=None)
+        y = restore.restore(
+            x, restore_model_dir, threads=threads, cancel=cancel, out=out,
+            progress=(lambda f: progress(0.95 * f)) if progress else None,
+        )
+        y = y[:, None] if y.ndim == 1 else y
+        if opts.polish:
+            y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
+        if progress:
+            progress(1.0)
+        return y
     profile = choose_noise_profile(x, opts.noise)
     heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
     if profile == "heavy" and not heavy.is_file():

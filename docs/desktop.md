@@ -9,7 +9,9 @@ SHA-256, keep files a previous install left in place, and are generated from the
 
 - the speech model for subtitles, Whisper large-v3-turbo (1.6 GB, from Hugging Face, `resources.SPEECH_MODEL`);
 - the model that restores the highs of phone-quality recordings, AP-BWE (4 x 119 MB ONNX, from this repository's
-  `models-v1` release, `resources.HIGHS_MODEL`).
+  `models-v1` release, `resources.HIGHS_MODEL`);
+- the model that rebuilds the voice (optional "Rebuild the voice" setting: removes room echo too), Sidon
+  (503 MB ONNX, same release, `resources.VOICE_MODEL`).
 
 They go to `{app}\models\<id>` on Windows and `/Library/Application Support/Audio Cleaner/models/<id>` on a Mac
 (`models.installer_dir`). If a download fails during setup (offline), setup still finishes; Settings then shows a

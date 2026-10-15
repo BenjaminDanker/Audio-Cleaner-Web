@@ -76,6 +76,9 @@ function RemuxPanel({ job, local }) {
   );
 }
 
+/** Failed and canceled jobs cost nothing: say so once (the server's own messages often say it already). */
+const withNotCharged = (text) => (/not charged|weren.t charged/i.test(text) ? text : `${text} You weren’t charged.`);
+
 export default function JobCard({ job, upload, local, onChanged }) {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -129,8 +132,8 @@ export default function JobCard({ job, upload, local, onChanged }) {
         </div>
       )}
 
-      {job.status === 'failed' && <p className="banner banner-error mb0" role="alert">{job.error || 'This one didn’t work out.'} You weren’t charged.</p>}
-      {job.status === 'canceled' && <p className="muted mb0">{job.error && job.error !== 'Canceled.' ? job.error : 'Canceled.'} You weren’t charged.</p>}
+      {job.status === 'failed' && <p className="banner banner-error mb0" role="alert">{withNotCharged(job.error || 'This one didn’t work out.')}</p>}
+      {job.status === 'canceled' && <p className="muted mb0">{withNotCharged(job.error && job.error !== 'Canceled.' ? job.error : 'Canceled.')}</p>}
 
       {job.status === 'done' && (
         <>

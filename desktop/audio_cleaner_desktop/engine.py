@@ -92,6 +92,7 @@ class JobOptions:
     noise: str = "auto"  # pipeline.NOISE_PROFILES: measured per file, or forced light / heavy
     echo_track: bool = False  # remove speaker echo using the file's second audio track (when it has one)
     restore_highs: bool = True  # bring back the highs of phone-quality recordings (needs HIGHS_MODEL)
+    rebuild_voice: bool = False  # Sidon instead of noise removal: also removes room echo; slow (VOICE_MODEL)
 
     def __post_init__(self) -> None:
         if self.noise not in pipeline.NOISE_PROFILES:
@@ -364,7 +365,7 @@ def process(
                 resources.model_path(),
                 pipeline.CleanOptions(
                     atten_lim_db=options.atten_lim_db, polish=options.polish, loudness_lufs=options.loudness_lufs,
-                    noise=options.noise, restore_highs=options.restore_highs,
+                    noise=options.noise, restore_highs=options.restore_highs, restore_voice=options.rebuild_voice,
                 ),
                 threads=threads,
                 progress=report.span(decode_end, clean_end),
@@ -372,8 +373,12 @@ def process(
                 out=pipeline.output_buffer(x, work),
                 heavy_model_path=resources.heavy_noise_model_path(),
                 bwe_model_dir=resources.highs_model_dir(),
+                restore_model_dir=resources.voice_model_dir(),
                 report=used,
             )
+            if options.rebuild_voice and used.get("noise") != "rebuilt":
+                notice = "; ".join(filter(None, [notice, "the model that rebuilds the voice is not installed, so it was "
+                                                 "cleaned the usual way"]))
             if used.get("highs"):
                 notice = "; ".join(filter(None, [notice, "missing highs restored"]))
             elif options.restore_highs and resources.highs_model_dir() is None and _sounds_band_limited(x):

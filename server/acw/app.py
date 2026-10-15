@@ -43,7 +43,7 @@ async def _cloud_asr_loop() -> None:
                 await openai_asr.run_for_job(jobs.job_dir(job["id"]), lang)
             except Exception:  # noqa: BLE001
                 log.exception("cloud ASR failed for %s", job["id"])
-                jobs.finish_failed(job, "Premium transcription failed; you were not charged.")
+                jobs.finish_failed(job, "Extra accurate transcription failed; you were not charged.")
                 continue
             db.execute(
                 "UPDATE jobs SET status = 'queued', next_stage = 'finalize', stage = 'finishing', progress = 90,"

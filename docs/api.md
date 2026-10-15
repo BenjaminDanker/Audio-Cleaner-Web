@@ -67,6 +67,8 @@ Products/tiers: `denoise/standard`, `transcribe/local`, `transcribe/premium`,
    when the noise is nearly as loud as the voice), `auto` = measured per file (`pipeline.HEAVY_BELOW_DB`).
    Band-limited recordings (phone calls, low-bitrate files) also get their missing highs restored (AP-BWE);
    full-band recordings are never changed, and the job's `notice` says when it happened.
+   `denoiseTier: "rebuild"` (its own price) rebuilds the voice with Sidon instead: it also removes room echo and
+   restores dull sound; `atten_lim_db` and `noise` do not apply to it.
    `echo_reference_track` (default `false`, must be a boolean) removes speaker echo from the first audio track
    (the mic) using the file's second audio track (the desktop/speaker sound, as OBS can record it), before the
    noise removal; the subtitles are then written from the echo-free recording. It is included in the price.

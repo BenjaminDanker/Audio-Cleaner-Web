@@ -25,6 +25,8 @@ class Rate:
 _RATE_LIST = [
     # File processing
     Rate("denoise", "standard", "Clean & polish", 10_000),
+    # The voice is rebuilt (also removes room echo): ~30x the CPU of the standard tier. Placeholder price.
+    Rate("denoise", "rebuild", "Clean & polish, voice rebuilt", 20_000),
     Rate("transcribe", "local", "Transcription", 4_000),
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Live streaming

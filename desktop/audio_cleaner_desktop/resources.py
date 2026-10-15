@@ -71,6 +71,22 @@ HIGHS_MODEL = models.SpeechModel(
 )
 models.register(HIGHS_MODEL)
 
+# Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md) and published
+# on the same release: the optional "rebuild the voice" step.
+VOICE_MODEL = models.SpeechModel(
+    id="rebuild-voice",
+    title="Model that rebuilds the voice",
+    description="Sidon: removes room echo and noise and restores dull sound by rebuilding the voice.",
+    licence="Sidon by Nakata, Saito, Ueda and Saruwatari (MIT); w2v-BERT 2.0 by Meta (MIT)",
+    files=(
+        models.ModelFile("sidon_fe.onnx", _MODELS_RELEASE + "sidon_fe.onnx", 397857704,
+                         "76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75"),
+        models.ModelFile("sidon_dec.onnx", _MODELS_RELEASE + "sidon_dec.onnx", 104975475,
+                         "08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4"),
+    ),
+)
+models.register(VOICE_MODEL)
+
 
 def _vendor_root() -> Path:
     if getattr(sys, "frozen", False):
@@ -147,6 +163,19 @@ def highs_model_dir() -> Path | None:
     fallback = _dev_fallback()
     if fallback is not None and bwe.available(fallback / "models" / "ap-bwe"):
         return fallback / "models" / "ap-bwe"
+    return None
+
+
+def voice_model_dir() -> Path | None:
+    """Folder of Sidon's ONNX files once installed (or the server's copy when run from source), else None."""
+    from acw_common import restore
+
+    found = models.location(VOICE_MODEL)
+    if found is not None:
+        return found
+    fallback = _dev_fallback()
+    if fallback is not None and restore.available(fallback / "models" / "sidon"):
+        return fallback / "models" / "sidon"
     return None
 
 

@@ -44,8 +44,10 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ✅ Studio clean, transcription (standard/premium, free quota), subtitles (soft subs + SRT/VTT/TXT)
 - ✅ Recordings: noise remover chosen per file (Background noise: Automatic / Light / Heavy; DeepFilterNet3 or
   DPDFNet-8, docs/research/denoise-2026-10.md addendum); missing highs of phone-quality recordings restored (AP-BWE)
-- ⬜ Desktop: upload the four AP-BWE ONNX models (~/audio-cleaner/models/ap-bwe/*to48k.onnx) to a GitHub release
-  tagged `models-v1` (not "latest"); the desktop app downloads them from there (resources.HIGHS_MODEL)
+- ⬜ Desktop: upload the four AP-BWE ONNX models (~/audio-cleaner/models/ap-bwe/*to48k.onnx) and the two Sidon
+  ONNX files (~/audio-cleaner/models/sidon/sidon_fe.onnx, sidon_dec.onnx) to a GitHub release tagged `models-v1`
+  (not "latest"); desktop setup downloads them from there (resources.HIGHS_MODEL, resources.VOICE_MODEL)
+- ⬜ Price of "Clean & polish, voice rebuilt" (placeholder $1.20/h = 2x Clean & polish; it uses ~30x the CPU)
 - ✅ Echo removal for recordings with a second audio track (desktop sound), included in Studio clean (option `echo_reference_track`, docs/api.md)
 - ✅ Live denoise + live captions, server side + protocol (PCM and Opus)
 - ✅ Live echo cancellation (speakers' sound removed from the mic; no extra price): OBS plugin sends the Desktop Audio as a

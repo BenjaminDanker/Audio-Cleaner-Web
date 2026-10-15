@@ -185,12 +185,14 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
                 loudness_lufs=opts.get("loudness_lufs", -16.0),
                 noise=opts.get("noise", "auto"),
+                restore_voice=spec.get("denoise_tier") == "rebuild",
             ),
             threads=threads,
             progress=lambda f: emit(stage="denoising" if f < 0.95 else "polishing", progress=int(start + 2 + span * f)),
             out=pipeline.output_buffer(x, job_dir),
             heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
             bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
+            restore_model_dir=Path(spec["models_dir"]) / "sidon",
             report=used,
         )
         noise_used = used.get("noise")

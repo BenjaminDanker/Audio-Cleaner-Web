@@ -149,7 +149,6 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     posts.length = 0;
     await start().click();
     await page.getByTestId('job-error').waitFor();
-    await page.unroute('**/api/me');
     const sent = posts.at(-1)?.options?.atten_lim_db;
     if (sent !== 12) throw new Error('atten_lim_db sent: ' + sent);
     if (posts.at(-1)?.options?.noise !== 'auto') throw new Error('noise should default to auto: ' + posts.at(-1)?.options?.noise);
@@ -159,6 +158,18 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await start().click();
     await page.getByTestId('job-error').waitFor();
     if (posts.at(-1)?.options?.noise !== 'heavy') throw new Error('noise sent: ' + posts.at(-1)?.options?.noise);
+    // "Rebuild the voice": its own price tier; strength and Background noise do not apply then
+    await page.getByRole('checkbox', { name: /Rebuild the voice/ }).check();
+    if (await page.locator('#noisekind').count() || await page.getByTestId('strength-strength').count()) throw new Error('strength/noise still shown with rebuild');
+    if (!/an hour/.test(await page.getByTestId('rebuild-hint').innerText())) throw new Error('rebuild price missing');
+    posts.length = 0;
+    const [req] = await Promise.all([
+      page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'),
+      start().click(),
+    ]);
+    if (req.postDataJSON()?.denoiseTier !== 'rebuild') throw new Error('denoiseTier sent: ' + req.postDataJSON()?.denoiseTier);
+    await page.getByRole('checkbox', { name: /Rebuild the voice/ }).uncheck();
+    await page.unroute('**/api/me');
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('strength-live-str').waitFor();
     if (JSON.stringify(await labels('live-str')) !== four) throw new Error('live: ' + JSON.stringify(await labels('live-str')));

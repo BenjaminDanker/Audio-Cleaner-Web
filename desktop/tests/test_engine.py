@@ -327,3 +327,17 @@ def test_echo_removed_using_the_second_audio_track(tmp_path):
     def level(a): return 10 * np.log10(np.mean(a**2) + 1e-12)
     echo_only = slice(sr * 2, sr * 4)  # before the voice starts, after the canceller has adapted
     assert level(mic[echo_only]) - level(y[echo_only]) > 20
+
+
+@pytest.mark.native
+def test_rebuild_voice_uses_the_voice_model_or_says_it_is_missing(speech_wav, tmp_path, monkeypatch):
+    if resources.voice_model_dir() is None:
+        monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+        result = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True), out_dir=tmp_path)
+        assert "rebuilds the voice is not installed" in result.notice
+        return
+    result = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True, audio_format="wav"), out_dir=tmp_path)
+    assert result.output.is_file() and (result.notice is None or "not installed" not in result.notice)
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+    fallback = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True), out_dir=tmp_path / "b")
+    assert "cleaned the usual way" in fallback.notice
