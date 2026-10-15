@@ -61,6 +61,8 @@ echo "host: $PHYS physical cores, $(( MEM_KB / 1048576 )) GB RAM -> $WORKERS fil
 
 systemctl --user daemon-reload
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
+# Health monitor + email alerts (acw-alert@.service is started by OnFailure=, never enabled)
+systemctl --user enable --now acw-monitor.timer >/dev/null 2>&1
 UNITS="acw-stream.service acw-web.service acw-tunnel.service"
 for i in $(seq 1 "$WORKERS"); do UNITS="$UNITS acw-worker@$i.service"; done
 # Workers beyond the new count (moved to a smaller machine): stop them.

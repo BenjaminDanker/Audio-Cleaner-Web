@@ -1,5 +1,6 @@
 [Unit]
 Description=Audio Cleaner GPU transcription worker (no network)
+OnFailure=acw-alert@%n.service
 
 [Service]
 Slice=acw.slice

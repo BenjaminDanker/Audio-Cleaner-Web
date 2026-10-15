@@ -1,5 +1,6 @@
 [Unit]
 Description=Audio Cleaner web/API (127.0.0.1:8790)
+OnFailure=acw-alert@%n.service
 After=network-online.target acw-stream.service
 Wants=acw-stream.service
 

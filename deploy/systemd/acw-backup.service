@@ -1,5 +1,6 @@
 [Unit]
 Description=Audio Cleaner database snapshot (balances, payments, jobs metadata)
+OnFailure=acw-alert@%n.service
 
 [Service]
 Slice=acw.slice

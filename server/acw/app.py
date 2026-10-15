@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import auth, db, jobs
+from . import alerts, auth, db, jobs
 from .api import auth_routes, billing_routes, jobs_routes, keys_routes
 from .asr import openai_asr
 from .billing import stripe_service
@@ -75,6 +75,10 @@ async def _housekeeping_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
+    try:
+        await asyncio.to_thread(alerts.web_started)  # mails if the last run ended uncleanly
+    except Exception:  # noqa: BLE001
+        log.exception("alert start-up check failed")
     tasks = [asyncio.create_task(_cloud_asr_loop()), asyncio.create_task(_housekeeping_loop())]
     await stream_routes.startup()
     try:
@@ -83,6 +87,10 @@ async def lifespan(app: FastAPI):
         for t in tasks:
             t.cancel()
         await stream_routes.shutdown()
+        try:
+            alerts.web_stopping()  # clean-stop marker: its absence at next start means a crash
+        except Exception:  # noqa: BLE001
+            log.exception("could not record clean stop")
 
 
 def create_app() -> FastAPI:

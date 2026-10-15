@@ -19,6 +19,7 @@ from pathlib import Path
 import httpx
 
 from acw_common.captions import Segment, segments_to_json
+from .. import alerts
 from ..config import get_settings
 
 log = logging.getLogger(__name__)
@@ -41,6 +42,8 @@ async def _transcribe_one(http: httpx.AsyncClient, key: str, path: Path, languag
         with path.open("rb") as f:
             r = await http.post(URL, headers={"Authorization": f"Bearer {key}"}, data=data,
                                 files={"file": (path.name, f, "audio/mpeg")})
+        if r.status_code >= 400:
+            alerts.report_openai("file transcription", r.status_code, r.content)  # status/error type only
         if r.status_code < 500 and r.status_code != 429:
             break
         log.warning("openai transcription retry %s: %s", attempt + 1, r.status_code)

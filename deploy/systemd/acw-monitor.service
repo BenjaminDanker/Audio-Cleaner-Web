@@ -1,0 +1,19 @@
+[Unit]
+Description=Audio Cleaner health monitor (emails the owner about problems)
+OnFailure=acw-alert@%n.service
+
+[Service]
+Slice=acw.slice
+Type=oneshot
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+# Reads the DB and system state; talks to loopback, our public health URL and SMTP.
+EnvironmentFile=%h/audio-cleaner/secrets/acw.env
+ExecStart=%h/audio-cleaner/venv/bin/python -m acw.monitor
+TimeoutStartSec=90
+Nice=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=300M

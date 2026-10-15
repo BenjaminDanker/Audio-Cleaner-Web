@@ -1,5 +1,6 @@
 [Unit]
 Description=Audio Cleaner file-job worker %i (no network)
+OnFailure=acw-alert@%n.service
 
 [Service]
 Slice=acw.slice

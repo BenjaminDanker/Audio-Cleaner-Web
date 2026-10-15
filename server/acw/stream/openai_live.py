@@ -20,6 +20,7 @@ import os
 import numpy as np
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
+from .. import alerts
 from ..config import get_settings
 
 log = logging.getLogger("acw.stream.premium")
@@ -68,8 +69,11 @@ class PremiumCaptions:
                 },
             }))
             self.reader_task = asyncio.create_task(self._read())
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.exception("premium captions connect failed")
+            resp = getattr(e, "response", None)  # websockets InvalidStatus: the HTTP answer
+            if resp is not None:
+                alerts.report_openai("live captions", getattr(resp, "status_code", None), getattr(resp, "body", None))
             self._fail()
 
     def _fail(self) -> None:
@@ -95,6 +99,8 @@ class PremiumCaptions:
                         self.emit({"type": "caption", "text": text, "final": True, "id": item})
                 elif t == "error":
                     log.warning("realtime error: %s", ev.get("error"))
+                    err = ev.get("error") if isinstance(ev.get("error"), dict) else {}
+                    alerts.report_openai("live captions", None, err_type=err.get("type"), err_code=err.get("code"))
         except Exception:  # noqa: BLE001
             log.exception("premium captions stream ended")
         if not self.failed:

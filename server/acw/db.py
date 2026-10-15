@@ -287,6 +287,16 @@ MIGRATIONS = [
     ("payments", "tax_cents", "ALTER TABLE payments ADD COLUMN tax_cents INTEGER NOT NULL DEFAULT 0"),
     ("payments", "tax_calculation", "ALTER TABLE payments ADD COLUMN tax_calculation TEXT"),
     ("payments", "tax_transaction", "ALTER TABLE payments ADD COLUMN tax_transaction TEXT"),
+    # Email alerts (acw.alerts): one row per alert kind, for de-duplication and "resolved" mails.
+    (
+        "alert_state",
+        "kind",
+        "CREATE TABLE IF NOT EXISTS alert_state ("
+        " kind TEXT PRIMARY KEY, active INTEGER NOT NULL DEFAULT 0, streak INTEGER NOT NULL DEFAULT 0,"
+        " clear_streak INTEGER NOT NULL DEFAULT 0, first_at INTEGER, last_sent_at INTEGER NOT NULL DEFAULT 0,"
+        " last_seen_at INTEGER, send_count INTEGER NOT NULL DEFAULT 0, suppressed INTEGER NOT NULL DEFAULT 0,"
+        " subject TEXT)",
+    ),
 ]
 
 

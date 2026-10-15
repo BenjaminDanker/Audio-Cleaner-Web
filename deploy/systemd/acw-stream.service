@@ -1,5 +1,6 @@
 [Unit]
 Description=Audio Cleaner live DSP worker (Unix socket only)
+OnFailure=acw-alert@%n.service
 
 [Service]
 Slice=acw.slice
