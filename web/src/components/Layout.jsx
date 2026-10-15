@@ -151,6 +151,22 @@ function Footer() {
   );
 }
 
+// Shown only to someone whose session began before the Terms last changed (signing in records agreement, so new
+// accounts never see it). Using the service records agreement to the new version, and the notice goes away.
+function TermsNotice() {
+  const { user } = useAuth();
+  const [hidden, setHidden] = useState(false);
+  if (!user || user.tosAccepted || hidden) return null;
+  return (
+    <div className="container" data-testid="terms-notice">
+      <div className="banner banner-info row-between" role="status">
+        <span>We&rsquo;ve updated our <Link to="/terms">Terms of Service</Link>. Using the service from now on means you agree to the new version.</span>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setHidden(true)}>OK</button>
+      </div>
+    </div>
+  );
+}
+
 export default function Layout() {
   const loc = useLocation();
   const main = useRef(null);
@@ -168,6 +184,7 @@ export default function Layout() {
       <a className="skip-link" href="#main">Skip to content</a>
       <Header />
       <OfflineBanner />
+      <TermsNotice />
       <main id="main" ref={main} tabIndex={-1}>
         <Outlet />
       </main>

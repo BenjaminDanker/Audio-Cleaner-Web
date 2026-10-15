@@ -94,6 +94,23 @@ if (want('studio')) {
     return `balance ${bal}`;
   });
 
+  await check('Terms changed since this session began: a notice (not a gate) until the new version is agreed by using the service', async () => {
+    if (await page.getByTestId('terms-notice').count()) throw new Error('notice shown to an account that has agreed');
+    await page.route('**/api/me', async (route) => {
+      const res = await route.fetch();
+      const j = await res.json();
+      await route.fulfill({ response: res, json: j.user ? { ...j, user: { ...j.user, tosAccepted: false } } : j });
+    });
+    await page.reload();
+    await page.getByTestId('terms-notice').waitFor();
+    const t = await page.getByTestId('terms-notice').innerText();
+    await page.unroute('**/api/me');
+    await page.reload();
+    await page.getByTestId('available').waitFor();
+    if (await page.getByTestId('terms-notice').count()) throw new Error('notice still shown');
+    return t.replace(/\s+/g, ' ');
+  });
+
   await check('clean & polish (wav) end-to-end, no Terms modal', async () => {
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'polish');

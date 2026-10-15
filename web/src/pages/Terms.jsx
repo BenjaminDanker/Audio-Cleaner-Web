@@ -28,9 +28,9 @@ export default function Terms() {
   return (
     <Legal title="Terms of Service" sections={SECTIONS}>
       <h2 id="about">1. About these terms</h2>
-      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free noise removal runs on your own device; it needs a free account, but no credit.</p>
+      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By signing in (which creates your account the first time) you agree to them, and buying credit or using a paid feature confirms it. If you do not agree, do not use the Service. The free noise removal runs on your own device; it needs a free account, but no credit.</p>
       <p><b>Where the Service is available.</b> The Service is not available to people in the European Union or European Economic Area (EU/EEA), the United Kingdom or Switzerland. Please do not create an account, buy credit or use the Service if you are there. If a payment is made with a card issued in one of those places, we refund it.</p>
-      <p>We may update these terms. When we do, the version date changes and we will ask you to accept the new version before you can use paid features again. Your continued use of the free noise removal is not conditional on this.</p>
+      <p>We may update these terms. When we do, the version date changes and signed-in users see a notice on the website. Signing in or using the Service after the change means you accept the new version. If you do not accept it, stop using the Service; you can close your account and get your unused credit back as described under termination below.</p>
 
       <h2 id="accounts">2. Accounts</h2>
       <ul>
