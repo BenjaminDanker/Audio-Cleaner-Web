@@ -114,3 +114,24 @@ Endpoint `https://mc-multi-world.space/audio/api/stripe/webhook`, events:
 Use a restricted API key with write access to: Customers, Checkout Sessions,
 PaymentIntents, Refunds, Customer portal sessions; read access to Payment
 methods, Charges and Events.
+
+### With the Stripe CLI (test mode; add `--live` for live mode)
+
+Webhook (the response shows `secret` once: that is `STRIPE_WEBHOOK_SECRET`;
+`api_version` matches the stripe-python version in requirements.lock):
+
+```
+stripe post /v1/webhook_endpoints -d url=https://mc-multi-world.space/audio/api/stripe/webhook -d api_version=2026-09-30.endive -d "description=Audio Cleaner" -d "enabled_events[]=checkout.session.completed" -d "enabled_events[]=checkout.session.async_payment_succeeded" -d "enabled_events[]=payment_intent.succeeded" -d "enabled_events[]=payment_intent.payment_failed" -d "enabled_events[]=charge.refunded" -d "enabled_events[]=charge.dispute.created" -d "enabled_events[]=radar.early_fraud_warning.created" -d "enabled_events[]=payment_method.detached"
+```
+
+Customer portal (only "update the saved card"; its `id` is `STRIPE_PORTAL_CONFIGURATION`,
+otherwise the portal settings must be saved once in the dashboard):
+
+```
+stripe post /v1/billing_portal/configurations -d "features[payment_method_update][enabled]=true" -d "business_profile[terms_of_service_url]=https://mc-multi-world.space/audio/terms" -d "business_profile[privacy_policy_url]=https://mc-multi-world.space/audio/privacy"
+```
+
+Not available through the API (dashboard only): restricted API keys, the
+account's public details (support email, statement descriptor, Terms/Privacy
+URLs shown on Checkout), and the Radar plan (stay on Standard while it is free,
+switch to Lite before 2027-01-21, when Standard starts costing $0.05 per payment).

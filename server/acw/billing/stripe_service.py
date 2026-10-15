@@ -171,9 +171,11 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
 
 def billing_portal_url(user_id: str) -> str:
     customer = ensure_customer(user_id)
-    portal = client().v1.billing_portal.sessions.create(
-        params={"customer": customer, "return_url": get_settings().url("/app/billing")}
-    )
+    settings = get_settings()
+    params = {"customer": customer, "return_url": settings.url("/app/billing")}
+    if settings.stripe_portal_configuration:  # one made with the API/CLI (docs/payments.md)
+        params["configuration"] = settings.stripe_portal_configuration
+    portal = client().v1.billing_portal.sessions.create(params=params)
     return portal.url
 
 
