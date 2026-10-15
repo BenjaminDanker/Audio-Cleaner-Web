@@ -275,6 +275,7 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .choice > span b { font-size: 0.97rem; }
 .choice > span small { color: var(--muted); font-size: 0.84rem; }
 .choice input:checked + span { border-color: var(--brand); background: var(--brand-soft); }
+.choice input[type="checkbox"]:checked + span b::after { content: " \2713"; color: var(--brand); }
 .choice input:focus-visible + span { outline: 3px solid var(--focus); outline-offset: 2px; }
 .form-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .inline-input { display: inline-flex; align-items: center; gap: 4px; }

@@ -1,4 +1,4 @@
-// Shared helpers for file jobs (Studio clean, transcription): create -> upload -> poll.
+// Shared helpers for file jobs (Clean & polish, subtitles & transcripts): create -> upload -> poll.
 
 import { api, uploadBlob } from './api.js';
 import { extractAudio } from './media/extract.js';
@@ -59,8 +59,8 @@ export function queueText(job) {
 }
 
 export function kindLabel(job) {
-  const base = { denoise: 'Studio clean', transcribe: 'Transcription', denoise_transcribe: 'Studio clean + transcription' }[job.kind] || job.kind;
-  return job.free ? `${base} (free)` : base;
+  const base = { denoise: 'Clean & polish', transcribe: 'Subtitles & transcript', denoise_transcribe: 'Clean & polish + subtitles & transcript' }[job.kind] || job.kind;
+  return base;
 }
 
 /**
@@ -75,7 +75,9 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   let name = file.name;
   let extracted = false;
   const options = { ...body.options };
-  if (info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
+  const wantsEmbed = !!(options.embed_subtitles && info?.hasVideo);
+  if (wantsEmbed) options.output_video = true; // the whole video goes up so the server can put the subtitles in it
+  if (!wantsEmbed && info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
     onStage?.('extract');
     try {
       const out = await extractAudio(file, { onProgress: (p) => onProgress?.({ phase: 'extract', frac: p }), signal });

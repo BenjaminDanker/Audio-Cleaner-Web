@@ -25,7 +25,7 @@ if (want('basic')) {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
-    for (const s of ['$0.60 / hour', '$0.01 / min', 'Studio clean', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    for (const s of ['$0.60 / hour', '$0.01 / min', 'Clean & polish', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
     if (/Available|Coming soon|\$0\.004/.test(txt)) throw new Error('status column or tiny per-minute number is back: ' + txt);
     return `${await page.locator('table tbody tr').count()} rows`;
   });
@@ -93,7 +93,7 @@ if (want('studio')) {
     return `balance ${bal}`;
   });
 
-  await check('studio clean (wav) end-to-end incl. ToS modal', async () => {
+  await check('clean & polish (wav) end-to-end incl. ToS modal', async () => {
     await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
     await page.getByTestId('estimate').waitFor();
     const est = await page.getByTestId('estimate').innerText();
@@ -119,7 +119,7 @@ if (want('studio')) {
     return await page.getByTestId('available').innerText();
   });
 
-  await check('studio clean of VIDEO: audio-only upload + local remux', async () => {
+  await check('clean & polish of VIDEO: audio-only upload + local remux', async () => {
     await page.setInputFiles('input[type=file]', join(FILES, 'test.mp4'));
     await page.getByTestId('estimate').waitFor();
     await page.getByRole('button', { name: /Start job/ }).click();
@@ -140,7 +140,7 @@ if (want('studio')) {
 
   await check('transcription + denoise (both) job: srt/vtt/txt outputs', async () => {
     await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-    await page.getByLabel('Both').check().catch(() => page.locator('label:has(input[value=denoise_transcribe])').click());
+    await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click(); // Clean & polish is on by default: both
     await page.getByTestId('estimate').waitFor();
     await page.getByRole('button', { name: /Start job/ }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
@@ -155,12 +155,13 @@ if (want('studio')) {
 }
 
 if (want('transcribe')) {
-  await check('free transcription page', async () => {
-    await gotoApp('/transcribe');
-    const intro = await page.locator('main header').innerText();
-    if (!/60 free minutes a day/.test(intro) || !/up to 30 minutes/.test(intro)) throw new Error(intro);
+  await check('free subtitles on the Files page (subtitles only, Standard, short file)', async () => {
+    await gotoApp('/app');
     await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-    await page.getByRole('button', { name: 'Start free transcription' }).click();
+    await page.locator('label.choice', { hasText: 'Clean & polish' }).click();
+    await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click();
+    await page.getByTestId('free-note').waitFor();
+    await page.getByRole('button', { name: 'Start (free)' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.', 300000);
     const st = await card.getAttribute('data-status');

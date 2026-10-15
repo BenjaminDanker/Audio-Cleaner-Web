@@ -1,4 +1,4 @@
-// Lossless FLAC encoder for uncompressed WAV / AIFF input, used to shrink Studio / transcription uploads.
+// Lossless FLAC encoder for uncompressed WAV / AIFF input, used to shrink file-job uploads.
 //
 // Why our own encoder: WebCodecs has no FLAC encoder in Chromium (AudioEncoder.isConfigSupported({codec: 'flac'}) is
 // false, verified on Chromium 145), and mediabunny only delegates encoding to WebCodecs. FLAC is simple enough to

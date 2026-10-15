@@ -122,7 +122,7 @@ if (want('header')) {
           if (g.sw > g.vw + 1) probs.push(`${p}: horizontal overflow ${g.sw}>${g.vw}`);
         }
         await page.getByRole('button', { name: 'Menu' }).click();
-        await page.getByRole('link', { name: 'Free denoise' }).first().waitFor({ state: 'visible' });
+        await page.getByRole('link', { name: 'Free cleanup' }).first().waitFor({ state: 'visible' });
         const open = await page.evaluate(() => ({ header: document.querySelector('.site-header').getBoundingClientRect().height, nav: document.querySelector('#main-nav').getBoundingClientRect(), vw: window.innerWidth }));
         if (open.header > 72) probs.push(`menu open: header grew to ${open.header}px`);
         if (open.nav.right > open.vw + 1 || open.nav.left < -1) probs.push('menu panel overflows');
@@ -428,10 +428,12 @@ if (want('flac')) {
   });
   await check('flac upload: free transcription of a WAV uploads FLAC and succeeds', async () => {
     reqs.length = 0;
-    await page.goto(`${BASE}/transcribe`);
+    await page.goto(`${BASE}/app`);
     await page.waitForSelector('input[type=file]');
     await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-    await page.getByRole('button', { name: 'Start free transcription' }).click();
+    await page.locator('label.choice', { hasText: 'Clean & polish' }).click();
+    await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click();
+    await page.getByRole('button', { name: 'Start (free)' }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
     if (!/Compressed for upload/.test(banner)) throw new Error(banner);
     const jobs = await apiCall(page, 'GET', 'jobs');

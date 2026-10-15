@@ -44,7 +44,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 {
   const { browser, page, logs } = await launch([], { viewport: { width: 360, height: 800 } });
   await signIn(page, EMAIL);
-  const pages = ['/', '/free', '/login', '/app', '/transcribe', '/app/billing', '/app/live', '/app/account', '/terms', '/privacy', '/licenses', '/nope'];
+  const pages = ['/', '/free', '/login', '/app', '/app/billing', '/app/live', '/app/account', '/terms', '/privacy', '/licenses', '/nope'];
   await check('responsive 360px: no horizontal overflow on any page', async () => {
     const bad = [];
     for (const p of pages) {
@@ -64,7 +64,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
   await check('mobile nav toggle opens menu', async () => {
     await page.goto(`${BASE}/`);
     await page.getByRole('button', { name: 'Menu' }).click();
-    await page.getByRole('link', { name: 'Free denoise' }).first().waitFor({ state: 'visible' });
+    await page.getByRole('link', { name: 'Free cleanup' }).first().waitFor({ state: 'visible' });
     return 'ok';
   });
   await browser.close();
@@ -75,7 +75,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
   await signIn(page, EMAIL);
   await check('a11y scan: unlabeled controls / buttons / images, heading order, landmarks', async () => {
     const probs = [];
-    for (const p of ['/', '/free', '/login', '/app', '/transcribe', '/app/billing', '/app/live', '/app/account', '/terms']) {
+    for (const p of ['/', '/free', '/login', '/app', '/app/billing', '/app/live', '/app/account', '/terms']) {
       await page.goto(`${BASE}${p}`);
       await page.waitForSelector('main h1');
       await page.waitForTimeout(500);
@@ -112,6 +112,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 {
   const { browser, context, page, logs } = await launch([], { colorScheme: 'dark' });
   await check('dark mode screenshots', async () => {
+    await signIn(page, EMAIL);
     await page.goto(`${BASE}/`); await page.waitForSelector('table');
     await page.screenshot({ path: join(SHOTS, 'dark-landing.png') });
     await page.goto(`${BASE}/free`); await page.waitForSelector('main h1');
@@ -133,7 +134,8 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await route.fulfill({ response: res, headers: { ...res.headers(), 'content-security-policy': csp } });
   });
   page.on('console', (m) => { if (/Content Security Policy|violat/i.test(m.text())) viol.push(m.text().slice(0, 200)); });
-  await check('CSP: landing, free denoise (wasm worker + mediabunny), studio, live worklets all work', async () => {
+  await check('CSP: landing, free cleanup (wasm worker + mediabunny), files, live worklets all work', async () => {
+    await signIn(page, EMAIL);
     await page.goto(`${BASE}/`); await page.waitForSelector('table');
     await page.goto(`${BASE}/free`);
     await page.setInputFiles('input[type=file]', join(FILES, 'test.mp4'));
@@ -141,9 +143,8 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await page.waitForSelector('[data-testid=result]', { timeout: 60000 });
     const rms = Number(await page.locator('[data-testid=result]').getAttribute('data-rms'));
     if (rms < 0.001) throw new Error('silent under CSP');
-    await signIn(page, EMAIL);
     // pages added/changed for production QA: no inline style attributes or scripts may be needed anywhere
-    for (const p of ['/app', '/app/billing', '/app/account', '/licenses', '/terms', '/privacy', '/transcribe']) {
+    for (const p of ['/app', '/app/billing', '/app/account', '/licenses', '/terms', '/privacy']) {
       await page.goto(`${BASE}${p}`); await page.waitForSelector('main h1'); await page.waitForTimeout(300);
     }
     await page.setViewportSize({ width: 360, height: 800 });

@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { usePageTitle } from '../hooks.js';
+import { takeReturn } from '../returnTo.js';
 
 // The token must be used exactly once even if React mounts this effect twice (StrictMode in dev).
 let inflight = null;
@@ -33,7 +34,7 @@ export default function LoginVerify() {
       if (!alive) return;
       if (r.ok) {
         await refresh();
-        navigate('/app', { replace: true });
+        navigate(takeReturn() || '/app', { replace: true });
       } else {
         setError(r.message);
       }

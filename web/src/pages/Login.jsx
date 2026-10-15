@@ -3,6 +3,7 @@ import { Link, Navigate, useSearchParams } from 'react-router-dom';
 import { api, oauthStartUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { IconGoogle, IconMail } from '../components/Icons.jsx';
+import { takeReturn } from '../returnTo.js';
 import Turnstile from '../components/Turnstile.jsx';
 import { usePageTitle } from '../hooks.js';
 
@@ -32,7 +33,7 @@ export default function Login() {
     api('auth/providers', { redirectOn401: false }).then(setProviders).catch((e) => setLoadErr(e.detail));
   }, []);
 
-  if (ready && signedIn) return <Navigate to="/app" replace />;
+  if (ready && signedIn) return <Navigate to={takeReturn() || '/app'} replace />;
 
   async function submit(e) {
     e.preventDefault();
@@ -57,7 +58,7 @@ export default function Login() {
       <div className="card login-card stack">
         <div>
           <h1 className="mb0">Sign in</h1>
-          <p className="muted mb0">One account for Studio, transcripts and live. New here? Signing in makes your account, it’s free. (The browser tool needs no account.)</p>
+          <p className="muted mb0">One free account for the browser cleanup, files, subtitles and live. New here? Signing in makes your account, no card needed.</p>
         </div>
         {errCode && <div className="banner banner-error" role="alert">{ERRORS[errCode] || 'Sign-in failed. Please try again.'}</div>}
         {loadErr && <div className="banner banner-error" role="alert">{loadErr}</div>}

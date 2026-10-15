@@ -15,6 +15,7 @@ const BANNED = [
   /premium/i,
   /\bupgrade/i, /\benterprise\b/i, /\bsolutions?\b/i, /\btiers?\b/i, /\bplans?\b/i, /\bpro\b/i, /professional/i, /seamless/i, /leverage/i,
   /Create a free account/i, /Get started today/i,
+  /\bStudio\b/i, /transcribe page/i, /free transcription/i, /no (account|sign-in)/i,
 ];
 
 /** Everything a visitor can read or hear on the page: the text, option labels, and the labels screen readers announce. */
@@ -53,8 +54,9 @@ await check('copy: public pages show no internals and none of the avoided words'
   const bad = [];
   bad.push(...(await scan(page, '/', 'table tbody tr')));
   bad.push(...(await scan(page, '/#pricing', 'table tbody tr')));
-  bad.push(...(await scan(page, '/free')));
-  bad.push(...(await scan(page, '/transcribe')));
+  bad.push(...(await scan(page, '/transcribe'))); // gone: the not-found page
+  bad.push(...(await scan(page, '/free'))); // signed out: lands on the sign-in page
+  if (!/\/login/.test(page.url())) throw new Error('signed-out /free did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/app/live'))); // signed out: lands on the sign-in page
   if (!/\/login/.test(page.url())) throw new Error('signed-out /app/live did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/login')));
@@ -75,12 +77,12 @@ await check('landing: no "privacy promise" section; retention stays in the FAQ; 
   return 'ok';
 });
 
-await check('copy: signed-in pages (Studio, Billing, Live, Account) show no internals', async () => {
+await check('copy: signed-in pages (Free cleanup, Files, Billing, Live, Account) show no internals', async () => {
   await signIn(page, EMAIL);
   const bad = [];
-  for (const p of ['/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
+  for (const p of ['/free', '/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
   if (bad.length) throw new Error(bad.join(' | '));
-  return '4 pages clean';
+  return '5 pages clean';
 });
 
 await browser.close();

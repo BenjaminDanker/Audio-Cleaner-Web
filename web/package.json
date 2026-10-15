@@ -21,7 +21,8 @@
     "test:qa": "node tests/qa-fixes.mjs",
     "test:offline": "node tests/offline.mjs",
     "test:copy": "node tests/copy.mjs",
-    "test:states": "node tests/states.mjs"
+    "test:states": "node tests/states.mjs",
+    "test:files": "node tests/files.mjs"
   },
   "dependencies": {
     "mediabunny": "^1.61.3",

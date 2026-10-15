@@ -43,11 +43,11 @@ function HeroArt() {
 }
 
 const FAQ = [
-  ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device. Once the page has loaded, nothing about your file is sent anywhere.'],
+  ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. You do need a free account to use it, to keep bots away.'],
   ['How fast is it?', 'Usually about one minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
-  ['What is Studio clean for?', 'Longer recordings and finished files. It does the noise removal for you, adds voice polish and a loudness target (podcast, YouTube or broadcast), and can write the subtitles in the same go. Your computer stays free in the meantime.'],
+  ['What is Clean & polish for?', 'Longer recordings and finished files. We remove the noise, even out the voice and set the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],
   ['Which files work?', 'Audio and video: MP3, WAV, FLAC, OGG, AAC/M4A, MP4, MOV, WebM and MKV, in current Chrome, Edge, Firefox and Safari. With video, the picture is left alone and only the sound is swapped.'],
-  ['Why does Studio only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
+  ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
   ['How does paying work?', 'You add credit, then spend it by the minute of audio. No subscription. You can top up from $10, and switch on auto-reload (with a monthly limit you choose) if you like. Turn it off whenever you want.'],
   ['What happens to my files and my words?', 'Files you upload are deleted as soon as they are processed. Results stay for 24 hours so you can download them, then they are deleted too. Live audio is never stored. We don’t train anything on your audio or your transcripts.'],
   ['Is there an OBS plugin?', 'Not yet, it’s on the way. Until then you can try live noise removal and captions right on the Live page, with your own microphone.'],
@@ -81,7 +81,7 @@ export default function Landing() {
   useEffect(() => {
     if (hash) setTimeout(() => document.querySelector(hash)?.scrollIntoView(), 50);
   }, [hash]);
-  const studio = findRate(pricing, 'denoise', 'standard');
+  const polish = findRate(pricing, 'denoise', 'standard');
   const tx = pricing?.free;
   const live = findRate(pricing, 'stream_denoise', 'light');
   const email = SITE.supportEmail.trim();
@@ -104,7 +104,7 @@ export default function Landing() {
               <Link to="/free" className="btn btn-primary btn-lg">Try it on a file</Link>
               <a href="#products" className="btn btn-secondary btn-lg">See what else we do</a>
             </div>
-            <p className="muted small">No account. No upload. No watermark.</p>
+            <p className="muted small">Free with an account. Nothing is uploaded. No watermark.</p>
           </div>
           <HeroArt />
         </div>
@@ -117,17 +117,17 @@ export default function Landing() {
           <div className="grid grid-4">
             <article className="card product-card">
               <div className="icon"><IconWave /></div>
-              <h3>Free in your browser <span className="badge badge-free">Free</span></h3>
-              <p>Drop in a file and get it back clean. No sign-in, no upload, no limits except how patient your computer is.</p>
+              <h3>Free cleanup <span className="badge badge-free">Free</span></h3>
+              <p>Drop in a file and get it back clean, right in your browser. You just need a free account. Nothing is uploaded, and the only limit is how patient your computer is.</p>
               <span className="spacer" />
               <Link to="/free" className="btn btn-primary">Try it now</Link>
             </article>
             <article className="card product-card">
               <div className="icon"><IconSparkle /></div>
-              <h3>Studio clean</h3>
-              <p>For long recordings and finished files: noise removal, voice polish and a loudness target for podcast, YouTube or broadcast.{studio && <> From {moneyUsd(studio.usdPerHour)} an hour.</>}</p>
+              <h3>Clean &amp; polish</h3>
+              <p>For long recordings and finished files: noise removed, voice evened out and loudness set for podcast, YouTube or broadcast.{polish && <> From {moneyUsd(polish.usdPerHour)} an hour.</>}</p>
               <span className="spacer" />
-              <Link to="/app" className="btn btn-secondary">Open Studio</Link>
+              <Link to="/app" className="btn btn-secondary">Clean a file</Link>
             </article>
             <article className="card product-card">
               <div className="icon"><IconBroadcast /></div>
@@ -141,7 +141,7 @@ export default function Landing() {
               <h3>Subtitles &amp; transcripts <span className="badge badge-free">Free every day</span></h3>
               <p>Get TXT, SRT and VTT files from your recording. Choose Standard, or Extra accurate for tricky audio.{tx && <> Free: {Math.round(tx.transcribeSecondsPerDay / 60)} minutes a day.</>}</p>
               <span className="spacer" />
-              <Link to="/transcribe" className="btn btn-secondary">Transcribe</Link>
+              <Link to="/app" className="btn btn-secondary">Get subtitles</Link>
             </article>
           </div>
         </div>
@@ -152,7 +152,7 @@ export default function Landing() {
           <h2 className="section-title">How it works</h2>
           <p className="section-lead">Three steps, whichever way you go.</p>
           <ol className="steps">
-            <li><h3>Pick a way</h3><p>The free browser tool for quick jobs. Studio for long files, loudness and subtitles.</p></li>
+            <li><h3>Pick a way</h3><p>The free browser cleanup for quick jobs. Clean &amp; polish for long files, loudness and subtitles.</p></li>
             <li><h3>Drop in a file</h3><p>Audio or video. With video, only the sound is uploaded, so it stays small and quick.</p></li>
             <li><h3>Listen, then save</h3><p>Flip between the original and the clean version at the same spot. Then save the audio, or your video with the new sound.</p></li>
           </ol>
@@ -162,13 +162,13 @@ export default function Landing() {
       <section className="section" id="pricing">
         <div className="container narrow stack">
           <h2 className="section-title mb0">What it costs</h2>
-          <p className="section-lead">The browser tool is free. For the rest you add credit and spend it by the minute of audio. That&rsquo;s all.</p>
+          <p className="section-lead">The browser cleanup is free with an account. For the rest you add credit and spend it by the minute of audio. That&rsquo;s all.</p>
           <PriceTable />
           <div className="card stack">
             <h3 className="mb0">How credit works</h3>
             <ul className="mb0">
               <li><b>No subscription.</b> Add credit from {pricing ? moneyCents(pricing.topup.minCents) : '$10'} and use it when you need it.</li>
-              <li><b>You only pay for what you use.</b> Studio shows an estimate before you upload. Live is counted by the second.</li>
+              <li><b>You only pay for what you use.</b> You see an estimate before you upload. Live is counted by the second.</li>
               <li><b>Auto-reload is optional.</b> It tops you up when you run low, up to a monthly limit you choose. Turn it off any time.</li>
               <li><b>Changed your mind?</b> Unused credit can be refunded within 14 days. The <Link to="/terms">Terms</Link> have the details.</li>
             </ul>

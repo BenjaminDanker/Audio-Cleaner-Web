@@ -19,7 +19,7 @@ const supported = typeof Worker !== 'undefined' && typeof WebAssembly !== 'undef
 export default function Free() {
   usePageTitle('Clean up a recording');
   const { data: pricing } = usePricing();
-  const studio = findRate(pricing, 'denoise', 'standard');
+  const polish = findRate(pricing, 'denoise', 'standard');
 
   const [file, setFile] = useState(null);
   const [info, setInfo] = useState(null);
@@ -120,7 +120,7 @@ export default function Free() {
       <header>
         <h1>Clean up a recording</h1>
         <p className="lead muted">Take the background noise out of a voice recording or video. It happens on your own device, so your file is never uploaded.</p>
-        <p className="row small muted mb0"><IconLock width={18} height={18} /> Private by design: no account, no upload, no tracking.</p>
+        <p className="row small muted mb0"><IconLock width={18} height={18} /> Private by design: nothing is uploaded and nothing is tracked. Your free account just unlocks the noise remover.</p>
       </header>
 
       {!supported && <div className="banner banner-error" role="alert">This browser can&rsquo;t run the noise remover. Please try a current version of Chrome, Edge, Firefox or Safari.</div>}
@@ -150,10 +150,10 @@ export default function Free() {
           {duration > LONG_SECONDS && !tooLong && (
             <div className="banner banner-warn">
               This is a long recording ({human(duration)}). Cleaning it here could take about {human(eta)} and needs a lot of memory.
-              Keep this tab open, or use <Link to="/app">Studio clean</Link> for long files.
+              Keep this tab open, or use <Link to="/app">Clean &amp; polish</Link> for long files.
             </div>
           )}
-          {tooLong && <div className="banner banner-error" role="alert">Recordings longer than {MAX_SECONDS / 3600} hours cannot be cleaned in the browser. Please split the file or use <Link to="/app">Studio clean</Link>.</div>}
+          {tooLong && <div className="banner banner-error" role="alert">Recordings longer than {MAX_SECONDS / 3600} hours cannot be cleaned in the browser. Please split the file or use <Link to="/app">Clean &amp; polish</Link>.</div>}
           {info?.channels > 2 && <p className="small muted mb0">This file has {info.channels} channels; they will be mixed down to mono.</p>}
           {error && <div className="banner banner-error" role="alert">{error}</div>}
 
@@ -191,9 +191,9 @@ export default function Free() {
         <aside className="card stack card-flat">
           <h2 className="mb0">Got a long recording, or want subtitles?</h2>
           <p className="mb0 muted">
-            Studio clean looks after long files without tying up your computer. It also evens out the loudness and can write the subtitles in the same go{studio ? ` (from ${moneyUsd(studio.usdPerHour)} an hour)` : ''}.
+            Clean &amp; polish looks after long files without tying up your computer. It also evens out the loudness, and you can add subtitles and a transcript in the same go{polish ? ` (from ${moneyUsd(polish.usdPerHour)} an hour)` : ''}.
           </p>
-          <div className="row"><Link to="/app" className="btn btn-primary">Try Studio clean</Link><Link to="/transcribe" className="btn btn-secondary">Free transcription</Link></div>
+          <div className="row"><Link to="/app" className="btn btn-primary">Open Files</Link></div>
         </aside>
       )}
     </div>

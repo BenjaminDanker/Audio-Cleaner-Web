@@ -4,7 +4,7 @@ import { usePricing } from '../hooks.js';
 // What each service is, in one plain line. Keyed by "product/tier" (the ids the price list uses); the names and the
 // prices themselves come from the server (GET /api/billing/pricing), so they can never disagree with the bill.
 const DESCRIPTIONS = {
-  'denoise/standard': 'Noise removal plus voice polish and loudness, ready to publish',
+  'denoise/standard': 'Noise removed, voice evened out and loudness set, ready to publish',
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
   'transcribe/premium': 'The same files, best for accents, noisy rooms and specialist words',
   'stream_denoise/light': 'Cleans up your mic while you talk',
@@ -66,10 +66,10 @@ function FreeRows({ title }) {
       <tr className="group"><th scope="rowgroup" colSpan={2}>{title}</th></tr>
       <tr>
         <th scope="row">
-          <span className="svc">Clean up a recording in your browser</span>
-          <span className="small muted desc">Takes noise out of audio and video on your own device. Nothing is uploaded.</span>
+          <span className="svc">Free cleanup in your browser</span>
+          <span className="small muted desc">Takes noise out of audio and video on your own device. Nothing is uploaded. Needs a free account.</span>
         </th>
-        <td className="num"><span className="price-main">Free</span><span className="small muted price-sub">no sign-in needed</span></td>
+        <td className="num"><span className="price-main">Free</span><span className="small muted price-sub">with an account</span></td>
       </tr>
     </>
   );

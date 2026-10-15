@@ -28,7 +28,7 @@ export default function Terms() {
   return (
     <Legal title="Terms of Service" sections={SECTIONS}>
       <h2 id="about">1. About these terms</h2>
-      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free browser tool runs on your own device and needs no account.</p>
+      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By creating an account, buying credit, or using paid features you agree to them. If you do not agree, do not use the paid features. The free browser tool runs on your own device; it needs a free account, but no credit.</p>
       <p>We may update these terms. When we do, the version date changes and we will ask you to accept the new version before you can use paid features again. Your continued use of the free browser tool is not conditional on this.</p>
 
       <h2 id="accounts">2. Accounts</h2>
@@ -41,8 +41,8 @@ export default function Terms() {
 
       <h2 id="services">3. The services</h2>
       <ul>
-        <li><b>Free browser denoise.</b> Runs locally in your browser. Your audio is not uploaded. Provided as is, without charge or warranty.</li>
-        <li><b>Studio clean.</b> Noise removal, loudness normalisation and related processing of files you upload.</li>
+        <li><b>Free cleanup.</b> Runs locally in your browser (you sign in to use it). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
+        <li><b>Clean &amp; polish.</b> Noise removal, voice levelling, loudness normalisation and related processing of files you upload.</li>
         <li><b>Transcription and subtitles.</b> Standard (done by us), or Extra accurate (the audio is sent to a third-party speech-recognition provider, see the Privacy Policy). A daily free allowance of Standard transcription may be offered; its size can change.</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed.</li>
       </ul>

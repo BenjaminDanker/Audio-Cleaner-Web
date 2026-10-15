@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
 const { browser, page, logs } = await launch();
+const mail = `e2e-poor-${Date.now()}@example.com`;
+await signIn(page, mail); // the free cleanup needs an account too
 await check('free: garbage file -> friendly error, no crash', async () => {
   await page.goto(`${BASE}/free`);
   await page.setInputFiles('input[type=file]', join(FILES, 'garbage.mp3'));
@@ -17,9 +19,7 @@ await check('free: text file -> friendly error', async () => {
   await page.locator('main .banner-error').first().waitFor({ timeout: 30000 });
   return await page.locator('main .banner-error').first().innerText();
 });
-const mail = `e2e-poor-${Date.now()}@example.com`;
-await signIn(page, mail);
-await check('studio: zero balance -> warning + disabled start, link to billing', async () => {
+await check('files: zero balance -> warning + disabled start, link to billing', async () => {
   await page.goto(`${BASE}/app`);
   await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
   await page.getByTestId('estimate').waitFor();
@@ -27,18 +27,19 @@ await check('studio: zero balance -> warning + disabled start, link to billing',
   if (!(await page.getByRole('button', { name: /Start job/ }).isDisabled())) throw new Error('start enabled');
   return w;
 });
-await check('studio: unreadable file -> clear message', async () => {
+await check('files: unreadable file -> clear message', async () => {
   await page.goto(`${BASE}/app`);
   await page.setInputFiles('input[type=file]', join(FILES, 'bad.txt'));
   await page.locator('main .banner-warn', { hasText: 'could not read' }).waitFor({ timeout: 15000 });
   return 'ok';
 });
-await check('transcribe: file >30 min blocked (free limit)', async () => {
-  await page.goto(`${BASE}/transcribe`);
+await check('subtitles only: a 10 min file is within the free limit, so it is free and can start without credit', async () => {
+  await page.goto(`${BASE}/app`);
   await page.setInputFiles('input[type=file]', join(FILES, 'long10min.mp3'));
-  await page.getByRole('button', { name: 'Start free transcription' }).waitFor();
-  // 10 min is under 30 min: expect enabled
-  const en = await page.getByRole('button', { name: 'Start free transcription' }).isEnabled();
+  await page.locator('label.choice', { hasText: 'Clean & polish' }).click();
+  await page.locator('label.choice', { hasText: 'Subtitles & transcript' }).click();
+  await page.getByRole('button', { name: 'Start (free)' }).waitFor();
+  const en = await page.getByRole('button', { name: 'Start (free)' }).isEnabled();
   return 'start enabled for 10 min file: ' + en;
 });
 console.log('LOGS:\n' + logs.join('\n'));

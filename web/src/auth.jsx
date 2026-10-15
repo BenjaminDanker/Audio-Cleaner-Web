@@ -13,7 +13,7 @@ export function useAuth() {
 
 export function AuthProvider({ children }) {
   const navigate = useNavigate();
-  const [state, setState] = useState({ ready: false, signedIn: false, user: null, balance: null, autoReload: null });
+  const [state, setState] = useState({ ready: false, signedIn: false, user: null, balance: null, autoReload: null, freeSecondsLeft: 0 });
   const [tosOpen, setTosOpen] = useState(false);
   const tosResolve = useRef(null);
   const stateRef = useRef(state);
@@ -21,9 +21,9 @@ export function AuthProvider({ children }) {
 
   const apply = useCallback((me) => {
     if (me?.signedIn) {
-      setState({ ready: true, signedIn: true, user: me.user, balance: me.balance, autoReload: me.autoReload });
+      setState({ ready: true, signedIn: true, user: me.user, balance: me.balance, autoReload: me.autoReload, freeSecondsLeft: Math.max(0, Number(me.freeTranscribeSecondsLeft) || 0) });
     } else {
-      setState({ ready: true, signedIn: false, user: null, balance: null, autoReload: null });
+      setState({ ready: true, signedIn: false, user: null, balance: null, autoReload: null, freeSecondsLeft: 0 });
     }
   }, []);
 

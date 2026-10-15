@@ -41,7 +41,7 @@ export default function Privacy() {
       <ul>
         <li>For video, your browser extracts the audio track and uploads only that where it can; the video picture never leaves your device in that case.</li>
         <li>Uploaded input files are <b>deleted when processing finishes</b> (or if the job fails or is canceled).</li>
-        <li>Results (cleaned audio, captions, transcripts) are available for download for <b>24 hours</b> and then deleted. You can delete them sooner from the Studio page.</li>
+        <li>Results (cleaned audio, captions, transcripts) are available for download for <b>24 hours</b> and then deleted. You can delete them sooner from the Files page.</li>
         <li>We do not listen to your content, and we do <b>not use your audio or transcripts for training</b> models.</li>
         <li><b>Standard</b> transcription is done by us and the audio goes no further. <b>Extra accurate</b> transcription sends the audio to a third-party speech-recognition provider (our sub-processor), which returns the text. It is used only for extra accurate transcription and extra accurate live captions, and only when you choose them. It may process audio in the United States under standard contractual clauses, and it does not use the audio for training. Only choose Extra accurate if you are comfortable with that.</li>
       </ul>

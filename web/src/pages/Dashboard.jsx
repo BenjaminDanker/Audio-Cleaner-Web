@@ -8,7 +8,7 @@ import { usePageTitle } from '../hooks.js';
 import { useJobs } from '../useJobs.js';
 
 export default function Dashboard() {
-  usePageTitle('Studio');
+  usePageTitle('Your files');
   const { user, balance, refresh, ensureTos } = useAuth();
   const localJobs = useRef(new Map()); // jobId -> {file, info, extracted} (this tab only)
   const { jobs, error, reload } = useJobs({ onFinished: refresh });
@@ -22,8 +22,8 @@ export default function Dashboard() {
     <div className="container page stack-lg">
       <header className="row-between">
         <div>
-          <h1 className="mb0">Studio</h1>
-          <p className="muted mb0">Clean up and transcribe your longer recordings.</p>
+          <h1 className="mb0">Your files</h1>
+          <p className="muted mb0">Clean &amp; polish recordings, and get subtitles and transcripts.</p>
         </div>
       </header>
 
@@ -45,7 +45,7 @@ export default function Dashboard() {
             <dt>Set aside for running jobs</dt><dd data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</dd>
             <dt>Total balance</dt><dd>{balanceMoney(balance?.balance_micros ?? 0)}</dd>
           </dl>
-          <div className="row"><Link to="/app/billing" className="btn btn-primary">Add credit</Link><Link to="/transcribe" className="btn btn-ghost">Free transcription</Link></div>
+          <div className="row"><Link to="/app/billing" className="btn btn-primary">Add credit</Link></div>
         </section>
         <section className="card stack" aria-labelledby="tips-h">
           <h2 id="tips-h" className="mb0">Good to know</h2>
@@ -57,7 +57,7 @@ export default function Dashboard() {
         </section>
       </div>
 
-      <JobForm variant="studio" onSubmitted={submitted} />
+      <JobForm onSubmitted={submitted} />
 
       <section aria-labelledby="jobs-h" className="stack">
         <div className="row-between">

@@ -1,10 +1,14 @@
 import { writeFileSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, launch, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
+
+const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free tool needs an account
 
 const { browser, page, logs } = await launch();
 const apiCalls = [];
 page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/')) apiCalls.push(`${r.method()} ${u.pathname}`); });
+await signIn(page, EMAIL);
+apiCalls.length = 0;
 
 async function runFree(file, strengthLabel = 'Strong') {
   await page.goto(`${BASE}/free`);
@@ -121,8 +125,9 @@ await check('free: the noise remover is fetched once, only on /free, and a stere
   const dfn = [];
   ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) dfn.push(u.pathname.split('/').pop()); });
   const p = await ctx.newPage();
+  await signIn(p, EMAIL);
   await p.goto(`${BASE}/`); await p.waitForSelector('table tbody tr');
-  await p.goto(`${BASE}/transcribe`); await p.waitForSelector('main h1');
+  await p.goto(`${BASE}/app`); await p.waitForSelector('main h1');
   await p.waitForTimeout(500);
   if (dfn.length) throw new Error('downloaded on another page: ' + dfn.join(', '));
   await p.goto(`${BASE}/free`);
@@ -142,6 +147,7 @@ await check('free: the noise remover is fetched once, only on /free, and a stere
 await check('free: starting before the download is done shows "Getting the noise remover ready… X of Y MB" and still finishes', async () => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const p = await ctx.newPage();
+  await signIn(p, EMAIL);
   await p.route(/DeepFilterNet3_onnx\.tar\.gz/, async (route) => {
     const res = await route.fetch();
     await new Promise((r) => setTimeout(r, 6000)); // a slow connection

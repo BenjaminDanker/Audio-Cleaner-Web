@@ -105,7 +105,10 @@ export default function JobCard({ job, upload, local, onChanged }) {
           <div className="job-title">{job.inputName}</div>
           <div className="small muted">{kindLabel(job)} · {dateTime(job.createdAt)} · {clock(job.durationSeconds)}</div>
         </div>
-        <span className={badgeClass(job.status)}>{statusLabel(job.status)}</span>
+        <span className="row">
+          {job.free && <span className="badge badge-free" data-testid="free-badge">Free</span>}
+          <span className={badgeClass(job.status)}>{statusLabel(job.status)}</span>
+        </span>
       </div>
 
       {job.status === 'uploading' && upload && (

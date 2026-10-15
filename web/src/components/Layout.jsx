@@ -37,7 +37,7 @@ function AccountMenu() {
       </summary>
       <div className="menu-panel">
         <div className="menu-email">{user.email}</div>
-        <Link to="/app" onClick={close}>Studio</Link>
+        <Link to="/app" onClick={close}>Files</Link>
         <Link to="/app/billing" onClick={close}>Billing</Link>
         <Link to="/app/live" onClick={close}>Live &amp; keys</Link>
         <Link to="/app/account" onClick={close}>Your account</Link>
@@ -61,9 +61,8 @@ function Header() {
           <span>{SITE.name}</span>
         </Link>
         <nav className="nav" id="main-nav" data-open={open} aria-label="Main">
-          <NavLink to="/free">Free denoise</NavLink>
-          <NavLink to="/app" end>Studio</NavLink>
-          <NavLink to="/transcribe">Transcribe</NavLink>
+          <NavLink to="/free">Free cleanup</NavLink>
+          <NavLink to="/app" end>Files</NavLink>
           <NavLink to="/app/live">Live</NavLink>
           <Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link>
         </nav>
@@ -103,7 +102,7 @@ function useRecovery(offline) {
   }, [offline, refresh]);
 }
 
-/** Site-wide notice while the paid side is unreachable. The free browser tool never depends on it. */
+/** Site-wide notice while the server is unreachable (sign-in, files and live all need it). */
 function OfflineBanner() {
   const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
   const [dismissed, setDismissed] = useState(false);
@@ -113,7 +112,7 @@ function OfflineBanner() {
   return (
     <div className="offline-banner" role="status" data-testid="api-offline">
       <div className="container row-between">
-        <span>{SITE.name} is taking a short break. <Link to="/free">Free tools in your browser</Link> still work.</span>
+        <span>{SITE.name} is taking a short break. Signing in and everything that needs an account will be back shortly.</span>
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDismissed(true)}>Dismiss</button>
       </div>
     </div>
@@ -135,9 +134,8 @@ function Footer() {
         <div>
           <h4>Product</h4>
           <ul>
-            <li><Link to="/free">Free browser denoise</Link></li>
-            <li><Link to="/app">Studio clean</Link></li>
-            <li><Link to="/transcribe">Free transcription</Link></li>
+            <li><Link to="/free">Free cleanup</Link></li>
+            <li><Link to="/app">Clean &amp; polish, subtitles</Link></li>
             <li><Link to="/app/live">Live for streamers</Link></li>
             <li><Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link></li>
           </ul>

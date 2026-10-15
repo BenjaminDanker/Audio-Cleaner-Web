@@ -13,12 +13,6 @@ const STRENGTHS = [
   { id: '100', label: 'Maximum', db: 100 },
 ];
 
-const KINDS = [
-  { id: 'denoise', title: 'Studio clean', sub: 'Takes out the noise and evens out the voice' },
-  { id: 'transcribe', title: 'Transcription', sub: 'Text and subtitles' },
-  { id: 'denoise_transcribe', title: 'Both', sub: 'Clean it first, then write it up from the clean version' },
-];
-
 const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
 
 function defaultAudioFormat(file, info) {
@@ -26,25 +20,29 @@ function defaultAudioFormat(file, info) {
   return extension(file.name) === 'webm' ? 'opus' : 'm4a';
 }
 
+const mins = (sec) => Math.max(1, Math.ceil(sec / 60));
+
 /**
- * New-job form. variant="studio": paid jobs. variant="free": free standard transcription (daily allowance).
+ * New-job form for the Files page: one file, then "Clean & polish" and/or "Subtitles & transcript".
+ * Subtitles only + Standard + a file within the free limits is free (comes out of the daily free minutes).
  * onSubmitted({id, ...}, {file, info, extracted})
  */
-export default function JobForm({ variant = 'studio', onSubmitted }) {
-  const free = variant === 'free';
-  const { balance, ensureTos, refresh } = useAuth();
+export default function JobForm({ onSubmitted }) {
+  const { balance, ensureTos, refresh, freeSecondsLeft } = useAuth();
   const { data: pricing } = usePricing();
 
   const [file, setFile] = useState(null);
   const [info, setInfo] = useState(null);
   const [probing, setProbing] = useState(false);
-  const [kind, setKind] = useState(free ? 'transcribe' : 'denoise');
+  const [polish, setPolish] = useState(true);
+  const [text, setText] = useState(false);
+  const [embed, setEmbed] = useState(false);
   const [tier, setTier] = useState('local'); // transcription: 'local' = Standard, 'premium' = Extra accurate (ids stay internal)
   const [format, setFormat] = useState('wav');
   const [formatTouched, setFormatTouched] = useState(false);
   const [loudness, setLoudness] = useState('-16');
   const [strength, setStrength] = useState('100');
-  const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true, json: false });
+  const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
   const [language, setLanguage] = useState('');
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(null); // {phase, frac, loaded, total}
@@ -54,17 +52,29 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
 
-  const wantsDenoise = kind === 'denoise' || kind === 'denoise_transcribe';
-  const wantsText = kind === 'transcribe' || kind === 'denoise_transcribe';
+  const wantsDenoise = polish;
+  const wantsText = text;
+  const kind = polish && text ? 'denoise_transcribe' : polish ? 'denoise' : text ? 'transcribe' : null;
   const duration = info?.duration || null;
   const maxJob = pricing?.maxJobSeconds;
   const freeMax = pricing?.free?.transcribeMaxFileSeconds;
+  const freeDay = pricing?.free?.transcribeSecondsPerDay;
+  const freeLeft = freeSecondsLeft || 0;
+  const textOnlyStandard = text && !polish && tier === 'local';
+  const free = !!(textOnlyStandard && duration && freeMax && duration <= freeMax && duration <= freeLeft);
+  // Why a Standard subtitles-only job is not free (shown only when it is close to being free).
+  let notFreeReason = '';
+  if (textOnlyStandard && duration && !free) {
+    if (freeMax && duration > freeMax) notFreeReason = `longer than the ${mins(freeMax)}-minute free limit`;
+    else if (duration > freeLeft) notFreeReason = freeLeft > 0 ? `more than the ${mins(freeLeft)} free ${mins(freeLeft) === 1 ? 'minute' : 'minutes'} you have left today` : 'you have used all of today’s free minutes';
+  }
 
   useEffect(() => { if (file && info && !formatTouched) setFormat(defaultAudioFormat(file, info)); }, [file, info, formatTouched]);
   useEffect(() => () => abort.current?.abort(), []);
 
   const est = useMemo(() => {
     if (free) return 0;
+    if (!kind) return null;
     return estimateMicros(pricing, { kind, transcribeTier: tier, seconds: duration });
   }, [pricing, kind, tier, duration, free]);
   const breakdown = useMemo(() => {
@@ -87,10 +97,10 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   if (info && !probing && !duration) problems.push('We couldn’t read the length of this file. Please choose a normal audio or video file (MP3, WAV, M4A, MP4, MOV, WebM, MKV...).');
   if (info?.hasAudio === false) problems.push('This file has no audio track.');
   if (duration && maxJob && duration > maxJob) problems.push(`Files can be at most ${Math.floor(maxJob / 3600)} hours long.`);
-  if (free && duration && freeMax && duration > freeMax) problems.push(`Free transcription is for files up to ${Math.round(freeMax / 60)} minutes. Try a shorter file, or use Transcription in Studio for longer ones.`);
   if (!free && est != null && balance && est > balance.available_micros) problems.push(`This job costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
+  if (!kind) problems.push('Choose at least one: Clean & polish, or Subtitles & transcript.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
-  const canStart = file && info && !probing && !busy && problems.length === 0 && (free || est != null);
+  const canStart = kind && file && info && !probing && !busy && problems.length === 0 && (free || est != null);
 
   async function submit(e) {
     e.preventDefault();
@@ -110,12 +120,13 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
     const body = {
       kind,
       denoiseTier: wantsDenoise ? 'standard' : null,
-      transcribeTier: wantsText ? (free ? 'local' : tier) : null,
+      transcribeTier: wantsText ? tier : null,
       durationSeconds: duration || 1,
       free,
       options: {
         audio_format: format,
-        caption_formats: ['srt', 'vtt', 'txt', 'json'].filter((c) => caps[c]),
+        caption_formats: wantsText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c]) : [],
+        embed_subtitles: !!(wantsText && embed && info?.hasVideo),
         language: language || null,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         atten_lim_db: STRENGTHS.find((s) => s.id === strength).db,
@@ -130,7 +141,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
       });
       setResult(out);
       onSubmitted?.(out, { file, info, extracted: out.extracted });
-      refresh();
+      await refresh(); // the free minutes left (and the balance) change as soon as a job exists
       setFile(null);
       setInfo(null);
     } catch (err) {
@@ -147,21 +158,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   const pct = step?.frac != null ? Math.round(step.frac * 100) : null;
   return (
     <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
-      <h2 id="newjob-h" className="mb0">{free ? 'Transcribe a file for free' : 'Clean up or transcribe a file'}</h2>
-
-      {!free && (
-        <fieldset className="field" disabled={busy}>
-          <legend className="label">What do you want?</legend>
-          <div className="choice-cards">
-            {KINDS.map((k) => (
-              <label className="choice" key={k.id}>
-                <input type="radio" name="kind" value={k.id} checked={kind === k.id} onChange={() => setKind(k.id)} />
-                <span><b>{k.title}</b><small>{k.sub}</small></span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-      )}
+      <h2 id="newjob-h" className="mb0">Add a file</h2>
 
       {!file && !busy && <FileDrop onFile={choose} />}
       {probing && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Reading file…</p>}
@@ -176,6 +173,21 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
         </div>
       )}
       {info?.hasVideo && info.viaMediabunny && <p className="small muted mb0">This is a video, so only its sound is uploaded. That keeps it small and quick, and the picture never leaves your device.</p>}
+
+      <fieldset className="field" disabled={busy}>
+        <legend className="label">What should we do?</legend>
+        <div className="choice-cards">
+          <label className="choice">
+            <input type="checkbox" name="polish" checked={polish} onChange={(e) => setPolish(e.target.checked)} />
+            <span><b>Clean &amp; polish</b><small>Noise removed, voice evened out, loudness set</small></span>
+          </label>
+          <label className="choice">
+            <input type="checkbox" name="text" checked={text} onChange={(e) => setText(e.target.checked)} />
+            <span><b>Subtitles &amp; transcript</b><small>Captions (SRT, VTT) and a text transcript</small></span>
+          </label>
+        </div>
+        {polish && text && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
+      </fieldset>
 
       {file && info && (
         <>
@@ -204,13 +216,12 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
 
           {wantsText && (
             <div className="stack">
-              {!free && (
-                <fieldset className="field" disabled={busy}>
+              <fieldset className="field" disabled={busy}>
                   <legend className="label">How accurate?</legend>
                   <div className="choice-cards">
                     <label className="choice">
                       <input type="radio" name="tier" value="local" checked={tier === 'local'} onChange={() => setTier('local')} />
-                      <span><b>Standard</b><small>Good for most recordings, free daily allowance</small></span>
+                      <span><b>Standard</b><small>Good for most recordings{freeDay && !polish ? `, with ${mins(freeDay)} free minutes a day` : ''}</small></span>
                     </label>
                     <label className="choice">
                       <input type="radio" name="tier" value="premium" checked={tier === 'premium'} onChange={() => setTier('premium')} />
@@ -219,7 +230,6 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
                   </div>
                   {tier === 'premium' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
                 </fieldset>
-              )}
               <div className="form-grid">
                 <div className="field">
                   <label htmlFor="lang">Language</label>
@@ -228,9 +238,9 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
                   </select>
                 </div>
                 <fieldset className="field" disabled={busy}>
-                  <legend className="label">Caption and transcript formats</legend>
+                  <legend className="label">Formats</legend>
                   <div className="checks">
-                    {[['srt', 'SRT'], ['vtt', 'VTT'], ['txt', 'Text'], ['json', 'JSON']].map(([id, label]) => (
+                    {[['srt', 'SRT'], ['vtt', 'VTT'], ['txt', 'TXT']].map(([id, label]) => (
                       <label className="check" key={id}>
                         <input type="checkbox" checked={caps[id]} onChange={(e) => setCaps({ ...caps, [id]: e.target.checked })} />
                         <span>{label}</span>
@@ -239,16 +249,27 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
                   </div>
                 </fieldset>
               </div>
+              {info?.hasVideo && (
+                <label className="check">
+                  <input type="checkbox" name="embed" checked={embed} onChange={(e) => setEmbed(e.target.checked)} disabled={busy} />
+                  <span>Embed the subtitles in the video{embed ? ' (your whole video is uploaded, so it takes longer)' : ''}</span>
+                </label>
+              )}
             </div>
           )}
 
-          {!free && duration && est != null && (
+          {!free && kind && duration && est != null && (
             <p className="mb0" data-testid="estimate">
               <b>Estimated cost: {money(est)}</b>{' '}
-              <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean ${money(breakdown[0])} + transcription ${money(breakdown[1])})` : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
+              <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean & polish ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
             </p>
           )}
-          {free && <p className="mb0 muted small">This comes out of your free minutes for today{pricing?.free ? ` (${Math.round(pricing.free.transcribeSecondsPerDay / 60)} a day)` : ''}. Longer files and Extra accurate are in <Link to="/app">Studio</Link>.</p>}
+          {free && (
+            <p className="mb0" data-testid="free-note">
+              <b>Free: uses {mins(duration)} of your {Math.floor(freeLeft / 60)} free minutes left today</b>
+            </p>
+          )}
+          {notFreeReason && <p className="mb0 muted small" data-testid="not-free-note">This one isn’t free because it’s {notFreeReason}, so it’s charged at the usual rate.</p>}
           {problems.map((p) => <div key={p} className="banner banner-warn" role="alert">{p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}</div>)}
         </>
       )}
@@ -286,7 +307,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
 
       <div className="row">
         <button type="submit" className="btn btn-primary btn-lg" disabled={!canStart}>
-          {free ? 'Start free transcription' : est ? `Start job (${money(est)})` : 'Start job'}
+          {free ? 'Start (free)' : est ? `Start job (${money(est)})` : 'Start job'}
         </button>
       </div>
     </form>
