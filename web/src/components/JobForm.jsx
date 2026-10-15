@@ -14,9 +14,9 @@ const STRENGTHS = [
 ];
 
 const KINDS = [
-  { id: 'denoise', title: 'Studio clean', sub: 'Remove noise and level the voice' },
+  { id: 'denoise', title: 'Studio clean', sub: 'Takes out the noise and evens out the voice' },
   { id: 'transcribe', title: 'Transcription', sub: 'Text and subtitles' },
-  { id: 'denoise_transcribe', title: 'Both', sub: 'Clean first, then transcribe the clean audio' },
+  { id: 'denoise_transcribe', title: 'Both', sub: 'Clean it first, then write it up from the clean version' },
 ];
 
 const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
@@ -39,7 +39,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   const [info, setInfo] = useState(null);
   const [probing, setProbing] = useState(false);
   const [kind, setKind] = useState(free ? 'transcribe' : 'denoise');
-  const [tier, setTier] = useState('local'); // transcription: local = standard, premium
+  const [tier, setTier] = useState('local'); // transcription: 'local' = Standard, 'premium' = Extra accurate (ids stay internal)
   const [format, setFormat] = useState('wav');
   const [formatTouched, setFormatTouched] = useState(false);
   const [loudness, setLoudness] = useState('-16');
@@ -51,6 +51,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
 
   const wantsDenoise = kind === 'denoise' || kind === 'denoise_transcribe';
@@ -83,11 +84,11 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   }
 
   const problems = [];
-  if (info && !probing && !duration) problems.push('We could not read the length of this file. Please choose a normal audio or video file (MP3, WAV, M4A, MP4, MOV, WebM, MKV...).');
+  if (info && !probing && !duration) problems.push('We couldn’t read the length of this file. Please choose a normal audio or video file (MP3, WAV, M4A, MP4, MOV, WebM, MKV...).');
   if (info?.hasAudio === false) problems.push('This file has no audio track.');
   if (duration && maxJob && duration > maxJob) problems.push(`Files can be at most ${Math.floor(maxJob / 3600)} hours long.`);
-  if (free && duration && freeMax && duration > freeMax) problems.push(`Free transcription is limited to ${Math.round(freeMax / 60)} minutes per file. Use a shorter file, or paid transcription in Studio.`);
-  if (!free && est != null && balance && est > balance.available_micros) problems.push(`This job costs about ${money(est)} but your available balance is ${balanceMoney(balance.available_micros)}.`);
+  if (free && duration && freeMax && duration > freeMax) problems.push(`Free transcription is for files up to ${Math.round(freeMax / 60)} minutes. Try a shorter file, or use Transcription in Studio for longer ones.`);
+  if (!free && est != null && balance && est > balance.available_micros) problems.push(`This job costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
   const canStart = file && info && !probing && !busy && problems.length === 0 && (free || est != null);
 
@@ -95,11 +96,12 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
     e.preventDefault();
     if (!canStart) return;
     if (!free && !(await ensureTos())) {
-      setError('Please accept the Terms of Service to continue.');
+      setError('Please accept the Terms of Service first, then we can get going.');
       return;
     }
     setBusy(true);
     setError('');
+    setErrorKind('');
     setResult(null);
     setStep({ phase: 'create', frac: 0 });
     setCompressedInfo(null);
@@ -132,7 +134,10 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
       setFile(null);
       setInfo(null);
     } catch (err) {
-      if (err?.name !== 'AbortError') setError(err.detail || err.message || 'Could not start the job.');
+      if (err?.name !== 'AbortError') {
+        setError(err.detail || err.message || 'Could not start the job.');
+        setErrorKind(err?.status === 507 ? 'storage' : '');
+      }
     } finally {
       setBusy(false);
       setStep(null);
@@ -142,7 +147,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
   const pct = step?.frac != null ? Math.round(step.frac * 100) : null;
   return (
     <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
-      <h2 id="newjob-h" className="mb0">{free ? 'Transcribe a file for free' : 'New job'}</h2>
+      <h2 id="newjob-h" className="mb0">{free ? 'Transcribe a file for free' : 'Clean up or transcribe a file'}</h2>
 
       {!free && (
         <fieldset className="field" disabled={busy}>
@@ -170,7 +175,7 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
           {!busy && <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setFile(null); setInfo(null); }}>Remove</button>}
         </div>
       )}
-      {info?.hasVideo && info.viaMediabunny && <p className="small muted mb0">This is a video: only its audio track will be uploaded, which keeps the upload small. Your video never leaves this device.</p>}
+      {info?.hasVideo && info.viaMediabunny && <p className="small muted mb0">This is a video, so only its sound is uploaded. That keeps it small and quick, and the picture never leaves your device.</p>}
 
       {file && info && (
         <>
@@ -201,17 +206,18 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
             <div className="stack">
               {!free && (
                 <fieldset className="field" disabled={busy}>
-                  <legend className="label">Transcription quality</legend>
+                  <legend className="label">How accurate?</legend>
                   <div className="choice-cards">
                     <label className="choice">
                       <input type="radio" name="tier" value="local" checked={tier === 'local'} onChange={() => setTier('local')} />
-                      <span><b>Standard</b><small>On-prem model. Private, fast, affordable.</small></span>
+                      <span><b>Standard</b><small>Good for most recordings, free daily allowance</small></span>
                     </label>
                     <label className="choice">
                       <input type="radio" name="tier" value="premium" checked={tier === 'premium'} onChange={() => setTier('premium')} />
-                      <span><b>Premium</b><small>Higher accuracy. Audio is sent to OpenAI as our sub-processor.</small></span>
+                      <span><b>Extra accurate</b><small>Best for accents, noisy rooms and specialist words</small></span>
                     </label>
                   </div>
+                  {tier === 'premium' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
                 </fieldset>
               )}
               <div className="form-grid">
@@ -239,10 +245,10 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
           {!free && duration && est != null && (
             <p className="mb0" data-testid="estimate">
               <b>Estimated cost: {money(est)}</b>{' '}
-              <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean ${money(breakdown[0])} + transcription ${money(breakdown[1])})` : ''}. You are only charged for what is processed. {BILLING_NOTE}</span>
+              <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean ${money(breakdown[0])} + transcription ${money(breakdown[1])})` : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
             </p>
           )}
-          {free && <p className="mb0 muted small">Free: counts against your daily allowance{pricing?.free ? ` of ${Math.round(pricing.free.transcribeSecondsPerDay / 60)} minutes` : ''}. Longer files and the premium model are in <Link to="/app">Studio</Link>.</p>}
+          {free && <p className="mb0 muted small">This comes out of your free minutes for today{pricing?.free ? ` (${Math.round(pricing.free.transcribeSecondsPerDay / 60)} a day)` : ''}. Longer files and Extra accurate are in <Link to="/app">Studio</Link>.</p>}
           {problems.map((p) => <div key={p} className="banner banner-warn" role="alert">{p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}</div>)}
         </>
       )}
@@ -251,9 +257,9 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
         <div className="stack" data-testid="upload-progress">
           <div className="row-between">
             <strong>
-              {step.phase === 'extract' && 'Extracting the audio from your video…'}
-              {step.phase === 'compress' && 'Compressing for upload…'}
-              {step.phase === 'create' && 'Creating job…'}
+              {step.phase === 'extract' && 'Pulling the sound out of your video…'}
+              {step.phase === 'compress' && 'Making it smaller for upload…'}
+              {step.phase === 'create' && 'Getting things ready…'}
               {step.phase === 'upload' && 'Uploading…'}
             </strong>
             <span className="muted small">
@@ -267,10 +273,14 @@ export default function JobForm({ variant = 'studio', onSubmitted }) {
         </div>
       )}
 
-      {error && <div className="banner banner-error" role="alert">{error}</div>}
+      {error && (
+        <div className={errorKind === 'storage' ? 'banner banner-warn' : 'banner banner-error'} role="alert" data-testid="job-error">
+          {error}
+        </div>
+      )}
       {result && !busy && (
         <div className="banner banner-success" role="status" data-testid="submitted">
-          Job started.{result.extracted ? ` Only the audio was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''}{result.compressed ? ` ${compressedNote(result.compressed)}.` : ''} Follow it below.
+          Got it, we’re on it.{result.extracted ? ` Only the sound was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''}{result.compressed ? ` ${compressedNote(result.compressed)}.` : ''} You can follow along below.
         </div>
       )}
 

@@ -396,3 +396,21 @@ blockquote { margin: 0 0 1em; padding: 4px 16px; border-left: 4px solid var(--br
 .dl-card .btn { align-self: flex-start; }
 .dl-card .spacer { flex: 1; }
 .desk-scope { margin-top: 24px; }
+
+/* ---------- Price list (two columns, wraps on a phone instead of scrolling sideways) ---------- */
+.price-wrap { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; }
+.price-table th, .price-table td { vertical-align: top; }
+.price-table tbody th[scope="row"] { font-weight: 400; text-align: left; width: 100%; overflow-wrap: anywhere; }
+.price-table tr.group th { padding-block: 8px; }
+.price-table .svc { display: block; font-weight: 650; }
+.price-table .desc { display: block; margin-top: 2px; }
+.price-table td.num { text-align: right; }
+.price-main { display: block; font-weight: 700; }
+.price-sub { display: block; }
+.free-note { color: var(--success); }
+@media (max-width: 480px) { .price-table th, .price-table td { padding: 10px 12px; } }
+
+/* ---------- Server on a short break / queue ---------- */
+.maintenance { max-width: 640px; margin: 24px auto; padding: 36px 24px; }
+.offline-banner a { color: inherit; font-weight: 600; }
+.queue-note { display: flex; gap: 8px; align-items: center; font-weight: 600; }

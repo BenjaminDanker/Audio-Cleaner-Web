@@ -20,7 +20,7 @@ function peak(f32) {
 
 /**
  * Folds one `{"type":"caption", text, final, id?}` event from the server into the list of caption lines.
- * - Premium captions (OpenAI) stream partial captions with an `id`, then a final one with the same `id`: the line with
+ * - Extra accurate (premium) captions stream partial captions with an `id`, then a final one with the same `id`: the line with
  *   that id is updated in place (partial -> final), so text never jumps or duplicates.
  * - Standard captions have no `id`: there is at most one id-less partial at the end of the list, replaced by the next
  *   partial and dropped when the id-less final arrives (which is appended).
@@ -62,7 +62,7 @@ export function applyCaption(items, ev, max = 200) {
 }
 
 /**
- * @param {{denoise: boolean, captions: 'local'|'premium'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
+ * @param {{denoise: 'light'|'low_latency'|null (the chosen noise-removal tier id), captions: 'local'|'premium'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
  *   onEvent: (ev:object)=>void, onStats:(s:object)=>void}} opts
  *   Server events reach `onEvent` as parsed JSON ('ready', 'caption', 'warning', 'stopped', 'error', plus a local 'closed');
  *   feed 'caption' events to applyCaption().
@@ -116,7 +116,7 @@ export async function startLive(opts) {
       audio: { channelCount: 1, sampleRate: 48000, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
     ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
-    if (ctx.sampleRate !== 48000) throw new Error('Your browser cannot run audio at 48 kHz, which live processing needs.');
+    if (ctx.sampleRate !== 48000) throw new Error('Your browser can\'t run audio at 48 kHz, which live needs.');
     await ctx.audioWorklet.addModule(captureUrl);
     await ctx.audioWorklet.addModule(playbackUrl);
     await ctx.resume();
@@ -136,15 +136,15 @@ export async function startLive(opts) {
 
     await new Promise((resolve, reject) => {
       const fail = (msg) => reject(new Error(msg));
-      const timer = setTimeout(() => fail('The server did not answer in time.'), 15000);
+      const timer = setTimeout(() => fail('Live didn\'t answer in time.'), 15000);
       ws.onopen = () => {
         ws.send(JSON.stringify({
-          type: 'start', version: 1, denoise: opts.denoise ? 'light' : null, captions: opts.captions || null,
+          type: 'start', version: 1, denoise: opts.denoise || null, captions: opts.captions || null,
           language: opts.language || null, sampleRate: 48000, attenLimDb: opts.attenDb, client: 'acw-web-demo/1.0',
         }));
       };
-      ws.onerror = () => { clearTimeout(timer); fail('Could not connect to the live service.'); };
-      ws.onclose = (e) => { clearTimeout(timer); fail(e.code === 1008 ? 'The live service refused the connection. Are you signed in?' : 'The connection closed before it started.'); };
+      ws.onerror = () => { clearTimeout(timer); fail('Couldn\'t connect to live.'); };
+      ws.onclose = (e) => { clearTimeout(timer); fail(e.code === 1008 ? 'Live said no to the connection. Are you signed in?' : 'The connection closed before live could start.'); };
       ws.onmessage = (e) => {
         if (typeof e.data !== 'string') return;
         const m = JSON.parse(e.data);
@@ -155,15 +155,16 @@ export async function startLive(opts) {
           onEvent(m);
         } else if (m.type === 'error') {
           clearTimeout(timer);
-          const err = new Error(m.message || 'The live service reported an error.');
-          err.code = m.code;
+          const err = new Error(m.message || 'Live ran into a problem.');
+          err.code = m.code; // e.g. 'full', 'bad_config', 'insufficient_funds', 'tos'
+          if (Array.isArray(m.available)) err.available = m.available; // with 'full': what it can still take, e.g. [{denoise:'light'},{captions:'premium'}]
           reject(err);
         }
       };
     });
 
     // From here on: steady-state handlers.
-    ws.onerror = () => onEvent({ type: 'error', code: 'socket', message: 'The connection to the live service failed.' });
+    ws.onerror = () => onEvent({ type: 'error', code: 'socket', message: 'The connection to live dropped.' });
     ws.onclose = () => {
       cleanup();
       onEvent({ type: 'closed', clean: stopping });

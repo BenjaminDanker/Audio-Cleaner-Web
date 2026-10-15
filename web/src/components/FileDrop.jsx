@@ -4,7 +4,7 @@ import { IconUpload } from './Icons.jsx';
 const ACCEPT = 'audio/*,video/*,.mp3,.wav,.flac,.ogg,.oga,.opus,.m4a,.aac,.mp4,.m4v,.mov,.webm,.mkv,.ts,.aiff,.aif,.caf,.wma,.avi';
 
 /** Drag-and-drop / click-to-choose file picker. */
-export default function FileDrop({ onFile, disabled, title = 'Drop an audio or video file here', hint = 'or click to choose a file. MP3, WAV, FLAC, M4A, MP4, MOV, WebM, MKV and more.' }) {
+export default function FileDrop({ onFile, disabled, title = 'Drop an audio or video file here', hint = 'or click to pick one. MP3, WAV, FLAC, M4A, MP4, MOV, WebM, MKV and more.' }) {
   const [over, setOver] = useState(false);
   const input = useRef(null);
   const pick = (files) => {

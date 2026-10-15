@@ -3,7 +3,7 @@ import { api, outputUrl } from '../api.js';
 import { saveBlob } from '../download.js';
 import { bytes, clock, dateTime, extension, human, money, stem } from '../format.js';
 import { useNow } from '../hooks.js';
-import { ACTIVE, kindLabel, statusLabel } from '../jobs.js';
+import { ACTIVE, kindLabel, queueText, statusLabel } from '../jobs.js';
 import { IconDownload } from './Icons.jsx';
 
 const OUT_LABEL = { audio: 'Cleaned audio', video: 'Video', captions: 'Captions', transcript: 'Transcript', segments: 'Segments' };
@@ -19,8 +19,8 @@ function Countdown({ expiresAt }) {
   const now = useNow(30_000);
   if (!expiresAt) return null;
   const left = expiresAt - now / 1000;
-  if (left <= 0) return <span className="muted small">Files are being deleted.</span>;
-  return <span className="muted small" data-testid="expiry">Files are deleted in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
+  if (left <= 0) return <span className="muted small">Your files are being cleared away.</span>;
+  return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
 }
 
 /** Add the cleaned audio back into the original video, locally. */
@@ -38,14 +38,14 @@ function RemuxPanel({ job, local }) {
     setBusy(true); setErr(''); setNote(''); setProg(0);
     try {
       const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
-      if (!res.ok) throw new Error('Could not download the cleaned audio.');
+      if (!res.ok) throw new Error('Couldn’t download the cleaned audio. Please try again.');
       const audioFile = await res.blob();
       const { remuxWithCleanAudio } = await import('../media/remux.js');
       const out = await remuxWithCleanAudio({ videoFile, audioFile, onProgress: setProg });
       saveBlob(out.blob, `${stem(videoFile.name)}-cleaned${out.ext}`);
       if (out.note) setNote(out.note);
     } catch (e) {
-      setErr(e.message || 'Could not build the video.');
+      setErr(e.message || 'Couldn’t build the video. Please try again.');
     } finally {
       setBusy(false);
     }
@@ -60,7 +60,7 @@ function RemuxPanel({ job, local }) {
           </button>
         ) : (
           <>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => picker.current?.click()}>Combine with your original video…</button>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => picker.current?.click()}>Put it back into your video…</button>
             <input
               ref={picker} type="file" accept="video/*,.mkv,.mov,.mp4,.webm" className="sr-only" tabIndex={-1}
               aria-label="Choose the original video"
@@ -68,7 +68,7 @@ function RemuxPanel({ job, local }) {
             />
           </>
         )}
-        <span className="small muted">Done on your device; the video is not uploaded.</span>
+        <span className="small muted">This happens on your device; the video isn’t uploaded.</span>
       </div>
       {note && <p className="small banner banner-info mb0">{note}</p>}
       {err && <p className="small banner banner-error mb0" role="alert">{err}</p>}
@@ -114,15 +114,20 @@ export default function JobCard({ job, upload, local, onChanged }) {
           <p className="small muted mb0">Uploading {bytes(upload.loaded)} of {bytes(upload.total)}</p>
         </div>
       )}
-      {(job.status === 'queued' || job.status === 'running' || job.status === 'cloud_asr') && (
+      {job.status === 'queued' && (
+        <p className="queue-note mb0" role="status" data-testid="queue-note">
+          <span className="spinner" aria-hidden="true" /> {queueText(job) || 'In line, you’re up soon'}
+        </p>
+      )}
+      {(job.status === 'running' || job.status === 'cloud_asr') && (
         <div>
           <progress className="bar" max={100} value={pct} aria-label={`Job progress, ${job.stage || statusLabel(job.status)}`} />
           <p className="small muted mb0" role="status">{job.stage || statusLabel(job.status)}{pct ? ` · ${Math.round(pct)}%` : ''}</p>
         </div>
       )}
 
-      {job.status === 'failed' && <p className="banner banner-error mb0" role="alert">{job.error || 'The job failed.'} You were not charged.</p>}
-      {job.status === 'canceled' && <p className="muted mb0">{job.error && job.error !== 'Canceled.' ? job.error : 'Canceled.'} You were not charged.</p>}
+      {job.status === 'failed' && <p className="banner banner-error mb0" role="alert">{job.error || 'This one didn’t work out.'} You weren’t charged.</p>}
+      {job.status === 'canceled' && <p className="muted mb0">{job.error && job.error !== 'Canceled.' ? job.error : 'Canceled.'} You weren’t charged.</p>}
 
       {job.status === 'done' && (
         <>
@@ -137,7 +142,7 @@ export default function JobCard({ job, upload, local, onChanged }) {
             ))}
           </ul>
           {showRemux && <RemuxPanel job={job} local={local} />}
-          {hasVideoOut && <p className="small muted mb0">The video file above has the cleaned audio already.</p>}
+          {hasVideoOut && <p className="small muted mb0">The video file above already has the clean sound in it.</p>}
           <div className="row-between">
             <span className="small muted">Cost <b>{money(job.costMicros || 0)}</b> · <Countdown expiresAt={job.expiresAt} /></span>
             <button type="button" className="btn btn-danger-outline btn-sm" disabled={busy} onClick={() => act(() => api(`jobs/${job.id}`, { method: 'DELETE' }))}>Delete now</button>

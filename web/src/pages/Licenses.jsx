@@ -27,7 +27,7 @@ export default function Licenses() {
                     <td>{c.what}</td>
                     <td>
                       <ul className="plain">
-                        {c.texts.map((t) => <li key={t.file}><a href={`${BASE}licenses/${t.file}`} target="_blank" rel="noopener noreferrer">{t.label}</a></li>)}
+                        {c.texts.map((t) => <li key={t.file || t.href}><a href={t.href || `${BASE}licenses/${t.file}`} target="_blank" rel="noopener noreferrer">{t.label}</a></li>)}
                       </ul>
                     </td>
                   </tr>

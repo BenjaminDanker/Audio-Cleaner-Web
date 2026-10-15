@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
-import { apiOffline } from '../api.js';
+import { apiOffline, checkHealth } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney } from '../format.js';
 import { loadPricing } from '../hooks.js';
@@ -37,10 +37,10 @@ function AccountMenu() {
       </summary>
       <div className="menu-panel">
         <div className="menu-email">{user.email}</div>
-        <Link to="/app" onClick={close}>Dashboard</Link>
+        <Link to="/app" onClick={close}>Studio</Link>
         <Link to="/app/billing" onClick={close}>Billing</Link>
-        <Link to="/app/live" onClick={close}>Live &amp; API keys</Link>
-        <Link to="/app/account" onClick={close}>Account &amp; data</Link>
+        <Link to="/app/live" onClick={close}>Live &amp; keys</Link>
+        <Link to="/app/account" onClick={close}>Your account</Link>
         <Link to="/terms" onClick={close}>Terms</Link>
         <button type="button" onClick={() => { close(); logout(); }}>Sign out</button>
       </div>
@@ -85,23 +85,36 @@ function Header() {
   );
 }
 
-/** Site-wide notice while the paid backend is unreachable. The free browser tool never depends on it. */
-function OfflineBanner() {
-  const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
+/**
+ * Re-checks /api/health every 30 s while the server is on its short break, and picks everything up again (who is signed
+ * in, the price list) as soon as it answers. Mounted once, in the Layout, so the banner and the "right back" panel
+ * share one timer.
+ */
+function useRecovery(offline) {
   const { refresh } = useAuth();
-  const [dismissed, setDismissed] = useState(false);
-  useEffect(() => { if (!offline) setDismissed(false); }, [offline]); // a later outage shows the notice again
   useEffect(() => {
     if (!offline) return undefined;
-    // Re-check both watched endpoints; the banner clears itself as soon as they answer again.
-    const id = setInterval(() => { refresh(); loadPricing().catch(() => {}); }, 30000);
+    const id = setInterval(async () => {
+      if (await checkHealth()) {
+        refresh();
+        loadPricing().catch(() => {});
+      }
+    }, 30000);
     return () => clearInterval(id);
   }, [offline, refresh]);
+}
+
+/** Site-wide notice while the paid side is unreachable. The free browser tool never depends on it. */
+function OfflineBanner() {
+  const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => { if (!offline) setDismissed(false); }, [offline]); // a later break shows the notice again
+  useRecovery(offline);
   if (!offline || dismissed) return null;
   return (
     <div className="offline-banner" role="status" data-testid="api-offline">
       <div className="container row-between">
-        <span>Paid services are temporarily offline. The free browser tool still works.</span>
+        <span>{SITE.name} is taking a short break. <Link to="/free">Free tools in your browser</Link> still work.</span>
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDismissed(true)}>Dismiss</button>
       </div>
     </div>
@@ -116,7 +129,7 @@ function Footer() {
       <div className="container footer-grid">
         <div>
           <Link to="/" className="brand"><Logo size={26} /><span>{SITE.name}</span></Link>
-          <p className="muted small mt0">Clean voice recordings in your browser, in the studio, or live. Your files stay yours.</p>
+          <p className="muted small mt0">A small tool for cleaning up voices. Your files stay yours.</p>
           {email && <p className="muted small">Contact: <a href={`mailto:${email}`}>{email}</a></p>}
           {legalName && <p className="muted small">&copy; {new Date().getFullYear()} {legalName}</p>}
         </div>

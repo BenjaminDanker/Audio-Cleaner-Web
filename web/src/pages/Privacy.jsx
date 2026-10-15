@@ -28,7 +28,7 @@ export default function Privacy() {
       <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{email && <> Contact: <a href={`mailto:${email}`}>{email}</a>.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
 
       <h2 id="browser">2. The free browser tool</h2>
-      <p>The free tool at <Link to="/free">/free</Link> processes your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise-reduction model and the public price list, none of which contain your data.</p>
+      <p>The free tool at <Link to="/free">/free</Link> processes your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover itself and the public price list, none of which contain your data.</p>
 
       <h2 id="collect">3. What we collect</h2>
       <ul>
@@ -44,15 +44,14 @@ export default function Privacy() {
         <li>Uploaded input files are <b>deleted when processing finishes</b> (or if the job fails or is canceled).</li>
         <li>Results (cleaned audio, captions, transcripts) are available for download for <b>24 hours</b> and then deleted. You can delete them sooner from the Studio page.</li>
         <li>We do not listen to your content, and we do <b>not use your audio or transcripts for training</b> models.</li>
-        <li><b>Standard</b> transcription runs on our own servers. <b>Premium</b> transcription sends the audio to <b>OpenAI</b>, our sub-processor, which returns the text. Only choose premium if you are comfortable with that.</li>
+        <li><b>Standard</b> transcription is done by us and the audio goes no further. <b>Extra accurate</b> transcription sends the audio to a third-party speech-recognition provider (our sub-processor), which returns the text. It is used only for extra accurate transcription and extra accurate live captions, and only when you choose them. It may process audio in the United States under standard contractual clauses, and it does not use the audio for training. Only choose Extra accurate if you are comfortable with that.</li>
       </ul>
 
       <h2 id="live">5. Live audio</h2>
-      <p>Live audio is streamed to our servers, processed in memory and returned to you. It is <b>not stored</b>. Captions are delivered to you as they are produced and are not saved. If you choose premium live captions, the audio is sent to OpenAI for that purpose.</p>
+      <p>Live audio is streamed to our servers, processed in memory and returned to you. It is <b>not stored</b>. Captions are delivered to you as they are produced and are not saved. If you choose extra accurate live captions, the audio is sent to the speech-recognition provider described in section 7 for that purpose. Standard live captions (English only) are produced by us and the audio goes no further.</p>
 
       <h2 id="desktop">6. The desktop app</h2>
-      <p>The free desktop app for Windows and macOS (<Link to="/desktop">/desktop</Link>) processes your files on your own computer. They are <b>never uploaded</b> and no server call carries your content. The app stores its settings and a local log on your computer; we do not receive them. We use <b>no analytics and no telemetry</b>.</p>
-      <p>Once a day the app fetches one small public file from our server to check whether an update is available. You can turn this check off in Settings. Like any web request, it reveals your IP address and the app version and operating system (in the user agent) to our server logs, which we keep as described under &ldquo;How long we keep things&rdquo; below.</p>
+      <p>The free desktop app for Windows and macOS (<Link to="/desktop">/desktop</Link>) works completely offline and processes your files on your own computer. They are <b>never uploaded</b> and no server call carries your content. The app does not contact us at all after you have installed it. It stores its settings and a local log on your computer; we do not receive them. We use <b>no analytics and no telemetry</b>.</p>
 
       <h2 id="subprocessors">7. Sub-processors and recipients</h2>
       <div className="table-wrap">
@@ -60,7 +59,7 @@ export default function Privacy() {
           <thead><tr><th>Who</th><th>Why</th><th>What they receive</th></tr></thead>
           <tbody>
             <tr><td>Stripe</td><td>Payments, saved cards, receipts, refunds</td><td>Email, payment details, amounts</td></tr>
-            <tr><td>OpenAI</td><td>Premium transcription and premium live captions only</td><td>The audio you choose to send</td></tr>
+            <tr><td>A third-party speech-recognition provider</td><td>Extra accurate transcription and extra accurate live captions only, and only when you choose them</td><td>The audio you choose to send. It may be processed in the United States under standard contractual clauses and is not used for training</td></tr>
             <tr><td>Google</td><td>Optional sign-in</td><td>Their own sign-in data; we receive your verified email and name</td></tr>
             <tr><td>Cloudflare (Turnstile)</td><td>Bot check on the email sign-in form, when enabled</td><td>A challenge token and your IP address</td></tr>
             <tr><td>Email delivery provider</td><td>Sign-in links</td><td>Your email address and the message</td></tr>
@@ -71,7 +70,7 @@ export default function Privacy() {
       <p>We do not sell personal data and do not share it for advertising.</p>
 
       <h2 id="cookies">8. Cookies and tracking</h2>
-      <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie during GitHub/Google sign-in). We use <b>no analytics, advertising trackers, third-party fonts, CDNs or social widgets</b>. The only third-party script is Cloudflare Turnstile, loaded only on the sign-in page when enabled.</p>
+      <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie during Google sign-in). We use <b>no analytics, advertising trackers, third-party fonts, CDNs or social widgets</b>. The only third-party script is Cloudflare Turnstile, loaded only on the sign-in page when enabled.</p>
 
       <h2 id="retention">9. How long we keep things</h2>
       <ul>

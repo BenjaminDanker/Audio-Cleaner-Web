@@ -42,8 +42,8 @@ export default function Terms() {
       <h2 id="services">3. The services</h2>
       <ul>
         <li><b>Free browser denoise.</b> Runs locally in your browser. Your audio is not uploaded. Provided as is, without charge or warranty.</li>
-        <li><b>Studio clean.</b> Server-side noise removal, loudness normalisation and related processing of files you upload.</li>
-        <li><b>Transcription and subtitles.</b> Standard (our own model, on our servers) or premium (sent to a third-party AI provider, see Privacy Policy). A daily free allowance of standard transcription may be offered; its size can change.</li>
+        <li><b>Studio clean.</b> Noise removal, loudness normalisation and related processing of files you upload.</li>
+        <li><b>Transcription and subtitles.</b> Standard (done by us), or Extra accurate (the audio is sent to a third-party speech-recognition provider, see the Privacy Policy). A daily free allowance of Standard transcription may be offered; its size can change.</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed.</li>
       </ul>
       <p>Prices are shown on the pricing page and before you start a job. We may change prices for future use; changes never apply to a job or live session that has already started.</p>
@@ -52,7 +52,7 @@ export default function Terms() {
       <ul>
         <li><b>How it works.</b> You buy credit in US dollars through Stripe (minimum top-up $10, maximum $500 at a time). Using the Service deducts credit at the posted rates. While a job or live session runs we reserve (&ldquo;hold&rdquo;) the estimated cost and release whatever is not used. Jobs that fail or are canceled before they start are not charged.</li>
         <li><b>No cash value.</b> Credit is a prepayment for the Service only. It is not money held on your behalf, not a deposit account, not a gift card or stored-value card, bears no interest, is not transferable, and cannot be exchanged for cash except as described below or where the law requires.</li>
-        <li><b>Refunds.</b> You may ask for the unused part of a top-up to be refunded to the original payment method within 14 days of that payment (self-service on the Billing page). After 14 days credit is non-refundable, except where applicable law gives you a right to a refund. Credit you have already used is not refundable.</li>
+        <li><b>Refunds.</b> You may ask for the unused part of a top-up to be refunded to the original payment method within 14 days of that payment (self-service on the Billing page). The first refund of a payment returns the unused credit minus the fee the card processor charged us for that payment (about 2.9% + $0.30 of the payment), because the processor does not give that fee back. The Billing page shows you the estimated amount before you confirm. After 14 days credit is non-refundable, except where applicable law gives you a right to a refund. Credit you have already used is not refundable.</li>
         <li><b>Forfeiture.</b> If you dispute a legitimate charge with your bank (chargeback), or we find fraud, payment abuse or a serious breach of these terms, we may cancel any remaining credit, suspend the account, and recover amounts owed.</li>
         <li><b>Taxes.</b> Prices may be exclusive of VAT, sales tax or similar taxes, which are added where required.</li>
         <li><b>Payment processing.</b> Payments are handled by Stripe. We do not see or store your full card number.</li>
@@ -87,7 +87,7 @@ export default function Terms() {
         <li>The free browser tool processes files locally; nothing is uploaded.</li>
         <li>Files you upload are deleted when processing finishes. Results are deleted 24 hours after they are ready (or when you delete them).</li>
         <li>Live audio is processed in memory and is not stored.</li>
-        <li>Premium transcription sends the audio to OpenAI as our sub-processor. Standard transcription does not leave our servers.</li>
+        <li>Extra accurate transcription and extra accurate live captions send the audio to a third-party speech-recognition provider, our sub-processor, only when you choose them. Standard transcription and standard live captions are done by us and the audio goes no further.</li>
         <li>Payments are processed by Stripe.</li>
       </ul>
       <p>Download your results promptly: we cannot recover deleted files.</p>

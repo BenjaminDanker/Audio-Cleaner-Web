@@ -1,7 +1,10 @@
-// DeepFilterNet3 (WebAssembly) worker. One instance denoises one audio channel.
+// Noise-remover worker. One instance cleans one audio channel.
 //
 // Protocol (main -> worker):
-//   { type: 'init', dfnBase, attenDb }              -> { type: 'ready' } | { type: 'error', message }
+//   { type: 'init', dfnBase, attenDb, version, module, model }
+//        module: the compiled WebAssembly.Module, model: the model bytes (both from the page's one shared download, so
+//        the worker fetches nothing but the small df.js glue module, which is in the HTTP cache by then; without them
+//        the worker falls back to fetching everything itself)  -> { type: 'ready' } | { type: 'error', message }
 //   { type: 'process', seq, samples: Float32Array }  -> { type: 'out', seq, samples }   (arbitrary length, 48 kHz mono)
 //   { type: 'flush', seq }                           -> { type: 'out', seq, samples, final: true }
 //   { type: 'atten', db }
@@ -19,20 +22,23 @@ let totalIn = 0;
 let producedOut = 0; // model output samples produced so far (including the delay)
 let emitted = 0; // samples handed back (after dropping the delay)
 
-async function init({ dfnBase, attenDb, version }) {
+async function init({ dfnBase, attenDb, version, module, model }) {
   const v = version ? `?v=${version}` : '';
   mod = await import(/* @vite-ignore */ `${dfnBase}df.js${v}`);
-  await mod.default({ module_or_path: `${dfnBase}df_bg.wasm${v}` });
-  const res = await fetch(`${dfnBase}DeepFilterNet3_onnx.tar.gz${v}`);
-  if (!res.ok) throw new Error(`Could not load the noise-reduction model (${res.status}).`);
-  let model = new Uint8Array(await res.arrayBuffer());
-  // Some static servers (and the Vite dev server) label *.tar.gz as Content-Encoding: gzip, so the browser hands us
-  // the already-decompressed tar. The model loader wants the gzip, so compress it again in that case.
-  if (!(model[0] === 0x1f && model[1] === 0x8b)) {
-    const gz = new Blob([model]).stream().pipeThrough(new CompressionStream('gzip'));
-    model = new Uint8Array(await new Response(gz).arrayBuffer());
+  await mod.default({ module_or_path: module || `${dfnBase}df_bg.wasm${v}` });
+  let bytes = model;
+  if (!bytes) {
+    const res = await fetch(`${dfnBase}DeepFilterNet3_onnx.tar.gz${v}`);
+    if (!res.ok) throw new Error(`Could not load the noise remover (${res.status}).`);
+    bytes = new Uint8Array(await res.arrayBuffer());
+    // Some static servers label *.tar.gz as Content-Encoding: gzip, so the browser hands us the decompressed tar; the
+    // model loader wants the gzip, so compress it again in that case.
+    if (!(bytes[0] === 0x1f && bytes[1] === 0x8b)) {
+      const gz = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
+      bytes = new Uint8Array(await new Response(gz).arrayBuffer());
+    }
   }
-  state = mod.df_create(model, attenDb);
+  state = mod.df_create(bytes, attenDb);
   if (mod.df_get_frame_length(state) !== HOP) throw new Error('Unexpected model frame size.');
 }
 

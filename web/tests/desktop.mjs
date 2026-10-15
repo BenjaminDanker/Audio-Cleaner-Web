@@ -135,7 +135,7 @@ await check('/desktop (built site): renders, "Coming soon", no download links, n
   await page.getByRole('heading', { name: 'System requirements' }).waitFor();
   await page.getByText('Windows 10 or Windows 11').waitFor();
   await page.getByText('macOS 11 (Big Sur) or newer').waitFor();
-  await page.getByRole('link', { name: /open-source licences and third-party notices/ }).waitFor();
+  if (await page.locator('main a[href$="/licenses"]').count()) throw new Error('/licenses must only be linked from the footer');
   if (logs.length) throw new Error(logs.join(' | '));
   return `${reqs.length} release request, cache-control: ${cc}`;
 }));
@@ -332,7 +332,8 @@ await check('privacy policy has a "The desktop app" section (and the table of co
   await page.waitForSelector('main h1');
   await page.getByRole('heading', { name: /The desktop app/ }).waitFor();
   const t = await page.locator('#desktop').evaluate((h) => { let s = h.textContent; for (let n = h.nextElementSibling; n && n.tagName !== 'H2'; n = n.nextElementSibling) s += ' ' + n.textContent; return s; });
-  for (const s of ['never uploaded', 'local log', 'once a day', 'IP address', 'no telemetry']) if (!t.toLowerCase().includes(s.toLowerCase())) throw new Error(`privacy text lacks "${s}"`);
+  for (const s of ['never uploaded', 'local log', 'offline', 'no telemetry']) if (!t.toLowerCase().includes(s.toLowerCase())) throw new Error(`privacy text lacks "${s}"`);
+  if (/update|once a day/i.test(t)) throw new Error('privacy text still mentions an update check');
   await page.locator('nav.toc a[href="#desktop"]').waitFor();
   return 'ok';
 }));

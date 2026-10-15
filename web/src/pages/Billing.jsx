@@ -16,6 +16,16 @@ function goStripe(url) {
 
 const REFUND_DAYS = 14;
 
+/** The card processor keeps about 2.9% + 30 cents of every payment; the first refund of a payment takes that off. */
+const cardFeeCents = (paymentCents) => Math.ceil(paymentCents * 0.029 + 30);
+
+/** What a refund of this payment should return to the card, as an estimate: unused credit minus the card fee (first refund only). */
+function refundEstimate(p, availableMicros) {
+  const unused = Math.max(0, Math.min(p.amount_cents - (p.refunded_cents || 0), Math.floor((availableMicros || 0) / 10000)));
+  const fee = (p.refunded_cents || 0) === 0 ? cardFeeCents(p.amount_cents) : 0;
+  return { unused, fee, back: Math.max(0, unused - fee) };
+}
+
 function dollarsToCents(text) {
   const n = Number(String(text).replace(/[^0-9.]/g, ''));
   return Number.isFinite(n) ? Math.round(n * 100) : NaN;
@@ -48,7 +58,7 @@ export default function Billing() {
     if (!c) return undefined;
     setParams({}, { replace: true });
     if (c === 'cancel') {
-      setBanner({ kind: 'info', text: 'Checkout was canceled. You have not been charged.' });
+      setBanner({ kind: 'info', text: 'No problem, checkout was canceled and you weren’t charged.' });
       return undefined;
     }
     if (c !== 'success') return undefined;
@@ -66,7 +76,7 @@ export default function Billing() {
         return;
       }
       if (tries >= 10) {
-        setBanner({ kind: 'warn', text: 'Your payment went through, but the balance has not updated yet. It can take a minute. Refresh this page shortly.' });
+        setBanner({ kind: 'warn', text: 'Your payment went through, but the balance hasn’t caught up yet. It can take a minute. Refresh this page in a bit.' });
         return;
       }
       setTimeout(tick, 2000);
@@ -81,7 +91,7 @@ export default function Billing() {
     <div className="container page stack-lg">
       <header>
         <h1 className="mb0">Billing</h1>
-        <p className="muted mb0">Prepaid credit. No subscription.</p>
+        <p className="muted mb0">Add credit, spend it as you go. No subscription.</p>
       </header>
 
       {banner && (
@@ -89,17 +99,17 @@ export default function Billing() {
           {banner.busy && <span className="spinner" aria-hidden="true" />} {banner.text}
         </div>
       )}
-      {unavailable && <div className="banner banner-warn" role="status" data-testid="payments-off">Payments are not available yet. You will be able to add credit here soon.</div>}
+      {unavailable && <div className="banner banner-warn" role="status" data-testid="payments-off">Payments aren’t switched on yet. You’ll be able to add credit here soon.</div>}
 
       <div className="grid grid-3">
         <section className="card" aria-labelledby="b1"><h2 id="b1" className="mb0 small muted">Available</h2><div className="big-number" data-testid="available">{balanceMoney(balance?.available_micros ?? 0)}</div></section>
-        <section className="card" aria-labelledby="b2"><h2 id="b2" className="mb0 small muted">On hold</h2><div className="big-number" data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</div><div className="muted small">Reserved for jobs and live sessions in progress</div></section>
-        <section className="card" aria-labelledby="b3"><h2 id="b3" className="mb0 small muted">Total balance</h2><div className="big-number">{balanceMoney(balance?.balance_micros ?? 0)}</div></section>
+        <section className="card" aria-labelledby="b2"><h2 id="b2" className="mb0 small muted">Set aside</h2><div className="big-number" data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</div><div className="muted small">Set aside for jobs and live sessions that are running</div></section>
+        <section className="card" aria-labelledby="b3"><h2 id="b3" className="mb0 small muted">Total</h2><div className="big-number">{balanceMoney(balance?.balance_micros ?? 0)}</div></section>
       </div>
 
       <TopUp pricing={pricing} ensureTos={ensureTos} unavailable={unavailable} />
       <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} ensureTos={ensureTos} unavailable={unavailable} />
-      <History history={history} error={histErr} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
+      <History history={history} error={histErr} availableMicros={balance?.available_micros ?? 0} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
     </div>
   );
 }
@@ -122,7 +132,7 @@ function TopUp({ pricing, ensureTos, unavailable }) {
     if (!valid || unavailable) return;
     setError('');
     if (!(await ensureTos())) {
-      setError('Please accept the Terms of Service to add credit.');
+      setError('Please agree to the Terms of Service first, then you can add credit.');
       return;
     }
     setBusy(true);
@@ -130,7 +140,7 @@ function TopUp({ pricing, ensureTos, unavailable }) {
       const { url } = await api('billing/checkout', { method: 'POST', body: { amountCents: cents, saveCard } });
       goStripe(url);
     } catch (err) {
-      setError(err.status === 503 ? 'Payments are not available yet. Please try again later.' : err.detail);
+      setError(err.status === 503 ? 'Payments aren’t available yet. Please try again later.' : err.detail);
       setBusy(false);
     }
   }
@@ -138,7 +148,7 @@ function TopUp({ pricing, ensureTos, unavailable }) {
   return (
     <form className="card stack" onSubmit={go} aria-labelledby="topup-h">
       <h2 id="topup-h" className="mb0">Add credit</h2>
-      {pricing?.taxAddedAtCheckout && <p className="muted mb0">Sales tax or VAT is added at checkout where it applies; you receive the full amount as credit.</p>}
+      {pricing?.taxAddedAtCheckout && <p className="muted mb0">Sales tax or VAT is added at checkout where it applies. You get the full amount as credit.</p>}
       <fieldset className="field">
         <legend className="label">Amount</legend>
         <div className="choice-cards">
@@ -168,9 +178,9 @@ function TopUp({ pricing, ensureTos, unavailable }) {
       {error && <div className="banner banner-error" role="alert" data-testid="topup-error">{error}</div>}
       <div className="row">
         <button type="submit" className="btn btn-primary btn-lg" disabled={!valid || busy || unavailable} aria-describedby={unavailable ? 'topup-off' : undefined}>{busy ? 'Opening checkout…' : `Pay ${valid ? moneyCents(cents) : ''} with Stripe`}</button>
-        <span className="muted small">Payments are handled by Stripe. We never see your card number.</span>
+        <span className="muted small">Payments go through Stripe. We never see your card number.</span>
       </div>
-      {unavailable && <p id="topup-off" className="hint mb0" data-testid="topup-off">Adding credit is switched off for now, because payments are not available yet. This button will work as soon as they are.</p>}
+      {unavailable && <p id="topup-off" className="hint mb0" data-testid="topup-off">Adding credit is switched off for now. This button will work as soon as payments are on.</p>}
     </form>
   );
 }
@@ -198,7 +208,7 @@ function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
   const a = dollarsToCents(amount);
   const c = dollarsToCents(cap);
   const problems = [];
-  if (!(t >= 0 && t <= max)) problems.push(`The threshold must be between $0 and ${moneyCents(max)}.`);
+  if (!(t >= 0 && t <= max)) problems.push(`The “below” amount must be between $0 and ${moneyCents(max)}.`);
   if (!(a >= min && a <= max)) problems.push(`The reload amount must be between ${moneyCents(min)} and ${moneyCents(max)}.`);
   if (!(c >= min && c <= 200000)) problems.push(`The monthly cap must be between ${moneyCents(min)} and ${moneyCents(200000)}.`);
   else if (a > c) problems.push('The monthly cap must be at least one reload.');
@@ -249,10 +259,10 @@ function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
         <h2 id="ar-h" className="mb0">Auto-reload</h2>
         <span className={on ? 'badge badge-ok' : 'badge'} data-testid="ar-state">{on ? 'On' : 'Off'}</span>
       </div>
-      <p className="muted mb0">Never run out mid-job: when your balance falls below a threshold, we charge your saved card automatically, up to a monthly cap you choose.</p>
+      <p className="muted mb0">So you don’t run dry mid-job: when your balance drops below an amount you pick, we top it up from your saved card, up to a monthly limit you choose.</p>
       {failures > 0 && (
         <div className="banner banner-warn" role="alert" data-testid="ar-failures">
-          The last {failures} automatic reload{failures === 1 ? '' : 's'} failed{on ? '' : ', so auto-reload was paused'}. Check your card in Manage card, then save these settings again to resume.
+          The last {failures} automatic reload{failures === 1 ? '' : 's'} didn’t go through{on ? '' : ', so auto-reload was paused'}. Check your card under “Manage card and receipts”, then save these settings again.
         </div>
       )}
       {!hasCard && <div className="banner banner-info">To use auto-reload, tick &ldquo;Save my card for auto-reload&rdquo; on your next top-up above.</div>}
@@ -279,13 +289,13 @@ function AutoReload({ autoReload, pricing, refresh, ensureTos, unavailable }) {
       {msg && <div className={`banner banner-${msg.kind}`} role={msg.kind === 'error' ? 'alert' : 'status'}>{msg.text}</div>}
       <div className="row">
         <button type="button" className="btn btn-secondary" disabled={!!busy || unavailable} onClick={portal}>Manage card and receipts</button>
-        <span className="muted small">{unavailable ? 'Not available while payments are off.' : 'Opens Stripe\u2019s secure customer portal.'}</span>
+        <span className="muted small">{unavailable ? 'Not available while payments are off.' : 'Opens Stripe’s secure page.'}</span>
       </div>
     </section>
   );
 }
 
-function History({ history, error, reload, unavailable }) {
+function History({ history, error, reload, unavailable, availableMicros }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState(null);
   const [confirmId, setConfirmId] = useState(null);
@@ -294,11 +304,11 @@ function History({ history, error, reload, unavailable }) {
     setBusy(id); setMsg(null);
     try {
       const r = await api('billing/refund', { method: 'POST', body: { paymentId: id } });
-      setMsg({ kind: 'success', text: `Refunded ${moneyCents(r.refundedCents)} to your card.` });
+      setMsg({ kind: 'success', text: `Done. ${moneyCents(r.refundedCents)} is on its way back to your card.` });
       setConfirmId(null);
       reload();
     } catch (e) {
-      setMsg({ kind: 'error', text: e.status === 503 ? 'Refunds are not available yet.' : e.detail });
+      setMsg({ kind: 'error', text: e.status === 503 ? 'Refunds aren’t available yet.' : e.detail });
     } finally {
       setBusy('');
     }
@@ -329,13 +339,20 @@ function History({ history, error, reload, unavailable }) {
                         <td className="num">{p.refunded_cents ? moneyCents(p.refunded_cents) : '—'}</td>
                         <td className="right">
                           {eligible && confirmId !== p.id && <button type="button" className="btn btn-secondary btn-sm" disabled={unavailable} aria-describedby={unavailable ? 'refund-off' : undefined} onClick={() => setConfirmId(p.id)}>Refund unused</button>}
-                          {eligible && confirmId === p.id && (
-                            <span className="row">
-                              <span className="small">Refund the unused part?</span>
-                              <button type="button" className="btn btn-danger btn-sm" disabled={busy === p.id || unavailable} onClick={() => refund(p.id)}>{busy === p.id ? 'Refunding…' : 'Yes, refund'}</button>
-                              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirmId(null)}>No</button>
-                            </span>
-                          )}
+                          {eligible && confirmId === p.id && (() => {
+                            const est = refundEstimate(p, availableMicros);
+                            return (
+                              <span className="row" data-testid="refund-confirm">
+                                <span className="small" data-testid="refund-estimate">
+                                  {est.back > 0
+                                    ? <>You&rsquo;ll get back about <b>{moneyCents(est.back)}</b> (unused {moneyCents(est.unused)} minus the card fee{est.fee ? ` of ${moneyCents(est.fee)}` : ''}).</>
+                                    : <>Your unused credit ({moneyCents(est.unused)}) doesn&rsquo;t cover the card fee{est.fee ? ` (${moneyCents(est.fee)})` : ''}, so there&rsquo;s nothing to send back yet.</>}
+                                </span>
+                                <button type="button" className="btn btn-danger btn-sm" disabled={busy === p.id || unavailable || est.back <= 0} onClick={() => refund(p.id)}>{busy === p.id ? 'Refunding…' : 'Yes, refund'}</button>
+                                <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirmId(null)}>No</button>
+                              </span>
+                            );
+                          })()}
                         </td>
                       </tr>
                     );
@@ -344,13 +361,13 @@ function History({ history, error, reload, unavailable }) {
               </table>
             </div>
           )}
-          {unavailable && <p id="refund-off" className="hint mb0" data-testid="refund-off">Refunds are switched off for now, because payments are not available yet. The refund buttons will work again as soon as they are.</p>}
-          <p className="small muted mb0">Self-service refunds cover the unused part of a payment made in the last {REFUND_DAYS} days. See the <Link to="/terms">Terms</Link>.</p>
-          <h3 className="mb0">Credit ledger</h3>
+          {unavailable && <p id="refund-off" className="hint mb0" data-testid="refund-off">Refunds are switched off for now. The refund buttons will work again as soon as payments are on.</p>}
+          <p className="small muted mb0">You can get the unused part of a payment from the last {REFUND_DAYS} days refunded here. The card processor keeps its fee (about 2.9% + 30¢) from the first refund of each payment. The <Link to="/terms">Terms</Link> have the details.</p>
+          <h3 className="mb0">Credit history</h3>
           {history.ledger.length === 0 ? <p className="card muted mb0">No activity yet.</p> : (
             <div className="table-wrap">
               <table data-testid="ledger">
-                <thead><tr><th>Date</th><th>Description</th><th>Type</th><th className="num">Amount</th><th className="num">Balance</th></tr></thead>
+                <thead><tr><th>Date</th><th>What</th><th>Type</th><th className="num">Amount</th><th className="num">Balance</th></tr></thead>
                 <tbody>
                   {history.ledger.map((l) => (
                     <tr key={l.id}>

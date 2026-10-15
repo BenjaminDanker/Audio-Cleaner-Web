@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router-dom';
 import AbPlayer from '../components/AbPlayer.jsx';
 import FileDrop from '../components/FileDrop.jsx';
 import { IconDownload, IconLock } from '../components/Icons.jsx';
 import { saveBlob } from '../download.js';
-import { bytes, clock, human, stem } from '../format.js';
+import { bytes, clock, human, moneyUsd, stem } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
-import { STRENGTHS } from '../media/denoise.js';
+import { denoiserLoadState, preloadDenoiser, STRENGTHS, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
-import { denoiseFile } from '../media/pipeline.js';
+import { denoiseFile, STAGE_LOADING } from '../media/pipeline.js';
 import { buildWav } from '../media/wav.js';
 
 const LONG_SECONDS = 2 * 3600;
@@ -17,7 +17,7 @@ const MAX_SECONDS = 6 * 3600;
 const supported = typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined';
 
 export default function Free() {
-  usePageTitle('Free browser denoise');
+  usePageTitle('Clean up a recording');
   const { data: pricing } = usePricing();
   const studio = findRate(pricing, 'denoise', 'standard');
 
@@ -30,6 +30,13 @@ export default function Free() {
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
   const abort = useRef(null);
+  const load = useSyncExternalStore(subscribeDenoiserLoad, denoiserLoadState);
+
+  // Start fetching the noise remover (about 22 MB, once, at low priority) as soon as this page opens, so it is usually
+  // ready by the time a file has been chosen. Nothing is downloaded on any other page.
+  useEffect(() => {
+    if (supported) preloadDenoiser().catch(() => {}); // a failure is reported when cleaning starts
+  }, []);
 
   const isVideo = !!info?.hasVideo;
 
@@ -82,7 +89,7 @@ export default function Free() {
         setPhase('ready');
         return;
       }
-      setError(e?.message || 'Something went wrong while cleaning this file.');
+      setError(e?.message || 'Something went wrong while cleaning this file. Please try again.');
       setPhase('ready');
     }
   }
@@ -98,22 +105,25 @@ export default function Free() {
 
   const duration = info?.duration;
   const tooLong = duration && duration > MAX_SECONDS;
-  const eta = useMemo(() => {
+  const procEta = useMemo(() => {
     if (!duration) return null;
     const channels = info?.channels && info.channels >= 2 ? 2 : 1;
     const cores = navigator.hardwareConcurrency || 2;
     return duration * 0.13 * (channels === 2 && cores < 3 ? 2 : 1);
   }, [duration, info]);
+  // Whatever is still downloading counts too, so the estimate is honest if you start straight away.
+  const loadLeft = load.done ? 0 : load.secondsLeft;
+  const eta = procEta == null ? null : procEta + (loadLeft || 0);
 
   return (
     <div className="container narrow page stack-lg">
       <header>
-        <h1>Free browser denoise</h1>
-        <p className="lead muted">Remove background noise from a voice recording or video. It runs on your device, so your file is never uploaded.</p>
+        <h1>Clean up a recording</h1>
+        <p className="lead muted">Take the background noise out of a voice recording or video. It happens on your own device, so your file is never uploaded.</p>
         <p className="row small muted mb0"><IconLock width={18} height={18} /> Private by design: no account, no upload, no tracking.</p>
       </header>
 
-      {!supported && <div className="banner banner-error" role="alert">This browser does not support WebAssembly and Web Workers, which the in-browser denoiser needs. Please try a current version of Chrome, Edge, Firefox or Safari.</div>}
+      {!supported && <div className="banner banner-error" role="alert">This browser can&rsquo;t run the noise remover. Please try a current version of Chrome, Edge, Firefox or Safari.</div>}
 
       {phase === 'idle' && supported && <FileDrop onFile={choose} />}
 
@@ -164,12 +174,12 @@ export default function Free() {
                 <button type="button" className="btn btn-primary btn-lg" onClick={start} disabled={info?.hasAudio === false || tooLong || !supported}>
                   {phase === 'done' ? 'Clean again with these settings' : 'Clean audio'}
                 </button>
-                {eta && <span className="muted small">Estimated time on this device: about {human(eta)}</span>}
+                {eta && <span className="muted small" data-testid="eta">Should take about {human(eta)} on this device{loadLeft ? ' (including getting the noise remover ready)' : ''}.</span>}
               </div>
             </>
           )}
 
-          {phase === 'working' && <ProgressPanel prog={prog} stage={stage} onCancel={() => abort.current?.abort()} />}
+          {phase === 'working' && <ProgressPanel prog={prog} stage={stage} load={load} procEta={procEta} onCancel={() => abort.current?.abort()} />}
         </section>
       )}
 
@@ -179,10 +189,9 @@ export default function Free() {
 
       {phase === 'done' && (
         <aside className="card stack card-flat">
-          <h2 className="mb0">Want better results, long files or subtitles?</h2>
+          <h2 className="mb0">Got a long recording, or want subtitles?</h2>
           <p className="mb0 muted">
-            Studio clean runs heavier processing on our servers, adds loudness normalisation, handles hours of audio without tying up your computer,
-            and can transcribe in the same pass{studio ? ` — from ${(studio.usdPerMinute * 60).toLocaleString('en-US', { style: 'currency', currency: 'USD' })} per hour` : ''}.
+            Studio clean looks after long files without tying up your computer. It also evens out the loudness and can write the subtitles in the same go{studio ? ` (from ${moneyUsd(studio.usdPerHour)} an hour)` : ''}.
           </p>
           <div className="row"><Link to="/app" className="btn btn-primary">Try Studio clean</Link><Link to="/transcribe" className="btn btn-secondary">Free transcription</Link></div>
         </aside>
@@ -191,29 +200,34 @@ export default function Free() {
   );
 }
 
-function ProgressPanel({ prog, stage, onCancel }) {
-  const pct = prog?.total ? Math.min(100, (prog.done / prog.total) * 100) : null;
+function ProgressPanel({ prog, stage, load, procEta, onCancel }) {
+  const loading = stage === STAGE_LOADING;
+  const pct = loading ? Math.min(100, (load.loaded / load.total) * 100) : prog?.total ? Math.min(100, (prog.done / prog.total) * 100) : null;
   const [announce, setAnnounce] = useState('');
   const last = useRef(-1);
   useEffect(() => {
-    if (pct == null) return;
+    if (pct == null || loading) return;
     const bucket = Math.floor(pct / 10);
     if (bucket !== last.current) {
       last.current = bucket;
       setAnnounce(`${bucket * 10} percent done`);
     }
-  }, [pct]);
+  }, [pct, loading]);
+  const mb = (n) => (n / 1048576).toFixed(1);
+  // While the download is still running the whole wait is "what is left to download" plus the cleaning itself.
+  const loadEta = loading && load.secondsLeft != null ? load.secondsLeft + (procEta || 0) : null;
+  const eta = loading ? loadEta : prog?.eta;
   return (
     <div className="stack" data-testid="progress">
       <div className="row-between">
-        <strong>{stage || 'Working…'}</strong>
+        <strong data-testid="stage">{loading ? `${STAGE_LOADING} ${mb(load.loaded)} of ${mb(load.total)} MB` : stage || 'Working…'}</strong>
         <span className="muted small" data-testid="progress-text">
-          {pct != null ? `${Math.floor(pct)}%` : `${clock(prog?.done || 0)} processed`}
-          {prog?.eta != null && prog.done > 0 ? ` · about ${human(prog.eta)} left` : ''}
-          {prog?.rate > 0 ? ` · ${prog.rate.toFixed(1)}× real time` : ''}
+          {loading ? `${Math.floor(pct)}%` : pct != null ? `${Math.floor(pct)}%` : `${clock(prog?.done || 0)} done`}
+          {eta != null && (loading || prog.done > 0) ? ` · about ${human(eta)} left` : ''}
+          {!loading && prog?.rate > 0 ? ` · ${prog.rate.toFixed(1)}× real time` : ''}
         </span>
       </div>
-      {pct != null ? <progress className="bar" max={100} value={pct} aria-label="Cleaning progress" /> : <progress className="bar" aria-label="Cleaning progress" />}
+      {pct != null ? <progress className="bar" max={100} value={pct} aria-label={loading ? 'Getting the noise remover ready' : 'Cleaning progress'} /> : <progress className="bar" aria-label="Cleaning progress" />}
       <p className="sr-only" role="status" aria-live="polite">{announce}</p>
       <div className="row">
         <button type="button" className="btn btn-secondary" onClick={onCancel}>Cancel</button>
@@ -267,7 +281,7 @@ function Result({ file, info, result, isVideo }) {
   const silent = pcm.rms < 1e-5;
   return (
     <section className="card stack" aria-labelledby="res-h" data-testid="result" data-rms={pcm.rms.toFixed(6)} data-peak={pcm.peak.toFixed(4)} data-frames={pcm.frames} data-channels={pcm.channels}>
-      <h2 id="res-h" className="mb0">Done. Compare and download</h2>
+      <h2 id="res-h" className="mb0">All done. Have a listen, then save it</h2>
       {silent && <div className="banner banner-warn">The cleaned audio is nearly silent. The original may only contain noise, or try a gentler strength.</div>}
       <AbPlayer original={file} cleanedUrl={url} isVideo={isVideo} />
       <p className="stat-row mb0">

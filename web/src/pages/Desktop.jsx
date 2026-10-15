@@ -46,12 +46,12 @@ function useDesktopRelease() {
 
 // ---- content -----------------------------------------------------------------------------------------------------
 const FEATURES = [
-  { icon: IconSparkle, title: 'The Studio clean chain', text: 'DeepFilterNet3 noise removal plus the same polish as the website: level match, gentle compression, -16 LUFS loudness and a limiter.' },
-  { icon: IconUpload, title: 'Drag-and-drop batch queue', text: 'Drop in as many recordings as you like and let them run one after another. Audio and video files both work.' },
-  { icon: IconWave, title: 'Four strength presets', text: 'Choose how hard the noise is pushed down, from gentle, which keeps some room tone, up to maximum noise removal.' },
-  { icon: IconCheck, title: 'Video stays untouched', text: 'The picture is copied as-is (stream copy, no re-encoding) and your metadata is kept. Only the audio track is replaced.' },
-  { icon: IconSparkle, title: 'Compare before you save', text: 'Preview any result and flip between Original and Cleaned at the same spot in the file.' },
-  { icon: IconLock, title: 'Private and offline', text: 'Everything runs on your computer. Your files are never uploaded, and no internet connection is needed to clean them.' },
+  { icon: IconSparkle, title: 'The full Studio clean', text: 'Noise removal plus the same voice polish as the website: even levels, gentle compression and a loudness target of your choice.' },
+  { icon: IconUpload, title: 'Drop in a whole batch', text: 'Drag in as many recordings as you like and let them run one after another. Audio and video both work.' },
+  { icon: IconWave, title: 'Four strengths', text: 'Choose how hard the noise gets pushed down, from gentle (keeps some room tone) up to maximum.' },
+  { icon: IconCheck, title: 'Your video stays as it was', text: 'The picture is copied over untouched and your metadata is kept. Only the sound is swapped.' },
+  { icon: IconSparkle, title: 'Listen before you save', text: 'Play any result and flip between Original and Cleaned at the same spot.' },
+  { icon: IconLock, title: 'Free, offline, all included', text: 'No account, no credit, and nothing more to download once it\'s installed. It works with no internet at all, and your files never leave your computer.' },
 ];
 
 const DOWNLOADS = [
@@ -103,7 +103,7 @@ function ComingSoon() {
         <h3 className="mb0">Coming soon</h3>
         <span className="badge badge-soon">Not released yet</span>
       </div>
-      <p className="mb0">The desktop app is not available to download yet. Until it is, the same noise removal runs in your browser: free, no sign-up, and your file still never leaves your device.</p>
+      <p className="mb0">The desktop app isn&rsquo;t ready to download yet. Until it is, the same kind of noise removal runs in your browser: free, no sign-up, and your file still never leaves your device.</p>
       <div className="row">
         <Link to="/free" className="btn btn-primary">Clean a file in your browser</Link>
       </div>
@@ -154,7 +154,7 @@ export default function Desktop() {
           <div>
             <p className="eyebrow">Audio Cleaner for desktop</p>
             <h1>Studio clean for all your files, right on your computer.</h1>
-            <p className="lead">A free Windows and macOS app that removes noise from audio and video files and levels them for sharing. Drop in a batch, walk away. Nothing is uploaded.</p>
+            <p className="lead">A free app for Windows and macOS that takes the noise out of audio and video files and levels them for sharing. Drop in a batch and walk away. It works offline, it has everything, and nothing is uploaded.</p>
             {loading && <p className="muted">Checking the latest release&hellip;</p>}
             {!loading && available && (
               <div className="row">
@@ -182,7 +182,7 @@ export default function Desktop() {
       <section className="section" id="download" aria-labelledby="download-title">
         <div className="container">
           <h2 className="section-title" id="download-title">Download</h2>
-          <p className="section-lead">Free to download and use. Pick the file for your computer; every version is listed so you can always choose another.</p>
+          <p className="section-lead">Free to download and use. Pick the file for your computer. Every version is listed, so you can always choose another.</p>
           {loading && <div className="card center muted" role="status" aria-busy="true">Checking the latest release&hellip;</div>}
           {!loading && !available && <ComingSoon />}
           {!loading && available && (
@@ -217,7 +217,7 @@ export default function Desktop() {
       <section className="section alt" id="features" aria-labelledby="features-title">
         <div className="container">
           <h2 className="section-title" id="features-title">What you get</h2>
-          <p className="section-lead">The same Studio clean you know from the website, without uploads or credit.</p>
+          <p className="section-lead">The same Studio clean you know from the website, with no uploads and no credit.</p>
           <div className="grid grid-3">
             {FEATURES.map(({ icon: Icon, title, text }) => (
               <article key={title} className="card product-card">
@@ -236,7 +236,7 @@ export default function Desktop() {
       <section className="section" id="requirements" aria-labelledby="requirements-title">
         <div className="container narrow">
           <h2 className="section-title" id="requirements-title">System requirements</h2>
-          <p className="section-lead">Check that your computer is supported, then pick the matching download above.</p>
+          <p className="section-lead">Make sure your computer is on the list, then pick the matching download above.</p>
           <div className="grid grid-2">
             <div className="card">
               <h3>Windows</h3>
@@ -260,16 +260,16 @@ export default function Desktop() {
         <div className="container narrow">
           <div className="row">
             <IconLock width={28} height={28} />
-            <h2 className="mb0" id="privacy-title">Private by design</h2>
+            <h2 className="mb0" id="privacy-title">Yours alone</h2>
           </div>
           <ul className="prose">
-            <li><b>Your files stay on your computer.</b> Cleaning runs locally and nothing is uploaded. The app works without an internet connection.</li>
-            <li><b>One small daily check.</b> Once a day the app asks this website whether a newer version exists. You can turn that check off.</li>
+            <li><b>Your files stay on your computer.</b> Everything happens right there and nothing is uploaded.</li>
+            <li><b>Works offline.</b> The app never needs the internet, and it doesn&rsquo;t phone home after you install it.</li>
             <li><b>No analytics and no telemetry.</b></li>
           </ul>
           <div className="row">
             <IconText width={20} height={20} />
-            <span>Read the <Link to="/privacy">Privacy Policy</Link>, or see the <Link to="/licenses">open-source licences and third-party notices</Link>.</span>
+            <span>The full story is in the <Link to="/privacy">Privacy Policy</Link>.</span>
           </div>
         </div>
       </section>

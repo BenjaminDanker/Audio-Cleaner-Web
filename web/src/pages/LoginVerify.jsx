@@ -26,7 +26,7 @@ export default function LoginVerify() {
       const token = takeToken();
       inflight = token
         ? api('auth/email/verify', { method: 'POST', body: { token }, redirectOn401: false }).then(() => ({ ok: true }), (e) => ({ ok: false, message: e.detail }))
-        : Promise.resolve({ ok: false, message: 'This sign-in link is incomplete. Request a new one.' });
+        : Promise.resolve({ ok: false, message: 'That sign-in link looks cut off. Ask for a new one.' });
     }
     let alive = true;
     inflight.then(async (r) => {

@@ -69,7 +69,7 @@ if (want('licenses')) {
   await check('licences: every component links to a real licence text', async () => {
     await page.goto(`${BASE}/licenses`);
     await page.waitForSelector('[data-testid=licenses] tbody tr');
-    const links = await page.locator('[data-testid=licenses] a[href*="/licenses/"]').evaluateAll((as) => as.map((a) => ({ href: a.getAttribute('href'), text: a.textContent })));
+    const links = await page.locator('[data-testid=licenses] a[href*="/licenses/"]:not([href^="http"])').evaluateAll((as) => as.map((a) => ({ href: a.getAttribute('href'), text: a.textContent })));
     if (links.length < 12) throw new Error(`only ${links.length} licence links`);
     const rows = await page.locator('[data-testid=licenses] tbody tr').count();
     const seen = new Set();
@@ -80,12 +80,14 @@ if (want('licenses')) {
       const res = await page.request.get(new URL(l.href, BASE + '/').href);
       const body = await res.text();
       if (!res.ok() || body.length < 500) throw new Error(`${l.href}: ${res.status()} ${body.length} bytes`);
-      if (!/MIT|Apache|Mozilla Public|Permission is hereby granted/.test(body.slice(0, 4000))) throw new Error(`${l.href}: does not look like a licence`);
+      if (!/MIT|Apache|Mozilla Public|Permission is hereby granted|Creative Commons Attribution/.test(body.slice(0, 4000))) throw new Error(`${l.href}: does not look like a licence`);
       if (/^\s*<!doctype html/i.test(body)) throw new Error(`${l.href}: got the SPA shell`);
       sizes.push(`${l.href.split('/').pop()}=${body.length}`);
     }
     const main = await page.locator('main').innerText();
-    for (const need of ['tract', 'mediabunny', 'React', 'Scheduler', 'React Router', 'Vite', 'Rust crates']) if (!main.includes(need)) throw new Error('missing ' + need);
+    for (const need of ['tract', 'mediabunny', 'React', 'Scheduler', 'React Router', 'Vite', 'Rust crates', 'FastConformer', 'sherpa-onnx', 'CC BY 4.0']) if (!main.includes(need)) throw new Error('missing ' + need);
+    // the Creative Commons licence text is not shipped, it is linked
+    if (!(await page.locator('[data-testid=licenses] a[href^="https://creativecommons.org/licenses/by/4.0/"]').count())) throw new Error('no link to the CC BY 4.0 licence');
     if (/to be attached/i.test(main)) throw new Error('placeholder text still present');
     return `${rows} components, ${seen.size} licence files: ${sizes.join(' ')}`;
   });
@@ -255,7 +257,7 @@ if (want('live')) {
       out.push(`${cap || 'none'}${den ? '+denoise' : ''}=$${want.toFixed(4)}`);
     }
     const opts = await page.locator('#live-cap option').allInnerTexts();
-    if (!opts.some((o) => /Premium \(OpenAI\)/.test(o))) throw new Error('no Premium option: ' + opts.join('|'));
+    if (!opts.some((o) => /Extra accurate/.test(o))) throw new Error('no Extra accurate option: ' + opts.join('|'));
     return out.join(', ');
   });
   await check('live: premium captions stream partials by id and finalize them in place (mocked server)', async () => {

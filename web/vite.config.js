@@ -1,7 +1,7 @@
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 
 // Version string for the (unhashed) public/dfn files, appended as ?v= so they can be cached for a long time.
 function dfnVersion() {
@@ -11,6 +11,12 @@ function dfnVersion() {
     if (existsSync(p)) h.update(readFileSync(p));
   }
   return h.digest('hex').slice(0, 10);
+}
+
+// Decoded byte sizes of the three files, for the progress readout while they download (src/media/denoise.js).
+function dfnSizes() {
+  const size = (f) => { const p = new URL(`./public/dfn/${f}`, import.meta.url); return existsSync(p) ? statSync(p).size : 0; };
+  return { js: size('df.js'), wasm: size('df_bg.wasm'), model: size('DeepFilterNet3_onnx.tar.gz') };
 }
 
 // The app is served under VITE_BASE (default "/audio/", use "/" on a dedicated domain).
@@ -25,7 +31,7 @@ export default defineConfig(({ mode }) => {
   return {
     base,
     plugins: [react()],
-    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()) },
+    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()) },
     worker: { format: 'es' },
     build: {
       target: 'es2022',

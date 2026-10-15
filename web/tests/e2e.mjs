@@ -21,17 +21,17 @@ async function waitJob(name, timeout = 240000) {
 }
 
 if (want('basic')) {
-  await check('landing: pricing table from API, tiers, soon badges', async () => {
+  await check('landing: pricing table from API (per hour, groups, no status column)', async () => {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
-    for (const s of ['$0.0100', '$0.60', 'Coming soon', 'Studio clean', '$0.0040']) if (!txt.includes(s)) throw new Error('missing ' + s);
-    const soon = await page.locator('.badge-soon').count();
-    return `${await page.locator('table tbody tr').count()} rows, ${soon} coming-soon`;
+    for (const s of ['$0.60 / hour', '$0.01 / min', 'Studio clean', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    if (/Available|Coming soon|\$0\.004/.test(txt)) throw new Error('status column or tiny per-minute number is back: ' + txt);
+    return `${await page.locator('table tbody tr').count()} rows`;
   });
   await check('404 page + legal pages', async () => {
     await page.goto(`${BASE}/nope`);
-    if (!(await page.textContent('h1')).includes('could not be found')) throw new Error('404 text');
+    if (!(await page.textContent('h1')).includes('find that page')) throw new Error('404 text');
     await page.goto(`${BASE}/terms`);
     if (!(await page.locator('.draft-banner').innerText()).includes('under legal review')) throw new Error('no draft banner');
     await page.goto(`${BASE}/privacy`); await page.waitForSelector('h1');
@@ -89,7 +89,7 @@ if (want('studio')) {
     if (bal !== '$5.00') throw new Error('balance ' + bal);
     const hdr = await page.locator('.balance-chip').innerText();
     if (!/\$5\.00/.test(hdr)) throw new Error('header ' + hdr);
-    if (!(await page.getByText('review and accept the Terms').count())) throw new Error('no ToS banner');
+    if (!(await page.getByText('have a look at the Terms').count())) throw new Error('no ToS banner');
     return `balance ${bal}`;
   });
 
@@ -102,7 +102,7 @@ if (want('studio')) {
     const dlg = page.getByRole('dialog');
     await dlg.waitFor();
     await dlg.getByRole('checkbox').check();
-    await dlg.getByRole('button', { name: 'Accept and continue' }).click();
+    await dlg.getByRole('button', { name: 'Agree and continue' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
@@ -158,7 +158,7 @@ if (want('transcribe')) {
   await check('free transcription page', async () => {
     await gotoApp('/transcribe');
     const intro = await page.locator('main header').innerText();
-    if (!/60 free minutes a day/.test(intro) || !/30 minutes per file/.test(intro)) throw new Error(intro);
+    if (!/60 free minutes a day/.test(intro) || !/up to 30 minutes/.test(intro)) throw new Error(intro);
     await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
     await page.getByRole('button', { name: 'Start free transcription' }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });

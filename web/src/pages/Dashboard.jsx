@@ -23,14 +23,14 @@ export default function Dashboard() {
       <header className="row-between">
         <div>
           <h1 className="mb0">Studio</h1>
-          <p className="muted mb0">Server-side cleaning and transcription for files.</p>
+          <p className="muted mb0">Clean up and transcribe your longer recordings.</p>
         </div>
       </header>
 
       {user && !user.tosAccepted && (
         <div className="banner banner-warn row-between" role="status">
-          <span>Please review and accept the Terms of Service before running paid jobs.</span>
-          <button type="button" className="btn btn-primary btn-sm" onClick={ensureTos}>Review and accept</button>
+          <span>Before your first job, please have a look at the Terms of Service.</span>
+          <button type="button" className="btn btn-primary btn-sm" onClick={ensureTos}>Take a look</button>
         </div>
       )}
 
@@ -39,10 +39,10 @@ export default function Dashboard() {
           <h2 id="bal-h" className="mb0">Balance</h2>
           <div>
             <div className="big-number" data-testid="available">{balanceMoney(balance?.available_micros ?? 0)}</div>
-            <div className="muted small">available to spend</div>
+            <div className="muted small">ready to spend</div>
           </div>
           <dl className="kv mb0">
-            <dt>On hold for running jobs</dt><dd data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</dd>
+            <dt>Set aside for running jobs</dt><dd data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</dd>
             <dt>Total balance</dt><dd>{balanceMoney(balance?.balance_micros ?? 0)}</dd>
           </dl>
           <div className="row"><Link to="/app/billing" className="btn btn-primary">Add credit</Link><Link to="/transcribe" className="btn btn-ghost">Free transcription</Link></div>
@@ -50,9 +50,9 @@ export default function Dashboard() {
         <section className="card stack" aria-labelledby="tips-h">
           <h2 id="tips-h" className="mb0">Good to know</h2>
           <ul className="mb0">
-            <li>Uploading a video? Only its <b>audio track</b> is uploaded. Your browser puts the cleaned audio back into the video afterwards.</li>
-            <li>Uploaded files are deleted when processing ends. Results are kept for <b>24 hours</b>.</li>
-            <li>You pay for what is processed. Billed per second of audio, no minimum charge. A failed or canceled job costs nothing.</li>
+            <li>Uploading a video? Only its <b>sound</b> is uploaded. Your browser puts the clean sound back into the video afterwards.</li>
+            <li>Your upload is deleted as soon as it’s processed. Results stay for <b>24 hours</b>.</li>
+            <li>You pay for what gets processed, by the second. A job that fails or is canceled costs nothing.</li>
           </ul>
         </section>
       </div>
@@ -65,8 +65,8 @@ export default function Dashboard() {
           <button type="button" className="btn btn-ghost btn-sm" onClick={reload}>Refresh</button>
         </div>
         {error && <div className="banner banner-error" role="alert">{error}</div>}
-        {jobs === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading jobs…</p>}
-        {jobs?.length === 0 && !error && <p className="card muted mb0">No jobs yet. Drop a file above to get started.</p>}
+        {jobs === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading your jobs…</p>}
+        {jobs?.length === 0 && !error && <p className="card muted mb0">Nothing here yet. Drop a file above and it’ll show up.</p>}
         {jobs?.map((j) => <JobCard key={j.id} job={j} local={localJobs.current.get(j.id)} onChanged={() => { reload(); refresh(); }} />)}
       </section>
     </div>

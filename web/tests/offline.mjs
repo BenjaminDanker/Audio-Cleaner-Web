@@ -16,7 +16,7 @@ const DEAD_PORT = 9; // nothing listens here
 const OFF = `http://127.0.0.1:${PORT}/audio`;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain' };
 
-let mode = 'dead-502'; // dead-502 | dead-reset | s502 | s503 | s504 | real
+let mode = 'dead-502'; // dead-502 | dead-reset | s502 | s503 | s504 | maint (the real maintenance answer of the front door) | real
 const apiHits = [];
 
 const server = createServer((req, res) => {
@@ -24,6 +24,7 @@ const server = createServer((req, res) => {
   if (url.pathname.startsWith('/audio/api/')) {
     apiHits.push(`${mode} ${req.method} ${url.pathname}`);
     if (mode === 'dead-reset') { req.socket.destroy(); return; }
+    if (mode === 'maint') { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ detail: 'maintenance', message: 'Audio Cleaner is taking a short break. Free tools in your browser still work.' })); return; }
     if (mode === 's502' || mode === 's503' || mode === 's504') { res.writeHead(Number(mode.slice(1)), { 'content-type': 'application/json' }); res.end('{"detail":"upstream"}'); return; }
     const port = mode === 'real' ? REAL_BACKEND : DEAD_PORT;
     const up = httpRequest({ host: '127.0.0.1', port, path: req.url, method: req.method, headers: req.headers }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
@@ -39,12 +40,12 @@ const server = createServer((req, res) => {
 });
 await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
 
-const TEXT = 'Paid services are temporarily offline. The free browser tool still works.';
+const TEXT = 'Audio Cleaner is taking a short break. Free tools in your browser still work.';
 const { browser, page, logs } = await launch();
 const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 
-for (const m of ['dead-502', 'dead-reset', 's502', 's503', 's504']) {
+for (const m of ['dead-502', 'dead-reset', 's502', 's503', 's504', 'maint']) {
   await check(`offline banner appears when the backend answers ${m}`, async () => {
     mode = m;
     await page.goto(`${OFF}/`);
@@ -108,13 +109,44 @@ await check('no banner while the API is up; paid pages degrade without crashing 
   return 'ok';
 });
 
-await check('banner disappears by itself once the backend is back (re-checks /api/me)', async () => {
+await check('banner disappears by itself once the backend is back (re-checks /api/health)', async () => {
   mode = 'dead-502';
   await page.goto(`${OFF}/`);
   await page.getByTestId('api-offline').waitFor();
   mode = 'real';
   await page.getByTestId('api-offline').waitFor({ state: 'detached', timeout: 45000 });
   return 'recovered';
+});
+
+await check('maintenance: Studio, Transcribe, Live, Billing and Account show a calm "We\'ll be right back" panel instead of forms; free tools stay', async () => {
+  mode = 'maint';
+  for (const p of ['/app', '/transcribe', '/app/live', '/app/billing', '/app/account']) {
+    await page.goto(`${OFF}${p}`);
+    const panel = page.getByTestId('maintenance');
+    await panel.waitFor({ timeout: 10000 });
+    const text = await panel.innerText();
+    if (!/We.ll be right back/.test(text) || !/free tools still work/i.test(text)) throw new Error(`${p}: ${text}`);
+    if (await page.locator('main input, main select, main form').count()) throw new Error(`${p}: a form is still on the page`);
+    if (page.url().includes('/login')) throw new Error(`${p}: bounced to the sign-in page`);
+    if (!(await panel.getByRole('link', { name: /browser/ }).getAttribute('href'))?.endsWith('/free')) throw new Error(`${p}: no link to the free tool`);
+  }
+  await page.screenshot({ path: join(SHOTS, 'maintenance.png') });
+  await page.goto(`${OFF}/free`);
+  if (await page.getByTestId('maintenance').count()) throw new Error('/free must not show the panel');
+  if (!(await page.locator('input[type=file]').count())) throw new Error('/free lost its file picker');
+  return 'panel on 5 pages, none on /free';
+});
+
+await check('maintenance: the panel goes away by itself when /api/health answers again', async () => {
+  mode = 'maint';
+  await page.goto(`${OFF}/transcribe`);
+  await page.getByTestId('maintenance').waitFor();
+  mode = 'real';
+  await page.getByTestId('maintenance').waitFor({ state: 'detached', timeout: 50000 });
+  await page.locator('main h1').first().waitFor();
+  if (await page.getByTestId('api-offline').count()) throw new Error('banner still shown');
+  if (!apiHits.some((h) => h.startsWith('real') && h.endsWith('/audio/api/health'))) throw new Error('recovery did not use /api/health: ' + apiHits.slice(-5).join(' ; '));
+  return 'recovered through /api/health';
 });
 
 console.log(`API hits seen by the stub: ${apiHits.length}`);

@@ -17,17 +17,17 @@ export default function Transcribe() {
       <header className="narrow">
         <h1>Free transcription</h1>
         <p className="lead muted">
-          Turn speech into text and subtitles (TXT, SRT, VTT) with our standard model.
-          {free ? ` Every account gets ${Math.round(free.transcribeSecondsPerDay / 60)} free minutes a day, up to ${Math.round(free.transcribeMaxFileSeconds / 60)} minutes per file.` : ''}
+          Turn speech into text and subtitles (TXT, SRT, VTT).
+          {free ? ` Everyone with an account gets ${Math.round(free.transcribeSecondsPerDay / 60)} free minutes a day, for files up to ${Math.round(free.transcribeMaxFileSeconds / 60)} minutes.` : ''}
         </p>
-        <p className="row small muted mb0"><IconLock width={18} height={18} /> Uploaded files are deleted after processing; results are kept for 24 hours.</p>
+        <p className="row small muted mb0"><IconLock width={18} height={18} /> Your upload is deleted once it’s processed. Results stay for 24 hours, then they’re gone too.</p>
       </header>
       {!ready && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading…</p>}
       {ready && !signedIn && (
         <div className="card stack narrow">
           <h2 className="mb0">Sign in to transcribe</h2>
-          <p className="mb0 muted">A free account lets us track your daily allowance. No payment details needed.</p>
-          <div><Link to="/login" className="btn btn-primary">Sign in or create an account</Link></div>
+          <p className="mb0 muted">An account is how we keep count of your free minutes. It costs nothing and we don’t ask for a card.</p>
+          <div><Link to="/login" className="btn btn-primary">Sign in</Link></div>
         </div>
       )}
       {ready && signedIn && <TranscribeApp />}
@@ -48,7 +48,7 @@ function TranscribeApp() {
         <h2 id="fj-h" className="mb0">Your free transcriptions</h2>
         {error && <div className="banner banner-error" role="alert">{error}</div>}
         {jobs === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading…</p>}
-        {jobs && mine.length === 0 && <p className="card muted mb0">Nothing yet.</p>}
+        {jobs && mine.length === 0 && <p className="card muted mb0">Nothing yet. Your first one will show up here.</p>}
         {mine.map((j) => <JobCard key={j.id} job={j} local={local.current.get(j.id)} onChanged={reload} />)}
       </section>
     </div>

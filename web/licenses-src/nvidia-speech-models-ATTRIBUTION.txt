@@ -1,0 +1,34 @@
+Attribution for NVIDIA speech models
+====================================
+
+Both models below are licensed under the Creative Commons Attribution 4.0
+International licence (CC BY 4.0).
+
+Licence summary: https://creativecommons.org/licenses/by/4.0/
+Full legal text:  https://creativecommons.org/licenses/by/4.0/legalcode
+
+You may share and adapt the models for any purpose, including commercially,
+as long as you give appropriate credit, link to the licence and say whether
+changes were made. This does not suggest that the licensor endorses anyone.
+The models are provided "as is", without warranties of any kind, as set out in
+the licence.
+
+
+1. NVIDIA NeMo FastConformer streaming transducer (English, 480 ms)
+-------------------------------------------------------------------
+Created by NVIDIA Corporation (NeMo toolkit, https://github.com/NVIDIA/NeMo).
+Licence: CC BY 4.0.
+Changes made: converted to ONNX and quantised to 8-bit integers (int8) so it
+runs efficiently on a CPU with sherpa-onnx. No retraining.
+Used for: live captions (English).
+
+
+2. NVIDIA Parakeet TDT 0.6B, versions 2 (English) and 3 (European languages)
+----------------------------------------------------------------------------
+Created by NVIDIA Corporation
+(https://huggingface.co/nvidia/parakeet-tdt-0.6b-v2 and
+https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+Licence: CC BY 4.0.
+Changes made: converted to ONNX (community conversion by istupakov). No
+retraining.
+Used for: Standard transcription of files.

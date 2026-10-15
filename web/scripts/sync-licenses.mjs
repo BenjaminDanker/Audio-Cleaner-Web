@@ -10,7 +10,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const out = join(root, 'public', 'licenses');
 
 const wanted = new Map();
-for (const c of COMPONENTS) for (const t of c.texts) wanted.set(t.file, t.from);
+for (const c of COMPONENTS) for (const t of c.texts) if (t.file) wanted.set(t.file, t.from);
 
 const missing = [...wanted].filter(([, from]) => !existsSync(join(root, from)));
 if (missing.length) {

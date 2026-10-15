@@ -1,10 +1,13 @@
 // Decode -> denoise (workers) -> collect. Used by the /free page.
 
 import { decodeToChunks, TARGET_RATE } from './decode.js';
-import { DenoiseEngine } from './denoise.js';
+import { DenoiseEngine, denoiserLoadState } from './denoise.js';
 import { interleave } from './wav.js';
 
 const MAX_IN_FLIGHT = 3;
+
+/** Stage text while the (one shared) noise-remover download is still running; Free.jsx shows its progress instead. */
+export const STAGE_LOADING = 'Getting the noise remover ready…';
 
 /**
  * @param {File} file
@@ -83,7 +86,9 @@ export async function denoiseFile(file, { attenDb, durationHint, signal, onProgr
         continue;
       }
       if (!engine) {
-        onStage?.('Loading the noise-reduction model…');
+        // Normally the download started when the page opened and is long finished. If not, say so (never a second download:
+        // the engine joins the one in progress).
+        onStage?.(denoiserLoadState().done ? 'Warming up…' : STAGE_LOADING);
         engine = new DenoiseEngine({ channels, attenDb });
         if (signal?.aborted) throw new DOMException('Canceled', 'AbortError');
         await engine.ready();

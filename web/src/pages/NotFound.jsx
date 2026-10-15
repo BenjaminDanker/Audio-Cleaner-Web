@@ -6,11 +6,11 @@ export default function NotFound() {
   return (
     <div className="container page error-page">
       <div className="code" aria-hidden="true">404</div>
-      <h1>This page could not be found</h1>
-      <p className="muted">The link may be old or mistyped.</p>
+      <h1>We couldn’t find that page</h1>
+      <p className="muted">The link might be old, or a letter slipped in.</p>
       <div className="row row-center">
-        <Link to="/" className="btn btn-primary">Back to the home page</Link>
-        <Link to="/free" className="btn btn-secondary">Clean a file for free</Link>
+        <Link to="/" className="btn btn-primary">Back to the start</Link>
+        <Link to="/free" className="btn btn-secondary">Try it on a file</Link>
       </div>
     </div>
   );

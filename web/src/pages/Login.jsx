@@ -7,11 +7,11 @@ import Turnstile from '../components/Turnstile.jsx';
 import { usePageTitle } from '../hooks.js';
 
 const ERRORS = {
-  cancelled: 'Sign-in was cancelled. You can try again.',
-  state: 'That sign-in attempt could not be verified (it may have been opened in another browser). Please try again.',
-  expired: 'That sign-in attempt expired. Please try again.',
-  provider: 'The sign-in provider had a problem. Please try again in a moment.',
-  suspended: 'This account is suspended. Please contact support.',
+  cancelled: 'You stopped the sign-in. Whenever you’re ready, you can try again.',
+  state: 'We couldn’t verify that sign-in (it may have been opened in another browser). Please try again.',
+  expired: 'That sign-in link ran out of time. Please try again.',
+  provider: 'The sign-in service had a hiccup. Please try again in a moment.',
+  suspended: 'This account is paused. Please get in touch and we’ll sort it out.',
 };
 
 export default function Login() {
@@ -57,12 +57,12 @@ export default function Login() {
       <div className="card login-card stack">
         <div>
           <h1 className="mb0">Sign in</h1>
-          <p className="muted mb0">One account for Studio clean, transcription and live streaming. The free browser tool needs no account.</p>
+          <p className="muted mb0">One account for Studio, transcripts and live. New here? Signing in makes your account, it’s free. (The browser tool needs no account.)</p>
         </div>
         {errCode && <div className="banner banner-error" role="alert">{ERRORS[errCode] || 'Sign-in failed. Please try again.'}</div>}
         {loadErr && <div className="banner banner-error" role="alert">{loadErr}</div>}
         {!providers && !loadErr && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading…</p>}
-        {none && <div className="banner banner-warn">Sign-in is not configured on this server yet.</div>}
+        {none && <div className="banner banner-warn">Sign-in isn’t switched on yet.</div>}
 
         {providers?.google && (
           <div className="stack">
@@ -76,7 +76,7 @@ export default function Login() {
             <div className="field">
               <label htmlFor="email">Email address</label>
               <input id="email" className="input" type="email" autoComplete="email" inputMode="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-              <span className="hint">We email you a one-time sign-in link. No password.</span>
+              <span className="hint">We’ll email you a link that signs you in. No password.</span>
             </div>
             {providers.turnstileSiteKey && <Turnstile siteKey={providers.turnstileSiteKey} onToken={setToken} onError={setError} resetKey={resetKey} />}
             {error && <div className="banner banner-error" role="alert">{error}</div>}
@@ -87,7 +87,7 @@ export default function Login() {
         )}
         {sent && (
           <div className="banner banner-success" role="status">
-            <p><b>Check your inbox.</b> If {email} can sign in, a link is on its way. It works once and expires in 15 minutes.</p>
+            <p><b>Check your inbox.</b> If {email} can sign in, a link is on its way. It works once and runs out in 15 minutes.</p>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSent(false); setToken(null); setResetKey((k) => k + 1); }}>Use a different email</button>
           </div>
         )}

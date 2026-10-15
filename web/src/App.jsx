@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './auth.jsx';
 import Layout from './components/Layout.jsx';
+import NeedsServer from './components/Maintenance.jsx';
 import Landing from './pages/Landing.jsx';
 
 const Free = lazy(() => import('./pages/Free.jsx'));
@@ -38,13 +39,13 @@ export default function App() {
           <Route index element={<Landing />} />
           <Route path="free" element={<Free />} />
           <Route path="desktop" element={<Desktop />} />
-          <Route path="login" element={<Login />} />
+          <Route path="login" element={<NeedsServer><Login /></NeedsServer>} />
           <Route path="login/verify" element={<LoginVerify />} />
-          <Route path="app" element={<RequireAuth><Dashboard /></RequireAuth>} />
-          <Route path="app/billing" element={<RequireAuth><Billing /></RequireAuth>} />
-          <Route path="app/live" element={<RequireAuth><Live /></RequireAuth>} />
-          <Route path="app/account" element={<RequireAuth><Account /></RequireAuth>} />
-          <Route path="transcribe" element={<Transcribe />} />
+          <Route path="app" element={<NeedsServer><RequireAuth><Dashboard /></RequireAuth></NeedsServer>} />
+          <Route path="app/billing" element={<NeedsServer><RequireAuth><Billing /></RequireAuth></NeedsServer>} />
+          <Route path="app/live" element={<NeedsServer><RequireAuth><Live /></RequireAuth></NeedsServer>} />
+          <Route path="app/account" element={<NeedsServer><RequireAuth><Account /></RequireAuth></NeedsServer>} />
+          <Route path="transcribe" element={<NeedsServer><Transcribe /></NeedsServer>} />
           <Route path="terms" element={<Terms />} />
           <Route path="privacy" element={<Privacy />} />
           <Route path="licenses" element={<Licenses />} />

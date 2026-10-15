@@ -116,6 +116,52 @@ await check('free: cancel works', async () => {
   return 'back to ready state';
 });
 
+await check('free: the noise remover is fetched once, only on /free, and a stereo file (two workers) fetches nothing again', async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const dfn = [];
+  ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) dfn.push(u.pathname.split('/').pop()); });
+  const p = await ctx.newPage();
+  await p.goto(`${BASE}/`); await p.waitForSelector('table tbody tr');
+  await p.goto(`${BASE}/transcribe`); await p.waitForSelector('main h1');
+  await p.goto(`${BASE}/desktop`); await p.waitForSelector('main h1');
+  await p.waitForTimeout(500);
+  if (dfn.length) throw new Error('downloaded on another page: ' + dfn.join(', '));
+  await p.goto(`${BASE}/free`);
+  await p.waitForFunction(() => performance.getEntriesByType('resource').some((e) => e.name.includes('DeepFilterNet3_onnx')), null, { timeout: 15000 });
+  await p.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
+  await p.getByRole('button', { name: 'Clean audio' }).click();
+  await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
+  const count = (n) => dfn.filter((f) => f === n).length;
+  if (count('df_bg.wasm') !== 1 || count('DeepFilterNet3_onnx.tar.gz') !== 1) throw new Error('downloads: ' + dfn.join(', '));
+  if (count('df.js') > 3) throw new Error('df.js fetched ' + count('df.js') + ' times');
+  const channels = await p.locator('[data-testid=result]').getAttribute('data-channels');
+  if (channels !== '2') throw new Error('expected a stereo run, got ' + channels);
+  await ctx.close();
+  return `wasm x1, model x1, df.js x${count('df.js')} (stereo, 2 workers)`;
+});
+
+await check('free: starting before the download is done shows "Getting the noise remover ready… X of Y MB" and still finishes', async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const p = await ctx.newPage();
+  await p.route(/DeepFilterNet3_onnx\.tar\.gz/, async (route) => {
+    const res = await route.fetch();
+    await new Promise((r) => setTimeout(r, 6000)); // a slow connection
+    await route.fulfill({ response: res });
+  });
+  await p.goto(`${BASE}/free`);
+  await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+  await p.getByRole('button', { name: 'Clean audio' }).waitFor();
+  const eta = await p.getByTestId('eta').innerText().catch(() => '');
+  await p.getByRole('button', { name: 'Clean audio' }).click();
+  await p.waitForFunction(() => /^Getting the noise remover ready/.test(document.querySelector('[data-testid=stage]')?.textContent || ''), null, { timeout: 15000 });
+  const stage = await p.getByTestId('stage').innerText();
+  if (!/^Getting the noise remover ready… [\d.]+ of [\d.]+ MB$/.test(stage)) throw new Error('stage: ' + stage);
+  const text = await p.getByTestId('progress-text').innerText();
+  await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
+  await ctx.close();
+  return `${stage}; "${text}"; before starting: "${eta}"`;
+});
+
 console.log('LOGS:\n' + logs.join('\n'));
 await browser.close();
 const bad = summary().filter((r) => !r.ok);

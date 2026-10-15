@@ -32,9 +32,30 @@ export const AUDIO_FORMATS = [
 
 export function statusLabel(status) {
   return {
-    uploading: 'Uploading', queued: 'Queued', running: 'Processing', cloud_asr: 'Transcribing (premium)', canceling: 'Canceling',
+    uploading: 'Uploading', queued: 'In line', running: 'Working on it', cloud_asr: 'Transcribing (extra accurate)', canceling: 'Canceling',
     done: 'Done', failed: 'Failed', canceled: 'Canceled', expired: 'Expired',
   }[status] || status;
+}
+
+/** "5 min", "under a minute", "1 h 20 min" for a rough wait. */
+function roughWait(seconds) {
+  const m = Math.round(seconds / 60);
+  if (m < 1) return 'under a minute';
+  if (m < 90) return `${m} min`;
+  const h = Math.floor(m / 60);
+  return `${h} h ${String(m % 60).padStart(2, '0')} min`;
+}
+
+/**
+ * Where a queued file job stands: "You're next", "In line: 2 ahead of you, about 5 min". Nothing is ever refused for being
+ * busy; jobs simply wait in line. `queuePosition` is 1-based and null unless the job is queued, `queueWaitSeconds` a rough estimate.
+ */
+export function queueText(job) {
+  if (job.status !== 'queued' || !Number.isFinite(job.queuePosition) || job.queuePosition < 1) return '';
+  const wait = Number.isFinite(job.queueWaitSeconds) && job.queueWaitSeconds > 0 ? `, about ${roughWait(job.queueWaitSeconds)}` : '';
+  const ahead = job.queuePosition - 1;
+  if (ahead === 0) return `You’re next${wait}`;
+  return `In line: ${ahead} ahead of you${wait}`;
 }
 
 export function kindLabel(job) {

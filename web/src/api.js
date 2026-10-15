@@ -18,10 +18,12 @@ export function onUnauthorized(fn) {
 }
 
 // ---- API availability -------------------------------------------------------------------------------------
-// Only /api/me and /api/billing/pricing are watched (every page asks for them). A network error or HTTP 502/503/504
-// there means the paid backend is down; other 5xx/4xx mean it is up. (503 elsewhere is meaningful, e.g. "payments
-// are not available yet", so other endpoints must not flip this.)
-const downBy = { me: false, pricing: false };
+// When the home server is down, the front door answers every /api/* call with HTTP 503 {"detail":"maintenance"}
+// (or 502/504 from a proxy, or the connection fails outright). All of these mean the same thing: "taking a short
+// break". /api/me and /api/billing/pricing are always watched (every page asks for them); any other endpoint only
+// counts when it says "maintenance" or answers 502/504, because a plain 503 elsewhere can be meaningful ("payments are
+// not available yet"). Recovery is a separate poll of /api/health (see checkHealth / the Layout).
+const downBy = { me: false, pricing: false, other: false };
 const offlineListeners = new Set();
 const DOWN_STATUS = new Set([502, 503, 504]);
 
@@ -37,8 +39,26 @@ export const apiOffline = {
     offlineListeners.add(fn);
     return () => offlineListeners.delete(fn);
   },
-  get: () => downBy.me || downBy.pricing,
+  get: () => downBy.me || downBy.pricing || downBy.other,
 };
+
+/**
+ * Asks /api/health whether the server is back. Returns true (and clears the "taking a break" state) when it answers
+ * with a success status, false otherwise. Never throws.
+ */
+export async function checkHealth() {
+  try {
+    const res = await fetch(`${API}health`, { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } });
+    if (!res.ok) return false;
+    downBy.me = false;
+    downBy.pricing = false;
+    downBy.other = false;
+    offlineListeners.forEach((fn) => fn());
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export class ApiError extends Error {
   constructor(message, status, fields) {
@@ -56,13 +76,16 @@ async function parse(res) {
   try {
     return JSON.parse(text);
   } catch {
-    return { detail: res.ok ? text : `Server error (${res.status}).` };
+    return { detail: res.ok ? text : `Something went wrong on our side (${res.status}).` };
   }
 }
 
 function errorFrom(res, data) {
   let detail = data && typeof data.detail === 'string' ? data.detail : null;
-  if (!detail) detail = res.status >= 500 ? 'The server had a problem. Please try again in a moment.' : `Request failed (${res.status}).`;
+  if (!detail) {
+    if (res.status === 507) detail = 'We are a bit short on storage space right now, so new files cannot be taken. Please try again in a little while.';
+    else detail = res.status >= 500 ? 'Something went wrong on our side. Please try again in a moment.' : `Request failed (${res.status}).`;
+  }
   return new ApiError(detail, res.status, data?.fields);
 }
 
@@ -101,10 +124,15 @@ export async function api(path, { method = 'GET', body, signal, redirectOn401 = 
   } catch (e) {
     if (e?.name === 'AbortError') throw e;
     if (path === 'billing/pricing') reportDown('pricing', true);
-    throw new ApiError('Could not reach the server. Check your connection and try again.', 0);
+    else reportDown('other', true);
+    throw new ApiError('Could not reach Audio Cleaner. Check your connection and try again.', 0);
   }
   if (path === 'billing/pricing') reportDown('pricing', DOWN_STATUS.has(res.status));
   const data = await parse(res);
+  if (path !== 'billing/pricing') {
+    const maintenance = res.status === 502 || res.status === 504 || (res.status === 503 && data?.detail === 'maintenance');
+    reportDown('other', maintenance);
+  }
   if (res.ok) return data;
   if (res.status === 403 && !_retried && /csrf/i.test(data?.detail || '')) {
     await fetchMe().catch(() => {});
@@ -137,7 +165,7 @@ export function uploadBlob(url, blob, { onProgress, signal } = {}) {
       }
       if (xhr.status >= 200 && xhr.status < 300) return resolve(data);
       if (xhr.status === 401 && unauthorizedHandler) unauthorizedHandler();
-      const detail = typeof data?.detail === 'string' ? data.detail : `Upload failed (${xhr.status}).`;
+      const detail = typeof data?.detail === 'string' ? data.detail : xhr.status === 507 ? 'We are a bit short on storage space right now. Please try again in a little while.' : `Upload failed (${xhr.status}).`;
       reject(new ApiError(detail, xhr.status));
     };
     xhr.onerror = () => reject(new ApiError('The upload was interrupted. Check your connection and try again.', 0));
