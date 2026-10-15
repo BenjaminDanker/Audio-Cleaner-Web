@@ -207,20 +207,20 @@ def rust_crates(src: Path, rust_target: str | None) -> str:
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo" / "bin" / "cargo")
     host = rust_target or os.environ.get("CARGO_BUILD_TARGET")
     if not host:
-        out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True, check=True).stdout
+        out = subprocess.run(["rustc", "-vV"], capture_output=True, text=True, encoding="utf-8", check=True).stdout
         host = re.search(r"^host: (\S+)", out, re.M).group(1)  # type: ignore[union-attr]
     base = [cargo]
     tree = subprocess.run(
         [*base, "tree", "--locked", "-p", "deep_filter", "--no-default-features", "--features", "capi",
          "-e", "normal", "--prefix", "none", "--target", host, "--format", "{p}|{l}|{r}"],
-        cwd=src, capture_output=True, text=True,
+        cwd=src, capture_output=True, text=True, encoding="utf-8",
     )
     if tree.returncode:
         fail(f"cargo tree failed:\n{tree.stderr}")
     meta = subprocess.run(
         [*base, "metadata", "--manifest-path", str(src / "libDF" / "Cargo.toml"), "--format-version", "1", "--locked",
          "--no-default-features", "--features", "capi", "--filter-platform", host],
-        cwd=src, capture_output=True, text=True,
+        cwd=src, capture_output=True, text=True, encoding="utf-8",
     )
     if meta.returncode:
         fail(f"cargo metadata failed:\n{meta.stderr}")
