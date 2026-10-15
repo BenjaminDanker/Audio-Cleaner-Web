@@ -53,9 +53,10 @@ if (want('prices')) {
       await page.goto(`${BASE}/#pricing`);
       await page.waitForSelector('[data-testid=prices] tbody tr');
       const t = await page.getByTestId('prices').innerText();
-      const need = ['Free', 'Files', 'Live streaming', 'Clean & polish', '$0.60 / hour', '$0.01 / min', '$0.24 / hour', 'Noise removed, voice evened out and loudness set, ready to publish', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Your first 60 minutes every day are free'];
+      const need = ['Free', 'Files', 'Live streaming', 'Clean & polish', '$0.60 / hour', '$0.01 / min', '$0.24 / hour', 'Noise removed, voice evened out and loudness set, ready to publish', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Noise removal in your browser', 'Subtitles & transcripts', '60 min every day', '$0.004 / min'];
+      if (/account/i.test(t)) throw new Error('the price list should not talk about accounts: ' + t);
       for (const n of need) if (!t.includes(n)) throw new Error(`missing "${n}" in: ${t}`);
-      if (/Available|Coming soon|low latency|\$0\.00\d/i.test(t)) throw new Error('should not show: ' + t);
+      if (/Available|Coming soon|low latency/i.test(t)) throw new Error('should not show: ' + t);
       if (!(await page.locator('[data-testid=prices] thead').evaluate((e) => e.classList.contains('sr-only')))) throw new Error('a visible column header row (the status and per-minute columns are gone)');
       const w = await page.getByTestId('prices').evaluate((e) => { const wrap = e.parentElement; return { sw: wrap.scrollWidth, cw: wrap.clientWidth, page: document.documentElement.scrollWidth, iw: window.innerWidth }; });
       if (w.sw > w.cw + 1 || w.page > w.iw + 1) throw new Error('sideways scroll: ' + JSON.stringify(w));

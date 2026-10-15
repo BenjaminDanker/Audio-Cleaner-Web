@@ -46,7 +46,7 @@ const FAQ = [
   ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. You do need a free account to use it, to keep bots away.'],
   ['How fast is it?', 'Usually about one minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
   ['What is Clean & polish for?', 'Longer recordings and finished files. We remove the noise, even out the voice and set the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],
-  ['Which files work?', 'Audio and video: MP3, WAV, FLAC, OGG, AAC/M4A, MP4, MOV, WebM and MKV, in current Chrome, Edge, Firefox and Safari. With video, the picture is left alone and only the sound is swapped.'],
+  ['Which files work?', 'On the Files page, almost any audio or video file: MP3, WAV, M4A/AAC, FLAC, OGG/Opus, WMA, AIFF, AMR, AC3, WavPack, MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG, MTS/M2TS, 3GP, MXF and more. The free cleanup in your browser takes the common ones your browser can open (MP3, WAV, M4A, FLAC, OGG, MP4, MOV, WebM, MKV). With video, the picture is left alone and only the sound is swapped.'],
   ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
   ['How does paying work?', 'You add credit, then spend it by the minute of audio. No subscription. You can top up from $10, and switch on auto-reload (with a monthly limit you choose) if you like. Turn it off whenever you want.'],
   ['What happens to my files and my words?', 'Files you upload are deleted as soon as they are processed. Results stay for 24 hours so you can download them, then they are deleted too. Live audio is never stored. We don’t train anything on your audio or your transcripts.'],
@@ -104,7 +104,7 @@ export default function Landing() {
               <Link to="/free" className="btn btn-primary btn-lg">Try it on a file</Link>
               <a href="#products" className="btn btn-secondary btn-lg">See what else we do</a>
             </div>
-            <p className="muted small">Free with an account. Nothing is uploaded. No watermark.</p>
+            <p className="muted small">Nothing is uploaded. No watermark.</p>
           </div>
           <HeroArt />
         </div>
@@ -118,7 +118,7 @@ export default function Landing() {
             <article className="card product-card">
               <div className="icon"><IconWave /></div>
               <h3>Free cleanup <span className="badge badge-free">Free</span></h3>
-              <p>Drop in a file and get it back clean, right in your browser. You just need a free account. Nothing is uploaded, and the only limit is how patient your computer is.</p>
+              <p>Drop in a file and get it back clean, right in your browser. Nothing is uploaded, and the only limit is how patient your computer is.</p>
               <span className="spacer" />
               <Link to="/free" className="btn btn-primary">Try it now</Link>
             </article>
@@ -162,7 +162,7 @@ export default function Landing() {
       <section className="section" id="pricing">
         <div className="container narrow stack">
           <h2 className="section-title mb0">What it costs</h2>
-          <p className="section-lead">The browser cleanup is free with an account. For the rest you add credit and spend it by the minute of audio. That&rsquo;s all.</p>
+          <p className="section-lead">Noise removal in your browser is free, and so are your first subtitle minutes each day. For the rest you add credit and spend it by the minute of audio. That&rsquo;s all.</p>
           <PriceTable />
           <div className="card stack">
             <h3 className="mb0">How credit works</h3>

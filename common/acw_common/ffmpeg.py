@@ -18,8 +18,9 @@ import numpy as np
 SAFE_INPUT = ["-protocol_whitelist", "file,pipe", "-probesize", "50M", "-analyzeduration", "50M"]
 # Container formats we accept from users. Anything else is rejected after probing.
 ALLOWED_FORMATS = {
-    "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "mp3", "wav", "flac", "ogg", "aac", "avi", "mpegts",
-    "aiff", "caf", "w64", "asf", "flv",
+    "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "mp3", "wav", "w64", "flac", "ogg", "aac", "aiff", "caf",
+    "asf", "avi", "flv", "mpeg", "mpegts", "mxf", "dv", "rm", "au", "amr", "ac3", "eac3", "dts", "wv", "ape",
+    "tta", "mpc", "mpc8",
 }
 VIDEO_CONTAINERS = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
 
@@ -215,7 +216,9 @@ class FFmpeg:
             acodec, sub_codec = ["-c:a", "aac", "-b:a", "256k"], "srt"
         else:
             acodec, sub_codec = ["-c:a", "aac", "-b:a", "256k"], "mov_text"
-        args = [self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-i", str(video_src)]
+        # +genpts: MPEG program streams (.mpg/.vob) carry packets without timestamps,
+        # which other containers refuse; harmless for files that have them.
+        args = [self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *SAFE_INPUT, "-fflags", "+genpts", "-i", str(video_src)]
         maps = ["-map", "0:v:0"]
         if audio is not None:
             args += ["-i", str(audio)]

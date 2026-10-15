@@ -257,7 +257,8 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
         cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None
         if cleaned is not None or (subtitle_file is not None and opts.get("embed_subtitles", True)):
             emit(stage="rebuilding video", progress=95)
-            ext = spec["input_ext"] if spec["input_ext"] in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else ".mp4"
+            # Other containers (AVI, WMV, FLV, MPEG, ...) go to MKV: it holds any video codec we copy.
+            ext = spec["input_ext"] if spec["input_ext"] in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else ".mkv"
             out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned'}{ext}"
             ff.mux_video(
                 job_dir / spec["input"],

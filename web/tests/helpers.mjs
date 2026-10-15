@@ -39,7 +39,8 @@ export async function launch(extraArgs = [], opts = {}) {
 export async function signIn(page, email) {
   const link = loginLink(email);
   await page.goto(link);
-  await page.waitForURL(/\/audio\/app$/, { timeout: 15000 });
+  // Lands on /app, or on the page the visitor was sent to sign in from.
+  await page.waitForURL((u) => u.pathname.startsWith('/audio/') && !u.pathname.startsWith('/audio/login'), { timeout: 15000 });
 }
 
 let results = [];

@@ -21,11 +21,10 @@ const GROUPS = [
 
 const minutes = (sec) => Math.round(sec / 60);
 
-/** "$0.60 / hour" is the headline. Per-minute only when it is a whole number of cents (no "$0.004"). */
+/** "$0.60 / hour" is the headline, the per-minute rate under it: "$0.01 / min", "$0.004 / min". */
 function perMinuteNote(usdPerMinute) {
-  const cents = usdPerMinute * 100;
-  if (cents < 1 - 1e-9 || Math.abs(cents - Math.round(cents)) > 1e-9) return null;
-  return `${moneyUsd(usdPerMinute)} / min`;
+  const digits = Math.abs(usdPerMinute * 100 - Math.round(usdPerMinute * 100)) < 1e-9 ? 2 : 3;
+  return `$${usdPerMinute.toFixed(digits)} / min`;
 }
 
 /**
@@ -50,8 +49,8 @@ export default function PriceTable({ only, testId = 'prices', showNote = true })
           </thead>
           <tbody>
             {groups.map((g) => (g.id === 'free'
-              ? <FreeRows key={g.id} title={g.title} />
-              : <GroupRows key={g.id} group={g} rates={data.rates} free={data.free} />))}
+              ? <FreeRows key={g.id} title={g.title} free={data.free} />
+              : <GroupRows key={g.id} group={g} rates={data.rates} />))}
           </tbody>
         </table>
       </div>
@@ -60,22 +59,31 @@ export default function PriceTable({ only, testId = 'prices', showNote = true })
   );
 }
 
-function FreeRows({ title }) {
+function FreeRows({ title, free }) {
   return (
     <>
       <tr className="group"><th scope="rowgroup" colSpan={2}>{title}</th></tr>
       <tr>
         <th scope="row">
-          <span className="svc">Free cleanup in your browser</span>
-          <span className="small muted desc">Takes noise out of audio and video on your own device. Nothing is uploaded. Needs a free account.</span>
+          <span className="svc">Noise removal in your browser</span>
+          <span className="small muted desc">Takes noise out of audio and video on your own device. Nothing is uploaded.</span>
         </th>
-        <td className="num"><span className="price-main">Free</span><span className="small muted price-sub">with an account</span></td>
+        <td className="num"><span className="price-main">Free</span></td>
       </tr>
+      {free && (
+        <tr>
+          <th scope="row">
+            <span className="svc">Subtitles &amp; transcripts</span>
+            <span className="small muted desc">Standard quality, files up to {minutes(free.transcribeMaxFileSeconds)} minutes. After that, the Transcription price below.</span>
+          </th>
+          <td className="num"><span className="price-main">Free</span><span className="small muted price-sub">{minutes(free.transcribeSecondsPerDay)} min every day</span></td>
+        </tr>
+      )}
     </>
   );
 }
 
-function GroupRows({ group, rates, free }) {
+function GroupRows({ group, rates }) {
   const rows = rates.filter((r) => group.products.includes(r.product) && r.available);
   if (rows.length === 0) return null;
   return (
@@ -89,15 +97,10 @@ function GroupRows({ group, rates, free }) {
             <th scope="row">
               <span className="svc">{r.label}</span>
               {desc && <span className="small muted desc">{desc}</span>}
-              {r.product === 'transcribe' && r.tier === 'local' && free && (
-                <span className="small desc free-note">
-                  Your first {minutes(free.transcribeSecondsPerDay)} minutes every day are free (files up to {minutes(free.transcribeMaxFileSeconds)} minutes).
-                </span>
-              )}
             </th>
             <td className="num">
               <span className="price-main">{moneyUsd(r.usdPerHour)} / hour</span>
-              {sub && <span className="small muted price-sub">{sub}</span>}
+              <span className="small muted price-sub">{sub}</span>
             </td>
           </tr>
         );

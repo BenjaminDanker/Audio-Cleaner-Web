@@ -54,13 +54,13 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (JSON.stringify(nav) !== JSON.stringify(['Free cleanup', 'Files', 'Live', 'Pricing'])) throw new Error(JSON.stringify(nav));
     return nav.join(' | ');
   });
-  await check('landing: product cards point to /free, /app, /app/live, /app; hero says free with an account', async () => {
+  await check('landing: product cards point to /free, /app, /app/live, /app; hero line', async () => {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('.product-card');
     const cards = await page.locator('.product-card').evaluateAll((els) => els.map((e) => [e.querySelector('h3').textContent.replace(/\s+/g, ' ').trim(), new URL(e.querySelector('a').href).pathname]));
     const want = [['Free cleanup Free', '/audio/free'], ['Clean & polish', '/audio/app'], ['Live for streamers', '/audio/app/live'], ['Subtitles & transcripts Free every day', '/audio/app']];
     if (JSON.stringify(cards) !== JSON.stringify(want)) throw new Error(JSON.stringify(cards));
-    if (!(await page.locator('.hero').innerText()).includes('Free with an account. Nothing is uploaded. No watermark.')) throw new Error('hero line');
+    if (!(await page.locator('.hero').innerText()).includes('Nothing is uploaded. No watermark.')) throw new Error('hero line');
     return 'ok';
   });
   await browser.close();
@@ -203,6 +203,26 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
     await apiCall(page, 'POST', `jobs/${id}/cancel`).catch(() => {});
     return t;
+  });
+
+  await check('a format the browser cannot open (WMA): accepted, honest "rough guess" note, and the server cleans it', async () => {
+    passThrough = true;
+    admin('grant', EMAIL, '5', 'files test: WMA');
+    await page.goto(`${BASE}/app`);
+    await choose('noisy.wma');
+    await page.getByTestId('length-unknown').waitFor({ timeout: 15000 });
+    await polish().check();
+    await subs().uncheck();
+    await page.getByRole('button', { name: /^Start/ }).click();
+    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+    const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
+    for (let i = 0; i < 90; i++) {
+      const j = await apiCall(page, 'GET', `jobs/${id}`);
+      if (j.body?.status === "done") return `done: ${j.body.outputs.map((o) => o.name).join(", ")} (${Math.round(j.body.durationSeconds)} s measured)`;
+      if (["failed", "canceled"].includes(j.body?.status)) throw new Error(JSON.stringify(j.body));
+      await page.waitForTimeout(1000);
+    }
+    throw new Error('job did not finish');
   });
 
   await browser.close();

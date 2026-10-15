@@ -24,9 +24,15 @@ from .config import get_settings
 KINDS = {"denoise", "transcribe", "denoise_transcribe"}
 AUDIO_FORMATS = {"wav", "flac", "mp3", "m4a", "opus"}
 CAPTION_FORMATS = {"srt", "vtt", "txt", "json"}
+# Anything FFmpeg reads well; the sandboxed probe decides for real (ffmpeg.ALLOWED_FORMATS).
 ALLOWED_EXTS = {
-    ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".oga", ".webm", ".mp4", ".mov", ".m4v",
-    ".mkv", ".avi", ".aiff", ".aif", ".caf", ".wma", ".ts",
+    # audio
+    ".wav", ".rf64", ".w64", ".mp3", ".mp2", ".mpa", ".m4a", ".m4b", ".m4r", ".aac", ".flac", ".ogg", ".oga",
+    ".opus", ".spx", ".wma", ".aiff", ".aif", ".aifc", ".caf", ".au", ".snd", ".amr", ".ac3", ".eac3", ".dts",
+    ".mka", ".wv", ".ape", ".tta", ".mpc",
+    # video
+    ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".wmv", ".asf", ".flv", ".f4v", ".3gp", ".3g2", ".ts",
+    ".mts", ".m2ts", ".mpg", ".mpeg", ".vob", ".mxf", ".dv", ".ogv", ".rm", ".rmvb",
 }
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")

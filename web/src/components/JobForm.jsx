@@ -5,7 +5,7 @@ import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money } fro
 import { estimateMicros, usePricing } from '../hooks.js';
 import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, submitJob } from '../jobs.js';
 import { probeMedia } from '../media/mb.js';
-import FileDrop from './FileDrop.jsx';
+import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
 
 const STRENGTHS = [
   { id: '18', label: 'Natural', db: 18 },
@@ -55,7 +55,10 @@ export default function JobForm({ onSubmitted }) {
   const wantsDenoise = polish;
   const wantsText = text;
   const kind = polish && text ? 'denoise_transcribe' : polish ? 'denoise' : text ? 'transcribe' : null;
-  const duration = info?.duration || null;
+  // Some formats (WMA, AMR, AVI, MPEG...) the browser can't read, but the server can. Then the length is a rough
+  // guess from the file size (128 kbit/s) until the server measures it; the price is corrected to the real length.
+  const lengthUnknown = !!(file && info && !probing && !info.duration && info.hasAudio !== false);
+  const duration = info?.duration || (lengthUnknown ? Math.min(Math.max(30, (file.size * 8) / 128000), pricing?.maxJobSeconds || 4 * 3600) : null);
   const maxJob = pricing?.maxJobSeconds;
   const freeMax = pricing?.free?.transcribeMaxFileSeconds;
   const freeDay = pricing?.free?.transcribeSecondsPerDay;
@@ -94,7 +97,6 @@ export default function JobForm({ onSubmitted }) {
   }
 
   const problems = [];
-  if (info && !probing && !duration) problems.push('We couldn’t read the length of this file. Please choose a normal audio or video file (MP3, WAV, M4A, MP4, MOV, WebM, MKV...).');
   if (info?.hasAudio === false) problems.push('This file has no audio track.');
   if (duration && maxJob && duration > maxJob) problems.push(`Files can be at most ${Math.floor(maxJob / 3600)} hours long.`);
   if (!free && est != null && balance && est > balance.available_micros) problems.push(`This job costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
@@ -160,7 +162,7 @@ export default function JobForm({ onSubmitted }) {
     <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
       <h2 id="newjob-h" className="mb0">Add a file</h2>
 
-      {!file && !busy && <FileDrop onFile={choose} />}
+      {!file && !busy && <FileDrop onFile={choose} accept={SERVER_FORMATS} hint="or click to pick one. Almost any audio or video file: MP3, WAV, M4A, FLAC, WMA, AMR, MP4, MOV, MKV, AVI, WMV, MPEG and more." />}
       {probing && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Reading file…</p>}
 
       {file && (
@@ -266,9 +268,10 @@ export default function JobForm({ onSubmitted }) {
           )}
           {free && (
             <p className="mb0" data-testid="free-note">
-              <b>Free: uses {mins(duration)} of your {Math.floor(freeLeft / 60)} free minutes left today</b>
+              <b>Free: uses {lengthUnknown ? 'about ' : ''}{mins(duration)} of your {Math.floor(freeLeft / 60)} free minutes left today</b>
             </p>
           )}
+          {lengthUnknown && <p className="mb0 muted small" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}
           {notFreeReason && <p className="mb0 muted small" data-testid="not-free-note">This one isn’t free because it’s {notFreeReason}, so it’s charged at the usual rate.</p>}
           {problems.map((p) => <div key={p} className="banner banner-warn" role="alert">{p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}</div>)}
         </>

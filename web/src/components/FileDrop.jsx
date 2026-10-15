@@ -1,10 +1,13 @@
 import { useRef, useState } from 'react';
 import { IconUpload } from './Icons.jsx';
 
-const ACCEPT = 'audio/*,video/*,.mp3,.wav,.flac,.ogg,.oga,.opus,.m4a,.aac,.mp4,.m4v,.mov,.webm,.mkv,.ts,.aiff,.aif,.caf,.wma,.avi';
+// What browsers can open themselves (the free in-browser tool).
+export const BROWSER_FORMATS = 'audio/*,video/*,.mp3,.wav,.flac,.ogg,.oga,.opus,.m4a,.aac,.mp4,.m4v,.mov,.webm,.mkv,.aiff,.aif';
+// What the server reads (Files page): nearly anything FFmpeg understands. Keep in step with server/acw/jobs.py.
+export const SERVER_FORMATS = `${BROWSER_FORMATS},.rf64,.w64,.mp2,.mpa,.m4b,.m4r,.spx,.wma,.aifc,.caf,.au,.snd,.amr,.ac3,.eac3,.dts,.mka,.wv,.ape,.tta,.mpc,.avi,.wmv,.asf,.flv,.f4v,.3gp,.3g2,.ts,.mts,.m2ts,.mpg,.mpeg,.vob,.mxf,.dv,.ogv,.rm,.rmvb`;
 
 /** Drag-and-drop / click-to-choose file picker. */
-export default function FileDrop({ onFile, disabled, title = 'Drop an audio or video file here', hint = 'or click to pick one. MP3, WAV, FLAC, M4A, MP4, MOV, WebM, MKV and more.' }) {
+export default function FileDrop({ onFile, disabled, accept = BROWSER_FORMATS, title = 'Drop an audio or video file here', hint = 'or click to pick one. MP3, WAV, FLAC, M4A, MP4, MOV, WebM, MKV and more.' }) {
   const [over, setOver] = useState(false);
   const input = useRef(null);
   const pick = (files) => {
@@ -25,7 +28,7 @@ export default function FileDrop({ onFile, disabled, title = 'Drop an audio or v
       <input
         ref={input}
         type="file"
-        accept={ACCEPT}
+        accept={accept}
         disabled={disabled}
         onChange={(e) => { pick(e.target.files); e.target.value = ''; }}
         aria-label="Choose an audio or video file"
