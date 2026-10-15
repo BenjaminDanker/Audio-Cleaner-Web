@@ -11,6 +11,7 @@ dependencies = [
   "scipy>=1.13",
   "pyloudnorm>=0.1",
   "PySide6-Essentials>=6.7",
+  "PySide6-Addons>=6.7",  # QtMultimedia for the preview
   "faster-whisper>=1.1",
 ]
 

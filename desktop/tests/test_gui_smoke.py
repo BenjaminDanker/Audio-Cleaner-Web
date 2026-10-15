@@ -184,3 +184,80 @@ def test_closing_while_cleaning_asks_and_stops(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(w, "_confirm", lambda title, text: True)
     w.close()
     assert not w.queue.busy
+
+
+@pytest.fixture
+def fake_bin(tmp_path, monkeypatch):
+    """Stands in for the Recycle Bin / Trash, so tests never touch the real one."""
+    from audio_cleaner_desktop.gui import main_window, shell
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    def move(path):
+        path.rename(bin_dir / path.name)
+        return True
+
+    monkeypatch.setattr(shell, "move_to_trash", move)
+    monkeypatch.setattr(main_window.shell, "move_to_trash", move)
+    return bin_dir
+
+
+@pytest.mark.native
+def test_clean_again_keeps_the_row_and_the_name(window, speech_wav, tmp_path, fake_bin):
+    src = tmp_path / "talk.wav"
+    src.write_bytes(speech_wav.read_bytes())
+    window.add_paths([src])
+    window.start()
+    item = next(iter(window._items.values()))
+    assert wait_until(lambda: item.state == DONE, timeout=120), item.message
+    first = item.outputs[0]
+    first_bytes = first.read_bytes()
+
+    window.settings_panel._strength.set_value("gentle")
+    window.prefs.strength = "gentle"
+    window.clean_again(item.id)
+    assert wait_until(lambda: item.state in (DONE, FAILED), timeout=120)
+    assert item.state == DONE, item.message
+    assert len(window._items) == 1 and len(window.view) == 1  # same row
+    assert item.outputs == [first] and first.name == "talk-cleaned.wav"  # same name, no "(2)"
+    assert first.read_bytes() != first_bytes  # the new, gentler result
+    assert [p.name for p in fake_bin.iterdir()] == ["talk-cleaned.wav"]  # the earlier one is in the bin
+    assert "earlier version" in item.message
+    assert not [p.name for p in tmp_path.iterdir() if "cleaned (" in p.name]  # no "(2)" copies left behind
+
+    # Adding the same file again does not make a twin row either.
+    assert window.add_paths([src]) == 1
+    assert len(window.view) == 1 and item.state == WAITING
+
+
+@pytest.mark.native
+def test_clean_again_never_bins_a_result_that_was_changed(window, speech_wav, tmp_path, fake_bin):
+    src = tmp_path / "talk.wav"
+    src.write_bytes(speech_wav.read_bytes())
+    window.add_paths([src])
+    window.start()
+    item = next(iter(window._items.values()))
+    assert wait_until(lambda: item.state == DONE, timeout=120), item.message
+    first = item.outputs[0]
+    with open(first, "ab") as f:  # edited elsewhere since
+        f.write(b"\0" * 10)
+    window.clean_again(item.id)
+    assert wait_until(lambda: item.state == DONE, timeout=120), item.message
+    assert first.exists() and item.outputs[0].name == "talk-cleaned (2).wav"
+    assert not any(fake_bin.iterdir())
+
+
+def test_help_tooltips_wrap_and_keep_their_structure(window):
+    from audio_cleaner_desktop.gui import tips
+    from audio_cleaner_desktop.gui.settings_panel import InfoButton
+
+    html = tips.to_html("Intro line.\n\n• one <b>\n• two\n\nLast.")
+    assert html.count("<table") == 2 and "&lt;b&gt;" in html and "&nbsp;" in html
+    button = window.settings_panel.findChildren(InfoButton)[0]
+    tips.pin(button._text, button)
+    popup = tips._popup
+    assert popup.isVisible() and popup.pinned
+    assert popup.width() <= tips.MAX_WIDTH + 40 and popup.height() > 60  # wrapped onto several lines
+    tips.pin(button._text, button)  # a second click closes it
+    assert not popup.isVisible()

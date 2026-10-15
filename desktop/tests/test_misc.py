@@ -77,5 +77,5 @@ def test_history_wording():
     assert format_hours(0) == "0 min" and format_hours(1800) == "30 min" and format_hours(5400) == "1.5 h"
     assert format_spent(30) == "< 1 min" and format_spent(125 * 60) == "2 h 05 min"
     text = describe_settings({"strength": "gentle", "polish": True, "loudness": "youtube", "subtitles": "srt"}, False)
-    assert text == "Gentle noise reduction, polished (youtube), subtitles: srt file"
+    assert text == "Gentle noise reduction, polished (YouTube), subtitles: srt file"
     assert "polished" not in describe_settings({"strength": "max", "polish": False}, True)

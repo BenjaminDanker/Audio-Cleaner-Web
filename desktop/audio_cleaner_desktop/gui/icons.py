@@ -104,9 +104,17 @@ def _trash(p: QPainter, c: QColor) -> None:
     p.drawPolyline(QPolygonF([QPointF(6.5, 7), QPointF(7.5, 19.5), QPointF(16.5, 19.5), QPointF(17.5, 7)]))
 
 
+def _again(p: QPainter, c: QColor) -> None:
+    """A circular arrow (do it again)."""
+    _stroke(p, c, 1.9)
+    p.drawArc(QRectF(5, 5, 14, 14), 60 * 16, 270 * 16)  # open on the right; the arrow continues clockwise
+    p.drawPolyline(QPolygonF([QPointF(11.6, 6.9), QPointF(16.3, 6.3), QPointF(14.6, 1.9)]))
+
+
 _DRAWERS: dict[str, Drawer] = {
     "play": _play, "pause": _pause, "folder": _folder, "close": _close, "plus": _plus,
     "upload": _upload, "waveform": _waveform, "info": _info, "up": _up, "down": _down, "trash": _trash,
+    "again": _again,
 }
 
 

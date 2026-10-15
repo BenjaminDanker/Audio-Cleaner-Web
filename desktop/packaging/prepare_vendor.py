@@ -55,7 +55,7 @@ WHISPER_DIR_NAME = "whisper-small"
 
 # Distributions whose notices are collected (plus everything they require at run time).
 PYTHON_ROOTS = [
-    "PySide6_Essentials", "shiboken6", "numpy", "scipy", "pyloudnorm", "faster-whisper", "ctranslate2",
+    "PySide6_Essentials", "PySide6_Addons", "shiboken6", "numpy", "scipy", "pyloudnorm", "faster-whisper", "ctranslate2",
     "tokenizers", "huggingface_hub", "onnxruntime",
 ]
 OPTIONAL_ROOTS = ["future"]  # older pyloudnorm releases need it
@@ -69,7 +69,7 @@ SUPPLEMENT = {
     "hf-xet": "Apache-2.0.txt",
     "flatbuffers": "Apache-2.0.txt",
 }
-QT_DISTS = {"pyside6-essentials", "shiboken6"}  # covered by the Qt notice and LGPL-3.0.txt
+QT_DISTS = {"pyside6-essentials", "pyside6-addons", "shiboken6"}  # covered by the Qt notice and LGPL-3.0.txt
 
 LICENSE_NAME = re.compile(r"^(licen[sc]e|copying|notice|unlicense|thirdpartynotices)([-_.].*)?$", re.I)
 CRATE_LICENSE_NAME = re.compile(r"^(licen[sc]e|copying|unlicense)([-_.].*)?$", re.I)

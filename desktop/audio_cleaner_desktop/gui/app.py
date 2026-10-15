@@ -12,6 +12,7 @@ from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .. import __version__, config
+from . import tips
 from .main_window import MainWindow, log_dir
 from .theme import ThemeWatcher
 
@@ -56,6 +57,7 @@ def create_application(argv: list[str]) -> QApplication:
     app.setApplicationVersion(__version__)
     app.setWindowIcon(QIcon(str(ICON)))
     app.setStyle("Fusion")
+    tips.install(app)
     return app
 
 

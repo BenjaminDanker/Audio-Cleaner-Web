@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import time
 from collections.abc import Iterable
@@ -272,9 +273,14 @@ class MainWindow(QMainWindow):
     def add_paths(self, paths: Iterable[str | Path]) -> int:
         """Queue files (folders are searched). Returns how many were added."""
         known = {i.path for i in self._items.values() if i.state in (WAITING, RUNNING)}
+        finished = {i.path: i for i in self._items.values() if i.state in (ITEM_DONE, ITEM_FAILED, CANCELLED)}
         added = 0
         for path in media.expand(paths):
             if path in known:
+                continue
+            if path in finished:  # already in the list: clean it again in its own row instead of adding a twin
+                self._requeue(finished.pop(path))
+                added += 1
                 continue
             item = FileItem(self._next_id, path, has_video=path.suffix.lower() in media.VIDEO_EXTENSIONS)
             self._next_id += 1
@@ -284,6 +290,7 @@ class MainWindow(QMainWindow):
             row.cancelRequested.connect(self.queue.cancel)
             row.previewRequested.connect(self.show_preview)
             row.revealRequested.connect(self._reveal)
+            row.againRequested.connect(self.clean_again)
             row.moveRequested.connect(self._move)
             self.view.add(row)
             if self._missing:
@@ -297,6 +304,52 @@ class MainWindow(QMainWindow):
             added += 1
         self._refresh_state()
         return added
+
+    def _requeue(self, item: FileItem) -> None:
+        """Put a finished, failed or cancelled row back in line (with the settings at the time it starts)."""
+        item.replaces = {p: st for p, st in item.made.items() if p in item.outputs}
+        item.state, item.progress, item.message, item.outputs = WAITING, 0.0, "", []
+        self._refresh_row(item)
+        if self.queue.active:
+            self._enqueue(item)
+
+    def clean_again(self, item_id: int) -> None:
+        """Clean one finished row again with the current settings, right away."""
+        item = self._items.get(item_id)
+        if item is None or item.state not in (ITEM_DONE, ITEM_FAILED, CANCELLED) or self._missing:
+            return
+        self._requeue(item)
+        if not self.queue.active:
+            self._batch_started = time.monotonic()
+            self._batch_done = self._batch_failed = 0
+            self._enqueue(item)
+            self.queue.start()
+        self._refresh_state()
+
+    def _take_place_of_previous(self, item: FileItem, paths: list[Path]) -> tuple[list[Path], bool]:
+        """After "Clean again": give each new file the name of the earlier result of the same type, once that
+        earlier file is safely in the Recycle Bin / Trash. Files that were changed since, or that can't be
+        moved to the bin, are left alone and the new file keeps its own name."""
+        replaced = False
+        out = []
+        for new in paths:
+            target = next((p for p in item.replaces if p.suffix.lower() == new.suffix.lower()), None)
+            if target is not None:
+                item.replaces.pop(target)
+                try:
+                    st = target.stat()
+                    unchanged = (st.st_size, st.st_mtime_ns) == item.made.get(target)
+                except OSError:
+                    unchanged = False
+                if unchanged and target != new and shell.move_to_trash(target):
+                    try:
+                        os.replace(new, target)
+                        new, replaced = target, True
+                    except OSError:
+                        log.warning("could not rename %s to %s", new, target, exc_info=True)
+            out.append(new)
+        item.replaces = {}
+        return out, replaced
 
     def _enqueue(self, item: FileItem) -> None:
         item.options = self.prefs.job_options()
@@ -388,15 +441,30 @@ class MainWindow(QMainWindow):
         self._queued.discard(item_id)
         if item is None:
             return
-        item.state, item.progress, item.outputs = ITEM_DONE, 1.0, result.paths
+        previewing = self.preview is not None and self.preview.isVisible() and self.preview.key == item_id
+        if previewing and item.replaces:
+            self.preview.release()
+        paths, replaced = self._take_place_of_previous(item, result.paths) if item.replaces else (result.paths, False)
+        item.state, item.progress, item.outputs = ITEM_DONE, 1.0, paths
         item.duration, item.has_video = result.duration, result.has_video
+        item.made = {}
+        for p in paths:
+            try:
+                st = p.stat()
+                item.made[p] = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                pass
+        notes = []
+        if replaced:
+            notes.append(f"the earlier version is in the {shell.TRASH_NAME}")
         if item.options and item.options.subtitles != "off" and result.subtitles is None and not result.embedded:
-            item.message = "no speech found for subtitles"
+            notes.append("no speech found for subtitles")
+        item.message = "; ".join(notes)
         self._batch_done += 1
-        self._record(item, DONE, "", [str(p) for p in result.paths])
+        self._record(item, DONE, "", [str(p) for p in paths])
         self._refresh_row(item)
-        if self.preview is not None and self.preview.isVisible() and self.preview.key == item_id:
-            self.preview.set_cleaned(result.output)
+        if previewing:
+            self.preview.show_files(item.id, item.path, paths[0], item.has_video, item.path.name)
         self._refresh_state()
 
     def _on_failed(self, item_id: int, message: str) -> None:
@@ -568,6 +636,28 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         self._fit_settings()
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        if not getattr(self, "_grown", False):
+            self._grown = True
+            QTimer.singleShot(0, self._grow_to_fit_settings)
+
+    def _grow_to_fit_settings(self) -> None:
+        """Make the window just tall enough that the settings need no scroll bar (fonts and display scaling
+        differ between computers, so this is measured, not fixed), as far as the screen allows."""
+        missing = self.settings_panel.full_height() - self._settings_scroll.viewport().height()
+        if missing <= 0 or self.isMaximized() or self.isFullScreen():
+            return
+        screen = self.screen().availableGeometry()
+        frame = self.frameGeometry().height() - self.height()
+        height = min(self.height() + missing + 2, screen.height() - frame)
+        if height <= self.height():
+            return
+        self.resize(self.width(), height)
+        top = self.frameGeometry().top()
+        if top + height + frame > screen.bottom():
+            self.move(self.x(), max(screen.top(), screen.bottom() - height - frame))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802
         if event.mimeData().hasUrls():

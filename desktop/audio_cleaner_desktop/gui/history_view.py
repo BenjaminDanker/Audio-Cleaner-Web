@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from .. import engine
 from . import shell
 from .history import DONE, Entry, HistoryStore, Totals
-from .settings_panel import FORMAT_LABELS, LOUDNESS_LABELS, STRENGTH_LABELS, SUBTITLE_LABELS
+from .settings_panel import FORMAT_LABELS, LOUDNESS_SHORT, STRENGTH_LABELS, SUBTITLE_LABELS
 from .theme import set_property
 from .widgets import ElidedLabel, IconButton, format_time
 
@@ -33,7 +33,7 @@ def format_spent(seconds: float) -> str:
 def describe_settings(s: dict, has_video: bool) -> str:
     parts = [dict(STRENGTH_LABELS).get(s.get("strength"), "Maximum") + " noise reduction"]
     if s.get("polish", True):
-        parts.append("polished (" + LOUDNESS_LABELS.get(s.get("loudness"), "").split(" (")[0].lower() + ")")
+        parts.append("polished (" + LOUDNESS_SHORT.get(s.get("loudness"), "podcast") + ")")
     if not has_video and s.get("audio_format", "same") != "same":
         parts.append(FORMAT_LABELS[s["audio_format"]])
     if s.get("subtitles", "off") != "off":

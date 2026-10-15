@@ -72,6 +72,7 @@ def stylesheet(t: Theme) -> str:
 QMainWindow, QDialog {{ background: {t.window.name()}; }}
 QLabel {{ background: transparent; }}
 QToolTip {{ padding: 4px 6px; }}
+QLabel#Tip {{ background: {t.surface.name()}; color: {t.text.name()}; border: 1px solid {t.border.name()}; border-radius: 6px; }}
 
 QFrame#Card {{ background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 12px; }}
 QFrame#Card[drop="true"] {{ border: 2px dashed {t.brand}; background: {t.brand_soft}; }}
@@ -212,6 +213,14 @@ class ThemeWatcher(QObject):
             return
         self._applied = theme
         self._app.setStyleSheet(stylesheet(theme))
+        # Checkboxes, radio buttons and selections use the app's blue, not the system accent colour
+        # (on Windows that is whatever the user picked, e.g. orange).
+        palette = self._app.palette()
+        for group in (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive):
+            palette.setColor(group, QPalette.ColorRole.Accent, QColor(theme.brand))
+            palette.setColor(group, QPalette.ColorRole.Highlight, QColor(theme.brand))
+            palette.setColor(group, QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        self._app.setPalette(palette)
 
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:
         if event.type() in (QEvent.Type.ApplicationPaletteChange, QEvent.Type.ApplicationFontChange) and obj is self._app:

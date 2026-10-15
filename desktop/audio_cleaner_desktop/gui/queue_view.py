@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import engine
-from . import icons
+from . import icons, shell
 from .theme import set_property
 from .widgets import ElidedLabel, IconButton, format_time
 
@@ -41,6 +41,10 @@ class FileItem:
     started_at: float = 0.0
     probed: bool = False
     options: engine.JobOptions | None = None
+    # Cleaned files from the previous run of this row and their (size, mtime_ns) when they were made:
+    # "Clean again" puts the new result in their place once it is finished (the old one goes to the bin).
+    made: dict[Path, tuple[int, int]] = field(default_factory=dict)
+    replaces: dict[Path, tuple[int, int]] = field(default_factory=dict)
 
 
 class DropZone(QFrame):
@@ -132,6 +136,7 @@ class FileRow(QFrame):
     cancelRequested = Signal(int)
     previewRequested = Signal(int)
     revealRequested = Signal(int)
+    againRequested = Signal(int)
     moveRequested = Signal(int, int)
 
     def __init__(self, item: FileItem, parent: QWidget | None = None):
@@ -181,9 +186,13 @@ class FileRow(QFrame):
         self._down = IconButton("down", "Move this file later in the queue")
         self._preview = IconButton("play", "Listen to the original and the cleaned version")
         self._reveal = IconButton("folder", "Show the cleaned file in its folder")
+        self._again = IconButton(
+            "again",
+            f"Clean again with the current settings.\nThe new result replaces this one; the earlier version goes to the {shell.TRASH_NAME}.",
+        )
         self._stop = IconButton("close", "Stop cleaning this file")
-        self._remove = IconButton("trash", "Remove this file from the list")
-        self._buttons = (self._up, self._down, self._preview, self._reveal, self._stop, self._remove)
+        self._remove = IconButton("close", "Take this file off the list (the file itself stays)")
+        self._buttons = (self._up, self._down, self._preview, self._reveal, self._again, self._stop, self._remove)
         actions = QWidget()
         actions_layout = QHBoxLayout(actions)
         actions_layout.setContentsMargins(0, 0, 0, 0)
@@ -196,6 +205,7 @@ class FileRow(QFrame):
         self._down.clicked.connect(lambda: self.moveRequested.emit(item.id, 1))
         self._preview.clicked.connect(lambda: self.previewRequested.emit(item.id))
         self._reveal.clicked.connect(lambda: self.revealRequested.emit(item.id))
+        self._again.clicked.connect(lambda: self.againRequested.emit(item.id))
         self._stop.clicked.connect(lambda: self.cancelRequested.emit(item.id))
         self._remove.clicked.connect(lambda: self.removeRequested.emit(item.id))
         self.refresh()
@@ -229,6 +239,7 @@ class FileRow(QFrame):
         self._stop.setVisible(state == RUNNING)
         self._preview.setVisible(state in (WAITING, DONE))
         self._reveal.setVisible(state == DONE)
+        self._again.setVisible(state in (DONE, FAILED, CANCELLED))
         self._remove.setVisible(state != RUNNING)
         self.setAccessibleName(f"{item.path.name}: {text}")
 

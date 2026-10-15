@@ -137,6 +137,12 @@ class PreviewPane(QFrame):
         if self._player is not None:
             self._player.stop()
 
+    def release(self) -> None:
+        """Stop and close the file, so it can be moved or renamed (Windows locks files that are open)."""
+        if self._player is not None:
+            self._player.stop()
+            self._player.setSource(QUrl())
+
     def toggle(self) -> None:
         if self._player is None:
             return

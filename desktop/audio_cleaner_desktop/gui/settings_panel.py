@@ -2,20 +2,21 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QToolTip, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
 )
 
 from .. import engine
+from . import tips
 from .preferences import Preferences
 from .widgets import ElidedLabel, IconButton, Segmented
 
 STRENGTH_LABELS = [("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Maximum")]
 LOUDNESS_LABELS = {
-    "podcast": "Podcast (-16 LUFS)", "youtube": "YouTube (-14 LUFS)", "broadcast": "Broadcast (-23 LUFS)",
+    "podcast": "Podcast: -16 LUFS", "youtube": "YouTube and streaming: -14 LUFS", "broadcast": "TV and radio: -23 LUFS",
     "keep": "Keep the original level",
 }
+LOUDNESS_SHORT = {"podcast": "podcast", "youtube": "YouTube", "broadcast": "TV and radio", "keep": "original level"}
 SUBTITLE_LABELS = {
     "off": "No subtitles", "srt": "SRT file", "vtt": "VTT file", "txt": "Text transcript", "embed": "Inside the video",
 }
@@ -24,7 +25,7 @@ PARALLEL_LABELS = {0: "Automatic", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 
 class InfoButton(IconButton):
-    """A small "?" that explains a setting; hover shows the text, a click pins it near the cursor."""
+    """A small "?" that explains a setting; hover shows the text, a click keeps it up (gui/tips.py)."""
 
     def __init__(self, text: str, parent: QWidget | None = None):
         super().__init__("info", text, size=16, parent=parent)
@@ -32,7 +33,7 @@ class InfoButton(IconButton):
         self.setFixedSize(24, 24)
         self.setAccessibleName("More about this setting")
         self.setAccessibleDescription(text)
-        self.clicked.connect(lambda: QToolTip.showText(QCursor.pos(), self._text, self))
+        self.clicked.connect(lambda: tips.pin(self._text, self))
 
 
 class _Row(QWidget):
@@ -80,22 +81,38 @@ class SettingsPanel(QFrame):
         layout.addWidget(title)
 
         self._strength = Segmented(STRENGTH_LABELS)
-        self._strength.setToolTip("Lower keeps more room tone and music")
+        self._strength.setToolTip("How much background noise to remove. Gentle sounds the most natural.")
         layout.addWidget(_Row(
-            "Noise reduction", "How much of the background gets removed. Gentle leaves more of the room and any music and "
-            "sounds the most natural. Maximum removes as much as it can, which suits noisy places. Not sure? Maximum "
-            "works well for most voice recordings.", self._strength,
+            "Noise reduction",
+            "How much of the background gets removed.\n\n"
+            "\u2022 Gentle: takes the edge off and keeps some room sound and music. Sounds the most natural.\n"
+            "\u2022 Balanced: most of the noise goes, the room still sounds like a room.\n"
+            "\u2022 Strong: nearly all of it goes.\n"
+            "\u2022 Maximum: removes as much as it can. Best for noisy places.\n\n"
+            "Not sure? Maximum works well for most voice recordings. Try Gentle if the voice starts to sound thin.",
+            self._strength,
         ))
 
         polish_row = _Row(
-            "Voice polish", "After the noise is gone, the voice is evened out so it sounds clear and steady: the level is "
-            "matched across the recording, a gentle compressor smooths loud and quiet words, the whole file is set to the "
-            "loudness below, and a limiter stops any peak from clipping. Turn it off to keep only the noise removal.",
+            "Voice polish",
+            "After the noise is gone, the voice is evened out so it sounds clear and steady:\n"
+            "\u2022 quiet and loud parts of the recording are matched\n"
+            "\u2022 a gentle compressor smooths loud and quiet words\n"
+            "\u2022 the whole file is set to the loudness you pick\n"
+            "\u2022 a limiter stops any peak from clipping\n\n"
+            "Loudness is measured in LUFS (loudness units). The closer to 0, the louder:\n"
+            "\u2022 -14: YouTube, Spotify and most streaming sites\n"
+            "\u2022 -16: podcasts, and a good choice for most things\n"
+            "\u2022 -23: TV and radio broadcast\n"
+            "Sites turn louder files down anyway, so pick where it will be played.\n\n"
+            "Turn polish off to keep only the noise removal.",
         )
         self._polish = QCheckBox("Polish the voice")
-        self._polish.setToolTip("Level match, gentle compression, loudness target and a limiter")
+        self._polish.setToolTip("Even out the voice and set the loudness below")
         polish_row.layout_.addWidget(self._polish)
-        self._loudness = _combo(LOUDNESS_LABELS, "How loud the finished file should be. Podcast suits most things.")
+        self._loudness = _combo(
+            LOUDNESS_LABELS, "How loud the finished file is, in LUFS (closer to 0 is louder). Podcast suits most things."
+        )
         polish_row.layout_.addWidget(self._loudness)
         layout.addWidget(polish_row)
 
@@ -105,11 +122,14 @@ class SettingsPanel(QFrame):
             "The language that is spoken. Detecting it works well for clear speech.",
         )
         sub_row = _Row(
-            "Subtitles", "Listens to the original recording and writes down what is said. Pick a subtitle file (SRT or "
-            "VTT) or a plain text transcript to get a file next to the cleaned one, or put the subtitles inside the "
-            "video so any player can switch them on. Audio files get an SRT file instead. This runs on your computer, so "
-            "nothing is uploaded, but it adds time to each file. Choose the language yourself if the speech is noisy or "
-            "mixes accents.", self._subtitles,
+            "Subtitles",
+            "Listens to the original recording and writes down what is said.\n\n"
+            "\u2022 SRT or VTT file: subtitles saved next to the cleaned file\n"
+            "\u2022 Text transcript: just the words, as plain text\n"
+            "\u2022 Inside the video: any player can switch them on (audio files get an SRT file instead)\n\n"
+            "It runs on your computer, so nothing is uploaded, but it adds time to each file. Choose the language "
+            "yourself if the speech is noisy or mixes accents.",
+            self._subtitles,
         )
         sub_row.layout_.addWidget(self._language)
         layout.addWidget(sub_row)
@@ -117,8 +137,12 @@ class SettingsPanel(QFrame):
         self._where = Segmented([("next", "Next to original"), ("folder", "Choose folder")])
         self._where.setToolTip("Where the cleaned files are saved")
         where_row = _Row(
-            "Save to", "Cleaned files get \"-cleaned\" added to their name and never replace anything. They are saved next to "
-            "the original, or all together in a folder you pick.", self._where,
+            "Save to",
+            "Cleaned files get \"-cleaned\" added to their name, next to the original or all together in a folder "
+            "you pick.\n\n"
+            "They never replace your original. Cleaning a file again with \"Clean again\" replaces that file's "
+            "earlier cleaned version, which goes to the Recycle Bin (Trash on a Mac), so you can still get it back.",
+            self._where,
         )
         folder_line = QHBoxLayout()
         self._folder = ElidedLabel()
@@ -136,16 +160,21 @@ class SettingsPanel(QFrame):
 
         self._format = _combo(FORMAT_LABELS, "The file type for cleaned audio files. Videos always keep their own type.")
         layout.addWidget(_Row(
-            "Audio file type", "Used when you clean audio files. \"Same as the original\" keeps MP3 as MP3, WAV as WAV and so "
-            "on. FLAC and WAV keep full quality; MP3, M4A and Opus are smaller. Videos always keep their own format.",
+            "Audio file type",
+            "Used when you clean audio files. Videos always keep their own format.\n\n"
+            "\u2022 Same as the original: MP3 stays MP3, WAV stays WAV, and so on\n"
+            "\u2022 FLAC and WAV: full quality, bigger files\n"
+            "\u2022 MP3, M4A and Opus: smaller files",
             self._format,
         ))
 
         self._parallel = _combo(PARALLEL_LABELS, "How many files are cleaned at the same time")
         layout.addWidget(_Row(
-            "Files at once", "Cleaning several files at the same time finishes a batch sooner, but each file takes a bit "
-            "longer and uses more memory. Automatic picks a number that suits your computer, and never more than its "
-            "memory allows.", self._parallel,
+            "Files at once",
+            "Cleaning several files at the same time finishes a batch sooner, but each file takes a bit longer and "
+            "uses more memory.\n\n"
+            "Automatic picks a number that suits your computer, and never more than its memory allows.",
+            self._parallel,
         ))
         layout.addStretch(1)
 
@@ -194,6 +223,13 @@ class SettingsPanel(QFrame):
     def _change_folder(self) -> None:
         if self._choose_folder():
             self._store("output_mode", "folder")
+
+    def full_height(self) -> int:
+        """Height with every optional line showing (subtitle language, output folder), so the window can be
+        sized once to fit them all."""
+        spacing = self.layout().spacing() // 2 + 6
+        extra = sum(w.sizeHint().height() + spacing for w in (self._language, self._folder_box) if w.isHidden())
+        return self.sizeHint().height() + extra
 
     def _refresh_enabled(self) -> None:
         self._loudness.setEnabled(self._polish.isChecked())

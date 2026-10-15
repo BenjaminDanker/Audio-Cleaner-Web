@@ -5,8 +5,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QFile, QUrl
 from PySide6.QtGui import QDesktopServices
+
+TRASH_NAME = "Recycle Bin" if sys.platform == "win32" else "Trash"
+
+
+def move_to_trash(path: Path) -> bool:
+    """Into the Recycle Bin / Trash (so it can be restored). False where the system has none."""
+    return QFile.moveToTrash(str(path))[0]
 
 
 def open_path(path: Path) -> bool:
