@@ -72,20 +72,36 @@ the $15 dispute fee dominate.
   last-activity dates (we have them), and ask a lawyer before you ever
   expire balances.
 
-## Tax: the decision that is yours
+## Tax and regions
+
+**Not offered in the EU/EEA, UK or Switzerland.** That avoids VAT
+registration (EU non-Union OSS, UK VAT) and EU/UK consumer-law duties, so
+**Stripe Tax for the EU/UK is not needed.** Two layers enforce it:
+
+1. **Server guard (built in).** When a payment succeeds, `stripe_service`
+   reads the card's issuing country. If it is in `BLOCKED_CARD_COUNTRIES`
+   (EU: AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO
+   SK SI ES SE; rest of EEA: IS LI NO; plus GB and CH), nothing is credited,
+   the payment is refunded in full (idempotent per payment), an audit record
+   `payment_refused_region` is written and auto-reload is switched off for
+   that user. Override the list with `ACW_BLOCKED_CARD_COUNTRIES`
+   (comma-separated ISO codes; `none` turns the guard off). Stripe keeps its
+   fee on a refund, so this is a backstop, not the main defence.
+2. **Stripe Radar rule (you add it in the dashboard).** So those cards are
+   declined *before* they are charged, add under Radar → Rules:
+   `Block if :card_country: in ('AT','BE','BG','HR','CY','CZ','DK','EE','FI','FR','DE','GR','HU','IE','IT','LV','LT','LU','MT','NL','PL','PT','RO','SK','SI','ES','SE','IS','LI','NO','GB','CH')`.
+   (Radar rules need Radar for Fraud Teams on some plans; if it isn't
+   available, the server guard still applies.) The Terms and sign-up pages
+   should say the service is not available in those regions.
 
 As a US seller of digital services:
-- **EU VAT** is due from the first B2C sale. Register for non-Union OSS,
-  which Stripe Tax can file.
-- **UK VAT**: register within 30 days of the first UK consumer sale.
 - **US states**: economic-nexus thresholds are mostly $100k or 200
   transactions, so there's nothing to do at launch. Check your own state:
   a home server may create physical nexus there.
 
-Options:
-1. Turn on Stripe Tax and register for UK VAT + non-Union OSS before selling there.
-2. Block EU/UK cards until then (a Radar rule on `:card_country:`).
-3. Use Stripe Managed Payments (merchant of record) and give up auto-reload.
+If you ever want to sell in the EU/UK: turn on Stripe Tax and register for UK VAT
++ non-Union OSS, or use a merchant of record (and give up auto-reload), then
+empty `ACW_BLOCKED_CARD_COUNTRIES` and remove the Radar rule.
 
 ## Webhooks to configure (Stripe dashboard → Developers → Webhooks)
 

@@ -38,16 +38,28 @@ def user_with_pending_payment():
 
 @pytest.fixture
 def fake_pi(monkeypatch):
+    """Fakes the Stripe network calls: the payment intent, the charge (card country) and refunds."""
     pi = SimpleNamespace(payment_method="pm_1", latest_charge="ch_1", setup_future_usage="off_session")
-    fake = SimpleNamespace(v1=SimpleNamespace(payment_intents=SimpleNamespace(retrieve=lambda _id: pi)))
+    state = SimpleNamespace(country="US", refunds=[])
+
+    def charge(_id, params=None):
+        return SimpleNamespace(payment_method_details=SimpleNamespace(card=SimpleNamespace(country=state.country)))
+
+    def refund(params=None, options=None):
+        state.refunds.append((params, options))
+        return SimpleNamespace(id=f"re_{len(state.refunds)}")
+
     real_client = stripe_service.client
 
     def client():
         c = real_client()
-        c.v1.payment_intents = fake.v1.payment_intents  # only the network call is faked
+        c.v1.payment_intents = SimpleNamespace(retrieve=lambda _id: pi)  # only the network calls are faked
+        c.v1.charges = SimpleNamespace(retrieve=charge)
+        c.v1.refunds = SimpleNamespace(create=refund)
         return c
 
     monkeypatch.setattr(stripe_service, "client", client)
+    return state
 
 
 def checkout_completed(uid, eid="evt_1"):
@@ -173,3 +185,77 @@ def test_self_service_refund_keeps_the_card_fee_once(monkeypatch):
     assert stripe_service.refund_unused(uid, "pay_fee") == 400 - 59
     assert refunds == [341]
     assert ledger.balance(uid)["balance_micros"] == 600 * 10_000  # all $4 of unused credit is gone
+
+
+def _post(client, ev):
+    body, sig = signed(ev)
+    return client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+
+
+@pytest.mark.parametrize("country", ["DE", "gb", "CH", "NO", "FR"])
+def test_checkout_by_blocked_country_card_is_refunded_not_credited(client, user_with_pending_payment, fake_pi, country):
+    uid = user_with_pending_payment
+    fake_pi.country = country
+    db.execute("UPDATE users SET auto_reload_enabled = 1 WHERE id = ?", (uid,))
+    for eid in ("evt_1", "evt_dup"):  # replayed delivery refunds only once (same idempotency key)
+        assert _post(client, checkout_completed(uid, eid)).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 0
+    assert {o["idempotency_key"] for _, o in fake_pi.refunds} == {"blocked-country-pay1"}
+    assert fake_pi.refunds[0][0]["charge"] == "ch_1" and "amount" not in fake_pi.refunds[0][0]  # full refund
+    assert db.one("SELECT status FROM payments WHERE id='pay1'")["status"] == "refused_region"
+    assert db.one("SELECT auto_reload_enabled FROM users WHERE id = ?", (uid,))["auto_reload_enabled"] == 0
+    assert db.one("SELECT COUNT(*) n FROM audit_log WHERE user_id = ? AND action = 'payment_refused_region'", (uid,))["n"] >= 1
+
+
+def test_us_card_is_credited_and_countries_are_configurable(client, user_with_pending_payment, fake_pi, monkeypatch):
+    uid = user_with_pending_payment
+    fake_pi.country = "DE"
+    monkeypatch.setenv("ACW_BLOCKED_CARD_COUNTRIES", "none")  # guard switched off
+    assert _post(client, checkout_completed(uid)).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 20_000_000 and not fake_pi.refunds
+    assert stripe_service.blocked_card_countries() == frozenset()
+    monkeypatch.delenv("ACW_BLOCKED_CARD_COUNTRIES")
+    assert {"DE", "GB", "CH", "IS", "LI", "NO", "FR"} <= stripe_service.blocked_card_countries()
+    assert "US" not in stripe_service.blocked_card_countries() and len(stripe_service.BLOCKED_CARD_COUNTRIES) == 30 + 2
+    monkeypatch.setenv("ACW_BLOCKED_CARD_COUNTRIES", "br, us")
+    assert stripe_service.blocked_card_countries() == {"BR", "US"}
+
+
+def test_refund_of_a_blocked_payment_does_not_touch_other_credit(client, user_with_pending_payment, fake_pi):
+    uid = user_with_pending_payment
+    ledger.credit(uid, 7_000_000, "grant", "t", "g")
+    fake_pi.country = "DE"
+    assert _post(client, checkout_completed(uid)).status_code == 200
+    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 2000,
+              "refunds": {"object": "list", "data": [{"id": "re_1", "object": "refund", "amount": 2000, "status": "succeeded"}]}}
+    assert _post(client, event("charge.refunded", charge, "evt_rf")).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 7_000_000
+
+
+def test_auto_reload_by_blocked_country_card_is_refunded_and_disabled(user_with_pending_payment, fake_pi, monkeypatch):
+    uid = user_with_pending_payment
+    fake_pi.country = "IE"
+    db.execute("DELETE FROM payments")
+    db.execute(
+        "UPDATE users SET auto_reload_enabled = 1, auto_reload_threshold_micros = 5000000, auto_reload_amount_cents = 2000,"
+        " auto_reload_monthly_cap_cents = 100000, default_payment_method = 'pm_1', stripe_customer_id = 'cus_1' WHERE id = ?",
+        (uid,),
+    )
+    real = stripe_service.client
+
+    def client():
+        c = real()
+        c.v1.payment_intents = SimpleNamespace(
+            create=lambda params=None, options=None: SimpleNamespace(id="pi_r", status="succeeded", latest_charge="ch_1"))
+        return c
+
+    monkeypatch.setattr(stripe_service, "client", client)
+    assert stripe_service.run_auto_reload(uid) == "refused_region"
+    assert ledger.balance(uid)["balance_micros"] == 0 and len(fake_pi.refunds) == 1
+    u = db.one("SELECT auto_reload_enabled, auto_reload_in_flight FROM users WHERE id = ?", (uid,))
+    assert (u["auto_reload_enabled"], u["auto_reload_in_flight"]) == (0, 0)
+    # The payment_intent.succeeded webhook for the same payment changes nothing.
+    pid = db.one("SELECT id FROM payments")["id"]
+    stripe_service._handle_pi_succeeded({"id": "pi_r", "currency": "usd", "latest_charge": "ch_1",
+                                         "metadata": {"acw_kind": "auto_reload", "acw_payment_id": pid, "acw_user_id": uid}})
+    assert ledger.balance(uid)["balance_micros"] == 0 and len(fake_pi.refunds) == 1

@@ -33,8 +33,10 @@ DFN3 is a real-time model. Offline jobs can afford much more compute:
 
 ## 3. Live denoise tiers - done (see research/denoise.md)
 
-- Shipped: `light` = DFN3 (30 ms, ~0.11 core/stream) and `low_latency` =
-  DFN3-LL (10 ms, ~0.28 core/stream, same quality). No causal candidate
+- Shipped: `light` = DFN3 (30 ms, ~0.11 core/stream). A `low_latency` tier
+  (DFN3-LL, 10 ms, ~0.28 core/stream, same quality) was shipped, then dropped
+  by the owner (10-20 ms isn't worth 2.6x the CPU); the model file can be
+  deleted. No causal candidate
   (DPDFNet, GTCRN) beat DFN3, so there is no separate "high quality" live tier.
 - Studio clean stays DFN3 + clarity; an optional GPU hybrid
   (MossFormerGAN-SE-16k below 7.5 kHz + DFN3) is pending a blind A/B listen.

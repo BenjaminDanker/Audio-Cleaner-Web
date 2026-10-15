@@ -29,7 +29,6 @@ _RATE_LIST = [
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Live streaming
     Rate("stream_denoise", "light", "Live noise removal", 4_000),
-    Rate("stream_denoise", "low_latency", "Live noise removal, low latency", 8_000),
     Rate("stream_captions", "local", "Live captions", 6_000),
     # The extra-accurate caption engine bills per minute of audio sent; we only send speech.
     Rate("stream_captions", "premium", "Live captions, extra accurate", 25_000),

@@ -24,7 +24,7 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ SMTP provider for email sign-in links (optional, but most users expect email)
 - ⬜ Stripe: test mode first. Restricted key, webhook endpoint + events
   (docs/payments.md), customer portal enabled, statement descriptor,
-  Radar rules (block high-risk, optionally EU/UK until VAT is registered).
+  Radar rules (block high-risk, and the EU/EEA/UK/CH card-country rule from docs/payments.md).
 - ✅ OpenAI key set (premium file + live captions verified in production)
 - ⬜ Cloudflare Turnstile keys (optional, for the email form)
 
@@ -35,8 +35,8 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
   transcription $0.24/h standard and $0.90/h premium, live denoise $0.24/h,
   live captions $0.36/h standard and $1.50/h premium)
 - ⬜ Terms of Service + Privacy Policy reviewed by a lawyer (drafts in the site)
-- ⬜ Tax: Stripe Tax on; register UK VAT and EU non-Union OSS, or block those
-  countries at first (docs/payments.md)
+- ✅ Not offered in EU/EEA/UK/CH (card-country guard + Radar rule; docs/payments.md).
+  ⬜ Add the Radar rule in the Stripe dashboard
 - ✅ Licence: proprietary/all rights reserved (source visible), OBS plugin GPL-2.0-or-later
 
 ## Product
@@ -47,4 +47,4 @@ Status as of 2026-10-10. ✅ done · ⬜ needs you · 🔬 research phase
   code signing (Apple Developer ID $99/yr, Windows Authenticode certificate)
 - 🔬 Studio clean: benchmark found no clearly better model than DFN3 + polish; optional GPU hybrid pending a blind A/B (docs/research/denoise.md)
 - 🔬 Faster local transcription (Parakeet), GPU (needs the NVIDIA driver: sudo)
-- ✅ Live low-latency tier (DFN3-LL, 10 ms) next to the standard 30 ms tier
+- ✅ One live denoise tier (DFN3, 30 ms); the low-latency tier (DFN3-LL) was tried and dropped

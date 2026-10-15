@@ -60,8 +60,10 @@ def test_live_refuses_with_what_still_fits(monkeypatch):
     assert cap == cpusplit.max_live_cores() * 2.4
     monkeypatch.setattr(worker, "_units", cap - 1.5)
     assert worker.admit({"denoise": "light"}) == (True, [])
-    ok, options = worker.admit({"denoise": "low_latency"})
-    assert not ok and {"denoise": "light"} in options and {"denoise": None, "captions": "premium"} in options
+    monkeypatch.setattr(worker, "_units", cap - 0.5)
+    ok, options = worker.admit({"denoise": "light"})
+    assert not ok and options == [{"denoise": None, "captions": "premium"}]
+    monkeypatch.setattr(worker, "_units", cap - 1.5)
     ok, options = worker.admit({"denoise": "light", "captions": "local"})
     assert not ok and {"captions": "premium"} in options  # same denoise, external captions fit
     # External captions only: no model runs here, never limited.

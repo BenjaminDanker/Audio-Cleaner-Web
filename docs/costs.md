@@ -18,7 +18,7 @@ variable costs are OpenAI (extra-accurate tiers only) and Stripe's fees.
 
 CPU per minute of audio comes from our measurements (docs/operations.md,
 docs/research/*): Studio clean 23.5 CPU-s (stereo), local transcription
-22 CPU-s with Parakeet (143 with Whisper), live denoise 20 CPU-s (standard, under load) / 48 (low latency),
+22 CPU-s with Parakeet (143 with Whisper), live denoise 20 CPU-s (under load),
 standard live captions ~12 CPU-s.
 
 ## Profit margin per minute of audio
@@ -34,7 +34,6 @@ pay for.
 | Transcription (standard, Parakeet/Whisper) | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
 | Transcription, extra accurate | $0.0150 | <$0.00001 | $0.0045 | $0.00066 | $0.00984 | 66% |
 | Live noise removal | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
-| Live noise removal, low latency | $0.0080 | $0.00002 | - | $0.00035 | $0.00763 | 95% |
 | Live captions (standard, English) | $0.0060 | $0.00001 | - | $0.00026 | $0.00573 | 95% |
 | Live captions, extra accurate | $0.0250 | <$0.00001 | ≤ $0.017 | $0.0011 | ≥ $0.0069 | ≥ 28% (worst case: talking non-stop; ~50-60% at a typical 50-70% speaking time, since silence isn't sent) |
 

@@ -9,7 +9,7 @@ Candidates and licences come from [denoise-candidates.md](denoise-candidates.md)
 | Question | Answer |
 |---|---|
 | (a) Studio clean file tier | **Keep DeepFilterNet3 + clarity chain as the default.** No candidate beats it clearly. The only measurable upgrade is a hybrid (MossFormerGAN 0-7.5 kHz + DFN3 above): +0.17 PESQ and +0.04 DNSMOS OVRL over the production chain on VoiceBank-DEMAND, but it is not ahead on the 6 real-world-style clips, needs the whole GPU for about 1.0x real time, and its weights are 16 kHz. Offer it only as an optional GPU "Studio+" tier, and only if the owner prefers it in a blind A/B on `~/audio-cleaner/research/samples/`. |
-| (b) Live medium / high (<= ~40 ms) | **Medium = DFN3 (30 ms, 0.107 core per stream). High / low-latency = DFN3-LL (10 ms, 0.28 core per stream), same quality.** Nothing else qualifies: DPDFNet measured 50 ms stream lag and is not better than DFN3 on this data, GTCRN is 16 kHz-only and clearly worse (OVRL -0.28). GTCRN is usable only as an economy tier (7 % of a core). |
+| (b) Live medium / high (<= ~40 ms) | **Medium = DFN3 (30 ms, 0.107 core per stream). High / low-latency = DFN3-LL (10 ms, 0.28 core per stream), same quality (later dropped as a product tier: 20 ms was not worth 2.6x the CPU).** Nothing else qualifies: DPDFNet measured 50 ms stream lag and is not better than DFN3 on this data, GTCRN is 16 kHz-only and clearly worse (OVRL -0.28). GTCRN is usable only as an economy tier (7 % of a core). |
 | (c) Does the GPU help? | **Not for the product as it stands.** DFN3 already runs at RTF 0.046 to 0.103 on CPU. The GPU only makes heavier models feasible (MF2 0.05, Resemble denoiser 0.05, MossFormerGAN 0.98), and those do not improve quality enough. Live models gain nothing from it (one 10 ms frame per call). The 4 GB card is shared with ASR through `gpu.lock`, and MossFormerGAN needs 2.2 GB (6 s windows) to 3.6 GB (10 s). |
 
 Limits of this report: nobody listened to the samples yet. The "observations" in section 5 come from DNSMOS and
@@ -148,7 +148,7 @@ Not recommended: MossFormer2_SE_48K (no gain, 7x CPU), Resemble Enhance (fails r
 ### 6.2 (b) Live medium / high
 
 - No change to `acw-stream` for medium: DFN3, hop 480, delay 1440 samples (30 ms). Capacity about 6 streams per core at a 70 % budget.
-- "High" (lowest latency): DFN3-LL, `~/audio-cleaner/models/DeepFilterNet3_ll_onnx.tar.gz` through the same libDF API. Hop 480, **delay 480 samples (10 ms)** instead of `MODEL_DELAY = 1440`, so the stream worker needs the delay per model. Cost 0.284 core per stream: 2.5 streams per core, so plan for about 2.6x more CPU per high-tier stream.
+- (Dropped later: the product ships only the 30 ms tier and no longer loads this model.) "High" (lowest latency): DFN3-LL, `~/audio-cleaner/models/DeepFilterNet3_ll_onnx.tar.gz` through the same libDF API. Hop 480, **delay 480 samples (10 ms)** instead of `MODEL_DELAY = 1440`, so the stream worker needs the delay per model. Cost 0.284 core per stream: 2.5 streams per core, so plan for about 2.6x more CPU per high-tier stream.
 - Latency convention used here: lag between the input stream and the output stream of a hop-by-hop host, measured by cross-correlation on clean speech (DFN3 30 ms, DFN3-LL 10 ms, GTCRN 16 ms, DPDFNet 50 ms). DPDFNet's official `StreamEnhancer` gives the same lag, and our driver is bit-identical to it.
 - If an economy tier is wanted: GTCRN 16 kHz (MIT, `stream/onnx_models/gtcrn.onnx` in its repo, 352 KB, 7 % core) with an 8 kHz bandwidth and OVRL about 0.28 lower. Not recommended for paid tiers.
 

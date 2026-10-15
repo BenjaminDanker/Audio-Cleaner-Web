@@ -21,8 +21,8 @@ from acw_common.dfn import DeepFilter
 from .protocol import HOP, SAMPLE_RATE
 
 log = logging.getLogger("acw.stream.engine")
-# Same quality (see docs/research/denoise.md); low_latency trades ~2.6x CPU for 10 ms instead of 30 ms.
-DENOISE_TIERS = {"light": "DeepFilterNet3_onnx.tar.gz", "low_latency": "DeepFilterNet3_ll_onnx.tar.gz"}
+# One live tier (30 ms). A 10 ms low-latency model was tried and dropped (see docs/research/denoise.md).
+DENOISE_TIERS = {"light": "DeepFilterNet3_onnx.tar.gz"}
 
 
 class LiveChain:

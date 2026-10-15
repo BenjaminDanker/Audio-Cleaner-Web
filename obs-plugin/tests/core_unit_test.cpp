@@ -130,9 +130,6 @@ static void test_protocol()
 	sp.opus_bitrate = 64000;
 	const std::string so = make_start_message(sp);
 	CHECK(so.find("\"codec\":\"opus\"") != std::string::npos && so.find("\"opusBitrate\":64000") != std::string::npos);
-	sp.low_latency = true;
-	CHECK(make_start_message(sp).find("\"denoise\":\"low_latency\"") != std::string::npos);
-	sp.low_latency = false;
 	uint8_t hdr[kHeaderSize];
 	encode_frame_header(kCodecOpus, 7, 99, hdr);
 	FrameHeader oh;

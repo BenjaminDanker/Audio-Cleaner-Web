@@ -11,7 +11,7 @@ Client sends one text message within 15 s:
 
 ```json
 {"type": "start", "version": 1,
- "denoise": "light" | "low_latency" | null,
+ "denoise": "light" | null,
  "captions": "local" | "premium" | null,
  "language": "en" | null,
  "sampleRate": 48000,
@@ -26,8 +26,8 @@ CPUs has a measured capacity; when the requested setup doesn't fit right now,
 the server refuses it and lists what would still work:
 
 ```json
-{"type": "error", "code": "full", "available": [{"denoise": "light"}, {"captions": "premium"}],
- "message": "Low-latency noise removal is full right now. Still available: standard noise removal, extra-accurate captions. Try again in a few minutes."}
+{"type": "error", "code": "full", "available": [{"captions": "premium"}],
+ "message": "Live noise removal is full right now. Still available: extra-accurate captions. Try again in a few minutes."}
 ```
 
 Clients should retry no sooner than a minute later. `captions: "premium"`
@@ -65,7 +65,7 @@ offset size  field
   (960 samples) is recommended.
 - The server returns exactly one frame per input frame, same `seq`/`ts_us`
   and the same number of samples, in the same codec. Processed audio is
-  delayed by `modelLatencyMs` (30 ms for `light`, 10 ms for `low_latency`) inside the stream, so the
+  delayed by `modelLatencyMs` (30 ms for `light`) inside the stream, so the
   client's total delay = network round trip + modelLatencyMs. Measure the
   round trip with `ts_us`.
 - When denoise is off (captions only) the audio comes back unchanged and

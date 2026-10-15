@@ -171,7 +171,6 @@ def _drop_worker(sess: "Session") -> None:
 
 
 _OPTION_TEXT = {
-    ("denoise", "light"): "standard noise removal",
     ("captions", "premium"): "extra-accurate captions",
 }
 
@@ -179,7 +178,7 @@ _OPTION_TEXT = {
 def _full_message(cfg: dict, options: list[dict]) -> str:
     wanted = []
     if cfg.get("denoise"):
-        wanted.append("low-latency noise removal" if cfg["denoise"] == "low_latency" else "live noise removal")
+        wanted.append("live noise removal")
     if cfg.get("captions") == "local":
         wanted.append("standard captions")
     msg = f"{' and '.join(wanted).capitalize() or 'Live'} {'is' if len(wanted) < 2 else 'are'} full right now."

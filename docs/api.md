@@ -10,9 +10,15 @@ are `422 {"detail": "Invalid request.", "fields": [...]}`.
 - Browser: HttpOnly session cookie set by the sign-in endpoints. Every
   non-GET request must send `X-CSRF-Token: <csrfToken from GET /api/me>` and
   is rejected if its `Origin` header is present and not the site origin.
-- Programs (OBS plugin, scripts): `Authorization: Bearer acw_...` API key with
-  scopes `stream` and/or `jobs`. Billing, keys and account endpoints refuse
-  API keys (browser session only).
+- Programs (OBS plugin, scripts): `Authorization: Bearer acw_...` API key.
+  Billing, keys and account endpoints refuse API keys (browser session only).
+  Each key carries one or both scopes, and a request outside its scopes gets 403:
+  - `stream`: live audio. Used by the OBS plugin; opens `/api/stream/ws`
+    (see [streaming-protocol.md](streaming-protocol.md)). Give the plugin a key
+    with only this scope.
+  - `jobs`: the REST file API for scripts and automation. `/api/jobs` (create,
+    upload, poll, download, cancel, delete), see "File jobs" below.
+  Both bill the signed-in account's balance exactly like the website does.
 
 ## Account
 
@@ -42,7 +48,7 @@ Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.
 | POST | `/api/billing/refund` | `{paymentId}` refunds unused credit from a payment < 14 days old |
 
 Products/tiers: `denoise/standard`, `transcribe/local`, `transcribe/premium`,
-`stream_denoise/light` (DFN3, 30 ms), `stream_denoise/low_latency` (DFN3-LL, 10 ms), `stream_captions/local`, `stream_captions/premium`.
+`stream_denoise/light` (DFN3, 30 ms), `stream_captions/local`, `stream_captions/premium`.
 
 ## File jobs
 

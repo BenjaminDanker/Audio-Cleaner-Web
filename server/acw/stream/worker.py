@@ -59,8 +59,6 @@ def admit(cfg: dict) -> tuple[bool, list[dict]]:
         return True, []
     options: list[dict] = []
     without_captions = cpusplit.session_units({**cfg, "captions": None})
-    if cfg.get("denoise") == "low_latency" and _units + cpusplit.session_units({**cfg, "denoise": "light"}) <= cap:
-        options.append({"denoise": "light"})
     if cfg.get("captions") == "local" and _units + without_captions <= cap:
         options.append({"captions": "premium"})
     if cfg.get("captions") != "premium" and not any(o.get("captions") for o in options):

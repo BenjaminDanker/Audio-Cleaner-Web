@@ -37,7 +37,7 @@ def physical_cores() -> list[list[int]]:
 
 
 # Capacity is counted in "units": one standard live-denoise session = 1.
-UNITS = {"light": 1.0, "low_latency": 3.6}
+UNITS = {"light": 1.0}
 CAPTIONS_LOCAL_UNITS = 0.7  # streaming English caption model
 # Units one physical core carries with good latency while file jobs run on the
 # other cores: 12 units on 5 cores, measured 2026-10-14 on the Ryzen 7 1700X.

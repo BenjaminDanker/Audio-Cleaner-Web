@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import stripe
 
 from .. import db
-from ..config import get_settings
+from ..config import _env, get_settings
 from . import ledger
 from .pricing import MICROS_PER_CENT, TOPUP_MAX_CENTS, TOPUP_MIN_CENTS
 
@@ -20,6 +20,52 @@ log = logging.getLogger(__name__)
 
 AUTO_RELOAD_MAX_FAILURES = 3
 EFW_AUTO_REFUND_MAX_CENTS = 5_000
+
+# Not offered in the EU/EEA, UK or Switzerland (no VAT / consumer-law handling). Payments by
+# cards issued there are refunded in full instead of credited. Override with
+# ACW_BLOCKED_CARD_COUNTRIES (comma-separated ISO codes; "none" disables the guard).
+BLOCKED_CARD_COUNTRIES = (
+    "AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE"  # EU
+    " IS LI NO"  # rest of the EEA
+    " GB CH"
+).split()
+
+
+def blocked_card_countries() -> frozenset[str]:
+    raw = _env("ACW_BLOCKED_CARD_COUNTRIES")
+    if raw is None:
+        return frozenset(BLOCKED_CARD_COUNTRIES)
+    return frozenset(c.strip().upper() for c in raw.replace(" ", ",").split(",") if c.strip() and c.strip().lower() != "none")
+
+
+def _card_country(charge_id: str) -> str | None:
+    """Issuing country of the card behind a charge (None for non-card payments)."""
+    charge = client().v1.charges.retrieve(charge_id)
+    details = getattr(charge, "payment_method_details", None)
+    card = getattr(details, "card", None) if details is not None else None
+    country = getattr(card, "country", None) if card is not None else None
+    return country.upper() if country else None
+
+
+def _refund_blocked_payment(payment_id: str, user_id: str, charge_id: str, country: str) -> None:
+    """Refund in full (idempotent), record it, and stop auto-reload for the user."""
+    client().v1.refunds.create(
+        params={"charge": charge_id, "reason": "requested_by_customer",
+                "metadata": {"acw_payment_id": payment_id, "acw_reason": "blocked_card_country"}},
+        options={"idempotency_key": f"blocked-country-{payment_id}"},
+    )
+    with db.tx() as c:
+        c.execute(
+            "UPDATE payments SET status = 'refused_region', stripe_charge = ?, failure_code = ?, updated_at = ?"
+            " WHERE id = ? AND status != 'succeeded'",
+            (charge_id, f"card_country_{country}", db.now(), payment_id),
+        )
+        c.execute("UPDATE users SET auto_reload_enabled = 0, auto_reload_in_flight = 0 WHERE id = ?", (user_id,))
+        c.execute(
+            "INSERT INTO audit_log(user_id, actor, action, detail, created_at) VALUES (?, 'stripe', 'payment_refused_region', ?, ?)",
+            (user_id, f"{payment_id}:{charge_id}:{country}", db.now()),
+        )
+    log.warning("payment %s refunded: card issued in blocked country %s", payment_id, country)
 
 
 class BillingUnavailable(Exception):
@@ -143,7 +189,16 @@ def _credit_payment(
 ) -> None:
     """Credit the USD amount *we* priced, once, if the Stripe object matches
     our payment row. Never trust amounts from the event: with Adaptive Pricing
-    they can be in the customer's currency."""
+    they can be in the customer's currency. Cards issued in blocked countries
+    (see BLOCKED_CARD_COUNTRIES) are refunded instead of credited."""
+    prior = db.one("SELECT status FROM payments WHERE id = ? AND user_id = ?", (payment_id, user_id))
+    if prior is not None and prior["status"] in ("succeeded", "refused_region"):
+        return
+    if prior is not None and charge_id:
+        country = _card_country(charge_id)  # a lookup failure raises: the webhook is retried
+        if country in blocked_card_countries():
+            _refund_blocked_payment(payment_id, user_id, charge_id, country)
+            return
     with db.tx() as c:
         p = c.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
         if p is None or p["user_id"] != user_id:
@@ -258,7 +313,9 @@ def _handle_charge_refunded(charge: dict) -> None:
     refunds = (charge.get("refunds") or {}).get("data") or []
     if not refunds:
         refunds = [r for r in client().v1.refunds.list(params={"charge": charge["id"], "limit": 100}).data]
-    p = db.one("SELECT amount_cents, tax_cents FROM payments WHERE id = ?", (payment_id,))
+    p = db.one("SELECT amount_cents, tax_cents, status FROM payments WHERE id = ?", (payment_id,))
+    if p["status"] == "refused_region":
+        return  # our own full refund of a payment that was never credited
     for r in refunds:
         r = r if isinstance(r, dict) else r.to_dict()
         if r.get("status") not in ("succeeded", "pending"):
@@ -447,7 +504,13 @@ def run_auto_reload(user_id: str) -> str:
     db.execute("UPDATE payments SET stripe_payment_intent = ?, updated_at = ? WHERE id = ?", (pi.id, db.now(), payment_id))
     if pi.status == "succeeded":
         charge = pi.latest_charge if isinstance(pi.latest_charge, str) else getattr(pi.latest_charge, "id", None)
-        _credit_payment(payment_id, user_id, checkout_session=None, pi_id=pi.id, charge_id=charge, pm_id=None, save_pm=False)
+        try:
+            _credit_payment(payment_id, user_id, checkout_session=None, pi_id=pi.id, charge_id=charge, pm_id=None, save_pm=False)
+        except Exception:  # noqa: BLE001 - e.g. country lookup failed; the webhook retries the check
+            log.exception("crediting auto-reload %s failed; left for the webhook", payment_id)
+            return "error"
+        if db.one("SELECT status FROM payments WHERE id = ?", (payment_id,))["status"] != "succeeded":
+            return "refused_region"
         _record_tax_transaction(payment_id)
         return "succeeded"
     return pi.status
