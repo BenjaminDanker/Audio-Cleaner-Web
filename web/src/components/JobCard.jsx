@@ -6,7 +6,7 @@ import { saveBlob } from '../download.js';
 import { bytes, clock, dateTime, human, money, shownName, stem } from '../format.js';
 import { useNow } from '../hooks.js';
 import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel } from '../jobs.js';
-import { buildMedia, FORMAT } from '../media/convert.js';
+import { buildMedia, canHoldSubtitles, defaultFormatId, FORMAT, srtToVtt } from '../media/convert.js';
 import { IconDownload } from './Icons.jsx';
 
 const OUT_LABEL = { audio: 'Cleaned audio', video: 'Video', captions: 'Captions', transcript: 'Transcript', segments: 'Segments' };
@@ -26,9 +26,28 @@ function Countdown({ expiresAt }) {
   return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
 }
 
+/** The job's subtitles as WebVTT text (from its .vtt file, or its .srt one), for putting into a video here. */
+async function jobSubtitles(job) {
+  const caps = job.outputs.filter((o) => o.kind === 'captions');
+  const pick = caps.find((o) => /\.vtt$/i.test(o.name)) || caps.find((o) => /\.srt$/i.test(o.name));
+  if (!pick) throw new Error('This job has no subtitles to put into the video.');
+  const res = await fetch(outputUrl(job.id, pick.name), { credentials: 'same-origin' });
+  if (!res.ok) throw new Error('Couldn’t download the subtitles. Please try again.');
+  const text = await res.text();
+  return /\.vtt$/i.test(pick.name) ? text : srtToVtt(text);
+}
+
+/** The file type a video with subtitles is made as when nothing was chosen: a WebM stays WebM, anything else becomes MKV. */
+function subtitledFormat(file, info, inputName) {
+  const id = defaultFormatId(file || { name: inputName }, info || { hasVideo: true }, true);
+  return canHoldSubtitles(id) ? id : 'mkv';
+}
+
 /**
  * Add the cleaned audio back into the original video, locally, as chosen in the form (file type, picture size, name).
  * For a recording with no picture and a video type chosen, it makes the video (plain black picture) the same way.
+ * With `local.embed` the job's subtitles go into the video too. A subtitles-only job (no cleaned audio from us) keeps the
+ * video's own sound, or the sound cleaned in this browser when that was chosen as well.
  */
 function RemuxPanel({ job, local, noPicture = false }) {
   const [file, setFile] = useState(local?.file || null);
@@ -39,24 +58,34 @@ function RemuxPanel({ job, local, noPicture = false }) {
   const picker = useRef(null);
   const ctl = useRef(null);
   const audioOut = job.outputs.find((o) => o.kind === 'audio');
-  if (!audioOut) return null;
+  const embed = !!local?.embed;
+  if (!audioOut && !embed) return null;
   const choice = local?.output && FORMAT[local.output.format]?.kind === 'video' ? local.output : null;
+  const waitingForBrowser = !audioOut && local?.browserClean && !local?.cleanPcm; // the free cleanup in this tab isn't done yet
 
   async function run(videoFile) {
     const abort = new AbortController();
     ctl.current = abort;
     setBusy(true); setErr(''); setNote(''); setProg(0);
     try {
-      const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
-      if (!res.ok) throw new Error('Couldn’t download the cleaned audio. Please try again.');
-      const audioFile = await res.blob();
+      const subtitles = embed ? await jobSubtitles(job) : '';
+      let audioFile = null;
+      if (audioOut) {
+        const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('Couldn’t download the cleaned audio. Please try again.');
+        audioFile = await res.blob();
+      }
+      const pcm = !audioOut && local?.cleanPcm ? local.cleanPcm : null;
+      if (!audioOut && !pcm) audioFile = videoFile; // subtitles only: the video keeps its own sound
+      const format = choice?.format || subtitledFormat(videoFile, local?.info, job.inputName);
       const { remuxWithCleanAudio } = await import('../media/remux.js');
       const out = noPicture
-        ? await buildMedia({ format: choice.format, audioFile, audioName: audioOut.name, onProgress: setProg, signal: abort.signal })
+        ? await buildMedia({ format, audioFile, audioName: audioOut?.name, subtitles, onProgress: setProg, signal: abort.signal })
         : await remuxWithCleanAudio({
-          videoFile, audioFile, audioName: audioOut.name, info: local?.info, format: choice?.format, size: choice?.size, onProgress: setProg, signal: abort.signal,
+          videoFile, pcm, audioFile, audioName: audioOut?.name || '', info: local?.info, format, size: choice?.size, subtitles, onProgress: setProg, signal: abort.signal,
         });
-      saveBlob(out.blob, choice?.name || `${stem(videoFile?.name || job.inputName)}-cleaned${out.ext}`);
+      const suffix = audioOut || pcm ? 'cleaned' : 'subtitled';
+      saveBlob(out.blob, choice?.name || `${stem(videoFile?.name || job.inputName)}-${suffix}${out.ext}`);
       if (out.note) setNote(out.note);
     } catch (e) {
       if (e?.name !== 'AbortError') setErr(e.message || 'Couldn’t build the video. Please try again.');
@@ -66,7 +95,8 @@ function RemuxPanel({ job, local, noPicture = false }) {
     }
   }
 
-  const label = busy ? `Building video… ${Math.round(prog * 100)}%` : null;
+  const label = busy ? `Building video… ${Math.round(prog * 100)}%` : waitingForBrowser ? 'Waiting for the noise removal in your browser…' : null;
+  const what = audioOut ? 'cleaned audio' : local?.cleanPcm ? 'cleaned audio and subtitles' : 'subtitles';
   return (
     <div className="stack" data-testid="remux">
       <div className="row">
@@ -75,12 +105,12 @@ function RemuxPanel({ job, local, noPicture = false }) {
             {label || `Save as ${shownName(choice.name)}`}
           </button>
         ) : file ? (
-          <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => run(file)} data-testid="remux-btn">
-            {label || (choice ? `Save ${shownName(choice.name)}` : `Put cleaned audio into ${shownName(file.name)}`)}
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy || waitingForBrowser} onClick={() => run(file)} data-testid="remux-btn">
+            {label || (choice ? `Save ${shownName(choice.name)}` : `Put the ${what} into ${shownName(file.name)}`)}
           </button>
         ) : (
           <>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => picker.current?.click()}>Put it back into your video…</button>
+            <button type="button" className="btn btn-secondary btn-sm" disabled={waitingForBrowser} onClick={() => picker.current?.click()}>{label || `Put the ${what} into your video…`}</button>
             <input
               ref={picker} type="file" accept="video/*,.mkv,.mov,.mp4,.webm" className="sr-only" tabIndex={-1}
               aria-label="Choose the original video"
@@ -108,8 +138,11 @@ export default function JobCard({ job, local, onChanged }) {
   const active = ACTIVE.has(job.status);
   const canCancel = job.status === 'uploading' || job.status === 'queued';
   const hasVideoInput = local?.info?.hasVideo || /\.(mp4|mov|m4v|mkv|webm)$/i.test(job.inputName || '');
-  const showRemux = job.status === 'done' && (hasVideoInput && local?.extracted !== false && local?.keepVideo !== false) && !!job.outputs.find((o) => o.kind === 'audio') && !job.outputs.find((o) => o.kind === 'video');
   const hasVideoOut = job.outputs.some((o) => o.kind === 'video');
+  const hasAudioOut = job.outputs.some((o) => o.kind === 'audio');
+  // Subtitles put into the video here, in the browser (chosen in the form in this tab); the server never needs the video for it.
+  const embedHere = !!local?.embed && job.outputs.some((o) => o.kind === 'captions');
+  const showRemux = job.status === 'done' && hasVideoInput && (local?.extracted !== false || embedHere) && local?.keepVideo !== false && !hasVideoOut && (hasAudioOut || embedHere);
   const chosenKind = FORMAT[local?.output?.format]?.kind;
   // A video type was chosen for a recording with no picture: the video (plain black picture) is made here from the cleaned sound.
   const showBlack = job.status === 'done' && chosenKind === 'video' && !hasVideoInput && !hasVideoOut && !!job.outputs.find((o) => o.kind === 'audio');
@@ -151,7 +184,7 @@ export default function JobCard({ job, local, onChanged }) {
           <div className="small muted">{kindLabel(job)} · {dateTime(job.createdAt)} · {clock(job.durationSeconds)}</div>
         </div>
         <span className="row">
-          {job.free && <span className="badge badge-free" data-testid="free-badge">Free</span>}
+          {job.free && <span className="badge badge-free" data-testid="free-badge">{job.kind === 'transcribe' ? 'Free' : 'Free subtitles'}</span>}
           <span className={badgeClass(job.status)}>{statusLabel(job.status)}</span>
         </span>
       </div>

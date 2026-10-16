@@ -303,20 +303,20 @@ await check('Clean & polish: the same name and type list is on the form, any sou
   return `list ${vals.join(', ')}`;
 });
 
-await check('Clean & polish of a video: a video type keeps the picture, the Keep-the-video box follows the list', async () => {
+await check('Clean & polish of a video: it starts as a video type (the picture is kept); the file type alone decides, no extra box', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'test.mp4'));
   await pick(page, 'noise', 'polish');
   const f = page.locator('[data-testid=output-fields]').first();
   await page.waitForFunction(() => { const s = document.querySelector('[data-testid=out-format]'); return s && !s.disabled; });
-  const keep = page.getByRole('checkbox', { name: /Keep the video/ });
-  if (!(await keep.isChecked())) throw new Error('not kept by default');
-  await f.getByTestId('out-format').selectOption('mp3');
-  if (await keep.isChecked()) throw new Error('still kept after choosing a sound type');
-  await keep.check();
+  if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('the Keep-the-video box is back');
   const kind = await f.getByTestId('out-format').inputValue();
-  if (!['mp4', 'mkv', 'webm', 'mov'].includes(kind)) throw new Error(`type after keeping: ${kind}`);
-  return `after Keep: ${kind}, ${await f.getByTestId('out-name').inputValue()}`;
+  if (!['mp4', 'mkv', 'webm', 'mov'].includes(kind)) throw new Error(`starts as ${kind}`);
+  await pick(page, 'subs', 'standard');
+  await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).waitFor();
+  await f.getByTestId('out-format').selectOption('mp3');
+  if (await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).count()) throw new Error('embedding offered for a sound file');
+  return `starts as ${kind}`;
 });
 
 
@@ -364,6 +364,42 @@ await check('Clean & polish of a video with a chosen type and size: the cleaned 
   if (dl.suggestedFilename() !== 'my clip.mkv') throw new Error(dl.suggestedFilename());
   if (i.v.height !== 480) throw new Error(`height ${i.v.height}`);
   return `${dl.suggestedFilename()} ${i.v.codec_name} ${i.v.width}x${i.v.height} + ${i.a.codec_name}`;
+});
+
+await check('Free subtitles put into the video in the browser: an MKV with the picture and sound copied and the subtitles as a track players read', async () => {
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'test.mp4'));
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'free');
+  await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
+  let sent = null;
+  const spy = (r) => { if (r.method() === 'POST' && /\/api\/jobs$/.test(r.url())) sent = r.postDataJSON(); };
+  page.on('request', spy);
+  await page.getByTestId('start').click();
+  await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+  page.off('request', spy);
+  if (!sent || sent.options.embed_subtitles !== false || sent.filename.endsWith('.mp4')) throw new Error(`the video went up for the subtitles: ${JSON.stringify(sent)}`);
+  // whatever the speech model heard in the test clip, the video gets these cues
+  const vtt = 'WEBVTT\n\n00:00:00.500 --> 00:00:02.000\nHello there\n\n00:00:02.500 --> 00:00:03.500\nSecond line\n';
+  await page.route('**/api/jobs/*/outputs/*.vtt', (r) => r.fulfill({ status: 200, contentType: 'text/vtt', body: vtt }));
+  const card = await waitJob('test');
+  const btn = card.getByTestId('remux-btn');
+  await btn.waitFor({ timeout: 240000 });
+  if (!/subtitles/.test(await btn.innerText())) throw new Error(`button says: ${await btn.innerText()}`);
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 120000 }), btn.click()]);
+  const p = join(FILES, 'conv-subtitled.mkv');
+  await dl.saveAs(p);
+  await page.unroute('**/api/jobs/*/outputs/*.vtt');
+  const j = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-of', 'json', p], { encoding: 'utf8' }));
+  const s = j.streams.find((x) => x.codec_type === 'subtitle');
+  const orig = probe(join(FILES, 'test.mp4'));
+  const i = probe(p);
+  if (dl.suggestedFilename() !== 'test-subtitled.mkv') throw new Error(dl.suggestedFilename());
+  if (!s || s.codec_name !== 'subrip') throw new Error(`subtitle track: ${s?.codec_name}`); // SRT-style: what FFmpeg-based players read
+  if (i.v.codec_name !== orig.v.codec_name || i.a.codec_name !== orig.a.codec_name) throw new Error('picture or sound was changed');
+  const text = execFileSync(FFMPEG, ['-v', 'error', '-i', p, '-map', '0:s:0', '-f', 'webvtt', '-'], { encoding: 'utf8' });
+  if (!/Hello there[\s\S]*Second line/.test(text)) throw new Error(`cues: ${text}`);
+  return `${dl.suggestedFilename()}: ${i.v.codec_name} + ${i.a.codec_name} + ${s.codec_name}`;
 });
 
 await check('under the production Content-Security-Policy: MP3 (blob worker + wasm), Opus and a video type are saved with no violations', async () => {

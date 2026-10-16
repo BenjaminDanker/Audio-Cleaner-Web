@@ -263,7 +263,8 @@ def test_live_full_and_backup_checks(tmp_path):
     assert monitor.check_backup(tmp_path, now=time.time() + 37 * 3600)[0].bad
 
 
-def test_run_end_to_end_mails_once_and_resolves(mail, monkeypatch):
+def test_run_end_to_end_mails_once_and_resolves(mail, monkeypatch, tmp_path):
+    monkeypatch.setattr(monitor, "UNIT_DIR", tmp_path / "units")  # not this computer's units (the mirror, the bulk process)
     monkeypatch.setattr(monitor, "expected_units", lambda: [])
     monkeypatch.setattr(monitor, "check_backup", lambda: [])
     monkeypatch.setattr(monitor, "check_installation", lambda now: [])  # no models, workers or sockets in a test run

@@ -194,7 +194,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return t.trim();
   });
 
-  await check('Clean & polish + Standard: one denoise_transcribe job (paid, estimate, "about $" on Start); Free subtitles is greyed out with a reason', async () => {
+  await check('Clean & polish + Standard: one denoise_transcribe job (paid, estimate, "about $" on Start); Free subtitles stay possible', async () => {
     await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
     await freshApp();
     await choose('noisy.wav');
@@ -204,9 +204,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await page.getByText(sentence, { exact: true }).waitFor();
     await page.getByTestId('estimate').waitFor();
     if (await page.getByTestId('free-note').count()) throw new Error('a paid job is shown as free');
-    if (!(await radio('subs', 'free').isDisabled())) throw new Error('free subtitles should be disabled together with Clean & polish');
-    const why = await card('subs', 'free').locator('small').innerText();
-    if (!/can.t be added to Clean & polish/.test(why)) throw new Error('reason: ' + why);
+    if (await radio('subs', 'free').isDisabled()) throw new Error('free subtitles should work together with Clean & polish');
     const label = (await start().innerText()).trim();
     if (!/^Start – about \$0\.00\d+$/.test(label)) throw new Error('label: ' + label);
     await page.screenshot({ path: join(SHOTS, 'cleanup-both.png'), fullPage: true });
@@ -214,6 +212,28 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await page.getByTestId('job-error').waitFor();
     const b = posts.at(-1);
     if (b.free !== false || b.kind !== 'denoise_transcribe' || b.denoiseTier !== 'standard' || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
+    return label;
+  });
+
+  await check('Clean & polish + Free subtitles: one denoise_transcribe job marked free; only the cleanup is estimated and paid', async () => {
+    await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'polish');
+    await pick(page, 'subs', 'standard');
+    const both = await page.getByTestId('estimate').innerText();
+    await pick(page, 'subs', 'free');
+    await page.getByText(/the subtitles are free/).waitFor();
+    const note = await page.getByTestId('free-note').innerText();
+    if (!/^Subtitles free: uses/.test(note.trim())) throw new Error('note: ' + note);
+    const label = (await start().innerText()).trim();
+    if (!/^Start – about \$/.test(label)) throw new Error('label: ' + label);
+    const cleanupOnly = await page.getByTestId('estimate').innerText();
+    if (cleanupOnly === both) throw new Error('the free subtitles are still priced');
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    const b = posts.at(-1);
+    if (b.free !== true || b.kind !== 'denoise_transcribe' || b.denoiseTier !== 'standard' || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
     return label;
   });
 
@@ -295,18 +315,29 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return why;
   });
 
-  await check('video file: "Keep the video, with the cleaned sound" and "Embed subtitles in the video" are offered; an audio file gets neither', async () => {
+  await check('video file: "Put the subtitles into the video" is offered and done in the browser (nothing extra uploaded); an audio file doesn\'t get it', async () => {
+    await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
     await freshApp();
     await choose('noisy.wav');
     await pick(page, 'subs', 'standard');
-    if (await page.getByRole('checkbox', { name: /Embed subtitles/ }).count()) throw new Error('embed offered for audio');
-    if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('keep-video offered for audio');
+    if (await page.getByRole('checkbox', { name: /subtitles into the video/ }).count()) throw new Error('embed offered for audio');
+    if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('keep-video offered');
     await page.getByRole('button', { name: 'Remove' }).click();
     await choose('test.mp4');
-    await page.getByRole('checkbox', { name: /Keep the video, with the cleaned sound/ }).waitFor();
+    if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('keep-video offered: the file type decides');
     await pick(page, 'subs', 'standard');
-    await page.getByRole('checkbox', { name: /Embed subtitles in the video/ }).waitFor();
-    return 'ok';
+    const box = page.getByRole('checkbox', { name: /Put the subtitles into the video/ });
+    await box.check();
+    const hint = await page.getByTestId('embed-hint').innerText();
+    if (!/nothing extra is uploaded/.test(hint)) throw new Error('hint: ' + hint);
+    await pick(page, 'noise', 'off');
+    await page.getByRole('checkbox', { name: 'SRT', exact: true }).uncheck();
+    await page.getByRole('checkbox', { name: 'VTT', exact: true }).uncheck();
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    const b = posts.at(-1);
+    if (b.options.embed_subtitles !== false || !b.options.caption_formats.includes('vtt')) throw new Error(JSON.stringify(b.options));
+    return hint;
   });
 
   await check('two audio tracks (mic + desktop sound): the echo box appears only for Clean & polish; free cleanup says it cannot do it; one-track files never see it', async () => {

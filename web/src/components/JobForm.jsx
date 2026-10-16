@@ -4,7 +4,7 @@ import { useAuth } from '../auth.jsx';
 import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, moneyUsd, shownName } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
 import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
-import { serverAudioFormat } from '../media/convert.js';
+import { canHoldSubtitles, defaultFormatId, MAX_BUILD_BYTES, serverAudioFormat } from '../media/convert.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
@@ -105,6 +105,7 @@ export default function JobForm({ onSubmitted }) {
   const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'polish' });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
+  const jobLocal = useRef(null); // {out, entry} of the job just started, so the sound cleaned here can join its subtitles
 
   useEffect(() => () => abort.current?.abort(), []);
   useEffect(() => () => { if (localResult?.result?.url) URL.revokeObjectURL(localResult.result.url); }, [localResult]);
@@ -121,9 +122,21 @@ export default function JobForm({ onSubmitted }) {
   const wantsText = subs !== 'off';
   const tier = subs === 'accurate' ? 'premium' : 'local'; // transcription level ids stay internal
   const kind = wantsPolish && wantsText ? 'denoise_transcribe' : wantsPolish ? 'denoise' : wantsText ? 'transcribe' : null;
-  const free = subs === 'free' && !wantsPolish;
+  const free = subs === 'free'; // the subtitles are free; with Clean & polish the cleanup is still paid
+  const allFree = free && !wantsPolish;
   const isVideo = !!info?.hasVideo;
   const hasSecondTrack = (info?.audioTracks || 0) >= 2; // OBS and others can record mic and desktop sound as two tracks
+  // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the
+  // browser can't open goes up whole, and then our side puts them in. A recording with no picture can get them in the
+  // plain black video made here when a video file type is picked.
+  const videoResult = isVideo ? !wantsPolish || choice.isVideoFile : wantsPolish && choice.isVideoFile;
+  const embedOnServer = isVideo && !info?.viaMediabunny;
+  const tooBigHere = isVideo && !embedOnServer && file && file.size > MAX_BUILD_BYTES;
+  const canEmbed = wantsText && videoResult && !tooBigHere;
+  const embedNow = canEmbed && embed;
+  const embedHere = embedNow && !embedOnServer;
+  // A subtitles-only video keeps its own file type when that can carry them (WebM), else it becomes MKV.
+  const embedFormat = wantsPolish ? choice.format : isVideo ? defaultFormatId(file, info, true) : null;
 
   // Some formats (WMA, AMR, AVI, MPEG...) the browser can't read, but the server can. Then the length is a rough
   // guess from the file size (128 kbit/s) until the server measures it; the price is corrected to the real length.
@@ -138,7 +151,7 @@ export default function JobForm({ onSubmitted }) {
   const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
 
-  // Free subtitles: only for a file within the per-file limit and today's free minutes, and not together with Clean & polish.
+  // Free subtitles: only for a file within the per-file limit and today's free minutes.
   const freeSubs = useMemo(() => {
     if (!duration) return { ok: false, why: 'We need the length of the file first.' };
     if (!freeMax) return { ok: false, why: 'We couldn’t load the free limits just now.' };
@@ -146,9 +159,8 @@ export default function JobForm({ onSubmitted }) {
     if (duration > freeLeft) {
       return { ok: false, why: freeLeft > 0 ? `This is more than the ${minutesWord(mins(freeLeft))} of free time you have left today.` : 'You’ve used all of today’s free minutes.' };
     }
-    if (wantsPolish) return { ok: false, why: 'Free subtitles can’t be added to Clean & polish. Standard can.' };
     return { ok: true, why: '' };
-  }, [duration, freeMax, freeLeft, wantsPolish]);
+  }, [duration, freeMax, freeLeft]);
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -168,10 +180,10 @@ export default function JobForm({ onSubmitted }) {
   }, [wantsPolish, isVideo, info, choice.outputs, choice.isVideoFile]);
 
   const est = useMemo(() => {
-    if (!kind) return 0;
-    if (free) return 0;
+    if (!kind || allFree) return 0;
+    if (free) return estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }); // only the cleanup is paid
     return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration });
-  }, [pricing, kind, tier, duration, free, denoiseTier]);
+  }, [pricing, kind, tier, duration, free, allFree, denoiseTier]);
   const breakdown = useMemo(() => {
     if (free || kind !== 'denoise_transcribe' || !duration) return null;
     return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration })];
@@ -208,7 +220,6 @@ export default function JobForm({ onSubmitted }) {
   function pickNoise(v) {
     setNoise(v);
     if (v === 'browser') warmUpDenoiser();
-    if (v === 'polish' && subs === 'free') setSubs('standard'); // free subtitles can't go with Clean & polish
   }
 
   function reset() {
@@ -225,11 +236,12 @@ export default function JobForm({ onSubmitted }) {
   // A video's picture is not uploaded and uncompressed WAV/AIFF is packed smaller first; anything else goes up as it is.
   const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
   if (kind && file && file.size > maxUpload && !canShrink) problems.push(`This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.`);
-  if (kind && !free && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
-  if (kind && !free && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
+  if (kind && !allFree && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
+  if (kind && !allFree && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
   if (info && !wantsBrowser && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
-  const canStart = (wantsBrowser || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || free || est != null) && (!wantsPolish || choice.valid);
+  if (embedHere && wantsPolish && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
+  const canStart = (wantsBrowser || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || allFree || est != null) && (!wantsPolish || choice.valid);
 
   async function runLocal(f, i, signal) {
     setLocalRunning(true);
@@ -258,8 +270,9 @@ export default function JobForm({ onSubmitted }) {
       free,
       options: {
         audio_format: serverAudioFormat(choice.format, f, i),
-        caption_formats: wantsText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c]) : [],
-        embed_subtitles: !!(wantsText && embed && i?.hasVideo),
+        // putting subtitles into the video here needs a subtitle file, even when only the transcript was ticked
+        caption_formats: wantsText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c] || (c === 'vtt' && embedHere && !caps.srt)) : [],
+        embed_subtitles: !!(embedNow && embedOnServer),
         language: language || null,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
@@ -275,10 +288,12 @@ export default function JobForm({ onSubmitted }) {
         onCompressed: setCompressedInfo,
       });
       setResult(out);
-      onSubmitted?.(out, {
-        file: f, info: i, extracted: out.extracted, keepVideo,
+      const entry = {
+        file: f, info: i, extracted: out.extracted, keepVideo, embed: embedHere, browserClean: wantsBrowser,
         output: wantsPolish ? { name: choice.name.trim(), format: choice.format, size: choice.size } : null,
-      });
+      };
+      jobLocal.current = { out, entry };
+      onSubmitted?.(out, entry);
       return out;
     } finally {
       setStep(null);
@@ -305,6 +320,14 @@ export default function JobForm({ onSubmitted }) {
       kind ? runJob(f, i, ctl.signal) : Promise.resolve(null),
     ]);
     const [local, job] = outcomes;
+    const started = jobLocal.current;
+    jobLocal.current = null;
+    if (started?.entry.embed && wantsBrowser) {
+      // The video with subtitles uses the sound cleaned here (or the original sound if that didn't work out).
+      if (local.status === 'fulfilled' && local.value) started.entry.cleanPcm = local.value.pcm;
+      else started.entry.browserClean = false;
+      onSubmitted?.(started.out, started.entry);
+    }
     const canceled = ctl.signal.aborted || outcomes.some((o) => o.status === 'rejected' && o.reason?.name === 'AbortError');
     let failed = false;
     if (local.status === 'fulfilled' && local.value) {
@@ -331,7 +354,7 @@ export default function JobForm({ onSubmitted }) {
 
   const pct = step?.frac != null ? Math.round(step.frac * 100) : null;
   const left = Math.floor(freeLeft / 60);
-  const startLabel = !(wantsBrowser || kind) ? 'Start' : free || !kind ? 'Start – free' : est ? `Start – about ${money(est)}` : 'Start';
+  const startLabel = !(wantsBrowser || kind) ? 'Start' : allFree || !kind ? 'Start – free' : est ? `Start – about ${money(est)}` : 'Start';
   return (
     <>
       <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
@@ -437,15 +460,6 @@ export default function JobForm({ onSubmitted }) {
             {hasSecondTrack && wantsBrowser && <p className="small muted mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Clean &amp; polish; the free cleanup in your browser can&rsquo;t do it.</p>}
 
             {isVideo && wantsBrowser && info.viaLibav && <p className="small muted mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Clean &amp; polish gives you the whole video back.</p>}
-            {isVideo && noise !== 'off' && !(wantsBrowser && info.viaLibav) && (
-              <label className="check">
-                <input
-                  type="checkbox" name="keepvideo" checked={keepVideo} disabled={busy}
-                  onChange={(e) => { setKeepVideo(e.target.checked); if (wantsPolish) choice.pickFormat(e.target.checked ? choice.defaultVideo() : choice.defaultAudio()); }}
-                />
-                <span>Keep the video, with the cleaned sound{wantsPolish ? ' (put back together on your device afterwards)' : ''}</span>
-              </label>
-            )}
 
             <fieldset className="field" disabled={busy}>
               <legend className="label">Subtitles &amp; transcript</legend>
@@ -454,11 +468,11 @@ export default function JobForm({ onSubmitted }) {
                 <Choice
                   name="subs" value="free" current={subs} onPick={setSubs} disabled={!freeSubs.ok}
                   title="Free (standard)" reason={freeSubs.why}
-                  hint={`Good for most recordings. Free for files up to ${freeMax ? minutesWord(mins(freeMax)) : 'a few minutes'}; you have ${minutesWord(left)} left today.`}
+                  hint={`Good for most recordings, in many languages. Free for files up to ${freeMax ? minutesWord(mins(freeMax)) : 'a few minutes'}; you have ${minutesWord(left)} left today.`}
                 />
                 <Choice
                   name="subs" value="standard" current={subs} onPick={setSubs}
-                  title="Standard" hint={`Paid. Good for most recordings${standardRate ? `, ${moneyUsd(standardRate.usdPerHour)} an hour` : ''}`}
+                  title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${moneyUsd(standardRate.usdPerHour)} an hour` : ''}`}
                 />
                 <Choice
                   name="subs" value="accurate" current={subs} onPick={setSubs}
@@ -491,24 +505,38 @@ export default function JobForm({ onSubmitted }) {
                     </div>
                   </fieldset>
                 </div>
-                {isVideo && (
+                {canEmbed && (
                   <label className="check">
-                    <input type="checkbox" name="embed" checked={embed} onChange={(e) => setEmbed(e.target.checked)} disabled={busy} />
-                    <span>Embed subtitles in the video{embed ? ' (your whole video is uploaded, so it takes longer)' : ''}</span>
+                    <input
+                      type="checkbox" name="embed" checked={embed} disabled={busy}
+                      onChange={(e) => {
+                        setEmbed(e.target.checked);
+                        // the cleaned video becomes an MKV, the kind of file players show these subtitles from
+                        if (e.target.checked && wantsPolish && !embedOnServer && !canHoldSubtitles(choice.format) && choice.okIds?.includes('mkv')) choice.pickFormat('mkv');
+                      }}
+                    />
+                    <span>Put the subtitles into the video
+                      <span className="hint block" data-testid="embed-hint">
+                        {embedOnServer
+                          ? 'Your browser can’t open this video type, so it’s uploaded whole and we put them in on our side.'
+                          : `Done on your device when the job is finished, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!wantsPolish && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
+                      </span>
+                    </span>
                   </label>
                 )}
+                {wantsText && videoResult && tooBigHere && <p className="small muted mb0" data-testid="embed-too-big">This video is too big to put the subtitles into here (over {gigabytes(MAX_BUILD_BYTES)}). You’ll get the subtitle files to load in your player or video editor.</p>}
               </div>
             )}
 
-            {kind && !free && duration && est != null && (
+            {kind && !allFree && duration && est != null && (
               <p className="mb0" data-testid="estimate">
                 <b>Estimated cost: {money(est)}</b>{' '}
-                <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean & polish ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
+                <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean & polish ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : free ? ' (clean & polish; the subtitles are free)' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
               </p>
             )}
             {free && (
               <p className="mb0" data-testid="free-note">
-                <b>Free: uses {lengthUnknown ? 'about ' : ''}{mins(duration)} of your {left} free minutes left today</b>
+                <b>{wantsPolish ? 'Subtitles free' : 'Free'}: uses {lengthUnknown ? 'about ' : ''}{mins(duration)} of your {left} free minutes left today</b>
               </p>
             )}
             {lengthUnknown && <p className="mb0 muted small" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}

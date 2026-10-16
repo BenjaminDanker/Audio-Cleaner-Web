@@ -261,6 +261,57 @@ export function serverAudioFormat(id, file, info) {
   return endingOf(file?.name) === 'webm' ? 'opus' : 'm4a';
 }
 
+/** Can a video file of this type made here carry subtitles that players show? Only MKV: there they are stored the way
+ *  nearly every player reads them (SRT-style text). An MP4 made here would hold them in a form most players skip. */
+export const canHoldSubtitles = (id) => id === 'mkv';
+
+/** WebVTT cues with only their times and text (no cue names, settings, notes or styles): plain SRT-style cues. */
+function plainCues(vtt) {
+  const out = ['WEBVTT'];
+  for (const block of String(vtt).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').split(/\n{2,}/)) {
+    const lines = block.split('\n');
+    const at = lines.findIndex((l) => l.includes('-->'));
+    const times = at >= 0 && lines[at].match(/^\s*(\S+)\s+-->\s+(\S+)/);
+    if (!times) continue; // the header, NOTE, STYLE and REGION blocks
+    const text = lines.slice(at + 1).join('\n').trim();
+    if (text) out.push(`${times[1]} --> ${times[2]}\n${text}`);
+  }
+  return `${out.join('\n\n')}\n`;
+}
+
+/**
+ * mediabunny marks an MKV subtitle track as S_TEXT/WEBVTT, which FFmpeg-based players (mpv, Plex, Jellyfin...) don't
+ * know. With plain cues the blocks are the same as SRT's, so the track is relabelled S_TEXT/UTF8 (SRT), which they all
+ * read: same-length CodecID (EBML strings may end in zero bytes) and its "WEBVTT" CodecPrivate turned into a Void
+ * element. Only the exact bytes mediabunny writes are touched; if they are not found the file stays as it was.
+ */
+function relabelAsSrt(buf) {
+  const b = new Uint8Array(buf);
+  const enc = new TextEncoder();
+  const find = (pat, from, to) => {
+    for (let i = b.indexOf(pat[0], from); i >= 0 && i <= to - pat.length; i = b.indexOf(pat[0], i + 1)) {
+      let k = 1;
+      while (k < pat.length && b[i + k] === pat[k]) k++;
+      if (k === pat.length) return i;
+    }
+    return -1;
+  };
+  const end = Math.min(b.length, 1 << 20); // the track list is at the start of the file
+  const id = find([0x86, 0x8d, ...enc.encode('S_TEXT/WEBVTT')], 0, end);
+  if (id < 0) return buf;
+  b.set([...enc.encode('S_TEXT/UTF8'), 0, 0], id + 2);
+  const priv = id + 15;
+  if (find([0x63, 0xa2, 0x86, ...enc.encode('WEBVTT')], priv, priv + 9) === priv) b.set([0xec, 0x87, 0, 0, 0, 0, 0, 0, 0], priv);
+  return buf;
+}
+
+/** SRT text as WebVTT (the same cues; WebVTT writes the milliseconds after a dot). */
+export function srtToVtt(srt) {
+  const body = String(srt).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+    .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+  return `WEBVTT\n\n${body.trim()}\n`;
+}
+
 /* ------------------------------------------------------------------------------------------------ making the file */
 
 const abortError = () => new DOMException('Canceled', 'AbortError');
@@ -295,9 +346,10 @@ async function asWav(mb, source, { signal, onProgress }) {
 
 /**
  * Put the cleaned sound into `output` as a track. Resolves {codec, run} once the track exists; call `run()` after
- * output.start() (it resolves when all sound has been written).
+ * output.start() (it resolves when all sound has been written). `codecs`: what may be encoded (this browser can);
+ * `copyOk`: what a sound file's own codec may be to be copied as it is (copying needs no encoder).
  */
-async function addCleanSound(mb, output, source, codecs, { signal, onProgress }) {
+async function addCleanSound(mb, output, source, codecs, { signal, onProgress, copyOk = codecs }) {
   const format = output.format;
   const allowed = codecs.filter((c) => format.getSupportedAudioCodecs().includes(c));
   if (source.pcm) {
@@ -337,7 +389,7 @@ async function addCleanSound(mb, output, source, codecs, { signal, onProgress })
   }
   const own = await track.getCodec();
   let pick;
-  if (allowed.includes(own)) {
+  if (own && copyOk.includes(own) && format.getSupportedAudioCodecs().includes(own)) {
     pick = undefined;
   } else {
     const rate = await track.getSampleRate();
@@ -348,9 +400,15 @@ async function addCleanSound(mb, output, source, codecs, { signal, onProgress })
       throw new RemuxUnsupported('This browser can’t write the sound for this kind of file. Try another format.');
     }
   }
-  const conv = await mb.Conversion.init({
-    input, output, composable: true, tracks: 'primary', video: { discard: true }, audio: pick ? { codec: pick } : undefined, showWarnings: false,
-  });
+  const init = (opts) => mb.Conversion.init({ input, output, composable: true, tracks: 'primary', video: { discard: true }, showWarnings: false, ...opts });
+  let conv = null;
+  if (!pick) {
+    // Copy it as it is. 'forced' also copies AAC whose first (priming) packet starts a little before zero, which
+    // the default mode would encode again.
+    conv = await init({ copy: { mode: 'forced' } }).catch(() => null);
+    if (conv && (!conv.isValid || conv.utilizedTracks.length === 0)) conv = null;
+  }
+  if (!conv) conv = await init({ audio: pick ? { codec: pick } : undefined });
   if (!conv.isValid || conv.utilizedTracks.length === 0) {
     input.dispose();
     throw new RemuxUnsupported('This browser can’t put the cleaned sound into this kind of file. Try another format.');
@@ -380,11 +438,12 @@ async function addCleanSound(mb, output, source, codecs, { signal, onProgress })
  * @param {Blob} [p.wav] the cleaned sound as a 16-bit WAV file, free path
  * @param {Blob} [p.audioFile] the cleaned sound as a file, paid path
  * @param {string} [p.audioName] name of that file (so an identical format is handed back untouched)
+ * @param {string} [p.subtitles] WebVTT text to put into a video file as a subtitle track (MP4, MKV, WebM)
  * @param {(frac:number)=>void} [p.onProgress]
  * @param {AbortSignal} [p.signal]
  * @returns {Promise<{blob:Blob, ext:string, mime:string, note:string|null}>}
  */
-export async function buildMedia({ format, size = 'same', videoFile = null, info = null, pcm = null, wav = null, audioFile = null, audioName = '', onProgress, signal }) {
+export async function buildMedia({ format, size = 'same', videoFile = null, info = null, pcm = null, wav = null, audioFile = null, audioName = '', subtitles = '', onProgress, signal }) {
   const def = FORMAT[format];
   if (!def) throw new Error('Unknown format');
   const mb = await loadMediabunny();
@@ -440,7 +499,7 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
   const cancels = [];
   let vin = null;
   try {
-    const sound = await addCleanSound(mb, output, source, audioCodecsFor(caps, format), { signal });
+    const sound = await addCleanSound(mb, output, source, audioCodecsFor(caps, format), { signal, copyOk: AUDIO_PREFS[format] });
     cancels.push(sound.cancel);
     let pictureRun;
     let pictureNote = null;
@@ -497,16 +556,28 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
       pictureNote = 'The picture is plain black.';
     }
 
+    let subtitlesRun = async () => {};
+    if (subtitles) {
+      if (!canHoldSubtitles(format)) throw new RemuxUnsupported(`Subtitles put into a video here need an MKV file (most players can’t show them from a ${def.label} made here). Pick MKV.`);
+      const subs = new mb.TextSubtitleSource('webvtt');
+      output.addSubtitleTrack(subs, { name: 'Subtitles' });
+      subtitlesRun = async () => {
+        await subs.add(plainCues(subtitles));
+        subs.close();
+      };
+    }
+
     signal?.addEventListener('abort', () => cancels.forEach((c) => c()), { once: true });
     await output.start();
-    await Promise.all([pictureRun(), sound.run()]);
+    await Promise.all([pictureRun(), sound.run(), subtitlesRun()]);
     if (signal?.aborted) throw abortError();
     await output.finalize();
     const mkNote = [];
     if (sound.codec === 'opus' && (format === 'mp4' || format === 'mov')) mkNote.push('The sound is stored as Opus in the MP4 file. Modern browsers and VLC play it; some older video editors do not.');
     if (sound.codec === 'pcm-s16') mkNote.push('The sound is stored uncompressed (PCM), so the file is a little bigger.');
     if (pictureNote) mkNote.unshift(pictureNote);
-    return done(new Blob([output.target.buffer], { type: def.mime }), mkNote.join(' ') || null);
+    const bytes = subtitles ? relabelAsSrt(output.target.buffer) : output.target.buffer;
+    return done(new Blob([bytes], { type: def.mime }), mkNote.join(' ') || null);
   } catch (e) {
     await output.cancel().catch(() => {});
     if (signal?.aborted) throw abortError();

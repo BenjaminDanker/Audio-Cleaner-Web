@@ -76,11 +76,11 @@ FREE_BYTES_SLACK = 25_000_000
 # Never let our work take the host below these.
 MEM_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
-# Order in which workers take queued jobs: paid before free, then the user with
-# the fewest jobs already running (so one big batch can't block everyone), then
-# first come, first served.
+# Order in which workers take queued jobs: paid before free (a paid cleanup with
+# free subtitles counts as paid), then the user with the fewest jobs already
+# running (so one big batch can't block everyone), then first come, first served.
 QUEUE_ORDER = (
-    "j.free, (SELECT COUNT(*) FROM jobs r WHERE r.user_id = j.user_id AND r.status IN ('running', 'cloud_asr')),"
+    "(j.free AND j.hold_id IS NULL), (SELECT COUNT(*) FROM jobs r WHERE r.user_id = j.user_id AND r.status IN ('running', 'cloud_asr')),"
     " j.queued_at"
 )
 
@@ -207,7 +207,8 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if kind not in KINDS:
         raise JobError("unknown job type")
     if kind in ("denoise", "denoise_transcribe"):
-        if free:
+        # "free" covers the subtitles only: a cleanup alone is never free here (it is free in the browser).
+        if free and kind == "denoise":
             raise JobError("Free jobs are transcription only; denoise runs free in your browser.")
         pricing.rate("denoise", denoise_tier or "")
     if kind in ("transcribe", "denoise_transcribe"):
@@ -342,20 +343,25 @@ def create_job(
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"])
-    est = 0 if free else pricing.job_cost_micros(
-        kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"]
-    )
-    hold_id = None
     if free:
-        with db.tx() as c:
-            _reserve_free(c, user_id, claimed_seconds)
-    elif est > 0:
+        params["rates"]["transcribe"] = 0  # free subtitles; a cleanup in the same job is still paid
+    est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"])
+    hold_id = None
+    if est > 0:
         try:
             hold_id = ledger.create_hold(user_id, est, "job", job_id)
         except ledger.InsufficientFunds as e:
             raise JobError(
                 f"This job costs about ${est / 1e6:.2f}; your available balance is ${e.available / 1e6:.2f}.", 402
             ) from e
+    if free:
+        try:
+            with db.tx() as c:
+                _reserve_free(c, user_id, claimed_seconds)
+        except Exception:
+            if hold_id:
+                ledger.release_hold(hold_id)
+            raise
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:

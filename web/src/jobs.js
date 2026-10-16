@@ -120,7 +120,8 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   let extracted = false;
   const options = { ...body.options };
   const wantsEmbed = !!(options.embed_subtitles && info?.hasVideo);
-  if (wantsEmbed) options.output_video = true; // the whole video goes up so the server can put the subtitles in it
+  // Only for a video this browser can't open (it goes up whole anyway): otherwise the subtitles are put in here, afterwards.
+  if (wantsEmbed) options.output_video = true;
   if (!wantsEmbed && info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
     onStage?.('extract');
     try {

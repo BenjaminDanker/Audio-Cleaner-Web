@@ -201,7 +201,8 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
 
 
 def _max_seconds(job: dict, params: dict) -> int:
-    return pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS if job["free"] else pricing.max_job_seconds(params["denoise_tier"])
+    most = pricing.max_job_seconds(params["denoise_tier"])
+    return min(most, pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS) if job["free"] else most
 
 
 def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
@@ -401,7 +402,8 @@ def _reprice(job: dict, duration: float) -> None:
                 (delta, job["user_id"], params["free_day"]),
             )
         job["claimed_seconds"] = duration
-        return
+        if not job["hold_id"]:
+            return  # free subtitles only; with a paid cleanup the hold is corrected below
     cost = _job_cost(job, params, duration)
     if cost > job["est_cost_micros"]:
         try:
@@ -450,7 +452,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
         if not n:
             log.warning("job %s is no longer running; not completing it", job["id"])
             return
-        if not job["free"] and job["hold_id"]:
+        if job["hold_id"]:
             cost = ledger.capture_hold(
                 job["hold_id"], _job_cost(job, params, duration),
                 f"{jobs.job_label(job['kind'], params['denoise_tier'], params['transcribe_tier'])}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,

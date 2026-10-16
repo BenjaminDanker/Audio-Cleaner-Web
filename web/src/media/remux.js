@@ -13,9 +13,10 @@ export { RemuxUnsupported };
  * @param {Blob} [p.audioFile] cleaned audio as a file (m4a/ogg/wav/flac/mp3...)
  * @param {string} [p.format] file type of the result (convert.js FORMATS id); the original's own type when left out
  * @param {string} [p.size] picture size ('same', '1080', ...)
+ * @param {string} [p.subtitles] WebVTT text to embed as a subtitle track (MKV and WebM only)
  * @returns {Promise<{blob:Blob, ext:string, mime:string, audioCodec:string|null, note:string|null}>}
  */
-export async function remuxWithCleanAudio({ videoFile, pcm, audioFile, audioName, info, format, size, onProgress, signal }) {
+export async function remuxWithCleanAudio({ videoFile, pcm, audioFile, audioName, info, format, size, subtitles, onProgress, signal }) {
   const out = await buildMedia({
     format: format || defaultFormatId(videoFile, { hasVideo: true }, true),
     size: size || 'same',
@@ -24,6 +25,7 @@ export async function remuxWithCleanAudio({ videoFile, pcm, audioFile, audioName
     pcm,
     audioFile,
     audioName,
+    subtitles,
     onProgress,
     signal,
   });

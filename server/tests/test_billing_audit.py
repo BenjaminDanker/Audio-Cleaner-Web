@@ -619,3 +619,34 @@ def test_session_progress_is_saved(monkeypatch):
     sess.id, sess.samples = "s9", 48_000 * 31
     assert asyncio.run(routes._persist(sess)) is True
     assert db.one("SELECT seconds FROM stream_sessions WHERE id = 's9'")["seconds"] == 31
+
+
+def test_free_subtitles_with_a_paid_cleanup_charge_only_the_cleanup():
+    from acw.worker import main as W
+
+    uid = user()
+    with pytest.raises(jobs.JobError):
+        make_job(uid, free=True)  # a cleanup on its own is never free here
+    with pytest.raises(jobs.JobError):  # no money for the cleanup: nothing taken from the free minutes either
+        make_job(uid, kind="denoise_transcribe", transcribe_tier="local", free=True)
+    assert jobs.free_seconds_left(uid) == 3600
+
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    with pytest.raises(jobs.JobError):
+        make_job(uid, kind="denoise_transcribe", transcribe_tier="premium", free=True)
+    job, d = running_job(uid, kind="denoise_transcribe", transcribe_tier="local", free=True)
+    cleanup = pricing.cost_micros("denoise", "standard", 600)
+    assert job["est_cost_micros"] == cleanup and ledger.balance(uid)["held_micros"] == cleanup
+    assert jobs.free_seconds_left(uid) == 3000
+    assert W._max_seconds(job, json.loads(job["params_json"])) == pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS
+    W._reprice(job, 900.0)  # measured longer than claimed: both the hold and the free minutes follow
+    assert jobs.free_seconds_left(uid) == 2700
+    assert ledger.balance(uid)["held_micros"] == pricing.cost_micros("denoise", "standard", 900)
+    job = dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
+    W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
+    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == pricing.cost_micros("denoise", "standard", 900)
+    assert ledger.balance(uid)["held_micros"] == 0
+
+    other = make_job(uid, kind="denoise_transcribe", transcribe_tier="local", free=True, claimed_seconds=300)
+    jobs.finish_failed(dict(db.one("SELECT * FROM jobs WHERE id = ?", (other,))), "x")
+    assert ledger.balance(uid)["held_micros"] == 0 and jobs.free_seconds_left(uid) == 2700

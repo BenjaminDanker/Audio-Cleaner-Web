@@ -84,8 +84,12 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
    `displayName` (optional, up to 120 characters; control, bidirectional and zero-width characters are removed) is
    the name shown for the job and used for the result files; without it the uploaded file's name is used. The
    uploaded file can be a re-encoded copy of what the person chose.
-   `free:true` is only allowed for `kind:"transcribe"` with `transcribeTier:"local"`
-   (daily allowance, 30 min/file). Paid jobs need accepted terms. Returns
+   `free:true` makes the subtitles free (daily allowance, 30 min/file) and needs `transcribeTier:"local"`: with
+   `kind:"transcribe"` the job is free, with `kind:"denoise_transcribe"` only the cleanup is charged (the job holds
+   and captures the cleanup's price and counts as paid in the queue). It is refused for `kind:"denoise"`.
+   `embed_subtitles` makes our side put the subtitles into the video, which needs the whole video uploaded. The
+   website only asks for it for a video the browser can't open (it goes up whole anyway); otherwise it uploads the
+   sound only and puts the subtitles into an MKV in the browser afterwards (SRT-style track, which players read). Paid jobs need accepted terms. Returns
    `{id, estCostMicros, uploadUrl}`; 402 if the balance can't cover the estimate.
    `durationSeconds` comes from the browser; the server re-measures and re-prices.
 2. `PUT /api/jobs/{id}/input` with the raw file bytes as the body (`Content-Length`
