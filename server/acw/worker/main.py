@@ -122,7 +122,7 @@ def admission(
     now = db.now()
     # Jobs started in the last minute may not have allocated their memory yet.
     mem += sum(jobs.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
-    if snap.memory_headroom - mem < jobs.MEM_RESERVE:
+    if snap.mem_available - mem < jobs.MEM_RESERVE or (snap.slice_headroom is not None and snap.slice_headroom - mem < jobs.SLICE_RESERVE):
         return False, f"memory: {snap.memory_headroom / jobs.GB:.1f} GB free, job needs {mem / jobs.GB:.1f} GB", 0
     if snap.disk_free - disk < jobs.DISK_RESERVE:
         return False, f"disk: {snap.disk_free / jobs.GB:.0f} GB free, job needs {disk / jobs.GB:.1f} GB", 0

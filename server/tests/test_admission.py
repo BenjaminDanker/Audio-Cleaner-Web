@@ -32,17 +32,35 @@ def test_cpu_only_matters_when_other_jobs_run():
 
 def test_waits_for_memory_and_disk():
     ok, why, _ = admission(job(transcribe="local"), snap(mem=5 * GB), [])
-    assert not ok and why.startswith("memory")  # 1.5 + 2.5 GB + 2 GB reserve > 5 GB
+    assert not ok and why.startswith("memory")  # 1.5 + 2.5 GB + 6 GB reserve > 5 GB
     ok, why, _ = admission(job(seconds=4 * 3600), snap(disk=15 * GB), [])
     assert not ok and why.startswith("disk")  # 4 h stereo scratch ~11 GB + 10 GB reserve
+
+
+def test_a_job_leaves_the_minecraft_reopen_threshold_free():
+    # the memory controller of the game servers reopens at 6 GiB available: a job must not take the host below it
+    assert jobs.MEM_RESERVE == 6 * GB
+    assert admission(job(), snap(mem=7.6 * GB), [])[0]  # 1.5 GB job, 6.1 GB left
+    ok, why, _ = admission(job(), snap(mem=7.4 * GB), [])
+    assert not ok and why.startswith("memory")
+
+
+def test_the_slice_limit_keeps_its_own_smaller_reserve():
+    need = jobs.job_needs(job(transcribe="local"))[0]
+    s = hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=need + jobs.SLICE_RESERVE + 1,
+                          disk_free=100 * GB)
+    assert admission(job(transcribe="local"), s, [])[0]  # the slice keeps 2 GB, the host side has 30 GB
+    s = hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=need + jobs.SLICE_RESERVE - 1,
+                          disk_free=100 * GB)
+    assert not admission(job(transcribe="local"), s, [])[0]
 
 
 def test_recently_started_jobs_count_against_memory():
     import time
 
     fresh = job(transcribe="local", started=int(time.time()))
-    assert admission(job(), snap(mem=7 * GB), [])[0]
-    assert not admission(job(), snap(mem=7 * GB), [fresh])[0]
+    assert admission(job(), snap(mem=8 * GB), [])[0]
+    assert not admission(job(), snap(mem=8 * GB), [fresh])[0]
 
 
 def test_live_counts_niced_work_as_available():

@@ -81,7 +81,12 @@ UPLOAD_WINDOW_SECONDS = 3600
 # ... but a job whose upload has not sent a single byte this long after it was created is canceled (it only holds disk space).
 UPLOAD_FIRST_BYTE_SECONDS = 600
 # Never let our work take the host below these.
-MEM_RESERVE = 2 * GB
+# Free system memory (MemAvailable) left after a job starts: the Minecraft memory controller closes new world starts at
+# 4 GiB available and reopens at 6 GiB, so a job that took the host down to 2 GB shut players out until it ended.
+MEM_RESERVE = 6 * GB
+# Room kept under the acw slice's own MemoryMax (a separate limit, 12.5 GB: a 6 GB reserve there would stop a 6 GB
+# local transcription from ever running next to the web and live processes).
+SLICE_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
 # Order in which workers take queued jobs: paid before free (a paid cleanup with
 # free subtitles counts as paid), then the user with the fewest jobs already
