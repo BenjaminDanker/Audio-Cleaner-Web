@@ -48,6 +48,10 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
   Ukrainian, Arabic, Hindi, Japanese, Korean and Chinese captions cannot be added to the stream (the status says so and
   they are not requested); with *Detect automatically* captions in such scripts are skipped. Accents and the usual
   punctuation are kept; letters the format lacks (Polish ł, Czech č, Turkish ş ...) are written with plain ones.
+  With a stream delay set in OBS (Settings, Advanced, Stream Delay), captions for the stream wait that long too, so they
+  stay with the words; the recording is not delayed and gets them at once. Twitch viewers switch captions on with the CC
+  button; on YouTube choose *Embedded 608/708* captions for the stream in YouTube Studio first. Both show one caption
+  track. Outputs made by other plugins (multistream, vertical canvas, Source Record) get no captions.
 * **Delay** - Low 80 ms, Balanced 150 ms, Safe 250 ms. Fixed for the whole session; changing it restarts the session. See below.
 * **Check for updates when OBS starts** (bottom of the dialog, on by default) - see "Update notice" below. It is one
   setting for the whole plugin, not per filter.

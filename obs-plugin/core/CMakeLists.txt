@@ -7,6 +7,7 @@ add_library(
   acw_core
   STATIC
   src/caption_pacer.cpp
+  src/delayed_sender.cpp
   src/opus_codec.cpp
   src/output_stage.cpp
   src/protocol.cpp

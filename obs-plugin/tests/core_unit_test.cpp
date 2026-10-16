@@ -2,6 +2,7 @@
 // Offline unit tests for acw_core (no network, no OBS).
 #include "acw/backoff.hpp"
 #include "acw/caption_pacer.hpp"
+#include "acw/delayed_sender.hpp"
 #include "acw/opus_codec.hpp"
 #include "acw/output_stage.hpp"
 #include "acw/protocol.hpp"
@@ -1027,6 +1028,53 @@ static void test_update_crypto()
 	CHECK(!verify_ed25519(msg + "x", updtest::sign(k, msg), k.pub_b64()));
 }
 
+static void test_delayed_sender()
+{
+	std::printf("delayed caption sender (stream delay)\n");
+	using clock = std::chrono::steady_clock;
+	std::mutex m;
+	std::vector<std::pair<std::string, clock::time_point>> sent;
+	{
+		DelayedSender d([&](const std::string &line, double) {
+			std::lock_guard<std::mutex> lk(m);
+			sent.emplace_back(line, clock::now());
+		});
+		const auto t0 = clock::now();
+		d.later("one", 2.0, t0 + std::chrono::milliseconds(150));
+		d.later("two", 2.0, t0 + std::chrono::milliseconds(100));  // due earlier: still after "one"
+		d.later("three", 2.0, t0 + std::chrono::milliseconds(200));
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+		{
+			std::lock_guard<std::mutex> lk(m);
+			CHECK(sent.empty());  // nothing before its time
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		std::lock_guard<std::mutex> lk(m);
+		CHECK(sent.size() == 3);
+		CHECK(sent[0].first == "one" && sent[1].first == "two" && sent[2].first == "three");
+		CHECK(sent[0].second >= t0 + std::chrono::milliseconds(150));
+		CHECK(sent[2].second >= t0 + std::chrono::milliseconds(200));
+	}
+	// clear() drops what waits; a long backlog keeps only the newest lines
+	sent.clear();
+	{
+		DelayedSender d([&](const std::string &line, double) {
+			std::lock_guard<std::mutex> lk(m);
+			sent.emplace_back(line, clock::now());
+		}, 3);
+		const auto later = clock::now() + std::chrono::seconds(30);
+		for (int i = 0; i < 5; ++i)
+			d.later("l" + std::to_string(i), 1.0, later);
+		CHECK(d.waiting() == 3);
+		d.clear();
+		CHECK(d.waiting() == 0);
+		d.later("now", 1.0, clock::now());
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		std::lock_guard<std::mutex> lk(m);
+		CHECK(sent.size() == 1 && sent[0].first == "now");
+	}
+}
+
 int main()
 {
 	test_spsc();
@@ -1035,6 +1083,7 @@ int main()
 	test_backoff();
 	test_caption_lines();
 	test_caption_pacing();
+	test_delayed_sender();
 	test_resampler();
 	test_output_stage();
 	test_session_passthrough(48000, 150);
