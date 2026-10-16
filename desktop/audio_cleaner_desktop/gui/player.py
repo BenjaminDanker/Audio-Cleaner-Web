@@ -6,14 +6,15 @@ no sound device), the pane says so and the rest of the app keeps working.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
-from . import icons, video_preview
+from . import icons, subtitles, video_preview
 from .widgets import ElidedLabel, IconButton, Segmented, SeekSlider, format_time
 
 log = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ def load_multimedia() -> SimpleNamespace | None:
 
 class PreviewPane(QFrame):
     closed = Signal()
+    _subtitles_read = Signal(object, object)  # key, cues (read on a worker thread)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -72,12 +74,25 @@ class PreviewPane(QFrame):
 
         self._stage = QStackedWidget()
         self._stage.setObjectName("Preview")
-        self._stage.setMinimumHeight(130)
+        self._stage.setMinimumHeight(195)
         self._art = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self._note = QLabel("Preview unavailable", alignment=Qt.AlignmentFlag.AlignCenter)
         self._note.setWordWrap(True)
         self._stage.addWidget(self._art)
         self._stage.addWidget(self._note)
+        # Subtitles over the bottom of the picture (or the waveform, for audio), timed to the sound.
+        self._subs = subtitles.Track([])
+        self._caption = QLabel(self._stage)
+        self._caption.setWordWrap(True)
+        self._caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._caption.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._caption.setStyleSheet(
+            "QLabel { color: white; background: rgba(0, 0, 0, 170); border-radius: 4px; padding: 3px 8px; font-size: 13px; }"
+        )
+        self._caption.hide()
+        self._stage.installEventFilter(self)
+        self._caption_timer = QTimer(self, interval=100, timeout=self._update_caption)
+        self._subtitles_read.connect(self._on_subtitles_read)
         layout.addWidget(self._stage, 1)
 
         controls = QHBoxLayout()
@@ -94,6 +109,14 @@ class PreviewPane(QFrame):
         controls.addWidget(self._play)
         controls.addWidget(self._slider, 1)
         controls.addWidget(self._time)
+        self._cc = QPushButton("CC")
+        self._cc.setCheckable(True)
+        self._cc.setChecked(True)
+        self._cc.setToolTip("Show the subtitles")
+        self._cc.setFixedWidth(42)
+        self._cc.toggled.connect(lambda _: self._update_caption())
+        self._cc.hide()
+        controls.addWidget(self._cc)
         self._which.setMinimumWidth(190)
         controls.addWidget(self._which)
         layout.addLayout(controls)
@@ -119,9 +142,17 @@ class PreviewPane(QFrame):
     def available(self) -> bool:
         return self._player is not None
 
-    def show_files(self, key: int, original: Path, cleaned: Path | None, has_video: bool, name: str) -> None:
+    def show_files(self, key: int, original: Path, cleaned: Path | None, has_video: bool, name: str,
+                   subtitle_file: Path | None = None) -> None:
+        """`subtitle_file`: the .srt/.vtt made with the result; without one, a subtitle track inside the cleaned video
+        is used when there is one."""
         self.stop()
         self.key = key
+        self._set_subtitles([])
+        if subtitle_file is not None and subtitle_file.suffix.lower() in (".srt", ".vtt"):
+            self._set_subtitles(subtitles.read_file(subtitle_file))
+        elif cleaned is not None and has_video:
+            self._read_embedded_subtitles(key, cleaned)
         self._original, self._cleaned = original, cleaned
         self._name.setText(name)
         self._which.set_enabled_key("cleaned", cleaned is not None)
@@ -206,6 +237,57 @@ class PreviewPane(QFrame):
             self._stage.insertWidget(0, self._video)
         self._player.setVideoOutput(self._video)
         self._stage.setCurrentWidget(self._video)
+
+    # -- subtitles ----------------------------------------------------------
+
+    def _read_embedded_subtitles(self, key: int, video: Path) -> None:
+        try:
+            from .. import resources
+
+            ffmpeg = resources.ffmpeg_dir() / resources._FFMPEG
+        except Exception:  # noqa: BLE001
+            return
+        threading.Thread(
+            target=lambda: self._subtitles_read.emit(key, subtitles.read_embedded(ffmpeg, video)),
+            name="preview-subtitles", daemon=True,
+        ).start()
+
+    def _on_subtitles_read(self, key, cues) -> None:
+        if key == self.key and cues:
+            self._set_subtitles(cues)
+
+    def _set_subtitles(self, cues: list) -> None:
+        self._subs = subtitles.Track(cues)
+        self._cc.setVisible(bool(self._subs))
+        if self._subs:
+            self._caption_timer.start()
+        else:
+            self._caption_timer.stop()
+        self._update_caption()
+
+    def _update_caption(self) -> None:
+        text = ""
+        if self._subs and self._cc.isChecked() and self._player is not None:
+            text = self._subs.at(self._player.position() / 1000)
+        if text != self._caption.text():
+            self._caption.setText(text)
+            self._place_caption()
+        self._caption.setVisible(bool(text))
+        if text:
+            self._caption.raise_()
+
+    def _place_caption(self) -> None:
+        area = self._stage.rect()
+        width = min(area.width() - 24, max(120, int(area.width() * 0.9)))
+        self._caption.setFixedWidth(width)
+        height = self._caption.heightForWidth(width)
+        self._caption.setFixedHeight(height if height > 0 else self._caption.sizeHint().height())
+        self._caption.move((area.width() - width) // 2, area.height() - self._caption.height() - 10)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802
+        if obj is self._stage and event.type() == QEvent.Type.Resize:
+            self._place_caption()
+        return super().eventFilter(obj, event)
 
     def _seek_picture(self, ms: int) -> None:
         if self._mode == "own" and self._synced is not None:

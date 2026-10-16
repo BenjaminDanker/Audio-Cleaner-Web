@@ -93,6 +93,11 @@ class _ProbeTask(QRunnable):
         self.signals.done.emit(self._id, result, error)
 
 
+def _subtitle_file(paths: list[Path]) -> Path | None:
+    """The .srt/.vtt among a result's files (subtitles inside a video are read from the video itself)."""
+    return next((p for p in paths[1:] if p.suffix.lower() in (".srt", ".vtt") and p.exists()), None)
+
+
 def _plural(n: int, one: str, many: str) -> str:
     return f"{n} {one if n == 1 else many}"
 
@@ -634,7 +639,7 @@ class MainWindow(QMainWindow):
         self._record(item, DONE, "", [str(p) for p in paths])
         self._refresh_row(item)
         if previewing:
-            self.preview.show_files(item.id, item.path, paths[0], item.has_video, item.path.name)
+            self.preview.show_files(item.id, item.path, paths[0], item.has_video, item.path.name, _subtitle_file(paths))
         self._refresh_state()
 
     def _on_failed(self, item_id: int, message: str) -> None:
@@ -703,7 +708,7 @@ class MainWindow(QMainWindow):
         if self.preview is None:
             self.preview = PreviewPane()
             self._left.addWidget(self.preview)
-        self.preview.show_files(item.id, item.path, cleaned, item.has_video, item.path.name)
+        self.preview.show_files(item.id, item.path, cleaned, item.has_video, item.path.name, _subtitle_file(item.outputs))
         self.preview.show()
 
     def _reveal(self, item_id: int) -> None:

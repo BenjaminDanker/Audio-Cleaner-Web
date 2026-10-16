@@ -53,7 +53,7 @@ LAME_SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
 # ---- what the app needs from FFmpeg ----------------------------------------------------------
 # Container formats (acw_common.ffmpeg.ALLOWED_FORMATS) + raw PCM pipes + text subtitles.
 DEMUXERS="mov,matroska,avi,mpegts,mp3,wav,flac,ogg,aac,asf,flv,aiff,caf,w64,ac3,eac3,pcm_s16le,pcm_s24le,pcm_f32le,srt,webvtt,rawvideo"
-MUXERS="mp4,mov,ipod,matroska,webm,wav,flac,ogg,opus,null,mp3,pcm_s16le,pcm_s24le,pcm_f32le,rawvideo"
+MUXERS="mp4,mov,ipod,matroska,webm,wav,flac,ogg,opus,null,mp3,pcm_s16le,pcm_s24le,pcm_f32le,rawvideo,srt"
 PROTOCOLS="file,pipe"
 # Audio decoders that are LGPL and common; pcm_*/adpcm_* are added from configure's own list below.
 # Video decoders for the preview (gui/video_preview.py decodes the picture itself, so it can drop frames on a slow
