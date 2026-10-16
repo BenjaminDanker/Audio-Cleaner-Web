@@ -220,8 +220,9 @@ if (want('billing')) {
     await page.getByLabel('Custom amount (USD)').fill('5');
     if (/neg/.test(await hint.getAttribute('class'))) throw new Error('$5 should be valid');
     await page.getByLabel('Custom amount (USD)').fill('600');
-    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid over $500');
-    if (!/most you can add at once is \$500\.00/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
+    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid over the limit');
+    // this account has not paid yet: its first top-up can be up to $50, and the hint says so
+    if (!/first top-up can be up to \$50\.00\. After that, up to \$500\.00/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
     await page.getByLabel('Custom amount (USD)').fill('abc');
     if (!/Enter an amount in dollars/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
     await page.getByLabel('Custom amount (USD)').fill('25');

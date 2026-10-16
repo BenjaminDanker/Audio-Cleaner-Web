@@ -207,6 +207,7 @@ function TopUp({ pricing, unavailable, limitCents }) {
             {valid ? `Between ${moneyCents(min)} and ${moneyCents(max)}.`
               : !Number.isInteger(cents) ? 'Enter an amount in dollars, like 12.50.'
               : cents < min ? `The smallest top-up is ${moneyCents(min)}.`
+              : limited ? `Your first top-up can be up to ${moneyCents(max)}. After that, up to ${moneyCents(pricing?.topup?.maxCents ?? 50000)} at a time.`
               : `The most you can add at once is ${moneyCents(max)}.`}
           </span>
         </div>

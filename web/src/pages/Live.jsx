@@ -567,16 +567,17 @@ function LiveDemo({ pricing }) {
           <b id="cap-h">Live captions</b>
           <div className="caption-log" ref={logRef} role="log" aria-live="polite" aria-labelledby="cap-h" data-testid="captions">
             {lines.length === 0 && <p className="muted">{live ? (!free && captions === 'premium' ? 'Say something and the captions show up here as you talk.' : 'Say something and the captions show up here as you talk and pause.') : 'Captions show up here while the test runs.'}</p>}
-            {lines.map((l) => (l.final
-              ? (
-                <div key={l.key}>
-                  <p className="mb0" data-testid="caption-line">{l.text}</p>
-                  {Object.entries(translations[String(l.id || '').replace(/^id:/, '')] || {}).map(([lang, text]) => (
-                    <p key={lang} className="small muted mb0" lang={lang} data-testid="caption-translation">{LANGUAGE_NAME[lang] || lang}: {text}</p>
-                  ))}
-                </div>
-              )
-              : <p key={l.key} className="partial" aria-hidden="true" data-testid="caption-partial">{l.text}</p>))}
+            {lines.map((l) => (
+              // one node per line: a partial turns into its final line in place
+              <div key={l.key}>
+                {l.final
+                  ? <p className="mb0" data-testid="caption-line">{l.text}</p>
+                  : <p className="partial mb0" aria-hidden="true" data-testid="caption-partial">{l.text}</p>}
+                {l.final && Object.entries(translations[String(l.id || '').replace(/^id:/, '')] || {}).map(([lang, text]) => (
+                  <p key={lang} className="small muted mb0" lang={lang} data-testid="caption-translation">{LANGUAGE_NAME[lang] || lang}: {text}</p>
+                ))}
+              </div>
+            ))}
           </div>
         </div>
       )}
