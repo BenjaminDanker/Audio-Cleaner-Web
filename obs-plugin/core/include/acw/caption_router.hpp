@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace acw {
@@ -58,7 +59,9 @@ private:
 	Sinks sinks_;
 	std::mutex mu_;
 	RouterConfig cfg_;
-	std::map<std::string, std::string> last_of_;  // per language: id of the caption translated last (a repeat is dropped)
+	// Per language: the caption translated last (its id and the connection it came from: ids start again with every
+	// new session). A repeat of it is dropped.
+	std::map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> last_of_;
 	std::unique_ptr<OverlayDisplay> display_;
 	bool stopped_ = false;
 };

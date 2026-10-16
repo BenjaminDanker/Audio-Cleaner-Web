@@ -1300,6 +1300,45 @@ static void test_subtitles()
 		CHECK(files[1].srt.find("00:00:09,000 --> 00:00:10,000\nprimero y por orden") != std::string::npos);
 		CHECK(files[1].srt.find("00:00:10,000 --> 00:00:11,000\nsin duracion") != std::string::npos);
 	}
+	// A paused recording: speech during the pause is left out, later cues are counted without it.
+	{
+		SubtitleRecorder pr;
+		pr.begin(at(0));
+		pr.pause(at(10));
+		pr.pause(at(11));  // twice: no effect
+		pr.resume(at(14));
+		auto pcue = [&](double s, double e, const char *text) {
+			SubtitleCue x;
+			x.lang = "en";
+			x.start = at(s);
+			x.end = at(e);
+			x.text = text;
+			pr.add(x);
+		};
+		pcue(8, 9, "before");
+		pcue(12, 13, "during the pause");  // after the resume it arrives late, but it was spoken inside the pause
+		pcue(9.5, 12, "straddles the start of the pause");
+		pcue(15, 16, "after");
+		const auto pf = pr.finish();
+		CHECK(pf.size() == 1);
+		if (pf.size() == 1) {
+			CHECK(pf[0].srt.find("00:00:08,000 --> 00:00:09,000\nbefore") != std::string::npos);
+			CHECK(pf[0].srt.find("during the pause") == std::string::npos);
+			CHECK(pf[0].srt.find("00:00:09,500 --> 00:00:10,000\nstraddles the start of the pause") != std::string::npos);
+			CHECK(pf[0].srt.find("00:00:11,000 --> 00:00:12,000\nafter") != std::string::npos);  // 15 s - 4 s of pause
+		}
+		// Speech spoken while the pause lasts is dropped as it arrives.
+		SubtitleRecorder q;
+		q.begin(at(0));
+		q.pause(at(5));
+		SubtitleCue x;
+		x.lang = "en";
+		x.start = at(6);
+		x.end = at(7);
+		x.text = "silent";
+		q.add(x);
+		CHECK(q.finish().empty());
+	}
 	// Long text is wrapped.
 	SrtCue lc;
 	lc.start = 0;
@@ -1506,6 +1545,13 @@ static void test_caption_router()
 		}
 	}
 
+	// A new connection numbers its captions from the start again: the same id is not a repeat then.
+	{
+		TranslationEvent again = tr("es", "otra vez buenos dias", "l1", 5.0, 6.5);
+		again.origin = origin + seconds(50);
+		r.on_translation(again);
+		CHECK(wait_overlay("Src Spanish", "buenos dias\notra vez buenos dias"));
+	}
 	// The closed captions can carry a translation instead.
 	cfg.closed_caption_language = "de";
 	r.configure(cfg);

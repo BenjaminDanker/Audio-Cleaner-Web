@@ -2,7 +2,8 @@
 
 An audio **filter** for OBS Studio that streams a source (usually your microphone) to the
 Audio Cleaner live service, returns the denoised audio and optionally produces live captions,
-which can be embedded in your stream as CEA-608/708 closed captions.
+which can be embedded in your stream as CEA-608/708 closed captions, translated into up to three more languages,
+shown as on-screen text and saved as subtitle files next to your recordings.
 
 Protocol: [`docs/streaming-protocol.md`](../docs/streaming-protocol.md) (v1). Licence: GPL-2.0-or-later.
 Built against libobs 31.1.1; works with OBS 31 and newer (OBS refuses plugins built for a *newer* major version).
@@ -41,17 +42,46 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
   On macOS the *Desktop Audio* channel is normally empty: add a *macOS Audio Capture* source and pick it by name here.
   With *Remove background noise* off only the captions are echo-free, the audio itself is not altered.
 * **Captions** - *Off*, *Standard (English)* or *Extra accurate (any language)*; **Caption language** (extra accurate only: a
-  language or *Detect automatically*; standard captions are always English); **Send captions to the stream** (on by default).
-  Captions go to the stream (and to a recording) as closed captions, final captions only, split into lines of at most 32
-  characters, paced, with stale ones dropped; only while streaming or recording. Nothing else in OBS shows them, so the filter
-  only asks for (and bills) captions when this option is on. The closed-caption format only shows Latin letters: Russian,
-  Ukrainian, Arabic, Hindi, Japanese, Korean and Chinese captions cannot be added to the stream (the status says so and
-  they are not requested); with *Detect automatically* captions in such scripts are skipped. Accents and the usual
+  language or *Detect automatically*; standard captions are always English). Final captions only. They can go to four
+  places, each optional (below). The filter only asks for (and bills) captions when one of the places uses them.
+* **Translate captions into** (under *Translations and where captions appear*) - up to three languages (Spanish, French,
+  German, Italian, Portuguese, Dutch, Polish, Russian, Ukrainian, Turkish, Arabic, Hindi, Japanese, Korean, Chinese,
+  Swedish, Danish, Finnish, Norwegian, Czech, Greek, Hebrew, Indonesian, Vietnamese, English). The spoken language is not
+  offered (with Standard captions that is English). The service translates each final caption a moment after it is spoken
+  (usually one or two seconds) and sends it as a `translation` event; the start message carries `"translate": [...]` and the
+  service's `ready` answer says which languages it switched on (the status says "Translating into Spanish and German", or
+  that a language was not switched on, e.g. by an older service). Every language is billed per second while the filter runs,
+  and is only asked for when a place shows it. If the service gives up on one language (a `translation_unavailable`
+  warning) that language stops, the status says so, and the other captions go on.
+* **Closed captions** - **Closed caption language** (*Same as spoken* or one of the translations; languages that need other
+  alphabets cannot be shown in the stream's caption format and are not offered) and **Send closed captions to**: *The stream*
+  (on), *The recording* (on), *The replay buffer* (off) and *Other outputs (multistream plugins)* (off). Closed captions carry
+  one language, are split into lines of at most 32 characters, paced, with stale ones dropped, and only go to outputs that
+  run. *Other outputs* looks at all of OBS's outputs (`obs_enum_outputs`) and captions each one that is running, takes encoded
+  packets and has a video encoder, once, apart from the stream, recording and replay buffer which the boxes above decide; each
+  output waits for its own stream delay (Settings, Advanced, Stream Delay) so the captions stay with the words, the recording
+  gets them at once. The closed-caption format only shows Latin letters: Russian, Ukrainian, Arabic, Hindi, Japanese,
+  Korean, Chinese, Greek, Hebrew and Vietnamese cannot be added to the stream (the status says so and they are not
+  requested for that purpose); with *Detect automatically* captions in such scripts are skipped. Accents and the usual
   punctuation are kept; letters the format lacks (Polish ł, Czech č, Turkish ş ...) are written with plain ones.
-  With a stream delay set in OBS (Settings, Advanced, Stream Delay), captions for the stream wait that long too, so they
-  stay with the words; the recording is not delayed and gets them at once. Twitch viewers switch captions on with the CC
-  button; on YouTube choose *Embedded 608/708* captions for the stream in YouTube Studio first. Both show one caption
-  track. Outputs made by other plugins (multistream, vertical canvas, Source Record) get no captions.
+  Twitch viewers switch captions on with the CC button; on YouTube choose *Embedded 608/708* captions for the stream in
+  YouTube Studio first. Both show one caption track.
+* **On-screen text** - for the spoken language and for each translation: **Create text source for <language>** makes an OBS
+  text source called "Audio Cleaner captions (<language>)" (GDI+ text on Windows, FreeType 2 text elsewhere; large white
+  bold text with an outline, wrapped in a 1600 pixel box at the bottom) and chooses it; **On-screen text for <language>**
+  picks any existing text source instead. The source is **not added to any scene**: put it where you want it with
+  *Sources, +, Add Existing* (OBS may forget a source that is in no scene when it closes or when you change the scene
+  collection, so add it to one). The filter writes the last one to three lines into the source (**lines at a time**) at reading pace and clears
+  it after **Clear on-screen text after silence** seconds. On-screen text is part of the picture, so it shows in both the
+  stream and the recording; this is the way to show a translation in a language the closed captions cannot (the stream's
+  caption format has one track and only Latin letters).
+* **Save subtitle files with recordings** (on) - while OBS records, the captions of every language (the spoken one and the
+  translations) are collected with times counted from the start of the recording (pauses are left out) and, when the
+  recording stops, saved next to it: `<recording without extension>.<language>.srt`, for example `2026-10-16 12-00-00.es.srt`
+  (the spoken language of Standard captions is `en`; with *Detect automatically* the spoken file has no language in the name:
+  `2026-10-16 12-00-00.srt`). Players such as VLC pick them up by themselves. Times are the service's own, so they are as exact
+  as the captions (within a fraction of a second of the video). With a recording split into several files only the last one
+  gets the file.
 * **Delay** - Low 80 ms, Balanced 150 ms, Safe 250 ms. Fixed for the whole session; changing it restarts the session. See below.
 * **Check for updates when OBS starts** (bottom of the dialog, on by default) - see "Update notice" below. It is one
   setting for the whole plugin, not per filter.
@@ -95,7 +125,11 @@ The checkbox **Check for updates when OBS starts** is stored in OBS's plugin set
 ### When something is wrong
 
 The status line says it in plain words; the OBS log has the technical reason. The filter never interrupts your audio:
-it keeps playing the (delayed) original.
+it keeps playing the (delayed) original. Whatever the service does (unreachable, slow, ending the session, sending garbage)
+the microphone passes through unprocessed and without gaps, the captions simply stop, and the status says why; nothing the
+network side does can stop the audio thread (no lock, no wait, no allocation there; the callbacks that hand captions to OBS
+run on the network thread and an exception in them is caught). `core_loopback_test` checks this sample for sample against
+a service that refuses, stops the session or never answers.
 
 | Status | Meaning | What happens |
 |---|---|---|
@@ -106,6 +140,12 @@ it keeps playing the (delayed) original.
 | settings not accepted / terms not accepted | the service says so | stops trying; change the setting or accept the terms, then *Try again* |
 | two live sessions already | account limit | retries slowly (30 s and more) |
 | full / busy | the service has no free capacity | retries after a minute or more (a retry hint from the service is respected) |
+| "The service stopped this session because your microphone audio was not arriving steadily" | the service ends a session whose microphone audio arrives less than half the time (`no_audio`; also `idle_timeout`) | starts again at once (normal backoff, growing if it repeats) as soon as OBS feeds audio again |
+| free trial over / first top-up needed | `trial_over`, `needs_topup` | stops trying; add balance on the website, then *Try again* |
+| free-trial capacity busy | `trial_busy` | retries slowly (a minute or more) |
+| "... sent too many messages" | `too_many_messages` / `rate_limited` | reconnects after 20 s |
+| "The caption service stopped working" | the session was only captions and they broke (`captions_unavailable`) | retries after about five minutes |
+| "... captions have stopped" / "Translation into Spanish stopped" | a warning: with noise removal on, the audio goes on; other languages go on | nothing to do |
 
 ### Latency and sync
 
@@ -165,9 +205,11 @@ machine only, as TLS-inspecting proxies do, is not seen and the connection fails
 Apple, TLS 1.2 at most). Override with `-DACW_TLS_BACKEND=`. `-DACW_USE_OPUS=OFF` builds without Opus (PCM only).
 
 Layout: `core/` OBS-independent library `acw_core` (SPSC rings, reframer, resampler, protocol, WebSocket thread, output stage,
-echo reference buffer, caption pacer, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
-and the installers that swap the plugin when OBS closes); `src/` thin OBS glue (`update-notice.cpp` runs the check and,
-on the button, the download and install); `tests/` unit tests, `core_loopback_test` (the real session against a
+echo reference buffer, caption pacer, caption router (which language goes where), on-screen text logic, subtitle files (SRT),
+choice of the outputs to caption, language lists, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
+and the installers that swap the plugin when OBS closes); `src/` thin OBS glue (`audio-cleaner-filter.cpp` the filter and its
+properties, `caption-output.cpp` the closed captions, `text-sources.cpp` the on-screen text sources, `subtitle-files.cpp` the
+subtitle files, `update-notice.cpp` runs the check and, on the button, the download and install); `tests/` unit tests, `core_loopback_test` (the real session against a
 fake server on 127.0.0.1: handshake, errors, retries, late replies, garbage, shutdown; also the update check against a local
 web server: newer / same / older, redirects, refused addresses, size limit, timeout, cancel), `core_stream_test` (live server) and
 `obs_smoke` (headless libobs host; `core_loopback_test --serve` is a server for it).

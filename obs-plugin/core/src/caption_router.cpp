@@ -106,10 +106,10 @@ void CaptionRouter::on_translation(const TranslationEvent &ev)
 		if (slot == cfg_.translate.size())
 			return;  // a language that was not asked for (or no longer is)
 		if (!ev.of.empty()) {
-			std::string &last = last_of_[ev.lang];
-			if (last == ev.of)
+			auto &last = last_of_[ev.lang];
+			if (last.first == ev.of && last.second == ev.origin)
 				return;  // the same caption translated twice
-			last = ev.of;
+			last = {ev.of, ev.origin};
 		}
 		to_cc = cfg_.closed_captions && cfg_.closed_caption_language == ev.lang;
 		if (display_ && slot < cfg_.overlay.size() && !cfg_.overlay[slot].empty())

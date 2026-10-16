@@ -214,4 +214,10 @@ behave exactly as described above.
   frame from it. Skip silent frames. Budget 9 ms more for D.
 - Captions: forward `final` captions to `obs_output_output_caption_text2`
   on the streaming output, paced (≤ 32 chars per line, don't queue a
-  backlog), or to a text source.
+  backlog), or to a text source. The embedded caption track carries one
+  language (Latin script only); further languages (`translation` events) go
+  to text sources and to one subtitle file per language next to a recording.
+- A stopped session is not the end: after `no_audio` (and `idle_timeout`)
+  reconnect with the normal backoff as soon as the host feeds audio again,
+  not after a fixed long wait. Whatever ends a session, keep passing the
+  microphone through unprocessed and say why in the status.

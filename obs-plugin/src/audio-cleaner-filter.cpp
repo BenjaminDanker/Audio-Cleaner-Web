@@ -90,6 +90,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_OVERLAY_LINES "overlay_lines"
 #define S_OVERLAY_CLEAR "overlay_clear_s"
 #define S_SAVE_SRT "save_srt"
+#define S_HINT_CAPTIONS "hint_captions"
+#define S_CFG_VERSION "cfg_version"  // 2 = has the caption outputs (see migrate_settings)
 #define S_ECHO_SOURCE "echo_source"
 #define S_STATUS "status"
 #define S_REFRESH "refresh_status"
@@ -318,7 +320,7 @@ struct ac_filter {
 	std::vector<RetiredTap> retired_taps;
 };
 
-Settings read_settings(obs_data_t *d, bool migrate = true)
+Settings read_settings(obs_data_t *d)
 {
 	Settings s;
 	s.api_key = obs_data_get_string(d, S_API_KEY);
@@ -343,18 +345,6 @@ Settings read_settings(obs_data_t *d, bool migrate = true)
 	s.cc_others = obs_data_get_bool(d, S_CC_OTHERS);
 	s.cc_language = obs_data_get_string(d, S_CC_LANGUAGE);
 	s.save_srt = obs_data_get_bool(d, S_SAVE_SRT);
-	// Settings saved before these options existed: "Send captions to the stream" off meant captions were not wanted at
-	// all (and not paid for). Keep it that way, and show it in the new options too.
-	if (migrate && obs_data_has_user_value(d, S_SEND_CAPTIONS) && !obs_data_get_bool(d, S_SEND_CAPTIONS) &&
-	    !obs_data_has_user_value(d, S_CC_STREAM) && !obs_data_has_user_value(d, S_CC_RECORDING)) {
-		s.cc_stream = s.cc_recording = false;
-		obs_data_set_bool(d, S_CC_STREAM, false);
-		obs_data_set_bool(d, S_CC_RECORDING, false);
-		if (!obs_data_has_user_value(d, S_SAVE_SRT)) {
-			s.save_srt = false;
-			obs_data_set_bool(d, S_SAVE_SRT, false);
-		}
-	}
 	for (int i = 0; i < kSlots; ++i) {
 		s.translate[static_cast<size_t>(i)] = obs_data_get_string(d, kTranslateKeys[i]);
 		s.overlay[static_cast<size_t>(i)] = obs_data_get_string(d, kOverlayKeys[i]);
@@ -363,6 +353,24 @@ Settings read_settings(obs_data_t *d, bool migrate = true)
 	s.overlay_lines = static_cast<int>(obs_data_get_int(d, S_OVERLAY_LINES));
 	s.overlay_clear_s = static_cast<int>(obs_data_get_int(d, S_OVERLAY_CLEAR));
 	return s;
+}
+
+// A filter saved by an earlier version (it has an API key but was never stamped) keeps behaving as it did: captions went
+// to the stream and the recording unless "Send captions to the stream" was off, which meant they were not wanted (and not
+// paid for) at all; subtitle files are new, so they start off. The result is written back so that the dialog shows it.
+// Only at load: while a new filter is being set up in the dialog the same signs (a key, no other choice yet) mean nothing.
+void migrate_settings(obs_data_t *d)
+{
+	if (obs_data_has_user_value(d, S_CFG_VERSION))
+		return;
+	if (obs_data_has_user_value(d, S_API_KEY)) {
+		if (obs_data_has_user_value(d, S_SEND_CAPTIONS) && !obs_data_get_bool(d, S_SEND_CAPTIONS)) {
+			obs_data_set_bool(d, S_CC_STREAM, false);
+			obs_data_set_bool(d, S_CC_RECORDING, false);
+		}
+		obs_data_set_bool(d, S_SAVE_SRT, false);
+	}
+	obs_data_set_int(d, S_CFG_VERSION, 2);
 }
 
 void log_cb(acw::LogLevel lv, const std::string &msg)
@@ -400,14 +408,18 @@ acw::CaptionRouter::Sinks make_sinks()
 void apply_outputs(ac_filter *f)
 {
 	const Settings &s = f->settings;
-	if (f->router)
-		f->router->configure(s.router_config());
-	caption_output_set_targets(f, f->enabled && s.configured() ? s.cc_target_mask() : 0u);
+	try {
+		if (f->router)
+			f->router->configure(s.router_config());
+		caption_output_set_targets(f, f->enabled && s.configured() ? s.cc_target_mask() : 0u);
+	} catch (const std::exception &e) {
+		obs_log(LOG_WARNING, "could not set up the caption outputs: %s", e.what());  // the audio is not affected
+	}
 }
 
 // Called with the lock held. Creates the session for the current settings and starts its network thread
 // (it only connects once audio flows, so this costs nothing while the filter is idle).
-acw::Session *make_session(ac_filter *f)
+acw::Session *make_session_unchecked(ac_filter *f)
 {
 	const Settings &s = f->settings;
 	if (!f->enabled || !s.configured())
@@ -444,6 +456,17 @@ acw::Session *make_session(ac_filter *f)
 	});
 	session->start();
 	return session;
+}
+
+acw::Session *make_session(ac_filter *f)
+{
+	try {
+		return make_session_unchecked(f);
+	} catch (const std::exception &e) {
+		// No session: the audio passes through as it came (an exception must never reach OBS).
+		obs_log(LOG_ERROR, "could not start the Audio Cleaner session: %s", e.what());
+		return nullptr;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +697,7 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 
 	{
 		std::lock_guard<std::mutex> lk(f->mu);
+		migrate_settings(settings);
 		f->settings = read_settings(settings);
 		// libobs sets source->enabled = true only *after* create() returns, so
 		// obs_source_enabled() is still false here. Filters start enabled; a saved
@@ -968,7 +992,7 @@ void refresh_group(obs_properties_t *g, const Settings &s)
 // Something in the group changed (a translation language ...): the lists depend on each other.
 bool group_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
-	refresh_group(props, read_settings(settings, false));
+	refresh_group(props, read_settings(settings));
 	return true;
 }
 
@@ -1070,6 +1094,12 @@ bool retry_clicked(obs_properties_t *props, obs_property_t *, void *data)
 	return true;
 }
 
+// The honest one-line hint under the captions choice: when another option is just as good.
+const char *captions_hint(const std::string &mode)
+{
+	return mode == "local" ? T_("AudioCleaner.Hint.CaptionsLocal") : mode == "premium" ? T_("AudioCleaner.Hint.CaptionsPremium") : "";
+}
+
 // Which controls make sense follows the captions choice: extra accurate captions have a language to pick,
 // standard captions are English only; the translation and output choices only matter when there are captions. The
 // spoken language decides which translations are offered.
@@ -1078,9 +1108,13 @@ bool captions_modified(obs_properties_t *props, obs_property_t *, obs_data_t *se
 	const std::string mode = obs_data_get_string(settings, S_CAPTIONS);
 	if (obs_property_t *lang = obs_properties_get(props, S_LANGUAGE))
 		obs_property_set_enabled(lang, mode == "premium");
+	if (obs_property_t *hint = obs_properties_get(props, S_HINT_CAPTIONS)) {
+		obs_property_set_description(hint, captions_hint(mode));
+		obs_property_set_visible(hint, mode == "local" || mode == "premium");
+	}
 	if (obs_property_t *grp = obs_properties_get(props, S_CAPTIONS_GROUP)) {
 		obs_property_set_enabled(grp, mode == "local" || mode == "premium");
-		refresh_group(obs_property_group_content(grp), read_settings(settings, false));
+		refresh_group(obs_property_group_content(grp), read_settings(settings));
 	}
 	return true;
 }
@@ -1168,6 +1202,7 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_set_long_description(key, T_("AudioCleaner.ApiKey.Long"));
 
 	obs_properties_add_bool(p, S_DENOISE, T_("AudioCleaner.Denoise"));
+	obs_property_text_set_info_word_wrap(obs_properties_add_text(p, "hint_denoise", T_("AudioCleaner.Hint.Denoise"), OBS_TEXT_INFO), true);
 
 	obs_property_t *strength = obs_properties_add_list(p, S_STRENGTH, T_("AudioCleaner.Strength"), OBS_COMBO_TYPE_LIST,
 							   OBS_COMBO_FORMAT_INT);
@@ -1198,6 +1233,11 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_list_add_string(cap, T_("AudioCleaner.Captions.Premium"), "premium");
 	obs_property_set_long_description(cap, T_("AudioCleaner.Captions.Long"));
 	obs_property_set_modified_callback(cap, captions_modified);
+	{
+		obs_property_t *hint = obs_properties_add_text(p, S_HINT_CAPTIONS, captions_hint(cur.captions), OBS_TEXT_INFO);
+		obs_property_text_set_info_word_wrap(hint, true);
+		obs_property_set_visible(hint, cur.captions == "local" || cur.captions == "premium");
+	}
 
 	obs_property_t *lang = obs_properties_add_list(p, S_LANGUAGE, T_("AudioCleaner.Language"), OBS_COMBO_TYPE_LIST,
 						       OBS_COMBO_FORMAT_STRING);
@@ -1217,6 +1257,7 @@ obs_properties_t *filter_properties(void *data)
 		obs_properties_t *g = obs_properties_create();
 		obs_property_t *intro = obs_properties_add_text(g, "captions_intro", T_("AudioCleaner.Translate.Info"), OBS_TEXT_INFO);
 		obs_property_text_set_info_word_wrap(intro, true);
+		obs_property_text_set_info_word_wrap(obs_properties_add_text(g, "hint_translate", T_("AudioCleaner.Hint.Translate"), OBS_TEXT_INFO), true);
 		for (int i = 0; i < kSlots; ++i) {
 			obs_property_t *t = obs_properties_add_list(g, kTranslateKeys[i],
 								    T_(i == 0 ? "AudioCleaner.Translate.Into" : "AudioCleaner.Translate.And"),

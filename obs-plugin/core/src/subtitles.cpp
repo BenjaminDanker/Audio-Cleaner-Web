@@ -167,6 +167,8 @@ void SubtitleRecorder::add(const SubtitleCue &cue)
 	c.text = cue.text;
 	if (std::max(c.start, c.end) <= 0.0)
 		return;  // spoken before the recording began
+	if (cue.end > cue.start && c.end - c.start < 1e-6)
+		return;  // spoken entirely while the recording was paused
 	c.start = std::max(0.0, c.start);
 	cues_[cue.lang].push_back(std::move(c));
 	++total_;
