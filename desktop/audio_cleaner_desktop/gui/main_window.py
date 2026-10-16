@@ -13,8 +13,8 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QRunnable, QSettings, QStandardPaths, Qt, QThreadPool, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QProgressBar, QPushButton,
-    QScrollArea, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
+    QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar,
+    QPushButton, QScrollArea, QSystemTrayIcon, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from acw_common.ffmpeg import MediaError
@@ -240,6 +240,12 @@ class MainWindow(QMainWindow):
         self.view = QueueView()
         card.addWidget(self.drop_zone, 1)
         card.addWidget(self.view, 1)
+        self.tip = QLabel("Tip: change the ending or pick a format to save as something else, e.g. .mp3 for just the sound.")
+        self.tip.setObjectName("Small")
+        self.tip.setWordWrap(True)
+        self.tip.setContentsMargins(6, 0, 6, 2)
+        self.tip.hide()
+        card.addWidget(self.tip)
         left.addWidget(self.queue_card, 1)
         self.preview: PreviewPane | None = None  # created on first use, so QtMultimedia only loads when needed
         self._left = left
@@ -318,6 +324,10 @@ class MainWindow(QMainWindow):
         History search."""
         if tips.is_showing() or self.tabs.currentIndex() != 0:
             return
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit):  # Esc in a name box only leaves the box
+            focus.clearFocus()
+            return
         self.request_cancel_all()
 
     def _tab_changed(self, index: int) -> None:
@@ -355,9 +365,14 @@ class MainWindow(QMainWindow):
                 added += 1
                 continue
             item = FileItem(self._next_id, path, has_video=path.suffix.lower() in media.VIDEO_EXTENSIONS)
+            item.source = engine.Source(item.has_video, path.suffix.lower())  # a guess, until the file is read
+            item.out_name = self._default_name(item)
             self._next_id += 1
             self._items[item.id] = item
             row = FileRow(item)
+            row.nameEdited.connect(self._name_typed)
+            row.endingPicked.connect(self._ending_picked)
+            row.nameDone.connect(self._name_done)
             row.removeRequested.connect(self.remove_item)
             row.cancelRequested.connect(self._stop_item)
             row.previewRequested.connect(self.show_preview)
@@ -367,6 +382,7 @@ class MainWindow(QMainWindow):
             self.view.add(row)
             if self._missing:
                 item.probed = True
+                row.refresh()
             else:
                 task = _ProbeTask(item.id, path)
                 task.signals.done.connect(self._on_probed)
@@ -379,7 +395,9 @@ class MainWindow(QMainWindow):
 
     def _requeue(self, item: FileItem) -> None:
         """Put a finished, failed or cancelled row back in line (with the settings at the time it starts)."""
-        item.replaces = {p: st for p, st in item.made.items() if p in item.outputs}
+        # The new result takes the place of the old one only under the same name: another name is a new file.
+        same_name = item.out_name == item.made_name
+        item.replaces = {p: st for p, st in item.made.items() if p in item.outputs} if same_name else {}
         item.state, item.progress, item.message, item.outputs = WAITING, 0.0, "", []
         self._refresh_row(item)
         if self.queue.active:
@@ -400,8 +418,8 @@ class MainWindow(QMainWindow):
         if not self.queue.active:
             self._batch_started = time.monotonic()
             self._batch_done = self._batch_failed = 0
-            self._enqueue(item)
-            self.queue.start()
+            if self._enqueue(item):
+                self.queue.start()
         self._refresh_state()
 
     def _take_place_of_previous(self, item: FileItem, paths: list[Path]) -> tuple[list[Path], bool]:
@@ -439,10 +457,62 @@ class MainWindow(QMainWindow):
         except OSError:
             return False
 
-    def _enqueue(self, item: FileItem, first: bool = False) -> None:
+    def _enqueue(self, item: FileItem, first: bool = False) -> bool:
+        """Put a file in line. False (and the reason shown in its row) when the name can't be used."""
+        if self._name_problem(item):
+            item.name_hint = True
+            self._refresh_row(item)
+            return False
         item.options = self.prefs.job_options()
         self._queued.add(item.id)
-        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir()), first=first)
+        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name), first=first)
+        return True
+
+    # -- what the result is called ------------------------------------------------
+
+    def _default_name(self, item: FileItem) -> str:
+        return engine.default_output_name(item.path, item.source, self.prefs.job_options())
+
+    @staticmethod
+    def _name_problem(item: FileItem) -> str:
+        return engine.check_output_name(item.out_name, item.source)[1] if item.source is not None else ""
+
+    def _name_typed(self, item_id: int, text: str) -> None:
+        item = self._items.get(item_id)
+        if item is not None:
+            item.out_name = text
+            self._name_changed(item)
+
+    def _ending_picked(self, item_id: int, ending: str) -> None:
+        item = self._items.get(item_id)
+        if item is not None:
+            item.out_name = engine.with_ending(item.out_name or self._default_name(item), ending)
+            item.name_hint = False
+            self._name_changed(item)
+
+    def _name_done(self, item_id: int) -> None:
+        """The name box was left: if the name can't be used, say why."""
+        item = self._items.get(item_id)
+        if item is not None and self._name_problem(item):
+            item.name_hint = True
+            self._refresh_row(item)
+
+    def _name_changed(self, item: FileItem) -> None:
+        item.out_custom = item.out_name.strip() != self._default_name(item)
+        problem = self._name_problem(item)
+        if not problem:
+            item.name_hint = False
+        if item.state == WAITING:
+            if item.id in self._queued:  # already in line (a batch is running): follow the name, or wait for a good one
+                if problem:
+                    self.queue.remove(item.id)
+                    self._queued.discard(item.id)
+                else:
+                    self.queue.set_output_name(item.id, item.out_name)
+            elif not problem and self.queue.active:
+                self._enqueue(item)
+        self._refresh_row(item)
+        self._refresh_state()
 
     @Slot(int, object, str)
     def _on_probed(self, item_id: int, result, error: str) -> None:
@@ -452,10 +522,13 @@ class MainWindow(QMainWindow):
         item.probed = True
         if result is not None:
             item.duration, item.has_video, item.channels = result.duration, result.has_video, result.audio_channels
+            item.source = engine.Source.of(result, item.path)
+            if not item.out_custom:
+                item.out_name = self._default_name(item)
         elif item.state == WAITING:
             self._queued.discard(item_id)
             self.queue.remove(item_id)
-            item.state, item.message = ITEM_FAILED, error
+            item.state, item.message, item.source = ITEM_FAILED, error, None
             self._record(item, FAILED, error, [])
         self._refresh_row(item)
         self._refresh_state()
@@ -474,7 +547,8 @@ class MainWindow(QMainWindow):
         for row in self.view.rows():
             if row.item.state == WAITING:
                 self._enqueue(row.item)
-        self.queue.start()
+        if self.queue.busy:  # files whose name can't be used are left out (their rows say why)
+            self.queue.start()
         self._refresh_state()
 
     def _ask_for_model(self, downloader: SpeechModelDownloader) -> bool:
@@ -661,6 +735,7 @@ class MainWindow(QMainWindow):
         if item is not None:
             item.state, item.progress, item.started_at, item.stopping = RUNNING, 0.0, time.monotonic(), False
             item.outdated = False
+            item.job_name = item.out_name
             self._awake.acquire()
             self._refresh_row(item)
             self._refresh_state()
@@ -683,6 +758,7 @@ class MainWindow(QMainWindow):
         paths, replaced = self._take_place_of_previous(item, result.paths) if item.replaces else (result.paths, False)
         item.state, item.progress, item.outputs, item.stopping = ITEM_DONE, 1.0, paths, False
         item.duration, item.has_video = result.duration, result.has_video
+        item.made_name = item.job_name
         item.made = {}
         for p in paths:
             try:
@@ -724,8 +800,7 @@ class MainWindow(QMainWindow):
             item.state, item.progress, item.stopping, item.restart, item.outdated = CANCELLED, 0.0, False, False, False
             if restart and not self._missing:  # "Restart with the new settings": straight back in, first in line
                 item.state = WAITING
-                self._enqueue(item, first=True)
-                if not self.queue.active:
+                if self._enqueue(item, first=True) and not self.queue.active:
                     self.queue.start()
             self._refresh_row(item)
             self._refresh_state()
@@ -831,6 +906,11 @@ class MainWindow(QMainWindow):
         options = self.prefs.job_options()
         self.queue.update_pending(options, self.prefs.output_dir())
         for item in self._items.values():
+            if item.state != RUNNING and not item.out_custom and item.source is not None:
+                item.out_name = self._default_name(item)  # the usual name follows the settings (the type of audio files)
+                if item.state == WAITING and item.id in self._queued:
+                    self.queue.set_output_name(item.id, item.out_name)
+                self._refresh_row(item)
             if item.state == WAITING:
                 item.options = options
             elif item.state == RUNNING:
@@ -853,6 +933,7 @@ class MainWindow(QMainWindow):
         waiting = len([i for i in self._items.values() if i.state == WAITING])
         finished = any(i.state in (ITEM_DONE, ITEM_FAILED, CANCELLED) for i in self._items.values())
         self.clear_button.setEnabled(finished)
+        self.tip.setVisible(has_files)
 
         if busy:
             stopping = not self.queue.pending_ids() and all(
@@ -895,7 +976,11 @@ class MainWindow(QMainWindow):
             self.status.setText(text + (f", {self._batch_failed} failed" if self._batch_failed else ""))
         else:
             waiting = len([i for i in items if i.state == WAITING])
-            self.status.setText(f"{_plural(waiting, 'file', 'files')} ready" if waiting else "Add some files to get started")
+            stuck = len([i for i in items if i.state == WAITING and self._name_problem(i)])
+            text = f"{_plural(waiting, 'file', 'files')} ready" if waiting else "Add some files to get started"
+            if stuck:
+                text += f", {stuck} can't start until the name is fixed" if stuck > 1 else ", 1 can't start until its name is fixed"
+            self.status.setText(text)
 
     def _check_disk(self) -> None:
         text = self._disk_warning()

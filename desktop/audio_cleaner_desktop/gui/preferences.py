@@ -49,6 +49,7 @@ class Preferences:
     restore_highs = _Setting(True)
     rebuild_voice = _Setting(False)
     audio_format = _Setting("same", engine.AUDIO_CHOICES)
+    video_size = _Setting("same", engine.VIDEO_SIZES)  # picture size of video results: the shorter side in pixels
     parallel = _Setting(0, range(5))  # files at once; 0 = Auto
     output_mode = _Setting("next", ("next", "folder"))
     output_folder = _Setting("")
@@ -64,7 +65,7 @@ class Preferences:
         return engine.JobOptions(
             strength=self.strength, polish=self.polish, audio_format=self.audio_format, loudness=self.loudness,
             subtitles=self.subtitles, language=self.language, noise=self.noise, echo_track=self.echo_track,
-            restore_highs=self.restore_highs, rebuild_voice=self.rebuild_voice,
+            restore_highs=self.restore_highs, rebuild_voice=self.rebuild_voice, video_size=self.video_size,
         )
 
     def output_dir(self) -> Path | None:

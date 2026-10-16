@@ -29,6 +29,7 @@ class Job:
     path: Path
     options: engine.JobOptions
     out_dir: Path | None = None
+    output_name: str | None = None  # the file name of the result (its ending says the type); None = the usual name
 
 
 def failure_message(error: BaseException) -> str:
@@ -58,9 +59,10 @@ class _JobThread(QThread):
     def run(self) -> None:
         job = self.job
         try:
+            extra = {"output_name": job.output_name} if job.output_name is not None else {}
             result = self._runner(
                 job.path, job.options, out_dir=job.out_dir, threads=self._threads, cancel=self.cancel,
-                progress=lambda f: self.progress.emit(job.id, f),
+                progress=lambda f: self.progress.emit(job.id, f), **extra,
             )
         except engine.Cancelled:
             self.stopped.emit(job.id)
@@ -128,6 +130,12 @@ class JobQueue(QObject):
         for job in self._pending:
             job.options, job.out_dir = options, out_dir
         self._pump()
+
+    def set_output_name(self, job_id: int, name: str | None) -> None:
+        """Another name for the result of a file still waiting."""
+        for job in self._pending:
+            if job.id == job_id:
+                job.output_name = name
 
     def pending_ids(self) -> list[int]:
         return [j.id for j in self._pending]

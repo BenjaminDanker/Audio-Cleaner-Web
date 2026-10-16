@@ -42,7 +42,8 @@ def _shown(panel):
         "loudness": panel._loudness.currentData(), "subtitles": panel._subtitles.currentData(),
         "language": panel._language.currentData(), "noise": panel._noise.currentData(),
         "echo": panel._echo.isChecked(), "highs": panel._highs.isChecked(), "rebuild": panel._rebuild.isChecked(),
-        "format": panel._format.currentData(), "parallel": panel._parallel.currentData(),
+        "format": panel._format.currentData(), "video_size": panel._video_size.currentData(),
+        "parallel": panel._parallel.currentData(),
         "where": panel._where.value(), "folder": panel._folder.text(),
     }
 
@@ -57,6 +58,7 @@ def _change_everything(panel, folder, monkeypatch):
     _click(panel._echo, True)
     _click(panel._highs, False)
     _pick(panel._format, "flac")
+    _pick(panel._video_size, "720")
     _pick(panel._parallel, 3)
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
     panel._where._buttons["folder"].click()
@@ -65,7 +67,7 @@ def _change_everything(panel, folder, monkeypatch):
 
 EXPECTED = {
     "strength": "gentle", "polish": False, "loudness": "broadcast", "subtitles": "vtt", "language": "de",
-    "noise": "heavy", "echo": True, "highs": False, "rebuild": True, "format": "flac", "parallel": 3,
+    "noise": "heavy", "echo": True, "highs": False, "rebuild": True, "format": "flac", "video_size": "720", "parallel": 3,
     "where": "folder",
 }
 
@@ -84,6 +86,7 @@ def test_every_setting_survives_closing_and_reopening(qapp, tmp_path, monkeypatc
     panel = w.settings_panel
     # a fresh install shows the defaults
     assert _shown(panel)["strength"] == "max" and _shown(panel)["where"] == "next" and _shown(panel)["highs"]
+    assert _shown(panel)["video_size"] == "same"  # the picture is left as it is unless asked
     _change_everything(panel, folder, monkeypatch)
     want = {**EXPECTED, "folder": str(folder)}
     assert _shown(panel) == want
@@ -105,6 +108,7 @@ def test_every_setting_survives_closing_and_reopening(qapp, tmp_path, monkeypatc
         assert (o.strength, o.polish, o.loudness, o.subtitles, o.language, o.noise) == (
             "gentle", False, "broadcast", "vtt", "de", "heavy")
         assert (o.echo_track, o.restore_highs, o.rebuild_voice, o.audio_format) == (True, False, True, "flac")
+        assert (o.video_size, o.short_side) == ("720", 720)
         assert again.prefs.parallel == 3 and again.prefs.output_dir() == folder
         assert again.tabs.currentIndex() == 1
         assert again.height() == height and again.width() >= 900  # not the 720 of a first start
@@ -132,6 +136,7 @@ def test_other_values_survive_too(qapp, tmp_path, monkeypatch):
     _click(p._highs, True)
     _click(p._rebuild, False)
     _pick(p._format, "opus")
+    _pick(p._video_size, "2160")  # the other end of the list
     _pick(p._parallel, 0)  # Automatic is a real choice, 0, and must not read back as unset
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *a, **k: str(folder))
     p._where._buttons["folder"].click()
@@ -143,7 +148,7 @@ def test_other_values_survive_too(qapp, tmp_path, monkeypatch):
         s = _shown(again.settings_panel)
         assert s["strength"] == "balanced" and s["noise"] == "light" and s["loudness"] == "youtube"
         assert s["subtitles"] == "embed" and s["language"] == "auto" and not s["echo"] and s["highs"] and not s["rebuild"]
-        assert s["format"] == "opus" and s["parallel"] == 0 and s["where"] == "next"
+        assert s["format"] == "opus" and s["parallel"] == 0 and s["where"] == "next" and s["video_size"] == "2160"
         assert again.prefs.output_folder == str(folder) and again.prefs.output_dir() is None
         again.settings_panel._where._buttons["folder"].click()  # the folder is offered again without asking
         assert again.prefs.output_dir() == folder
@@ -155,13 +160,14 @@ def test_a_saved_setting_that_no_longer_exists_falls_back(qapp, tmp_path):
     ThemeWatcher(qapp)
     ini = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     ini.setValue("strength", "nonsense")
+    ini.setValue("video_size", "900")
     ini.setValue("parallel", "99")
     ini.setValue("output_mode", "folder")  # but no folder saved
     ini.sync()
     w = _open(tmp_path)
     try:
         s = _shown(w.settings_panel)
-        assert s["strength"] == "max" and s["parallel"] == 0 and s["where"] == "next"
+        assert s["strength"] == "max" and s["parallel"] == 0 and s["where"] == "next" and s["video_size"] == "same"
     finally:
         _close(w)
 
@@ -181,3 +187,21 @@ def test_a_note_says_why_noise_settings_are_unavailable_while_rebuilding(qapp, t
         assert panel._strength.isEnabled() and panel._noise.isEnabled() and panel._rebuild_note.isHidden()
     finally:
         panel.deleteLater()
+
+
+def test_the_video_size_choices_and_their_help(qapp, tmp_path):
+    ThemeWatcher(qapp)
+    from audio_cleaner_desktop.gui.settings_panel import VIDEO_SIZE_LABELS, InfoButton
+
+    w = _open(tmp_path)
+    try:
+        box = w.settings_panel._video_size
+        assert [box.itemData(i) for i in range(box.count())] == ["same", "2160", "1440", "1080", "720", "480"]
+        assert [box.itemText(i) for i in range(box.count())] == [
+            "Same as the original", "2160p (4K)", "1440p", "1080p (Full HD)", "720p (HD)", "480p"]
+        assert "only stretches the picture" in box.toolTip()
+        helps = [b._text for b in w.settings_panel.findChildren(InfoButton) if "Same as the original: the picture" in b._text]
+        assert helps and "Bigger than the original only stretches the picture" in helps[0] and "stays tall" in helps[0]
+        assert set(VIDEO_SIZE_LABELS) == set(box.itemData(i) for i in range(box.count()))
+    finally:
+        _close(w)

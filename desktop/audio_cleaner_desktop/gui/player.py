@@ -37,6 +37,8 @@ def load_multimedia() -> SimpleNamespace | None:
     return _multimedia
 
 
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".flv", ".avi"}
+
 class PreviewPane(QFrame):
     closed = Signal()
     _subtitles_read = Signal(object, object)  # key, cues (read on a worker thread)
@@ -151,7 +153,7 @@ class PreviewPane(QFrame):
         self._set_subtitles([])
         if subtitle_file is not None and subtitle_file.suffix.lower() in (".srt", ".vtt"):
             self._set_subtitles(subtitles.read_file(subtitle_file))
-        elif cleaned is not None and has_video:
+        elif cleaned is not None and cleaned.suffix.lower() in _VIDEO_SUFFIXES:  # a video made from a sound has them too
             self._read_embedded_subtitles(key, cleaned)
         self._original, self._cleaned = original, cleaned
         self._name.setText(name)

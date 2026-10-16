@@ -33,6 +33,7 @@ From the repository root, with `PYTHONPATH=desktop:common`:
 ```sh
 python -m audio_cleaner_desktop                       # the window; FILE... are queued
 python -m audio_cleaner_desktop --cli in.mp4 -o out/  # no window (see --help for the options)
+python -m audio_cleaner_desktop --cli talk.mp4 --output-name talk.mp3   # just the sound (also --format mp3, --video-size 720)
 python -m audio_cleaner_desktop --selftest [--gui]    # checks the bundled native pieces (--gui: and the window)
 python -m audio_cleaner_desktop --download-models     # the three models, from a terminal
 ```

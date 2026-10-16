@@ -276,10 +276,16 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    `df.dll` in `$OUT` (default `~/audio-cleaner/src/deepfilter-build/out`); the checkout also holds
    `models/DeepFilterNet3_onnx.tar.gz`.
 2. **FFmpeg**: `desktop/packaging/build_ffmpeg.sh <linux-x86_64|macos-arm64|macos-x86_64|windows-x86_64> <out_dir>`.
-   LGPL only (no GPL, version3, nonfree): FFmpeg 8.0.3 + libopus + LAME from sha256-pinned tarballs, linked statically
-   into `ffmpeg` and `ffprobe`. `windows-x86_64` cross-compiles on Linux (`apt install mingw-w64 nasm`) or builds
+   LGPL only (no GPL, version3, nonfree, no x264): FFmpeg 8.0.3 + libopus + LAME + libvpx (BSD, only its VP9 encoder is
+   used) from sha256-pinned tarballs, linked statically into `ffmpeg` and `ffprobe`. H.264 pictures are encoded by the
+   operating system through FFmpeg: `h264_mf` (Media Foundation, `--enable-mediafoundation`; FFmpeg 8.0's `mfenc.c` also
+   needs `--enable-d3d11va` to compile; the programs load Media Foundation themselves when asked, so they still start
+   on a Windows without it) on Windows and `h264_videotoolbox` (`--enable-videotoolbox`) on a Mac; FFmpeg's own `mpeg4`
+   (and `flv` for .flv files) are the encoders everywhere else and the fallback. `windows-x86_64` cross-compiles on
+   Linux (`apt install mingw-w64 g++-mingw-w64-x86-64 nasm`; libvpx has a little C++ and needs perl to build) or builds
    natively in an MSYS2 MINGW64 shell. `REQUIRE_ASM=1` fails when nasm is missing instead of building slower code.
-   Writes `ffmpeg-buildinfo.txt` and the licence texts next to the programs.
+   `WITH_LAME=0` / `WITH_VPX=0` leave those encoders out. Writes `ffmpeg-buildinfo.txt` and the licence texts next to the
+   programs.
 3. **Vendor directory**:
    ```sh
    python desktop/packaging/prepare_vendor.py --libdf PATH/libdf.so --ffmpeg-dir FFMPEG_OUT --model PATH/DeepFilterNet3_onnx.tar.gz \
@@ -288,7 +294,7 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    Copies the native files, checks the DFN3 and DPDFNet models (sha256 pinned), puts a small test-only speech model in
    `vendor/test-models/whisper-small/` (`Systran/faster-whisper-small`, revision and file hashes pinned in the script;
    `--download-whisper` fetches it; it is not bundled) and
-   writes `licenses/`: FFmpeg/LAME/opus, DeepFilterNet, DPDFNet, the Rust crates of libDF (`cargo tree` of the capi
+   writes `licenses/`: FFmpeg/LAME/opus/libvpx, DeepFilterNet, DPDFNet, the Rust crates of libDF (`cargo tree` of the capi
    build), all Python packages of the interpreter running the script, Qt/PySide6 (LGPL + GPL text from
    `desktop/packaging/licenses/`), Whisper, Silero VAD, the downloaded models (AP-BWE, Sidon, w2v-BERT 2.0 and the
    CC BY attribution of their training data), WebRTC (echo canceller) and LiveKit, Python, PyInstaller and an index
@@ -388,6 +394,42 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
 
 ## Things worth knowing
 
+* **What a result is called and what it becomes** (`engine.py`, `gui/queue_view.py`). Under each file in the list is a name
+  box that starts with the usual name (`<name>-cleaned.<ending>`) and a list of the types that file can become, joined
+  to its right. The ending in the box and the list always agree: typing `.mp3` selects MP3, choosing a type in the list
+  rewrites the ending (an ending that is only part of a name, like `v1.2`, gets the new one added). A name that can't be
+  used (empty, no ending, an ending that is not in the list, characters Windows does not allow, a reserved Windows name,
+  a WAV too long for the format) gets a short red reason under the box once the box is left, and Clean leaves that file
+  out (the others start; the status line says how many wait for a fixed name). A taken name is never replaced: it gets
+  ` (2)`, ` (3)` (the usual name keeps `-cleaned (2)`). The list is `engine.available_endings()`: for a sound WAV, FLAC,
+  MP3, M4A (AAC), Opus, OGG (Opus) and the video types; for a video the video types and the sound types.
+  * *Sound to sound*: the pipeline's encoders as before. *Video to just its sound*: the same, the other tracks are not kept
+    (the row says so). *Sound to video*: a black 1280x720 picture at one frame a second (an FFmpeg `color` source in a
+    filter graph, so no input device is needed) with the cleaned sound, so subtitles can be embedded; it takes the Video
+    size setting like any video result.
+  * *Video to video* (MP4, MOV, MKV, FLV, WebM): the picture is copied without encoding when the file stays the same
+    kind (also MP4 <-> M4V) or the new container holds that codec (`ffmpeg._COPY_VIDEO`; MKV takes anything), and is
+    encoded otherwise or when the size changes: with the system's H.264 encoder (Windows `h264_mf`, macOS
+    `h264_videotoolbox`), else MPEG-4 (`flv` for .flv), VP9 for .webm. The bit rate is a share of the pixels per second
+    that suits the encoder (`picture_bitrate`), never far above the original's. If the system's encoder fails the next
+    one is tried and the row says "this computer's own video encoder wasn't available...". Encoding reports its
+    progress (FFmpeg `-progress`) into the bar. WebM is offered for a picture it holds as it is (VP8/VP9/AV1) and, since
+    the build has libvpx, for every video and sound (`engine.WEBM_ENCODE`).
+  * *Subtitles* embed when the container holds them (MP4, MOV, MKV, WebM); a Flash video gets an .srt file instead.
+  * *Video size* (Settings, default Same as the original): 2160p/1440p/1080p/720p/480p is the length of the shorter side,
+    so the picture keeps its shape and a tall video stays tall; plain lanczos resizing, bigger than the original only
+    stretches it; a phone video stored sideways is judged as it is shown and comes out upright. A picture that already
+    has the size is copied. `common/acw_common/ffmpeg.py` does all of it behind `mux_video(..., video=VideoOut(...))` and
+    `make_video()`; without `video=` `mux_video` copies the picture exactly as before (the server).
+  * *The "Audio file type" setting* is kept as the starting point of the box for sound files (so nothing changes for people
+    who never touch the box); a video starts in its own container. The usual name follows the settings until the user
+    types something else (or picks another type); then the name is theirs.
+  * *Clean again* uses the name in the box. Under the same name as the last run the new result takes the place of the old
+    one (which goes to the Recycle Bin / Trash, as before); under another name or type it is a new file and the old one
+    stays.
+  * *Command line*: `--output-name NAME` (one file), `--format EXT` (the type of every result; the usual name), `--video-size`.
+* **Only the Windows and macOS builds can show the system encoders work.** Linux has none, so the tests there (and in
+  development) take the MPEG-4 path; the CI tests on Windows and macOS accept either codec.
 * **Preview of videos.** The sound plays in Qt's player; the picture is decoded by our own FFmpeg at the preview's size and shown against the sound's clock (`gui/video_preview.py`). Qt's player decodes every frame and holds the sound back when the picture is late, so an 8K video on a slower PC played in slow motion. Now late frames are dropped, the decoder jumps ahead to the key frame nearest the sound when it falls behind, and decodes key frames only if it keeps falling behind; the sound is never held back. Formats our FFmpeg does not decode (AV1) still use Qt's player. That is why the FFmpeg build includes video decoders and the scaler (`build_ffmpeg.sh` VIDEO_DECODERS).
 * **No console window flashes on Windows.** The app has no console, so every console program started by a library would
   get a window of its own for a moment (Python's `platform` module runs `cmd /c ver` when its WMI query fails, and

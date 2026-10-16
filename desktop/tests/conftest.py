@@ -113,6 +113,66 @@ def mp4_file(speech_wav, tmp_path_factory) -> Path:
     return path
 
 
+def make_video(path: Path, wav: Path, size: tuple[int, int] = (160, 90), seconds: float = 2, fps: int = 10,
+               vcodec: str = "mpeg4", acodec: str = "aac", rotation: int = 0) -> Path:
+    """A small video of one colour with the sound of `wav`, made by the app's own FFmpeg (its colour filter and its
+    MPEG-4 / VP9 encoders: no test video file and no full FFmpeg needed). `rotation` stores it turned, like a phone does."""
+    width, height = size
+    codec = ["-c:v", vcodec, *(["-b:v", "150k", "-deadline", "realtime", "-cpu-used", "8"] if vcodec == "libvpx-vp9" else [])]
+    target = path if not rotation else path.with_name(path.stem + "-straight" + path.suffix)
+    run_ffmpeg(
+        bundled_ffmpeg(), "-i", str(wav), "-filter_complex", f"color=c=0x3060a0:s={width}x{height}:r={fps}:d={seconds}[v]",
+        "-map", "[v]", "-map", "0:a", *codec, "-c:a", acodec, "-t", str(seconds), str(target),
+    )
+    if rotation:
+        run_ffmpeg(bundled_ffmpeg(), "-display_rotation", str(rotation), "-i", str(target), "-c", "copy", str(path))
+        target.unlink()
+    return path
+
+
+def stream_facts(path: Path, kind: str) -> list[dict]:
+    return [s for s in ffprobe_json(path)["streams"] if s["codec_type"] == kind]
+
+
+def picture_packets(path: Path) -> list[int]:
+    """Sizes of the packets of the first picture stream: equal for two files when the picture was copied, not re-encoded."""
+    out = subprocess.run(
+        [str(bundled_ffprobe()), "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=size", "-of", "csv=p=0", str(path)],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    return [int(x) for x in out.split()]
+
+
+def displayed_size(path: Path) -> tuple[int, int]:
+    """Width and height of the picture as a player shows it (turned when the file says so)."""
+    stream = stream_facts(path, "video")[0]
+    turn = int(next((d.get("rotation", 0) for d in stream.get("side_data_list", []) if "rotation" in d), 0))
+    width, height = int(stream["width"]), int(stream["height"])
+    return (height, width) if abs(turn) % 180 == 90 else (width, height)
+
+
+@pytest.fixture(scope="session")
+def clip_wav(tmp_path_factory) -> Path:
+    """Three seconds of a noisy tone: cheap to clean."""
+    from scipy.io import wavfile
+
+    path = tmp_path_factory.mktemp("clip") / "clip.wav"
+    sr = 48000
+    t = np.arange(3 * sr) / sr
+    rng = np.random.default_rng(2)
+    x = 0.2 * np.sin(2 * np.pi * 220 * t) * (np.sin(2 * np.pi * 2 * t) > 0) + 0.03 * rng.standard_normal(t.size)
+    wavfile.write(path, sr, (x * 32767).astype(np.int16))
+    return path
+
+
+@pytest.fixture
+def quick_clean(monkeypatch):
+    """The noise removal is left out (the audio goes through as it is): tests of file types and names do not need it."""
+    from acw_common import pipeline
+
+    monkeypatch.setattr(pipeline, "clean_audio", lambda x, *a, **k: np.array(x, dtype=np.float32))
+
+
 def wait_until(predicate, timeout: float = 120.0, interval: float = 0.01) -> bool:
     """Run the Qt event loop until `predicate()` is true. (QTest.qWait holds the GIL, which would
     starve the worker threads that run Python code.)"""

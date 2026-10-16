@@ -72,7 +72,7 @@ if ($FfmpegDir) {
         if (Test-Path $ffmpeg) { Remove-Item -Recurse -Force $ffmpeg }
         $env:MSYSTEM = 'MINGW64'; $env:CHERE_INVOKING = '1'
         $env:DL_DIR_WIN = Join-Path $work 'dl'
-        $cmd = "pacman -S --needed --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-nasm make diffutils tar xz curl && " +
+        $cmd = "pacman -S --needed --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-pkgconf mingw-w64-x86_64-nasm make diffutils perl tar xz curl && " +
                "cd `"`$(cygpath -u '$repo')`" && REQUIRE_ASM=1 DL_DIR=`"`$(cygpath -u '$($env:DL_DIR_WIN)')`" " +
                "bash desktop/packaging/build_ffmpeg.sh windows-x86_64 `"`$(cygpath -u '$ffmpeg')`""
         Run $msysBash @('-lc', $cmd)

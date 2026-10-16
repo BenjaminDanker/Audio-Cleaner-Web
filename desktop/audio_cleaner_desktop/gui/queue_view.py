@@ -7,7 +7,8 @@ from pathlib import Path
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .. import engine
@@ -48,6 +49,14 @@ class FileItem:
     stopping: bool = False  # asked to stop; the file finishes its current step first
     restart: bool = False  # stopping in order to start again with the current settings
     outdated: bool = False  # running with settings that have changed since it started
+    # What the result is called: the text of the name box (the ending says the type). While `out_custom` is False it is
+    # the usual name and follows the settings; typing another name makes it the user's.
+    source: engine.Source | None = None
+    out_name: str = ""
+    out_custom: bool = False
+    made_name: str = ""  # the name the files in `outputs` were asked for under
+    job_name: str = ""  # the name asked for in the job that is running (or ran last)
+    name_hint: bool = False  # show why the name can't be used (the box was left, or a start was refused)
 
 
 class DropZone(QFrame):
@@ -141,6 +150,9 @@ class FileRow(QFrame):
     revealRequested = Signal(int)
     againRequested = Signal(int)
     moveRequested = Signal(int, int)
+    nameEdited = Signal(int, str)  # the text of the name box, as typed
+    endingPicked = Signal(int, str)  # a type chosen in the list (".mp3")
+    nameDone = Signal(int)  # the name box was left
 
     def __init__(self, item: FileItem, parent: QWidget | None = None):
         super().__init__(parent)
@@ -175,6 +187,7 @@ class FileRow(QFrame):
         self._second.addWidget(self._meta)
         self._second.addWidget(bar_page)
         middle.addWidget(self._second)
+        self._build_editor(middle)
         layout.addLayout(middle, 1)
 
         self._status = ElidedLabel()
@@ -212,6 +225,88 @@ class FileRow(QFrame):
         self._stop.clicked.connect(lambda: self.cancelRequested.emit(item.id))
         self._remove.clicked.connect(lambda: self.removeRequested.emit(item.id))
         self.refresh()
+
+    def _build_editor(self, parent: QVBoxLayout) -> None:
+        """The name of the result and, joined to it, the list of types it can have."""
+        self._endings: list[str] = []
+        self._editor = QWidget()
+        box = QVBoxLayout(self._editor)
+        box.setContentsMargins(0, 2, 0, 0)
+        box.setSpacing(2)
+        line = QHBoxLayout()
+        line.setSpacing(-1)  # the two borders overlap into one
+        self._namebox = QLineEdit()
+        self._namebox.setObjectName("NameBox")
+        self._namebox.setToolTip(
+            "What the cleaned file is called. Change the ending (for example .mp3) to save it as something else, "
+            "or pick a type in the list."
+        )
+        self._namebox.setAccessibleName("Name of the cleaned file")
+        self._namebox.setClearButtonEnabled(False)
+        self._format = QComboBox()
+        self._format.setObjectName("FormatBox")
+        self._format.setPlaceholderText("Pick a type")
+        self._format.setToolTip(
+            "The types this file can be saved as. A video can become another kind of video, or just its sound. A sound "
+            "can become a video with a plain black picture, which can carry subtitles."
+        )
+        self._format.setAccessibleName("File type of the cleaned file")
+        self._format.setMinimumContentsLength(9)
+        self._format.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        line.addWidget(self._namebox, 1)
+        line.addWidget(self._format)
+        box.addLayout(line)
+        self._hint = QLabel()
+        self._hint.setObjectName("Small")
+        self._hint.setWordWrap(True)
+        set_property(self._hint, "state", "failed")
+        self._hint.hide()
+        box.addWidget(self._hint)
+        parent.addWidget(self._editor)
+        self._namebox.textEdited.connect(self._typed)
+        self._namebox.editingFinished.connect(lambda: self.nameDone.emit(self.item.id))
+        self._format.activated.connect(self._picked)
+
+    def _typed(self, text: str) -> None:
+        self.nameEdited.emit(self.item.id, text)
+
+    def _picked(self, index: int) -> None:
+        ending = self._format.itemData(index)
+        if ending:
+            self.endingPicked.emit(self.item.id, ending)
+
+    def _refresh_editor(self) -> None:
+        item = self.item
+        source = item.source
+        self._editor.setVisible(source is not None)
+        if source is None:
+            return
+        endings = engine.available_endings(source)
+        if endings != self._endings:
+            self._endings = endings
+            self._format.clear()
+            group = None
+            for ending in endings:
+                kind = "audio" if ending in engine.AUDIO_ENDINGS else "video"
+                if group is not None and kind != group:
+                    self._format.insertSeparator(self._format.count())
+                group = kind
+                self._format.addItem(f"{engine.ENDING_NAMES[ending]} {kind}", ending)
+        if self._namebox.text() != item.out_name:  # (a changed text would move the cursor: only when it differs)
+            self._namebox.setText(item.out_name)
+        self._format.setCurrentIndex(self._format.findData(engine.split_name(item.out_name)[1]))
+        problem = engine.check_output_name(item.out_name, source)[1]
+        show = bool(problem) and item.name_hint
+        self._hint.setText(problem)
+        self._hint.setVisible(show)
+        set_property(self._namebox, "invalid", show)
+        editable = item.probed and item.state != RUNNING
+        self._namebox.setEnabled(editable)
+        self._format.setEnabled(editable)
+
+    def focus_name(self) -> None:
+        self._namebox.setFocus()
+        self._namebox.selectAll()
 
     def refresh(self) -> None:
         item = self.item
@@ -251,6 +346,7 @@ class FileRow(QFrame):
             f"Clean again with the current settings.\nThe new result replaces this one; the earlier version goes to the {shell.TRASH_NAME}."
         )
         self._remove.setVisible(state != RUNNING)
+        self._refresh_editor()
         self.setAccessibleName(f"{item.path.name}: {text}")
 
     def _meta_text(self) -> str:

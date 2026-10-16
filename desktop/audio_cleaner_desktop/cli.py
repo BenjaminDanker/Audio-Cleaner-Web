@@ -37,9 +37,14 @@ class _ProgressLine:
             print("\r" + " " * (len(self._label) + 7) + "\r", end="")
 
 
-def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, parallel: int = 1) -> int:
+def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, parallel: int = 1,
+        output_name: str | None = None, output_format: str | None = None) -> int:
     """Clean each input. Returns 0 when all succeed, 1 when any fails, 130 on Ctrl+C. `parallel` is the number
-    of files cleaned at once (1-4, or 0 for Automatic), never more than the memory allows."""
+    of files cleaned at once (1-4, or 0 for Automatic), never more than the memory allows. `output_name` is the
+    file name of the result (one input only); `output_format` the type ("mp3", "mp4", ...) of every result."""
+    if output_name is not None and len(inputs) != 1:
+        print("--output-name works for one file at a time; use --format to choose the type of several.", file=sys.stderr)
+        return 1
     missing = resources.check()
     if missing:
         print("Missing components: " + ", ".join(missing), file=sys.stderr)
@@ -65,7 +70,8 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
         label = f"[{n}/{len(inputs)}] {Path(name).name}"
         line = _ProgressLine(label, tty=False if at_once > 1 else None)
         try:
-            result = engine.process(name, options, out_dir=out_dir, progress=line, cancel=cancel, threads=threads)
+            result = engine.process(name, options, out_dir=out_dir, progress=line, cancel=cancel, threads=threads,
+                                    output_name=output_name, output_format=output_format)
         except engine.Cancelled:
             line.finish()
             print(f"{label}  cancelled", file=sys.stderr)
@@ -241,6 +247,23 @@ def _check_update_verification() -> None:
         raise RuntimeError("the update signature check accepted a signature it should refuse")
 
 
+def _check_video_output(ff, sound: Path) -> None:
+    """FFmpeg can make the video results: a black picture for a sound as MP4 (the system's H.264 encoder where it works,
+    FFmpeg's own MPEG-4 otherwise), WebM (libvpx) and Flash video, resized (the colour source, scaler and encoders are
+    there), and re-pack a picture into another container."""
+    from acw_common.ffmpeg import VideoOut
+
+    for ending, size in ((".mp4", 480), (".webm", None), (".flv", None)):
+        made = ff.make_video(sound, sound.with_name("selftest" + ending), 3.0, video=VideoOut(size))
+        info = ff.probe(made)
+        if not info.has_video or info.video_height != (size or 720) or abs(info.duration - 3.0) > 1.5:
+            raise RuntimeError(f"FFmpeg could not make a {ending} video from a sound")
+    report: dict = {}
+    mkv = ff.mux_video(sound.with_name("selftest.mp4"), sound, sound.with_name("selftest.mkv"), video=VideoOut(), report=report)
+    if not ff.probe(mkv).has_video or report.get("encoder") != "copy":
+        raise RuntimeError("FFmpeg could not copy a picture into another container")
+
+
 def _check_windows_quiet() -> None:
     """Windows: `platform` must be able to ask WMI itself (else it runs `cmd /c ver`), and programs libraries start
     must not get a console window."""
@@ -273,6 +296,7 @@ def selftest(gui: bool = False) -> int:
             out = ff.write_audio(pipeline.as_output(y), sr, Path(tmp) / "selftest", "flac")
             info = ff.probe(out)
             decoded = ff.decode(out, info, sr, 1, 10)
+            _check_video_output(ff, out)
         if abs(info.duration - 3.0) > 0.2 or info.audio_channels != 1 or decoded.size < 2.8 * sr:
             raise RuntimeError(f"FFmpeg round-trip mismatch (duration {info.duration:.2f} s)")
         _check_windows_quiet()

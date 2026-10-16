@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 from .. import engine
 from . import shell
 from .history import DONE, Entry, HistoryStore, Totals
-from .settings_panel import FORMAT_LABELS, LOUDNESS_SHORT, STRENGTH_LABELS, SUBTITLE_LABELS
+from .settings_panel import FORMAT_LABELS, LOUDNESS_SHORT, STRENGTH_LABELS, SUBTITLE_LABELS, VIDEO_SIZE_LABELS
 from .theme import set_property
 from .widgets import ElidedLabel, IconButton, format_time
 
@@ -45,6 +45,8 @@ def describe_settings(s: dict, has_video: bool) -> str:
         parts.append("polished (" + LOUDNESS_SHORT.get(s.get("loudness"), "podcast") + ")")
     if not has_video and s.get("audio_format", "same") != "same":
         parts.append(FORMAT_LABELS[s["audio_format"]])
+    if s.get("video_size", "same") != "same":
+        parts.append("video " + VIDEO_SIZE_LABELS.get(s["video_size"], s["video_size"] + "p"))
     if s.get("subtitles", "off") != "off":
         parts.append("subtitles: " + SUBTITLE_LABELS[s["subtitles"]].lower())
     return ", ".join(parts)
@@ -55,7 +57,7 @@ def settings_dict(options: engine.JobOptions) -> dict:
         "strength": options.strength, "polish": options.polish, "loudness": options.loudness,
         "audio_format": options.audio_format, "subtitles": options.subtitles, "language": options.language,
         "noise": options.noise, "echo_track": options.echo_track, "restore_highs": options.restore_highs,
-        "rebuild_voice": options.rebuild_voice,
+        "rebuild_voice": options.rebuild_voice, "video_size": options.video_size,
     }
 
 

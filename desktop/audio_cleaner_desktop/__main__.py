@@ -9,7 +9,10 @@ from . import quiet_popen
 quiet_popen.install()  # first, before the heavier imports below (the frozen app does this in packaging/launcher.py)
 
 from . import __version__, config  # noqa: E402
-from .engine import AUDIO_CHOICES, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTHS, SUBTITLE_MODES, JobOptions  # noqa: E402
+from .engine import (  # noqa: E402
+    AUDIO_CHOICES, AUDIO_ENDINGS, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTHS, SUBTITLE_MODES, VIDEO_ENDINGS,
+    VIDEO_SIZES, JobOptions,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,6 +36,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--audio-format", choices=list(AUDIO_CHOICES), default="same",
         help="format for audio files (video keeps its container); default: same as input",
+    )
+    p.add_argument(
+        "--output-name", metavar="NAME",
+        help="the file name of the result (one file only); its ending says the type, e.g. talk.mp3 saves just the sound "
+        "(default: <name>-cleaned plus the usual ending)",
+    )
+    p.add_argument(
+        "--format", choices=[e.lstrip(".") for e in (*AUDIO_ENDINGS, *VIDEO_ENDINGS)], dest="output_format",
+        help="the type of the results: a sound type (just the sound, also from a video), or a video type (a sound "
+        "becomes a video with a black picture); default: the type of the original (--audio-format for audio files)",
+    )
+    p.add_argument(
+        "--video-size", choices=list(VIDEO_SIZES), default="same",
+        help="picture size of video results: the pixels of the shorter side, or same as the original (default); "
+        "bigger than the original only stretches the picture",
     )
     p.add_argument(
         "--loudness", choices=list(LOUDNESS_TARGETS), default=DEFAULT_LOUDNESS,
@@ -100,8 +118,11 @@ def main(argv: list[str] | None = None) -> int:
             strength=args.strength, polish=not args.no_polish, audio_format=args.audio_format,
             loudness=args.loudness, subtitles=args.subtitles, language=args.language, noise=args.noise,
             echo_track=args.echo_track, restore_highs=not args.no_restore_highs, rebuild_voice=args.rebuild_voice,
+            video_size=args.video_size,
         )
-        return cli.run(args.files, args.output_dir, options, args.parallel)
+        if args.output_name is not None and len(args.files) != 1:
+            parser.error("--output-name works for one file at a time; use --format to choose the type of several")
+        return cli.run(args.files, args.output_dir, options, args.parallel, args.output_name, args.output_format)
 
     from .gui.app import run
 

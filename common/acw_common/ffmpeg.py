@@ -7,12 +7,14 @@ crafted playlist/concat file cannot make ffmpeg open other paths or URLs.
 from __future__ import annotations
 
 import json
+import math
 import ntpath
 import os
 import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +39,7 @@ AUDIO_FORMATS = {
     "mp3": (".mp3", ["-c:a", "libmp3lame", "-b:a", "256k"]),
     "m4a": (".m4a", ["-c:a", "aac", "-b:a", "256k"]),
     "opus": (".opus", ["-c:a", "libopus", "-b:a", "128k"]),
+    "ogg": (".ogg", ["-c:a", "libopus", "-b:a", "128k"]),  # Opus in an Ogg file with the usual .ogg ending
 }
 
 
@@ -103,6 +106,14 @@ class ProbeResult:
     # Codec names, in the same order as audio_indices; and (stream index, codec name) of each subtitle stream.
     audio_codecs: tuple[str, ...] = ()
     subtitle_streams: tuple[tuple[int, str], ...] = ()
+    # The first picture: size as stored, pixel shape (width / height of one pixel), turn in degrees (a phone video
+    # may be stored sideways and say "show it turned"), frames per second and bits per second (0 = unknown).
+    video_width: int = 0
+    video_height: int = 0
+    video_sar: float = 1.0
+    video_rotation: int = 0
+    video_fps: float = 0.0
+    video_bitrate: int = 0
 
     @property
     def audio_tracks(self) -> int:
@@ -130,6 +141,43 @@ def path_arg(path: Path | str) -> str:
         s = ntpath.abspath(s)  # also turns / into \ : the prefix switches path normalisation off
         s = "\\\\?\\UNC\\" + s[2:] if s.startswith("\\\\") else "\\\\?\\" + s
     return s
+
+
+def _ratio(text: object) -> float:
+    """"30000/1001" or "16:9" as a number; 0 when it is not one."""
+    try:
+        a, b = str(text).replace(":", "/").split("/")
+        return float(a) / float(b) if float(b) else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _picture_facts(stream: dict) -> dict:
+    """The video_* fields of ProbeResult from ffprobe's description of the first picture stream."""
+    rotation = 0
+    try:
+        rotation = int(float((stream.get("tags") or {}).get("rotate", 0)))
+    except (ValueError, TypeError):
+        pass
+    for side in stream.get("side_data_list") or []:
+        if "rotation" in side:
+            try:
+                rotation = int(round(float(side["rotation"])))
+            except (ValueError, TypeError):
+                pass
+    fps = _ratio(stream.get("avg_frame_rate")) or _ratio(stream.get("r_frame_rate"))
+    try:
+        bitrate = int(stream.get("bit_rate") or 0)
+    except (ValueError, TypeError):
+        bitrate = 0
+    return {
+        "video_width": int(stream.get("width") or 0),
+        "video_height": int(stream.get("height") or 0),
+        "video_sar": _ratio(stream.get("sample_aspect_ratio")) or 1.0,
+        "video_rotation": rotation % 360,
+        "video_fps": fps if 0 < fps < 1000 else 0.0,
+        "video_bitrate": max(0, bitrate),
+    }
 
 
 class FFmpeg:
@@ -234,6 +282,7 @@ class FFmpeg:
             subtitle_streams=tuple(
                 (int(s["index"]), s.get("codec_name", "")) for s in streams if s.get("codec_type") == "subtitle"
             ),
+            **(_picture_facts(video[0]) if video else {}),
         )
 
     def measure_duration(self, path: Path, probe: ProbeResult, max_seconds: float, track: int = 0) -> float:
@@ -374,6 +423,9 @@ class FFmpeg:
         sub_lang: str | None = None,
         keep_metadata: bool = False,
         report: dict | None = None,
+        *,
+        video: "VideoOut | None" = None,
+        progress: Callable[[float], None] | None = None,
     ) -> Path:
         """Copy the video stream; replace the first audio track with `audio` (or keep the source audio when
         None); optionally add a soft subtitle track.
@@ -386,32 +438,133 @@ class FFmpeg:
         Metadata and chapters are dropped unless `keep_metadata` (the server
         strips them for privacy; the desktop app keeps e.g. creation time).
         Only the first video stream is kept, which also drops camera data
-        tracks such as Sony's "rtmd" that break some players."""
+        tracks such as Sony's "rtmd" that break some players.
+
+        Without `video` the picture is always copied (the server). With it, the picture is copied when the container
+        takes it and the size stays, and re-encoded otherwise: with the operating system's H.264 encoder where
+        there is one, else FFmpeg's own (see picture_encoders()). `report` then also says {"encoder": name or
+        "copy", "fallback": True when the first choice failed}. `progress` gets the finished share (0..1) of
+        an encode."""
         try:
             info = self.probe(video_src)
         except MediaError:
             info = None
         plan = _plan_extras(info, out.suffix.lower())
-        args = self._mux_args(video_src, audio, out, subtitles, sub_lang, keep_metadata, plan)
-        r = self._run(args, timeout=7200)
-        if r.returncode != 0 and (plan["audio"] or plan["subs"]):
-            plan = {**plan, "audio": [], "subs": []}
-            r = self._run(self._mux_args(video_src, audio, out, subtitles, sub_lang, keep_metadata, plan), timeout=7200)
-        if r.returncode != 0:
-            raise MediaError("Could not rebuild the video with the cleaned audio.")
+        picture = _picture_plan(info, out.suffix.lower(), video) if video is not None else None
+        encoders: list[str | None] = picture["encoders"] if picture else [None]
+        duration = info.duration if info is not None else 0.0
+        timeout = max(7200.0, duration * 8)
+        r = None
+        used = 0
+        for used, encoder in enumerate(encoders):
+            options = {"encoder": encoder, "picture": picture}
+            variants = [plan, {**plan, "audio": [], "subs": []}] if (plan["audio"] or plan["subs"]) else [plan]
+            for variant in variants:
+                args = self._mux_args(video_src, audio, out, subtitles, sub_lang, keep_metadata, variant, **options)
+                r = self._run_encode(args, timeout, duration, progress if picture else None)
+                if r.returncode == 0:
+                    plan = variant
+                    break
+            if r is not None and r.returncode == 0:
+                break
+        if r is None or r.returncode != 0:
+            raise MediaError(
+                "Could not convert the picture of this video. Try another file type, or keep its size."
+                if picture else "Could not rebuild the video with the cleaned audio."
+            )
         if report is not None:
             report.update(audio_kept=len(plan["audio"]), audio_dropped=plan["total_audio"] - len(plan["audio"]),
                           subtitles_kept=len(plan["subs"]), subtitles_dropped=plan["total_subs"] - len(plan["subs"]))
+            if video is not None:
+                report.update(encoder=encoders[used] or "copy", fallback=used > 0)
         return out
 
-    def _mux_args(self, video_src, audio, out, subtitles, sub_lang, keep_metadata, plan) -> list[str]:
+    def make_video(
+        self,
+        audio: Path,
+        out: Path,
+        duration: float,
+        subtitles: Path | None = None,
+        sub_lang: str | None = None,
+        report: dict | None = None,
+        *,
+        video: "VideoOut | None" = None,
+        progress: Callable[[float], None] | None = None,
+    ) -> Path:
+        """A video file for a sound: a black picture (1280x720, or the size `video` asks for; one frame a second, so
+        the file stays small) with `audio` as the sound and, when given, a soft subtitle track. Lets a recording
+        carry subtitles. `report` gets {"encoder": name, "fallback": bool} like mux_video()."""
         ext = out.suffix.lower()
-        if ext == ".webm":
-            acodec, new_sub = ["libopus", "160k"], "webvtt"
-        elif ext == ".mkv":
-            acodec, new_sub = ["aac", "256k"], "srt"
-        else:
-            acodec, new_sub = ["aac", "256k"], "mov_text"
+        width, height = black_size(video.short_side if video else None)
+        timeout = max(7200.0, duration * 8)
+        r = None
+        used = 0
+        encoders = picture_encoders(ext)
+        for used, encoder in enumerate(encoders):
+            args = self._black_args(audio, out, duration, subtitles, sub_lang, encoder, (width, height))
+            r = self._run_encode(args, timeout, duration, progress)
+            if r.returncode == 0:
+                break
+        if r is None or r.returncode != 0:
+            raise MediaError("Could not make a video file for this sound.")
+        if report is not None:
+            report.update(encoder=encoders[used], fallback=used > 0)
+        return out
+
+    def _run_encode(self, args: list[str], timeout: float, duration: float,
+                    progress: Callable[[float], None] | None) -> subprocess.CompletedProcess:
+        """Run an FFmpeg command; with `progress`, FFmpeg's own progress report turns into fractions of `duration`."""
+        if progress is None or duration <= 0:
+            return self._run(args, timeout=timeout)
+        args = [args[0], "-progress", "pipe:1", "-nostats", *args[1:]]
+        with tempfile.TemporaryFile() as err:
+            proc = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=err, **_NO_WINDOW)
+            limit = threading.Timer(timeout, proc.kill)
+            limit.daemon = True
+            limit.start()
+            with self._guard(proc):
+                try:
+                    for line in proc.stdout:
+                        key, _, value = line.decode("ascii", "replace").strip().partition("=")
+                        if key in ("out_time_us", "out_time_ms") and value.lstrip("-").isdigit():
+                            progress(min(1.0, max(0.0, int(value) / 1e6 / duration)))
+                    proc.wait()
+                finally:
+                    limit.cancel()
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait()
+                    proc.stdout.close()
+            if self._cancelled():
+                raise Cancelled()
+            err.seek(0)
+            return subprocess.CompletedProcess(args, proc.returncode, b"", err.read())
+
+    def _black_args(self, audio, out, duration, subtitles, sub_lang, encoder, size) -> list[str]:
+        ext = out.suffix.lower()
+        acodec, new_sub = _container_codecs(ext)
+        width, height = size
+        args = [self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-i", path_arg(audio)]
+        if subtitles is not None:
+            args += ["-i", path_arg(subtitles)]
+        # The picture comes from a filter (no input device needed): black, one frame a second, a little longer than
+        # the sound; -shortest ends the file with the sound.
+        args += ["-filter_complex", f"color=c=black:s={width}x{height}:r=1:d={math.ceil(duration) + 2},format=yuv420p[v]",
+                 "-map", "[v]", "-map", "0:a:0", "-c:a", acodec[0], "-b:a", acodec[1]]
+        if subtitles is not None:
+            args += ["-map", "1:s:0", "-c:s", "srt" if ext == ".mkv" else new_sub]
+            if sub_lang:
+                args += ["-metadata:s:s:0", f"language={sub_lang}"]
+        args += _picture_args(encoder, {"fps": 1.0, "bitrate": picture_bitrate(encoder, width, height, 1.0, floor=64_000)})
+        args += ["-map_metadata", "-1", "-map_chapters", "-1", "-shortest"]
+        if ext in (".mp4", ".mov", ".m4v"):
+            args += ["-movflags", "+faststart"]
+        args += ["-threads", str(self.threads), "-y", path_arg(out)]
+        return args
+
+    def _mux_args(self, video_src, audio, out, subtitles, sub_lang, keep_metadata, plan, encoder=None, picture=None) -> list[str]:
+        ext = out.suffix.lower()
+        acodec, new_sub = _container_codecs(ext)
         # +genpts: MPEG program streams (.mpg/.vob) carry packets without timestamps,
         # which other containers refuse; harmless for files that have them.
         args = [self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *self._in(video_src), "-fflags", "+genpts", "-i", path_arg(video_src)]
@@ -439,7 +592,7 @@ class FFmpeg:
                 maps += [f"-c:s:{kept_subs}", "srt"]
             if sub_lang:
                 maps += [f"-metadata:s:s:{kept_subs}", f"language={sub_lang}"]
-        args += maps + ["-c:v", "copy"]
+        args += maps + (_picture_args(encoder, picture) if encoder else ["-c:v", "copy"])
         args += ["-map_metadata", "0"] if keep_metadata else ["-map_metadata", "-1", "-map_chapters", "-1"]
         if ext in (".mp4", ".mov", ".m4v"):
             args += ["-movflags", "+faststart"]
@@ -474,3 +627,126 @@ def _plan_extras(info: ProbeResult | None, ext: str) -> dict:
         subs = []
     return {"audio": audio, "subs": subs, "total_audio": max(0, len(info.audio_indices) - 1),
             "total_subs": len(info.subtitle_streams)}
+
+
+def _container_codecs(ext: str) -> tuple[list[str], str]:
+    """The audio encoder (name, bitrate) a container gets for the cleaned sound, and the kind of text subtitles it holds."""
+    if ext == ".webm":
+        return ["libopus", "160k"], "webvtt"
+    if ext == ".mkv":
+        return ["aac", "256k"], "srt"
+    return ["aac", "256k"], "mov_text"
+
+
+# ---- the picture of a video result -------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class VideoOut:
+    """What the picture of a result should be like. `short_side`: the pixels of the shorter side; the picture is resized
+    to it (plain lanczos resizing, same shape, never turned from portrait to landscape or back; bigger than the
+    original only stretches it). None keeps the size."""
+
+    short_side: int | None = None
+
+
+def _even(x: float) -> int:
+    return max(2, int(round(x / 2)) * 2)
+
+
+def picture_size(width: int, height: int, sar: float, rotation: int, short_side: int) -> tuple[int, int]:
+    """The size of a picture of `width` x `height` pixels (pixels `sar` times as wide as tall, shown turned by `rotation`
+    degrees) after resizing it to a shorter side of `short_side` pixels. Both numbers are even (video encoders need that)."""
+    shown_w, shown_h = width * (sar if sar > 0 else 1.0), float(height)
+    if rotation % 180 == 90:
+        shown_w, shown_h = shown_h, shown_w
+    aspect = shown_w / shown_h if shown_h else 1.0
+    if aspect >= 1:
+        return _even(short_side * aspect), _even(short_side)
+    return _even(short_side), _even(short_side / aspect)
+
+
+def black_size(short_side: int | None) -> tuple[int, int]:
+    """The size of the black picture made for a sound: 1280x720, or 16:9 at the shorter side asked for."""
+    return (1280, 720) if short_side is None else picture_size(16, 9, 1.0, 0, short_side)
+
+
+# What each container takes as the picture without re-encoding (a container not listed takes anything).
+_COPY_VIDEO = {
+    ".mp4": {"h264", "hevc", "mpeg4", "av1", "vp9", "mpeg2video", "mjpeg"},
+    ".m4v": {"h264", "hevc", "mpeg4", "av1", "vp9", "mpeg2video", "mjpeg"},
+    ".mov": {"h264", "hevc", "mpeg4", "prores", "mjpeg", "mpeg2video", "dnxhd"},
+    ".webm": {"vp8", "vp9", "av1"},
+    ".flv": {"h264", "flv1"},
+}
+# Containers that are the same kind of file as far as the picture goes.
+_SAME_KIND = (frozenset({".mp4", ".m4v"}),)
+# How many bits a second a picture of one pixel and one frame gets (the efficient encoders need fewer).
+_BITS_PER_PIXEL = {"h264_mf": 0.07, "h264_videotoolbox": 0.07, "libvpx-vp9": 0.05, "mpeg4": 0.14, "flv": 0.16}
+
+
+def picture_encoders(ext: str) -> list[str]:
+    """The picture encoders to try for a result with ending `ext`, best first. The app's FFmpeg is LGPL (no x264), so
+    H.264 comes from the operating system: Media Foundation on Windows, VideoToolbox on macOS; if there is none, or it
+    refuses, FFmpeg's own MPEG-4 (Sorenson H.263 for .flv) does it. WebM gets VP9."""
+    if ext == ".webm":
+        return ["libvpx-vp9"]
+    system = {"win32": ["h264_mf"], "darwin": ["h264_videotoolbox"]}.get(sys.platform, [])
+    return [*system, "flv" if ext == ".flv" else "mpeg4"]
+
+
+def picture_bitrate(encoder: str, width: int, height: int, fps: float, source_bps: int = 0, source_pixels: int = 0,
+                    floor: int = 250_000) -> int:
+    """Bits a second for a re-encoded picture: a share of the pixels per second that suits the encoder, between `floor`
+    and 80 Mbit/s, and not more than half as much again as the original had when the picture does not get bigger."""
+    pixels = width * height
+    target = pixels * (fps if fps > 0 else 30.0) * _BITS_PER_PIXEL.get(encoder, 0.1)
+    if source_bps > 0 and source_pixels and pixels <= source_pixels:
+        target = min(target, max(source_bps * 1.5, 500_000))
+    return int(min(max(target, floor), 80_000_000))
+
+
+def _picture_plan(info: ProbeResult | None, ext: str, video: VideoOut) -> dict | None:
+    """What to do with the picture of `info` for a result ending in `ext`: None (copy it), or a dict with the encoders to
+    try, the size, the frame rate and the bit rate base."""
+    if info is None or not info.has_video:
+        return None
+    width, height = info.video_width, info.video_height
+    turned = info.video_rotation % 180 == 90
+    shown = (height, width) if turned else (width, height)  # as stored, after turning
+    size = None
+    if video.short_side and width and height:
+        size = picture_size(width, height, info.video_sar, info.video_rotation, video.short_side)
+        if size == shown and abs(info.video_sar - 1.0) < 0.01:
+            size = None  # already that size
+    same_kind = ext == info.ext or any(ext in kind and info.ext in kind for kind in _SAME_KIND)
+    fits = same_kind or ext not in _COPY_VIDEO or info.video_codec in _COPY_VIDEO[ext]
+    if size is None and fits:
+        return None
+    if size is None and (shown[0] % 2 or shown[1] % 2):
+        size = (shown[0] // 2 * 2, shown[1] // 2 * 2)  # encoders want even numbers
+    out = size or shown
+    fps = info.video_fps or 30.0
+    return {
+        "encoders": picture_encoders(ext), "size": size, "fps": fps, "out": out,
+        "source_bps": info.video_bitrate, "source_pixels": shown[0] * shown[1],
+    }
+
+
+def _picture_args(encoder: str, picture: dict) -> list[str]:
+    """FFmpeg options that re-encode the picture with `encoder` (see _picture_plan; a dict with just "fps" and "bitrate"
+    works too)."""
+    fps = picture.get("fps") or 30.0
+    bitrate = picture.get("bitrate")
+    if bitrate is None:
+        width, height = picture["out"]
+        bitrate = picture_bitrate(encoder, width, height, fps, picture.get("source_bps", 0), picture.get("source_pixels", 0))
+    args: list[str] = []
+    if picture.get("size"):
+        width, height = picture["size"]
+        args += ["-vf", f"scale={width}:{height}:flags=lanczos,setsar=1"]
+    args += ["-c:v", encoder, "-b:v", str(bitrate), "-g", str(max(10, round(fps * 2))), "-pix_fmt", "yuv420p"]
+    if encoder == "libvpx-vp9":
+        args += ["-deadline", "good", "-cpu-used", "4", "-row-mt", "1"]
+    elif encoder == "h264_videotoolbox":
+        args += ["-allow_sw", "1"]  # an Intel Mac without a hardware encoder
+    return args

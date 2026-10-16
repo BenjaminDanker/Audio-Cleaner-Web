@@ -2,9 +2,10 @@
 
     probe -> [transcribe the original] -> decode -> DeepFilterNet3 (+ polish) -> write audio / mux into the video
 
-The result is written next to the source (or into `out_dir`) as "<name>-cleaned.<ext>"
-and never replaces an existing file. Subtitles ("<name>-cleaned.srt" ...) go next to it,
-or into the video as a soft track.
+The result is written next to the source (or into `out_dir`) as "<name>-cleaned.<ext>" (or under the name and in the
+format asked for: its ending says which, see available_endings()) and never replaces an existing file. A video can
+become another kind of video, or just its sound; a sound can become a video with a black picture (so it can carry
+subtitles). Subtitles ("<name>-cleaned.srt" ...) go next to it, or into the video as a soft track.
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from acw_common import captions, pipeline, transcribe
-from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult
+from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult, VideoOut
 
 from . import models, resources
 
@@ -40,6 +41,20 @@ STRENGTHS: dict[str, float] = {"gentle": 12.0, "balanced": 24.0, "strong": 40.0,
 DEFAULT_STRENGTH = "max"
 OUTPUT_AUDIO_FORMATS = ("wav", "flac", "mp3", "m4a", "opus")
 AUDIO_CHOICES = ("same", *OUTPUT_AUDIO_FORMATS)
+# Every ending a result can have. Sound: the name in acw_common.ffmpeg.AUDIO_FORMATS; video: the container.
+AUDIO_ENDINGS = {".mp3": "mp3", ".wav": "wav", ".flac": "flac", ".m4a": "m4a", ".opus": "opus", ".ogg": "ogg"}
+VIDEO_ENDINGS = (".mp4", ".mov", ".mkv", ".flv", ".webm")
+ENDING_NAMES = {
+    ".mp3": "MP3", ".wav": "WAV", ".flac": "FLAC", ".m4a": "M4A", ".opus": "Opus", ".ogg": "OGG",
+    ".mp4": "MP4", ".mov": "MOV", ".mkv": "MKV", ".flv": "FLV", ".webm": "WebM", ".m4v": "M4V",
+}
+# A picture that WebM takes as it is; any other picture becomes VP9 (libvpx is part of the FFmpeg build).
+WEBM_COPY_CODECS = ("vp8", "vp9", "av1")
+WEBM_ENCODE = True
+# Containers that hold soft subtitles; the others (flv) get an .srt file next to the result instead.
+_EMBED_ENDINGS = (".mp4", ".m4v", ".mov", ".mkv", ".webm")
+# Video size: the shorter side in pixels ("same" keeps the original).
+VIDEO_SIZES = ("same", "2160", "1440", "1080", "720", "480")
 
 # Loudness targets (LUFS) for the polish step; None keeps the level of the recording.
 LOUDNESS_TARGETS: dict[str, float | None] = {"podcast": -16.0, "youtube": -14.0, "broadcast": -23.0, "keep": None}
@@ -100,6 +115,7 @@ class JobOptions:
     echo_track: bool = False  # remove speaker echo using the file's second audio track (when it has one)
     restore_highs: bool = True  # bring back the highs of phone-quality recordings (needs HIGHS_MODEL)
     rebuild_voice: bool = False  # Sidon instead of noise removal: also removes room echo; slow (VOICE_MODEL)
+    video_size: str = "same"  # of a video result: "same", or the pixels of the shorter side (VIDEO_SIZES)
 
     def __post_init__(self) -> None:
         if self.noise not in pipeline.NOISE_PROFILES:
@@ -114,6 +130,8 @@ class JobOptions:
             raise ValueError(f"unknown subtitle mode {self.subtitles!r}")
         if self.language != "auto" and self.language not in LANGUAGES:
             raise ValueError(f"unknown language {self.language!r}")
+        if self.video_size not in VIDEO_SIZES:
+            raise ValueError(f"unknown video size {self.video_size!r}")
 
     @property
     def atten_lim_db(self) -> float:
@@ -122,6 +140,11 @@ class JobOptions:
     @property
     def loudness_lufs(self) -> float | None:
         return LOUDNESS_TARGETS[self.loudness]
+
+    @property
+    def short_side(self) -> int | None:
+        """Pixels of the shorter side of a video result; None keeps the size of the original."""
+        return None if self.video_size == "same" else int(self.video_size)
 
 
 @dataclass(frozen=True)
@@ -168,19 +191,110 @@ def estimated_scratch_gb(duration: float, channels: int) -> float:
     return duration / 3600 * min(channels, pipeline.MAX_CHANNELS) * GB_PER_HOUR_PER_CHANNEL
 
 
+@dataclass(frozen=True)
+class Source:
+    """What decides which results a file can become."""
+
+    has_video: bool
+    ext: str = ""  # of the file, lower case with the dot
+    video_codec: str | None = None
+    duration: float = 0.0
+    channels: int = 2
+
+    @classmethod
+    def of(cls, info: object, path: Path | str | None = None) -> "Source":
+        """From a probe result (or anything with the same fields: the ones that are missing count as unknown)."""
+        ext = getattr(info, "ext", "") or (Path(path).suffix.lower() if path else "")
+        return cls(
+            bool(getattr(info, "has_video", False)), ext, getattr(info, "video_codec", None),
+            float(getattr(info, "duration", 0.0) or 0.0), int(getattr(info, "audio_channels", 2) or 2),
+        )
+
+
+def default_ending(source: Source, options: JobOptions) -> str:
+    """Ending of the cleaned file when nothing else is asked for: the container of the video, or the chosen audio format."""
+    if source.has_video:
+        return source.ext if source.ext in _VIDEO_CONTAINERS else ".mkv"
+    return AUDIO_FORMATS[_audio_format(source, options)][0]
+
+
 def output_extension(probe_result: ProbeResult, options: JobOptions) -> str:
-    """Extension of the cleaned file: the container of the video, or the chosen audio format."""
-    if probe_result.has_video:
-        return probe_result.ext if probe_result.ext in _VIDEO_CONTAINERS else ".mkv"
-    return AUDIO_FORMATS[_audio_format(probe_result, options)][0]
+    return default_ending(Source.of(probe_result), options)
 
 
-def _audio_format(probe_result: ProbeResult, options: JobOptions) -> str:
+def available_endings(source: Source) -> list[str]:
+    """The endings this file can become, in the order the format list shows them: the file's own kind first (a video:
+    the video types, then the sound types; a sound: the sound types, then the video types)."""
+    video = [e for e in VIDEO_ENDINGS if e != ".webm" or WEBM_ENCODE or (source.has_video and source.video_codec in WEBM_COPY_CODECS)]
+    if source.has_video and source.ext == ".m4v":
+        video.insert(1, ".m4v")
+    audio = list(AUDIO_ENDINGS)
+    return [*video, *audio] if source.has_video else [*audio, *video]
+
+
+def split_name(name: str) -> tuple[str, str]:
+    """"talk-cleaned.MP3" -> ("talk-cleaned", ".mp3"); a name without an ending gives an empty ending."""
+    stem, dot, ending = name.rpartition(".")
+    return (stem, "." + ending.lower()) if dot else (name, "")
+
+
+def default_output_name(path: Path | str, source: Source, options: JobOptions, ending: str | None = None) -> str:
+    """"<name>-cleaned.<ending>": what the result is called unless the user types another name."""
+    return f"{Path(path).stem}-cleaned{ending or default_ending(source, options)}"
+
+
+def with_ending(name: str, ending: str) -> str:
+    """`name` with another ending: a known one is replaced, anything else (no ending, or something that is only part of
+    the name, like "v1.2") gets the new one added."""
+    stem, current = split_name(name.strip())
+    if current in ENDING_NAMES:
+        return stem + ending
+    return name.strip() + ending
+
+
+_BAD_NAME_CHARS = set('<>:"/\\|?*')
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+
+
+def check_output_name(name: str, source: Source) -> tuple[str, str]:
+    """Is `name` a good name for a result of `source`? Returns (ending, "") when it is, ("", reason) when not; the reason
+    is short and fit for the user."""
+    name = name.strip()
+    if not name:
+        return "", "Type a name for the cleaned file."
+    if any(c in _BAD_NAME_CHARS or ord(c) < 32 for c in name):
+        return "", 'A name can\'t contain any of these: \\ / : * ? " < > |'
+    stem, ending = split_name(name)
+    if not ending:
+        return "", "Add an ending such as .mp3, or pick a type from the list."
+    if not stem.strip() or stem.strip() == ".":
+        return "", f"Type a name in front of {ending}."
+    if name.endswith((".", " ")):
+        return "", "A name can't end with a dot or a space."
+    if len(name.encode("utf-8")) > 255:
+        return "", "That name is too long."
+    if stem.split(".")[0].strip().upper() in _RESERVED_NAMES:
+        return "", "Windows doesn't allow that name."
+    if ending not in available_endings(source):
+        options = ", ".join(e for e in available_endings(source)[:6])
+        return "", f"This file can't be saved as {ending}. Pick a type from the list ({options} ...)."
+    if ending == ".wav" and _wav_too_big(source):
+        return "", "This recording is too long for a WAV file. Pick FLAC or another type."
+    return ending, ""
+
+
+def _wav_too_big(source: Source) -> bool:
+    channels = min(source.channels, pipeline.MAX_CHANNELS)
+    return source.duration * pipeline.SAMPLE_RATE * channels * 3 > _WAV_MAX_BYTES
+
+
+def _audio_format(source: Source | ProbeResult, options: JobOptions) -> str:
+    if not isinstance(source, Source):
+        source = Source.of(source)
     fmt = options.audio_format
     if fmt == "same":
-        fmt = _SAME_AS_INPUT.get(probe_result.ext, "flac")
-    channels = min(probe_result.audio_channels, pipeline.MAX_CHANNELS)
-    if fmt == "wav" and probe_result.duration * pipeline.SAMPLE_RATE * channels * 3 > _WAV_MAX_BYTES:
+        fmt = _SAME_AS_INPUT.get(source.ext, "flac")
+    if fmt == "wav" and _wav_too_big(source):
         return "flac"
     return fmt
 
@@ -196,13 +310,14 @@ def unique_output(directory: Path, stem: str, ext: str, companion: str = "") -> 
         n += 1
 
 
-def claim_output(directory: Path, stem: str, ext: str, companion: str = "") -> Path:
+def claim_output(directory: Path, stem: str, ext: str, companion: str = "", suffix: str = "-cleaned") -> Path:
     """Like unique_output(), but the name is taken for good: an empty file is created under it (and under the
     companion name), so a job running at the same time can't pick the same name. The caller replaces the
-    placeholder with the result, or removes it."""
+    placeholder with the result, or removes it. With `suffix` "" the first try is `stem` itself (the name the user
+    typed) and a taken name becomes "<stem> (2)"."""
     n = 1
     while True:
-        candidate = directory / (f"{stem}-cleaned{ext}" if n == 1 else f"{stem}-cleaned ({n}){ext}")
+        candidate = directory / (f"{stem}{suffix}{ext}" if n == 1 else f"{stem}{suffix} ({n}){ext}")
         n += 1
         mine: list[Path] = []
         try:
@@ -418,9 +533,32 @@ def process_file(
     progress: Progress | None = None,
     cancel: threading.Event | None = None,
     threads: int | None = None,
+    output_name: str | None = None,
+    output_format: str | None = None,
 ) -> Path:
     """Clean `src` and return the path of the new file (see `process`)."""
-    return process(src, options, out_dir=out_dir, progress=progress, cancel=cancel, threads=threads).output
+    return process(src, options, out_dir=out_dir, progress=progress, cancel=cancel, threads=threads,
+                   output_name=output_name, output_format=output_format).output
+
+
+def output_name_for(src: Path | str, source: Source, options: JobOptions, output_name: str | None = None,
+                    output_format: str | None = None) -> str:
+    """The name of the result: `output_name` when given (its ending says the format),
+    else "<name>-cleaned" in the format `output_format` ("mp3" or ".mp3"), else in the usual one. MediaError when the
+    name or the format is not possible for this file."""
+    ending = None
+    if output_format:
+        ending = "." + output_format.lower().lstrip(".")
+    if output_name is None:
+        name = default_output_name(src, source, options, ending)
+    else:
+        name = output_name.strip()
+        if ending and split_name(name)[1] != ending:
+            raise MediaError(f"The name {name} does not end in {ending}.")
+    problem = check_output_name(name, source)[1]
+    if problem:
+        raise MediaError(problem)
+    return name
 
 
 def process(
@@ -431,8 +569,14 @@ def process(
     progress: Progress | None = None,
     cancel: threading.Event | None = None,
     threads: int | None = None,
+    output_name: str | None = None,
+    output_format: str | None = None,
 ) -> JobResult:
     """Clean `src` (and make subtitles when asked) and say what was written.
+
+    `output_name` is the file name of the result (its ending, such as .mp3 or .mp4, says what it becomes); without it
+    the result is "<name>-cleaned" plus the usual ending, or the one in `output_format`. A taken name gets " (2)" and
+    so on.
 
     `progress` receives a fraction in [0, 1]. Setting `cancel` raises `Cancelled`
     (at the next checkpoint; encoding steps run to completion first). Raises
@@ -448,7 +592,7 @@ def process(
 
     info = probe(src, ff)
     dest_dir = Path(out_dir) if out_dir is not None else src.absolute().parent
-    ext = output_extension(info, options)
+    out_stem, ext = split_name(output_name_for(src, Source.of(info), options, output_name, output_format))
     tmp_out = dest_dir / f".acw-{uuid.uuid4().hex}{ext}"
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -457,7 +601,7 @@ def process(
         raise MediaError(f"Cannot write to the folder {dest_dir}: {e.strerror or e}") from e
 
     want_subs = options.subtitles != "off"
-    embed = options.subtitles == "embed" and info.has_video
+    embed = options.subtitles == "embed" and ext in _EMBED_ENDINGS
     sub_kind = "srt" if options.subtitles == "embed" else options.subtitles  # the file format of the text
     # Share of the progress bar given to each stage.
     transcribe_end = 0.45 if want_subs else 0.0
@@ -528,14 +672,17 @@ def process(
                                                  "restores highs in Settings to improve it"]))
             _check_cancel(cancel)
             kept = _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,
-                          work=work)
+                          work=work, progress=report.span(clean_end, 0.99))
             if info.audio_tracks > 1:
                 notice = "; ".join(filter(None, [notice, _other_tracks_notice(info.audio_tracks - 1, kept.get("audio_kept", 0))]))
+            if kept.get("fallback"):
+                notice = "; ".join(filter(None, [notice, "this computer's own video encoder wasn't available, so the "
+                                                 "picture was saved in a simpler format and the file is bigger than usual"]))
             # Windows can't delete a file that is still mapped.
             x = y = None
             _check_cancel(cancel)
             sidecar = sub_tmp is not None and not embed
-            final = claim_output(dest_dir, src.stem, ext, _SUBTITLE_SUFFIX[sub_kind] if sidecar else "")
+            final = claim_output(dest_dir, out_stem, ext, _SUBTITLE_SUFFIX[sub_kind] if sidecar else "", suffix="")
             sub_final = final.with_suffix(_SUBTITLE_SUFFIX[sub_kind]) if sidecar else None
             claimed = [final, *([sub_final] if sub_final else [])]
             os.replace(tmp_out, final)
@@ -609,18 +756,26 @@ def _other_tracks_notice(others: int, kept: int) -> str:
 
 def _write(
     ff: FFmpeg, src: Path, audio: np.ndarray, info: ProbeResult, options: JobOptions, target: Path,
-    subtitles: Path | None, language: str | None, *, work: Path,
+    subtitles: Path | None, language: str | None, *, work: Path, progress: Progress | None = None,
 ) -> dict:
-    """Write the result. Returns what the video keeps of the source (see FFmpeg.mux_video's report)."""
+    """Write the result (`target`'s ending says what it is). Returns what the video keeps of the source (see
+    FFmpeg.mux_video's report)."""
     kept: dict = {}
+    ending = target.suffix.lower()
     try:
-        if info.has_video:
+        if ending in AUDIO_ENDINGS:  # just the sound, also of a video
+            ff.write_audio(audio, pipeline.SAMPLE_RATE, target, AUDIO_ENDINGS[ending])
+        else:
             # The cleaned sound is written to the job's work folder first (up to several GB for a long video).
             cleaned = ff.write_audio(audio, pipeline.SAMPLE_RATE, work / "cleaned", "flac")
             iso3 = LANGUAGES.get(language or "", ("", ""))[1] or None
-            ff.mux_video(src, cleaned, target, subtitles=subtitles, sub_lang=iso3, keep_metadata=True, report=kept)
-        else:
-            ff.write_audio(audio, pipeline.SAMPLE_RATE, target, _audio_format(info, options))
+            picture = VideoOut(short_side=options.short_side)
+            if info.has_video:
+                ff.mux_video(src, cleaned, target, subtitles=subtitles, sub_lang=iso3, keep_metadata=True, report=kept,
+                             video=picture, progress=progress)
+            else:  # a sound becomes a video with a black picture
+                ff.make_video(cleaned, target, len(audio) / pipeline.SAMPLE_RATE, subtitles=subtitles, sub_lang=iso3,
+                              report=kept, video=picture, progress=progress)
     except RuntimeError as e:
         log.error("encoding failed: %s", e)
         raise MediaError("Saving the cleaned audio failed.") from e

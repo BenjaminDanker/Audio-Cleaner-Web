@@ -25,6 +25,10 @@ SUBTITLE_LABELS = {
     "off": "No subtitles", "srt": "SRT file", "vtt": "VTT file", "txt": "Text transcript", "embed": "Inside the video",
 }
 FORMAT_LABELS = {"same": "Same as the original", "wav": "WAV", "flac": "FLAC", "mp3": "MP3", "m4a": "M4A", "opus": "Opus"}
+VIDEO_SIZE_LABELS = {
+    "same": "Same as the original", "2160": "2160p (4K)", "1440": "1440p", "1080": "1080p (Full HD)", "720": "720p (HD)",
+    "480": "480p",
+}
 PARALLEL_LABELS = {0: "Automatic", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 
@@ -227,14 +231,34 @@ class SettingsPanel(QFrame):
         where_row.layout_.addWidget(self._folder_box)
         layout.addWidget(where_row)
 
-        self._format = _combo(FORMAT_LABELS, "The file type for cleaned audio files. Videos always keep their own type.")
+        self._format = _combo(
+            FORMAT_LABELS,
+            "The usual file type for cleaned audio files. You can pick another for any file in the list, under its name.",
+        )
         layout.addWidget(_Row(
             "Audio file type",
-            "Used when you clean audio files. Videos always keep their own format.\n\n"
+            "The file type audio files are saved as, unless you pick another one for a file in the list (the type "
+            "next to its name). Videos keep their own type unless you pick another for them there.\n\n"
             "\u2022 Same as the original: MP3 stays MP3, WAV stays WAV, and so on\n"
             "\u2022 FLAC and WAV: full quality, bigger files\n"
             "\u2022 MP3, M4A and Opus: smaller files",
             self._format,
+        ))
+
+        self._video_size = _combo(
+            VIDEO_SIZE_LABELS,
+            "The size of the picture in videos you save. Bigger than the original only stretches the picture.",
+        )
+        layout.addWidget(_Row(
+            "Video size",
+            "How big the picture is in the videos you save (a video made from a sound has a plain black picture).\n\n"
+            "\u2022 Same as the original: the picture is kept as it is when the file type allows it, which is fastest "
+            "and loses nothing\n"
+            "\u2022 2160p (4K), 1440p, 1080p, 720p, 480p: the picture is resized so its shorter side has that many "
+            "pixels. It keeps its shape, and a tall video stays tall. Smaller sizes make smaller files.\n\n"
+            "Bigger than the original only stretches the picture: it does not add any detail and makes the file "
+            "larger. Resizing saves the picture again, which takes longer than keeping it.",
+            self._video_size,
         ))
 
         self._parallel = _combo(PARALLEL_LABELS, "How many files are cleaned at the same time")
@@ -285,6 +309,7 @@ class SettingsPanel(QFrame):
         self._subtitles.currentIndexChanged.connect(lambda _: self._store("subtitles", self._subtitles.currentData()))
         self._language.currentIndexChanged.connect(lambda _: self._store("language", self._language.currentData()))
         self._format.currentIndexChanged.connect(lambda _: self._store("audio_format", self._format.currentData()))
+        self._video_size.currentIndexChanged.connect(lambda _: self._store("video_size", self._video_size.currentData()))
         self._parallel.currentIndexChanged.connect(lambda _: self._store("parallel", self._parallel.currentData()))
         self._where.changed.connect(self._where_changed)
         self._updates.toggled.connect(lambda v: self._store("check_updates", v))
@@ -309,6 +334,7 @@ class SettingsPanel(QFrame):
         _select(self._subtitles, p.subtitles)
         _select(self._language, p.language)
         _select(self._format, p.audio_format)
+        _select(self._video_size, p.video_size)
         _select(self._parallel, p.parallel)
         self._updates.setChecked(p.check_updates)
         mode = p.output_mode if p.output_folder else "next"

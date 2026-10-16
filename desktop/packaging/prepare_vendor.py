@@ -44,7 +44,7 @@ DFN_MODEL_SHA256 = "c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb6
 DPDFNET_FILE = "dpdfnet8_48khz_hr.onnx"
 DPDFNET_SHA256 = "7b3afbb260a08fe9af3d16e3bda992971be1e7e951d1dee7c2d235f5c43f5631"
 LIB_NAMES = ("libdf.so", "libdf.dylib", "df.dll")
-FFMPEG_NOTICES = ("COPYING.LGPLv2.1", "FFmpeg-LICENSE.md", "ffmpeg-buildinfo.txt", "lame-COPYING", "opus-COPYING")
+FFMPEG_NOTICES = ("COPYING.LGPLv2.1", "FFmpeg-LICENSE.md", "ffmpeg-buildinfo.txt", "lame-COPYING", "opus-COPYING", "libvpx-COPYING")
 
 # Speech model for the tests (the app itself downloads large-v3-turbo, resources.SPEECH_MODEL):
 # Systran/faster-whisper-small (CTranslate2 conversion of OpenAI Whisper small, MIT).
@@ -186,11 +186,12 @@ class Notices:
 
 def ffmpeg_notices(n: Notices, ffmpeg_dir: Path) -> None:
     desc = {
-        "ffmpeg-buildinfo.txt": "FFmpeg, libopus, LAME: versions, build configuration, where to get the exact sources",
+        "ffmpeg-buildinfo.txt": "FFmpeg, libopus, LAME, libvpx: versions, build configuration, where to get the exact sources",
         "COPYING.LGPLv2.1": "GNU LGPL v2.1, the licence of the bundled ffmpeg and ffprobe",
         "FFmpeg-LICENSE.md": "FFmpeg licensing overview",
         "lame-COPYING": "LAME (MP3 encoder inside ffmpeg), LGPL",
         "opus-COPYING": "libopus (inside ffmpeg), BSD",
+        "libvpx-COPYING": "libvpx (WebM video encoder inside ffmpeg), BSD, with its patent grant",
     }
     for name in FFMPEG_NOTICES:
         n.add_file(name, ffmpeg_dir / name, desc[name])
