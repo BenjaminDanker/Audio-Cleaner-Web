@@ -433,3 +433,7 @@ textarea.input { min-height: 140px; resize: vertical; line-height: 1.45; }
 @media (max-width: 560px) {
   .install-body { padding-left: 16px; }
 }
+
+/* "Good to know" notes under a choice: when something free you already have is enough */
+.good-to-know { display: block; border-left: 3px solid var(--border); padding: 2px 0 2px 10px; }
+.good-to-know b { color: var(--text, inherit); font-weight: 650; }

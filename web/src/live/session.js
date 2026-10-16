@@ -141,6 +141,7 @@ export async function startLive(opts) {
         ws.send(JSON.stringify({
           type: 'start', version: 1, denoise: opts.denoise || null, captions: opts.captions || null,
           language: opts.language || null, sampleRate: 48000, attenLimDb: opts.attenDb, client: 'acw-web-demo/1.0',
+          ...(opts.translate?.length ? { translate: opts.translate } : {}),
         }));
       };
       ws.onerror = () => { clearTimeout(timer); fail('Couldn’t connect to live.'); };

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { api, streamUrl } from '../api.js';
+import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
 import { IconBroadcast } from '../components/Icons.jsx';
 import PluginInstall from '../components/PluginInstall.jsx';
@@ -60,6 +61,8 @@ function ObsSetup() {
     </section>
   );
 }
+
+const LANGUAGE_NAME = Object.fromEntries(LANGUAGES.filter(([c]) => c));
 
 /* ------------------------------------------------------------------ API keys */
 
@@ -252,6 +255,8 @@ function LiveDemo({ pricing }) {
   const [info, setInfo] = useState(null);
   const [stats, setStats] = useState(null);
   const [lines, setLines] = useState([]); // caption lines {key, id, text, final}; partials are updated in place by id
+  const [targets, setTargets] = useState(['', '', '']); // translations (paid test)
+  const [translations, setTranslations] = useState({}); // caption id -> {lang: text}
   const [warning, setWarning] = useState(null); // {text, credit}
   const [stopped, setStopped] = useState(null); // {text, credit}
   const session = useRef(null);
@@ -267,7 +272,10 @@ function LiveDemo({ pricing }) {
   const priceKnown = !!pricing && (!denoise || !!den) && (!captions || !!cap);
   const offered = (!denoise || den?.available !== false) && (!captions || cap?.available !== false);
   const accurateListed = capRates.premium?.available !== false;
-  const onTrial = trialLiveSecondsLeft > 0 && captions !== 'premium'; // the free trial covers Standard live only
+  const spoken = captions === 'premium' ? language : 'en';
+  const liveTargets = captions ? targets.filter((t) => t && t !== spoken) : [];
+  const onTrial = trialLiveSecondsLeft > 0 && captions !== 'premium' && liveTargets.length === 0; // the free trial covers Standard live only
+  const translateRate = findRate(pricing, 'stream_translate', 'standard');
   const mediaOk = !!(navigator.mediaDevices?.getUserMedia && window.AudioWorklet && window.WebSocket);
 
   useEffect(() => () => session.current?.stop(), []);
@@ -277,6 +285,8 @@ function LiveDemo({ pricing }) {
     if (ev.type === 'ready') setInfo(ev);
     else if (ev.type === 'caption') {
       setLines((l) => applyCaption(l, ev));
+    } else if (ev.type === 'translation') {
+      setTranslations((t) => ({ ...t, [ev.of]: { ...t[ev.of], [ev.lang]: ev.text } }));
     } else if (ev.type === 'warning') {
       if (ev.code === 'low_balance') setWarning({ text: `Your balance covers about ${Math.max(0, Math.round(ev.secondsLeft))} more seconds. Add credit to keep going.`, credit: true });
       else if (ev.code === 'trial_low') setWarning({ text: `Your free trial has about ${trialLeft(ev.secondsLeft)} of live left. Add credit to keep going after that.`, credit: true });
@@ -295,7 +305,7 @@ function LiveDemo({ pricing }) {
 
   /** cfg: {denoise: tier id | null, captions: '' | 'local' | 'premium'} (defaults to what is selected right now). */
   async function start(cfg = { denoise: denoise ? 'light' : null, captions }) {
-    setError(''); setFull(null); setWarning(null); setStopped(null); setLines([]); setStats(null); setInfo(null);
+    setError(''); setFull(null); setWarning(null); setStopped(null); setLines([]); setTranslations({}); setStats(null); setInfo(null);
     setState('starting');
     if (free) {
       try {
@@ -316,6 +326,7 @@ function LiveDemo({ pricing }) {
       session.current = await startLive({
         denoise: cfg.denoise, captions: cfg.captions || null,
         language: cfg.captions === 'premium' ? language || null : null, // standard captions are English; the language only matters for extra accurate
+        translate: cfg.captions ? liveTargets : [],
         attenDb: strengthDb(strength), monitor,
         onEvent, onStats: setStats,
       });
@@ -391,6 +402,7 @@ function LiveDemo({ pricing }) {
           />
           <span className="hint">You can change it while you talk.</span>
           {!free && <span className="hint">Echo from your speakers is removed automatically. With headphones you don’t need it.</span>}
+          {!free && denoise && <GoodToKnow k="liveDenoise" />}
         </Group>
 
         <Group id="grp-captions" title="Captions">
@@ -448,6 +460,24 @@ function LiveDemo({ pricing }) {
             </>
           )}
           {captions === 'local' && <span className="hint">Standard captions are English only. For another language, choose Extra accurate.</span>}
+          {captions === 'local' && <GoodToKnow k="liveCaptions" />}
+          {captions === 'premium' && <GoodToKnow k="liveAccurate" />}
+          {captions && (
+            <div className="field" data-testid="live-translate">
+              <span className="label">Also translate into</span>
+              {targets.map((t, i) => (
+                <select
+                  key={i} className="select" aria-label={`Live translation language ${i + 1}`} value={t} disabled={busy}
+                  onChange={(e) => setTargets(targets.map((x, j) => (j === i ? e.target.value : x)))}
+                >
+                  <option value="">{i === 0 ? 'No translation' : 'No other language'}</option>
+                  {LANGUAGES.filter(([c]) => c && c !== spoken && (c === t || !targets.includes(c))).map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+                </select>
+              ))}
+              {liveTargets.length > 0 && <GoodToKnow k="liveTranslations" />}
+              <span className="hint">Each line shows under the caption a moment later{translateRate ? `. ${moneyUsd(translateRate.usdPerHour)} an hour per language, counted by the speech translated` : ''}{onTrial || !liveTargets.length ? '' : '. Not covered by the free trial'}.</span>
+            </div>
+          )}
           </>
           )}
         </Group>
@@ -538,7 +568,14 @@ function LiveDemo({ pricing }) {
           <div className="caption-log" ref={logRef} role="log" aria-live="polite" aria-labelledby="cap-h" data-testid="captions">
             {lines.length === 0 && <p className="muted">{live ? (!free && captions === 'premium' ? 'Say something and the captions show up here as you talk.' : 'Say something and the captions show up here as you talk and pause.') : 'Captions show up here while the test runs.'}</p>}
             {lines.map((l) => (l.final
-              ? <p key={l.key} data-testid="caption-line">{l.text}</p>
+              ? (
+                <div key={l.key}>
+                  <p className="mb0" data-testid="caption-line">{l.text}</p>
+                  {Object.entries(translations[String(l.id || '').replace(/^id:/, '')] || {}).map(([lang, text]) => (
+                    <p key={lang} className="small muted mb0" lang={lang} data-testid="caption-translation">{LANGUAGE_NAME[lang] || lang}: {text}</p>
+                  ))}
+                </div>
+              )
               : <p key={l.key} className="partial" aria-hidden="true" data-testid="caption-partial">{l.text}</p>))}
           </div>
         </div>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
+import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, moneyUsd, shownName } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
@@ -442,6 +443,8 @@ export default function JobForm({ onSubmitted }) {
                 />
               </div>
             </fieldset>
+            {wantsBrowser && <GoodToKnow k="browserDenoise" />}
+            {wantsPolish && <GoodToKnow k={rebuild && rebuildRate ? 'rebuild' : 'polish'} />}
 
             {wantsBrowser && (
               <div className="stack">
@@ -529,6 +532,10 @@ export default function JobForm({ onSubmitted }) {
               {wantsBrowser && serverText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
               {wantsPolish && localSubs && <span className="hint" data-testid="polish-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
             </fieldset>
+            {subs === 'browser' && <GoodToKnow k="browserSubs" />}
+            {subs === 'standard' && <GoodToKnow k="standardSubs" />}
+            {subs === 'accurate' && <GoodToKnow k="accurateSubs" />}
+            {translations.length > 0 && <GoodToKnow k="translations" />}
 
             {wantsText && (
               <div className="stack">

@@ -167,6 +167,40 @@ await check('live: paid demo with fake mic, denoise + local captions', async () 
   return `RTT avg ${rtt.toFixed(1)} ms, frames sent ${sent} recv ${recv}; captions: ${cap ? JSON.stringify(cap) : 'NONE'}`;
 });
 
+await check('live: translations in the paid test: the start asks for them, each translated line shows under its caption (mocked server)', async () => {
+  let startMsg = null;
+  await page.routeWebSocket(/\/api\/stream\/ws/, (ws) => {
+    ws.onMessage((m) => {
+      if (typeof m !== 'string') return;
+      const j = JSON.parse(m);
+      if (j.type === 'start') {
+        startMsg = j;
+        ws.send(JSON.stringify({ type: 'ready', sessionId: 's1', sampleRate: 48000, hopSamples: 480, modelLatencyMs: 30, usdPerMinute: 0.016, maxSessionSeconds: 3600, translate: j.translate }));
+        setTimeout(() => {
+          ws.send(JSON.stringify({ type: 'caption', id: 'l0', text: 'Hello chat', final: true, start: 0, end: 1 }));
+          ws.send(JSON.stringify({ type: 'translation', lang: 'es', of: 'l0', text: 'Hola chat', start: 0, end: 1 }));
+          ws.send(JSON.stringify({ type: 'translation', lang: 'ja', of: 'l0', text: 'こんにちは', start: 0, end: 1 }));
+        }, 300);
+      } else if (j.type === 'stop') ws.close();
+    });
+  });
+  try {
+    await page.goto(`${BASE}/app/live`);
+    await paidTest();
+    await page.getByLabel('Live translation language 1').selectOption('es');
+    await page.getByLabel('Live translation language 2').selectOption('ja');
+    await page.getByTestId('live-start').click();
+    await page.getByTestId('caption-translation').nth(1).waitFor({ timeout: 15000 });
+    const shown = await page.getByTestId('caption-translation').allInnerTexts();
+    await page.getByTestId('live-stop').click();
+    if (JSON.stringify(startMsg?.translate) !== '["es","ja"]') throw new Error('start: ' + JSON.stringify(startMsg));
+    if (JSON.stringify(shown) !== JSON.stringify(['Spanish: Hola chat', 'Japanese: こんにちは'])) throw new Error(JSON.stringify(shown));
+    return shown.join(' | ');
+  } finally {
+    await page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
+  }
+});
+
 await check('live: protocol sanity (start msg, ready, binary frames, stop)', async () => {
   const s = JSON.parse(wsFrames.start);
   if (s.sampleRate !== 48000 || s.version !== 1 || s.denoise !== 'light' || s.captions !== 'local') throw new Error(wsFrames.start);
