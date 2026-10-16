@@ -34,6 +34,8 @@ def get_pricing() -> dict:
             "minCents": pricing.TOPUP_MIN_CENTS,
             "maxCents": pricing.TOPUP_MAX_CENTS,
             "presetsCents": pricing.TOPUP_PRESETS_CENTS,
+            # bonus credit on bigger top-ups, highest tier first: [{fromCents, percent}]
+            "bonus": [{"fromCents": c, "percent": pm / 10} for c, pm in pricing.TOPUP_BONUS_TIERS],
         },
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
         "maxUploadBytes": get_settings().max_upload_bytes,

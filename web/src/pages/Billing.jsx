@@ -152,6 +152,12 @@ function topupLimit(pricing, limitCents) {
   return { max: limitCents != null ? Math.min(site, limitCents) : site, limited: limitCents != null && limitCents < site };
 }
 
+/** Bonus credit for a top-up of `cents` (the tiers come highest first), in cents. */
+export function topupBonusCents(pricing, cents) {
+  const tier = (pricing?.topup?.bonus ?? []).find((t) => cents >= t.fromCents);
+  return tier ? Math.floor((cents * tier.percent) / 100) : 0;
+}
+
 function TopUp({ pricing, unavailable, limitCents }) {
   const min = pricing?.topup?.minCents ?? 500;
   const { max, limited } = topupLimit(pricing, limitCents);
@@ -164,6 +170,8 @@ function TopUp({ pricing, unavailable, limitCents }) {
 
   const cents = choice === 'custom' ? dollarsToCents(custom) : Number(choice);
   const valid = Number.isInteger(cents) && cents >= min && cents <= max;
+  const bonus = valid ? topupBonusCents(pricing, cents) : 0;
+  const tiers = [...(pricing?.topup?.bonus ?? [])].reverse(); // lowest first, for the sentence
 
   async function go(e) {
     e.preventDefault();
@@ -190,7 +198,7 @@ function TopUp({ pricing, unavailable, limitCents }) {
           {presets.map((c) => (
             <label className="choice" key={c}>
               <input type="radio" name="amount" value={c} checked={choice === String(c)} onChange={() => setChoice(String(c))} />
-              <span><b>{moneyCents(c)}</b></span>
+              <span><b>{moneyCents(c)}</b>{topupBonusCents(pricing, c) > 0 && <small>+{moneyCents(topupBonusCents(pricing, c))} bonus</small>}</span>
             </label>
           ))}
           <label className="choice">
@@ -211,6 +219,12 @@ function TopUp({ pricing, unavailable, limitCents }) {
               : `The most you can add at once is ${moneyCents(max)}.`}
           </span>
         </div>
+      )}
+      {tiers.length > 0 && (
+        <p className="hint mb0" data-testid="topup-bonus">
+          {bonus > 0 ? <><b>You get {moneyCents(cents + bonus)} of credit</b> ({moneyCents(bonus)} bonus). </> : null}
+          Bigger top-ups cost less in card fees, so we pass that on: {tiers.map((t) => `+${t.percent}% from ${moneyCents(t.fromCents)}`).join(', ')}. Bonus credit isn’t refundable and goes if its payment is refunded.
+        </p>
       )}
       <label className="check">
         <input type="checkbox" checked={saveCard} onChange={(e) => setSaveCard(e.target.checked)} />

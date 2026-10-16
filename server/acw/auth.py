@@ -27,7 +27,7 @@ from .security import (
     user_agent,
 )
 
-TOS_VERSION = "2026-10-15"
+TOS_VERSION = "2026-10-16"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # A browser that has not been seen for this long must sign in again (the session also has a fixed life).
 SESSION_IDLE_SECONDS = 14 * 86400

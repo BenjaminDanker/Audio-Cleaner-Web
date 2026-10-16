@@ -14,7 +14,7 @@ import stripe
 
 from .. import db
 from ..config import _env, get_settings
-from . import ledger, trust
+from . import ledger, pricing, trust
 from .pricing import MICROS_PER_CENT, TOPUP_MAX_CENTS, TOPUP_MIN_CENTS
 
 log = logging.getLogger(__name__)
@@ -287,6 +287,10 @@ def _credit_payment(
             " stripe_charge = ?, updated_at = ? WHERE id = ?",
             (pi_id, charge_id, db.now(), payment_id),
         )
+        bonus = pricing.topup_bonus_micros(amount_cents)
+        if bonus:
+            ledger.credit(user_id, bonus, "grant", "payment_bonus", payment_id,
+                          f"Bonus for a ${amount_cents / 100:.2f} top-up", c=c)
         if p["kind"] == "auto_reload":
             c.execute(
                 "UPDATE users SET auto_reload_in_flight = 0, auto_reload_failures = 0 WHERE id = ?",
@@ -394,6 +398,7 @@ def _handle_charge_refunded(charge: dict) -> None:
     p = db.one("SELECT amount_cents, tax_cents, status FROM payments WHERE id = ?", (payment_id,))
     if p["status"] == "refused_region":
         return  # our own full refund of a payment that was never credited
+    take_back_bonus(user_id, payment_id)
     for r in refunds:
         r = r if isinstance(r, dict) else r.to_dict()
         if r.get("status") not in ("succeeded", "pending"):
@@ -462,6 +467,7 @@ def _handle_dispute_created(dispute: dict) -> None:
     if row is None:
         log.error("dispute %s for unknown charge %s", dispute.get("id"), charge_id)
         return
+    take_back_bonus(row["user_id"], row["id"])
     db.execute("UPDATE payments SET status = 'disputed', updated_at = ? WHERE id = ?", (db.now(), row["id"]))
     taken = suspend_and_zero(row["user_id"], f"dispute {dispute.get('reason')}", dispute["id"])
     _note_unrecovered("dispute_unrecovered", row, dispute["id"], taken)
@@ -633,6 +639,26 @@ def run_auto_reload(user_id: str) -> str:
     return pi.status
 
 
+def take_back_bonus(user_id: str, payment_id: str, c=None) -> int:
+    """A top-up's bonus goes when the payment is refunded (even in part) or disputed: once, as far as the credit
+    is still there (allow_partial). Returns micros taken back."""
+
+    def work(c) -> int:
+        given = c.execute("SELECT COALESCE(SUM(amount_micros), 0) AS s FROM ledger WHERE user_id = ? AND kind = 'grant'"
+                          " AND ref_type = 'payment_bonus' AND ref_id = ?", (user_id, payment_id)).fetchone()["s"]
+        back = c.execute("SELECT COUNT(*) AS n FROM ledger WHERE user_id = ? AND ref_type = 'payment_bonus_back' AND ref_id = ?",
+                         (user_id, payment_id)).fetchone()["n"]
+        if given <= 0 or back:
+            return 0
+        return ledger.debit_available(user_id, int(given), "grant", "payment_bonus_back", payment_id,
+                                      "Top-up bonus taken back (its payment was refunded)", allow_partial=True, c=c)
+
+    if c is not None:
+        return work(c)
+    with db.tx() as c2:
+        return work(c2)
+
+
 def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
     """Self-serve refund of unused credit from one recent payment. Returns cents refunded."""
     p = db.one("SELECT * FROM payments WHERE id = ? AND user_id = ?", (payment_id, user_id))
@@ -640,6 +666,7 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
         raise ValueError("This payment can't be refunded.")
     if db.now() - p["created_at"] > max_age_days * 86400:
         raise ValueError(f"Payments older than {max_age_days} days can't be refunded online; contact support.")
+    take_back_bonus(user_id, payment_id)
     bal = ledger.balance(user_id)
     # Given credit (grants) counts as spent last: a refund never pays it out as money.
     bought = max(0, bal["available_micros"] - ledger.granted_micros(user_id))

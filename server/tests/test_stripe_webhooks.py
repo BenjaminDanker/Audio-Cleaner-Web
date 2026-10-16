@@ -370,3 +370,69 @@ def test_a_payment_that_is_not_a_card_is_never_charged(client, user_with_pending
     assert fake_pi.cancels and not fake_pi.captures and not fake_pi.refunds
     assert ledger.balance(uid)["balance_micros"] == 0
     assert db.one("SELECT status FROM payments WHERE id = 'pay1'")["status"] == "refused_region"
+
+
+# ------------------------------------------------------------- bonus credit on bigger top-ups (2026-10-16)
+
+def test_bonus_tiers():
+    from acw.billing import pricing
+
+    assert pricing.topup_bonus_micros(2_000) == 0
+    assert pricing.topup_bonus_micros(5_000) == 1_000_000  # +2% of $50 = $1.00
+    assert pricing.topup_bonus_micros(10_000) == 2_500_000  # +2.5% of $100
+    assert pricing.topup_bonus_micros(50_000) == 12_500_000
+
+
+def _make_50(uid):
+    db.execute("UPDATE payments SET amount_cents = 5000 WHERE id = 'pay1'")
+
+
+def test_a_50_dollar_top_up_gets_its_bonus_once_and_loses_it_when_refunded(client, user_with_pending_payment, fake_pi):
+    uid = user_with_pending_payment
+    _make_50(uid)
+    for eid in ("evt_1", "evt_2"):
+        body, sig = signed(checkout_completed(uid, eid))
+        client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    assert ledger.balance(uid)["balance_micros"] == 51_000_000  # $50 + $1 bonus, credited once
+    assert ledger.granted_micros(uid) == 1_000_000  # given, never paid out as money
+    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 1000,
+              "refunds": {"object": "list", "data": [{"id": "re_1", "object": "refund", "amount": 1000, "status": "succeeded"}]}}
+    for eid in ("evt_r1", "evt_r2"):
+        body, sig = signed(event("charge.refunded", charge, eid))
+        client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    assert ledger.balance(uid)["balance_micros"] == 40_000_000  # $10 refunded and the $1 bonus gone, once
+    assert ledger.granted_micros(uid) == 0
+
+
+def test_a_self_service_refund_never_pays_out_the_bonus(monkeypatch):
+    from types import SimpleNamespace
+
+    from acw import auth
+    from acw.billing import stripe_service
+
+    uid = auth.get_or_create_user("bonus@example.com")["id"]
+    now = db.now()
+    db.execute(
+        "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
+        " VALUES ('pay_b', ?, 'checkout', 'succeeded', 5000, 0, 0, 'ch_b', ?, ?)", (uid, now, now))
+    ledger.credit(uid, 5000 * 10_000, "topup", "payment", "pay_b")
+    ledger.credit(uid, 1_000_000, "grant", "payment_bonus", "pay_b")
+    refunds = []
+
+    class Fake:
+        class v1:
+            class charges:
+                @staticmethod
+                def retrieve(_id, params=None):
+                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=175, currency="usd"))
+
+            class refunds:
+                @staticmethod
+                def create(params=None, options=None):
+                    refunds.append(params["amount"])
+                    return SimpleNamespace(id=f"re_{len(refunds)}")
+
+    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
+    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
+    assert stripe_service.refund_unused(uid, "pay_b") == 5000 - 175
+    assert ledger.balance(uid)["balance_micros"] == 0  # the bonus went with the payment, nothing left to spend

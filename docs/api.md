@@ -31,7 +31,7 @@ live worker, stuck jobs, missing model files and the ledger check.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/me` | `{signedIn:false, contactForm}` or `{signedIn, contactForm, user:{id,email,displayName,isAdmin,status,tosAccepted,createdAt}, csrfToken, balance:{balance_micros,held_micros,available_micros}, topupMaxCents, trialLiveSecondsLeft, autoReload:{enabled,thresholdMicros,amountCents,monthlyCapCents,hasCard,failures}}`. `topupMaxCents`: the largest top-up right now ($50 until a first top-up has gone through, then $500); `trialLiveSecondsLeft`: what is left of the free live trial (whole seconds). With an API key the answer is only `{signedIn, contactForm, user:{id,status}, balance, trialLiveSecondsLeft}` |
-| POST | `/api/account/tos` | `{version}`: must equal the current terms version (see `TOS_VERSION`, currently `2026-10-10`) |
+| POST | `/api/account/tos` | `{version}`: must equal the current terms version (see `TOS_VERSION`, currently `2026-10-16`) |
 | GET | `/api/auth/providers` | `{google:bool, email:bool, turnstileSiteKey:str|null}` |
 | GET | `/api/auth/oauth/google/start` | browser navigation; ends at `/app` (or `/login?error=...`) |
 | POST | `/api/auth/email` | `{email, turnstileToken?}` sends a magic link to `/login/verify#token=...` |

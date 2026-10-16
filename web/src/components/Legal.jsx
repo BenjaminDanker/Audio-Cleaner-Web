@@ -2,7 +2,7 @@ import { Link } from 'react-router';
 import { useAuth } from '../auth.jsx';
 import { SITE } from '../site.js';
 
-export const LEGAL_VERSION = '2026-10-15';
+export const LEGAL_VERSION = '2026-10-16';
 
 /** Wrapper for legal text: version and table of contents. */
 export default function Legal({ title, sections, children }) {

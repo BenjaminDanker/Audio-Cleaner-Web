@@ -43,11 +43,22 @@ RATES: dict[tuple[str, str], Rate] = {(r.product, r.tier): r for r in _RATE_LIST
 # No minimum: jobs are billed per second of audio (rounded up), as advertised.
 MIN_JOB_CHARGE_MICROS = 0
 
-# Top-up rules (cents). $10 minimum keeps Stripe's fixed fee and dispute
-# exposure reasonable (see docs/payments.md).
+# Top-up rules (cents). $5 minimum (the owner's choice: Stripe's 30c fixed fee makes small top-ups cost us more,
+# 8.9% of $5, but the free trial covers trying things out).
 TOPUP_MIN_CENTS = 500
 TOPUP_MAX_CENTS = 50_000
 TOPUP_PRESETS_CENTS = [1_000, 2_000, 5_000, 10_000]
+# Bonus credit on bigger top-ups, roughly what Stripe's fixed fee saves on them (it is 5.9% of $10, 3.5% of $50, 3.2%
+# of $100): (from cents, per mille). Bonus credit is given credit: never refunded as money, and taken back when its
+# payment is refunded or disputed.
+TOPUP_BONUS_TIERS = [(10_000, 25), (5_000, 20)]
+
+
+def topup_bonus_micros(amount_cents: int) -> int:
+    for from_cents, per_mille in TOPUP_BONUS_TIERS:
+        if amount_cents >= from_cents:
+            return amount_cents * MICROS_PER_CENT * per_mille // 1000
+    return 0
 
 # The free subtitle minutes on our side are gone (free subtitles run in the browser); a job created free before that
 # change still finishes under the limits it was created with (acw/worker/main.py).

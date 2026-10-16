@@ -164,7 +164,7 @@ if (want('jobs') || want('billing') || want('files')) {
     await page.getByTestId('available').waitFor();
     await page.evaluate(async () => {
       const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
-      await fetch('/audio/api/account/tos', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken }, body: JSON.stringify({ version: '2026-10-15' }) });
+      await fetch('/audio/api/account/tos', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken }, body: JSON.stringify({ version: '2026-10-16' }) });
     });
   };
 
