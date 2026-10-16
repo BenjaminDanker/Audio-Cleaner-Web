@@ -76,6 +76,7 @@ export default function Privacy() {
       <h2 id="retention">8. How long we keep things</h2>
       <ul>
         <li>Account data: while your account exists, then deleted on request unless we must keep it by law.</li>
+        <li>A one-way hash of your email address, kept for good, even after you delete your account, only so the one-time welcome credit is not given twice. It cannot be turned back into your address and is not linked to your account.</li>
         <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email). Records that go with them, such as that you accepted the Terms, started a payment, turned automatic top-up on or off, or were refunded or credited, are kept just as long.</li>
         <li>Job records and live-session records (metadata only, no content): deleted 12 months after the job or session. File names are removed from your credit history after 12 months; what you paid stays there as a line without the name (date, kind of work, length, amount) for the 7 years above.</li>
         <li>Security logs, including IP addresses and browser types of sign-ins and live sessions: 90 days. The entries themselves (a sign-in, a key created, a contact message sent) are deleted after 12 months, without IP addresses after the first 90 days.</li>

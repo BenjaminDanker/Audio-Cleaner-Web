@@ -14,7 +14,7 @@ const SAID = /responsible|hearing|damage|exposure/i; // what speech.wav says
 
 const { browser, context, page, logs } = await launch([], { acceptDownloads: true });
 const calls = [];
-context.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/')) calls.push(`${r.method()} ${u.pathname}`); });
+context.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/') || u.pathname.includes('/audio/dfn/models/')) calls.push(`${r.method()} ${u.pathname}`); });
 await signIn(page, EMAIL);
 
 async function run(file, { noise = 'off', embed = false } = {}) {
@@ -62,17 +62,17 @@ await check('subtitles: a short recording, made in the browser: right words, Eng
   if (txt.name !== 'speech-transcript.txt' || !SAID.test(readFileSync(txt.path, 'utf8'))) throw new Error(txt.name);
   const posted = calls.filter((c) => c.startsWith('POST') || c.includes('/jobs/'));
   if (posted.length) throw new Error(`sent to the server: ${posted.join(', ')}`);
-  const model = calls.filter((c) => c.includes('/downloads/browser/'));
+  const model = calls.filter((c) => c.includes('/dfn/models/'));
   if (model.length < 7) throw new Error(`model files fetched: ${model.join(', ')}`);
   await page.screenshot({ path: join(SHOTS, 'subs-free.png'), fullPage: true });
-  return `${ms} ms; "${preview.slice(0, 80)}"; ${model.length} model files from our server`;
+  return `${ms} ms; "${preview.slice(0, 80)}"; ${model.length} model files from the site`;
 });
 
 await check('subtitles: after a reload the model comes from the browser\'s cache, not our server', async () => {
   calls.length = 0;
   const { res } = await run('speech.wav');
   if (!SAID.test(await res.getByTestId('subs-preview').innerText())) throw new Error('wrong words');
-  const model = calls.filter((c) => c.includes('/downloads/browser/'));
+  const model = calls.filter((c) => c.includes('/dfn/models/'));
   if (model.length) throw new Error(`fetched again: ${model.join(', ')}`);
   return 'cached';
 });

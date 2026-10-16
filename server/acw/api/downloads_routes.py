@@ -7,8 +7,6 @@
                                            website's buttons (served directly, never redirected)
   desktop/latest/<platform>                windows | mac-apple-silicon | mac-intel: the current installer, same way
   models/<file>                            a model archive deploy/models.lock lists
-  browser/<model>/<file>                   a file of a model that runs in the browser (acw/browser_models.py):
-                                           signed-in browsers only, counted like the other free-tool files
 
 Public: no sign-in, a rate limit per network (httpstack: all /api/ calls; here: starting file downloads) and the
 download byte-rate cap of the bulk process (acw/bulk_app.py applies it to these paths). The files were verified by
@@ -22,10 +20,10 @@ import os
 import re
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import Response
 
-from .. import auth, browser_models, downloads
+from .. import downloads
 from ..security import client_ip, client_net, enforce
 
 router = APIRouter(prefix="/api/downloads", tags=["downloads"])
@@ -215,17 +213,3 @@ def obs_plugin_file(name: str, request: Request) -> Response:
 def model_file(name: str, request: Request) -> Response:
     return _get("models", name, request)
 
-
-@both("/browser/{model}/{name:path}")
-def browser_model_file(model: str, name: str, request: Request, principal: auth.Principal = Depends(auth.require_session)) -> Response:
-    entry = browser_models.lookup(model, name)
-    if entry is None:
-        raise HTTPException(status_code=404, detail="Not found.")
-    rng = request.headers.get("range") or ""
-    if request.method == "GET" and (not rng or rng.strip().startswith("bytes=0-")):
-        enforce("asset_fetch", principal.user_id)  # the same daily allowance as the noise remover's files
-    resp = serve("browser", entry, request, opener=browser_models.open_file)
-    resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"  # the model id names the version
-    if "content-disposition" in resp.headers:
-        del resp.headers["content-disposition"]
-    return resp

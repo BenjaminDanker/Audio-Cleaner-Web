@@ -61,10 +61,49 @@ function syncOrt() {
   console.log(`sync-dfn: onnxruntime-web -> public/dfn/ort/${ortDir.split('/').pop()}/`);
 }
 
+// The free subtitles' model (Whisper base, ~80 MB): deploy/fetch-models.sh downloads it (pinned in deploy/models.lock)
+// to ~/audio-cleaner/models/browser/whisper-base; it is copied next to the noise remover (same sign-in gate on the VPS),
+// into a folder named after the pin, after its sha256 is checked against models.lock. The model id must match
+// src/media/speech.js (MODEL).
+const SPEECH_ID = 'whisper-base-1846881';
+const speechSrc = process.env.SPEECH_MODEL_DIR || join(homedir(), 'audio-cleaner', 'models', 'browser', 'whisper-base');
+const speechOut = join(out, 'models', SPEECH_ID);
+function speechPins() {
+  const lock = readFileSync(join(root, '..', 'deploy', 'models.lock'), 'utf8');
+  const pins = [];
+  for (const line of lock.split('\n')) {
+    const p = line.trim().split(/\s+/);
+    if (p[0] === 'file' && p[4]?.startsWith('models/browser/whisper-base/')) pins.push({ name: p[4].slice('models/browser/whisper-base/'.length), sha: p[2], size: Number(p[3]) });
+  }
+  return pins;
+}
+function syncSpeech() {
+  const pins = speechPins();
+  if (!pins.length) throw new Error('sync-dfn: no models/browser/whisper-base pins in deploy/models.lock');
+  const ok = (dir) => pins.every((f) => existsSync(join(dir, f.name)) && statSync(join(dir, f.name)).size === f.size);
+  if (ok(speechOut)) return;
+  if (!ok(speechSrc)) {
+    console.warn(`sync-dfn: the subtitle model is not in ${speechSrc} (run deploy/fetch-models.sh); the free subtitles will not load`);
+    return;
+  }
+  for (const f of pins) {
+    const got = createHash('sha256').update(readFileSync(join(speechSrc, f.name))).digest('hex');
+    if (got !== f.sha) throw new Error(`sync-dfn: ${f.name} does not match its pin in deploy/models.lock`);
+  }
+  const modelsOut = join(out, 'models');
+  if (existsSync(modelsOut)) for (const d of readdirSync(modelsOut)) if (d !== SPEECH_ID) rmSync(join(modelsOut, d), { recursive: true });
+  for (const f of pins) {
+    mkdirSync(dirname(join(speechOut, f.name)), { recursive: true });
+    copyFileSync(join(speechSrc, f.name), join(speechOut, f.name));
+  }
+  console.log(`sync-dfn: subtitle model -> public/dfn/models/${SPEECH_ID}/`);
+}
+
 const libavPresent = () => existsSync(libavOut) && readdirSync(libavOut).length === 1;
 const complete = () => files.every(([, name]) => existsSync(join(out, name))) && (libavPresent() || !existsSync(libavDist));
 if (process.argv.includes('--if-missing') && complete()) {
   syncOrt();
+  syncSpeech();
   console.log('sync-dfn: public/dfn already complete');
   process.exit(0);
 }
@@ -83,3 +122,4 @@ for (const [src, name] of files) {
 console.log(`sync-dfn: copied ${(total / 1048576).toFixed(1)} MB to public/dfn/`);
 syncLibav();
 syncOrt();
+syncSpeech();

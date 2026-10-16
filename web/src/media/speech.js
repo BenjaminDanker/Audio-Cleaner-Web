@@ -1,15 +1,14 @@
 // Main-thread side of the free in-browser subtitles: one shared model download and one worker per page, then
 // subtitles for a whole file (transcribeFile) or for short pieces of live speech (transcribeSpeech).
 //
-// The model (Whisper base, about 80 MB) comes from our own server, for signed-in visitors only, and stays in the
-// browser's cache, so it is downloaded once. The runtime's WebAssembly sits next to the noise remover's files (same
-// gate). Everything runs on the visitor's device; nothing is uploaded.
+// The model (Whisper base, about 80 MB) and the runtime's WebAssembly sit next to the noise remover's files (the same
+// sign-in gate, scripts/sync-dfn.mjs) and stay in the browser's cache, so they are downloaded once. Everything runs
+// on the visitor's device; nothing is uploaded.
 
-import { API } from '../api.js';
 import { decodeToChunks, TARGET_RATE } from './decode.js';
 import { Resampler } from './resample.js';
 
-const MODEL = 'whisper-base-1846881'; // server/acw/browser_models.py
+const MODEL = 'whisper-base-1846881'; // the folder scripts/sync-dfn.mjs puts it in (SPEECH_ID)
 const MODEL_BYTES = 79664191; // the seven files together, for the progress readout
 const RATE = 16000;
 const WINDOW = 30 * RATE; // the model hears at most 30 s at a time
@@ -77,7 +76,7 @@ export function preloadSpeech() {
   const origin = location.origin;
   worker.postMessage({
     type: 'init', model: MODEL, plainWasm: plainWasmOnly(),
-    modelHost: `${origin}${API}downloads/browser/`,
+    modelHost: `${origin}${import.meta.env.BASE_URL}dfn/models/`,
     ortBase: `${origin}${import.meta.env.BASE_URL}dfn/ort/${__ORT_DIR__}/`,
   });
   return e.ready;

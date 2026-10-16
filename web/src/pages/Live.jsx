@@ -22,7 +22,7 @@ export default function Live() {
         <IconBroadcast width={36} height={36} />
         <div>
           <h1 className="mb0">Live for streamers</h1>
-          <p className="muted mb0">Clean mic audio and live captions for OBS. You only pay while you’re live.</p>
+          <p className="muted mb0">Clean mic audio and live captions for OBS. New accounts get their first hour free; after that you only pay while you’re live.</p>
         </div>
       </header>
       <LivePrices />
@@ -45,22 +45,7 @@ function LivePrices() {
   );
 }
 
-/** Keys and the plugin download need credit in the account: both only spend it. */
-function useHasCredit() {
-  const { balance } = useAuth();
-  return (balance?.balance_micros ?? 0) > 0;
-}
-
-function NeedsCredit({ what }) {
-  return (
-    <p className="banner banner-info mb0" data-testid="needs-credit">
-      Add credit to {what}. Keys and the plugin only spend credit, so they need some in your account to work. <Link to="/app/billing">Add credit</Link>
-    </p>
-  );
-}
-
 function ObsSetup() {
-  const hasCredit = useHasCredit();
   return (
     <section className="card stack" aria-labelledby="obs-h">
       <h2 id="obs-h" className="mb0">OBS plugin setup</h2>
@@ -70,7 +55,7 @@ function ObsSetup() {
         <li>In OBS, add the <b>Audio Cleaner</b> filter to your microphone source and paste the key.</li>
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
-      {hasCredit ? <PluginInstall /> : <NeedsCredit what="download the plugin" />}
+      <PluginInstall />
       <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>
     </section>
   );
@@ -81,7 +66,6 @@ function ObsSetup() {
 const SCOPE_LABEL = { stream: 'OBS plugin and live', jobs: 'File API for scripts' };
 
 function ApiKeys() {
-  const hasCredit = useHasCredit();
   const [keys, setKeys] = useState(null);
   const [error, setError] = useState('');
   const [name, setName] = useState('OBS on my PC');
@@ -152,8 +136,7 @@ function ApiKeys() {
           </div>
         </div>
       )}
-      {!hasCredit && <NeedsCredit what="make a key" />}
-      <form className="stack" onSubmit={create} hidden={!hasCredit}>
+      <form className="stack" onSubmit={create}>
         <div className="field">
           <label htmlFor="key-name">Name</label>
           <input id="key-name" className="input" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} required />

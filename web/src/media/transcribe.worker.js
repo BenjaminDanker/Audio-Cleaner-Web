@@ -3,7 +3,7 @@
 //
 // Protocol (main -> worker):
 //   { type: 'init', modelHost, model, ortBase, plainWasm }   -> progress* then { type: 'ready' } | { type: 'error', message }
-//        modelHost: absolute URL the model folder hangs off (our /api/downloads/browser/), model: its id there;
+//        modelHost: absolute URL the model folder hangs off (the site's dfn/models/), model: its id there;
 //        ortBase: absolute URL of the runtime's folder; plainWasm: use the build without WebGPU support (older Safari)
 //   { type: 'detect', id, audio: Float32Array (16 kHz mono, up to 30 s) }   -> { type: 'language', id, language }
 //   { type: 'transcribe', id, audio, language }   -> { type: 'result', id, segments: [{start, end, text}] }  (seconds)

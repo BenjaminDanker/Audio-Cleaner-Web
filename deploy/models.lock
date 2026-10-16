@@ -25,7 +25,7 @@
 #   Silero VAD            istupakov/silero-vad-onnx (what onnx-asr downloads), MIT
 #   Live captions         csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8
 #   Free subtitles        onnx-community/whisper-base (OpenAI Whisper base, MIT), 8-bit ONNX: runs in the visitor's
-#                         browser, served from here to signed-in browsers (server/acw/browser_models.py)
+#                         browser; web/scripts/sync-dfn.mjs copies it into the site (served from the VPS, signed-in only)
 #   AP-BWE, Sidon ONNX    our conversions (tools/export_apbwe_onnx.py, tools/convert_sidon_onnx.py), published as the
 #                         models-v1 release archive; the Sidon TorchScript files come from sarulab-speech/sidon-v0.1
 #   FFmpeg / FFprobe      BtbN/FFmpeg-Builds autobuild-2026-10-09-14-16 (n8.1.3-16-ge0a878dd70, GPL, static).

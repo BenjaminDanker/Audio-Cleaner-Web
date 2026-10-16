@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import auth, db
-from ..billing import ledger
 from ..security import client_ip, enforce, new_api_key
 
 router = APIRouter(prefix="/api/keys", tags=["api-keys"])
@@ -43,9 +42,6 @@ def create_key(body: CreateKey, request: Request, principal: auth.Principal = De
     n = db.one("SELECT COUNT(*) AS n FROM api_keys WHERE user_id = ? AND revoked_at IS NULL", (principal.user_id,))["n"]
     if n >= MAX_KEYS:
         raise HTTPException(status_code=400, detail=f"You can have at most {MAX_KEYS} active keys.")
-    # A key only spends credit, so a new one needs some in the account (keys made earlier keep working).
-    if ledger.balance(principal.user_id)["balance_micros"] <= 0:
-        raise HTTPException(status_code=402, detail="Add credit first: a key uses your credit, so it needs some to work.")
     key, prefix, key_hash = new_api_key()
     key_id = db.new_id()
     db.execute(

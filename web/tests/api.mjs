@@ -1,8 +1,7 @@
-import { BASE, admin, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, check, launch, signIn, summary } from './helpers.mjs';
 const { browser, page, logs } = await launch();
 const EMAIL = `e2e-api-${Date.now()}@example.com`;
 await signIn(page, EMAIL);
-admin('grant', EMAIL, '1', 'api test'); // making a key needs credit
 await check('api: 403 CSRF -> refresh /api/me once and retry', async () => {
   let n = 0; const seen = [];
   page.on('request', (r) => { if (r.url().includes('/api/me') || r.url().includes('/api/keys')) seen.push(`${r.method()} ${new URL(r.url()).pathname}`); });

@@ -108,15 +108,7 @@ await check('live: the plugin section offers a download per platform with the ve
   await page.setViewportSize({ width: 1280, height: 900 });
   if (m.sw > m.vw + 1) throw new Error('sideways scroll at 360px');
   await page.unroute('**/api/downloads/obs-plugin/manifest.json');
-  // no credit in the account: no downloads and no key form, a note with a link to add credit instead
-  await page.route('**/api/me', async (r) => { const res = await r.fetch(); const j = await res.json(); await r.fulfill({ response: res, json: { ...j, balance: { ...j.balance, balance_micros: 0, available_micros: 0 } } }); });
-  await page.goto(`${BASE}/app/live`);
-  await page.getByTestId('needs-credit').first().waitFor();
-  if ((await page.getByTestId('needs-credit').count()) !== 2) throw new Error('both the plugin and the key form should say credit is needed');
-  if (await page.getByTestId('plugin-downloads').count()) throw new Error('downloads offered without credit');
-  if (await page.getByRole('button', { name: 'Create key' }).isVisible()) throw new Error('key form shown without credit');
-  await page.unroute('**/api/me');
-  return 'version, 5 buttons, install steps, source link; partial manifest; not-ready message; needs credit';
+  return 'version, 5 buttons, install steps, source link; partial manifest; not-ready message';
 });
 
 await check('live: free test with a fake mic (clear speech): the voice is cleaned and captioned in the browser; nothing is sent to us', async () => {

@@ -65,11 +65,8 @@ def test_api_key_scopes_and_revocation(client):
     assert client.get("/api/me", headers={"Authorization": f"Bearer {key}"}).status_code == 401
 
 
-def test_key_create_needs_credit_shows_key_once_and_stores_hash(client, signed_in):
-    uid, h = signed_in
-    r = client.post("/api/keys", json={"name": "obs", "scopes": ["stream"]}, headers=h)
-    assert r.status_code == 402 and "credit" in r.json()["detail"]
-    ledger.credit(uid, 1_000_000, "grant", "t", "g")
+def test_key_create_shows_key_once_and_stores_hash(client, signed_in):
+    _, h = signed_in
     r = client.post("/api/keys", json={"name": "obs", "scopes": ["stream"]}, headers=h)
     assert r.status_code == 200
     key = r.json()["key"]

@@ -140,7 +140,7 @@ export default function Landing() {
             <article className="card product-card">
               <div className="icon"><IconBroadcast /></div>
               <h3>Live for streamers</h3>
-              <p>Clean mic audio and live captions while you stream. You only pay for the minutes you are live.{live && <> From {moneyUsd(live.usdPerHour)} an hour.</>}</p>
+              <p>Clean mic audio and live captions while you stream. Your first hour is on us, then you only pay for the minutes you are live.{live && <> From {moneyUsd(live.usdPerHour)} an hour.</>}</p>
               <span className="spacer" />
               <Link to="/app/live" className="btn btn-secondary">Try live</Link>
             </article>

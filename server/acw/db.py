@@ -228,8 +228,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS audit_user ON audit_log(user_id, id);
 
--- A deleted account's free usage for the day, kept by hash of the address, so signing up again with the same
--- address doesn't give a fresh daily allowance. Removed the next day.
+-- No longer written (it held a deleted account's free subtitle minutes for a day); emptied by auth.purge_expired.
 CREATE TABLE IF NOT EXISTS deleted_emails (
     email_hash TEXT PRIMARY KEY,
     day TEXT NOT NULL,
@@ -307,6 +306,13 @@ MIGRATIONS = [
     ("stream_sessions", "frames", "ALTER TABLE stream_sessions ADD COLUMN frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "late_frames", "ALTER TABLE stream_sessions ADD COLUMN late_frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "dropped_frames", "ALTER TABLE stream_sessions ADD COLUMN dropped_frames INTEGER NOT NULL DEFAULT 0"),
+    # The welcome credit: a one-way hash of each address that has had it, so deleting the account and signing up
+    # again doesn't give it twice. Kept for good (a hash, no account link).
+    (
+        "welcome_claims",
+        "email_hash",
+        "CREATE TABLE IF NOT EXISTS welcome_claims (email_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL)",
+    ),
     # Email alerts (acw.alerts): one row per alert kind, for de-duplication and "resolved" mails.
     (
         "alert_state",

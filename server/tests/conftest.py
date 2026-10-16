@@ -17,6 +17,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("ACW_BASE_PATH", raising=False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_secret")
+    monkeypatch.setenv("ACW_WELCOME_CREDIT_MICROS", "0")  # tests start from an empty balance; test_welcome_credit.py turns it on
     from acw import db
     from acw.config import get_settings
     from acw.security import limiter

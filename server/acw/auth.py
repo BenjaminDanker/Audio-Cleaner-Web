@@ -46,6 +46,18 @@ class Principal:
 
 # ---------------------------------------------------------------- users
 
+def _welcome(c, user_id: str, email: str) -> None:
+    """A new account's welcome credit, once per email address ever (a deleted account signing up again doesn't
+    get it twice: only a hash of the address is kept)."""
+    from .billing import ledger, pricing
+
+    amount = pricing.welcome_credit_micros()
+    if amount <= 0:
+        return
+    if c.execute("INSERT OR IGNORE INTO welcome_claims(email_hash, created_at) VALUES (?, ?)", (sha256_hex(email), db.now())).rowcount:
+        ledger.credit(user_id, amount, "grant", "welcome", user_id, "Welcome credit: try live for an hour", c=c)
+
+
 def get_or_create_user(email: str, display_name: str | None = None) -> dict:
     email = email.strip().lower()
     settings = get_settings()
@@ -61,6 +73,7 @@ def get_or_create_user(email: str, display_name: str | None = None) -> dict:
                 "INSERT INTO audit_log(user_id, actor, action, created_at) VALUES (?, 'system', 'user_created', ?)",
                 (user_id, db.now()),
             )
+            _welcome(c, user_id, email)
             row = c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         elif (email in settings.admin_emails) != bool(row["is_admin"]):
             # The list in the environment is the only source of admin rights: add and remove follow it.
@@ -301,4 +314,4 @@ def purge_expired() -> None:
     db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
     db.execute("DELETE FROM login_tokens WHERE expires_at <= ?", (now - 86400,))
     db.execute("DELETE FROM oauth_states WHERE expires_at <= ?", (now,))
-    db.execute("DELETE FROM deleted_emails WHERE day < ?", (_utc_day(),))
+    db.execute("DELETE FROM deleted_emails")  # left over from the free subtitle minutes (no longer written)

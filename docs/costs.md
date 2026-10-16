@@ -50,7 +50,7 @@ latency); standard live captions ~12 CPU-s.
 | Free thing | What it costs us |
 |---|---|
 | Browser denoise | Nothing per use (runs on the visitor's device). ~12 MB of VPS traffic per new visitor (cached for a year after). |
-| Free subtitles | Made in the visitor's browser: no compute here. Each new browser downloads the 80 MB model once from this computer (through the VPS link). |
+| Free subtitles | Made in the visitor's browser: no compute here. Each new browser downloads the 80 MB model and the 26 MB runtime once from the VPS. |
 | Desktop app | Nothing (runs offline on the user's computer). |
 
 ## Fixed and risk items

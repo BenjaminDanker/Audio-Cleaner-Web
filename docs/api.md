@@ -84,9 +84,8 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
    the name shown for the job and used for the result files; without it the uploaded file's name is used. The
    uploaded file can be a re-encoded copy of what the person chose.
    `free:true` is refused (400): jobs on our side are always paid. Free noise removal and free subtitles run in the
-   visitor's browser (the subtitle model is served to signed-in browsers at
-   `/api/downloads/browser/<model>/<file>`, server/acw/browser_models.py). Jobs created free before that change still
-   finish free.
+   visitor's browser (their engines and models are site files under `/audio/dfn/`, for signed-in browsers only;
+   web/scripts/sync-dfn.mjs). Jobs created free before that change still finish free.
    `embed_subtitles` makes our side put the subtitles into the video, which needs the whole video uploaded. The
    website only asks for it for a video the browser can't open (it goes up whole anyway); otherwise it uploads the
    sound only and puts the subtitles into an MKV in the browser afterwards (SRT-style track, which players read). Paid jobs need accepted terms. Returns

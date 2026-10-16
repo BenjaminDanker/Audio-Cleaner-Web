@@ -72,6 +72,12 @@ def balance(user_id: str) -> dict:
     }
 
 
+def granted_micros(user_id: str) -> int:
+    """Credit given, not bought (the welcome credit, admin grants): never paid out by a refund."""
+    row = db.one("SELECT COALESCE(SUM(amount_micros), 0) AS s FROM ledger WHERE user_id = ? AND kind = 'grant' AND amount_micros > 0", (user_id,))
+    return int(row["s"])
+
+
 def credit(
     user_id: str,
     amount_micros: int,
