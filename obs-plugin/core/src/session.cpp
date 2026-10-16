@@ -8,6 +8,7 @@
 #include "acw/resampler.hpp"
 #include "acw/spsc.hpp"
 #include "acw/stats.hpp"
+#include "tls_options.hpp"
 
 #include <ixwebsocket/IXNetSystem.h>
 #include <ixwebsocket/IXWebSocket.h>
@@ -20,7 +21,6 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
 #include <limits>
 #include <mutex>
 #include <thread>
@@ -143,23 +143,6 @@ bool is_local_host(std::string h)
 }
 
 std::atomic<int> g_bg_threads{0};  // network threads that are running (detached ones included)
-
-#if defined(ACW_TLS_MBEDTLS) && !defined(_WIN32)
-// mbedTLS has no system trust store: use the distribution's CA bundle.
-std::string find_ca_bundle()
-{
-	static const char *candidates[] = {
-		"/etc/ssl/certs/ca-certificates.crt",  // Debian, Ubuntu
-		"/etc/pki/tls/certs/ca-bundle.crt",    // Fedora, RHEL
-		"/etc/ssl/ca-bundle.pem",              // openSUSE
-		"/etc/ssl/cert.pem",                   // Alpine, macOS
-	};
-	for (const char *c : candidates)
-		if (std::ifstream(c).good())
-			return c;
-	return {};
-}
-#endif
 
 }  // namespace
 
@@ -647,18 +630,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		ws.disableAutomaticReconnection();  // we run our own backoff
 		ws.disablePerMessageDeflate();
 		ws.setHandshakeTimeout(10);
-		{
-			ix::SocketTLSOptions tls;
-			tls.caFile = cfg.ca_file.empty() ? "SYSTEM" : cfg.ca_file;  // certificate + hostname are always verified
-#if defined(ACW_TLS_MBEDTLS) && !defined(_WIN32)
-			if (cfg.ca_file.empty()) {
-				const std::string bundle = find_ca_bundle();
-				if (!bundle.empty())
-					tls.caFile = bundle;
-			}
-#endif
-			ws.setTLSOptions(tls);
-		}
+		ws.setTLSOptions(detail::make_tls_options(cfg.ca_file));
 
 		if (use_opus)
 			att->opus_dec = std::make_unique<OpusDec>();

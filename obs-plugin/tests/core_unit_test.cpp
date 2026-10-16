@@ -9,6 +9,7 @@
 #include "acw/resampler.hpp"
 #include "acw/session.hpp"
 #include "acw/spsc.hpp"
+#include "acw/update_check.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -800,6 +801,118 @@ static void test_session_config()
 	CHECK(s5.status_line().find("SECRET") == std::string::npos);
 }
 
+// ---------------------------------------------------------------------------------------------------
+// update notice: version numbers and the version file
+
+static void test_update_versions()
+{
+	std::printf("update check: versions\n");
+	using namespace acw;
+	Version v;
+	CHECK(parse_version("0.1.57", v) && v.part[0] == 0 && v.part[1] == 1 && v.part[2] == 57 && v.part[3] == 0);
+	CHECK(parse_version("12.345678.9", v) && v.part[1] == 345678);
+	CHECK(parse_version("2", v) && v.part[0] == 2);
+	CHECK(parse_version("1.2.3.4", v) && v.part[3] == 4);
+	const char *bad[] = {"",      " ",       "v1.2.3", "1.2.3-beta", "1..3",   ".1",      "1.",      "1.2.3.4.5", "1.2.x",
+			     "1,2,3", "1.2.3 ",  " 1.2.3", "1.2.3\n",    "-1.2.3", "+1.2.3",  "1234567.0"};
+	for (const char *b : bad) {
+		Version keep;
+		keep.part[0] = 99;
+		Version probe = keep;
+		CHECK(!parse_version(b, probe));
+		CHECK(probe.part[0] == 99);  // untouched on failure
+	}
+	CHECK(!parse_version(std::string("1.2\0" "3", 4), v));
+
+	// Numeric, not alphabetic: 0.1.9 < 0.1.57 < 0.1.100 < 0.2.0 < 1.0.0
+	const char *order[] = {"0.1.0", "0.1.9", "0.1.57", "0.1.100", "0.2.0", "1.0.0", "1.0.0.1", "1.0.1", "10.0.0"};
+	const int n = static_cast<int>(sizeof(order) / sizeof(order[0]));
+	for (int i = 0; i < n; ++i)
+		for (int j = 0; j < n; ++j) {
+			Version a, b;
+			CHECK(parse_version(order[i], a) && parse_version(order[j], b));
+			const int c = compare_versions(a, b);
+			CHECK((c < 0) == (i < j) && (c == 0) == (i == j));
+			CHECK(is_newer_version(order[i], order[j]) == (i > j));
+		}
+	CHECK(is_newer_version("1.0", "0.9.9"));
+	{
+		Version a, b;
+		CHECK(parse_version("1.0", a) && parse_version("1.0.0.0", b) && compare_versions(a, b) == 0);
+	}
+	CHECK(!is_newer_version("garbage", "0.1.0"));
+	CHECK(!is_newer_version("0.2.0", "garbage"));
+	CHECK(!is_newer_version("0.1.0", "0.1.0"));
+}
+
+static void test_update_json()
+{
+	std::printf("update check: version.json\n");
+	using namespace acw;
+	UpdateInfo i;
+	const std::string page = kReleasePageUrl;
+
+	CHECK(parse_update_json(R"({"version": "0.1.57", "url": ")" + page + R"("})", i));
+	CHECK(i.version == "0.1.57" && i.url == page);
+
+	// No address, or one that is not ours: the fixed page is used.
+	CHECK(parse_update_json(R"({"version":"0.1.57"})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.57","url":"https://evil.example/releases/"})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.57","url":"http://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/x"})", i) &&
+	      i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.57","url":"https://github.com/BenjaminDanker/Audio-Cleaner-Web.evil.example/releases/"})",
+			    i) &&
+	      i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.57","url":"https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases"})", i) &&
+	      i.url == page);  // the prefix includes the trailing slash
+	CHECK(parse_update_json(R"({"version":"0.1.57","url":42})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.57","url":null})", i) && i.url == page);
+	// Our own releases pages are fine, e.g. a tagged release.
+	const std::string tag = std::string(kReleasePagePrefix) + "tag/obs-plugin-v0.1.7";
+	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"("})", i) && i.url == tag);
+	// ... unless they carry characters that do not belong in an address.
+	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"( --evil"})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"(\"x"})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"(\u0000"})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"(\n"})", i) && i.url == page);
+	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + std::string(400, 'a') + R"("})", i) && i.url == page);
+
+	// Not a version file.
+	const char *bad[] = {"",
+			     "null",
+			     "[]",
+			     "[\"0.1.0\"]",
+			     "\"0.1.0\"",
+			     "{}",
+			     R"({"version": 1})",
+			     R"({"version": 0.1})",
+			     R"({"version": null})",
+			     R"({"version": ""})",
+			     R"({"version": "v1.2.3"})",
+			     R"({"version": "1.2.3-rc1"})",
+			     R"({"version": "banana"})",
+			     R"({"Version": "1.2.3"})",
+			     R"({"version": "1.2.3")",
+			     "<html><body>404</body></html>",
+			     "{\"version\": \"1.2.3\"} trailing"};
+	for (const char *b : bad) {
+		UpdateInfo keep;
+		keep.version = "kept";
+		UpdateInfo probe = keep;
+		CHECK(!parse_update_json(b, probe));
+		CHECK(probe.version == "kept");
+	}
+	// Extra fields are ignored.
+	CHECK(parse_update_json(R"({"version":"3.4.5","note":"x","files":[1,2]})", i) && i.version == "3.4.5");
+
+	CHECK(release_url_allowed(page));
+	CHECK(!release_url_allowed(""));
+	CHECK(!release_url_allowed(kReleasePagePrefix));  // nothing after the prefix
+	CHECK(!release_url_allowed("https://github.com/BenjaminDanker/Audio-Cleaner-Web/release/tag/x"));
+	CHECK(!release_url_allowed(page + "?a=b c"));
+	CHECK(!release_url_allowed(page + "\r\nX: y"));
+}
+
 int main()
 {
 	test_spsc();
@@ -816,6 +929,8 @@ int main()
 	test_reference_buffer();
 	test_session_config();
 	test_session_texts();
+	test_update_versions();
+	test_update_json();
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures ? 1 : 0;
 }

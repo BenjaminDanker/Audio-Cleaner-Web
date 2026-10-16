@@ -13,6 +13,7 @@ add_library(
   src/reference.cpp
   src/resampler.cpp
   src/session.cpp
+  src/update_check.cpp
 )
 target_include_directories(acw_core PUBLIC include)
 target_compile_features(acw_core PUBLIC cxx_std_17)

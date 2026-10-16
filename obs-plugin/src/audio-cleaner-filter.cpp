@@ -41,6 +41,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include "caption-output.h"
+#include "update-notice.h"
 
 #include "acw/reference.hpp"
 #include "acw/session.hpp"
@@ -72,6 +73,9 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_RETRY "retry_now"
 #define S_ADVANCED "advanced"
 #define S_DETAILS "details"
+#define S_CHECK_UPDATES "check_updates"  // shows the plugin-wide setting (update-notice.cpp); the filter's copy is unused
+#define S_UPDATE_INFO "update_info"
+#define S_UPDATE_DOWNLOAD "update_download"
 
 #define DEFAULT_URL "wss://mc-multi-world.space/audio/api/stream/ws"
 #define ECHO_DESKTOP "@desktop"  // the Desktop Audio source (output channel 1); "" = no echo cancellation
@@ -460,6 +464,7 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_string(d, S_CODEC, "opus");
 	obs_data_set_default_bool(d, S_SEND_CAPTIONS, true);
 	obs_data_set_default_string(d, S_ECHO_SOURCE, ECHO_DESKTOP);
+	obs_data_set_default_bool(d, S_CHECK_UPDATES, true);
 }
 
 void *filter_create(obs_data_t *settings, obs_source_t *source)
@@ -657,6 +662,29 @@ bool captions_modified(obs_properties_t *props, obs_property_t *, obs_data_t *se
 	return true;
 }
 
+// "Download the update": opens the release page in the browser. Nothing is downloaded by the plugin.
+bool update_download_clicked(obs_properties_t *, obs_property_t *, void *)
+{
+	update_notice_open_download_page();
+	return false;
+}
+
+// The checkbox belongs to the whole plugin, not to this filter: it is saved in the plugin's own config file.
+bool check_updates_modified(obs_properties_t *, obs_property_t *, obs_data_t *settings)
+{
+	const bool on = obs_data_get_bool(settings, S_CHECK_UPDATES);
+	if (on != update_notice_enabled())
+		update_notice_set_enabled(on);
+	return false;
+}
+
+std::string replace_all(std::string text, const std::string &from, const std::string &to)
+{
+	for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+		text.replace(at, from.size(), to);
+	return text;
+}
+
 struct echo_list_ctx {
 	obs_property_t *list;
 	obs_source_t *self;     // the filtered source: it cannot be its own speakers
@@ -686,6 +714,16 @@ obs_properties_t *filter_properties(void *data)
 	if (f) {
 		std::lock_guard<std::mutex> lk(f->mu);
 		cur = f->settings;
+	}
+
+	// A newer version of the plugin was found (once per OBS start, see update-notice.cpp): say so first.
+	char latest[64];
+	if (update_notice_available(latest, sizeof(latest))) {
+		const std::string msg = replace_all(replace_all(T_("AudioCleaner.Update.Available"), "%1", latest), "%2", PLUGIN_VERSION);
+		obs_property_t *info = obs_properties_add_text(p, S_UPDATE_INFO, msg.c_str(), OBS_TEXT_INFO);
+		obs_property_text_set_info_type(info, OBS_TEXT_INFO_WARNING);
+		obs_property_text_set_info_word_wrap(info, true);
+		obs_properties_add_button2(p, S_UPDATE_DOWNLOAD, T_("AudioCleaner.Update.Download"), update_download_clicked, nullptr);
 	}
 
 	obs_property_t *key = obs_properties_add_text(p, S_API_KEY, T_("AudioCleaner.ApiKey"), OBS_TEXT_PASSWORD);
@@ -766,6 +804,17 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_t *details = obs_properties_add_text(adv, S_DETAILS, det.c_str(), OBS_TEXT_INFO);
 	obs_property_text_set_info_word_wrap(details, true);
 	obs_properties_add_group(p, S_ADVANCED, T_("AudioCleaner.Advanced"), OBS_GROUP_NORMAL, adv);
+
+	// Plugin-wide setting: show its current value in this filter's dialog (the filter's own copy may be stale).
+	if (f && f->context) {
+		if (obs_data_t *own = obs_source_get_settings(f->context)) {
+			obs_data_set_bool(own, S_CHECK_UPDATES, update_notice_enabled());
+			obs_data_release(own);
+		}
+	}
+	obs_property_t *upd = obs_properties_add_bool(p, S_CHECK_UPDATES, T_("AudioCleaner.Update.Check"));
+	obs_property_set_long_description(upd, T_("AudioCleaner.Update.Check.Long"));
+	obs_property_set_modified_callback(upd, check_updates_modified);
 	return p;
 }
 

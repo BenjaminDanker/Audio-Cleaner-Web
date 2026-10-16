@@ -20,6 +20,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include "caption-output.h"
+#include "update-notice.h"
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
@@ -37,12 +38,14 @@ bool obs_module_load(void)
 {
 	caption_output_init();
 	audio_cleaner_register_filter();
+	update_notice_start(); /* a background thread; never blocks the start of OBS */
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	return true;
 }
 
 void obs_module_unload(void)
 {
+	update_notice_stop();
 	caption_output_shutdown();
 	audio_cleaner_shutdown(); /* network threads that could not be joined in time must be gone before the code is */
 	obs_log(LOG_INFO, "plugin unloaded");

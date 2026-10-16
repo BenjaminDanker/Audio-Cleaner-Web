@@ -52,6 +52,19 @@ string(JSON _email GET ${buildspec} email)
 string(JSON _version GET ${buildspec} version)
 string(JSON _bundleId GET ${buildspec} platformConfig macos bundleId)
 
+# CI builds are versioned MAJOR.MINOR.<run number> (cmake/ci-version.cmake): the number is handed in with
+# -DACW_VERSION=... or the environment variable of that name, instead of being edited into buildspec.json.
+# Everything below (the module's compiled version, resource files, the Info.plist, the package names) follows it.
+if(NOT DEFINED ACW_VERSION AND DEFINED ENV{ACW_VERSION})
+  set(ACW_VERSION "$ENV{ACW_VERSION}")
+endif()
+if(ACW_VERSION)
+  if(NOT ACW_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "ACW_VERSION must be MAJOR.MINOR.PATCH, got '${ACW_VERSION}'")
+  endif()
+  set(_version "${ACW_VERSION}")
+endif()
+
 set(PLUGIN_AUTHOR ${_author})
 set(PLUGIN_WEBSITE ${_website})
 set(PLUGIN_EMAIL ${_email})

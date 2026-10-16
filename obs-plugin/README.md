@@ -14,6 +14,11 @@ https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/tag/obs-plugin-late
 `obs-plugin/` replaces it; an `obs-plugin-v<version>` tag publishes a permanent release), and unpack.
 OBS must be **version 31 or newer**; restart OBS afterwards.
 
+Every build has its own version number, `MAJOR.MINOR.<build number>` (for example 0.1.57; the release is titled
+"OBS plugin 0.1.57", and the files carry the number in their names). A `obs-plugin-vX.Y.Z` tag builds exactly X.Y.Z.
+The plugin tells you when a newer one exists (see "Update notice" below); to update, install the new package the same
+way as the first time (close OBS first on Windows; the `.deb` replaces the old one because its version is higher).
+
 | Platform | What to do |
 |---|---|
 | Windows | Unzip the `...-windows.zip`; it holds one folder, `audio-cleaner`. Put that folder into `C:\ProgramData\obs-studio\plugins\` (so the DLL ends up in `C:\ProgramData\obs-studio\plugins\audio-cleaner\bin\64bit\`). |
@@ -45,6 +50,8 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
   they are not requested); with *Detect automatically* captions in such scripts are skipped. Accents and the usual
   punctuation are kept; letters the format lacks (Polish ł, Czech č, Turkish ş ...) are written with plain ones.
 * **Delay** - Low 80 ms, Balanced 150 ms, Safe 250 ms. Fixed for the whole session; changing it restarts the session. See below.
+* **Check for updates when OBS starts** (bottom of the dialog, on by default) - see "Update notice" below. It is one
+  setting for the whole plugin, not per filter.
 * **Status** (press *Refresh status*): plain words about what is going on, plus *Try again* when the service refused
   something only you can fix (see "When something is wrong"). **Advanced** holds the server address, the audio format
   (compact Opus by default, ~60 kbps each way; uncompressed 16-bit PCM, ~770 kbps, as a fallback) and a technical line
@@ -56,6 +63,24 @@ With denoise off (captions only) the audio is not delayed at all.
 **Each filter is its own live session, billed per second while it runs** (captions too, whether or not you are live), and
 an account can have **two live sessions at a time**: a third filter, or a second computer, is refused until one ends
 (a session whose connection dropped lingers on the service for up to about 30 s).
+
+### Update notice
+
+Once each time OBS starts (a few seconds after the plugin loads, on a thread of its own, never on the audio path and never
+holding up OBS) the plugin downloads the small file
+`https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/obs-plugin-latest/version.json`
+(`{"version": "0.1.57", "url": "..."}`; at most 4 KB, https only, certificates and host names verified, a few seconds of
+patience) and compares the number with its own. If the release is newer:
+
+* the filter's properties start with a notice, "Update available: Audio Cleaner plugin 0.1.57 (you have 0.1.5)", and a
+  **Download the update** button that opens the release page in your browser;
+* the OBS log gets one line, `update available: Audio Cleaner plugin 0.1.57 (you have 0.1.5): <page>`.
+
+Nothing is downloaded or installed by the plugin: a loaded plugin cannot replace itself, and on Windows installing needs
+administrator rights. The button only ever opens a page of `github.com/BenjaminDanker/Audio-Cleaner-Web/releases/`; an
+address in the file is used only if it starts with exactly that, otherwise the fixed release page is opened. A check that
+fails (offline, firewall, GitHub down) is one line in the log and nothing else. The checkbox is stored in OBS's plugin
+settings folder (`.../obs-studio/plugin_config/audio-cleaner/settings.json`).
 
 ### When something is wrong
 
@@ -98,6 +123,10 @@ dropped instead of queued).
   Muting a source in OBS does not stop streaming - disable the filter.
 * **OBS stores filter settings, including the API key, unencrypted in the scene collection JSON.** Use a dedicated key with only
   the live scope and do not share scene files. The plugin never logs the key.
+* **Once per OBS start the plugin contacts GitHub** to read the number of the newest plugin version (see "Update notice").
+  GitHub sees your internet address and a `User-Agent` of the form `obs-audio-cleaner/<plugin version>`; no account, key,
+  audio or other data is sent. Turn it off with **Check for updates when OBS starts** in the filter's properties (then
+  no request is made at all).
 * Certificates and host names are always verified. The only exception is an explicit `ws://` URL for local testing; it is
   accepted for this computer and the local network only (localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, *.local) and
   shows a warning there.
@@ -108,6 +137,9 @@ Needs CMake >= 3.28. Third-party code (IXWebSocket, nlohmann/json, libopus, mbed
 and linked statically and privately (it is never installed or packaged).
 
 ```
+# build number: the version is buildspec.json's MAJOR.MINOR.PATCH; CI builds MAJOR.MINOR.<run number> by passing
+# ACW_VERSION (cmake -P cmake/ci-version.cmake prints it; -DACW_VERSION=0.1.57 or the environment variable of that name)
+
 # core library + tests only (no OBS needed)
 cmake --preset core-tests && cmake --build --preset core-tests && ctest --test-dir build_tests
 
@@ -123,8 +155,10 @@ machine only, as TLS-inspecting proxies do, is not seen and the connection fails
 Apple, TLS 1.2 at most). Override with `-DACW_TLS_BACKEND=`. `-DACW_USE_OPUS=OFF` builds without Opus (PCM only).
 
 Layout: `core/` OBS-independent library `acw_core` (SPSC rings, reframer, resampler, protocol, WebSocket thread, output stage,
-echo reference buffer, caption pacer); `src/` thin OBS glue; `tests/` unit tests, `core_loopback_test` (the real session against a
-fake server on 127.0.0.1: handshake, errors, retries, late replies, garbage, shutdown), `core_stream_test` (live server) and
+echo reference buffer, caption pacer, the update check: versions, version.json, the HTTPS request); `src/` thin OBS glue
+(`update-notice.cpp` runs the check and opens the release page); `tests/` unit tests, `core_loopback_test` (the real session against a
+fake server on 127.0.0.1: handshake, errors, retries, late replies, garbage, shutdown; also the update check against a local
+web server: newer / same / older, redirects, refused addresses, size limit, timeout, cancel), `core_stream_test` (live server) and
 `obs_smoke` (headless libobs host; `core_loopback_test --serve` is a server for it).
 
 CI: `.github/workflows/obs-plugin.yml`. Core tests run on Linux (also under ASan + UBSan and under TSan), macOS and Windows

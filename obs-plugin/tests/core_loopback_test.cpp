@@ -5,6 +5,7 @@
 // Run under ASan/UBSan and TSan in CI.
 #include "acw/reference.hpp"
 #include "acw/session.hpp"
+#include "acw/update_check.hpp"
 
 #include <ixwebsocket/IXGetFreePort.h>
 #include <ixwebsocket/IXNetSystem.h>
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -269,6 +271,92 @@ private:
 		const std::string r = "HTTP/1.1 " + std::to_string(status.load()) +
 				      " Rejected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 		sock->writeBytes(r, never);
+		state->setTerminated();
+	}
+	size_t getConnectedClientsCount() override { return 0; }
+};
+
+// A web server for the update check: answers GET <path> with the raw HTTP reply the test has stored for it.
+// "<hang>" never answers, "<endless>" promises a huge body and keeps sending.
+class FakeWeb : public ix::SocketServer {
+public:
+	FakeWeb() : ix::SocketServer(ix::getFreePort(), "127.0.0.1")
+	{
+		const auto res = listen();
+		if (!res.first)
+			std::printf("fake web: cannot listen: %s\n", res.second.c_str());
+		start();
+	}
+	~FakeWeb() override
+	{
+		stopping = true;
+		stop();
+	}
+	std::string base() { return "http://127.0.0.1:" + std::to_string(getPort()); }
+
+	static std::string ok(const std::string &body, const char *type = "application/json")
+	{
+		return "HTTP/1.1 200 OK\r\nContent-Type: " + std::string(type) + "\r\nContent-Length: " + std::to_string(body.size()) +
+		       "\r\nConnection: close\r\n\r\n" + body;
+	}
+	static std::string redirect(const std::string &to, int code = 302)
+	{
+		return "HTTP/1.1 " + std::to_string(code) + " Found\r\nLocation: " + to + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	}
+	static std::string status(int code)
+	{
+		return "HTTP/1.1 " + std::to_string(code) + " X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+	}
+	void set(const std::string &path, const std::string &reply)
+	{
+		std::lock_guard<std::mutex> lk(mu);
+		replies[path] = reply;
+	}
+
+	std::mutex mu;
+	std::map<std::string, std::string> replies;
+	std::string last_user_agent;
+	std::atomic<int> requests{0};
+	std::atomic<bool> stopping{false};
+
+private:
+	void handleConnection(std::unique_ptr<ix::Socket> sock, std::shared_ptr<ix::ConnectionState> state) override
+	{
+		++requests;
+		const ix::CancellationRequest never = [] { return false; };
+		std::string path, ua;
+		for (int i = 0; i < 100; ++i) {  // the request line and headers, up to the blank line
+			const auto line = sock->readLine(never);
+			if (!line.first || line.second == "\r\n" || line.second == "\n" || line.second.empty())
+				break;
+			if (i == 0) {
+				const size_t a = line.second.find(' '), b = line.second.find(' ', a + 1);
+				path = line.second.substr(a + 1, b - a - 1);
+			} else if (line.second.compare(0, 11, "User-Agent:") == 0) {
+				ua = line.second.substr(12);
+				while (!ua.empty() && (ua.back() == '\r' || ua.back() == '\n'))
+					ua.pop_back();
+			}
+		}
+		std::string reply;
+		{
+			std::lock_guard<std::mutex> lk(mu);
+			last_user_agent = ua;
+			const auto it = replies.find(path);
+			reply = it == replies.end() ? status(404) : it->second;
+		}
+		if (reply == "<hang>") {
+			for (int i = 0; i < 300 && !stopping; ++i)
+				std::this_thread::sleep_for(milliseconds(50));
+		} else if (reply == "<endless>") {
+			sock->writeBytes("HTTP/1.1 200 OK\r\nContent-Length: 100000000\r\nConnection: close\r\n\r\n", never);
+			const std::string chunk(8192, 'x');
+			for (int i = 0; i < 20000 && !stopping; ++i)
+				if (!sock->writeBytes(chunk, never))
+					break;
+		} else {
+			sock->writeBytes(reply, never);
+		}
 		state->setTerminated();
 	}
 	size_t getConnectedClientsCount() override { return 0; }
@@ -730,6 +818,162 @@ static void test_stop_paths()
 	}
 }
 
+static void test_update_check()
+{
+	std::printf("update check against a local web server\n");
+	FakeWeb web;
+	const std::string json_new = R"({"version": "0.1.57", "url": ")" + std::string(kReleasePageUrl) + R"("})";
+	web.set("/new.json", FakeWeb::ok(json_new));
+	web.set("/same.json", FakeWeb::ok(R"({"version":"0.1.9"})"));
+	web.set("/old.json", FakeWeb::ok(R"({"version":"0.0.3"})"));
+	web.set("/garbage.json", FakeWeb::ok("<html>not json</html>", "text/html"));
+	web.set("/noversion.json", FakeWeb::ok(R"({"url":"x"})"));
+	web.set("/badversion.json", FakeWeb::ok(R"({"version":"latest"})"));
+	web.set("/big.json", FakeWeb::ok(R"({"version":"9.9.9","pad":")" + std::string(6000, 'a') + R"("})"));
+	web.set("/err500", FakeWeb::status(500));
+	web.set("/hop1", FakeWeb::redirect("/hop2", 301));
+	web.set("/hop2", FakeWeb::redirect(web.base() + "/new.json", 307));
+	web.set("/loop", FakeWeb::redirect("/loop"));
+	web.set("/to-plain-http", FakeWeb::redirect("http://example.com/version.json"));
+	web.set("/to-ftp", FakeWeb::redirect("ftp://example.com/version.json"));
+	web.set("/to-relative", FakeWeb::redirect("new.json"));
+	web.set("/to-network-path", FakeWeb::redirect("//example.com/new.json"));
+	web.set("/hang", "<hang>");
+	web.set("/endless", "<endless>");
+
+	auto opts = [&](const char *path) {
+		UpdateCheckOptions o;
+		o.url = web.base() + path;
+		o.allow_local_http = true;
+		o.user_agent = "obs-audio-cleaner/0.1.9";
+		o.connect_timeout_s = 2;
+		o.transfer_timeout_s = 2;
+		o.total_timeout_s = 6;
+		return o;
+	};
+	auto run = [&](const char *current, const char *path) {
+		UpdateCheck c;
+		return c.run(current, opts(path));
+	};
+
+	{
+		const auto r = run("0.1.9", "/new.json");
+		CHECK(r.status == UpdateStatus::UpdateAvailable);
+		CHECK(r.info.version == "0.1.57");
+		CHECK(r.info.url == kReleasePageUrl);
+		std::lock_guard<std::mutex> lk(web.mu);
+		CHECK(web.last_user_agent == "obs-audio-cleaner/0.1.9");
+	}
+	CHECK(run("0.1.9", "/same.json").status == UpdateStatus::UpToDate);
+	CHECK(run("0.1.9", "/old.json").status == UpdateStatus::UpToDate);
+	CHECK(run("0.1.57", "/new.json").status == UpdateStatus::UpToDate);
+	CHECK(run("0.1.56", "/new.json").status == UpdateStatus::UpdateAvailable);
+	CHECK(run("0.1.100", "/new.json").status == UpdateStatus::UpToDate);  // numbers, not text
+
+	// Redirects: followed (relative and absolute, 301/307), but only to places that are allowed.
+	CHECK(run("0.1.9", "/hop1").status == UpdateStatus::UpdateAvailable);
+	CHECK(run("0.1.9", "/to-relative").status == UpdateStatus::Failed);  // relative to a directory: not supported
+	for (const char *p : {"/loop", "/to-plain-http", "/to-ftp", "/to-network-path"}) {
+		const auto r = run("0.1.9", p);
+		CHECK(r.status == UpdateStatus::Failed && !r.error.empty());
+	}
+	{
+		const auto r = run("0.1.9", "/to-plain-http");
+		CHECK(contains(r.error, "not allowed"));
+	}
+
+	// Things that are not a version file.
+	for (const char *p : {"/garbage.json", "/noversion.json", "/badversion.json", "/err500", "/missing"}) {
+		const auto r = run("0.1.9", p);
+		CHECK(r.status == UpdateStatus::Failed && !r.error.empty());
+	}
+	CHECK(contains(run("0.1.9", "/err500").error, "500"));
+	CHECK(contains(run("0.1.9", "/missing").error, "404"));
+	CHECK(run("not a version", "/new.json").status == UpdateStatus::Failed);
+
+	// Size limit: a body over the limit is refused (declared long, or really long).
+	{
+		const auto r = run("0.1.9", "/big.json");
+		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "large"));
+	}
+	{
+		const auto t0 = steady_clock::now();
+		const auto r = run("0.1.9", "/endless");
+		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "large"));
+		CHECK(steady_clock::now() - t0 < seconds(3));
+	}
+
+	// A server that never answers: the transfer timeout ends it.
+	{
+		const auto t0 = steady_clock::now();
+		auto o = opts("/hang");
+		o.transfer_timeout_s = 1;
+		UpdateCheck c;
+		const auto r = c.run("0.1.9", o);
+		CHECK(r.status == UpdateStatus::Failed);
+		CHECK(steady_clock::now() - t0 < seconds(4));
+	}
+	// ... and cancel() ends it at once, from another thread (OBS unloading the plugin).
+	{
+		UpdateCheck c;
+		auto o = opts("/hang");
+		o.transfer_timeout_s = 30;
+		o.total_timeout_s = 60;
+		UpdateCheckResult r;
+		std::atomic<bool> done{false};
+		std::thread th([&] {
+			r = c.run("0.1.9", o);
+			done = true;
+		});
+		std::this_thread::sleep_for(milliseconds(400));
+		CHECK(!done);
+		const auto t0 = steady_clock::now();
+		c.cancel();
+		CHECK(wait_until([&] { return done.load(); }, 3000));
+		th.join();
+		CHECK(steady_clock::now() - t0 < seconds(3));
+		CHECK(r.status == UpdateStatus::Failed);
+		// A cancelled check stays cancelled.
+		CHECK(c.run("0.1.9", opts("/new.json")).status == UpdateStatus::Failed);
+	}
+
+	// Addresses that are never used: plain http:// (unless a test allows the local one), other schemes.
+	{
+		auto o = opts("/new.json");
+		o.allow_local_http = false;
+		const int before = web.requests.load();
+		UpdateCheck c;
+		const auto r = c.run("0.1.9", o);
+		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "not allowed"));
+		CHECK(web.requests.load() == before);  // nothing was sent
+	}
+	for (const char *u : {"http://example.com/version.json", "ftp://127.0.0.1/x", "file:///etc/passwd", "", "https://"}) {
+		auto o = opts("/new.json");
+		o.url = u;
+		UpdateCheck c;
+		const auto r = c.run("0.1.9", o);
+		CHECK(r.status == UpdateStatus::Failed);
+	}
+	// https:// to a port where nobody listens: a plain failure, quickly.
+	{
+		auto o = opts("/new.json");
+		o.url = "https://127.0.0.1:" + std::to_string(ix::getFreePort()) + "/version.json";
+		const auto t0 = steady_clock::now();
+		UpdateCheck c;
+		const auto r = c.run("0.1.9", o);
+		CHECK(r.status == UpdateStatus::Failed);
+		CHECK(steady_clock::now() - t0 < seconds(5));
+	}
+	// https:// to a server that only speaks plain HTTP: the TLS handshake fails, nothing is accepted.
+	{
+		auto o = opts("/new.json");
+		o.url = "https://127.0.0.1:" + std::to_string(web.getPort()) + "/new.json";
+		UpdateCheck c;
+		const auto r = c.run("0.1.9", o);
+		CHECK(r.status == UpdateStatus::Failed);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	ix::initNetSystem();
@@ -752,6 +996,7 @@ int main(int argc, char **argv)
 	test_captions_only();
 	test_robustness();
 	test_stop_paths();
+	test_update_check();
 	ix::uninitNetSystem();
 	std::printf("\n%d checks, %d failures\n", g_checks.load(), g_failures.load());
 	return g_failures ? 1 : 0;

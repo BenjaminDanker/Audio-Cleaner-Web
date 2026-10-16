@@ -46,10 +46,20 @@ endif()
 
 target_sources(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE src/plugin-main.c src/audio-cleaner-filter.cpp src/caption-output.cpp src/caption-output.h
+  PRIVATE
+    src/plugin-main.c
+    src/audio-cleaner-filter.cpp
+    src/caption-output.cpp
+    src/caption-output.h
+    src/update-notice.cpp
+    src/update-notice.h
 )
 target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE acw_core)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+if(OS_WINDOWS)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE shell32) # ShellExecute: opens the release page in the browser
+endif()
 
 if(OS_LINUX)
   # Keep the statically linked third-party code private to the module so it can

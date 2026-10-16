@@ -7,6 +7,12 @@
 # helper scripts. The module is built against libobs 31.1.1, the oldest release
 # we support: OBS refuses to load plugins built for a newer major version, but
 # loads plugins built for an older one.
+#
+# Versions follow the desktop app: every build is MAJOR.MINOR.<run number> (MAJOR.MINOR from buildspec.json, 0.1.57),
+# a pushed tag obs-plugin-vX.Y.Z builds exactly X.Y.Z (cmake/ci-version.cmake). The number reaches the build as the
+# ACW_VERSION environment variable, so the plugin's compiled version, the package names, the .deb version and the
+# release title all say the same. The rolling obs-plugin-latest pre-release carries a version.json that the plugin
+# reads (once per OBS start) to tell its users that a newer version exists.
 name: OBS plugin
 
 on:
@@ -132,6 +138,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Version
+        run: cmake -P cmake/ci-version.cmake
 
       - name: Install build dependencies
         run: |
@@ -173,10 +181,14 @@ jobs:
         run: |
           # 0x1f01xxxx = libobs API 31.1.x
           objdump -d --disassemble=obs_module_ver build_x86_64/audio-cleaner.so | grep -E 'mov +\$0x1f01' 
+      - name: Check the module carries the build's version
+        run: |
+          # The version the plugin compares with the newest one on GitHub is a string inside the module.
+          strings -a build_x86_64/audio-cleaner.so | grep -Fx -- "$ACW_VERSION"
 
       - name: Package
         run: |
-          name=$(jq -r .name buildspec.json); version=$(jq -r .version buildspec.json)
+          name=$(jq -r .name buildspec.json); version="$ACW_VERSION"
           cmake --install build_x86_64 --config "$CONFIG" --strip --prefix "$PWD/release/$CONFIG"
           cpack -G DEB --config build_x86_64/CPackConfig.cmake -B "$PWD/release"
           # "Other Linux": a ready plugin folder, to be unpacked into ~/.config/obs-studio/plugins/
@@ -195,6 +207,7 @@ jobs:
               grep -Ev "^\./usr/(lib/[^/]+/obs-plugins/${name}\.so|share/obs/obs-plugins/${name}/(locale/en-US\.ini|LICENSE|THIRD_PARTY_LICENSES\.md))\$" || true)
             [ -z "$bad" ] || { echo "::error::unexpected files in $f:"; echo "$bad"; exit 1; }
             dpkg-deb -I "$f" | grep -E 'Maintainer|Description'
+            [ "$(dpkg-deb -f "$f" Version)" = "$ACW_VERSION" ] || { echo "::error::$f has version $(dpkg-deb -f "$f" Version), not $ACW_VERSION"; exit 1; }
           done
           bad=$(tar -tJf release/*-ubuntu-x86_64.tar.xz | grep -v '/$' |
             grep -Ev "^${name}/(bin/64bit/${name}\.so|data/(locale/en-US\.ini|LICENSE|THIRD_PARTY_LICENSES\.md))\$" || true)
@@ -216,6 +229,8 @@ jobs:
       CODESIGN_IDENT: "-"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Version
+        run: cmake -P cmake/ci-version.cmake
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
       # Configure fetches the OBS sources and obs-deps and builds libobs from them (~2.5 min): keep the result, it
@@ -251,7 +266,7 @@ jobs:
 
       - name: Package
         run: |
-          name=$(jq -r .name buildspec.json); version=$(jq -r .version buildspec.json)
+          name=$(jq -r .name buildspec.json); version="$ACW_VERSION"
           cd "release/$CONFIG"
           XZ_OPT=-T0 tar -cJf "../${name}-${version}-macos-universal.tar.xz" "${name}.plugin"
           lipo -archs "${name}.plugin/Contents/MacOS/${name}"
@@ -270,6 +285,8 @@ jobs:
         working-directory: obs-plugin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Version
+        run: cmake -P cmake/ci-version.cmake
       # Same as on the Mac: OBS sources, obs-deps and the libobs built from them, kept between runs.
       - name: Cache OBS sources, obs-deps and libobs
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -295,7 +312,7 @@ jobs:
       - name: Package
         run: |
           $spec = Get-Content buildspec.json -Raw | ConvertFrom-Json
-          $out = "release/$($spec.name)-$($spec.version)-windows-x64.zip"
+          $out = "release/$($spec.name)-$env:ACW_VERSION-windows-x64.zip"
           Compress-Archive -Force -Path "release/$env:CONFIG/*" -DestinationPath $out
           Get-Item $out
       - name: Check the package holds the plugin folder and nothing else
@@ -318,7 +335,9 @@ jobs:
   # Every successful build of main / on-prem replaces the "obs-plugin-latest" pre-release, so
   # https://github.com/<repo>/releases/tag/obs-plugin-latest always has the newest plugin. It is a
   # pre-release and never marked latest (the repository's releases/latest link belongs to the
-  # desktop app). A hand-made obs-plugin-v<version> tag publishes a permanent release instead.
+  # desktop app). Its title carries the version, and its version.json (uploaded last, once the files are there)
+  # is what installed plugins read to tell their users that a newer version exists. A hand-made
+  # obs-plugin-v<version> tag publishes a permanent release instead, without version.json.
   release:
     name: GitHub Release
     if: >-
@@ -337,8 +356,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          sparse-checkout: obs-plugin/buildspec.json
+          sparse-checkout: |
+            obs-plugin/buildspec.json
+            obs-plugin/cmake/ci-version.cmake
           sparse-checkout-cone-mode: false
+
+      - name: Version
+        run: cmake -P obs-plugin/cmake/ci-version.cmake
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -350,7 +374,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="$(jq -r .version obs-plugin/buildspec.json)"
+          version="$ACW_VERSION"
           cd release
           ls -l
           # One clearly named file per kind of computer (the build artifacts keep CMake/CPack's names).
@@ -374,18 +398,24 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
               --title "OBS plugin $version" --notes "$notes" "${files[@]}"
           else
-            title="OBS plugin $version (latest build)"
+            title="OBS plugin $version"
+            # What installed plugins read: the newest version and the page to get it from. Uploaded after the files,
+            # so nobody is told about a version whose files are not there yet.
+            printf '{"version": "%s", "url": "https://github.com/%s/releases/tag/obs-plugin-latest"}\n' "$version" "$GITHUB_REPOSITORY" > version.json
+            jq -e --arg v "$version" '.version == $v' version.json >/dev/null
+            keep=("${files[@]}" version.json)
             # Update the existing release in place, so the download links never 404 while it changes.
             update_in_place() {
               gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/obs-plugin-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null || return 1
               gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}" || return 1
               gh release edit obs-plugin-latest --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease --latest=false || return 1
-              # Files of an older version number (they have it in their name) go away.
+              # Files of an older version number (they have it in their name) go away; version.json stays.
               gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
                 while read -r asset; do
-                  printf '%s\n' "${files[@]}" | grep -qxF "$asset" ||
+                  printf '%s\n' "${keep[@]}" | grep -qxF "$asset" ||
                     gh release delete-asset obs-plugin-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
                 done
+              gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber version.json
             }
             if gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && update_in_place; then
               echo "updated obs-plugin-latest in place"
@@ -394,5 +424,6 @@ jobs:
               gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
               gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
                 --title "$title" --notes "$notes" "${files[@]}"
+              gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber version.json
             fi
           fi
