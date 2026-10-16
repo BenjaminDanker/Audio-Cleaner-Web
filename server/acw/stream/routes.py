@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from collections import OrderedDict, deque
 
@@ -33,6 +34,14 @@ router = APIRouter(tags=["stream"])
 
 MAX_SESSIONS_PER_USER = trust.MAX_LIVE_SESSIONS  # of which at most one runs on the free trial
 MAX_SESSIONS_PER_IP = 6  # across accounts
+# Everything live in this process shares one event loop and one GIL (measured 2026-10-16: 2 to 3 percent of a core per
+# session, about 4.5 percent for an extra-accurate one, which also feeds the OpenAI socket from the loop). Past about
+# 30 sessions every session sees tens of ms of added latency, and the job API runs in the same process. These limits
+# are separate from the stream worker's capacity (cores for noise removal, the caption decoder).
+MAX_LIVE_SESSIONS = int(os.environ.get("ACW_MAX_LIVE_SESSIONS", "30"))  # all kinds, this process
+MAX_PREMIUM_SESSIONS = int(os.environ.get("ACW_MAX_PREMIUM_SESSIONS", "15"))  # of which with extra-accurate captions
+LIVE_BUSY_MESSAGE = "Live is very busy right now. Please try again in a few minutes."
+PREMIUM_BUSY_MESSAGE = "Extra-accurate captions are very busy right now. Please try again in a few minutes."
 MAX_SESSION_SECONDS = 12 * 3600
 START_TIMEOUT = 15
 SILENCE_TIMEOUT = 30  # nothing at all from the client
@@ -338,6 +347,16 @@ async def _refuse(ws: WebSocket, code: str, message: str, retry_after: int | Non
     await ws.close(code=close)
 
 
+async def _refuse_busy(ws: WebSocket, message: str) -> None:
+    """The 'full' answer clients already show (a friendly message and a retry), for the limits of this process."""
+    await _send_json(ws, {"type": "error", "code": "full", "available": [], "retryAfterSeconds": 60, "message": message})
+    await ws.close(code=1013)
+
+
+def premium_sessions() -> int:
+    return sum(1 for sessions in _open.values() for s in sessions if s.cfg.get("captions") == "premium")
+
+
 async def _evict_stale(user_id: str, limit: int | None = None) -> bool:
     """Free a slot for `user_id` by ending their stalest silent session. True if one was ended."""
     limit = MAX_SESSIONS_PER_USER if limit is None else limit
@@ -426,6 +445,9 @@ async def stream_ws(ws: WebSocket) -> None:
         return
     if _live_ip.get(net, 0) >= MAX_SESSIONS_PER_IP:
         await _refuse(ws, "too_many_sessions", "Too many live sessions from this network.", 30)
+        return
+    if sum(_live.values()) >= MAX_LIVE_SESSIONS:
+        await _refuse_busy(ws, LIVE_BUSY_MESSAGE)
         return
     _live[principal.user_id] = _live.get(principal.user_id, 0) + 1
     _live_ip[net] = _live_ip.get(net, 0) + 1
@@ -543,6 +565,9 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
     if atten is None or not all(v is None or isinstance(v, str) for v in (denoise, captions)):
         await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Check the noise strength and the options you chose."})
         await ws.close(code=1008)
+        return None
+    if captions == "premium" and premium_sessions() >= MAX_PREMIUM_SESSIONS:
+        await _refuse_busy(ws, PREMIUM_BUSY_MESSAGE)
         return None
     # The free trial pays for Standard live while the account has trial seconds left; anything else is billed.
     trial_left = 0.0
