@@ -21,6 +21,11 @@ import installer_models  # noqa: E402
 
 from audio_cleaner_desktop import models, resources  # noqa: E402
 
+# The macOS installer scripts are shell scripts for /bin/bash on a Mac: they run here on Linux and macOS (Git Bash
+# on Windows reads paths and permissions differently, and nothing there ever runs them).
+runs_bash_scripts = pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None, reason="the macOS shell scripts run on Linux and macOS")
+
 
 def test_the_catalog_is_read_without_numpy():
     code = "import sys; sys.modules['numpy'] = None; sys.path[:0] = [r'%s', r'%s']; import installer_models; installer_models.render()"
@@ -118,6 +123,7 @@ def test_the_pascal_blocks_are_balanced():
         assert words[first - 1] in ("procedure", "function"), name
 
 
+@runs_bash_scripts
 def test_mac_postinstall_downloads_safely(tmp_path):
     text = installer_models.render_mac()
     for flag in ("--proto '=https'", "--speed-limit 1000", "--speed-time 60", "--max-time 3600", "-C -"):
@@ -133,7 +139,7 @@ def test_mac_postinstall_downloads_safely(tmp_path):
     assert subprocess.run(["bash", "-n", str(script)]).returncode == 0
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@runs_bash_scripts
 def test_mac_postinstall_writes_the_marker_only_for_complete_models(tmp_path):
     """Run the script's `finish` against a pretend model folder (a portable stat stands in for BSD stat)."""
     text = installer_models.render_mac().replace(installer_models.MAC_MODELS, str(tmp_path / "models"))
@@ -182,7 +188,7 @@ def _tiny_catalog(url: str):
     return blob, members, (one, two)
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@runs_bash_scripts
 def test_mac_postinstall_downloads_unpacks_and_cleans_up(tmp_path):
     """Run the generated script for a tiny archive, with stand-ins for curl, shasum, ditto and BSD stat."""
     import sys
@@ -365,6 +371,7 @@ def test_windows_update_forgets_a_model_made_for_another_catalog():
     assert stale.count("DelTree") == 0 and "models'" not in stale.replace("\\models\\", "")
 
 
+@runs_bash_scripts
 def test_mac_preinstall_removes_only_the_installed_app(tmp_path):
     text = installer_models.render_mac_preinstall()
     assert text.startswith("#!/bin/bash\n")
@@ -408,14 +415,15 @@ def test_mac_scripts_are_written_together_and_the_package_uses_them(tmp_path):
     sys.argv = ["installer_models.py", "--mac", str(out)]
     assert installer_models.main() == 0
     assert sorted(p.name for p in out.iterdir()) == ["postinstall", "preinstall"]
-    assert all(p.stat().st_mode & 0o111 for p in out.iterdir())
+    if sys.platform != "win32":  # Windows has no execute bit; the package is built on a Mac
+        assert all(p.stat().st_mode & 0o111 for p in out.iterdir())
     make_pkg = (PACKAGING / "macos" / "make_pkg.sh").read_text(encoding="utf-8")
     assert '[ -x "$SCRIPTS/preinstall" ]' in make_pkg and "BundleIsRelocatable -bool false" in make_pkg
     assert "BundleIsVersionChecked -bool false" in make_pkg and "--install-location /Applications" in make_pkg
     assert "does not download the models again" in distribution.welcome_text(2.5)
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@runs_bash_scripts
 def test_mac_postinstall_skips_complete_models_and_refetches_stale_or_partial_ones(tmp_path):
     """Run the generated script with a curl that fails the test if it is called, over complete, stale and partial
     installs (a portable stat stands in for BSD stat)."""

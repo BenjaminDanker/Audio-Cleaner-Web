@@ -13,14 +13,14 @@ on:
   push:
     branches: [main, on-prem]
     tags: ["obs-plugin-v*"]
-    paths: ["obs-plugin/**", ".github/workflows/obs-plugin.yml"]
+    paths: ["obs-plugin/**", "!obs-plugin/README.md", ".github/workflows/obs-plugin.yml"]
   pull_request:
-    paths: ["obs-plugin/**", ".github/workflows/obs-plugin.yml"]
+    paths: ["obs-plugin/**", "!obs-plugin/README.md", ".github/workflows/obs-plugin.yml"]
   workflow_dispatch:
 
 concurrency:
   group: obs-plugin-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -94,8 +94,8 @@ jobs:
         run: ctest --test-dir build_san --output-on-failure
 
   # ---------------------------------------------------------------------------
-  # The same tests with the compilers of the other two platforms. Informational for now: nobody has run
-  # them by hand there yet, so a failure does not hold back the release.
+  # The same tests with the compilers of the other two platforms. Informational for now: a failure does not hold
+  # back the release.
   core-tests-portable:
     name: Core tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -110,8 +110,17 @@ jobs:
         working-directory: obs-plugin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The third-party libraries (JSON, WebSocket client, TLS, Opus) are downloaded and compiled by the configure and
+      # build steps: keep their sources and objects between runs (they change only with the pins in third_party.cmake).
+      - name: Cache the third-party sources and objects
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: obs-plugin/build_tests/_deps
+          key: obs-core-deps-${{ matrix.os }}-${{ hashFiles('obs-plugin/core/cmake/third_party.cmake', 'obs-plugin/core/CMakeLists.txt', 'obs-plugin/CMakeLists.txt', '.github/workflows/obs-plugin.yml') }}
+      # The macOS rules of the plugin template need the Xcode generator, which is only for the plugin bundle; the
+      # core library and its tests build with the default one. Warnings do not fail this informational build.
       - name: Configure
-        run: cmake -S . -B build_tests -DACW_BUILD_PLUGIN=OFF -DACW_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: cmake -S . -B build_tests -DACW_BUILD_PLUGIN=OFF -DACW_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF
       - name: Build
         run: cmake --build build_tests --config RelWithDebInfo --parallel
       - name: Unit and loopback tests
@@ -121,7 +130,6 @@ jobs:
   linux:
     name: Ubuntu x86_64
     runs-on: ubuntu-24.04
-    needs: core-tests
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -202,7 +210,6 @@ jobs:
   macos:
     name: macOS universal
     runs-on: macos-15
-    needs: core-tests
     env:
       # --- code signing: NOT IMPLEMENTED, placeholders only (see README "Signing") -------------
       # Ad-hoc signature ("-") is used unless a Developer ID identity is provided.
@@ -211,6 +218,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Select Xcode
         run: sudo xcode-select --switch /Applications/Xcode_16.1.0.app/Contents/Developer
+      # Configure fetches the OBS sources and obs-deps and builds libobs from them (~2.5 min): keep the result, it
+      # only changes with the pins in buildspec.json. The downloaded archives are not kept (hash-checked again).
+      - name: Cache OBS sources, obs-deps and libobs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            obs-plugin/.deps
+            !obs-plugin/.deps/*.tar.xz
+            !obs-plugin/.deps/*.tar.gz
+          key: obs-deps-${{ runner.os }}-${{ hashFiles('obs-plugin/buildspec.json', 'obs-plugin/CMakePresets.json', 'obs-plugin/cmake/common/buildspec_common.cmake', 'obs-plugin/cmake/macos/buildspec.cmake') }}
       - name: Configure (downloads OBS 31.1.1 sources + obs-deps pinned in buildspec.json)
         run: cmake --preset macos-ci
       - name: Build
@@ -247,13 +264,20 @@ jobs:
   windows:
     name: Windows x64
     runs-on: windows-2022
-    needs: core-tests
     defaults:
       run:
         shell: pwsh
         working-directory: obs-plugin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Same as on the Mac: OBS sources, obs-deps and the libobs built from them, kept between runs.
+      - name: Cache OBS sources, obs-deps and libobs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            obs-plugin/.deps
+            !obs-plugin/.deps/*.zip
+          key: obs-deps-${{ runner.os }}-${{ hashFiles('obs-plugin/buildspec.json', 'obs-plugin/CMakePresets.json', 'obs-plugin/cmake/common/buildspec_common.cmake', 'obs-plugin/cmake/windows/buildspec.cmake') }}
       - name: Configure (downloads OBS 31.1.1 sources + obs-deps pinned in buildspec.json)
         run: cmake --preset windows-ci-x64
       - name: Build

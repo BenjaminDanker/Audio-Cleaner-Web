@@ -7,7 +7,7 @@ import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, Signal
+from PySide6.QtCore import QDir, QEvent, Qt, Signal
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -55,9 +55,9 @@ class Application(QApplication):
 
     def event(self, event: QEvent) -> bool:  # noqa: N802
         if event.type() == QEvent.Type.FileOpen:
-            path = event.file()
+            path = event.file()  # from a file:// URL: forward slashes also on Windows
             if path:
-                self.fileOpened.emit(path)
+                self.fileOpened.emit(QDir.toNativeSeparators(path))
             return True
         return super().event(event)
 

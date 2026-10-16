@@ -21,6 +21,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from audio_cleaner_desktop import resources  # noqa: E402
 
+SPEECH_SECONDS = 4  # length of the stand-in used where the dev sample is missing (CI)
 SPEECH_SAMPLE = Path.home() / "audio-cleaner" / "dev" / "live_opus.wav"
 FULL_FFMPEG = Path(os.environ.get("ACW_FULL_FFMPEG", Path.home() / "audio-cleaner" / "bin" / "ffmpeg"))
 
@@ -69,7 +70,9 @@ def ffprobe_json(path: Path) -> dict:
 
 @pytest.fixture(scope="session")
 def speech_wav(tmp_path_factory) -> Path:
-    """About ten seconds of real speech (the dev sample), or noisy tones when that is not available."""
+    """About ten seconds of real speech (the dev sample), or a few seconds of noisy tones when that is not available.
+    The tones sit in so much noise that the heavy-noise remover is picked, which takes about as long as the
+    recording itself: the shorter the stand-in, the faster every test that cleans it."""
     path = tmp_path_factory.mktemp("media") / "speech.wav"
     if SPEECH_SAMPLE.is_file():
         shutil.copy(SPEECH_SAMPLE, path)
@@ -77,7 +80,7 @@ def speech_wav(tmp_path_factory) -> Path:
     from scipy.io import wavfile
 
     sr = 48000
-    t = np.arange(10 * sr) / sr
+    t = np.arange(SPEECH_SECONDS * sr) / sr
     rng = np.random.default_rng(1)
     x = 0.2 * np.sin(2 * np.pi * 220 * t) * (np.sin(2 * np.pi * 2 * t) > 0) + 0.03 * rng.standard_normal(t.size)
     wavfile.write(path, sr, (x * 32767).astype(np.int16))
@@ -123,6 +126,33 @@ def wait_until(predicate, timeout: float = 120.0, interval: float = 0.01) -> boo
             return True
         time.sleep(interval)
     return False
+
+
+@pytest.fixture(autouse=True)
+def _no_windows_left_behind():
+    """Delete the windows a test opened. They were never deleted, so each test left ~10 more top-level widgets
+    (a window, its dialogs and tooltips), and every wait_until after them served all the earlier ones as well: the
+    last tests of a long run took ten times as long as they do alone."""
+    yield
+    widgets = sys.modules.get("PySide6.QtWidgets")
+    app = widgets.QApplication.instance() if widgets is not None else None
+    if app is None:
+        return
+    from PySide6.QtCore import QEvent
+
+    app.processEvents()  # timers the test left pending (zero-delay calls) run while the windows still exist
+    keep = getattr(sys.modules.get("audio_cleaner_desktop.gui.tips"), "_popup", None)  # the run's one tooltip popup
+    for w in app.topLevelWidgets():
+        if w is keep:
+            continue
+        try:
+            if hasattr(w, "_closing"):
+                w._closing = True  # a main window: no delayed housekeeping after the test has ended
+            w.hide()
+            w.deleteLater()
+        except RuntimeError:  # already deleted
+            pass
+    app.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 @pytest.fixture(scope="session")

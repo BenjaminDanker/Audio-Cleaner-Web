@@ -694,9 +694,13 @@ static void test_stop_paths()
 		Session s(cfg, nullptr, nullptr);
 		s.start();
 		Feeder f(s, nullptr);
-		std::this_thread::sleep_for(milliseconds(1500));
-		CHECK(s.snapshot().state == SessionState::Backoff);
-		CHECK(contains(s.status_line(), "Could not reach the server"));
+		// Windows takes about two seconds to give up on a refused port (it retries the SYN), Linux and macOS answer at once.
+		CHECK(wait_until(
+			[&] {
+				return s.snapshot().state == SessionState::Backoff &&
+				       contains(s.status_line(), "Could not reach the server");
+			},
+			10000));
 		f.stop();
 		const auto t0 = steady_clock::now();
 		s.stop(0, 500);

@@ -60,7 +60,9 @@ def test_run_and_check_output_go_through_it(popen, monkeypatch):
 
 def test_install_only_on_windows_and_only_once(monkeypatch):
     original = subprocess.Popen.__init__
-    monkeypatch.setattr(subprocess.Popen, "__init__", original)  # restored at the end of the test
+    while getattr(original, q._MARK, False):  # on Windows the app import has installed it already: take it off
+        original = original.__wrapped__
+    monkeypatch.setattr(subprocess.Popen, "__init__", original)  # whatever was there is put back at the end
     monkeypatch.setattr(sys, "platform", "linux")
     assert q.install() is False and subprocess.Popen.__init__ is original
     monkeypatch.setattr(sys, "platform", "darwin")

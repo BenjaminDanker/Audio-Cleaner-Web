@@ -163,7 +163,8 @@ def test_long_windows_paths_get_the_extended_prefix(monkeypatch):
     assert ffmod.path_arg("\\\\?\\C:\\x.wav") == "\\\\?\\C:\\x.wav"
     assert ffmod.path_arg("\\\\server\\share\\a.wav") == "\\\\?\\UNC\\server\\share\\a.wav"
     monkeypatch.setattr(ffmod.sys, "platform", "linux")
-    assert ffmod.path_arg(Path("/tmp/a.wav")) == "/tmp/a.wav"
+    assert ffmod.path_arg("/tmp/a.wav") == "/tmp/a.wav"  # a string, so the expectation holds on every OS
+    assert ffmod.path_arg(Path("a.wav")) == str(Path("a.wav"))
 
 
 # -- messages -------------------------------------------------------------------------------------------------
@@ -241,8 +242,28 @@ def test_windows_selects_the_file_with_two_arguments_even_with_spaces_and_commas
     command = shell.reveal_command(path, "win32")
     assert command[:2] == ["explorer", "/select,"] and len(command) == 3
     assert command[2].replace("\\", "/") == "C:/My Videos/a, b-cleaned.wav"
-    assert shell.reveal_command(Path("/Users/me/a.wav"), "darwin") == ["open", "-R", "/Users/me/a.wav"]
+    mac_path = Path("/Users/me/a.wav")
+    assert shell.reveal_command(mac_path, "darwin") == ["open", "-R", str(mac_path)]
     assert shell.reveal_command(path, "linux") is None
+
+
+_SECOND_START = """
+import json, sys
+from PySide6.QtCore import QCoreApplication
+from audio_cleaner_desktop.gui import single_instance
+app = QCoreApplication([])
+sys.exit(0 if single_instance.forward(sys.argv[1], json.loads(sys.argv[2])) else 1)
+"""
+
+
+def _second_start(name, files):
+    """What starting the app again does, as the process it really is (the files travel as ASCII JSON in the
+    argument, so the command line of any OS passes them on unharmed)."""
+    import json
+
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)}
+    return subprocess.Popen([sys.executable, "-c", _SECOND_START, name, json.dumps(files)], env=env,
+                            stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
 
 def test_a_second_start_hands_its_files_to_the_first(qapp, tmp_path):
@@ -254,14 +275,36 @@ def test_a_second_start_hands_its_files_to_the_first(qapp, tmp_path):
     assert server.listen()
     try:
         files = [str(tmp_path / "a b.wav"), str(tmp_path / "ü録.mp4")]
-        assert single_instance.forward(name, files)
-        assert single_instance.forward(name, [])  # started again without files: just come to the front
-        assert wait_until(lambda: len(got) == 2, timeout=10)
+        starts = [_second_start(name, files), _second_start(name, [])]  # the second: no files, just come to the front
+        # each one leaves once the window (this thread, so keep the event loop running) has answered
+        assert wait_until(lambda: len(got) == 2 and all(start.poll() is not None for start in starts), timeout=60)
+        for start in starts:
+            assert start.returncode == 0, start.stderr.read()
         assert sorted(got, key=len) == [[], files]
     finally:
         server.close()
         server.deleteLater()
         wait_until(lambda: False, timeout=0.2)  # let the sockets go before the next test
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a Windows named pipe can drop what a sender wrote before it hung up "
+                    "while the receiver was busy: the sender waits for the answer for that reason")
+def test_a_second_start_that_does_not_wait_for_the_answer_still_gets_through(qapp, tmp_path):
+    """An older program (or a sender that gave up waiting) hangs up right after writing."""
+    name = f"audio-cleaner-test-nowait-{os.getpid()}"
+    server = single_instance.InstanceServer(name, qapp)
+    got = []
+    server.received.connect(got.append)
+    assert server.listen()
+    try:
+        files = [str(tmp_path / "a.wav")]
+        assert single_instance.forward(name, files, ack_ms=0)
+        assert wait_until(lambda: len(got) == 1, timeout=10)
+        assert got == [files]
+    finally:
+        server.close()
+        server.deleteLater()
+        wait_until(lambda: False, timeout=0.2)
 
 
 # -- window ---------------------------------------------------------------------------------------------------
@@ -403,7 +446,7 @@ def test_files_the_system_opens_reach_the_window(qapp, tmp_path, monkeypatch):
         qapp.sendEvent(qapp, QFileOpenEvent(QUrl.fromLocalFile(str(tmp_path / "a.mp4"))))
     finally:
         qapp.fileOpened.disconnect(got.append)
-    assert got == [str(tmp_path / "a.mp4")]
+    assert got == [str(tmp_path / "a.mp4")]  # in the platform's own form (QUrl gives C:/Users/... on Windows)
     assert QEvent.Type.FileOpen
 
 

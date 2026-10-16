@@ -8,7 +8,7 @@
                           downloads its speech model when subtitles are first wanted, see models.py)
 
     python prepare_vendor.py --libdf PATH --ffmpeg-dir DIR --model PATH
-        [--whisper-model DIR | --download-whisper] [--deepfilter-src DIR | --deepfilter-notices DIR]
+        [--whisper-model DIR | --download-whisper | --no-test-model] [--deepfilter-src DIR | --deepfilter-notices DIR]
         [--rust-target TRIPLE] [--out DIR]
 
 CI builds libDF on one runner and assembles the app on another, so the DeepFilterNet notices (which need the
@@ -123,7 +123,7 @@ def copy_native(libdf: Path, ffmpeg_dir: Path, out: Path) -> None:
             (native / n).chmod(0o755)
 
 
-def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: bool, out: Path) -> None:
+def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: bool, out: Path, test_model: bool = True) -> None:
     need_file(model, "DeepFilterNet3 model")
     if sha256_of(model) != DFN_MODEL_SHA256:
         fail(f"{model} is not the expected DeepFilterNet3_onnx.tar.gz (sha256 mismatch)")
@@ -139,6 +139,10 @@ def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: 
     stale = models / WHISPER_DIR_NAME  # older vendor layout: it must not end up in the bundle
     if stale.exists():
         shutil.rmtree(stale)
+    if not test_model:  # a build that is not going to run the tests (CI's installer jobs) does not need the 460 MB
+        if target.exists():
+            shutil.rmtree(target)
+        return
     if download:
         try:
             from huggingface_hub import snapshot_download
@@ -492,6 +496,8 @@ def main() -> int:
     ap.add_argument("--whisper-model", type=Path, default=Path.home() / "audio-cleaner" / "models" / "whisper" / "small",
                     help="directory of Systran/faster-whisper-small (default: %(default)s)")
     ap.add_argument("--download-whisper", action="store_true", help=f"download {WHISPER_REPO}@{WHISPER_REVISION[:8]} with huggingface_hub (CI)")
+    ap.add_argument("--no-test-model", action="store_true",
+                    help="leave out the small speech model that only the tests use (it is never bundled anyway)")
     ap.add_argument("--deepfilter-src", type=Path, default=Path.home() / "audio-cleaner" / "src" / "deepfilter-build",
                     help="checkout prepared by native/deepfilter/build.sh (default: %(default)s)")
     ap.add_argument("--deepfilter-notices", type=Path, metavar="DIR",
@@ -515,7 +521,7 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     print(f"vendor directory: {out}")
     copy_native(a.libdf, a.ffmpeg_dir, out)
-    copy_models(a.model, a.dpdfnet, a.whisper_model, a.download_whisper, out)
+    copy_models(a.model, a.dpdfnet, a.whisper_model, a.download_whisper, out, test_model=not a.no_test_model)
     n = Notices(out)
     ffmpeg_notices(n, a.ffmpeg_dir)
     if a.deepfilter_notices:

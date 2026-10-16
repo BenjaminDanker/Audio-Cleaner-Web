@@ -8,7 +8,13 @@ option(ACW_BUILD_PLUGIN "Build the OBS Studio module (needs libobs)" ON)
 option(ACW_BUILD_TESTS "Build the acw_core unit tests and the live streaming test tool (no OBS needed)" OFF)
 option(ENABLE_FRONTEND_API "Use obs-frontend-api (needed to send captions to the stream)" ON)
 
-include(compilerconfig)
+if(OS_MACOS AND NOT ACW_BUILD_PLUGIN)
+  # The template's macOS rules insist on the Xcode generator (they set up the plugin bundle). The core library and
+  # its tests need none of that: they build with any generator, and only get the shared compiler options.
+  include(compiler_common)
+else()
+  include(compilerconfig)
+endif()
 
 if(ACW_BUILD_PLUGIN)
   include(defaults)
