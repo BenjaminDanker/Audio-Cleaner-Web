@@ -21,6 +21,17 @@ if(ACW_BUILD_PLUGIN)
   include(helpers)
 endif()
 
+# The folder the plugin is built in never ends up in what we ship (source file names in asserts and debug info would
+# name the build machine's checkout): everything under the checkout is recorded relative to it.
+get_filename_component(ACW_CHECKOUT "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+if(MSVC)
+  file(TO_NATIVE_PATH "${ACW_CHECKOUT}/" _acw_checkout_native)
+  add_compile_options("/d1trimfile:${_acw_checkout_native}")
+  add_link_options("/PDBALTPATH:%_PDB%")  # the dll names its .pdb by file name only
+else()
+  add_compile_options("-ffile-prefix-map=${ACW_CHECKOUT}/=")
+endif()
+
 # OBS-independent core: ring buffers, reframer, resampler, protocol, WebSocket client, output stage.
 add_subdirectory(core)
 

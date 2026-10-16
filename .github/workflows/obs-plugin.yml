@@ -268,6 +268,8 @@ jobs:
         run: |
           name=$(jq -r .name buildspec.json); version="$ACW_VERSION"
           cd "release/$CONFIG"
+          # No debug symbols in what we ship (they list the build machine's object file paths).
+          strip -S "${name}.plugin/Contents/MacOS/${name}"
           XZ_OPT=-T0 tar -cJf "../${name}-${version}-macos-universal.tar.xz" "${name}.plugin"
           lipo -archs "${name}.plugin/Contents/MacOS/${name}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -313,6 +315,8 @@ jobs:
         run: |
           $spec = Get-Content buildspec.json -Raw | ConvertFrom-Json
           $out = "release/$($spec.name)-$env:ACW_VERSION-windows-x64.zip"
+          # Debug symbols stay out of what we ship (the .pdb lists the build machine's paths).
+          Get-ChildItem "release/$env:CONFIG" -Recurse -Filter *.pdb | Remove-Item -Force
           Compress-Archive -Force -Path "release/$env:CONFIG/*" -DestinationPath $out
           Get-Item $out
       - name: Check the package holds the plugin folder and nothing else
@@ -323,7 +327,7 @@ jobs:
             $names = $zip.Entries | Where-Object { $_.Name -ne '' } | ForEach-Object { $_.FullName -replace '\\', '/' }
           } finally { $zip.Dispose() }
           $names | ForEach-Object { "  $_" }
-          $bad = $names | Where-Object { $_ -notmatch '^audio-cleaner/(bin/64bit/audio-cleaner\.(dll|pdb)|data/.+)$' }
+          $bad = $names | Where-Object { $_ -notmatch '^audio-cleaner/(bin/64bit/audio-cleaner\.dll|data/.+)$' }
           if ($bad) { throw "unexpected files in the zip: $($bad -join ', ')" }
           if (-not ($names -contains 'audio-cleaner/bin/64bit/audio-cleaner.dll')) { throw 'the dll is missing from the zip' }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -390,6 +394,17 @@ jobs:
           mv "$(one *.deb)" "$base-ubuntu-debian.deb"
           mv "$(one *-ubuntu-x86_64.tar.xz)" "$base-linux-other.tar.xz"
           files=("$base-windows.zip" "$base-mac.tar.xz" "$base-ubuntu-debian.deb" "$base-linux-other.tar.xz")
+          # Nothing users download may name where the plugin is built (the repository or its owner).
+          scan="$RUNNER_TEMP/scan"; rm -rf "$scan"; mkdir -p "$scan"/{win,mac,deb,other}
+          python3 -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$base-windows.zip" "$scan/win"
+          tar -xJf "$base-mac.tar.xz" -C "$scan/mac"; tar -xJf "$base-linux-other.tar.xz" -C "$scan/other"
+          dpkg-deb -x "$base-ubuntu-debian.deb" "$scan/deb"; dpkg-deb -f "$base-ubuntu-debian.deb" > "$scan/deb/control.txt"
+          leaks=$(grep -rlaiF -e "${GITHUB_REPOSITORY#*/}" -e "${GITHUB_REPOSITORY_OWNER}" "$scan" || true)
+          if [ -n "$leaks" ]; then
+            echo "::error::these files name the repository or its owner: $leaks"
+            for f in $leaks; do strings -n 6 "$f" | grep -aiF -e "${GITHUB_REPOSITORY#*/}" -e "${GITHUB_REPOSITORY_OWNER}" | head -3; done
+            exit 1
+          fi
           notes="Audio Cleaner OBS plugin $version for OBS 31.1 or newer, built from ${GITHUB_SHA::7}. Not code-signed yet.
 
           - Windows: $base-windows.zip
