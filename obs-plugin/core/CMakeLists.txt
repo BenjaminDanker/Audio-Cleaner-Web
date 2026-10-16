@@ -10,6 +10,7 @@ add_library(
   src/caption_router.cpp
   src/delayed_sender.cpp
   src/languages.cpp
+  src/live_gate.cpp
   src/opus_codec.cpp
   src/output_select.cpp
   src/overlay_text.cpp

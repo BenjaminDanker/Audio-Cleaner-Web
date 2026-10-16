@@ -78,7 +78,9 @@ static bool contains(const std::string &hay, const char *needle)
 // ---------------------------------------------------------------------------------------------------
 // The fake service
 
-enum class Mode { Echo, GarbageBinary, WildSeq, GarbageText, DropAfter100, Silent };
+// ReplySilence: answers every microphone frame with a silence frame (as the service does for silence); BadSilence: with a
+// silence frame whose sample count is wrong.
+enum class Mode { Echo, GarbageBinary, WildSeq, GarbageText, DropAfter100, Silent, ReplySilence, BadSilence };
 
 class FakeServer {
 public:
@@ -114,10 +116,14 @@ public:
 	std::string last_start;
 
 	std::atomic<int> opens{0}, starts{0}, mic{0}, refs{0};
+	// By kind: microphone frames that were silence frames (codec 4) or Opus (codec 3), reference frames that were silence frames.
+	std::atomic<int> silent_mic{0}, opus_mic{0}, silent_refs{0};
+	// true: honour "returnAudio": false (send no audio back), as the service does. Off by default: the other tests want the echo.
+	std::atomic<bool> honor_return_audio{false};
 
 	void reset_counts()
 	{
-		opens = starts = mic = refs = 0;
+		opens = starts = mic = refs = silent_mic = opus_mic = silent_refs = 0;
 	}
 
 private:
@@ -169,6 +175,7 @@ private:
 		if (!msg->binary) {
 			if (contains(msg->str, "\"start\"")) {
 				++starts;
+				no_audio_back_ = honor_return_audio && contains(msg->str, "\"returnAudio\":false");
 				std::string err, rdy, after, creason;
 				{
 					std::lock_guard<std::mutex> lk(mu);
@@ -214,11 +221,20 @@ private:
 		if (d.size() < 16)
 			return;
 		const uint16_t flags = static_cast<uint8_t>(d[2]) | (static_cast<uint8_t>(d[3]) << 8);
+		const uint8_t codec = static_cast<uint8_t>(d[1]);
 		if (flags & 1) {
 			++refs;
+			if (codec == 4)
+				++silent_refs;
 			return;
 		}
 		const int n = ++mic;
+		if (codec == 4)
+			++silent_mic;
+		else if (codec == 3)
+			++opus_mic;
+		if (no_audio_back_)
+			return;
 		switch (mode.load()) {
 		case Mode::Echo: {
 			const int dl = reply_delay_ms.load();
@@ -256,9 +272,20 @@ private:
 			break;
 		case Mode::Silent:
 			break;
+		case Mode::ReplySilence:
+		case Mode::BadSilence: {
+			std::string g = d.substr(0, 16);
+			g[1] = 4;
+			const uint16_t count = mode.load() == Mode::ReplySilence ? 960 : 7;
+			g.push_back(static_cast<char>(count & 0xff));
+			g.push_back(static_cast<char>(count >> 8));
+			ws.sendBinary(g);
+			break;
+		}
 		}
 	}
 
+	std::atomic<bool> no_audio_back_{false};
 	int port_;
 	ix::WebSocketServer srv_;
 	std::thread sender_;
@@ -1585,6 +1612,329 @@ static void test_update_download()
 	std::filesystem::remove_all(tmp, ec);
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Silence frames, returnAudio, the network thread's wake-ups
+
+static const char *kReadySilence =
+	R"({"type":"ready","sessionId":"s","sampleRate":48000,"hopSamples":480,"modelLatencyMs":30.0,)"
+	R"("usdPerMinute":0.01,"maxSessionSeconds":43200,"echoReference":true,"silenceFrames":true})";
+
+// A host that feeds the session in real time, in blocks of `chunk` samples (OBS hands over 480 or 1024 at a time); what it feeds
+// (noise, or a constant level) and whether the source is muted can change while it runs. Optionally keeps what went in and came out.
+class Source {
+public:
+	explicit Source(Session &s, size_t chunk = 480, bool keep = false) : s_(s), chunk_(chunk), keep_(keep)
+	{
+		th_ = std::thread([this] { run(); });
+	}
+	~Source() { stop(); }
+	void stop()
+	{
+		run_ = false;
+		if (th_.joinable())
+			th_.join();
+	}
+	std::atomic<bool> noise{true}, muted{false};
+	std::atomic<float> level{0.0f};  // fed when `noise` is off
+	Capture cap;                     // read after stop()
+
+private:
+	void run()
+	{
+		std::mt19937 rng(5);
+		std::normal_distribution<float> nd(0.0f, 0.1f);
+		std::vector<float> blk(chunk_), proc;
+		const auto period = microseconds(static_cast<long long>(static_cast<double>(chunk_) * 1e6 / 48000.0));
+		auto t = steady_clock::now();
+		while (run_) {
+			const bool nz = noise.load();
+			const float lv = level.load();
+			for (float &v : blk)
+				v = nz ? nd(rng) + 0.001f : lv;
+			proc = blk;
+			s_.process(proc.data(), proc.size(), muted.load());
+			if (keep_) {
+				cap.in.insert(cap.in.end(), blk.begin(), blk.end());
+				cap.out.insert(cap.out.end(), proc.begin(), proc.end());
+			}
+			t += period;
+			std::this_thread::sleep_until(t);
+		}
+	}
+	Session &s_;
+	size_t chunk_;
+	bool keep_;
+	std::atomic<bool> run_{true};
+	std::thread th_;
+};
+
+static bool streaming(Session &s)
+{
+	return s.snapshot().state == SessionState::Streaming;
+}
+
+static void test_silence_frames()
+{
+	std::printf("silence frames: only for a service that takes them; silence, a muted source and a quiet block are sent as such\n");
+	// 1. A service that takes them: digital silence is not encoded.
+	{
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = kReadySilence;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s);
+		src.noise = false;
+		CHECK(wait_until([&] { return streaming(s); }, 5000));
+		CHECK(wait_until([&] { return srv.silent_mic.load() > 100; }, 6000));
+		const SessionSnapshot n = s.snapshot();
+		CHECK(n.silence_active);
+		CHECK(srv.opus_mic.load() == 0);
+		CHECK(srv.silent_mic.load() >= srv.mic.load() - 2);
+		CHECK(n.silent_sent >= 100 && n.sent - n.silent_sent <= 2);
+		CHECK(n.tx_bytes <= 20 * n.sent);  // 18 bytes each
+		CHECK(wait_until([&] { return s.snapshot().used > 60; }, 3000));  // the silence replies are played
+		CHECK(s.snapshot().bad_frames == 0);
+		CHECK(contains(s.status_details(), "silent frames"));
+		CHECK(contains(s.status_line(), "Connected"));
+		src.stop();
+		s.stop(0, 500);
+	}
+	// 2. A service that does not mention them gets ordinary frames, silent or not.
+	{
+		FakeServer srv;
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s);
+		src.noise = false;
+		CHECK(wait_until([&] { return srv.opus_mic.load() > 100; }, 8000));
+		CHECK(srv.silent_mic.load() == 0);
+		CHECK(!s.snapshot().silence_active && s.snapshot().silent_sent == 0);
+		src.muted = true;  // muted: still ordinary frames
+		const int before = srv.opus_mic.load();
+		CHECK(wait_until([&] { return srv.opus_mic.load() > before + 40; }, 3000));
+		CHECK(srv.silent_mic.load() == 0);
+		src.stop();
+		s.stop(0, 500);
+	}
+	// 3. A muted source is silence (even though the audio is loud); unmuted, the audio is sent again.
+	{
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = kReadySilence;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s);
+		src.muted = true;
+		CHECK(wait_until([&] { return srv.silent_mic.load() > 60; }, 8000));
+		CHECK(srv.opus_mic.load() <= 1);
+		src.muted = false;
+		CHECK(wait_until([&] { return srv.opus_mic.load() > 40; }, 4000));
+		const int silent_then = srv.silent_mic.load();
+		std::this_thread::sleep_for(milliseconds(800));
+		CHECK(srv.silent_mic.load() - silent_then <= 2);  // loud audio is not mistaken for silence
+		src.muted = true;
+		const int opus_then = srv.opus_mic.load();
+		CHECK(wait_until([&] { return srv.silent_mic.load() > silent_then + 40; }, 3000));
+		CHECK(srv.opus_mic.load() - opus_then <= 3);
+		src.stop();
+		s.stop(0, 500);
+	}
+	// 4. "Silence" is every sample below 1e-5: a little above that is audio.
+	{
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = kReadySilence;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s);
+		src.noise = false;
+		src.level = -6e-6f;
+		CHECK(wait_until([&] { return srv.silent_mic.load() > 50; }, 8000));
+		CHECK(srv.opus_mic.load() == 0);
+		src.level = 3e-5f;
+		CHECK(wait_until([&] { return srv.opus_mic.load() > 40; }, 4000));
+		const int silent_then = srv.silent_mic.load();
+		std::this_thread::sleep_for(milliseconds(600));
+		CHECK(srv.silent_mic.load() - silent_then <= 2);
+		src.stop();
+		s.stop(0, 500);
+	}
+	// 5. The echo reference: a silent block is a silence frame (a service without them gets nothing, as before).
+	for (int takes = 0; takes < 2; ++takes) {
+		FakeServer srv;
+		if (takes) {
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = kReadySilence;
+		}
+		auto ref = std::make_shared<ReferenceBuffer>(48000);
+		SessionConfig cfg = base_config(srv.url());
+		cfg.reference = ref;
+		Session s(cfg, nullptr, nullptr);
+		s.start();
+		std::atomic<bool> run{true}, loud{false};
+		std::thread rth([&] {
+			std::vector<float> b(480);
+			float ph = 0;
+			auto t = steady_clock::now();
+			while (run) {
+				for (float &v : b) {
+					v = loud ? 0.3f * std::sin(ph) : 0.0f;
+					ph += 0.05f;
+				}
+				ref->push(b.data(), b.size());
+				t += milliseconds(10);
+				std::this_thread::sleep_until(t);
+			}
+		});
+		Source src(s);
+		CHECK(wait_until([&] { return srv.mic.load() > 150; }, 8000));
+		if (takes) {
+			CHECK(srv.refs.load() > 100);
+			CHECK(srv.silent_refs.load() >= srv.refs.load() - 2);
+			CHECK(srv.opus_mic.load() > 100);  // the microphone is loud: encoded
+			loud = true;
+			const int refs_then = srv.refs.load();
+			CHECK(wait_until([&] { return srv.refs.load() > refs_then + 80; }, 4000));
+			const int silent_then = srv.silent_refs.load();
+			std::this_thread::sleep_for(milliseconds(800));
+			CHECK(srv.silent_refs.load() - silent_then <= 2);
+		} else {
+			CHECK(srv.refs.load() == 0);
+			CHECK(srv.silent_refs.load() == 0);
+		}
+		run = false;
+		rth.join();
+		src.stop();
+		s.stop(0, 500);
+	}
+	// 6. The service's silence frames are zeros in the output, on the usual deadlines.
+	{
+		FakeServer srv;
+		srv.mode = Mode::ReplySilence;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = kReadySilence;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s, 480, true);
+		CHECK(wait_until([&] { return s.snapshot().used > 150; }, 10000));
+		src.stop();
+		const Capture &c = src.cap;
+		double peak = 0;
+		for (size_t i = c.out.size() - 24000; i < c.out.size(); ++i)  // the last half second
+			peak = std::max<double>(peak, std::fabs(c.out[i]));
+		std::printf("  loud microphone, silence replies: output peak %.2g\n", peak);
+		CHECK(peak == 0.0);
+		CHECK(s.snapshot().bad_frames == 0);
+		s.stop(0, 500);
+	}
+	// 7. A silence reply that is not valid is a bad frame: never played, the audio goes on unprocessed.
+	{
+		FakeServer srv;
+		srv.mode = Mode::BadSilence;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = kReadySilence;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s, 480, true);
+		CHECK(wait_until([&] { return s.snapshot().bad_frames > 50; }, 10000));
+		src.stop();
+		CHECK(s.snapshot().used == 0);
+		CHECK(is_plain_delayed_copy(src.cap, static_cast<int>(std::lround(s.delay_seconds() * 48000.0))));
+		s.stop(0, 500);
+	}
+}
+
+static void test_return_audio()
+{
+	std::printf("captions only: the service is asked not to send audio back, and nothing waits for it\n");
+	FakeServer srv;
+	srv.honor_return_audio = true;
+	{
+		std::lock_guard<std::mutex> lk(srv.mu);
+		srv.after_ready = R"({"type":"caption","text":"no audio back","final":true,"start":1.0,"end":2.0})";
+	}
+	std::mutex mu;
+	std::vector<std::string> caps;
+	SessionConfig cfg = base_config(srv.url());
+	cfg.denoise = false;
+	cfg.captions = "local";
+	Session s(cfg,
+		  [&](const CaptionEvent &e) {
+			  std::lock_guard<std::mutex> lk(mu);
+			  caps.push_back(e.text);
+		  },
+		  nullptr);
+	s.start();
+	Source src(s, 480, true);
+	CHECK(wait_until([&] { return streaming(s); }, 5000));
+	CHECK(wait_until([&] { std::lock_guard<std::mutex> lk(mu); return !caps.empty(); }, 3000));
+	{
+		std::lock_guard<std::mutex> lk(srv.mu);
+		CHECK(contains(srv.last_start, "\"returnAudio\":false"));
+		CHECK(contains(srv.last_start, "\"denoise\":null"));
+	}
+	std::this_thread::sleep_for(seconds(3));
+	const SessionSnapshot n = s.snapshot();
+	CHECK(n.state == SessionState::Streaming && n.reconnects == 0);
+	CHECK(n.sent > 120);
+	CHECK(n.received == 0 && n.bad_frames == 0);  // none came back
+	CHECK(contains(s.status_line(), "Captions are running"));
+	src.stop();
+	CHECK(s.delay_seconds() == 0.0);
+	CHECK(is_plain_delayed_copy(src.cap, 0));  // the microphone is passed through at once, untouched
+	s.stop(0, 500);
+
+	// With noise removal the audio is wanted: the start message does not say otherwise.
+	FakeServer srv2;
+	srv2.honor_return_audio = true;
+	Session s2(base_config(srv2.url()), nullptr, nullptr);
+	s2.start();
+	Source src2(s2);
+	CHECK(wait_until([&] { return s2.snapshot().used > 30; }, 8000));
+	{
+		std::lock_guard<std::mutex> lk(srv2.mu);
+		CHECK(!contains(srv2.last_start, "returnAudio"));
+	}
+	src2.stop();
+	s2.stop(0, 500);
+}
+
+static void test_network_thread_sleeps()
+{
+	std::printf("network thread: sleeps until the next frame is due instead of polling\n");
+	for (size_t chunk : {size_t(480), size_t(1024)}) {
+		FakeServer srv;
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Source src(s, chunk);
+		CHECK(wait_until([&] { return s.snapshot().used > 20; }, 8000));
+		const SessionSnapshot a = s.snapshot();
+		std::this_thread::sleep_for(seconds(3));
+		const SessionSnapshot b = s.snapshot();
+		const double loops_per_s = static_cast<double>(b.net_loops - a.net_loops) / 3.0;
+		const double frames_per_s = static_cast<double>(b.sent - a.sent) / 3.0;
+		std::printf("  chunks of %zu samples: %.0f loop rounds/s (was 500 with the 2 ms poll), %.1f frames/s, round trip %.2f ms, late %llu\n",
+			    chunk, loops_per_s, frames_per_s, b.rtt_avg_ms, static_cast<unsigned long long>(b.late - a.late));
+		CHECK(loops_per_s < 130.0);
+		CHECK(frames_per_s > 0.93 * 48000.0 / 960.0);  // every frame goes out, none is held back
+		CHECK(b.rtt_avg_ms < 30.0);
+		CHECK(b.late - a.late <= 2 && b.dropped == 0);
+		src.stop();
+		s.stop(0, 500);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	ix::initNetSystem();
@@ -1608,6 +1958,9 @@ int main(int argc, char **argv)
 	test_http_refusals();
 	test_ready_validation();
 	test_captions_only();
+	test_return_audio();
+	test_silence_frames();
+	test_network_thread_sleeps();
 	test_robustness();
 	test_stop_paths();
 	test_update_check();

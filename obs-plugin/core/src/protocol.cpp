@@ -71,6 +71,27 @@ void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *o
 	put_u64(out + 8, ts_us);
 }
 
+size_t encode_frame_silence(uint32_t seq, uint64_t ts_us, size_t samples, uint8_t *out, uint16_t flags)
+{
+	if (samples < kSilenceMinSamples || samples > kMaxRxSamples || samples % kSilenceStep != 0)
+		return 0;
+	encode_frame_header(kCodecSilence, seq, ts_us, out, flags);
+	put_u16(out + kHeaderSize, static_cast<uint16_t>(samples));
+	return kHeaderSize + kSilencePayload;
+}
+
+bool parse_silence_samples(const uint8_t *data, size_t len, size_t &samples)
+{
+	FrameHeader h;
+	if (len != kHeaderSize + kSilencePayload || !parse_frame_header(data, len, h) || h.codec != kCodecSilence)
+		return false;
+	const size_t n = static_cast<size_t>(data[kHeaderSize]) | (static_cast<size_t>(data[kHeaderSize + 1]) << 8);
+	if (n < kSilenceMinSamples || n > kMaxRxSamples || n % kSilenceStep != 0)
+		return false;
+	samples = n;
+	return true;
+}
+
 bool parse_frame_header(const uint8_t *data, size_t len, FrameHeader &hdr)
 {
 	if (len < kHeaderSize)
@@ -90,6 +111,14 @@ bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out,
 		return false;
 	const uint8_t *p = data + kHeaderSize;
 	const size_t payload = len - kHeaderSize;
+	if (hdr.codec == kCodecSilence) {
+		size_t n = 0;
+		if (!parse_silence_samples(data, len, n) || n > max_samples)
+			return false;
+		std::fill(out, out + n, 0.0f);
+		n_samples = n;
+		return true;
+	}
 	if (hdr.codec == kCodecS16) {
 		if (payload % 2)
 			return false;
@@ -159,6 +188,8 @@ std::string make_start_message(const StartParams &p)
 		j["echoReference"] = true;
 	if (!p.translate.empty())
 		j["translate"] = p.translate;
+	if (!p.return_audio)
+		j["returnAudio"] = false;  // captions only: no audio frames come back
 	j["client"] = p.client;
 	return j.dump();
 }
@@ -224,6 +255,8 @@ bool parse_event(const std::string &text, Event &ev)
 		integer("maxSessionSeconds", ev.max_session_seconds);
 		if (auto it = j.find("echoReference"); it != j.end() && it->is_boolean())
 			ev.echo_reference = it->get<bool>();
+		if (auto it = j.find("silenceFrames"); it != j.end() && it->is_boolean())
+			ev.silence_frames = it->get<bool>();
 		if (auto it = j.find("translate"); it != j.end() && it->is_array()) {
 			ev.has_translate = true;
 			for (const auto &e : *it)

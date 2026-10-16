@@ -63,6 +63,9 @@ struct SessionSnapshot {
 	double rtt_last_ms = 0, rtt_avg_ms = 0, rtt_p95_ms = 0, rtt_max_ms = 0;
 	double ping_rtt_ms = 0;
 	uint64_t captured = 0, sent = 0, received = 0, used = 0, late = 0, passthrough = 0, dropped = 0;
+	uint64_t silent_sent = 0;      // of `sent`: silence frames (nothing encoded, nothing billed)
+	uint64_t net_loops = 0;        // how many times the network thread woke up while streaming
+	bool silence_active = false;   // the service takes silence frames
 	uint64_t bad_frames = 0, warmup_discarded = 0;
 	uint64_t tx_bytes = 0, rx_bytes = 0;  // audio traffic (frame headers included)
 	uint32_t reconnects = 0;
@@ -115,7 +118,9 @@ public:
 
 	// Audio thread: processes `n` mono samples at cfg.host_rate in place.
 	// Wait-free; no allocation, locks or system calls (except the clock).
-	void process(float *mono, size_t n);
+	// `muted`: the source is muted in OBS (its audio is not mixed in): what is sent to the service for these samples is
+	// silence, so a muted microphone is not captioned, and with a service that takes silence frames it costs nothing.
+	void process(float *mono, size_t n, bool muted = false);
 
 	// Delay (seconds) that process() applies to the audio; use it to back-date
 	// output timestamps. 0 when the audio is not altered.

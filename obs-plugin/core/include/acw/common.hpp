@@ -18,8 +18,15 @@ constexpr uint8_t kProtoVersion = 1;
 constexpr uint8_t kCodecS16 = 1;
 constexpr uint8_t kCodecF32 = 2;
 constexpr uint8_t kCodecOpus = 3;  // exactly one 20 ms Opus packet per frame
+constexpr uint8_t kCodecSilence = 4;  // no audio: a u16 (little endian) count of 48 kHz samples of silence (480..4800, multiple of 480)
+constexpr size_t kSilencePayload = 2;
+constexpr size_t kSilenceMinSamples = 480;
+constexpr size_t kSilenceStep = 480;
 constexpr size_t kHeaderSize = 16;
 constexpr uint16_t kFlagReference = 1;  // frame flags bit 0: echo reference (what the speakers play), not microphone audio
+
+// A block whose every sample is below this (absolute value) is digital silence: it is sent as a silence frame, not encoded.
+constexpr float kSilenceLevel = 1e-5f;
 
 // Latency presets (fixed output delay D, chosen at session start).
 enum class LatencyPreset { Low = 80, Balanced = 150, Safe = 250 };

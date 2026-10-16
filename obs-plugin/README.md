@@ -90,10 +90,21 @@ Right-click an audio source > Filters > `+` > **Audio Cleaner (cloud)**.
   (compact Opus by default, ~60 kbps each way; uncompressed 16-bit PCM, ~770 kbps, as a fallback) and a technical line
   (round trip, frame counters).
 
-The session starts when the enabled filter first receives audio and stops when the filter is disabled or removed.
-With denoise off (captions only) the audio is not delayed at all.
+**Only while streaming or recording** (on by default, also for filters saved by earlier versions) - the filter keeps no
+session, and so nothing is billed, until OBS is streaming, recording, running the replay buffer or running the virtual
+camera. The session starts as soon as one of them is *starting* (so processing is ready when the output begins) and ends
+about 10 seconds after the last one has stopped (a stream that restarts, or a recording that stops and starts again, keeps
+the same session). In between the microphone plays normally, unprocessed, and the status says "Waiting for you to go live
+or record: nothing is billed until then." Outputs made by other plugins (a second stream, Source Record, NDI) are not
+seen: untick the box when you need the filter for those, or to test it without streaming. Without the OBS frontend API
+(a build with `ENABLE_FRONTEND_API=OFF`) the setting is not shown and the filter always runs.
 
-**Each filter is its own live session, billed per second while it runs** (captions too, whether or not you are live), and
+With the box unticked, the session starts when the enabled filter first receives audio and stops when the filter is
+disabled or removed. With denoise off (captions only) the audio is not delayed at all and the service is asked not to send
+any audio back (`returnAudio: false` in the start message).
+
+**Each filter is its own live session, billed per second while it runs** (captions too; with *Only while streaming or
+recording* that means while an output runs, plus the 10 seconds after), and
 an account can have **four live sessions at a time**: a fifth filter, or another computer, is refused until one ends
 (a session whose connection dropped lingers on the service for up to about 30 s).
 
@@ -169,17 +180,33 @@ tells you when the delay is too short. OBS at 44.1 kHz is resampled
 (linear-phase polyphase, 44.1 <-> 48 kHz); other rates are passed through unchanged with a status warning.
 The filter is mono: channels are averaged and the result is written to all channels.
 
-The microphone is sent frame by frame for as long as OBS feeds the filter, silence and a source muted in OBS included
-(only echo-reference frames of pure silence are skipped). The service ends a session that gets no microphone audio for a few
-minutes, so keep it that way if you change the code. The only times the filter stops sending are: not connected, OBS has
-stopped feeding it audio (the filter then closes the session itself after 10 s), and a congested connection (frames are
-dropped instead of queued).
+The microphone is sent frame by frame for as long as OBS feeds the filter, silence and a source muted in OBS included.
+The service ends a session that gets no microphone audio for a few minutes, so keep it that way if you change the code.
+The only times the filter stops sending are: not connected, OBS has stopped feeding it audio (the filter then closes the
+session itself after 10 s), and a congested connection (frames are dropped instead of queued).
+
+**Silence is free.** When the service's `ready` message says `"silenceFrames": true`, a 20 ms block that is silence goes out
+as an 18-byte *silence frame* (protocol codec 4: the usual 16-byte header plus the sample count at 48 kHz as a
+little-endian u16) instead of an encoded one. Silence means: the filtered source is muted in OBS (`obs_source_muted`; the
+filter sends zeros for a muted source, with any service, so a muted microphone is not captioned), or every sample of the
+block is quieter than 1e-5 (digital silence, for example behind a noise gate). The same holds for the echo-reference
+stream: a silent reference block is a silence frame (a service without them still gets nothing for it). The service
+answers each microphone silence frame with a silence frame (same `seq` and `ts_us`), which the output stage plays as that
+many zero samples under the usual deadline rules. The Opus encoder just skips those frames. Silence frames cost the service
+nothing and are **not billed**; the frames keep coming in real time, so the session counts as alive. The details line shows
+how many were sent.
+
+The network thread sleeps until the next 20 ms frame is due (the audio thread only stores a few numbers; from the input
+sample clock the network thread works out when the next frame is complete) instead of polling every 2 ms: about 50 wake-ups
+a second instead of 470 per session.
 
 ### Privacy and security
 
 * With echo cancellation, the sound of the chosen speaker source leaves your machine too, with the same encryption and billing.
 * Audio of the filtered source leaves your machine (encrypted with TLS) and is processed on the server; it is billed per second.
-  Muting a source in OBS does not stop streaming - disable the filter.
+  A muted source is sent as silence (not captioned, not billed where the service takes silence frames), but the session
+  stays open (and billed, for the seconds of audio that are not silent) - disable the filter, or use *Only while streaming
+  or recording*, to end it.
 * **OBS stores filter settings, including the API key, unencrypted in the scene collection JSON.** Use a dedicated key with only
   the live scope and do not share scene files. The plugin never logs the key.
 * **Once per OBS start the plugin contacts our download server** to read the newest plugin version (see "Updates"); when
@@ -215,9 +242,9 @@ Apple, TLS 1.2 at most). Override with `-DACW_TLS_BACKEND=`. `-DACW_USE_OPUS=OFF
 
 Layout: `core/` OBS-independent library `acw_core` (SPSC rings, reframer, resampler, protocol, WebSocket thread, output stage,
 echo reference buffer, caption pacer, caption router (which language goes where), on-screen text logic, subtitle files (SRT),
-choice of the outputs to caption, language lists, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
+choice of the outputs to caption, the live-only decision (`LiveGate`), language lists, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
 and the installers that swap the plugin when OBS closes); `src/` thin OBS glue (`audio-cleaner-filter.cpp` the filter and its
-properties, `caption-output.cpp` the closed captions, `text-sources.cpp` the on-screen text sources, `subtitle-files.cpp` the
+properties, `caption-output.cpp` the closed captions, `live-state.cpp` the stream / recording / replay buffer / virtual camera events, `text-sources.cpp` the on-screen text sources, `subtitle-files.cpp` the
 subtitle files, `update-notice.cpp` runs the check and, on the button, the download and install); `tests/` unit tests, `core_loopback_test` (the real session against a
 fake server on 127.0.0.1: handshake, errors, retries, late replies, garbage, shutdown; also the update check against a local
 web server: newer / same / older, redirects, refused addresses, size limit, timeout, cancel), `core_stream_test` (live server) and

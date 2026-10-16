@@ -42,13 +42,18 @@ public:
 private:
 	int in_rate_, out_rate_;
 	int64_t up_, down_;
-	int taps_;
+	int64_t step_i_, step_ph_;  // down_ / up_ and down_ % up_: how far the next output is (no division per output)
+	int taps_;                  // taps per phase of the filter design
+	size_t stride_;             // taps_ rounded up to a multiple of 8: the length of one row of h_
 	double delay_sec_ = 0.0;
-	std::vector<float> h_;      // polyphase coefficients, [phase][tap]
-	std::vector<float> hist_;   // last taps_-1 input samples
+	// Polyphase coefficients, one row of stride_ per phase, in the order the input is read (oldest sample first), the
+	// extra leading taps zero: an output is one contiguous dot product of a row with the input.
+	std::vector<float> h_;
+	std::vector<float> hist_;   // last stride_-1 input samples
 	std::vector<float> work_;   // history + current block (preallocated, no audio-thread allocation)
 	int64_t consumed_ = 0;      // input samples consumed so far
-	int64_t next_p_ = 0;        // position (in 1/up input-sample units) of the next output
+	int64_t next_i_ = 0;        // newest input index the next output uses
+	int64_t next_ph_ = 0;       // ... and its phase (0..up_-1); the output is at position next_i_ * up_ + next_ph_
 };
 
 }  // namespace acw

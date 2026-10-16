@@ -49,6 +49,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include "caption-output.h"
+#include "live-state.h"
 #include "subtitle-files.h"
 #include "text-sources.h"
 #include "update-notice.h"
@@ -96,6 +97,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_SAVE_SRT "save_srt"
 #define S_HINT_CAPTIONS "hint_captions"
 #define S_CFG_VERSION "cfg_version"  // 2 = has the caption outputs (see migrate_settings)
+#define S_LIVE_ONLY "live_only"  // run only while OBS streams, records, has the replay buffer or the virtual camera on
 #define S_ECHO_SOURCE "echo_source"
 #define S_STATUS "status"
 #define S_REFRESH "refresh_status"
@@ -160,6 +162,7 @@ struct Settings {
 	int latency_ms = 150;          // 80 / 150 / 250
 	std::string codec = "opus";    // opus | pcm
 	std::string echo_source = ECHO_DESKTOP;  // name of the source that plays through the speakers
+	bool live_only = true;  // a session only while an output runs (false = always, as before; always false without the frontend API)
 
 	// Where the captions go. Closed captions: to which outputs, and in which language ("same" = the spoken one, else
 	// one of the translations). On-screen text: an OBS text source per language. Subtitle files: next to recordings.
@@ -249,7 +252,7 @@ struct Settings {
 		const std::string cap = effective_captions();
 		return api_key == o.api_key && url == o.url && denoise == o.denoise && cap == o.effective_captions() &&
 		       (cap.empty() || (caption_language() == o.caption_language() && wanted_translations() == o.wanted_translations())) &&
-		       latency_ms == o.latency_ms && codec == o.codec && split == o.split &&
+		       latency_ms == o.latency_ms && codec == o.codec && split == o.split && live_only == o.live_only &&
 		       echo_source.empty() == o.echo_source.empty();  // which source it is does not matter to the session
 	}
 
@@ -320,6 +323,7 @@ struct ac_filter {
 	std::mutex mu;  // serialises create/update/enable/destroy (never taken by the audio thread)
 	Settings settings;
 	bool enabled = true;
+	bool live_on = true;  // the outputs say sessions may run (see live-state.cpp); only matters with Settings::live_only
 
 	// The audio thread only ever reads `session` (and `session_r`: the right side's own session when the two sides
 	// are different people).
@@ -381,6 +385,7 @@ Settings read_settings(obs_data_t *d)
 		s.latency_ms = 150;
 	s.codec = obs_data_get_string(d, S_CODEC) == std::string("pcm") ? "pcm" : "opus";
 	s.echo_source = obs_data_get_string(d, S_ECHO_SOURCE);
+	s.live_only = live_state_available() && obs_data_get_bool(d, S_LIVE_ONLY);
 
 	s.cc_stream = obs_data_get_bool(d, S_CC_STREAM);
 	s.cc_recording = obs_data_get_bool(d, S_CC_RECORDING);
@@ -465,8 +470,8 @@ void apply_outputs(ac_filter *f)
 acw::Session *make_session_unchecked(ac_filter *f, bool right)
 {
 	const Settings &s = f->settings;
-	if (!f->enabled || !s.configured())
-		return nullptr;
+	if (!f->enabled || !s.configured() || (s.live_only && !f->live_on))
+		return nullptr;  // nothing runs (and nothing is billed) while OBS neither streams nor records
 
 	acw::SessionConfig cfg;
 	cfg.url = s.url;
@@ -609,7 +614,7 @@ obs_source_t *find_echo_source(const std::string &want)
 void update_reference(ac_filter *f)
 {
 	const std::string &want = f->settings.echo_source;
-	if (!f->enabled || !f->reference || want.empty()) {
+	if (!f->enabled || !f->reference || want.empty() || (f->settings.live_only && !f->live_on)) {
 		detach_reference(f);
 		return;
 	}
@@ -645,6 +650,8 @@ void reap_graveyard(ac_filter *f)
 	f->graveyard.clear();
 }
 
+void apply_live_locked(ac_filter *f);
+
 // Graphics thread, every frame: retry the listening about once a second.
 void filter_tick(void *data, float seconds)
 {
@@ -660,6 +667,8 @@ void filter_tick(void *data, float seconds)
 	update_reference(f);
 	reap_retired_taps(f, elapsed, false);
 	reap_graveyard(f);
+	live_state_poll();      // an output that started without us hearing of it
+	apply_live_locked(f);   // ... and the end of the grace period after the last output stopped
 }
 
 // Ends a session that is no longer reachable through f->session. Called with the lock held.
@@ -708,6 +717,35 @@ void rebuild_session(ac_filter *f)
 	apply_outputs(f);
 }
 
+// Makes the filter's sessions follow the outputs: starts them when one starts, ends them when the grace period after the
+// last one has passed. Called with the lock held.
+void apply_live_locked(ac_filter *f)
+{
+	try {
+		const bool want = live_state_wanted();
+		if (want == f->live_on)
+			return;
+		f->live_on = want;
+		if (f->settings.live_only)
+			rebuild_session(f);
+	} catch (const std::exception &e) {
+		obs_log(LOG_WARNING, "could not follow the outputs: %s", e.what());  // the audio is not affected
+	}
+}
+
+// Every filter that exists, so that an output starting (a frontend event) reaches all of them at once.
+std::mutex g_filters_mu;
+std::vector<ac_filter *> g_filters;
+
+void apply_live_all()
+{
+	std::lock_guard<std::mutex> rk(g_filters_mu);  // always taken before a filter's own lock
+	for (ac_filter *f : g_filters) {
+		std::lock_guard<std::mutex> lk(f->mu);
+		apply_live_locked(f);
+	}
+}
+
 void on_enable_signal(void *data, calldata_t *cd)
 {
 	auto *f = static_cast<ac_filter *>(data);
@@ -753,6 +791,7 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_int(d, S_OVERLAY_CLEAR, 6);
 	obs_data_set_default_bool(d, S_SAVE_SRT, true);
 	obs_data_set_default_string(d, S_ECHO_SOURCE, ECHO_DESKTOP);
+	obs_data_set_default_bool(d, S_LIVE_ONLY, true);  // also for filters saved before this setting existed
 	obs_data_set_default_bool(d, S_CHECK_UPDATES, true);
 }
 
@@ -780,6 +819,8 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 		std::lock_guard<std::mutex> lk(f->mu);
 		migrate_settings(settings);
 		f->settings = read_settings(settings);
+		live_state_poll();
+		f->live_on = live_state_wanted();
 		// libobs sets source->enabled = true only *after* create() returns, so
 		// obs_source_enabled() is still false here. Filters start enabled; a saved
 		// disabled state arrives afterwards through the "enable" signal.
@@ -788,12 +829,20 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 	}
 	signal_handler_connect(obs_source_get_signal_handler(source), "enable", on_enable_signal, f);
 	obs_add_tick_callback(filter_tick, f);
+	{
+		std::lock_guard<std::mutex> rk(g_filters_mu);
+		g_filters.push_back(f);
+	}
 	return f;
 }
 
 void filter_destroy(void *data)
 {
 	auto *f = static_cast<ac_filter *>(data);
+	{
+		std::lock_guard<std::mutex> rk(g_filters_mu);  // waits for an event that is reaching the filters
+		g_filters.erase(std::remove(g_filters.begin(), g_filters.end(), f), g_filters.end());
+	}
 	signal_handler_disconnect(obs_source_get_signal_handler(f->context), "enable", on_enable_signal, f);
 	obs_remove_tick_callback(filter_tick, f);  // waits for a tick in progress
 	{
@@ -847,6 +896,9 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 	acw::Session *s = f->session.load(std::memory_order_seq_cst);
 	acw::Session *sr = f->session_r.load(std::memory_order_seq_cst);
 	if (s && audio->frames > 0) {
+		// A source muted in OBS is not heard, so the service gets silence for it (not captioned; free where it takes silence frames).
+		obs_source_t *parent = obs_filter_get_parent(f->context);
+		const bool muted = parent && obs_source_muted(parent);
 		float *planes[MAX_AV_PLANES];
 		size_t nch = 0;
 		for (size_t c = 0; c < MAX_AV_PLANES && audio->data[c]; ++c)
@@ -862,8 +914,8 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 				const size_t n = std::min<size_t>(audio->frames - done, kMaxBlock);
 				std::copy(planes[0] + done, planes[0] + done + n, left);
 				std::copy(planes[1] + done, planes[1] + done + n, right);
-				s->process(left, n);
-				sr->process(right, n);
+				s->process(left, n, muted);
+				sr->process(right, n, muted);
 				std::copy(left, left + n, planes[0] + done);
 				std::copy(right, right + n, planes[1] + done);
 				for (size_t c = 2; c < nch; ++c)
@@ -887,7 +939,7 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 						acc += planes[c][done + i];
 					mono[i] = acc * inv;
 				}
-				s->process(mono, n);
+				s->process(mono, n, muted);
 				for (size_t c = 0; c < nch; ++c)
 					std::copy(mono, mono + n, planes[c] + done);
 				done += n;
@@ -969,6 +1021,8 @@ std::string status_text(ac_filter *f)
 									    : T_("AudioCleaner.Status.CaptionsNotSent");
 			return T_("AudioCleaner.Status.NothingEnabled");
 		}
+		if (st.live_only && !f->live_on)
+			return T_("AudioCleaner.Status.WaitingLive");
 		acw::Session *s = f->session.load();
 		if (!s)
 			return T_("AudioCleaner.Status.NotRunning");
@@ -1448,6 +1502,12 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Balanced"), 150);
 	obs_property_list_add_int(lat, T_("AudioCleaner.Latency.Safe"), 250);
 
+	if (live_state_available()) {
+		obs_property_t *live = obs_properties_add_bool(p, S_LIVE_ONLY, T_("AudioCleaner.LiveOnly"));
+		obs_property_set_long_description(live, T_("AudioCleaner.LiveOnly.Long"));
+		obs_property_text_set_info_word_wrap(obs_properties_add_text(p, "hint_live_only", T_("AudioCleaner.Hint.LiveOnly"), OBS_TEXT_INFO), true);
+	}
+
 	// Read-only status: for OBS_TEXT_INFO the dialog shows the description when the
 	// stored value is empty, so the text is never written to the scene file.
 	const std::string st = f ? status_text(f) : std::string();
@@ -1504,4 +1564,5 @@ extern "C" void audio_cleaner_register_filter(void)
 	info.get_properties = filter_properties;
 	info.filter_audio = filter_audio;
 	obs_register_source(&info);
+	live_state_set_listener(apply_live_all);  // an output starting reaches the filters at once
 }

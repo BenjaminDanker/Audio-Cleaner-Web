@@ -26,10 +26,19 @@ size_t encode_frame_s16(uint32_t seq, uint64_t ts_us, const float *pcm, size_t n
 // Writes only the 16-byte header (any codec, e.g. Opus where the payload follows).
 void encode_frame_header(uint8_t codec, uint32_t seq, uint64_t ts_us, uint8_t *out, uint16_t flags = 0);
 
+// Writes a silence frame (codec 4): the header plus the sample count as a u16, little endian. `samples` is a count at 48 kHz,
+// a multiple of 480 from 480 to 4800. Returns the bytes written (kHeaderSize + 2), or 0 for an invalid count.
+// Only for servers whose `ready` has "silenceFrames": true.
+size_t encode_frame_silence(uint32_t seq, uint64_t ts_us, size_t samples, uint8_t *out, uint16_t flags = 0);
+
+// A silence frame's sample count (data holds the whole frame, header first). False unless it is exactly header + 2 bytes
+// of a codec 4 frame with a valid count.
+bool parse_silence_samples(const uint8_t *data, size_t len, size_t &samples);
+
 // Parses the 16-byte header; false when too short or the version is unknown.
 bool parse_frame_header(const uint8_t *data, size_t len, FrameHeader &hdr);
 
-// Parses a frame (pcm_s16le or f32le). Returns false on malformed input.
+// Parses a frame (pcm_s16le, f32le or silence: a silence frame gives that many zeros). Returns false on malformed input.
 // `out` receives at most `max_samples`; `n_samples` is the payload length.
 bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out, size_t max_samples,
 		  size_t &n_samples);
@@ -46,6 +55,7 @@ struct StartParams {
 	std::string client;                  // e.g. "obs-audio-cleaner/0.1.0"
 	bool echo_reference = false;         // we will send what the speakers play so the server can cancel the echo
 	std::vector<std::string> translate;  // 2-letter codes to translate the captions into (needs captions); empty = none
+	bool return_audio = true;            // false: we do not use the audio the server sends back (captions only), so it sends none
 };
 
 std::string make_start_message(const StartParams &p);
@@ -65,6 +75,7 @@ struct Event {
 	int sample_rate = 0;
 	int max_session_seconds = 0;
 	bool echo_reference = false;  // the server will use the reference frames
+	bool silence_frames = false;  // the server understands silence frames (codec 4) from us, and answers them in kind
 	std::vector<std::string> translate;  // the languages the server actually translates into
 	bool has_translate = false;          // ... the field was there at all (an older server leaves it out)
 	// caption / translation

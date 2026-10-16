@@ -5,6 +5,7 @@
 #include "acw/caption_router.hpp"
 #include "acw/delayed_sender.hpp"
 #include "acw/languages.hpp"
+#include "acw/live_gate.hpp"
 #include "acw/opus_codec.hpp"
 #include "acw/output_select.hpp"
 #include "acw/output_stage.hpp"
@@ -25,10 +26,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <mutex>
+#include <numeric>
 #include <random>
 #include <set>
 #include <thread>
@@ -1630,6 +1633,263 @@ static void test_caption_router()
 	CHECK(rec.cues.size() == 1);
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Silence frames, returnAudio, "only while streaming or recording", the resampler against a reference
+
+static void test_silence_protocol()
+{
+	std::printf("protocol: silence frames, returnAudio, silenceFrames in ready\n");
+	uint8_t f[kHeaderSize + 2];
+	CHECK(encode_frame_silence(0x01020304u, 0x1122334455667788ull, 960, f) == 18);
+	CHECK(f[0] == 1 && f[1] == 4 && f[2] == 0 && f[3] == 0);  // version 1, codec 4, no flags
+	CHECK(f[4] == 0x04 && f[7] == 0x01 && f[8] == 0x88 && f[15] == 0x11);  // seq and ts like every frame
+	CHECK(f[16] == 0xC0 && f[17] == 0x03);  // 960 = 0x03C0, little endian
+	size_t n = 0;
+	CHECK(parse_silence_samples(f, sizeof f, n) && n == 960);
+	FrameHeader h;
+	CHECK(parse_frame_header(f, sizeof f, h) && h.codec == kCodecSilence && h.seq == 0x01020304u && h.flags == 0);
+	// the flags work like on every frame (an echo-reference silence frame)
+	CHECK(encode_frame_silence(7, 9, 480, f, kFlagReference) == 18 && f[2] == 1 && f[3] == 0 && f[16] == 0xE0 && f[17] == 0x01);
+	CHECK(parse_silence_samples(f, sizeof f, n) && n == 480);
+	// the largest frame and all valid counts
+	for (size_t c = 480; c <= 4800; c += 480) {
+		CHECK(encode_frame_silence(1, 1, c, f) == 18);
+		CHECK(parse_silence_samples(f, sizeof f, n) && n == c);
+	}
+	// invalid counts are not written, and not accepted when read
+	for (size_t bad : {size_t(0), size_t(1), size_t(240), size_t(481), size_t(960 + 1), size_t(5280), size_t(65535)})
+		CHECK(encode_frame_silence(1, 1, bad, f) == 0);
+	encode_frame_silence(1, 1, 960, f);
+	for (uint16_t bad : {uint16_t(0), uint16_t(7), uint16_t(479), uint16_t(4801), uint16_t(5280), uint16_t(65535)}) {
+		uint8_t g[18];
+		std::memcpy(g, f, 18);
+		g[16] = static_cast<uint8_t>(bad & 0xff);
+		g[17] = static_cast<uint8_t>(bad >> 8);
+		CHECK(!parse_silence_samples(g, 18, n));
+	}
+	CHECK(!parse_silence_samples(f, 17, n) && !parse_silence_samples(f, 16, n));  // too short
+	uint8_t longer[19];
+	std::memcpy(longer, f, 18);
+	longer[18] = 0;
+	CHECK(!parse_silence_samples(longer, 19, n));  // exactly two payload bytes
+	uint8_t other[18];
+	std::memcpy(other, f, 18);
+	other[1] = kCodecS16;
+	CHECK(!parse_silence_samples(other, 18, n));  // not codec 4
+	other[1] = kCodecSilence;
+	other[0] = 2;
+	CHECK(!parse_silence_samples(other, 18, n));  // unknown version
+	// decode_frame hands out that many zeros
+	std::vector<float> out(kMaxRxSamples, 1.0f);
+	size_t got = 0;
+	CHECK(decode_frame(f, 18, h, out.data(), out.size(), got) && got == 960 && h.codec == 4);
+	for (size_t i = 0; i < 960; ++i)
+		CHECK(out[i] == 0.0f);
+	CHECK(out[960] == 1.0f);  // nothing beyond
+	CHECK(!decode_frame(f, 18, h, out.data(), 480, got));  // does not fit
+	CHECK(!decode_frame(longer, 19, h, out.data(), out.size(), got));
+
+	// returnAudio is only said when it is false
+	StartParams sp;
+	sp.codec = "opus";
+	CHECK(make_start_message(sp).find("returnAudio") == std::string::npos);
+	sp.return_audio = false;
+	CHECK(make_start_message(sp).find("\"returnAudio\":false") != std::string::npos);
+
+	// the `ready` message
+	Event ev;
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a","sampleRate":48000,"modelLatencyMs":30})", ev) && !ev.silence_frames);
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a","sampleRate":48000,"modelLatencyMs":30,"silenceFrames":true})", ev) && ev.silence_frames);
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a","sampleRate":48000,"modelLatencyMs":30,"silenceFrames":false})", ev) && !ev.silence_frames);
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a","sampleRate":48000,"modelLatencyMs":30,"silenceFrames":"yes"})", ev) && !ev.silence_frames);
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a","sampleRate":48000,"modelLatencyMs":30,"silenceFrames":1})", ev) && !ev.silence_frames);
+}
+
+static void test_reference_silence()
+{
+	std::printf("echo reference buffer: quiet blocks count as silence\n");
+	std::vector<float> block(960);
+	auto pulled = [&](float level) {
+		ReferenceBuffer rb(48000);
+		std::vector<float> x(9600, level);
+		rb.push(x.data(), x.size());
+		return rb.pull(block.data(), 960);
+	};
+	CHECK(!pulled(0.0f));
+	CHECK(!pulled(5e-6f));
+	CHECK(!pulled(-9e-6f));
+	CHECK(pulled(2e-5f));
+	CHECK(pulled(-2e-5f));
+	CHECK(pulled(0.3f));
+	// one loud sample in a block of silence is enough
+	ReferenceBuffer rb(48000);
+	std::vector<float> x(9600, 0.0f);
+	x[9600 - 500] = 0.01f;
+	rb.push(x.data(), x.size());
+	CHECK(rb.pull(block.data(), 960));
+}
+
+static void test_live_gate()
+{
+	std::printf("live gate (only while streaming or recording)\n");
+	using Clock = LiveGate::Clock;
+	using std::chrono::milliseconds;
+	using std::chrono::seconds;
+	const Clock::time_point t0 = Clock::now();
+	auto at = [&](double s) { return t0 + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(s)); };
+
+	LiveGate g;  // grace period 10 s
+	CHECK(g.grace() == seconds(10));
+	CHECK(!g.run(at(0)) && !g.any_active());  // nothing running: no session
+	CHECK(!g.run(at(1000)));
+
+	// starts at once (the event is "starting"), runs while the output runs, stops 10 s after it stopped
+	g.set_active(LiveOutput::Stream, true, at(5));
+	CHECK(g.run(at(5)) && g.any_active() && g.active(LiveOutput::Stream) && !g.active(LiveOutput::Recording));
+	CHECK(g.run(at(3600)));
+	g.set_active(LiveOutput::Stream, false, at(3600));
+	CHECK(!g.any_active());
+	CHECK(g.run(at(3600)));
+	CHECK(g.run(at(3609.9)));
+	CHECK(!g.run(at(3610)));
+	CHECK(!g.run(at(3611)) && !g.run(at(9999)));  // and it stays off
+
+	// no flapping: an output that comes back within the grace period keeps the same run, and its stop starts a new grace period
+	g.set_active(LiveOutput::Recording, true, at(4000));
+	g.set_active(LiveOutput::Recording, false, at(4100));
+	CHECK(g.run(at(4105)));
+	g.set_active(LiveOutput::Recording, true, at(4106));
+	CHECK(g.run(at(4150)));
+	g.set_active(LiveOutput::Recording, false, at(4200));
+	CHECK(g.run(at(4209)));
+	CHECK(!g.run(at(4210.5)));
+
+	// several outputs: it runs while any does; the grace period starts when the last one stops
+	g.set_active(LiveOutput::Stream, true, at(5000));
+	g.set_active(LiveOutput::Recording, true, at(5001));
+	g.set_active(LiveOutput::VirtualCam, true, at(5002));
+	g.set_active(LiveOutput::Replay, true, at(5003));
+	g.set_active(LiveOutput::Stream, false, at(5100));
+	g.set_active(LiveOutput::Recording, false, at(5200));
+	g.set_active(LiveOutput::Replay, false, at(5300));
+	CHECK(g.run(at(9000)));  // the virtual camera is still on
+	CHECK(g.any_active() && g.active(LiveOutput::VirtualCam));
+	g.set_active(LiveOutput::VirtualCam, false, at(9100));
+	CHECK(g.run(at(9109)) && !g.run(at(9110)));
+
+	// a repeated "stopped" does not push the end back; a repeated "started" changes nothing
+	g.set_active(LiveOutput::Replay, true, at(9200));
+	g.set_active(LiveOutput::Replay, true, at(9201));
+	g.set_active(LiveOutput::Replay, false, at(9300));
+	g.set_active(LiveOutput::Replay, false, at(9305));
+	g.set_active(LiveOutput::Replay, false, at(9308));
+	CHECK(g.run(at(9309)));
+	CHECK(!g.run(at(9310.5)));
+
+	// an output that fails to start (starting, then stopped) leaves nothing running after the grace period
+	g.set_active(LiveOutput::Stream, true, at(9400));
+	g.set_active(LiveOutput::Stream, false, at(9401));
+	CHECK(g.run(at(9405)) && !g.run(at(9411.5)));
+
+	// polling later or earlier than the stop time, and a gate that was never started, never invents a run
+	LiveGate fresh(milliseconds(500));
+	CHECK(fresh.grace() == milliseconds(500));
+	fresh.set_active(LiveOutput::Stream, false, at(1));  // "stopped" without a start
+	CHECK(!fresh.run(at(1)) && !fresh.run(at(2)));
+	fresh.set_active(LiveOutput::Stream, true, at(3));
+	fresh.set_active(LiveOutput::Stream, false, at(4));
+	CHECK(fresh.run(at(4.4)) && !fresh.run(at(4.5)));
+}
+
+// Reference: the filter the resampler is built from (a Kaiser-windowed sinc, `taps` per phase, cut-off just below the lower
+// Nyquist, unity gain), evaluated directly in double precision for every output sample.
+static std::vector<double> reference_resample(const std::vector<float> &in, int in_rate, int out_rate, int taps, double beta,
+					      size_t n_out)
+{
+	const double kPi = 3.14159265358979323846;
+	const int g = std::gcd(in_rate, out_rate);
+	const int64_t up = out_rate / g, down = in_rate / g;
+	const int64_t len = static_cast<int64_t>(taps) * up;
+	auto i0 = [](double x) {
+		double sum = 1, term = 1;
+		for (int k = 1; k < 60; ++k) {
+			term *= x * x / 4.0 / (static_cast<double>(k) * k);
+			sum += term;
+		}
+		return sum;
+	};
+	const double fc = 0.5 * std::min(in_rate, out_rate) * 0.94 / (static_cast<double>(in_rate) * up);
+	const double mid = (static_cast<double>(len) - 1.0) / 2.0;
+	std::vector<double> proto(static_cast<size_t>(len));
+	double sum = 0;
+	for (int64_t k = 0; k < len; ++k) {
+		const double t = static_cast<double>(k) - mid;
+		const double sinc = std::fabs(t) < 1e-12 ? 2.0 * fc : std::sin(2.0 * kPi * fc * t) / (kPi * t);
+		const double r = t / mid;
+		proto[static_cast<size_t>(k)] = sinc * i0(beta * std::sqrt(std::max(0.0, 1.0 - r * r))) / i0(beta);
+		sum += proto[static_cast<size_t>(k)];
+	}
+	for (double &p : proto)
+		p *= static_cast<double>(up) / sum;
+	// Output m sits at position m * down (in 1/up input samples): y[m] = sum over inputs n of x[n] * proto[m * down - n * up].
+	std::vector<double> out(n_out, 0.0);
+	for (size_t m = 0; m < n_out; ++m) {
+		const int64_t p = static_cast<int64_t>(m) * down;
+		double acc = 0;
+		for (int64_t n = p / up; n > (p / up) - taps; --n) {
+			if (n < 0 || n >= static_cast<int64_t>(in.size()))
+				continue;
+			acc += static_cast<double>(in[static_cast<size_t>(n)]) * proto[static_cast<size_t>(p - n * up)];
+		}
+		out[m] = acc;
+	}
+	return out;
+}
+
+static void test_resampler_reference()
+{
+	std::printf("resampler against a double-precision reference\n");
+	std::mt19937 rng(21);
+	std::normal_distribution<float> nd(0.0f, 0.2f);
+	struct Case {
+		int in_rate, out_rate, taps;
+		double beta;
+	};
+	// the two the plugin uses, and others that exercise odd tap counts and other ratios
+	const Case cases[] = {{44100, 48000, 48, 8.0}, {48000, 44100, 48, 8.0}, {16000, 48000, 20, 8.0},
+			      {48000, 16000, 33, 6.0}, {32000, 48000, 12, 8.0}, {22050, 48000, 48, 8.0}};
+	for (const Case &c : cases) {
+		std::vector<float> in(c.in_rate / 5);  // 200 ms
+		for (float &v : in)
+			v = nd(rng);
+		// one call, and the same input in irregular pieces (including single samples and pieces larger than the inner block)
+		RationalResampler one(c.in_rate, c.out_rate, c.taps, c.beta), pieces(c.in_rate, c.out_rate, c.taps, c.beta);
+		std::vector<float> a(one.max_output(in.size()) + 8), b(a.size());
+		const size_t na = one.process(in.data(), in.size(), a.data());
+		size_t nb = 0, pos = 0;
+		const size_t sizes[] = {1, 7, 441, 480, 5000, 3, 1024, 63, 4097};
+		for (size_t k = 0; pos < in.size(); ++k) {
+			const size_t m = std::min(sizes[k % 9], in.size() - pos);
+			nb += pieces.process(&in[pos], m, b.data() + nb);
+			pos += m;
+		}
+		CHECK(na == nb);
+		const std::vector<double> ref = reference_resample(in, c.in_rate, c.out_rate, c.taps, c.beta, na);
+		double err_one = 0, err_pieces = 0, peak = 0;
+		for (size_t i = 0; i < na; ++i) {
+			err_one = std::max(err_one, std::fabs(static_cast<double>(a[i]) - ref[i]));
+			err_pieces = std::max(err_pieces, std::fabs(static_cast<double>(b[i]) - ref[i]));
+			peak = std::max(peak, std::fabs(ref[i]));
+		}
+		std::printf("  %5d -> %5d Hz, %2d taps: %zu samples, largest difference %.2g (signal peak %.2f)\n", c.in_rate, c.out_rate, c.taps, na,
+			    std::max(err_one, err_pieces), peak);
+		CHECK(na + 4 >= in.size() * static_cast<size_t>(c.out_rate) / static_cast<size_t>(c.in_rate));
+		CHECK(err_one < 2e-6);  // float arithmetic; a wrong tap or phase is off by orders of magnitude more
+		CHECK(err_pieces < 2e-6);
+		CHECK(peak > 0.3);
+	}
+}
+
 int main()
 {
 	test_spsc();
@@ -1649,11 +1909,15 @@ int main()
 	test_delayed_sender_tags();
 	test_caption_router();
 	test_resampler();
+	test_resampler_reference();
+	test_silence_protocol();
+	test_live_gate();
 	test_output_stage();
 	test_session_passthrough(48000, 150);
 	test_session_passthrough(44100, 150);
 	test_session_passthrough(44100, 80);
 	test_reference_buffer();
+	test_reference_silence();
 	test_session_config();
 	test_session_texts();
 	test_update_versions();

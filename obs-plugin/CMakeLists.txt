@@ -62,6 +62,8 @@ target_sources(
     src/audio-cleaner-filter.cpp
     src/caption-output.cpp
     src/caption-output.h
+    src/live-state.cpp
+    src/live-state.h
     src/subtitle-files.cpp
     src/subtitle-files.h
     src/text-sources.cpp

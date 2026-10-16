@@ -23,6 +23,9 @@ OpusEnc::OpusEnc(int bitrate)
 		return;
 	}
 	opus_encoder_ctl(enc_, OPUS_SET_BITRATE(bitrate));
+	// Complexity 5: libopus defaults to 9-10, which costs several times the encode time at these bitrates for speech
+	// that sounds the same (the server resamples and cleans it anyway).
+	opus_encoder_ctl(enc_, OPUS_SET_COMPLEXITY(5));
 	opus_encoder_ctl(enc_, OPUS_SET_VBR(1));
 	opus_encoder_ctl(enc_, OPUS_SET_INBAND_FEC(0));
 	opus_encoder_ctl(enc_, OPUS_SET_DTX(0));

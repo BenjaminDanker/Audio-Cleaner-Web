@@ -71,12 +71,15 @@ struct Frame {
 	float pcm[kFrameSamples] = {};
 	float ref[kFrameSamples] = {};  // what the speakers played meanwhile (echo cancellation)
 	bool has_ref = false;           // ... and it is not silence
+	bool silent = false;            // the microphone block is silence (muted, or every sample below kSilenceLevel)
 };
 
 constexpr size_t kMaxBlock = 2048;           // host-rate samples handled per inner step
 constexpr size_t kQueueFrames = 32;          // 640 ms between the audio thread and the network thread
 constexpr size_t kMaxTxBuffered = 40 * 1024; // bytes queued in the socket before we drop frames
 constexpr int kPingIntervalMs = 5000;
+constexpr uint64_t kFrameWakeSlackUs = 500;  // the network thread wakes this long after a frame is due: the audio thread has stored it by then
+constexpr uint64_t kStaleAudioUs = 40000;    // a predicted frame this much overdue: the audio is not flowing (any more)
 constexpr int kRxWatchdogMs = 20000;
 constexpr int kIdleDisconnectMs = 10000;     // no audio from the host for this long: close the session
 constexpr size_t kRttRing = 8192;
@@ -207,10 +210,17 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	double delay_sec = 0.0;
 	Frame cur;
 	size_t fill = 0;
+	float cur_peak = 0.0f;  // loudest sample of the microphone block being assembled
 	uint32_t next_seq = 0;
+	// What the network thread needs to know when the next frame will be complete, so that it can sleep until then instead
+	// of polling: the audio thread only stores these (after each process() call, the last one is the release).
+	std::atomic<uint32_t> sched_fill{0};      // samples of the next frame already in hand (48 kHz)
+	std::atomic<uint32_t> sched_chunk{0};     // samples (48 kHz) the last process() call delivered: OBS hands them over at this pace
+	std::atomic<uint64_t> sched_call_us{0};   // when that call happened (now_us() clock); 0 = none yet
 	SpscQueue<Frame> queue{kQueueFrames};
 	std::atomic<bool> streaming{false};
 	std::atomic<bool> echo_active{false};  // the server accepted the echo reference
+	std::atomic<bool> silence_active{false};  // the server takes silence frames
 	std::atomic<int> atten_db{100};        // current attenuation limit (UI thread writes, network thread reads)
 	std::atomic<int64_t> origin_ticks{0};  // steady-clock time of the audio second 0 of this connection (0 = none yet)
 	std::atomic<uint64_t> last_process_us{0};
@@ -370,20 +380,28 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	// Audio thread
 	// =========================================================================
 
-	void process(float *io, size_t n)
+	void process(float *io, size_t n, bool muted)
 	{
-		last_process_us.store(now_us(), std::memory_order_relaxed);  // the network thread polls this
+		const uint64_t t0 = now_us();
+		last_process_us.store(t0, std::memory_order_relaxed);  // the network thread polls this
 		if (!supported)
 			return;
+		size_t total48 = 0;
 		while (n > 0) {
 			const size_t m = std::min(n, kMaxBlock);
-			process_block(io, m);
+			total48 += process_block(io, m, muted);
 			io += m;
 			n -= m;
 		}
+		if (total48 > 0) {
+			sched_fill.store(static_cast<uint32_t>(fill), std::memory_order_relaxed);
+			sched_chunk.store(static_cast<uint32_t>(total48), std::memory_order_relaxed);
+			sched_call_us.store(t0, std::memory_order_release);
+		}
 	}
 
-	void process_block(float *io, size_t m)
+	// Returns the number of 48 kHz samples this block gave the frame assembly.
+	size_t process_block(float *io, size_t m, bool muted)
 	{
 		const float *x48 = io;
 		size_t n48 = m;
@@ -393,13 +411,13 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		}
 		if (stage)
 			stage->push_input(x48, n48);
-		assemble(x48, n48);
+		assemble(x48, n48, muted);
 
 		if (!stage)
-			return;  // captions only: the audio is not altered
+			return n48;  // captions only: the audio is not altered
 		if (!resampled) {
 			stage->render(io, m);
-			return;
+			return n48;
 		}
 		size_t need = down->input_needed(m);
 		need = std::min(need, out48.size());
@@ -407,15 +425,26 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		const size_t got = down->process(out48.data(), need, io);
 		for (size_t i = got; i < m; ++i)  // cannot happen for host_rate <= 48 kHz; stay safe
 			io[i] = got ? io[got - 1] : 0.0f;
+		return n48;
 	}
 
-	void assemble(const float *x, size_t n)
+	void assemble(const float *x, size_t n, bool muted)
 	{
 		while (n > 0) {
 			const size_t take = std::min(n, kFrameSamples - fill);
 			float *dst = cur.pcm + fill;
-			for (size_t i = 0; i < take; ++i)  // a NaN/Inf from a misbehaving source must not reach the encoder
-				dst[i] = std::isfinite(x[i]) ? x[i] : 0.0f;
+			if (muted) {
+				// Muted in OBS: the service gets silence for these samples (they are not heard, so they are not captioned).
+				std::fill(dst, dst + take, 0.0f);
+			} else {
+				float peak = cur_peak;
+				for (size_t i = 0; i < take; ++i) {  // a NaN/Inf from a misbehaving source must not reach the encoder
+					const float v = std::isfinite(x[i]) ? x[i] : 0.0f;
+					dst[i] = v;
+					peak = std::max(peak, std::fabs(v));
+				}
+				cur_peak = peak;
+			}
 			fill += take;
 			x += take;
 			n -= take;
@@ -424,6 +453,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			fill = 0;
 			cur.seq = next_seq++;
 			cur.ts_us = now_us();
+			cur.silent = cur_peak < kSilenceLevel;
+			cur_peak = 0.0f;
 			cur.has_ref = cfg.reference && cfg.reference->pull(cur.ref, kFrameSamples);  // also keeps its clock moving
 			counters.captured.fetch_add(1, std::memory_order_relaxed);
 			if (!streaming.load(std::memory_order_acquire))
@@ -455,6 +486,47 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	{
 		const uint64_t t = last_process_us.load(std::memory_order_relaxed);
 		return t != 0 && now_us() - t < 2'000'000;
+	}
+
+	// When (now_us() clock) the audio thread will complete the next 20 ms frame, worked out from the input sample clock:
+	// OBS hands the audio over in chunks of about the same size at a steady pace, so the frame is complete in the call
+	// that brings the missing samples, k calls after the last one. 0 = unknown (no audio yet).
+	uint64_t next_frame_due_us() const
+	{
+		const uint64_t call = sched_call_us.load(std::memory_order_acquire);
+		if (call == 0)
+			return 0;
+		const uint64_t fill_now = sched_fill.load(std::memory_order_relaxed);
+		const uint64_t chunk = sched_chunk.load(std::memory_order_relaxed);
+		if (chunk == 0 || fill_now >= kFrameSamples)
+			return 0;
+		const uint64_t calls = (kFrameSamples - fill_now + chunk - 1) / chunk;  // calls until the frame is complete
+		return call + calls * chunk * 1'000'000 / kNetRate;
+	}
+
+	static Clock::time_point time_of_us(uint64_t us) { return clock_epoch() + std::chrono::microseconds(us - 1); }
+
+	// Sleeps until there is something to do: the next frame is due, a ping, the late-frame window or a watchdog is
+	// due, a stop is requested or the server closed the connection. (This replaces a poll every 2 ms.)
+	void sleep_until_work(Clock::time_point last_ping, Clock::time_point last_window)
+	{
+		const Clock::time_point now = Clock::now();
+		const uint64_t now_u = now_us();
+		Clock::time_point wake = now + std::chrono::milliseconds(250);  // the watchdogs below are checked at least this often
+		wake = std::min(wake, last_ping + std::chrono::milliseconds(kPingIntervalMs));
+		if (cfg.denoise)
+			wake = std::min(wake, last_window + std::chrono::seconds(1));
+		const uint64_t due = next_frame_due_us();
+		if (due != 0 && now_u < due + kStaleAudioUs) {
+			uint64_t at = due + kFrameWakeSlackUs;
+			if (at <= now_u)
+				at = now_u + 1000;  // overdue: the audio thread is late, look again in a moment
+			wake = std::min(wake, time_of_us(at));
+		} else {
+			wake = std::min(wake, now + std::chrono::milliseconds(50));  // no audio coming: wake rarely, but notice it starting
+		}
+		std::unique_lock<std::mutex> lk(mu);
+		cv.wait_until(lk, wake, [&] { return stopping() || queue.front() != nullptr; });
 	}
 
 	// Blocked: waits until the user asks for another try (or the session is stopped).
@@ -779,6 +851,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 					att->reason = "closed by server (code " + std::to_string(msg->closeInfo.code) +
 						      (msg->closeInfo.reason.empty() ? "" : ", " + msg->closeInfo.reason) + ")";
 				att->cv.notify_all();
+				self->cv.notify_all();  // the network thread may be asleep until the next frame is due
 				break;
 			}
 			case ix::WebSocketMessageType::Error: {
@@ -787,6 +860,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				att->http_status = msg->errorInfo.http_status;
 				att->reason = msg->errorInfo.reason;
 				att->cv.notify_all();
+				self->cv.notify_all();
 				break;
 			}
 			case ix::WebSocketMessageType::Message:
@@ -831,6 +905,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			sp.opus_bitrate = use_opus ? (cfg.denoise ? cfg.opus_bitrate : kOpusMinBitrate) : 0;
 			sp.client = cfg.client;
 			sp.echo_reference = cfg.reference != nullptr;
+			sp.return_audio = cfg.denoise;  // captions only: nothing is done with the audio that would come back
 			if (!cfg.captions.empty())
 				sp.translate = cfg.translate;  // translations need captions
 			if (!ws.sendText(make_start_message(sp)).success) {
@@ -892,6 +967,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		}
 		const bool send_ref = cfg.reference && ready.echo_reference;
 		echo_active.store(send_ref);
+		const bool send_silence = ready.silence_frames;  // silent blocks go out as silence frames, only if the service takes them
+		silence_active.store(send_silence);
 		if (cfg.reference && !send_ref)
 			log(LogLevel::Warning, "the server does not offer echo cancellation: continuing without it");
 		const int latency = static_cast<int>(std::lround(ml * (kNetRate / 1000.0))) + opus_extra_latency;
@@ -976,15 +1053,25 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 						counters.tx_bytes.fetch_add(len, std::memory_order_relaxed);
 					return ok;
 				};
-				// The reference goes first, so the server has it when the microphone frame arrives.
-				// (Silent reference frames are skipped; the microphone frames are never skipped, silent or
-				// not: they are what keeps the session alive on the server.)
-				if (send_ref && f->has_ref) {
-					const size_t rlen = encode(ref_enc.get(), f->ref, kFlagReference);
+				// Silence goes out as a 18-byte silence frame when the server takes them (nothing is encoded, it costs the
+				// server nothing and is not billed); otherwise it is encoded like any other audio.
+				auto silence = [&](uint16_t flags) -> size_t {
+					return encode_frame_silence(f->seq, f->ts_us, kFrameSamples, reinterpret_cast<uint8_t *>(&tx[0]), flags);
+				};
+				// The reference goes first, so the server has it when the microphone frame arrives. A silent reference
+				// is a silence frame, or (a server that does not take them) skipped. The microphone frames are never
+				// skipped, silent or not: they are what keeps the session alive on the server.
+				if (send_ref) {
+					size_t rlen = 0;
+					if (f->has_ref)
+						rlen = encode(ref_enc.get(), f->ref, kFlagReference);
+					else if (send_silence)
+						rlen = silence(kFlagReference);
 					if (rlen && send(rlen))
 						counters.reference_sent.fetch_add(1, std::memory_order_relaxed);
 				}
-				const size_t len = encode(enc.get(), f->pcm, 0);
+				const bool as_silence = send_silence && f->silent;
+				const size_t len = as_silence ? silence(0) : encode(enc.get(), f->pcm, 0);
 				if (!len) {
 					counters.dropped.fetch_add(1, std::memory_order_relaxed);
 					queue.pop();
@@ -992,9 +1079,11 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				}
 				if (static_cast<int64_t>(f->seq) >= att->first_valid_seq.load(std::memory_order_relaxed))
 					store.mark_sent(f->seq);
-				if (send(len))
+				if (send(len)) {
 					counters.sent.fetch_add(1, std::memory_order_relaxed);
-				else
+					if (as_silence)
+						counters.silent_sent.fetch_add(1, std::memory_order_relaxed);
+				} else
 					counters.dropped.fetch_add(1, std::memory_order_relaxed);
 				queue.pop();
 			}
@@ -1027,12 +1116,13 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				break;
 			}
 
-			std::unique_lock<std::mutex> lk(mu);
-			cv.wait_for(lk, std::chrono::milliseconds(2), [&] { return stopping(); });
+			counters.net_loops.fetch_add(1, std::memory_order_relaxed);
+			sleep_until_work(last_ping, last_window);
 		}
 		streaming.store(false, std::memory_order_release);
 		origin_ticks.store(0, std::memory_order_release);
 		echo_active.store(false);
+		silence_active.store(false);
 		link_slow.store(false);
 		late_x10.store(0);
 		out.streamed_ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t_start).count());
@@ -1378,9 +1468,9 @@ void Session::stop(int flush_ms, int join_timeout_ms)
 	d.disable_callbacks();
 }
 
-void Session::process(float *mono, size_t n)
+void Session::process(float *mono, size_t n, bool muted)
 {
-	impl_->process(mono, n);
+	impl_->process(mono, n, muted);
 }
 
 double Session::delay_seconds() const
@@ -1450,6 +1540,7 @@ SessionSnapshot Session::snapshot() const
 	s.codec = d.use_opus ? "opus" : "pcm_s16le";
 	s.echo_requested = d.cfg.reference != nullptr;
 	s.echo_active = d.echo_active.load();
+	s.silence_active = d.silence_active.load();
 	s.passthrough_only = !d.supported;
 	s.delay_ms = d.supported ? d.delay_sec * 1000.0 : 0.0;
 	s.captured = d.counters.captured.load();
@@ -1459,6 +1550,8 @@ SessionSnapshot Session::snapshot() const
 	s.late = d.counters.late.load();
 	s.passthrough = d.counters.passthrough.load();
 	s.dropped = d.counters.dropped.load();
+	s.silent_sent = d.counters.silent_sent.load();
+	s.net_loops = d.counters.net_loops.load();
 	s.bad_frames = d.counters.bad_frames.load();
 	s.warmup_discarded = d.counters.warmup_discarded.load();
 	s.tx_bytes = d.counters.tx_bytes.load();
@@ -1597,12 +1690,18 @@ std::string Session::status_details() const
 	if (s.state == SessionState::Streaming && (s.rtt_last_ms > 0 || s.received > 0)) {
 		std::snprintf(buf, sizeof buf, ", round trip %.0f ms (p95 %.0f)", s.rtt_avg_ms, s.rtt_p95_ms);
 		out += buf;
+	} else if (s.state == SessionState::Streaming && s.ping_rtt_ms > 0) {
+		// Captions only: no audio comes back, so the round trip is the one of the pings.
+		std::snprintf(buf, sizeof buf, ", round trip %.0f ms", s.ping_rtt_ms);
+		out += buf;
 	}
 	if (s.state == SessionState::Streaming || s.captured > 0) {
 		out += ", frames in time " + std::to_string(s.used) + ", late " + std::to_string(s.late) + ", unprocessed " +
 		       std::to_string(s.passthrough);
 		if (s.dropped)
 			out += ", dropped " + std::to_string(s.dropped);
+		if (s.silent_sent)
+			out += ", silent frames (not billed) " + std::to_string(s.silent_sent);
 		if (s.late_percent > 0) {
 			std::snprintf(buf, sizeof buf, ", recently late %.0f%%", s.late_percent);
 			out += buf;

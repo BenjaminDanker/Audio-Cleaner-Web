@@ -2,6 +2,7 @@
 #include "acw/reference.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace acw {
 
@@ -52,11 +53,12 @@ bool ReferenceBuffer::pull(float *out, size_t n)
 		std::fill(out, out + n, 0.0f);
 		return false;
 	}
-	bool any = false;
+	float peak = 0.0f;
 	for (size_t i = 0; i < n; ++i) {
 		out[i] = ring_[(read_ + i) % kRing];
-		any = any || out[i] != 0.0f;
+		peak = std::max(peak, std::fabs(out[i]));
 	}
+	bool any = peak >= kSilenceLevel;  // quieter than this everywhere: the block is silence
 	// The writer may have lapped us while we copied: then the copy is not trustworthy.
 	if (written_.load(std::memory_order_acquire) - read_ > kRing) {
 		std::fill(out, out + n, 0.0f);
