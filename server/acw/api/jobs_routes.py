@@ -192,7 +192,7 @@ def list_jobs(principal: auth.Principal = Depends(auth.require_scope("jobs"))) -
         "SELECT * FROM jobs WHERE user_id = ? AND status != 'expired' ORDER BY created_at DESC LIMIT 50",
         (principal.user_id,),
     )
-    queue = jobs.queued_ids()
+    queue = jobs.queue_snapshot() if any(r["status"] == "queued" for r in rows) else ([], {})  # shared for a second across requests
     return {"jobs": [jobs.public_job(dict(r), queue) for r in rows]}
 
 

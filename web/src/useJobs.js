@@ -2,11 +2,20 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import { ACTIVE } from './jobs.js';
 
-const POLL_MS = 1500;
+const POLL_MS = 1500; // while a job is uploading or running (its progress moves)
+const SLOW_POLL_MS = 5000; // while jobs only wait in the queue or are with our speech partner: nothing but the queue position changes
+
+const MOVING = new Set(['uploading', 'running', 'canceling']);
+
+/** Milliseconds until the list is fetched again: quick while some job's progress moves, slow while jobs only wait. */
+export function pollDelay(list) {
+  return (list || []).some((j) => MOVING.has(j.status)) ? POLL_MS : SLOW_POLL_MS;
+}
 
 /**
- * Job list for the signed-in user. While any job is active the list itself is fetched again every 1.5 s (one request,
- * whatever the number of jobs; GET /api/jobs carries each job's status, stage and progress). If the server asks us to wait
+ * Job list for the signed-in user. While any job is active the list itself is fetched again (one request,
+ * whatever the number of jobs; GET /api/jobs carries each job's status, stage and progress): every 1.5 s while one is
+ * uploading or running, every 5 s while they only wait (queued, or in the cloud stage). If the server asks us to wait
  * (HTTP 429, Retry-After) or cannot be reached, polling slows down instead of hammering it, and a short note says so. A
  * sign-in that ran out (401) takes the visitor to the sign-in page like every other call.
  */
@@ -46,6 +55,7 @@ export function useJobs({ onFinished } = {}) {
         const now = new Map(r.jobs.map((j) => [j.id, j]));
         const ended = before.some((j) => ACTIVE.has(j.status) && now.has(j.id) && !ACTIVE.has(now.get(j.id).status));
         failures = 0;
+        wait = pollDelay(r.jobs);
         setJobs(r.jobs);
         setError('');
         if (ended) finished.current?.();

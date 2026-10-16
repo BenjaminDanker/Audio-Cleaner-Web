@@ -192,6 +192,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_user ON jobs(user_id, created_at);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, queued_at);
+-- the queue order counts a user's running jobs per queued row, and the job list polls it (16.7 ms -> 0.2 ms with 30,000 old jobs)
+CREATE INDEX IF NOT EXISTS jobs_user_status ON jobs(user_id, status);
 
 CREATE TABLE IF NOT EXISTS free_usage (
     user_id TEXT NOT NULL REFERENCES users(id),

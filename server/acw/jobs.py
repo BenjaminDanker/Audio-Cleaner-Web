@@ -14,6 +14,8 @@ import json
 import math
 import re
 import shutil
+import threading
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
@@ -393,6 +395,7 @@ def mark_uploaded(job_id: str) -> None:
         " WHERE id = ? AND status = 'uploading'",
         (db.now(), job_id),
     )
+    invalidate_queue_cache()
 
 
 def finish_failed(
@@ -423,6 +426,7 @@ def finish_failed(
                 "UPDATE free_usage SET seconds = MAX(0, seconds - ?) WHERE user_id = ? AND day = ?",
                 (float(cur["claimed_seconds"]), job["user_id"], json.loads(cur["params_json"])["free_day"]),
             )
+    invalidate_queue_cache()
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
     metrics.job_ended(job["id"])
     return True
@@ -453,6 +457,13 @@ def requeue(job: dict) -> None:
             p.unlink(missing_ok=True)
 
 
+def _seconds_left(r: dict, now: int) -> float:
+    left = job_seconds(r)
+    if r["status"] != "queued" and r.get("started_at"):
+        left = max(10.0, left - (now - r["started_at"]))
+    return left
+
+
 def queue_wait_seconds(ahead: list[str]) -> int:
     """Estimate until a job behind `ahead` starts: the work in front of it
     (including what is running now) spread over the workers."""
@@ -462,25 +473,56 @@ def queue_wait_seconds(ahead: list[str]) -> int:
         tuple(ahead),
     )
     now = db.now()
-    work = 0.0
-    for r in rows:
-        r = dict(r)
-        left = job_seconds(r)
-        if r["status"] != "queued" and r.get("started_at"):
-            left = max(10.0, left - (now - r["started_at"]))
-        work += left
+    work = sum(_seconds_left(dict(r), now) for r in rows)
     return int(work / max(1, get_settings().workers))
 
 
-def public_job(job: dict, queue: list[str] | None = None) -> dict:
+# Everyone looking at the job list sees the same queue. The ordering and the estimates cost a query per queued job
+# and run in the process that also relays live audio, so they are computed once a second for all requests
+# (a user's own changes drop the cache so they see them at once).
+QUEUE_CACHE_SECONDS = 1.0
+_queue_cache: dict = {"key": None, "at": 0.0, "ids": [], "waits": {}}
+_queue_cache_lock = threading.Lock()
+
+
+def invalidate_queue_cache() -> None:
+    with _queue_cache_lock:
+        _queue_cache["key"] = None
+
+
+def queue_snapshot() -> tuple[list[str], dict[str, int]]:
+    """(queued job ids in start order, estimated seconds until each starts), at most QUEUE_CACHE_SECONDS old.
+    One pass for the whole queue: the estimate for a job is the work running now plus the work queued in front of it,
+    spread over the workers (the same figure queue_wait_seconds gives)."""
+    key = str(get_settings().db_path)
+    with _queue_cache_lock:
+        if _queue_cache["key"] == key and time.monotonic() - _queue_cache["at"] < QUEUE_CACHE_SECONDS:
+            return _queue_cache["ids"], _queue_cache["waits"]
+        # Computed under the lock: concurrent requests wait for one computation instead of each running their own.
+        ids = queued_ids()
+        now = db.now()
+        workers = max(1, get_settings().workers)
+        rows = {r["id"]: dict(r) for r in db.all_rows("SELECT * FROM jobs WHERE status IN ('running', 'cloud_asr', 'queued')")}
+        work = sum(_seconds_left(r, now) for r in rows.values() if r["status"] != "queued")
+        waits: dict[str, int] = {}
+        for jid in ids:
+            waits[jid] = int(work / workers)
+            if jid in rows:
+                work += _seconds_left(rows[jid], now)
+        _queue_cache.update(key=key, at=time.monotonic(), ids=ids, waits=waits)
+        return ids, waits
+
+
+def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None) -> dict:
+    """`queue` is queue_snapshot() (pass it once when listing many jobs)."""
     outputs = json.loads(job["outputs_json"]) if job.get("outputs_json") else []
     params = json.loads(job["params_json"])
     position = eta = None
     if job["status"] == "queued":
-        queue = queued_ids() if queue is None else queue
-        if job["id"] in queue:
-            position = queue.index(job["id"]) + 1
-            eta = queue_wait_seconds(queue[: position - 1])
+        ids, waits = queue_snapshot() if queue is None else queue
+        if job["id"] in waits:
+            position = ids.index(job["id"]) + 1
+            eta = waits[job["id"]]
     return {
         "queuePosition": position,
         "queueWaitSeconds": eta,
