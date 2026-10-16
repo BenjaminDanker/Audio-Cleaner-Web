@@ -176,3 +176,26 @@ def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, w
     assert got[0]["code"] == "bad_config"
     got = run_session(client, 0.1, {"captions": "local", "language": ["en", "es"]})
     assert got[0]["code"] == "bad_config" and "English only" in got[0]["message"]
+
+
+def test_digital_silence_is_not_run_through_the_live_model():
+    calls = []
+
+    class FakeDf:
+        delay = 1440
+
+        def process(self, x):
+            calls.append(len(x))
+            return x.copy()
+
+    chain = engine.LiveChain.__new__(engine.LiveChain)
+    engine.LiveChain.__init__(chain, None, None, None)  # no model: then give it the fake one
+    chain.df = FakeDf()
+    voice = np.full(960, 0.1, np.float32)
+    zeros = np.zeros(960, np.float32)
+    for _ in range(5):
+        chain.process(voice)
+    out = [chain.process(zeros) for _ in range(50)]  # 1 s of a noise gate's silence
+    assert not np.any(np.concatenate(out[engine.SILENT_SKIP_AFTER // 960:]))  # skipped: silence out
+    assert len(calls) == 5 + engine.SILENT_SKIP_AFTER // 960  # the model only saw the first 200 ms of it
+    assert np.any(chain.process(voice)) and len(calls) == 5 + engine.SILENT_SKIP_AFTER // 960 + 1  # sound: back at once

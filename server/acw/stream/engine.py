@@ -24,6 +24,13 @@ log = logging.getLogger("acw.stream.engine")
 DENOISE_TIERS = {"light": "DeepFilterNet3_onnx.tar.gz"}
 
 
+# Digital silence (a noise gate before our filter, a muted interface) isn't run through the model: once this many
+# samples of it have gone through (more than the model's 30 ms delay, so its buffers hold nothing but silence), the
+# output is silence too, until sound comes back.
+SILENT_PEAK = 1e-5  # -100 dBFS
+SILENT_SKIP_AFTER = SAMPLE_RATE // 5  # 200 ms
+
+
 class LiveChain:
     def __init__(self, lib_path: Path, models_dir: Path, tier: str | None, atten_lim_db: float = 100.0):
         self.df = DeepFilter(lib_path, models_dir / DENOISE_TIERS[tier], atten_lim_db) if tier else None
@@ -33,6 +40,8 @@ class LiveChain:
         self.ceiling = 10 ** (-1.0 / 20)
         self.release = 10 ** (6.0 / 20 / 100)  # recover ~6 dB per second at 100 hops/s
         self.latency_samples = self.df.delay if self.df else 0
+        self.silent_run = 0  # samples of digital silence in a row
+        self.skipped = 0  # samples not run through the model (for the stats)
 
     def set_atten_lim(self, db: float) -> None:
         if self.df:
@@ -41,6 +50,13 @@ class LiveChain:
     def process(self, x: np.ndarray) -> np.ndarray:
         if self.df is None:
             return x
+        if float(np.max(np.abs(x))) < SILENT_PEAK:
+            self.silent_run += len(x)
+            if self.silent_run > SILENT_SKIP_AFTER:
+                self.skipped += len(x)
+                return np.zeros(len(x), np.float32)
+        else:
+            self.silent_run = 0
         y = self.df.process(x)
         y, self.zi = sosfilt(self.sos, y, zi=self.zi)
         y = y.astype(np.float32)

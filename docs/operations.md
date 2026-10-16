@@ -635,7 +635,7 @@ session, so at 28 sessions each one cost 0.40 cores instead of 0.14 (the weights
 caches; native/deepfilter/tract-0.23.patch now shares one copy, bit-identical output); one Python process per pair of
 cores; Opus through libopus (PyAV held the GIL for every encode); WebSocket compression off (it deflated every audio
 frame: a quarter of the relay's work); standard captions skip silence (2 s after the last speech, with 0.3 s kept
-before the next words; word error rate unchanged on LibriSpeech with pauses).
+before the next words; word error rate unchanged on LibriSpeech with pauses); digital silence from a noise gate or a muted interface stops going through the noise model after 0.2 s.
 
 **After a libdf change, rebuild it:** `native/deepfilter/build.sh native`, then copy `out/libdf.so` (in the build
 directory, default `~/audio-cleaner/src/deepfilter-build/out/`) to `~/audio-cleaner/bin/` and restart `acw-stream`.
