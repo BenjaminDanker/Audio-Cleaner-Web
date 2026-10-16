@@ -11,8 +11,8 @@
 # Versions follow the desktop app: every build is MAJOR.MINOR.<run number> (MAJOR.MINOR from buildspec.json, 0.1.57),
 # a pushed tag obs-plugin-vX.Y.Z builds exactly X.Y.Z (cmake/ci-version.cmake). The number reaches the build as the
 # ACW_VERSION environment variable, so the plugin's compiled version, the package names, the .deb version and the
-# release title all say the same. The rolling obs-plugin-latest pre-release carries a version.json that the plugin
-# reads (once per OBS start) to tell its users that a newer version exists.
+# release title all say the same. The rolling obs-plugin-latest pre-release carries a signed obs-plugin-manifest.json that the plugin
+# reads through our download server (once per OBS start) to offer the update.
 name: OBS plugin
 
 on:
@@ -335,9 +335,9 @@ jobs:
   # Every successful build of main / on-prem replaces the "obs-plugin-latest" pre-release, so
   # https://github.com/<repo>/releases/tag/obs-plugin-latest always has the newest plugin. It is a
   # pre-release and never marked latest (the repository's releases/latest link belongs to the
-  # desktop app). Its title carries the version, and its version.json (uploaded last, once the files are there)
-  # is what installed plugins read to tell their users that a newer version exists. A hand-made
-  # obs-plugin-v<version> tag publishes a permanent release instead, without version.json.
+  # desktop app). Its title carries the version, and its signed obs-plugin-manifest.json (uploaded last, once the
+  # files are there) is what our download server mirrors and installed plugins read to offer the update. A hand-made
+  # obs-plugin-v<version> tag publishes a permanent release instead, without a manifest.
   release:
     name: GitHub Release
     if: >-
@@ -373,6 +373,10 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          # Signs obs-plugin-manifest.json (Ed25519). Our download server only passes on a manifest with a good
+          # signature, and the plugin checks it again before it downloads anything. No secret: no manifest (warning).
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          UPDATE_PUBLIC_KEY: lkLV2nf15eOuttdcqpieY2QJFyPsF4WOIwidisbp6Hw=
         run: |
           version="$ACW_VERSION"
           cd release
@@ -394,28 +398,58 @@ jobs:
           - Other Linux: $base-linux-other.tar.xz (copy the files into your OBS plugins folder)
 
           Where each one goes is in obs-plugin/README.md."
+          # The signed manifest that installed plugins read (through our download server): version, and per kind of
+          # computer the file's name, size, SHA-256 and SHA-512. Keys sorted, compact, no trailing newline.
+          signed=()
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::warning::The secret UPDATE_SIGNING_KEY is not set: no plugin manifest, installed plugins will not offer this version."
+          else
+            key="$RUNNER_TEMP/update-signing-key.pem"
+            (umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
+            if [ "$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | base64)" != "$UPDATE_PUBLIC_KEY" ]; then
+              echo "::error::UPDATE_SIGNING_KEY does not belong to the public key the plugin trusts: no manifest published."
+            else
+              python3 - "$version" "${files[@]}" <<'PY'
+          import hashlib, json, os, sys
+          version, names = sys.argv[1], sys.argv[2:]
+          kinds = {"-windows.zip": "windows-x64", "-mac.tar.xz": "macos", "-ubuntu-debian.deb": "ubuntu-debian",
+                   "-linux-other.tar.xz": "linux-other"}
+          files = {}
+          for name in names:
+              kind = next(k for suffix, k in kinds.items() if name.endswith(suffix))
+              data = open(name, "rb").read()
+              files[kind] = {"name": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                             "sha512": hashlib.sha512(data).hexdigest()}
+          text = json.dumps({"files": files, "version": version}, sort_keys=True, separators=(",", ":"))
+          open("obs-plugin-manifest.json", "w", encoding="utf-8", newline="").write(text)
+          PY
+              openssl pkeyutl -sign -rawin -inkey "$key" -in obs-plugin-manifest.json -out obs-plugin-manifest.json.sig
+              openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-public.pem"
+              openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/update-public.pem" -in obs-plugin-manifest.json -sigfile obs-plugin-manifest.json.sig
+              signed=(obs-plugin-manifest.json obs-plugin-manifest.json.sig)
+            fi
+            rm -f "$key"
+          fi
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
               --title "OBS plugin $version" --notes "$notes" "${files[@]}"
           else
             title="OBS plugin $version"
-            # What installed plugins read: the newest version and the page to get it from. Uploaded after the files,
-            # so nobody is told about a version whose files are not there yet.
-            printf '{"version": "%s", "url": "https://github.com/%s/releases/tag/obs-plugin-latest"}\n' "$version" "$GITHUB_REPOSITORY" > version.json
-            jq -e --arg v "$version" '.version == $v' version.json >/dev/null
-            keep=("${files[@]}" version.json)
+            keep=("${files[@]}" "${signed[@]}")
             # Update the existing release in place, so the download links never 404 while it changes.
             update_in_place() {
               gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/obs-plugin-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null || return 1
               gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}" || return 1
               gh release edit obs-plugin-latest --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease --latest=false || return 1
-              # Files of an older version number (they have it in their name) go away; version.json stays.
+              # Files of an older version number (they have it in their name) go away, and so does an old manifest when
+              # this build has none (the old one would describe files that are gone).
               gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
                 while read -r asset; do
                   printf '%s\n' "${keep[@]}" | grep -qxF "$asset" ||
                     gh release delete-asset obs-plugin-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
                 done
-              gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber version.json
+              # The manifest last, so nobody is told about a version whose files are not there yet.
+              [ "${#signed[@]}" -eq 0 ] || gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${signed[@]}"
             }
             if gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && update_in_place; then
               echo "updated obs-plugin-latest in place"
@@ -424,6 +458,6 @@ jobs:
               gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
               gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
                 --title "$title" --notes "$notes" "${files[@]}"
-              gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber version.json
+              [ "${#signed[@]}" -eq 0 ] || gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${signed[@]}"
             fi
           fi

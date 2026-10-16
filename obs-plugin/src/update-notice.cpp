@@ -16,8 +16,10 @@ You should have received a copy of the GNU General Public License along
 with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
-/* See update-notice.h. Nothing here runs on the audio thread, and nothing blocks OBS: the request is made by a
- * thread of our own (acw_core's UpdateCheck, HTTPS with verified certificates, short timeouts, tiny size limit). */
+
+/* See update-notice.h. Nothing here runs on the audio thread, and nothing blocks OBS: the check and the update
+ * each run on a thread of their own (acw_core: HTTPS with verified certificates, short timeouts, size limits, the
+ * manifest's Ed25519 signature and the file's SHA-512 checked before anything is used). */
 
 #include <obs-module.h>
 #include <util/platform.h>
@@ -26,10 +28,13 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "update-notice.h"
 
 #include "acw/update_check.hpp"
+#include "acw/update_download.hpp"
+#include "acw/update_install.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -44,18 +49,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <shellapi.h>
 #else
-#include <spawn.h>
-#include <sys/wait.h>
+#include <dlfcn.h>
+#include <limits.h>
+#include <stdlib.h>
 #include <unistd.h>
-#if defined(__APPLE__)
-#include <crt_externs.h>  // a dylib cannot name `environ` directly
-#define ACW_ENVIRON (*_NSGetEnviron())
-#else
-extern char **environ;
-#define ACW_ENVIRON environ
-#endif
 #endif
 
 #define CONFIG_FILE "settings.json"
@@ -73,10 +71,16 @@ bool g_started = false;      // this session's check was started (it runs once p
 bool g_stop = false;         // the plugin is unloading
 bool g_done = false;         // the check thread has finished
 bool g_found = false;        // the check found a newer version
-std::string g_latest;        // ... its number
-std::string g_url;           // ... and the page for it (always on our releases)
+acw::UpdateManifest g_manifest;  // ... its signed manifest
 std::thread g_thread;
 std::shared_ptr<acw::UpdateCheck> g_check;
+
+// The update itself (after the button)
+update_install_state g_install = UPDATE_INSTALL_IDLE;
+std::string g_install_detail;
+bool g_install_running = false;
+std::thread g_install_thread;
+std::shared_ptr<acw::UpdateDownload> g_download;
 
 // The settings file lives in the module's own config folder, so it is the same for every filter and scene.
 char *config_file()
@@ -115,6 +119,11 @@ void write_enabled(bool on)
 	bfree(path);
 }
 
+std::string user_agent()
+{
+	return std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
+}
+
 void worker(std::shared_ptr<acw::UpdateCheck> check, int delay_s)
 {
 	if (delay_s > 0) {
@@ -128,9 +137,9 @@ void worker(std::shared_ptr<acw::UpdateCheck> check, int delay_s)
 	}
 
 	acw::UpdateCheckOptions opt;
-	opt.user_agent = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
+	opt.user_agent = user_agent();
 #ifdef ACW_UPDATE_TEST_URL /* only for a test harness that stands in for libobs; never defined in a real build */
-	opt.url = ACW_UPDATE_TEST_URL;
+	opt.base_url = ACW_UPDATE_TEST_URL;
 	opt.allow_local_http = true;
 #endif
 	const acw::UpdateCheckResult r = check->run(PLUGIN_VERSION, opt);
@@ -139,16 +148,15 @@ void worker(std::shared_ptr<acw::UpdateCheck> check, int delay_s)
 		std::lock_guard<std::mutex> lk(g_mu);
 		if (r.status == acw::UpdateStatus::UpdateAvailable) {
 			g_found = true;
-			g_latest = r.info.version;
-			g_url = r.info.url;
+			g_manifest = r.manifest;
 		}
 		g_done = true;
 		g_cv.notify_all();
 	}
 	switch (r.status) {
 	case acw::UpdateStatus::UpdateAvailable:
-		obs_log(LOG_INFO, "update available: Audio Cleaner plugin %s (you have %s): %s", r.info.version.c_str(),
-			PLUGIN_VERSION, r.info.url.c_str());
+		obs_log(LOG_INFO, "update available: Audio Cleaner plugin %s (you have %s)", r.manifest.version.c_str(),
+			PLUGIN_VERSION);
 		break;
 	case acw::UpdateStatus::UpToDate:
 		obs_log(LOG_INFO, "the plugin is up to date (%s)", PLUGIN_VERSION);
@@ -170,29 +178,132 @@ void start_check_locked(int delay_s)
 	g_thread = std::thread(worker, g_check, delay_s);
 }
 
-bool open_url(const std::string &url)
+// The path of this plugin's own module file (UTF-8), "" when it cannot be found.
+std::string own_module_path()
 {
 #if defined(_WIN32)
-	const std::wstring wide(url.begin(), url.end());  // the address is plain ASCII (release_url_allowed)
-	return reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+	HMODULE module = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCWSTR>(&update_notice_start), &module))
+		return {};
+	std::wstring wide(32768, L'\0');
+	const DWORD n = GetModuleFileNameW(module, wide.data(), static_cast<DWORD>(wide.size()));
+	if (n == 0 || n >= wide.size())
+		return {};
+	wide.resize(n);
+	const int len = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), nullptr, 0, nullptr, nullptr);
+	std::string out(static_cast<size_t>(std::max(len, 0)), '\0');
+	if (len > 0)
+		WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), out.data(), len, nullptr, nullptr);
+	return out;
 #else
-	/* No shell sees the address as code: it is an argument, never part of a command line. */
-	pid_t pid = 0;
-#if defined(__APPLE__)
-	const char *const argv[] = {"open", url.c_str(), nullptr};
-	if (posix_spawn(&pid, "/usr/bin/open", nullptr, nullptr, const_cast<char *const *>(argv), ACW_ENVIRON) != 0)
-		return false;
+	Dl_info info{};
+	if (!dladdr(reinterpret_cast<void *>(&update_notice_start), &info) || !info.dli_fname)
+		return {};
+	char real[PATH_MAX];
+	return realpath(info.dli_fname, real) ? std::string(real) : std::string(info.dli_fname);
+#endif
+}
+
+unsigned long own_pid()
+{
+#if defined(_WIN32)
+	return GetCurrentProcessId();
 #else
-	/* xdg-open can keep running for a while: the shell starts it in the background and ends at once. */
-	const char *const argv[] = {"sh", "-c", "xdg-open \"$1\" >/dev/null 2>&1 &", "sh", url.c_str(), nullptr};
-	if (posix_spawn(&pid, "/bin/sh", nullptr, nullptr, const_cast<char *const *>(argv), ACW_ENVIRON) != 0)
-		return false;
+	return static_cast<unsigned long>(getpid());
 #endif
-	int status = 0;
-	if (waitpid(pid, &status, 0) < 0)
-		return false;
-	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+void set_install(update_install_state state, const std::string &detail)
+{
+	std::lock_guard<std::mutex> lk(g_mu);
+	g_install = state;
+	g_install_detail = detail;
+}
+
+// Downloads this computer's file, checks it and hands it to the installer. Runs on its own thread.
+void install_worker(acw::UpdateManifest manifest, std::shared_ptr<acw::UpdateDownload> download)
+{
+	auto fail = [](const std::string &why) {
+		obs_log(LOG_WARNING, "plugin update failed: %s", why.c_str());
+		set_install(UPDATE_INSTALL_FAILED, why);
+	};
+	const std::string module = own_module_path();
+	const acw::InstallTarget target = acw::classify_install(acw::host_os(), module);
+	auto file = manifest.files.find(target.key);
+	if (module.empty() || target.kind == acw::InstallKind::Unknown) {
+		fail("this copy of the plugin is installed somewhere the updater does not know; download it from the website instead");
+	} else if (file == manifest.files.end()) {
+		fail("the new version has no file for this computer yet");
+	} else {
+		std::string dir, error;
+		if (!acw::make_update_work_dir(dir, error)) {
+			fail(error);
+		} else {
+			acw::DownloadOptions opt;
+			opt.user_agent = user_agent();
+#ifdef ACW_UPDATE_TEST_URL
+			opt.base_url = ACW_UPDATE_TEST_URL;
+			opt.allow_local_http = true;
 #endif
+			const acw::DownloadResult got = download->run(file->second, dir, opt);
+			if (got.cancelled) {
+				set_install(UPDATE_INSTALL_IDLE, {});
+			} else if (!got.ok) {
+				fail(got.error);
+			} else {
+				acw::ApplyRequest req;
+				req.file = got.path;
+				req.file_sha512 = file->second.sha512;
+				req.target = target;
+				req.pid = own_pid();
+				req.module_file = module;
+				req.work_dir = dir;
+				req.log = acw::update_log_path();
+#if !defined(_WIN32) && !defined(__APPLE__)
+				req.immediate = std::getenv("FLATPAK_ID") != nullptr;  // processes in the sandbox end with OBS
+#endif
+				const acw::ApplyResult r = acw::apply_update(req);
+				switch (r.outcome) {
+				case acw::ApplyOutcome::InstallsOnExit:
+					set_install(UPDATE_INSTALL_ON_EXIT, {});
+					break;
+				case acw::ApplyOutcome::InstalledNow:
+					set_install(UPDATE_INSTALL_DONE_RESTART, {});
+					break;
+				case acw::ApplyOutcome::InstallerOpened:
+					set_install(UPDATE_INSTALL_INSTALLER_OPEN, {});
+					break;
+				case acw::ApplyOutcome::FolderShown:
+					set_install(UPDATE_INSTALL_FOLDER_SHOWN, r.detail);
+					break;
+				case acw::ApplyOutcome::Failed:
+					fail(r.error);
+					break;
+				}
+				obs_log(LOG_INFO, "plugin update %s: %s", manifest.version.c_str(),
+					r.outcome == acw::ApplyOutcome::Failed ? "failed" : "handed to the installer");
+			}
+		}
+	}
+	std::lock_guard<std::mutex> lk(g_mu);
+	g_install_running = false;
+	g_cv.notify_all();
+}
+
+// Ends a thread: joined when it finishes in time, else left to finish on its own (it only holds shared state).
+void finish_thread(std::thread &th, std::unique_lock<std::mutex> &lk, bool (*done)())
+{
+	if (!th.joinable())
+		return;
+	const bool in_time = g_cv.wait_for(lk, std::chrono::milliseconds(STOP_WAIT_MS), done);
+	std::thread t = std::move(th);
+	lk.unlock();
+	if (in_time)
+		t.join();
+	else
+		t.detach();  // stuck in the network library: it cannot be waited for forever (same as acw_core's threads)
+	lk.lock();
 }
 
 }  // namespace
@@ -209,29 +320,17 @@ extern "C" void update_notice_start(void)
 
 extern "C" void update_notice_stop(void)
 {
-	std::shared_ptr<acw::UpdateCheck> check;
-	std::thread th;
-	bool joinable = false;
-	{
-		std::unique_lock<std::mutex> lk(g_mu);
-		g_stop = true;
-		check = g_check;
-		g_cv.notify_all();
-		if (check)
-			check->cancel();
-		if (g_thread.joinable()) {
-			joinable = g_cv.wait_for(lk, std::chrono::milliseconds(STOP_WAIT_MS), [] { return g_done; });
-			th = std::move(g_thread);
-		}
-	}
-	if (th.joinable()) {
-		if (joinable)
-			th.join();
-		else
-			th.detach();  // stuck in the network library: it cannot be waited for forever (same as acw_core's threads)
-	}
-	std::lock_guard<std::mutex> lk(g_mu);
+	std::unique_lock<std::mutex> lk(g_mu);
+	g_stop = true;
+	g_cv.notify_all();
+	if (g_check)
+		g_check->cancel();
+	if (g_download)
+		g_download->cancel();
+	finish_thread(g_thread, lk, [] { return g_done; });
+	finish_thread(g_install_thread, lk, [] { return !g_install_running; });
 	g_check.reset();
+	g_download.reset();
 	g_started = false;
 	g_found = false;
 }
@@ -266,21 +365,34 @@ extern "C" bool update_notice_available(char *latest, size_t size)
 	std::lock_guard<std::mutex> lk(g_mu);
 	if (!g_enabled || !g_found || !latest || size == 0)
 		return false;
-	const size_t n = std::min(g_latest.size(), size - 1);
-	std::memcpy(latest, g_latest.data(), n);
+	const size_t n = std::min(g_manifest.version.size(), size - 1);
+	std::memcpy(latest, g_manifest.version.data(), n);
 	latest[n] = '\0';
 	return true;
 }
 
-extern "C" void update_notice_open_download_page(void)
+extern "C" void update_notice_install(void)
 {
-	std::string url;
-	{
-		std::lock_guard<std::mutex> lk(g_mu);
-		url = g_found ? g_url : std::string();
+	std::lock_guard<std::mutex> lk(g_mu);
+	const bool again = g_install == UPDATE_INSTALL_IDLE || g_install == UPDATE_INSTALL_FAILED;
+	if (!g_found || g_stop || g_install_running || !again)
+		return;
+	if (g_install_thread.joinable())
+		g_install_thread.join();  // the previous try has finished (g_install_running is false)
+	g_install = UPDATE_INSTALL_WORKING;
+	g_install_detail.clear();
+	g_install_running = true;
+	g_download = std::make_shared<acw::UpdateDownload>();
+	g_install_thread = std::thread(install_worker, g_manifest, g_download);
+}
+
+extern "C" enum update_install_state update_notice_install_state(char *detail, size_t size)
+{
+	std::lock_guard<std::mutex> lk(g_mu);
+	if (detail && size) {
+		const size_t n = std::min(g_install_detail.size(), size - 1);
+		std::memcpy(detail, g_install_detail.data(), n);
+		detail[n] = '\0';
 	}
-	if (!acw::release_url_allowed(url))
-		url = acw::kReleasePageUrl;
-	if (!open_url(url))
-		obs_log(LOG_WARNING, "could not open the browser; the update is at %s", url.c_str());
+	return g_install;
 }

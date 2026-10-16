@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "acw/update_check.hpp"
 
-#include "acw/session.hpp"
-#include "tls_options.hpp"
+#include "acw/update_verify.hpp"
+#include "http_get.hpp"
 
-#include <ixwebsocket/IXHttp.h>
-#include <ixwebsocket/IXHttpClient.h>
 #include <ixwebsocket/IXNetSystem.h>
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
-#include <mutex>
 
 namespace acw {
 
@@ -58,21 +55,72 @@ bool is_newer_version(const std::string &latest, const std::string &current)
 	return parse_version(latest, l) && parse_version(current, c) && compare_versions(l, c) > 0;
 }
 
-bool release_url_allowed(const std::string &url)
+bool valid_update_file_name(const std::string &name)
 {
-	const std::string prefix = kReleasePagePrefix;
-	if (url.size() <= prefix.size() || url.size() > 300 || url.compare(0, prefix.size(), prefix) != 0)
+	if (name.empty() || name.size() > 120)
 		return false;
-	for (char ch : url) {
-		const unsigned char c = static_cast<unsigned char>(ch);
-		if (c <= 0x20 || c >= 0x7f || c == '"' || c == '\'' || c == '<' || c == '>' || c == '`' || c == '\\' || c == '^' ||
-		    c == '|' || c == '{' || c == '}')
+	for (size_t i = 0; i < name.size(); ++i) {
+		const char c = name[i];
+		const bool alnum = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+		if (!(alnum || c == '.' || c == '_' || c == '-'))
+			return false;
+		if (i == 0 && !alnum)
+			return false;
+		if (c == '.' && i + 1 < name.size() && name[i + 1] == '.')
 			return false;
 	}
 	return true;
 }
 
-bool parse_update_json(const std::string &body, UpdateInfo &out)
+const char *update_file_suffix(const std::string &key)
+{
+	if (key == kKeyWindows)
+		return ".zip";
+	if (key == kKeyMac || key == kKeyLinuxOther)
+		return ".tar.xz";
+	if (key == kKeyDebian)
+		return ".deb";
+	return "";
+}
+
+namespace {
+
+bool ends_with(const std::string &s, const std::string &suffix)
+{
+	return s.size() > suffix.size() && s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool read_file_entry(const std::string &key, const nlohmann::json &j, UpdateFile &out)
+{
+	const std::string suffix = update_file_suffix(key);
+	if (suffix.empty() || !j.is_object())
+		return false;
+	const auto name = j.find("name");
+	const auto size = j.find("size");
+	const auto s512 = j.find("sha512");
+	const auto s256 = j.find("sha256");
+	if (name == j.end() || !name->is_string() || size == j.end() || !size->is_number_unsigned() || s512 == j.end() ||
+	    !s512->is_string())
+		return false;
+	UpdateFile f;
+	f.name = name->get<std::string>();
+	f.size = size->get<uint64_t>();
+	f.sha512 = s512->get<std::string>();
+	if (s256 != j.end()) {
+		if (!s256->is_string() || !is_hex_digest(s256->get<std::string>(), 64))
+			return false;
+		f.sha256 = s256->get<std::string>();
+	}
+	if (!valid_update_file_name(f.name) || !ends_with(f.name, suffix) || f.size == 0 || f.size > kMaxUpdateFileBytes ||
+	    !is_hex_digest(f.sha512, 128))
+		return false;
+	out = f;
+	return true;
+}
+
+}  // namespace
+
+bool parse_update_manifest(const std::string &body, UpdateManifest &out)
 {
 	const nlohmann::json j = nlohmann::json::parse(body, nullptr, /*allow_exceptions=*/false);
 	if (!j.is_object())
@@ -81,188 +129,61 @@ bool parse_update_json(const std::string &body, UpdateInfo &out)
 	Version unused;
 	if (ver == j.end() || !ver->is_string() || !parse_version(ver->get<std::string>(), unused))
 		return false;
-	UpdateInfo info;
-	info.version = ver->get<std::string>();
-	info.url = kReleasePageUrl;
-	const auto url = j.find("url");
-	if (url != j.end() && url->is_string() && release_url_allowed(url->get<std::string>()))
-		info.url = url->get<std::string>();
-	out = info;
+	const auto files = j.find("files");
+	if (files == j.end() || !files->is_object())
+		return false;
+	UpdateManifest m;
+	m.version = ver->get<std::string>();
+	for (auto it = files->begin(); it != files->end(); ++it) {
+		UpdateFile f;
+		if (read_file_entry(it.key(), it.value(), f))
+			m.files[it.key()] = f;
+	}
+	out = std::move(m);
 	return true;
 }
 
 // ---------------------------------------------------------------------------------------------------
-// the request
-
-namespace {
-
-// "https://host/path?query" -> "https://host" (empty when it is not an absolute address).
-std::string origin_of(const std::string &url)
-{
-	const size_t scheme = url.find("://");
-	if (scheme == std::string::npos)
-		return {};
-	const size_t slash = url.find_first_of("/?#", scheme + 3);
-	return slash == std::string::npos ? url : url.substr(0, slash);
-}
-
-// A redirect target as an absolute address: the target itself, or a path on the same server.
-std::string resolve_location(const std::string &base, const std::string &location)
-{
-	if (location.find("://") != std::string::npos)
-		return location;
-	if (!location.empty() && location[0] == '/' && !(location.size() > 1 && location[1] == '/'))
-		return origin_of(base) + location;
-	return {};  // "//host/x", "x/y": not worth supporting
-}
-
-// https:// anywhere, http:// only to this computer / the local network and only when the caller allows it.
-bool url_allowed(const std::string &url, const UpdateCheckOptions &opt)
-{
-	if (url.size() > 2000)
-		return false;
-	if (url.compare(0, 8, "https://") == 0)
-		return url.size() > 8;
-	if (opt.allow_local_http && url.compare(0, 7, "http://") == 0)
-		return server_url_allowed("ws://" + url.substr(7));
-	return false;
-}
-
-const char *error_name(ix::HttpErrorCode c)
-{
-	switch (c) {
-	case ix::HttpErrorCode::CannotConnect:
-		return "cannot connect";
-	case ix::HttpErrorCode::Timeout:
-		return "timed out";
-	case ix::HttpErrorCode::UrlMalformed:
-		return "bad address";
-	case ix::HttpErrorCode::CannotCreateSocket:
-		return "no socket";
-	case ix::HttpErrorCode::SendError:
-		return "send failed";
-	case ix::HttpErrorCode::ReadError:
-	case ix::HttpErrorCode::CannotReadStatusLine:
-	case ix::HttpErrorCode::MissingStatus:
-	case ix::HttpErrorCode::HeaderParsingError:
-	case ix::HttpErrorCode::ChunkReadError:
-	case ix::HttpErrorCode::CannotReadBody:
-		return "bad reply";
-	case ix::HttpErrorCode::MissingLocation:
-	case ix::HttpErrorCode::TooManyRedirects:
-		return "bad redirect";
-	case ix::HttpErrorCode::Cancelled:
-		return "cancelled";
-	default:
-		return "error";
-	}
-}
-
-}  // namespace
+// the check
 
 struct UpdateCheck::Impl {
-	std::mutex mu;
-	bool cancelled = false;
-	std::shared_ptr<ix::HttpRequestArgs> current;  // the request in flight
+	detail::HttpGet http;
 
-	// Makes the request in flight (and every later one) give up.
-	void cancel()
+	bool fetch(const std::string &url, size_t max_bytes, const UpdateCheckOptions &opt, std::chrono::steady_clock::time_point deadline,
+		   std::string &body, std::string &error)
 	{
-		std::lock_guard<std::mutex> lk(mu);
-		cancelled = true;
-		if (current)
-			current->cancel = true;
-	}
-	// False when cancel() was called; otherwise the request is registered so that cancel() reaches it.
-	bool begin(const std::shared_ptr<ix::HttpRequestArgs> &args)
-	{
-		std::lock_guard<std::mutex> lk(mu);
-		if (cancelled)
-			return false;
-		args->cancel = false;
-		current = args;
-		return true;
-	}
-	void end()
-	{
-		std::lock_guard<std::mutex> lk(mu);
-		current.reset();
-	}
-
-	bool fetch(const UpdateCheckOptions &opt, std::string &body, std::string &error)
-	{
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, opt.total_timeout_s));
-		ix::HttpClient client;
-		client.setTLSOptions(detail::make_tls_options(opt.ca_file));
-
-		std::string url = opt.url;
-		for (int hop = 0; hop <= opt.max_redirects; ++hop) {
-			if (!url_allowed(url, opt)) {
-				error = "address not allowed (only https)";
+		detail::HttpGetOptions o;
+		o.user_agent = opt.user_agent;
+		o.accept = "application/json, application/octet-stream";
+		o.ca_file = opt.ca_file;
+		o.connect_timeout_s = opt.connect_timeout_s;
+		o.transfer_timeout_s = opt.transfer_timeout_s;
+		const auto left = std::chrono::duration_cast<std::chrono::seconds>(deadline - std::chrono::steady_clock::now()).count();
+		o.total_timeout_s = static_cast<int>(std::max<long long>(1, left));
+		o.max_redirects = opt.max_redirects;
+		o.allow_local_http = opt.allow_local_http;
+		std::string got;
+		bool too_big = false;
+		detail::HttpReceiver rx;
+		rx.begin = [&] {
+			got.clear();
+			too_big = false;
+		};
+		rx.chunk = [&](const std::string &chunk) {
+			got += chunk;
+			if (got.size() > max_bytes) {
+				too_big = true;
 				return false;
 			}
-			if (std::chrono::steady_clock::now() > deadline) {
-				error = "timed out";
-				return false;
-			}
-			auto args = client.createRequest(url, ix::HttpClient::kGet);
-			args->followRedirects = false;  // followed below, address by address
-			args->connectTimeout = std::max(1, opt.connect_timeout_s);
-			args->transferTimeout = std::max(1, opt.transfer_timeout_s);
-			args->compress = false;
-			args->extraHeaders["User-Agent"] = opt.user_agent;
-			args->extraHeaders["Accept"] = "application/json";
-			std::string got;
-			bool too_big = false;
-			args->onChunkCallback = [&](const std::string &chunk) {
-				got += chunk;
-				if (got.size() > opt.max_bytes) {
-					too_big = true;
-					args->cancel = true;  // stops the read; the rest of the reply is never fetched
-				}
-			};
-			if (!begin(args)) {
-				error = "cancelled";
-				return false;
-			}
-			const ix::HttpResponsePtr resp = client.get(url, args);
-			end();
-
-			if (too_big) {
-				error = "reply too large";
-				return false;
-			}
-			if (!resp) {
-				error = "no reply";
-				return false;
-			}
-			const int code = resp->statusCode;
-			if (code >= 301 && code <= 308 && code != 304 && code != 305 && code != 306) {
-				const auto loc = resp->headers.find("Location");
-				if (loc == resp->headers.end() || loc->second.empty()) {
-					error = "redirect without a target";
-					return false;
-				}
-				url = resolve_location(url, loc->second);
-				if (url.empty()) {
-					error = "unsupported redirect";
-					return false;
-				}
-				continue;
-			}
-			if (resp->errorCode != ix::HttpErrorCode::Ok) {
-				error = error_name(resp->errorCode);
-				return false;
-			}
-			if (code != 200) {
-				error = "HTTP " + std::to_string(code);
-				return false;
-			}
-			body = std::move(got);
 			return true;
+		};
+		if (!http.get(url, o, rx, error)) {
+			if (too_big)
+				error = "reply too large";
+			return false;
 		}
-		error = "too many redirects";
-		return false;
+		body = std::move(got);
+		return true;
 	}
 };
 
@@ -271,7 +192,7 @@ UpdateCheck::~UpdateCheck() = default;
 
 void UpdateCheck::cancel()
 {
-	impl_->cancel();
+	impl_->http.cancel();
 }
 
 UpdateCheckResult UpdateCheck::run(const std::string &current_version, const UpdateCheckOptions &opt)
@@ -282,18 +203,29 @@ UpdateCheckResult UpdateCheck::run(const std::string &current_version, const Upd
 		r.error = "own version number is not valid: " + current_version;
 		return r;
 	}
+	if (opt.base_url.empty() || opt.base_url.back() != '/') {
+		r.error = "bad update address";
+		return r;
+	}
 	ix::initNetSystem();  // counted: the sessions' own initialisation is unaffected
-	std::string body;
-	const bool ok = impl_->fetch(opt, body, r.error);
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(std::max(1, opt.total_timeout_s));
+	std::string manifest, sig;
+	bool ok = impl_->fetch(opt.base_url + "manifest.json", opt.max_manifest_bytes, opt, deadline, manifest, r.error);
+	if (ok)
+		ok = impl_->fetch(opt.base_url + "manifest.json.sig", 64, opt, deadline, sig, r.error);
 	ix::uninitNetSystem();
 	if (!ok)
 		return r;
-	if (!parse_update_json(body, r.info)) {
-		r.error = "unreadable version file";
+	if (!verify_ed25519(manifest, sig, opt.public_key.empty() ? std::string(kUpdatePublicKeyBase64) : opt.public_key)) {
+		r.error = "the signature of the update list does not match";
+		return r;
+	}
+	if (!parse_update_manifest(manifest, r.manifest)) {
+		r.error = "unreadable update list";
 		return r;
 	}
 	Version latest;
-	parse_version(r.info.version, latest);
+	parse_version(r.manifest.version, latest);
 	r.status = compare_versions(latest, cur) > 0 ? UpdateStatus::UpdateAvailable : UpdateStatus::UpToDate;
 	return r;
 }

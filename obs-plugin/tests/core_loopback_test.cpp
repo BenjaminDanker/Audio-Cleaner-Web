@@ -6,6 +6,9 @@
 #include "acw/reference.hpp"
 #include "acw/session.hpp"
 #include "acw/update_check.hpp"
+#include "acw/update_download.hpp"
+#include "acw/update_verify.hpp"
+#include "update_test_util.hpp"
 
 #include <ixwebsocket/IXGetFreePort.h>
 #include <ixwebsocket/IXNetSystem.h>
@@ -20,6 +23,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <functional>
 #include <map>
 #include <memory>
@@ -31,6 +37,14 @@
 
 using namespace acw;
 using namespace std::chrono;
+
+// A folder of our own for the downloaded files.
+namespace testing_detail {
+inline std::string tmp_dir()
+{
+	return (std::filesystem::temp_directory_path() / ("acw-dl-test-" + std::to_string(std::random_device{}()))).string();
+}
+}  // namespace testing_detail
 
 static std::atomic<int> g_failures{0};
 static std::atomic<int> g_checks{0};
@@ -818,32 +832,42 @@ static void test_stop_paths()
 	}
 }
 
+// A signed release on the fake web server: /m/manifest.json, /m/manifest.json.sig and the files.
+struct FakeRelease {
+	std::string payload_win = std::string(300000, 'w') + "windows payload";
+	std::string payload_mac = "mac payload";
+	std::string manifest;
+	std::string sig;
+	updtest::KeyPair key = updtest::make_key(1);
+
+	static std::string manifest_for(const std::string &version, const std::string &win_payload, const std::string &mac_payload)
+	{
+		return "{\"files\":{\"macos\":" + updtest::file_entry("plugin-" + version + "-mac.tar.xz", mac_payload) +
+		       ",\"windows-x64\":" + updtest::file_entry("plugin-" + version + "-windows.zip", win_payload) + "},\"version\":\"" + version + "\"}";
+	}
+	void publish(FakeWeb &web, const std::string &version, const std::string &prefix = "/m/")
+	{
+		manifest = manifest_for(version, payload_win, payload_mac);
+		sig = updtest::sign(key, manifest);
+		web.set(prefix + "manifest.json", FakeWeb::ok(manifest));
+		web.set(prefix + "manifest.json.sig", FakeWeb::ok(sig, "application/octet-stream"));
+		web.set(prefix + "plugin-" + version + "-windows.zip", FakeWeb::ok(payload_win, "application/zip"));
+		web.set(prefix + "plugin-" + version + "-mac.tar.xz", FakeWeb::ok(payload_mac, "application/octet-stream"));
+	}
+};
+
 static void test_update_check()
 {
-	std::printf("update check against a local web server\n");
+	std::printf("update check against a local web server (signed manifest)\n");
 	FakeWeb web;
-	const std::string json_new = R"({"version": "0.1.57", "url": ")" + std::string(kReleasePageUrl) + R"("})";
-	web.set("/new.json", FakeWeb::ok(json_new));
-	web.set("/same.json", FakeWeb::ok(R"({"version":"0.1.9"})"));
-	web.set("/old.json", FakeWeb::ok(R"({"version":"0.0.3"})"));
-	web.set("/garbage.json", FakeWeb::ok("<html>not json</html>", "text/html"));
-	web.set("/noversion.json", FakeWeb::ok(R"({"url":"x"})"));
-	web.set("/badversion.json", FakeWeb::ok(R"({"version":"latest"})"));
-	web.set("/big.json", FakeWeb::ok(R"({"version":"9.9.9","pad":")" + std::string(6000, 'a') + R"("})"));
-	web.set("/err500", FakeWeb::status(500));
-	web.set("/hop1", FakeWeb::redirect("/hop2", 301));
-	web.set("/hop2", FakeWeb::redirect(web.base() + "/new.json", 307));
-	web.set("/loop", FakeWeb::redirect("/loop"));
-	web.set("/to-plain-http", FakeWeb::redirect("http://example.com/version.json"));
-	web.set("/to-ftp", FakeWeb::redirect("ftp://example.com/version.json"));
-	web.set("/to-relative", FakeWeb::redirect("new.json"));
-	web.set("/to-network-path", FakeWeb::redirect("//example.com/new.json"));
-	web.set("/hang", "<hang>");
-	web.set("/endless", "<endless>");
+	FakeRelease rel;
+	rel.publish(web, "0.1.57");
+	const updtest::KeyPair other = updtest::make_key(2);
 
-	auto opts = [&](const char *path) {
+	auto opts = [&](const std::string &folder = "/m/") {
 		UpdateCheckOptions o;
-		o.url = web.base() + path;
+		o.base_url = web.base() + folder;
+		o.public_key = rel.key.pub_b64();
 		o.allow_local_http = true;
 		o.user_agent = "obs-audio-cleaner/0.1.9";
 		o.connect_timeout_s = 2;
@@ -851,72 +875,139 @@ static void test_update_check()
 		o.total_timeout_s = 6;
 		return o;
 	};
-	auto run = [&](const char *current, const char *path) {
+	auto run = [&](const char *current, const std::string &folder = "/m/") {
 		UpdateCheck c;
-		return c.run(current, opts(path));
+		return c.run(current, opts(folder));
 	};
 
 	{
-		const auto r = run("0.1.9", "/new.json");
+		const auto r = run("0.1.9");
 		CHECK(r.status == UpdateStatus::UpdateAvailable);
-		CHECK(r.info.version == "0.1.57");
-		CHECK(r.info.url == kReleasePageUrl);
+		CHECK(r.manifest.version == "0.1.57" && r.manifest.files.size() == 2);
+		CHECK(r.manifest.files.at(kKeyWindows).name == "plugin-0.1.57-windows.zip");
+		CHECK(r.manifest.files.at(kKeyWindows).size == rel.payload_win.size());
 		std::lock_guard<std::mutex> lk(web.mu);
 		CHECK(web.last_user_agent == "obs-audio-cleaner/0.1.9");
 	}
-	CHECK(run("0.1.9", "/same.json").status == UpdateStatus::UpToDate);
-	CHECK(run("0.1.9", "/old.json").status == UpdateStatus::UpToDate);
-	CHECK(run("0.1.57", "/new.json").status == UpdateStatus::UpToDate);
-	CHECK(run("0.1.56", "/new.json").status == UpdateStatus::UpdateAvailable);
-	CHECK(run("0.1.100", "/new.json").status == UpdateStatus::UpToDate);  // numbers, not text
+	CHECK(run("0.1.57").status == UpdateStatus::UpToDate);
+	CHECK(run("0.1.100").status == UpdateStatus::UpToDate);  // numbers, not text
+	CHECK(run("0.1.56").status == UpdateStatus::UpdateAvailable);
+	CHECK(run("0.2.0").status == UpdateStatus::UpToDate);    // an old signed manifest never downgrades
+	CHECK(run("not a version").status == UpdateStatus::Failed);
 
-	// Redirects: followed (relative and absolute, 301/307), but only to places that are allowed.
-	CHECK(run("0.1.9", "/hop1").status == UpdateStatus::UpdateAvailable);
-	CHECK(run("0.1.9", "/to-relative").status == UpdateStatus::Failed);  // relative to a directory: not supported
-	for (const char *p : {"/loop", "/to-plain-http", "/to-ftp", "/to-network-path"}) {
-		const auto r = run("0.1.9", p);
-		CHECK(r.status == UpdateStatus::Failed && !r.error.empty());
-	}
+	// The signature decides.
 	{
-		const auto r = run("0.1.9", "/to-plain-http");
-		CHECK(contains(r.error, "not allowed"));
+		FakeRelease bad;
+		bad.publish(web, "0.1.58", "/tampered/");
+		std::string m = bad.manifest;
+		m[m.find("0.1.58")] = '9';  // one changed character, the old signature
+		web.set("/tampered/manifest.json", FakeWeb::ok(m));
+		auto r = run("0.1.9", "/tampered/");
+		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "signature"));
+
+		bad.key = other;  // signed by somebody else
+		bad.publish(web, "0.1.58", "/wrongkey/");
+		r = run("0.1.9", "/wrongkey/");
+		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "signature"));
+
+		bad.key = rel.key;
+		bad.publish(web, "0.1.58", "/shortsig/");
+		web.set("/shortsig/manifest.json.sig", FakeWeb::ok(bad.sig.substr(0, 63), "application/octet-stream"));
+		CHECK(run("0.1.9", "/shortsig/").status == UpdateStatus::Failed);
+		bad.publish(web, "0.1.58", "/longsig/");
+		web.set("/longsig/manifest.json.sig", FakeWeb::ok(bad.sig + "x", "application/octet-stream"));
+		CHECK(run("0.1.9", "/longsig/").status == UpdateStatus::Failed);
+		bad.publish(web, "0.1.58", "/nosig/");
+		web.set("/nosig/manifest.json.sig", FakeWeb::status(404));
+		auto r2 = run("0.1.9", "/nosig/");
+		CHECK(r2.status == UpdateStatus::Failed && contains(r2.error, "404"));
+		bad.publish(web, "0.1.58", "/swapped/");  // the signature of another version
+		FakeRelease older;
+		older.publish(web, "0.1.50", "/older/");
+		web.set("/swapped/manifest.json.sig", FakeWeb::ok(older.sig, "application/octet-stream"));
+		CHECK(run("0.1.9", "/swapped/").status == UpdateStatus::Failed);
+		bad.publish(web, "0.1.58", "/hex/");  // a hex or base64 text signature is not the raw one
+		web.set("/hex/manifest.json.sig", FakeWeb::ok(acw::hex_encode(reinterpret_cast<const uint8_t *>(bad.sig.data()), 64)));
+		CHECK(run("0.1.9", "/hex/").status == UpdateStatus::Failed);
+
+		// the default key is the real one: a test-signed manifest is refused with it
+		UpdateCheckOptions o = opts();
+		o.public_key.clear();
+		UpdateCheck c;
+		CHECK(c.run("0.1.9", o).status == UpdateStatus::Failed);
 	}
 
-	// Things that are not a version file.
-	for (const char *p : {"/garbage.json", "/noversion.json", "/badversion.json", "/err500", "/missing"}) {
-		const auto r = run("0.1.9", p);
-		CHECK(r.status == UpdateStatus::Failed && !r.error.empty());
-	}
-	CHECK(contains(run("0.1.9", "/err500").error, "500"));
-	CHECK(contains(run("0.1.9", "/missing").error, "404"));
-	CHECK(run("not a version", "/new.json").status == UpdateStatus::Failed);
-
-	// Size limit: a body over the limit is refused (declared long, or really long).
+	// A correctly signed file that is not a manifest, a missing manifest, errors.
 	{
-		const auto r = run("0.1.9", "/big.json");
+		auto publish_text = [&](const std::string &folder, const std::string &text) {
+			web.set(folder + "manifest.json", FakeWeb::ok(text));
+			web.set(folder + "manifest.json.sig", FakeWeb::ok(updtest::sign(rel.key, text), "application/octet-stream"));
+		};
+		publish_text("/garbage/", "<html>not json</html>");
+		publish_text("/nover/", "{\"files\":{}}");
+		publish_text("/badver/", "{\"version\":\"latest\",\"files\":{}}");
+		for (const char *f : {"/garbage/", "/nover/", "/badver/"}) {
+			const auto r = run("0.1.9", f);
+			CHECK(r.status == UpdateStatus::Failed && contains(r.error, "unreadable"));
+		}
+		web.set("/err500/manifest.json", FakeWeb::status(500));
+		CHECK(contains(run("0.1.9", "/err500/").error, "500"));
+		CHECK(contains(run("0.1.9", "/nothing-here/").error, "404"));
+	}
+
+	// Size limit: a manifest over the limit is refused (declared long, or really long).
+	{
+		web.set("/big/manifest.json", FakeWeb::ok(std::string(20000, ' ') + rel.manifest));
+		web.set("/big/manifest.json.sig", FakeWeb::ok(updtest::sign(rel.key, std::string(20000, ' ') + rel.manifest), "application/octet-stream"));
+		const auto r = run("0.1.9", "/big/");
 		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "large"));
-	}
-	{
+		web.set("/endless/manifest.json", "<endless>");
 		const auto t0 = steady_clock::now();
-		const auto r = run("0.1.9", "/endless");
-		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "large"));
+		const auto r2 = run("0.1.9", "/endless/");
+		CHECK(r2.status == UpdateStatus::Failed && contains(r2.error, "large"));
 		CHECK(steady_clock::now() - t0 < seconds(3));
 	}
 
-	// A server that never answers: the transfer timeout ends it.
+	// Redirects: followed on the same server (relative and absolute), refused anywhere else.
 	{
+		web.set("/r1/manifest.json", FakeWeb::redirect("/r2/manifest.json", 301));
+		web.set("/r2/manifest.json", FakeWeb::redirect(web.base() + "/m/manifest.json", 307));
+		web.set("/r1/manifest.json.sig", FakeWeb::redirect("/m/manifest.json.sig", 302));
+		CHECK(run("0.1.9", "/r1/").status == UpdateStatus::UpdateAvailable);
+		web.set("/loop/manifest.json", FakeWeb::redirect("/loop/manifest.json"));
+		CHECK(run("0.1.9", "/loop/").status == UpdateStatus::Failed);
+		web.set("/plain/manifest.json", FakeWeb::redirect("http://example.com/manifest.json"));
+		CHECK(contains(run("0.1.9", "/plain/").error, "not allowed"));
+		web.set("/ftp/manifest.json", FakeWeb::redirect("ftp://example.com/manifest.json"));
+		CHECK(run("0.1.9", "/ftp/").status == UpdateStatus::Failed);
+		web.set("/rel/manifest.json", FakeWeb::redirect("manifest2.json"));
+		CHECK(run("0.1.9", "/rel/").status == UpdateStatus::Failed);
+		web.set("/net/manifest.json", FakeWeb::redirect("//example.com/manifest.json"));
+		CHECK(run("0.1.9", "/net/").status == UpdateStatus::Failed);
+		// another server, even a local one: refused (the plugin talks to one place only)
+		FakeWeb elsewhere;
+		FakeRelease rel2;
+		rel2.publish(elsewhere, "0.1.99");
+		web.set("/away/manifest.json", FakeWeb::redirect(elsewhere.base() + "/m/manifest.json"));
+		const int asked = elsewhere.requests.load();
+		const auto away = run("0.1.9", "/away/");
+		CHECK(away.status == UpdateStatus::Failed && contains(away.error, "another server"));
+		CHECK(elsewhere.requests.load() == asked);
+	}
+
+	// A server that never answers: the transfer timeout ends it; cancel() ends it at once.
+	{
+		web.set("/hang/manifest.json", "<hang>");
 		const auto t0 = steady_clock::now();
-		auto o = opts("/hang");
+		auto o = opts("/hang/");
 		o.transfer_timeout_s = 1;
 		UpdateCheck c;
-		const auto r = c.run("0.1.9", o);
-		CHECK(r.status == UpdateStatus::Failed);
+		CHECK(c.run("0.1.9", o).status == UpdateStatus::Failed);
 		CHECK(steady_clock::now() - t0 < seconds(4));
 	}
-	// ... and cancel() ends it at once, from another thread (OBS unloading the plugin).
 	{
 		UpdateCheck c;
-		auto o = opts("/hang");
+		auto o = opts("/hang/");
 		o.transfer_timeout_s = 30;
 		o.total_timeout_s = 60;
 		UpdateCheckResult r;
@@ -933,13 +1024,12 @@ static void test_update_check()
 		th.join();
 		CHECK(steady_clock::now() - t0 < seconds(3));
 		CHECK(r.status == UpdateStatus::Failed);
-		// A cancelled check stays cancelled.
-		CHECK(c.run("0.1.9", opts("/new.json")).status == UpdateStatus::Failed);
+		CHECK(c.run("0.1.9", opts()).status == UpdateStatus::Failed);  // a cancelled check stays cancelled
 	}
 
-	// Addresses that are never used: plain http:// (unless a test allows the local one), other schemes.
+	// Addresses that are never used: plain http:// (unless a test allows the local one), other schemes, no folder.
 	{
-		auto o = opts("/new.json");
+		auto o = opts();
 		o.allow_local_http = false;
 		const int before = web.requests.load();
 		UpdateCheck c;
@@ -947,31 +1037,194 @@ static void test_update_check()
 		CHECK(r.status == UpdateStatus::Failed && contains(r.error, "not allowed"));
 		CHECK(web.requests.load() == before);  // nothing was sent
 	}
-	for (const char *u : {"http://example.com/version.json", "ftp://127.0.0.1/x", "file:///etc/passwd", "", "https://"}) {
-		auto o = opts("/new.json");
-		o.url = u;
+	for (const char *u : {"http://example.com/p/", "ftp://127.0.0.1/p/", "file:///etc/", "", "https://", "https://127.0.0.1/no-slash"}) {
+		auto o = opts();
+		o.base_url = u;
 		UpdateCheck c;
-		const auto r = c.run("0.1.9", o);
-		CHECK(r.status == UpdateStatus::Failed);
+		CHECK(c.run("0.1.9", o).status == UpdateStatus::Failed);
 	}
-	// https:// to a port where nobody listens: a plain failure, quickly.
+	// https:// to a port where nobody listens, and to a server that only speaks plain HTTP: plain failures.
 	{
-		auto o = opts("/new.json");
-		o.url = "https://127.0.0.1:" + std::to_string(ix::getFreePort()) + "/version.json";
+		auto o = opts();
+		o.base_url = "https://127.0.0.1:" + std::to_string(ix::getFreePort()) + "/m/";
 		const auto t0 = steady_clock::now();
 		UpdateCheck c;
-		const auto r = c.run("0.1.9", o);
-		CHECK(r.status == UpdateStatus::Failed);
+		CHECK(c.run("0.1.9", o).status == UpdateStatus::Failed);
 		CHECK(steady_clock::now() - t0 < seconds(5));
 	}
-	// https:// to a server that only speaks plain HTTP: the TLS handshake fails, nothing is accepted.
 	{
-		auto o = opts("/new.json");
-		o.url = "https://127.0.0.1:" + std::to_string(web.getPort()) + "/new.json";
+		auto o = opts();
+		o.base_url = "https://127.0.0.1:" + std::to_string(web.getPort()) + "/m/";
 		UpdateCheck c;
-		const auto r = c.run("0.1.9", o);
-		CHECK(r.status == UpdateStatus::Failed);
+		CHECK(c.run("0.1.9", o).status == UpdateStatus::Failed);
 	}
+	// The address the plugin ships with: one place, no GitHub.
+	{
+		const std::string base = kUpdateBaseUrl;
+		CHECK(base == "https://mc-multi-world.space/audio/api/downloads/obs-plugin/");
+		CHECK(base.find("github") == std::string::npos && base.find("Benjamin") == std::string::npos);
+	}
+}
+
+static void test_update_download()
+{
+	std::printf("update download against a local web server\n");
+	FakeWeb web;
+	FakeRelease rel;
+	rel.publish(web, "0.1.57");
+	const UpdateFile win = [&] {
+		UpdateManifest m;
+		parse_update_manifest(rel.manifest, m);
+		return m.files.at(kKeyWindows);
+	}();
+	const UpdateFile mac = [&] {
+		UpdateManifest m;
+		parse_update_manifest(rel.manifest, m);
+		return m.files.at(kKeyMac);
+	}();
+	auto tmp = std::filesystem::path(testing_detail::tmp_dir());
+	std::filesystem::create_directories(tmp);
+	auto listing = [&] {
+		std::string names;
+		for (const auto &e : std::filesystem::directory_iterator(tmp))
+			names += e.path().filename().string() + ";";
+		return names;
+	};
+	auto opts = [&](const std::string &folder = "/m/") {
+		DownloadOptions o;
+		o.base_url = web.base() + folder;
+		o.allow_local_http = true;
+		o.connect_timeout_s = 2;
+		o.transfer_timeout_s = 5;
+		o.user_agent = "obs-audio-cleaner/0.1.9";
+		return o;
+	};
+	auto read = [](const std::string &path) {
+		std::ifstream f(path, std::ios::binary);
+		return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	};
+
+	{
+		UpdateDownload d;
+		const auto r = d.run(win, tmp.string(), opts());
+		CHECK(r.ok && r.error.empty());
+		CHECK(read(r.path) == rel.payload_win);
+		CHECK(std::filesystem::path(r.path).filename() == "plugin-0.1.57-windows.zip");
+		CHECK(d.bytes_done() == rel.payload_win.size());
+		CHECK(listing() == "plugin-0.1.57-windows.zip;");  // no .part left
+		std::filesystem::remove(r.path);
+	}
+	{
+		UpdateDownload d;
+		const auto r = d.run(mac, tmp.string(), opts());
+		CHECK(r.ok && read(r.path) == rel.payload_mac);
+		std::filesystem::remove(r.path);
+	}
+	auto expect_fail = [&](const char *what, const UpdateFile &f, const std::string &folder, const char *why) {
+		UpdateDownload d;
+		const auto r = d.run(f, tmp.string(), opts(folder));
+		const bool ok = !r.ok && r.path.empty() && contains(r.error, why) && listing().empty();
+		CHECK(ok);
+		if (!ok)
+			std::printf("  (%s) ok=%d error='%s' dir='%s'\n", what, r.ok, r.error.c_str(), listing().c_str());
+	};
+	{  // the server sends other bytes than the signed list names
+		FakeRelease evil;
+		evil.payload_win = std::string(rel.payload_win.size(), 'E');  // same size, other content
+		evil.publish(web, "0.1.57", "/evil/");
+		web.set("/evil/plugin-0.1.57-windows.zip", FakeWeb::ok(evil.payload_win));
+		expect_fail("same size, other bytes", win, "/evil/", "not the one");
+		web.set("/evil/plugin-0.1.57-windows.zip", FakeWeb::ok(rel.payload_win + "x"));
+		expect_fail("longer", win, "/evil/", "not the one");
+		web.set("/evil/plugin-0.1.57-windows.zip", FakeWeb::ok(rel.payload_win.substr(0, rel.payload_win.size() - 1)));
+		expect_fail("shorter", win, "/evil/", "incomplete");
+		// the connection ends before the announced length
+		web.set("/evil/plugin-0.1.57-windows.zip", "HTTP/1.1 200 OK\r\nContent-Length: 400000\r\nConnection: close\r\n\r\nabc");
+		expect_fail("cut off", win, "/evil/", "failed");
+		web.set("/evil/plugin-0.1.57-windows.zip", FakeWeb::ok(""));
+		expect_fail("empty", win, "/evil/", "incomplete");
+	}
+	expect_fail("404", win, "/nothing/", "404");
+	{
+		web.set("/e500/plugin-0.1.57-windows.zip", FakeWeb::status(500));
+		expect_fail("500", win, "/e500/", "500");
+	}
+	{  // redirects: followed on the same server; the body of a redirect or an error never ends up in the file
+		web.set("/redir/plugin-0.1.57-windows.zip", "HTTP/1.1 302 Found\r\nLocation: /m/plugin-0.1.57-windows.zip\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+		UpdateDownload d;
+		const auto r = d.run(win, tmp.string(), opts("/redir/"));
+		CHECK(r.ok && read(r.path) == rel.payload_win);
+		std::filesystem::remove(r.path);
+		FakeWeb elsewhere;
+		FakeRelease rel2;
+		rel2.publish(elsewhere, "0.1.57");
+		web.set("/away/plugin-0.1.57-windows.zip", FakeWeb::redirect(elsewhere.base() + "/m/plugin-0.1.57-windows.zip"));
+		const int asked = elsewhere.requests.load();
+		expect_fail("other server", win, "/away/", "failed");
+		CHECK(elsewhere.requests.load() == asked);
+		web.set("/plain/plugin-0.1.57-windows.zip", FakeWeb::redirect("http://example.com/x.zip"));
+		expect_fail("plain http", win, "/plain/", "failed");
+	}
+	{  // names that are not plain names are refused before anything is sent
+		const int before = web.requests.load();
+		for (const char *bad : {"../x.zip", "a/b.zip", "..", "", "x y.zip", "C:\\x.zip", ".hidden"}) {
+			UpdateFile f = win;
+			f.name = bad;
+			UpdateDownload d;
+			const auto r = d.run(f, tmp.string(), opts());
+			CHECK(!r.ok && r.path.empty());
+		}
+		UpdateFile f = win;
+		f.size = 0;
+		UpdateDownload d0;
+		CHECK(!d0.run(f, tmp.string(), opts()).ok);
+		f = win;
+		f.sha512 = "abc";
+		UpdateDownload d1;
+		CHECK(!d1.run(f, tmp.string(), opts()).ok);
+		f = win;
+		f.size = kMaxUpdateFileBytes + 1;
+		UpdateDownload d2;
+		CHECK(!d2.run(f, tmp.string(), opts()).ok);
+		CHECK(web.requests.load() == before && listing().empty());
+	}
+	{  // a server that sends far more than listed is stopped early
+		UpdateFile f = win;
+		web.set("/m/endless.zip", "<endless>");
+		f.name = "endless.zip";
+		UpdateDownload d;
+		const auto t0 = steady_clock::now();
+		const auto r = d.run(f, tmp.string(), opts());
+		CHECK(!r.ok && contains(r.error, "not the one") && listing().empty());
+		CHECK(steady_clock::now() - t0 < seconds(5));
+	}
+	{  // cancel() ends a download that has stalled
+		UpdateFile f = win;
+		f.name = "hang.zip";
+		web.set("/m/hang.zip", "<hang>");
+		UpdateDownload d;
+		auto o = opts();
+		o.transfer_timeout_s = 30;
+		DownloadResult r;
+		std::atomic<bool> done{false};
+		std::thread th([&] {
+			r = d.run(f, tmp.string(), o);
+			done = true;
+		});
+		std::this_thread::sleep_for(milliseconds(400));
+		CHECK(!done);
+		d.cancel();
+		CHECK(wait_until([&] { return done.load(); }, 3000));
+		th.join();
+		CHECK(!r.ok && r.cancelled && listing().empty());
+	}
+	{  // a folder that does not exist: a plain failure
+		UpdateDownload d;
+		const auto r = d.run(win, (tmp / "nope").string(), opts());
+		CHECK(!r.ok && contains(r.error, "saved"));
+	}
+	std::error_code ec;
+	std::filesystem::remove_all(tmp, ec);
 }
 
 int main(int argc, char **argv)
@@ -997,6 +1250,7 @@ int main(int argc, char **argv)
 	test_robustness();
 	test_stop_paths();
 	test_update_check();
+	test_update_download();
 	ix::uninitNetSystem();
 	std::printf("\n%d checks, %d failures\n", g_checks.load(), g_failures.load());
 	return g_failures ? 1 : 0;

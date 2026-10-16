@@ -54,7 +54,7 @@ target_sources(
     src/update-notice.cpp
     src/update-notice.h
 )
-target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE acw_core)
+target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE acw_core ${CMAKE_DL_LIBS}) # dladdr: where the plugin is installed (updates)
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 
 if(OS_WINDOWS)

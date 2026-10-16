@@ -662,11 +662,12 @@ bool captions_modified(obs_properties_t *props, obs_property_t *, obs_data_t *se
 	return true;
 }
 
-// "Download the update": opens the release page in the browser. Nothing is downloaded by the plugin.
+// "Download and install the update": starts it in the background (update-notice.cpp); the properties are drawn
+// again so they show that it is running.
 bool update_download_clicked(obs_properties_t *, obs_property_t *, void *)
 {
-	update_notice_open_download_page();
-	return false;
+	update_notice_install();
+	return true;
 }
 
 // The checkbox belongs to the whole plugin, not to this filter: it is saved in the plugin's own config file.
@@ -723,7 +724,28 @@ obs_properties_t *filter_properties(void *data)
 		obs_property_t *info = obs_properties_add_text(p, S_UPDATE_INFO, msg.c_str(), OBS_TEXT_INFO);
 		obs_property_text_set_info_type(info, OBS_TEXT_INFO_WARNING);
 		obs_property_text_set_info_word_wrap(info, true);
-		obs_properties_add_button2(p, S_UPDATE_DOWNLOAD, T_("AudioCleaner.Update.Download"), update_download_clicked, nullptr);
+		char detail[1024];
+		const update_install_state state = update_notice_install_state(detail, sizeof(detail));
+		const char *status = nullptr;
+		switch (state) {
+		case UPDATE_INSTALL_WORKING: status = "AudioCleaner.Update.Working"; break;
+		case UPDATE_INSTALL_ON_EXIT: status = "AudioCleaner.Update.OnExit"; break;
+		case UPDATE_INSTALL_DONE_RESTART: status = "AudioCleaner.Update.Restart"; break;
+		case UPDATE_INSTALL_INSTALLER_OPEN: status = "AudioCleaner.Update.InstallerOpen"; break;
+		case UPDATE_INSTALL_FOLDER_SHOWN: status = "AudioCleaner.Update.FolderShown"; break;
+		case UPDATE_INSTALL_FAILED: status = "AudioCleaner.Update.Failed"; break;
+		case UPDATE_INSTALL_IDLE: break;
+		}
+		if (status) {
+			const std::string text = replace_all(T_(status), "%1", detail);
+			obs_property_t *st = obs_properties_add_text(p, "update_status", text.c_str(), OBS_TEXT_INFO);
+			obs_property_text_set_info_type(st, state == UPDATE_INSTALL_FAILED ? OBS_TEXT_INFO_ERROR : OBS_TEXT_INFO_NORMAL);
+			obs_property_text_set_info_word_wrap(st, true);
+		}
+		if (state == UPDATE_INSTALL_IDLE || state == UPDATE_INSTALL_FAILED)
+			obs_properties_add_button2(p, S_UPDATE_DOWNLOAD,
+						   T_(state == UPDATE_INSTALL_FAILED ? "AudioCleaner.Update.TryAgain" : "AudioCleaner.Update.Download"),
+						   update_download_clicked, nullptr);
 	}
 
 	obs_property_t *key = obs_properties_add_text(p, S_API_KEY, T_("AudioCleaner.ApiKey"), OBS_TEXT_PASSWORD);

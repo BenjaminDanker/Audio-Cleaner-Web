@@ -9,15 +9,14 @@ Built against libobs 31.1.1; works with OBS 31 and newer (OBS refuses plugins bu
 
 ## Install
 
-Download the package for your platform from the newest build,
-https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/tag/obs-plugin-latest (every push that changes
-`obs-plugin/` replaces it; an `obs-plugin-v<version>` tag publishes a permanent release), and unpack.
+Download the package for your platform from the Live page of the website (it comes from our own download server,
+`https://mc-multi-world.space/audio/api/downloads/obs-plugin/`), and unpack. For maintainers: CI publishes every build
+as the `obs-plugin-latest` pre-release, and the server mirrors it (docs/operations.md, "Release downloads").
 OBS must be **version 31 or newer**; restart OBS afterwards.
 
 Every build has its own version number, `MAJOR.MINOR.<build number>` (for example 0.1.57; the release is titled
 "OBS plugin 0.1.57", and the files carry the number in their names). A `obs-plugin-vX.Y.Z` tag builds exactly X.Y.Z.
-The plugin tells you when a newer one exists (see "Update notice" below); to update, install the new package the same
-way as the first time (close OBS first on Windows; the `.deb` replaces the old one because its version is higher).
+The plugin tells you when a newer one exists and installs it for you (see "Updates" below).
 
 | Platform | What to do |
 |---|---|
@@ -64,23 +63,30 @@ With denoise off (captions only) the audio is not delayed at all.
 an account can have **two live sessions at a time**: a third filter, or a second computer, is refused until one ends
 (a session whose connection dropped lingers on the service for up to about 30 s).
 
-### Update notice
+### Updates
 
 Once each time OBS starts (a few seconds after the plugin loads, on a thread of its own, never on the audio path and never
-holding up OBS) the plugin downloads the small file
-`https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/obs-plugin-latest/version.json`
-(`{"version": "0.1.57", "url": "..."}`; at most 4 KB, https only, certificates and host names verified, a few seconds of
-patience) and compares the number with its own. If the release is newer:
+holding up OBS) the plugin reads the newest version's manifest from our download server,
+`https://mc-multi-world.space/audio/api/downloads/obs-plugin/manifest.json`, and its signature (`manifest.json.sig`).
+The manifest is signed when it is built (Ed25519); the plugin checks the signature with the public key built into it and
+ignores anything that is not signed by that key, or not newer than itself. https only, certificates and host names
+verified, small size limits, a few seconds of patience. If the release is newer:
 
-* the filter's properties start with a notice, "Update available: Audio Cleaner plugin 0.1.57 (you have 0.1.5)", and a
-  **Download the update** button that opens the release page in your browser;
-* the OBS log gets one line, `update available: Audio Cleaner plugin 0.1.57 (you have 0.1.5): <page>`.
+* the filter's properties start with "Update available: Audio Cleaner plugin 0.1.57 (you have 0.1.50)" and a
+  **Download and install the update** button; the OBS log gets one line;
+* the button downloads this computer's package from the same server, checks its size and SHA-512 against the signed
+  manifest, and installs it:
+  * **Windows** (a plugin folder with `bin\64bit\audio-cleaner.dll`): a small PowerShell script waits for OBS to close,
+    then puts the new files in place (with one Windows admin prompt if the plugin folder needs it, e.g. Program Files);
+    the new version is in use the next time OBS starts;
+  * **macOS** (`audio-cleaner.plugin` in your user's plugins folder) and **Linux plugin folders**: the same, with an sh
+    script; nothing needs admin rights; in the Flatpak OBS it is swapped at once and a restart of OBS uses it;
+  * **Ubuntu/Debian package** (`/usr/...`): the `.deb` is opened with your system's package installer;
+  * anywhere else: the folder with the new package is opened and the settings say where it goes.
+  If anything fails, the old plugin stays in place and keeps working; the settings say why and offer "Try again".
 
-Nothing is downloaded or installed by the plugin: a loaded plugin cannot replace itself, and on Windows installing needs
-administrator rights. The button only ever opens a page of `github.com/BenjaminDanker/Audio-Cleaner-Web/releases/`; an
-address in the file is used only if it starts with exactly that, otherwise the fixed release page is opened. A check that
-fails (offline, firewall, GitHub down) is one line in the log and nothing else. The checkbox is stored in OBS's plugin
-settings folder (`.../obs-studio/plugin_config/audio-cleaner/settings.json`).
+The checkbox **Check for updates when OBS starts** is stored in OBS's plugin settings folder
+(`.../obs-studio/plugin_config/audio-cleaner/settings.json`). With it off, no request is made.
 
 ### When something is wrong
 
@@ -123,9 +129,9 @@ dropped instead of queued).
   Muting a source in OBS does not stop streaming - disable the filter.
 * **OBS stores filter settings, including the API key, unencrypted in the scene collection JSON.** Use a dedicated key with only
   the live scope and do not share scene files. The plugin never logs the key.
-* **Once per OBS start the plugin contacts GitHub** to read the number of the newest plugin version (see "Update notice").
-  GitHub sees your internet address and a `User-Agent` of the form `obs-audio-cleaner/<plugin version>`; no account, key,
-  audio or other data is sent. Turn it off with **Check for updates when OBS starts** in the filter's properties (then
+* **Once per OBS start the plugin contacts our download server** to read the newest plugin version (see "Updates"); when
+  you press the update button it downloads the package from there. The server sees your internet address and a
+  `User-Agent` of the form `obs-audio-cleaner/<plugin version>`; no account, key, audio or other data is sent. Turn it off with **Check for updates when OBS starts** in the filter's properties (then
   no request is made at all).
 * Certificates and host names are always verified. The only exception is an explicit `ws://` URL for local testing; it is
   accepted for this computer and the local network only (localhost, 127.x, 10.x, 172.16-31.x, 192.168.x, *.local) and
@@ -155,8 +161,9 @@ machine only, as TLS-inspecting proxies do, is not seen and the connection fails
 Apple, TLS 1.2 at most). Override with `-DACW_TLS_BACKEND=`. `-DACW_USE_OPUS=OFF` builds without Opus (PCM only).
 
 Layout: `core/` OBS-independent library `acw_core` (SPSC rings, reframer, resampler, protocol, WebSocket thread, output stage,
-echo reference buffer, caption pacer, the update check: versions, version.json, the HTTPS request); `src/` thin OBS glue
-(`update-notice.cpp` runs the check and opens the release page); `tests/` unit tests, `core_loopback_test` (the real session against a
+echo reference buffer, caption pacer, updates: the signed manifest check (Monocypher Ed25519 + SHA-512), the download,
+and the installers that swap the plugin when OBS closes); `src/` thin OBS glue (`update-notice.cpp` runs the check and,
+on the button, the download and install); `tests/` unit tests, `core_loopback_test` (the real session against a
 fake server on 127.0.0.1: handshake, errors, retries, late replies, garbage, shutdown; also the update check against a local
 web server: newer / same / older, redirects, refused addresses, size limit, timeout, cancel), `core_stream_test` (live server) and
 `obs_smoke` (headless libobs host; `core_loopback_test --serve` is a server for it).

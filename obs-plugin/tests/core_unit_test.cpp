@@ -10,7 +10,10 @@
 #include "acw/session.hpp"
 #include "acw/spsc.hpp"
 #include "acw/update_check.hpp"
+#include "acw/update_verify.hpp"
+#include "update_test_util.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -19,6 +22,7 @@
 #include <random>
 #include <set>
 #include <thread>
+#include <vector>
 
 static int g_failures = 0;
 static int g_checks = 0;
@@ -845,72 +849,182 @@ static void test_update_versions()
 	CHECK(!is_newer_version("0.1.0", "0.1.0"));
 }
 
-static void test_update_json()
+static std::string entry_json(const std::string &name, const std::string &size, const std::string &sha512 = std::string(128, 'b'))
 {
-	std::printf("update check: version.json\n");
+	return "{\"name\":\"" + name + "\",\"size\":" + size + ",\"sha256\":\"" + std::string(64, 'a') + "\",\"sha512\":\"" + sha512 + "\"}";
+}
+
+static void test_update_manifest()
+{
+	std::printf("update check: manifest\n");
 	using namespace acw;
-	UpdateInfo i;
-	const std::string page = kReleasePageUrl;
+	UpdateManifest m;
 
-	CHECK(parse_update_json(R"({"version": "0.1.57", "url": ")" + page + R"("})", i));
-	CHECK(i.version == "0.1.57" && i.url == page);
+	const std::string win = entry_json("audio-cleaner-obs-plugin-0.1.60-windows.zip", "3000000");
+	const std::string mac = entry_json("audio-cleaner-obs-plugin-0.1.60-mac.tar.xz", "4000000");
+	const std::string deb = entry_json("audio-cleaner-obs-plugin-0.1.60-ubuntu-debian.deb", "2000000");
+	const std::string oth = entry_json("audio-cleaner-obs-plugin-0.1.60-linux-other.tar.xz", "2000000");
+	const std::string full = "{\"files\":{\"linux-other\":" + oth + ",\"macos\":" + mac + ",\"ubuntu-debian\":" + deb +
+				 ",\"windows-x64\":" + win + "},\"published\":\"2026-10-16T10:00:00Z\",\"version\":\"0.1.60\"}";
+	CHECK(parse_update_manifest(full, m));
+	CHECK(m.version == "0.1.60" && m.files.size() == 4);
+	CHECK(m.files.at(kKeyWindows).name == "audio-cleaner-obs-plugin-0.1.60-windows.zip");
+	CHECK(m.files.at(kKeyWindows).size == 3000000);
+	CHECK(m.files.at(kKeyWindows).sha512 == std::string(128, 'b'));
+	CHECK(m.files.at(kKeyWindows).sha256 == std::string(64, 'a'));
+	CHECK(m.files.at(kKeyMac).name.size() > 0 && m.files.at(kKeyDebian).name.size() > 0 && m.files.at(kKeyLinuxOther).name.size() > 0);
 
-	// No address, or one that is not ours: the fixed page is used.
-	CHECK(parse_update_json(R"({"version":"0.1.57"})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.57","url":"https://evil.example/releases/"})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.57","url":"http://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/x"})", i) &&
-	      i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.57","url":"https://github.com/BenjaminDanker/Audio-Cleaner-Web.evil.example/releases/"})",
-			    i) &&
-	      i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.57","url":"https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases"})", i) &&
-	      i.url == page);  // the prefix includes the trailing slash
-	CHECK(parse_update_json(R"({"version":"0.1.57","url":42})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.57","url":null})", i) && i.url == page);
-	// Our own releases pages are fine, e.g. a tagged release.
-	const std::string tag = std::string(kReleasePagePrefix) + "tag/obs-plugin-v0.1.7";
-	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"("})", i) && i.url == tag);
-	// ... unless they carry characters that do not belong in an address.
-	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"( --evil"})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"(\"x"})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"(\u0000"})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + R"(\n"})", i) && i.url == page);
-	CHECK(parse_update_json(R"({"version":"0.1.7","url":")" + tag + std::string(400, 'a') + R"("})", i) && i.url == page);
+	// Whitespace and key order do not matter; fields we do not know are ignored; the sha256 is optional.
+	CHECK(parse_update_manifest("{\"version\": \"1.2.3\", \"x\": [1], \"files\": {\"macos\": {\"sha512\": \"" + std::string(128, 'c') +
+					    "\", \"size\": 5, \"name\": \"p.tar.xz\", \"extra\": null}}}",
+				    m));
+	CHECK(m.version == "1.2.3" && m.files.size() == 1 && m.files.at(kKeyMac).sha256.empty());
 
-	// Not a version file.
+	// Entries that cannot be used are left out, the rest of the manifest stays usable.
+	const std::string odd = "{\"version\":\"0.1.60\",\"files\":{"
+				"\"windows-x64\":" + entry_json("../evil.zip", "5") + ","
+				"\"macos\":" + entry_json("a.zip", "5") + ","                      // wrong ending for its kind
+				"\"ubuntu-debian\":" + entry_json("a.deb", "0") + ","              // empty
+				"\"linux-other\":" + entry_json("a.tar.xz", "67108865") + ","      // over 64 MiB
+				"\"beos\":" + entry_json("a.zip", "5") + "}}";                     // a kind we do not know
+	CHECK(parse_update_manifest(odd, m) && m.files.empty());
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":" + entry_json("a.tar.xz", "67108864") + "}}", m) &&
+	      m.files.size() == 1);
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":" + entry_json("a.tar.xz", "5", std::string(127, 'b')) + "}}", m) &&
+	      m.files.empty());  // a short digest
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":" + entry_json("a.tar.xz", "5", std::string(128, 'B')) + "}}", m) &&
+	      m.files.empty());  // upper case: the CI writes lower case
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":" + entry_json("a.tar.xz", "-5") + "}}", m) && m.files.empty());
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":" + entry_json("a.tar.xz", "\"5\"") + "}}", m) && m.files.empty());
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":" + entry_json("a.tar.xz", "5.5") + "}}", m) && m.files.empty());
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{\"macos\":[1]}}", m) && m.files.empty());
+	CHECK(parse_update_manifest("{\"version\":\"0.1.60\",\"files\":{}}", m) && m.files.empty());
+
+	// Not a manifest.
 	const char *bad[] = {"",
 			     "null",
 			     "[]",
-			     "[\"0.1.0\"]",
-			     "\"0.1.0\"",
 			     "{}",
-			     R"({"version": 1})",
-			     R"({"version": 0.1})",
-			     R"({"version": null})",
-			     R"({"version": ""})",
-			     R"({"version": "v1.2.3"})",
-			     R"({"version": "1.2.3-rc1"})",
-			     R"({"version": "banana"})",
-			     R"({"Version": "1.2.3"})",
-			     R"({"version": "1.2.3")",
+			     "{\"version\":\"0.1.60\"}",                // no files
+			     "{\"files\":{}}",                          // no version
+			     "{\"version\":\"0.1.60\",\"files\":[]}",
+			     "{\"version\":\"0.1.60\",\"files\":null}",
+			     "{\"version\":1,\"files\":{}}",
+			     "{\"version\":\"v1.2.3\",\"files\":{}}",
+			     "{\"version\":\"1.2.3-rc1\",\"files\":{}}",
+			     "{\"version\":\"\",\"files\":{}}",
+			     "{\"Version\":\"1.2.3\",\"files\":{}}",
 			     "<html><body>404</body></html>",
-			     "{\"version\": \"1.2.3\"} trailing"};
+			     "{\"version\":\"1.2.3\",\"files\":{}} trailing",
+			     "{\"version\":\"1.2.3\",\"files\":{}"};
 	for (const char *b : bad) {
-		UpdateInfo keep;
+		UpdateManifest keep;
 		keep.version = "kept";
-		UpdateInfo probe = keep;
-		CHECK(!parse_update_json(b, probe));
+		UpdateManifest probe = keep;
+		CHECK(!parse_update_manifest(b, probe));
 		CHECK(probe.version == "kept");
 	}
-	// Extra fields are ignored.
-	CHECK(parse_update_json(R"({"version":"3.4.5","note":"x","files":[1,2]})", i) && i.version == "3.4.5");
 
-	CHECK(release_url_allowed(page));
-	CHECK(!release_url_allowed(""));
-	CHECK(!release_url_allowed(kReleasePagePrefix));  // nothing after the prefix
-	CHECK(!release_url_allowed("https://github.com/BenjaminDanker/Audio-Cleaner-Web/release/tag/x"));
-	CHECK(!release_url_allowed(page + "?a=b c"));
-	CHECK(!release_url_allowed(page + "\r\nX: y"));
+	// File names: a plain name and nothing else.
+	CHECK(valid_update_file_name("audio-cleaner-obs-plugin-0.1.60-windows.zip"));
+	CHECK(valid_update_file_name("a"));
+	CHECK(valid_update_file_name("A_b-c.1.tar.xz"));
+	CHECK(valid_update_file_name(std::string(120, 'a')));
+	for (const char *n : {"", ".hidden", "-x", "_x", "../x.zip", "..", ".", "a/b.zip", "a\\b.zip", "/etc/passwd", "C:x.zip", "a b.zip",
+			      "a..b.zip", "x.zip\n", "x%2e.zip", "x?.zip", "x#.zip", "x:y.zip", "x;y.zip", "x&y.zip", "x$y.zip", "x`y.zip", "x\"y.zip",
+			      "x'y.zip", "x|y.zip", "x*y.zip", "ü.zip", "x\xC3\xBC.zip"})
+		CHECK(!valid_update_file_name(n));
+	CHECK(!valid_update_file_name(std::string(121, 'a')));
+	CHECK(!valid_update_file_name(std::string("a\0b", 3)));
+	CHECK(std::string(update_file_suffix(kKeyWindows)) == ".zip");
+	CHECK(std::string(update_file_suffix(kKeyMac)) == ".tar.xz");
+	CHECK(std::string(update_file_suffix(kKeyDebian)) == ".deb");
+	CHECK(std::string(update_file_suffix(kKeyLinuxOther)) == ".tar.xz");
+	CHECK(std::string(update_file_suffix("nope")).empty());
+}
+
+static void test_update_crypto()
+{
+	std::printf("update check: base64, SHA-512, Ed25519\n");
+	using namespace acw;
+
+	// base64
+	std::vector<uint8_t> b;
+	CHECK(base64_decode("", b) && b.empty());
+	CHECK(base64_decode("Zg==", b) && b.size() == 1 && b[0] == 'f');
+	CHECK(base64_decode("Zm8=", b) && b.size() == 2);
+	CHECK(base64_decode("Zm9v", b) && b.size() == 3);
+	CHECK(base64_decode("Zm9vYg==", b) && b.size() == 4);
+	CHECK(base64_decode("+/+/", b) && b.size() == 3 && b[0] == 0xfb && b[1] == 0xff && b[2] == 0xbf);
+	for (const char *bad : {"Zg=", "Zg", "Zg=a", "=Zg=", "Z===", "Zg==Zg==", "Zm9v ", " Zm9v", "Zm9v\n", "Zm-_", "Zh==", "Zm9=", "Zm9\x01"})
+		CHECK(!base64_decode(bad, b));
+	for (size_t n = 0; n < 40; ++n) {
+		std::vector<uint8_t> v(n);
+		for (size_t i = 0; i < n; ++i)
+			v[i] = static_cast<uint8_t>(i * 37 + n);
+		const std::string e = base64_encode(v.data(), v.size());
+		std::vector<uint8_t> back;
+		CHECK(base64_decode(e, back) && back == v);
+	}
+	CHECK(is_hex_digest(std::string(128, '0'), 128) && !is_hex_digest(std::string(127, '0'), 128) && !is_hex_digest(std::string(128, 'A'), 128));
+	CHECK(!is_hex_digest(std::string(127, '0') + "g", 128));
+
+	// SHA-512 (FIPS 180 vectors)
+	CHECK(sha512_hex("") ==
+	      "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e");
+	CHECK(sha512_hex("abc") ==
+	      "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f");
+	CHECK(sha512_hex("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu") ==
+	      "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909");
+	{
+		// in pieces of every size = in one go
+		std::string data(1000, 'x');
+		for (size_t i = 0; i < data.size(); ++i)
+			data[i] = static_cast<char>(i * 7);
+		const std::string whole = sha512_hex(data);
+		for (size_t piece : {1u, 3u, 127u, 128u, 129u, 500u}) {
+			Sha512 h;
+			for (size_t at = 0; at < data.size(); at += piece)
+				h.update(data.data() + at, std::min(piece, data.size() - at));
+			CHECK(h.finish_hex() == whole);
+		}
+	}
+
+	// Ed25519: a signature made by `openssl pkeyutl -sign -rawin` (what the CI does) over the exact bytes.
+	const std::string msg = "{\"files\":{},\"version\":\"0.1.60\"}";
+	const char *pub = "FDHGbeQu9FAd51SLwN5L6xua+/Vw9RJCnxbIItVoclA=";
+	const char sig_hex[] =
+		"e5404e1119523eb0186a1f88d4b7660cc87e67765494a8a151c945e6999dd955b7c951cdd329f08f9390555862d4070ebca8201b6c7a22daaf794307a588f10f";
+	std::string sig;
+	for (size_t i = 0; i < 128; i += 2)
+		sig += static_cast<char>(std::stoi(std::string(sig_hex + i, 2), nullptr, 16));
+	CHECK(sig.size() == 64);
+	CHECK(verify_ed25519(msg, sig, pub));
+	// tampered message, tampered signature (every byte position), another key, malformed inputs
+	CHECK(!verify_ed25519(msg + " ", sig, pub));
+	CHECK(!verify_ed25519("{\"files\":{},\"version\":\"0.1.61\"}", sig, pub));
+	CHECK(!verify_ed25519("", sig, pub));
+	for (size_t i = 0; i < 64; ++i) {
+		std::string t = sig;
+		t[i] = static_cast<char>(t[i] ^ 0x01);
+		CHECK(!verify_ed25519(msg, t, pub));
+	}
+	CHECK(!verify_ed25519(msg, sig, kUpdatePublicKeyBase64));  // the real key did not sign this
+	CHECK(!verify_ed25519(msg, sig.substr(0, 63), pub));
+	CHECK(!verify_ed25519(msg, sig + "x", pub));
+	CHECK(!verify_ed25519(msg, "", pub));
+	CHECK(!verify_ed25519(msg, sig, ""));
+	CHECK(!verify_ed25519(msg, sig, "FDHGbeQu9FAd51SLwN5L6xua+/Vw9RJCnxbIItVoclA"));       // no padding
+	CHECK(!verify_ed25519(msg, sig, "FDHGbeQu9FAd51SLwN5L6xua+/Vw9RJCnxbIItVo"));          // too short
+	CHECK(!verify_ed25519(msg, sig, "!DHGbeQu9FAd51SLwN5L6xua+/Vw9RJCnxbIItVoclA="));      // not base64
+	CHECK(!verify_ed25519(msg, std::string(64, '\0'), pub));
+	CHECK(base64_decode(kUpdatePublicKeyBase64, b) && b.size() == 32);  // the embedded key is well-formed
+
+	// ... and our own signer agrees with itself (the loopback tests use it)
+	const updtest::KeyPair k = updtest::make_key(1), other = updtest::make_key(2);
+	CHECK(verify_ed25519(msg, updtest::sign(k, msg), k.pub_b64()));
+	CHECK(!verify_ed25519(msg, updtest::sign(k, msg), other.pub_b64()));
+	CHECK(!verify_ed25519(msg + "x", updtest::sign(k, msg), k.pub_b64()));
 }
 
 int main()
@@ -930,7 +1044,8 @@ int main()
 	test_session_config();
 	test_session_texts();
 	test_update_versions();
-	test_update_json();
+	test_update_manifest();
+	test_update_crypto();
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures ? 1 : 0;
 }

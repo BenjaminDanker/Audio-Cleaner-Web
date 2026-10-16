@@ -5,6 +5,7 @@
 #   IXWebSocket     11.4.6   BSD-3-Clause WebSocket client (we compile its sources ourselves)
 #   mbedTLS         3.6.7    Apache-2.0 OR GPL-2.0-or-later   (TLS backend on Windows / fallback)
 #   libopus         1.5.2    BSD-3-Clause 20 ms audio packets, ~60 kbps instead of ~770 kbps PCM
+#   Monocypher      4.0.2    BSD-2-Clause OR CC0-1.0   Ed25519 signature check + SHA-512 for the plugin updates
 #   OpenSSL         system   Apache-2.0   (TLS backend on Linux when its headers are installed)
 #   Security.framework (macOS SecureTransport, via IXWebSocket)
 
@@ -182,6 +183,35 @@ if(ACW_USE_OPUS)
   FetchContent_MakeAvailable(acw_opus)
   set(BUILD_SHARED_LIBS "${_acw_saved_shared_opus}")
   set(CMAKE_POSITION_INDEPENDENT_CODE "${_acw_saved_pic_opus}")
+endif()
+
+# ------------------------------------------------------------------- Monocypher
+# Checks the Ed25519 signature of the update manifest and the SHA-512 of the downloaded update (its optional
+# ed25519 module). Two small C files, compiled into the module.
+FetchContent_Declare(
+  acw_monocypher_src
+  URL https://monocypher.org/download/monocypher-4.0.2.tar.gz
+  URL_HASH SHA256=38d07179738c0c90677dba3ceb7a7b8496bcfea758ba1a53e803fed30ae0879c
+  SOURCE_SUBDIR acw_no_cmake # we build the sources ourselves
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(acw_monocypher_src)
+add_library(
+  acw_monocypher
+  STATIC
+  "${acw_monocypher_src_SOURCE_DIR}/src/monocypher.c"
+  "${acw_monocypher_src_SOURCE_DIR}/src/optional/monocypher-ed25519.c"
+)
+target_include_directories(
+  acw_monocypher
+  SYSTEM
+  PUBLIC "${acw_monocypher_src_SOURCE_DIR}/src" "${acw_monocypher_src_SOURCE_DIR}/src/optional"
+)
+set_target_properties(acw_monocypher PROPERTIES POSITION_INDEPENDENT_CODE ON C_VISIBILITY_PRESET hidden)
+if(MSVC)
+  target_compile_options(acw_monocypher PRIVATE /W0)
+else()
+  target_compile_options(acw_monocypher PRIVATE -w)
 endif()
 
 # Keep third-party warnings out of our build output.

@@ -17,10 +17,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 /*
- * "A newer version of the plugin exists": once per OBS session, on a thread of its own, the plugin reads the
- * small version file of the newest release from GitHub and compares it with its own version. If the file
- * says newer, the filter's properties show a notice and a button that opens the release page. Nothing is
- * downloaded or installed (a loaded plugin cannot replace itself). The check can be turned off; the choice
+ * Plugin updates: once per OBS session, on a thread of its own, the plugin reads the signed manifest of the newest
+ * plugin from our download server and compares it with its own version. If it is newer, the filter's properties
+ * say so with a button; the button downloads this computer's file, checks it against the signed manifest and
+ * installs it (acw_core update_download / update_install): on Windows and for plugin folders it is swapped in when
+ * OBS closes, a .deb install is handed to the system's package installer. The check can be turned off; the choice
  * is global (OBS module config, settings.json), not per filter.
  */
 
@@ -46,8 +47,20 @@ void update_notice_set_enabled(bool on);
 
 /* True when the check is on and found a newer version; copies its number into `latest`. */
 bool update_notice_available(char *latest, size_t size);
-/* Opens the release page in the browser (a fixed address on our own GitHub releases). */
-void update_notice_open_download_page(void);
+/* Where the update stands after the button was pressed. */
+enum update_install_state {
+	UPDATE_INSTALL_IDLE = 0,       /* not started */
+	UPDATE_INSTALL_WORKING,        /* downloading and checking */
+	UPDATE_INSTALL_ON_EXIT,        /* ready: it installs when OBS closes */
+	UPDATE_INSTALL_DONE_RESTART,   /* installed already: restart OBS */
+	UPDATE_INSTALL_INSTALLER_OPEN, /* the system's package installer was opened with the file */
+	UPDATE_INSTALL_FOLDER_SHOWN,   /* cannot be replaced from here: the folder with the file was opened; detail = where it goes */
+	UPDATE_INSTALL_FAILED,         /* detail = why, in plain words */
+};
+/* Starts downloading and installing the newer version (in the background; returns at once). */
+void update_notice_install(void);
+/* The state of that, with its detail text (may be empty). */
+enum update_install_state update_notice_install_state(char *detail, size_t size);
 
 #ifdef __cplusplus
 }
