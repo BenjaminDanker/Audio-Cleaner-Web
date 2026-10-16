@@ -5,8 +5,8 @@
 # app (PyInstaller, frozen --selftest incl. the window, installer: Inno Setup / .pkg; Windows also installs and
 # uninstalls it once) and the tests (common + desktop, on all cores). A separate job checks that every model the
 # installers download is where the catalog says (it can fail on its own without stopping the builds). The release
-# needs the builds and the tests. Push a tag desktop-vX.Y.Z whose version matches audio_cleaner_desktop.__version__ to
-# publish a GitHub Release with the three installers (GitHub shows each file's SHA-256). Signing is optional and only
+# needs the builds and the tests. Every build is versioned MAJOR.MINOR.<run number> (desktop/packaging/version.py);
+# a pushed tag desktop-vX.Y.Z builds exactly X.Y.Z and its release is kept. GitHub shows each file's SHA-256. Signing is optional and only
 # happens when the secrets exist (docs/desktop.md lists them):
 #   macOS    MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD (+ APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD to notarize)
 #   Windows  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
@@ -239,13 +239,11 @@ jobs:
           pip install --require-hashes -r desktop/requirements.lock -r desktop/requirements-build.lock
 
       - name: Version
+        # MAJOR.MINOR from the app, the run number as the last part (a tag desktop-vX.Y.Z: exactly X.Y.Z), written
+        # into the app before it is built, so the app, the installers and the release all say the same.
         run: |
-          version="$(python -c "from audio_cleaner_desktop import __version__ as v; print(v, end='')")"
+          version="$(python desktop/packaging/version.py --write)"
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "desktop-v$version" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match the app version $version (expected desktop-v$version)"
-            exit 1
-          fi
 
       - name: Heavy-noise model (DPDFNet-8, pinned and verified)
         run: bash deploy/fetch-dpdfnet.sh build/dpdfnet
@@ -565,8 +563,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Every successful build of main / on-prem is published, so the newest installers are always at
-  # .../releases/latest: tag desktop-v<version>-build.<run number>, and only the newest 5 such automatic
-  # releases are kept. A hand-made desktop-v<version> tag publishes a release of that exact version.
+  # .../releases/latest: tag desktop-v<MAJOR.MINOR.run number>, and only the newest 5 such automatic releases are
+  # kept. A hand-made desktop-vX.Y.Z tag publishes a release of that exact version that is never removed.
   release:
     name: GitHub Release
     if: >-
@@ -582,7 +580,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: desktop/audio_cleaner_desktop/__init__.py
+          sparse-checkout: |
+            desktop/audio_cleaner_desktop/__init__.py
+            desktop/packaging/version.py
           sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -595,15 +595,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' desktop/audio_cleaner_desktop/__init__.py)"
-          [ -n "$version" ] || { echo "::error::could not read __version__"; exit 1; }
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            tag="$GITHUB_REF_NAME"
-            title="Audio Cleaner $version"
-          else
-            tag="desktop-v$version-build.$GITHUB_RUN_NUMBER"
-            title="Audio Cleaner $version (build $GITHUB_RUN_NUMBER)"
-          fi
+          version="$(python3 desktop/packaging/version.py)"
+          tag="desktop-v$version"
+          title="Audio Cleaner $version"
           cd release
           # Friendlier names for the release page (the build artifacts keep the platform names).
           mv AudioCleaner-Setup-x64.exe "AudioCleaner-$version-Windows.exe"
@@ -622,6 +616,10 @@ jobs:
           setup unpacks for you. After that everything works offline. If a download fails, the app still works and offers it in Settings.
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
+          # Marks the automatic releases, so the clean-up below never removes one made from a hand-pushed tag.
+          [ "$GITHUB_REF_TYPE" = tag ] || notes="$notes
+
+          <!-- automatic build -->"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --latest --title "$title" --notes "$notes" "${files[@]}"
           else
@@ -633,9 +631,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Automatic releases: the marker in their notes, or the older desktop-v<version>-build.<n> tags.
+          kept=0
           gh release list --repo "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
-            --jq '[.[] | select(.tagName | test("^desktop-v.*-build\\.[0-9]+$"))] | sort_by(.createdAt) | reverse | .[5:] | .[].tagName' |
-          while read -r old; do
-            echo "removing $old"
-            gh release delete "$old" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            --jq 'sort_by(.createdAt) | reverse | .[] | select(.tagName | startswith("desktop-v")) | .tagName' |
+          while read -r tag; do
+            if [[ "$tag" =~ -build\.[0-9]+$ ]] || \
+               gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body --jq .body | grep -q '<!-- automatic build -->'; then
+              kept=$((kept + 1))
+              if [ "$kept" -gt 5 ]; then
+                echo "removing $tag"
+                gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+              fi
+            fi
           done

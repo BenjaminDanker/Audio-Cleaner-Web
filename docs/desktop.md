@@ -68,13 +68,14 @@ the checklist at the end).
 ## Release process (CI)
 
 1. Releases are automatic: every push to `main` / `on-prem` that changes `desktop/`, `common/`,
-   `native/deepfilter/` or the workflow builds and publishes a GitHub Release tagged
-   `desktop-v<__version__>-build.<run number>` (only the newest 5 such automatic releases are kept). Bump
-   `__version__` in `desktop/audio_cleaner_desktop/__init__.py` (and `version` in `desktop/pyproject.toml`) when the
-   app changes in a way friends should notice; the build number tells builds of one version apart.
-2. Optional, for a release that stays: tag the commit `git tag desktop-v2.0.0 && git push origin desktop-v2.0.0`.
-   The tag must be `desktop-v` plus the exact `__version__`; the workflow refuses a mismatch. Tagged releases are
-   never deleted by the cleanup.
+   `native/deepfilter/` or the workflow builds and publishes a GitHub Release. Its version is MAJOR.MINOR from
+   `__version__` in `desktop/audio_cleaner_desktop/__init__.py` plus the CI run number as the last part (2.0.11,
+   2.0.12, ...; `desktop/packaging/version.py` writes it into the app before it is built, so the app, the installers,
+   the file names and the release title all show it). Only the newest 5 automatic releases are kept. Bump MAJOR.MINOR
+   in `__init__.py` (and `version` in `desktop/pyproject.toml`) when the app changes in a way friends should notice.
+2. Optional, for a release that stays: tag the commit, e.g. `git tag desktop-v2.0.50 && git push origin desktop-v2.0.50`.
+   The tag builds exactly that version; its MAJOR.MINOR must match `__init__.py`. Releases from tags are never
+   deleted by the cleanup.
 3. `.github/workflows/desktop.yml` builds, per platform: FFmpeg (LGPL, from pinned source tarballs; Windows is
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest --gui`
    (also builds the window and runs the noise models, echo canceller, AP-BWE and Sidon when their files are there),
