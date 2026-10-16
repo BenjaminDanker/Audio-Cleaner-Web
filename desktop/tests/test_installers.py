@@ -39,7 +39,8 @@ def test_the_catalog_is_read_without_numpy():
 def test_windows_include_budgets_space_cleans_up_and_tries_every_download():
     text = installer_models.render()
     plain = [m for m in installer_models.CATALOG if m.archive is None for _ in m.files]  # the speech model's files
-    assert plain and text.count("ExternalSize:") == len(plain) and text.count("deleteafterinstall") == len(plain)
+    # deleteafterinstall would delete the INSTALLED file when setup ends (the temporary download goes with {tmp} anyway)
+    assert plain and text.count("ExternalSize:") == len(plain) and "deleteafterinstall" not in text
     assert text.count("    FetchModel(") == len(plain)  # one download each: a failure does not stop the next
     assert text.count("    FetchArchive;") == 1  # and the archive is one download
     assert "GetSpaceOnDisk64(ExpandConstant('{tmp}')" in text

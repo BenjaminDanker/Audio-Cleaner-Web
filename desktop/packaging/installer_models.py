@@ -91,7 +91,7 @@ def render(catalog=CATALOG) -> str:
         full = dest + "\\" + rel.name
         files.append(
             f'Source: "{{tmp}}\\{tmp}"; DestDir: "{dest}"; DestName: "{rel.name}"; ExternalSize: {f.size}; '
-            "Flags: external skipifsourcedoesntexist ignoreversion deleteafterinstall"
+            "Flags: external skipifsourcedoesntexist ignoreversion"
         )
         fetches.append(f"    FetchModel({_pascal(f.url)}, {_pascal(tmp)}, {_pascal(f.sha256)}, {_pascal(full)}, {f.size});")
     markers = []
