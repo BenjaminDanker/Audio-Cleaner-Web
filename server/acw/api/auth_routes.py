@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from .. import alerts, auth, db, jobs
+from .. import alerts, auth, db, jobs, keycaps
 from ..billing import ledger, trust
 from ..config import get_settings
 from ..security import canonical_email, client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex
@@ -322,6 +322,8 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
             "user": {"id": user["id"], "status": user["status"]},
             "balance": bal,
             "trialLiveSecondsLeft": max(0, int(user["trial_live_seconds"])),
+            # This key's own monthly spending limit and what it has used (absent when it has none).
+            **({"keyLimit": limit} if (limit := keycaps.key_limit(principal.api_key_id)) else {}),
         }
     return {
         "signedIn": True,
@@ -373,12 +375,12 @@ def export_account(principal: auth.Principal = Depends(auth.require_session)) ->
     """Everything we hold about the signed-in user (GDPR/CCPA access request)."""
     uid = principal.user_id
     user = dict(db.one("SELECT * FROM users WHERE id = ?", (uid,)))
-    for k in ("stripe_customer_id", "default_payment_method"):
+    for k in ("stripe_customer_id", "default_payment_method", "webhook_secret"):  # secrets are not copied into a file
         user[k] = bool(user[k])
     tables = {
         "identities": "SELECT provider, email, created_at FROM identities WHERE user_id = ?",
         "sessions": "SELECT created_at, last_seen_at, expires_at, ip, user_agent FROM sessions WHERE user_id = ?",
-        "apiKeys": "SELECT name, prefix, scopes, created_at, last_used_at, revoked_at FROM api_keys WHERE user_id = ?",
+        "apiKeys": "SELECT name, prefix, scopes, created_at, last_used_at, revoked_at, monthly_cap_micros FROM api_keys WHERE user_id = ?",
         "ledger": "SELECT amount_micros, kind, description, balance_after_micros, created_at FROM ledger WHERE user_id = ?",
         "payments": "SELECT kind, status, amount_cents, refunded_cents, created_at FROM payments WHERE user_id = ?",
         "jobs": "SELECT kind, tier, status, input_name, duration_seconds, cost_micros, created_at, finished_at FROM jobs WHERE user_id = ?",
@@ -422,13 +424,15 @@ def delete_account(body: DeleteBody, request: Request, response: Response,
             ledger.debit_available(uid, bal, "adjustment", "account", uid, "Forfeited on account deletion", allow_partial=True, c=c)
         c.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
         c.execute("DELETE FROM identities WHERE user_id = ?", (uid,))
+        c.execute("DELETE FROM idempotency_keys WHERE user_id = ?", (uid,))
+        c.execute("DELETE FROM job_callbacks WHERE user_id = ?", (uid,))  # the addresses people gave us
         c.execute("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?", (db.now(), uid))
         c.execute("UPDATE jobs SET input_name = 'deleted', params_json = json_remove(params_json, '$.display_name'), outputs_json = NULL, status = CASE WHEN status = 'done' THEN 'expired' ELSE status END WHERE user_id = ?", (uid,))
         c.execute("UPDATE stream_sessions SET client_ip = NULL WHERE user_id = ?", (uid,))
         c.execute("UPDATE audit_log SET ip = NULL WHERE user_id = ?", (uid,))
         c.execute(
             "UPDATE users SET email = ?, display_name = NULL, status = 'deleted', auto_reload_enabled = 0,"
-            " default_payment_method = NULL WHERE id = ?",
+            " default_payment_method = NULL, webhook_secret = NULL WHERE id = ?",
             (f"deleted-{uid}@deleted.invalid", uid),
         )
         c.execute(

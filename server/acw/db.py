@@ -330,6 +330,36 @@ MIGRATIONS = [
         " last_seen_at INTEGER, send_count INTEGER NOT NULL DEFAULT 0, suppressed INTEGER NOT NULL DEFAULT 0,"
         " subject TEXT)",
     ),
+    # Public API: which API key created a job (spending caps, usage per key), a monthly spending cap per key
+    # (micros; NULL = none), the account's secret for signing job callbacks, and the two small tables below.
+    ("jobs", "api_key_id", "ALTER TABLE jobs ADD COLUMN api_key_id TEXT"),
+    ("api_keys", "monthly_cap_micros", "ALTER TABLE api_keys ADD COLUMN monthly_cap_micros INTEGER"),
+    ("users", "webhook_secret", "ALTER TABLE users ADD COLUMN webhook_secret TEXT"),
+    # Idempotency-Key header of POST /api/jobs: the same key (per account, for 24 hours) names the same job.
+    # No foreign keys: rows are removed by age (jobs.sweep) and with the account.
+    (
+        "idempotency_keys",
+        "key",
+        "CREATE TABLE IF NOT EXISTS idempotency_keys ("
+        " user_id TEXT NOT NULL, key TEXT NOT NULL, body_hash TEXT NOT NULL, job_id TEXT NOT NULL,"
+        " created_at INTEGER NOT NULL, PRIMARY KEY (user_id, key))",
+    ),
+    # callbackUrl of a job: delivered by the web process (acw.webhooks) when the job ends. state: pending | delivered | failed.
+    (
+        "job_callbacks",
+        "job_id",
+        "CREATE TABLE IF NOT EXISTS job_callbacks ("
+        " job_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, url TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',"
+        " attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0, last_status INTEGER,"
+        " last_error TEXT, last_attempt_at INTEGER, delivered_at INTEGER, created_at INTEGER NOT NULL)",
+    ),
+]
+
+# Indexes on the columns above (a database made before them has no such column when SCHEMA runs, so they come after).
+POST_MIGRATION_SQL = [
+    "CREATE INDEX IF NOT EXISTS jobs_api_key ON jobs(api_key_id, finished_at) WHERE api_key_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS stream_sessions_api_key ON stream_sessions(api_key_id, ended_at) WHERE api_key_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS job_callbacks_due ON job_callbacks(next_attempt_at) WHERE state = 'pending'",
 ]
 
 
@@ -340,6 +370,8 @@ def init_db() -> None:
         cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             c.execute(ddl)
+    for sql in POST_MIGRATION_SQL:
+        c.execute(sql)
     c.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO NOTHING",
         (str(SCHEMA_VERSION),),

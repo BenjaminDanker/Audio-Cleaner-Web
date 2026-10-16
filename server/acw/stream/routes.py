@@ -23,7 +23,7 @@ from collections import OrderedDict, deque
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, cpusplit, db, metrics, translate
+from .. import auth, cpusplit, db, keycaps, metrics, translate
 from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
@@ -258,6 +258,7 @@ class Session:
         self.trial_charged = 0.0
         self.trial_warned = False
         self.switched = False
+        self.capped = False  # the API key's monthly spending cap stopped the next minute from being reserved
 
     @property
     def seconds(self) -> float:
@@ -299,7 +300,10 @@ class Session:
 
     def open_hold(self) -> None:
         minutes = pricing.STREAM_HOLD_MINUTES
-        self.hold_id = ledger.create_hold(self.p.user_id, self.rate * minutes, "stream", self.id)
+        # A key with a monthly spending cap is checked in the same transaction that reserves the money.
+        with db.tx() as c:
+            keycaps.check(c, getattr(self.p, "api_key_id", None), self.rate * minutes)
+            self.hold_id = ledger.create_hold(self.p.user_id, self.rate * minutes, "stream", self.id, c=c)
         self.held_seconds = minutes * 60.0
 
     def save_progress(self) -> None:
@@ -322,14 +326,22 @@ class Session:
             self.open_hold()
         except (ledger.InsufficientFunds, ledger.LedgerError):
             return False
+        except keycaps.KeyCapReached:
+            self.capped = True
+            return False
         self.switched = True
         self.save_progress()
         return True
 
     def extend_hold(self) -> bool:
         try:
-            ledger.extend_hold(self.hold_id, self.current_rate())  # one more minute
+            with db.tx() as c:
+                keycaps.check(c, getattr(self.p, "api_key_id", None), self.current_rate())  # the key's monthly cap, if it has one
+                ledger.extend_hold(self.hold_id, self.current_rate(), c=c)  # one more minute
         except (ledger.InsufficientFunds, ledger.LedgerError):
+            return False
+        except keycaps.KeyCapReached:
+            self.capped = True
             return False
         self.held_seconds += 60.0
         return True
@@ -696,6 +708,12 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
                                              f"(${rate * pricing.STREAM_HOLD_MINUTES / 1e6:.2f}); available ${e.available / 1e6:.2f}."})
             await ws.close(code=1008)
             return None
+        except keycaps.KeyCapReached as e:
+            _live_ids.discard(sess.id)
+            _open.get(principal.user_id, []).remove(sess)
+            await _send_json(ws, {"type": "error", "code": "key_spending_cap", "message": str(e)})
+            await ws.close(code=1008)
+            return None
         except ledger.LedgerError:
             _live_ids.discard(sess.id)
             _open.get(principal.user_id, []).remove(sess)
@@ -1008,15 +1026,20 @@ async def _billing_tick(sess: Session) -> bool:
         ok = await asyncio.to_thread(sess.extend_hold)
         if not ok:
             sess.next_extend_try = time.monotonic() + 10
-            if not sess.warned:
+            if sess.capped and not sess.warned:
+                sess.warned = True
+                await _send_json(sess.ws, {"type": "warning", "code": "key_spending_cap",
+                                           "message": "This API key is about to reach its monthly spending limit; live processing will stop soon.",
+                                           "secondsLeft": int(remaining)})
+            elif not sess.warned:
                 sess.warned = True
                 bal = await asyncio.to_thread(ledger.balance, sess.p.user_id)
                 await _send_json(sess.ws, {"type": "warning", "code": "low_balance",
                                            "message": "Your balance is running out; live processing will stop soon.",
                                            "secondsLeft": int(remaining), "availableMicros": bal["available_micros"]})
     if remaining <= 0:
-        sess.end_reason = "insufficient_funds"
-        await _send_json(sess.ws, {"type": "stopped", "reason": "insufficient_funds"})
+        sess.end_reason = "key_spending_cap" if sess.capped else "insufficient_funds"
+        await _send_json(sess.ws, {"type": "stopped", "reason": sess.end_reason})
         return False
     return True
 

@@ -3,6 +3,7 @@ import { Link } from 'react-router';
 import { api, streamUrl } from '../api.js';
 import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
+import ApiKeys from '../components/ApiKeys.jsx';
 import { IconBroadcast } from '../components/Icons.jsx';
 import PluginInstall from '../components/PluginInstall.jsx';
 import PriceTable from '../components/PriceTable.jsx';
@@ -63,130 +64,6 @@ function ObsSetup() {
 }
 
 const LANGUAGE_NAME = Object.fromEntries(LANGUAGES.filter(([c]) => c));
-
-/* ------------------------------------------------------------------ API keys */
-
-const SCOPE_LABEL = { stream: 'OBS plugin and live', jobs: 'File API for scripts' };
-
-function ApiKeys() {
-  const [keys, setKeys] = useState(null);
-  const [error, setError] = useState('');
-  const [name, setName] = useState('OBS on my PC');
-  const [scopes, setScopes] = useState({ stream: true, jobs: false });
-  const [busy, setBusy] = useState(false);
-  const [fresh, setFresh] = useState(null);
-  const [copied, setCopied] = useState(false);
-  const [confirm, setConfirm] = useState(null);
-
-  const load = useCallback(async () => {
-    try {
-      setKeys((await api('keys')).keys);
-      setError('');
-    } catch (e) {
-      setError(e.detail);
-    }
-  }, []);
-  useEffect(() => { load(); }, [load]);
-
-  async function create(e) {
-    e.preventDefault();
-    setBusy(true); setError(''); setFresh(null); setCopied(false);
-    try {
-      const r = await api('keys', { method: 'POST', body: { name: name.trim(), scopes: Object.keys(scopes).filter((s) => scopes[s]) } });
-      setFresh(r);
-      load();
-    } catch (err) {
-      setError(err.detail);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function revoke(id) {
-    setBusy(true);
-    try {
-      await api(`keys/${id}`, { method: 'DELETE' });
-      setConfirm(null);
-      if (fresh?.id === id) setFresh(null);
-      await load();
-    } catch (err) {
-      setError(err.detail);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(fresh.key);
-      setCopied(true);
-    } catch {
-      setError('Copying didn\'t work. Select the key and copy it by hand.');
-    }
-  }
-
-  const noScope = !scopes.stream && !scopes.jobs;
-  return (
-    <section className="card stack" aria-labelledby="keys-h">
-      <h2 id="keys-h" className="mb0">API keys</h2>
-      <p className="muted mb0 small">Keys let programs (like the OBS plugin or your own scripts) use your balance, so treat them like passwords. You can have up to 10.</p>
-      {fresh && (
-        <div className="stack" data-testid="new-key">
-          <div className="banner banner-success"><b>Here’s your new key.</b> Copy it now, because we only show it once.</div>
-          <div className="key-box">
-            <code data-testid="key-value">{fresh.key}</code>
-            <button type="button" className="btn btn-primary btn-sm" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
-          </div>
-        </div>
-      )}
-      <form className="stack" onSubmit={create}>
-        <div className="field">
-          <label htmlFor="key-name">Name</label>
-          <input id="key-name" className="input" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} required />
-        </div>
-        <fieldset className="field">
-          <legend className="label">What can this key do?</legend>
-          <div className="stack-sm">
-            <label className="check">
-              <input type="checkbox" checked={scopes.stream} onChange={(e) => setScopes({ ...scopes, stream: e.target.checked })} />
-              <span><b>{SCOPE_LABEL.stream}</b><span className="hint block">Lets the OBS plugin and live captions use your balance while you stream.</span></span>
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={scopes.jobs} onChange={(e) => setScopes({ ...scopes, jobs: e.target.checked })} />
-              <span><b>{SCOPE_LABEL.jobs}</b><span className="hint block">Lets your own scripts send files in for noise removal and subtitles, charged like the Cleanup page.</span></span>
-            </label>
-          </div>
-        </fieldset>
-        <div><button type="submit" className="btn btn-primary" disabled={busy || noScope || !name.trim()}>Create key</button></div>
-      </form>
-      {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {keys === null && !error && <p role="status" className="muted mb0">Loading…</p>}
-      {keys && keys.length === 0 && <p className="muted mb0">No keys yet.</p>}
-      {keys && keys.length > 0 && (
-        <ul className="outputs" aria-label="Active keys" data-testid="keys">
-          {keys.map((k) => (
-            <li key={k.id}>
-              <span>
-                <span className="oname">{k.name}</span>{' '}
-                <span className="mono muted">{k.prefix}…</span>
-                <div className="small muted">{k.scopes.map((x) => SCOPE_LABEL[x] || x).join(', ')} · created {dateTime(k.createdAt)} · {k.lastUsedAt ? `last used ${dateTime(k.lastUsedAt)}` : 'never used'}</div>
-              </span>
-              {confirm === k.id ? (
-                <span className="row">
-                  <span className="small">Revoke this key?</span>
-                  <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => revoke(k.id)}>Revoke</button>
-                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConfirm(null)}>Keep</button>
-                </span>
-              ) : (
-                <button type="button" className="btn btn-danger-outline btn-sm" onClick={() => setConfirm(k.id)} aria-label={`Revoke key ${k.name}`}>Revoke</button>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
 
 /* ------------------------------------------------------------------ browser demo */
 

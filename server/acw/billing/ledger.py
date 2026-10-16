@@ -186,20 +186,26 @@ def _active_hold(c: sqlite3.Connection, hold_id: str) -> sqlite3.Row:
     return hold
 
 
-def extend_hold(hold_id: str, extra_micros: int) -> None:
-    """Grow an active hold, e.g. a live stream reserving its next minutes."""
+def extend_hold(hold_id: str, extra_micros: int, *, c: sqlite3.Connection | None = None) -> None:
+    """Grow an active hold, e.g. a live stream reserving its next minutes. With `c` it joins the caller's transaction."""
     if extra_micros <= 0:
         return
-    with db.tx() as c:
-        hold = _active_hold(c, hold_id)
-        row = _user_row(c, hold["user_id"])
+
+    def run(cc: sqlite3.Connection) -> None:
+        hold = _active_hold(cc, hold_id)
+        row = _user_row(cc, hold["user_id"])
         if row["status"] != "active":
             raise LedgerError("account is not active")
         available = row["balance_micros"] - row["held_micros"]
         if extra_micros > available:
             raise InsufficientFunds(extra_micros, available)
-        c.execute("UPDATE holds SET amount_micros = amount_micros + ? WHERE id = ?", (extra_micros, hold_id))
-        c.execute("UPDATE users SET held_micros = held_micros + ? WHERE id = ?", (extra_micros, hold["user_id"]))
+        cc.execute("UPDATE holds SET amount_micros = amount_micros + ? WHERE id = ?", (extra_micros, hold_id))
+        cc.execute("UPDATE users SET held_micros = held_micros + ? WHERE id = ?", (extra_micros, hold["user_id"]))
+
+    if c is not None:
+        return run(c)
+    with db.tx() as cc:
+        return run(cc)
 
 
 def capture_hold(

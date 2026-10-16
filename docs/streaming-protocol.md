@@ -1,5 +1,8 @@
 # Live streaming protocol v1
 
+The website shows this page at `/developers/live` (`web/src/pages/DevelopersLive.jsx`), written by hand from this file in
+friendlier words: **change both** when the protocol changes (see the note at the top of [api.md](api.md)).
+
 One WebSocket per live source: `wss://<host><base>/api/stream/ws`.
 
 Authenticate with `Authorization: Bearer acw_...` (API key with the `stream`
@@ -23,6 +26,7 @@ Client sends one text message within 15 s:
  "denoise": "light" | null,
  "captions": "local" | "premium" | null,
  "language": "en" | ["en", "es"] | null,
+ "translate": ["es", "de"],
  "sampleRate": 48000,
  "codec": "opus" | "pcm_s16le",
  "opusBitrate": 96000,
@@ -31,7 +35,7 @@ Client sends one text message within 15 s:
  "client": "obs-audio-cleaner/0.1.0"}
 ```
 
-`echoReference` is optional (default false); see section 5.
+`echoReference` is optional (default false); see section 5. `translate` is optional (default none); see "Translations".
 
 `language` is the spoken language, or for someone who switches between languages a list of up to three: extra-accurate
 captions then follow the switches, and translations translate whatever was said (a translation language may then be
@@ -70,6 +74,9 @@ Clients should retry no sooner than a minute later (`retryAfterSeconds`, see the
 the server will use it. `modelLatencyMs` includes the delay of echo
 cancellation (9 ms) in that case.
 
+`usdPerMinute` is the price of this session's setup per minute of audio (all the parts added up, the free trial aside);
+5 minutes of it are set aside when the session starts and charged by the second of processed audio when it ends.
+
 or `{"type":"error","code":...,"message":...}` and closes. Every error event may carry **`retryAfterSeconds`**
 (an integer): do not try again sooner. Codes:
 
@@ -80,6 +87,7 @@ or `{"type":"error","code":...,"message":...}` and closes. Every error event may
 | `bad_tier` | an option we do not offer |
 | `nothing_enabled` | neither `denoise` nor `captions` is set |
 | `insufficient_funds` | the credit set aside up front (5 minutes) is more than the available balance |
+| `key_spending_cap` | the API key has a monthly spending cap and the 5 minutes set aside up front would go over it. The message says how much is left and when the month starts over; the owner can raise the cap in the API keys card. Not for browser sessions or keys without a cap |
 | `tos` | the current Terms have not been accepted |
 | `trial_busy` | a free-trial session was turned away because live is busy (above about 70% of its capacity). Paid sessions are not affected. `retryAfterSeconds` 120 |
 | `rate_limited` | (during the session) too many text messages: more than 50 a second sustained (burst 100), or more than 5 `config` a second. The socket is closed with 1008 |
@@ -140,13 +148,14 @@ offset size  field
 {"type": "warning", "code": "trial_low", "secondsLeft": 290}   // free trial: sent once, at 5 minutes left (or at once if less is left at the start)
 {"type": "warning", "code": "trial_used_up_now_paid", "usdPerMinute": 0.01}   // the trial ran out and the session went on from credit (a hold is set aside now); no audio is dropped
 {"type": "warning", "code": "captions_unavailable", "message": "..."}   // extra-accurate captions broke down: not billed from here on
-{"type": "stopped", "reason": "insufficient_funds" | "max_duration" | "idle_timeout" | "no_audio" | "captions_unavailable" | "trial_over" | "account_closed"}
+{"type": "warning", "code": "key_spending_cap", "secondsLeft": 180, "message": "..."}   // the key's monthly cap leaves no room for the next minute: the session stops when the minutes already set aside run out
+{"type": "stopped", "reason": "insufficient_funds" | "key_spending_cap" | "max_duration" | "idle_timeout" | "no_audio" | "captions_unavailable" | "trial_over" | "account_closed"}
 {"type": "error", "code": "...", "message": "..."}
 {"type": "pong", "t": ..., "seconds": 123.4}
 ```
 
 `stopped` is the last thing the server sends before it closes the socket: `insufficient_funds` (the balance cannot
-cover the next minute), `max_duration` (12 hours), `idle_timeout` (**no microphone audio for 2 minutes**: pings
+cover the next minute), `key_spending_cap` (the same, because the API key's monthly spending cap is used up), `max_duration` (12 hours), `idle_timeout` (**no microphone audio for 2 minutes**: pings
 and echo-reference frames do not count; a muted microphone must keep sending frames, silent ones are fine, as
 the OBS plugin and the website do), `no_audio` (**microphone audio arrived for less than half of the wall-clock time over the last 60 s**, judged after the first 30 s: keep sending every 10 ms frame in real time, silence included; a client that is a few seconds late is fine, one that sends a frame now and then is not), `captions_unavailable` (the session was only extra-accurate captions and they stopped working; nothing is billed for them from that point) `trial_over` (the free trial ran out and the available credit cannot cover the session; nothing is charged) and `account_closed` (the account was suspended or deleted, the API key
 was revoked, or the browser session ended; checked every 30 s). A session replaced by a newer one of the same

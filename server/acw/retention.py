@@ -45,7 +45,7 @@ TERMINAL_JOB_STATES = ("done", "failed", "canceled", "expired")
 # Audit rows: what is only an activity log (deleted after RECORD_DAYS) and what is evidence kept with the money
 # records (consent, payments, refunds, grants, suspensions, deletions). An action nobody has classified is kept, never
 # deleted; a test (tests/test_retention.py) fails when the code writes an action that is in neither list.
-AUDIT_ROUTINE = ("login", "user_created", "api_key_created", "api_key_revoked", "contact_sent")
+AUDIT_ROUTINE = ("login", "user_created", "api_key_created", "api_key_revoked", "api_key_cap_changed", "webhook_secret_rotated", "contact_sent")
 AUDIT_WITH_MONEY = (
     "tos_accepted", "checkout_started", "auto_reload_enabled", "auto_reload_disabled", "auto_reload_failed",
     "payment_refused_region", "suspended", "suspend", "unsuspend", "refund", "refund_unrecovered",

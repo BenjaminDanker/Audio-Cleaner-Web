@@ -140,6 +140,7 @@ function Footer() {
             <li><Link to="/app">Cleanup, subtitles</Link></li>
             <li><Link to="/app/live">Live for streamers</Link></li>
             <li><Link to={{ pathname: '/', hash: '#pricing' }}>Pricing</Link></li>
+            <li><Link to="/developers">For developers</Link></li>
             {contact && <li><Link to="/contact">Contact</Link></li>}
           </ul>
         </div>

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import re
 import stat
 import time
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from .. import auth, db, jobs
+from .. import auth, db, jobs, keycaps, webhooks
+from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
 
@@ -34,7 +37,20 @@ class CreateJob(BaseModel):
     durationSeconds: float = Field(gt=0)
     free: bool = False
     displayName: str | None = Field(default=None, max_length=300)
+    callbackUrl: str | None = Field(default=None, max_length=600)
     options: dict = Field(default_factory=dict)
+
+
+class EstimateJob(BaseModel):
+    kind: str = Field(max_length=32)
+    denoiseTier: str | None = Field(default=None, max_length=32)
+    transcribeTier: str | None = Field(default=None, max_length=32)
+    durationSeconds: float = Field(gt=0)
+    options: dict = Field(default_factory=dict)
+
+
+IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")  # visible ASCII, no spaces
+KEY_CAP_HEADERS = {"X-Error-Code": "key_spending_cap"}
 
 
 ALMOST_DONE = "This job is almost done and can’t be canceled now."
@@ -49,13 +65,39 @@ def _get_owned(job_id: str, principal: auth.Principal) -> dict:
     return dict(row)
 
 
+def _upload_url(job_id: str) -> str:
+    return f"api/jobs/{job_id}/input"
+
+
 @router.post("")
-def create(body: CreateJob, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
+def create(body: CreateJob, request: Request, response: Response, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
+    # Idempotency-Key: the same key (this account, 24 hours) names the same job. A repeat is answered before anything
+    # else, so it uses none of the job creation allowance and holds no money twice.
+    idem = None
+    raw_key = request.headers.get("idempotency-key")
+    if raw_key is not None:
+        raw_key = raw_key.strip()
+        if not IDEMPOTENCY_KEY.match(raw_key):
+            raise HTTPException(status_code=400, detail="Idempotency-Key must be 1 to 128 visible characters.")
+        digest = hashlib.sha256(json.dumps(body.model_dump(), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        idem = (raw_key, digest)
+        try:
+            again = jobs.replay_of(principal.user_id, *idem)
+        except jobs.JobError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))
+        if again is not None:
+            return _replayed(again, response)
     enforce("job_create", principal.user_id)
     enforce("job_create", f"ip:{client_net(client_ip(request))}")
     auth.accept_terms(principal.user_id, "continued use", client_ip(request))
     if len(json.dumps(body.options)) > 2000:
         raise HTTPException(status_code=400, detail="options too large")
+    callback = None
+    if body.callbackUrl is not None:
+        try:
+            callback = webhooks.check_url(body.callbackUrl)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     try:
         created = jobs.create_job(
             principal.user_id,
@@ -68,12 +110,48 @@ def create(body: CreateJob, request: Request, principal: auth.Principal = Depend
             options=body.options,
             free=body.free,
             display_name=body.displayName,
+            api_key_id=principal.api_key_id,
+            callback_url=callback,
+            idempotency=idem,
         )
+    except jobs.Replay as r:  # a parallel request with the same key won
+        return _replayed({"id": r.job_id, "estCostMicros": r.est_cost_micros}, response)
+    except keycaps.KeyCapReached as e:
+        raise HTTPException(status_code=403, detail=str(e), headers=KEY_CAP_HEADERS)
     except jobs.JobError as e:
         raise HTTPException(status_code=e.status, detail=str(e), headers={"Retry-After": str(e.retry_after or 60)} if e.status == 429 else None)
     except ValueError as e:  # pricing errors
         raise HTTPException(status_code=400, detail=str(e))
-    return {**created, "uploadUrl": f"api/jobs/{created['id']}/input"}
+    if callback:
+        with db.tx() as c:
+            webhooks.ensure_secret(c, principal.user_id)  # so there is a secret to see (and verify with) in the API keys card
+    return {**created, "uploadUrl": _upload_url(created["id"])}
+
+
+def _replayed(found: dict, response: Response) -> dict:
+    response.headers["Idempotent-Replayed"] = "true"
+    return {**found, "uploadUrl": _upload_url(found["id"]), "idempotentReplay": True}
+
+
+@router.post("/estimate")
+def estimate(body: EstimateJob, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
+    """The price the website shows for these choices, without creating anything or holding any money."""
+    if len(json.dumps(body.options)) > 2000:
+        raise HTTPException(status_code=400, detail="options too large")
+    try:
+        out = jobs.estimate(body.kind, body.denoiseTier, body.transcribeTier, body.durationSeconds, body.options)
+    except jobs.JobError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    except ValueError as e:  # pricing errors
+        raise HTTPException(status_code=400, detail=str(e))
+    available = ledger.balance(principal.user_id)["available_micros"]
+    out["availableMicros"] = available
+    out["affordable"] = available >= out["estCostMicros"]
+    if principal.api_key_id:
+        limit = keycaps.key_limit(principal.api_key_id)
+        if limit is not None:
+            out["keyLimit"] = limit
+    return out
 
 
 # An upload that sends nothing for this long is abandoned (it would hold a connection and its disk space).
@@ -193,7 +271,8 @@ def list_jobs(principal: auth.Principal = Depends(auth.require_scope("jobs"))) -
         (principal.user_id,),
     )
     queue = jobs.queue_snapshot() if any(r["status"] == "queued" for r in rows) else ([], {})  # shared for a second across requests
-    return {"jobs": [jobs.public_job(dict(r), queue) for r in rows]}
+    callbacks = jobs.callbacks_for([r["id"] for r in rows])
+    return {"jobs": [jobs.public_job(dict(r), queue, callbacks) for r in rows]}
 
 
 @router.get("/{job_id}")

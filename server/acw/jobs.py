@@ -10,6 +10,7 @@ seconds of the daily allowance the same way.
 """
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import re
@@ -20,7 +21,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import db, metrics
+from . import db, keycaps, metrics
 from .billing import ledger, pricing
 from .config import get_settings
 
@@ -307,6 +308,76 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     return out
 
 
+def check_duration(kind: str, denoise_tier: str | None, seconds: float) -> None:
+    if not 0.5 <= seconds <= pricing.MAX_JOB_SECONDS:
+        raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
+    if denoise_tier == "rebuild" and kind != "transcribe" and seconds > pricing.MAX_REBUILD_SECONDS:
+        raise JobError(
+            f"Voice rebuilding takes files up to {pricing.MAX_REBUILD_SECONDS // 60} minutes; use the standard cleanup for longer files."
+        )
+
+
+def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, duration_seconds: float, options: dict) -> dict:
+    """The price of a job before it exists (no hold, nothing stored): the same checks and the same price as creating
+    it, with the parts of the price listed. POST /api/jobs/estimate."""
+    check_duration(kind, denoise_tier, duration_seconds)
+    opts = validate_options(kind, denoise_tier, transcribe_tier, options, False)
+    d_tier = denoise_tier if kind != "transcribe" else None
+    t_tier = transcribe_tier if kind != "denoise" else None
+    n = len(opts["translate"])
+    rates = pricing.job_rates(kind, d_tier, t_tier, n)
+    total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n)
+    lines = []
+    if "denoise" in rates:
+        r = pricing.rate("denoise", d_tier)
+        lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("denoise", d_tier, duration_seconds, rates["denoise"])})
+    if "transcribe" in rates:
+        r = pricing.rate("transcribe", t_tier)
+        lines.append({"item": "transcribe", "label": r.label, "quantity": 1, "usdPerMinute": rates["transcribe"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("transcribe", t_tier, duration_seconds, rates["transcribe"])})
+    if "translate" in rates:
+        r = pricing.rate("transcribe_translate", "standard")
+        lines.append({"item": "translate", "label": r.label, "quantity": n, "usdPerMinute": rates["translate"] / pricing.MICROS_PER_USD,
+                      "micros": n * pricing.cost_micros("transcribe_translate", "standard", duration_seconds, rates["translate"])})
+    return {
+        "estCostMicros": total,
+        "estCostUsd": total / pricing.MICROS_PER_USD,
+        "durationSeconds": duration_seconds,
+        "maxSeconds": pricing.max_job_seconds(d_tier),
+        "lines": lines,
+        "options": opts,
+    }
+
+
+class Replay(Exception):
+    """create_job found the Idempotency-Key already used by a job: nothing was created."""
+
+    def __init__(self, job_id: str, est_cost_micros: int):
+        super().__init__(job_id)
+        self.job_id = job_id
+        self.est_cost_micros = est_cost_micros
+
+
+IDEMPOTENCY_SECONDS = 86400
+
+
+def replay_of(user_id: str, key: str, body_hash: str, c=None) -> dict | None:
+    """The job an Idempotency-Key of this account (used in the last 24 hours) already made, as the create answer;
+    None for a new key. The same key with other job details is a conflict (409). `c`: inside a transaction."""
+    q = c.execute if c is not None else db.conn().execute
+    row = q(
+        "SELECT k.body_hash, k.job_id, k.created_at, j.est_cost_micros FROM idempotency_keys k LEFT JOIN jobs j ON j.id = k.job_id"
+        " WHERE k.user_id = ? AND k.key = ?",
+        (user_id, key),
+    ).fetchone()
+    if row is None or row["created_at"] <= db.now() - IDEMPOTENCY_SECONDS:
+        return None
+    if not hmac.compare_digest(row["body_hash"].encode(), body_hash.encode()):
+        raise JobError("This Idempotency-Key was already used for a different job. Use a new key for a new job.", 409)
+    return {"id": row["job_id"], "estCostMicros": row["est_cost_micros"] or 0}
+
+
 def create_job(
     user_id: str,
     *,
@@ -319,6 +390,9 @@ def create_job(
     options: dict,
     free: bool,
     display_name: str | None = None,
+    api_key_id: str | None = None,
+    callback_url: str | None = None,
+    idempotency: tuple[str, str] | None = None,
 ) -> dict:
     settings = get_settings()
     ext = Path(filename).suffix.lower()
@@ -326,12 +400,7 @@ def create_job(
         raise JobError("Unsupported file type.")
     if not 0 < size_bytes <= settings.max_upload_bytes:
         raise JobError(f"Files must be under {settings.max_upload_bytes // 1024**2} MB.", 413)
-    if not 0.5 <= claimed_seconds <= pricing.MAX_JOB_SECONDS:
-        raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
-    if denoise_tier == "rebuild" and kind != "transcribe" and claimed_seconds > pricing.MAX_REBUILD_SECONDS:
-        raise JobError(
-            f"Voice rebuilding takes files up to {pricing.MAX_REBUILD_SECONDS // 60} minutes; use the standard cleanup for longer files."
-        )
+    check_duration(kind, denoise_tier, claimed_seconds)
     if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
         raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
     opts = validate_options(kind, denoise_tier, transcribe_tier, options, free)
@@ -364,6 +433,10 @@ def create_job(
         # The limits, the money and the row are one step: parallel requests can't all pass a check that
         # none of them has recorded yet (the money rolls back with everything else).
         with db.tx() as c:
+            if idempotency is not None:  # a parallel request with the same key waited for this transaction and now sees its row
+                again = replay_of(user_id, *idempotency, c=c)
+                if again is not None:
+                    raise Replay(again["id"], again["estCostMicros"])
             active = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE)).fetchone()
             if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
                 raise JobError("You already have several jobs in progress; wait for one to finish.", 429, retry_after=60)
@@ -378,6 +451,7 @@ def create_job(
                 raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
             hold_id = None
             if est > 0:
+                keycaps.check(c, api_key_id, est)  # the API key's monthly spending cap (KeyCapReached)
                 try:
                     hold_id = ledger.create_hold(user_id, est, "job", job_id, c=c)
                 except ledger.InsufficientFunds as e:
@@ -386,11 +460,22 @@ def create_job(
                     ) from e
             c.execute(
                 "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes,"
-                " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at)"
-                " VALUES (?,?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?)",
+                " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at, api_key_id)"
+                " VALUES (?,?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?,?)",
                 (job_id, user_id, kind, tier, 0, json.dumps(params), filename[:200], size_bytes,
-                 claimed_seconds, hold_id, est, now, now + UPLOAD_FIRST_BYTE_SECONDS),
+                 claimed_seconds, hold_id, est, now, now + UPLOAD_FIRST_BYTE_SECONDS, api_key_id),
             )
+            if callback_url:
+                c.execute(
+                    "INSERT INTO job_callbacks(job_id, user_id, url, created_at) VALUES (?,?,?,?)", (job_id, user_id, callback_url, now)
+                )
+            if idempotency is not None:
+                c.execute(
+                    "INSERT INTO idempotency_keys(user_id, key, body_hash, job_id, created_at) VALUES (?,?,?,?,?)"
+                    " ON CONFLICT(user_id, key) DO UPDATE SET body_hash = excluded.body_hash, job_id = excluded.job_id,"
+                    " created_at = excluded.created_at",
+                    (user_id, idempotency[0], idempotency[1], job_id, now),
+                )
     except Exception:
         shutil.rmtree(job_dir(job_id), ignore_errors=True)
         raise
@@ -547,8 +632,31 @@ def queue_snapshot() -> tuple[list[str], dict[str, int]]:
         return ids, waits
 
 
-def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None) -> dict:
-    """`queue` is queue_snapshot() (pass it once when listing many jobs)."""
+def callbacks_for(job_ids: list[str]) -> dict[str, dict]:
+    """The state of each job's callback (the jobs that have one), as shown with the job."""
+    if not job_ids:
+        return {}
+    cols = "SELECT job_id, url, state, attempts, next_attempt_at, last_status, last_error, delivered_at FROM job_callbacks"
+    if len(job_ids) == 1:
+        rows = [r for r in (db.one(f"{cols} WHERE job_id = ?", (job_ids[0],)),) if r is not None]
+    else:
+        rows = db.all_rows(f"{cols} WHERE job_id IN ({','.join('?' * len(job_ids))})", tuple(job_ids))
+    return {
+        r["job_id"]: {
+            "url": r["url"].split("?", 1)[0],  # the query string often carries a token: not shown back
+            "state": r["state"],
+            "attempts": r["attempts"],
+            "lastStatus": r["last_status"],
+            "lastError": r["last_error"],
+            "deliveredAt": r["delivered_at"],
+            "nextAttemptAt": r["next_attempt_at"] if r["state"] == "pending" and r["attempts"] else None,
+        }
+        for r in rows
+    }
+
+
+def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None, callbacks: dict[str, dict] | None = None) -> dict:
+    """`queue` is queue_snapshot() and `callbacks` callbacks_for() (pass them once when listing many jobs)."""
     outputs = json.loads(job["outputs_json"]) if job.get("outputs_json") else []
     params = json.loads(job["params_json"])
     position = eta = None
@@ -557,7 +665,8 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None)
         if job["id"] in waits:
             position = ids.index(job["id"]) + 1
             eta = waits[job["id"]]
-    return {
+    callback = (callbacks if callbacks is not None else callbacks_for([job["id"]])).get(job["id"])
+    out = {
         "queuePosition": position,
         "queueWaitSeconds": eta,
         "id": job["id"],
@@ -580,11 +689,15 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None)
         "finishedAt": job["finished_at"],
         "expiresAt": job["expires_at"] if job["status"] == "done" else None,
     }
+    if callback is not None:
+        out["callback"] = callback
+    return out
 
 
 def sweep() -> None:
     """Expire finished outputs and abandoned uploads; recover stuck jobs."""
     now = db.now()
+    db.execute("DELETE FROM idempotency_keys WHERE created_at <= ?", (now - IDEMPOTENCY_SECONDS,))
     for job in db.all_rows("SELECT * FROM jobs WHERE status = 'uploading' AND expires_at <= ?", (now,)):
         finish_failed(dict(job), "Upload was not completed.", status="canceled")
     # 'canceling' was a transient state of older versions of the cancel request.

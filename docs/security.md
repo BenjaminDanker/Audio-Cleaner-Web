@@ -18,7 +18,7 @@ or secrets.
 
 | Process | Network | Filesystem | Other |
 |---|---|---|---|
-| acw-web | loopback listen; outbound HTTPS (Stripe, OpenAI, OAuth, SMTP) | its data dir | seccomp `@system-service`, no `@privileged`, NoNewPrivileges, MemoryMax, `LimitNOFILE=8192` |
+| acw-web | loopback listen; outbound HTTPS (Stripe, OpenAI, OAuth, SMTP, and job callbacks to addresses the account owner gave: the only call to an address chosen by a user, see "Job callbacks") | its data dir | seccomp `@system-service`, no `@privileged`, NoNewPrivileges, MemoryMax, `LimitNOFILE=8192` |
 | acw-mirror (oneshot, every 10 min) | outbound HTTPS to the release service only (AF_INET/AF_INET6); no listen | `data/downloads/` | seccomp `@system-service`, no `@privileged`, NoNewPrivileges, PrivateTmp, MemoryMax 600M; the read token (if any) is a 0600 file it never logs |
 | acw-bulk | loopback listen (8794); no outbound use | its data dir | same hardening as acw-web, MemoryMax 1G; only the upload, result-download and release-download routes, no background loops, no live code |
 | acw-worker@N | **none** (seccomp: AF_UNIX only) | DB + jobs dir | Nice 10, CPUWeight 50 |
@@ -62,7 +62,13 @@ also removes the shared-UID risk with the Minecraft servers.
 - OAuth: PKCE + state stored server-side and bound to the browser by a
   short-lived cookie; Google `nonce`/`aud`/`iss`/`email_verified` checked;
 - API keys: `acw_` + 256-bit random, hashed at rest, shown once, scoped
-  (`stream`, `jobs`), cannot touch billing/keys/account.
+  (`stream`, `jobs`), cannot touch billing/keys/account. A key can carry a monthly spending cap
+  (`api_keys.monthly_cap_micros`, `acw/keycaps.py`), checked inside the transaction that reserves the money (job
+  creation, live start, each live minute), so parallel requests can't pass together; jobs and live sessions record the
+  key (`jobs.api_key_id`, `stream_sessions.api_key_id`), and only a browser session can set or change a cap.
+- `Idempotency-Key` on job creation: kept per account for 24 hours in `idempotency_keys` (the key text and a hash of
+  the request body, no file data), swept by `jobs.sweep` and removed with the account. A repeat is answered before
+  rate limits and money are touched; checked again inside the creation transaction against parallel requests.
 - WebSocket: API key, or session cookie + exact Origin match (no cross-site
   WebSocket hijacking).
 - Rate limits: per IP (IPv6 per /64) and per user for auth, email, uploads, job creation,
@@ -94,6 +100,53 @@ also removes the shared-UID risk with the Minecraft servers.
 - Money: integer micro-dollars, CHECK constraints (balance ≥ 0, held ≤ balance),
   serialized transactions, idempotent Stripe processing keyed by event and
   object ids, webhook signatures verified.
+
+## Job callbacks (`callbackUrl`)
+
+A job may carry an https address that the web process calls when the job ends (`acw/webhooks.py`, docs/api.md "Finish
+notifications"). This is the one place where the server connects to an address a user chose, from a machine on a home
+network, so it is built to reach nothing but the public internet:
+
+- Only the web process delivers (its lifespan runs the delivery loop). The workers, the live worker and the bulk process
+  have no network, and a test (`tests/test_webhooks.py::test_only_the_web_process_delivers`) fails if they start using it.
+  The job code (worker, cancel, sweep) knows nothing about callbacks: it only writes the job's final state, and the loop
+  looks at the `job_callbacks` table. A failing or slow receiver can therefore not hold up, fail or bill a job.
+- Address at creation (syntax only, `webhooks.check_url`): `https` scheme, port 443 or none, a host **name** with a dot
+  (IP addresses, `localhost`, `.local`, `.internal`, `.lan`, `.home.arpa` and similar are refused), no `user:password@`, no
+  fragment, ASCII only, 500 characters at most, and not this service's own host name.
+- Address at delivery: the name is resolved by the loop's resolver and **every** address it returns must be public:
+  refused are `0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`, `169.254/16` (link-local and cloud metadata), `172.16/12`,
+  `192.0.0/24`, `192.0.2/24`, `192.168/16`, `198.18/15`, `198.51.100/24`, `203.0.113/24`, multicast and reserved `224/4`
+  and `240/4`; for IPv6 `::`, `::1`, `::/96`, IPv4-mapped addresses (unwrapped and checked as IPv4), `64:ff9b::/96` and
+  `64:ff9b:1::/48` (NAT64), `100::/64`, `2001::/23` (Teredo and other protocol ranges), `2001:db8::/32`, `2002::/16`
+  (6to4), `3fff::/20`, `5f00::/16`, `fc00::/7`, `fe80::/10`, `fec0::/10` and `ff00::/8`; plus everything Python's
+  `ipaddress` does not call global, this machine's own addresses (its host name's addresses and the source address it
+  would use towards the internet over IPv4 and IPv6) and any network in `ACW_WEBHOOK_DENY` (comma separated; use it for
+  the public address of the home connection and of the VPS). One private address among public ones refuses the whole
+  answer (DNS rebinding tricks).
+- The connection goes to the checked address itself (TLS with the host name as SNI and certificate name, TLS 1.2 or
+  newer, normal certificate verification), so nothing resolves a second time between the check and the connect. No
+  proxy. **No redirects are followed**: any 3xx is a failure, so a public address can't bounce the call to an internal one.
+- 5 seconds for the whole attempt (DNS, TCP, TLS, request, first line of the answer), the answer is read only up to its
+  first line (8 KB cap) and then dropped, the request body is a few hundred bytes of JSON (job id, status, cost and
+  output names), at most 3 attempts (30 s and 5 minutes apart), at most 4 deliveries at once. A claim in the table
+  (`next_attempt_at`) keeps two processes from delivering the same callback. Waiting callbacks that never saw their job end
+  are given up after 2 days, results are deleted after 7 days, and an account's callbacks go with the account.
+- Everything is asynchronous: DNS through the event loop's resolver, the socket as an asyncio stream, every database call
+  in a thread. A tarpit receiver costs one task for at most 5 seconds.
+- What is revealed: the job id, status, error text, cost and output names go to an address the account owner chose;
+  nothing about other accounts, no download link (downloading still needs the owner's key). The result shown with the job
+  hides the query string of the address (it often holds a token).
+- **The signing secret** (`users.webhook_secret`, `whsec_` + 144 random bits) is needed in clear to compute HMACs, so it
+  is stored **in plain text** in the database, like the DB itself a file only the service user can read (mode 0600), and
+  it is included in the nightly backups. It is not hashed or encrypted: encryption would need a key stored next to it.
+  The browser session (never an API key) can read and replace it (`GET`/`POST /api/keys/webhook-secret`, audited as
+  `webhook_secret_rotated`); it is left out of the account export (only "exists") and removed when the account is
+  deleted. Each request carries `X-Audio-Cleaner-Signature: t=<unix>,v1=hex(HMAC-SHA256(secret, "<t>.<body>"))` so a
+  receiver can check who sent it and reject old timestamps. Rotating the secret signs still-waiting callbacks with the
+  new one.
+- Tests (`tests/test_webhooks.py`) mock DNS and the connection; they cover the address table above, mixed answers,
+  redirects, timeouts, the retries and the signature.
 
 ## Abuse / fraud
 

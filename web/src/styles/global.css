@@ -437,3 +437,47 @@ textarea.input { min-height: 140px; resize: vertical; line-height: 1.45; }
 /* "Good to know" notes under a choice: when something free you already have is enough */
 .good-to-know { display: block; border-left: 3px solid var(--border); padding: 2px 0 2px 10px; }
 .good-to-know b { color: var(--text, inherit); font-weight: 650; }
+
+/* ---------- Developer pages (/developers, /developers/live) ---------- */
+.dev-layout { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.dev-toc { padding: 16px 18px; }
+.dev-toc h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 0.6em; }
+.dev-toc ol { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 2px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.dev-toc li a { display: block; padding: 5px 8px; border-radius: 6px; text-decoration: none; color: var(--muted); font-size: 0.93rem; }
+.dev-toc li a:hover { background: var(--surface-2); color: var(--text); }
+.dev-main { min-width: 0; max-width: 820px; }
+.dev-main .lead { font-size: 1.1rem; max-width: 62ch; }
+.dev-section { margin-top: 2.4em; }
+.dev-section h2 { font-size: 1.45rem; margin-bottom: 0.6em; }
+.dev-section h3 { margin-top: 1.6em; }
+.dev-section ul, .dev-section ol { padding-left: 1.3em; margin: 0 0 1em; }
+.dev-section li { margin-bottom: 0.45em; }
+.dev-section .ol-steps { padding-left: 1.4em; }
+.dev-section .table-wrap { margin-bottom: 1em; }
+.dev-main code { font-family: var(--mono); font-size: 0.88em; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.dev-table th[scope="row"] { font-weight: 500; white-space: nowrap; vertical-align: top; }
+.dev-table td { vertical-align: top; min-width: 12em; }
+pre.code { margin: 0 0 1em; padding: 14px 16px; overflow-x: auto; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.86rem; line-height: 1.5; max-width: 100%; }
+pre.code code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; white-space: pre; }
+.dev-foot { margin-top: 3em; }
+@media (max-width: 420px) { .dev-toc ol { grid-template-columns: minmax(0, 1fr); } }
+@media (min-width: 960px) {
+  .dev-layout { grid-template-columns: 220px minmax(0, 1fr); gap: 36px; }
+  .dev-toc ol { grid-template-columns: minmax(0, 1fr); }
+  .dev-toc { position: sticky; top: calc(var(--header-h) + 16px); max-height: calc(100vh - var(--header-h) - 32px); overflow-y: auto; }
+}
+/* API key card (Live page) */
+.key-extra { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid var(--border); }
+.cap-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; }
+.cap-form .input { width: 8.5em; min-height: 36px; padding: 6px 10px; }
+.secret-box { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
+.secret-box code { flex: 1 1 240px; font-family: var(--mono); font-size: 0.86rem; overflow-wrap: anywhere; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+/* On a phone the developer tables become one block per row instead of scrolling sideways past the explanation. */
+@media (max-width: 640px) {
+  .dev-table, .dev-table tbody, .dev-table tr, .dev-table th, .dev-table td { display: block; width: 100%; }
+  .dev-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+  .dev-table tr { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  .dev-table tbody tr:last-child { border-bottom: 0; }
+  .dev-table th, .dev-table td { padding: 2px 0; border-bottom: 0; min-width: 0; white-space: normal; }
+  .dev-table td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+}

@@ -20,9 +20,17 @@ const BANNED = [
 ];
 
 /** Everything a visitor can read or hear on the page: the text, option labels, and the labels screen readers announce. */
-async function visibleText(page) {
-  return page.evaluate(() => {
-    const parts = [document.title, document.body.innerText];
+async function visibleText(page, { skipCode = false } = {}) {
+  return page.evaluate((skipCode) => {
+    // The developer pages show the API's own field values (for example "premium") in code samples and code-styled names;
+    // those have to be spelled exactly, so code is left out of the scan there. Everything else on the page is checked.
+    let body = document.body.innerText;
+    if (skipCode) {
+      const clone = document.body.cloneNode(true);
+      clone.querySelectorAll('code, pre, script, style').forEach((e) => e.remove());
+      body = clone.innerText;
+    }
+    const parts = [document.title, body];
     for (const o of document.querySelectorAll('option')) parts.push(o.textContent);
     for (const d of document.querySelectorAll('details')) parts.push(d.textContent); // closed answers are not in innerText
     // what a search result or a shared link shows
@@ -31,7 +39,7 @@ async function visibleText(page) {
       for (const a of ['aria-label', 'title', 'placeholder', 'alt']) if (e.getAttribute(a)) parts.push(e.getAttribute(a));
     }
     return parts.join('\n');
-  });
+  }, skipCode);
 }
 
 function findings(text) {
@@ -43,12 +51,12 @@ function findings(text) {
   return out;
 }
 
-async function scan(page, path, waitFor) {
+async function scan(page, path, waitFor, opts) {
   await page.goto(`${BASE}${path}`);
   await page.waitForSelector('main h1', { timeout: 15000 });
   if (waitFor) await page.waitForSelector(waitFor, { timeout: 15000 });
   await page.waitForTimeout(500);
-  return findings(await visibleText(page)).map((f) => `${path}: ${f}`);
+  return findings(await visibleText(page, opts)).map((f) => `${path}: ${f}`);
 }
 
 const { browser, page } = await launch();
@@ -66,8 +74,10 @@ await check('copy: public pages show no internals and none of the avoided words'
   bad.push(...(await scan(page, '/login')));
   bad.push(...(await scan(page, '/contact'))); // here mail is not set up, so the calm "not switched on" page (the form's own words: tests/contact.mjs)
   bad.push(...(await scan(page, '/nope')));
+  bad.push(...(await scan(page, '/developers', 'pre.code', { skipCode: true }))); // the API guide: code samples are exempt
+  bad.push(...(await scan(page, '/developers/live', 'pre.code', { skipCode: true })));
   if (bad.length) throw new Error(bad.join(' | '));
-  return '10 pages clean';
+  return '12 pages clean';
 });
 
 await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets]) and no empty contact links', async () => {
