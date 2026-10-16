@@ -102,4 +102,5 @@ def run(files: list[str]) -> int:
     server.received.connect(lambda paths: bring_forward(window, paths))
     app.fileOpened.connect(lambda path: bring_forward(window, [path]))
     window.show()
+    window.updater.schedule_startup_check()  # frozen app, setting on: a quiet check ~10 s from now
     return app.exec()

@@ -11,6 +11,8 @@
 #   macOS    MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD (+ APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD to notarize)
 #   Windows  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT,
 #            AZURE_SIGNING_PROFILE (Azure Artifact Signing)
+# The release job also signs update.json (the information the installed apps' update check reads) with the Ed25519 key in
+# the secret UPDATE_SIGNING_KEY; without that secret the release has no update.json and installed apps do not update.
 # Every third-party action is pinned to a full commit SHA.
 name: Desktop app
 
@@ -582,7 +584,9 @@ jobs:
         with:
           sparse-checkout: |
             desktop/audio_cleaner_desktop/__init__.py
+            desktop/audio_cleaner_desktop/updater.py
             desktop/packaging/version.py
+            desktop/packaging/make_update_manifest.py
           sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -594,6 +598,9 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          # The private Ed25519 key the apps' update check trusts (docs/desktop.md). Without it (or with another key
+          # than the one built into the app) no update information is published and no installed app updates itself.
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: |
           version="$(python3 desktop/packaging/version.py)"
           tag="desktop-v$version"
@@ -604,6 +611,25 @@ jobs:
           mv AudioCleaner-macOS-arm64.pkg "AudioCleaner-$version-Mac-Apple-silicon.pkg"
           mv AudioCleaner-macOS-x86_64.pkg "AudioCleaner-$version-Mac-Intel.pkg"
           files=("AudioCleaner-$version-Windows.exe" "AudioCleaner-$version-Mac-Apple-silicon.pkg" "AudioCleaner-$version-Mac-Intel.pkg")
+          # The signed update information the installed apps read (update.json + update.json.sig, raw Ed25519 over the
+          # exact bytes of update.json). Fails closed: no key, a key the app does not trust, or a signature that does not
+          # verify means no manifest, and apps simply stay on their version.
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::warning::The secret UPDATE_SIGNING_KEY is not set, so this release has no update.json: installed apps will not update to it."
+          else
+            key="$RUNNER_TEMP/update-signing-key.pem"
+            (umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
+            if python3 "$GITHUB_WORKSPACE/desktop/packaging/make_update_manifest.py" check-key "$key"; then
+              python3 "$GITHUB_WORKSPACE/desktop/packaging/make_update_manifest.py" manifest --version "$version" --repo "$GITHUB_REPOSITORY" --dir .
+              openssl pkeyutl -sign -rawin -inkey "$key" -in update.json -out update.json.sig
+              openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-public.pem"
+              openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/update-public.pem" -in update.json -sigfile update.json.sig
+              files+=(update.json update.json.sig)
+            else
+              echo "::error::UPDATE_SIGNING_KEY is not the key whose public half is built into the app (PUBLIC_KEY in updater.py), so this release has no update.json."
+            fi
+            rm -f "$key" "$RUNNER_TEMP/update-public.pem"
+          fi
           notes="Audio Cleaner $version, built from ${GITHUB_SHA::7}.
 
           - Windows 10 or 11: AudioCleaner-$version-Windows.exe

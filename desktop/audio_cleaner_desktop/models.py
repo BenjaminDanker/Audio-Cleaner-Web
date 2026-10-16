@@ -301,15 +301,20 @@ def _seed(model: SpeechModel, f: ModelFile, dest: Path, cancel: threading.Event 
         return False
 
 
+def https_opener() -> urllib.request.OpenerDirector:
+    """The opener every download of the app uses: the operating system's certificates, redirects only to https."""
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _HttpsRedirects())
+
+
 def _fetch(f: ModelFile, dest: Path, done_before: int, total: int, progress: Progress | None,
-           cancel: threading.Event | None, opener) -> None:
+           cancel: threading.Event | None, opener, user_agent: str | None = None) -> None:
     part = dest.with_name(dest.name + ".part")
     have = part.stat().st_size if part.is_file() else 0
     if have > f.size:
         part.unlink()
         have = 0
     if have < f.size:
-        request = urllib.request.Request(f.url, headers={"User-Agent": f"{config.APP_NAME} desktop"})
+        request = urllib.request.Request(f.url, headers={"User-Agent": user_agent or f"{config.APP_NAME} desktop"})
         if have:
             request.add_header("Range", f"bytes={have}-")
         try:
@@ -332,6 +337,19 @@ def _fetch(f: ModelFile, dest: Path, done_before: int, total: int, progress: Pro
         part.unlink(missing_ok=True)
         raise DownloadError(f"{f.path} did not download correctly. Please try again.")
     os.replace(part, dest)
+
+
+def fetch_file(url: str, dest: Path, size: int, sha256: str, progress: Progress | None = None,
+               cancel: threading.Event | None = None, user_agent: str | None = None, opener=None) -> None:
+    """Download one file pinned by size and SHA-256 to `dest` with the same care as a model: resumes from
+    `dest.part` after an interruption, checks the size and the hash, and only then puts it at `dest`. Raises
+    DownloadError or Cancelled. (The updater uses it for the installer of a new version.)"""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    have = part.stat().st_size if part.is_file() else 0
+    _check_disk(dest.parent, max(0, size - min(have, size)))
+    f = ModelFile(dest.name, url, size, sha256)
+    _fetch(f, dest, 0, size, progress, cancel, opener or https_opener(), user_agent)
 
 
 _ARCHIVE_LOCKS: dict[str, threading.Lock] = {}

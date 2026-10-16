@@ -3,7 +3,8 @@
 The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code).
 The installer carries the app, FFmpeg and the two noise models (DeepFilterNet3, and DPDFNet-8 for heavy noise), so
 noise removal works offline straight after installing. Three larger models (2.5 GB in all) are downloaded by setup
-itself, and only by setup: the app never downloads anything on its own at start-up. The installer is small; the
+itself, and only by setup (the app downloads a model only when asked to; its one automatic request is the update check,
+see "Automatic updates" below). The installer is small; the
 Windows installer's download page and the Mac .pkg's postinstall script check every file's SHA-256, keep files a
 previous install left in place, and are generated from the app's catalog by `packaging/installer_models.py`:
 
@@ -85,13 +86,98 @@ the checklist at the end).
    builds by hand (artifacts only, no release; a push that only changes `deploy/fetch-dpdfnet.sh` also builds). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
 4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
    and `AudioCleaner-<version>-Mac-Intel.pkg` (GitHub shows each file's SHA-256 itself, so there is no separate
-   checksum file) and marks the release as latest, so the link to share with
-   friends is always `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest`. The app is not on the
-   website and never contacts it.
+   checksum file) plus `update.json` and `update.json.sig` (the signed update information, see "Automatic updates"), and
+   marks the release as latest, so the link to share with friends is always
+   `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest`. The app is not on the website and never
+   contacts it; it contacts GitHub (update check, and model downloads when asked).
 5. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a
    noisy video, clean it, turn on subtitles, open About.
 
 Secrets are only read by the signing steps; without them every step is skipped and unsigned installers are produced.
+(`UPDATE_SIGNING_KEY` is a different thing: see "Automatic updates".)
+
+## Automatic updates
+
+An installed app looks for a newer version about 10 seconds after it starts (at most once in 24 hours, unless the user
+presses "Check now" in Settings), downloads it in the background and installs it. It only runs in the frozen app; from
+source nothing happens by itself. The code is `audio_cleaner_desktop/updater.py` (a Qt-free core plus the small
+`UpdateController` the window uses); the setting is "Check for updates when Audio Cleaner starts" in Settings (on by
+default), About shows "Updates: on/off", and the EULA and the About text say what is sent: a normal web request to GitHub
+(the IP address, and the app version in the User-Agent), nothing else.
+
+**What the app does.** It fetches `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest/download/update.json`
+and `update.json.sig` (small, 20 s timeout, https only, the system certificate store), verifies the signature with the
+public key built into the app, and only then reads the manifest. It ignores a manifest whose version is not newer than
+its own (versions compare as numbers, so 2.0.15 is newer than 2.0.9), picks the file of its platform
+(`windows-x86_64`, `macos-arm64`, `macos-x86_64`) and downloads that installer into the app's data folder
+(`%LOCALAPPDATA%\Audio Cleaner\Audio Cleaner\updates`, `~/Library/Application Support/Audio Cleaner/Audio Cleaner/updates`)
+with the model downloader's code (`models.fetch_file`: https only, never a redirect to http, resumable, size and SHA-256
+checked, free space checked first). The download address is built from the version and file name
+(`.../releases/download/desktop-v<version>/<file>`), not taken from the manifest. Only the newest download is kept;
+the verified manifest is saved next to it, so the next start finds the download again without asking GitHub (and checks
+the signature and the file's hash once more). A manifest with a bad or missing signature, a size or hash that does not
+match, an unexpected file name, or no file for the platform is never used; every failure is a line in the log
+(Help > Open log folder) and in the status line under the setting, never a dialog.
+
+* **Windows.** A banner says "Audio Cleaner <v> is ready. It installs when you close the app." with a "Restart now"
+  button. When the app is closed (normally, or after the user confirmed quitting a running batch) it starts the
+  downloaded setup detached, with `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` and `/CURRENTUSER` or `/ALLUSERS` when the
+  running copy lives in the user's profile or in Program Files (for any other folder no switch: Inno Setup then reuses
+  the previous install's mode, `UsePreviousPrivileges=yes`, which its documentation says it does without asking). An
+  all-users install therefore shows the normal administrator prompt. That automatic install is tried once per version
+  (`update_install_tried` in the settings): if the prompt was declined, closing the app does not ask again for the same
+  version, "Restart now" does. "Restart now" waits for a running batch to finish (the banner says so) and then closes the
+  app; setup is started with `/RELAUNCH=1`, which makes a silent setup start the new version as the original user (the
+  second `[Run]` entry in `AudioCleaner.iss`; without the parameter a silent setup starts nothing). A silent setup never
+  downloads models; if a new version needs different models the app offers the download as usual.
+* **macOS.** The banner says "Audio Cleaner <v> is downloaded and ready to install." with an "Install" button that opens
+  the `.pkg` with `open`; the macOS installer asks for the password. Nothing is silent. (A file the app downloads itself
+  does not get the quarantine flag, so Gatekeeper does not block the opened `.pkg`.)
+* **Settings.** The checkbox, a "Check now" button and a line of text: "You have the newest version (2.0.15).",
+  "Downloading 2.0.16... 40%", "Version 2.0.16 is ready...", or the error. Turning the checkbox off stops checks and
+  automatic installs; the user can still install a new version by hand.
+
+**The signature.** CI signs `update.json` in the release job (`desktop.yml`) with a raw Ed25519 signature over the exact
+bytes of the file: `openssl pkeyutl -sign -rawin -inkey KEY.pem -in update.json -out update.json.sig` (64 bytes). The
+private key is the GitHub Actions secret **`UPDATE_SIGNING_KEY`** (the PEM file, with its `-----BEGIN PRIVATE KEY-----`
+lines); a copy is kept offline, outside the repository. The release job builds `update.json` with
+`packaging/make_update_manifest.py` (version, publish time, release page, and the name, size and SHA-256 of the three
+installers, keys sorted), signs it, checks the signature against the key's public half and uploads both files with the
+installers, for automatic and tagged releases alike. It fails closed: **without the secret, or with a key that is not
+the one built into the app, the release gets no `update.json`** (a warning or error annotation shows it) and no installed
+app updates itself; the installers are still published. The public key is `PUBLIC_KEY` in `updater.py` (raw Ed25519,
+base64). Signature checking uses the `cryptography` package, pinned in `requirements.lock` (48.0.1, the newest release
+that still ships a macOS Intel wheel; later releases dropped it) with `cffi` and `pycparser`; the frozen
+`--selftest` makes a key pair, signs and verifies to prove the bundled copy works.
+
+**Checking that updates are live.** After a build: the release page has `update.json` and `update.json.sig`;
+`curl -sL https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest/download/update.json` shows the version and
+hashes; `openssl pkeyutl -verify -rawin -pubin -inkey PUB.pem -in update.json -sigfile update.json.sig` says
+"Signature Verified Successfully" (PUB.pem: `openssl pkey -in KEY.pem -pubout`).
+
+**Rotating the key** (planned, or after a leak). 1. `openssl genpkey -algorithm ed25519 -out new.pem`.
+2. Public half in app form: `openssl pkey -in new.pem -pubout -outform DER | tail -c 32 | base64`. 3. Put that into
+`PUBLIC_KEY` in `updater.py`, store `new.pem` in the secret `UPDATE_SIGNING_KEY`, push. The new release is signed by the
+new key; **apps already installed only trust the old key**, so they cannot update themselves to it. They have to
+get one last release signed with the OLD key whose app already contains the new `PUBLIC_KEY`: do step 3 in two pushes
+(first change `PUBLIC_KEY` while the secret still holds the old key, wait for that release; then replace the secret).
+`make_update_manifest.py check-key` (run by the release job) refuses a secret that does not match `PUBLIC_KEY`, so a
+mistake in the order publishes no manifest instead of one nobody trusts. Users who miss the bridging release install
+the newest setup by hand.
+
+**If the secret leaks.** The key alone does not let anyone push a file to the apps: the manifest only names a file in
+this repository's releases (the app builds the address itself and downloads it over https), so an attacker also needs
+write access to the repository to publish a release. Treat a leak as serious anyway: 1. delete the secret at once (a
+release without the key gets no manifest); 2. look at the releases and the workflow runs for anything you did not
+make, and delete a release with an `update.json` you did not make (apps then see the previous release); 3. if only the
+key leaked, rotate it with the two pushes above; 4. if the GitHub account or a token leaked as well, nobody can say what
+was signed: make a new key, change `PUBLIC_KEY`, publish new installers, and tell users (release page) to install the
+newest setup by hand once, because installed apps keep trusting the old key. Rotate the key as well if a machine that
+held a copy was lost.
+
+**Owner to-do.** Add the secret `UPDATE_SIGNING_KEY` (GitHub > Settings > Secrets and variables > Actions) with the
+contents of `~/audio-cleaner/secrets/update-signing-key.pem`. Not yet exercised on real machines: see the checklist
+at the end of this file.
 
 ## Signing (optional, recommended)
 
@@ -223,8 +309,9 @@ to 2 GiB each.
 
 ## Updating
 
-To update, just run the new setup (the .exe or the .pkg) over the installed app. There is nothing to uninstall first;
-it is the same install, done again, and the models are not downloaded again.
+The installed app updates itself (see "Automatic updates"); by hand, just run the new setup (the .exe or the .pkg) over
+the installed app. There is nothing to uninstall first; it is the same install, done again, and the models are not
+downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
 
 * **Windows.** Setup closes the running app, reuses the folder and the mode (per user or for all users) of the previous
   install (`UsePreviousAppDir`/`UsePreviousPrivileges`; the `AppId` never changes), deletes the old program files
@@ -292,5 +379,11 @@ upgraded unpinned before the install (`python -m pip install --upgrade pip`).
   downloads exist" job is green.
 
 * Set the Apple and Azure secrets if you want signed installers (optional).
+* Add the secret `UPDATE_SIGNING_KEY` (the contents of `~/audio-cleaner/secrets/update-signing-key.pem`) so releases get
+  a signed `update.json`; without it nothing updates itself (see "Automatic updates").
 * Push, run the workflow once via "Run workflow", and download the three artifacts to test on real machines. The
-  Windows and macOS jobs have not been exercised yet.
+  Windows and macOS jobs have not been exercised yet. On real machines also check the updates: install an older
+  build, publish a newer one, and see (Windows, per user and for all users) the banner, "Restart now" (the new version
+  starts, not elevated), closing the app instead (silent install, no window, no console flash, the app starts normally
+  next time), a declined administrator prompt, a running batch; (macOS, both architectures) the "Install" button
+  opens the installer. Check the Windows install log if `/RELAUNCH=1` or `{param:...}` misbehaves.

@@ -67,7 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    # The app only goes online to download a model when asked to: keep the libraries it uses from doing so.
+    # The app goes online only to download a model when asked to and (setting on) to look for an update, with its own
+    # code (updater.py, models.py): keep the libraries it uses from doing so.
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
     if sys.platform == "win32":

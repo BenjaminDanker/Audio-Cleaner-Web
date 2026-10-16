@@ -13,6 +13,7 @@ dependencies = [
   "PySide6-Essentials>=6.7",
   "PySide6-Addons>=6.7",  # QtMultimedia for the preview
   "faster-whisper>=1.1",
+  "cryptography>=46",  # checks the signature of the update information (audio_cleaner_desktop/updater.py)
 ]
 
 [project.gui-scripts]

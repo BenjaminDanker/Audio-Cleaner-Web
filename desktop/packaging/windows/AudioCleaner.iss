@@ -15,6 +15,11 @@
 ; user or all users), closes the running app, deletes the old program files (_internal) before copying the new ones,
 ; and downloads no model that is already complete in {app}\models (installer_models.py). {app}\models, the settings
 ; (registry), the history and the models the app downloaded itself are never touched by an update.
+;
+; The app updates itself by running this setup silently over the install (audio_cleaner_desktop/updater.py):
+;   AudioCleaner-x.y.z-Windows.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART [/CURRENTUSER or /ALLUSERS] [/RELAUNCH=1]
+; A silent setup shows no model page and downloads no model. /RELAUNCH=1 ("Restart now" in the app) makes a silent
+; setup start the new version when it is done, as the user who started setup, not elevated; without it nothing starts.
 
 #ifndef AppVersion
   #error Pass /DAppVersion=x.y.z
@@ -92,8 +97,16 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; The app's own update ("Restart now"): the silent setup starts the new version.
+Filename: "{app}\{#AppExe}"; Flags: nowait runasoriginaluser; Check: RelaunchAfterSilentUpdate
 
 [Code]
+{ Only the app's own silent update asks for this (/RELAUNCH=1): a silent install by hand starts nothing. }
+function RelaunchAfterSilentUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
+
 { The models and history the app made in the user's profile are not part of the install log: ask before removing them. }
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var

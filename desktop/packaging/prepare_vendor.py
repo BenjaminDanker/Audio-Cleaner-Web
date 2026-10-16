@@ -61,7 +61,7 @@ WHISPER_DIR_NAME = "whisper-small"
 # Distributions whose notices are collected (plus everything they require at run time).
 PYTHON_ROOTS = [
     "PySide6_Essentials", "PySide6_Addons", "shiboken6", "numpy", "scipy", "pyloudnorm", "faster-whisper", "ctranslate2",
-    "tokenizers", "huggingface_hub", "onnxruntime", "livekit",
+    "tokenizers", "huggingface_hub", "onnxruntime", "livekit", "cryptography",
 ]
 OPTIONAL_ROOTS = ["future"]  # older pyloudnorm releases need it
 # Installed but not shipped: PyAV carries GPL builds of x264/x265, so the frozen app uses a stub instead

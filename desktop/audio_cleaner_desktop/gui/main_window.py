@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Iterable
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
 from acw_common.ffmpeg import MediaError
 
 from .. import __version__, config, engine, models, resources, sysinfo
+from ..updater import UpdateController
 from . import media, queue_view, shell, tips
 from .about import AboutDialog
 from .history import DONE, FAILED, Entry, HistoryStore
@@ -110,6 +112,7 @@ class MainWindow(QMainWindow):
         settings: QSettings | None = None,
         history_path: Path | None = None,
         runner=engine.process,
+        updater: UpdateController | None = None,
     ):
         super().__init__()
         self.setWindowTitle(config.APP_NAME)
@@ -117,6 +120,8 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._qs = settings if settings is not None else QSettings()
         self.prefs = Preferences(self._qs)
+        self.updater = updater or UpdateController(self.prefs, self)
+        self._restart_when_idle = False  # "Restart now" was pressed while files were being cleaned
         self.history = HistoryStore(history_path or data_dir() / "history.sqlite3")
         self.queue = JobQueue(self, runner)
         self.queue.set_parallel(self.prefs.parallel)
@@ -169,7 +174,7 @@ class MainWindow(QMainWindow):
 
         help_menu = self.menuBar().addMenu("&Help")
         about = QAction(f"&About {config.APP_NAME}", self, menuRole=QAction.MenuRole.AboutRole)
-        about.triggered.connect(lambda: AboutDialog(self).exec())
+        about.triggered.connect(lambda: AboutDialog(self, updates_on=self.prefs.check_updates).exec())
         logs = QAction("Open &log folder", self)
         logs.triggered.connect(lambda: shell.open_path(log_dir()))
         help_menu.addActions([about, logs])
@@ -205,10 +210,13 @@ class MainWindow(QMainWindow):
         self.banner_disk = Banner()
         self.banner_models = Banner()
         self.banner_models.action.connect(self.fetch_models)
+        self.banner_update = Banner()
+        self.banner_update.action.connect(self._update_action)
         self._model_queue: list[SpeechModelDownloader] = []
         layout.addWidget(self.banner_missing)
         layout.addWidget(self.banner_disk)
         layout.addWidget(self.banner_models)
+        layout.addWidget(self.banner_update)
         if self._missing:
             self.banner_missing.show_message(
                 "Audio Cleaner is missing some of its own files (" + ", ".join(self._missing) + "). "
@@ -244,6 +252,7 @@ class MainWindow(QMainWindow):
                                 and self._show_model_progress(done, total))
         self.settings_panel = SettingsPanel(
             self.prefs, self.speech_download, highs_downloader=self.highs_download, voice_downloader=self.voice_download,
+            updater=self.updater,
         )
         self._settings_scroll = scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -288,6 +297,7 @@ class MainWindow(QMainWindow):
         self.clear_button.clicked.connect(self.clear_finished)
         self.settings_panel.changed.connect(self._settings_changed)
         self.tabs.currentChanged.connect(self._tab_changed)
+        self.updater.readyChanged.connect(self._update_ready)
 
         q = self.queue
         q.itemStarted.connect(self._on_started)
@@ -671,6 +681,8 @@ class MainWindow(QMainWindow):
         self._awake.release()
         engine.release_memory()  # an idle app does not keep the models in memory
         self._refresh_state()
+        if self._restart_when_idle:
+            QTimer.singleShot(0, self._restart_for_update)
         done, failed = self._batch_done, self._batch_failed
         if (done or failed) and not self.isActiveWindow():
             text = _plural(done, "file", "files") + " cleaned" + (f", {failed} failed" if failed else "")
@@ -697,6 +709,47 @@ class MainWindow(QMainWindow):
             self.history_page.refresh()
         else:
             self._history_stale = True  # drawn when the tab is opened
+
+    # -- updates --------------------------------------------------------------------------------------------
+
+    def _update_ready(self) -> None:
+        """A newer version has been downloaded (updater.py checked its signature and checksum)."""
+        version = self.updater.ready_version
+        if not version:
+            self.banner_update.hide()
+        elif sys.platform == "darwin":
+            self.banner_update.show_message(f"Audio Cleaner {version} is downloaded and ready to install.", "info", action_text="Install")
+        else:
+            self.banner_update.show_message(
+                f"Audio Cleaner {version} is ready. It installs when you close the app.", "info", action_text="Restart now")
+
+    def _update_action(self) -> None:
+        version = self.updater.ready_version
+        if not version:
+            return
+        if sys.platform == "darwin":
+            if self.updater.open_installer():
+                self.banner_update.show_message(
+                    f"The installer for {version} is open. Quit Audio Cleaner while it installs.", "info")
+            else:
+                self.banner_update.show_message("The update could not be opened. It will be downloaded again the next time.", "warn")
+            return
+        if self.queue.busy:  # never interrupt a batch
+            self._restart_when_idle = True
+            self.banner_update.show_message(
+                f"Audio Cleaner will restart to install {version} when the files are finished.", "info")
+            return
+        self._restart_for_update()
+
+    def _restart_for_update(self) -> None:
+        """Close the app; setup then installs the new version and starts it (updater.install_on_close)."""
+        self._restart_when_idle = False
+        if self.queue.busy or self._closing:
+            return
+        self.updater.relaunch = True
+        self.close()
+        if not self._closing:  # closing was refused: stay as we were
+            self.updater.relaunch = False
 
     # -- preview / reveal -----------------------------------------------------
 
@@ -894,6 +947,7 @@ class MainWindow(QMainWindow):
             return
         self._closing = True
         self._pool.clear()  # probes still waiting in line are not needed any more
+        self.updater.cancel()  # a download resumes from where it stopped next time
         for dl in self._downloaders():
             dl.cancel()  # resumes from where it stopped next time
         for signal in (self.queue.itemFinished, self.queue.itemFailed, self.queue.itemCancelled, self.queue.idle):
@@ -912,6 +966,7 @@ class MainWindow(QMainWindow):
         self._qs.setValue("tab", self.tabs.currentIndex())
         self._qs.sync()
         self.history.close()
+        self.updater.install_on_close()  # Windows: setup for a downloaded update starts now and outlives the app
         super().closeEvent(event)
         if not stopped:
             # A file is in the middle of a step that does not stop quickly. Leave without waiting for it: what it

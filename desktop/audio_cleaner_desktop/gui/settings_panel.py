@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from .. import engine, resources, sysinfo
+from ..updater import UpdateController
 from . import tips
 from .preferences import Preferences
 from .speech_model import SpeechModelDownloader, SpeechModelPanel
@@ -74,10 +75,11 @@ class SettingsPanel(QFrame):
 
     def __init__(self, prefs: Preferences, downloader: SpeechModelDownloader | None = None, parent: QWidget | None = None,
                  highs_downloader: SpeechModelDownloader | None = None,
-                 voice_downloader: SpeechModelDownloader | None = None):
+                 voice_downloader: SpeechModelDownloader | None = None, updater: UpdateController | None = None):
         super().__init__(parent)
         self.setObjectName("Card")
         self._prefs = prefs
+        self.updater = updater or UpdateController(prefs, self)
         self.downloader = downloader or SpeechModelDownloader(self)
         self.highs_downloader = highs_downloader or SpeechModelDownloader(self, resources.HIGHS_MODEL)
         self.voice_downloader = voice_downloader or SpeechModelDownloader(self, resources.VOICE_MODEL)
@@ -245,6 +247,31 @@ class SettingsPanel(QFrame):
             "Automatic picks a number that suits your computer, and never more than its memory allows.",
             self._parallel,
         ))
+
+        self._updates = WrapCheck("Check for updates when Audio Cleaner starts")
+        self._updates.setToolTip("Looks on GitHub for a newer version a few seconds after the app starts, at most once a day")
+        updates_row = _Row(
+            "Updates",
+            "When this is on, Audio Cleaner looks on GitHub for a newer version a few seconds after it starts (at most "
+            "once a day) and downloads it in the background. It sends nothing but a normal web request: your IP "
+            "address and the version of this app.\n\n"
+            "\u2022 Windows: the new version installs by itself when you close the app, over the old one. Your settings, "
+            "history and models stay.\n"
+            "\u2022 Mac: a message offers to open the installer; it asks for your password as any installer does.\n\n"
+            "Every update is checked against a digital signature and a checksum before it is used. Turn this off to "
+            "update by hand (download the new installer from the releases page and run it).",
+            self._updates,
+        )
+        update_line = QHBoxLayout()
+        self._check_now = QPushButton("Check now")
+        self._check_now.setToolTip("Look for a newer version right now")
+        self._update_status = QLabel()
+        self._update_status.setObjectName("Small")
+        self._update_status.setWordWrap(True)
+        update_line.addWidget(self._check_now)
+        update_line.addWidget(self._update_status, 1)
+        updates_row.layout_.addLayout(update_line)
+        layout.addWidget(updates_row)
         layout.addStretch(1)
 
         self._load()
@@ -260,6 +287,15 @@ class SettingsPanel(QFrame):
         self._format.currentIndexChanged.connect(lambda _: self._store("audio_format", self._format.currentData()))
         self._parallel.currentIndexChanged.connect(lambda _: self._store("parallel", self._parallel.currentData()))
         self._where.changed.connect(self._where_changed)
+        self._updates.toggled.connect(lambda v: self._store("check_updates", v))
+        self._check_now.clicked.connect(self.updater.check_now)
+        self.updater.statusChanged.connect(self._show_update_status)
+        self._show_update_status(self.updater.status)
+
+    def _show_update_status(self, text: str) -> None:
+        self._update_status.setText(text)
+        self._update_status.setVisible(bool(text))
+        self._check_now.setEnabled(not self.updater.busy)  # one check at a time
 
     def _load(self) -> None:
         p = self._prefs
@@ -274,6 +310,7 @@ class SettingsPanel(QFrame):
         _select(self._language, p.language)
         _select(self._format, p.audio_format)
         _select(self._parallel, p.parallel)
+        self._updates.setChecked(p.check_updates)
         mode = p.output_mode if p.output_folder else "next"
         self._where.set_value(mode)
         self._refresh_enabled()
@@ -306,7 +343,7 @@ class SettingsPanel(QFrame):
         sized once to fit them all."""
         spacing = self.layout().spacing() // 2 + 6
         optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel, self.voice_panel,
-                    self._rebuild_note)
+                    self._rebuild_note, self._update_status)
         extra = sum(w.sizeHint().height() + spacing for w in optional if w.isHidden())
         return self.sizeHint().height() + extra
 

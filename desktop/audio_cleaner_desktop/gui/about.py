@@ -17,6 +17,12 @@ QT_NOTICE = (
     "the application folder with your own builds. FFmpeg is included as separate programs built under the LGPL v2.1; "
     "see ffmpeg-buildinfo.txt for sources and build steps."
 )
+ONLINE_NOTICE = (
+    "Your files never leave your computer. Audio Cleaner goes online only to download its models (when you set it up "
+    "or ask for them) and, if \u201cCheck for updates when Audio Cleaner starts\u201d is on in Settings, to look for a newer "
+    "version on GitHub and download it. Those requests contain no more than any web page request: your IP address and "
+    "the version of this app."
+)
 
 
 def downloaded_models():
@@ -32,7 +38,7 @@ def notice_files() -> list[Path]:
 
 
 class AboutDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None):
+    def __init__(self, parent: QWidget | None = None, updates_on: bool | None = None):
         super().__init__(parent)
         self.setWindowTitle(f"About {config.APP_NAME}")
         self.setMinimumWidth(560)
@@ -52,10 +58,22 @@ class AboutDialog(QDialog):
         version = QLabel(f"Version {__version__}")
         version.setObjectName("Muted")
         rights = QLabel("Free to use \u00b7 \u00a9 2026 Benjamin Danker")
-        for w in (name, version, rights):
+        widgets = [name, version, rights]
+        if updates_on is not None:
+            self.updates_label = QLabel(f"Updates: {'on' if updates_on else 'off'}")
+            self.updates_label.setObjectName("Muted")
+            self.updates_label.setToolTip(
+                "Looks for a newer version on GitHub when the app starts. Change it in Settings > Updates."
+            )
+            widgets.insert(2, self.updates_label)
+        for w in widgets:
             text.addWidget(w)
         head.addLayout(text, 1)
         layout.addLayout(head)
+
+        online = QLabel(ONLINE_NOTICE)
+        online.setWordWrap(True)
+        layout.addWidget(online)
 
         qt = QLabel(QT_NOTICE)
         qt.setWordWrap(True)

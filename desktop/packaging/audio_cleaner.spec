@@ -51,7 +51,10 @@ datas = [
     # loaded at run time through the package path (About dialog, window icon)
     (str(DESKTOP / "audio_cleaner_desktop" / "assets"), "audio_cleaner_desktop/assets"),
 ]
-hiddenimports = []
+hiddenimports = [
+    # the updater checks the signature of update.json with cryptography's Ed25519 (a compiled Rust module + cffi)
+    "cryptography.hazmat.bindings._rust", "cryptography.hazmat.primitives.asymmetric.ed25519", "_cffi_backend",
+]
 if sys.platform == "win32":
     # `platform` imports _wmi inside a try: block; keep it, or platform.uname() (onnxruntime and truststore ask for it
     # at import time) falls back to running `cmd /c ver`, which flashes a console window.

@@ -215,6 +215,30 @@ def _check_gui() -> None:
             window.history.close()
 
 
+def _check_update_verification() -> None:
+    """The bundled `cryptography` can check an Ed25519 signature the way the updater does: a signed manifest is
+    accepted, a tampered one is refused, and the embedded public key is a valid key."""
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+
+    from . import updater
+
+    Ed25519PublicKey.from_public_bytes(base64.b64decode(updater.PUBLIC_KEY, validate=True))  # the built-in key loads
+    private = Ed25519PrivateKey.generate()
+    public = base64.b64encode(private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+    data = b'{"version": "1.0.0"}'
+    updater.verify_signature(data, private.sign(data), public)
+    for bad_data, bad_key in ((data + b" ", public), (data, updater.PUBLIC_KEY)):
+        try:
+            updater.verify_signature(bad_data, private.sign(data), bad_key)
+        except updater.UpdateError:
+            continue
+        raise RuntimeError("the update signature check accepted a signature it should refuse")
+
+
 def _check_windows_quiet() -> None:
     """Windows: `platform` must be able to ask WMI itself (else it runs `cmd /c ver`), and programs libraries start
     must not get a console window."""
@@ -250,6 +274,7 @@ def selftest(gui: bool = False) -> int:
         if abs(info.duration - 3.0) > 0.2 or info.audio_channels != 1 or decoded.size < 2.8 * sr:
             raise RuntimeError(f"FFmpeg round-trip mismatch (duration {info.duration:.2f} s)")
         _check_windows_quiet()
+        _check_update_verification()
         _check_speech_runtime()
         skipped = _check_models()
         if gui:
