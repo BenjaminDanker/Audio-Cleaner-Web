@@ -40,8 +40,14 @@ MAX_PENDING_REFS = 50  # reference frames kept for mic frames that haven't arriv
 # people who pay.
 TRIAL_CAPACITY_FRACTION = 0.7
 MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "500"))  # thread sanity bound
+# The one shared caption decoder does at most about 13x real time in total however many streams share it (measured
+# 2026-10-16: 12 streams already creep, 16 fall further behind every second, 24 grow the worker's memory until the
+# kernel kills it and every live session drops). The units model underrates a caption stream, so the streams get
+# their own cap: 10 is the measured safe state (half a second of delay).
+MAX_CAPTION_STREAMS = int(os.environ.get("ACW_STREAM_MAX_CAPTION_STREAMS", "10"))
 _units = 0.0
 _active = 0
+_caption_streams = 0
 _monitor: hostload.HostLoad | None = None
 
 
@@ -67,6 +73,12 @@ def admit(cfg: dict) -> tuple[bool, list[dict]]:
         return False, []
     if not cpusplit.session_units({**cfg, "echo_reference": False}):
         return True, []  # only external captions: echo cancellation alone is never worth refusing
+    if cfg.get("captions") == "local" and _caption_streams >= MAX_CAPTION_STREAMS:
+        # Standard captions are full whatever the units say: keep the rest of the setup if it fits, else extra-accurate alone.
+        without_captions = cpusplit.session_units({**cfg, "captions": None})
+        if _units + without_captions <= capacity_units():
+            return False, [{"captions": "premium"}]
+        return False, [{"denoise": None, "captions": "premium"}]
     cap = capacity_units()
     if _units + units <= cap:
         return True, []
@@ -92,9 +104,10 @@ def _repin() -> None:
 
 
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    global _active, _units
+    global _active, _units, _caption_streams
     settings = get_settings()
     admitted = False
+    counted_captions = False
     units = 0.0
     loop = asyncio.get_running_loop()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="live-dsp")
@@ -121,6 +134,9 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         _active += 1
         _units += units
         admitted = True
+        if cfg.get("captions") == "local":
+            _caption_streams += 1
+            counted_captions = True
         _repin()
         chain = await loop.run_in_executor(
             executor, LiveChain, settings.bin_dir / "libdf.so", settings.models_dir, tier, float(cfg.get("atten_lim_db", 100.0))
@@ -213,6 +229,8 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         if admitted:
             _active -= 1
             _units = max(0.0, _units - units)
+            if counted_captions:
+                _caption_streams = max(0, _caption_streams - 1)
             _repin()
         if captioner is not None:
             executor.submit(captioner.close)  # waits for the recogniser's current tick: not on the event loop

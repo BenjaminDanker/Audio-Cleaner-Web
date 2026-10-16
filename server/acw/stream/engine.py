@@ -240,6 +240,28 @@ def _tidy(text: str) -> str:
     return text[:1].upper() + text[1:]
 
 
+# A caption stream is shed, not queued, when the decoder falls behind it (see StreamingCaptioner._take_audio).
+MAX_BACKLOG_SAMPLES = 2 * SAMPLE_RATE  # 2 s of 48 kHz audio waiting for the decoder
+KEEP_BACKLOG_SAMPLES = SAMPLE_RATE // 2  # what is kept of it: the newest half second
+RECOVERED_BACKLOG_SAMPLES = SAMPLE_RATE // 2  # the incident is over once a tick finds less than this waiting
+CAPTIONS_BEHIND_MESSAGE = "Captions are running behind because live is very busy, so some words are being skipped. They catch up on their own."
+
+
+def shed_backlog(chunks: list[np.ndarray], keep: int) -> tuple[list[np.ndarray], int]:
+    """Drop the oldest audio, keeping the newest `keep` samples (whole chunks, the oldest one trimmed). Returns (kept, dropped samples)."""
+    kept: list[np.ndarray] = []
+    have = 0
+    for c in reversed(chunks):
+        if have >= keep:
+            break
+        if have + len(c) > keep:
+            c = c[len(c) - (keep - have):]
+        kept.append(c)
+        have += len(c)
+    kept.reverse()
+    return kept, sum(len(c) for c in chunks) - have
+
+
 class StreamingCaptioner:
     """Live English captions for one session: a partial line while someone
     talks, a final line at each pause. Fed the session's original (not
@@ -259,6 +281,7 @@ class StreamingCaptioner:
         self._last_text = ""
         self._line = 0
         self.closed = False
+        self._behind = False  # one "captions_behind" warning per incident
         self.engine.add(self)
 
     def feed(self, x48: np.ndarray) -> None:
@@ -269,6 +292,17 @@ class StreamingCaptioner:
         with self._pending_lock:
             chunks, self._pending = self._pending, []
         if chunks:
+            total = sum(len(c) for c in chunks)
+            if total > MAX_BACKLOG_SAMPLES:
+                # The decoder is more than ~2 s behind this stream (too many streams, or the box is busy). Queueing the
+                # rest would only make every caption later and grow memory: drop the oldest audio, say so once.
+                chunks, dropped = shed_backlog(chunks, KEEP_BACKLOG_SAMPLES)
+                self._fed += dropped // 3  # the captions' times keep following the talk, not only the audio that was fed
+                if not self._behind:
+                    self._behind = True
+                    self.emit({"type": "warning", "code": "captions_behind", "message": CAPTIONS_BEHIND_MESSAGE})
+            elif total < RECOVERED_BACKLOG_SAMPLES:
+                self._behind = False
             x = self._to16k(np.concatenate(chunks))
             self.stream.accept_waveform(_StreamingRecognizer.INPUT_RATE, x)
             self._fed += len(x)
