@@ -93,7 +93,7 @@ export default function Landing() {
   const tx = pricing?.free;
   const live = findRate(pricing, 'stream_denoise', 'light');
   const email = SITE.supportEmail.trim();
-  const { contact } = useAuth();
+  const { contact, signedIn, known } = useAuth();
   return (
     <>
       {notice === 'account-deleted' && (
@@ -111,9 +111,9 @@ export default function Landing() {
             <p className="lead">Take the hiss, hum and room noise out of podcasts, calls, lectures and videos. It all happens on your own device, so your file never leaves it.</p>
             <div className="row">
               <Link to="/app" className="btn btn-primary btn-lg">Try it on a file</Link>
-              <a href="#products" className="btn btn-secondary btn-lg">See what else we do</a>
+              <a href="#pricing" className="btn btn-secondary btn-lg">See what it costs</a>
             </div>
-            <p className="muted small">Nothing is uploaded. No watermark.</p>
+            <p className="muted small">No watermark, no daily limit.</p>
           </div>
           <HeroArt />
         </div>
@@ -147,8 +147,8 @@ export default function Landing() {
             </article>
             <article className="card product-card">
               <div className="icon"><IconText /></div>
-              <h3>Subtitles &amp; transcripts <span className="badge badge-free">Free every day</span></h3>
-              <p>Get TXT, SRT and VTT files from your recording. Choose Standard, or Extra accurate for tricky audio.{tx && <> Free: {Math.round(tx.transcribeSecondsPerDay / 60)} minutes a day.</>}</p>
+              <h3>Subtitles &amp; transcripts {tx && <span className="badge badge-free">{Math.round(tx.transcribeSecondsPerDay / 60)} min free a day</span>}</h3>
+              <p>Get TXT, SRT and VTT files from your recording. Choose Standard, or Extra accurate for tricky audio. They’re made on our side, so the free minutes are counted.</p>
               <span className="spacer" />
               <Link to="/app" className="btn btn-secondary">Get subtitles</Link>
             </article>
@@ -176,14 +176,14 @@ export default function Landing() {
           <div className="card stack">
             <h3 className="mb0">How credit works</h3>
             <ul className="mb0">
-              <li><b>No subscription.</b> Add credit from {pricing ? moneyCents(pricing.topup.minCents) : '$10'} and use it when you need it.</li>
+              <li><b>No subscription.</b> Add credit from {pricing ? moneyCents(pricing.topup.minCents) : '$5'} and use it when you need it.</li>
               <li><b>You only pay for what you use.</b> You see an estimate before you upload. Live is counted by the second.</li>
               <li><b>Auto-reload is optional.</b> It tops you up when you run low, up to a monthly limit you choose. Turn it off any time.</li>
               <li><b>Changed your mind?</b> Unused credit can be refunded within 14 days. The <Link to="/terms">Terms</Link> have the details.</li>
             </ul>
             <div className="row">
               <Link to="/app/billing" className="btn btn-primary">Add credit</Link>
-              <Link to="/login" className="btn btn-ghost">Make an account, it&rsquo;s free</Link>
+              {known && !signedIn && <Link to="/login" className="btn btn-ghost">Sign in to start</Link>}
             </div>
           </div>
         </div>

@@ -35,6 +35,11 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (dfn.length) throw new Error('fetched: ' + dfn.join(', '));
     return 'sign-in page, 0 requests to /dfn/';
   });
+  await check('landing, signed out: "Sign in to start" by the prices', async () => {
+    await page.goto(`${BASE}/`);
+    await page.getByRole('link', { name: 'Sign in to start' }).waitFor();
+    return 'ok';
+  });
   await check('signing in from /app comes back to /app (email link in the same tab)', async () => {
     await page.goto(loginLink(`return-${Date.now()}@example.com`));
     await page.waitForURL(/\/audio\/app$/, { timeout: 15000 });
@@ -59,11 +64,14 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
   await check('landing: product cards point to /app, /app, /app/live, /app (nothing to /free); hero line; availability answer', async () => {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('.product-card');
+    await page.getByText('min free a day').waitFor(); // once the price list is in
     const cards = await page.locator('.product-card').evaluateAll((els) => els.map((e) => [e.querySelector('h3').textContent.replace(/\s+/g, ' ').trim(), new URL(e.querySelector('a').href).pathname]));
-    const want = [['Free, in your browser Free', '/audio/app'], ['Clean & polish', '/audio/app'], ['Live for streamers', '/audio/app/live'], ['Subtitles & transcripts Free every day', '/audio/app']];
+    const want = [['Free, in your browser Free', '/audio/app'], ['Clean & polish', '/audio/app'], ['Live for streamers', '/audio/app/live'], ['Subtitles & transcripts 60 min free a day', '/audio/app']];
     if (JSON.stringify(cards) !== JSON.stringify(want)) throw new Error(JSON.stringify(cards));
     if (await page.locator('a[href$="/free"]').count()) throw new Error('a link to /free on the landing page');
-    if (!(await page.locator('.hero').innerText()).includes('Nothing is uploaded. No watermark.')) throw new Error('hero line');
+    if (!(await page.locator('.hero').innerText()).includes('No watermark, no daily limit.')) throw new Error('hero line');
+    if ((await page.getByRole('link', { name: 'See what it costs' }).getAttribute('href')) !== '#pricing') throw new Error('the second hero button should go to the prices');
+    if (await page.getByRole('link', { name: /Sign in to start|Make an account/ }).count()) throw new Error('a sign-in button for someone signed in');
     const faq = await page.locator('.faq').textContent();
     if (!/isn.t offered in the EU\/EEA, the UK or Switzerland/.test(faq)) throw new Error('availability answer missing');
     return 'ok';

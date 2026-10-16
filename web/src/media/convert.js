@@ -16,8 +16,16 @@ import { buildWav } from './wav.js';
 
 export class RemuxUnsupported extends Error {}
 
-/** A video this big is not rebuilt in the browser (the finished file is assembled in memory). */
+/** Without a place on disk for it (see diskTarget), a video this big is not rebuilt: the finished file would be
+ *  assembled in memory. Browsers that have one (Chrome, Edge, Firefox) build any size the disk has room for. */
 export const MAX_BUILD_BYTES = 1.5 * 1024 ** 3;
+
+/** Can this browser write a finished file straight to disk (its private storage), so its size doesn't matter? */
+export const canBuildOnDisk = () => typeof navigator !== 'undefined' && typeof navigator.storage?.getDirectory === 'function'
+  && typeof globalThis.FileSystemFileHandle?.prototype?.createWritable === 'function';
+
+/** The most this browser can rebuild for a video of `bytes` (null: no limit but the disk's free room). */
+export const buildLimit = () => (canBuildOnDisk() ? null : MAX_BUILD_BYTES);
 
 /* ------------------------------------------------------------------------------------------------ the formats */
 
@@ -285,8 +293,8 @@ function plainCues(vtt) {
  * read: same-length CodecID (EBML strings may end in zero bytes) and its "WEBVTT" CodecPrivate turned into a Void
  * element. Only the exact bytes mediabunny writes are touched; if they are not found the file stays as it was.
  */
-function relabelAsSrt(buf) {
-  const b = new Uint8Array(buf);
+function relabelAsSrt(buf, whole = true) {
+  const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   const enc = new TextEncoder();
   const find = (pat, from, to) => {
     for (let i = b.indexOf(pat[0], from); i >= 0 && i <= to - pat.length; i = b.indexOf(pat[0], i + 1)) {
@@ -296,7 +304,7 @@ function relabelAsSrt(buf) {
     }
     return -1;
   };
-  const end = Math.min(b.length, 1 << 20); // the track list is at the start of the file
+  const end = whole ? Math.min(b.length, 1 << 20) : b.length; // in a whole file the track list is near the start
   const id = find([0x86, 0x8d, ...enc.encode('S_TEXT/WEBVTT')], 0, end);
   if (id < 0) return buf;
   b.set([...enc.encode('S_TEXT/UTF8'), 0, 0], id + 2);
@@ -313,6 +321,63 @@ export function srtToVtt(srt) {
 }
 
 /* ------------------------------------------------------------------------------------------------ making the file */
+
+// Finished files written to the browser's private storage. The newest one stays until the next build (its download
+// may still be reading it); older ones, and any left from an earlier visit, are removed.
+const BUILD_PREFIX = 'build-';
+async function clearOldBuilds(root) {
+  try {
+    for await (const name of root.keys()) {
+      if (name.startsWith(BUILD_PREFIX)) await root.removeEntry(name).catch(() => {});
+    }
+  } catch { /* nothing to clear */ }
+}
+
+/**
+ * Where a video file is written while it is made: a file on disk in the browser's private storage when the browser
+ * has one (memory use stays small whatever the size), else memory. `needBytes` is a rough size of the result.
+ * `relabel`: rewrite the subtitle track's label as the bytes go by (relabelAsSrt).
+ * @returns {Promise<{target, onDisk:boolean, result:()=>Promise<Blob>, drop:()=>Promise<void>}>}
+ */
+async function diskTarget(mb, needBytes, { relabel = false } = {}) {
+  if (canBuildOnDisk()) {
+    let root = null;
+    try {
+      root = await navigator.storage.getDirectory();
+    } catch { /* private storage is switched off (some private windows): use memory */ }
+    if (root) {
+      const name = `${BUILD_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await clearOldBuilds(root);
+      const est = await navigator.storage.estimate?.().catch(() => null);
+      if (est?.quota && est.quota - (est.usage || 0) < needBytes * 1.1) {
+        throw new RemuxUnsupported(`There isn’t enough free space on this device to make the file (it needs about ${Math.ceil(needBytes / 1024 ** 3)} GB). Free some space and try again.`);
+      }
+      const handle = await root.getFileHandle(name, { create: true });
+      const file = await handle.createWritable();
+      const sink = new WritableStream({
+        write: (chunk) => file.write({ type: 'write', position: chunk.position, data: relabel ? relabelAsSrt(chunk.data, false) : chunk.data }),
+        close: () => file.close(),
+        abort: (why) => file.abort(why),
+      });
+      return {
+        target: new mb.StreamTarget(sink, { chunked: true }),
+        onDisk: true,
+        result: () => handle.getFile(),
+        drop: async () => {
+          await file.abort().catch(() => {});
+          await root.removeEntry(name).catch(() => {});
+        },
+      };
+    }
+  }
+  const target = new mb.BufferTarget();
+  return {
+    target,
+    onDisk: false,
+    result: async () => new Blob([relabel ? relabelAsSrt(target.buffer) : target.buffer]),
+    drop: async () => {},
+  };
+}
 
 const abortError = () => new DOMException('Canceled', 'AbortError');
 
@@ -492,10 +557,11 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
   const caps = await outputCaps();
   const px = SIZES.find((s) => s.id === size)?.px || 0;
   const withPicture = !!videoFile && !!info?.hasVideo;
-  if (withPicture && videoFile.size > MAX_BUILD_BYTES) {
-    throw new RemuxUnsupported('This video is too large to rebuild in the browser. Save the cleaned audio and combine it in your video editor.');
+  const store = await diskTarget(mb, (withPicture ? videoFile.size : 0) + (audioFile?.size || 0) + 64 * 1024 ** 2, { relabel: !!subtitles && format === 'mkv' });
+  if (!store.onDisk && withPicture && videoFile.size > MAX_BUILD_BYTES) {
+    throw new RemuxUnsupported('This video is too large for this browser to rebuild (over 1.5 GB). Chrome, Edge or Firefox can do it; or save the cleaned audio and combine it in your video editor.');
   }
-  const output = new mb.Output({ format: makeFormat(mb, format), target: new mb.BufferTarget() });
+  const output = new mb.Output({ format: makeFormat(mb, format), target: store.target });
   const cancels = [];
   let vin = null;
   try {
@@ -576,10 +642,11 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
     if (sound.codec === 'opus' && (format === 'mp4' || format === 'mov')) mkNote.push('The sound is stored as Opus in the MP4 file. Modern browsers and VLC play it; some older video editors do not.');
     if (sound.codec === 'pcm-s16') mkNote.push('The sound is stored uncompressed (PCM), so the file is a little bigger.');
     if (pictureNote) mkNote.unshift(pictureNote);
-    const bytes = subtitles ? relabelAsSrt(output.target.buffer) : output.target.buffer;
-    return done(new Blob([bytes], { type: def.mime }), mkNote.join(' ') || null);
+    const made = await store.result();
+    return done(made.type === def.mime ? made : new Blob([made], { type: def.mime }), mkNote.join(' ') || null);
   } catch (e) {
     await output.cancel().catch(() => {});
+    await store.drop();
     if (signal?.aborted) throw abortError();
     throw e;
   } finally {

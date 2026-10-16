@@ -399,7 +399,10 @@ await check('Free subtitles put into the video in the browser: an MKV with the p
   if (i.v.codec_name !== orig.v.codec_name || i.a.codec_name !== orig.a.codec_name) throw new Error('picture or sound was changed');
   const text = execFileSync(FFMPEG, ['-v', 'error', '-i', p, '-map', '0:s:0', '-f', 'webvtt', '-'], { encoding: 'utf8' });
   if (!/Hello there[\s\S]*Second line/.test(text)) throw new Error(`cues: ${text}`);
-  return `${dl.suggestedFilename()}: ${i.v.codec_name} + ${i.a.codec_name} + ${s.codec_name}`;
+  // the file was made on disk (the browser's private storage), not in memory, so a video of any size can be done
+  const onDisk = await page.evaluate(async () => { const n = []; for await (const k of (await navigator.storage.getDirectory()).keys()) n.push(k); return n.filter((k) => k.startsWith('build-')).length; });
+  if (onDisk !== 1) throw new Error(`files in private storage: ${onDisk}`);
+  return `${dl.suggestedFilename()}: ${i.v.codec_name} + ${i.a.codec_name} + ${s.codec_name}, made on disk`;
 });
 
 await check('under the production Content-Security-Policy: MP3 (blob worker + wasm), Opus and a video type are saved with no violations', async () => {

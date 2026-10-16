@@ -4,7 +4,7 @@ import { useAuth } from '../auth.jsx';
 import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, moneyUsd, shownName } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
 import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
-import { canHoldSubtitles, defaultFormatId, MAX_BUILD_BYTES, serverAudioFormat } from '../media/convert.js';
+import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from '../media/convert.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
@@ -131,7 +131,8 @@ export default function JobForm({ onSubmitted }) {
   // plain black video made here when a video file type is picked.
   const videoResult = isVideo ? !wantsPolish || choice.isVideoFile : wantsPolish && choice.isVideoFile;
   const embedOnServer = isVideo && !info?.viaMediabunny;
-  const tooBigHere = isVideo && !embedOnServer && file && file.size > MAX_BUILD_BYTES;
+  const limit = buildLimit(); // null: this browser writes the result to disk, so any size works
+  const tooBigHere = isVideo && !embedOnServer && file && limit != null && file.size > limit;
   const canEmbed = wantsText && videoResult && !tooBigHere;
   const embedNow = canEmbed && embed;
   const embedHere = embedNow && !embedOnServer;
@@ -524,7 +525,7 @@ export default function JobForm({ onSubmitted }) {
                     </span>
                   </label>
                 )}
-                {wantsText && videoResult && tooBigHere && <p className="small muted mb0" data-testid="embed-too-big">This video is too big to put the subtitles into here (over {gigabytes(MAX_BUILD_BYTES)}). You’ll get the subtitle files to load in your player or video editor.</p>}
+                {wantsText && videoResult && tooBigHere && <p className="small muted mb0" data-testid="embed-too-big">This browser can’t rebuild a video this big (over {gigabytes(limit)}); Chrome, Edge or Firefox can. You’ll get the subtitle files to load in your player or video editor.</p>}
               </div>
             )}
 
