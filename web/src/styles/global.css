@@ -93,6 +93,8 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .narrow { max-width: 780px; }
 .page { padding-block: 28px 64px; min-height: 60vh; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
+.plain-list { list-style: none; padding: 0; margin: 0; }
+.stack-tight { gap: 6px; }
 .stack-lg { display: flex; flex-direction: column; gap: 28px; }
 .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .row-center { justify-content: center; }

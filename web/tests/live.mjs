@@ -43,6 +43,41 @@ await check('live: the test panel is three aligned groups (Noise removal, Captio
   return `3 groups at y=${Math.round(a.y)}, ${Math.round(a.width)}/${Math.round(b.width)}/${Math.round(c.width)} px wide; stack on a phone`;
 });
 
+await check('live: the plugin section offers a download per platform with the version; says so plainly when no download exists yet; no "coming soon"', async () => {
+  const manifest = { version: '0.1.60', files: {
+    'windows-x64': { name: 'a.zip', size: 5242880, sha256: 'a'.repeat(64) }, macos: { name: 'b.tar.xz', size: 4194304, sha256: 'b'.repeat(64) },
+    'ubuntu-debian': { name: 'c.deb', size: 3145728, sha256: 'c'.repeat(64) }, 'linux-other': { name: 'd.tar.xz', size: 2097152, sha256: 'd'.repeat(64) } } };
+  await page.route('**/api/downloads/obs-plugin/manifest.json', (r) => r.fulfill({ json: manifest }));
+  await page.goto(`${BASE}/app/live`);
+  const box = page.getByTestId('plugin-downloads');
+  await box.getByTestId('plugin-version').waitFor();
+  const t = await box.innerText();
+  for (const x of ['Newest version: 0.1.60', 'Windows', 'Mac', 'Ubuntu, Debian, Mint', 'Other Linux', 'C:\\ProgramData\\obs-studio\\plugins', '~/Library/Application Support/obs-studio/plugins', '~/.config/obs-studio/plugins', '5.0 MB']) if (!t.includes(x)) throw new Error(`missing "${x}" in: ${t}`);
+  const hrefs = {};
+  for (const id of ['windows', 'mac', 'ubuntu-debian', 'linux-other']) hrefs[id] = await box.getByTestId(`plugin-${id}`).getAttribute('href');
+  for (const [id, h] of Object.entries(hrefs)) if (!h.endsWith(`/audio/api/downloads/obs-plugin/latest/${id}`) && !h.endsWith(`/api/downloads/obs-plugin/latest/${id}`)) throw new Error(`href ${id}: ${h}`);
+  if (/coming soon|github/i.test(await page.locator('main').innerText())) throw new Error('old or revealing wording on the page');
+  // a platform the manifest does not list gets no button
+  await page.unroute('**/api/downloads/obs-plugin/manifest.json');
+  const small = { version: '0.1.61', files: { macos: manifest.files.macos } };
+  await page.route('**/api/downloads/obs-plugin/manifest.json', (r) => r.fulfill({ json: small }));
+  await page.goto(`${BASE}/app/live`);
+  await box.getByTestId('plugin-mac').waitFor();
+  if (await box.getByTestId('plugin-windows').count()) throw new Error('a button for a file that is not listed');
+  // nothing published yet: plain words, no buttons, no sideways scroll on a phone
+  await page.unroute('**/api/downloads/obs-plugin/manifest.json');
+  await page.route('**/api/downloads/obs-plugin/manifest.json', (r) => r.fulfill({ status: 404, json: { detail: 'Not found.' } }));
+  await page.goto(`${BASE}/app/live`);
+  await box.getByTestId('plugin-unavailable').waitFor();
+  if (await box.locator('a.btn').count()) throw new Error('download buttons without a download');
+  await page.setViewportSize({ width: 360, height: 800 });
+  const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, vw: window.innerWidth }));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  if (m.sw > m.vw + 1) throw new Error('sideways scroll at 360px');
+  await page.unroute('**/api/downloads/obs-plugin/manifest.json');
+  return 'version, 4 buttons, install steps; partial manifest; not-ready message';
+});
+
 await check('live: demo with fake mic, denoise + local captions', async () => {
   await page.goto(`${BASE}/app/live`);
   await page.getByTestId('live-start').waitFor();

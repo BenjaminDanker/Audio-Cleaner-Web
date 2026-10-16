@@ -12,7 +12,8 @@
   models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, ap-bwe/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
               silero-vad/, whisper/{large-v3-turbo,small}   (every file, its source and sha256: deploy/models.lock)
   wasm/       df.js + df_bg.wasm for the browser build
-  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha, metrics.prom   (0700)
+  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha, metrics.prom,
+              downloads/ (the mirrored release files, see "Release downloads")   (0700)
   secrets/    acw.env (web, secrets), acw-worker.env   (0700, files 0600)
   src/        build trees (DeepFilterNet, deepfilter-build) - safe to delete
   dev/        local dev instance (dev.sh) - safe to delete
@@ -66,7 +67,8 @@ Ports on primary-ram (all loopback) and how they reach the VPS:
 | Unit | Listens on (home) | VPS side | Carries |
 |---|---|---|---|
 | `acw-web` | `127.0.0.1:8790` | `127.0.0.1:18790` via `acw-tunnel` (`-o IPQoS=lowdelay`) | everything except the two bulk routes: sign-in, API, billing, the live WebSocket |
-| `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`) and result downloads (`GET /api/jobs/{id}/outputs/{name}`) only |
+| `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`), result downloads (`GET /api/jobs/{id}/outputs/{name}`) and the release downloads (`GET /api/downloads/...`) only |
+| `acw-mirror.timer` | none (a oneshot every 10 minutes) | nothing: it only fetches from the release service | copies the newest release files to `data/downloads/` ("Release downloads") |
 
 Check from the VPS with `curl -s 127.0.0.1:18790/audio/api/health` and `curl -s 127.0.0.1:18794/audio/api/health`.
 
@@ -118,6 +120,70 @@ The router: `IPQoS` marks the two SSH connections so a router that prioritises b
 cake/fq_codel) can favour the live one. It does nothing without such a router; the separate connection and process are
 what helps in any case. Setting up SQM on the home router remains the best second step (docs/launch-checklist.md).
 
+## Release downloads (desktop installers, OBS plugin, model archive)
+
+Users and the apps never see the GitHub repository (it may become private). GitHub Releases stays where CI puts the build
+output; primary-ram keeps a verified copy and serves it under our own domain, from the bulk process (`acw-bulk`, so a
+download never queues in front of live audio, under the same byte-rate cap `ACW_DOWNLOAD_MBPS_TOTAL` as result downloads).
+**Nothing is stored on the VPS**: Caddy only proxies `^/audio/api/(jobs/<id>/outputs/|downloads/)` to the bulk upstream
+(`deploy/vps/audio.caddy`, falling back to the main process like the other bulk routes).
+
+**Addresses** (base `https://mc-multi-world.space/audio/api/downloads`; GET and HEAD, Range works, no sign-in, no redirects):
+
+| Address | What |
+|---|---|
+| `/desktop/update.json`, `/desktop/update.json.sig` | the desktop app's signed update information, byte for byte as CI made it |
+| `/desktop/<file>` | an installer the current manifest lists (the previous version's for 7 days) |
+| `/desktop/latest/windows`, `/mac-apple-silicon`, `/mac-intel` | the current installer, served directly |
+| `/obs-plugin/manifest.json`, `/obs-plugin/manifest.json.sig` | the plugin's signed manifest (the release assets `obs-plugin-manifest.json` and `.sig`) |
+| `/obs-plugin/<file>`, `/obs-plugin/latest/windows`, `/mac`, `/ubuntu-debian`, `/linux-other` | plugin packages; the website's buttons use `latest/...` |
+| `/models/<file>` | the model archive (`AudioCleaner-models-v1.zip`): every `models-v*` archive `deploy/models.lock` lists |
+
+**How it works.** `acw-mirror.timer` starts `acw-mirror.service` (`python -m acw.admin mirror --once`, `acw/mirror.py`) a
+minute after it is enabled and then 10 minutes after each run. A run reads the GitHub REST API (`/repos/<repo>/releases`),
+and per channel: the newest `desktop-v<version>` release (`update.json`, `.sig` and the installers it lists), the
+`obs-plugin-latest` release (manifest, `.sig`, the packages), and the `models-v*` archives named in `deploy/models.lock`
+(`install.sh` copies the lock to `~/audio-cleaner/app/models.lock`; size and sha256 come from it). Before anything is
+published: the Ed25519 signature of the manifest is checked with the public key built into the apps (the `cryptography`
+package if installed, else `openssl`, 3.0 or newer), then every file's size and sha256 (and sha512 when the manifest gives
+it), the size caps (installer 1 GB, plugin 50 MB, models 2 GB), the file names (strict pattern), and that the version is not
+older than the one served. Downloads resume from a `.part` file; the disk must keep 5 GB free (`ACW_MIRROR_MIN_FREE_GB`).
+Then the files are moved to `data/downloads/<channel>/<version>/` and `state.json` (the list of names the routes may serve)
+is replaced atomically, last. A failure at any step publishes nothing: the previous version keeps being served, the error is
+in `mirror-status.json` and the journal, and the monitor mails `mirror_stale` after an hour (a newer release not served) or
+2 hours (no successful run). The previous version's files stay 7 days (downloads in progress), then they are deleted.
+The routes serve only names in `state.json`, open files without following links, re-check the size, and rate-limit the
+start of a file download per network (40 bursts, then one every 45 s; resuming and HEAD cost a tenth).
+
+**Commands.**
+
+```bash
+cd ~/audio-cleaner/app && set -a && . ../secrets/acw-worker.env && set +a
+../venv/bin/python -m acw.admin mirror --status          # what is served and when it was last mirrored
+../venv/bin/python -m acw.admin mirror --once            # run a pass now (what the timer does); --channel desktop|obs-plugin|models
+../venv/bin/python -m acw.admin mirror --once --force    # fetch and publish again even if the served version looks current or newer (a downgrade, a damaged copy)
+../venv/bin/python -m acw.admin mirror --verify          # hash every served file against its recorded checksum (no network)
+systemctl --user start acw-mirror.service                # the same as --once, with the unit's settings; journalctl --user -u acw-mirror
+```
+
+A release must not be older than the served one: to roll the desktop app or the plugin back on purpose, publish a newer
+version with the old contents, or delete `data/downloads/<channel>/state.json` and run `mirror --once` (the channel is
+empty for the minute it takes).
+
+**If the repository becomes private.** The mirror needs a token: GitHub > Settings > Developer settings > Fine-grained
+personal access tokens > repository access "Only select repositories" = this one repository, permission **Contents: Read-only**
+(nothing else), and put the token alone in `~/audio-cleaner/secrets/github-releases-read.token` (`chmod 600`; another place:
+`ACW_GITHUB_TOKEN_FILE` in `acw-worker.env`). It is sent only to `api.github.com`, never to the storage host the download
+redirects to, and never written to a log. Without the file the mirror reads anonymously (works while the repository is
+public; the limit is 60 requests an hour, a pass uses 3 to 5, so once every 10 minutes is close to it: add the token anyway).
+The file names the desktop app, the plugin and the website use are on our domain only; the repository name appears in one
+place (`DEFAULT_REPO` in `acw/mirror.py`, or `ACW_GITHUB_REPO`).
+
+**One-time:** deploy (`deploy/install.sh` enables the timer and installs `models.lock`), then update the VPS Caddy snippet as in
+"One-time setup" (the `downloads/` part of the bulk matcher; until then the downloads still work, through the main tunnel).
+Check: `curl -sI https://mc-multi-world.space/audio/api/downloads/desktop/update.json` after the first pass finished
+(`mirror --status`; the 0.9 GB model archive takes a few minutes on the first pass).
+
 ## Admin CLI
 
 ```bash
@@ -133,6 +199,7 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
 ../venv/bin/python -m acw.admin verify-backup FILE.sqlite3.gz
 ../venv/bin/python -m acw.admin retention      # apply the retention rules now and print what each removed (the web process does it hourly)
 ../venv/bin/python -m acw.admin storage        # sizes of the database, job files, data directory and backups
+../venv/bin/python -m acw.admin mirror --status  # release downloads: what is served, when it was last mirrored (--once runs a pass now, --force refetches, --verify hashes every served file)
 ../venv/bin/python -m acw.admin compact-money  # payment/ledger records older than 7 years: what it would remove (add --apply to do it)
 ```
 
@@ -210,11 +277,12 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 
 | Alert (kind) | Fires when | Notes |
 |---|---|---|
-| Service not running (`service:<unit>`) | an enabled `acw-*` unit (or `acw-backup.timer`) is not `active` for 2 checks in a row; also sent at once by the `OnFailure=` hook (`acw-alert@.service`) when a unit enters `failed` | the hook only fires when systemd gives up; with `Restart=always` that is rare, so the next row covers crash loops |
+| Service not running (`service:<unit>`) | an enabled `acw-*` unit (or `acw-backup.timer`, `acw-mirror.timer`) is not `active` for 2 checks in a row; also sent at once by the `OnFailure=` hook (`acw-alert@.service`) when a unit enters `failed` | the hook only fires when systemd gives up; with `Restart=always` that is rare, so the next row covers crash loops |
 | Restarting repeatedly (`restarts:<unit>`) | systemd auto-restarted the unit 2+ times in 30 minutes (`NRestarts`) | a manual `systemctl restart` does not count |
 | Back up after unclean stop (`web_unclean_stop`) | acw-web starts and the previous run did not record a clean shutdown (crash, kill, OOM, power loss) | at most 1 mail per hour |
 | API down locally (`health_local`) | `http://127.0.0.1:8790/audio/api/health` fails twice in a row | acw-web is down or stuck |
 | Upload/download process down (`health_bulk`) | only where `acw-bulk` is enabled: `http://127.0.0.1:8794/audio/api/health` fails twice in a row | uploads and downloads fall back to `acw-web` once the VPS notices (docs/operations.md, Bulk transfers); `acw-tunnel-bulk` is watched as a service like the other units |
+| Release downloads out of date (`mirror_stale`) | only where `acw-mirror.timer` is enabled: a channel has had no successful mirror run for 2 hours, or a newer release has been on the release service for over an hour without being served (for example its signature or a checksum is wrong), twice in a row | people keep getting the last good version, never a wrong one; the mail has the last error. See "Release downloads" |
 | Not reachable from the internet (`health_public`) | local health is fine but `https://mc-multi-world.space/audio/api/health` fails from this machine twice in a row | the problem is the tunnel, VPS or Caddy; skipped when the public origin is not https |
 | File queue long (`queue_long`) | the head job has waited over 20 min, or the last job's estimated wait (`jobs.queue_wait_seconds`) is over 45 min | the mail shows busy cores for Audio Cleaner vs everything else (with the busiest other process names, e.g. `java`) and memory, so you can see when the Minecraft servers are the cause |
 | Jobs abnormally slow (`jobs_slow`) | a running job, 10+ minutes in, is projected to take over 3x its `jobs.job_seconds` estimate | same host load breakdown |
@@ -396,6 +464,7 @@ Take a backup first (`systemctl --user start acw-backup.service`).
 | Journal (`journalctl --user`) | see below | size and age caps |
 | `/var/log/syslog` (rsyslog gets a copy of everything journald sees, `ForwardToSyslog=yes`) | the same lines, with client addresses | logrotate: weekly, 4 kept, so about five weeks (inside the 90 days); ~16 MB a week at the example load |
 | GitHub releases of the desktop app | installers | the newest 5 automatic ones (docs/desktop.md) |
+| `data/downloads/` | the mirrored release files | the current version of each channel plus the previous one for 7 days: about 1 GB for the three installers, 2x that for a week after each release, ~0.1 GB of plugin packages and the 0.9 GB model archive; `mirror` refuses to download unless 5 GB stay free, `acw_downloads_bytes{channel}` in `metrics.prom` shows it |
 | `app.prev` | one previous copy of the code (1 MB) | replaced at every deploy |
 | `/var/www/audio` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
 | `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; the dev instance; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
@@ -443,7 +512,7 @@ Only configuration changes (the shared host `mc-multi-world.space/audio` is the 
    silver, validates (reverts on failure), and reloads.
    Re-run it (after `scp deploy/vps/audio.caddy deploy/vps/install-audio-route.sh vps:~/acw/`) whenever the
    snippet changes. The current one caps request bodies (64 KB; 4 GB only for the upload route; 1 MB for the
-   Stripe webhook), sends uploads and result downloads to the bulk tunnel first (see "Bulk transfers", which also
+   Stripe webhook), sends uploads, result downloads and the release downloads (`/audio/api/downloads/`) to the bulk tunnel first (see "Bulk transfers", which also
    needs the tunnel key changed on the VPS first) and was validated with `caddy validate` on Caddy 2.11. Once, add to the **global options**
    block at the top of `/etc/caddy/Caddyfile`: `servers { timeouts { read_header 10s } }`, then `sudo caddy validate` and reload.
    Turnstile's three CSP additions are written in the snippet, commented out.

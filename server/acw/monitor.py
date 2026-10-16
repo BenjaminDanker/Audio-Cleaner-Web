@@ -177,8 +177,9 @@ def _state_set(name: str, value) -> None:
 
 def expected_units() -> list[str]:
     names = sorted(p.name for p in (UNIT_DIR / "default.target.wants").glob("acw-*.service"))
-    if (UNIT_DIR / "timers.target.wants" / "acw-backup.timer").exists():
-        names.append("acw-backup.timer")
+    for timer in ("acw-backup.timer", "acw-mirror.timer"):
+        if (UNIT_DIR / "timers.target.wants" / timer).exists():
+            names.append(timer)
     return names
 
 
@@ -276,6 +277,25 @@ def check_bulk(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Pat
         f"{url} failed ({why}). acw-bulk is down or stuck: uploads and result downloads fall back to the main process "
         "once the VPS notices (a few seconds to a minute), or fail if the VPS is not set up for the fallback.\n"
         "Check: systemctl --user status acw-bulk; journalctl --user -u acw-bulk -n 80 --no-pager\n",
+        confirm=2,
+    )]
+
+
+def check_mirror(unit_dir: Path | None = None, now: float | None = None) -> list[Finding]:
+    """The release mirror (acw-mirror.timer, every 10 minutes) keeps the downloads current: no successful run for
+    2 hours, or a newer release on the build service not served for an hour. Only checked where the timer is enabled."""
+    unit_dir = UNIT_DIR if unit_dir is None else unit_dir
+    if not (unit_dir / "timers.target.wants" / "acw-mirror.timer").exists():
+        return []
+    from . import mirror
+
+    problems = mirror.stale_problems(now)
+    return [Finding(
+        "mirror_stale", bool(problems), "Release downloads are out of date",
+        "\n".join(problems) + "\nWhat people can download now is the last good version (nothing wrong is ever served); "
+        "new releases are not reaching the website and the apps.\n"
+        "Check: python -m acw.admin mirror --status; journalctl --user -u acw-mirror -n 60 --no-pager; "
+        "docs/operations.md, \"Release downloads\".\n",
         confirm=2,
     )]
 
@@ -526,6 +546,18 @@ def write_metrics(findings: list[Finding], states: dict[str, dict[str, str]], no
             prom.add("acw_storage_bytes", "gauge", "Bytes used by the data directory (without jobs), the database, job files and the backups.", n, what=what)
     except Exception:  # noqa: BLE001
         log.exception("could not size the data directories")
+    try:
+        from . import downloads, mirror
+
+        for ch, c in sorted((mirror.load_status().get("channels") or {}).items()):
+            if isinstance(c.get("last_ok"), (int, float)):
+                prom.add("acw_mirror_last_ok_timestamp_seconds", "gauge", "When the release mirror last finished a channel without a problem.", int(c["last_ok"]), channel=ch)
+        for ch in downloads.CHANNELS:
+            if downloads.root().joinpath(ch).is_dir():
+                prom.add("acw_downloads_bytes", "gauge", "Bytes of release files kept for download.",
+                         sum(p.stat().st_size for p in downloads.channel_dir(ch).rglob("*") if p.is_file()), channel=ch)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the mirror state")
     prom.add("acw_backup_age_seconds", "gauge", "Age of the newest database snapshot (absent when there is none).",
              None if newest is None else max(0, int(time.time() - newest)))
     for f in findings:
@@ -573,6 +605,7 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
     guarded("services", services)
     guarded("health", lambda: check_health(http))
     guarded("bulk", lambda: check_bulk(http))
+    guarded("mirror", check_mirror)
     guarded("queue", lambda: check_queue(host_ctx))
     guarded("slow_jobs", lambda: check_slow_jobs(host_ctx))
     guarded("resources", resources)

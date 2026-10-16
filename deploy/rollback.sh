@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put the previous copy of the code back (deploy/install.sh keeps it as ~/audio-cleaner/app.prev).
 #   deploy/rollback.sh [--wait-live[=SECS]] [--force]
-# Swaps app and app.prev, restarts the web process, the bulk-transfer process, the file workers and the live worker, and checks them.
+# Swaps app and app.prev (the release mirror's timer follows the code), restarts the web process, the bulk-transfer process, the file workers and the live worker, and checks them.
 # Only code goes back: units, packages and the database stay as they are (schema changes are additive, the
 # previous code ignores new tables and columns). Running it again swaps forward again.
 set -euo pipefail
@@ -52,6 +52,13 @@ for unit in $(systemctl --user list-units --plain --no-legend 'acw-worker@*.serv
 done
 # shellcheck disable=SC2086
 systemctl --user restart $UNITS
+# Code from before the release mirror existed has no acw/mirror.py: its timer would only fail and mail.
+if [ -f "$H/app/acw/mirror.py" ]; then
+  systemctl --user start acw-mirror.timer 2>/dev/null || true
+else
+  systemctl --user stop acw-mirror.timer 2>/dev/null || true
+  echo "note: this copy of the code has no release mirror: acw-mirror.timer is stopped (it starts again when you roll forward or deploy)" >&2
+fi
 BULK_TUNNEL=""
 systemctl --user is-enabled --quiet acw-tunnel-bulk.service 2>/dev/null && BULK_TUNNEL="acw-tunnel-bulk.service"
 # shellcheck disable=SC2086

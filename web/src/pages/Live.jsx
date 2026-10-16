@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { api, streamUrl } from '../api.js';
+import { API, api, streamUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { IconBroadcast } from '../components/Icons.jsx';
+import { IconBroadcast, IconDownload } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';
-import { balanceMoney, clock, dateTime, rate, moneyUsd } from '../format.js';
+import { balanceMoney, bytes, clock, dateTime, rate, moneyUsd } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
 import { applyCaption, startLive } from '../live/session.js';
@@ -43,17 +43,75 @@ function LivePrices() {
   );
 }
 
+// The plugin files are mirrored on our own server (docs/operations.md, "Release downloads"): the buttons use the
+// "latest" addresses, the manifest only tells which version that is.
+const PLUGIN_DOWNLOADS = `${API}downloads/obs-plugin`;
+const PLUGIN_PLATFORMS = [
+  { id: 'windows', key: 'windows-x64', label: 'Windows', how: <>Unzip it and put the <span className="mono">audio-cleaner</span> folder into <span className="mono">C:\ProgramData\obs-studio\plugins</span>.</> },
+  {
+    id: 'mac', key: 'macos', label: 'Mac',
+    how: <>Unpack it and copy <span className="mono">audio-cleaner.plugin</span> into <span className="mono">~/Library/Application Support/obs-studio/plugins</span>. If your Mac refuses to open it, run this once in Terminal: <span className="mono">xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/audio-cleaner.plugin</span></>,
+  },
+  { id: 'ubuntu-debian', key: 'ubuntu-debian', label: 'Ubuntu, Debian, Mint', how: <>Open the downloaded <span className="mono">.deb</span> file with your software installer (or run <span className="mono">sudo apt install ./&lt;file&gt;</span>). It needs OBS 31 or newer.</> },
+  { id: 'linux-other', key: 'linux-other', label: 'Other Linux', how: <>Unpack it into <span className="mono">~/.config/obs-studio/plugins</span> (for the Flatpak version of OBS: <span className="mono">~/.var/app/com.obsproject.Studio/config/obs-studio/plugins</span>).</> },
+];
+
+/** What the plugin download page says: 'loading', 'unavailable' or { version, files }. */
+function usePluginManifest() {
+  const [state, setState] = useState('loading');
+  useEffect(() => {
+    const ctl = new AbortController();
+    (async () => {
+      try {
+        const r = await fetch(`${PLUGIN_DOWNLOADS}/manifest.json`, { signal: ctl.signal, cache: 'no-cache' });
+        if (!r.ok) throw new Error(String(r.status));
+        const m = await r.json();
+        if (typeof m?.version !== 'string' || typeof m?.files !== 'object' || m.files === null) throw new Error('shape');
+        setState({ version: m.version, files: m.files });
+      } catch (e) {
+        if (!ctl.signal.aborted) setState('unavailable');
+      }
+    })();
+    return () => ctl.abort();
+  }, []);
+  return state;
+}
+
 function ObsSetup() {
+  const plugin = usePluginManifest();
+  const ready = plugin !== 'loading' && plugin !== 'unavailable';
   return (
     <section className="card stack" aria-labelledby="obs-h">
       <h2 id="obs-h" className="mb0">OBS plugin setup</h2>
       <ol className="ol-steps mb0">
         <li>Create an API key on this page with <b>OBS plugin and live</b> switched on, and copy it.</li>
-        <li>Install the Audio Cleaner OBS plugin. <span className="badge badge-soon">Coming soon</span></li>
+        <li>Download and install the Audio Cleaner OBS plugin below. You need OBS 31 or newer; restart OBS afterwards.</li>
         <li>In OBS, add the <b>Audio Cleaner</b> filter to your microphone source and paste the key.</li>
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
-      <div className="row"><button type="button" className="btn btn-secondary" disabled aria-disabled="true">Download plugin (coming soon)</button></div>
+      <div className="stack" data-testid="plugin-downloads" aria-labelledby="obs-dl-h" role="group">
+        <h3 id="obs-dl-h" className="mb0">Install the Audio Cleaner OBS plugin</h3>
+        {plugin === 'loading' && <p className="small muted mb0" role="status">Checking for the newest version&hellip;</p>}
+        {plugin === 'unavailable' && (
+          <p className="small muted mb0" role="status" data-testid="plugin-unavailable">The plugin download isn&rsquo;t ready yet. Please check back in a little while.</p>
+        )}
+        {ready && <p className="small muted mb0" data-testid="plugin-version">Newest version: <b>{plugin.version}</b></p>}
+        {ready && (
+          <ul className="stack plain-list">
+            {PLUGIN_PLATFORMS.filter((p) => plugin.files[p.key]).map((p) => (
+              <li key={p.id} className="stack stack-tight">
+                <div className="row">
+                  <a className="btn btn-secondary" href={`${PLUGIN_DOWNLOADS}/latest/${p.id}`} data-testid={`plugin-${p.id}`}>
+                    <IconDownload width={18} height={18} /> {p.label}
+                    {Number.isFinite(plugin.files[p.key].size) && <span className="muted small">({bytes(plugin.files[p.key].size)})</span>}
+                  </a>
+                </div>
+                <p className="small muted mb0">{p.how}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
       <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>
     </section>
   );

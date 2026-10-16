@@ -149,6 +149,7 @@ for f in "$REPO"/deploy/systemd/acw-*.service; do
     case "$name" in
       acw-worker@.service) for i in $(seq 1 "$WORKERS"); do add_restart "acw-worker@$i.service"; done ;;
       acw-alert@.service) ;;  # started on demand
+      acw-mirror.service) ;;  # run by its timer (a restart would start a download here and now)
       acw-tunnel-bulk.service) [ "$BULK_TUNNEL" = 1 ] && add_restart "$name" ;;  # only once the VPS allows its port
       *) add_restart "$name" ;;
     esac
@@ -217,6 +218,8 @@ fi
 rsync -ac --delete --exclude '__pycache__' "$REPO/server/acw/" "$H/app/acw/"
 rsync -ac --delete --exclude '__pycache__' "$REPO/common/acw_common/" "$H/app/acw_common/"
 git -C "$REPO" rev-parse --short HEAD > "$H/app/VERSION"
+# The release mirror reads the archive list of the model files from here (the code copy above has no deploy/ folder).
+install -m 600 "$REPO/deploy/models.lock" "$H/app/models.lock"
 chmod -R go-rwx "$H/app"
 
 # ---- 7. Models and programs: every file in deploy/models.lock is present and has the recorded sha256
@@ -256,6 +259,9 @@ done
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
 # Health monitor + email alerts (acw-alert@.service is started by OnFailure=, never enabled)
 systemctl --user enable --now acw-monitor.timer >/dev/null 2>&1
+# Release mirror: copies, checks and publishes the newest desktop/plugin/model files every 10 minutes (the first run
+# starts a minute after the timer). Its first download of the model archive takes a while; nothing here waits for it.
+systemctl --user enable --now acw-mirror.timer >/dev/null 2>&1
 if [ "$BULK_TUNNEL" = 0 ]; then
   echo "note: acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'systemctl --user enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)" >&2
 fi
@@ -264,6 +270,11 @@ for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-wo
 [ "$GPU" = 1 ] || systemctl --user disable --now acw-worker-gpu.service >/dev/null 2>&1 || true
 # shellcheck disable=SC2086
 systemctl --user enable $UNITS >/dev/null 2>&1
+
+if [ "$RESTART" = 1 ]; then
+  systemctl --user is-active --quiet acw-mirror.timer || echo "warning: acw-mirror.timer is not active (systemctl --user status acw-mirror.timer): release downloads will not update" >&2
+  echo "release downloads: $(acw_admin mirror --status 2>/dev/null | tr '\n' '|' || echo unknown)"
+fi
 
 # ---- 11. Restart what changed, then check everything
 STATUS=0

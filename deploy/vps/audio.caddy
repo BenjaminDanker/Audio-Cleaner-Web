@@ -1,6 +1,6 @@
     # ---- Audio Cleaner (/audio) --------------------------------------------
     # API + live WebSocket: SSH reverse tunnel from primary-ram (127.0.0.1:18790).
-    # Uploads and result downloads: their own tunnel and process (127.0.0.1:18794 -> acw-bulk), so a big transfer
+    # Uploads, result downloads and release downloads (/audio/api/downloads/): their own tunnel and process (127.0.0.1:18794 -> acw-bulk), so a big transfer
     # never queues in front of live audio; if that upstream is down they fall back to 18790 (the main process
     # serves the same routes). Before using this file, the key must be allowed to listen on 18794 (docs/operations.md).
     # Static site (incl. the free in-browser denoiser) is served from this VPS,
@@ -19,7 +19,9 @@
     #     }
     handle /audio/api/* {
         @acw_upload path_regexp ^/audio/api/jobs/[0-9a-f]{32}/input$
-        @acw_download path_regexp ^/audio/api/jobs/[0-9a-f]{32}/outputs/
+        # Result downloads and the release downloads (desktop installers, OBS plugin, model archive: the files live on
+        # primary-ram, nothing is stored on this VPS) use the bulk upstream too, so they never queue in front of live audio.
+        @acw_download path_regexp ^/audio/api/(jobs/[0-9a-f]{32}/outputs/|downloads/)
         @acw_webhook path /audio/api/stripe/webhook
         handle @acw_upload {
             request_body {

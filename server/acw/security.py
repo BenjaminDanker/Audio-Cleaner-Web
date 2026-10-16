@@ -124,6 +124,7 @@ LIMITS = {
     "contact_email_day": (5, 5 / 86400),
     "webhook": (120, 5.0),             # Stripe delivers a handful per payment; this only stops floods
     "ws_handshake": (30, 0.5),         # live WebSocket attempts per IP, before any database work
+    "download": (40, 40 / 1800),       # release downloads (installers, plugin, models) started per network; resumes cost a tenth
 }
 
 

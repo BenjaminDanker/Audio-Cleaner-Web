@@ -14,6 +14,10 @@
   retention                      apply the retention rules now (the web process does it hourly) and print the counts
   storage                        sizes of what grows: database, job files, data directory, backups
   compact-money [--apply]        records older than 7 years: what would be removed (and, with --apply, remove it; yearly)
+  mirror [--once] [--force] [--channel C] [--verify] [--status]
+                                 copy the newest release files (desktop installers, OBS plugin, model archive) from the
+                                 build service, check them and publish them for download (acw-mirror.timer runs it every
+                                 10 minutes); --status shows what is served, --verify hashes every served file
   backup DIR [--keep N]          consistent gzip'd DB snapshot, checked after writing; keeps the newest N
                                  (optional encrypted copy off the machine: see acw/backup.py)
 """
@@ -62,6 +66,12 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("storage", help="sizes of the database, job files, data directory and backups")
     p = sub.add_parser("compact-money", help="payment/ledger records older than 7 years: show, or with --apply remove (balances stay correct)")
     p.add_argument("--apply", action="store_true")
+    p = sub.add_parser("mirror", help="mirror the release files from the build service and publish them for download")
+    p.add_argument("--once", action="store_true", help="one pass (the default; the timer's unit says it explicitly)")
+    p.add_argument("--force", action="store_true", help="fetch again even if the served version looks current or newer")
+    p.add_argument("--channel", choices=("desktop", "obs-plugin", "models"), help="only this channel")
+    p.add_argument("--verify", action="store_true", help="hash every served file against its recorded checksum; no network")
+    p.add_argument("--status", action="store_true", help="print what is served and when it was last mirrored; no network")
     p = sub.add_parser("backup")
     p.add_argument("dir")
     p.add_argument("--keep", type=int, default=30)
@@ -103,6 +113,10 @@ def main(argv: list[str] | None = None) -> None:
         db.execute("UPDATE users SET status = 'active' WHERE id = ?", (u["id"],))
         db.audit("admin-cli", "unsuspend", user_id=u["id"])
         print("active")
+    elif a.cmd == "mirror":
+        from . import mirror
+
+        sys.exit(mirror.main(force=a.force, verify=a.verify, status=a.status, only=a.channel))
     elif a.cmd == "backup":
         from pathlib import Path
 

@@ -5,13 +5,15 @@ WebSocket, so a big transfer could add latency to live sessions (head-of-line bl
 stream, one event loop, one home uplink). This process serves only
   * PUT  /api/jobs/{id}/input            the upload
   * GET  /api/jobs/{id}/outputs/{name}   a result download
+  * GET  /api/downloads/...              the release files (desktop installers, OBS plugin, model archive), mirrored
+                                         from the build service by acw/mirror.py and served from our own domain
   * GET  /api/health                     for the monitor and the VPS (answers {"ok": true})
 and nothing else (every other path is 404). It reuses the route functions of the main app, so authentication,
 body limits, upload bandwidth caps and security headers are the same code. It runs none of the background loops
 (housekeeping, cloud transcription, live) and has no live worker. Its own tunnel (acw-tunnel-bulk) carries it
 to the VPS, so a transfer queues behind nothing the live session needs.
 
-The main app keeps serving the same two routes, so nothing breaks before the VPS sends them here (and if this
+The main app keeps serving the same routes, so nothing breaks before the VPS sends them here (and if this
 process or its tunnel is down, the VPS falls back to the main one).
 """
 from __future__ import annotations
@@ -23,17 +25,17 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from . import db, httpstack
-from .api import jobs_routes
+from .api import downloads_routes, jobs_routes
 from .config import get_settings
 from .security import downloads
 
 log = logging.getLogger("acw.bulk")
 
-_DOWNLOAD = re.compile(r"^/api/jobs/[0-9a-f]{32}/outputs/")
+_DOWNLOAD = re.compile(r"^/api/(?:jobs/[0-9a-f]{32}/outputs/|downloads/)")
 
 
 class DownloadThrottleMiddleware:
-    """Result downloads share one byte-rate cap (security.downloads). The cap is applied to the response body
+    """Result downloads and release downloads share one byte-rate cap (security.downloads). The cap is applied to the response body
     as it is sent, so a slow link or many downloads at once never push more than the cap onto the uplink.
     Zero-copy file sending is switched off for them, otherwise the bytes would not pass through here."""
 
@@ -91,6 +93,7 @@ def create_bulk_app() -> FastAPI:
     router.add_api_route("/{job_id}/input", jobs_routes.upload, methods=["PUT"])
     router.add_api_route("/{job_id}/outputs/{name}", jobs_routes.download, methods=["GET"])
     app.include_router(router)
+    app.include_router(downloads_routes.router)
     return app
 
 

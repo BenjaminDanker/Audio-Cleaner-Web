@@ -1,0 +1,31 @@
+[Unit]
+Description=Audio Cleaner release mirror (copies the newest desktop, OBS plugin and model files from the build service, verifies them, publishes them for download)
+OnFailure=acw-alert@%n.service
+
+[Service]
+Slice=acw.slice
+Type=oneshot
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+# Paths and the public site address only. The optional GitHub read token is a file (secrets/github-releases-read.token,
+# ACW_GITHUB_TOKEN_FILE) that the job reads itself and never logs.
+EnvironmentFile=%h/audio-cleaner/secrets/acw-worker.env
+ExecStart=%h/audio-cleaner/venv/bin/python -m acw.admin mirror --once
+# A 0.9 GB archive over a slow link takes a while; a run that is still going when the timer fires again is simply not started twice.
+TimeoutStartSec=3h
+Nice=15
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @sandbox
+SystemCallErrorNumber=EPERM
+SystemCallFilter=~@privileged
+# Network: the release service over HTTPS (the only connection it opens), and loopback/unix sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=600M
+TasksMax=50

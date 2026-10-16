@@ -10,7 +10,7 @@ or secrets.
 |---|---|---|
 | `/audio/*` static | internet (VPS Caddy) | no server logic |
 | `/audio/api/*`, WebSocket | internet → VPS → SSH tunnel → 127.0.0.1:8790 | the only path into primary-ram |
-| uploads and result downloads | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same two routes the main process also serves; nothing else is routed there |
+| uploads, result downloads and release downloads (`/audio/api/downloads/`: installers, OBS plugin, model archive) | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same routes the main process also serves; nothing else is routed there. The release files are mirrored to primary-ram by `acw-mirror` (signature and checksums checked first); nothing is stored on the VPS |
 | primary-ram LAN ports | unchanged | the app binds loopback only |
 | VPS → primary-ram | `127.0.0.1:18790` and `127.0.0.1:18794` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false"` (the second `permitlisten` is added when the bulk tunnel is switched on, docs/operations.md; verified before for one port: no shell, no other ports, no local forwards) |
 
@@ -19,7 +19,8 @@ or secrets.
 | Process | Network | Filesystem | Other |
 |---|---|---|---|
 | acw-web | loopback listen; outbound HTTPS (Stripe, OpenAI, OAuth, SMTP) | its data dir | seccomp `@system-service`, no `@privileged`, NoNewPrivileges, MemoryMax, `LimitNOFILE=8192` |
-| acw-bulk | loopback listen (8794); no outbound use | its data dir | same hardening as acw-web, MemoryMax 1G; only the upload and download routes, no background loops, no live code |
+| acw-mirror (oneshot, every 10 min) | outbound HTTPS to the release service only (AF_INET/AF_INET6); no listen | `data/downloads/` | seccomp `@system-service`, no `@privileged`, NoNewPrivileges, PrivateTmp, MemoryMax 600M; the read token (if any) is a 0600 file it never logs |
+| acw-bulk | loopback listen (8794); no outbound use | its data dir | same hardening as acw-web, MemoryMax 1G; only the upload, result-download and release-download routes, no background loops, no live code |
 | acw-worker@N | **none** (seccomp: AF_UNIX only) | DB + jobs dir | Nice 10, CPUWeight 50 |
 | job runner (per job) | **none**: seccomp refuses `socket`, `connect`, `bind`, `listen`, `accept`, `sendto`, `sendmmsg` (plus `io_uring`, `ptrace`, `process_vm_*`, `pidfd_getfd`), and Landlock denies TCP | **Landlock**: read-only system libs, venv, code, models, binaries; read-write only its job dir, where it can create files and directories but **not** links, pipes or sockets; no `$HOME`, no `/proc`, no DB, no secrets | RLIMIT_CPU/AS/FSIZE, no core dumps, `-protocol_whitelist file,pipe` for ffmpeg, container-format allowlist, and the demuxer is chosen from the file's magic bytes (one demuxer parses an upload, not all of them) |
 | acw-stream | **none** (AF_UNIX) | Landlock read-only after binding its socket (required in production: it refuses to start without it) | CPUWeight 300 |
