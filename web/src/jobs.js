@@ -62,6 +62,7 @@ const STAGES = {
   'waiting to transcribe': 'Writing the transcript',
   'writing captions': 'Writing the captions',
   translating: 'Translating the subtitles',
+  'waiting to translate': 'Translating the subtitles',
   'rebuilding video': 'Putting the video back together',
   finishing: 'Finishing up',
   done: 'Finishing up',

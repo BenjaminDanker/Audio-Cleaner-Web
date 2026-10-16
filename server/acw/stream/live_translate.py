@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 
 import httpx
 
@@ -17,7 +18,8 @@ from .. import translate
 log = logging.getLogger(__name__)
 
 FAIL_LIMIT = 3
-QUEUE_LINES = 20  # a language that can't keep up drops its oldest waiting lines (live: late text is useless)
+QUEUE_LINES = 8  # a language that can't keep up drops its oldest waiting lines (live: late text is useless)
+MAX_LINE_AGE = 20.0  # seconds: a line that waited this long is skipped, not translated (and not billed)
 CONTEXT_LINES = 3
 
 
@@ -40,7 +42,7 @@ class LiveTranslator:
         text = str(ev.get("text") or "").strip()
         if not text:
             return
-        item = (ev.get("id"), text, ev.get("start"), ev.get("end"), list(self._context))
+        item = (ev.get("id"), text, ev.get("start"), ev.get("end"), list(self._context), time.monotonic())
         self._context = (self._context + [text])[-CONTEXT_LINES:]
         for t, q in self._queues.items():
             if t in self.off:
@@ -53,7 +55,9 @@ class LiveTranslator:
         q = self._queues[lang]
         fails = 0
         while True:
-            cid, text, start, end, context = await q.get()
+            cid, text, start, end, context, queued_at = await q.get()
+            if time.monotonic() - queued_at > MAX_LINE_AGE:
+                continue  # it waited behind slow answers: showing it now would only confuse
             try:
                 out = await translate.translate_line(self._http, text, self.source, lang, context)
             except Exception:  # noqa: BLE001 - one line failing must not end the session

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import weakref
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,21 @@ log = logging.getLogger(__name__)
 URL = "https://api.openai.com/v1/chat/completions"
 BATCH_LINES = 40  # lines per request for files: enough context, and a short answer to check
 BACKOFF_SECONDS = (3, 15, 60)
+# Live captions: late text is useless, and a line stuck behind 3 + 15 + 60 s of retries is up to 78 s late while the
+# lines behind it are dropped. One quick retry, then the line is skipped.
+LIVE_BACKOFF_SECONDS = (0.5,)
+# Requests to the text model in flight at once in this process, all sessions and jobs together (20 live sessions with 3
+# languages each would otherwise send bursts into the provider's rate limits and the web process's event loop).
+MAX_IN_FLIGHT = 8
+_gates: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+
+
+def _gate() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    gate = _gates.get(loop)
+    if gate is None:
+        gate = _gates[loop] = asyncio.Semaphore(MAX_IN_FLIGHT)
+    return gate
 
 # The languages offered (web/src/jobs.js LANGUAGES), with the names the model is told.
 LANGUAGE_NAMES = {
@@ -83,16 +99,17 @@ def _system_prompt(source: str | None, target: str) -> str:
     )
 
 
-async def _post(http: httpx.AsyncClient, body: dict) -> dict:
+async def _post(http: httpx.AsyncClient, body: dict, backoff: tuple[float, ...] | None = None) -> dict:
     key = get_settings().openai_api_key
     if not key:
         raise TranslationError("translations are not configured")
     last: Exception | None = None
-    for wait in (0, *BACKOFF_SECONDS):
+    for wait in (0, *(BACKOFF_SECONDS if backoff is None else backoff)):
         if wait:
-            await asyncio.sleep(wait)
+            await asyncio.sleep(wait)  # waiting for a retry does not hold one of the in-flight places
         try:
-            r = await http.post(URL, headers={"Authorization": f"Bearer {key}"}, json=body)
+            async with _gate():
+                r = await http.post(URL, headers={"Authorization": f"Bearer {key}"}, json=body)
         except httpx.HTTPError as e:
             last = e
             continue
@@ -132,11 +149,13 @@ async def translate_lines(http: httpx.AsyncClient, lines: list[str], source: str
         if isinstance(out, list) and len(out) == len(lines) and all(isinstance(x, str) for x in out):
             return [x.strip() for x in out]
     # The batch came back with a different number of lines twice: one line at a time keeps the timing right.
-    return [await translate_line(http, line, source, target) for line in lines]
+    return [await translate_line(http, line, source, target, live=False) for line in lines]
 
 
-async def translate_line(http: httpx.AsyncClient, text: str, source: str | None, target: str, context: list[str] | None = None) -> str:
-    """One caption line (live), with up to a few earlier lines as context (not translated again)."""
+async def translate_line(http: httpx.AsyncClient, text: str, source: str | None, target: str, context: list[str] | None = None,
+                         live: bool = True) -> str:
+    """One caption line (live), with up to a few earlier lines as context (not translated again). Live lines are
+    retried once, quickly; with live=False (a file's fallback) the full back-off applies."""
     ctx = "\n".join(context[-3:]) if context else ""
     body = {
         "model": model(),
@@ -146,7 +165,7 @@ async def translate_line(http: httpx.AsyncClient, text: str, source: str | None,
             {"role": "user", "content": (f"Earlier lines, for context only:\n{ctx}\n\n" if ctx else "") + f"Line to translate:\n{text}"},
         ],
     }
-    data = await _post(http, body)
+    data = await _post(http, body, LIVE_BACKOFF_SECONDS if live else None)
     try:
         return str(data["choices"][0]["message"]["content"]).strip()
     except (KeyError, IndexError, TypeError) as e:

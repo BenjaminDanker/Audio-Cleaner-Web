@@ -578,7 +578,7 @@ Minecraft servers need.
 **File jobs (Studio clean, transcription).** One CPU worker per 3 physical
 cores (min 2, max 8; `ACW_WORKERS` overrides), plus the GPU worker when there
 is one. A worker takes the next job only when its measured needs fit (memory
-and scratch disk with a reserve for the host; idle cores among the CPUs jobs
+and scratch disk with a reserve for the host: 6 GB of free system memory, the point where the Minecraft memory controller reopens world starts, and 2 GB under the acw slice's own MemoryMax; idle cores among the CPUs jobs
 may use right now); with nothing running the queue always moves. Queue order:
 paid before free, then the user with the fewest jobs running, then first come
 first served. The API reports `queuePosition` and `queueWaitSeconds`.
@@ -629,5 +629,18 @@ by other load measured on the live cores. On this machine: 7 live cores x 2.68
 
 When full, a new session is refused with the options that still fit;
 sessions that only use the external (extra-accurate) captions are never
-limited. On a bigger CPU all of this scales by itself (cores from the
+limited by the stream worker. Limits added after the 2026-10-16 capacity audit (all overridable in `acw.env`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ACW_STREAM_MAX_CAPTION_STREAMS` | `10` | Standard caption streams at once. The one shared caption decoder does about 13x real time in total, so more than about 12 streams fall behind; at the cap a new one is refused and offered extra-accurate captions. A stream that still falls more than 2 s behind drops its oldest audio and the client gets one `captions_behind` warning per incident |
+| `ACW_MAX_LIVE_SESSIONS` / `ACW_MAX_PREMIUM_SESSIONS` | `30` / `15` | live sessions of every kind / with extra-accurate captions, in the web process (one event loop relays them all and also serves the job API); beyond them a session gets the usual "full" answer |
+| `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
+
+Other queue limits: the job list shares one queue computation per second between all requests (`jobs.queue_snapshot`),
+the web page polls every 5 s while jobs only wait and every 1.5 s while one uploads or runs; extra-accurate
+transcription and file translation have two places each (`PREMIUM_JOBS_AT_ONCE`, `TRANSLATION_JOBS_AT_ONCE` in
+`app.py`) so neither waits for the other; at most 8 requests to the text model run at once in the web process and a live
+translation line is retried once after 0.5 s and then skipped; a stage that runs past its time limit but is still
+making progress is given the time its progress says it needs, up to 3x the limit. On a bigger CPU all of this scales by itself (cores from the
 topology, speed from the calibration).

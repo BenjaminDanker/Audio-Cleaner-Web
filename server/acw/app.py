@@ -26,20 +26,37 @@ from .stream import routes as stream_routes
 log = logging.getLogger("acw")
 
 
-PREMIUM_JOBS_AT_ONCE = 2
-_cloud_tasks: set[asyncio.Task] = set()
+PREMIUM_JOBS_AT_ONCE = 2  # extra-accurate transcriptions (long OpenAI calls per file)
+TRANSLATION_JOBS_AT_ONCE = 2  # file translations: places of their own, so a 4 hour talk in three languages (40 minutes) can't hold up
+#                               every transcription and a transcription backlog can't hold up translations
+_cloud_tasks: dict[asyncio.Task, str] = {}  # running task -> its phase ("asr" or "translate")
+_CLOUD_STAGES = {"asr": "Transcribing", "translate": "Translating"}
 
 
-def _claim_cloud_jobs(limit: int) -> list[dict]:
+def _needs_transcription(job: dict) -> bool:
+    """The job's cloud work starts with extra-accurate transcription (its segments are not there yet)."""
+    return json.loads(job["params_json"]).get("transcribe_tier") == "premium" and not (jobs.job_dir(job["id"]) / "segments.json").exists()
+
+
+def _claim_cloud_jobs(limit: int, phase: str | None = None) -> list[dict]:
+    """Take up to `limit` waiting cloud jobs (oldest first) that are in `phase` ("asr": transcription still to do;
+    "translate": only translations are left), any phase if None. Each is marked as being worked on and carries `_phase`."""
     claimed = []
-    for job in db.all_rows("SELECT * FROM jobs WHERE status = 'cloud_asr' AND stage != 'Transcribing' ORDER BY queued_at LIMIT ?", (limit,)):
+    for job in db.all_rows(
+        "SELECT * FROM jobs WHERE status = 'cloud_asr' AND stage NOT IN ('Transcribing', 'Translating') ORDER BY queued_at LIMIT 100"
+    ):
+        if len(claimed) >= limit:
+            break
         job = dict(job)
+        job_phase = "asr" if _needs_transcription(job) else "translate"
+        if phase is not None and job_phase != phase:
+            continue
         n = db.execute(
-            "UPDATE jobs SET stage = 'Transcribing', heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr' AND stage != 'Transcribing'",
-            (db.now(), job["id"]),
+            "UPDATE jobs SET stage = ?, heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr' AND stage NOT IN ('Transcribing', 'Translating')",
+            (_CLOUD_STAGES[job_phase], db.now(), job["id"]),
         ).rowcount
         if n:
-            claimed.append(job)
+            claimed.append({**job, "_phase": job_phase})
     return claimed
 
 
@@ -73,7 +90,9 @@ async def _translate(job: dict, targets: list[str]) -> None:
 
 async def _run_cloud_job(job: dict) -> None:
     """The steps of a job that need the internet: extra-accurate transcription, then translations. Work already
-    done is kept on disk, so a restart or a failed attempt doesn't pay for it twice."""
+    done is kept on disk, so a restart or a failed attempt doesn't pay for it twice. One call does one phase:
+    after the transcription a job that also wants translations goes back to waiting ("Waiting to translate") and is
+    taken up again in the translation places, so the two kinds of work never wait for each other's places."""
 
     async def heartbeat() -> None:
         while True:
@@ -84,9 +103,12 @@ async def _run_cloud_job(job: dict) -> None:
     try:
         params = json.loads(job["params_json"])
         opts = params["options"]
-        if params.get("transcribe_tier") == "premium" and not (jobs.job_dir(job["id"]) / "segments.json").exists():
+        if _needs_transcription(job):
             await openai_asr.run_for_job(jobs.job_dir(job["id"]), opts.get("language"), job["duration_seconds"] or job["claimed_seconds"])
-        if opts.get("translate"):
+            if opts.get("translate"):
+                await asyncio.to_thread(_set_stage, job["id"], "Waiting to translate")
+                return
+        elif opts.get("translate"):
             await _translate(job, list(opts["translate"]))
         await asyncio.to_thread(_cloud_done, job)
     except Exception:  # noqa: BLE001
@@ -100,12 +122,13 @@ async def _cloud_asr_loop() -> None:
     while True:
         await asyncio.sleep(3)
         try:
-            _cloud_tasks.difference_update({t for t in _cloud_tasks if t.done()})
-            free = PREMIUM_JOBS_AT_ONCE - len(_cloud_tasks)
-            if free > 0:
-                for job in await asyncio.to_thread(_claim_cloud_jobs, free):
-                    t = asyncio.create_task(_run_cloud_job(job))
-                    _cloud_tasks.add(t)
+            for t in [t for t in _cloud_tasks if t.done()]:
+                del _cloud_tasks[t]
+            for phase, places in (("asr", PREMIUM_JOBS_AT_ONCE), ("translate", TRANSLATION_JOBS_AT_ONCE)):
+                free = places - sum(1 for p in _cloud_tasks.values() if p == phase)
+                if free > 0:
+                    for job in await asyncio.to_thread(_claim_cloud_jobs, free, phase):
+                        _cloud_tasks[asyncio.create_task(_run_cloud_job(job))] = phase
         except Exception:  # noqa: BLE001
             log.exception("cloud ASR loop failed")
 
@@ -115,8 +138,8 @@ def _housekeeping() -> None:
         auth.purge_expired,
         # Cloud ASR that never finished (process restart mid-request): retry.
         lambda: db.execute(
-            "UPDATE jobs SET stage = 'Waiting to transcribe' WHERE status = 'cloud_asr'"
-            " AND stage = 'Transcribing' AND heartbeat_at < ?",
+            "UPDATE jobs SET stage = CASE stage WHEN 'Translating' THEN 'Waiting to translate' ELSE 'Waiting to transcribe' END"
+            " WHERE status = 'cloud_asr' AND stage IN ('Transcribing', 'Translating') AND heartbeat_at < ?",
             (db.now() - 600,),
         ),
         ledger.reap_stale_holds,  # money reserved by things that are over
@@ -153,7 +176,10 @@ async def _housekeeping_loop() -> None:
 async def lifespan(app: FastAPI):
     db.init_db()
     # A previous process died while transcribing: pick those jobs up again right away (finished segments are kept).
-    db.execute("UPDATE jobs SET stage = 'Waiting to transcribe' WHERE status = 'cloud_asr' AND stage = 'Transcribing'")
+    db.execute(
+        "UPDATE jobs SET stage = CASE stage WHEN 'Translating' THEN 'Waiting to translate' ELSE 'Waiting to transcribe' END"
+        " WHERE status = 'cloud_asr' AND stage IN ('Transcribing', 'Translating')"
+    )
     try:
         await asyncio.to_thread(alerts.web_started)  # mails if the last run ended uncleanly
     except Exception:  # noqa: BLE001
