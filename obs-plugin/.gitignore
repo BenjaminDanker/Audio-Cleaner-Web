@@ -8,14 +8,15 @@
 !/data
 !/src
 !/tests
+!/packaging
 !.clang-format
 !.gitignore
 !buildspec.json
 !CMakeLists.txt
 !CMakePresets.json
-!LICENSE
+!LICENSE.txt
 !README.md
-!THIRD_PARTY_LICENSES.md
+!THIRD_PARTY_LICENSES.txt
 
 # Exclude lock files
 *.lock.json

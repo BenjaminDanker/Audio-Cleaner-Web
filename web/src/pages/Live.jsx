@@ -46,8 +46,13 @@ function LivePrices() {
 // The plugin files are mirrored on our own server (docs/operations.md, "Release downloads"): the buttons use the
 // "latest" addresses, the manifest only tells which version that is.
 const PLUGIN_DOWNLOADS = `${API}downloads/obs-plugin`;
+const WIN_BY_HAND = <>Open <span className="mono">C:\ProgramData\obs-studio</span>, make a folder called <span className="mono">plugins</span> there if it isn&rsquo;t there yet, and put the unzipped <span className="mono">audio-cleaner</span> folder into it, so you end up with <span className="mono">C:\ProgramData\obs-studio\plugins\audio-cleaner\bin\64bit\audio-cleaner.dll</span>. Not into Program Files: OBS doesn&rsquo;t look there for this kind of plugin.</>;
 const PLUGIN_PLATFORMS = [
-  { id: 'windows', key: 'windows-x64', label: 'Windows', how: <>Unzip it and put the <span className="mono">audio-cleaner</span> folder into <span className="mono">C:\ProgramData\obs-studio\plugins</span>.</> },
+  {
+    id: 'windows-setup', key: 'windows-setup', label: 'Windows',
+    how: <>Close OBS, run the file and click through. Windows may say it protected your PC because the installer isn&rsquo;t signed: click <b>More info</b>, then <b>Run anyway</b>.</>,
+  },
+  { id: 'windows', key: 'windows-x64', label: 'Windows (zip)', labelAlone: 'Windows', how: WIN_BY_HAND, howWithSetup: <>Or copy it by hand: {WIN_BY_HAND}</> },
   {
     id: 'mac', key: 'macos', label: 'Mac',
     how: <>Unpack it and copy <span className="mono">audio-cleaner.plugin</span> into <span className="mono">~/Library/Application Support/obs-studio/plugins</span>. If your Mac refuses to open it, run this once in Terminal: <span className="mono">xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/audio-cleaner.plugin</span></>,
@@ -77,9 +82,22 @@ function usePluginManifest() {
   return state;
 }
 
+/** Keys and the plugin download need credit in the account: both only spend it. */
+function useHasCredit() {
+  const { balance } = useAuth();
+  return (balance?.balance_micros ?? 0) > 0;
+}
+
+function NeedsCredit({ what }) {
+  return (
+    <p className="banner banner-info mb0" data-testid="needs-credit">
+      Add credit to {what}. Keys and the plugin only spend credit, so they need some in your account to work. <Link to="/app/billing">Add credit</Link>
+    </p>
+  );
+}
+
 function ObsSetup() {
-  const plugin = usePluginManifest();
-  const ready = plugin !== 'loading' && plugin !== 'unavailable';
+  const hasCredit = useHasCredit();
   return (
     <section className="card stack" aria-labelledby="obs-h">
       <h2 id="obs-h" className="mb0">OBS plugin setup</h2>
@@ -89,6 +107,17 @@ function ObsSetup() {
         <li>In OBS, add the <b>Audio Cleaner</b> filter to your microphone source and paste the key.</li>
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
+      {hasCredit ? <PluginDownloads /> : <NeedsCredit what="download the plugin" />}
+      <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>
+    </section>
+  );
+}
+
+function PluginDownloads() {
+  const plugin = usePluginManifest();
+  const ready = plugin !== 'loading' && plugin !== 'unavailable';
+  const hasSetup = ready && !!plugin.files['windows-setup'];
+  return (
       <div className="stack" data-testid="plugin-downloads" aria-labelledby="obs-dl-h" role="group">
         <h3 id="obs-dl-h" className="mb0">Install the Audio Cleaner OBS plugin</h3>
         {plugin === 'loading' && <p className="small muted mb0" role="status">Checking for the newest version&hellip;</p>}
@@ -102,18 +131,21 @@ function ObsSetup() {
               <li key={p.id} className="stack stack-tight">
                 <div className="row">
                   <a className="btn btn-secondary" href={`${PLUGIN_DOWNLOADS}/latest/${p.id}`} data-testid={`plugin-${p.id}`}>
-                    <IconDownload width={18} height={18} /> {p.label}
+                    <IconDownload width={18} height={18} /> {hasSetup || !p.labelAlone ? p.label : p.labelAlone}
                     {Number.isFinite(plugin.files[p.key].size) && <span className="muted small">({bytes(plugin.files[p.key].size)})</span>}
                   </a>
                 </div>
-                <p className="small muted mb0">{p.how}</p>
+                <p className="small muted mb0">{hasSetup && p.howWithSetup ? p.howWithSetup : p.how}</p>
               </li>
             ))}
           </ul>
         )}
+        {ready && plugin.files.source && (
+          <p className="small muted mb0" data-testid="plugin-source">
+            The plugin is free software (GPL 2.0 or later). <a href={`${PLUGIN_DOWNLOADS}/latest/source`}>Its source code</a> is here too.
+          </p>
+        )}
       </div>
-      <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>
-    </section>
   );
 }
 
@@ -122,6 +154,7 @@ function ObsSetup() {
 const SCOPE_LABEL = { stream: 'OBS plugin and live', jobs: 'File API for scripts' };
 
 function ApiKeys() {
+  const hasCredit = useHasCredit();
   const [keys, setKeys] = useState(null);
   const [error, setError] = useState('');
   const [name, setName] = useState('OBS on my PC');
@@ -192,7 +225,8 @@ function ApiKeys() {
           </div>
         </div>
       )}
-      <form className="stack" onSubmit={create}>
+      {!hasCredit && <NeedsCredit what="make a key" />}
+      <form className="stack" onSubmit={create} hidden={!hasCredit}>
         <div className="field">
           <label htmlFor="key-name">Name</label>
           <input id="key-name" className="input" value={name} maxLength={60} onChange={(e) => setName(e.target.value)} required />

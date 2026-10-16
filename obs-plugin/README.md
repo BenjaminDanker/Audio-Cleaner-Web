@@ -20,7 +20,7 @@ The plugin tells you when a newer one exists and installs it for you (see "Updat
 
 | Platform | What to do |
 |---|---|
-| Windows | Unzip the `...-windows.zip`; it holds one folder, `audio-cleaner`. Put that folder into `C:\ProgramData\obs-studio\plugins\` (so the DLL ends up in `C:\ProgramData\obs-studio\plugins\audio-cleaner\bin\64bit\`). |
+| Windows | Run `...-windows-setup.exe` with OBS closed (no admin prompt; it is not code-signed, so SmartScreen asks: More info, Run anyway). By hand instead: unzip `...-windows.zip` (one folder, `audio-cleaner`) and put that folder into `C:\ProgramData\obs-studio\plugins\`, creating `plugins` if it is not there, so the DLL ends up in `C:\ProgramData\obs-studio\plugins\audio-cleaner\bin\64bit\`. Not `Program Files\obs-studio\obs-plugins`: OBS loads only single DLLs from there, not plugin folders. |
 | macOS | Unpack the `...-mac.tar.xz` and copy `audio-cleaner.plugin` into `~/Library/Application Support/obs-studio/plugins/`. The plugin is not signed yet, so macOS blocks a downloaded copy: run `xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/audio-cleaner.plugin` once. |
 | Ubuntu, Debian, Linux Mint | `sudo apt install ./audio-cleaner-obs-plugin-<version>-ubuntu-debian.deb`. It needs `obs-studio >= 31` and OpenSSL 3. The Ubuntu repositories only carry older OBS versions (24.04 has 30.x): get a current one from the OBS PPA (`sudo add-apt-repository ppa:obsproject/obs-studio`). |
 | Other Linux | Unpack the `...-linux-other.tar.xz` into the OBS plugin folder: `mkdir -p ~/.config/obs-studio/plugins && tar -xf <file> -C ~/.config/obs-studio/plugins`. That creates `audio-cleaner/bin/64bit/audio-cleaner.so` and `audio-cleaner/data/` (the texts; without them the filter shows raw names). For the Flatpak version of OBS use `~/.var/app/com.obsproject.Studio/config/obs-studio/plugins/` instead. |
@@ -180,4 +180,4 @@ trigger Gatekeeper / SmartScreen warnings.
 
 ## Licences
 
-GPL-2.0-or-later, see `LICENSE`. Third-party components: `THIRD_PARTY_LICENSES.md`. Both files are installed with the plugin.
+GPL-2.0-or-later, see `LICENSE.txt`. Third-party components: `THIRD_PARTY_LICENSES.txt`. Both files are installed with the plugin.

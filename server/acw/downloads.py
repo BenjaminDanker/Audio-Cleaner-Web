@@ -40,7 +40,8 @@ MANIFESTS = {
 }
 # Public platform names of the plugin's download buttons -> the keys of the plugin manifest.
 DESKTOP_PLATFORMS = {"windows": "windows-x86_64", "mac-apple-silicon": "macos-arm64", "mac-intel": "macos-x86_64"}
-OBS_PLATFORMS = {"windows": "windows-x64", "mac": "macos", "ubuntu-debian": "ubuntu-debian", "linux-other": "linux-other"}
+OBS_PLATFORMS = {"windows": "windows-x64", "windows-setup": "windows-setup", "mac": "macos", "ubuntu-debian": "ubuntu-debian",
+                 "linux-other": "linux-other", "source": "source"}
 
 
 def root() -> Path:

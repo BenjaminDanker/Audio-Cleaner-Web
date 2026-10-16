@@ -166,6 +166,14 @@ def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: 
 
 
 # ---- licence collection ---------------------------------------------------------------------------------
+def shipped_name(name: str) -> str:
+    """Every notice ships as a .txt file, so a double-click opens it on Windows too: "lame-COPYING" ->
+    "lame-COPYING.txt", "FFmpeg-LICENSE.md" -> "FFmpeg-LICENSE.txt" (the texts are plain text either way)."""
+    if name.lower().endswith(".txt"):
+        return name
+    return (name[:-3] if name.lower().endswith(".md") else name) + ".txt"
+
+
 class Notices:
     """Writes the files in vendor/licenses and remembers what each one is for (for the index)."""
 
@@ -177,6 +185,7 @@ class Notices:
         self.index: list[tuple[str, str]] = []
 
     def add_text(self, name: str, text: str, description: str) -> None:
+        name = shipped_name(name)
         (self.dir / name).write_text(text.rstrip() + "\n", encoding="utf-8")
         self.index.append((name, description))
 
@@ -288,7 +297,7 @@ def rust_crates(src: Path, rust_target: str | None) -> str:
         "=================================================================================================\n"
         f"{len(crates)} crates for {host}, from the dependency tree of native/deepfilter/Cargo.lock (feature capi).\n"
         "Where a crate offers several licences (for example \"MIT OR Apache-2.0\") we use it under either one.\n"
-        "DeepFilterNet itself: see DeepFilterNet-LICENSE-MIT and DeepFilterNet-LICENSE-APACHE.\n\n"
+        "DeepFilterNet itself: see DeepFilterNet-LICENSE-MIT.txt and DeepFilterNet-LICENSE-APACHE.txt.\n\n"
         f"Summary\n-------\n{summary}\n\nLicence texts\n-------------\n"
         "Identical texts are printed once; later crates refer back to the first occurrence.\n\n"
     )

@@ -45,6 +45,7 @@ await check('live: the test panel is three aligned groups (Noise removal, Captio
 
 await check('live: the plugin section offers a download per platform with the version; says so plainly when no download exists yet; no "coming soon"', async () => {
   const manifest = { version: '0.1.60', files: {
+    'windows-setup': { name: 'a.exe', size: 1048576, sha256: 'e'.repeat(64) }, source: { name: 's.tar.gz', size: 99999, sha256: 'f'.repeat(64) },
     'windows-x64': { name: 'a.zip', size: 5242880, sha256: 'a'.repeat(64) }, macos: { name: 'b.tar.xz', size: 4194304, sha256: 'b'.repeat(64) },
     'ubuntu-debian': { name: 'c.deb', size: 3145728, sha256: 'c'.repeat(64) }, 'linux-other': { name: 'd.tar.xz', size: 2097152, sha256: 'd'.repeat(64) } } };
   await page.route('**/api/downloads/obs-plugin/manifest.json', (r) => r.fulfill({ json: manifest }));
@@ -52,11 +53,12 @@ await check('live: the plugin section offers a download per platform with the ve
   const box = page.getByTestId('plugin-downloads');
   await box.getByTestId('plugin-version').waitFor();
   const t = await box.innerText();
-  for (const x of ['Newest version: 0.1.60', 'Windows', 'Mac', 'Ubuntu, Debian, Mint', 'Other Linux', 'C:\\ProgramData\\obs-studio\\plugins', '~/Library/Application Support/obs-studio/plugins', '~/.config/obs-studio/plugins', '5.0 MB']) if (!t.includes(x)) throw new Error(`missing "${x}" in: ${t}`);
+  for (const x of ['Newest version: 0.1.60', 'Windows', 'Windows (zip)', 'Run anyway', 'make a folder called plugins', 'Mac', 'Ubuntu, Debian, Mint', 'Other Linux', 'C:\\ProgramData\\obs-studio\\plugins', '~/Library/Application Support/obs-studio/plugins', '~/.config/obs-studio/plugins', '5.0 MB']) if (!t.includes(x)) throw new Error(`missing "${x}" in: ${t}`);
   const hrefs = {};
-  for (const id of ['windows', 'mac', 'ubuntu-debian', 'linux-other']) hrefs[id] = await box.getByTestId(`plugin-${id}`).getAttribute('href');
+  for (const id of ['windows-setup', 'windows', 'mac', 'ubuntu-debian', 'linux-other']) hrefs[id] = await box.getByTestId(`plugin-${id}`).getAttribute('href');
   for (const [id, h] of Object.entries(hrefs)) if (!h.endsWith(`/audio/api/downloads/obs-plugin/latest/${id}`) && !h.endsWith(`/api/downloads/obs-plugin/latest/${id}`)) throw new Error(`href ${id}: ${h}`);
   if (/coming soon|github/i.test(await page.locator('main').innerText())) throw new Error('old or revealing wording on the page');
+  if (!(await box.getByTestId('plugin-source').getByRole('link').getAttribute('href')).endsWith('/obs-plugin/latest/source')) throw new Error('source link');
   // a platform the manifest does not list gets no button
   await page.unroute('**/api/downloads/obs-plugin/manifest.json');
   const small = { version: '0.1.61', files: { macos: manifest.files.macos } };
@@ -75,7 +77,15 @@ await check('live: the plugin section offers a download per platform with the ve
   await page.setViewportSize({ width: 1280, height: 900 });
   if (m.sw > m.vw + 1) throw new Error('sideways scroll at 360px');
   await page.unroute('**/api/downloads/obs-plugin/manifest.json');
-  return 'version, 4 buttons, install steps; partial manifest; not-ready message';
+  // no credit in the account: no downloads and no key form, a note with a link to add credit instead
+  await page.route('**/api/me', async (r) => { const res = await r.fetch(); const j = await res.json(); await r.fulfill({ response: res, json: { ...j, balance: { ...j.balance, balance_micros: 0, available_micros: 0 } } }); });
+  await page.goto(`${BASE}/app/live`);
+  await page.getByTestId('needs-credit').first().waitFor();
+  if ((await page.getByTestId('needs-credit').count()) !== 2) throw new Error('both the plugin and the key form should say credit is needed');
+  if (await page.getByTestId('plugin-downloads').count()) throw new Error('downloads offered without credit');
+  if (await page.getByRole('button', { name: 'Create key' }).isVisible()) throw new Error('key form shown without credit');
+  await page.unroute('**/api/me');
+  return 'version, 5 buttons, install steps, source link; partial manifest; not-ready message; needs credit';
 });
 
 await check('live: demo with fake mic, denoise + local captions', async () => {

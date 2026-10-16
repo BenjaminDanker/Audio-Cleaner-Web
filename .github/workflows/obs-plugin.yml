@@ -204,13 +204,13 @@ jobs:
           name=$(jq -r .name buildspec.json)
           for f in release/*.deb; do
             bad=$(dpkg-deb -c "$f" | awk '$1 !~ /^d/ {print $6}' |
-              grep -Ev "^\./usr/(lib/[^/]+/obs-plugins/${name}\.so|share/obs/obs-plugins/${name}/(locale/en-US\.ini|LICENSE|THIRD_PARTY_LICENSES\.md))\$" || true)
+              grep -Ev "^\./usr/(lib/[^/]+/obs-plugins/${name}\.so|share/obs/obs-plugins/${name}/(locale/en-US\.ini|LICENSE\.txt|THIRD_PARTY_LICENSES\.txt))\$" || true)
             [ -z "$bad" ] || { echo "::error::unexpected files in $f:"; echo "$bad"; exit 1; }
             dpkg-deb -I "$f" | grep -E 'Maintainer|Description'
             [ "$(dpkg-deb -f "$f" Version)" = "$ACW_VERSION" ] || { echo "::error::$f has version $(dpkg-deb -f "$f" Version), not $ACW_VERSION"; exit 1; }
           done
           bad=$(tar -tJf release/*-ubuntu-x86_64.tar.xz | grep -v '/$' |
-            grep -Ev "^${name}/(bin/64bit/${name}\.so|data/(locale/en-US\.ini|LICENSE|THIRD_PARTY_LICENSES\.md))\$" || true)
+            grep -Ev "^${name}/(bin/64bit/${name}\.so|data/(locale/en-US\.ini|LICENSE\.txt|THIRD_PARTY_LICENSES\.txt))\$" || true)
           [ -z "$bad" ] || { echo "::error::unexpected files in the tarball:"; echo "$bad"; exit 1; }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -330,10 +330,30 @@ jobs:
           $bad = $names | Where-Object { $_ -notmatch '^audio-cleaner/(bin/64bit/audio-cleaner\.dll|data/.+)$' }
           if ($bad) { throw "unexpected files in the zip: $($bad -join ', ')" }
           if (-not ($names -contains 'audio-cleaner/bin/64bit/audio-cleaner.dll')) { throw 'the dll is missing from the zip' }
+      # The installer most people use: it puts the same folder into C:\ProgramData\obs-studio\plugins (no admin
+      # prompt) and closes nothing by itself (it asks for OBS to be closed). The zip stays for the plugin's own updater.
+      - name: Installer (Inno Setup)
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            foreach ($p in "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") {
+              if (Test-Path $p) { $iscc = $p; break }
+            }
+          }
+          if (-not $iscc) {
+            choco install innosetup --version=6.7.1 --no-progress -y
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          $src = (Resolve-Path "release/$env:CONFIG/audio-cleaner").Path
+          & $iscc "/DAppVersion=$env:ACW_VERSION" "/DSourceDir=$src" "/DOutputDir=$PWD\release" packaging\windows\audio-cleaner-obs.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed ($LASTEXITCODE)" }
+          Get-Item release/*-windows-setup.exe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: audio-cleaner-windows-x64
-          path: obs-plugin/release/*.zip
+          path: |
+            obs-plugin/release/*.zip
+            obs-plugin/release/*-windows-setup.exe
 
   # ---------------------------------------------------------------------------
   # Every successful build of main / on-prem replaces the "obs-plugin-latest" pre-release, so
@@ -360,9 +380,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # the whole plugin folder: its source code is published next to the packages (the GPL asks for it)
           sparse-checkout: |
-            obs-plugin/buildspec.json
-            obs-plugin/cmake/ci-version.cmake
+            obs-plugin/
           sparse-checkout-cone-mode: false
 
       - name: Version
@@ -390,15 +410,20 @@ jobs:
           one() { local m=("$@"); [ "${#m[@]}" -eq 1 ] || { echo "::error::expected one file, got: ${m[*]}"; exit 1; }; echo "${m[0]}"; }
           base="audio-cleaner-obs-plugin-$version"
           mv "$(one *-windows-x64.zip)" "$base-windows.zip"
+          mv "$(one *-windows-setup.exe)" "$base-windows-setup.exe"
           mv "$(one *-macos-universal.tar.xz)" "$base-mac.tar.xz"
           mv "$(one *.deb)" "$base-ubuntu-debian.deb"
           mv "$(one *-ubuntu-x86_64.tar.xz)" "$base-linux-other.tar.xz"
-          files=("$base-windows.zip" "$base-mac.tar.xz" "$base-ubuntu-debian.deb" "$base-linux-other.tar.xz")
+          # The complete source of this version (GPL-2.0-or-later): the plugin folder as built, nothing else.
+          tar -C "$GITHUB_WORKSPACE" --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
+            --transform "s|^obs-plugin|$base-source|" --exclude-vcs -czf "$base-source.tar.gz" obs-plugin
+          files=("$base-windows-setup.exe" "$base-windows.zip" "$base-mac.tar.xz" "$base-ubuntu-debian.deb" "$base-linux-other.tar.xz" "$base-source.tar.gz")
           # Nothing users download may name where the plugin is built (the repository or its owner).
           scan="$RUNNER_TEMP/scan"; rm -rf "$scan"; mkdir -p "$scan"/{win,mac,deb,other}
           python3 -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$base-windows.zip" "$scan/win"
           tar -xJf "$base-mac.tar.xz" -C "$scan/mac"; tar -xJf "$base-linux-other.tar.xz" -C "$scan/other"
           dpkg-deb -x "$base-ubuntu-debian.deb" "$scan/deb"; dpkg-deb -f "$base-ubuntu-debian.deb" > "$scan/deb/control.txt"
+          mkdir -p "$scan/src"; tar -xzf "$base-source.tar.gz" -C "$scan/src"; cp "$base-windows-setup.exe" "$scan/"
           leaks=$(grep -rlaiF -e "${GITHUB_REPOSITORY#*/}" -e "${GITHUB_REPOSITORY_OWNER}" "$scan" || true)
           if [ -n "$leaks" ]; then
             echo "::error::these files name the repository or its owner: $leaks"
@@ -407,10 +432,11 @@ jobs:
           fi
           notes="Audio Cleaner OBS plugin $version for OBS 31.1 or newer, built from ${GITHUB_SHA::7}. Not code-signed yet.
 
-          - Windows: $base-windows.zip
+          - Windows: $base-windows-setup.exe (or $base-windows.zip to copy by hand)
           - Mac (Apple silicon and Intel in one file): $base-mac.tar.xz
           - Ubuntu, Debian and Linux Mint: $base-ubuntu-debian.deb (install it like any .deb)
           - Other Linux: $base-linux-other.tar.xz (copy the files into your OBS plugins folder)
+          - Source code (GPL-2.0-or-later): $base-source.tar.gz
 
           Where each one goes is in obs-plugin/README.md."
           # The signed manifest that installed plugins read (through our download server): version, and per kind of
@@ -427,8 +453,8 @@ jobs:
               python3 - "$version" "${files[@]}" <<'PY'
           import hashlib, json, os, sys
           version, names = sys.argv[1], sys.argv[2:]
-          kinds = {"-windows.zip": "windows-x64", "-mac.tar.xz": "macos", "-ubuntu-debian.deb": "ubuntu-debian",
-                   "-linux-other.tar.xz": "linux-other"}
+          kinds = {"-windows.zip": "windows-x64", "-windows-setup.exe": "windows-setup", "-mac.tar.xz": "macos",
+                   "-ubuntu-debian.deb": "ubuntu-debian", "-linux-other.tar.xz": "linux-other", "-source.tar.gz": "source"}
           files = {}
           for name in names:
               kind = next(k for suffix, k in kinds.items() if name.endswith(suffix))
