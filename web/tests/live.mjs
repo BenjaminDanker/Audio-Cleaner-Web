@@ -66,13 +66,28 @@ await check('live: the plugin section offers a download per platform with the ve
     'ubuntu-debian': { name: 'c.deb', size: 3145728, sha256: 'c'.repeat(64) }, 'linux-other': { name: 'd.tar.xz', size: 2097152, sha256: 'd'.repeat(64) } } };
   await page.route('**/api/downloads/obs-plugin/manifest.json', (r) => r.fulfill({ json: manifest }));
   await page.goto(`${BASE}/app/live`);
+  // the download itself is not what this checks: answer it as a file, so the page stays where it is
+  await page.route('**/api/downloads/obs-plugin/latest/**', (r) => r.fulfill({ status: 200, body: 'x', headers: { 'Content-Disposition': 'attachment; filename="x.bin"', 'Content-Type': 'application/octet-stream' } }));
   const box = page.getByTestId('plugin-downloads');
   await box.getByTestId('plugin-version').waitFor();
-  const t = await box.innerText();
-  for (const x of ['Newest version: 0.1.60', 'Windows', 'Windows (zip)', 'Run anyway', 'make a folder called plugins', 'Mac', 'Ubuntu, Debian, Mint', 'Other Linux', 'C:\\ProgramData\\obs-studio\\plugins', '~/Library/Application Support/obs-studio/plugins', '~/.config/obs-studio/plugins', '5.0 MB']) if (!t.includes(x)) throw new Error(`missing "${x}" in: ${t}`);
+  const rows = (await box.locator('.install-name').allInnerTexts()).map((x) => x.trim());
+  if (JSON.stringify(rows) !== JSON.stringify(['Windows', 'Mac', 'Ubuntu, Debian, Mint', 'Other Linux, Flatpak'])) throw new Error(JSON.stringify(rows));
+  // this browser runs on Linux: its steps are the open ones, the others are folded away
+  const openNow = async () => (await box.locator('details[open]').evaluateAll((els) => els.map((e) => e.dataset.testid)));
+  if (JSON.stringify(await openNow()) !== JSON.stringify(['install-linux-other'])) throw new Error(`open: ${await openNow()}`);
+  if (!(await box.getByTestId('install-linux-other').innerText()).includes('~/.config/obs-studio/plugins')) throw new Error('linux steps');
+  // clicking a download opens that computer's steps
+  for (const [id, need] of [['windows', ['%ProgramData%\\obs-studio', 'make one', 'audio-cleaner.dll', 'Run anyway', '5.0 MB']], ['mac', ['Go to Folder', 'xattr -dr com.apple.quarantine', '~/Library/Application Support/obs-studio']], ['ubuntu-debian', ['sudo apt install', 'Flatpak']]]) {
+    await Promise.all([page.waitForEvent('download'), box.getByTestId(`plugin-${id}`).click()]);
+    await page.waitForFunction((tid) => document.querySelector(`[data-testid=${tid}]`)?.open, `install-${id}`);
+    if (JSON.stringify(await openNow()) !== JSON.stringify([`install-${id}`])) throw new Error(`after ${id}: open ${await openNow()}`);
+    const t = await box.getByTestId(`install-${id}`).innerText();
+    for (const x of need) if (!t.includes(x)) throw new Error(`${id} steps lack "${x}": ${t}`);
+  }
   const hrefs = {};
   for (const id of ['windows-setup', 'windows', 'mac', 'ubuntu-debian', 'linux-other']) hrefs[id] = await box.getByTestId(`plugin-${id}`).getAttribute('href');
   for (const [id, h] of Object.entries(hrefs)) if (!h.endsWith(`/audio/api/downloads/obs-plugin/latest/${id}`) && !h.endsWith(`/api/downloads/obs-plugin/latest/${id}`)) throw new Error(`href ${id}: ${h}`);
+  await page.unroute('**/api/downloads/obs-plugin/latest/**');
   if (/coming soon|github/i.test(await page.locator('main').innerText())) throw new Error('old or revealing wording on the page');
   if (!(await box.getByTestId('plugin-source').getByRole('link').getAttribute('href')).endsWith('/obs-plugin/latest/source')) throw new Error('source link');
   // a platform the manifest does not list gets no button

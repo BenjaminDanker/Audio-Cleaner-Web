@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
-import { API, api, streamUrl } from '../api.js';
+import { api, streamUrl } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { IconBroadcast, IconDownload } from '../components/Icons.jsx';
+import { IconBroadcast } from '../components/Icons.jsx';
+import PluginInstall from '../components/PluginInstall.jsx';
 import PriceTable from '../components/PriceTable.jsx';
-import { balanceMoney, bytes, clock, dateTime, rate, moneyUsd } from '../format.js';
+import { balanceMoney, clock, dateTime, rate, moneyUsd } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
 import { startLocalLive } from '../live/local.js';
@@ -44,45 +45,6 @@ function LivePrices() {
   );
 }
 
-// The plugin files are mirrored on our own server (docs/operations.md, "Release downloads"): the buttons use the
-// "latest" addresses, the manifest only tells which version that is.
-const PLUGIN_DOWNLOADS = `${API}downloads/obs-plugin`;
-const WIN_BY_HAND = <>Open <span className="mono">C:\ProgramData\obs-studio</span>, make a folder called <span className="mono">plugins</span> there if it isn&rsquo;t there yet, and put the unzipped <span className="mono">audio-cleaner</span> folder into it, so you end up with <span className="mono">C:\ProgramData\obs-studio\plugins\audio-cleaner\bin\64bit\audio-cleaner.dll</span>. Not into Program Files: OBS doesn&rsquo;t look there for this kind of plugin.</>;
-const PLUGIN_PLATFORMS = [
-  {
-    id: 'windows-setup', key: 'windows-setup', label: 'Windows',
-    how: <>Close OBS, run the file and click through. Windows may say it protected your PC because the installer isn&rsquo;t signed: click <b>More info</b>, then <b>Run anyway</b>.</>,
-  },
-  { id: 'windows', key: 'windows-x64', label: 'Windows (zip)', labelAlone: 'Windows', how: WIN_BY_HAND, howWithSetup: <>Or copy it by hand: {WIN_BY_HAND}</> },
-  {
-    id: 'mac', key: 'macos', label: 'Mac',
-    how: <>Unpack it and copy <span className="mono">audio-cleaner.plugin</span> into <span className="mono">~/Library/Application Support/obs-studio/plugins</span>. If your Mac refuses to open it, run this once in Terminal: <span className="mono">xattr -dr com.apple.quarantine ~/Library/Application\ Support/obs-studio/plugins/audio-cleaner.plugin</span></>,
-  },
-  { id: 'ubuntu-debian', key: 'ubuntu-debian', label: 'Ubuntu, Debian, Mint', how: <>Open the downloaded <span className="mono">.deb</span> file with your software installer (or run <span className="mono">sudo apt install ./&lt;file&gt;</span>). It needs OBS 31 or newer.</> },
-  { id: 'linux-other', key: 'linux-other', label: 'Other Linux', how: <>Unpack it into <span className="mono">~/.config/obs-studio/plugins</span> (for the Flatpak version of OBS: <span className="mono">~/.var/app/com.obsproject.Studio/config/obs-studio/plugins</span>).</> },
-];
-
-/** What the plugin download page says: 'loading', 'unavailable' or { version, files }. */
-function usePluginManifest() {
-  const [state, setState] = useState('loading');
-  useEffect(() => {
-    const ctl = new AbortController();
-    (async () => {
-      try {
-        const r = await fetch(`${PLUGIN_DOWNLOADS}/manifest.json`, { signal: ctl.signal, cache: 'no-cache' });
-        if (!r.ok) throw new Error(String(r.status));
-        const m = await r.json();
-        if (typeof m?.version !== 'string' || typeof m?.files !== 'object' || m.files === null) throw new Error('shape');
-        setState({ version: m.version, files: m.files });
-      } catch (e) {
-        if (!ctl.signal.aborted) setState('unavailable');
-      }
-    })();
-    return () => ctl.abort();
-  }, []);
-  return state;
-}
-
 /** Keys and the plugin download need credit in the account: both only spend it. */
 function useHasCredit() {
   const { balance } = useAuth();
@@ -108,45 +70,9 @@ function ObsSetup() {
         <li>In OBS, add the <b>Audio Cleaner</b> filter to your microphone source and paste the key.</li>
         <li>Pick how much delay you can live with (80, 150 or 250 ms), turn on captions if you want them, and go live.</li>
       </ol>
-      {hasCredit ? <PluginDownloads /> : <NeedsCredit what="download the plugin" />}
+      {hasCredit ? <PluginInstall /> : <NeedsCredit what="download the plugin" />}
       <p className="small muted mb0">Address for the plugin: <span className="mono">{streamUrl()}</span></p>
     </section>
-  );
-}
-
-function PluginDownloads() {
-  const plugin = usePluginManifest();
-  const ready = plugin !== 'loading' && plugin !== 'unavailable';
-  const hasSetup = ready && !!plugin.files['windows-setup'];
-  return (
-      <div className="stack" data-testid="plugin-downloads" aria-labelledby="obs-dl-h" role="group">
-        <h3 id="obs-dl-h" className="mb0">Install the Audio Cleaner OBS plugin</h3>
-        {plugin === 'loading' && <p className="small muted mb0" role="status">Checking for the newest version&hellip;</p>}
-        {plugin === 'unavailable' && (
-          <p className="small muted mb0" role="status" data-testid="plugin-unavailable">The plugin download isn&rsquo;t ready yet. Please check back in a little while.</p>
-        )}
-        {ready && <p className="small muted mb0" data-testid="plugin-version">Newest version: <b>{plugin.version}</b></p>}
-        {ready && (
-          <ul className="stack plain-list">
-            {PLUGIN_PLATFORMS.filter((p) => plugin.files[p.key]).map((p) => (
-              <li key={p.id} className="stack stack-tight">
-                <div className="row">
-                  <a className="btn btn-secondary" href={`${PLUGIN_DOWNLOADS}/latest/${p.id}`} data-testid={`plugin-${p.id}`}>
-                    <IconDownload width={18} height={18} /> {hasSetup || !p.labelAlone ? p.label : p.labelAlone}
-                    {Number.isFinite(plugin.files[p.key].size) && <span className="muted small">({bytes(plugin.files[p.key].size)})</span>}
-                  </a>
-                </div>
-                <p className="small muted mb0">{hasSetup && p.howWithSetup ? p.howWithSetup : p.how}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-        {ready && plugin.files.source && (
-          <p className="small muted mb0" data-testid="plugin-source">
-            The plugin is free software (GPL 2.0 or later). <a href={`${PLUGIN_DOWNLOADS}/latest/source`}>Its source code</a> is here too.
-          </p>
-        )}
-      </div>
   );
 }
 

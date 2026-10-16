@@ -417,3 +417,19 @@ textarea.input { min-height: 140px; resize: vertical; line-height: 1.45; }
 .hint.hint-bad { color: var(--danger); font-weight: 600; }
 .save-as { padding-top: 14px; border-top: 1px solid var(--border); }
 .save-as h3 { font-size: 1rem; }
+
+/* OBS plugin downloads (Live page): one row per kind of computer; its steps open under it */
+.install-list { display: flex; flex-direction: column; gap: 10px; }
+.install-list details { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.install-list summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+.install-list summary::-webkit-details-marker { display: none; }
+.install-list summary::before { content: "›"; font-size: 1.4rem; line-height: 1; color: var(--muted); transition: transform 0.15s ease; width: 1ch; }
+.install-list details[open] > summary::before { transform: rotate(90deg); }
+.install-list .install-name { font-weight: 650; flex: 1; min-width: 0; }
+.install-body { padding: 0 16px 14px 40px; display: flex; flex-direction: column; gap: 8px; }
+.install-body .ol-steps { margin: 0; }
+.install-body .ol-steps li { margin-bottom: 6px; }
+.install-code { display: inline-block; max-width: 100%; overflow-wrap: anywhere; background: var(--surface-2, rgba(127, 127, 127, 0.12)); padding: 1px 6px; border-radius: 4px; font-size: 0.85em; }
+@media (max-width: 560px) {
+  .install-body { padding-left: 16px; }
+}

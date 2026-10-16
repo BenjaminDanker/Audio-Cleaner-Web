@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import butter, resample_poly, sosfilt, sosfilt_zi
+from scipy.signal import butter, firwin, sosfilt, sosfilt_zi
 
 from acw_common.dfn import DeepFilter
 
@@ -207,6 +207,33 @@ def shared_recognizer(models_dir: Path, threads: int = 2) -> _StreamingRecognize
 _PRONOUN_I = re.compile(r"\bi(?=$|\s|'(?:m|ve|ll|d)\b)")
 
 
+class Decimate3:
+    """48 kHz -> 16 kHz for the recognizer, one batch at a time, as if the whole stream were converted in one go
+    (the same filter as scipy's resample_poly(x, 1, 3)). Converting each batch on its own would put a small click at
+    every batch edge, and the edges fall wherever the network timing puts them."""
+
+    HALF = 30  # resample_poly's filter half-length for a factor of 3
+
+    def __init__(self) -> None:
+        self.h = firwin(2 * self.HALF + 1, 1 / 3, window=("kaiser", 5.0)).astype(np.float32)
+        self.buf = np.zeros(self.HALF, np.float32)  # what resample_poly assumes before the first sample: silence
+        self.next = self.HALF  # where in `buf` the next output sample is centred
+
+    def __call__(self, x: np.ndarray) -> np.ndarray:
+        buf = np.concatenate([self.buf, np.asarray(x, np.float32)])
+        last = len(buf) - 1 - self.HALF  # the last centre whose filter window is complete
+        if last < self.next:
+            self.buf = buf
+            return np.zeros(0, np.float32)
+        centres = np.arange(self.next, last + 1, 3)
+        valid = np.convolve(buf[centres[0] - self.HALF:centres[-1] + self.HALF + 1], self.h, mode="valid")
+        out = valid[::3].astype(np.float32)
+        keep_from = centres[-1] + 3 - self.HALF  # the next window starts here
+        self.buf = buf[keep_from:]
+        self.next = self.HALF
+        return out
+
+
 def _tidy(text: str) -> str:
     """The model writes lowercase without punctuation: capitalise the line and "I"."""
     text = _PRONOUN_I.sub("I", text.strip())
@@ -226,6 +253,7 @@ class StreamingCaptioner:
         self.emit = emit
         self._pending: list[np.ndarray] = []
         self._pending_lock = threading.Lock()
+        self._to16k = Decimate3()
         self._fed = 0  # 16 kHz samples given to the recognizer
         self._line_start = 0  # sample where the current line began
         self._last_text = ""
@@ -241,7 +269,7 @@ class StreamingCaptioner:
         with self._pending_lock:
             chunks, self._pending = self._pending, []
         if chunks:
-            x = resample_poly(np.concatenate(chunks), 1, 3).astype(np.float32)
+            x = self._to16k(np.concatenate(chunks))
             self.stream.accept_waveform(_StreamingRecognizer.INPUT_RATE, x)
             self._fed += len(x)
 
