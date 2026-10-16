@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { clock } from '../format.js';
 
 /**
- * A/B player: the original file drives playback (audio or video element), the cleaned audio is a second
- * element kept in sync. Toggling only mutes one and unmutes the other, so you hear both at the same position.
+ * A/B player: the original file (audio or video element) and the cleaned audio play side by side; toggling only
+ * mutes one and unmutes the other, so you hear both at the same position. The one you are listening to sets the
+ * time and the other follows it: a big video the computer can't decode in time then never holds the cleaned sound
+ * back (the picture jumps to catch up instead, the way the browser drops late frames).
  */
 export default function AbPlayer({ original, cleanedUrl, isVideo }) {
   const origUrl = useMemo(() => URL.createObjectURL(original), [original]);
@@ -19,8 +21,14 @@ export default function AbPlayer({ original, cleanedUrl, isVideo }) {
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
-  const lead = useCallback(() => (origOk ? master.current : slave.current), [origOk]);
-  const follower = useCallback(() => (origOk ? slave.current : null), [origOk]);
+  const lead = useCallback(
+    () => (origOk && mode === 'original' ? master.current : slave.current),
+    [origOk, mode],
+  );
+  const follower = useCallback(
+    () => (!origOk ? null : mode === 'original' ? slave.current : master.current),
+    [origOk, mode],
+  );
 
   // keep mute state in sync with the chosen mode
   useEffect(() => {
@@ -35,9 +43,12 @@ export default function AbPlayer({ original, cleanedUrl, isVideo }) {
     const onPlay = () => { setPlaying(true); if (b) { b.currentTime = a.currentTime; b.play().catch(() => {}); } };
     const onPause = () => { setPlaying(false); b?.pause(); };
     const onSeek = () => { setTime(a.currentTime); if (b) b.currentTime = a.currentTime; };
+    // A video follows more loosely than audio: each jump costs it a decode from the previous key frame.
+    const slack = b && b.tagName === 'VIDEO' ? 0.5 : 0.15;
     const onTime = () => {
       setTime(a.currentTime);
-      if (b && !a.paused && Math.abs(b.currentTime - a.currentTime) > 0.15) b.currentTime = a.currentTime;
+      if (b && !a.paused && Math.abs(b.currentTime - a.currentTime) > slack) b.currentTime = a.currentTime;
+      if (b && !a.paused && b.paused) b.play().catch(() => {});
     };
     const onMeta = () => setDur(Number.isFinite(a.duration) ? a.duration : 0);
     const onEnd = () => { setPlaying(false); b?.pause(); };
@@ -57,6 +68,19 @@ export default function AbPlayer({ original, cleanedUrl, isVideo }) {
       a.removeEventListener('ended', onEnd);
     };
   }, [lead, follower, origUrl, cleanedUrl]);
+
+  // Switching what you hear while playing: the new leader takes over from the old one's position.
+  const prevMode = useRef(mode);
+  useEffect(() => {
+    if (prevMode.current === mode || !origOk) return;
+    prevMode.current = mode;
+    const a = lead();
+    const b = follower();
+    if (a && b) {
+      a.currentTime = b.currentTime;
+      if (!b.paused) a.play().catch(() => {});
+    }
+  }, [mode, origOk, lead, follower]);
 
   const toggle = () => {
     const a = lead();
