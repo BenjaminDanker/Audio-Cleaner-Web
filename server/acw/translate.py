@@ -1,8 +1,11 @@
 """Translations of captions and transcripts (files and live), through a text model of our speech partner.
 
 Runs in the web process (the only service allowed to reach the internet). Only TEXT is sent: the lines that were
-already transcribed, never audio. The model is ACW_OPENAI_TRANSLATE_MODEL (default gpt-4.1-mini: fast, and costs a
-few cents per hour of speech per language).
+already transcribed, never audio. The model is ACW_OPENAI_TRANSLATE_MODEL, default gpt-6-luna with reasoning off:
+in our test (2026-10-16, gaming/stream lines into Spanish, Japanese, German) it was the cheapest current model, about
+1.3 s per live line, and it got slang ("cheesed", "one-tapped") and grammar right where gpt-5.4-mini/nano and
+gpt-5.6-luna slipped; gpt-6.1-sol was a little better but ~20x the price and slower. About a cent per hour of speech
+per language.
 
 Files: `translate_job(job_dir, targets, source)` reads segments.json and writes segments.<lang>.json with the same
 timing and the translated text, one language at a time; a language that fails is left out (the job then says so and
@@ -43,7 +46,15 @@ class TranslationError(Exception):
 
 
 def model() -> str:
-    return os.environ.get("ACW_OPENAI_TRANSLATE_MODEL", "gpt-4.1-mini")
+    return os.environ.get("ACW_OPENAI_TRANSLATE_MODEL", "gpt-6-luna")
+
+
+def _tuning() -> dict:
+    """Reasoning models take no temperature; with reasoning off they answer as fast as a plain model."""
+    m = model()
+    if m.startswith(("gpt-5", "gpt-6", "o")):
+        return {"reasoning_effort": os.environ.get("ACW_OPENAI_TRANSLATE_EFFORT", "none")}
+    return {"temperature": 0.2}
 
 
 def check_targets(targets: object, spoken: str | None = None) -> list[str]:
@@ -104,7 +115,7 @@ async def translate_lines(http: httpx.AsyncClient, lines: list[str], source: str
         return []
     body = {
         "model": model(),
-        "temperature": 0.2,
+        **_tuning(),
         "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": _system_prompt(source, target)
@@ -129,7 +140,7 @@ async def translate_line(http: httpx.AsyncClient, text: str, source: str | None,
     ctx = "\n".join(context[-3:]) if context else ""
     body = {
         "model": model(),
-        "temperature": 0.2,
+        **_tuning(),
         "messages": [
             {"role": "system", "content": _system_prompt(source, target) + " Answer with the translation of the LAST line only."},
             {"role": "user", "content": (f"Earlier lines, for context only:\n{ctx}\n\n" if ctx else "") + f"Line to translate:\n{text}"},
