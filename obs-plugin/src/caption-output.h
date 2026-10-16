@@ -15,7 +15,16 @@ extern "C" {
 void caption_output_init(void);
 void caption_output_shutdown(void);
 
-/* Queue caption text for the streaming output; a no-op while not streaming. */
+/* Which outputs the closed captions go to (bits). A filter registers its own choice under its own address (any
+ * pointer that stays the same for the filter's life); the channel serves the union of all filters' choices.
+ * 0 removes the filter's entry. */
+#define CAPTION_TARGET_STREAM 1u
+#define CAPTION_TARGET_RECORDING 2u
+#define CAPTION_TARGET_REPLAY 4u
+#define CAPTION_TARGET_OTHERS 8u /* outputs made by other plugins (multistream and the like) */
+void caption_output_set_targets(const void *owner, unsigned targets);
+
+/* Queue caption text for the chosen outputs; a no-op while none of them runs. */
 void caption_output_push(const char *text);
 
 #ifdef __cplusplus

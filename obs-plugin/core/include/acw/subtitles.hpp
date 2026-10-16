@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace acw {
@@ -46,6 +47,10 @@ public:
 	// A recording started now (or at `start`): forgets earlier cues and collects new ones.
 	void begin(std::chrono::steady_clock::time_point start);
 	bool active() const;
+	// The recording was paused / went on (its own clock stands still meanwhile): speech in between is left out and the
+	// cues after it are counted without the pause. No-ops while no recording runs.
+	void pause(std::chrono::steady_clock::time_point now);
+	void resume(std::chrono::steady_clock::time_point now);
 	// Any thread; ignored while no recording runs. Cues that end before the recording started are dropped.
 	void add(const SubtitleCue &cue);
 	// The recording stopped: the files to write (one per language that has cues), and collecting ends.
@@ -58,6 +63,10 @@ private:
 	mutable std::mutex mu_;
 	bool active_ = false;
 	std::chrono::steady_clock::time_point t0_{};
+	bool paused_ = false;
+	std::chrono::steady_clock::time_point pause_start_{};
+	std::vector<std::pair<std::chrono::steady_clock::time_point, std::chrono::steady_clock::time_point>> pauses_;  // finished ones
+	double position(std::chrono::steady_clock::time_point t) const;  // seconds into the recording, pauses not counted
 	std::map<std::string, std::vector<SrtCue>> cues_;
 	size_t total_ = 0;
 };

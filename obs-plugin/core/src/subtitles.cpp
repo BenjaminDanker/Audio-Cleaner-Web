@@ -105,6 +105,8 @@ void SubtitleRecorder::begin(std::chrono::steady_clock::time_point start)
 	std::lock_guard<std::mutex> lk(mu_);
 	active_ = true;
 	t0_ = start;
+	paused_ = false;
+	pauses_.clear();
 	cues_.clear();
 	total_ = 0;
 }
@@ -115,6 +117,37 @@ bool SubtitleRecorder::active() const
 	return active_;
 }
 
+double SubtitleRecorder::position(std::chrono::steady_clock::time_point t) const
+{
+	double s = std::chrono::duration<double>(t - t0_).count();
+	for (const auto &p : pauses_) {
+		if (t >= p.second)
+			s -= std::chrono::duration<double>(p.second - p.first).count();
+		else if (t > p.first)
+			s -= std::chrono::duration<double>(t - p.first).count();
+	}
+	return s;
+}
+
+void SubtitleRecorder::pause(std::chrono::steady_clock::time_point now)
+{
+	std::lock_guard<std::mutex> lk(mu_);
+	if (!active_ || paused_)
+		return;
+	paused_ = true;
+	pause_start_ = now;
+}
+
+void SubtitleRecorder::resume(std::chrono::steady_clock::time_point now)
+{
+	std::lock_guard<std::mutex> lk(mu_);
+	if (!active_ || !paused_)
+		return;
+	paused_ = false;
+	if (now > pause_start_ && pauses_.size() < 1000)
+		pauses_.emplace_back(pause_start_, now);
+}
+
 void SubtitleRecorder::add(const SubtitleCue &cue)
 {
 	if (cue.text.empty())
@@ -122,9 +155,15 @@ void SubtitleRecorder::add(const SubtitleCue &cue)
 	std::lock_guard<std::mutex> lk(mu_);
 	if (!active_ || total_ >= kMaxCues)
 		return;
+	std::chrono::steady_clock::time_point cue_end = cue.end;
+	if (paused_) {  // speech during the pause is not in the recording
+		if (cue.start >= pause_start_)
+			return;
+		cue_end = std::min(cue_end, pause_start_);
+	}
 	SrtCue c;
-	c.start = std::chrono::duration<double>(cue.start - t0_).count();
-	c.end = std::chrono::duration<double>(cue.end - t0_).count();
+	c.start = position(cue.start);
+	c.end = position(cue_end);
 	c.text = cue.text;
 	if (std::max(c.start, c.end) <= 0.0)
 		return;  // spoken before the recording began

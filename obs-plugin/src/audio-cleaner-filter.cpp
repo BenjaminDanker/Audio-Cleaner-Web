@@ -33,7 +33,15 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  *
  * filter_audio() never blocks: it copies samples into acw_core's lock-free
  * rings and reads the delayed output from them. Everything slow (network, TLS,
- * Opus, reconnects) happens on acw_core's own threads.
+ * Opus, reconnects) happens on acw_core's own threads. Whatever the service does
+ * (unreachable, slow, ends the session) the microphone audio keeps passing through
+ * unprocessed; captions just stop and the status says why.
+ *
+ * Captions: the final captions (and their translations, when chosen) go through a
+ * per-filter acw::CaptionRouter to: the paced closed-caption channel (one language),
+ * OBS text sources (one per language, on screen) and the subtitle files written next
+ * to recordings (subtitle-files.cpp). Everything about which output gets what is
+ * decided in the OBS-independent core; this file only wires the settings to it.
  */
 
 #include <obs-module.h>
@@ -41,12 +49,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 
 #include "caption-output.h"
+#include "subtitle-files.h"
+#include "text-sources.h"
 #include "update-notice.h"
 
+#include "acw/caption_router.hpp"
+#include "acw/languages.hpp"
 #include "acw/reference.hpp"
 #include "acw/session.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -66,7 +79,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_STRENGTH "strength"
 #define S_LATENCY "latency_ms"
 #define S_CODEC "codec"
-#define S_SEND_CAPTIONS "send_captions"
+#define S_SEND_CAPTIONS "send_captions"  // before the output choices below existed: "off" meant captions were not wanted at all
+#define S_CAPTIONS_GROUP "captions_group"
+#define S_CC_LANGUAGE "cc_language"
+#define S_CC_STREAM "cc_stream"
+#define S_CC_RECORDING "cc_recording"
+#define S_CC_REPLAY "cc_replay"
+#define S_CC_OTHERS "cc_others"
+#define S_OVERLAY_SPOKEN "overlay_spoken"
+#define S_OVERLAY_LINES "overlay_lines"
+#define S_OVERLAY_CLEAR "overlay_clear_s"
+#define S_SAVE_SRT "save_srt"
 #define S_ECHO_SOURCE "echo_source"
 #define S_STATUS "status"
 #define S_REFRESH "refresh_status"
@@ -100,34 +123,21 @@ const LangEntry kLanguages[] = {
 	{"ru", "AudioCleaner.Language.ru"},     {"uk", "AudioCleaner.Language.uk"}, {"ar", "AudioCleaner.Language.ar"},
 	{"hi", "AudioCleaner.Language.hi"},     {"ja", "AudioCleaner.Language.ja"}, {"ko", "AudioCleaner.Language.ko"},
 	{"zh", "AudioCleaner.Language.zh"},
+	{"el", "AudioCleaner.Language.el"},     {"he", "AudioCleaner.Language.he"}, {"id", "AudioCleaner.Language.id"},
+	{"vi", "AudioCleaner.Language.vi"},
 };
 
-// The closed-caption format of a stream (CEA-608) can only show Latin letters: captions in these languages
-// can be made, but not added to the stream.
-bool language_fits_stream(const std::string &code)
-{
-	static const char *no[] = {"ru", "uk", "ar", "hi", "ja", "ko", "zh", "he", "el", "th", "bg", "sr", "fa", "bn", "ta", "te"};
-	for (const char *n : no)
-		if (code == n)
-			return false;
-	return true;
-}
+constexpr int kSlots = static_cast<int>(acw::kMaxTranslations);  // translation languages at once
+const char *const kTranslateKeys[kSlots] = {"translate_1", "translate_2", "translate_3"};
+const char *const kOverlayKeys[kSlots] = {"overlay_1", "overlay_2", "overlay_3"};
+const char *const kCreateKeys[kSlots + 1] = {"create_overlay_spoken", "create_overlay_1", "create_overlay_2", "create_overlay_3"};
 
-// "en-US", "DE", " fr_CA " -> "en", "de", "fr"; anything that is not a 2-3 letter code -> "auto".
-std::string normalise_language(const std::string &in)
+// The name of a language in the user's language (the plugin's own text), or the English one.
+std::string lang_label(const std::string &code)
 {
-	std::string out;
-	for (char ch : in) {
-		const unsigned char c = static_cast<unsigned char>(ch);
-		if (std::isspace(c))
-			continue;
-		if (!std::isalpha(c))
-			break;  // '-' or '_' starts the region
-		out += static_cast<char>(std::tolower(c));
-	}
-	if (out.size() < 2 || out.size() > 3)
-		return "auto";
-	return out;
+	const std::string key = "AudioCleaner.Lang." + code;
+	const char *t = obs_module_text(key.c_str());
+	return t && key != t ? std::string(t) : acw::language_name(code);
 }
 
 struct Settings {
@@ -139,18 +149,71 @@ struct Settings {
 	int strength = 100;            // attenuation limit in dB: 12 / 24 / 40 / 100 (same levels as the website and desktop app)
 	int latency_ms = 150;          // 80 / 150 / 250
 	std::string codec = "opus";    // opus | pcm
-	bool send_captions = true;
 	std::string echo_source = ECHO_DESKTOP;  // name of the source that plays through the speakers
+
+	// Where the captions go. Closed captions: to which outputs, and in which language ("same" = the spoken one, else
+	// one of the translations). On-screen text: an OBS text source per language. Subtitle files: next to recordings.
+	bool cc_stream = true, cc_recording = true, cc_replay = false, cc_others = false;
+	std::string cc_language = "same";
+	std::array<std::string, kSlots> translate;  // language chosen in each slot ("" = none)
+	std::string overlay_spoken;                 // text source for the spoken language
+	std::array<std::string, kSlots> overlay;    // text source for the language of each slot
+	int overlay_lines = 2, overlay_clear_s = 6;
+	bool save_srt = true;
 
 	// Standard captions are English only; the language setting belongs to the extra accurate ones.
 	std::string caption_language() const { return captions == "premium" ? language : std::string("auto"); }
+	// The language that is spoken, as far as it is known ("" = detected automatically).
+	std::string spoken() const { return acw::spoken_language(captions, language); }
 
-	// Captions only have a use when they go to the stream, and only then are they asked for (and billed).
+	// The translation language of each slot: unknown codes, the spoken language and repeats are dropped.
+	std::array<std::string, kSlots> slot_languages() const
+	{
+		std::array<std::string, kSlots> out;
+		std::vector<std::string> taken;
+		for (int i = 0; i < kSlots; ++i) {
+			const std::vector<std::string> c = acw::clean_translation_targets({translate[i]}, spoken());
+			if (!c.empty() && std::find(taken.begin(), taken.end(), c[0]) == taken.end()) {
+				out[i] = c[0];
+				taken.push_back(c[0]);
+			}
+		}
+		return out;
+	}
+
 	bool captions_wanted() const { return captions != "off"; }
-	bool captions_fit_stream() const { return language_fits_stream(caption_language()); }
+
+	bool cc_any_target() const { return cc_stream || cc_recording || cc_replay || cc_others; }
+	// Language of the closed captions: "" = the spoken one, else one of the slot languages.
+	std::string cc_code() const
+	{
+		if (cc_language.empty() || cc_language == "same")
+			return std::string();
+		for (const std::string &l : slot_languages())
+			if (l == cc_language)
+				return l;
+		return std::string();
+	}
+	bool cc_fits() const { return acw::language_fits_stream(cc_code().empty() ? caption_language() : cc_code()); }
+	// Captions go to closed-caption outputs only when some are chosen and the language can be shown there.
+	bool cc_wanted() const { return captions_wanted() && cc_any_target() && cc_fits(); }
+
+	bool wants_spoken() const { return (cc_wanted() && cc_code().empty()) || !overlay_spoken.empty() || save_srt; }
+	// Translation languages worth asking (and paying) for: some place shows them.
+	std::vector<std::string> wanted_translations() const
+	{
+		std::vector<std::string> out;
+		const auto langs = slot_languages();
+		for (int i = 0; i < kSlots; ++i)
+			if (!langs[i].empty() && ((cc_wanted() && cc_code() == langs[i]) || !overlay[i].empty() || save_srt))
+				out.push_back(langs[i]);
+		return out;
+	}
+
+	// Captions are only asked for (and billed) when something shows them.
 	std::string effective_captions() const
 	{
-		return captions_wanted() && send_captions && captions_fit_stream() ? captions : std::string();
+		return captions_wanted() && (wants_spoken() || !wanted_translations().empty()) ? captions : std::string();
 	}
 
 	bool configured() const { return !api_key.empty() && (denoise || !effective_captions().empty()); }
@@ -160,9 +223,48 @@ struct Settings {
 	{
 		const std::string cap = effective_captions();
 		return api_key == o.api_key && url == o.url && denoise == o.denoise && cap == o.effective_captions() &&
-		       (cap.empty() || caption_language() == o.caption_language()) && latency_ms == o.latency_ms &&
-		       codec == o.codec &&
+		       (cap.empty() || (caption_language() == o.caption_language() && wanted_translations() == o.wanted_translations())) &&
+		       latency_ms == o.latency_ms && codec == o.codec &&
 		       echo_source.empty() == o.echo_source.empty();  // which source it is does not matter to the session
+	}
+
+	unsigned cc_target_mask() const
+	{
+		unsigned m = 0;
+		if (!cc_wanted())
+			return m;
+		if (cc_stream)
+			m |= CAPTION_TARGET_STREAM;
+		if (cc_recording)
+			m |= CAPTION_TARGET_RECORDING;
+		if (cc_replay)
+			m |= CAPTION_TARGET_REPLAY;
+		if (cc_others)
+			m |= CAPTION_TARGET_OTHERS;
+		return m;
+	}
+
+	acw::RouterConfig router_config() const
+	{
+		acw::RouterConfig rc;
+		rc.spoken = spoken();
+		const auto langs = slot_languages();
+		const std::vector<std::string> wanted = wanted_translations();
+		rc.translate.assign(kSlots, std::string());
+		rc.overlay.assign(kSlots, std::string());
+		for (int i = 0; i < kSlots; ++i) {
+			if (std::find(wanted.begin(), wanted.end(), langs[i]) == wanted.end())
+				continue;
+			rc.translate[static_cast<size_t>(i)] = langs[i];
+			rc.overlay[static_cast<size_t>(i)] = overlay[i];
+		}
+		rc.closed_caption_language = cc_code();
+		rc.closed_captions = cc_wanted();
+		rc.overlay_spoken = overlay_spoken;
+		rc.overlay_options.max_lines = static_cast<size_t>(std::min(3, std::max(1, overlay_lines)));
+		rc.overlay_options.clear_after_s = std::min(60, std::max(2, overlay_clear_s));
+		rc.subtitles = save_srt;
+		return rc;
 	}
 };
 
@@ -170,6 +272,14 @@ struct Settings {
 struct ref_tap {
 	std::shared_ptr<acw::ReferenceBuffer> buffer;
 	std::vector<float> mono;  // scratch for the downmix (callback thread only)
+};
+
+struct ac_filter;
+
+// What a "Create text source" button needs to know about its filter and language slot (-1 = the spoken language).
+struct overlay_button {
+	ac_filter *filter = nullptr;
+	int slot = -1;
 };
 
 struct ac_filter {
@@ -188,6 +298,10 @@ struct ac_filter {
 
 	std::vector<float> mono;  // preallocated scratch for the downmix
 
+	// Where captions go; it outlives the sessions that call it (they hold a reference).
+	std::shared_ptr<acw::CaptionRouter> router;
+	overlay_button buttons[kSlots + 1];
+
 	// Echo reference: the buffer lives as long as the filter, sessions and the tap share it.
 	std::shared_ptr<acw::ReferenceBuffer> reference;
 	obs_weak_source_t *ref_weak = nullptr;  // the source we listen to (weak: never keeps it alive)
@@ -204,7 +318,7 @@ struct ac_filter {
 	std::vector<RetiredTap> retired_taps;
 };
 
-Settings read_settings(obs_data_t *d)
+Settings read_settings(obs_data_t *d, bool migrate = true)
 {
 	Settings s;
 	s.api_key = obs_data_get_string(d, S_API_KEY);
@@ -215,14 +329,39 @@ Settings read_settings(obs_data_t *d)
 	s.captions = obs_data_get_string(d, S_CAPTIONS);
 	if (s.captions != "local" && s.captions != "premium")
 		s.captions = "off";
-	s.language = normalise_language(obs_data_get_string(d, S_LANGUAGE));
+	s.language = acw::normalise_language(obs_data_get_string(d, S_LANGUAGE));
 	s.strength = static_cast<int>(obs_data_get_int(d, S_STRENGTH));
 	s.latency_ms = static_cast<int>(obs_data_get_int(d, S_LATENCY));
 	if (s.latency_ms != 80 && s.latency_ms != 250)
 		s.latency_ms = 150;
 	s.codec = obs_data_get_string(d, S_CODEC) == std::string("pcm") ? "pcm" : "opus";
-	s.send_captions = obs_data_get_bool(d, S_SEND_CAPTIONS);
 	s.echo_source = obs_data_get_string(d, S_ECHO_SOURCE);
+
+	s.cc_stream = obs_data_get_bool(d, S_CC_STREAM);
+	s.cc_recording = obs_data_get_bool(d, S_CC_RECORDING);
+	s.cc_replay = obs_data_get_bool(d, S_CC_REPLAY);
+	s.cc_others = obs_data_get_bool(d, S_CC_OTHERS);
+	s.cc_language = obs_data_get_string(d, S_CC_LANGUAGE);
+	s.save_srt = obs_data_get_bool(d, S_SAVE_SRT);
+	// Settings saved before these options existed: "Send captions to the stream" off meant captions were not wanted at
+	// all (and not paid for). Keep it that way, and show it in the new options too.
+	if (migrate && obs_data_has_user_value(d, S_SEND_CAPTIONS) && !obs_data_get_bool(d, S_SEND_CAPTIONS) &&
+	    !obs_data_has_user_value(d, S_CC_STREAM) && !obs_data_has_user_value(d, S_CC_RECORDING)) {
+		s.cc_stream = s.cc_recording = false;
+		obs_data_set_bool(d, S_CC_STREAM, false);
+		obs_data_set_bool(d, S_CC_RECORDING, false);
+		if (!obs_data_has_user_value(d, S_SAVE_SRT)) {
+			s.save_srt = false;
+			obs_data_set_bool(d, S_SAVE_SRT, false);
+		}
+	}
+	for (int i = 0; i < kSlots; ++i) {
+		s.translate[static_cast<size_t>(i)] = obs_data_get_string(d, kTranslateKeys[i]);
+		s.overlay[static_cast<size_t>(i)] = obs_data_get_string(d, kOverlayKeys[i]);
+	}
+	s.overlay_spoken = obs_data_get_string(d, S_OVERLAY_SPOKEN);
+	s.overlay_lines = static_cast<int>(obs_data_get_int(d, S_OVERLAY_LINES));
+	s.overlay_clear_s = static_cast<int>(obs_data_get_int(d, S_OVERLAY_CLEAR));
 	return s;
 }
 
@@ -246,6 +385,26 @@ void log_cb(acw::LogLevel lv, const std::string &msg)
 	obs_log(level, "%s", msg.c_str());
 }
 
+// Where a filter's captions end up: the paced closed-caption channel, OBS text sources, the subtitle files.
+acw::CaptionRouter::Sinks make_sinks()
+{
+	acw::CaptionRouter::Sinks sinks;
+	sinks.closed_caption = [](const std::string &text) { caption_output_push(text.c_str()); };
+	sinks.overlay = [](const std::string &source, const std::string &text) { text_source_set_text(source.c_str(), text.c_str()); };
+	sinks.subtitle = [](const acw::SubtitleCue &cue) { subtitle_files_add(cue); };
+	return sinks;
+}
+
+// Called with the lock held (or while the filter is created / destroyed): tells the router and the closed-caption
+// channel what the settings say.
+void apply_outputs(ac_filter *f)
+{
+	const Settings &s = f->settings;
+	if (f->router)
+		f->router->configure(s.router_config());
+	caption_output_set_targets(f, f->enabled && s.configured() ? s.cc_target_mask() : 0u);
+}
+
 // Called with the lock held. Creates the session for the current settings and starts its network thread
 // (it only connects once audio flows, so this costs nothing while the filter is idle).
 acw::Session *make_session(ac_filter *f)
@@ -260,6 +419,8 @@ acw::Session *make_session(ac_filter *f)
 	cfg.denoise = s.denoise;
 	cfg.captions = s.effective_captions();
 	cfg.language = cfg.captions.empty() || s.caption_language() == "auto" ? "" : s.caption_language();
+	if (!cfg.captions.empty())
+		cfg.translate = s.wanted_translations();
 	cfg.atten_lim_db = s.strength;
 	cfg.delay_ms = s.latency_ms;
 	cfg.codec = s.codec == "pcm" ? acw::Codec::Pcm16 : acw::Codec::Opus;
@@ -268,8 +429,19 @@ acw::Session *make_session(ac_filter *f)
 		cfg.reference = f->reference;
 	cfg.client = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
 
+	// The session keeps the router alive; the router never calls into the filter.
+	std::shared_ptr<acw::CaptionRouter> router = f->router;
 	auto *session = new acw::Session(
-		cfg, [](const acw::CaptionEvent &ev) { caption_output_push(ev.text.c_str()); }, log_cb);
+		cfg,
+		[router](const acw::CaptionEvent &ev) {
+			if (router)
+				router->on_caption(ev);
+		},
+		log_cb);
+	session->set_translation_callback([router](const acw::TranslationEvent &ev) {
+		if (router)
+			router->on_translation(ev);
+	});
 	session->start();
 	return session;
 }
@@ -434,6 +606,7 @@ void rebuild_session(ac_filter *f)
 	retire_session(f, old);
 	reap_graveyard(f);
 	update_reference(f);
+	apply_outputs(f);
 }
 
 void on_enable_signal(void *data, calldata_t *cd)
@@ -463,6 +636,19 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_int(d, S_LATENCY, 150);
 	obs_data_set_default_string(d, S_CODEC, "opus");
 	obs_data_set_default_bool(d, S_SEND_CAPTIONS, true);
+	obs_data_set_default_string(d, S_CC_LANGUAGE, "same");
+	obs_data_set_default_bool(d, S_CC_STREAM, true);
+	obs_data_set_default_bool(d, S_CC_RECORDING, true);
+	obs_data_set_default_bool(d, S_CC_REPLAY, false);
+	obs_data_set_default_bool(d, S_CC_OTHERS, false);
+	for (int i = 0; i < kSlots; ++i) {
+		obs_data_set_default_string(d, kTranslateKeys[i], "");
+		obs_data_set_default_string(d, kOverlayKeys[i], "");
+	}
+	obs_data_set_default_string(d, S_OVERLAY_SPOKEN, "");
+	obs_data_set_default_int(d, S_OVERLAY_LINES, 2);
+	obs_data_set_default_int(d, S_OVERLAY_CLEAR, 6);
+	obs_data_set_default_bool(d, S_SAVE_SRT, true);
 	obs_data_set_default_string(d, S_ECHO_SOURCE, ECHO_DESKTOP);
 	obs_data_set_default_bool(d, S_CHECK_UPDATES, true);
 }
@@ -472,6 +658,11 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 	auto *f = new ac_filter();
 	f->context = source;
 	f->mono.assign(kMaxBlock, 0.0f);
+	f->router = std::make_shared<acw::CaptionRouter>(make_sinks());
+	for (int i = 0; i <= kSlots; ++i) {
+		f->buttons[i].filter = f;
+		f->buttons[i].slot = i - 1;
+	}
 
 	audio_t *audio = obs_get_audio();
 	if (audio) {
@@ -512,6 +703,8 @@ void filter_destroy(void *data)
 		detach_reference(f);
 		reap_retired_taps(f, 0.0f, true);
 	}
+	caption_output_set_targets(f, 0u);
+	f->router->stop();  // empties the on-screen text
 	delete f;
 }
 
@@ -523,7 +716,7 @@ void filter_update(void *data, obs_data_t *settings)
 	const Settings prev = f->settings;
 	f->settings = next;
 	if (!prev.same_session_as(next)) {
-		rebuild_session(f);
+		rebuild_session(f);  // also applies the outputs
 		return;
 	}
 	if (prev.strength != next.strength) {
@@ -532,6 +725,7 @@ void filter_update(void *data, obs_data_t *settings)
 			s->set_atten_lim_db(next.strength);
 	}
 	update_reference(f);  // a different echo source
+	apply_outputs(f);     // other languages, outputs, text sources
 }
 
 // ---------------------------------------------------------------------------
@@ -581,32 +775,99 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 // ---------------------------------------------------------------------------
 // properties
 
+std::string replace_all(std::string text, const std::string &from, const std::string &to)
+{
+	for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
+		text.replace(at, from.size(), to);
+	return text;
+}
+
+// The plugin's own wording for a status id of acw::Session::status_line ("reason.no_audio", "warning.translation_unavailable",
+// "translating", ...), or "" when it has none (the built-in English text is used then).
+std::string localized(const std::string &id)
+{
+	const size_t dot = id.find('.');
+	const std::string head = dot == std::string::npos ? std::string() : id.substr(0, dot);
+	const std::string rest = dot == std::string::npos ? id : id.substr(dot + 1);
+	std::string key = "AudioCleaner.Status.";
+	if (head == "reason")
+		key += "Reason.";
+	else if (head == "warning")
+		key += "Warning.";
+	key += rest;
+	const char *t = obs_module_text(key.c_str());
+	return t && key != t ? std::string(t) : std::string();
+}
+
+// A message about the last "Create text source" press, shown in every filter's status for a while.
+std::mutex g_notice_mu;
+std::string g_notice;
+std::chrono::steady_clock::time_point g_notice_at;
+
+void set_notice(const std::string &text)
+{
+	std::lock_guard<std::mutex> lk(g_notice_mu);
+	g_notice = text;
+	g_notice_at = std::chrono::steady_clock::now();
+}
+
+std::string current_notice()
+{
+	std::lock_guard<std::mutex> lk(g_notice_mu);
+	if (g_notice.empty() || std::chrono::steady_clock::now() - g_notice_at > std::chrono::minutes(10))
+		return std::string();
+	return g_notice;
+}
+
 // The plain-words status shown in the dialog. Called without the lock.
 std::string status_text(ac_filter *f)
 {
-	std::lock_guard<std::mutex> lk(f->mu);
-	const Settings &st = f->settings;
-	if (!f->enabled)
-		return T_("AudioCleaner.Status.Disabled");
-	if (st.api_key.empty())
-		return T_("AudioCleaner.Status.NoKey");
-	if (!st.configured()) {
-		if (!st.denoise && st.captions_wanted() && !st.captions_fit_stream())
-			return T_("AudioCleaner.Status.CaptionsLanguage");
-		if (!st.denoise && st.captions_wanted() && !st.send_captions)
-			return T_("AudioCleaner.Status.CaptionsNotSent");
-		return T_("AudioCleaner.Status.NothingEnabled");
+	Settings st;
+	std::string line;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);
+		st = f->settings;
+		if (!f->enabled)
+			return T_("AudioCleaner.Status.Disabled");
+		if (st.api_key.empty())
+			return T_("AudioCleaner.Status.NoKey");
+		if (!st.configured()) {
+			if (!st.denoise && st.captions_wanted())  // captions are the only thing on, and they have nowhere to go
+				return st.cc_any_target() && !st.cc_fits() ? T_("AudioCleaner.Status.CaptionsLanguage")
+									    : T_("AudioCleaner.Status.CaptionsNotSent");
+			return T_("AudioCleaner.Status.NothingEnabled");
+		}
+		acw::Session *s = f->session.load();
+		if (!s)
+			return T_("AudioCleaner.Status.NotRunning");
+		line = s->status_line(localized);
+		if (!st.echo_source.empty() && !f->ref_weak)
+			line += std::string(" ") + T_("AudioCleaner.Status.EchoWaiting");
 	}
-	acw::Session *s = f->session.load();
-	if (!s)
-		return T_("AudioCleaner.Status.NotRunning");
-	std::string line = s->status_line();
-	if (st.captions_wanted() && !st.captions_fit_stream())
-		line += std::string(" ") + T_("AudioCleaner.Status.CaptionsLanguage");
-	else if (st.captions_wanted() && !st.send_captions)
-		line += std::string(" ") + T_("AudioCleaner.Status.CaptionsNotSent");
-	if (!st.echo_source.empty() && !f->ref_weak)
-		line += std::string(" ") + T_("AudioCleaner.Status.EchoWaiting");
+	if (st.captions_wanted()) {
+		if (st.effective_captions().empty())
+			line += std::string(" ") + (st.cc_any_target() && !st.cc_fits() ? T_("AudioCleaner.Status.CaptionsLanguage")
+											 : T_("AudioCleaner.Status.CaptionsNotSent"));
+		else if (st.cc_any_target() && !st.cc_fits())
+			line += std::string(" ") + T_("AudioCleaner.Status.CaptionsLanguageOther");
+		for (int i = 0; i < kSlots; ++i)
+			if (!st.translate[static_cast<size_t>(i)].empty() && st.slot_languages()[static_cast<size_t>(i)].empty())
+				line += " " + replace_all(T_("AudioCleaner.Status.TranslateIgnored"), "%1", lang_label(st.translate[static_cast<size_t>(i)]));
+		// Text sources that are chosen but not there (deleted, or the scene collection is still loading).
+		std::vector<std::string> names;
+		if (!st.overlay_spoken.empty())
+			names.push_back(st.overlay_spoken);
+		const auto langs = st.slot_languages();
+		for (int i = 0; i < kSlots; ++i)
+			if (!langs[static_cast<size_t>(i)].empty() && !st.overlay[static_cast<size_t>(i)].empty())
+				names.push_back(st.overlay[static_cast<size_t>(i)]);
+		for (const std::string &n : names)
+			if (!text_source_exists(n.c_str()))
+				line += " " + replace_all(T_("AudioCleaner.Status.OverlayMissing"), "%1", n);
+	}
+	const std::string notice = current_notice();
+	if (!notice.empty())
+		line += " " + notice;
 	return line;
 }
 
@@ -617,11 +878,170 @@ std::string details_text(ac_filter *f)
 	return s ? s->status_details() : std::string();
 }
 
+// ---- the group "translations and where captions go": content that follows the settings -------------------------
+
+void fill_translate_list(obs_property_t *list, const Settings &s, int slot)
+{
+	obs_property_list_clear(list);
+	obs_property_list_add_string(list, T_("AudioCleaner.Translate.None"), "");
+	const std::string spoken = s.spoken();
+	const std::string current = s.translate[static_cast<size_t>(slot)];
+	bool found = current.empty();
+	for (const acw::LanguageInfo &l : acw::translation_languages()) {
+		if (spoken == l.code)
+			continue;  // the service refuses the spoken language as a target
+		bool taken = false;  // chosen in another slot
+		for (int j = 0; j < kSlots; ++j)
+			taken = taken || (j != slot && s.translate[static_cast<size_t>(j)] == l.code);
+		if (taken)
+			continue;
+		obs_property_list_add_string(list, lang_label(l.code).c_str(), l.code);
+		found = found || current == l.code;
+	}
+	if (!found)  // chosen earlier, no longer offered (it became the spoken language): keep it visible
+		obs_property_list_add_string(list, lang_label(current).c_str(), current.c_str());
+}
+
+void fill_source_list(obs_property_t *list, const std::string &current)
+{
+	obs_property_list_clear(list);
+	obs_property_list_add_string(list, T_("AudioCleaner.Overlay.None"), "");
+	bool found = current.empty();
+	text_sources_list([&](const char *name) {
+		obs_property_list_add_string(list, name, name);
+		found = found || current == name;
+	});
+	if (!found)  // a source that is not (yet) there: keep the choice
+		obs_property_list_add_string(list, current.c_str(), current.c_str());
+}
+
+// The language a text-source row stands for, in words ("Spanish"); slot -1 is the spoken language.
+std::string overlay_language_name(const Settings &s, int slot)
+{
+	if (slot < 0) {
+		const std::string sp = s.spoken();
+		return sp.empty() ? std::string(T_("AudioCleaner.Overlay.SpokenLanguage")) : lang_label(sp);
+	}
+	return lang_label(s.slot_languages()[static_cast<size_t>(slot)]);
+}
+
+// Fills the lists of the group and names the rows after the chosen languages. `g` is the group's own property list.
+void refresh_group(obs_properties_t *g, const Settings &s)
+{
+	if (!g)
+		return;
+	const auto langs = s.slot_languages();
+	for (int i = 0; i < kSlots; ++i)
+		if (obs_property_t *l = obs_properties_get(g, kTranslateKeys[i]))
+			fill_translate_list(l, s, i);
+
+	if (obs_property_t *cc = obs_properties_get(g, S_CC_LANGUAGE)) {
+		obs_property_list_clear(cc);
+		const std::string sp = s.spoken();
+		const std::string same = sp.empty() ? std::string(T_("AudioCleaner.CcLanguage.Same"))
+						    : replace_all(T_("AudioCleaner.CcLanguage.SameNamed"), "%1", lang_label(sp));
+		obs_property_list_add_string(cc, same.c_str(), "same");
+		for (int i = 0; i < kSlots; ++i)  // only languages the closed-caption format can show
+			if (!langs[static_cast<size_t>(i)].empty() && acw::language_fits_stream(langs[static_cast<size_t>(i)]))
+				obs_property_list_add_string(cc, lang_label(langs[static_cast<size_t>(i)]).c_str(), langs[static_cast<size_t>(i)].c_str());
+	}
+
+	for (int row = 0; row <= kSlots; ++row) {  // row 0 = spoken language, rows 1.. = the translation slots
+		const int slot = row - 1;
+		const bool used = slot < 0 || !langs[static_cast<size_t>(slot)].empty();
+		const char *key = slot < 0 ? S_OVERLAY_SPOKEN : kOverlayKeys[slot];
+		const std::string name = overlay_language_name(s, slot);
+		if (obs_property_t *l = obs_properties_get(g, key)) {
+			fill_source_list(l, slot < 0 ? s.overlay_spoken : s.overlay[static_cast<size_t>(slot)]);
+			const std::string label = replace_all(T_("AudioCleaner.Overlay.TextFor"), "%1", name);
+			obs_property_set_description(l, label.c_str());
+			obs_property_set_visible(l, used);
+		}
+		if (obs_property_t *b = obs_properties_get(g, kCreateKeys[row])) {
+			const std::string label = replace_all(T_("AudioCleaner.Overlay.Create"), "%1", name);
+			obs_property_set_description(b, label.c_str());
+			obs_property_set_visible(b, used);
+		}
+	}
+}
+
+// Something in the group changed (a translation language ...): the lists depend on each other.
+bool group_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	refresh_group(props, read_settings(settings, false));
+	return true;
+}
+
+// "Create text source for <language>": makes the source (not in any scene: the user adds it with "Add Existing") and
+// chooses it for that language. Runs on OBS's UI thread (a button click already does; obs_queue_task makes sure).
+bool create_overlay_clicked(obs_properties_t *props, obs_property_t *, void *data)
+{
+	auto *b = static_cast<overlay_button *>(data);
+	ac_filter *f = b ? b->filter : nullptr;
+	if (!f)
+		return false;
+	std::string language;
+	const char *key;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);
+		if (b->slot >= 0 && f->settings.slot_languages()[static_cast<size_t>(b->slot)].empty())
+			return false;  // no language chosen for this row
+		language = overlay_language_name(f->settings, b->slot);
+		key = b->slot < 0 ? S_OVERLAY_SPOKEN : kOverlayKeys[b->slot];
+	}
+	const std::string name = replace_all(T_("AudioCleaner.Overlay.Name"), "%1", language);
+	std::shared_ptr<obs_weak_source_t> weak(obs_source_get_weak_source(f->context), obs_weak_source_release);
+	const std::string skey = key;
+	text_source_create(name, [weak, skey, name](TextSourceResult r) {
+		const char *msg = "AudioCleaner.Overlay.NoTextSource";
+		switch (r) {
+		case TextSourceResult::Created:
+			msg = "AudioCleaner.Overlay.Created";
+			break;
+		case TextSourceResult::AlreadyThere:
+			msg = "AudioCleaner.Overlay.AlreadyThere";
+			break;
+		case TextSourceResult::NameTaken:
+			msg = "AudioCleaner.Overlay.NameTaken";
+			break;
+		case TextSourceResult::NoTextSource:
+			break;
+		}
+		set_notice(replace_all(T_(msg), "%1", name));
+		if (r == TextSourceResult::Created || r == TextSourceResult::AlreadyThere) {
+			if (obs_source_t *filter = obs_weak_source_get_source(weak.get())) {
+				obs_data_t *patch = obs_data_create();
+				obs_data_set_string(patch, skey.c_str(), name.c_str());
+				obs_source_update(filter, patch);  // this filter now writes into that source
+				obs_data_release(patch);
+				obs_source_release(filter);
+			}
+		}
+	});
+	// From the UI thread (this is) the source exists and is chosen by now: show it in the lists. The dialog keeps its
+	// list of controls between redraws, so they have to be refilled here.
+	Settings cur;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);
+		cur = f->settings;
+	}
+	refresh_group(props, cur);
+	return true;
+}
+
 // Puts the current status into the dialog.
 void refresh_texts(ac_filter *f, obs_properties_t *props)
 {
 	if (obs_property_t *st = obs_properties_get(props, S_STATUS))
 		obs_property_set_description(st, status_text(f).c_str());
+	if (obs_property_t *grp = obs_properties_get(props, S_CAPTIONS_GROUP)) {  // e.g. a text source made meanwhile
+		Settings cur;
+		{
+			std::lock_guard<std::mutex> lk(f->mu);
+			cur = f->settings;
+		}
+		refresh_group(obs_property_group_content(grp), cur);
+	}
 	if (obs_property_t *adv = obs_properties_get(props, S_ADVANCED))
 		if (obs_properties_t *inner = obs_property_group_content(adv))
 			if (obs_property_t *d = obs_properties_get(inner, S_DETAILS))
@@ -651,14 +1071,17 @@ bool retry_clicked(obs_properties_t *props, obs_property_t *, void *data)
 }
 
 // Which controls make sense follows the captions choice: extra accurate captions have a language to pick,
-// standard captions are English only. Sending to the stream only matters when there are captions.
+// standard captions are English only; the translation and output choices only matter when there are captions. The
+// spoken language decides which translations are offered.
 bool captions_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
 {
 	const std::string mode = obs_data_get_string(settings, S_CAPTIONS);
 	if (obs_property_t *lang = obs_properties_get(props, S_LANGUAGE))
 		obs_property_set_enabled(lang, mode == "premium");
-	if (obs_property_t *send = obs_properties_get(props, S_SEND_CAPTIONS))
-		obs_property_set_enabled(send, mode == "local" || mode == "premium");
+	if (obs_property_t *grp = obs_properties_get(props, S_CAPTIONS_GROUP)) {
+		obs_property_set_enabled(grp, mode == "local" || mode == "premium");
+		refresh_group(obs_property_group_content(grp), read_settings(settings, false));
+	}
 	return true;
 }
 
@@ -677,13 +1100,6 @@ bool check_updates_modified(obs_properties_t *, obs_property_t *, obs_data_t *se
 	if (on != update_notice_enabled())
 		update_notice_set_enabled(on);
 	return false;
-}
-
-std::string replace_all(std::string text, const std::string &from, const std::string &to)
-{
-	for (size_t at = text.find(from); at != std::string::npos; at = text.find(from, at + to.size()))
-		text.replace(at, from.size(), to);
-	return text;
 }
 
 struct echo_list_ctx {
@@ -794,10 +1210,57 @@ obs_properties_t *filter_properties(void *data)
 	if (!lang_known)  // a code from an older setting: keep it selectable
 		obs_property_list_add_string(lang, cur.language.c_str(), cur.language.c_str());
 	obs_property_set_enabled(lang, cur.captions == "premium");
+	obs_property_set_modified_callback(lang, captions_modified);  // the translations offered depend on it
 
-	obs_property_t *send = obs_properties_add_bool(p, S_SEND_CAPTIONS, T_("AudioCleaner.SendCaptions"));
-	obs_property_set_long_description(send, T_("AudioCleaner.SendCaptions.Long"));
-	obs_property_set_enabled(send, cur.captions_wanted());
+	// Translations, closed captions, on-screen text, subtitle files.
+	{
+		obs_properties_t *g = obs_properties_create();
+		obs_property_t *intro = obs_properties_add_text(g, "captions_intro", T_("AudioCleaner.Translate.Info"), OBS_TEXT_INFO);
+		obs_property_text_set_info_word_wrap(intro, true);
+		for (int i = 0; i < kSlots; ++i) {
+			obs_property_t *t = obs_properties_add_list(g, kTranslateKeys[i],
+								    T_(i == 0 ? "AudioCleaner.Translate.Into" : "AudioCleaner.Translate.And"),
+								    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+			obs_property_set_long_description(t, T_("AudioCleaner.Translate.Long"));
+			obs_property_set_modified_callback(t, group_modified);
+		}
+
+		obs_property_t *cc = obs_properties_add_list(g, S_CC_LANGUAGE, T_("AudioCleaner.CcLanguage"), OBS_COMBO_TYPE_LIST,
+							     OBS_COMBO_FORMAT_STRING);
+		obs_property_set_long_description(cc, T_("AudioCleaner.CcLanguage.Long"));
+		obs_property_set_modified_callback(cc, group_modified);
+		obs_property_t *sendto = obs_properties_add_text(g, "cc_targets_info", T_("AudioCleaner.SendCaptions"), OBS_TEXT_INFO);
+		obs_property_text_set_info_word_wrap(sendto, true);
+		obs_property_set_long_description(sendto, T_("AudioCleaner.SendCaptions.Long"));
+		obs_properties_add_bool(g, S_CC_STREAM, T_("AudioCleaner.SendCaptions.Stream"));
+		obs_properties_add_bool(g, S_CC_RECORDING, T_("AudioCleaner.SendCaptions.Recording"));
+		obs_properties_add_bool(g, S_CC_REPLAY, T_("AudioCleaner.SendCaptions.Replay"));
+		obs_property_t *others = obs_properties_add_bool(g, S_CC_OTHERS, T_("AudioCleaner.SendCaptions.Others"));
+		obs_property_set_long_description(others, T_("AudioCleaner.SendCaptions.Others.Long"));
+
+		obs_property_t *ov = obs_properties_add_text(g, "overlay_info", T_("AudioCleaner.Overlay.Info"), OBS_TEXT_INFO);
+		obs_property_text_set_info_word_wrap(ov, true);
+		for (int row = 0; row <= kSlots; ++row) {
+			const char *key = row == 0 ? S_OVERLAY_SPOKEN : kOverlayKeys[row - 1];
+			obs_property_t *l = obs_properties_add_list(g, key, "", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+			obs_property_set_long_description(l, T_("AudioCleaner.Overlay.Long"));
+			obs_properties_add_button2(g, kCreateKeys[row], "", create_overlay_clicked, f ? &f->buttons[row] : nullptr);
+		}
+		obs_property_t *lines = obs_properties_add_list(g, S_OVERLAY_LINES, T_("AudioCleaner.Overlay.Lines"), OBS_COMBO_TYPE_LIST,
+								OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(lines, T_("AudioCleaner.Overlay.Lines.1"), 1);
+		obs_property_list_add_int(lines, T_("AudioCleaner.Overlay.Lines.2"), 2);
+		obs_property_list_add_int(lines, T_("AudioCleaner.Overlay.Lines.3"), 3);
+		obs_property_t *clear = obs_properties_add_int_slider(g, S_OVERLAY_CLEAR, T_("AudioCleaner.Overlay.Clear"), 2, 30, 1);
+		obs_property_int_set_suffix(clear, " s");
+
+		obs_property_t *srt = obs_properties_add_bool(g, S_SAVE_SRT, T_("AudioCleaner.Subtitles"));
+		obs_property_set_long_description(srt, T_("AudioCleaner.Subtitles.Long"));
+
+		refresh_group(g, cur);
+		obs_property_t *grp = obs_properties_add_group(p, S_CAPTIONS_GROUP, T_("AudioCleaner.CaptionsGroup"), OBS_GROUP_NORMAL, g);
+		obs_property_set_enabled(grp, cur.captions_wanted());
+	}
 
 	obs_property_t *lat = obs_properties_add_list(p, S_LATENCY, T_("AudioCleaner.Latency"), OBS_COMBO_TYPE_LIST,
 						      OBS_COMBO_FORMAT_INT);
