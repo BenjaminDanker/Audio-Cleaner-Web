@@ -321,6 +321,7 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
             "contactForm": contact,
             "user": {"id": user["id"], "status": user["status"]},
             "balance": bal,
+            "trialLiveSecondsLeft": max(0, int(user["trial_live_seconds"])),
         }
     return {
         "signedIn": True,
@@ -336,10 +337,10 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
         },
         "csrfToken": principal.csrf_token,
         "balance": bal,
-        # What the pages need to explain limits: whether a top-up has gone through yet (extra-accurate choices
-        # unlock with it) and the largest top-up right now (new accounts start small).
-        "hasPaid": trust.has_settled_payment(principal.user_id),
+        # What the pages need to explain limits: the largest top-up right now (the first one is smaller) and
+        # the free live trial that is left, in seconds.
         "topupMaxCents": trust.topup_max_cents(principal.user_id),
+        "trialLiveSecondsLeft": max(0, int(user["trial_live_seconds"])),
         "autoReload": {
             "enabled": bool(user["auto_reload_enabled"]),
             "thresholdMicros": user["auto_reload_threshold_micros"],

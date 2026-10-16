@@ -50,6 +50,7 @@ const FAQ = [
   ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
   ['How does paying work?', 'You add credit, then spend it by the minute of audio. No subscription. You can top up from $10, and switch on auto-reload (with a monthly limit you choose) if you like. Turn it off whenever you want.'],
   ['What happens to my files and my words?', 'Files you upload are deleted as soon as they are processed. Results stay for 24 hours so you can download them, then they are deleted too. Live audio is never stored. We don’t train anything on your audio or your transcripts.'],
+  ['What does the free trial cover?', 'Your first two hours of live are free: live noise removal and Standard captions, once per email address. Extra accurate captions are paid, and the free trial is paused for a while whenever live is busy.'],
   ['Where is it available?', 'Audio Cleaner isn’t offered in the EU/EEA, the UK or Switzerland. If a card issued there is used by mistake, the payment is cancelled and the card isn’t charged.'],
   ['Is there an OBS plugin?', 'Not yet, it’s on the way. Until then you can try live noise removal and captions right on the Live page, with your own microphone.'],
 ];
@@ -140,7 +141,7 @@ export default function Landing() {
             <article className="card product-card">
               <div className="icon"><IconBroadcast /></div>
               <h3>Live for streamers</h3>
-              <p>Clean mic audio and live captions while you stream. Your first hour is on us, then you only pay for the minutes you are live.{live && <> From {moneyUsd(live.usdPerHour)} an hour.</>}</p>
+              <p>Clean mic audio and live captions while you stream. Your first two hours of live are free, then you only pay for the minutes you are live.{live && <> From {moneyUsd(live.usdPerHour)} an hour.</>}</p>
               <span className="spacer" />
               <Link to="/app/live" className="btn btn-secondary">Try live</Link>
             </article>
@@ -175,6 +176,7 @@ export default function Landing() {
           <div className="card stack">
             <h3 className="mb0">How credit works</h3>
             <ul className="mb0">
+              <li><b>Your first two hours of live are free.</b> Noise removal and Standard captions, no card needed.</li>
               <li><b>No subscription.</b> Add credit from {pricing ? moneyCents(pricing.topup.minCents) : '$5'} and use it when you need it.</li>
               <li><b>You only pay for what you use.</b> You see an estimate before you upload. Live is counted by the second.</li>
               <li><b>Auto-reload is optional.</b> It tops you up when you run low, up to a monthly limit you choose. Turn it off any time.</li>

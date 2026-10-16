@@ -85,17 +85,6 @@ def cost_micros(product: str, tier: str, seconds: float, micros_per_minute: int 
     return math.ceil((rate(product, tier).micros_per_minute if micros_per_minute is None else micros_per_minute) * secs / 60)
 
 
-def welcome_credit_micros() -> int:
-    """The credit a new account gets: one hour of live noise removal + standard live captions, unless set
-    otherwise (ACW_WELCOME_CREDIT_MICROS; 0 = none)."""
-    from ..config import get_settings
-
-    fixed = get_settings().welcome_credit_micros
-    if fixed is not None:
-        return max(0, fixed)
-    return 60 * (rate("stream_denoise", "light").micros_per_minute + rate("stream_captions", "local").micros_per_minute)
-
-
 def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, translate_languages: int = 0) -> dict[str, int]:
     """Micros per minute of each part of a job at today's prices. Stored with the job, so a price
     change never applies to a job that was already created. `translate` is per language."""

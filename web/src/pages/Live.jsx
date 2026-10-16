@@ -5,7 +5,7 @@ import { useAuth } from '../auth.jsx';
 import { IconBroadcast } from '../components/Icons.jsx';
 import PluginInstall from '../components/PluginInstall.jsx';
 import PriceTable from '../components/PriceTable.jsx';
-import { balanceMoney, clock, dateTime, rate, moneyUsd } from '../format.js';
+import { balanceMoney, clock, dateTime, rate, moneyUsd, trialLeft } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
 import { startLocalLive } from '../live/local.js';
@@ -22,7 +22,7 @@ export default function Live() {
         <IconBroadcast width={36} height={36} />
         <div>
           <h1 className="mb0">Live for streamers</h1>
-          <p className="muted mb0">Clean mic audio and live captions for OBS. New accounts get their first hour free; after that you only pay while you’re live.</p>
+          <p className="muted mb0">Clean mic audio and live captions for OBS. Your first two hours of live are free; after that you only pay while you’re live.</p>
         </div>
       </header>
       <LivePrices />
@@ -191,7 +191,8 @@ const ERROR_TEXT = {
   insufficient_funds: null, // the server's message is clear
   tos: 'Please agree to the Terms of Service first.',
   bad_config: null, // the server's message says what to change
-  needs_topup: null, // the server's message says what to do
+  trial_busy: null, // the server's message says what to do
+  too_many_sessions: null,
   rate_limited: 'The connection was closed because this page sent too many messages. Please start again.',
 };
 const DENOISE_NAME = { light: 'standard noise removal' };
@@ -233,10 +234,11 @@ const STOPPED_TEXT = {
   idle_timeout: 'The session ended because no sound reached us for a while. Start it again when you’re ready.',
   no_audio: 'The session ended because not enough sound reached us. Check your microphone and connection, then start again.',
   captions_unavailable: 'The session ended because extra-accurate captions aren’t available right now. You weren’t charged for them.',
+  trial_over: 'Your free trial is used up, so the session stopped.',
 };
 
 function LiveDemo({ pricing }) {
-  const { balance, refresh, hasPaid } = useAuth();
+  const { balance, refresh, trialLiveSecondsLeft } = useAuth();
   const [mode, setMode] = useState('free'); // 'free': everything in this browser | 'paid': on our servers, like the OBS plugin
   const [freeCaps, setFreeCaps] = useState(true);
   const [denoise, setDenoise] = useState(true);
@@ -251,7 +253,7 @@ function LiveDemo({ pricing }) {
   const [stats, setStats] = useState(null);
   const [lines, setLines] = useState([]); // caption lines {key, id, text, final}; partials are updated in place by id
   const [warning, setWarning] = useState(null); // {text, credit}
-  const [stopped, setStopped] = useState('');
+  const [stopped, setStopped] = useState(null); // {text, credit}
   const session = useRef(null);
   const logRef = useRef(null);
   const free = mode === 'free';
@@ -265,6 +267,7 @@ function LiveDemo({ pricing }) {
   const priceKnown = !!pricing && (!denoise || !!den) && (!captions || !!cap);
   const offered = (!denoise || den?.available !== false) && (!captions || cap?.available !== false);
   const accurateListed = capRates.premium?.available !== false;
+  const onTrial = trialLiveSecondsLeft > 0 && captions !== 'premium'; // the free trial covers Standard live only
   const mediaOk = !!(navigator.mediaDevices?.getUserMedia && window.AudioWorklet && window.WebSocket);
 
   useEffect(() => () => session.current?.stop(), []);
@@ -276,9 +279,11 @@ function LiveDemo({ pricing }) {
       setLines((l) => applyCaption(l, ev));
     } else if (ev.type === 'warning') {
       if (ev.code === 'low_balance') setWarning({ text: `Your balance covers about ${Math.max(0, Math.round(ev.secondsLeft))} more seconds. Add credit to keep going.`, credit: true });
+      else if (ev.code === 'trial_low') setWarning({ text: `Your free trial has about ${trialLeft(ev.secondsLeft)} of live left. Add credit to keep going after that.`, credit: true });
+      else if (ev.code === 'trial_used_up_now_paid') setWarning({ text: 'Your free trial is used up. The session carries on and now uses your credit.', credit: false });
       else setWarning({ text: ev.message || 'A heads-up from the live service.', credit: false });
     } else if (ev.type === 'stopped') {
-      setStopped(STOPPED_TEXT[ev.reason] ?? 'The session stopped.');
+      setStopped({ text: STOPPED_TEXT[ev.reason] ?? 'The session stopped.', credit: ev.reason === 'insufficient_funds' || ev.reason === 'trial_over' });
     } else if (ev.type === 'error') {
       setError(ERROR_TEXT[ev.code] ?? ev.message ?? 'The live service ran into a problem.');
     } else if (ev.type === 'closed') {
@@ -290,7 +295,7 @@ function LiveDemo({ pricing }) {
 
   /** cfg: {denoise: tier id | null, captions: '' | 'local' | 'premium'} (defaults to what is selected right now). */
   async function start(cfg = { denoise: denoise ? 'light' : null, captions }) {
-    setError(''); setFull(null); setWarning(null); setStopped(''); setLines([]); setStats(null); setInfo(null);
+    setError(''); setFull(null); setWarning(null); setStopped(null); setLines([]); setStats(null); setInfo(null);
     setState('starting');
     if (free) {
       try {
@@ -350,6 +355,7 @@ function LiveDemo({ pricing }) {
     <section className="card stack" aria-labelledby="demo-h">
       <h2 id="demo-h" className="mb0">Try it with your microphone</h2>
       <p className="muted mb0">Talk into your mic and hear the result as it happens.</p>
+      {trialLiveSecondsLeft > 0 && <p className="mb0" data-testid="live-trial-left"><b>Free trial: {trialLeft(trialLiveSecondsLeft)} of live left.</b> <span className="muted">It covers noise removal and Standard captions.</span></p>}
       <div className="seg" role="radiogroup" aria-label="Which test" data-testid="live-mode">
         {[['free', 'Free, in your browser'], ['paid', 'Paid, done on our side']].map(([v, l]) => (
           <label key={v}>
@@ -365,7 +371,9 @@ function LiveDemo({ pricing }) {
         </>
       ) : (
         <>
-          <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>
+          {onTrial
+            ? <div className="banner banner-info" data-testid="live-trial-banner"><b>Covered by your free trial.</b> No credit is used until the trial runs out. <b>Please wear headphones</b>, or you’ll get feedback.</div>
+            : <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>}
           <p className="mb0" data-testid="live-free-hint">This is how the OBS plugin works. Want to try without spending credit? Switch to the free test above.</p>
         </>
       )}
@@ -423,12 +431,11 @@ function LiveDemo({ pricing }) {
             </label>
             {(!pricing || capRates.premium) && (
               <label className="choice">
-                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={busy || !accurateListed || !hasPaid} onChange={() => setCaptions('premium')} />
-                <span><b>Extra accurate</b><small>{!hasPaid ? 'Needs a top-up first' : <>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</>}</small></span>
+                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={busy || !accurateListed} onChange={() => setCaptions('premium')} />
+                <span><b>Extra accurate</b><small>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</small></span>
               </label>
             )}
           </div>
-          {!hasPaid && <span className="hint" data-testid="accurate-locked-note">Extra accurate needs a top-up first: <Link to="/billing">add credit</Link> once and it unlocks. Standard captions work with your welcome credit.</span>}
           {captions === 'premium' && (
             <>
               <div className="field">
@@ -465,7 +472,12 @@ function LiveDemo({ pricing }) {
         {!pricing && <span className="muted">Loading prices…</span>}
         {pricing && perMin <= 0 && priceKnown && <span className="muted">Turn on noise removal or captions to start.</span>}
         {pricing && !priceKnown && <span className="muted">We don’t have a price for that combination.</span>}
-        {pricing && priceKnown && perMin > 0 && (
+        {pricing && priceKnown && perMin > 0 && onTrial && (
+          <>
+            <b>Cost: free while your trial lasts</b> <span className="muted">({trialLeft(trialLiveSecondsLeft)} left). After that it’s {rate(perMin)} a minute from your credit.</span>
+          </>
+        )}
+        {pricing && priceKnown && perMin > 0 && !onTrial && (
           <>
             <b>Cost: {rate(perMin)} a minute</b> <span className="muted">({moneyUsd(perMin * 60)} an hour).
             {denoise && den && cap ? ` Noise removal ${rate(den.usdPerMinute)} + ${captions === 'premium' ? 'extra accurate' : 'standard'} captions ${rate(cap.usdPerMinute)} a minute.` : ''}
@@ -495,7 +507,7 @@ function LiveDemo({ pricing }) {
       )}
       {error && <div className="banner banner-error" role="alert" data-testid="live-error">{error} {/balance|credit|reserves|set aside/i.test(error) && <Link to="/app/billing">Add credit</Link>}</div>}
       {warning && <div className="banner banner-warn" role="alert">{warning.text} {warning.credit && <Link to="/app/billing">Add credit</Link>}</div>}
-      {stopped && <div className="banner banner-info" role="status">{stopped}</div>}
+      {stopped && <div className="banner banner-info" role="status">{stopped.text} {stopped.credit && <Link to="/app/billing">Add credit</Link>}</div>}
 
       {(live || stats) && (
         <div className="grid grid-3" data-testid="live-stats" data-rtt={stats ? stats.rttAvg.toFixed(1) : ''} data-recv={stats?.recv ?? 0} data-sent={stats?.sent ?? 0}>

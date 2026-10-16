@@ -641,7 +641,7 @@ def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
     if db.now() - p["created_at"] > max_age_days * 86400:
         raise ValueError(f"Payments older than {max_age_days} days can't be refunded online; contact support.")
     bal = ledger.balance(user_id)
-    # Given credit (the welcome hour, grants) counts as spent last: a refund never pays it out as money.
+    # Given credit (grants) counts as spent last: a refund never pays it out as money.
     bought = max(0, bal["available_micros"] - ledger.granted_micros(user_id))
     refundable = min(p["amount_cents"] - p["refunded_cents"], bought // MICROS_PER_CENT)
     if refundable <= 0:

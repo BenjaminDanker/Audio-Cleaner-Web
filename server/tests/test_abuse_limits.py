@@ -1,5 +1,5 @@
 """Fixes from the security / fraud audit: job reservations, cancel after the paid step, live duty cycle and message
-rate, welcome-credit farming, first-top-up trust rules, premium captions that break down, malformed options,
+rate, free-trial farming, first-top-up limits, premium captions that break down, malformed options,
 and what an API key may learn from /api/me."""
 import asyncio
 import json
@@ -277,25 +277,18 @@ def test_settings_changes_have_a_tighter_limit(monkeypatch):
     assert sess.end_reason == "rate_limited" and sess.ws.closed[0] == 1008
 
 
-# ---------------------------------------------------------------- H3/H4: one live session until the first payment
+# ---------------------------------------------------------------- H3/H4: live sessions per account
 
-def test_live_sessions_at_once_depend_on_a_first_payment():
-    uid = user()
-    assert trust.max_live_sessions(uid) == 1
-    settle_payment(uid)
-    assert trust.max_live_sessions(uid) == 2
-
-
-def test_an_unpaid_account_gets_one_live_session(client, signed_in):
+def test_two_live_sessions_at_most_per_account(client, signed_in):
     from acw.stream import routes
 
     uid, h = signed_in
-    routes._live[uid] = 1
+    routes._live[uid] = 2
     try:
         with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ev = ws.receive_json()
-        assert ev["code"] == "too_many_sessions" and "first top-up" in ev["message"]
-        settle_payment(uid)
+        assert ev["code"] == "too_many_sessions" and "Two live sessions" in ev["message"]
+        routes._live[uid] = 1  # the same for an account that has never paid: one more is fine
         with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ws.send_text(json.dumps({"type": "nonsense"}))  # past the session limit: the server now wants a start message
             with pytest.raises(Exception):
@@ -304,10 +297,10 @@ def test_an_unpaid_account_gets_one_live_session(client, signed_in):
         routes._live.pop(uid, None)
 
 
-# ---------------------------------------------------------------- H4: welcome credit key, extra accurate
+# ---------------------------------------------------------------- H4: free-trial key
 
-def _welcome_on(monkeypatch, secret="s" * 40):
-    monkeypatch.delenv("ACW_WELCOME_CREDIT_MICROS", raising=False)
+def _trial_on(monkeypatch, secret="s" * 40):
+    monkeypatch.delenv("ACW_LIVE_TRIAL_SECONDS", raising=False)
     if secret:
         monkeypatch.setenv("ACW_SESSION_SECRET", secret)
     else:
@@ -315,19 +308,19 @@ def _welcome_on(monkeypatch, secret="s" * 40):
     get_settings.cache_clear()
 
 
-def test_mailbox_aliases_get_one_welcome_credit(monkeypatch):
-    _welcome_on(monkeypatch)
+def test_mailbox_aliases_get_one_free_trial(monkeypatch):
+    _trial_on(monkeypatch)
     aliases = ["john.doe@gmail.com", "johndoe@gmail.com", "john.doe+1@gmail.com", "j.o.h.n.d.o.e+x@gmail.com",
                "johndoe+y@googlemail.com", "JohnDoe@GMAIL.com", "other+a@corp.example", "other+b@corp.example", "other@corp.example"]
-    got = [ledger.balance(auth.get_or_create_user(a)["id"])["balance_micros"] > 0 for a in aliases]
+    got = [auth.get_or_create_user(a)["trial_live_seconds"] > 0 for a in aliases]
     assert got == [True] + [False] * 5 + [True, False, False]
     assert db.one("SELECT COUNT(*) n FROM welcome_claims")["n"] == 2
 
 
-def test_the_welcome_claim_is_keyed_with_the_server_secret(monkeypatch):
+def test_the_trial_claim_is_keyed_with_the_server_secret(monkeypatch):
     import hashlib
 
-    _welcome_on(monkeypatch)
+    _trial_on(monkeypatch)
     auth.get_or_create_user("someone@example.com")
     key = db.one("SELECT email_hash FROM welcome_claims")["email_hash"]
     assert key != hashlib.sha256(b"someone@example.com").hexdigest()  # a copy of the database can't be checked by guessing addresses
@@ -347,7 +340,7 @@ def test_without_a_secret_the_claim_key_is_a_plain_hash_and_warns_once(monkeypat
 
     from acw import security
 
-    _welcome_on(monkeypatch, secret=None)
+    _trial_on(monkeypatch, secret=None)
     monkeypatch.setattr(security, "_warned_unkeyed", False)
     with caplog.at_level(logging.WARNING, logger="acw.security"):
         auth.get_or_create_user("one@example.com")
@@ -364,18 +357,6 @@ def test_canonical_mailbox():
     assert canonical_email("ＡＢ@example.com") == "ab@example.com"  # full-width letters (NFKC)
 
 
-def test_extra_accurate_files_need_a_first_payment(client, signed_in):
-    uid, h = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    body = {"kind": "transcribe", "transcribeTier": "premium", "filename": "a.wav", "sizeBytes": 1000, "durationSeconds": 60}
-    r = client.post("/api/jobs", json=body, headers=h)
-    assert r.status_code == 402 and r.json()["detail"].startswith("Extra accurate needs a top-up first")
-    assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0
-    assert client.post("/api/jobs", json={**body, "transcribeTier": "local"}, headers=h).status_code == 200
-    settle_payment(uid)
-    assert client.post("/api/jobs", json=body, headers=h).status_code == 200
-
-
 def test_a_refunded_payment_does_not_count_as_paid():
     uid = user()
     settle_payment(uid, cents=1000)
@@ -386,46 +367,36 @@ def test_a_refunded_payment_does_not_count_as_paid():
     assert not trust.has_settled_payment(uid)
 
 
-def test_extra_accurate_live_captions_need_a_first_payment(client, signed_in, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    get_settings.cache_clear()
-    uid, h = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
-        ws.send_text(json.dumps({"type": "start", "denoise": "light", "captions": "premium", "sampleRate": 48000}))
-        ev = ws.receive_json()
-    assert ev["code"] == "needs_topup" and ev["message"].startswith("Extra accurate needs a top-up first")
-    assert db.one("SELECT COUNT(*) n FROM stream_sessions")["n"] == 0
-
-
-def test_me_tells_the_pages_about_payment_state(client, signed_in):
+def test_me_tells_the_pages_about_the_top_up_limit(client, signed_in):
     uid, h = signed_in
     me = client.get("/api/me").json()
-    assert me["hasPaid"] is False and me["topupMaxCents"] == trust.NEW_ACCOUNT_TOPUP_MAX_CENTS
+    assert "hasPaid" not in me and me["topupMaxCents"] == trust.FIRST_TOPUP_MAX_CENTS == 5_000
+    assert me["trialLiveSecondsLeft"] == 0
     settle_payment(uid)
-    me = client.get("/api/me").json()
-    assert me["hasPaid"] is True and me["topupMaxCents"] == pricing.TOPUP_MAX_CENTS
+    assert client.get("/api/me").json()["topupMaxCents"] == pricing.TOPUP_MAX_CENTS == 50_000
 
 
 # ---------------------------------------------------------------- M4: first top-ups
 
-def test_new_accounts_can_add_at_most_50_dollars_at_first(client, signed_in, monkeypatch):
+def test_a_first_top_up_can_be_up_to_50_dollars_then_up_to_500(client, signed_in, monkeypatch):
     uid, h = signed_in
     made = []
     monkeypatch.setattr(stripe_service, "create_checkout", lambda u, c, s: made.append(c) or "https://checkout.example/x")
     r = client.post("/api/billing/checkout", json={"amountCents": 20_000}, headers=h)
-    assert r.status_code == 400 and "$50" in r.json()["detail"] and "first top-up" in r.json()["detail"]
+    assert r.status_code == 400 and "first top-up can be up to $50" in r.json()["detail"] and "$500" in r.json()["detail"]
     assert client.post("/api/billing/checkout", json={"amountCents": 5_000}, headers=h).status_code == 200
     assert made == [5_000]
-    # a first payment lifts it, and so does a 72-hour-old account
-    settle_payment(uid)
+    settle_payment(uid)  # a top-up has gone through
     assert client.post("/api/billing/checkout", json={"amountCents": 20_000}, headers=h).status_code == 200
+    assert client.post("/api/billing/checkout", json={"amountCents": 50_000}, headers=h).status_code == 200
 
 
-def test_old_accounts_have_the_usual_limit():
+def test_the_age_of_the_account_does_not_matter():
     uid = user()
     assert trust.topup_max_cents(uid) == 5_000
-    db.execute("UPDATE users SET created_at = ? WHERE id = ?", (db.now() - 73 * 3600, uid))
+    db.execute("UPDATE users SET created_at = ? WHERE id = ?", (db.now() - 400 * 86400, uid))
+    assert trust.topup_max_cents(uid) == 5_000
+    settle_payment(uid)
     assert trust.topup_max_cents(uid) == pricing.TOPUP_MAX_CENTS
 
 
@@ -436,7 +407,7 @@ def test_the_checkout_function_checks_the_limit_too(monkeypatch):
         stripe_service.create_checkout(uid, 10_000, False)
 
 
-def test_auto_reload_amount_respects_the_new_account_limit(client, signed_in):
+def test_auto_reload_amount_respects_the_first_top_up_limit(client, signed_in):
     uid, h = signed_in
     db.execute("UPDATE users SET default_payment_method = 'pm_1' WHERE id = ?", (uid,))
     body = {"enabled": True, "thresholdCents": 500, "amountCents": 10_000, "monthlyCapCents": 20_000, "consent": True}
@@ -608,21 +579,8 @@ def test_an_api_key_does_not_learn_the_address_or_billing_settings(client):
     assert me["signedIn"] is True and me["user"] == {"id": uid, "status": "active"}
     assert me["balance"]["available_micros"] == 50_000_000
     text = json.dumps(me)
-    assert "owner@example.com" not in text and "autoReload" not in me and "csrfToken" not in me and "hasPaid" not in me
+    assert "owner@example.com" not in text and "autoReload" not in me and "csrfToken" not in me
     # a browser session still gets all of it
     _, h = login(client, "owner@example.com")
     full = client.get("/api/me").json()
     assert full["user"]["email"] == "owner@example.com" and "autoReload" in full
-
-
-def test_a_test_server_can_trust_every_account(monkeypatch):
-    from acw import auth
-    from acw.billing import trust
-    from acw.config import get_settings
-
-    uid = auth.get_or_create_user("trusted@example.com")["id"]
-    assert not trust.has_settled_payment(uid)
-    monkeypatch.setenv("ACW_TRUST_ALL_ACCOUNTS", "1")
-    get_settings.cache_clear()
-    assert trust.has_settled_payment(uid)
-    get_settings.cache_clear()

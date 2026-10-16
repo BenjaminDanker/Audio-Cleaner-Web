@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db, metrics
-from .billing import ledger, pricing, trust
+from .billing import ledger, pricing
 from .config import get_settings
 
 KINDS = {"denoise", "transcribe", "denoise_transcribe"}
@@ -299,8 +299,6 @@ def create_job(
     if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
         raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
     opts = validate_options(kind, denoise_tier, transcribe_tier, options, free)
-    if kind != "denoise" and transcribe_tier == "premium" and not trust.has_settled_payment(user_id):
-        raise JobError(trust.PREMIUM_NEEDS_TOPUP, 402)
     # The one hard limit: the upload and its scratch files must fit on disk, on top of what other uploads
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload

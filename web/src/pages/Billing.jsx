@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { balanceMoney, dateTime, money, moneyCents } from '../format.js';
+import { balanceMoney, dateTime, money, moneyCents, trialLeft } from '../format.js';
 import { ledgerKind, ledgerText } from '../ledger.js';
 import { usePageTitle, usePricing } from '../hooks.js';
 import { SITE } from '../site.js';
@@ -48,7 +48,7 @@ function dollarsToCents(text) {
 
 export default function Billing() {
   usePageTitle('Billing');
-  const { balance, autoReload, refresh, topupMaxCents } = useAuth();
+  const { balance, autoReload, refresh, topupMaxCents, trialLiveSecondsLeft } = useAuth();
   const { data: pricing } = usePricing();
   const [params, setParams] = useSearchParams();
   const [banner, setBanner] = useState(null);
@@ -127,6 +127,12 @@ export default function Billing() {
       )}
       {unavailable && <div className="banner banner-warn" role="status" data-testid="payments-off">Payments aren’t switched on yet. You’ll be able to add credit here soon.</div>}
 
+      {trialLiveSecondsLeft > 0 && (
+        <div className="banner banner-info" role="status" data-testid="billing-trial">
+          <b>Your first two hours of live are free.</b> You have {trialLeft(trialLiveSecondsLeft)} of live left. It covers noise removal and Standard captions, and you don’t need to add credit for it.
+        </div>
+      )}
+
       <div className="grid grid-3">
         <section className="card" aria-labelledby="b1"><h2 id="b1" className="mb0 small muted">Available</h2><div className="big-number" data-testid="available">{balanceMoney(balance?.available_micros ?? 0)}</div></section>
         <section className="card" aria-labelledby="b2"><h2 id="b2" className="mb0 small muted">Set aside</h2><div className="big-number" data-testid="held">{balanceMoney(balance?.held_micros ?? 0)}</div><div className="muted small">Set aside for jobs and live sessions that are running</div></section>
@@ -140,7 +146,7 @@ export default function Billing() {
   );
 }
 
-/** The largest top-up for this account right now: the site's limit, or less while the account is new and has not paid yet. */
+/** The largest top-up for this account right now: the site's limit, or less until a first top-up has gone through. */
 function topupLimit(pricing, limitCents) {
   const site = pricing?.topup?.maxCents ?? 50000;
   return { max: limitCents != null ? Math.min(site, limitCents) : site, limited: limitCents != null && limitCents < site };
@@ -177,7 +183,7 @@ function TopUp({ pricing, unavailable, limitCents }) {
     <form className="card stack" onSubmit={go} aria-labelledby="topup-h">
       <h2 id="topup-h" className="mb0">Add credit</h2>
       {pricing?.taxAddedAtCheckout && <p className="muted mb0">Sales tax or VAT is added at checkout where it applies. You get the full amount as credit.</p>}
-      {limited && <p className="muted mb0" data-testid="topup-limit">Until your first top-up has gone through (or your account is 3 days old), you can add up to {moneyCents(max)} at a time.</p>}
+      {limited && <p className="muted mb0" data-testid="topup-limit">Your first top-up can be up to {moneyCents(max)}. Once a top-up has gone through, you can add up to {moneyCents(pricing?.topup?.maxCents ?? 50000)} at a time.</p>}
       <fieldset className="field">
         <legend className="label">Amount</legend>
         <div className="choice-cards">

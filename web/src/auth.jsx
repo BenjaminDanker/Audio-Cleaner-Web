@@ -10,17 +10,17 @@ export function useAuth() {
 
 export function AuthProvider({ children }) {
   const navigate = useNavigate();
-  const [state, setState] = useState({ ready: false, known: false, signedIn: false, user: null, balance: null, autoReload: null, contact: null, hasPaid: true, topupMaxCents: null });
+  const [state, setState] = useState({ ready: false, known: false, signedIn: false, user: null, balance: null, autoReload: null, contact: null, topupMaxCents: null, trialLiveSecondsLeft: 0 });
   const stateRef = useRef(state);
   stateRef.current = state;
 
   const apply = useCallback((me) => {
     if (me?.signedIn) {
-      // `hasPaid`: a top-up has gone through (extra accurate choices unlock with it). `topupMaxCents`: the most one top-up may be right now (new accounts start small); null = the usual limit.
-      setState({ ready: true, known: true, signedIn: true, user: me.user, balance: me.balance, autoReload: me.autoReload, contact: !!me.contactForm, hasPaid: me.hasPaid !== false, topupMaxCents: me.topupMaxCents ?? null });
+      // `topupMaxCents`: the most one top-up may be right now (the first one is smaller); null = the usual limit. `trialLiveSecondsLeft`: free live trial left.
+      setState({ ready: true, known: true, signedIn: true, user: me.user, balance: me.balance, autoReload: me.autoReload, contact: !!me.contactForm, topupMaxCents: me.topupMaxCents ?? null, trialLiveSecondsLeft: me.trialLiveSecondsLeft ?? 0 });
     } else {
       // `contact`: whether the contact form can send mail right now (null = not known yet). Only a yes or no; the address stays on the server.
-      setState({ ready: true, known: true, signedIn: false, user: null, balance: null, autoReload: null, contact: me?.contactForm === undefined ? stateRef.current.contact : !!me.contactForm, hasPaid: true, topupMaxCents: null });
+      setState({ ready: true, known: true, signedIn: false, user: null, balance: null, autoReload: null, contact: me?.contactForm === undefined ? stateRef.current.contact : !!me.contactForm, topupMaxCents: null, trialLiveSecondsLeft: 0 });
     }
   }, []);
 

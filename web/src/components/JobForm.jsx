@@ -91,7 +91,7 @@ function Choice({ name, value, current, onPick, disabled, title, hint, reason })
  * onSubmitted({id, ...}, {file, info, extracted, keepVideo})
  */
 export default function JobForm({ onSubmitted }) {
-  const { balance, refresh, hasPaid } = useAuth();
+  const { balance, refresh } = useAuth();
   const { data: pricing, error: pricingError } = usePricing();
   const load = useSyncExternalStore(subscribeDenoiserLoad, denoiserLoadState);
   const speechLoad = useSyncExternalStore(subscribeSpeechLoad, speechLoadState);
@@ -520,11 +520,10 @@ export default function JobForm({ onSubmitted }) {
                   title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${moneyUsd(standardRate.usdPerHour)} an hour` : ''}`}
                 />
                 <Choice
-                  name="subs" value="accurate" current={subs} onPick={pickSubs} disabled={!hasPaid}
-                  title="Extra accurate" reason="Needs a top-up first" hint="Paid. Best for accents, noisy rooms and specialist words. Works in any language."
+                  name="subs" value="accurate" current={subs} onPick={pickSubs}
+                  title="Extra accurate" hint="Paid. Best for accents, noisy rooms and specialist words. Works in any language."
                 />
               </div>
-              {!hasPaid && <span className="hint" data-testid="accurate-locked-note">Extra accurate needs a top-up first: <Link to="/billing">add credit</Link> once and it unlocks. Standard works with your welcome credit.</span>}
               {subs === 'accurate' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
               {wantsPolish && serverText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
               {wantsBrowser && serverText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}

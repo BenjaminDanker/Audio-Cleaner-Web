@@ -48,18 +48,16 @@ class Principal:
 
 # ---------------------------------------------------------------- users
 
-def _welcome(c, user_id: str, email: str) -> None:
-    """A new account's welcome credit, once per email address ever (a deleted account signing up again doesn't
-    get it twice: only a hash of the address is kept)."""
-    from .billing import ledger, pricing
-
-    amount = pricing.welcome_credit_micros()
-    if amount <= 0:
+def _grant_trial(c, user_id: str, email: str) -> None:
+    """A new account's free live trial, once per mailbox ever (a deleted account signing up again doesn't get it
+    twice: only a keyed hash of the mailbox is kept)."""
+    seconds = get_settings().live_trial_seconds
+    if seconds <= 0:
         return
     # The key is the mailbox, not the spelling: +tags, Gmail dots and googlemail.com all reach the same inbox.
     key = keyed_hash("welcome", canonical_email(email))
     if c.execute("INSERT OR IGNORE INTO welcome_claims(email_hash, created_at) VALUES (?, ?)", (key, db.now())).rowcount:
-        ledger.credit(user_id, amount, "grant", "welcome", user_id, "Welcome credit: try live for an hour", c=c)
+        c.execute("UPDATE users SET trial_live_seconds = ? WHERE id = ?", (float(seconds), user_id))
 
 
 def get_or_create_user(email: str, display_name: str | None = None) -> dict:
@@ -77,7 +75,7 @@ def get_or_create_user(email: str, display_name: str | None = None) -> dict:
                 "INSERT INTO audit_log(user_id, actor, action, created_at) VALUES (?, 'system', 'user_created', ?)",
                 (user_id, db.now()),
             )
-            _welcome(c, user_id, email)
+            _grant_trial(c, user_id, email)
             row = c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         elif (email in settings.admin_emails) != bool(row["is_admin"]):
             # The list in the environment is the only source of admin rights: add and remove follow it.

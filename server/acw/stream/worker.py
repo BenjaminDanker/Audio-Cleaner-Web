@@ -36,6 +36,9 @@ log = logging.getLogger("acw.stream.worker")
 # audio to the external caption service run no model here: never limited.
 LIVE_MIN_MEMORY = 300 * 1024**2
 MAX_PENDING_REFS = 50  # reference frames kept for mic frames that haven't arrived (1 s)
+# Free-trial sessions only start while live is less than this full, so a trial never takes the last places from
+# people who pay.
+TRIAL_CAPACITY_FRACTION = 0.7
 MAX_SESSIONS = int(os.environ.get("ACW_STREAM_MAX_SESSIONS", "500"))  # thread sanity bound
 _units = 0.0
 _active = 0
@@ -50,6 +53,11 @@ def capacity_units() -> float:
     live = cpusplit.live_cpus()
     other = max(0.0, sum(snap.busy_per_cpu[c] for c in live if c < len(snap.busy_per_cpu)) - snap.own_cores)
     return cap * max(0.0, 1.0 - other / max(1, cpusplit.max_live_cores()))
+
+
+def trial_busy(cfg: dict) -> bool:
+    """A free-trial session (cfg["trial"]) is turned away while live use is at TRIAL_CAPACITY_FRACTION of its capacity."""
+    return bool(cfg.get("trial")) and _units >= TRIAL_CAPACITY_FRACTION * capacity_units()
 
 
 def admit(cfg: dict) -> tuple[bool, list[dict]]:
@@ -100,6 +108,9 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         tier = cfg.get("denoise")
         if tier is not None and tier not in DENOISE_TIERS:
             await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "bad_tier"}))
+            return
+        if trial_busy(cfg):
+            await P.send_msg(writer, P.MSG_EVENT, P.pack_json({"type": "error", "code": "trial_busy"}))
             return
         ok, options = admit(cfg)
         if not ok:

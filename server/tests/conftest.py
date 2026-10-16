@@ -17,7 +17,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("ACW_BASE_PATH", raising=False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_dummy")
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test_secret")
-    monkeypatch.setenv("ACW_WELCOME_CREDIT_MICROS", "0")  # tests start from an empty balance; test_welcome_credit.py turns it on
+    monkeypatch.setenv("ACW_LIVE_TRIAL_SECONDS", "0")  # tests start without the free live trial; test_live_trial.py turns it on
     from acw import db
     from acw.config import get_settings
     from acw.security import limiter
@@ -60,7 +60,7 @@ def signed_in(client):
 
 
 def settle_payment(user_id, cents=1000):
-    """A top-up that went through: the account counts as paid (extra-accurate choices, two live sessions, large top-ups)."""
+    """A top-up that went through: the account counts as paid (large top-ups)."""
     from acw import db
 
     now = db.now()

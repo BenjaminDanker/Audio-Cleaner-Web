@@ -203,7 +203,7 @@ await check('contact: Terms section 13, Privacy and the licences page point to t
   // the retention text matches what the server does
   await page.goto(`${BASE}/privacy`);
   const t = await page.locator('#retention ~ ul').first().innerText();
-  for (const need of [/7 years/, /12 months/, /90 days/, /30 days/, /contact form/, /welcome credit/]) if (!need.test(t)) throw new Error(`Privacy retention lacks ${need}`);
+  for (const need of [/7 years/, /12 months/, /90 days/, /30 days/, /contact form/, /free live trial/]) if (!need.test(t)) throw new Error(`Privacy retention lacks ${need}`);
   return 'ok';
 });
 

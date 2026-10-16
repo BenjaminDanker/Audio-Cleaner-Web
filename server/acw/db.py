@@ -308,13 +308,16 @@ MIGRATIONS = [
     ("stream_sessions", "dropped_frames", "ALTER TABLE stream_sessions ADD COLUMN dropped_frames INTEGER NOT NULL DEFAULT 0"),
     # Seconds of audio processed when the extra-accurate captions of a session broke down: billed without them from there.
     ("stream_sessions", "premium_off_seconds", "ALTER TABLE stream_sessions ADD COLUMN premium_off_seconds REAL"),
-    # The welcome credit: a one-way hash of each address that has had it, so deleting the account and signing up
+    # The free live trial: a one-way hash of each mailbox that has had it, so deleting the account and signing up
     # again doesn't give it twice. Kept for good (a hash, no account link).
     (
         "welcome_claims",
         "email_hash",
         "CREATE TABLE IF NOT EXISTS welcome_claims (email_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL)",
     ),
+    # The free live trial: seconds of Standard live an account has left, and how many seconds of each session came from it.
+    ("users", "trial_live_seconds", "ALTER TABLE users ADD COLUMN trial_live_seconds REAL NOT NULL DEFAULT 0"),
+    ("stream_sessions", "trial_seconds", "ALTER TABLE stream_sessions ADD COLUMN trial_seconds REAL NOT NULL DEFAULT 0"),
     # Email alerts (acw.alerts): one row per alert kind, for de-duplication and "resolved" mails.
     (
         "alert_state",

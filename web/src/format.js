@@ -55,6 +55,15 @@ export function clock(seconds) {
   return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
 }
 
+/** Time left of the free live trial, in prose: "1 h 42 min", "42 min", "under a minute". */
+export function trialLeft(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (h > 0) return m > 0 ? `${h} h ${m} min` : `${h} h`;
+  return m > 0 ? `${m} min` : 'under a minute';
+}
+
 /** "3 min 20 s" style, for ETAs and durations in prose. */
 export function human(seconds) {
   if (!Number.isFinite(seconds)) return '';

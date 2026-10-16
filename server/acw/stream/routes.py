@@ -4,6 +4,10 @@ Billing: a rolling hold covers the next few minutes; it is topped up as audio
 flows and captured at the exact processed duration when the session ends. A
 session stops (after a warning) when the balance cannot cover the next minute.
 
+Free trial: a session that is only Standard noise removal and/or Standard captions runs on the account's free
+trial seconds (users.trial_live_seconds) while there are any: no hold, nothing charged. When they run out the
+session moves on to paid billing if the account has the credit for it, and stops otherwise.
+
 Pacing: audio must arrive at about real-time speed, otherwise live pricing
 could be abused as a cheap batch service.
 """
@@ -27,7 +31,7 @@ from . import protocol as P
 log = logging.getLogger("acw.stream")
 router = APIRouter(tags=["stream"])
 
-MAX_SESSIONS_PER_USER = trust.MAX_LIVE_SESSIONS  # one for an account that has not paid anything yet (billing/trust.py)
+MAX_SESSIONS_PER_USER = trust.MAX_LIVE_SESSIONS  # of which at most one runs on the free trial
 MAX_SESSIONS_PER_IP = 6  # across accounts
 MAX_SESSION_SECONDS = 12 * 3600
 START_TIMEOUT = 15
@@ -50,6 +54,9 @@ CONFIG_BURST = 5.0
 PACE_BURST_SECONDS = 6.0
 PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
 LOW_BALANCE_WARN_SECONDS = 300
+TRIAL_LOW_WARN_SECONDS = 300
+TRIAL_BUSY_MESSAGE = "Free trial sessions are paused while live is busy. Try again in a few minutes, or add credit to go live now."
+TRIAL_ONE_AT_A_TIME_MESSAGE = "Your free trial covers one live session at a time. Stop the other one first, or add credit to run both."
 
 _live: dict[str, int] = {}  # user_id -> active sessions in this process
 _live_ip: dict[str, int] = {}  # client address -> active sessions in this process
@@ -75,23 +82,25 @@ def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
     Sessions started less than `min_age` seconds ago are left alone (their handler may still be setting up)."""
     n = 0
     for row in db.all_rows(
-        "SELECT id, hold_id, seconds, denoise_tier, caption_tier, premium_off_seconds FROM stream_sessions"
+        "SELECT id, hold_id, seconds, denoise_tier, caption_tier, premium_off_seconds, trial_seconds FROM stream_sessions"
         " WHERE status = 'active' AND started_at <= ?",
         (db.now() - min_age,),
     ):
         if row["id"] in _live_ids:
             continue
         cost = 0
+        # The free trial seconds were taken off the account when they were saved: only the rest is billed.
+        paid = max(0.0, row["seconds"] - row["trial_seconds"])
         if row["hold_id"]:
             try:
-                if row["seconds"] > 0:
+                if paid > 0:
                     cost = ledger.capture_hold(
                         row["hold_id"],
                         _split_micros(
                             _rate_micros_per_minute(row["denoise_tier"], row["caption_tier"]),
-                            _premium_rate(row["caption_tier"]), row["seconds"], row["premium_off_seconds"],
+                            _premium_rate(row["caption_tier"]), paid, row["premium_off_seconds"],
                         ),
-                        f"Live session ({row['seconds'] / 60:.1f} min, cut short)",
+                        f"Live session ({paid / 60:.1f} min, cut short)",
                     )
             except Exception:  # noqa: BLE001
                 log.exception("billing stale stream session")
@@ -185,7 +194,7 @@ async def _send_json(ws: WebSocket, obj: dict) -> None:
 
 
 class Session:
-    def __init__(self, ws: WebSocket, principal: auth.Principal, cfg: dict, rate: int):
+    def __init__(self, ws: WebSocket, principal: auth.Principal, cfg: dict, rate: int, trial_budget: float = 0.0):
         self.ws = ws
         self.p = principal
         self.cfg = cfg
@@ -208,6 +217,12 @@ class Session:
         # The extra-accurate captions part of the rate, and the audio seconds at which it stopped working (None: still on).
         self.premium_rate = _premium_rate(cfg.get("captions"))
         self.premium_off_seconds: float | None = None
+        # Free trial: the trial seconds the account had when this session started (0: not a trial session), how many
+        # of the session's seconds are already taken off the account, and whether it has moved on to paid billing.
+        self.trial_budget = trial_budget
+        self.trial_charged = 0.0
+        self.trial_warned = False
+        self.switched = False
 
     @property
     def seconds(self) -> float:
@@ -216,6 +231,24 @@ class Session:
     @seconds.setter
     def seconds(self, value: float) -> None:
         self.samples = round(value * P.SAMPLE_RATE)
+
+    @property
+    def trial(self) -> bool:
+        return self.trial_budget > 0
+
+    @property
+    def on_trial(self) -> bool:
+        """Running on free trial seconds right now (no hold, nothing billed)."""
+        return self.trial_budget > 0 and not self.switched
+
+    @property
+    def trial_used(self) -> float:
+        """Seconds of this session paid for by the trial: whole seconds, like the paid ones, up to what the account had."""
+        return min(float(math.ceil(round(self.seconds, 6))), self.trial_budget) if self.trial_budget else 0.0
+
+    @property
+    def paid_seconds(self) -> float:
+        return max(0.0, self.seconds - self.trial_used)
 
     def micros_for(self, seconds: float) -> int:
         return _split_micros(self.rate, self.premium_rate, seconds, self.premium_off_seconds)
@@ -233,6 +266,30 @@ class Session:
         minutes = pricing.STREAM_HOLD_MINUTES
         self.hold_id = ledger.create_hold(self.p.user_id, self.rate * minutes, "stream", self.id)
         self.held_seconds = minutes * 60.0
+
+    def save_progress(self) -> None:
+        """Save the time processed so far (a restart bills it, see close_orphans) and take the trial seconds used
+        since the last save off the account, together."""
+        used = self.trial_used
+        with db.tx() as c:
+            c.execute(
+                "UPDATE stream_sessions SET seconds = ?, premium_off_seconds = ?, trial_seconds = ?, hold_id = ? WHERE id = ?",
+                (self.seconds, self.premium_off_seconds, used, self.hold_id, self.id),
+            )
+            if used > self.trial_charged:
+                c.execute("UPDATE users SET trial_live_seconds = MAX(0, trial_live_seconds - ?) WHERE id = ?",
+                          (used - self.trial_charged, self.p.user_id))
+        self.trial_charged = max(self.trial_charged, used)
+
+    def switch_to_paid(self) -> bool:
+        """The trial seconds are used up: carry on from the account's credit. False if it can't cover it."""
+        try:
+            self.open_hold()
+        except (ledger.InsufficientFunds, ledger.LedgerError):
+            return False
+        self.switched = True
+        self.save_progress()
+        return True
 
     def extend_hold(self) -> bool:
         try:
@@ -300,6 +357,39 @@ async def _evict_stale(user_id: str, limit: int | None = None) -> bool:
     return _live.get(user_id, 0) < limit
 
 
+def _trial_eligible(cfg: dict, denoise, captions) -> bool:
+    """The free trial covers Standard live only: noise removal and/or Standard captions. Extra-accurate captions
+    and translation are billed from credit."""
+    return denoise in (None, "light") and captions in (None, "local") and not cfg.get("translate")
+
+
+def _trial_seconds_left(user_id: str) -> float:
+    row = db.one("SELECT trial_live_seconds FROM users WHERE id = ?", (user_id,))
+    return max(0.0, float(row["trial_live_seconds"])) if row else 0.0
+
+
+async def _trial_slot(user_id: str) -> bool:
+    """True when the account has no other free-trial session running (one that has gone silent is replaced,
+    like for the session limit). Checked last, with nothing awaited before the new session is registered."""
+    def others() -> list["Session"]:
+        return [x for x in _open.get(user_id, []) if x.trial]
+
+    now = time.monotonic()
+    stale = [x for x in others() if now - x.last_rx > STALE_SESSION_SECONDS]
+    if stale:
+        victim = max(stale, key=lambda x: now - x.last_rx)
+        victim.end_reason = "replaced"
+        try:
+            await victim.ws.close(code=1001)
+        except Exception:  # noqa: BLE001 - its socket is gone, which is the point
+            pass
+        for _ in range(30):
+            if victim not in _open.get(user_id, []):
+                break
+            await asyncio.sleep(0.1)
+    return not others()
+
+
 @router.websocket("/api/stream/ws")
 async def stream_ws(ws: WebSocket) -> None:
     ip = (ws.headers.get("x-forwarded-for") or (ws.client.host if ws.client else "")).split(",")[-1].strip()[:64]
@@ -330,10 +420,8 @@ async def stream_ws(ws: WebSocket) -> None:
         # A deploy is waiting for sessions to end (deploy/drain.sh): no new ones start.
         await _refuse(ws, "restarting", "Live audio is restarting for an update. Please try again in a minute.", 60, 1013)
         return
-    limit = await asyncio.to_thread(trust.max_live_sessions, principal.user_id)
-    if _live.get(principal.user_id, 0) >= limit and not await _evict_stale(principal.user_id, limit):
-        await _refuse(ws, "too_many_sessions", "Two live sessions at most per account." if limit > 1 else
-                      "One live session at a time until you’ve made your first top-up.", 30)
+    if _live.get(principal.user_id, 0) >= MAX_SESSIONS_PER_USER and not await _evict_stale(principal.user_id):
+        await _refuse(ws, "too_many_sessions", "Two live sessions at most per account.", 30)
         return
     if _live_ip.get(net, 0) >= MAX_SESSIONS_PER_IP:
         await _refuse(ws, "too_many_sessions", "Too many live sessions from this network.", 30)
@@ -434,25 +522,29 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await ws.close(code=1008)
         return None
 
-    if captions == "premium" and not await asyncio.to_thread(trust.has_settled_payment, principal.user_id):
-        await _send_json(ws, {"type": "error", "code": "needs_topup", "message": trust.PREMIUM_NEEDS_TOPUP})
-        await ws.close(code=1008)
-        return None
-
     atten = _atten(cfg.get("attenLimDb", 100.0))
     if atten is None or not all(v is None or isinstance(v, str) for v in (denoise, captions)):
         await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Check the noise strength and the options you chose."})
         await ws.close(code=1008)
         return None
+    # The free trial pays for Standard live while the account has trial seconds left; anything else is billed.
+    trial_left = 0.0
+    if _trial_eligible(cfg, denoise, captions):
+        trial_left = await asyncio.to_thread(_trial_seconds_left, principal.user_id)
+        if trial_left > 0 and not await _trial_slot(principal.user_id):
+            await _send_json(ws, {"type": "error", "code": "too_many_sessions", "message": TRIAL_ONE_AT_A_TIME_MESSAGE})
+            await ws.close(code=1008)
+            return None
     sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language,
                                    "atten_lim_db": atten,
-                                   "echo_reference": cfg.get("echoReference") is True}, rate)
+                                   "echo_reference": cfg.get("echoReference") is True}, rate, trial_left)
     # Whatever goes wrong from here (the client vanishing, the worker, the database), _finish gives the hold back.
     _live_ids.add(sess.id)
     _open.setdefault(principal.user_id, []).append(sess)
     try:
         try:
-            await asyncio.to_thread(sess.open_hold)
+            if not sess.trial:  # a trial session reserves nothing: it is not charged
+                await asyncio.to_thread(sess.open_hold)
         except ledger.InsufficientFunds as e:
             _live_ids.discard(sess.id)
             _open.get(principal.user_id, []).remove(sess)
@@ -478,6 +570,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             if captions != "local":
                 worker_cfg["captions"] = None
             worker_cfg["tap_pcm"] = captions == "premium"
+            worker_cfg["trial"] = sess.trial
             worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
             await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
             kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
@@ -488,6 +581,12 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
                 options = ready.get("available") or []
                 await _send_json(ws, {"type": "error", "code": "full", "available": options, "retryAfterSeconds": 60,
                                       "message": _full_message(worker_cfg, options)})
+                await ws.close(code=1013)
+                return sess
+            if kind == P.MSG_EVENT and ready.get("code") == "trial_busy":
+                sess.end_reason = "trial_busy"
+                _drop_worker(sess)
+                await _send_json(ws, {"type": "error", "code": "trial_busy", "retryAfterSeconds": 120, "message": TRIAL_BUSY_MESSAGE})
                 await ws.close(code=1013)
                 return sess
             if kind != P.MSG_EVENT or ready.get("type") != "ready":
@@ -525,6 +624,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             "usdPerMinute": sess.current_rate() / 1e6,
             "maxSessionSeconds": MAX_SESSION_SECONDS,
             **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
+            **({"trial": True, "trialSecondsLeft": int(sess.trial_budget)} if sess.trial else {}),
         })
         return sess
     except BaseException:
@@ -692,10 +792,7 @@ async def _persist(sess: Session) -> bool:
     open: suspension and deletion stop a running session. False when the session must end."""
 
     def work() -> bool:
-        db.execute(
-            "UPDATE stream_sessions SET seconds = ?, premium_off_seconds = ? WHERE id = ?",
-            (sess.seconds, sess.premium_off_seconds, sess.id),
-        )
+        sess.save_progress()
         row = db.one("SELECT status FROM users WHERE id = ?", (sess.p.user_id,))
         if row is None or row["status"] != "active":
             return False
@@ -715,7 +812,23 @@ async def _persist(sess: Session) -> bool:
 
 
 async def _billing_tick(sess: Session) -> bool:
-    remaining = sess.held_seconds - sess.seconds
+    if sess.on_trial:
+        left = sess.trial_budget - sess.seconds
+        if left > 0:
+            if left <= TRIAL_LOW_WARN_SECONDS and not sess.trial_warned:
+                sess.trial_warned = True
+                await _send_json(sess.ws, {"type": "warning", "code": "trial_low", "secondsLeft": int(left),
+                                           "message": "Your free trial is almost used up."})
+            return True
+        # Used up: carry on from the account's credit without a gap, or stop if it can't cover it.
+        if not await asyncio.to_thread(sess.switch_to_paid):
+            sess.end_reason = "trial_over"
+            await _send_json(sess.ws, {"type": "stopped", "reason": "trial_over"})
+            return False
+        await _send_json(sess.ws, {"type": "warning", "code": "trial_used_up_now_paid",
+                                   "message": "Your free trial is used up. Live now runs on your credit.",
+                                   "usdPerMinute": sess.current_rate() / 1e6})
+    remaining = sess.held_seconds - sess.paid_seconds
     if remaining < 4 * 60 and time.monotonic() >= sess.next_extend_try:
         ok = await asyncio.to_thread(sess.extend_hold)
         if not ok:
@@ -761,21 +874,28 @@ async def _finish_inner(sess: Session) -> None:
             log.exception("closing premium captions")
     cost = 0
     try:
-        if sess.hold_id and sess.seconds > 0:
+        if sess.hold_id and sess.paid_seconds > 0:
+            paid = sess.paid_seconds
             cost = await asyncio.to_thread(
-                ledger.capture_hold, sess.hold_id, sess.micros_for(sess.seconds), f"Live session ({sess.seconds / 60:.1f} min)",
+                ledger.capture_hold, sess.hold_id, sess.micros_for(paid), f"Live session ({paid / 60:.1f} min)",
             )
     except Exception:  # noqa: BLE001 - e.g. the account was suspended and its holds released
         log.exception("billing stream session %s", sess.id)
     finally:
         if sess.hold_id:
             await asyncio.to_thread(ledger.release_hold, sess.hold_id)  # nothing left reserved, whatever happened
+        if sess.trial:
+            try:
+                await asyncio.to_thread(sess.save_progress)  # the rest of the trial seconds this session used
+            except Exception:  # noqa: BLE001
+                log.exception("saving the trial seconds of stream session %s", sess.id)
         fs = sess.frame_stats
         await asyncio.to_thread(
             db.execute,
-            "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ?,"
-            " frames = ?, late_frames = ?, dropped_frames = ?, premium_off_seconds = ? WHERE id = ?",
-            (sess.seconds, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped, sess.premium_off_seconds, sess.id),
+            "UPDATE stream_sessions SET status = 'ended', seconds = ?, trial_seconds = ?, cost_micros = ?, end_reason = ?,"
+            " ended_at = ?, frames = ?, late_frames = ?, dropped_frames = ?, premium_off_seconds = ? WHERE id = ?",
+            (sess.seconds, sess.trial_used, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped,
+             sess.premium_off_seconds, sess.id),
         )
         await asyncio.to_thread(metrics.live_ended, sess.id, fs, time.monotonic() - sess.started)
     try:
