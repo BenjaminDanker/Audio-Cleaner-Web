@@ -4,6 +4,7 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -19,14 +20,19 @@ public:
 	// send(line, display_seconds) runs on the sender's own thread, at or after the time given to `later`.
 	using SendFn = std::function<void(const std::string &line, double display_seconds)>;
 
+	// The same, for lines of several outputs: the tag says which one a line is for, and the outputs keep their own order
+	// (a line for an output with a short delay may leave before an earlier line of an output with a long one).
+	using TaggedSendFn = std::function<void(const std::string &line, double display_seconds, uint64_t tag)>;
+
 	explicit DelayedSender(SendFn send, size_t max_lines = 600);
+	explicit DelayedSender(TaggedSendFn send, size_t max_lines = 600);
 	~DelayedSender();
 	DelayedSender(const DelayedSender &) = delete;
 	DelayedSender &operator=(const DelayedSender &) = delete;
 
 	// Any thread. Lines go out in the order they were given (a later line never overtakes an earlier one).
 	// Beyond `max_lines` waiting (a very long delay with constant talking), the oldest waiting line is dropped.
-	void later(const std::string &line, double display_seconds, std::chrono::steady_clock::time_point due);
+	void later(const std::string &line, double display_seconds, std::chrono::steady_clock::time_point due, uint64_t tag = 0);
 
 	// Drops whatever is still waiting (the stream stopped).
 	void clear();

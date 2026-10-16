@@ -2,6 +2,7 @@
 #include "acw/delayed_sender.hpp"
 
 #include <algorithm>
+#include <iterator>
 
 namespace acw {
 
@@ -10,8 +11,9 @@ struct DelayedSender::State {
 		std::string line;
 		double seconds;
 		std::chrono::steady_clock::time_point due;
+		uint64_t tag;
 	};
-	SendFn send;
+	TaggedSendFn send;
 	size_t max_lines;
 	mutable std::mutex mu;
 	std::condition_variable cv;
@@ -37,7 +39,7 @@ struct DelayedSender::State {
 			Item it = std::move(q.front());
 			q.pop_front();
 			lk.unlock();
-			send(it.line, it.seconds);
+			send(it.line, it.seconds, it.tag);
 			lk.lock();
 		}
 		done = true;
@@ -45,7 +47,7 @@ struct DelayedSender::State {
 	}
 };
 
-DelayedSender::DelayedSender(SendFn send, size_t max_lines) : st_(std::make_shared<State>())
+DelayedSender::DelayedSender(TaggedSendFn send, size_t max_lines) : st_(std::make_shared<State>())
 {
 	st_->send = std::move(send);
 	st_->max_lines = std::max<size_t>(1, max_lines);
@@ -53,19 +55,36 @@ DelayedSender::DelayedSender(SendFn send, size_t max_lines) : st_(std::make_shar
 	st_->th = std::thread([st] { st->run(); });
 }
 
+DelayedSender::DelayedSender(SendFn send, size_t max_lines)
+	: DelayedSender(TaggedSendFn([send = std::move(send)](const std::string &line, double seconds, uint64_t) { send(line, seconds); }),
+			max_lines)
+{
+}
+
 DelayedSender::~DelayedSender()
 {
 	stop();
 }
 
-void DelayedSender::later(const std::string &line, double display_seconds, std::chrono::steady_clock::time_point due)
+void DelayedSender::later(const std::string &line, double display_seconds, std::chrono::steady_clock::time_point due,
+			  uint64_t tag)
 {
 	std::lock_guard<std::mutex> lk(st_->mu);
 	if (st_->stopping)
 		return;
-	if (!st_->q.empty() && due < st_->q.back().due)
-		due = st_->q.back().due;  // keep the order even if the delay was shortened meanwhile
-	st_->q.push_back({line, display_seconds, due});
+	// Keep the order of one output even if its delay was shortened meanwhile.
+	for (auto it = st_->q.rbegin(); it != st_->q.rend(); ++it) {
+		if (it->tag == tag) {
+			if (due < it->due)
+				due = it->due;
+			break;
+		}
+	}
+	// The queue is ordered by due time (equal times: first come, first out), so the thread only looks at the front.
+	auto pos = st_->q.end();
+	while (pos != st_->q.begin() && std::prev(pos)->due > due)
+		--pos;
+	st_->q.insert(pos, State::Item{line, display_seconds, due, tag});
 	while (st_->q.size() > st_->max_lines)
 		st_->q.pop_front();
 	st_->cv.notify_all();

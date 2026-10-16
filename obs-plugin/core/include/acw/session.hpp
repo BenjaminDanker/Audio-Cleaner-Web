@@ -3,6 +3,7 @@
 // WebSocket client thread + fixed-delay output stage. OBS independent.
 #pragma once
 
+#include "acw/caption_events.hpp"
 #include "acw/common.hpp"
 #include "acw/reference.hpp"
 
@@ -26,6 +27,7 @@ struct SessionConfig {
 	bool denoise = true;               // tier "light"
 	std::string captions;              // "", "local" (standard, English) or "premium" (extra accurate)
 	std::string language;              // "" = auto
+	std::vector<std::string> translate;  // 2-letter codes to translate the captions into (up to 3; needs captions)
 	int atten_lim_db = 100;            // attenuation limit: 12 / 24 / 40 / 100
 	int delay_ms = 150;                // fixed output delay D: 80 / 150 / 250
 	Codec codec = Codec::Opus;
@@ -68,16 +70,17 @@ struct SessionSnapshot {
 	bool low_balance = false;
 	int seconds_left = -1;
 	std::string warning;           // last warning text (e.g. captions unavailable)
+	std::string reason_code;       // why the session is not streaming ("no_audio", "trial_over", ...; "" = no particular reason)
+	std::string reason_arg;        // a detail for that reason (the service's own message)
+	// Translations: asked for, switched on by the service (the `ready` message; known only when it said so) and the
+	// ones it gave up on (a `translation_unavailable` warning).
+	std::vector<std::string> translate_requested, translate_active, translate_failed;
+	bool translate_active_known = false;
+	bool captions_failed = false;  // a `captions_unavailable` warning: the captions stopped (the audio goes on)
 	// Recent frames (last few seconds) that came back too late to be used. link_too_slow: most of them did,
 	// i.e. the connection (or the server) cannot keep up with the chosen delay.
 	bool link_too_slow = false;
 	double late_percent = 0;
-};
-
-struct CaptionEvent {
-	std::string text;
-	bool is_final = false;
-	double start = 0, end = 0;
 };
 
 enum class LogLevel { Debug, Info, Warning, Error };
@@ -85,12 +88,19 @@ enum class LogLevel { Debug, Info, Warning, Error };
 class Session {
 public:
 	using CaptionCallback = std::function<void(const CaptionEvent &)>;
+	using TranslationCallback = std::function<void(const TranslationEvent &)>;
 	using LogCallback = std::function<void(LogLevel, const std::string &)>;
+	// Plain-words texts of the user's language: gets an id ("reason.no_audio", "warning.translation_unavailable", ...)
+	// and returns the text ("%1" is replaced by a detail such as a language name), or "" to use the built-in English.
+	using Localizer = std::function<std::string(const std::string &id)>;
 
 	Session(const SessionConfig &cfg, CaptionCallback on_caption, LogCallback on_log);
 	~Session();
 	Session(const Session &) = delete;
 	Session &operator=(const Session &) = delete;
+
+	// Where translations go. Call before start(); runs on the network thread, so it must return quickly.
+	void set_translation_callback(TranslationCallback cb);
 
 	// Starts the network thread (idempotent). The thread idles until audio flows, so starting early is free.
 	// Not for the audio thread (it creates a thread).
@@ -123,7 +133,7 @@ public:
 
 	SessionSnapshot snapshot() const;
 	// One or two plain sentences for the user.
-	std::string status_line() const;
+	std::string status_line(const Localizer &loc = nullptr) const;
 	// Technical line: round-trip time, frame counters, reconnects, codec.
 	std::string status_details() const;
 

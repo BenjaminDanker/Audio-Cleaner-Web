@@ -45,6 +45,7 @@ struct StartParams {
 	int opus_bitrate = 0;                // downlink bitrate requested from the server (opus only; 0 = server default)
 	std::string client;                  // e.g. "obs-audio-cleaner/0.1.0"
 	bool echo_reference = false;         // we will send what the speakers play so the server can cancel the echo
+	std::vector<std::string> translate;  // 2-letter codes to translate the captions into (needs captions); empty = none
 };
 
 std::string make_start_message(const StartParams &p);
@@ -52,7 +53,7 @@ std::string make_ping_message(uint64_t t);
 std::string make_config_message(int atten_lim_db);
 std::string make_stop_message();
 
-enum class EventType { Unknown, Ready, Caption, Warning, Stopped, Error, Pong };
+enum class EventType { Unknown, Ready, Caption, Translation, Warning, Stopped, Error, Pong };
 
 struct Event {
 	EventType type = EventType::Unknown;
@@ -64,11 +65,15 @@ struct Event {
 	int sample_rate = 0;
 	int max_session_seconds = 0;
 	bool echo_reference = false;  // the server will use the reference frames
-	// caption
+	std::vector<std::string> translate;  // the languages the server actually translates into
+	bool has_translate = false;          // ... the field was there at all (an older server leaves it out)
+	// caption / translation
 	std::string text;
 	bool is_final = false;
 	double start = 0.0, end = 0.0;
-	std::string caption_id;
+	std::string caption_id;  // caption: its id
+	std::string lang;        // translation (and some warnings): the language
+	std::string of;          // translation: id of the caption it translates
 	// warning / error / stopped
 	std::string code;      // warning/error code, or stopped.reason
 	std::string message;

@@ -7,13 +7,18 @@ add_library(
   acw_core
   STATIC
   src/caption_pacer.cpp
+  src/caption_router.cpp
   src/delayed_sender.cpp
+  src/languages.cpp
   src/opus_codec.cpp
+  src/output_select.cpp
+  src/overlay_text.cpp
   src/output_stage.cpp
   src/protocol.cpp
   src/reference.cpp
   src/resampler.cpp
   src/session.cpp
+  src/subtitles.cpp
   src/http_get.cpp
   src/update_check.cpp
   src/update_download.cpp

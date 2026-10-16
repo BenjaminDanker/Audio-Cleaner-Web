@@ -2,6 +2,7 @@
 #include "acw/session.hpp"
 
 #include "acw/backoff.hpp"
+#include "acw/languages.hpp"
 #include "acw/opus_codec.hpp"
 #include "acw/output_stage.hpp"
 #include "acw/protocol.hpp"
@@ -54,10 +55,14 @@ namespace {
 
 // Microseconds on a process-wide monotonic clock; also the `ts_us` we put in
 // frames (opaque to the server, echoed back for RTT measurement).
-uint64_t now_us()
+const Clock::time_point &clock_epoch()
 {
 	static const Clock::time_point t0 = Clock::now();
-	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count()) + 1;
+	return t0;
+}
+uint64_t now_us()
+{
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - clock_epoch()).count()) + 1;
 }
 
 struct Frame {
@@ -80,6 +85,7 @@ constexpr uint64_t kLateMinFrames = 100;  // ... needs at least this many frames
 constexpr double kLateSetPct = 30.0;     // more than this many percent late: the link is too slow
 constexpr double kLateClearPct = 15.0;   // ... until it is below this again
 constexpr int kFramingMs = 25;           // 20 ms frame + 5 ms cross-fade: what the delay budget loses to framing
+constexpr size_t kMaxCaptionBytes = 4000;  // a translation longer than this is cut (the service sends sentences)
 constexpr int kOpusMinBitrate = 24000;   // the lowest the server accepts: enough when only captions are wanted
 
 bool is_secure_url(const std::string &u)
@@ -158,6 +164,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		bool ready = false;
 		int http_status = 0;
 		std::string reason;                // transport-level close/error text
+		std::string close_reason;          // the reason text of the server's close frame (it can be a code such as "too_many_messages")
 		std::string server_code, server_msg;  // `error` event
 		int retry_after_s = 0;             // ... and its optional retry hint
 		std::string stopped_reason;        // `stopped` event
@@ -170,6 +177,9 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	struct Outcome {
 		std::string reason;      // technical, for the log and the details line
 		std::string message;     // plain words for the user
+		std::string code;        // the reason as a word ("no_audio", "trial_over", ...), for the plugin's own texts
+		std::string arg;         // a detail for those texts (the server's own message)
+		bool keep_backoff = false;  // do not count a long session as a success (it ended for a reason that may repeat)
 		int min_wait_ms = 0;
 		int streamed_ms = 0;
 		bool immediate = false;  // reconnect without waiting (server restarted the session)
@@ -179,6 +189,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 
 	SessionConfig cfg;
 	CaptionCallback on_caption;
+	TranslationCallback on_translation;
 	LogCallback on_log;
 	std::mutex cb_mu;
 	bool cb_enabled = true;
@@ -201,6 +212,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	std::atomic<bool> streaming{false};
 	std::atomic<bool> echo_active{false};  // the server accepted the echo reference
 	std::atomic<int> atten_db{100};        // current attenuation limit (UI thread writes, network thread reads)
+	std::atomic<int64_t> origin_ticks{0};  // steady-clock time of the audio second 0 of this connection (0 = none yet)
 	std::atomic<uint64_t> last_process_us{0};
 
 	// ---- thread control ----------------------------------------------------
@@ -229,6 +241,12 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	bool low_balance = false;
 	int seconds_left = -1;
 	std::string warning;
+	std::string reason_code, reason_arg;
+	std::vector<std::string> translate_active;
+	bool translate_active_known = false;
+	std::vector<std::string> translate_failed;
+	bool captions_failed = false;
+	std::vector<std::string> other_warnings;  // texts of warnings that have no plugin text of their own
 	double ping_rtt_ms = 0;
 	std::vector<float> rtt_ring;
 	size_t rtt_n = 0;
@@ -286,14 +304,39 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	void log(LogLevel lv, const std::string &msg)
 	{
 		std::lock_guard<std::mutex> lk(cb_mu);
-		if (cb_enabled && on_log)
-			on_log(lv, msg);
+		if (cb_enabled && on_log) {
+			try {
+				on_log(lv, msg);
+			} catch (...) {
+			}
+		}
 	}
+	// The callbacks belong to the plugin; whatever they do must never take the network thread (and with it the
+	// stream's audio path) down: an exception ends here.
 	void emit_caption(const CaptionEvent &ev)
 	{
 		std::lock_guard<std::mutex> lk(cb_mu);
-		if (cb_enabled && on_caption)
-			on_caption(ev);
+		if (cb_enabled && on_caption) {
+			try {
+				on_caption(ev);
+			} catch (...) {
+			}
+		}
+	}
+	void emit_translation(const TranslationEvent &ev)
+	{
+		std::lock_guard<std::mutex> lk(cb_mu);
+		if (cb_enabled && on_translation) {
+			try {
+				on_translation(ev);
+			} catch (...) {
+			}
+		}
+	}
+	Clock::time_point origin() const
+	{
+		const int64_t t = origin_ticks.load(std::memory_order_acquire);
+		return t == 0 ? Clock::time_point{} : Clock::time_point(Clock::duration(t));
 	}
 	void disable_callbacks()
 	{
@@ -301,12 +344,15 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		cb_enabled = false;
 	}
 
-	void set_state(SessionState s, const std::string &d = std::string(), const std::string &m = std::string())
+	void set_state(SessionState s, const std::string &d = std::string(), const std::string &m = std::string(),
+		       const std::string &code = std::string(), const std::string &arg = std::string())
 	{
 		std::lock_guard<std::mutex> lk(st_mu);
 		state = s;
 		detail = d;
 		message = m;
+		reason_code = code;
+		reason_arg = arg;
 		if (s != SessionState::Backoff)
 			backoff_s = 0;
 	}
@@ -476,15 +522,30 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				counters.reconnects.fetch_add(1, std::memory_order_relaxed);
 			first = false;
 
-			Outcome out = run_attempt();
+			Outcome out;
+			try {
+				out = run_attempt();
+			} catch (const std::exception &e) {
+				// Nothing in here may take the thread (and OBS with it) down: the audio goes on unprocessed.
+				out = Outcome{};
+				out.reason = std::string("internal error: ") + e.what();
+				out.message = "Something went wrong inside the plugin. Reconnecting.";
+				out.min_wait_ms = 5000;
+			} catch (...) {
+				out = Outcome{};
+				out.reason = "internal error";
+				out.message = "Something went wrong inside the plugin. Reconnecting.";
+				out.min_wait_ms = 5000;
+			}
+			streaming.store(false, std::memory_order_release);
 			if (stopping())
 				break;
-			if (out.streamed_ms >= 30000) {
+			if (out.streamed_ms >= 30000 && !out.keep_backoff) {
 				backoff.reset();
 				slow_backoff.reset();
 			}
 			if (out.give_up) {
-				set_state(SessionState::Blocked, out.reason, out.message);
+				set_state(SessionState::Blocked, out.reason, out.message, out.code, out.arg);
 				log(LogLevel::Warning, out.message + " (" + out.reason + ") Not retrying until you press Try again or change a setting.");
 				wait_for_retry();
 				backoff.reset();
@@ -499,6 +560,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				state = SessionState::Backoff;
 				detail = out.reason;
 				message = out.message;
+				reason_code = out.code;
+				reason_arg = out.arg;
 				backoff_s = static_cast<int>((wait.count() + 999) / 1000);
 			}
 			log(LogLevel::Warning, "connection lost (" + out.reason + "); retrying in " + std::to_string(backoff_s) +
@@ -538,10 +601,27 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	void classify_server_error(const std::string &code, const std::string &msg, int retry_after_s, Outcome &out) const
 	{
 		out.reason = "server: " + code + (msg.empty() ? "" : " - " + msg);
+		out.code = code;
+		out.arg = msg;
 		if (code == "insufficient_funds") {
 			out.give_up = true;
 			out.message = "There is not enough balance to start live processing." + (msg.empty() ? std::string() : " " + msg) +
 				      " Add balance on the website, then press Try again.";
+		} else if (code == "needs_topup") {
+			out.give_up = true;
+			out.message = "Extra accurate captions need a first top-up on the website. Add balance there (or use Standard captions), "
+				      "then press Try again.";
+		} else if (code == "trial_over") {
+			out.give_up = true;
+			out.message = "Your free trial of live processing is over. Add balance on the website, then press Try again.";
+		} else if (code == "trial_busy") {
+			out.slow = true;
+			out.min_wait_ms = 60000;
+			out.message = "Live processing for free trials is busy right now. Trying again in a few minutes.";
+		} else if (code == "rate_limited" || code == "too_many_messages") {
+			out.code = "too_many_messages";
+			out.min_wait_ms = 20000;
+			out.message = "The service closed the connection because this plugin sent too many messages. Reconnecting in a moment.";
 		} else if (code == "tos") {
 			out.give_up = true;
 			out.message = "Please accept the terms of service on the website, then press Try again.";
@@ -582,6 +662,54 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			out.message = "The server reported a problem" + (msg.empty() ? std::string(".") : ": " + msg) + " Reconnecting.";
 		}
 		out.min_wait_ms = std::max(out.min_wait_ms, retry_after_s * 1000);
+	}
+
+	// Reasons the service may give in the close frame of the socket instead of (or as well as) an event.
+	static bool is_close_code(const std::string &r)
+	{
+		return r == "too_many_messages" || r == "no_audio" || r == "trial_over" || r == "trial_busy" || r == "needs_topup" ||
+		       r == "insufficient_funds" || r == "captions_unavailable" || r == "idle_timeout" || r == "account_closed";
+	}
+
+	// A `stopped` event: the service ended the session on purpose.
+	static void classify_stop(const std::string &stopped, Outcome &out)
+	{
+		out.reason = "server stopped the session: " + stopped;
+		out.code = stopped;
+		if (stopped == "max_duration") {
+			out.immediate = true;
+			out.message = "The session reached its time limit; starting a new one.";
+		} else if (stopped == "insufficient_funds") {
+			out.give_up = true;
+			out.message = "Your balance ran out, so live processing stopped. Add balance on the website, then press "
+				      "Try again.";
+		} else if (stopped == "account_closed") {
+			out.give_up = true;
+			out.message = "Your account is not active any more. Check it on the website, then press Try again.";
+		} else if (stopped == "trial_over") {
+			out.give_up = true;
+			out.message = "Your free trial of live processing is over. Add balance on the website, then press Try again.";
+		} else if (stopped == "no_audio" || stopped == "idle_timeout") {
+			// The microphone audio did not arrive steadily (or at all). Nothing is wrong with the account: start again
+			// as soon as audio flows (the loop only connects while it does); the backoff keeps growing if it repeats.
+			out.keep_backoff = true;
+			out.code = "no_audio";
+			out.message = "The service stopped this session because your microphone audio was not arriving steadily. It starts "
+				      "again by itself when audio flows.";
+		} else if (stopped == "captions_unavailable") {
+			out.slow = true;
+			out.min_wait_ms = 300000;
+			out.message = "The caption service stopped working, so this session ended (nothing is billed for it). Trying again "
+				      "in a few minutes.";
+		} else if (stopped == "too_many_messages" || stopped == "rate_limited") {
+			out.code = "too_many_messages";
+			out.min_wait_ms = 20000;
+			out.message = "The service closed the connection because this plugin sent too many messages. Reconnecting in a moment.";
+		} else {
+			out.code.clear();
+			out.min_wait_ms = 120000;
+			out.message = "The server ended the session. Trying again in a moment.";
+		}
 	}
 
 	// The WebSocket upgrade failed (HTTP status) or the connection could not be made at all.
@@ -646,6 +774,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			case ix::WebSocketMessageType::Close: {
 				std::lock_guard<std::mutex> lk(att->mu);
 				att->closed = true;
+				att->close_reason = msg->closeInfo.reason;
 				if (att->reason.empty())
 					att->reason = "closed by server (code " + std::to_string(msg->closeInfo.code) +
 						      (msg->closeInfo.reason.empty() ? "" : ", " + msg->closeInfo.reason) + ")";
@@ -702,6 +831,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			sp.opus_bitrate = use_opus ? (cfg.denoise ? cfg.opus_bitrate : kOpusMinBitrate) : 0;
 			sp.client = cfg.client;
 			sp.echo_reference = cfg.reference != nullptr;
+			if (!cfg.captions.empty())
+				sp.translate = cfg.translate;  // translations need captions
 			if (!ws.sendText(make_start_message(sp)).success) {
 				out.reason = "could not send start message";
 				out.message = "Could not send the start request. Trying again.";
@@ -775,6 +906,11 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			low_balance = false;
 			seconds_left = -1;
 			warning.clear();
+			translate_active = ready.translate;
+			translate_active_known = ready.has_translate;
+			translate_failed.clear();
+			captions_failed = false;
+			other_warnings.clear();
 		}
 		set_state(SessionState::Streaming, "connected");
 		{
@@ -895,6 +1031,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			cv.wait_for(lk, std::chrono::milliseconds(2), [&] { return stopping(); });
 		}
 		streaming.store(false, std::memory_order_release);
+		origin_ticks.store(0, std::memory_order_release);
 		echo_active.store(false);
 		link_slow.store(false);
 		late_x10.store(0);
@@ -911,7 +1048,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		}
 
 		if (out.reason.empty()) {
-			std::string stopped, code, msg, transport;
+			std::string stopped, code, msg, transport, close_reason;
 			int retry_after = 0;
 			{
 				std::lock_guard<std::mutex> lk(att->mu);
@@ -920,23 +1057,12 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				msg = att->server_msg;
 				retry_after = att->retry_after_s;
 				transport = att->reason;
+				close_reason = att->close_reason;
 			}
+			if (stopped.empty() && code.empty() && is_close_code(close_reason))
+				code = close_reason;  // the service can name the reason in the close frame alone
 			if (!stopped.empty()) {
-				out.reason = "server stopped the session: " + stopped;
-				if (stopped == "max_duration") {
-					out.immediate = true;
-					out.message = "The session reached its time limit; starting a new one.";
-				} else if (stopped == "insufficient_funds") {
-					out.give_up = true;
-					out.message = "Your balance ran out, so live processing stopped. Add balance on the website, then press "
-						      "Try again.";
-				} else if (stopped == "account_closed") {
-					out.give_up = true;
-					out.message = "Your account is not active any more. Check it on the website, then press Try again.";
-				} else {
-					out.min_wait_ms = 120000;
-					out.message = "The server ended the session. Trying again in a moment.";
-				}
+				classify_stop(stopped, out);
 			} else if (!code.empty()) {
 				classify_server_error(code, msg, retry_after, out);
 			} else {
@@ -1013,6 +1139,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			return;
 		switch (ev.type) {
 		case EventType::Ready: {
+			// Second 0 of the service's clock (the audio it counts starts with the session): events follow in order.
+			origin_ticks.store(Clock::now().time_since_epoch().count(), std::memory_order_release);
 			std::lock_guard<std::mutex> lk(att.mu);
 			att.ready_ev = ev;
 			att.ready = true;
@@ -1026,7 +1154,22 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				ce.is_final = true;
 				ce.start = ev.start;
 				ce.end = ev.end;
+				ce.id = ev.caption_id;
+				ce.origin = origin();
 				emit_caption(ce);
+			}
+			break;
+		case EventType::Translation:
+			if (!ev.text.empty() && !ev.lang.empty()) {
+				TranslationEvent te;
+				te.lang = normalise_language(ev.lang);
+				te.text = ev.text.size() > kMaxCaptionBytes ? ev.text.substr(0, kMaxCaptionBytes) : ev.text;
+				te.of = ev.of;
+				te.start = ev.start;
+				te.end = ev.end;
+				te.origin = origin();
+				if (te.lang != "auto")
+					emit_translation(te);
 			}
 			break;
 		case EventType::Warning: {
@@ -1040,6 +1183,16 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				msg = "balance running low";
 				if (ev.seconds_left >= 0)
 					msg += " (about " + std::to_string(ev.seconds_left) + " s of live processing left)";
+			} else if (ev.code == "translation_unavailable") {
+				const std::string lang = normalise_language(ev.lang);
+				msg = "translation into " + language_name(lang) + " stopped" + (ev.message.empty() ? "" : ": " + ev.message);
+				std::lock_guard<std::mutex> lk(st_mu);
+				if (std::find(translate_failed.begin(), translate_failed.end(), lang) == translate_failed.end() && translate_failed.size() < 8)
+					translate_failed.push_back(lang);
+			} else if (ev.code == "captions_unavailable") {
+				msg = ev.message.empty() ? "captions stopped" : ev.message;
+				std::lock_guard<std::mutex> lk(st_mu);
+				captions_failed = true;
 			} else {
 				msg = ev.message.empty() ? ev.code : ev.message;
 				std::lock_guard<std::mutex> lk(st_mu);
@@ -1087,6 +1240,12 @@ Session::Session(const SessionConfig &cfg, CaptionCallback on_caption, LogCallba
 Session::~Session()
 {
 	stop(0, 500);
+}
+
+void Session::set_translation_callback(TranslationCallback cb)
+{
+	std::lock_guard<std::mutex> lk(impl_->cb_mu);
+	impl_->on_translation = std::move(cb);
 }
 
 bool Session::started() const
@@ -1265,6 +1424,12 @@ SessionSnapshot Session::snapshot() const
 		s.low_balance = d.low_balance;
 		s.seconds_left = d.seconds_left;
 		s.warning = d.warning;
+		s.reason_code = d.reason_code;
+		s.reason_arg = d.reason_arg;
+		s.translate_active = d.translate_active;
+		s.translate_active_known = d.translate_active_known;
+		s.translate_failed = d.translate_failed;
+		s.captions_failed = d.captions_failed;
 		s.ping_rtt_ms = d.ping_rtt_ms;
 		s.rtt_last_ms = d.rtt_last;
 		s.rtt_avg_ms = d.rtt_avg;
@@ -1279,6 +1444,8 @@ SessionSnapshot Session::snapshot() const
 			s.rtt_p95_ms = v[k];
 		}
 	}
+	if (!d.cfg.captions.empty())
+		s.translate_requested = d.cfg.translate;
 	s.insecure = d.insecure;
 	s.codec = d.use_opus ? "opus" : "pcm_s16le";
 	s.echo_requested = d.cfg.reference != nullptr;
@@ -1302,11 +1469,45 @@ SessionSnapshot Session::snapshot() const
 	return s;
 }
 
-std::string Session::status_line() const
+namespace {
+
+std::string replace_first(std::string text, const std::string &from, const std::string &to)
+{
+	const size_t at = text.find(from);
+	if (at != std::string::npos)
+		text.replace(at, from.size(), to);
+	return text;
+}
+
+// "Spanish", "Spanish and German", "Spanish, German and French".
+std::string join_names(const std::vector<std::string> &codes)
+{
+	std::string out;
+	for (size_t i = 0; i < codes.size(); ++i) {
+		if (i > 0)
+			out += i + 1 == codes.size() ? " and " : ", ";
+		out += language_name(codes[i]);
+	}
+	return out;
+}
+
+}  // namespace
+
+std::string Session::status_line(const Localizer &loc) const
 {
 	const Impl &d = *impl_;
-	const SessionSnapshot s = snapshot();
+	SessionSnapshot s = snapshot();
 	const bool cleaning = d.cfg.denoise && d.supported;
+	// A text in the user's language, or the built-in English one. "%1" is replaced by `arg`.
+	auto say = [&](const std::string &id, const std::string &builtin, const std::string &arg = std::string()) {
+		std::string t = loc ? loc(id) : std::string();
+		return t.empty() ? builtin : replace_first(t, "%1", arg);
+	};
+	if (!s.reason_code.empty() && (s.state == SessionState::Backoff || s.state == SessionState::Blocked)) {
+		const std::string t = loc ? loc("reason." + s.reason_code) : std::string();
+		if (!t.empty())
+			s.message = replace_first(t, "%1", s.reason_arg);
+	}
 	std::string out;
 	switch (s.state) {
 	case SessionState::Streaming:
@@ -1317,8 +1518,22 @@ std::string Session::status_line() const
 						    : " Check your internet connection.";
 		} else {
 			out = cleaning ? "Connected. Your audio is being cleaned." : "Connected.";
-			if (!d.cfg.captions.empty())
+			if (!d.cfg.captions.empty() && !s.captions_failed)
 				out += " Captions are running.";
+			// Translations: the ones the service switched on, and the ones it did not.
+			std::vector<std::string> on, off;
+			for (const std::string &l : s.translate_requested) {
+				const bool active = std::find(s.translate_active.begin(), s.translate_active.end(), l) != s.translate_active.end();
+				const bool failed = std::find(s.translate_failed.begin(), s.translate_failed.end(), l) != s.translate_failed.end();
+				if (failed)
+					continue;  // said below
+				(active ? on : off).push_back(l);
+			}
+			if (!on.empty() && !s.captions_failed)
+				out += " " + say("status.translating", "Translating into " + join_names(on) + ".", join_names(on));
+			if (!off.empty())
+				out += " " + say("warning.translation_not_started",
+						 "The service did not switch on translation into " + join_names(off) + ".", join_names(off));
 		}
 		if (s.echo_active)
 			out += " Echo cancellation is on.";
@@ -1351,6 +1566,14 @@ std::string Session::status_line() const
 			out += " (about " + std::to_string((s.seconds_left + 59) / 60) + " min left)";
 		out += ".";
 	}
+	if (s.captions_failed)
+		out += " " + say("warning.captions_unavailable",
+				 "The caption service had trouble, so captions have stopped" +
+					 std::string(cleaning ? "; your audio is not affected." : "."));
+	for (const std::string &l : s.translate_failed)
+		out += " " + say("warning.translation_unavailable",
+				 "Translation into " + language_name(l) + " stopped because the translation service had trouble; the other captions go on.",
+				 language_name(l));
 	if (!s.warning.empty())
 		out += " " + s.warning;
 	if (s.insecure)

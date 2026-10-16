@@ -142,6 +142,8 @@ std::string make_start_message(const StartParams &p)
 	j["attenLimDb"] = p.atten_lim_db;
 	if (p.echo_reference)
 		j["echoReference"] = true;
+	if (!p.translate.empty())
+		j["translate"] = p.translate;
 	j["client"] = p.client;
 	return j.dump();
 }
@@ -207,6 +209,20 @@ bool parse_event(const std::string &text, Event &ev)
 		integer("maxSessionSeconds", ev.max_session_seconds);
 		if (auto it = j.find("echoReference"); it != j.end() && it->is_boolean())
 			ev.echo_reference = it->get<bool>();
+		if (auto it = j.find("translate"); it != j.end() && it->is_array()) {
+			ev.has_translate = true;
+			for (const auto &e : *it)
+				if (e.is_string() && ev.translate.size() < 8)
+					ev.translate.push_back(e.get<std::string>());
+		}
+	} else if (type == "translation") {
+		ev.type = EventType::Translation;
+		str("lang", ev.lang);
+		str("text", ev.text);
+		str("of", ev.of);
+		num("start", ev.start);
+		num("end", ev.end);
+		ev.is_final = true;
 	} else if (type == "caption") {
 		ev.type = EventType::Caption;
 		str("text", ev.text);
@@ -218,6 +234,7 @@ bool parse_event(const std::string &text, Event &ev)
 	} else if (type == "warning") {
 		ev.type = EventType::Warning;
 		str("code", ev.code);
+		str("lang", ev.lang);
 		str("message", ev.message);
 		integer("secondsLeft", ev.seconds_left);
 	} else if (type == "stopped") {

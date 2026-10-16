@@ -2,14 +2,19 @@
 // Offline unit tests for acw_core (no network, no OBS).
 #include "acw/backoff.hpp"
 #include "acw/caption_pacer.hpp"
+#include "acw/caption_router.hpp"
 #include "acw/delayed_sender.hpp"
+#include "acw/languages.hpp"
 #include "acw/opus_codec.hpp"
+#include "acw/output_select.hpp"
 #include "acw/output_stage.hpp"
+#include "acw/overlay_text.hpp"
 #include "acw/protocol.hpp"
 #include "acw/reference.hpp"
 #include "acw/resampler.hpp"
 #include "acw/session.hpp"
 #include "acw/spsc.hpp"
+#include "acw/subtitles.hpp"
 #include "acw/update_check.hpp"
 #include "acw/update_verify.hpp"
 #include "update_test_util.hpp"
@@ -20,6 +25,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <mutex>
 #include <random>
 #include <set>
 #include <thread>
@@ -1075,6 +1084,480 @@ static void test_delayed_sender()
 	}
 }
 
+static void test_translation_protocol()
+{
+	std::printf("translation protocol: start message, translation and ready events\n");
+	StartParams sp;
+	sp.captions = "premium";
+	sp.language = "de";
+	sp.translate = {"es", "fr"};
+	std::string m = make_start_message(sp);
+	CHECK(m.find("\"translate\":[\"es\",\"fr\"]") != std::string::npos);
+	sp.translate.clear();
+	CHECK(make_start_message(sp).find("translate") == std::string::npos);  // unchanged for everyone who does not translate
+
+	Event ev;
+	CHECK(parse_event(R"({"type":"translation","lang":"es","text":"hola","of":"l12","start":12.34,"end":15.02})", ev));
+	CHECK(ev.type == EventType::Translation && ev.lang == "es" && ev.text == "hola" && ev.of == "l12");
+	CHECK(ev.start == 12.34 && ev.end == 15.02 && ev.is_final);
+	CHECK(parse_event(R"({"type":"translation","lang":5,"text":[1],"of":null})", ev));
+	CHECK(ev.type == EventType::Translation && ev.lang.empty() && ev.text.empty());
+	CHECK(parse_event(R"({"type":"caption","id":"l12","text":"hi","final":true,"start":1,"end":2})", ev));
+	CHECK(ev.type == EventType::Caption && ev.caption_id == "l12");
+
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a","translate":["es","de",7,"fr"]})", ev));
+	CHECK(ev.type == EventType::Ready && ev.has_translate && ev.translate.size() == 3 && ev.translate[1] == "de");
+	CHECK(parse_event(R"({"type":"ready","sessionId":"a"})", ev));
+	CHECK(!ev.has_translate && ev.translate.empty());
+	CHECK(parse_event(R"({"type":"ready","translate":"es"})", ev));
+	CHECK(!ev.has_translate);
+
+	CHECK(parse_event(R"({"type":"warning","code":"translation_unavailable","lang":"es","message":"m"})", ev));
+	CHECK(ev.type == EventType::Warning && ev.code == "translation_unavailable" && ev.lang == "es");
+}
+
+static void test_languages()
+{
+	std::printf("languages: closed-caption fit, cleaning the translation targets\n");
+	CHECK(translation_languages().size() == 25);
+	CHECK(language_name("es") == "Spanish" && language_name("zz") == "zz");
+	CHECK(language_fits_stream("es") && language_fits_stream("pl") && language_fits_stream("id") && language_fits_stream("sv"));
+	CHECK(!language_fits_stream("ru") && !language_fits_stream("ja") && !language_fits_stream("el") && !language_fits_stream("he") &&
+	      !language_fits_stream("vi") && !language_fits_stream("zh"));
+	CHECK(normalise_language("en-US") == "en" && normalise_language(" FR_ca ") == "fr" && normalise_language("") == "auto" &&
+	      normalise_language("e") == "auto");
+	CHECK(spoken_language("local", "de") == "en");  // Standard captions are English whatever the language says
+	CHECK(spoken_language("premium", "de") == "de" && spoken_language("premium", "auto").empty() && spoken_language("off", "de").empty());
+
+	auto v = [](std::initializer_list<const char *> l) {
+		std::vector<std::string> out;
+		for (const char *c : l)
+			out.push_back(c);
+		return out;
+	};
+	CHECK(clean_translation_targets(v({"es", "", "de"}), "en") == v({"es", "de"}));
+	CHECK(clean_translation_targets(v({"en", "es"}), "en") == v({"es"}));  // the spoken language is no target
+	CHECK(clean_translation_targets(v({"en", "es"}), "") == v({"en", "es"}));
+	CHECK(clean_translation_targets(v({"ES", "es", "de", "xx", "fr", "it"}), "en") == v({"es", "de", "fr"}));  // no repeats, known codes, three
+	CHECK(clean_translation_targets({}, "en").empty());
+}
+
+static void test_overlay_text()
+{
+	std::printf("on-screen text: last lines, reading pace, cleared after silence\n");
+	OverlayText::Options o;
+	o.max_lines = 2;
+	o.line_chars = 20;
+	o.clear_after_s = 5.0;
+	OverlayText t(o);
+	CHECK(t.text().empty() && t.seconds_until_change(0) < 0);
+	t.push("Hello there", 10.0);
+	CHECK(t.update(10.0) && t.text() == "Hello there");
+	CHECK(!t.update(10.1));
+	// A second caption fits next to the first at once (room for two lines) ...
+	t.push("How are you today", 10.5);
+	CHECK(t.update(10.5) && t.text() == "Hello there\nHow are you today");
+	// ... a third waits until the oldest line has been up long enough, then pushes it out.
+	t.push("Fine thanks", 10.6);
+	CHECK(!t.update(10.6));
+	CHECK(t.seconds_until_change(10.6) > 0.0);
+	CHECK(t.update(12.5));
+	CHECK(t.text() == "How are you today\nFine thanks");
+	// Silence: cleared clear_after_s after the last line came up.
+	CHECK(!t.update(15.0));
+	CHECK(t.update(17.6));
+	CHECK(t.text().empty());
+	CHECK(t.seconds_until_change(17.6) < 0);
+
+	// A long caption rolls through the window line by line; nothing is skipped.
+	OverlayText l(o);
+	l.push("one two three four five six seven eight nine ten eleven twelve thirteen fourteen", 0.0);
+	std::vector<std::string> seen;
+	for (double now = 0.0; now < 12.0; now += 0.05)
+		if (l.update(now) && !l.text().empty())
+			seen.push_back(l.text());
+	std::string all;
+	for (const std::string &s : seen)
+		all += s + "|";
+	for (const char *w : {"one", "four", "seven", "ten", "thirteen", "fourteen"})
+		CHECK(all.find(w) != std::string::npos);
+	CHECK(l.text().empty());  // and cleared in the end
+
+	// Too much at once: the oldest waiting lines are dropped, the lag stays bounded.
+	OverlayText b(o);
+	for (int i = 0; i < 50; ++i)
+		b.push("word" + std::to_string(i) + " word word word word", 0.0);
+	b.update(0.0);
+	double now = 0;
+	while (b.seconds_until_change(now) >= 0 && now < 100) {
+		now += std::max(0.01, b.seconds_until_change(now));
+		b.update(now);
+	}
+	CHECK(now < 40.0);
+	b.clear();
+	CHECK(b.text().empty() && b.seconds_until_change(0) < 0);
+}
+
+static void test_overlay_display()
+{
+	std::printf("on-screen text thread: updates, clearing, dropped targets\n");
+	std::mutex mu;
+	std::vector<std::pair<std::string, std::string>> log;
+	auto last = [&](const std::string &target) {
+		std::lock_guard<std::mutex> lk(mu);
+		std::string r = "<none>";
+		for (const auto &e : log)
+			if (e.first == target)
+				r = e.second;
+		return r;
+	};
+	auto wait_for = [&](const std::string &target, const std::string &text) {
+		for (int i = 0; i < 300; ++i) {
+			if (last(target) == text)
+				return true;
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		return false;
+	};
+	OverlayText::Options o;
+	o.clear_after_s = 0.3;
+	o.min_line_s = 0.05;
+	o.max_line_s = 0.1;
+	{
+		OverlayDisplay d([&](const std::string &t, const std::string &x) {
+			std::lock_guard<std::mutex> lk(mu);
+			log.emplace_back(t, x);
+		});
+		d.set_targets({{"Spoken", o}, {"Spanish", o}});
+		d.push("Nope", "ignored: no such target");
+		d.push("Spoken", "Good evening");
+		CHECK(wait_for("Spoken", "Good evening"));
+		CHECK(last("Nope") == "<none>");
+		CHECK(wait_for("Spoken", ""));  // cleared by itself after the silence
+		d.push("Spanish", "Buenas noches");
+		CHECK(wait_for("Spanish", "Buenas noches"));
+		d.set_targets({{"Spoken", o}});  // Spanish is no longer used: it is emptied
+		CHECK(wait_for("Spanish", ""));
+		d.set_targets({{"Spoken", o}, {"Spanish", o}});
+		d.push("Spanish", "Otra vez");
+		CHECK(wait_for("Spanish", "Otra vez"));
+		d.clear_all();
+		CHECK(wait_for("Spanish", ""));
+		d.push("Spoken", "Last words");
+		CHECK(wait_for("Spoken", "Last words"));
+		d.stop(500);
+		CHECK(last("Spoken") == "");  // stopping empties the screen
+	}
+}
+
+static void test_subtitles()
+{
+	std::printf("subtitle files: cue times relative to the recording, SRT text, file names\n");
+	CHECK(srt_time(0) == "00:00:00,000" && srt_time(62.345) == "00:01:02,345" && srt_time(3723.5) == "01:02:03,500" &&
+	      srt_time(-3) == "00:00:00,000");
+	CHECK(subtitle_path("/v/2026-10-16 12-00-00.mkv", "es") == "/v/2026-10-16 12-00-00.es.srt");
+	CHECK(subtitle_path("/v/a.b/clip", "de") == "/v/a.b/clip.de.srt");  // a dot in a folder name is not an extension
+	CHECK(subtitle_path("C:\\Videos\\clip.mp4", "") == "C:\\Videos\\clip.srt");
+
+	using namespace std::chrono;
+	const auto t0 = steady_clock::now();
+	auto at = [&](double s) { return t0 + duration_cast<steady_clock::duration>(duration<double>(s)); };
+	SubtitleRecorder rec;
+	SubtitleCue c;
+	c.lang = "es";
+	c.text = "ignored";
+	c.start = at(1);
+	c.end = at(2);
+	rec.add(c);  // no recording yet
+	CHECK(!rec.active() && rec.finish().empty());
+	rec.begin(at(100));
+	CHECK(rec.active());
+	auto cue = [&](const char *lang, double s, double e, const char *text) {
+		SubtitleCue x;
+		x.lang = lang;
+		x.start = at(s);
+		x.end = at(e);
+		x.text = text;
+		rec.add(x);
+	};
+	cue("", 98, 99.5, "before the recording");     // ended before it started: dropped
+	cue("", 99.5, 101, "just at the start");       // crosses the start: kept, from 0
+	cue("", 103, 105, "second line of speech");
+	cue("es", 103.2, 105.2, "segunda linea");
+	cue("es", 110, 110, "sin duracion");           // no duration: gets a readable one
+	cue("es", 109, 111, "primero y por orden");     // arrives out of order
+	cue("de", 104, 106, "");                       // empty: dropped
+	const std::vector<SubtitleRecorder::File> files = rec.finish();
+	CHECK(!rec.active());
+	CHECK(files.size() == 2);
+	if (files.size() == 2) {
+		CHECK(files[0].lang == "" && files[0].cues == 2);  // std::map order: "" first
+		CHECK(files[0].srt ==
+		      "1\n00:00:00,000 --> 00:00:01,000\njust at the start\n\n2\n00:00:03,000 --> 00:00:05,000\nsecond line of speech\n\n");
+		CHECK(files[1].lang == "es" && files[1].cues == 3);
+		// 109-111 and 110-110 overlap: the first is cut where the next begins; the one without a duration lasts a second.
+		CHECK(files[1].srt.find("00:00:03,200 --> 00:00:05,200\nsegunda linea") != std::string::npos);
+		CHECK(files[1].srt.find("00:00:09,000 --> 00:00:10,000\nprimero y por orden") != std::string::npos);
+		CHECK(files[1].srt.find("00:00:10,000 --> 00:00:11,000\nsin duracion") != std::string::npos);
+	}
+	// Long text is wrapped.
+	SrtCue lc;
+	lc.start = 0;
+	lc.end = 4;
+	lc.text = "This sentence is rather long and should be split over two lines of subtitle text";
+	const std::string srt = make_srt({lc});
+	CHECK(srt.find("\n\n") == srt.size() - 2);
+	size_t lines = 0;
+	for (char ch : srt)
+		lines += ch == '\n';
+	CHECK(lines == 5);  // number, time, two text lines, blank
+	// Writing is atomic and replaces an old file.
+	const std::string path = (std::filesystem::temp_directory_path() / ("acw-srt-test-" + std::to_string(std::random_device{}()) + ".srt")).string();
+	std::string err;
+	CHECK(write_text_file(path, "one", &err));
+	CHECK(write_text_file(path, "two", &err));
+	{
+		std::ifstream f(path, std::ios::binary);
+		std::string got((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+		CHECK(got == "two");
+	}
+	CHECK(!std::filesystem::exists(path + ".part"));
+	std::filesystem::remove(path);
+	CHECK(!write_text_file("/nonexistent-folder-acw/x.srt", "x", &err) && !err.empty());
+}
+
+static void test_output_select()
+{
+	std::printf("closed-caption outputs: stream, recording, replay buffer, other plugins' outputs\n");
+	auto out = [](uintptr_t id, const char *name, OutputRole r, bool active, bool encoded, bool video, uint32_t delay = 0) {
+		OutputInfo o;
+		o.id = id;
+		o.name = name;
+		o.role = r;
+		o.active = active;
+		o.encoded = encoded;
+		o.has_video_encoder = video;
+		o.delay_s = delay;
+		return o;
+	};
+	const std::vector<OutputInfo> all = {
+		out(1, "simple_stream", OutputRole::Stream, true, true, true, 10),
+		out(2, "simple_file_output", OutputRole::Recording, true, true, true),
+		out(3, "ReplayBuffer", OutputRole::Replay, true, true, true),
+		out(4, "multi-rtmp YouTube", OutputRole::Other, true, true, true, 5),
+		out(5, "multi-rtmp idle", OutputRole::Other, false, true, true),
+		out(6, "virtualcam", OutputRole::Other, true, false, true),
+		out(7, "audio only", OutputRole::Other, true, true, false),
+		out(1, "simple_stream again", OutputRole::Other, true, true, true),  // the same output, also in the general list
+		out(8, "vertical record", OutputRole::Other, true, true, true),
+	};
+	auto ids = [&](const CaptionTargets &t) {
+		std::vector<int> r;
+		for (size_t i : pick_caption_outputs(all, t))
+			r.push_back(static_cast<int>(all[i].id));
+		return r;
+	};
+	CaptionTargets t;  // defaults: stream and recording
+	CHECK((ids(t) == std::vector<int>{1, 2}));
+	t.replay = true;
+	CHECK((ids(t) == std::vector<int>{1, 2, 3}));
+	t.others = true;
+	CHECK((ids(t) == std::vector<int>{1, 2, 3, 4, 8}));  // not idle, not virtual camera, not audio only, nothing twice
+	t.stream = false;
+	CHECK((ids(t) == std::vector<int>{2, 3, 4, 8}));  // the stream's box is off, and it is not "other" either
+	CaptionTargets none;
+	none.stream = none.recording = false;
+	CHECK(ids(none).empty());
+	CHECK(pick_caption_outputs({}, t).empty());
+	CHECK(output_tag(all[0]) == 1 && output_tag(all[1]) == 2 && output_tag(all[2]) == 3);
+	CHECK(output_tag(all[3]) != output_tag(all[8]) && output_tag(all[3]) == output_tag(out(99, "multi-rtmp YouTube", OutputRole::Other, true, true, true)));
+	CHECK(output_tag(all[3]) >= 0x100);
+}
+
+static void test_delayed_sender_tags()
+{
+	std::printf("delayed captions of several outputs: each keeps its own order\n");
+	using namespace std::chrono;
+	std::mutex mu;
+	std::vector<std::pair<std::string, uint64_t>> got;
+	DelayedSender d([&](const std::string &line, double, uint64_t tag) {
+		std::lock_guard<std::mutex> lk(mu);
+		got.emplace_back(line, tag);
+	});
+	const auto now = steady_clock::now();
+	d.later("slow 1", 2.0, now + milliseconds(300), 1);
+	d.later("fast 1", 2.0, now + milliseconds(50), 2);
+	d.later("slow 2 (due earlier but behind slow 1)", 2.0, now + milliseconds(100), 1);
+	d.later("fast 2", 2.0, now + milliseconds(120), 2);
+	for (int i = 0; i < 100; ++i) {
+		{
+			std::lock_guard<std::mutex> lk(mu);
+			if (got.size() == 4)
+				break;
+		}
+		std::this_thread::sleep_for(milliseconds(10));
+	}
+	std::lock_guard<std::mutex> lk(mu);
+	CHECK(got.size() == 4);
+	if (got.size() == 4) {
+		CHECK(got[0].first == "fast 1" && got[1].first == "fast 2");  // the output with the short delay is not held up
+		CHECK(got[2].first == "slow 1" && got[3].first.rfind("slow 2", 0) == 0);
+	}
+}
+
+static void test_caption_router()
+{
+	std::printf("caption routing: closed captions in one language, text sources, subtitle cues\n");
+	using namespace std::chrono;
+	struct Rec {
+		std::mutex mu;
+		std::vector<std::string> cc;
+		std::vector<std::pair<std::string, std::string>> overlay;
+		std::vector<SubtitleCue> cues;
+	} rec;
+	CaptionRouter::Sinks sinks;
+	sinks.closed_caption = [&](const std::string &t) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.cc.push_back(t);
+	};
+	sinks.overlay = [&](const std::string &s, const std::string &t) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.overlay.emplace_back(s, t);
+	};
+	sinks.subtitle = [&](const SubtitleCue &c) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.cues.push_back(c);
+	};
+	CaptionRouter r(sinks);
+	const auto origin = steady_clock::now() - seconds(100);
+	auto cap = [&](const char *text, double s, double e) {
+		CaptionEvent c;
+		c.text = text;
+		c.is_final = true;
+		c.start = s;
+		c.end = e;
+		c.origin = origin;
+		return c;
+	};
+	auto tr = [&](const char *lang, const char *text, const char *of, double s, double e) {
+		TranslationEvent t;
+		t.lang = lang;
+		t.text = text;
+		t.of = of;
+		t.start = s;
+		t.end = e;
+		t.origin = origin;
+		return t;
+	};
+	auto overlay_last = [&](const std::string &src) {
+		std::lock_guard<std::mutex> lk(rec.mu);
+		std::string v = "<none>";
+		for (const auto &o : rec.overlay)
+			if (o.first == src)
+				v = o.second;
+		return v;
+	};
+	auto wait_overlay = [&](const std::string &src, const std::string &want) {
+		for (int i = 0; i < 300; ++i) {
+			if (overlay_last(src) == want)
+				return true;
+			std::this_thread::sleep_for(milliseconds(10));
+		}
+		return false;
+	};
+
+	// Nothing configured: nothing happens.
+	r.on_caption(cap("ignored", 1, 2));
+	{
+		std::lock_guard<std::mutex> lk(rec.mu);
+		CHECK(rec.cc.empty() && rec.overlay.empty() && rec.cues.empty());
+	}
+
+	RouterConfig cfg;
+	cfg.spoken = "en";
+	cfg.translate = {"es", "", "de"};
+	cfg.closed_captions = true;  // the spoken language
+	cfg.overlay_spoken = "Src English";
+	cfg.overlay = {"Src Spanish", "Src unused", ""};
+	cfg.subtitles = true;
+	cfg.overlay_options.clear_after_s = 30;
+	r.configure(cfg);
+	r.on_caption(cap("good morning", 5.0, 6.5));
+	CHECK(wait_overlay("Src English", "good morning"));
+	r.on_translation(tr("es", "buenos dias", "l1", 5.0, 6.5));
+	r.on_translation(tr("es", "buenos dias", "l1", 5.0, 6.5));  // the same caption twice: once
+	r.on_translation(tr("de", "guten Morgen", "l1", 5.0, 6.5));  // slot without a text source: no overlay
+	r.on_translation(tr("fr", "bonjour", "l1", 5.0, 6.5));       // not asked for: ignored
+	CHECK(wait_overlay("Src Spanish", "buenos dias"));
+	{
+		std::lock_guard<std::mutex> lk(rec.mu);
+		CHECK(rec.cc.size() == 1 && rec.cc[0] == "good morning");  // spoken language on the closed-caption channel
+		CHECK(rec.cues.size() == 3);                                 // en, es, de (not the repeat, not fr)
+		int es = 0;
+		for (const auto &o : rec.overlay)
+			es += o.first == "Src Spanish" && o.second == "buenos dias";
+		CHECK(es == 1);
+		if (rec.cues.size() == 3) {
+			CHECK(rec.cues[0].lang == "en" && rec.cues[0].text == "good morning");
+			CHECK(rec.cues[1].lang == "es" && rec.cues[2].lang == "de");
+			// start/end are seconds of audio from the connection start, on the computer's clock.
+			CHECK(rec.cues[0].start == origin + duration_cast<steady_clock::duration>(duration<double>(5.0)));
+			CHECK(rec.cues[0].end == origin + duration_cast<steady_clock::duration>(duration<double>(6.5)));
+		}
+	}
+
+	// The closed captions can carry a translation instead.
+	cfg.closed_caption_language = "de";
+	r.configure(cfg);
+	r.on_caption(cap("how are you", 8.0, 9.0));
+	r.on_translation(tr("es", "como estas", "l2", 8.0, 9.0));
+	r.on_translation(tr("de", "wie geht es dir", "l2", 8.0, 9.0));
+	{
+		std::lock_guard<std::mutex> lk(rec.mu);
+		CHECK(rec.cc.size() == 2 && rec.cc[1] == "wie geht es dir");
+	}
+	// No closed captions wanted, no subtitle files: only the text sources.
+	cfg.closed_captions = false;
+	cfg.subtitles = false;
+	r.configure(cfg);
+	{
+		std::lock_guard<std::mutex> lk(rec.mu);
+		rec.cc.clear();
+		rec.cues.clear();
+	}
+	r.on_translation(tr("de", "vielen Dank", "l3", 10, 11));
+	r.on_caption(cap("thank you", 10, 11));
+	{
+		std::lock_guard<std::mutex> lk(rec.mu);
+		CHECK(rec.cc.empty() && rec.cues.empty());
+	}
+	// Without a time from the service the cue ends when it arrived.
+	cfg.subtitles = true;
+	r.configure(cfg);
+	CaptionEvent bare = cap("no times", 0, 0);
+	bare.origin = steady_clock::time_point{};
+	const auto before = steady_clock::now();
+	r.on_caption(bare);
+	{
+		std::lock_guard<std::mutex> lk(rec.mu);
+		CHECK(rec.cues.size() == 1);
+		if (!rec.cues.empty()) {
+			CHECK(rec.cues[0].end >= before && rec.cues[0].end <= steady_clock::now());
+			CHECK(rec.cues[0].start < rec.cues[0].end);
+		}
+	}
+	// Text sources that are no longer used are emptied; stopping ends everything.
+	cfg.overlay_spoken = "";
+	r.configure(cfg);
+	CHECK(wait_overlay("Src English", ""));
+	r.clear_overlays();
+	CHECK(wait_overlay("Src Spanish", ""));
+	r.stop();
+	r.on_caption(cap("after stop", 1, 2));
+	std::lock_guard<std::mutex> lk(rec.mu);
+	CHECK(rec.cues.size() == 1);
+}
+
 int main()
 {
 	test_spsc();
@@ -1084,6 +1567,14 @@ int main()
 	test_caption_lines();
 	test_caption_pacing();
 	test_delayed_sender();
+	test_translation_protocol();
+	test_languages();
+	test_overlay_text();
+	test_overlay_display();
+	test_subtitles();
+	test_output_select();
+	test_delayed_sender_tags();
+	test_caption_router();
 	test_resampler();
 	test_output_stage();
 	test_session_passthrough(48000, 150);

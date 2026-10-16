@@ -109,7 +109,8 @@ public:
 	std::string ready = R"({"type":"ready","sessionId":"s","sampleRate":48000,"hopSamples":480,"modelLatencyMs":30.0,)"
 			    R"("usdPerMinute":0.01,"maxSessionSeconds":43200,"echoReference":true})";
 	std::string error;        // non-empty: answer `start` with this instead of `ready`, then close
-	std::string after_ready;  // sent right after `ready`
+	std::string after_ready;  // sent right after `ready` (several messages: one per line)
+	std::string close_reason; // non-empty: close the socket with this reason (code 1008) after `after_ready`
 	std::string last_start;
 
 	std::atomic<int> opens{0}, starts{0}, mic{0}, refs{0};
@@ -168,13 +169,14 @@ private:
 		if (!msg->binary) {
 			if (contains(msg->str, "\"start\"")) {
 				++starts;
-				std::string err, rdy, after;
+				std::string err, rdy, after, creason;
 				{
 					std::lock_guard<std::mutex> lk(mu);
 					last_start = msg->str;
 					err = error;
 					rdy = ready;
 					after = after_ready;
+					creason = close_reason;
 				}
 				if (!err.empty()) {
 					ws.sendText(err);
@@ -182,9 +184,18 @@ private:
 					return;
 				}
 				ws.sendText(rdy);
-				if (!after.empty())
-					ws.sendText(after);
-				if (contains(after, "\"stopped\""))
+				for (size_t pos = 0; pos <= after.size();) {
+					const size_t nl = after.find('\n', pos);
+					const std::string part = after.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
+					if (!part.empty())
+						ws.sendText(part);
+					if (nl == std::string::npos)
+						break;
+					pos = nl + 1;
+				}
+				if (!creason.empty())
+					ws.close(1008, creason);
+				else if (contains(after, "\"stopped\""))
 					ws.close();  // like the service: the stopped message, then the end
 				if (mode == Mode::GarbageText) {
 					ws.sendText("not json");
@@ -633,6 +644,353 @@ static void test_server_errors()
 	CHECK(srv.starts.load() == 1);
 	f.stop();
 	s.stop(0, 500);
+}
+
+// Records what the session does to the audio: pushes noise through process() in real time (10 ms blocks) and keeps
+// both sides. `max_call_us` is the longest single process() call.
+struct Capture {
+	std::vector<float> in, out;
+	long long max_call_us = 0;
+};
+
+static Capture run_audio(Session &s, double secs)
+{
+	Capture c;
+	std::mt19937 rng(11);
+	std::normal_distribution<float> nd(0.0f, 0.1f);
+	std::vector<float> blk(480), proc;
+	auto t = steady_clock::now();
+	const int blocks = static_cast<int>(secs * 100);
+	for (int b = 0; b < blocks; ++b) {
+		for (float &v : blk)
+			v = nd(rng) + 0.001f;  // never exactly zero: a hole of silence would show
+		proc = blk;
+		const auto t0 = steady_clock::now();
+		s.process(proc.data(), proc.size());
+		c.max_call_us = std::max<long long>(c.max_call_us, duration_cast<microseconds>(steady_clock::now() - t0).count());
+		c.in.insert(c.in.end(), blk.begin(), blk.end());
+		c.out.insert(c.out.end(), proc.begin(), proc.end());
+		t += milliseconds(10);
+		std::this_thread::sleep_until(t);
+	}
+	return c;
+}
+
+// The audio is the delayed original, sample for sample: nothing lost, nothing silenced, nothing added.
+static bool is_plain_delayed_copy(const Capture &c, int delay_samples)
+{
+	if (c.in.size() != c.out.size() || c.in.size() < static_cast<size_t>(delay_samples) + 1000)
+		return false;
+	for (size_t i = static_cast<size_t>(delay_samples); i < c.out.size(); ++i)
+		if (c.out[i] != c.in[i - static_cast<size_t>(delay_samples)])
+			return false;
+	return true;
+}
+
+static void test_never_breaks_the_stream()
+{
+	std::printf("whatever the service does, the microphone audio passes through unprocessed, unbroken, without silence\n");
+	struct Case {
+		const char *name;
+		const char *error;        // answer `start` with this
+		const char *after_ready;  // ... or this after `ready`
+		const char *close_reason;
+	};
+	const Case cases[] = {
+		{"service never sends processed audio", "", "", ""},
+		{"service refuses (busy)", R"({"type":"error","code":"unavailable","message":"busy"})", "", ""},
+		{"service stops the session: no_audio", "", R"({"type":"stopped","reason":"no_audio"})", ""},
+		{"service stops the session: trial_over", "", R"({"type":"stopped","reason":"trial_over"})", ""},
+		{"service closes: too_many_messages", "", "", "too_many_messages"},
+		{"service says the captions broke", "", R"({"type":"stopped","reason":"captions_unavailable"})", ""},
+	};
+	for (const Case &c : cases) {
+		std::printf("  %s\n", c.name);
+		FakeServer srv;
+		srv.mode = Mode::Silent;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.error = c.error;
+			srv.after_ready = c.after_ready;
+			srv.close_reason = c.close_reason;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		const Capture cap = run_audio(s, 4.0);
+		const int d = static_cast<int>(std::lround(s.delay_seconds() * 48000));
+		CHECK(d == 7200);
+		CHECK(is_plain_delayed_copy(cap, d));
+		CHECK(cap.max_call_us < 30000);
+		CHECK(!s.status_line().empty());
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  service unreachable\n");
+		Session s(base_config("ws://127.0.0.1:1/x"), nullptr, nullptr);
+		s.start();
+		const Capture cap = run_audio(s, 3.0);
+		CHECK(is_plain_delayed_copy(cap, static_cast<int>(std::lround(s.delay_seconds() * 48000))));
+		CHECK(cap.max_call_us < 30000);
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  service ends mid-session (server dropped after 100 frames)\n");
+		FakeServer srv;
+		srv.mode = Mode::DropAfter100;
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		const Capture cap = run_audio(s, 5.0);
+		// Processed frames came back for a while (the echo), so the audio is not a plain copy; what matters is that it
+		// never went silent and never jumped: every block carries a signal as strong as the input's.
+		double min_rms = 1e9;
+		const size_t blk = 480;
+		for (size_t i = 8000; i + blk <= cap.out.size(); i += blk) {
+			double e = 0;
+			for (size_t k = 0; k < blk; ++k)
+				e += static_cast<double>(cap.out[i + k]) * cap.out[i + k];
+			min_rms = std::min(min_rms, std::sqrt(e / blk));
+		}
+		std::printf("    quietest 10 ms block: rms %.4f (input 0.1)\n", min_rms);
+		CHECK(min_rms > 0.05);
+		CHECK(cap.max_call_us < 30000);
+		s.stop(0, 500);
+	}
+}
+
+static void test_stop_reasons()
+{
+	std::printf("stop reasons: plain words, reconnect at once when audio flows again after no_audio\n");
+	{
+		std::printf("  no_audio\n");
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.after_ready = R"({"type":"stopped","reason":"no_audio"})";
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Feeder f(s, nullptr);
+		CHECK(wait_until([&] { return srv.starts.load() >= 2; }, 4000));  // not the 2 minutes of an unknown reason
+		CHECK(wait_until([&] { return s.snapshot().state == SessionState::Backoff; }, 3000));
+		const SessionSnapshot n = s.snapshot();
+		CHECK(n.reason_code == "no_audio");
+		CHECK(n.backoff_seconds <= 8);
+		CHECK(contains(s.status_line(), "microphone audio"));
+		CHECK(contains(s.status_line(), "Your audio keeps playing without cleaning"));
+		f.stop();
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  no audio from OBS at all: nothing connects, nothing is billed\n");
+		FakeServer srv;
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		std::this_thread::sleep_for(milliseconds(800));
+		CHECK(srv.opens.load() == 0);
+		s.stop(0, 500);
+	}
+	struct Case {
+		const char *name;
+		const char *error;
+		const char *after_ready;
+		const char *close_reason;
+		bool blocks;
+		int min_backoff_s;
+		const char *text;
+		const char *code;
+	};
+	const Case cases[] = {
+		{"trial_over (stopped)", "", R"({"type":"stopped","reason":"trial_over"})", "", true, 0, "free trial", "trial_over"},
+		{"trial_over (error)", R"({"type":"error","code":"trial_over","message":"x"})", "", "", true, 0, "free trial", "trial_over"},
+		{"needs_topup", R"({"type":"error","code":"needs_topup","message":"Top up first"})", "", "", true, 0, "first top-up", "needs_topup"},
+		{"trial_busy", R"({"type":"error","code":"trial_busy","message":"busy"})", "", "", false, 60, "free trials is busy", "trial_busy"},
+		{"too_many_messages (close frame)", "", "", "too_many_messages", false, 20, "too many messages", "too_many_messages"},
+		{"too_many_messages (error)", R"({"type":"error","code":"rate_limited","message":"Too many messages."})", "", "", false, 20,
+		 "too many messages", "too_many_messages"},
+		{"captions_unavailable (stopped)", "", R"({"type":"stopped","reason":"captions_unavailable"})", "", false, 300, "caption service",
+		 "captions_unavailable"},
+		{"insufficient_funds (stopped)", "", R"({"type":"stopped","reason":"insufficient_funds"})", "", true, 0, "balance ran out",
+		 "insufficient_funds"},
+	};
+	for (const Case &c : cases) {
+		std::printf("  %s\n", c.name);
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.error = c.error;
+			srv.after_ready = c.after_ready;
+			srv.close_reason = c.close_reason;
+		}
+		Session s(base_config(srv.url()), nullptr, nullptr);
+		s.start();
+		Feeder f(s, nullptr);
+		const SessionState want = c.blocks ? SessionState::Blocked : SessionState::Backoff;
+		CHECK(wait_until([&] { return s.snapshot().state == want; }, 5000));
+		const SessionSnapshot n = s.snapshot();
+		CHECK(n.reason_code == c.code);
+		CHECK(contains(s.status_line(), c.text));
+		if (!c.blocks)
+			CHECK(n.backoff_seconds >= c.min_backoff_s);
+		// The plugin's own wording wins when it has one.
+		const std::string want_id = std::string("reason.") + c.code;
+		const std::string loc = s.status_line(
+			[&](const std::string &id) { return id == want_id ? std::string("LOCALISED[%1]") : std::string(); });
+		CHECK(contains(loc, "LOCALISED["));
+		CHECK(!contains(loc, c.text));
+		std::this_thread::sleep_for(milliseconds(1500));
+		CHECK(srv.starts.load() == 1);  // none of these is retried at once
+		f.stop();
+		s.stop(0, 500);
+	}
+}
+
+// Translations: what is asked for, what the service switches on, what arrives, what goes wrong.
+static void test_translations()
+{
+	std::printf("translations: start request, ready echo, events with times, warnings\n");
+	const std::string ready_es_de =
+		R"({"type":"ready","sessionId":"s","sampleRate":48000,"hopSamples":480,"modelLatencyMs":30.0,"usdPerMinute":0.01,)"
+		R"("maxSessionSeconds":43200,"translate":["es","de"]})";
+	{
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = ready_es_de;
+			srv.after_ready =
+				"{\"type\":\"caption\",\"id\":\"l1\",\"text\":\"hello there\",\"final\":true,\"start\":1.0,\"end\":2.5}\n"
+				"{\"type\":\"translation\",\"lang\":\"es\",\"text\":\"hola\",\"of\":\"l1\",\"start\":1.0,\"end\":2.5}\n"
+				"{\"type\":\"translation\",\"lang\":\"de\",\"text\":\"hallo\",\"of\":\"l1\",\"start\":1.0,\"end\":2.5}\n"
+				"{\"type\":\"translation\",\"lang\":\"fr\",\"text\":\"\",\"of\":\"l1\"}";
+		}
+		std::mutex mu;
+		std::vector<CaptionEvent> caps;
+		std::vector<TranslationEvent> trs;
+		SessionConfig cfg = base_config(srv.url());
+		cfg.denoise = false;
+		cfg.captions = "local";
+		cfg.translate = {"es", "de"};
+		Session s(
+			cfg,
+			[&](const CaptionEvent &e) {
+				std::lock_guard<std::mutex> lk(mu);
+				caps.push_back(e);
+			},
+			nullptr);
+		s.set_translation_callback([&](const TranslationEvent &e) {
+			std::lock_guard<std::mutex> lk(mu);
+			trs.push_back(e);
+		});
+		s.start();
+		Feeder f(s, nullptr);
+		CHECK(wait_until(
+			[&] {
+				std::lock_guard<std::mutex> lk(mu);
+				return caps.size() >= 1 && trs.size() >= 2;
+			},
+			5000));
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			CHECK(contains(srv.last_start, "\"translate\":[\"es\",\"de\"]"));
+			CHECK(contains(srv.last_start, "\"captions\":\"local\""));
+		}
+		std::this_thread::sleep_for(milliseconds(300));
+		{
+			std::lock_guard<std::mutex> lk(mu);
+			CHECK(caps.size() == 1 && caps[0].id == "l1" && caps[0].text == "hello there");
+			CHECK(caps[0].origin != steady_clock::time_point{});
+			CHECK(trs.size() == 2);
+			if (trs.size() >= 2) {
+				CHECK(trs[0].lang == "es" && trs[0].text == "hola" && trs[0].of == "l1");
+				CHECK(trs[0].start == 1.0 && trs[0].end == 2.5);
+				CHECK(trs[0].origin == caps[0].origin);
+				CHECK(trs[1].lang == "de" && trs[1].text == "hallo");
+			}
+		}
+		const SessionSnapshot n = s.snapshot();
+		CHECK(n.translate_active_known && n.translate_active.size() == 2);
+		CHECK(contains(s.status_line(), "Captions are running. Translating into Spanish and German."));
+		CHECK(contains(s.status_line([](const std::string &id) {
+			       return id == "status.translating" ? std::string("T[%1]") : std::string();
+		       }),
+			       "T[Spanish and German]"));
+		f.stop();
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  an older service leaves the translations out of `ready`\n");
+		FakeServer srv;
+		SessionConfig cfg = base_config(srv.url());
+		cfg.denoise = false;
+		cfg.captions = "local";
+		cfg.translate = {"es"};
+		Session s(cfg, nullptr, nullptr);
+		s.start();
+		Feeder f(s, nullptr);
+		CHECK(wait_until([&] { return s.snapshot().state == SessionState::Streaming; }, 5000));
+		CHECK(contains(s.status_line(), "did not switch on translation into Spanish"));
+		CHECK(!contains(s.status_line(), "Translating into"));
+		f.stop();
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  translation_unavailable: that language stops, the captions go on\n");
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.ready = ready_es_de;
+			srv.after_ready = R"({"type":"warning","code":"translation_unavailable","lang":"es","message":"engine down"})";
+		}
+		SessionConfig cfg = base_config(srv.url());
+		cfg.denoise = false;
+		cfg.captions = "local";
+		cfg.translate = {"es", "de"};
+		Session s(cfg, nullptr, nullptr);
+		s.start();
+		Feeder f(s, nullptr);
+		CHECK(wait_until([&] { return !s.snapshot().translate_failed.empty(); }, 5000));
+		const std::string line = s.status_line();
+		CHECK(contains(line, "Translation into Spanish stopped"));
+		CHECK(contains(line, "Translating into German."));
+		CHECK(contains(line, "Captions are running"));
+		CHECK(s.snapshot().state == SessionState::Streaming);
+		f.stop();
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  captions_unavailable warning: noise removal goes on\n");
+		FakeServer srv;
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.after_ready = R"({"type":"warning","code":"captions_unavailable","message":"x"})";
+		}
+		SessionConfig cfg = base_config(srv.url());
+		cfg.captions = "local";
+		Session s(cfg, nullptr, nullptr);
+		s.start();
+		Feeder f(s, nullptr);
+		CHECK(wait_until([&] { return s.snapshot().captions_failed; }, 5000));
+		CHECK(contains(s.status_line(), "captions have stopped"));
+		CHECK(!contains(s.status_line(), "Captions are running"));
+		CHECK(s.snapshot().state == SessionState::Streaming);
+		f.stop();
+		s.stop(0, 500);
+	}
+	{
+		std::printf("  no captions: no translations are asked for\n");
+		FakeServer srv;
+		SessionConfig cfg = base_config(srv.url());
+		cfg.translate = {"es"};
+		Session s(cfg, nullptr, nullptr);
+		s.start();
+		Feeder f(s, nullptr);
+		CHECK(wait_until([&] { return s.snapshot().state == SessionState::Streaming; }, 5000));
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			CHECK(!contains(srv.last_start, "translate"));
+		}
+		f.stop();
+		s.stop(0, 500);
+	}
 }
 
 static void test_http_refusals()
@@ -1244,6 +1602,9 @@ int main(int argc, char **argv)
 	test_echo_and_keepalive();
 	test_slow_link();
 	test_server_errors();
+	test_stop_reasons();
+	test_translations();
+	test_never_breaks_the_stream();
 	test_http_refusals();
 	test_ready_validation();
 	test_captions_only();
