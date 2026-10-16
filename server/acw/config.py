@@ -72,6 +72,7 @@ class Settings:
     stripe_automatic_tax: bool
     stripe_tax_code: str
     stripe_payment_method_configuration: str | None
+    trust_all_accounts: bool  # dev/test servers only: every account counts as having paid (acw.billing.trust)
     welcome_credit_micros: int | None  # None: one hour of live (noise removal + standard captions) at today's prices
 
     openai_api_key: str | None
@@ -158,6 +159,7 @@ def get_settings() -> Settings:
         # A payment method configuration with cards only (incl. Apple Pay / Google Pay): payments are authorized,
         # then the card's issuing country is checked before they are charged, which needs a card.
         stripe_payment_method_configuration=_env("STRIPE_PAYMENT_METHOD_CONFIGURATION", "") or None,
+        trust_all_accounts=_env_bool("ACW_TRUST_ALL_ACCOUNTS", False),
         # Credit every new account gets once (per email address, ever). 0 switches it off.
         welcome_credit_micros=(lambda v: None if v is None else int(v))(_env("ACW_WELCOME_CREDIT_MICROS")),
         openai_api_key=_env("OPENAI_API_KEY"),

@@ -613,3 +613,16 @@ def test_an_api_key_does_not_learn_the_address_or_billing_settings(client):
     _, h = login(client, "owner@example.com")
     full = client.get("/api/me").json()
     assert full["user"]["email"] == "owner@example.com" and "autoReload" in full
+
+
+def test_a_test_server_can_trust_every_account(monkeypatch):
+    from acw import auth
+    from acw.billing import trust
+    from acw.config import get_settings
+
+    uid = auth.get_or_create_user("trusted@example.com")["id"]
+    assert not trust.has_settled_payment(uid)
+    monkeypatch.setenv("ACW_TRUST_ALL_ACCOUNTS", "1")
+    get_settings.cache_clear()
+    assert trust.has_settled_payment(uid)
+    get_settings.cache_clear()

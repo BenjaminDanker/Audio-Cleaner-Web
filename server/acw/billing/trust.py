@@ -23,7 +23,11 @@ PREMIUM_NEEDS_TOPUP = (
 
 
 def has_settled_payment(user_id: str) -> bool:
-    """A top-up that went through and has not been paid back in full."""
+    """A top-up that went through and has not been paid back in full (or a test server that trusts everyone)."""
+    from ..config import get_settings
+
+    if get_settings().trust_all_accounts:
+        return True
     row = db.one(
         "SELECT 1 FROM payments WHERE user_id = ? AND status = 'succeeded' AND refunded_cents < amount_cents LIMIT 1", (user_id,)
     )
