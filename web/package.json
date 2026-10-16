@@ -24,9 +24,11 @@
     "test:states": "node tests/states.mjs",
     "test:files": "node tests/files.mjs",
     "test:fixes": "node tests/fixes.mjs",
-    "test:contact": "node tests/contact.mjs"
+    "test:contact": "node tests/contact.mjs",
+    "test:convert": "node tests/convert.mjs"
   },
   "dependencies": {
+    "@mediabunny/mp3-encoder": "1.61.3",
     "mediabunny": "^1.61.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

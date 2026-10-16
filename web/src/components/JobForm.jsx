@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
 import { useAuth } from '../auth.jsx';
-import { balanceMoney, BILLING_NOTE, bytes, clock, extension, human, money, moneyUsd, shownName } from '../format.js';
+import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, moneyUsd, shownName } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
-import { AUDIO_FORMATS, LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
+import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
+import { serverAudioFormat } from '../media/convert.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
 import { buildWav, wavFits } from '../media/wav.js';
 import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
+import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
 import { strengthDb } from '../strengths.js';
@@ -37,11 +39,6 @@ function warmUpDenoiser() {
 const inGigabytes = (text) => text.replace(/\b(\d{4,})\s*MB\b/g, (_, n) => gigabytes(Number(n) * 1024 ** 2));
 
 const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
-
-function defaultAudioFormat(file, info) {
-  if (!info?.hasVideo) return 'wav';
-  return extension(file.name) === 'webm' ? 'opus' : 'm4a';
-}
 
 const mins = (sec) => Math.max(1, Math.ceil(sec / 60));
 const minutesWord = (n) => `${n} ${n === 1 ? 'minute' : 'minutes'}`;
@@ -89,8 +86,6 @@ export default function JobForm({ onSubmitted }) {
   const [keepVideo, setKeepVideo] = useState(true);
   const [embed, setEmbed] = useState(false);
   const [echo, setEcho] = useState(false); // Clean & polish: remove speaker echo using the second audio track
-  const [format, setFormat] = useState('wav');
-  const [formatTouched, setFormatTouched] = useState(false);
   const [loudness, setLoudness] = useState('-16');
   const [noiseKind, setNoiseKind] = useState('auto');
   const [rebuild, setRebuild] = useState(false); // Clean & polish, voice rebuilt (its own price)
@@ -107,6 +102,7 @@ export default function JobForm({ onSubmitted }) {
   const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
+  const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'polish' });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
 
@@ -166,7 +162,10 @@ export default function JobForm({ onSubmitted }) {
 
   // Free subtitles that stop being possible (another file, the free minutes ran out) are switched off, never silently charged.
   useEffect(() => { if (subs === 'free' && info && !freeSubs.ok) setSubs('off'); }, [subs, info, freeSubs]);
-  useEffect(() => { if (file && info && !formatTouched) setFormat(defaultAudioFormat(file, info)); }, [file, info, formatTouched]);
+  // For Clean & polish the file type in the list and "Keep the video" are the same decision: a video type keeps the picture.
+  useEffect(() => {
+    if (wantsPolish && isVideo && !info?.viaLibav && choice.outputs) setKeepVideo(choice.isVideoFile);
+  }, [wantsPolish, isVideo, info, choice.outputs, choice.isVideoFile]);
 
   const est = useMemo(() => {
     if (!kind) return 0;
@@ -191,7 +190,6 @@ export default function JobForm({ onSubmitted }) {
     setInfo(null);
     setResult(null);
     setError('');
-    setFormatTouched(false);
     setEmbed(false);
     setEcho(false);
     setKeepVideo(true);
@@ -231,7 +229,7 @@ export default function JobForm({ onSubmitted }) {
   if (kind && !free && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
   if (info && !wantsBrowser && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
-  const canStart = (wantsBrowser || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || free || est != null);
+  const canStart = (wantsBrowser || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || free || est != null) && (!wantsPolish || choice.valid);
 
   async function runLocal(f, i, signal) {
     setLocalRunning(true);
@@ -259,7 +257,7 @@ export default function JobForm({ onSubmitted }) {
       durationSeconds: duration || 1,
       free,
       options: {
-        audio_format: format,
+        audio_format: serverAudioFormat(choice.format, f, i),
         caption_formats: wantsText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c]) : [],
         embed_subtitles: !!(wantsText && embed && i?.hasVideo),
         language: language || null,
@@ -277,7 +275,10 @@ export default function JobForm({ onSubmitted }) {
         onCompressed: setCompressedInfo,
       });
       setResult(out);
-      onSubmitted?.(out, { file: f, info: i, extracted: out.extracted, keepVideo });
+      onSubmitted?.(out, {
+        file: f, info: i, extracted: out.extracted, keepVideo,
+        output: wantsPolish ? { name: choice.name.trim(), format: choice.format, size: choice.size } : null,
+      });
       return out;
     } finally {
       setStep(null);
@@ -414,18 +415,13 @@ export default function JobForm({ onSubmitted }) {
                 </div>
                 )}
                 <div className="field">
-                  <label htmlFor="afmt">Cleaned audio format</label>
-                  <select id="afmt" className="select" value={format} onChange={(e) => { setFormat(e.target.value); setFormatTouched(true); }} disabled={busy}>
-                    {AUDIO_FORMATS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
-                  </select>
-                </div>
-                <div className="field">
                   <label htmlFor="loud">Loudness target</label>
                   <select id="loud" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy}>
                     {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
                   </select>
                 </div>
               </div>
+              <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
               {hasSecondTrack && (
                 <label className="check">
                   <input type="checkbox" name="echo" checked={echo} onChange={(e) => setEcho(e.target.checked)} disabled={busy} />
@@ -443,7 +439,10 @@ export default function JobForm({ onSubmitted }) {
             {isVideo && wantsBrowser && info.viaLibav && <p className="small muted mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Clean &amp; polish gives you the whole video back.</p>}
             {isVideo && noise !== 'off' && !(wantsBrowser && info.viaLibav) && (
               <label className="check">
-                <input type="checkbox" name="keepvideo" checked={keepVideo} onChange={(e) => setKeepVideo(e.target.checked)} disabled={busy} />
+                <input
+                  type="checkbox" name="keepvideo" checked={keepVideo} disabled={busy}
+                  onChange={(e) => { setKeepVideo(e.target.checked); if (wantsPolish) choice.pickFormat(e.target.checked ? choice.defaultVideo() : choice.defaultAudio()); }}
+                />
                 <span>Keep the video, with the cleaned sound{wantsPolish ? ' (put back together on your device afterwards)' : ''}</span>
               </label>
             )}

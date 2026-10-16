@@ -4,7 +4,9 @@ import { IconDownload } from './Icons.jsx';
 import { saveBlob } from '../download.js';
 import { clock, human, stem } from '../format.js';
 import { STAGE_LOADING } from '../media/pipeline.js';
+import { buildMedia, cleanName } from '../media/convert.js';
 import { buildWav, wavFits } from '../media/wav.js';
+import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 
 // The two pieces of the in-browser noise removal that the Cleanup page shows: progress while it runs, and the result
 // (listen, then download). Nothing here uploads anything.
@@ -50,6 +52,11 @@ export function BrowserResult({ file, info, result, isVideo, keepVideo = true, o
   const [note, setNote] = useState('');
   const [encoder, setEncoder] = useState(undefined); // undefined: unknown yet, null: none
   const [remuxProg, setRemuxProg] = useState(0);
+  const choice = useOutputChoice({ file, info, keepVideo: isVideo && keepVideo });
+  const [saveProg, setSaveProg] = useState(0);
+  const [saveNote, setSaveNote] = useState('');
+  const saveAbort = useRef(null);
+  useEffect(() => () => saveAbort.current?.abort(), []);
 
   useEffect(() => {
     if (!isVideo) return undefined;
@@ -83,6 +90,26 @@ export function BrowserResult({ file, info, result, isVideo, keepVideo = true, o
     }
   }
 
+  async function save() {
+    if (!choice.valid || busy) return;
+    const ctl = new AbortController();
+    saveAbort.current = ctl;
+    setBusy('save'); setErr(''); setSaveNote(''); setSaveProg(0);
+    try {
+      const out = await buildMedia({
+        format: choice.format, size: choice.size, videoFile: isVideo ? file : null, info, pcm, wav,
+        onProgress: setSaveProg, signal: ctl.signal,
+      });
+      saveBlob(out.blob, cleanName(choice.name));
+      setSaveNote(out.note || 'Saved.');
+    } catch (e) {
+      if (e?.name !== 'AbortError') setErr(e.message || 'Could not make that file. Try another file type.');
+    } finally {
+      saveAbort.current = null;
+      setBusy('');
+    }
+  }
+
   const silent = pcm.rms < 1e-5;
   const fits24 = wavFits(pcm.seconds, pcm.channels, 24); // a WAV file cannot hold more than about 4 GB
   return (
@@ -112,6 +139,18 @@ export function BrowserResult({ file, info, result, isVideo, keepVideo = true, o
       {isVideo && keepVideo && encoder === null && <p className="banner banner-info small mb0">This browser cannot encode AAC or Opus audio, so a rebuilt video is not available here. Download the cleaned WAV and combine it with your video, or try a Chromium-based browser.</p>}
       {isVideo && keepVideo && encoder && <p className="small muted mb0">The video picture is copied unchanged; only the audio is replaced ({encoder === 'aac' ? 'AAC' : 'Opus'}).</p>}
       {note && <p className="banner banner-info small mb0">{note}</p>}
+      <div className="stack save-as" data-testid="save-as">
+        <h3 className="mb0">Or save it with another name or file type</h3>
+        <OutputFields choice={choice} info={info} idPrefix="res" disabled={!!busy} />
+        <div className="row">
+          <button type="button" className="btn btn-primary" onClick={save} disabled={!choice.valid || !!busy} data-testid="save-btn">
+            <IconDownload width={18} height={18} /> {busy === 'save' ? `Making your file… ${Math.round(saveProg * 100)}%` : 'Save'}
+          </button>
+          {busy === 'save' && <button type="button" className="btn btn-secondary" onClick={() => saveAbort.current?.abort()} data-testid="save-cancel">Cancel</button>}
+        </div>
+        {busy === 'save' && <progress className="bar" max={100} value={Math.round(saveProg * 100)} aria-label="Making your file" />}
+        {saveNote && <p className="small muted mb0" role="status" data-testid="save-note">{saveNote}</p>}
+      </div>
       {err && <p className="banner banner-error small mb0" role="alert">{err}</p>}
     </section>
   );

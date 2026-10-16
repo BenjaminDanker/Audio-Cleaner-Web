@@ -1,0 +1,22 @@
+LAME MP3 encoder (inside @mediabunny/mp3-encoder) used by this website
+=======================================================================
+
+When you save a result as an MP3, your browser downloads one small extra file
+(a script with the MP3 encoder inside it) and writes the MP3 itself, on your
+own device. Nothing is uploaded. That encoder is LAME, compiled to WebAssembly
+by the mediabunny project (@mediabunny/mp3-encoder, MPL-2.0).
+
+LAME is licensed under the GNU Lesser General Public License, version 2 or
+later (the full text of version 2.1 is alongside this file). We did not modify
+LAME or the encoder package. The encoder lives in its own file, separate from
+the rest of the site, so it can be replaced by a modified copy of LAME.
+
+Source code
+-----------
+LAME:                      https://lame.sourceforge.io/
+@mediabunny/mp3-encoder:   https://github.com/Vanilagy/mediabunny/tree/main/packages/mp3-encoder
+                           (the WebAssembly build is made from the files in its lib/ and src/ folders)
+npm package:               https://www.npmjs.com/package/@mediabunny/mp3-encoder
+
+Want the source of exactly the version we ship, or a way to relink it with a
+modified LAME? Ask through the contact form and we will send it.

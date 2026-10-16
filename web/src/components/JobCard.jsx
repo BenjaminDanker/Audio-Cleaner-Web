@@ -6,6 +6,7 @@ import { saveBlob } from '../download.js';
 import { bytes, clock, dateTime, human, money, shownName, stem } from '../format.js';
 import { useNow } from '../hooks.js';
 import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel } from '../jobs.js';
+import { buildMedia, FORMAT } from '../media/convert.js';
 import { IconDownload } from './Icons.jsx';
 
 const OUT_LABEL = { audio: 'Cleaned audio', video: 'Video', captions: 'Captions', transcript: 'Transcript', segments: 'Segments' };
@@ -25,40 +26,57 @@ function Countdown({ expiresAt }) {
   return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
 }
 
-/** Add the cleaned audio back into the original video, locally. */
-function RemuxPanel({ job, local }) {
+/**
+ * Add the cleaned audio back into the original video, locally, as chosen in the form (file type, picture size, name).
+ * For a recording with no picture and a video type chosen, it makes the video (plain black picture) the same way.
+ */
+function RemuxPanel({ job, local, noPicture = false }) {
   const [file, setFile] = useState(local?.file || null);
   const [busy, setBusy] = useState(false);
   const [prog, setProg] = useState(0);
   const [err, setErr] = useState('');
   const [note, setNote] = useState('');
   const picker = useRef(null);
+  const ctl = useRef(null);
   const audioOut = job.outputs.find((o) => o.kind === 'audio');
   if (!audioOut) return null;
+  const choice = local?.output && FORMAT[local.output.format]?.kind === 'video' ? local.output : null;
 
   async function run(videoFile) {
+    const abort = new AbortController();
+    ctl.current = abort;
     setBusy(true); setErr(''); setNote(''); setProg(0);
     try {
       const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
       if (!res.ok) throw new Error('Couldn’t download the cleaned audio. Please try again.');
       const audioFile = await res.blob();
       const { remuxWithCleanAudio } = await import('../media/remux.js');
-      const out = await remuxWithCleanAudio({ videoFile, audioFile, onProgress: setProg });
-      saveBlob(out.blob, `${stem(videoFile.name)}-cleaned${out.ext}`);
+      const out = noPicture
+        ? await buildMedia({ format: choice.format, audioFile, audioName: audioOut.name, onProgress: setProg, signal: abort.signal })
+        : await remuxWithCleanAudio({
+          videoFile, audioFile, audioName: audioOut.name, info: local?.info, format: choice?.format, size: choice?.size, onProgress: setProg, signal: abort.signal,
+        });
+      saveBlob(out.blob, choice?.name || `${stem(videoFile?.name || job.inputName)}-cleaned${out.ext}`);
       if (out.note) setNote(out.note);
     } catch (e) {
-      setErr(e.message || 'Couldn’t build the video. Please try again.');
+      if (e?.name !== 'AbortError') setErr(e.message || 'Couldn’t build the video. Please try again.');
     } finally {
+      ctl.current = null;
       setBusy(false);
     }
   }
 
+  const label = busy ? `Building video… ${Math.round(prog * 100)}%` : null;
   return (
     <div className="stack" data-testid="remux">
       <div className="row">
-        {file ? (
+        {noPicture ? (
+          <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => run(null)} data-testid="remux-btn">
+            {label || `Save as ${shownName(choice.name)}`}
+          </button>
+        ) : file ? (
           <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => run(file)} data-testid="remux-btn">
-            {busy ? `Building video… ${Math.round(prog * 100)}%` : `Put cleaned audio into ${shownName(file.name)}`}
+            {label || (choice ? `Save ${shownName(choice.name)}` : `Put cleaned audio into ${shownName(file.name)}`)}
           </button>
         ) : (
           <>
@@ -70,6 +88,7 @@ function RemuxPanel({ job, local }) {
             />
           </>
         )}
+        {busy && <button type="button" className="btn btn-ghost btn-sm" onClick={() => ctl.current?.abort()}>Cancel</button>}
         <span className="small muted">This happens on your device; the video isn’t uploaded.</span>
       </div>
       {note && <p className="small banner banner-info mb0">{note}</p>}
@@ -91,6 +110,23 @@ export default function JobCard({ job, local, onChanged }) {
   const hasVideoInput = local?.info?.hasVideo || /\.(mp4|mov|m4v|mkv|webm)$/i.test(job.inputName || '');
   const showRemux = job.status === 'done' && (hasVideoInput && local?.extracted !== false && local?.keepVideo !== false) && !!job.outputs.find((o) => o.kind === 'audio') && !job.outputs.find((o) => o.kind === 'video');
   const hasVideoOut = job.outputs.some((o) => o.kind === 'video');
+  const chosenKind = FORMAT[local?.output?.format]?.kind;
+  // A video type was chosen for a recording with no picture: the video (plain black picture) is made here from the cleaned sound.
+  const showBlack = job.status === 'done' && chosenKind === 'video' && !hasVideoInput && !hasVideoOut && !!job.outputs.find((o) => o.kind === 'audio');
+  // A sound type was chosen: the file keeps the name chosen in the form.
+  const audioName = chosenKind === 'audio' ? local.output.name : null;
+
+  // The server names its files its own way (and its header wins over the link's name): the name chosen in the form is applied here.
+  async function saveRenamed(o, name) {
+    setErr('');
+    try {
+      const res = await fetch(outputUrl(job.id, o.name), { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('Couldn’t download that file. Please try again.');
+      saveBlob(await res.blob(), name);
+    } catch (e) {
+      setErr(e.message || 'Couldn’t download that file. Please try again.');
+    }
+  }
 
   async function act(fn) {
     setBusy(true); setErr('');
@@ -146,7 +182,8 @@ export default function JobCard({ job, local, onChanged }) {
             {job.outputs.map((o) => (
               <li key={o.name}>
                 <span><span className="oname">{o.name}</span> <span className="muted small">· {OUT_LABEL[o.kind] || o.kind} · {bytes(o.bytes)}</span></span>
-                <a className="btn btn-primary btn-sm" href={outputUrl(job.id, o.name)} download={o.name} data-testid="download">
+                <a className="btn btn-primary btn-sm" href={outputUrl(job.id, o.name)} download={o.name} data-testid="download"
+                  onClick={o.kind === 'audio' && audioName ? (e) => { e.preventDefault(); saveRenamed(o, audioName); } : undefined}>
                   <IconDownload width={16} height={16} /> Download
                 </a>
               </li>
@@ -154,6 +191,7 @@ export default function JobCard({ job, local, onChanged }) {
           </ul>
           {job.notice && <p className="banner banner-info small mb0" role="status" data-testid="job-notice">{job.notice}</p>}
           {showRemux && <RemuxPanel job={job} local={local} />}
+          {showBlack && <RemuxPanel job={job} local={local} noPicture />}
           {hasVideoOut && <p className="small muted mb0">The video file above already has the clean sound in it.</p>}
           <div className="row-between">
             <span className="small muted">Cost <b>{money(job.costMicros || 0)}</b> · <Countdown expiresAt={job.expiresAt} /></span>

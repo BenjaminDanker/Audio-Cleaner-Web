@@ -52,6 +52,7 @@ export async function probeMedia(file) {
   const info = {
     duration: null, hasVideo: false, hasAudio: null, audioCodec: null, videoCodec: null,
     channels: null, sampleRate: null, canDecode: null, viaMediabunny: false, viaLibav: false, audioTracks: 0,
+    width: null, height: null, videoCanDecode: null,
   };
   try {
     const { input } = await openInput(file);
@@ -60,7 +61,14 @@ export async function probeMedia(file) {
     info.hasVideo = !!vTrack;
     info.hasAudio = !!aTrack;
     info.audioTracks = (await input.getAudioTracks()).length;
-    if (vTrack) info.videoCodec = await vTrack.getCodec();
+    if (vTrack) {
+      info.videoCodec = await vTrack.getCodec();
+      try {
+        info.width = await vTrack.getDisplayWidth();
+        info.height = await vTrack.getDisplayHeight();
+        info.videoCanDecode = await vTrack.canDecode();
+      } catch { /* the size is only needed for the picture-size choices */ }
+    }
     if (aTrack) {
       info.audioCodec = await aTrack.getCodec();
       info.channels = await aTrack.getNumberOfChannels();

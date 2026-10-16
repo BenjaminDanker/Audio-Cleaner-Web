@@ -118,6 +118,19 @@ export const COMPONENTS = [
     texts: [{ label: 'Mozilla Public License 2.0', file: 'mediabunny-LICENSE.txt', from: 'node_modules/mediabunny/LICENSE' }],
   },
   {
+    name: '@mediabunny/mp3-encoder', by: 'Vanilagy and contributors', license: 'MPL-2.0', pkg: '@mediabunny/mp3-encoder', url: 'https://github.com/Vanilagy/mediabunny/tree/main/packages/mp3-encoder',
+    what: 'Writes MP3 files in your browser. It is a separate file your browser downloads only when you save a result as an MP3. Used unmodified; its source is available at the link.',
+    texts: [{ label: 'Mozilla Public License 2.0', file: 'mediabunny-mp3-encoder-LICENSE.txt', from: 'node_modules/@mediabunny/mp3-encoder/LICENSE' }],
+  },
+  {
+    name: 'LAME', by: 'The LAME developers', license: 'LGPL-2.0-or-later', url: 'https://lame.sourceforge.io/',
+    what: 'The MP3 encoder inside the file above, compiled to WebAssembly. Unmodified; where to get the source and how to replace it are in the notice.',
+    texts: [
+      { label: 'Notice: source code and how to replace it', file: 'lame-NOTICE.txt', from: 'licenses-src/lame-NOTICE.txt' },
+      { label: 'GNU Lesser General Public License 2.1', file: 'lame-COPYING.LGPLv2.1.txt', from: 'licenses-src/ffmpeg-COPYING.LGPLv2.1' },
+    ],
+  },
+  {
     name: 'FFmpeg (built with libav.js)', by: 'The FFmpeg developers; Yahweasel (libav.js)', license: 'LGPL-2.1-or-later', url: 'https://ffmpeg.org/',
     what: 'Reads audio formats your browser cannot (WMA, AVI, FLV, MPEG, AC-3, DTS, AMR, WavPack and more). Downloaded only when such a file is opened. Unmodified; where to get the source and how it was built are in the notice.',
     texts: [
