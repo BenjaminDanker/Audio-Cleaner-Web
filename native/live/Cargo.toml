@@ -1,0 +1,29 @@
+[package]
+name = "acw-live"
+version = "0.1.0"
+edition = "2021"
+description = "Audio Cleaner live audio engine: every live session in one native process (no Python per frame)"
+license = "LicenseRef-Proprietary"
+publish = false
+
+# The engine speaks the stream worker's Unix-socket protocol (server/acw/stream/protocol.py), so the web process
+# can't tell it from the Python worker (server/acw/stream/worker.py), which stays as the fallback.
+# Build: native/live/build.sh (it points SHERPA_ONNX_LIB_DIR at the sherpa-onnx that the Python venv already has).
+
+[dependencies]
+libc = "0.2"
+libloading = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sonora = "=0.2.0"
+sherpa-onnx-sys = { version = "=1.13.8", default-features = false, features = ["shared"] }
+landlock = "0.4"
+flate2 = "1"
+tar = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = 1
+panic = "unwind"

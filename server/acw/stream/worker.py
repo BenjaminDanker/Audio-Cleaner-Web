@@ -321,13 +321,16 @@ def supervise(workers: int) -> None:
     for i in range(1, workers + 1):
         start(i)
     restarts: dict[int, float] = {}
+    wait: dict[int, float] = {}  # seconds before the next restart: doubles while a worker keeps dying, up to a minute
     while not stopping:
         time.sleep(1.0)
         for i, p in list(procs.items()):
             if p.poll() is not None and not stopping:
-                # Its sessions ended with it (the clients reconnect, to this or another worker). Not too often.
-                if time.monotonic() - restarts.get(i, 0.0) < 2.0:
+                # Its sessions ended with it (the clients reconnect, to this or another worker).
+                if time.monotonic() - restarts.get(i, 0.0) < wait.get(i, 2.0):
                     continue
+                ran = time.monotonic() - restarts.get(i, 0.0)
+                wait[i] = 2.0 if ran > 300 else min(60.0, wait.get(i, 1.0) * 2)
                 log.warning("live worker %d exited (%s); starting it again", i, p.returncode)
                 restarts[i] = time.monotonic()
                 start(i)
