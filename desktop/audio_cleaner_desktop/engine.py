@@ -550,7 +550,15 @@ def process(
             raise
         finally:
             x = y = None
-            _remove_work_dir(work)
+            # Usually gone at once. On Windows a memory-mapped file can stay locked until the garbage collector lets
+            # go of it: then the retries run in the background, so a stopped job is reported (and restartable) at
+            # once. What a crash leaves behind is swept at the next start.
+            try:
+                shutil.rmtree(work)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                threading.Thread(target=_remove_work_dir, args=(work,), name="scratch-cleanup", daemon=True).start()
     finally:
         tmp_out.unlink(missing_ok=True)
         for placeholder in claimed:  # a name taken but never filled (the job failed in between)

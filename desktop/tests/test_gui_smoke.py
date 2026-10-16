@@ -263,3 +263,47 @@ def test_help_tooltips_wrap_and_keep_their_structure(window):
     assert popup.width() <= tips.MAX_WIDTH + 40 and popup.height() > 60  # wrapped onto several lines
     tips.pin(button._text, button)  # a second click closes it
     assert not popup.isVisible()
+
+
+def test_changed_settings_reach_waiting_files_and_a_running_one_can_restart_with_them(qapp, tmp_path, monkeypatch):
+    import threading
+
+    from audio_cleaner_desktop.gui import main_window
+    from audio_cleaner_desktop.gui.queue_view import RUNNING
+
+    calls: list[tuple[str, str]] = []
+    started = threading.Event()
+
+    def runner(path, options, *, cancel, progress, **_):
+        calls.append((path.name, options.noise))
+        started.set()
+        while not cancel.wait(0.01):
+            pass
+        raise engine.Cancelled()
+
+    monkeypatch.setattr(main_window.resources, "check", lambda: [])
+    settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
+    w = MainWindow([], settings=settings, history_path=tmp_path / "h.db", runner=runner)
+    w.show()
+    for name in ("a.wav", "b.wav"):
+        (tmp_path / name).write_bytes(b"x")
+    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
+    w.prefs.parallel = 1
+    w._settings_changed()
+    w.add_paths([tmp_path / "a.wav", tmp_path / "b.wav"])
+    assert wait_until(lambda: all(i.probed for i in w._items.values()), timeout=10)
+    w.start()
+    assert wait_until(started.is_set, timeout=10) and calls == [("a.wav", "auto")]
+    a = next(i for i in w._items.values() if i.path.name == "a.wav")
+
+    w.prefs.noise = "heavy"  # what the Background noise setting does
+    w._settings_changed()
+    assert [j.options.noise for j in w.queue._pending] == ["heavy"]  # b, still waiting, takes the new setting
+    row = w.view.row(a.id)
+    assert a.state == RUNNING and a.outdated and row._again.isVisibleTo(row)
+
+    w.clean_again(a.id)  # the row's "Restart with the new settings"
+    assert wait_until(lambda: len(calls) == 2, timeout=10)
+    assert calls[1] == ("a.wav", "heavy")  # straight back in, before b, with the new setting
+    monkeypatch.setattr(w, "_confirm", lambda title, text: True)
+    w.close()

@@ -46,6 +46,8 @@ class FileItem:
     made: dict[Path, tuple[int, int]] = field(default_factory=dict)
     replaces: dict[Path, tuple[int, int]] = field(default_factory=dict)
     stopping: bool = False  # asked to stop; the file finishes its current step first
+    restart: bool = False  # stopping in order to start again with the current settings
+    outdated: bool = False  # running with settings that have changed since it started
 
 
 class DropZone(QFrame):
@@ -219,7 +221,8 @@ class FileRow(QFrame):
 
         text, style = {
             WAITING: ("Waiting", ""),
-            RUNNING: ("Stopping...", "warn") if item.stopping else (f"Cleaning {int(item.progress * 100)}%", "cleaning"),
+            RUNNING: (("Restarting...", "cleaning") if item.restart else ("Stopping...", "warn")) if item.stopping
+            else (f"Cleaning {int(item.progress * 100)}%", "cleaning"),
             DONE: ("Done", "done"),
             FAILED: ("Failed", "failed"),
             CANCELLED: ("Cancelled", "warn"),
@@ -241,7 +244,12 @@ class FileRow(QFrame):
         self._stop.setEnabled(not item.stopping)
         self._preview.setVisible(state in (WAITING, DONE))
         self._reveal.setVisible(state == DONE)
-        self._again.setVisible(state in (DONE, FAILED, CANCELLED))
+        restartable = state == RUNNING and item.outdated and not item.stopping
+        self._again.setVisible(state in (DONE, FAILED, CANCELLED) or restartable)
+        self._again.setToolTip(
+            "Restart this file with the new settings" if state == RUNNING else
+            f"Clean again with the current settings.\nThe new result replaces this one; the earlier version goes to the {shell.TRASH_NAME}."
+        )
         self._remove.setVisible(state != RUNNING)
         self.setAccessibleName(f"{item.path.name}: {text}")
 

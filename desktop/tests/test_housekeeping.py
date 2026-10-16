@@ -82,8 +82,8 @@ def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path,
         pytest.skip("native components missing")
     monkeypatch.setenv("ACW_DESKTOP_SCRATCH", str(tmp_path / "scratch"))
     seen = []
-    real = engine._remove_work_dir
-    monkeypatch.setattr(engine, "_remove_work_dir", lambda work: seen.append(work.parent) or real(work))
+    real = engine.shutil.rmtree
+    monkeypatch.setattr(engine.shutil, "rmtree", lambda work, *a, **k: seen.append(Path(work).parent) or real(work, *a, **k))
     out = tmp_path / "out"
     result = engine.process(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=out)
     assert seen == [tmp_path / "scratch"]

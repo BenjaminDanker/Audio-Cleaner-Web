@@ -116,8 +116,17 @@ class JobQueue(QObject):
 
     # -- queue --------------------------------------------------------------
 
-    def add(self, job: Job) -> None:
-        self._pending.append(job)
+    def add(self, job: Job, first: bool = False) -> None:
+        if first:
+            self._pending.insert(0, job)
+        else:
+            self._pending.append(job)
+        self._pump()
+
+    def update_pending(self, options: engine.JobOptions, out_dir: Path | None) -> None:
+        """Files still waiting are cleaned with the settings as they are when they start, not when they were added."""
+        for job in self._pending:
+            job.options, job.out_dir = options, out_dir
         self._pump()
 
     def pending_ids(self) -> list[int]:

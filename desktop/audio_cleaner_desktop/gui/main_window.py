@@ -369,8 +369,14 @@ class MainWindow(QMainWindow):
             self._enqueue(item)
 
     def clean_again(self, item_id: int) -> None:
-        """Clean one finished row again with the current settings, right away."""
+        """Clean one finished row again with the current settings, right away (a running one: restart it)."""
         item = self._items.get(item_id)
+        if item is not None and item.state == RUNNING:
+            item.restart = True
+            self.queue.cancel(item_id)
+            self._mark_stopping(item_id)
+            self._refresh_state()
+            return
         if item is None or item.state not in (ITEM_DONE, ITEM_FAILED, CANCELLED) or self._missing:
             return
         self._requeue(item)
@@ -416,10 +422,10 @@ class MainWindow(QMainWindow):
         except OSError:
             return False
 
-    def _enqueue(self, item: FileItem) -> None:
+    def _enqueue(self, item: FileItem, first: bool = False) -> None:
         item.options = self.prefs.job_options()
         self._queued.add(item.id)
-        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir()))
+        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir()), first=first)
 
     @Slot(int, object, str)
     def _on_probed(self, item_id: int, result, error: str) -> None:
@@ -586,6 +592,7 @@ class MainWindow(QMainWindow):
         item = self._items.get(item_id)
         if item is not None:
             item.state, item.progress, item.started_at, item.stopping = RUNNING, 0.0, time.monotonic(), False
+            item.outdated = False
             self._awake.acquire()
             self._refresh_row(item)
             self._refresh_state()
@@ -645,7 +652,13 @@ class MainWindow(QMainWindow):
         item = self._items.get(item_id)
         self._queued.discard(item_id)
         if item is not None:
-            item.state, item.progress, item.stopping = CANCELLED, 0.0, False
+            restart = item.restart
+            item.state, item.progress, item.stopping, item.restart, item.outdated = CANCELLED, 0.0, False, False, False
+            if restart and not self._missing:  # "Restart with the new settings": straight back in, first in line
+                item.state = WAITING
+                self._enqueue(item, first=True)
+                if not self.queue.active:
+                    self.queue.start()
             self._refresh_row(item)
             self._refresh_state()
 
@@ -702,6 +715,18 @@ class MainWindow(QMainWindow):
 
     def _settings_changed(self) -> None:
         self.queue.set_parallel(self.prefs.parallel)
+        # Files still waiting are cleaned with the settings as they are now; a file being cleaned offers to
+        # restart with them (its row's "again" button).
+        options = self.prefs.job_options()
+        self.queue.update_pending(options, self.prefs.output_dir())
+        for item in self._items.values():
+            if item.state == WAITING:
+                item.options = options
+            elif item.state == RUNNING:
+                outdated = item.options is not None and item.options != options
+                if outdated != item.outdated:
+                    item.outdated = outdated
+                    self._refresh_row(item)
         self._refresh_state()
 
     def _refresh_row(self, item: FileItem) -> None:
