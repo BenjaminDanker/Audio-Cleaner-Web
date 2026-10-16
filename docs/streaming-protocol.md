@@ -83,7 +83,7 @@ or `{"type":"error","code":...,"message":...}` and closes. Every error event may
 | `tos` | the current Terms have not been accepted |
 | `trial_busy` | a free-trial session was turned away because live is busy (above about 70% of its capacity). Paid sessions are not affected. `retryAfterSeconds` 120 |
 | `rate_limited` | (during the session) too many text messages: more than 50 a second sustained (burst 100), or more than 5 `config` a second. The socket is closed with 1008 |
-| `too_many_sessions` | two live sessions per account (six per network) are already running, or a free-trial session is asked for while another one of the account is running. A session of yours that has been silent for 10 s is taken to be dropped and is replaced instead. `retryAfterSeconds` 30 |
+| `too_many_sessions` | four live sessions per account (six per network) are already running, or a free-trial session is asked for while another one of the account is running. A session of yours that has been silent for 10 s is taken to be dropped and is replaced instead. `retryAfterSeconds` 30 |
 | `full` | live capacity is used up right now; `available` lists what still fits. `retryAfterSeconds` 60 |
 | `restarting` | the service is being updated: new sessions are refused for a minute or so. `retryAfterSeconds` 60 |
 | `unavailable` | live processing is busy or offline (or extra-accurate captions are not available). `retryAfterSeconds` 30 (300 for captions) |

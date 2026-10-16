@@ -111,7 +111,7 @@ also removes the shared-UID risk with the Minecraft servers.
 - Live sessions must keep sending: microphone audio below half of the wall-clock time over the last 60 s (judged after
   the first 30 s) ends the session with `stopped: no_audio` (both clients send every frame, silent ones too). Text
   messages are limited per connection (50 a second sustained, burst 100; `config` 5 a second); a breach closes the
-  socket with 1008. An account can run two live sessions at a time, of which at most one on the free trial.
+  socket with 1008. An account can run four live sessions at a time, of which at most one on the free trial.
 - Free live trial: two hours of Standard live (`users.trial_live_seconds`, `ACW_LIVE_TRIAL_SECONDS`, 0 = off), granted once per mailbox. The key is HMAC-SHA256 under `ACW_SESSION_SECRET` of the canonical
   mailbox (NFKC, lower case, no `+tag`, no dots and `googlemail.com` = `gmail.com` at Gmail), so aliases don't give
   it twice (also after deleting the account and signing up again) and a copy of the database can't be used to test addresses. Without a configured secret (development) the

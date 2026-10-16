@@ -131,10 +131,25 @@ std::string make_start_message(const StartParams &p)
 		j["captions"] = p.captions;
 	else
 		j["captions"] = nullptr;
-	if (p.language.empty())
+	if (p.language.empty()) {
 		j["language"] = nullptr;
-	else
+	} else if (p.language.find(',') == std::string::npos) {
 		j["language"] = p.language;
+	} else {
+		// "en,es": someone who switches between languages (extra-accurate captions follow the switches)
+		json list = json::array();
+		size_t from = 0;
+		while (from <= p.language.size()) {
+			const size_t comma = p.language.find(',', from);
+			const std::string one = p.language.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+			if (!one.empty() && list.size() < 3)
+				list.push_back(one);
+			if (comma == std::string::npos)
+				break;
+			from = comma + 1;
+		}
+		j["language"] = list;
+	}
 	j["sampleRate"] = kNetRate;
 	j["codec"] = p.codec;
 	if (p.codec == "opus" && p.opus_bitrate > 0)

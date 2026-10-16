@@ -25,4 +25,23 @@ struct TranslationEvent {
 	std::chrono::steady_clock::time_point origin{};
 };
 
+// Several voices can share the captions: a filter per microphone, or the two sides of a stereo source split into two
+// sessions. Each line then starts with its speaker's name ("" = no label), and the ids of the second side get a prefix
+// so its lines never replace the first side's (both sessions number their lines from the start).
+inline void label_speaker(CaptionEvent &ev, const std::string &speaker, const std::string &id_prefix = std::string())
+{
+	if (!speaker.empty() && !ev.text.empty())
+		ev.text = speaker + ": " + ev.text;
+	if (!id_prefix.empty() && !ev.id.empty())
+		ev.id = id_prefix + ev.id;
+}
+
+inline void label_speaker(TranslationEvent &ev, const std::string &speaker, const std::string &id_prefix = std::string())
+{
+	if (!speaker.empty() && !ev.text.empty())
+		ev.text = speaker + ": " + ev.text;
+	if (!id_prefix.empty() && !ev.of.empty())
+		ev.of = id_prefix + ev.of;
+}
+
 }  // namespace acw

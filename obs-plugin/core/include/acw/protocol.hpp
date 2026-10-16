@@ -39,7 +39,7 @@ bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out,
 struct StartParams {
 	bool denoise = true;                 // tier "light"
 	std::string captions;                // "", "local" (standard) or "premium" (extra accurate)
-	std::string language;                // "" = auto
+	std::string language;                // "" = auto; "en,es" = someone who switches between these (up to three)
 	int atten_lim_db = 100;
 	std::string codec = "pcm_s16le";     // "opus" or "pcm_s16le"
 	int opus_bitrate = 0;                // downlink bitrate requested from the server (opus only; 0 = server default)

@@ -76,6 +76,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_DENOISE "denoise"
 #define S_CAPTIONS "captions"
 #define S_LANGUAGE "language"
+#define S_LANGUAGE_2 "language_2"  // a second spoken language (extra accurate): "none" or a code
+#define S_SPEAKER "speaker_name"
+#define S_SPLIT "split_channels"
+#define S_SPEAKER_R "speaker_name_right"
 #define S_STRENGTH "strength"
 #define S_LATENCY "latency_ms"
 #define S_CODEC "codec"
@@ -148,6 +152,10 @@ struct Settings {
 	bool denoise = true;
 	std::string captions = "off";  // off | local (standard, English) | premium (extra accurate, any language)
 	std::string language = "auto";
+	std::string language_2 = "none";  // someone who switches between two languages (extra accurate only)
+	std::string speaker;              // put before each caption line ("" = none): several mics share the captions
+	bool split = false;               // left and right are different people: one session per side
+	std::string speaker_r;            // the right side's name when split
 	int strength = 100;            // attenuation limit in dB: 12 / 24 / 40 / 100 (same levels as the website and desktop app)
 	int latency_ms = 150;          // 80 / 150 / 250
 	std::string codec = "opus";    // opus | pcm
@@ -163,10 +171,18 @@ struct Settings {
 	int overlay_lines = 2, overlay_clear_s = 6;
 	bool save_srt = true;
 
-	// Standard captions are English only; the language setting belongs to the extra accurate ones.
-	std::string caption_language() const { return captions == "premium" ? language : std::string("auto"); }
-	// The language that is spoken, as far as it is known ("" = detected automatically).
-	std::string spoken() const { return acw::spoken_language(captions, language); }
+	// A second spoken language that applies: extra accurate captions, a first language chosen, and a different one.
+	bool mixed() const { return captions == "premium" && language != "auto" && language_2 != "none" && !language_2.empty() && language_2 != language; }
+	// Standard captions are English only; the language setting belongs to the extra accurate ones. "en,es" for someone
+	// who switches between two.
+	std::string caption_language() const
+	{
+		if (captions != "premium")
+			return std::string("auto");
+		return mixed() ? language + "," + language_2 : language;
+	}
+	// The language that is spoken, as far as it is known ("" = detected automatically, or more than one).
+	std::string spoken() const { return mixed() ? std::string() : acw::spoken_language(captions, language); }
 
 	// The translation language of each slot: unknown codes, the spoken language and repeats are dropped.
 	std::array<std::string, kSlots> slot_languages() const
@@ -196,7 +212,14 @@ struct Settings {
 				return l;
 		return std::string();
 	}
-	bool cc_fits() const { return acw::language_fits_stream(cc_code().empty() ? caption_language() : cc_code()); }
+	bool cc_fits() const
+	{
+		if (!cc_code().empty())
+			return acw::language_fits_stream(cc_code());
+		if (mixed())  // both spoken languages must fit the closed-caption format
+			return acw::language_fits_stream(language) && acw::language_fits_stream(language_2);
+		return acw::language_fits_stream(caption_language());
+	}
 	// Captions go to closed-caption outputs only when some are chosen and the language can be shown there.
 	bool cc_wanted() const { return captions_wanted() && cc_any_target() && cc_fits(); }
 
@@ -226,7 +249,7 @@ struct Settings {
 		const std::string cap = effective_captions();
 		return api_key == o.api_key && url == o.url && denoise == o.denoise && cap == o.effective_captions() &&
 		       (cap.empty() || (caption_language() == o.caption_language() && wanted_translations() == o.wanted_translations())) &&
-		       latency_ms == o.latency_ms && codec == o.codec &&
+		       latency_ms == o.latency_ms && codec == o.codec && split == o.split &&
 		       echo_source.empty() == o.echo_source.empty();  // which source it is does not matter to the session
 	}
 
@@ -278,6 +301,11 @@ struct ref_tap {
 
 struct ac_filter;
 
+struct SpeakerNames {
+	std::mutex mu;
+	std::string left, right;
+};
+
 // What a "Create text source" button needs to know about its filter and language slot (-1 = the spoken language).
 struct overlay_button {
 	ac_filter *filter = nullptr;
@@ -293,12 +321,19 @@ struct ac_filter {
 	Settings settings;
 	bool enabled = true;
 
-	// The audio thread only ever reads `session`.
+	// The audio thread only ever reads `session` (and `session_r`: the right side's own session when the two sides
+	// are different people).
 	std::atomic<acw::Session *> session{nullptr};
+	std::atomic<acw::Session *> session_r{nullptr};
 	std::atomic<bool> in_audio{false};
 	std::vector<acw::Session *> graveyard;  // sessions that could not be freed safely yet
 
 	std::vector<float> mono;  // preallocated scratch for the downmix
+	std::vector<float> right; // ... and for the right side when it has its own session
+
+	// The speaker names put before each caption line. The sessions' callbacks read them, so a name can change
+	// without a new session (each key typed in the dialog is a settings change).
+	std::shared_ptr<SpeakerNames> names = std::make_shared<SpeakerNames>();
 
 	// Where captions go; it outlives the sessions that call it (they hold a reference).
 	std::shared_ptr<acw::CaptionRouter> router;
@@ -332,6 +367,14 @@ Settings read_settings(obs_data_t *d)
 	if (s.captions != "local" && s.captions != "premium")
 		s.captions = "off";
 	s.language = acw::normalise_language(obs_data_get_string(d, S_LANGUAGE));
+	s.language_2 = obs_data_get_string(d, S_LANGUAGE_2);
+	if (s.language_2 != "none")
+		s.language_2 = acw::normalise_language(s.language_2);
+	if (s.language_2.empty() || s.language_2 == "auto")
+		s.language_2 = "none";
+	s.speaker = obs_data_get_string(d, S_SPEAKER);
+	s.split = obs_data_get_bool(d, S_SPLIT);
+	s.speaker_r = obs_data_get_string(d, S_SPEAKER_R);
 	s.strength = static_cast<int>(obs_data_get_int(d, S_STRENGTH));
 	s.latency_ms = static_cast<int>(obs_data_get_int(d, S_LATENCY));
 	if (s.latency_ms != 80 && s.latency_ms != 250)
@@ -419,7 +462,7 @@ void apply_outputs(ac_filter *f)
 
 // Called with the lock held. Creates the session for the current settings and starts its network thread
 // (it only connects once audio flows, so this costs nothing while the filter is idle).
-acw::Session *make_session_unchecked(ac_filter *f)
+acw::Session *make_session_unchecked(ac_filter *f, bool right)
 {
 	const Settings &s = f->settings;
 	if (!f->enabled || !s.configured())
@@ -437,31 +480,45 @@ acw::Session *make_session_unchecked(ac_filter *f)
 	cfg.delay_ms = s.latency_ms;
 	cfg.codec = s.codec == "pcm" ? acw::Codec::Pcm16 : acw::Codec::Opus;
 	cfg.host_rate = static_cast<int>(f->sample_rate);
-	if (!s.echo_source.empty())
-		cfg.reference = f->reference;
+	if (!s.echo_source.empty() && !right)
+		cfg.reference = f->reference;  // one listener per echo buffer: the left side's session (or the only one)
 	cfg.client = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
 
-	// The session keeps the router alive; the router never calls into the filter.
+	// The session keeps the router (and the names) alive; neither calls into the filter.
 	std::shared_ptr<acw::CaptionRouter> router = f->router;
+	std::shared_ptr<SpeakerNames> names = f->names;
+	const std::string prefix = right ? "R/" : "";  // both sessions number their lines from l0
 	auto *session = new acw::Session(
 		cfg,
-		[router](const acw::CaptionEvent &ev) {
-			if (router)
-				router->on_caption(ev);
+		[router, names, right, prefix](const acw::CaptionEvent &ev) {
+			if (!router)
+				return;
+			acw::CaptionEvent labelled = ev;
+			{
+				std::lock_guard<std::mutex> lk(names->mu);
+				acw::label_speaker(labelled, right ? names->right : names->left, prefix);
+			}
+			router->on_caption(labelled);
 		},
 		log_cb);
-	session->set_translation_callback([router](const acw::TranslationEvent &ev) {
-		if (router)
-			router->on_translation(ev);
+	session->set_translation_callback([router, names, right, prefix](const acw::TranslationEvent &ev) {
+		if (!router)
+			return;
+		acw::TranslationEvent labelled = ev;
+		{
+			std::lock_guard<std::mutex> lk(names->mu);
+			acw::label_speaker(labelled, right ? names->right : names->left, prefix);
+		}
+		router->on_translation(labelled);
 	});
 	session->start();
 	return session;
 }
 
-acw::Session *make_session(ac_filter *f)
+acw::Session *make_session(ac_filter *f, bool right = false)
 {
 	try {
-		return make_session_unchecked(f);
+		return make_session_unchecked(f, right);
 	} catch (const std::exception &e) {
 		// No session: the audio passes through as it came (an exception must never reach OBS).
 		obs_log(LOG_ERROR, "could not start the Audio Cleaner session: %s", e.what());
@@ -621,12 +678,31 @@ void retire_session(ac_filter *f, acw::Session *old)
 	delete old;
 }
 
+// The names before each caption line: with both sides split, each side is named (by default "Left" / "Right").
+// Called with the lock held.
+void apply_names(ac_filter *f)
+{
+	const Settings &s = f->settings;
+	std::lock_guard<std::mutex> lk(f->names->mu);
+	f->names->left = s.speaker;
+	f->names->right = s.split ? s.speaker_r : std::string();
+	if (s.split && f->names->left.empty())
+		f->names->left = T_("AudioCleaner.Speaker.LeftDefault");
+	if (s.split && f->names->right.empty())
+		f->names->right = T_("AudioCleaner.Speaker.RightDefault");
+}
+
 // Called with the lock held.
 void rebuild_session(ac_filter *f)
 {
+	apply_names(f);
 	acw::Session *fresh = make_session(f);
+	// The right side gets its own session only when the two sides are different people and the audio has two.
+	acw::Session *fresh_r = fresh && f->settings.split && f->channels >= 2 ? make_session(f, true) : nullptr;
 	acw::Session *old = f->session.exchange(fresh);
+	acw::Session *old_r = f->session_r.exchange(fresh_r);
 	retire_session(f, old);
+	retire_session(f, old_r);
 	reap_graveyard(f);
 	update_reference(f);
 	apply_outputs(f);
@@ -655,6 +731,10 @@ void filter_defaults(obs_data_t *d)
 	obs_data_set_default_bool(d, S_DENOISE, true);
 	obs_data_set_default_string(d, S_CAPTIONS, "off");
 	obs_data_set_default_string(d, S_LANGUAGE, "auto");
+	obs_data_set_default_string(d, S_LANGUAGE_2, "none");
+	obs_data_set_default_string(d, S_SPEAKER, "");
+	obs_data_set_default_bool(d, S_SPLIT, false);
+	obs_data_set_default_string(d, S_SPEAKER_R, "");
 	obs_data_set_default_int(d, S_STRENGTH, 100);
 	obs_data_set_default_int(d, S_LATENCY, 150);
 	obs_data_set_default_string(d, S_CODEC, "opus");
@@ -681,6 +761,7 @@ void *filter_create(obs_data_t *settings, obs_source_t *source)
 	auto *f = new ac_filter();
 	f->context = source;
 	f->mono.assign(kMaxBlock, 0.0f);
+	f->right.assign(kMaxBlock, 0.0f);
 	f->router = std::make_shared<acw::CaptionRouter>(make_sinks());
 	for (int i = 0; i <= kSlots; ++i) {
 		f->buttons[i].filter = f;
@@ -747,7 +828,10 @@ void filter_update(void *data, obs_data_t *settings)
 		// Strength can change while streaming: no new session, no change of the delay.
 		if (acw::Session *s = f->session.load())
 			s->set_atten_lim_db(next.strength);
+		if (acw::Session *s = f->session_r.load())
+			s->set_atten_lim_db(next.strength);
 	}
+	apply_names(f);  // the speaker names change without a new session
 	update_reference(f);  // a different echo source
 	apply_outputs(f);     // other languages, outputs, text sources
 }
@@ -761,13 +845,37 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 
 	f->in_audio.store(true, std::memory_order_seq_cst);
 	acw::Session *s = f->session.load(std::memory_order_seq_cst);
+	acw::Session *sr = f->session_r.load(std::memory_order_seq_cst);
 	if (s && audio->frames > 0) {
 		float *planes[MAX_AV_PLANES];
 		size_t nch = 0;
 		for (size_t c = 0; c < MAX_AV_PLANES && audio->data[c]; ++c)
 			planes[nch++] = reinterpret_cast<float *>(audio->data[c]);
 
-		if (nch > 0) {
+		if (sr && nch >= 2) {
+			// Two people, one on each side: each side goes through its own session and stays on its side (more
+			// channels than two get the left side).
+			float *left = f->mono.data();
+			float *right = f->right.data();
+			size_t done = 0;
+			while (done < audio->frames) {
+				const size_t n = std::min<size_t>(audio->frames - done, kMaxBlock);
+				std::copy(planes[0] + done, planes[0] + done + n, left);
+				std::copy(planes[1] + done, planes[1] + done + n, right);
+				s->process(left, n);
+				sr->process(right, n);
+				std::copy(left, left + n, planes[0] + done);
+				std::copy(right, right + n, planes[1] + done);
+				for (size_t c = 2; c < nch; ++c)
+					std::copy(left, left + n, planes[c] + done);
+				done += n;
+			}
+			const double delay = s->delay_seconds();
+			if (delay > 0.0) {
+				const uint64_t d = static_cast<uint64_t>(delay * 1e9);
+				audio->timestamp = audio->timestamp > d ? audio->timestamp - d : 0;
+			}
+		} else if (nch > 0) {
 			float *mono = f->mono.data();
 			const float inv = 1.0f / static_cast<float>(nch);
 			size_t done = 0;
@@ -865,6 +973,8 @@ std::string status_text(ac_filter *f)
 		if (!s)
 			return T_("AudioCleaner.Status.NotRunning");
 		line = s->status_line(localized);
+		if (acw::Session *sr = f->session_r.load())  // two sessions, one per side
+			line = replace_all(replace_all(T_("AudioCleaner.Status.Sides"), "%1", line), "%2", sr->status_line(localized));
 		if (!st.echo_source.empty() && !f->ref_weak)
 			line += std::string(" ") + T_("AudioCleaner.Status.EchoWaiting");
 	}
@@ -899,7 +1009,10 @@ std::string details_text(ac_filter *f)
 {
 	std::lock_guard<std::mutex> lk(f->mu);
 	acw::Session *s = f->session.load();
-	return s ? s->status_details() : std::string();
+	std::string out = s ? s->status_details() : std::string();
+	if (acw::Session *sr = f->session_r.load())
+		out += "\n\n" + std::string(T_("AudioCleaner.Status.RightSide")) + "\n" + sr->status_details();
+	return out;
 }
 
 // ---- the group "translations and where captions go": content that follows the settings -------------------------
@@ -1089,6 +1202,8 @@ bool retry_clicked(obs_properties_t *props, obs_property_t *, void *data)
 		std::lock_guard<std::mutex> lk(f->mu);  // the session cannot be freed meanwhile
 		if (acw::Session *s = f->session.load())
 			s->retry_now();
+		if (acw::Session *s = f->session_r.load())
+			s->retry_now();
 	}
 	refresh_texts(f, props);
 	return true;
@@ -1108,6 +1223,10 @@ bool captions_modified(obs_properties_t *props, obs_property_t *, obs_data_t *se
 	const std::string mode = obs_data_get_string(settings, S_CAPTIONS);
 	if (obs_property_t *lang = obs_properties_get(props, S_LANGUAGE))
 		obs_property_set_enabled(lang, mode == "premium");
+	if (obs_property_t *lang2 = obs_properties_get(props, S_LANGUAGE_2))
+		obs_property_set_enabled(lang2, mode == "premium" && std::string(obs_data_get_string(settings, S_LANGUAGE)) != "auto");
+	if (obs_property_t *spkr = obs_properties_get(props, S_SPEAKER_R))
+		obs_property_set_visible(spkr, obs_data_get_bool(settings, S_SPLIT));
 	if (obs_property_t *hint = obs_properties_get(props, S_HINT_CAPTIONS)) {
 		obs_property_set_description(hint, captions_hint(mode));
 		obs_property_set_visible(hint, mode == "local" || mode == "premium");
@@ -1251,6 +1370,25 @@ obs_properties_t *filter_properties(void *data)
 		obs_property_list_add_string(lang, cur.language.c_str(), cur.language.c_str());
 	obs_property_set_enabled(lang, cur.captions == "premium");
 	obs_property_set_modified_callback(lang, captions_modified);  // the translations offered depend on it
+
+	obs_property_t *lang2 = obs_properties_add_list(p, S_LANGUAGE_2, T_("AudioCleaner.Language2"), OBS_COMBO_TYPE_LIST,
+							OBS_COMBO_FORMAT_STRING);
+	obs_property_set_long_description(lang2, T_("AudioCleaner.Language2.Long"));
+	obs_property_list_add_string(lang2, T_("AudioCleaner.Language2.None"), "none");
+	for (const LangEntry &l : kLanguages)
+		if (std::string(l.code) != "auto")
+			obs_property_list_add_string(lang2, T_(l.key), l.code);
+	obs_property_set_enabled(lang2, cur.captions == "premium" && cur.language != "auto");
+	obs_property_set_modified_callback(lang2, captions_modified);
+
+	obs_property_t *spk = obs_properties_add_text(p, S_SPEAKER, T_("AudioCleaner.Speaker"), OBS_TEXT_DEFAULT);
+	obs_property_set_long_description(spk, T_("AudioCleaner.Speaker.Long"));
+	obs_property_t *split = obs_properties_add_bool(p, S_SPLIT, T_("AudioCleaner.Split"));
+	obs_property_set_long_description(split, T_("AudioCleaner.Split.Long"));
+	obs_property_set_modified_callback(split, captions_modified);
+	obs_property_t *spkr = obs_properties_add_text(p, S_SPEAKER_R, T_("AudioCleaner.SpeakerRight"), OBS_TEXT_DEFAULT);
+	obs_property_set_visible(spkr, cur.split);
+	obs_property_text_set_info_word_wrap(obs_properties_add_text(p, "hint_split", T_("AudioCleaner.Hint.Split"), OBS_TEXT_INFO), true);
 
 	// Translations, closed captions, on-screen text, subtitle files.
 	{

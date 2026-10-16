@@ -490,7 +490,7 @@ async def stream_ws(ws: WebSocket) -> None:
         await _refuse(ws, "restarting", "Live audio is restarting for an update. Please try again in a minute.", 60, 1013)
         return
     if _live.get(principal.user_id, 0) >= MAX_SESSIONS_PER_USER and not await _evict_stale(principal.user_id):
-        await _refuse(ws, "too_many_sessions", "Two live sessions at most per account.", 30)
+        await _refuse(ws, "too_many_sessions", "Four live sessions at most per account.", 30)
         return
     if _live_ip.get(net, 0) >= MAX_SESSIONS_PER_IP:
         await _refuse(ws, "too_many_sessions", "Too many live sessions from this network.", 30)

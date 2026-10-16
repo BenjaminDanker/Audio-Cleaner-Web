@@ -94,8 +94,17 @@ The session starts when the enabled filter first receives audio and stops when t
 With denoise off (captions only) the audio is not delayed at all.
 
 **Each filter is its own live session, billed per second while it runs** (captions too, whether or not you are live), and
-an account can have **two live sessions at a time**: a third filter, or a second computer, is refused until one ends
+an account can have **four live sessions at a time**: a fifth filter, or another computer, is refused until one ends
 (a session whose connection dropped lingers on the service for up to about 30 s).
+
+**Several people.** Add the filter to each person's microphone: every filter is cleaned and captioned on its own, and
+all of them share one caption track (they take turns). Put each person's name in *Speaker name* so their lines start
+with it. One stereo source with a person on each side (two mics on one audio interface): tick *Left and right are
+different people*; each side then runs as its own session (billed as two) and stays on its side. Echo cancellation
+applies to the left side only in that case.
+
+**Two languages.** With extra accurate captions, *Also speaks* adds a second language you switch to while talking; the
+captions follow the switches, and translations translate whichever was spoken.
 
 ### Updates
 

@@ -300,10 +300,10 @@ def test_one_trial_session_at_a_time(client, signed_in, fake_worker, monkeypatch
         routes._open.pop(uid, None)
 
 
-def test_the_account_limit_of_two_still_counts_trial_sessions(client, signed_in, fake_worker):
+def test_the_account_limit_still_counts_trial_sessions(client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    routes._live[uid] = 2
+    routes._live[uid] = routes.MAX_SESSIONS_PER_USER
     try:
         assert run_session(client, 1)[0]["code"] == "too_many_sessions"
     finally:

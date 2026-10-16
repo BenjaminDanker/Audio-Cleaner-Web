@@ -26,7 +26,7 @@ struct SessionConfig {
 	std::string api_key;               // never logged
 	bool denoise = true;               // tier "light"
 	std::string captions;              // "", "local" (standard, English) or "premium" (extra accurate)
-	std::string language;              // "" = auto
+	std::string language;              // "" = auto; "en,es" = someone who switches between these (up to three)
 	std::vector<std::string> translate;  // 2-letter codes to translate the captions into (up to 3; needs captions)
 	int atten_lim_db = 100;            // attenuation limit: 12 / 24 / 40 / 100
 	int delay_ms = 150;                // fixed output delay D: 80 / 150 / 250

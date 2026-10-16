@@ -158,6 +158,13 @@ static void test_protocol()
 	CHECK(s.find("echoReference") == std::string::npos && so.find("echoReference") == std::string::npos);
 	sp.echo_reference = true;
 	CHECK(make_start_message(sp).find("\"echoReference\":true") != std::string::npos);
+	{
+		StartParams ml = sp;
+		ml.language = "en,es";  // someone who switches languages: a list
+		CHECK(make_start_message(ml).find("\"language\":[\"en\",\"es\"]") != std::string::npos);
+		ml.language = "de";
+		CHECK(make_start_message(ml).find("\"language\":\"de\"") != std::string::npos);
+	}
 	sp.denoise = false;
 	sp.captions = "";
 	const std::string s2 = make_start_message(sp);
@@ -262,6 +269,25 @@ static void test_backoff()
 	for (int i = 0; i < 5; ++i)
 		differs |= b2.next() != b3.next();
 	CHECK(differs);
+}
+
+static void test_speaker_labels()
+{
+	CaptionEvent c;
+	c.text = "hello there";
+	c.id = "l0";
+	label_speaker(c, "Sam", "R/");
+	CHECK(c.text == "Sam: hello there" && c.id == "R/l0");
+	CaptionEvent unnamed;
+	unnamed.text = "hi";
+	unnamed.id = "l1";
+	label_speaker(unnamed, "");
+	CHECK(unnamed.text == "hi" && unnamed.id == "l1");  // one voice: nothing changes
+	TranslationEvent t;
+	t.text = "hola";
+	t.of = "l0";
+	label_speaker(t, "Sam", "R/");
+	CHECK(t.text == "Sam: hola" && t.of == "R/l0");  // the translation still finds its caption
 }
 
 static void test_caption_lines()
@@ -1610,6 +1636,7 @@ int main()
 	test_protocol();
 	test_opus();
 	test_backoff();
+	test_speaker_labels();
 	test_caption_lines();
 	test_caption_pacing();
 	test_delayed_sender();

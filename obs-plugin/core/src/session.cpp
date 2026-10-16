@@ -641,7 +641,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		} else if (code == "too_many_sessions") {
 			out.slow = true;
 			out.min_wait_ms = 30000;
-			out.message = "Your account already has two live sessions running (other Audio Cleaner filters, or another "
+			out.message = "Your account already has four live sessions running (other Audio Cleaner filters, or another "
 				      "computer). Close one of them; this one keeps trying.";
 		} else if (code == "full") {
 			out.slow = true;

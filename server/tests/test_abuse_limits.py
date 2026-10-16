@@ -279,16 +279,16 @@ def test_settings_changes_have_a_tighter_limit(monkeypatch):
 
 # ---------------------------------------------------------------- H3/H4: live sessions per account
 
-def test_two_live_sessions_at_most_per_account(client, signed_in):
+def test_four_live_sessions_at_most_per_account(client, signed_in):
     from acw.stream import routes
 
     uid, h = signed_in
-    routes._live[uid] = 2
+    routes._live[uid] = 4
     try:
         with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ev = ws.receive_json()
-        assert ev["code"] == "too_many_sessions" and "Two live sessions" in ev["message"]
-        routes._live[uid] = 1  # the same for an account that has never paid: one more is fine
+        assert ev["code"] == "too_many_sessions" and "Four live sessions" in ev["message"]
+        routes._live[uid] = 3  # the same for an account that has never paid: one more is fine
         with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ws.send_text(json.dumps({"type": "nonsense"}))  # past the session limit: the server now wants a start message
             with pytest.raises(Exception):

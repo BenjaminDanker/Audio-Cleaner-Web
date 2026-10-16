@@ -11,8 +11,10 @@ from . import pricing
 
 # Until a first payment has gone through, one top-up can be at most this much.
 FIRST_TOPUP_MAX_CENTS = 5_000
-# Live sessions at once per account (a free-trial session counts too; there is at most one of those).
-MAX_LIVE_SESSIONS = 2
+# Live sessions at once per account (a free-trial session counts too; there is at most one of those). Four: a
+# podcast or co-stream with a filter per microphone, or a stereo source split into two voices. Each paid session sets
+# its own minutes aside first, so more sessions never spend more than the credit.
+MAX_LIVE_SESSIONS = 4
 
 
 def has_settled_payment(user_id: str) -> bool:
