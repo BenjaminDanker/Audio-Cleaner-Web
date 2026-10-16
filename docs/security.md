@@ -101,6 +101,27 @@ also removes the shared-UID risk with the Minecraft servers.
 - Free subtitles run in the browser, so they cost us no compute; their model files (about 80 MB) are served only to
   signed-in browsers and count against the same daily per-account allowance as the noise remover's files
   (`asset_fetch`); browsers keep them in their cache. Jobs on our side are never free.
+- Job reservations: the per-account active-job count, the disk promised to uploads that are still arriving and the
+  job row are checked and written in one transaction (parallel requests can't all pass). An account may have at most
+  8 GiB of uploads waiting; a file must be plausible for its claimed length (at most 40 MB per second, or 200 MB
+  whatever the length); an upload that has sent no byte 10 minutes after creation is canceled (the hour-long window
+  starts with the first bytes).
+- Cancel is refused (409) once the extra-accurate transcription is done (`next_stage = finalize`: the paid-for work
+  exists, only packaging is left), and answers 409 whenever nothing was canceled.
+- Live sessions must keep sending: microphone audio below half of the wall-clock time over the last 60 s (judged after
+  the first 30 s) ends the session with `stopped: no_audio` (both clients send every frame, silent ones too). Text
+  messages are limited per connection (50 a second sustained, burst 100; `config` 5 a second); a breach closes the
+  socket with 1008. An account that has not paid yet can run one live session at a time instead of two.
+- Welcome credit: claimed once per mailbox. The key is HMAC-SHA256 under `ACW_SESSION_SECRET` of the canonical
+  mailbox (NFKC, lower case, no `+tag`, no dots and `googlemail.com` = `gmail.com` at Gmail), so aliases don't give
+  it twice and a copy of the database can't be used to test addresses. Without a configured secret (development) the
+  key is a plain SHA-256 and a warning is logged once. Rows written before this change keep their old key.
+- Trust ladder (`acw/billing/trust.py`): extra-accurate transcription and live captions (the speech partner costs us
+  real money per minute) need a settled payment (a `payments` row `succeeded` and not fully refunded); the first
+  top-ups of an account younger than 72 h without one are limited to $50 (checkout and auto-reload).
+- Premium live captions that break down mid-session are billed only up to that point (`stream_sessions.premium_off_seconds`);
+  a captions-only session then ends.
+- `/api/me` with an API key returns only the user id and status and the balance, never the address or billing settings.
 - Disputes and early fraud warnings suspend the account, release holds, zero
   the balance; EFWs up to $50 are refunded automatically.
 - 3DS at Checkout whenever Stripe or the bank asks for it; auto-reload has a monthly cap and

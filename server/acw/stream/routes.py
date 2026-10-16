@@ -14,12 +14,12 @@ import json
 import logging
 import math
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from .. import auth, cpusplit, db, metrics
-from ..billing import ledger, pricing
+from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
 from . import protocol as P
@@ -27,13 +27,26 @@ from . import protocol as P
 log = logging.getLogger("acw.stream")
 router = APIRouter(tags=["stream"])
 
-MAX_SESSIONS_PER_USER = 2
+MAX_SESSIONS_PER_USER = trust.MAX_LIVE_SESSIONS  # one for an account that has not paid anything yet (billing/trust.py)
 MAX_SESSIONS_PER_IP = 6  # across accounts
 MAX_SESSION_SECONDS = 12 * 3600
 START_TIMEOUT = 15
 SILENCE_TIMEOUT = 30  # nothing at all from the client
 IDLE_TIMEOUT = 2 * 60  # no microphone audio (pings and echo-reference frames don't count); both clients keep sending frames while muted
 PERSIST_EVERY = 30  # seconds between saving the billed time (a restart then bills what was processed)
+# A session must keep sending: over the last DUTY_WINDOW seconds at least DUTY_MIN_FRACTION of the wall-clock time
+# must have arrived as microphone audio (checked once DUTY_GRACE seconds have passed). Both clients send every
+# frame, silent ones too, so a normal session is at 1.0; a link too slow to carry half of the audio is no live
+# session anyway. Without this, one tiny frame every two minutes held a place (and its cores) for twelve hours.
+DUTY_WINDOW = 60.0
+DUTY_GRACE = 30.0
+DUTY_MIN_FRACTION = 0.5
+# Text messages per connection (ping, config, stop): a token bucket, and a tighter one for `config`, which also
+# costs a write to the worker. Real clients send a ping every few seconds and a config when the slider moves.
+MSG_RATE = 50.0
+MSG_BURST = 100.0
+CONFIG_RATE = 5.0
+CONFIG_BURST = 5.0
 PACE_BURST_SECONDS = 6.0
 PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
 LOW_BALANCE_WARN_SECONDS = 300
@@ -62,7 +75,8 @@ def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
     Sessions started less than `min_age` seconds ago are left alone (their handler may still be setting up)."""
     n = 0
     for row in db.all_rows(
-        "SELECT id, hold_id, seconds, denoise_tier, caption_tier FROM stream_sessions WHERE status = 'active' AND started_at <= ?",
+        "SELECT id, hold_id, seconds, denoise_tier, caption_tier, premium_off_seconds FROM stream_sessions"
+        " WHERE status = 'active' AND started_at <= ?",
         (db.now() - min_age,),
     ):
         if row["id"] in _live_ids:
@@ -73,7 +87,10 @@ def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
                 if row["seconds"] > 0:
                     cost = ledger.capture_hold(
                         row["hold_id"],
-                        _micros(_rate_micros_per_minute(row["denoise_tier"], row["caption_tier"]), row["seconds"]),
+                        _split_micros(
+                            _rate_micros_per_minute(row["denoise_tier"], row["caption_tier"]),
+                            _premium_rate(row["caption_tier"]), row["seconds"], row["premium_off_seconds"],
+                        ),
                         f"Live session ({row['seconds'] / 60:.1f} min, cut short)",
                     )
             except Exception:  # noqa: BLE001
@@ -116,6 +133,53 @@ def _micros(rate: int, seconds: float) -> int:
     return math.ceil(rate * math.ceil(round(seconds, 6)) / 60)
 
 
+def _premium_rate(captions: str | None) -> int:
+    """Micros per minute of the extra-accurate captions part of a session's rate (0 without them)."""
+    return pricing.rate("stream_captions", "premium").micros_per_minute if captions == "premium" else 0
+
+
+def _split_micros(rate: int, premium_rate: int, seconds: float, premium_off_seconds: float | None) -> int:
+    """Price of a session of `seconds`. The extra-accurate captions part (`premium_rate` of `rate`) stops at
+    `premium_off_seconds` when they broke down: only what was actually provided is billed."""
+    if not premium_rate or premium_off_seconds is None:
+        return _micros(rate, seconds)
+    return _micros(rate - premium_rate, seconds) + _micros(premium_rate, min(seconds, premium_off_seconds))
+
+
+class TokenBucket:
+    """Messages per second: `rate` sustained, up to `burst` at once."""
+
+    def __init__(self, rate: float, burst: float):
+        self.rate, self.burst = rate, burst
+        self.tokens, self.at = burst, time.monotonic()
+
+    def take(self) -> bool:
+        now = time.monotonic()
+        self.tokens = min(self.burst, self.tokens + (now - self.at) * self.rate)
+        self.at = now
+        if self.tokens < 1.0:
+            return False
+        self.tokens -= 1.0
+        return True
+
+
+class DutyCycle:
+    """Microphone audio received against wall-clock time over a sliding window."""
+
+    def __init__(self, now: float):
+        self.start = now
+        self.marks: deque[tuple[float, float]] = deque([(now, 0.0)])  # (time, audio seconds so far), about one a second
+
+    def starved(self, now: float, audio_seconds: float) -> bool:
+        if now - self.marks[-1][0] >= 1.0:
+            self.marks.append((now, audio_seconds))
+        while len(self.marks) > 1 and self.marks[1][0] <= now - DUTY_WINDOW:
+            self.marks.popleft()  # the first mark is the newest one that is at least a window old
+        t0, a0 = self.marks[0]
+        span = now - t0
+        return span >= DUTY_GRACE and (audio_seconds - a0) < DUTY_MIN_FRACTION * span
+
+
 async def _send_json(ws: WebSocket, obj: dict) -> None:
     await ws.send_text(json.dumps(obj, separators=(",", ":")))
 
@@ -141,6 +205,9 @@ class Session:
         self.last_rx = time.monotonic()  # when the client last sent anything
         self.worker_task: asyncio.Task | None = None
         self.premium = None
+        # The extra-accurate captions part of the rate, and the audio seconds at which it stopped working (None: still on).
+        self.premium_rate = _premium_rate(cfg.get("captions"))
+        self.premium_off_seconds: float | None = None
 
     @property
     def seconds(self) -> float:
@@ -151,7 +218,16 @@ class Session:
         self.samples = round(value * P.SAMPLE_RATE)
 
     def micros_for(self, seconds: float) -> int:
-        return _micros(self.rate, seconds)
+        return _split_micros(self.rate, self.premium_rate, seconds, self.premium_off_seconds)
+
+    def current_rate(self) -> int:
+        """Micros per minute being provided right now (without the captions that broke down)."""
+        return self.rate - (self.premium_rate if self.premium_off_seconds is not None else 0)
+
+    def premium_failed(self) -> None:
+        """The extra-accurate captions stopped working: they are not billed from this point."""
+        if self.premium_off_seconds is None and self.premium_rate:
+            self.premium_off_seconds = self.seconds
 
     def open_hold(self) -> None:
         minutes = pricing.STREAM_HOLD_MINUTES
@@ -160,7 +236,7 @@ class Session:
 
     def extend_hold(self) -> bool:
         try:
-            ledger.extend_hold(self.hold_id, self.rate)  # one more minute
+            ledger.extend_hold(self.hold_id, self.current_rate())  # one more minute
         except (ledger.InsufficientFunds, ledger.LedgerError):
             return False
         self.held_seconds += 60.0
@@ -204,8 +280,9 @@ async def _refuse(ws: WebSocket, code: str, message: str, retry_after: int | Non
     await ws.close(code=close)
 
 
-async def _evict_stale(user_id: str) -> bool:
+async def _evict_stale(user_id: str, limit: int | None = None) -> bool:
     """Free a slot for `user_id` by ending their stalest silent session. True if one was ended."""
+    limit = MAX_SESSIONS_PER_USER if limit is None else limit
     now = time.monotonic()
     stale = [x for x in _open.get(user_id, []) if now - x.last_rx > STALE_SESSION_SECONDS]
     if not stale:
@@ -217,10 +294,10 @@ async def _evict_stale(user_id: str) -> bool:
     except Exception:  # noqa: BLE001 - its socket is gone, which is the point
         pass
     for _ in range(30):  # its handler notices, bills what it processed and releases the slot
-        if _live.get(user_id, 0) < MAX_SESSIONS_PER_USER:
+        if _live.get(user_id, 0) < limit:
             return True
         await asyncio.sleep(0.1)
-    return _live.get(user_id, 0) < MAX_SESSIONS_PER_USER
+    return _live.get(user_id, 0) < limit
 
 
 @router.websocket("/api/stream/ws")
@@ -253,8 +330,10 @@ async def stream_ws(ws: WebSocket) -> None:
         # A deploy is waiting for sessions to end (deploy/drain.sh): no new ones start.
         await _refuse(ws, "restarting", "Live audio is restarting for an update. Please try again in a minute.", 60, 1013)
         return
-    if _live.get(principal.user_id, 0) >= MAX_SESSIONS_PER_USER and not await _evict_stale(principal.user_id):
-        await _refuse(ws, "too_many_sessions", "Two live sessions at most per account.", 30)
+    limit = await asyncio.to_thread(trust.max_live_sessions, principal.user_id)
+    if _live.get(principal.user_id, 0) >= limit and not await _evict_stale(principal.user_id, limit):
+        await _refuse(ws, "too_many_sessions", "Two live sessions at most per account." if limit > 1 else
+                      "One live session at a time until you’ve made your first top-up.", 30)
         return
     if _live_ip.get(net, 0) >= MAX_SESSIONS_PER_IP:
         await _refuse(ws, "too_many_sessions", "Too many live sessions from this network.", 30)
@@ -355,6 +434,11 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await ws.close(code=1008)
         return None
 
+    if captions == "premium" and not await asyncio.to_thread(trust.has_settled_payment, principal.user_id):
+        await _send_json(ws, {"type": "error", "code": "needs_topup", "message": trust.PREMIUM_NEEDS_TOPUP})
+        await ws.close(code=1008)
+        return None
+
     atten = _atten(cfg.get("attenLimDb", 100.0))
     if atten is None or not all(v is None or isinstance(v, str) for v in (denoise, captions)):
         await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Check the noise strength and the options you chose."})
@@ -420,16 +504,25 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             from .openai_live import PremiumCaptions
 
             sess.premium = PremiumCaptions(
-                language, lambda ev: asyncio.ensure_future(_send_json(ws, ev)), user_hint=principal.user_id
+                language, lambda ev: asyncio.ensure_future(_send_json(ws, ev)), user_hint=principal.user_id,
+                on_fail=sess.premium_failed,
             )
             await sess.premium.connect()
+            if sess.premium.failed and sess.current_rate() == 0:
+                # Captions were all this session was for, and they don't work: nothing to bill, nothing to keep open.
+                sess.end_reason = "captions_unavailable"
+                _drop_worker(sess)
+                await _send_json(ws, {"type": "error", "code": "unavailable", "retryAfterSeconds": 60,
+                                      "message": "Extra-accurate captions are unavailable right now. Try again in a few minutes."})
+                await ws.close(code=1013)
+                return sess
         await _send_json(ws, {
             "type": "ready",
             "sessionId": sess.id,
             "sampleRate": P.SAMPLE_RATE,
             "hopSamples": P.HOP,
             "modelLatencyMs": round(ready.get("latencySamples", 0) * 1000 / P.SAMPLE_RATE, 1),
-            "usdPerMinute": rate / 1e6,
+            "usdPerMinute": sess.current_rate() / 1e6,
             "maxSessionSeconds": MAX_SESSION_SECONDS,
             **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
         })
@@ -472,6 +565,8 @@ async def _run(sess: Session) -> None:
     worker_task = asyncio.create_task(from_worker())
     sess.worker_task = worker_task
     last_mic = last_persist = time.monotonic()
+    duty = DutyCycle(last_mic)
+    messages, configs = TokenBucket(MSG_RATE, MSG_BURST), TokenBucket(CONFIG_RATE, CONFIG_BURST)
     try:
         while True:
             now = time.monotonic()
@@ -485,6 +580,15 @@ async def _run(sess: Session) -> None:
             if now - sess.started >= MAX_SESSION_SECONDS:  # wall time too, not just audio received
                 sess.end_reason = "max_duration"
                 await _send_json(ws, {"type": "stopped", "reason": "max_duration"})
+                break
+            if duty.starved(now, sess.seconds):
+                sess.end_reason = "no_audio"
+                await _send_stopped(ws, "no_audio")
+                break
+            if sess.premium_rate and sess.premium_off_seconds is not None and sess.current_rate() == 0:
+                # The captions this session was started for broke down and there is nothing else to provide.
+                sess.end_reason = "captions_unavailable"
+                await _send_stopped(ws, "captions_unavailable")
                 break
             try:
                 msg = await asyncio.wait_for(ws.receive(), timeout=min(SILENCE_TIMEOUT, idle_left))
@@ -545,6 +649,11 @@ async def _run(sess: Session) -> None:
                     sess.frames.popitem(last=False)
                 await P.send_msg(sess.writer, P.MSG_AUDIO, ipc)
             elif msg.get("text") is not None:
+                if not messages.take():  # a flood of tiny messages is work on the loop that carries every session
+                    sess.end_reason = "rate_limited"
+                    await _send_json(ws, {"type": "error", "code": "rate_limited", "message": "Too many messages."})
+                    await ws.close(code=1008, reason="too_many_messages")
+                    break
                 if len(msg["text"]) > 2048:
                     continue
                 try:
@@ -552,6 +661,11 @@ async def _run(sess: Session) -> None:
                 except ValueError:
                     continue
                 t = c.get("type") if isinstance(c, dict) else None
+                if t == "config" and not configs.take():
+                    sess.end_reason = "rate_limited"
+                    await _send_json(ws, {"type": "error", "code": "rate_limited", "message": "Too many settings changes."})
+                    await ws.close(code=1008, reason="too_many_config_messages")
+                    break
                 if t == "ping":
                     await _send_json(ws, {"type": "pong", "t": c.get("t"), "seconds": round(sess.seconds, 2)})
                 elif t == "stop":
@@ -578,7 +692,10 @@ async def _persist(sess: Session) -> bool:
     open: suspension and deletion stop a running session. False when the session must end."""
 
     def work() -> bool:
-        db.execute("UPDATE stream_sessions SET seconds = ? WHERE id = ?", (sess.seconds, sess.id))
+        db.execute(
+            "UPDATE stream_sessions SET seconds = ?, premium_off_seconds = ? WHERE id = ?",
+            (sess.seconds, sess.premium_off_seconds, sess.id),
+        )
         row = db.one("SELECT status FROM users WHERE id = ?", (sess.p.user_id,))
         if row is None or row["status"] != "active":
             return False
@@ -657,8 +774,8 @@ async def _finish_inner(sess: Session) -> None:
         await asyncio.to_thread(
             db.execute,
             "UPDATE stream_sessions SET status = 'ended', seconds = ?, cost_micros = ?, end_reason = ?, ended_at = ?,"
-            " frames = ?, late_frames = ?, dropped_frames = ? WHERE id = ?",
-            (sess.seconds, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped, sess.id),
+            " frames = ?, late_frames = ?, dropped_frames = ?, premium_off_seconds = ? WHERE id = ?",
+            (sess.seconds, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped, sess.premium_off_seconds, sess.id),
         )
         await asyncio.to_thread(metrics.live_ended, sess.id, fs, time.monotonic() - sess.started)
     try:

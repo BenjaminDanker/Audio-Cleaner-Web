@@ -48,7 +48,7 @@ function dollarsToCents(text) {
 
 export default function Billing() {
   usePageTitle('Billing');
-  const { balance, autoReload, refresh } = useAuth();
+  const { balance, autoReload, refresh, topupMaxCents } = useAuth();
   const { data: pricing } = usePricing();
   const [params, setParams] = useSearchParams();
   const [banner, setBanner] = useState(null);
@@ -133,17 +133,23 @@ export default function Billing() {
         <section className="card" aria-labelledby="b3"><h2 id="b3" className="mb0 small muted">Total</h2><div className="big-number">{balanceMoney(balance?.balance_micros ?? 0)}</div></section>
       </div>
 
-      <TopUp pricing={pricing} unavailable={unavailable} />
-      <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} unavailable={unavailable} />
+      <TopUp pricing={pricing} unavailable={unavailable} limitCents={topupMaxCents} />
+      <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} unavailable={unavailable} limitCents={topupMaxCents} />
       <History history={history} error={histErr} availableMicros={balance?.available_micros ?? 0} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
     </div>
   );
 }
 
-function TopUp({ pricing, unavailable }) {
+/** The largest top-up for this account right now: the site's limit, or less while the account is new and has not paid yet. */
+function topupLimit(pricing, limitCents) {
+  const site = pricing?.topup?.maxCents ?? 50000;
+  return { max: limitCents != null ? Math.min(site, limitCents) : site, limited: limitCents != null && limitCents < site };
+}
+
+function TopUp({ pricing, unavailable, limitCents }) {
   const min = pricing?.topup?.minCents ?? 500;
-  const max = pricing?.topup?.maxCents ?? 50000;
-  const presets = pricing?.topup?.presetsCents ?? [1000, 2000, 5000, 10000];
+  const { max, limited } = topupLimit(pricing, limitCents);
+  const presets = (pricing?.topup?.presetsCents ?? [1000, 2000, 5000, 10000]).filter((c) => c <= max);
   const [choice, setChoice] = useState('2000'); // preset cents or 'custom'
   const [custom, setCustom] = useState('25');
   const [saveCard, setSaveCard] = useState(false);
@@ -171,6 +177,7 @@ function TopUp({ pricing, unavailable }) {
     <form className="card stack" onSubmit={go} aria-labelledby="topup-h">
       <h2 id="topup-h" className="mb0">Add credit</h2>
       {pricing?.taxAddedAtCheckout && <p className="muted mb0">Sales tax or VAT is added at checkout where it applies. You get the full amount as credit.</p>}
+      {limited && <p className="muted mb0" data-testid="topup-limit">Until your first top-up has gone through (or your account is 3 days old), you can add up to {moneyCents(max)} at a time.</p>}
       <fieldset className="field">
         <legend className="label">Amount</legend>
         <div className="choice-cards">
@@ -212,9 +219,10 @@ function TopUp({ pricing, unavailable }) {
   );
 }
 
-function AutoReload({ autoReload, pricing, refresh, unavailable }) {
+function AutoReload({ autoReload, pricing, refresh, unavailable, limitCents }) {
   const min = pricing?.topup?.minCents ?? 500;
   const max = pricing?.topup?.maxCents ?? 50000;
+  const maxAmount = topupLimit(pricing, limitCents).max; // one reload counts as a top-up
   const hasCard = !!autoReload?.hasCard;
   const [threshold, setThreshold] = useState('5');
   const [amount, setAmount] = useState('20');
@@ -236,7 +244,7 @@ function AutoReload({ autoReload, pricing, refresh, unavailable }) {
   const c = dollarsToCents(cap);
   const problems = [];
   if (!(t >= 0 && t <= max)) problems.push(`The “below” amount must be between $0 and ${moneyCents(max)}.`);
-  if (!(a >= min && a <= max)) problems.push(`The reload amount must be between ${moneyCents(min)} and ${moneyCents(max)}.`);
+  if (!(a >= min && a <= maxAmount)) problems.push(`The reload amount must be between ${moneyCents(min)} and ${moneyCents(maxAmount)}.`);
   if (!(c >= min && c <= 200000)) problems.push(`The monthly cap must be between ${moneyCents(min)} and ${moneyCents(200000)}.`);
   else if (a > c) problems.push('The monthly cap must be at least one reload.');
   const valid = problems.length === 0;

@@ -14,7 +14,7 @@ import pytest
 from acw import auth, db, jobs
 from acw.billing import ledger, pricing
 from tests.test_billing_audit import frame, make_job, run_session, running_job, user
-from tests.conftest import ORIGIN, login
+from tests.conftest import ORIGIN, login, settle_payment
 
 
 # ---------------------------------------------------------------- request bodies (SEC-01)
@@ -194,11 +194,13 @@ def test_promised_upload_bytes_are_not_free_space(monkeypatch):
     snap = SimpleNamespace(disk_free=20 * GB)
     monkeypatch.setattr(hostload, "get", lambda d: SimpleNamespace(snapshot=lambda: snap))
     uid = user()
+    other = user("b@example.com")  # one account may only have 8 GB of uploads waiting (test_job_reservations.py)
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
+    ledger.credit(other, 50_000_000, "grant", "t", "g2")
     make_job(uid, size_bytes=4 * GB)  # needs 4 GB + 10 GB reserve of the 20 GB
-    make_job(uid, size_bytes=4 * GB)  # 4 GB are promised to the first: 16 GB left, still enough
+    make_job(other, size_bytes=4 * GB)  # 4 GB are promised to the first: 16 GB left, still enough
     with pytest.raises(jobs.JobError, match="short on storage"):
-        make_job(uid, size_bytes=4 * GB)  # 8 GB promised: 12 GB left, 14 needed
+        make_job(other, size_bytes=4 * GB)  # 8 GB promised: 12 GB left, 14 needed
     assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 2
     assert db.one("SELECT COUNT(*) n FROM holds WHERE status = 'active'")["n"] == 2  # the refused job's hold was given back
 
@@ -580,6 +582,7 @@ def test_shared_caption_thread_survives_a_failing_session():
 
 def test_ledger_history_has_friendly_labels_and_says_when_there_is_more():
     uid = user()
+    settle_payment(uid)
     ledger.credit(uid, 50_000_000, "topup", "payment", "p0", "Top-up")
     jid = make_job(uid, kind="denoise_transcribe", transcribe_tier="premium", filename="noisy.flac",
                    options={}, claimed_seconds=120)
@@ -694,6 +697,7 @@ def test_two_premium_jobs_run_at_once(monkeypatch):
     from acw import app as appmod
 
     uid = user()
+    settle_payment(uid)
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     ids = []
     for _ in range(3):
@@ -832,6 +836,7 @@ def test_monitor_notices_stuck_states():
     from acw import monitor
 
     uid = user()
+    settle_payment(uid)
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     now = db.now()
     quiet = {f.kind: f.bad for f in monitor.check_stuck_states(now)}

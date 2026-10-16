@@ -306,6 +306,8 @@ MIGRATIONS = [
     ("stream_sessions", "frames", "ALTER TABLE stream_sessions ADD COLUMN frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "late_frames", "ALTER TABLE stream_sessions ADD COLUMN late_frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "dropped_frames", "ALTER TABLE stream_sessions ADD COLUMN dropped_frames INTEGER NOT NULL DEFAULT 0"),
+    # Seconds of audio processed when the extra-accurate captions of a session broke down: billed without them from there.
+    ("stream_sessions", "premium_off_seconds", "ALTER TABLE stream_sessions ADD COLUMN premium_off_seconds REAL"),
     # The welcome credit: a one-way hash of each address that has had it, so deleting the account and signing up
     # again doesn't give it twice. Kept for good (a hash, no account link).
     (

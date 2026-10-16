@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import db, metrics
-from .billing import ledger, pricing
+from .billing import ledger, pricing, trust
 from .config import get_settings
 
 KINDS = {"denoise", "transcribe", "denoise_transcribe"}
@@ -38,6 +38,12 @@ ALLOWED_EXTS = {
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")
 MAX_ACTIVE_JOBS_PER_USER = 3
+# Disk promised to uploads that are still arriving, per account, and the most a file may weigh per second of its
+# claimed length (320 Mbit/s: high-end video) unless it is small anyway. Without these a claim of a 4 GiB file
+# that is half a second long reserves 4 GiB of disk for an hour at no cost.
+MAX_RESERVED_UPLOAD_BYTES = 8 * 1024**3
+MAX_BYTES_PER_SECOND = 40_000_000
+PLAUSIBLE_ANY_SIZE_BYTES = 200 * 1024**2
 
 # What a job needs before a worker may start it (measured 2026-10-14, see
 # docs/operations.md). Decoded/cleaned audio are memory-mapped scratch files,
@@ -70,6 +76,8 @@ WALL_PER_AUDIO_SECOND = {"standard": 3, "rebuild": 4}
 STAGE_SLACK_SECONDS = 1800
 # An upload that has not finished this long after its last bytes arrived is canceled (the clock restarts while data flows).
 UPLOAD_WINDOW_SECONDS = 3600
+# ... but a job whose upload has not sent a single byte this long after it was created is canceled (it only holds disk space).
+UPLOAD_FIRST_BYTE_SECONDS = 600
 # Never let our work take the host below these.
 MEM_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
@@ -212,11 +220,11 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
         pricing.rate("transcribe", transcribe_tier or "")
     out: dict = {}
     fmt = options.get("audio_format", "wav")
-    if fmt not in AUDIO_FORMATS:
+    if not isinstance(fmt, str) or fmt not in AUDIO_FORMATS:
         raise JobError("unsupported output format")
     out["audio_format"] = fmt
     caps = options.get("caption_formats", ["srt", "vtt", "txt"])
-    if not isinstance(caps, list) or not set(caps) <= CAPTION_FORMATS:
+    if not isinstance(caps, list) or not all(isinstance(x, str) for x in caps) or not set(caps) <= CAPTION_FORMATS:
         raise JobError("unsupported caption format")
     out["caption_formats"] = list(dict.fromkeys(caps))
     lang = options.get("language")
@@ -227,7 +235,10 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     out["embed_subtitles"] = bool(options.get("embed_subtitles", True))
     lufs = options.get("loudness_lufs", -16.0)
     if lufs is not None:
-        lufs = float(lufs)
+        try:
+            lufs = float(lufs)
+        except (TypeError, ValueError):
+            raise JobError("loudness target must be a number")
         if not -30.0 <= lufs <= -9.0:
             raise JobError("loudness target must be between -30 and -9 LUFS")
     out["loudness_lufs"] = lufs
@@ -245,7 +256,7 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     out["echo_reference_track"] = echo
     # Which noise remover: measured per recording ("auto"), or forced for light / heavy background noise.
     noise = options.get("noise", "auto")
-    if noise not in ("auto", "light", "heavy"):
+    if not isinstance(noise, str) or noise not in ("auto", "light", "heavy"):
         raise JobError("noise must be auto, light or heavy")
     out["noise"] = noise
     return out
@@ -276,12 +287,13 @@ def create_job(
         raise JobError(
             f"Voice rebuilding takes files up to {pricing.MAX_REBUILD_SECONDS // 60} minutes; use the standard cleanup for longer files."
         )
+    if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
+        raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
     opts = validate_options(kind, denoise_tier, transcribe_tier, options, free)
-    active = db.one("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE))
-    if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
-        raise JobError("You already have several jobs in progress; wait for one to finish.", 429, retry_after=60)
+    if kind != "denoise" and transcribe_tier == "premium" and not trust.has_settled_payment(user_id):
+        raise JobError(trust.PREMIUM_NEEDS_TOPUP, 402)
     # The one hard limit: the upload and its scratch files must fit on disk, on top of what other uploads
-    # that are still arriving have been promised (checked again when the job is stored).
+    # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
 
     disk_need = size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"]) + DISK_RESERVE
@@ -300,35 +312,43 @@ def create_job(
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"])
     est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"])
-    hold_id = None
-    if est > 0:
-        try:
-            hold_id = ledger.create_hold(user_id, est, "job", job_id)
-        except ledger.InsufficientFunds as e:
-            raise JobError(
-                f"This job costs about ${est / 1e6:.2f}; your available balance is ${e.available / 1e6:.2f}.", 402
-            ) from e
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
         d = job_dir(job_id)
         d.mkdir(parents=True, mode=0o700)
+        # The limits, the money and the row are one step: parallel requests can't all pass a check that
+        # none of them has recorded yet (the money rolls back with everything else).
         with db.tx() as c:
+            active = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE)).fetchone()
+            if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
+                raise JobError("You already have several jobs in progress; wait for one to finish.", 429, retry_after=60)
             # Bytes promised to uploads that are still arriving are not free space any more.
             promised = c.execute("SELECT COALESCE(SUM(input_bytes), 0) AS n FROM jobs WHERE status = 'uploading'").fetchone()["n"]
+            mine = c.execute(
+                "SELECT COALESCE(SUM(input_bytes), 0) AS n FROM jobs WHERE status = 'uploading' AND user_id = ?", (user_id,)
+            ).fetchone()["n"]
+            if mine + size_bytes > MAX_RESERVED_UPLOAD_BYTES:
+                raise JobError("You have large uploads waiting already; wait for them to finish.", 429, retry_after=60)
             if disk_free - promised < disk_need:
                 raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
+            hold_id = None
+            if est > 0:
+                try:
+                    hold_id = ledger.create_hold(user_id, est, "job", job_id, c=c)
+                except ledger.InsufficientFunds as e:
+                    raise JobError(
+                        f"This job costs about ${est / 1e6:.2f}; your available balance is ${e.available / 1e6:.2f}.", 402
+                    ) from e
             c.execute(
                 "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes,"
                 " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at)"
                 " VALUES (?,?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?)",
                 (job_id, user_id, kind, tier, 0, json.dumps(params), filename[:200], size_bytes,
-                 claimed_seconds, hold_id, est, now, now + UPLOAD_WINDOW_SECONDS),
+                 claimed_seconds, hold_id, est, now, now + UPLOAD_FIRST_BYTE_SECONDS),
             )
     except Exception:
         shutil.rmtree(job_dir(job_id), ignore_errors=True)
-        if hold_id:
-            ledger.release_hold(hold_id)
         raise
     return {"id": job_id, "estCostMicros": est}
 
@@ -367,16 +387,22 @@ def mark_uploaded(job_id: str) -> None:
     )
 
 
-def finish_failed(job: dict, message: str, status: str = "failed", only_from: tuple[str, ...] | None = None) -> None:
+def finish_failed(
+    job: dict, message: str, status: str = "failed", only_from: tuple[str, ...] | None = None, not_stage: str | None = None
+) -> bool:
     """Release money/quota and delete files. Safe to call twice. The status change, the hold and the free
     allowance move in one transaction, so a crash can't leave money reserved for a finished job.
-    `only_from` limits it to jobs still in one of those states (cancel: not once a worker has started)."""
+    `only_from` limits it to jobs still in one of those states (cancel: not once a worker has started) and
+    `not_stage` to jobs whose next stage is another one (cancel: not once the paid-for transcription is done).
+    True when the job was moved to `status` by this call."""
     with db.tx() as c:
-        cur = c.execute("SELECT status, free, claimed_seconds, params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+        cur = c.execute("SELECT status, next_stage, free, claimed_seconds, params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()
         if cur is None or cur["status"] in ("done", "failed", "canceled", "expired"):
-            return
+            return False
         if only_from is not None and cur["status"] not in only_from:
-            return
+            return False
+        if not_stage is not None and cur["next_stage"] == not_stage:
+            return False
         c.execute(
             "UPDATE jobs SET status = ?, error = ?, finished_at = ?, expires_at = ? WHERE id = ?",
             (status, message[:500], db.now(), db.now() + 86400, job["id"]),
@@ -391,6 +417,7 @@ def finish_failed(job: dict, message: str, status: str = "failed", only_from: tu
             )
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
     metrics.job_ended(job["id"])
+    return True
 
 
 def requeue(job: dict) -> None:

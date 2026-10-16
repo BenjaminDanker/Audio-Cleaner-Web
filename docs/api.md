@@ -30,7 +30,7 @@ live worker, stuck jobs, missing model files and the ledger check.
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/me` | `{signedIn:false, contactForm}` or `{signedIn, contactForm, user:{id,email,displayName,isAdmin,status,tosAccepted,createdAt}, csrfToken, balance:{balance_micros,held_micros,available_micros}, autoReload:{enabled,thresholdMicros,amountCents,monthlyCapCents,hasCard,failures}}` |
+| GET | `/api/me` | `{signedIn:false, contactForm}` or `{signedIn, contactForm, user:{id,email,displayName,isAdmin,status,tosAccepted,createdAt}, csrfToken, balance:{balance_micros,held_micros,available_micros}, hasPaid, topupMaxCents, autoReload:{enabled,thresholdMicros,amountCents,monthlyCapCents,hasCard,failures}}`. `hasPaid`: a top-up has gone through (extra-accurate choices need it); `topupMaxCents`: the largest top-up right now ($50 for an account under 72 h old with no payment yet). With an API key the answer is only `{signedIn, contactForm, user:{id,status}, balance}` |
 | POST | `/api/account/tos` | `{version}`: must equal the current terms version (see `TOS_VERSION`, currently `2026-10-10`) |
 | GET | `/api/auth/providers` | `{google:bool, email:bool, turnstileSiteKey:str|null}` |
 | GET | `/api/auth/oauth/google/start` | browser navigation; ends at `/app` (or `/login?error=...`) |
@@ -48,8 +48,8 @@ Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/billing/pricing` | public. `{rates:[{product,tier,label,usdPerMinute,usdPerHour,available}], topup:{minCents,maxCents,presetsCents}, free:{transcribeSecondsPerDay,transcribeMaxFileSeconds}, maxJobSeconds, paymentsEnabled}` |
-| POST | `/api/billing/checkout` | `{amountCents, saveCard}` → `{url}`; redirect the browser there. Returns to `/app/billing?checkout=success|cancel` |
-| POST | `/api/billing/auto-reload` | `{enabled, thresholdCents, amountCents, monthlyCapCents, consent}`; `consent:true` required to enable, needs a saved card |
+| POST | `/api/billing/checkout` | `{amountCents, saveCard}` → `{url}`; redirect the browser there. Returns to `/app/billing?checkout=success|cancel`. 400 above `topupMaxCents` of `/api/me` |
+| POST | `/api/billing/auto-reload` | `{enabled, thresholdCents, amountCents, monthlyCapCents, consent}`; `consent:true` required to enable, needs a saved card; `amountCents` is limited like a top-up (400) |
 | POST | `/api/billing/portal` | `{url}` Stripe customer portal (manage/remove cards, receipts) |
 | GET | `/api/billing/history` | `{balance, ledger:[...], ledgerHasMore, payments:[{id,kind,status,amount_cents,refunded_cents,created_at}]}`. The newest 100 ledger entries, each `{id,amount_micros,kind,description,balance_after_micros,created_at,label}` plus, for usage entries, `product` (`clean`, `transcript`, `clean_transcript`, `live`), `tier`, `minutes` and `displayName` (the file name as the person chose it). `label` is the customer-facing name ("Top-up", "Clean & polish + Subtitles & transcript"); `ledgerHasMore` says older entries exist. |
 | POST | `/api/billing/refund` | `{paymentId}` refunds unused credit from a payment < 14 days old |
@@ -89,7 +89,7 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
    `embed_subtitles` makes our side put the subtitles into the video, which needs the whole video uploaded. The
    website only asks for it for a video the browser can't open (it goes up whole anyway); otherwise it uploads the
    sound only and puts the subtitles into an MKV in the browser afterwards (SRT-style track, which players read). Paid jobs need accepted terms. Returns
-   `{id, estCostMicros, uploadUrl}`; 402 if the balance can't cover the estimate.
+   `{id, estCostMicros, uploadUrl}`; 402 if the balance can't cover the estimate, or if `transcribeTier` is `premium` and the account has not made a first top-up; 400 for malformed `options` or a `sizeBytes` that is implausible for `durationSeconds` (over 40 MB per second, unless under 200 MB); 429 while 3 jobs are active or more than 8 GiB of uploads wait. The upload must start within 10 minutes of creation.
    `durationSeconds` comes from the browser; the server re-measures and re-prices.
 2. `PUT /api/jobs/{id}/input` with the raw file bytes as the body (`Content-Length`
    must equal `sizeBytes`). Use XHR for upload progress.
@@ -105,7 +105,7 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
    the file's other audio tracks (unchanged) and its own subtitles where the container can hold them; only the
    first audio track is cleaned.
 
-Also: `GET /api/jobs` (latest 50), `POST /api/jobs/{id}/cancel` (before it starts),
+Also: `GET /api/jobs` (latest 50), `POST /api/jobs/{id}/cancel` (before it starts; 409 when it has started or its transcription is already done),
 `DELETE /api/jobs/{id}` (delete outputs now).
 
 ## API keys (browser session)

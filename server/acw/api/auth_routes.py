@@ -24,9 +24,9 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from .. import alerts, auth, db, jobs
-from ..billing import ledger
+from ..billing import ledger, trust
 from ..config import get_settings
-from ..security import client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex
+from ..security import canonical_email, client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex
 from .turnstile import verify_turnstile
 
 log = logging.getLogger(__name__)
@@ -53,14 +53,6 @@ def clean_email(raw: str) -> str | None:
         return None
     return email
 
-
-def canonical_email(email: str) -> str:
-    """The mailbox the address really reaches, for rate limits: no +tag, and no dots at Gmail."""
-    local, _, domain = email.partition("@")
-    local = local.split("+", 1)[0]
-    if domain in ("gmail.com", "googlemail.com"):
-        local, domain = local.replace(".", ""), "gmail.com"
-    return f"{local}@{domain}"
 
 PROVIDERS = {
     "google": {
@@ -321,6 +313,15 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
         return {"signedIn": False, "contactForm": contact}
     user = db.one("SELECT * FROM users WHERE id = ?", (principal.user_id,))
     bal = ledger.balance(principal.user_id)
+    if principal.via == "api_key":
+        # A key (the OBS plugin, a script) is often shared or stored in plain text: it learns the balance it
+        # spends from, never the owner's address or billing settings.
+        return {
+            "signedIn": True,
+            "contactForm": contact,
+            "user": {"id": user["id"], "status": user["status"]},
+            "balance": bal,
+        }
     return {
         "signedIn": True,
         "contactForm": contact,
@@ -335,6 +336,10 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
         },
         "csrfToken": principal.csrf_token,
         "balance": bal,
+        # What the pages need to explain limits: whether a top-up has gone through yet (extra-accurate choices
+        # unlock with it) and the largest top-up right now (new accounts start small).
+        "hasPaid": trust.has_settled_payment(principal.user_id),
+        "topupMaxCents": trust.topup_max_cents(principal.user_id),
         "autoReload": {
             "enabled": bool(user["auto_reload_enabled"]),
             "thresholdMicros": user["auto_reload_threshold_micros"],

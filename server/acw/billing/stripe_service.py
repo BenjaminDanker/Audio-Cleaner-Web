@@ -14,7 +14,7 @@ import stripe
 
 from .. import db
 from ..config import _env, get_settings
-from . import ledger
+from . import ledger, trust
 from .pricing import MICROS_PER_CENT, TOPUP_MAX_CENTS, TOPUP_MIN_CENTS
 
 log = logging.getLogger(__name__)
@@ -148,6 +148,9 @@ def ensure_customer(user_id: str) -> str:
 def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
     if not (TOPUP_MIN_CENTS <= amount_cents <= TOPUP_MAX_CENTS):
         raise ValueError("amount out of range")
+    limit = trust.topup_max_cents(user_id)
+    if amount_cents > limit:
+        raise ValueError(trust.topup_limit_message(limit))
     settings = get_settings()
     customer = ensure_customer(user_id)
     payment_id = db.new_id()
@@ -555,7 +558,7 @@ def run_auto_reload(user_id: str) -> str:
             return "skip"
         spent = u["auto_reload_month_cents"] if u["auto_reload_month"] == month else 0
         amount = int(u["auto_reload_amount_cents"])
-        if amount < TOPUP_MIN_CENTS or spent + amount > u["auto_reload_monthly_cap_cents"]:
+        if amount < TOPUP_MIN_CENTS or spent + amount > u["auto_reload_monthly_cap_cents"] or amount > trust.topup_max_cents(user_id):
             return "cap"
         payment_id = db.new_id()
         now = db.now()

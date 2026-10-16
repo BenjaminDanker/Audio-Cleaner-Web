@@ -13,7 +13,7 @@ import pytest
 from acw import db
 from acw.billing import ledger
 
-from .conftest import login
+from .conftest import login, settle_payment
 
 HOME = Path(os.environ.get("ACW_HOME", Path.home() / "audio-cleaner"))
 SAMPLE = os.environ.get("ACW_TEST_AUDIO", str(HOME / "src/DeepFilterNet/assets/noisy_snr0.wav"))
@@ -40,6 +40,7 @@ def test_premium_transcription_stage_machine(client, signed_in, monkeypatch):
 
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
+    settle_payment(uid)  # extra accurate needs a first top-up
     data = Path(SAMPLE).read_bytes()
     r = client.post("/api/jobs", json={
         "kind": "denoise_transcribe", "denoiseTier": "standard", "transcribeTier": "premium",

@@ -66,7 +66,9 @@ or `{"type":"error","code":...,"message":...}` and closes. Every error event may
 | `nothing_enabled` | neither `denoise` nor `captions` is set |
 | `insufficient_funds` | the credit set aside up front (5 minutes) is more than the available balance |
 | `tos` | the current Terms have not been accepted |
-| `too_many_sessions` | two live sessions per account (six per network) are already running. A session of yours that has been silent for 10 s is taken to be dropped and is replaced instead. `retryAfterSeconds` 30 |
+| `needs_topup` | `captions: "premium"` (extra accurate) before the account has made a first top-up. The session does not start |
+| `rate_limited` | (during the session) too many text messages: more than 50 a second sustained (burst 100), or more than 5 `config` a second. The socket is closed with 1008 |
+| `too_many_sessions` | two live sessions per account (one until the first top-up; six per network) are already running. A session of yours that has been silent for 10 s is taken to be dropped and is replaced instead. `retryAfterSeconds` 30 |
 | `full` | live capacity is used up right now; `available` lists what still fits. `retryAfterSeconds` 60 |
 | `restarting` | the service is being updated: new sessions are refused for a minute or so. `retryAfterSeconds` 60 |
 | `unavailable` | live processing is busy or offline (or extra-accurate captions are not available). `retryAfterSeconds` 30 (300 for captions) |
@@ -111,8 +113,8 @@ offset size  field
 {"type": "caption", "text": "...", "final": true, "start": 12.34, "end": 15.02}
 {"type": "caption", "text": "partial words", "final": false, "id": "item_..."}   // premium only
 {"type": "warning", "code": "low_balance", "secondsLeft": 180, "availableMicros": 0}
-{"type": "warning", "code": "captions_unavailable", "message": "..."}
-{"type": "stopped", "reason": "insufficient_funds" | "max_duration" | "idle_timeout" | "account_closed"}
+{"type": "warning", "code": "captions_unavailable", "message": "..."}   // extra-accurate captions broke down: not billed from here on
+{"type": "stopped", "reason": "insufficient_funds" | "max_duration" | "idle_timeout" | "no_audio" | "captions_unavailable" | "account_closed"}
 {"type": "error", "code": "...", "message": "..."}
 {"type": "pong", "t": ..., "seconds": 123.4}
 ```
@@ -120,7 +122,7 @@ offset size  field
 `stopped` is the last thing the server sends before it closes the socket: `insufficient_funds` (the balance cannot
 cover the next minute), `max_duration` (12 hours), `idle_timeout` (**no microphone audio for 2 minutes**: pings
 and echo-reference frames do not count; a muted microphone must keep sending frames, silent ones are fine, as
-the OBS plugin and the website do) and `account_closed` (the account was suspended or deleted, the API key
+the OBS plugin and the website do), `no_audio` (**microphone audio arrived for less than half of the wall-clock time over the last 60 s**, judged after the first 30 s: keep sending every 10 ms frame in real time, silence included; a client that is a few seconds late is fine, one that sends a frame now and then is not), `captions_unavailable` (the session was only extra-accurate captions and they stopped working; nothing is billed for them from that point) and `account_closed` (the account was suspended or deleted, the API key
 was revoked, or the browser session ended; checked every 30 s). A session replaced by a newer one of the same
 account (see `too_many_sessions`) is closed with WebSocket code 1001 and no event.
 

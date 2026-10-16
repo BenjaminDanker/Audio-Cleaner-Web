@@ -37,6 +37,9 @@ class CreateJob(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
+ALMOST_DONE = "This job is almost done and can’t be canceled now."
+
+
 def _get_owned(job_id: str, principal: auth.Principal) -> dict:
     if len(job_id) != 32:
         raise HTTPException(status_code=404, detail="Job not found.")
@@ -120,7 +123,8 @@ async def upload(job_id: str, request: Request, principal: auth.Principal = Depe
     user_throttle = uploads.for_user(principal.user_id)
     pending: list[bytes] = []
     pending_n = 0
-    last_check = last_keepalive = time.monotonic()
+    last_check = time.monotonic()
+    last_keepalive = float("-inf")  # the first bytes move the expiry from "must start soon" to the full upload window
     checked_at = 0
     stream = request.stream().__aiter__()
     try:
@@ -202,8 +206,13 @@ def cancel(job_id: str, principal: auth.Principal = Depends(auth.require_scope("
     job = _get_owned(job_id, principal)
     if job["status"] not in ("uploading", "queued"):
         raise HTTPException(status_code=409, detail="Only jobs that have not started can be canceled.")
+    if job["next_stage"] == "finalize":
+        # The costly part (extra-accurate transcription) is done; only the packaging is left.
+        raise HTTPException(status_code=409, detail=ALMOST_DONE)
     # One transaction moves the status and releases the money; a worker can't claim the job in between.
-    jobs.finish_failed(job, "Canceled.", status="canceled", only_from=("uploading", "queued"))
+    # Only a queued job that is still before its last stage: the check is repeated inside that transaction.
+    if not jobs.finish_failed(job, "Canceled.", status="canceled", only_from=("uploading", "queued"), not_stage="finalize"):
+        raise HTTPException(status_code=409, detail="This job has just started and can’t be canceled now.")
     return {"ok": True}
 
 

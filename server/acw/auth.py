@@ -18,8 +18,10 @@ from . import db
 from .config import get_settings
 from .security import (
     API_KEY_PREFIX,
+    canonical_email,
     client_ip,
     consteq,
+    keyed_hash,
     random_token,
     sha256_hex,
     user_agent,
@@ -54,7 +56,9 @@ def _welcome(c, user_id: str, email: str) -> None:
     amount = pricing.welcome_credit_micros()
     if amount <= 0:
         return
-    if c.execute("INSERT OR IGNORE INTO welcome_claims(email_hash, created_at) VALUES (?, ?)", (sha256_hex(email), db.now())).rowcount:
+    # The key is the mailbox, not the spelling: +tags, Gmail dots and googlemail.com all reach the same inbox.
+    key = keyed_hash("welcome", canonical_email(email))
+    if c.execute("INSERT OR IGNORE INTO welcome_claims(email_hash, created_at) VALUES (?, ?)", (key, db.now())).rowcount:
         ledger.credit(user_id, amount, "grant", "welcome", user_id, "Welcome credit: try live for an hour", c=c)
 
 

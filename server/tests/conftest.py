@@ -57,3 +57,13 @@ def login(client, email="user@example.com", accept_tos=True):
 @pytest.fixture
 def signed_in(client):
     return login(client)
+
+
+def settle_payment(user_id, cents=1000):
+    """A top-up that went through: the account counts as paid (extra-accurate choices, two live sessions, large top-ups)."""
+    from acw import db
+
+    now = db.now()
+    db.execute(
+        "INSERT INTO payments(id, user_id, kind, status, amount_cents, created_at, updated_at)"
+        " VALUES (?, ?, 'checkout', 'succeeded', ?, ?, ?)", (db.new_id(), user_id, cents, now, now))

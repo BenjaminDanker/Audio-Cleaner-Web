@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .. import auth, db
-from ..billing import ledger, pricing, stripe_service
+from ..billing import ledger, pricing, stripe_service, trust
 from ..billing.pricing import MICROS_PER_CENT
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, run_outbound
@@ -54,6 +54,9 @@ async def checkout(body: CheckoutBody, request: Request, principal: auth.Princip
     _require_tos(principal)
     enforce("checkout", principal.user_id)
     enforce("checkout", f"ip:{client_net(client_ip(request))}")
+    limit = await anyio.to_thread.run_sync(trust.topup_max_cents, principal.user_id)
+    if body.amountCents > limit:
+        raise HTTPException(status_code=400, detail=trust.topup_limit_message(limit))
     url = await run_outbound(stripe_service.create_checkout, principal.user_id, body.amountCents, body.saveCard)
     db.audit("user", "checkout_started", user_id=principal.user_id, detail=str(body.amountCents), ip=client_ip(request))
     return {"url": url}
@@ -79,6 +82,9 @@ def set_auto_reload(body: AutoReloadBody, request: Request, principal: auth.Prin
     _require_tos(principal)
     user = db.one("SELECT default_payment_method FROM users WHERE id = ?", (principal.user_id,))
     if body.enabled:
+        limit = trust.topup_max_cents(principal.user_id)
+        if body.amountCents > limit:
+            raise HTTPException(status_code=400, detail=trust.topup_limit_message(limit))
         if not body.consent:
             raise HTTPException(status_code=400, detail="Auto-reload needs your explicit authorization.")
         if not user["default_payment_method"]:

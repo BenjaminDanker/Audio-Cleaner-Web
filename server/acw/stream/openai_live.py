@@ -34,9 +34,10 @@ class PremiumCaptions:
     END_SILENCE_S = 0.6
     MAX_TURN_S = 12.0
 
-    def __init__(self, language: str | None, emit, user_hint: str = ""):
+    def __init__(self, language: str | None, emit, user_hint: str = "", on_fail=None):
         self.language = language
         self.emit = emit
+        self.on_fail = on_fail  # called once, when the captions stop working (the session stops billing them)
         self.user_hint = hashlib.sha256(user_hint.encode()).hexdigest()[:32] if user_hint else None
         self.ws = None
         self.reader_task: asyncio.Task | None = None
@@ -79,8 +80,10 @@ class PremiumCaptions:
     def _fail(self) -> None:
         if not self.failed:
             self.failed = True
+            if self.on_fail is not None:
+                self.on_fail()
             self.emit({"type": "warning", "code": "captions_unavailable",
-                       "message": "Premium captions are temporarily unavailable; audio processing continues."})
+                       "message": "Extra-accurate captions are unavailable for now. You won’t be charged for them from here on."})
 
     async def _read(self) -> None:
         try:

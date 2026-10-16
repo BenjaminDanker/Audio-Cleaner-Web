@@ -191,6 +191,8 @@ const ERROR_TEXT = {
   insufficient_funds: null, // the server's message is clear
   tos: 'Please agree to the Terms of Service first.',
   bad_config: null, // the server's message says what to change
+  needs_topup: null, // the server's message says what to do
+  rate_limited: 'The connection was closed because this page sent too many messages. Please start again.',
 };
 const DENOISE_NAME = { light: 'standard noise removal' };
 const CAPTION_NAME = { local: 'standard captions', premium: 'extra accurate captions' };
@@ -225,8 +227,16 @@ function Group({ id, title, children }) {
   );
 }
 
+const STOPPED_TEXT = {
+  insufficient_funds: 'The session stopped because your balance ran out.',
+  max_duration: 'The session reached its maximum length.',
+  idle_timeout: 'The session ended because no sound reached us for a while. Start it again when you’re ready.',
+  no_audio: 'The session ended because not enough sound reached us. Check your microphone and connection, then start again.',
+  captions_unavailable: 'The session ended because extra-accurate captions aren’t available right now. You weren’t charged for them.',
+};
+
 function LiveDemo({ pricing }) {
-  const { balance, refresh } = useAuth();
+  const { balance, refresh, hasPaid } = useAuth();
   const [mode, setMode] = useState('free'); // 'free': everything in this browser | 'paid': on our servers, like the OBS plugin
   const [freeCaps, setFreeCaps] = useState(true);
   const [denoise, setDenoise] = useState(true);
@@ -268,7 +278,7 @@ function LiveDemo({ pricing }) {
       if (ev.code === 'low_balance') setWarning({ text: `Your balance covers about ${Math.max(0, Math.round(ev.secondsLeft))} more seconds. Add credit to keep going.`, credit: true });
       else setWarning({ text: ev.message || 'A heads-up from the live service.', credit: false });
     } else if (ev.type === 'stopped') {
-      setStopped(ev.reason === 'insufficient_funds' ? 'The session stopped because your balance ran out.' : ev.reason === 'max_duration' ? 'The session reached its maximum length.' : 'The session stopped.');
+      setStopped(STOPPED_TEXT[ev.reason] ?? 'The session stopped.');
     } else if (ev.type === 'error') {
       setError(ERROR_TEXT[ev.code] ?? ev.message ?? 'The live service ran into a problem.');
     } else if (ev.type === 'closed') {
@@ -413,11 +423,12 @@ function LiveDemo({ pricing }) {
             </label>
             {(!pricing || capRates.premium) && (
               <label className="choice">
-                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={busy || !accurateListed} onChange={() => setCaptions('premium')} />
-                <span><b>Extra accurate</b><small>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</small></span>
+                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={busy || !accurateListed || !hasPaid} onChange={() => setCaptions('premium')} />
+                <span><b>Extra accurate</b><small>{!hasPaid ? 'Needs a top-up first' : <>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</>}</small></span>
               </label>
             )}
           </div>
+          {!hasPaid && <span className="hint" data-testid="accurate-locked-note">Extra accurate needs a top-up first: <Link to="/billing">add credit</Link> once and it unlocks. Standard captions work with your welcome credit.</span>}
           {captions === 'premium' && (
             <>
               <div className="field">

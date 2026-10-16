@@ -17,13 +17,16 @@ import hmac
 import math
 import secrets
 import threading
+import logging
 import time
+import unicodedata
 from collections import OrderedDict
 
 import anyio
 from fastapi import HTTPException, Request
 
 API_KEY_PREFIX = "acw_"
+log = logging.getLogger(__name__)
 
 
 def random_token(nbytes: int = 32) -> str:
@@ -32,6 +35,36 @@ def random_token(nbytes: int = 32) -> str:
 
 def sha256_hex(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def canonical_email(email: str) -> str:
+    """The mailbox an address really reaches: lower case, NFKC, no +tag (any provider), and no dots at Gmail
+    (googlemail.com is Gmail). Used for rate limits and for once-per-person grants."""
+    email = unicodedata.normalize("NFKC", email.strip()).lower()
+    local, _, domain = email.partition("@")
+    local = local.split("+", 1)[0]
+    if domain in ("gmail.com", "googlemail.com"):
+        local, domain = local.replace(".", ""), "gmail.com"
+    return f"{local}@{domain}"
+
+
+_warned_unkeyed = False
+
+
+def keyed_hash(purpose: str, value: str) -> str:
+    """HMAC-SHA256 of `value` under the server secret, separated by `purpose`, for values that are stored only to
+    be matched later (so a copy of the database can't be used to test guesses). Without a configured secret
+    (a development setup) it is a plain SHA-256 and the first use logs a warning."""
+    global _warned_unkeyed
+    from .config import get_settings
+
+    s = get_settings()
+    if not s.session_secret_configured:
+        if not _warned_unkeyed:
+            _warned_unkeyed = True
+            log.warning("ACW_SESSION_SECRET is not set: %s hashes are unkeyed", purpose)
+        return sha256_hex(value)
+    return hmac.new(s.session_secret, f"{purpose}\0{value}".encode(), hashlib.sha256).hexdigest()
 
 
 def consteq(a: str, b: str) -> bool:

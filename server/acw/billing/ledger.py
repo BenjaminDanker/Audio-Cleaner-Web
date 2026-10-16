@@ -150,10 +150,12 @@ def debit_available(
         return run(cc)
 
 
-def create_hold(user_id: str, amount_micros: int, ref_type: str, ref_id: str) -> str:
+def create_hold(user_id: str, amount_micros: int, ref_type: str, ref_id: str, *, c: sqlite3.Connection | None = None) -> str:
+    """Reserve money. With `c` it joins the caller's transaction (a job's checks and its row are one step)."""
     if amount_micros <= 0:
         raise LedgerError("hold amount must be positive")
-    with db.tx() as c:
+
+    def run(c: sqlite3.Connection) -> str:
         row = _user_row(c, user_id)
         if row["status"] != "active":
             raise LedgerError("account is not active")
@@ -168,6 +170,11 @@ def create_hold(user_id: str, amount_micros: int, ref_type: str, ref_id: str) ->
         )
         c.execute("UPDATE users SET held_micros = held_micros + ? WHERE id = ?", (amount_micros, user_id))
         return hold_id
+
+    if c is not None:
+        return run(c)
+    with db.tx() as cc:
+        return run(cc)
 
 
 def _active_hold(c: sqlite3.Connection, hold_id: str) -> sqlite3.Row:
