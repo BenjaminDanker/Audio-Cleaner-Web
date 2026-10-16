@@ -352,6 +352,7 @@ def test_checkout_uses_the_cards_only_configuration_and_not_payment_method_types
     url = stripe_service.create_checkout(uid, 500, False)  # $5 is the smallest top-up now
     assert url.startswith("https://checkout.stripe.com/")
     assert "payment_method_types" not in sent and sent["payment_method_configuration"] == "pmc_cards_only"
+    assert sent["payment_method_options"]["card"]["request_three_d_secure"] == "automatic"
     assert sent["payment_intent_data"]["capture_method"] == "manual"
     with pytest.raises(ValueError):
         stripe_service.create_checkout(uid, 499, False)

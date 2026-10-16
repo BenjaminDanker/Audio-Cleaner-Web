@@ -203,9 +203,9 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
                 }
             ],
             "payment_intent_data": pi_data,
-            # 3DS on the first, on-session purchase shifts fraud liability in
-            # most cases and makes later off-session reloads less likely to fail.
-            "payment_method_options": {"card": {"request_three_d_secure": "any"}},
+            # Let Stripe and the bank decide when to ask for 3DS. Forcing it
+            # ("any") makes cards whose bank has no 3DS challenge fail outright.
+            "payment_method_options": {"card": {"request_three_d_secure": "automatic"}},
             "metadata": {"acw_user_id": user_id, "acw_payment_id": payment_id},
             # Shown above the Pay button: paying is agreeing to the Terms.
             "custom_text": {"submit": {"message": f"By paying you agree to the [Terms of Service]({settings.url('/terms')})."}},
