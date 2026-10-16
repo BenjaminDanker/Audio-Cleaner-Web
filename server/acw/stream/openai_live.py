@@ -34,8 +34,11 @@ class PremiumCaptions:
     END_SILENCE_S = 0.6
     MAX_TURN_S = 12.0
 
-    def __init__(self, language: str | None, emit, user_hint: str = "", on_fail=None):
-        self.language = language
+    SEND_EVERY_S = 0.1  # audio is sent in 100 ms pieces: a fifth of the messages of 20 ms ones, for 80 ms of delay
+
+    def __init__(self, languages: list[str] | str | None, emit, user_hint: str = "", on_fail=None):
+        # One language, or the few a speaker switches between (the model then follows the switches).
+        self.languages = [languages] if isinstance(languages, str) else list(languages or [])
         self.emit = emit
         self.on_fail = on_fail  # called once, when the captions stop working (the session stops billing them)
         self.user_hint = hashlib.sha256(user_hint.encode()).hexdigest()[:32] if user_hint else None
@@ -49,6 +52,8 @@ class PremiumCaptions:
         self.partial: dict[str, str] = {}
         self.t = 0.0
         self.failed = False
+        self._pending = bytearray()  # audio not sent yet
+        self._pending_s = 0.0
 
     async def connect(self) -> None:
         from websockets.asyncio.client import connect
@@ -57,10 +62,11 @@ class PremiumCaptions:
         if self.user_hint:
             headers["OpenAI-Safety-Identifier"] = self.user_hint
         try:
-            self.ws = await connect(REALTIME_URL, additional_headers=headers, max_size=2**22, open_timeout=15)
+            # No compression: base64 audio shrinks little, and deflating every message costs our event loop.
+            self.ws = await connect(REALTIME_URL, additional_headers=headers, max_size=2**22, open_timeout=15, compression=None)
             transcription = {"model": LIVE_MODEL}
-            if self.language:
-                transcription["languages"] = [self.language]
+            if self.languages:
+                transcription["languages"] = self.languages
             await self.ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
@@ -121,16 +127,24 @@ class PremiumCaptions:
         if not speaking and not self.in_turn:
             return  # don't bill the API for silence between turns
         try:
-            await self.ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm).decode()}))
+            self._pending += pcm
+            self._pending_s += dur
             if speaking:
                 self.in_turn, self.silence_s = True, 0.0
             elif self.in_turn:
                 self.silence_s += dur
+            commit = False
             if self.in_turn:
                 self.turn_s += dur
-                if self.silence_s >= self.END_SILENCE_S or self.turn_s >= self.MAX_TURN_S:
-                    await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                    self.in_turn, self.turn_s, self.silence_s = False, 0.0, 0.0
+                commit = self.silence_s >= self.END_SILENCE_S or self.turn_s >= self.MAX_TURN_S
+            if commit or self._pending_s >= self.SEND_EVERY_S:
+                await self.ws.send(json.dumps({"type": "input_audio_buffer.append",
+                                               "audio": base64.b64encode(bytes(self._pending)).decode()}))
+                self._pending.clear()
+                self._pending_s = 0.0
+            if commit:
+                await self.ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                self.in_turn, self.turn_s, self.silence_s = False, 0.0, 0.0
         except Exception:  # noqa: BLE001
             self._fail()
 

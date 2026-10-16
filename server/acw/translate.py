@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import weakref
 from pathlib import Path
 
@@ -91,12 +92,31 @@ def check_targets(targets: object, spoken: str | None = None) -> list[str]:
 
 
 def _system_prompt(source: str | None, target: str) -> str:
+    """Tested 2026-10-16 on stream lines into Spanish, German and Japanese: without the tone and gaming-terms parts the
+    model translated "don't push, he's one shot" as "don't shove" and turned casual talk formal."""
     src = LANGUAGE_NAMES.get((source or "")[:2], "the original language") if source else "the original language"
     return (
-        f"You translate subtitles of spoken audio from {src} into {LANGUAGE_NAMES[target]}. "
-        "Translate the meaning naturally and briefly, as subtitles; keep names, numbers and technical words; "
-        "do not add notes, quotes or explanations. Never refuse: if a line is unclear, translate it as well as you can."
+        f"You translate subtitles of spoken audio (usually a streamer or creator talking) from {src} into "
+        f"{LANGUAGE_NAMES[target]}. Translate what the speaker means and how they say it: keep their tone and register "
+        "(casual stays casual, jokes and sarcasm stay jokes and sarcasm, excitement, frustration and swearing keep the "
+        "same strength; don't soften, censor or formalise). Use the words people really use when talking or gaming, "
+        "preferring widely understood ones over strongly regional slang; keep names, numbers and gaming terms that are "
+        "normally left in English. The speaker may switch languages within a line: translate all of it. The text comes "
+        "from speech recognition and may have small errors: translate the most likely meaning. Keep it as short as "
+        "natural subtitles. Answer with the translation only, no notes or quotes. Never refuse: if a line is unclear, "
+        "translate it as well as you can."
     )
+
+
+_REPEATS = re.compile(r"([^\w\s.!?~\-ー…・])\1{4,}")  # five or more of one symbol; not dots, dashes and the like
+
+
+def looks_broken(source_text: str, out: str) -> bool:
+    """A rare glitch of fast models: a run of junk symbols (seen once: "笑♀♀♀♀♀♀") or an answer far longer than the line."""
+    m = _REPEATS.search(out)
+    if m and m.group(0) not in source_text:
+        return True
+    return len(out) > 3 * len(source_text) + 60
 
 
 async def _post(http: httpx.AsyncClient, body: dict, backoff: tuple[float, ...] | None = None) -> dict:
@@ -146,7 +166,8 @@ async def translate_lines(http: httpx.AsyncClient, lines: list[str], source: str
             out = json.loads(data["choices"][0]["message"]["content"])["lines"]
         except (KeyError, IndexError, TypeError, ValueError):
             continue
-        if isinstance(out, list) and len(out) == len(lines) and all(isinstance(x, str) for x in out):
+        if (isinstance(out, list) and len(out) == len(lines) and all(isinstance(x, str) for x in out)
+                and not any(looks_broken(a, b) for a, b in zip(lines, out))):
             return [x.strip() for x in out]
     # The batch came back with a different number of lines twice: one line at a time keeps the timing right.
     return [await translate_line(http, line, source, target, live=False) for line in lines]
@@ -165,11 +186,15 @@ async def translate_line(http: httpx.AsyncClient, text: str, source: str | None,
             {"role": "user", "content": (f"Earlier lines, for context only:\n{ctx}\n\n" if ctx else "") + f"Line to translate:\n{text}"},
         ],
     }
-    data = await _post(http, body, LIVE_BACKOFF_SECONDS if live else None)
-    try:
-        return str(data["choices"][0]["message"]["content"]).strip()
-    except (KeyError, IndexError, TypeError) as e:
-        raise TranslationError("unexpected answer") from e
+    for _ in range(2):  # a broken answer is asked again once
+        data = await _post(http, body, LIVE_BACKOFF_SECONDS if live else None)
+        try:
+            out = str(data["choices"][0]["message"]["content"]).strip()
+        except (KeyError, IndexError, TypeError) as e:
+            raise TranslationError("unexpected answer") from e
+        if not looks_broken(text, out):
+            return out
+    raise TranslationError("broken answer")
 
 
 def _read_segments(job_dir: Path) -> dict:

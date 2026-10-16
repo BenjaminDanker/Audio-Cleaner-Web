@@ -159,8 +159,7 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
     snap = cpus = None
     if load is not None:
         snap = load.snapshot()
-        units, per_core = cpusplit.live_units(get_settings().data_dir)
-        cpus = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
+        cpus = cpusplit.job_cpus_now(get_settings().data_dir)
 
     def running_jobs(c) -> list[dict]:
         return [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
@@ -327,8 +326,7 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         beat = 0.0
         while proc.poll() is None:
             # Off the live-audio cores while live sessions run (acw.cpusplit).
-            units, per_core = cpusplit.live_units(data_dir)
-            want = cpusplit.job_cpus(units, per_core) if units > 0 else cpusplit.all_cpus()
+            want = cpusplit.job_cpus_now(data_dir)
             if want != pinned:
                 cpusplit.pin_tree(proc.pid, want)
                 pinned = want

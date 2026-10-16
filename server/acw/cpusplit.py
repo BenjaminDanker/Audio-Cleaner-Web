@@ -41,10 +41,22 @@ UNITS = {"light": 1.0}
 CAPTIONS_LOCAL_UNITS = 0.7  # streaming English caption model
 ECHO_UNITS = 0.2  # echo cancellation: 0.020 cores per stream next to 0.096 for the denoiser (2026-10-15)
 # Units one physical core carries with good latency while file jobs run on the
-# other cores: 12 units on 5 cores, measured 2026-10-14 on the Ryzen 7 1700X.
-# Other CPUs: scaled at start-up by calibrate_units_per_core().
+# other cores. Other CPUs: scaled at start-up by calibrate_units_per_core().
+# * libdf with one copy of the model weights per session (no df_shares_model): 12 units on 5 cores, measured
+#   2026-10-14 on the Ryzen 7 1700X. Each session's 8 MB of weights evicted the others' from the caches, so a
+#   session cost 0.14 cores alone and 0.40 at 28 sessions.
+# * libdf sharing one copy (df_shares_model, native/deepfilter/tract-0.23.patch), the Opus codec through libopus and
+#   one worker process per pair of cores: 30 Opus sessions on 6 cores at p99 15 ms, 36 fell behind (2026-10-16).
+#   4.05 at the reference cost is 4.3 per core on the 1700X (whose single-session cost is 0.104).
 REFERENCE_UNITS_PER_CORE = 2.4
+SHARED_MODEL_UNITS_PER_CORE = 4.05
 REFERENCE_FRAME_COST = 0.110  # cores one standard session used single-threaded there
+# Live audio runs in several worker processes, one per pair of live cores: one Python process falls behind at about
+# ten sessions however many cores it has (each session's thread needs the GIL around every native call).
+CORES_PER_STREAM_WORKER = 2
+# Free-trial sessions only start while live is less than this full, so a trial never takes the last places from
+# people who pay.
+TRIAL_CAPACITY_FRACTION = 0.7
 
 
 def session_units(cfg: dict) -> float:
@@ -68,6 +80,28 @@ def live_cores_for(units: float, units_per_core: float) -> int:
     if units <= 0:
         return 0
     return min(max_live_cores(), int(-(-units // units_per_core)) + 1)
+
+
+def stream_workers() -> int:
+    """How many live worker processes run (acw.stream.worker): one per CORES_PER_STREAM_WORKER live cores, or
+    ACW_STREAM_WORKERS. The web process finds them by their sockets, so only the worker side reads this."""
+    env = os.environ.get("ACW_STREAM_WORKERS", "").strip()
+    n = int(env) if env.isdigit() else -(-max_live_cores() // CORES_PER_STREAM_WORKER)
+    return max(1, min(n, max_live_cores()))
+
+
+def stream_worker_cores(index: int, workers: int) -> list[int]:
+    """Physical core indexes (into physical_cores()) of live worker `index` (1-based) of `workers`: the live cores
+    split into contiguous, nearly equal parts, the first workers taking the extra ones."""
+    base, extra = divmod(max_live_cores(), workers)
+    i = index - 1
+    start = i * base + min(i, extra)
+    return list(range(start, start + base + (1 if i < extra else 0)))
+
+
+def cpus_of(core_indexes) -> set[int]:
+    cores = physical_cores()
+    return {c for i in core_indexes if 0 <= i < len(cores) for c in cores[i]}
 
 
 def live_cpus(units: float | None = None, units_per_core: float = REFERENCE_UNITS_PER_CORE) -> set[int]:
@@ -98,9 +132,10 @@ def units_per_core() -> float:
     s = get_settings()
     cache = s.data_dir / "live-calibration.json"
     cpu = _cpu_model()
+    shared = shares_model(s.bin_dir / "libdf.so")
     try:
         saved = json.loads(cache.read_text())
-        if saved.get("cpu") == cpu:
+        if saved.get("cpu") == cpu and saved.get("shared_model", False) == shared:
             return float(saved["units_per_core"])
     except (OSError, ValueError, KeyError):
         pass
@@ -109,7 +144,7 @@ def units_per_core() -> float:
     except Exception:  # noqa: BLE001 - no model (tests, dev): assume the reference machine
         return REFERENCE_UNITS_PER_CORE
     try:
-        cache.write_text(json.dumps({"cpu": cpu, "units_per_core": round(value, 3)}))
+        cache.write_text(json.dumps({"cpu": cpu, "shared_model": shared, "units_per_core": round(value, 3)}))
     except OSError:
         pass  # sandboxed process: the next unsandboxed one writes it
     return value
@@ -145,7 +180,18 @@ def calibrate_units_per_core(lib_path: Path, model_path: Path, runs: int = 3, se
             costs.append((time.thread_time() - t) / seconds)
     finally:
         df.close()
-    return REFERENCE_UNITS_PER_CORE * REFERENCE_FRAME_COST / max(min(costs), 1e-3)
+    reference = SHARED_MODEL_UNITS_PER_CORE if shares_model(lib_path) else REFERENCE_UNITS_PER_CORE
+    return reference * REFERENCE_FRAME_COST / max(min(costs), 1e-3)
+
+
+def shares_model(lib_path: Path) -> bool:
+    """Whether this libdf build keeps one copy of the model weights for all sessions (df_shares_model)."""
+    import ctypes
+
+    try:
+        return hasattr(ctypes.CDLL(str(lib_path)), "df_shares_model")
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------- live marker
@@ -154,21 +200,48 @@ def marker(data_dir: Path) -> Path:
     return data_dir / "live-units"
 
 
-def set_live_units(data_dir: Path, units: float, units_per_core: float) -> None:
-    """Written by the web process whenever server-processed live sessions start/stop."""
+def set_live_units(data_dir: Path, units: float, units_per_core: float, cores=None) -> None:
+    """Written by the web process whenever server-processed live sessions start/stop. `cores`: the physical core
+    indexes of the live workers that have sessions using our CPU (file jobs keep off them and one spare core)."""
     p = marker(data_dir)
     tmp = p.with_suffix(".tmp")
-    tmp.write_text(f"{max(0.0, units):.2f} {units_per_core:.3f}")
+    text = f"{max(0.0, units):.2f} {units_per_core:.3f}"
+    if cores is not None:
+        text += " " + (",".join(str(c) for c in sorted(set(cores))) or "-")
+    tmp.write_text(text)
     tmp.replace(p)
+
+
+def _read_marker(data_dir: Path) -> tuple[float, float, list[int] | None]:
+    try:
+        parts = marker(data_dir).read_text().split()
+        cores = None
+        if len(parts) > 2:
+            cores = [] if parts[2] == "-" else [int(c) for c in parts[2].split(",")]
+        return float(parts[0]), float(parts[1]), cores
+    except (OSError, ValueError, IndexError):
+        return 0.0, REFERENCE_UNITS_PER_CORE, None
 
 
 def live_units(data_dir: Path) -> tuple[float, float]:
     """(units in use, units per core) from the marker; (0, reference) if none."""
-    try:
-        units, per_core = marker(data_dir).read_text().split()
-        return float(units), float(per_core)
-    except (OSError, ValueError):
-        return 0.0, REFERENCE_UNITS_PER_CORE
+    units, per_core, _ = _read_marker(data_dir)
+    return units, per_core
+
+
+def job_cpus_now(data_dir: Path) -> set[int]:
+    """The logical CPUs file jobs may use right now: off the cores of the live workers that have sessions, plus the
+    next live core (where the next session's worker would start), or by units from an older marker."""
+    units, per_core, cores = _read_marker(data_dir)
+    if cores is None:
+        return job_cpus(units, per_core) if units > 0 else all_cpus()
+    if not cores:
+        return all_cpus()
+    reserved = set(cores)
+    spare = next((c for c in range(max_live_cores()) if c not in reserved), None)
+    if spare is not None:
+        reserved.add(spare)
+    return cpus_of(i for i in range(len(physical_cores())) if i not in reserved) or all_cpus()
 
 
 # ------------------------------------------------------------------ pinning

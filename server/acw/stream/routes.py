@@ -34,14 +34,15 @@ router = APIRouter(tags=["stream"])
 
 MAX_SESSIONS_PER_USER = trust.MAX_LIVE_SESSIONS  # of which at most one runs on the free trial
 MAX_SESSIONS_PER_IP = 6  # across accounts
-# Everything live in this process shares one event loop and one GIL (measured 2026-10-16: 2 to 3 percent of a core per
-# session, about 4.5 percent for an extra-accurate one, which also feeds the OpenAI socket from the loop). Past about
-# 30 sessions every session sees tens of ms of added latency, and the job API runs in the same process. These limits
-# are separate from the stream worker's capacity (cores for noise removal, the caption decoder).
-MAX_LIVE_SESSIONS = int(os.environ.get("ACW_MAX_LIVE_SESSIONS", "30"))  # all kinds, this process
-MAX_PREMIUM_SESSIONS = int(os.environ.get("ACW_MAX_PREMIUM_SESSIONS", "15"))  # of which with extra-accurate captions
+# Everything live in this process shares one event loop and one GIL, which relays the audio (and feeds the
+# extra-accurate captions' socket) next to the job API. Its cost per session was measured (2026-10-16: about 2% of a
+# core per Opus session once WebSocket compression is off, a little more with extra-accurate captions), but the mix
+# of sessions, uploads and API calls varies, so admission looks at the result instead of counting: how late the loop
+# runs its timers (LoopLag). New sessions are refused only while it runs late; running sessions are never cut.
+# MAX_LIVE_SESSIONS is only a sanity bound below uvicorn's --limit-concurrency.
+MAX_LIVE_SESSIONS = int(os.environ.get("ACW_MAX_LIVE_SESSIONS", "300"))
+LOOP_LAG_LIMIT = float(os.environ.get("ACW_LOOP_LAG_LIMIT_MS", "25")) / 1000  # p90 timer lateness over 10 s
 LIVE_BUSY_MESSAGE = "Live is very busy right now. Please try again in a few minutes."
-PREMIUM_BUSY_MESSAGE = "Extra-accurate captions are very busy right now. Please try again in a few minutes."
 MAX_SESSION_SECONDS = 12 * 3600
 START_TIMEOUT = 15
 SILENCE_TIMEOUT = 30  # nothing at all from the client
@@ -71,6 +72,25 @@ _live: dict[str, int] = {}  # user_id -> active sessions in this process
 _live_ip: dict[str, int] = {}  # client address -> active sessions in this process
 _live_ids: set[str] = set()  # ids of the sessions this process is running (the rest "active" in the database are orphans)
 _live_units = 0.0  # capacity units of running sessions (file jobs move off the cores they need)
+_busy_cores: dict[int, int] = {}  # physical core -> sessions using our CPU on the live worker that owns it
+
+
+def _publish_units() -> None:
+    """The marker file job workers read: units in use and the cores of the live workers running them."""
+    cpusplit.set_live_units(get_settings().data_dir, _live_units, cpusplit.units_per_core(),
+                            [c for c, n in _busy_cores.items() if n > 0])
+
+
+def worker_sockets() -> list:
+    """The live workers' sockets, in the order they are filled: the configured one (worker 1), then stream-2.sock,
+    stream-3.sock... that exist next to it (acw.stream.worker.socket_path)."""
+    base = get_settings().stream_worker_socket
+    more = []
+    for p in base.parent.glob(f"{base.stem}-*{base.suffix}"):
+        n = p.stem.rsplit("-", 1)[-1]
+        if n.isdigit():
+            more.append((int(n), p))
+    return [base] + [p for _, p in sorted(more)]
 
 
 def drain_requested() -> bool:
@@ -79,8 +99,11 @@ def drain_requested() -> bool:
 
 
 async def startup() -> None:
+    global _lag_task
+    if _lag_task is None or _lag_task.done():
+        _lag_task = asyncio.get_running_loop().create_task(_lag.run())
     await asyncio.to_thread(cpusplit.units_per_core)  # calibrate once, off the event loop
-    cpusplit.set_live_units(get_settings().data_dir, 0.0, cpusplit.units_per_core())
+    _publish_units()
     # Sessions left "active" by a previous process never reached _finish.
     await asyncio.to_thread(close_orphans, 0, "server_restart")
 
@@ -220,6 +243,7 @@ class Session:
         self.next_extend_try = 0.0
         self.end_reason = "client_closed"
         self.reader = self.writer = None
+        self.worker_cores: list[int] = []  # the physical cores of the live worker running this session
         self.last_rx = time.monotonic()  # when the client last sent anything
         self.worker_task: asyncio.Task | None = None
         self.premium = None
@@ -353,8 +377,33 @@ async def _refuse_busy(ws: WebSocket, message: str) -> None:
     await ws.close(code=1013)
 
 
-def premium_sessions() -> int:
-    return sum(1 for sessions in _open.values() for s in sessions if s.cfg.get("captions") == "premium")
+class LoopLag:
+    """How late this process's event loop runs a 100 ms timer: the measured cost of everything it does at once."""
+
+    INTERVAL = 0.1
+
+    def __init__(self, window: int = 100):  # the last 10 s
+        self.samples: deque[float] = deque(maxlen=window)
+
+    async def run(self) -> None:
+        while True:
+            t = time.monotonic()
+            await asyncio.sleep(self.INTERVAL)
+            self.samples.append(max(0.0, time.monotonic() - t - self.INTERVAL))
+
+    def p90(self) -> float:
+        if not self.samples:
+            return 0.0
+        xs = sorted(self.samples)
+        return xs[int(0.9 * (len(xs) - 1))]
+
+
+_lag = LoopLag()
+_lag_task: asyncio.Task | None = None
+
+
+def loop_busy() -> bool:
+    return _lag.p90() > LOOP_LAG_LIMIT
 
 
 async def _evict_stale(user_id: str, limit: int | None = None) -> bool:
@@ -446,7 +495,9 @@ async def stream_ws(ws: WebSocket) -> None:
     if _live_ip.get(net, 0) >= MAX_SESSIONS_PER_IP:
         await _refuse(ws, "too_many_sessions", "Too many live sessions from this network.", 30)
         return
-    if sum(_live.values()) >= MAX_LIVE_SESSIONS:
+    if sum(_live.values()) >= MAX_LIVE_SESSIONS or loop_busy():
+        if loop_busy():
+            log.warning("live: new session refused, the event loop runs %.0f ms late (p90)", _lag.p90() * 1000)
         await _refuse_busy(ws, LIVE_BUSY_MESSAGE)
         return
     _live[principal.user_id] = _live.get(principal.user_id, 0) + 1
@@ -460,7 +511,9 @@ async def stream_ws(ws: WebSocket) -> None:
             units = cpusplit.session_units(sess.cfg)
             if units:
                 _live_units += units
-                cpusplit.set_live_units(get_settings().data_dir, _live_units, cpusplit.units_per_core())
+                for c in sess.worker_cores:
+                    _busy_cores[c] = _busy_cores.get(c, 0) + 1
+                _publish_units()
             await _run(sess)
     except WebSocketDisconnect:
         pass
@@ -471,11 +524,51 @@ async def stream_ws(ws: WebSocket) -> None:
     finally:
         if units:
             _live_units = max(0.0, _live_units - units)
-            cpusplit.set_live_units(get_settings().data_dir, _live_units, cpusplit.units_per_core())
+            for c in sess.worker_cores:
+                _busy_cores[c] = max(0, _busy_cores.get(c, 1) - 1)
+            _publish_units()
         _live[principal.user_id] -= 1
         _live_ip[net] = max(0, _live_ip.get(net, 1) - 1)
         if sess is not None:
             await _finish(sess)
+
+
+def trial_room() -> float:
+    """Units free-trial sessions may fill, all live workers together: they never take the last places."""
+    return cpusplit.TRIAL_CAPACITY_FRACTION * cpusplit.max_live_cores() * cpusplit.units_per_core()
+
+
+async def _open_worker(sess: "Session", worker_cfg: dict) -> dict:
+    """Starts the session on the first live worker that takes it (they are filled in order, so the cores in use
+    stay together). Returns its "ready" event, or the refusal: "full" (with what would still fit) if every worker
+    is full, "trial_busy", or raises if none answers."""
+    refusal: dict | None = None
+    for path in worker_sockets():
+        try:
+            reader, writer = await asyncio.open_unix_connection(str(path))
+        except OSError:
+            continue  # a worker that is restarting, or a socket left by an earlier setup
+        try:
+            await P.send_msg(writer, P.MSG_START, P.pack_json(worker_cfg))
+            kind, payload = await asyncio.wait_for(P.read_msg(reader), timeout=20)
+            ready = json.loads(payload)
+        except Exception:  # noqa: BLE001 - this worker is broken: try the next
+            log.exception("live worker %s did not answer", path.name)
+            writer.close()
+            continue
+        if kind == P.MSG_EVENT and ready.get("type") == "ready":
+            sess.reader, sess.writer = reader, writer
+            sess.worker_cores = [int(c) for c in ready.get("cores") or []]
+            return ready
+        writer.close()
+        if kind == P.MSG_EVENT and ready.get("code") in ("full", "trial_busy"):
+            if refusal is None or refusal.get("code") != "full":
+                refusal = ready  # "full" says what would still fit: it wins over "trial_busy"
+            continue
+        raise RuntimeError(f"worker refused: {ready}")
+    if refusal is None:
+        raise RuntimeError("no live worker answers")
+    return refusal
 
 
 def _drop_worker(sess: "Session") -> None:
@@ -517,21 +610,26 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
     await asyncio.to_thread(auth.accept_terms, principal.user_id, "continued use", ip)
     denoise = cfg.get("denoise")
     captions = cfg.get("captions")
-    language = cfg.get("language")
-    if (language is not None and not (isinstance(language, str) and 2 <= len(language) <= 3 and language.isalpha())) or (
-        cfg.get("sampleRate", P.SAMPLE_RATE) != P.SAMPLE_RATE
-    ):
-        await _send_json(ws, {"type": "error", "code": "bad_config", "message": "48 kHz audio and a 2-3 letter language code."})
+    # The spoken language: one code, or for people who switch between languages a list of up to three (extra-accurate
+    # captions follow the switches; translations then translate whatever was said).
+    spoken = cfg.get("language")
+    spoken_list = spoken if isinstance(spoken, list) else ([] if spoken is None else [spoken])
+    if (not all(isinstance(x, str) and 2 <= len(x) <= 3 and x.isalpha() for x in spoken_list) or len(spoken_list) > 3
+            or cfg.get("sampleRate", P.SAMPLE_RATE) != P.SAMPLE_RATE):
+        await _send_json(ws, {"type": "error", "code": "bad_config",
+                              "message": "48 kHz audio and a 2-3 letter language code (or a list of up to three)."})
         await ws.close(code=1008)
         return None
-    if captions == "local" and language not in (None, "en"):
+    spoken_list = list(dict.fromkeys(x.lower() for x in spoken_list))
+    language = spoken_list[0] if len(spoken_list) == 1 else None  # one language for sure, else None
+    if captions == "local" and spoken_list not in ([], ["en"]):
         await _send_json(ws, {"type": "error", "code": "bad_config",
                               "message": "Standard captions are English only. Extra-accurate captions work in other languages."})
         await ws.close(code=1008)
         return None
     # Translations of the final captions (billed by the speech translated, per language, when the session ends).
     try:
-        targets = translate.check_targets(cfg.get("translate"), language or ("en" if captions == "local" else None))
+        targets = translate.check_targets(cfg.get("translate"), language or ("en" if captions == "local" and not spoken_list else None))
     except ValueError as e:
         await _send_json(ws, {"type": "error", "code": "bad_config", "message": f"Translations: {e}."})
         await ws.close(code=1008)
@@ -566,9 +664,6 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Check the noise strength and the options you chose."})
         await ws.close(code=1008)
         return None
-    if captions == "premium" and premium_sessions() >= MAX_PREMIUM_SESSIONS:
-        await _refuse_busy(ws, PREMIUM_BUSY_MESSAGE)
-        return None
     # The free trial pays for Standard live while the account has trial seconds left; anything else is billed.
     trial_left = 0.0
     if _trial_eligible(cfg, denoise, captions):
@@ -577,7 +672,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             await _send_json(ws, {"type": "error", "code": "too_many_sessions", "message": TRIAL_ONE_AT_A_TIME_MESSAGE})
             await ws.close(code=1008)
             return None
-    sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language,
+    sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language, "languages": spoken_list,
                                    "atten_lim_db": atten,
                                    "echo_reference": cfg.get("echoReference") is True}, rate, trial_left)
     # Whatever goes wrong from here (the client vanishing, the worker, the database), _finish gives the hold back.
@@ -607,31 +702,29 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             (sess.id, principal.user_id, principal.api_key_id, denoise, captions, sess.hold_id, ip[:64], db.now()),
         )
         try:
-            sess.reader, sess.writer = await asyncio.open_unix_connection(str(get_settings().stream_worker_socket))
             worker_cfg = dict(sess.cfg)
             if captions != "local":
                 worker_cfg["captions"] = None
             worker_cfg["tap_pcm"] = captions == "premium"
             worker_cfg["trial"] = sess.trial
             worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
-            await P.send_msg(sess.writer, P.MSG_START, P.pack_json(worker_cfg))
-            kind, payload = await asyncio.wait_for(P.read_msg(sess.reader), timeout=20)
-            ready = json.loads(payload)
-            if kind == P.MSG_EVENT and ready.get("code") == "full":
+            if sess.trial and _live_units + cpusplit.session_units(worker_cfg) > trial_room():
+                ready = {"code": "trial_busy"}
+            else:
+                ready = await _open_worker(sess, worker_cfg)
+            if ready.get("code") == "full":
                 sess.end_reason = "full"
-                _drop_worker(sess)
                 options = ready.get("available") or []
                 await _send_json(ws, {"type": "error", "code": "full", "available": options, "retryAfterSeconds": 60,
                                       "message": _full_message(worker_cfg, options)})
                 await ws.close(code=1013)
                 return sess
-            if kind == P.MSG_EVENT and ready.get("code") == "trial_busy":
+            if ready.get("code") == "trial_busy":
                 sess.end_reason = "trial_busy"
-                _drop_worker(sess)
                 await _send_json(ws, {"type": "error", "code": "trial_busy", "retryAfterSeconds": 120, "message": TRIAL_BUSY_MESSAGE})
                 await ws.close(code=1013)
                 return sess
-            if kind != P.MSG_EVENT or ready.get("type") != "ready":
+            if ready.get("type") != "ready":
                 raise RuntimeError(f"worker refused: {ready}")
         except Exception:  # noqa: BLE001
             log.exception("stream worker unavailable")
@@ -656,7 +749,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         if captions == "premium":
             from .openai_live import PremiumCaptions
 
-            sess.premium = PremiumCaptions(language, premium_event, user_hint=principal.user_id, on_fail=sess.premium_failed)
+            sess.premium = PremiumCaptions(spoken_list, premium_event, user_hint=principal.user_id, on_fail=sess.premium_failed)
             await sess.premium.connect()
             if sess.premium.failed and sess.current_rate() == 0:
                 # Captions were all this session was for, and they don't work: nothing to bill, nothing to keep open.

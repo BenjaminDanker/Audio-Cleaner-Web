@@ -67,12 +67,73 @@ def fit(x: np.ndarray | None, n: int) -> np.ndarray:
     return x[:n] if len(x) >= n else np.pad(x, (0, n - len(x)))
 
 
+_OPUS_APPLICATION_AUDIO = 2049
+_OPUS_SET_BITRATE = 4002
+_OPUS_SET_VBR = 4006
+_opus_lib = None
+
+
+def _libopus():
+    """The system libopus through ctypes (None if it isn't installed). ctypes lets go of the GIL during each call, so
+    the sessions of one worker encode and decode in parallel; PyAV holds the GIL for the whole encode (measured
+    2026-10-16: four streams in four threads took 3x as long as one)."""
+    global _opus_lib
+    if _opus_lib is None:
+        import ctypes
+        import ctypes.util
+
+        try:
+            lib = ctypes.CDLL(ctypes.util.find_library("opus") or "libopus.so.0")
+        except OSError:
+            _opus_lib = False
+            return None
+        c_int_p = ctypes.POINTER(ctypes.c_int)
+        lib.opus_decoder_create.restype = ctypes.c_void_p
+        lib.opus_decoder_create.argtypes = [ctypes.c_int32, ctypes.c_int, c_int_p]
+        lib.opus_decode_float.restype = ctypes.c_int
+        lib.opus_decode_float.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32,
+                                          ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_int]
+        lib.opus_decoder_destroy.argtypes = [ctypes.c_void_p]
+        lib.opus_encoder_create.restype = ctypes.c_void_p
+        lib.opus_encoder_create.argtypes = [ctypes.c_int32, ctypes.c_int, ctypes.c_int, c_int_p]
+        lib.opus_encode_float.restype = ctypes.c_int32
+        lib.opus_encode_float.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float), ctypes.c_int,
+                                          ctypes.c_char_p, ctypes.c_int32]
+        lib.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
+        lib.opus_encoder_ctl.restype = ctypes.c_int
+        _opus_lib = lib
+    return _opus_lib or None
+
+
 class OpusCodec:
     """Per-session Opus decoder (client uplink) and encoder (cleaned audio
     back). Runs only in the sandboxed stream worker: the uplink bitstream is
-    untrusted."""
+    untrusted. libopus directly when it is installed, else PyAV."""
+
+    FRAME = 960  # 20 ms at 48 kHz: the only packet size the clients send
+    MAX_PACKET = 4000
 
     def __init__(self, bitrate: int = 96_000, encoder: bool = True):
+        bitrate = int(min(max(bitrate, 24_000), 160_000))
+        self._lib = _libopus()
+        self.dec = self.enc = None
+        if self._lib is not None:
+            import ctypes
+
+            self._c = ctypes
+            err = ctypes.c_int(0)
+            self.dec = self._lib.opus_decoder_create(SAMPLE_RATE, 1, ctypes.byref(err))
+            if not self.dec or err.value:
+                raise RuntimeError("opus decoder")
+            self._pcm = np.zeros(self.FRAME, np.float32)
+            if encoder:
+                self.enc = self._lib.opus_encoder_create(SAMPLE_RATE, 1, _OPUS_APPLICATION_AUDIO, ctypes.byref(err))
+                if not self.enc or err.value:
+                    raise RuntimeError("opus encoder")
+                self._lib.opus_encoder_ctl(ctypes.c_void_p(self.enc), _OPUS_SET_BITRATE, ctypes.c_int32(bitrate))
+                self._lib.opus_encoder_ctl(ctypes.c_void_p(self.enc), _OPUS_SET_VBR, ctypes.c_int32(1))
+                self._out = ctypes.create_string_buffer(self.MAX_PACKET)
+            return
         import av
 
         self._av = av
@@ -86,11 +147,17 @@ class OpusCodec:
         self.enc.sample_rate = SAMPLE_RATE
         self.enc.layout = "mono"
         self.enc.format = "s16"
-        self.enc.bit_rate = int(min(max(bitrate, 24_000), 160_000))
+        self.enc.bit_rate = bitrate
         self.enc.options = {"application": "audio", "frame_duration": "20", "vbr": "on"}
         self.enc.open()
 
     def decode(self, pkt: bytes) -> np.ndarray:
+        if self._lib is not None:
+            fp = self._pcm.ctypes.data_as(self._c.POINTER(self._c.c_float))
+            n = self._lib.opus_decode_float(self.dec, pkt, len(pkt), fp, self.FRAME, 0)
+            if n != self.FRAME:  # an error (< 0, e.g. a packet longer than 20 ms) or a shorter packet
+                raise ValueError("opus packets must be 20 ms")
+            return self._pcm.copy()
         frames = self.dec.decode(self._av.Packet(pkt))
         if not frames:
             return np.zeros(960, np.float32)
@@ -102,12 +169,33 @@ class OpusCodec:
         return x
 
     def encode(self, y: np.ndarray) -> bytes:
+        if self._lib is not None:
+            y = np.ascontiguousarray(np.clip(y, -1.0, 1.0), np.float32)
+            n = self._lib.opus_encode_float(self.enc, y.ctypes.data_as(self._c.POINTER(self._c.c_float)), len(y),
+                                            self._out, self.MAX_PACKET)
+            if n < 0:
+                raise RuntimeError(f"opus encode failed ({n})")
+            return self._out.raw[:n]
         pcm = (np.clip(y, -1.0, 1.0) * 32767.0).astype(np.int16).reshape(1, -1)
         frame = self._av.AudioFrame.from_ndarray(pcm, format="s16", layout="mono")
         frame.sample_rate = SAMPLE_RATE
         frame.pts = self.pts
         self.pts += pcm.shape[1]
         return b"".join(bytes(p) for p in self.enc.encode(frame))
+
+    def close(self) -> None:
+        if self._lib is not None:
+            if self.dec:
+                self._lib.opus_decoder_destroy(self.dec)
+            if self.enc:
+                self._lib.opus_encoder_destroy(self.enc)
+            self.dec = self.enc = None
+
+    def __del__(self) -> None:  # pragma: no cover
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class _StreamingRecognizer:
@@ -262,6 +350,13 @@ def shed_backlog(chunks: list[np.ndarray], keep: int) -> tuple[list[np.ndarray],
     return kept, sum(len(c) for c in chunks) - have
 
 
+# Silence isn't decoded: after a pause long enough for the line to end, the audio is skipped (only counted, so the
+# captions' times stay right) until someone talks again; the last moments before that are kept and decoded with it.
+SPEECH_DBFS = -50.0  # quieter than this is silence (of the denoised audio when noise removal is on, else the mic's)
+GATE_AFTER_S = 2.0  # quiet this long first, so the line has ended (WER on LibriSpeech with pauses: 4.4% gated vs 4.7-5.2% not)
+PREROLL_FRAMES = 15  # 0.3 s of 20 ms frames kept while gated: the start of the next words
+
+
 class StreamingCaptioner:
     """Live English captions for one session: a partial line while someone
     talks, a final line at each pause. Fed the session's original (not
@@ -273,39 +368,76 @@ class StreamingCaptioner:
         self.engine = shared_recognizer(models_dir)
         self.stream = self.engine.rec.create_stream()
         self.emit = emit
-        self._pending: list[np.ndarray] = []
+        self._pending: list[np.ndarray | int] = []  # audio to decode, and (ints) samples skipped as silence
         self._pending_lock = threading.Lock()
         self._to16k = Decimate3()
-        self._fed = 0  # 16 kHz samples given to the recognizer
+        self._fed = 0  # 16 kHz samples given to the recognizer (or skipped as silence)
         self._line_start = 0  # sample where the current line began
         self._last_text = ""
         self._line = 0
         self.closed = False
         self._behind = False  # one "captions_behind" warning per incident
+        self._quiet = 0.0  # seconds since the last speech
+        self._gated = False
+        self._preroll: list[np.ndarray] = []
+        self._skipped = 0  # 48 kHz samples skipped since the gate closed (not counting the preroll)
+        self.skipped_total = 0
         self.engine.add(self)
 
-    def feed(self, x48: np.ndarray) -> None:
-        with self._pending_lock:
-            self._pending.append(x48)
+    def feed(self, x48: np.ndarray, level_dbfs: float | None = None) -> None:
+        """`level_dbfs`: how loud the speech in this frame is (the denoised frame's level when noise removal runs);
+        by default the frame's own level."""
+        if level_dbfs is None:
+            level_dbfs = 20 * np.log10(float(np.sqrt(np.mean(x48 * x48))) + 1e-9)
+        if level_dbfs >= SPEECH_DBFS:
+            self._quiet = 0.0
+            with self._pending_lock:
+                if self._gated:
+                    self._gated = False
+                    self._pending.append(self._skipped)
+                    self._pending.extend(self._preroll)
+                    self._preroll, self._skipped = [], 0
+                self._pending.append(x48)
+            return
+        self._quiet += len(x48) / SAMPLE_RATE
+        if self._quiet <= GATE_AFTER_S:
+            with self._pending_lock:
+                self._pending.append(x48)
+            return
+        self._gated = True
+        self._preroll.append(x48)
+        if len(self._preroll) > PREROLL_FRAMES:
+            n = len(self._preroll.pop(0))
+            self._skipped += n
+            self.skipped_total += n
 
     def _take_audio(self) -> None:  # decoder thread
         with self._pending_lock:
-            chunks, self._pending = self._pending, []
-        if chunks:
-            total = sum(len(c) for c in chunks)
-            if total > MAX_BACKLOG_SAMPLES:
-                # The decoder is more than ~2 s behind this stream (too many streams, or the box is busy). Queueing the
-                # rest would only make every caption later and grow memory: drop the oldest audio, say so once.
-                chunks, dropped = shed_backlog(chunks, KEEP_BACKLOG_SAMPLES)
-                self._fed += dropped // 3  # the captions' times keep following the talk, not only the audio that was fed
-                if not self._behind:
-                    self._behind = True
-                    self.emit({"type": "warning", "code": "captions_behind", "message": CAPTIONS_BEHIND_MESSAGE})
-            elif total < RECOVERED_BACKLOG_SAMPLES:
-                self._behind = False
-            x = self._to16k(np.concatenate(chunks))
-            self.stream.accept_waveform(_StreamingRecognizer.INPUT_RATE, x)
-            self._fed += len(x)
+            items, self._pending = self._pending, []
+        if not items:
+            return
+        total = sum(len(c) for c in items if not isinstance(c, int))
+        if total > MAX_BACKLOG_SAMPLES:
+            # The decoder is more than ~2 s behind this stream (too many streams, or the box is busy). Queueing the
+            # rest would only make every caption later and grow memory: drop the oldest audio, say so once.
+            kept, dropped = shed_backlog([c for c in items if not isinstance(c, int)], KEEP_BACKLOG_SAMPLES)
+            items = [dropped + sum(c for c in items if isinstance(c, int))] + kept
+            if not self._behind:
+                self._behind = True
+                self.emit({"type": "warning", "code": "captions_behind", "message": CAPTIONS_BEHIND_MESSAGE})
+        elif total < RECOVERED_BACKLOG_SAMPLES:
+            self._behind = False
+        run: list[np.ndarray] = []
+        for c in items + [0]:
+            if isinstance(c, int):
+                if run:
+                    x = self._to16k(np.concatenate(run))
+                    self.stream.accept_waveform(_StreamingRecognizer.INPUT_RATE, x)
+                    self._fed += len(x)
+                    run = []
+                self._fed += c // 3  # skipped: the captions' times keep following the talk
+            else:
+                run.append(c)
 
     def _publish(self, final: bool = False) -> None:  # decoder thread
         rec = self.engine.rec

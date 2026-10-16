@@ -42,7 +42,7 @@ class RecordingCaptioner:
     def __init__(self, *_args):
         RecordingCaptioner.fed = []
 
-    def feed(self, x):
+    def feed(self, x, level_dbfs=None):
         RecordingCaptioner.fed.append(x)
 
     def flush(self):

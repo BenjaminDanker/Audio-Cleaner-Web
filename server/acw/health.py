@@ -28,16 +28,19 @@ def missing_files() -> list[str]:
 
 
 def stream_worker_ok(timeout: float = 2.0) -> bool:
-    path = get_settings().stream_worker_socket
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect(str(path))
-        return True
-    except OSError:
-        return False
-    finally:
-        s.close()
+    """Every live worker answers on its socket (acw.stream.routes.worker_sockets)."""
+    from .stream.routes import worker_sockets
+
+    for path in worker_sockets():
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(str(path))
+        except OSError:
+            return False
+        finally:
+            s.close()
+    return True
 
 
 def stale_running_jobs(now: int | None = None) -> int:

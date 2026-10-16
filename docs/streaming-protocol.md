@@ -22,7 +22,7 @@ Client sends one text message within 15 s:
 {"type": "start", "version": 1,
  "denoise": "light" | null,
  "captions": "local" | "premium" | null,
- "language": "en" | null,
+ "language": "en" | ["en", "es"] | null,
  "sampleRate": 48000,
  "codec": "opus" | "pcm_s16le",
  "opusBitrate": 96000,
@@ -32,6 +32,14 @@ Client sends one text message within 15 s:
 ```
 
 `echoReference` is optional (default false); see section 5.
+
+`language` is the spoken language, or for someone who switches between languages a list of up to three: extra-accurate
+captions then follow the switches, and translations translate whatever was said (a translation language may then be
+one of the spoken ones). Standard captions are English only (`"en"` or null).
+
+`captions: "premium"` without denoise is never refused because our live workers are busy; any new session is refused
+(code `full`, `available: []`) only while the server's own relay is measurably overloaded, which running sessions
+never notice.
 
 **Free trial.** Every account gets two hours of Standard live once (per mailbox). A session that is only
 `denoise: "light"` and/or `captions: "local"` runs on those trial seconds while the account has any: nothing is set

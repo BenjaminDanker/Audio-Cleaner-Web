@@ -12,7 +12,7 @@ Environment=PYTHONPATH=%h/audio-cleaner/app
 EnvironmentFile=%h/audio-cleaner/secrets/acw.env
 ExecStart=%h/audio-cleaner/venv/bin/uvicorn acw.app:app --host 127.0.0.1 --port 8790 \
     --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
-    --timeout-keep-alive 30 --ws-max-size 1048576 --limit-concurrency 500 --no-access-log
+    --timeout-keep-alive 30 --ws-max-size 1048576 --ws-per-message-deflate false --limit-concurrency 500 --no-access-log
 Restart=always
 RestartSec=3
 UMask=0077

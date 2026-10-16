@@ -120,6 +120,25 @@ def test_a_batch_with_the_wrong_number_of_lines_falls_back_to_one_line_at_a_time
     assert asyncio.run(run()) == ["<a>", "<b>", "<c>"]
 
 
+def test_a_broken_answer_is_asked_again_and_then_given_up(monkeypatch):
+    answers = iter(["ここ嫌い、笑♀♀♀♀♀♀", "ここマジで嫌いｗ", "x" * 500, "y" * 500])
+    calls = fake_model(monkeypatch, lambda t, lines: [next(answers)])
+
+    async def run(text):
+        async with httpx.AsyncClient() as http:
+            return await translate.translate_line(http, text, "en", "ja")
+
+    assert asyncio.run(run("I hate it here lmao")) == "ここマジで嫌いｗ" and len(calls) == 2
+    with pytest.raises(translate.TranslationError):
+        asyncio.run(run("short line"))
+    assert not translate.looks_broken("wait... what?!", "Warte.... was?!")  # a run the line itself has
+
+
+def test_the_prompt_keeps_tone_and_gaming_terms():
+    p = translate._system_prompt("en", "de")
+    assert "into German" in p and "tone" in p and "gaming terms" in p and "switch languages" in p
+
+
 def test_finalize_writes_one_set_of_files_per_language(tmp_path):
     from acw.worker import runner
 

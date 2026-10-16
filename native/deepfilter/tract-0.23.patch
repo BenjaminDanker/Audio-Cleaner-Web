@@ -10,9 +10,12 @@ the pinned native/deepfilter/Cargo.lock.
   * capi.rs: df_create defaults to always-on stages; new df_create_with_params and df_last_error;
     df_create* return NULL instead of panicking; df_process_frame catches panics.
     New cargo profile `release-capi` (release-lto with panic=unwind) so that works.
+  * tract.rs: the three networks are optimized once per process and shared (Arc plans) by every
+    instance; capi.rs: df_shares_model() says so. Many concurrent instances no longer each keep
+    ~8 MB of weights that evict one another from the CPU caches (live audio: 0.40 -> 0.14 cores per
+    stream at 28 streams on 7 cores, bit-identical output).
   * wasm.rs: df_create always-on stages; new df_create_with_params, df_process_frames (batch),
     df_free; errors are thrown as JS errors; console_error_panic_hook installed.
-
 diff --git a/Cargo.toml b/Cargo.toml
 index 1019dbe..6e5588e 100644
 --- a/Cargo.toml
@@ -69,7 +72,7 @@ index c0f3271..f15663e 100644
  js-sys = { version = "0.3", optional = true }
  
 diff --git a/libDF/src/capi.rs b/libDF/src/capi.rs
-index 37f9afd..1649a99 100644
+index 37f9afd..12e6088 100644
 --- a/libDF/src/capi.rs
 +++ b/libDF/src/capi.rs
 @@ -1,10 +1,12 @@
@@ -245,7 +248,7 @@ index 37f9afd..1649a99 100644
  #[no_mangle]
  pub unsafe extern "C" fn df_create(
      path: *const c_char,
-@@ -86,28 +184,58 @@ pub unsafe extern "C" fn df_create(
+@@ -86,28 +184,65 @@ pub unsafe extern "C" fn df_create(
      atten_lim: f32,
      log_level: *const c_char,
  ) -> *mut DFState {
@@ -309,6 +312,13 @@ index 37f9afd..1649a99 100644
 +#[no_mangle]
 +pub unsafe extern "C" fn df_last_error() -> *const c_char {
 +    LAST_ERROR.with(|e| e.borrow().as_ref().map_or(std::ptr::null(), |c| c.as_ptr()))
++}
++
++/// 1: every model instance in this process shares one copy of the network weights (only the state is per
++/// instance), so many concurrent instances stay in the CPU caches. Builds without this function keep a copy each.
++#[no_mangle]
++pub extern "C" fn df_shares_model() -> i32 {
++    1
  }
  
  /// Get DeepFilterNet frame size in samples.
@@ -320,7 +330,7 @@ index 37f9afd..1649a99 100644
  }
  
  /// Get the next log message. Must be freed via `df_free_log_msg(ptr)`
-@@ -156,18 +284,28 @@ pub unsafe extern "C" fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
+@@ -156,18 +291,28 @@ pub unsafe extern "C" fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
  ///     - output: Output buffer of length df_get_frame_length()
  ///
  /// Returns:
@@ -355,7 +365,7 @@ index 37f9afd..1649a99 100644
  }
  
  /// Processes a filter bank sample and return raw gains and DF coefs.
-@@ -199,12 +337,12 @@ pub unsafe extern "C" fn df_process_frame_raw(
+@@ -199,12 +344,12 @@ pub unsafe extern "C" fn df_process_frame_raw(
      let mut out_coefs =
          ArrayViewMut4::from_shape_ptr((1, state.m.df_order, state.m.nb_df, 2), *out_coefs_p);
      if let Some(gains) = gains {
@@ -370,7 +380,7 @@ index 37f9afd..1649a99 100644
      } else {
          *out_coefs_p = std::ptr::null_mut();
      }
-@@ -249,5 +387,7 @@ pub unsafe extern "C" fn df_gain_size(st: *const DFState) -> DynArray {
+@@ -249,5 +394,7 @@ pub unsafe extern "C" fn df_gain_size(st: *const DFState) -> DynArray {
  /// Free a DeepFilterNet Model
  #[no_mangle]
  pub unsafe extern "C" fn df_free(model: *mut DFState) {
@@ -380,7 +390,7 @@ index 37f9afd..1649a99 100644
 +    }
  }
 diff --git a/libDF/src/tract.rs b/libDF/src/tract.rs
-index b39a987..b929e26 100644
+index b39a987..fa40095 100644
 --- a/libDF/src/tract.rs
 +++ b/libDF/src/tract.rs
 @@ -7,9 +7,10 @@ use std::time::Instant;
@@ -404,20 +414,91 @@ index b39a987..b929e26 100644
  
  #[derive(Clone)]
  pub struct DfTract {
-@@ -257,9 +258,9 @@ impl DfTract {
-         )?;
-         let df_dec =
-             init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch)?;
+@@ -238,6 +239,59 @@ impl Default for DfTract {
+     }
+ }
+ 
++type SharedPlans = (
++    std::sync::Arc<TypedRunnableModel>,
++    std::sync::Arc<TypedRunnableModel>,
++    std::sync::Arc<TypedRunnableModel>,
++);
++
++/// The optimized, read-only plans of the three networks, built once per (model, channels, reduce
++/// mask) and shared by every DfTract in the process: each instance only keeps its own state
++/// (RNN states, pulse buffers). Separate copies of the weights (~8 MB per instance) made many
++/// concurrent instances memory-bound: each evicted the others' weights from the CPU caches.
++fn shared_plans(
++    [enc, erb_dec, df_dec]: [&Vec<u8>; 3],
++    model_cfg: &ini::Properties,
++    df_cfg: &ini::Properties,
++    ch: usize,
++    reduce_mask: &ReduceMask,
++) -> Result<SharedPlans> {
++    use std::collections::hash_map::DefaultHasher;
++    use std::collections::HashMap;
++    use std::hash::{Hash, Hasher};
++    use std::sync::{Mutex, OnceLock};
++
++    static PLANS: OnceLock<Mutex<HashMap<u64, SharedPlans>>> = OnceLock::new();
++    let mut h = DefaultHasher::new();
++    (enc, erb_dec, df_dec).hash(&mut h);
++    for (k, v) in model_cfg.iter().chain(df_cfg.iter()) {
++        (k, v).hash(&mut h);
++    }
++    (ch, reduce_mask.clone() as u8).hash(&mut h);
++    let key = h.finish();
++    let plans = PLANS.get_or_init(|| Mutex::new(HashMap::new()));
++    // Built under the lock: two sessions starting together build the plans once, not twice.
++    let mut plans = plans.lock().unwrap_or_else(|e| e.into_inner());
++    if let Some(p) = plans.get(&key) {
++        return Ok(p.clone());
++    }
++    let enc = init_encoder_from_read(&mut Cursor::new(enc), df_cfg, ch)?.into_runnable()?;
++    let erb_dec = init_erb_decoder_from_read(
++        &mut Cursor::new(erb_dec),
++        model_cfg,
++        df_cfg,
++        ch,
++        Some(reduce_mask.clone()),
++    )?
++    .into_runnable()?;
++    let df_dec =
++        init_df_decoder_from_read(&mut Cursor::new(df_dec), model_cfg, df_cfg, ch)?
++            .into_runnable()?;
++    let p = (enc, erb_dec, df_dec);
++    plans.insert(key, p.clone());
++    Ok(p)
++}
++
+ impl DfTract {
+     pub fn new(dfp: DfParams, rp: &RuntimeParams) -> Result<Self> {
+         #[cfg(feature = "timings")]
+@@ -247,19 +301,10 @@ impl DfTract {
+         let df_cfg = config.section(Some("df")).unwrap();
+         let ch = rp.n_ch;
+ 
+-        let enc = init_encoder_from_read(&mut Cursor::new(dfp.enc), df_cfg, ch)?;
+-        let erb_dec = init_erb_decoder_from_read(
+-            &mut Cursor::new(dfp.erb_dec),
+-            model_cfg,
+-            df_cfg,
+-            ch,
+-            Some(rp.reduce_mask.clone()),
+-        )?;
+-        let df_dec =
+-            init_df_decoder_from_read(&mut Cursor::new(dfp.df_dec), model_cfg, df_cfg, ch)?;
 -        let enc = SimpleState::new(enc.into_runnable()?)?;
 -        let erb_dec = SimpleState::new(erb_dec.into_runnable()?)?;
 -        let df_dec = SimpleState::new(df_dec.into_runnable()?)?;
-+        let enc = SimpleState::new(&enc.into_runnable()?)?;
-+        let erb_dec = SimpleState::new(&erb_dec.into_runnable()?)?;
-+        let df_dec = SimpleState::new(&df_dec.into_runnable()?)?;
++        let (enc, erb_dec, df_dec) = shared_plans([&dfp.enc, &dfp.erb_dec, &dfp.df_dec], model_cfg, df_cfg, ch, &rp.reduce_mask)?;
++        let enc = SimpleState::new(&enc)?;
++        let erb_dec = SimpleState::new(&erb_dec)?;
++        let df_dec = SimpleState::new(&df_dec)?;
          #[cfg(feature = "timings")]
          let t1 = Instant::now();
  
-@@ -439,7 +440,7 @@ impl DfTract {
+@@ -439,7 +484,7 @@ impl DfTract {
      ///     - gains: Gain estimates of shape `[n_ch, 1, 1, n_erb]`.
      ///     - coefs: Real-valued DF coefficients estimates of shape `[n_ch, 1, 1, n_erb, 2]`.
      pub fn process_raw(&mut self) -> Result<(f32, Option<Tensor>, Option<Tensor>)> {
@@ -426,7 +507,7 @@ index b39a987..b929e26 100644
          let ch = spec.len_of(Axis(0));
  
          for (nsy_ch, mut erb_ch, mut cplx_ch, state) in izip!(
-@@ -457,12 +458,14 @@ impl DfTract {
+@@ -457,12 +502,14 @@ impl DfTract {
              );
          }
          // Run encoder
@@ -444,7 +525,7 @@ index b39a987..b929e26 100644
          let c0 = enc_emb.pop().unwrap();
          let emb = enc_emb.pop().unwrap();
  
-@@ -532,7 +535,7 @@ impl DfTract {
+@@ -532,7 +579,7 @@ impl DfTract {
          self.rolling_spec_buf_x.pop_front();
          for (ns_ch, mut rbuf, state) in izip!(
              noisy.axis_iter(Axis(0)),
@@ -453,7 +534,7 @@ index b39a987..b929e26 100644
              self.df_states.iter_mut(),
          ) {
              let spec = as_slice_mut_complex(rbuf.as_slice_mut().unwrap());
-@@ -552,9 +555,9 @@ impl DfTract {
+@@ -552,9 +599,9 @@ impl DfTract {
              .rolling_spec_buf_y
              .get_mut(self.df_order - 1)
              .unwrap()
@@ -465,7 +546,7 @@ index b39a987..b929e26 100644
              if gains.shape()[0] < noisy.shape()[0] {
                  // Mask was reduced to single channel
                  let gain_slc = gains.as_slice_mut().unwrap();
-@@ -600,14 +603,14 @@ impl DfTract {
+@@ -600,14 +647,14 @@ impl DfTract {
              self.rolling_spec_buf_x
                  .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
                  .unwrap()
@@ -482,7 +563,7 @@ index b39a987..b929e26 100644
              &[self.ch, self.n_freqs],
          )
          .into_dimensionality::<Ix2>()
-@@ -673,7 +676,7 @@ impl DfTract {
+@@ -673,7 +720,7 @@ impl DfTract {
  
      pub fn set_spec_buffer(&mut self, spec: ArrayView2<f32>) -> Result<()> {
          debug_assert_eq!(self.spec_buf.shape(), spec.shape());
@@ -491,7 +572,7 @@ index b39a987..b929e26 100644
          for (i_ch, mut b_ch) in spec.outer_iter().zip(buf.outer_iter_mut()) {
              for (&i, b) in i_ch.iter().zip(b_ch.iter_mut()) {
                  *b = i
-@@ -687,7 +690,7 @@ impl DfTract {
+@@ -687,7 +734,7 @@ impl DfTract {
              self.rolling_spec_buf_x
                  .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
                  .unwrap()
@@ -500,7 +581,7 @@ index b39a987..b929e26 100644
                  .unwrap(),
              &[self.ch, self.n_freqs],
          )
-@@ -696,7 +699,7 @@ impl DfTract {
+@@ -696,7 +743,7 @@ impl DfTract {
      }
      pub fn get_spec_enh(&self) -> ArrayView2<Complex32> {
          as_arrayview_complex(
@@ -509,7 +590,7 @@ index b39a987..b929e26 100644
              &[self.ch, self.n_freqs],
          )
          .into_dimensionality::<Ix2>()
-@@ -704,7 +707,7 @@ impl DfTract {
+@@ -704,7 +751,7 @@ impl DfTract {
      }
      pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<Complex32> {
          as_arrayview_mut_complex(
@@ -518,7 +599,7 @@ index b39a987..b929e26 100644
              &[self.ch, self.n_freqs],
          )
          .into_dimensionality::<Ix2>()
-@@ -738,16 +741,16 @@ fn df(
+@@ -738,16 +785,16 @@ fn df(
      debug_assert_eq!(ch, spec_out.shape()[0]);
      debug_assert!(spec.len() >= df_order);
      let mut o_f: ArrayViewMut2<Complex32> =
@@ -538,7 +619,7 @@ index b39a987..b929e26 100644
              .into_dimensionality::<Ix2>()
              .unwrap()
      });
-@@ -772,7 +775,7 @@ fn init_encoder_impl(
+@@ -772,7 +819,7 @@ fn init_encoder_impl(
      n_ch: usize,
  ) -> Result<TypedModel> {
      log::debug!("Start init encoder.");
@@ -547,7 +628,7 @@ index b39a987..b929e26 100644
  
      let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
      let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
-@@ -788,7 +791,7 @@ fn init_encoder_impl(
+@@ -788,7 +835,7 @@ fn init_encoder_impl(
          .with_input_fact(0, feat_erb)?
          .with_input_fact(1, feat_spec)?
          .with_input_names(["feat_erb", "feat_spec"])?
@@ -556,7 +637,7 @@ index b39a987..b929e26 100644
  
      m.analyse(true)?;
      let mut m = m.into_typed()?;
-@@ -821,7 +824,7 @@ fn init_erb_decoder_impl(
+@@ -821,7 +868,7 @@ fn init_erb_decoder_impl(
      mask_reduction: Option<ReduceMask>,
  ) -> Result<TypedModel> {
      log::debug!("Start init ERB decoder.");
@@ -565,7 +646,7 @@ index b39a987..b929e26 100644
  
      let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
      let layer_width = net_cfg.get("conv_ch").unwrap().parse::<usize>()?;
-@@ -854,7 +857,7 @@ fn init_erb_decoder_impl(
+@@ -854,7 +901,7 @@ fn init_erb_decoder_impl(
          .with_input_fact(3, e1)?
          .with_input_fact(4, e0)?
          .with_input_names(["emb", "e3", "e2", "e1", "e0"])?;
@@ -574,7 +655,7 @@ index b39a987..b929e26 100644
  
      m.analyse(true)?;
  
-@@ -900,7 +903,7 @@ fn init_erb_decoder_impl(
+@@ -900,7 +947,7 @@ fn init_erb_decoder_impl(
              _ => (),
          }
      }
@@ -583,7 +664,7 @@ index b39a987..b929e26 100644
  
      let m = m.into_optimized()?;
  
-@@ -934,7 +937,7 @@ fn init_df_decoder_impl(
+@@ -934,7 +981,7 @@ fn init_df_decoder_impl(
      n_ch: usize,
  ) -> Result<TypedModel> {
      log::debug!("Start init DF decoder.");
@@ -592,7 +673,7 @@ index b39a987..b929e26 100644
  
      let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
      let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
-@@ -956,7 +959,7 @@ fn init_df_decoder_impl(
+@@ -956,7 +1003,7 @@ fn init_df_decoder_impl(
          .with_input_fact(0, emb)?
          .with_input_fact(1, c0)?
          .with_input_names(["emb", "c0"])?
@@ -601,7 +682,7 @@ index b39a987..b929e26 100644
  
      m.analyse(true)?;
      let mut m = m.into_typed()?;
-@@ -1067,14 +1070,11 @@ pub fn as_arrayview_mut_complex<'a>(
+@@ -1067,14 +1114,11 @@ pub fn as_arrayview_mut_complex<'a>(
      }
  }
  pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<f32> {

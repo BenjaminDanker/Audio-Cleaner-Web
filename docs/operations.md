@@ -607,34 +607,48 @@ all services together may use `ACW_MEMORY_PERCENT` (default 40) of RAM
 scales with cores and the start-up speed calibration. Moving to a bigger
 machine needs no edits: run `deploy/install.sh` there.
 
-**Live comes first.** Live audio gets whole physical cores (`acw.cpusplit`):
-as many as its sessions need plus one spare, up to all but `ACW_MIN_JOB_CORES`
-(default 1 per 8 cores) which file jobs always keep. File jobs are re-pinned
-to whatever is left, every second, so they slow down instead of slowing live
-audio (a job thread on a live core's other hyper-thread halves its speed: one
-niced 6-thread job made 12 sessions lag 0.5 s before this split).
+**Live comes first.** Live audio runs in several worker processes (`acw-stream` starts them: one per
+pair of live cores, `ACW_STREAM_WORKERS` to change it; set it in `acw-worker.env`). Worker 1 listens on
+`data/stream.sock`, worker n on `data/stream-n.sock`; each is pinned to its own cores and the web process fills
+them in order, trying the next when one is full. Live may use all cores but `ACW_MIN_JOB_CORES` (default 1 per 8
+cores), which file jobs always keep; file jobs keep off the cores of the workers that have sessions plus one spare,
+re-pinned every second, so they slow down instead of slowing live audio (a job thread on a live core's other
+hyper-thread halves its speed). One Python process falls behind at about ten sessions however many cores it has
+(each session's thread needs the GIL around every native call): hence the workers.
 
-Capacity is in units (live denoise = 1, local captions
-= 0.7): live cores x units per core, where units per core is calibrated at
-start-up from how fast this CPU runs the model (2.68 on the 1700X; reference
-2.4 at 0.110 cores per session; override `ACW_LIVE_UNITS_PER_CORE`), shrunk
-by other load measured on the live cores. On this machine: 7 live cores x 2.68
-= ~18.8 units. Benchmark with a 6-thread file job squeezed onto the last core,
-20 ms frames, round trip inside the server:
+Capacity is in units (live denoise = 1, local captions = 0.7): each worker's cores x units per core, calibrated at
+start-up from how fast this CPU runs the model (reference 4.05 at 0.110 cores per session when libdf shares the model
+weights between sessions, `df_shares_model`; 2.4 for an older libdf; 4.3 on the 1700X; override
+`ACW_LIVE_UNITS_PER_CORE`), shrunk by other load measured on its cores. Measured 2026-10-16 (Opus, 20 ms frames,
+3 workers on 6 cores, round trip inside the server):
 
-| sessions | p50 | p99 |
-|---|---|---|
-| 16 standard | 9 ms | 13 ms |
-| 18 standard | 7 ms | 13 ms |
+| sessions on 6 cores | p50 | p99 | captions behind (median) |
+|---|---|---|---|
+| 30 noise removal | 7 ms | 16 ms | |
+| 36 noise removal | falls behind | | |
+| 12 noise removal + standard captions | 6 ms | 14 ms | 0.12 s |
+| 18 noise removal + standard captions | 7 ms | 39 ms | 0.56 s |
+| 30 standard captions only (speech with pauses) | 1 ms | 3 ms | 0.31 s |
 
-When full, a new session is refused with the options that still fit;
-sessions that only use the external (extra-accurate) captions are never
-limited by the stream worker. Limits added after the 2026-10-16 capacity audit (all overridable in `acw.env`):
+What made the difference (before: 15 noise-removal sessions on 7 cores): libdf kept a copy of the 8 MB model per
+session, so at 28 sessions each one cost 0.40 cores instead of 0.14 (the weights evicted one another from the CPU
+caches; native/deepfilter/tract-0.23.patch now shares one copy, bit-identical output); one Python process per pair of
+cores; Opus through libopus (PyAV held the GIL for every encode); WebSocket compression off (it deflated every audio
+frame: a quarter of the relay's work); standard captions skip silence (2 s after the last speech, with 0.3 s kept
+before the next words; word error rate unchanged on LibriSpeech with pauses).
+
+**After a libdf change, rebuild it:** `native/deepfilter/build.sh native`, then copy `out/libdf.so` (in the build
+directory, default `~/audio-cleaner/src/deepfilter-build/out/`) to `~/audio-cleaner/bin/` and restart `acw-stream`.
+Until then the old library keeps running at the old capacity (the calibration notices which one it is).
+
+When full, a new session is refused with the options that still fit; sessions that only use the external
+(extra-accurate) captions are never limited by the stream workers. Other limits (all overridable in `acw.env`):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ACW_STREAM_MAX_CAPTION_STREAMS` | `10` | Standard caption streams at once. The one shared caption decoder does about 13x real time in total, so more than about 12 streams fall behind; at the cap a new one is refused and offered extra-accurate captions. A stream that still falls more than 2 s behind drops its oldest audio and the client gets one `captions_behind` warning per incident |
-| `ACW_MAX_LIVE_SESSIONS` / `ACW_MAX_PREMIUM_SESSIONS` | `30` / `15` | live sessions of every kind / with extra-accurate captions, in the web process (one event loop relays them all and also serves the job API); beyond them a session gets the usual "full" answer |
+| `ACW_STREAM_MAX_CAPTION_STREAMS` | 5 per core of the worker | Standard caption streams per worker (in `acw-worker.env`). Each worker's caption decoder does about 13x real time in total; silence isn't decoded, but a stream can talk all the time. At the cap a new one goes to the next worker, or is offered extra-accurate captions. A stream that still falls more than 2 s behind drops its oldest audio and the client gets one `captions_behind` warning per incident |
+| `ACW_LOOP_LAG_LIMIT_MS` | `25` | the web process relays all live audio on one event loop, next to the job API: new live sessions are refused while it runs a 100 ms timer this late (p90 over 10 s). Running sessions are never cut. About 1% of a core per session was measured, so this rarely triggers |
+| `ACW_MAX_LIVE_SESSIONS` | `300` | sanity bound on live sessions in the web process (below uvicorn's `--limit-concurrency 500`) |
 | `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
 
 Other queue limits: the job list shares one queue computation per second between all requests (`jobs.queue_snapshot`),
