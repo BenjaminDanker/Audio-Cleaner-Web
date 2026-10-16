@@ -75,7 +75,85 @@ def noise_estimate_db(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> float:
     if not energies:
         return 99.0
     e = np.concatenate(energies)
+    # Digital silence (a noise gate, a muted stretch) says nothing about the noise under the speech: a gated recording
+    # with 10 dB SNR measured 98 dB with it counted, and went to the light model.
+    e = e[e > SILENCE_DB]
+    if len(e) < 10:
+        return 99.0
     return float(np.percentile(e, 90) - np.percentile(e, 10))
+
+
+# Frame energy (dBFS, 10 ms frames) below which audio is digital silence: a noise gate's output, a muted stretch.
+SILENCE_DB = -90.0
+SKIP_MIN_GAP_S = 1.5  # silent stretches at least this long are not run through the noise models
+SKIP_CONTEXT_S = 0.5  # of the silence on each side that is: the models settle on it (measured: 53.9 dB SNR vs a full run)
+# Left and right are the same recording when the difference is this far below the sum (or exactly equal): cleaned
+# once. Stricter than the rebuild tier's -20 dB (restore.py).
+DUAL_MONO_SIDE_DB = -40.0
+DEAD_CHANNEL_PEAK = 1e-4  # a channel that never gets louder than this (-80 dBFS) carries nothing
+
+
+def channel_plan(x: np.ndarray, block: int = SAMPLE_RATE * 30) -> list[int | None]:
+    """Per output channel, the channel whose cleaned result it gets: [0, 1] for real stereo, [0, 0] when both sides
+    carry the same recording (a mono mic saved as stereo), [0, None] / [None, 1] when one side is silent (it stays
+    silent). Read block by block, so a memory-mapped recording is never loaded at once."""
+    if x.ndim != 2 or x.shape[1] != 2:
+        return list(range(x.shape[1] if x.ndim == 2 else 1))
+    exact = True
+    side = mid = 0.0
+    peaks = [0.0, 0.0]
+    for a in range(0, len(x), block):
+        b = np.asarray(x[a:a + block], dtype=np.float64)
+        exact = exact and np.array_equal(b[:, 0], b[:, 1])
+        side += float(np.sum(np.square(b[:, 0] - b[:, 1])))
+        mid += float(np.sum(np.square(b[:, 0] + b[:, 1])))
+        peaks = [max(peaks[c], float(np.max(np.abs(b[:, c])))) if len(b) else peaks[c] for c in range(2)]
+    dead = [p < DEAD_CHANNEL_PEAK for p in peaks]
+    if dead[0] and dead[1]:
+        return [0, 0]
+    if dead[0] or dead[1]:
+        return [None, 1] if dead[0] else [0, None]
+    if exact or (mid > 0 and 10 * np.log10(side / mid + 1e-30) < DUAL_MONO_SIDE_DB):
+        return [0, 0]
+    return [0, 1]
+
+
+def sound_spans(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> list[tuple[int, int]]:
+    """The parts of a mono recording worth running through a noise model: everything except digital-silence
+    stretches of SKIP_MIN_GAP_S or more, with SKIP_CONTEXT_S of the silence kept on each side. One span covering
+    everything when there is nothing (much) to skip."""
+    frame = SAMPLE_RATE // 100
+    silent = []
+    for a in range(0, len(x), block):
+        b = np.asarray(x[a:a + block], dtype=np.float64)
+        n = len(b) // frame
+        e = 10 * np.log10(np.mean(np.square(b[:n * frame].reshape(n, frame)), axis=1) + 1e-30) if n else np.zeros(0)
+        silent.append(e < SILENCE_DB)
+    quiet = np.concatenate(silent) if silent else np.zeros(0, bool)
+    n_frames = len(quiet)
+    min_gap = int(SKIP_MIN_GAP_S * 100)
+    ctx = int(SKIP_CONTEXT_S * 100)
+    spans: list[tuple[int, int]] = []
+    start = 0  # frame where the current span began
+    i = 0
+    while i < n_frames:
+        if not quiet[i]:
+            i += 1
+            continue
+        j = i
+        while j < n_frames and quiet[j]:
+            j += 1
+        if j - i >= min_gap:
+            if i > 0:  # (a silent start has nothing before it to finish)
+                spans.append((start, i + ctx))
+            start = j - ctx if j < n_frames else n_frames
+        i = j
+    if start < n_frames:
+        spans.append((start, n_frames))
+    spans = [(a * frame, min(len(x), b * frame) if b < n_frames else len(x)) for a, b in spans if b > a]
+    if not spans or sum(b - a for a, b in spans) > 0.9 * len(x):
+        return [(0, len(x))]
+    return spans
 
 
 def choose_noise_profile(x: np.ndarray, wanted: str = "auto") -> str:
@@ -83,6 +161,16 @@ def choose_noise_profile(x: np.ndarray, wanted: str = "auto") -> str:
     if wanted in ("light", "heavy"):
         return wanted
     return "heavy" if noise_estimate_db(x) < HEAVY_BELOW_DB else "light"
+
+
+def done_end(spans: list[tuple[int, int]], a: int) -> slice:
+    """The silent stretch that ends where the span starting at `a` begins."""
+    prev = 0
+    for s0, s1 in spans:
+        if s0 == a:
+            return slice(prev, a)
+        prev = s1
+    return slice(a, a)
 
 
 def clean_audio(
@@ -140,28 +228,49 @@ def clean_audio(
         report["highs"] = highs
     share = 0.8 if highs else 0.95  # of the progress bar for noise removal
     y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
-    for ch in range(channels):
-        def prog(f: float, ch: int = ch) -> None:
-            if progress:
-                progress(share * (ch + f) / channels)
+    # Work only where it changes something: a channel that duplicates the other is cleaned once, a silent one not at
+    # all, and digital silence isn't run through the model (it stays silent).
+    plan = channel_plan(x)
+    todo = sorted({c for c in plan if c is not None})
+    if report is not None and todo != list(range(channels)):
+        report["channels_cleaned"] = len(todo)
+    for k, ch in enumerate(todo):
+        spans = sound_spans(x[:, ch])
+        total = sum(b - a for a, b in spans) or 1
+        done = 0
+        for a, b in spans:
+            def prog(f: float, k: int = k, done: int = done, size: int = b - a) -> None:
+                if progress:
+                    progress(share * (k + (done + f * size) / total) / len(todo))
 
-        if profile == "heavy":
-            dpdfnet.denoise_array(
-                x[:, ch], atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel, out=y[:, ch],
-                model_path=heavy,
-            )
-        else:
-            dfn.denoise_array(
-                x[:, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog,
-                cancel=cancel, out=y[:, ch],
-            )
+            if a > 0 or b < len(x):
+                y[done_end(spans, a), ch] = 0.0  # the silence before this span
+            if profile == "heavy":
+                dpdfnet.denoise_array(
+                    x[a:b, ch], atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel,
+                    out=y[a:b, ch], model_path=heavy,
+                )
+            else:
+                dfn.denoise_array(
+                    x[a:b, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog,
+                    cancel=cancel, out=y[a:b, ch],
+                )
+            done += b - a
+        if spans[-1][1] < len(x):
+            y[spans[-1][1]:, ch] = 0.0
     if cancel is not None and cancel.is_set():
         raise Cancelled()
     if highs:
-        bwe.extend(
-            y, bwe_model_dir, threads=threads, cancel=cancel, out=y, model=highs,
-            progress=(lambda f: progress(share + (0.95 - share) * f)) if progress else None,
-        )
+        for ch in todo:
+            bwe.extend(
+                y[:, ch:ch + 1], bwe_model_dir, threads=threads, cancel=cancel, out=y[:, ch:ch + 1], model=highs,
+                progress=(lambda f: progress(share + (0.95 - share) * f)) if progress else None,
+            )
+    for c, src in enumerate(plan):
+        if src is None:
+            y[:, c] = 0.0
+        elif src != c:
+            y[:, c] = y[:, src]  # before the polish: its loudness is measured on both channels, as before
     if opts.polish:
         y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
     if progress:

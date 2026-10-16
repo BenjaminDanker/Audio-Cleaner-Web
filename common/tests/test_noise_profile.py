@@ -91,3 +91,56 @@ def test_restore_voice_replaces_noise_removal_and_highs_when_its_models_are_ther
     y = pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(restore_voice=True, polish=False),
                              restore_model_dir=tmp_path, report=report)
     assert calls == ["sidon"] and report == {"noise": "rebuilt", "highs": None} and y.shape == (len(x), 1)
+
+
+# --- work only where it changes something (2026-10-16 efficiency audit)
+
+def test_gated_silence_does_not_hide_the_noise():
+    from acw_common import pipeline
+
+    rng = np.random.default_rng(0)
+    sr = pipeline.SAMPLE_RATE
+    t = np.arange(4 * sr) / sr
+    voice = (0.3 * np.sin(2 * np.pi * 200 * t) * (np.sin(2 * np.pi * 2 * t) > 0)).astype(np.float32)
+    noisy = voice + (0.1 * rng.standard_normal(len(t))).astype(np.float32)  # about 10 dB SNR
+    gated = np.concatenate([noisy, np.zeros(3 * sr, np.float32)])  # a noise gate's digital silence after it
+    assert abs(pipeline.noise_estimate_db(gated) - pipeline.noise_estimate_db(noisy)) < 3
+
+
+def test_channel_plan():
+    from acw_common import pipeline
+
+    rng = np.random.default_rng(1)
+    a = rng.standard_normal(48_000).astype(np.float32) * 0.1
+    b = rng.standard_normal(48_000).astype(np.float32) * 0.1
+    assert pipeline.channel_plan(np.stack([a, b], 1)) == [0, 1]
+    assert pipeline.channel_plan(np.stack([a, a], 1)) == [0, 0]
+    assert pipeline.channel_plan(np.stack([a, a + 0.001 * b], 1)) == [0, 0]  # -40 dB of difference and less
+    assert pipeline.channel_plan(np.stack([a, a + 0.1 * b], 1)) == [0, 1]
+    assert pipeline.channel_plan(np.stack([a, np.zeros_like(a)], 1)) == [0, None]
+    assert pipeline.channel_plan(np.stack([np.zeros_like(a), b], 1)) == [None, 1]
+    assert pipeline.channel_plan(a[:, None]) == [0]
+
+
+def test_sound_spans_skip_long_digital_silence_only():
+    from acw_common import pipeline
+
+    sr = pipeline.SAMPLE_RATE
+    sound = np.full(2 * sr, 0.1, np.float32)
+    x = np.concatenate([np.zeros(3 * sr), sound, np.zeros(sr), sound, np.zeros(4 * sr), sound]).astype(np.float32)
+    ctx = int(pipeline.SKIP_CONTEXT_S * sr)
+    assert pipeline.sound_spans(x) == [(3 * sr - ctx, 8 * sr + ctx), (12 * sr - ctx, len(x))]  # the 1 s pause stays in
+    assert pipeline.sound_spans(sound) == [(0, len(sound))]
+    hiss = np.full(4 * sr, 1e-3, np.float32)  # room noise is not silence: it is denoised as before
+    assert pipeline.sound_spans(np.concatenate([sound, hiss, sound])) == [(0, 8 * sr)]
+
+
+def test_language_detection_listens_to_speech_not_a_silent_intro():
+    from acw_common import transcribe
+
+    sr = transcribe.SAMPLE_RATE
+    speech = np.full(40 * sr, 0.1, np.float32)
+    x = np.concatenate([np.zeros(35 * sr, np.float32), speech])
+    got = transcribe.speech_sample(x)
+    assert len(got) == 30 * sr and np.all(got == 0.1)
+    assert len(transcribe.speech_sample(np.zeros(5 * sr, np.float32))) == 5 * sr  # nothing loud: the start, as before

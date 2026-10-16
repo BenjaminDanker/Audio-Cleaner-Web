@@ -159,7 +159,7 @@ def denoise_array(
     atten_lim_db: float = 100.0,
     threads: int = 4,
     segment_seconds: float = 60.0,
-    overlap_seconds: float = 2.0,
+    overlap_seconds: float = 0.5,  # warm-up each side (2 s and 0.5 s both match a contiguous run at 54 dB SNR)
     progress=None,
     cancel: threading.Event | None = None,
     out: np.ndarray | None = None,

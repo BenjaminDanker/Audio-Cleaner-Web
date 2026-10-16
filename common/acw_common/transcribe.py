@@ -69,13 +69,33 @@ def unload() -> None:
     gc.collect()
 
 
+def speech_sample(audio_16k: np.ndarray, seconds: float = 30.0, floor_dbfs: float = -55.0) -> np.ndarray:
+    """Up to `seconds` of the recording that isn't (near) silence: half-second pieces louder than `floor_dbfs`, in
+    order. A long silent intro would otherwise be all the language detector hears (with 35 s of leading silence a
+    German recording was detected as English). The start of the recording if nothing is loud enough."""
+    win = SAMPLE_RATE // 2
+    want = int(seconds * SAMPLE_RATE)
+    keep: list[np.ndarray] = []
+    have = 0
+    for a in range(0, len(audio_16k) - win + 1, win):
+        piece = audio_16k[a:a + win]
+        if 20 * np.log10(float(np.sqrt(np.mean(np.square(piece, dtype=np.float64)))) + 1e-12) >= floor_dbfs:
+            keep.append(piece)
+            have += win
+            if have >= want:
+                break
+    if not keep:
+        return audio_16k[:want]
+    return np.concatenate(keep)
+
+
 def detect_language(audio_16k: np.ndarray, whisper_model_path: Path, threads: int = 4, model=None) -> str:
-    """Spoken language of the first 30 s, by a small Whisper model."""
+    """Spoken language of the first 30 s of speech, by a small Whisper model."""
     from faster_whisper import WhisperModel
 
     if model is None:
         model = WhisperModel(str(whisper_model_path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
-    language, _prob, _all = model.detect_language(audio_16k[: 30 * SAMPLE_RATE].astype(np.float32, copy=False))
+    language, _prob, _all = model.detect_language(speech_sample(audio_16k).astype(np.float32, copy=False))
     return language
 
 
