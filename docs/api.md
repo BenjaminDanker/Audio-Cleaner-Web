@@ -68,8 +68,12 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
     "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
                 "language": "en" | null, "output_video": true, "embed_subtitles": true,
                 "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
-                "noise": "auto|light|heavy"}}
+                "noise": "auto|light|heavy", "translate": ["es", "de"]}}
    ```
+   `translate` (default `[]`, at most 3 languages, not the spoken one; needs a transcription kind): the subtitles and
+   transcript are also made in those languages (`<stem>.<lang>.srt|vtt`, `<stem>.<lang>-transcript.txt`), priced per
+   language (`transcribe_translate/standard`). Every caption/transcript output has a `lang` field. A language that
+   can't be made is left out, said in the job's `notice` and not charged.
    `noise` (default `"auto"`) picks the noise remover: `light` = DeepFilterNet3, `heavy` = DPDFNet-8 (better
    when the noise is nearly as loud as the voice), `auto` = measured per file (`pipeline.HEAVY_BELOW_DB`).
    Band-limited recordings (phone calls, low-bitrate files) also get their missing highs restored (AP-BWE);

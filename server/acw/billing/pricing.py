@@ -29,11 +29,14 @@ _RATE_LIST = [
     Rate("denoise", "rebuild", "Clean & polish, voice rebuilt", 30_000),
     Rate("transcribe", "local", "Transcription", 4_000),
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
+    # Per extra language, on top of the transcription (text only goes to the speech partner; a few cents an hour).
+    Rate("transcribe_translate", "standard", "Translated subtitles, per language", 4_000),
     # Live streaming
     Rate("stream_denoise", "light", "Live noise removal", 4_000),
     Rate("stream_captions", "local", "Live captions", 6_000),
     # The extra-accurate caption engine bills per minute of audio sent; we only send speech.
     Rate("stream_captions", "premium", "Live captions, extra accurate", 30_000),
+    Rate("stream_translate", "standard", "Live caption translation, per language", 4_000),
 ]
 RATES: dict[tuple[str, str], Rate] = {(r.product, r.tier): r for r in _RATE_LIST}
 
@@ -93,27 +96,33 @@ def welcome_credit_micros() -> int:
     return 60 * (rate("stream_denoise", "light").micros_per_minute + rate("stream_captions", "local").micros_per_minute)
 
 
-def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None) -> dict[str, int]:
+def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, translate_languages: int = 0) -> dict[str, int]:
     """Micros per minute of each part of a job at today's prices. Stored with the job, so a price
-    change never applies to a job that was already created."""
+    change never applies to a job that was already created. `translate` is per language."""
     out: dict[str, int] = {}
     if kind in ("denoise", "denoise_transcribe") and denoise_tier:
         out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
         out["transcribe"] = rate("transcribe", transcribe_tier).micros_per_minute
+        if translate_languages:
+            out["translate"] = rate("transcribe_translate", "standard").micros_per_minute
     return out
 
 
 def job_cost_micros(
-    kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float, rates: dict[str, int] | None = None
+    kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float, rates: dict[str, int] | None = None,
+    translate_languages: int = 0,
 ) -> int:
-    """`rates` (from job_rates) pins the prices; without it the current price list applies."""
+    """`rates` (from job_rates) pins the prices; without it the current price list applies. `translate_languages`:
+    how many translations are charged (asked for when estimating, made when the job is done)."""
     rates = rates or {}
     total = 0
     if kind in ("denoise", "denoise_transcribe") and denoise_tier:
         total += cost_micros("denoise", denoise_tier, seconds, rates.get("denoise"))
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
         total += cost_micros("transcribe", transcribe_tier, seconds, rates.get("transcribe"))
+        if translate_languages:
+            total += translate_languages * cost_micros("transcribe_translate", "standard", seconds, rates.get("translate"))
     return max(total, MIN_JOB_CHARGE_MICROS) if total else 0
 
 

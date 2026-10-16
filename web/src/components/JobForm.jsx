@@ -111,6 +111,7 @@ export default function JobForm({ onSubmitted }) {
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
   const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
   const [language, setLanguage] = useState('');
+  const [targets, setTargets] = useState(['', '', '']); // translations (made on our side, with Standard or Extra accurate)
   const [busy, setBusy] = useState(false);
   const [step, setStep] = useState(null); // upload: {phase, frac, loaded, total}
   const [localRunning, setLocalRunning] = useState(false);
@@ -146,6 +147,7 @@ export default function JobForm({ onSubmitted }) {
   const serverText = wantsText && !localSubs; // made on our side, paid
   const tier = subs === 'accurate' ? 'premium' : 'local'; // transcription level ids stay internal
   const kind = wantsPolish && serverText ? 'denoise_transcribe' : wantsPolish ? 'denoise' : serverText ? 'transcribe' : null;
+  const translations = serverText ? targets.filter((t) => t && t !== language) : [];
   const isVideo = !!info?.hasVideo;
   const hasSecondTrack = (info?.audioTracks || 0) >= 2; // OBS and others can record mic and desktop sound as two tracks
   // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the
@@ -171,6 +173,7 @@ export default function JobForm({ onSubmitted }) {
   const rebuildRate = findRate(pricing, 'denoise', 'rebuild');
   const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
+  const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -189,12 +192,12 @@ export default function JobForm({ onSubmitted }) {
 
   const est = useMemo(() => {
     if (!kind) return 0;
-    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration });
-  }, [pricing, kind, tier, duration, denoiseTier]);
+    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length });
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length]);
   const breakdown = useMemo(() => {
     if (kind !== 'denoise_transcribe' || !duration) return null;
-    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration })];
-  }, [pricing, kind, tier, duration, denoiseTier]);
+    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length]);
 
   async function choose(f) {
     if (f.size < TINY_FILE_BYTES) {
@@ -299,6 +302,7 @@ export default function JobForm({ onSubmitted }) {
         caption_formats: serverText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c] || (c === 'vtt' && embedHere && !caps.srt)) : [],
         embed_subtitles: !!(embedNow && embedOnServer),
         language: language || null,
+        translate: translations,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
         atten_lim_db: strengthDb(strength),
@@ -359,7 +363,7 @@ export default function JobForm({ onSubmitted }) {
         else started.entry.browserClean = false;
       }
       if (localSubs) {
-        if (subsFiles) started.entry.localVtt = subsFiles.vtt;
+        if (subsFiles) { started.entry.localVtt = subsFiles.vtt; started.entry.localLang = subsFiles.language; }
         else started.entry.browserSubs = false;
       }
       onSubmitted?.(started.out, started.entry);
@@ -536,6 +540,25 @@ export default function JobForm({ onSubmitted }) {
                       {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
                     </select>
                   </div>
+                  <fieldset className="field" disabled={busy || !serverText} data-testid="translate-to">
+                    <legend className="label">Also translate into</legend>
+                    <div className="checks">
+                      {targets.map((t, i) => (
+                        <select
+                          key={i} className="select" aria-label={`Translation language ${i + 1}`} value={t}
+                          onChange={(e) => setTargets(targets.map((x, j) => (j === i ? e.target.value : x)))}
+                        >
+                          <option value="">{i === 0 ? 'No translation' : 'No other language'}</option>
+                          {LANGUAGES.filter(([c]) => c && c !== language && (c === t || !targets.includes(c))).map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+                        </select>
+                      ))}
+                    </div>
+                    <span className="hint" data-testid="translate-hint">
+                      {serverText
+                        ? `One set of subtitle files per language${translateRate ? `, ${moneyUsd(translateRate.usdPerHour)} an hour each` : ''}. Made from the transcript.`
+                        : 'Translations come with Standard or Extra accurate subtitles.'}
+                    </span>
+                  </fieldset>
                   <fieldset className="field" disabled={busy}>
                     <legend className="label">Formats</legend>
                     <div className="checks">

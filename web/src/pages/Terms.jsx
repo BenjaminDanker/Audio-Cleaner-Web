@@ -47,6 +47,7 @@ export default function Terms() {
         <li><b>Free noise removal and free subtitles.</b> Run locally in your browser from the Cleanup page (you sign in to use them). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
         <li><b>Clean &amp; polish.</b> Paid noise removal done on our side, voice levelling, loudness normalisation and related processing of files you upload.</li>
         <li><b>Transcription and subtitles.</b> Free in your browser (above), Standard (paid, done by us), or Extra accurate (paid; the audio is sent to a third-party speech-recognition provider, see the Privacy Policy). Extra accurate, for subtitles and for live captions, is available once your account has made a first top-up.</li>
+        <li><b>Translations.</b> Paid subtitles and live captions can also be translated into other languages (paid per language; the text, not the audio, is translated by the same third-party provider). Translations are made by software and can be wrong: check them before you rely on them.</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed.</li>
         <li><b>The OBS plugin is free software</b> under the GNU General Public License, version 2 or later; its source code is offered next to the download. Nothing in these Terms limits what that licence lets you do with the plugin itself. Using the Service through it is still covered by these Terms.</li>
       </ul>

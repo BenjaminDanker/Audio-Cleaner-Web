@@ -11,18 +11,21 @@ const DESCRIPTIONS = {
   'stream_denoise/light': 'Cleans up your mic while you talk',
   'stream_captions/local': 'Live captions in English',
   'stream_captions/premium': 'Live captions in other languages too, best for accents and specialist words',
+  'transcribe_translate/standard': 'The subtitles and transcript in another language, for each language you add',
+  'stream_translate/standard': 'Your live captions in another language, for each language you add',
 };
 
 // The server's names for two rows say "Transcription"; everywhere else on the site this is "Subtitles & transcripts".
 const LABELS = {
   'transcribe/local': 'Subtitles & transcripts',
   'transcribe/premium': 'Subtitles & transcripts, extra accurate',
+  'transcribe_translate/standard': 'Translated subtitles, per language',
 };
 
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
-  { id: 'files', title: 'Files', products: ['denoise', 'transcribe'] },
-  { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions'] },
+  { id: 'files', title: 'Files', products: ['denoise', 'transcribe', 'transcribe_translate'] },
+  { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions', 'stream_translate'] },
 ];
 
 

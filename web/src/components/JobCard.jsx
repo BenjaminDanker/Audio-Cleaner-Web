@@ -5,7 +5,7 @@ import { useAuth } from '../auth.jsx';
 import { saveBlob } from '../download.js';
 import { bytes, clock, dateTime, human, money, shownName, stem } from '../format.js';
 import { useNow } from '../hooks.js';
-import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel } from '../jobs.js';
+import { ACTIVE, jobTitle, kindLabel, LANGUAGES, queueText, stageText, statusLabel } from '../jobs.js';
 import { buildMedia, canHoldSubtitles, defaultFormatId, FORMAT, srtToVtt } from '../media/convert.js';
 import { IconDownload } from './Icons.jsx';
 
@@ -28,15 +28,26 @@ function Countdown({ expiresAt }) {
 
 /** The job's subtitles as WebVTT text (made in this browser, or from its .vtt file, or its .srt one), for putting into a video here. */
 async function jobSubtitles(job, local) {
-  if (local?.localVtt) return local.localVtt;
+  if (local?.localVtt) return [{ text: local.localVtt, lang: local.localLang, name: langName(local.localLang) }];
+  // one track per language: the spoken one first, then the translations, each from its .vtt (or its .srt)
   const caps = job.outputs.filter((o) => o.kind === 'captions');
-  const pick = caps.find((o) => /\.vtt$/i.test(o.name)) || caps.find((o) => /\.srt$/i.test(o.name));
-  if (!pick) throw new Error('This job has no subtitles to put into the video.');
-  const res = await fetch(outputUrl(job.id, pick.name), { credentials: 'same-origin' });
-  if (!res.ok) throw new Error('Couldn’t download the subtitles. Please try again.');
-  const text = await res.text();
-  return /\.vtt$/i.test(pick.name) ? text : srtToVtt(text);
+  const langs = [...new Set(caps.map((o) => o.lang || ''))];
+  const tracks = [];
+  for (const lang of langs) {
+    const mine = caps.filter((o) => (o.lang || '') === lang);
+    const pick = mine.find((o) => /\.vtt$/i.test(o.name)) || mine.find((o) => /\.srt$/i.test(o.name));
+    if (!pick) continue;
+    const res = await fetch(outputUrl(job.id, pick.name), { credentials: 'same-origin' });
+    if (!res.ok) throw new Error('Couldn’t download the subtitles. Please try again.');
+    const text = await res.text();
+    tracks.push({ text: /\.vtt$/i.test(pick.name) ? text : srtToVtt(text), lang: lang || undefined, name: langName(lang) });
+  }
+  if (!tracks.length) throw new Error('This job has no subtitles to put into the video.');
+  return tracks;
 }
+
+const LANGUAGE_NAME = Object.fromEntries(LANGUAGES.filter(([c]) => c));
+const langName = (code) => LANGUAGE_NAME[code] || 'Subtitles';
 
 /** The file type a video with subtitles is made as when nothing was chosen: a WebM stays WebM, anything else becomes MKV. */
 function subtitledFormat(file, info, inputName) {
@@ -70,7 +81,7 @@ function RemuxPanel({ job, local, noPicture = false }) {
     ctl.current = abort;
     setBusy(true); setErr(''); setNote(''); setProg(0);
     try {
-      const subtitles = embed ? await jobSubtitles(job, local) : '';
+      const subtitles = embed ? await jobSubtitles(job, local) : null;
       let audioFile = null;
       if (audioOut) {
         const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
@@ -216,7 +227,7 @@ export default function JobCard({ job, local, onChanged }) {
           <ul className="outputs" aria-label="Downloads">
             {job.outputs.map((o) => (
               <li key={o.name}>
-                <span><span className="oname">{o.name}</span> <span className="muted small">· {OUT_LABEL[o.kind] || o.kind} · {bytes(o.bytes)}</span></span>
+                <span><span className="oname">{o.name}</span> <span className="muted small">· {OUT_LABEL[o.kind] || o.kind}{o.lang && LANGUAGE_NAME[o.lang] ? ` · ${LANGUAGE_NAME[o.lang]}` : ''} · {bytes(o.bytes)}</span></span>
                 <a className="btn btn-primary btn-sm" href={outputUrl(job.id, o.name)} download={o.name} data-testid="download"
                   onClick={o.kind === 'audio' && audioName ? (e) => { e.preventDefault(); saveRenamed(o, audioName); } : undefined}>
                   <IconDownload width={16} height={16} /> Download

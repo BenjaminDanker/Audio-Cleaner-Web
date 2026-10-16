@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from . import alerts, auth, db, httpstack, jobs, retention
 from . import health as health_checks
 from .api import auth_routes, billing_routes, contact_routes, downloads_routes, jobs_routes, keys_routes
+from . import translate
 from .asr import openai_asr
 from .billing import ledger, stripe_service
 from .config import get_settings
@@ -54,9 +55,25 @@ def _beat(job_id: str) -> None:
     db.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr'", (db.now(), job_id))
 
 
+def _set_stage(job_id: str, stage: str) -> None:
+    db.execute("UPDATE jobs SET stage = ?, heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr'", (stage, db.now(), job_id))
+
+
+async def _translate(job: dict, targets: list[str]) -> None:
+    """The job's translations (segments.<lang>.json). A language that can't be made is left out, said in the job's
+    notice, and not charged (worker/main.py _job_cost counts `translated`)."""
+    await asyncio.to_thread(_set_stage, job["id"], "Translating")
+    done = await translate.translate_job(jobs.job_dir(job["id"]), targets)
+    await asyncio.to_thread(jobs.update_params, job["id"], translated=done)
+    missing = [translate.LANGUAGE_NAMES.get(t, t) for t in targets if t not in done]
+    if missing:
+        what = " and ".join(missing)
+        await asyncio.to_thread(jobs.set_notice, job["id"], f"The {what} translation couldn’t be made this time, so you weren’t charged for it.")
+
+
 async def _run_cloud_job(job: dict) -> None:
-    """Extra-accurate transcription of one job. Segments already transcribed are kept on disk, so a restart
-    or a failed attempt doesn't pay for them twice."""
+    """The steps of a job that need the internet: extra-accurate transcription, then translations. Work already
+    done is kept on disk, so a restart or a failed attempt doesn't pay for it twice."""
 
     async def heartbeat() -> None:
         while True:
@@ -65,8 +82,12 @@ async def _run_cloud_job(job: dict) -> None:
 
     beat = asyncio.create_task(heartbeat())
     try:
-        lang = json.loads(job["params_json"])["options"].get("language")
-        await openai_asr.run_for_job(jobs.job_dir(job["id"]), lang, job["duration_seconds"] or job["claimed_seconds"])
+        params = json.loads(job["params_json"])
+        opts = params["options"]
+        if params.get("transcribe_tier") == "premium" and not (jobs.job_dir(job["id"]) / "segments.json").exists():
+            await openai_asr.run_for_job(jobs.job_dir(job["id"]), opts.get("language"), job["duration_seconds"] or job["claimed_seconds"])
+        if opts.get("translate"):
+            await _translate(job, list(opts["translate"]))
         await asyncio.to_thread(_cloud_done, job)
     except Exception:  # noqa: BLE001
         log.exception("cloud ASR failed for %s", job["id"])

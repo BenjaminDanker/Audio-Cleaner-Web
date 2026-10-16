@@ -234,6 +234,8 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
     )
+    # Translations need the internet, which this sandbox doesn't have: they run outside it, then `finalize` writes the files.
+    needs_cloud = needs_cloud or bool(opts.get("translate"))
     result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
               "noise": noise_used}
     if not needs_cloud:
@@ -308,6 +310,28 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
             outputs.append({"file": txt.name, "kind": "transcript"})
         if "json" in formats:
             outputs.append({"file": seg_path.name, "kind": "segments"})
+        for o in outputs:
+            if o["kind"] in ("captions", "transcript", "segments") and language:
+                o["lang"] = language[:2]
+        # Translations (made outside the sandbox from segments.json): the same files, one set per language.
+        for lang in opts.get("translate") or []:
+            tpath = job_dir / f"segments.{lang}.json"
+            if not tpath.is_file() or tpath.is_symlink():
+                continue
+            tsegs = captions.segments_from_json(json.loads(tpath.read_text(encoding="utf-8"))["segments"])
+            tcues = captions.build_cues(tsegs, lang)
+            if "srt" in formats:
+                p = job_dir / f"{stem}.{lang}.srt"
+                p.write_text(captions.to_srt(tcues), encoding="utf-8")
+                outputs.append({"file": p.name, "kind": "captions", "lang": lang})
+            if "vtt" in formats:
+                p = job_dir / f"{stem}.{lang}.vtt"
+                p.write_text(captions.to_vtt(tcues), encoding="utf-8")
+                outputs.append({"file": p.name, "kind": "captions", "lang": lang})
+            if "txt" in formats:
+                p = job_dir / f"{stem}.{lang}-transcript.txt"
+                p.write_text(captions.to_text(tsegs), encoding="utf-8")
+                outputs.append({"file": p.name, "kind": "transcript", "lang": lang})
 
     if state["has_video"] and opts.get("output_video", True):
         cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None

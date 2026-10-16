@@ -389,6 +389,40 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     throw new Error('job did not finish');
   });
 
+  await check('translations: Standard subtitles + Spanish: the choice is sent and priced; a translation that can’t be made (no partner on this test server) is left out with a note, and the job still finishes', async () => {
+    passThrough = true;
+    admin('grant', EMAIL, '5', 'files test: translation');
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'off');
+    await pick(page, 'subs', 'browser');
+    if (!(await page.getByLabel('Translation language 1').isDisabled())) throw new Error('translations offered with free subtitles');
+    await pick(page, 'subs', 'standard');
+    const before = await page.getByTestId('estimate').innerText();
+    await page.getByLabel('Translation language 1').selectOption('es');
+    await page.waitForFunction((b) => document.querySelector('[data-testid=estimate]')?.innerText !== b, before);
+    const sent = [];
+    const spy = (r) => { if (r.method() === 'POST' && /\/api\/jobs$/.test(r.url())) sent.push(r.postDataJSON()); };
+    page.on('request', spy);
+    await start().click();
+    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+    page.off('request', spy);
+    if (JSON.stringify(sent.at(-1)?.options?.translate) !== '["es"]') throw new Error(JSON.stringify(sent.at(-1)?.options));
+    const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
+    for (let i = 0; i < 180; i++) {
+      const j = await apiCall(page, 'GET', `jobs/${id}`);
+      if (j.body?.status === 'done') {
+        if (!/Spanish translation couldn’t be made/.test(j.body.notice || '')) throw new Error(`notice: ${j.body.notice}`);
+        if (j.body.outputs.some((o) => o.lang === 'es')) throw new Error('a Spanish file without a translation');
+        if (!j.body.outputs.some((o) => o.kind === 'captions' && o.lang)) throw new Error('captions without their language');
+        return j.body.notice;
+      }
+      if (['failed', 'canceled'].includes(j.body?.status)) throw new Error(JSON.stringify(j.body));
+      await page.waitForTimeout(1000);
+    }
+    throw new Error('job did not finish');
+  });
+
   await check('a real two-track job with echo removal: the server finds both tracks (no "only one track" note) and finishes', async () => {
     passThrough = true;
     admin('grant', EMAIL, '5', 'files test: echo');

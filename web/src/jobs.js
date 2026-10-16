@@ -40,7 +40,7 @@ export const AUDIO_FORMATS = [
 
 export function statusLabel(status) {
   return {
-    uploading: 'Uploading', queued: 'In line', running: 'Working on it', cloud_asr: 'Transcribing (extra accurate)', canceling: 'Canceling',
+    uploading: 'Uploading', queued: 'In line', running: 'Working on it', cloud_asr: 'Working on it', canceling: 'Canceling',
     done: 'Done', failed: 'Failed', canceled: 'Canceled', expired: 'Expired',
   }[status] || status;
 }
@@ -61,6 +61,7 @@ const STAGES = {
   'cloud asr running': 'Writing the transcript',
   'waiting to transcribe': 'Writing the transcript',
   'writing captions': 'Writing the captions',
+  translating: 'Translating the subtitles',
   'rebuilding video': 'Putting the video back together',
   finishing: 'Finishing up',
   done: 'Finishing up',

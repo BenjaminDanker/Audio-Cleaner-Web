@@ -269,6 +269,13 @@ export function serverAudioFormat(id, file, info) {
   return endingOf(file?.name) === 'webm' ? 'opus' : 'm4a';
 }
 
+/** Three-letter language codes (ISO 639-2/T) for subtitle tracks, from the site's two-letter ones. */
+export const ISO639_2 = {
+  en: 'eng', es: 'spa', fr: 'fra', de: 'deu', it: 'ita', pt: 'por', nl: 'nld', pl: 'pol', ru: 'rus', uk: 'ukr', tr: 'tur',
+  ar: 'ara', hi: 'hin', ja: 'jpn', ko: 'kor', zh: 'zho', sv: 'swe', da: 'dan', fi: 'fin', no: 'nor', cs: 'ces', el: 'ell',
+  he: 'heb', id: 'ind', vi: 'vie',
+};
+
 /** Can a video file of this type made here carry subtitles that players show? Only MKV: there they are stored the way
  *  nearly every player reads them (SRT-style text). An MP4 made here would hold them in a form most players skip. */
 export const canHoldSubtitles = (id) => id === 'mkv';
@@ -305,11 +312,12 @@ function relabelAsSrt(buf, whole = true) {
     return -1;
   };
   const end = whole ? Math.min(b.length, 1 << 20) : b.length; // in a whole file the track list is near the start
-  const id = find([0x86, 0x8d, ...enc.encode('S_TEXT/WEBVTT')], 0, end);
-  if (id < 0) return buf;
-  b.set([...enc.encode('S_TEXT/UTF8'), 0, 0], id + 2);
-  const priv = id + 15;
-  if (find([0x63, 0xa2, 0x86, ...enc.encode('WEBVTT')], priv, priv + 9) === priv) b.set([0xec, 0x87, 0, 0, 0, 0, 0, 0, 0], priv);
+  // every subtitle track (one per language)
+  for (let id = find([0x86, 0x8d, ...enc.encode('S_TEXT/WEBVTT')], 0, end); id >= 0; id = find([0x86, 0x8d, ...enc.encode('S_TEXT/WEBVTT')], id + 15, end)) {
+    b.set([...enc.encode('S_TEXT/UTF8'), 0, 0], id + 2);
+    const priv = id + 15;
+    if (find([0x63, 0xa2, 0x86, ...enc.encode('WEBVTT')], priv, priv + 9) === priv) b.set([0xec, 0x87, 0, 0, 0, 0, 0, 0, 0], priv);
+  }
   return buf;
 }
 
@@ -503,7 +511,8 @@ async function addCleanSound(mb, output, source, codecs, { signal, onProgress, c
  * @param {Blob} [p.wav] the cleaned sound as a 16-bit WAV file, free path
  * @param {Blob} [p.audioFile] the cleaned sound as a file, paid path
  * @param {string} [p.audioName] name of that file (so an identical format is handed back untouched)
- * @param {string} [p.subtitles] WebVTT text to put into a video file as a subtitle track (MP4, MKV, WebM)
+ * @param {string|{text:string, lang?:string, name?:string}[]} [p.subtitles] WebVTT text to put into a video file as
+ *   a subtitle track (MKV), or several tracks, one per language (players let viewers pick)
  * @param {(frac:number)=>void} [p.onProgress]
  * @param {AbortSignal} [p.signal]
  * @returns {Promise<{blob:Blob, ext:string, mime:string, note:string|null}>}
@@ -623,13 +632,20 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
     }
 
     let subtitlesRun = async () => {};
-    if (subtitles) {
+    const tracks = !subtitles ? [] : typeof subtitles === 'string' ? [{ text: subtitles }] : subtitles.filter((t) => t?.text);
+    if (tracks.length) {
       if (!canHoldSubtitles(format)) throw new RemuxUnsupported(`Subtitles put into a video here need an MKV file (most players can’t show them from a ${def.label} made here). Pick MKV.`);
-      const subs = new mb.TextSubtitleSource('webvtt');
-      output.addSubtitleTrack(subs, { name: 'Subtitles' });
+      const sources = tracks.map((t, i) => {
+        const src = new mb.TextSubtitleSource('webvtt');
+        const code = ISO639_2[t.lang];
+        output.addSubtitleTrack(src, { name: t.name || (tracks.length > 1 ? `Subtitles ${i + 1}` : 'Subtitles'), ...(code ? { languageCode: code } : {}) });
+        return [src, t.text];
+      });
       subtitlesRun = async () => {
-        await subs.add(plainCues(subtitles));
-        subs.close();
+        for (const [src, text] of sources) {
+          await src.add(plainCues(text));
+          src.close();
+        }
       };
     }
 

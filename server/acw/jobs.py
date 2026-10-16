@@ -231,6 +231,15 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if lang is not None and not (isinstance(lang, str) and LANG_RE.match(lang)):
         raise JobError("bad language code")
     out["language"] = lang
+    # Translations of the subtitles (up to 3 languages), made from the transcript after it is written.
+    from . import translate
+
+    try:
+        out["translate"] = translate.check_targets(options.get("translate"), lang)
+    except ValueError as e:
+        raise JobError(str(e)) from None
+    if out["translate"] and kind not in ("transcribe", "denoise_transcribe"):
+        raise JobError("translations need subtitles or a transcript")
     out["output_video"] = bool(options.get("output_video", True))
     out["embed_subtitles"] = bool(options.get("embed_subtitles", True))
     lufs = options.get("loudness_lufs", -16.0)
@@ -310,8 +319,9 @@ def create_job(
         "display_name": clean_display_name(display_name),
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
-    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"])
-    est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"])
+    n_translate = len(opts["translate"])
+    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate)
+    est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
@@ -491,7 +501,7 @@ def public_job(job: dict, queue: list[str] | None = None) -> dict:
         "costMicros": job["cost_micros"],
         "options": params["options"],
         "notice": params.get("notice"),
-        "outputs": [{"name": o["file"], "kind": o["kind"], "bytes": o.get("bytes")} for o in outputs],
+        "outputs": [{"name": o["file"], "kind": o["kind"], "bytes": o.get("bytes"), **({"lang": o["lang"]} if o.get("lang") else {})} for o in outputs],
         "createdAt": job["created_at"],
         "finishedAt": job["finished_at"],
         "expiresAt": job["expires_at"] if job["status"] == "done" else None,

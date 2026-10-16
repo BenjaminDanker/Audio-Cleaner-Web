@@ -7,6 +7,7 @@ runner it spawns has neither. Run several instances for parallelism.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import math
 import os
@@ -377,7 +378,10 @@ def _read_result(path: Path) -> dict:
 
 def _job_cost(job: dict, params: dict, seconds: float) -> int:
     """What the job costs for `seconds` of audio, at the prices it was created with."""
-    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"))
+    # Translations: what was asked for until the job is done, then only the languages that were made.
+    asked = params.get("options", {}).get("translate") or []
+    made = params.get("translated", asked)
+    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"), len(made))
 
 
 def _reprice(job: dict, duration: float) -> None:
@@ -428,7 +432,9 @@ def _complete(job: dict, d: Path, res: dict) -> None:
         except OSError:
             continue
         if stat.S_ISREG(st.st_mode) and st.st_dev == dev and o["kind"] in OUTPUT_KINDS:
-            outputs.append({"file": name, "kind": o["kind"], "bytes": st.st_size})
+            lang = o.get("lang")
+            outputs.append({"file": name, "kind": o["kind"], "bytes": st.st_size,
+                            **({"lang": lang} if isinstance(lang, str) and re.fullmatch(r"[a-z]{2,3}", lang) else {})})
     params = json.loads(job["params_json"])
     duration = float(job.get("duration_seconds") or job["claimed_seconds"])
     keep = {o["file"] for o in outputs}
