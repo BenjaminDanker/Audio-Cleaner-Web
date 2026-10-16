@@ -71,6 +71,10 @@ class LiveTranslator:
                 continue
             if isinstance(start, (int, float)) and isinstance(end, (int, float)) and end > start:
                 self.seconds[lang] += float(end) - float(start)
+            else:
+                # Extra-accurate captions come without times: count the line's speaking time from its length
+                # (about 2.5 words a second, at least one second).
+                self.seconds[lang] += max(1.0, len(text.split()) / 2.5)
             self.emit({"type": "translation", "lang": lang, "text": out, "of": cid,
                        **({"start": start} if start is not None else {}), **({"end": end} if end is not None else {})})
 

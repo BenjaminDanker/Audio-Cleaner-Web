@@ -138,3 +138,18 @@ def test_a_session_without_translations_has_no_translation_charge(client, signed
     got = session(client, {"captions": "local"})
     assert "translate" not in got[0] and not any(m["type"] == "translation" for m in got)
     assert db.one("SELECT COUNT(*) n FROM ledger WHERE ref_id LIKE '%:translate'")["n"] == 0
+
+
+def test_captions_without_times_are_counted_by_their_length(monkeypatch):
+    calls = []
+
+    async def run():
+        t = live_translate.LiveTranslator(["es"], "en", calls.append)
+        t.offer({"type": "caption", "id": "item_1", "text": "one two three four five", "final": True})  # extra accurate: no times
+        await asyncio.sleep(0.05)
+        await t.close()
+        return t.total_seconds()
+
+    fake_translations(monkeypatch)
+    assert asyncio.run(run()) == 2.0  # five words, 2.5 a second
+    assert calls and calls[0]["of"] == "item_1"
