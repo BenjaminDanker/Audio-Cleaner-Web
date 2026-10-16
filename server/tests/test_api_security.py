@@ -118,16 +118,16 @@ def test_upload_must_match_declared_size_and_cancel_refunds(client, signed_in):
     assert ledger.balance(uid) == {"balance_micros": 1_000_000, "held_micros": 0, "available_micros": 1_000_000}
 
 
-def test_free_transcription_quota(client, signed_in):
-    _, h = signed_in
-    body = {"kind": "transcribe", "transcribeTier": "local", "free": True, "filename": "a.wav", "sizeBytes": 100}
-    assert client.post("/api/jobs", json={**body, "durationSeconds": 31 * 60}, headers=h).status_code == 400
-    assert client.post("/api/jobs", json={**body, "durationSeconds": 29 * 60}, headers=h).status_code == 200
-    assert client.post("/api/jobs", json={**body, "durationSeconds": 29 * 60}, headers=h).status_code == 200
-    r = client.post("/api/jobs", json={**body, "durationSeconds": 5 * 60}, headers=h)
-    assert r.status_code == 402
-    # premium is never free; denoise is never free on the server
-    assert client.post("/api/jobs", json={**body, "transcribeTier": "premium", "durationSeconds": 60}, headers=h).status_code == 400
+def test_jobs_on_our_side_are_never_free(client, signed_in):
+    """Free subtitles and free noise removal run in the browser: a job asking to be free is refused, whatever it is."""
+    uid, h = signed_in
+    ledger.credit(uid, 1_000_000, "grant", "t", "g")
+    body = {"kind": "transcribe", "transcribeTier": "local", "free": True, "filename": "a.wav", "sizeBytes": 100, "durationSeconds": 60}
+    for extra in ({}, {"kind": "denoise_transcribe", "denoiseTier": "standard"}, {"kind": "denoise", "denoiseTier": "standard", "transcribeTier": None}):
+        r = client.post("/api/jobs", json={**body, **extra}, headers=h)
+        assert r.status_code == 400 and "browser" in r.json()["detail"]
+    assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0
+    assert "free" not in client.get("/api/billing/pricing").json()
 
 
 def test_bad_filenames_and_types_rejected(client, signed_in):
@@ -183,4 +183,4 @@ def test_free_tool_assets_need_a_signed_in_browser(client):
     assert r.status_code == 429  # daily cap per account
     limiter.reset()
     me = client.get("/api/me", headers=h).json()
-    assert me["freeTranscribeSecondsLeft"] == 3600
+    assert "freeTranscribeSecondsLeft" not in me

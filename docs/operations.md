@@ -415,7 +415,7 @@ example load of 1000 file jobs and 50 hours of live audio a day (about 100 sessi
 | `sessions` | deleted when they expire (`auth.purge_expired`), and at the latest 30 days after expiry; address and browser type blanked after 90 days | ~0.4 KB, 30 days of logins |
 | `login_tokens`, `oauth_states` | deleted a day after they expire (used or not), at the latest after 30 days | negligible |
 | `stripe_events` | processed events deleted after 90 days (Stripe retries for about 3 days, so a repeat is always recognized); an unprocessed one after 12 months (the monitor alerts after 10 minutes) | ~0.1 KB each |
-| `free_usage` | one row per account and day, deleted after 60 days | negligible |
+| `free_usage` | one row per account and day from the old free server subtitles (no new rows), deleted after 60 days | negligible |
 | `deleted_emails` | deleted the next day | none |
 | `api_keys` | revoked keys deleted after 12 months; active keys are limited to 10 per account | negligible |
 | `identities`, `users` | one row per account, kept while the account exists. A deleted account stays as an anonymous row because ledger and payments point at it; `compact-money` removes it once nothing does. Growth is the number of sign-ups, which the sign-in rate limits bound | ~0.5 KB per account |

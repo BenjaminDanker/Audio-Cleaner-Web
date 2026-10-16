@@ -90,7 +90,6 @@ export default function Landing() {
     return () => clearTimeout(timer);
   }, [hash]);
   const polish = findRate(pricing, 'denoise', 'standard');
-  const tx = pricing?.free;
   const live = findRate(pricing, 'stream_denoise', 'light');
   const email = SITE.supportEmail.trim();
   const { contact, signedIn, known } = useAuth();
@@ -147,8 +146,8 @@ export default function Landing() {
             </article>
             <article className="card product-card">
               <div className="icon"><IconText /></div>
-              <h3>Subtitles &amp; transcripts {tx && <span className="badge badge-free">{Math.round(tx.transcribeSecondsPerDay / 60)} min free a day</span>}</h3>
-              <p>Get TXT, SRT and VTT files from your recording. Choose Standard, or Extra accurate for tricky audio. They’re made on our side, so the free minutes are counted.</p>
+              <h3>Subtitles &amp; transcripts <span className="badge badge-free">Free in your browser</span></h3>
+              <p>Get TXT, SRT and VTT files from your recording, or have them put into your video. Free on your own device, or paid on our side: Standard, or Extra accurate for tricky audio.</p>
               <span className="spacer" />
               <Link to="/app" className="btn btn-secondary">Get subtitles</Link>
             </article>
@@ -171,7 +170,7 @@ export default function Landing() {
       <section className="section" id="pricing">
         <div className="container narrow stack">
           <h2 className="section-title mb0">What it costs</h2>
-          <p className="section-lead">Noise removal in your browser is free, and so are your first subtitle minutes each day. For the rest you add credit and spend it by the minute of audio. That&rsquo;s all.</p>
+          <p className="section-lead">Noise removal and subtitles in your browser are free. For the rest you add credit and spend it by the minute of audio. That&rsquo;s all.</p>
           <PriceTable />
           <div className="card stack">
             <h3 className="mb0">How credit works</h3>

@@ -65,7 +65,6 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
     "denoiseTier": "standard", "transcribeTier": "local" | "premium",
     "filename": "talk.mp4", "sizeBytes": 123456, "durationSeconds": 612.4,
     "displayName": "My talk.wav",
-    "free": false,
     "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
                 "language": "en" | null, "output_video": true, "embed_subtitles": true,
                 "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
@@ -84,9 +83,10 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
    `displayName` (optional, up to 120 characters; control, bidirectional and zero-width characters are removed) is
    the name shown for the job and used for the result files; without it the uploaded file's name is used. The
    uploaded file can be a re-encoded copy of what the person chose.
-   `free:true` makes the subtitles free (daily allowance, 30 min/file) and needs `transcribeTier:"local"`: with
-   `kind:"transcribe"` the job is free, with `kind:"denoise_transcribe"` only the cleanup is charged (the job holds
-   and captures the cleanup's price and counts as paid in the queue). It is refused for `kind:"denoise"`.
+   `free:true` is refused (400): jobs on our side are always paid. Free noise removal and free subtitles run in the
+   visitor's browser (the subtitle model is served to signed-in browsers at
+   `/api/downloads/browser/<model>/<file>`, server/acw/browser_models.py). Jobs created free before that change still
+   finish free.
    `embed_subtitles` makes our side put the subtitles into the video, which needs the whole video uploaded. The
    website only asks for it for a video the browser can't open (it goes up whole anyway); otherwise it uploads the
    sound only and puts the subtitles into an MKV in the browser afterwards (SRT-style track, which players read). Paid jobs need accepted terms. Returns

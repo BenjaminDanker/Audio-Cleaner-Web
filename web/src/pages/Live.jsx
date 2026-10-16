@@ -7,6 +7,7 @@ import PriceTable from '../components/PriceTable.jsx';
 import { balanceMoney, bytes, clock, dateTime, rate, moneyUsd } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
+import { startLocalLive } from '../live/local.js';
 import { applyCaption, startLive } from '../live/session.js';
 import StrengthPicker from '../components/StrengthPicker.jsx';
 import { strengthDb } from '../strengths.js';
@@ -317,6 +318,8 @@ function Group({ id, title, children }) {
 
 function LiveDemo({ pricing }) {
   const { balance, refresh } = useAuth();
+  const [mode, setMode] = useState('free'); // 'free': everything in this browser | 'paid': on our servers, like the OBS plugin
+  const [freeCaps, setFreeCaps] = useState(true);
   const [denoise, setDenoise] = useState(true);
   const [captions, setCaptions] = useState('local'); // '' | 'local' (standard, English only) | 'premium' (extra accurate, any language)
   const [language, setLanguage] = useState('');
@@ -332,6 +335,8 @@ function LiveDemo({ pricing }) {
   const [stopped, setStopped] = useState('');
   const session = useRef(null);
   const logRef = useRef(null);
+  const free = mode === 'free';
+  const showCaptions = free ? freeCaps : !!captions;
 
   // Price of exactly what is selected: stream_denoise/light + stream_captions/<level> from /api/billing/pricing.
   const den = findRate(pricing, 'stream_denoise', 'light');
@@ -368,6 +373,21 @@ function LiveDemo({ pricing }) {
   async function start(cfg = { denoise: denoise ? 'light' : null, captions }) {
     setError(''); setFull(null); setWarning(null); setStopped(''); setLines([]); setStats(null); setInfo(null);
     setState('starting');
+    if (free) {
+      try {
+        session.current = await startLocalLive({
+          denoise, captions: freeCaps, language: language || null, attenDb: strengthDb(strength), monitor, onEvent, onStats: setStats,
+        });
+        setState('live');
+      } catch (e) {
+        session.current = null;
+        setState('idle');
+        if (e?.name === 'NotAllowedError') setError('Microphone access was blocked. Allow it in your browser and try again.');
+        else if (e?.name === 'NotFoundError') setError('We couldn’t find a microphone.');
+        else setError(e?.message || 'Couldn’t start.');
+      }
+      return;
+    }
     try {
       session.current = await startLive({
         denoise: cfg.denoise, captions: cfg.captions || null,
@@ -410,26 +430,69 @@ function LiveDemo({ pricing }) {
   return (
     <section className="card stack" aria-labelledby="demo-h">
       <h2 id="demo-h" className="mb0">Try it with your microphone</h2>
-      <p className="muted mb0">Talk into your mic and hear the result as it happens. The OBS plugin works the same way.</p>
-      <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>
-      <p className="mb0" data-testid="live-free-hint">Want to try without spending credit? Free noise removal and your free daily subtitle minutes are on the <Link to="/app">Cleanup page</Link>.</p>
+      <p className="muted mb0">Talk into your mic and hear the result as it happens.</p>
+      <div className="seg" role="radiogroup" aria-label="Which test" data-testid="live-mode">
+        {[['free', 'Free, in your browser'], ['paid', 'Paid, done on our side']].map(([v, l]) => (
+          <label key={v}>
+            <input type="radio" name="live-mode" value={v} checked={mode === v} disabled={busy} onChange={() => setMode(v)} />
+            <span>{l}</span>
+          </label>
+        ))}
+      </div>
+      {free ? (
+        <>
+          <div className="banner banner-info" data-testid="live-free-banner"><b>Free:</b> this test runs on your own device, nothing is sent anywhere and it uses no credit. <b>Please wear headphones</b>, or you’ll get feedback.</div>
+          <p className="mb0" data-testid="live-plugin-note">The OBS plugin works like the paid test: the work happens on our side, so your computer stays free for your stream, and its captions get about 40% fewer words wrong than these free ones on clear English speech.</p>
+        </>
+      ) : (
+        <>
+          <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>
+          <p className="mb0" data-testid="live-free-hint">This is how the OBS plugin works. Want to try without spending credit? Switch to the free test above.</p>
+        </>
+      )}
       {!mediaOk && <div className="banner banner-error" role="alert">This browser can’t do what the live test needs (microphone, AudioWorklet, WebSocket). A current Chrome, Edge, Firefox or Safari will.</div>}
 
       <div className="opt-grid" data-testid="live-options">
         <Group id="grp-noise" title="Noise removal">
           <label className="check">
             <input type="checkbox" checked={denoise} disabled={busy} onChange={(e) => setDenoise(e.target.checked)} />
-            <span>Remove noise from my voice<span className="hint block">{den ? `${moneyUsd(den.usdPerHour)} an hour` : 'Takes out hiss, hum and room noise.'}</span></span>
+            <span>Remove noise from my voice<span className="hint block">{free ? 'Free, done on your device.' : den ? `${moneyUsd(den.usdPerHour)} an hour` : 'Takes out hiss, hum and room noise.'}</span></span>
           </label>
           <StrengthPicker
             name="live-str" value={strength} disabled={!denoise || state === 'starting'}
             onChange={(id) => { setStrength(id); session.current?.setAtten(strengthDb(id)); }}
           />
           <span className="hint">You can change it while you talk.</span>
-          <span className="hint">Echo from your speakers is removed automatically. With headphones you don’t need it.</span>
+          {!free && <span className="hint">Echo from your speakers is removed automatically. With headphones you don’t need it.</span>}
         </Group>
 
         <Group id="grp-captions" title="Captions">
+          {free ? (
+            <>
+              <div className="choice-stack" role="radiogroup" aria-labelledby="grp-captions">
+                <label className="choice">
+                  <input type="radio" name="live-free-captions" value="off" checked={!freeCaps} disabled={busy} onChange={() => setFreeCaps(false)} />
+                  <span><b>Off</b><small>No captions</small></span>
+                </label>
+                <label className="choice">
+                  <input type="radio" name="live-free-captions" value="on" checked={freeCaps} disabled={busy} onChange={() => setFreeCaps(true)} />
+                  <span><b>On</b><small>Free, made on your device, in many languages</small></span>
+                </label>
+              </div>
+              {freeCaps && (
+                <>
+                  <div className="field">
+                    <label htmlFor="live-free-lang">Language you speak</label>
+                    <select id="live-free-lang" className="select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
+                      {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+                    </select>
+                  </div>
+                  <span className="hint" data-testid="free-captions-note">Each line shows after you pause. The first time, the caption maker downloads about 80 MB.</span>
+                </>
+              )}
+            </>
+          ) : (
+          <>
           <div className="choice-stack" role="radiogroup" aria-labelledby="grp-captions">
             <label className="choice">
               <input type="radio" name="live-captions" value="" checked={captions === ''} disabled={busy} onChange={() => setCaptions('')} />
@@ -458,6 +521,8 @@ function LiveDemo({ pricing }) {
             </>
           )}
           {captions === 'local' && <span className="hint">Standard captions are English only. For another language, choose Extra accurate.</span>}
+          </>
+          )}
         </Group>
 
         <Group id="grp-hear" title="You hear">
@@ -473,6 +538,9 @@ function LiveDemo({ pricing }) {
         </Group>
       </div>
 
+      {free ? (
+        <p className="mb0" data-testid="live-price" data-usd-per-minute="0"><b>Cost: free.</b> <span className="muted">Nothing is sent to us, so nothing is charged.</span></p>
+      ) : (
       <p className="mb0" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
         {!pricing && <span className="muted">Loading prices…</span>}
         {pricing && perMin <= 0 && priceKnown && <span className="muted">Turn on noise removal or captions to start.</span>}
@@ -485,9 +553,10 @@ function LiveDemo({ pricing }) {
           </>
         )}
       </p>
+      )}
 
       <div className="row">
-        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => start()} disabled={busy || !mediaOk || (!denoise && !captions) || !priceKnown || !offered} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
+        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => start()} disabled={busy || !mediaOk || (free ? !denoise && !freeCaps : (!denoise && !captions) || !priceKnown || !offered)} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
         {(live || state === 'stopping') && <button type="button" className="btn btn-danger btn-lg" onClick={stop} disabled={state === 'stopping'} data-testid="live-stop">{state === 'stopping' ? 'Stopping…' : 'Stop'}</button>}
         {live && <span className="badge badge-ok" role="status">Live</span>}
       </div>
@@ -511,9 +580,9 @@ function LiveDemo({ pricing }) {
       {(live || stats) && (
         <div className="grid grid-3" data-testid="live-stats" data-rtt={stats ? stats.rttAvg.toFixed(1) : ''} data-recv={stats?.recv ?? 0} data-sent={stats?.sent ?? 0}>
           <div className="stack">
-            <b>Round trip</b>
+            <b>{free ? 'Processing delay' : 'Round trip'}</b>
             <div className="big-number">{stats ? `${Math.round(stats.rttAvg)} ms` : '…'}</div>
-            <span className="small muted">+ {info ? `${Math.round(info.modelLatencyMs)} ms` : '30 ms'} processing delay. Playback buffer {stats ? Math.round(stats.bufferMs) : 0} ms{stats?.underruns ? `, ${stats.underruns} gaps` : ''}.</span>
+            <span className="small muted">+ {info ? `${Math.round(info.modelLatencyMs)} ms` : '30 ms'} {free ? 'model' : 'processing'} delay. Playback buffer {stats ? Math.round(stats.bufferMs) : 0} ms{stats?.underruns ? `, ${stats.underruns} gaps` : ''}.</span>
           </div>
           <div className="stack">
             <b id="in-l">Microphone level</b>
@@ -524,18 +593,18 @@ function LiveDemo({ pricing }) {
           <div className="stack">
             <b>Session</b>
             <div className="small muted">
-              {stats ? `${clock(stats.elapsed)} · ${stats.sent} frames sent, ${stats.recv} received` : ''}
-              {info && stats ? <><br />So far about {moneyUsd((stats.elapsed / 60) * info.usdPerMinute)} at {rate(info.usdPerMinute)} per minute</> : null}
+              {stats ? `${clock(stats.elapsed)} · ${stats.sent} frames ${free ? 'in' : 'sent'}, ${stats.recv} ${free ? 'cleaned' : 'received'}` : ''}
+              {info && stats && !info.local ? <><br />So far about {moneyUsd((stats.elapsed / 60) * info.usdPerMinute)} at {rate(info.usdPerMinute)} per minute</> : null}
             </div>
           </div>
         </div>
       )}
 
-      {captions && (
+      {showCaptions && (
         <div className="stack">
           <b id="cap-h">Live captions</b>
           <div className="caption-log" ref={logRef} role="log" aria-live="polite" aria-labelledby="cap-h" data-testid="captions">
-            {lines.length === 0 && <p className="muted">{live ? (captions === 'premium' ? 'Say something and the captions show up here as you talk.' : 'Say something and the captions show up here as you talk and pause.') : 'Captions show up here while the test runs.'}</p>}
+            {lines.length === 0 && <p className="muted">{live ? (!free && captions === 'premium' ? 'Say something and the captions show up here as you talk.' : 'Say something and the captions show up here as you talk and pause.') : 'Captions show up here while the test runs.'}</p>}
             {lines.map((l) => (l.final
               ? <p key={l.key} data-testid="caption-line">{l.text}</p>
               : <p key={l.key} className="partial" aria-hidden="true" data-testid="caption-partial">{l.text}</p>))}

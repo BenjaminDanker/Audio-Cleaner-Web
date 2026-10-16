@@ -189,31 +189,23 @@ await check('free: starting before the download is done shows "Getting the noise
   return `${stage}; "${text}"; before starting: "${eta}"`;
 });
 
-await check('free + free: browser noise removal AND a free subtitles job at the same time (download appears, free job created)', async () => {
+await check('free + free: browser noise removal AND free subtitles at the same time, both in the browser, no job at all', async () => {
   const posts = [];
   await page.route('**/api/jobs', (r) => { if (r.request().method() === 'POST') posts.push(r.request().postDataJSON()); return r.continue(); });
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
-  await pick(page, 'subs', 'free');
-  await page.getByTestId('free-note').waitFor();
+  await pick(page, 'subs', 'browser');
   const label = (await page.getByTestId('start').innerText()).trim();
   if (label !== 'Start – free') throw new Error('label: ' + label);
   await page.getByTestId('start').click();
   await page.waitForSelector('[data-testid=result]', { timeout: 180000 });
-  await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-  const body = posts.at(-1);
-  if (!body || body.free !== true || body.kind !== 'transcribe' || body.transcribeTier !== 'local' || body.denoiseTier) throw new Error('job: ' + JSON.stringify(body));
-  await page.getByTestId('free-badge').first().waitFor();
+  await page.getByTestId('subs-result').waitFor({ timeout: 300000 });
+  await page.unroute('**/api/jobs');
+  if (posts.length) throw new Error('a job was sent: ' + JSON.stringify(posts.at(-1)));
   const link = page.getByRole('link', { name: /Cleaned WAV/ });
   const [dl] = await Promise.all([page.waitForEvent('download'), link.click()]);
   await page.screenshot({ path: join(SHOTS, 'free-free-combo.png'), fullPage: true });
-  const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
-  await page.evaluate(async (id) => {
-    const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
-    await fetch(`/audio/api/jobs/${id}/cancel`, { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': me.csrfToken } });
-  }, id);
-  await page.unroute('**/api/jobs');
-  return `download ${dl.suggestedFilename()} + free job ${id}`;
+  return `download ${dl.suggestedFilename()} + subtitles (${await page.getByTestId('subs-result').getAttribute('data-cues')} cues)`;
 });
 
 await check('/free is gone: the not-found page, no redirect', async () => {

@@ -335,7 +335,6 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
         },
         "csrfToken": principal.csrf_token,
         "balance": bal,
-        "freeTranscribeSecondsLeft": jobs.free_seconds_left(principal.user_id),
         "autoReload": {
             "enabled": bool(user["auto_reload_enabled"]),
             "thresholdMicros": user["auto_reload_threshold_micros"],
@@ -415,13 +414,6 @@ def delete_account(body: DeleteBody, request: Request, response: Response,
         bal = c.execute("SELECT balance_micros FROM users WHERE id = ?", (uid,)).fetchone()["balance_micros"]
         if bal > 0:
             ledger.debit_available(uid, bal, "adjustment", "account", uid, "Forfeited on account deletion", allow_partial=True, c=c)
-        used = c.execute("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (uid, jobs_mod.utc_day())).fetchone()
-        if used and used["seconds"] > 0:
-            c.execute(
-                "INSERT INTO deleted_emails(email_hash, day, free_seconds) VALUES (?,?,?)"
-                " ON CONFLICT(email_hash) DO UPDATE SET day = excluded.day, free_seconds = excluded.free_seconds",
-                (sha256_hex(principal.email.lower()), jobs_mod.utc_day(), used["seconds"]),
-            )
         c.execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
         c.execute("DELETE FROM identities WHERE user_id = ?", (uid,))
         c.execute("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE user_id = ?", (db.now(), uid))

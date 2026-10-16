@@ -38,11 +38,11 @@ await check('cleanup: zero balance -> warning + disabled start, link to billing'
   if (!(await page.getByTestId('start').isDisabled())) throw new Error('start enabled');
   return w;
 });
-await check('subtitles only: a 10 min file is within the free limit, so it is free and can start without credit', async () => {
+await check('subtitles only, free in the browser: a 10 min file can start without credit', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'long10min.mp3'));
   await pick(page, 'noise', 'off');
-  await pick(page, 'subs', 'free');
+  await pick(page, 'subs', 'browser');
   await page.getByRole('button', { name: 'Start – free' }).waitFor();
   const en = await page.getByRole('button', { name: 'Start – free' }).isEnabled();
   if (!en) throw new Error('start disabled for a free 10 min file');

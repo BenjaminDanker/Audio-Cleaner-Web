@@ -104,8 +104,8 @@ export const COMPONENTS = [
     texts: [{ label: 'MIT licence', file: 'onnx-asr-LICENSE-MIT.txt', from: 'licenses-src/onnx-asr-LICENSE-MIT' }],
   },
   {
-    name: 'OpenAI Whisper (large-v3-turbo, small) with faster-whisper and CTranslate2', by: 'OpenAI; SYSTRAN; OpenNMT', license: 'MIT', url: 'https://github.com/openai/whisper',
-    what: 'Standard transcription of files in languages the model above does not cover, and spotting which language is spoken.',
+    name: 'OpenAI Whisper (large-v3-turbo, small, base) with faster-whisper and CTranslate2', by: 'OpenAI; SYSTRAN; OpenNMT', license: 'MIT', url: 'https://github.com/openai/whisper',
+    what: 'Standard transcription of files in languages the model above does not cover, and spotting which language is spoken. Whisper base (converted to ONNX by the onnx-community project) makes the free subtitles in your browser.',
     texts: [
       { label: 'Whisper licence (MIT)', href: 'https://github.com/openai/whisper/blob/main/LICENSE' },
       { label: 'faster-whisper licence (MIT)', href: 'https://github.com/SYSTRAN/faster-whisper/blob/master/LICENSE' },
@@ -121,6 +121,20 @@ export const COMPONENTS = [
     name: '@mediabunny/mp3-encoder', by: 'Vanilagy and contributors', license: 'MPL-2.0', pkg: '@mediabunny/mp3-encoder', url: 'https://github.com/Vanilagy/mediabunny/tree/main/packages/mp3-encoder',
     what: 'Writes MP3 files in your browser. It is a separate file your browser downloads only when you save a result as an MP3. Used unmodified; its source is available at the link.',
     texts: [{ label: 'Mozilla Public License 2.0', file: 'mediabunny-mp3-encoder-LICENSE.txt', from: 'node_modules/@mediabunny/mp3-encoder/LICENSE' }],
+  },
+  {
+    name: 'Transformers.js', by: 'Hugging Face', license: 'Apache-2.0', pkg: '@huggingface/transformers', url: 'https://github.com/huggingface/transformers.js',
+    what: 'Runs the subtitle model in your browser for the free subtitles, with its tokenizer (@huggingface/tokenizers, Apache-2.0) and template library (@huggingface/jinja, MIT). Downloaded only when you choose free subtitles.',
+    texts: [
+      { label: 'Apache License 2.0', file: 'transformers-js-LICENSE.txt', from: 'node_modules/@huggingface/transformers/LICENSE' },
+      { label: '@huggingface/tokenizers: Apache License 2.0', file: 'hf-tokenizers-LICENSE.txt', from: 'node_modules/@huggingface/tokenizers/LICENSE' },
+      { label: '@huggingface/jinja: MIT licence', file: 'hf-jinja-LICENSE.txt', from: 'node_modules/@huggingface/jinja/LICENSE' },
+    ],
+  },
+  {
+    name: 'ONNX Runtime Web', by: 'Microsoft', license: 'MIT', pkg: 'onnxruntime-web', url: 'https://github.com/microsoft/onnxruntime',
+    what: 'The engine, compiled to WebAssembly, that the free subtitles run on in your browser.',
+    texts: [{ label: 'MIT licence', file: 'onnxruntime-LICENSE-MIT.txt', from: 'licenses-src/onnxruntime-LICENSE-MIT' }],
   },
   {
     name: 'LAME', by: 'The LAME developers', license: 'LGPL-2.0-or-later', url: 'https://lame.sourceforge.io/',

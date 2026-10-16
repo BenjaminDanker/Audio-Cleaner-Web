@@ -25,9 +25,11 @@
     "test:files": "node tests/files.mjs",
     "test:fixes": "node tests/fixes.mjs",
     "test:contact": "node tests/contact.mjs",
-    "test:convert": "node tests/convert.mjs"
+    "test:convert": "node tests/convert.mjs",
+    "test:subtitles": "node tests/subtitles.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "4.3.0",
     "@mediabunny/mp3-encoder": "1.61.3",
     "mediabunny": "^1.61.3",
     "react": "^18.3.1",

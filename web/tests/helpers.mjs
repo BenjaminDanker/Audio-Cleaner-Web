@@ -58,7 +58,7 @@ export async function check(name, fn) {
 export const summary = () => results;
 
 // ---- the Cleanup page's options (drop a file, then pick what to do) ----
-/** Click one of the option cards: group 'noise' (off | browser | polish) or 'subs' (off | free | standard | accurate). */
+/** Click one of the option cards: group 'noise' (off | browser | polish) or 'subs' (off | browser | standard | accurate). */
 export async function pick(page, group, value) {
   await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
 }

@@ -366,11 +366,11 @@ await check('Clean & polish of a video with a chosen type and size: the cleaned 
   return `${dl.suggestedFilename()} ${i.v.codec_name} ${i.v.width}x${i.v.height} + ${i.a.codec_name}`;
 });
 
-await check('Free subtitles put into the video in the browser: an MKV with the picture and sound copied and the subtitles as a track players read', async () => {
+await check('Standard subtitles put into the video in the browser: an MKV with the picture and sound copied and the subtitles as a track players read', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'test.mp4'));
   await pick(page, 'noise', 'off');
-  await pick(page, 'subs', 'free');
+  await pick(page, 'subs', 'standard');
   await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
   let sent = null;
   const spy = (r) => { if (r.method() === 'POST' && /\/api\/jobs$/.test(r.url())) sent = r.postDataJSON(); };

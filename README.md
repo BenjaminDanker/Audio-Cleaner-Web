@@ -11,8 +11,9 @@ Speech denoising and transcription, self-hosted.
 - **Live for streamers** (pay as you go): OBS plugin streams the mic to the
   server and gets back cleaned audio (+30 ms model latency) and live captions
   (CEA-608 into Twitch/YouTube).
-- **Transcription** (pay as you go, plus a free daily allowance): Parakeet and Whisper on our own server
-  (GPU when there is one), or extra accurate through OpenAI. Outputs SRT, VTT and TXT.
+- **Transcription**: free in the browser (Whisper base, about 80 MB, run on the visitor's device), or pay as you go:
+  Parakeet and Whisper on our own server (GPU when there is one), or extra accurate through OpenAI. Outputs SRT,
+  VTT and TXT, or a video with them inside (made in the browser).
 - **Desktop app** (free, Windows/macOS): the Studio clean chain running locally
   on video and audio files, batch queue, preview with original/cleaned toggle.
 

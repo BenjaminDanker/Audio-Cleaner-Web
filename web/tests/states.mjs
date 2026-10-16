@@ -53,7 +53,7 @@ if (want('prices')) {
       await page.goto(`${BASE}/#pricing`);
       await page.waitForSelector('[data-testid=prices] tbody tr');
       const t = await page.getByTestId('prices').innerText();
-      const need = ['Free', 'Files', 'Live streaming', 'Clean & polish', '$0.60 / hour', '$0.01 / min', '$0.24 / hour', 'Noise removed, voice evened out and loudness set, ready to publish', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Noise removal in your browser', 'Subtitles & transcripts', '60 min every day', '$0.004 / min'];
+      const need = ['Free', 'Files', 'Live streaming', 'Clean & polish', '$0.60 / hour', '$0.01 / min', '$0.24 / hour', 'Noise removed, voice evened out and loudness set, ready to publish', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Noise removal in your browser', 'Subtitles & transcripts in your browser', '$0.004 / min'];
       if (/account/i.test(t)) throw new Error('the price list should not talk about accounts: ' + t);
       for (const n of need) if (!t.includes(n)) throw new Error(`missing "${n}" in: ${t}`);
       if (/Available|Coming soon|low latency/i.test(t) || t.includes('Live captions, extra accurate')) throw new Error('should not show: ' + t);
@@ -161,6 +161,7 @@ if (want('livefull')) {
   const capCard = (v) => page.locator(`label.choice:has(input[name=live-captions][value=${v}])`);
   await check('live: no low-latency option anywhere; when live is full the message and one-click alternatives appear and retrying works', async () => {
     await page.goto(`${BASE}/app/live`);
+    await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click(); // the paid test (the free one runs in the browser)
     await page.getByTestId('live-price').waitFor();
     if (/low.latency|20 ms/i.test(await page.locator('main').innerText()) || (await page.locator('#live-den').count())) throw new Error('low latency is still on the page');
     await capCard('premium').click();
@@ -184,6 +185,7 @@ if (want('livefull')) {
   await check('live: the language picker only appears with Extra accurate (any language); Standard says English only and sends no language', async () => {
     mode = 'ok';
     await page.goto(`${BASE}/app/live`);
+    await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click(); // the paid test (the free one runs in the browser)
     await page.getByTestId('live-price').waitFor();
     if (await page.locator('#live-lang').count()) throw new Error('language picker shown for standard captions');
     if (!/English only/.test(await capCard('local').innerText())) throw new Error('Standard card: ' + (await capCard('local').innerText()));
@@ -206,6 +208,7 @@ if (want('livefull')) {
     await page.unroute(/\/api\/stream\/ws/);
     await page.routeWebSocket(/\/api\/stream\/ws/, (ws) => ws.onMessage((m) => { if (typeof m === 'string' && JSON.parse(m).type === 'start') ws.send(JSON.stringify({ type: 'error', code: 'bad_config', message: 'Standard captions are English only.' })); }));
     await page.goto(`${BASE}/app/live`);
+    await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click(); // the paid test (the free one runs in the browser)
     await page.getByTestId('live-price').waitFor();
     await page.getByTestId('live-start').click();
     await page.getByTestId('live-error').waitFor({ timeout: 15000 });

@@ -61,22 +61,12 @@ def get_or_create_user(email: str, display_name: str | None = None) -> dict:
                 "INSERT INTO audit_log(user_id, actor, action, created_at) VALUES (?, 'system', 'user_created', ?)",
                 (user_id, db.now()),
             )
-            tomb = c.execute("SELECT day, free_seconds FROM deleted_emails WHERE email_hash = ?", (sha256_hex(email),)).fetchone()
-            if tomb is not None and tomb["day"] == _utc_day():
-                # Signing up again after deleting the account: today's free usage comes along.
-                c.execute("INSERT INTO free_usage(user_id, day, seconds) VALUES (?,?,?)", (user_id, tomb["day"], tomb["free_seconds"]))
             row = c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         elif (email in settings.admin_emails) != bool(row["is_admin"]):
             # The list in the environment is the only source of admin rights: add and remove follow it.
             c.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if email in settings.admin_emails else 0, row["id"]))
             row = c.execute("SELECT * FROM users WHERE id = ?", (row["id"],)).fetchone()
     return dict(row)
-
-
-def _utc_day() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def link_identity(provider: str, provider_user_id: str, email: str, display_name: str | None) -> dict:

@@ -10,16 +10,16 @@ export function useAuth() {
 
 export function AuthProvider({ children }) {
   const navigate = useNavigate();
-  const [state, setState] = useState({ ready: false, known: false, signedIn: false, user: null, balance: null, autoReload: null, freeSecondsLeft: 0, contact: null });
+  const [state, setState] = useState({ ready: false, known: false, signedIn: false, user: null, balance: null, autoReload: null, contact: null });
   const stateRef = useRef(state);
   stateRef.current = state;
 
   const apply = useCallback((me) => {
     if (me?.signedIn) {
-      setState({ ready: true, known: true, signedIn: true, user: me.user, balance: me.balance, autoReload: me.autoReload, freeSecondsLeft: Math.max(0, Number(me.freeTranscribeSecondsLeft) || 0), contact: !!me.contactForm });
+      setState({ ready: true, known: true, signedIn: true, user: me.user, balance: me.balance, autoReload: me.autoReload, contact: !!me.contactForm });
     } else {
       // `contact`: whether the contact form can send mail right now (null = not known yet). Only a yes or no; the address stays on the server.
-      setState({ ready: true, known: true, signedIn: false, user: null, balance: null, autoReload: null, freeSecondsLeft: 0, contact: me?.contactForm === undefined ? stateRef.current.contact : !!me.contactForm });
+      setState({ ready: true, known: true, signedIn: false, user: null, balance: null, autoReload: null, contact: me?.contactForm === undefined ? stateRef.current.contact : !!me.contactForm });
     }
   }, []);
 

@@ -1,4 +1,4 @@
-import { defineConfig, loadEnv } from 'vite';
+import { defaultClientConditions, defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -22,6 +22,13 @@ function dfnSizes() {
 // The versioned folder of the libav.js decoder (scripts/sync-dfn.mjs), or '' when it is not built.
 function libavDir() {
   const p = new URL('./public/dfn/libav/', import.meta.url);
+  const dirs = existsSync(p) ? readdirSync(p) : [];
+  return dirs.length === 1 ? dirs[0] : '';
+}
+
+// The versioned folder of the speech runtime (scripts/sync-dfn.mjs), or '' when it is not there.
+function ortDir() {
+  const p = new URL('./public/dfn/ort/', import.meta.url);
   const dirs = existsSync(p) ? readdirSync(p) : [];
   return dirs.length === 1 ? dirs[0] : '';
 }
@@ -60,7 +67,10 @@ export default defineConfig(({ mode }) => {
   return {
     base,
     plugins: [react(), sitePlugin(siteOrigin(env), base)],
-    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()), __LIBAV_DIR__: JSON.stringify(libavDir()) },
+    // The speech runtime's build that loads its WebAssembly from where we say (the gated public/dfn/ort/ folder,
+    // src/media/transcribe.worker.js) instead of having a 26 MB copy of it put among the public assets.
+    resolve: { conditions: ['onnxruntime-web-use-extern-wasm', ...defaultClientConditions] },
+    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()), __LIBAV_DIR__: JSON.stringify(libavDir()), __ORT_DIR__: JSON.stringify(ortDir()) },
     worker: { format: 'es' },
     build: {
       target: 'es2022',

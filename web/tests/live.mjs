@@ -14,9 +14,27 @@ page.on('websocket', (ws) => {
 
 await check('live: sign in', async () => { await signIn(page, EMAIL); return 'ok'; });
 
-await check('live: the test panel is three aligned groups (Noise removal, Captions, You hear); clear labels; no low latency; free-trial line links to Cleanup', async () => {
+const paidTest = async () => {
+  await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
+  await page.getByTestId('live-free-hint').waitFor();
+};
+
+await check('live: the test starts as the free one (in the browser, no credit), with a note on how the OBS plugin compares', async () => {
+  await page.goto(`${BASE}/app/live`);
+  await page.getByTestId('live-free-banner').waitFor();
+  if (!(await page.getByTestId('live-mode').locator('input[value=free]').isChecked())) throw new Error('not free by default');
+  const note = await page.getByTestId('live-plugin-note').innerText();
+  if (!/40% fewer words wrong/.test(note)) throw new Error(note);
+  if (!/Cost: free/.test(await page.getByTestId('live-price').innerText())) throw new Error('price line');
+  const caps = await page.getByTestId('group-captions').innerText();
+  if (!/Free, made on your device/.test(caps) || /Extra accurate/.test(caps)) throw new Error(caps);
+  return note;
+});
+
+await check('live: the paid test panel is three aligned groups (Noise removal, Captions, You hear); clear labels; no low latency; points to the free test', async () => {
   await page.goto(`${BASE}/app/live`);
   await page.getByTestId('live-options').waitFor();
+  await paidTest();
   const boxes = {};
   for (const [id, title, inside] of [['noise', 'Noise removal', ['How much noise to remove', 'Remove noise']], ['captions', 'Captions', ['Off', 'Standard', 'Extra accurate']], ['hear', 'You hear', ['Nothing', 'Original', 'Cleaned']]]) {
     const g = page.getByTestId(`group-${id}`);
@@ -31,9 +49,7 @@ await check('live: the test panel is three aligned groups (Noise removal, Captio
   if (!(a.x + a.width <= b.x + 1 && b.x + b.width <= c.x + 1)) throw new Error('groups overlap or are out of order');
   const t = await page.locator('main').innerText();
   if (/How strong|low.latency|Noise removal style|20 ms/i.test(t)) throw new Error('old wording is still on the page');
-  if (!t.includes('Want to try without spending credit? Free noise removal and your free daily subtitle minutes are on the Cleanup page.')) throw new Error('free-trial line missing');
-  const href = await page.getByTestId('live-free-hint').getByRole('link', { name: 'Cleanup page' }).getAttribute('href');
-  if (!/\/audio\/app$/.test(href)) throw new Error('link: ' + href);
+  if (!t.includes('This is how the OBS plugin works. Want to try without spending credit? Switch to the free test above.')) throw new Error('free-test line missing');
   await page.screenshot({ path: join(SHOTS, 'live-groups.png'), fullPage: true });
   await page.setViewportSize({ width: 360, height: 800 });
   const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, vw: window.innerWidth, tops: ['noise', 'captions', 'hear'].map((i) => document.querySelector(`[data-testid=group-${i}]`).getBoundingClientRect().top) }));
@@ -88,8 +104,34 @@ await check('live: the plugin section offers a download per platform with the ve
   return 'version, 5 buttons, install steps, source link; partial manifest; not-ready message; needs credit';
 });
 
-await check('live: demo with fake mic, denoise + local captions', async () => {
+await check('live: free test with a fake mic (clear speech): the voice is cleaned and captioned in the browser; nothing is sent to us', async () => {
+  const f = await launch(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${join(FILES, 'speech.wav')}`]);
+  try {
+    let sockets = 0;
+    f.page.on('websocket', () => { sockets++; });
+    await signIn(f.page, EMAIL);
+    await f.page.goto(`${BASE}/app/live`);
+    await f.page.getByTestId('live-start').click();
+    await f.page.getByTestId('live-stop').waitFor({ timeout: 120000 });
+    await f.page.waitForFunction(() => Number(document.querySelector('[data-testid=live-stats]')?.getAttribute('data-recv')) > 100, null, { timeout: 30000 });
+    await f.page.getByTestId('caption-line').first().waitFor({ timeout: 90000 });
+    const lines = await f.page.getByTestId('caption-line').allInnerTexts();
+    const delay = Number(await f.page.getByTestId('live-stats').getAttribute('data-rtt'));
+    await f.page.screenshot({ path: join(SHOTS, 'live-free.png'), fullPage: true });
+    await f.page.getByTestId('live-stop').click();
+    await f.page.getByTestId('live-start').waitFor({ timeout: 15000 });
+    if (await f.page.getByTestId('live-error').count()) throw new Error(await f.page.getByTestId('live-error').innerText());
+    if (!lines.some((l) => /responsible|hearing|damage|exposure/i.test(l))) throw new Error(`captions: ${JSON.stringify(lines)}`);
+    if (sockets) throw new Error('a connection to the live service was opened');
+    return `cleaning delay ${delay.toFixed(1)} ms; captions: ${JSON.stringify(lines.slice(0, 2))}`;
+  } finally {
+    await f.browser.close();
+  }
+});
+
+await check('live: paid demo with fake mic, denoise + local captions', async () => {
   await page.goto(`${BASE}/app/live`);
+  await paidTest();
   await page.getByTestId('live-start').waitFor();
   await page.getByTestId('live-start').click();
   await page.getByTestId('live-stop').waitFor({ timeout: 30000 });

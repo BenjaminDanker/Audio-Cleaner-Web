@@ -210,6 +210,11 @@ export class DenoiseEngine {
     return Promise.all(this.workers.map((w) => w.request('flush')));
   }
 
+  /** Change how strong the noise removal is, from the next frame on (live use). */
+  setAtten(db) {
+    for (const w of this.workers) w.worker.postMessage({ type: 'atten', db });
+  }
+
   terminate() {
     for (const w of this.workers) w.terminate();
   }

@@ -203,33 +203,10 @@ def test_promised_upload_bytes_are_not_free_space(monkeypatch):
     assert db.one("SELECT COUNT(*) n FROM holds WHERE status = 'active'")["n"] == 2  # the refused job's hold was given back
 
 
-def test_free_job_cannot_be_much_bigger_than_its_length_allows():
-    uid = user()
-    with pytest.raises(jobs.JobError, match="larger than a recording"):
-        make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", free=True, size_bytes=2 * 1024**3,
-                 claimed_seconds=60)
-    make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", free=True, size_bytes=50_000_000, claimed_seconds=60)
 
 
-def test_global_free_allowance_per_day(monkeypatch):
-    monkeypatch.setattr(pricing, "FREE_GLOBAL_SECONDS_PER_DAY", 700)
-    a, b = user("a@example.com"), user("b@example.com")
-    make_job(a, kind="transcribe", denoise_tier=None, transcribe_tier="local", free=True, claimed_seconds=600)
-    with pytest.raises(jobs.JobError, match="very busy"):
-        make_job(b, kind="transcribe", denoise_tier=None, transcribe_tier="local", free=True, claimed_seconds=600)
 
 
-def test_deleted_account_keeps_todays_free_usage(client):
-    uid, h = login(client, "gone@example.com")
-    make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", free=True, claimed_seconds=1200, size_bytes=1000)
-    # (the job is still uploading; cancel it so the account can be deleted, keeping the usage as it stands)
-    db.execute("UPDATE jobs SET status = 'done' WHERE user_id = ?", (uid,))
-    r = client.post("/api/account/delete", json={"confirm": "gone@example.com"}, headers=h)
-    assert r.status_code == 200, r.text
-    again = auth.get_or_create_user("gone@example.com")
-    assert again["id"] != uid
-    assert jobs.free_seconds_left(again["id"]) == pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY - 1200
-    assert db.one("SELECT COUNT(*) n FROM deleted_emails WHERE email_hash LIKE '%gone%'")["n"] == 0  # only a hash is kept
 
 
 def test_upload_expiry_moves_while_bytes_arrive(client, signed_in):
@@ -945,13 +922,6 @@ def test_pricing_reports_the_upload_limit(client):
     assert client.get("/api/billing/pricing").json()["maxUploadBytes"] == 4 * 1024**3
 
 
-def test_429_from_job_creation_says_how_long(client, signed_in, monkeypatch):
-    uid, h = signed_in
-    monkeypatch.setattr(pricing, "FREE_GLOBAL_SECONDS_PER_DAY", 100)
-    r = client.post("/api/jobs", json={"kind": "transcribe", "transcribeTier": "local", "filename": "a.wav", "sizeBytes": 1000,
-                                       "durationSeconds": 600, "free": True}, headers=h)
-    assert r.status_code == 429
-    assert 1 <= int(r.headers["Retry-After"]) <= 86400 and int(r.headers["Retry-After"]) != 300
 
 
 def test_hostile_display_names_are_cleaned_on_the_server(client, signed_in):

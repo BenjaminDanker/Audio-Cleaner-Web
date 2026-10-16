@@ -8,8 +8,10 @@ import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
+import { preloadSpeech, speechLoadState, subscribeSpeechLoad, transcribeFile } from '../media/speech.js';
 import { buildWav, wavFits } from '../media/wav.js';
 import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
+import SubtitlesResult, { SubtitlesProgress, subtitleFiles } from './SubtitlesResult.jsx';
 import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
@@ -40,8 +42,23 @@ const inGigabytes = (text) => text.replace(/\b(\d{4,})\s*MB\b/g, (_, n) => gigab
 
 const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
 
-const mins = (sec) => Math.max(1, Math.ceil(sec / 60));
-const minutesWord = (n) => `${n} ${n === 1 ? 'minute' : 'minutes'}`;
+
+/** Start fetching the subtitle maker (about 80 MB, once; the browser keeps it) as soon as free subtitles are chosen. */
+function warmUpSpeech() {
+  if (!supported || navigator.connection?.saveData) return;
+  preloadSpeech().catch(() => {});
+}
+
+/** Can this browser make the subtitles for this file itself? */
+function subsVerdict(info) {
+  const paid = 'Standard can (paid).';
+  if (!supported) return { ok: false, why: `This browser can’t run the subtitle maker. ${paid}` };
+  if (info.hasAudio === false) return { ok: false, why: 'This file has no audio track.' };
+  const readable = info.canDecode !== false && (info.viaMediabunny || info.viaLibav || info.duration != null);
+  if (!readable) return { ok: false, why: `Your browser can’t open this file type. ${paid}` };
+  if (info.duration && info.duration > MAX_SECONDS) return { ok: false, why: `This is longer than ${MAX_SECONDS / 3600} hours, which is too long for your browser. ${paid}` };
+  return { ok: true, why: '' };
+}
 
 /** Can this browser do the noise removal for this file? `why` is the plain-words reason when it can't. */
 function browserVerdict(info) {
@@ -69,20 +86,21 @@ function Choice({ name, value, current, onPick, disabled, title, hint, reason })
 /**
  * The Cleanup form: drop one file, then choose what to do with it. Only what is possible for that file is offered.
  *   Noise removal:  Off | Free, in your browser (nothing uploaded) | Clean & polish (paid, on our side)
- *   Subtitles:      Off | Free (standard) | Standard | Extra accurate
+ *   Subtitles:      Off | Free, in your browser (nothing uploaded) | Standard (paid) | Extra accurate (paid)
  * Any combination works: the browser part runs here, in parallel with the job (if any) for the rest.
  * onSubmitted({id, ...}, {file, info, extracted, keepVideo})
  */
 export default function JobForm({ onSubmitted }) {
-  const { balance, refresh, freeSecondsLeft } = useAuth();
+  const { balance, refresh } = useAuth();
   const { data: pricing, error: pricingError } = usePricing();
   const load = useSyncExternalStore(subscribeDenoiserLoad, denoiserLoadState);
+  const speechLoad = useSyncExternalStore(subscribeSpeechLoad, speechLoadState);
 
   const [file, setFile] = useState(null);
   const [info, setInfo] = useState(null);
   const [probing, setProbing] = useState(false);
   const [noise, setNoise] = useState('off'); // 'off' | 'browser' | 'polish'
-  const [subs, setSubs] = useState('off'); // 'off' | 'free' | 'standard' | 'accurate'
+  const [subs, setSubs] = useState('off'); // 'off' | 'browser' | 'standard' | 'accurate'
   const [keepVideo, setKeepVideo] = useState(true);
   const [embed, setEmbed] = useState(false);
   const [echo, setEcho] = useState(false); // Clean & polish: remove speaker echo using the second audio track
@@ -99,6 +117,9 @@ export default function JobForm({ onSubmitted }) {
   const [localProg, setLocalProg] = useState(null);
   const [localStage, setLocalStage] = useState('');
   const [localResult, setLocalResult] = useState(null); // {file, info, isVideo, keepVideo, result}
+  const [subsRunning, setSubsRunning] = useState(false);
+  const [subsProg, setSubsProg] = useState(null);
+  const [subsResult, setSubsResult] = useState(null); // {file, info, files, embed, cleanPcm} from the free in-browser subtitles
   const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
@@ -117,23 +138,25 @@ export default function JobForm({ onSubmitted }) {
   }, [busy]);
 
   const verdict = info ? browserVerdict(info) : null;
+  const sVerdict = info ? subsVerdict(info) : null;
   const wantsBrowser = noise === 'browser';
   const wantsPolish = noise === 'polish';
-  const wantsText = subs !== 'off';
+  const wantsText = subs !== 'off'; // any subtitles: the language, formats and "into the video" choices apply
+  const localSubs = subs === 'browser'; // made here, free
+  const serverText = wantsText && !localSubs; // made on our side, paid
   const tier = subs === 'accurate' ? 'premium' : 'local'; // transcription level ids stay internal
-  const kind = wantsPolish && wantsText ? 'denoise_transcribe' : wantsPolish ? 'denoise' : wantsText ? 'transcribe' : null;
-  const free = subs === 'free'; // the subtitles are free; with Clean & polish the cleanup is still paid
-  const allFree = free && !wantsPolish;
+  const kind = wantsPolish && serverText ? 'denoise_transcribe' : wantsPolish ? 'denoise' : serverText ? 'transcribe' : null;
   const isVideo = !!info?.hasVideo;
   const hasSecondTrack = (info?.audioTracks || 0) >= 2; // OBS and others can record mic and desktop sound as two tracks
   // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the
   // browser can't open goes up whole, and then our side puts them in. A recording with no picture can get them in the
   // plain black video made here when a video file type is picked.
   const videoResult = isVideo ? !wantsPolish || choice.isVideoFile : wantsPolish && choice.isVideoFile;
-  const embedOnServer = isVideo && !info?.viaMediabunny;
+  const embedOnServer = serverText && isVideo && !info?.viaMediabunny;
   const limit = buildLimit(); // null: this browser writes the result to disk, so any size works
   const tooBigHere = isVideo && !embedOnServer && file && limit != null && file.size > limit;
-  const canEmbed = wantsText && videoResult && !tooBigHere;
+  // subtitles made here go into a video this browser can rebuild (one it opens itself)
+  const canEmbed = wantsText && videoResult && !tooBigHere && (serverText || !isVideo || !!info?.viaMediabunny);
   const embedNow = canEmbed && embed;
   const embedHere = embedNow && !embedOnServer;
   // A subtitles-only video keeps its own file type when that can carry them (WebM), else it becomes MKV.
@@ -144,24 +167,10 @@ export default function JobForm({ onSubmitted }) {
   const lengthUnknown = !!(file && info && !probing && !info.duration && info.hasAudio !== false);
   const maxJob = pricing?.maxJobSeconds;
   const duration = info?.duration || (lengthUnknown ? Math.min(Math.max(30, (file.size * 8) / 128000), maxJob || 4 * 3600) : null);
-  const freeMax = pricing?.free?.transcribeMaxFileSeconds;
-  const freeDay = pricing?.free?.transcribeSecondsPerDay;
-  const freeLeft = freeSecondsLeft || 0;
   const polishRate = findRate(pricing, 'denoise', 'standard');
   const rebuildRate = findRate(pricing, 'denoise', 'rebuild');
   const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
-
-  // Free subtitles: only for a file within the per-file limit and today's free minutes.
-  const freeSubs = useMemo(() => {
-    if (!duration) return { ok: false, why: 'We need the length of the file first.' };
-    if (!freeMax) return { ok: false, why: 'We couldn’t load the free limits just now.' };
-    if (duration > freeMax) return { ok: false, why: `This file is longer than the ${mins(freeMax)}-minute free limit.` };
-    if (duration > freeLeft) {
-      return { ok: false, why: freeLeft > 0 ? `This is more than the ${minutesWord(mins(freeLeft))} of free time you have left today.` : 'You’ve used all of today’s free minutes.' };
-    }
-    return { ok: true, why: '' };
-  }, [duration, freeMax, freeLeft]);
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -173,22 +182,19 @@ export default function JobForm({ onSubmitted }) {
   const loadLeft = load.done ? 0 : load.secondsLeft;
   const eta = procEta == null ? null : procEta + (loadLeft || 0);
 
-  // Free subtitles that stop being possible (another file, the free minutes ran out) are switched off, never silently charged.
-  useEffect(() => { if (subs === 'free' && info && !freeSubs.ok) setSubs('off'); }, [subs, info, freeSubs]);
   // For Clean & polish the file type in the list and "Keep the video" are the same decision: a video type keeps the picture.
   useEffect(() => {
     if (wantsPolish && isVideo && !info?.viaLibav && choice.outputs) setKeepVideo(choice.isVideoFile);
   }, [wantsPolish, isVideo, info, choice.outputs, choice.isVideoFile]);
 
   const est = useMemo(() => {
-    if (!kind || allFree) return 0;
-    if (free) return estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }); // only the cleanup is paid
+    if (!kind) return 0;
     return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration });
-  }, [pricing, kind, tier, duration, free, allFree, denoiseTier]);
+  }, [pricing, kind, tier, duration, denoiseTier]);
   const breakdown = useMemo(() => {
-    if (free || kind !== 'denoise_transcribe' || !duration) return null;
+    if (kind !== 'denoise_transcribe' || !duration) return null;
     return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration })];
-  }, [pricing, kind, tier, duration, free, denoiseTier]);
+  }, [pricing, kind, tier, duration, denoiseTier]);
 
   async function choose(f) {
     if (f.size < TINY_FILE_BYTES) {
@@ -218,6 +224,11 @@ export default function JobForm({ onSubmitted }) {
     setProbing(false);
   }
 
+  function pickSubs(v) {
+    setSubs(v);
+    if (v === 'browser') warmUpSpeech();
+  }
+
   function pickNoise(v) {
     setNoise(v);
     if (v === 'browser') warmUpDenoiser();
@@ -237,12 +248,12 @@ export default function JobForm({ onSubmitted }) {
   // A video's picture is not uploaded and uncompressed WAV/AIFF is packed smaller first; anything else goes up as it is.
   const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
   if (kind && file && file.size > maxUpload && !canShrink) problems.push(`This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.`);
-  if (kind && !allFree && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
-  if (kind && !allFree && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
-  if (info && !wantsBrowser && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
+  if (kind && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
+  if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
+  if (info && !wantsBrowser && !localSubs && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
   if (embedHere && wantsPolish && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
-  const canStart = (wantsBrowser || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || allFree || est != null) && (!wantsPolish || choice.valid);
+  const canStart = (wantsBrowser || localSubs || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || est != null) && (!wantsPolish || choice.valid);
 
   async function runLocal(f, i, signal) {
     setLocalRunning(true);
@@ -261,18 +272,31 @@ export default function JobForm({ onSubmitted }) {
     }
   }
 
+  async function runLocalSubs(f, i, signal) {
+    setSubsRunning(true);
+    setSubsProg({ done: 0, total: i?.duration || null, eta: null, stage: '' });
+    try {
+      return await transcribeFile(f, {
+        language: language || null, durationHint: i?.duration || null, signal,
+        onProgress: (p) => setSubsProg((x) => ({ ...x, ...p })),
+        onStage: (s) => setSubsProg((x) => ({ ...x, stage: s })),
+      });
+    } finally {
+      setSubsRunning(false);
+    }
+  }
+
   async function runJob(f, i, signal) {
     setStep({ phase: 'create', frac: 0 });
     const body = {
       kind,
       denoiseTier: wantsPolish ? denoiseTier : null,
-      transcribeTier: wantsText ? tier : null,
+      transcribeTier: serverText ? tier : null,
       durationSeconds: duration || 1,
-      free,
       options: {
         audio_format: serverAudioFormat(choice.format, f, i),
         // putting subtitles into the video here needs a subtitle file, even when only the transcript was ticked
-        caption_formats: wantsText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c] || (c === 'vtt' && embedHere && !caps.srt)) : [],
+        caption_formats: serverText ? ['srt', 'vtt', 'txt'].filter((c) => caps[c] || (c === 'vtt' && embedHere && !caps.srt)) : [],
         embed_subtitles: !!(embedNow && embedOnServer),
         language: language || null,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
@@ -290,7 +314,7 @@ export default function JobForm({ onSubmitted }) {
       });
       setResult(out);
       const entry = {
-        file: f, info: i, extracted: out.extracted, keepVideo, embed: embedHere, browserClean: wantsBrowser,
+        file: f, info: i, extracted: out.extracted, keepVideo, embed: embedHere, browserClean: wantsBrowser, browserSubs: localSubs,
         output: wantsPolish ? { name: choice.name.trim(), format: choice.format, size: choice.size } : null,
       };
       jobLocal.current = { out, entry };
@@ -314,23 +338,40 @@ export default function JobForm({ onSubmitted }) {
     setResult(null);
     setCompressedInfo(null);
     if (wantsBrowser) setLocalResult(null);
+    if (localSubs) setSubsResult(null);
+    const subsCaps = { ...caps };
+    const subsEmbed = embedHere && !kind; // with a job, the job's card puts them into the video
 
-    // The browser part and the job (if there is one) run side by side; each reports on its own.
+    // The browser parts and the job (if there is one) run side by side; each reports on its own.
     const outcomes = await Promise.allSettled([
       wantsBrowser ? runLocal(f, i, ctl.signal) : Promise.resolve(null),
+      localSubs ? runLocalSubs(f, i, ctl.signal) : Promise.resolve(null),
       kind ? runJob(f, i, ctl.signal) : Promise.resolve(null),
     ]);
-    const [local, job] = outcomes;
+    const [local, subsOut, job] = outcomes;
+    const subsFiles = subsOut.status === 'fulfilled' && subsOut.value ? subtitleFiles(subsOut.value) : null;
     const started = jobLocal.current;
     jobLocal.current = null;
-    if (started?.entry.embed && wantsBrowser) {
-      // The video with subtitles uses the sound cleaned here (or the original sound if that didn't work out).
-      if (local.status === 'fulfilled' && local.value) started.entry.cleanPcm = local.value.pcm;
-      else started.entry.browserClean = false;
+    if (started?.entry.embed && (wantsBrowser || localSubs)) {
+      // The video the job's card makes uses the sound cleaned here and the subtitles made here, when they worked out.
+      if (wantsBrowser) {
+        if (local.status === 'fulfilled' && local.value) started.entry.cleanPcm = local.value.pcm;
+        else started.entry.browserClean = false;
+      }
+      if (localSubs) {
+        if (subsFiles) started.entry.localVtt = subsFiles.vtt;
+        else started.entry.browserSubs = false;
+      }
       onSubmitted?.(started.out, started.entry);
     }
     const canceled = ctl.signal.aborted || outcomes.some((o) => o.status === 'rejected' && o.reason?.name === 'AbortError');
     let failed = false;
+    if (subsFiles) {
+      setSubsResult({ file: f, info: i, files: subsFiles, caps: subsCaps, embed: subsEmbed, cleanPcm: local.status === 'fulfilled' && local.value ? local.value.pcm : null });
+    } else if (subsOut.status === 'rejected' && subsOut.reason?.name !== 'AbortError') {
+      failed = true;
+      setError(subsOut.reason?.message || 'Something went wrong while making the subtitles. Please try again.');
+    }
     if (local.status === 'fulfilled' && local.value) {
       setLocalResult({ file: f, info: i, isVideo: !!i?.hasVideo, keepVideo: keepVideo && !i?.viaLibav, result: local.value });
     } else if (local.status === 'rejected' && local.reason?.name !== 'AbortError') {
@@ -343,7 +384,7 @@ export default function JobForm({ onSubmitted }) {
       setError(inGigabytes(err.detail || err.message || 'Could not start the job.'));
       setErrorKind(err?.status === 507 ? 'storage' : '');
     }
-    if (kind) await refresh(); // the free minutes left (and the balance) change as soon as a job exists
+    if (kind) await refresh(); // the balance changes as soon as a job exists
     setBusy(false);
     setLocalRunning(false);
     setStep(null);
@@ -354,8 +395,7 @@ export default function JobForm({ onSubmitted }) {
   }
 
   const pct = step?.frac != null ? Math.round(step.frac * 100) : null;
-  const left = Math.floor(freeLeft / 60);
-  const startLabel = !(wantsBrowser || kind) ? 'Start' : allFree || !kind ? 'Start – free' : est ? `Start – about ${money(est)}` : 'Start';
+  const startLabel = !(wantsBrowser || localSubs || kind) ? 'Start' : !kind ? 'Start – free' : est ? `Start – about ${money(est)}` : 'Start';
   return (
     <>
       <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
@@ -465,24 +505,25 @@ export default function JobForm({ onSubmitted }) {
             <fieldset className="field" disabled={busy}>
               <legend className="label">Subtitles &amp; transcript</legend>
               <div className="choice-cards">
-                <Choice name="subs" value="off" current={subs} onPick={setSubs} title="Off" hint="No subtitles or transcript" />
+                <Choice name="subs" value="off" current={subs} onPick={pickSubs} title="Off" hint="No subtitles or transcript" />
                 <Choice
-                  name="subs" value="free" current={subs} onPick={setSubs} disabled={!freeSubs.ok}
-                  title="Free (standard)" reason={freeSubs.why}
-                  hint={`Good for most recordings, in many languages. Free for files up to ${freeMax ? minutesWord(mins(freeMax)) : 'a few minutes'}; you have ${minutesWord(left)} left today.`}
+                  name="subs" value="browser" current={subs} onPick={pickSubs} disabled={!sVerdict.ok}
+                  title="Free, in your browser" reason={sVerdict.why}
+                  hint="Made on your own device, nothing is uploaded. Fine for clear speech. The first time, it downloads about 80 MB."
                 />
                 <Choice
-                  name="subs" value="standard" current={subs} onPick={setSubs}
+                  name="subs" value="standard" current={subs} onPick={pickSubs}
                   title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${moneyUsd(standardRate.usdPerHour)} an hour` : ''}`}
                 />
                 <Choice
-                  name="subs" value="accurate" current={subs} onPick={setSubs}
+                  name="subs" value="accurate" current={subs} onPick={pickSubs}
                   title="Extra accurate" hint="Paid. Best for accents, noisy rooms and specialist words. Works in any language."
                 />
               </div>
               {subs === 'accurate' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
-              {wantsPolish && wantsText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
-              {wantsBrowser && wantsText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
+              {wantsPolish && serverText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
+              {wantsBrowser && serverText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
+              {wantsPolish && localSubs && <span className="hint" data-testid="polish-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
             </fieldset>
 
             {wantsText && (
@@ -520,7 +561,7 @@ export default function JobForm({ onSubmitted }) {
                       <span className="hint block" data-testid="embed-hint">
                         {embedOnServer
                           ? 'Your browser can’t open this video type, so it’s uploaded whole and we put them in on our side.'
-                          : `Done on your device when the job is finished, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!wantsPolish && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
+                          : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!wantsPolish && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
                       </span>
                     </span>
                   </label>
@@ -529,15 +570,10 @@ export default function JobForm({ onSubmitted }) {
               </div>
             )}
 
-            {kind && !allFree && duration && est != null && (
+            {kind && duration && est != null && (
               <p className="mb0" data-testid="estimate">
                 <b>Estimated cost: {money(est)}</b>{' '}
-                <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean & polish ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : free ? ' (clean & polish; the subtitles are free)' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
-              </p>
-            )}
-            {free && (
-              <p className="mb0" data-testid="free-note">
-                <b>{wantsPolish ? 'Subtitles free' : 'Free'}: uses {lengthUnknown ? 'about ' : ''}{mins(duration)} of your {left} free minutes left today</b>
+                <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean & polish ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? ' (clean & polish; the subtitles made on your device are free)' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
               </p>
             )}
             {lengthUnknown && <p className="mb0 muted small" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}
@@ -553,6 +589,7 @@ export default function JobForm({ onSubmitted }) {
         {busy && (
           <div className="stack" data-testid="run-progress">
             {localRunning && <ProgressPanel prog={localProg} stage={localStage} load={load} procEta={procEta} />}
+            {subsRunning && <SubtitlesProgress prog={subsProg} load={speechLoad} />}
             {step && (
               <div className="stack" data-testid="upload-progress">
                 <div className="row-between">
@@ -573,7 +610,7 @@ export default function JobForm({ onSubmitted }) {
             )}
             <div className="row">
               <button type="button" className="btn btn-secondary" onClick={() => abort.current?.abort()}>Cancel</button>
-              {wantsBrowser && <span className="muted small">Keep this tab open while it works.</span>}
+              {(wantsBrowser || localSubs) && <span className="muted small">Keep this tab open while it works.</span>}
             </div>
           </div>
         )}
@@ -596,6 +633,12 @@ export default function JobForm({ onSubmitted }) {
         )}
       </form>
 
+      {subsResult && (
+        <SubtitlesResult
+          file={subsResult.file} info={subsResult.info} files={subsResult.files} caps={subsResult.caps} embed={subsResult.embed}
+          cleanPcm={subsResult.cleanPcm} onClose={() => setSubsResult(null)}
+        />
+      )}
       {localResult && (
         <BrowserResult
           file={localResult.file} info={localResult.info} result={localResult.result} isVideo={localResult.isVideo}

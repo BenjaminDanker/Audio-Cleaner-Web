@@ -98,9 +98,9 @@ also removes the shared-UID risk with the Minecraft servers.
 ## Abuse / fraud
 
 - Live audio must arrive at ~real-time pace (prevents using live pricing as cheap batch).
-- Free transcription: signed-in only, 60 min/day per account, 30 min/file, and a ceiling for all free users
-  together per day (`pricing.FREE_GLOBAL_SECONDS_PER_DAY`). Deleting an account and signing up again with the same
-  address the same day keeps that day's usage (a hash of the address is kept until the next day).
+- Free subtitles run in the browser, so they cost us no compute; their model files (about 80 MB) are served only to
+  signed-in browsers and count against the same daily per-account allowance as the noise remover's files
+  (`asset_fetch`); browsers keep them in their cache. Jobs on our side are never free.
 - Disputes and early fraud warnings suspend the account, release holds, zero
   the balance; EFWs up to $50 are refunded automatically.
 - 3DS at Checkout whenever Stripe or the bank asks for it; auto-reload has a monthly cap and

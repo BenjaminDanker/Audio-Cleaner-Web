@@ -35,10 +35,6 @@ def get_pricing() -> dict:
             "maxCents": pricing.TOPUP_MAX_CENTS,
             "presetsCents": pricing.TOPUP_PRESETS_CENTS,
         },
-        "free": {
-            "transcribeSecondsPerDay": pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY,
-            "transcribeMaxFileSeconds": pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS,
-        },
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
         "maxUploadBytes": get_settings().max_upload_bytes,
         "maxRebuildSeconds": pricing.MAX_REBUILD_SECONDS,

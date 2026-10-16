@@ -191,7 +191,8 @@ if (want('account')) {
   await page.goto(loginLink(mail));
   await page.waitForURL(/\/audio\/app$/);
   await check('account delete: 409 reason is shown in an alert; after success lands on / with a one-time banner (no bounce to /login)', async () => {
-    const made = await apiCall(page, 'POST', 'jobs', { kind: 'transcribe', transcribeTier: 'local', filename: 'qa-hold.wav', sizeBytes: 1000, durationSeconds: 5, free: true, options: { audio_format: 'wav', caption_formats: ['txt'] } });
+    admin('grant', mail, '1', 'qa delete test'); // a running job (jobs here are paid) blocks the delete
+    const made = await apiCall(page, 'POST', 'jobs', { kind: 'transcribe', transcribeTier: 'local', filename: 'qa-hold.wav', sizeBytes: 1000, durationSeconds: 5, options: { audio_format: 'wav', caption_formats: ['txt'] } });
     if (made.status !== 200) throw new Error('could not create a held job: ' + JSON.stringify(made));
     await page.goto(`${BASE}/app/account`);
     await page.getByLabel(/Type your email/).fill(mail);
@@ -239,6 +240,7 @@ if (want('live')) {
   await apiCall(page, 'POST', 'account/tos', { version: '2026-10-15' });
   await check('live: price of the chosen combination (denoise light + captions tier) comes from /api/billing/pricing', async () => {
     await page.goto(`${BASE}/app/live`);
+    await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
     await page.getByTestId('live-price').waitFor();
     const price = async () => {
       const el = page.getByTestId('live-price');
@@ -277,6 +279,7 @@ if (want('live')) {
       send.push((o) => ws.send(JSON.stringify({ type: 'caption', ...o })));
     });
     await page.goto(`${BASE}/app/live`);
+    await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
     await page.locator('label.choice:has(input[name=live-captions][value=premium])').click();
     const box = page.getByRole('checkbox', { name: /Remove noise/ });
     if (!(await box.isChecked())) await box.check();
@@ -431,14 +434,15 @@ if (want('flac')) {
     if (create.body.filename !== 'noisy.mp3' || create.body.sizeBytes !== statSync(join(FILES, 'noisy.mp3')).size || put.length !== create.body.sizeBytes) throw new Error(JSON.stringify([create.body.filename, create.body.sizeBytes, put.length]));
     return banner;
   });
-  await check('flac upload: free transcription of a WAV uploads FLAC and succeeds', async () => {
+  await check('flac upload: Standard transcription of a WAV uploads FLAC and succeeds', async () => {
     reqs.length = 0;
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('input[type=file]');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
-    await pick(page, 'subs', 'free');
-    await page.getByRole('button', { name: 'Start – free' }).click();
+    await pick(page, 'subs', 'standard');
+    await page.getByTestId('estimate').waitFor();
+    await page.getByRole('button', { name: /^Start – about/ }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
     if (!/Compressed for upload/.test(banner)) throw new Error(banner);
     const jobs = await apiCall(page, 'GET', 'jobs');

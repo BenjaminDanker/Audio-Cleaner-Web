@@ -46,9 +46,25 @@ function syncLibav() {
   console.log(`sync-dfn: libav.js -> public/dfn/libav/${dir.split('/').pop()}/`);
 }
 
+// The speech runtime for the free in-browser subtitles (ONNX Runtime Web, MIT, from node_modules): its WebAssembly files
+// are loaded at run time, so they are copied next to the noise remover's (same sign-in gate), in a folder named after
+// the version (cached for a week). Which of the two builds a browser takes: src/media/transcribe.worker.js.
+const ortPkg = JSON.parse(readFileSync(join(root, 'node_modules', 'onnxruntime-web', 'package.json'), 'utf8'));
+const ortOut = join(out, 'ort');
+const ortDir = join(ortOut, ortPkg.version.replace(/[^A-Za-z0-9.-]/g, '-'));
+const ortFiles = ['ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.asyncify.wasm', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm'];
+function syncOrt() {
+  if (ortFiles.every((f) => existsSync(join(ortDir, f)))) return;
+  if (existsSync(ortOut)) for (const d of readdirSync(ortOut)) if (join(ortOut, d) !== ortDir) rmSync(join(ortOut, d), { recursive: true });
+  mkdirSync(ortDir, { recursive: true });
+  for (const f of ortFiles) copyFileSync(join(root, 'node_modules', 'onnxruntime-web', 'dist', f), join(ortDir, f));
+  console.log(`sync-dfn: onnxruntime-web -> public/dfn/ort/${ortDir.split('/').pop()}/`);
+}
+
 const libavPresent = () => existsSync(libavOut) && readdirSync(libavOut).length === 1;
 const complete = () => files.every(([, name]) => existsSync(join(out, name))) && (libavPresent() || !existsSync(libavDist));
 if (process.argv.includes('--if-missing') && complete()) {
+  syncOrt();
   console.log('sync-dfn: public/dfn already complete');
   process.exit(0);
 }
@@ -66,3 +82,4 @@ for (const [src, name] of files) {
 }
 console.log(`sync-dfn: copied ${(total / 1048576).toFixed(1)} MB to public/dfn/`);
 syncLibav();
+syncOrt();

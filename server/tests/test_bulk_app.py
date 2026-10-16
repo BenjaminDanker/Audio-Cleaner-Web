@@ -35,7 +35,7 @@ def test_only_the_bulk_routes_exist():
         # the release files (acw/api/downloads_routes.py): GET and HEAD each
         *{(m, p) for m in ("GET", "HEAD") for p in (
             "/api/downloads/desktop/{name}", "/api/downloads/desktop/latest/{platform}", "/api/downloads/obs-plugin/latest/{platform}",
-            "/api/downloads/obs-plugin/{name}", "/api/downloads/models/{name}")},
+            "/api/downloads/obs-plugin/{name}", "/api/downloads/models/{name}", "/api/downloads/browser/{model}/{name}")},
     }
 
 

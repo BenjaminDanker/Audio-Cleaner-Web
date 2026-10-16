@@ -44,11 +44,11 @@ export default function Terms() {
 
       <h2 id="services">3. The services</h2>
       <ul>
-        <li><b>Free noise removal.</b> Runs locally in your browser from the Cleanup page (you sign in to use it). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
+        <li><b>Free noise removal and free subtitles.</b> Run locally in your browser from the Cleanup page (you sign in to use them). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
         <li><b>Clean &amp; polish.</b> Paid noise removal done on our side, voice levelling, loudness normalisation and related processing of files you upload.</li>
-        <li><b>Transcription and subtitles.</b> Standard (done by us), or Extra accurate (the audio is sent to a third-party speech-recognition provider, see the Privacy Policy). A daily free allowance of Standard transcription may be offered; its size can change.</li>
+        <li><b>Transcription and subtitles.</b> Free in your browser (above), Standard (paid, done by us), or Extra accurate (paid; the audio is sent to a third-party speech-recognition provider, see the Privacy Policy).</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed. Creating API keys and downloading the plugin need credit in your account, since both only spend it.</li>
-        <li><b>The OBS plugin is free software</b> under the GNU General Public License, version 2 or later; its source code is offered next to the download. Nothing in these Terms limits what that licence lets you do with the plugin itself. Using our servers through it is still covered by these Terms.</li>
+        <li><b>The OBS plugin is free software</b> under the GNU General Public License, version 2 or later; its source code is offered next to the download. Nothing in these Terms limits what that licence lets you do with the plugin itself. Using the Service through it is still covered by these Terms.</li>
       </ul>
       <p>Prices are shown in the pricing section of the home page and before you start a job. We may change prices for future use; changes never apply to a job or live session that has already started.</p>
 

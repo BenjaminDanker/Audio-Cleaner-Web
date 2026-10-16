@@ -175,13 +175,13 @@ if (want('studio')) {
 }
 
 if (want('transcribe')) {
-  await check('free subtitles on the Cleanup page (subtitles only, Standard, short file)', async () => {
+  await check('Standard subtitles on the Cleanup page (subtitles only, short file, paid)', async () => {
     await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
-    await pick(page, 'subs', 'free');
-    await page.getByTestId('free-note').waitFor();
-    await page.getByRole('button', { name: 'Start – free' }).click();
+    await pick(page, 'subs', 'standard');
+    await page.getByTestId('estimate').waitFor();
+    await page.getByRole('button', { name: /^Start – about/ }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.', 300000);
     const st = await card.getAttribute('data-status');

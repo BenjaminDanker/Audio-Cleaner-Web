@@ -25,7 +25,6 @@ const GROUPS = [
   { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions'] },
 ];
 
-const minutes = (sec) => Math.round(sec / 60);
 
 /** "$0.60 / hour" is the headline, the per-minute rate under it: "$0.01 / min", "$0.004 / min". */
 function perMinuteNote(usdPerMinute) {
@@ -55,7 +54,7 @@ export default function PriceTable({ only, testId = 'prices', showNote = true })
           </thead>
           <tbody>
             {groups.map((g) => (g.id === 'free'
-              ? <FreeRows key={g.id} title={g.title} free={data.free} />
+              ? <FreeRows key={g.id} title={g.title} />
               : <GroupRows key={g.id} group={g} rates={data.rates} />))}
           </tbody>
         </table>
@@ -65,7 +64,7 @@ export default function PriceTable({ only, testId = 'prices', showNote = true })
   );
 }
 
-function FreeRows({ title, free }) {
+function FreeRows({ title }) {
   return (
     <>
       <tr className="group"><th scope="rowgroup" colSpan={2}>{title}</th></tr>
@@ -76,15 +75,13 @@ function FreeRows({ title, free }) {
         </th>
         <td className="num"><span className="price-main">Free</span></td>
       </tr>
-      {free && (
-        <tr>
-          <th scope="row">
-            <span className="svc">Subtitles &amp; transcripts</span>
-            <span className="small muted desc">Standard quality, files up to {minutes(free.transcribeMaxFileSeconds)} minutes. After that, the Subtitles &amp; transcripts price below.</span>
-          </th>
-          <td className="num"><span className="price-main">Free</span><span className="small muted price-sub">{minutes(free.transcribeSecondsPerDay)} min every day</span></td>
-        </tr>
-      )}
+      <tr>
+        <th scope="row">
+          <span className="svc">Subtitles &amp; transcripts in your browser</span>
+          <span className="small muted desc">Made on your own device, nothing is uploaded. Fine for clear speech; the paid ones below are more accurate.</span>
+        </th>
+        <td className="num"><span className="price-main">Free</span></td>
+      </tr>
     </>
   );
 }

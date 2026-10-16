@@ -1,7 +1,7 @@
 // The Cleanup page: signed-out /app fetches nothing from /dfn/; after a file is dropped only the options that are possible
 // for it are offered (with a short reason for the others): noise removal Off | Free, in your browser | Clean & polish, and
-// subtitles Off | Free (standard) | Standard | Extra accurate. Subtitles-only + Free + a short file sends free:true and needs no
-// credit; Clean & polish + a subtitles level sends denoise_transcribe; one Start button says what it costs; Balance and
+// subtitles Off | Free, in your browser | Standard | Extra accurate. Free subtitles make no job at all (tests/subtitles.mjs
+// covers them); Clean & polish + a subtitles level sends denoise_transcribe; one Start button says what it costs; Balance and
 // "Good to know" sit below "Your jobs"; /transcribe and /free no longer exist.
 // Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output, and the fixtures.
 // Usage: node tests/files.mjs
@@ -64,9 +64,8 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
   await check('landing: product cards point to /app, /app, /app/live, /app (nothing to /free); hero line; availability answer', async () => {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('.product-card');
-    await page.getByText('min free a day').waitFor(); // once the price list is in
     const cards = await page.locator('.product-card').evaluateAll((els) => els.map((e) => [e.querySelector('h3').textContent.replace(/\s+/g, ' ').trim(), new URL(e.querySelector('a').href).pathname]));
-    const want = [['Free, in your browser Free', '/audio/app'], ['Clean & polish', '/audio/app'], ['Live for streamers', '/audio/app/live'], ['Subtitles & transcripts 60 min free a day', '/audio/app']];
+    const want = [['Free, in your browser Free', '/audio/app'], ['Clean & polish', '/audio/app'], ['Live for streamers', '/audio/app/live'], ['Subtitles & transcripts Free in your browser', '/audio/app']];
     if (JSON.stringify(cards) !== JSON.stringify(want)) throw new Error(JSON.stringify(cards));
     if (await page.locator('a[href$="/free"]').count()) throw new Error('a link to /free on the landing page');
     if (!(await page.locator('.hero').innerText()).includes('No watermark, no daily limit.')) throw new Error('hero line');
@@ -128,13 +127,13 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return `order: form < jobs < balance, tips`;
   });
 
-  await check('a file the browser can open (WAV): noise removal Off | Free, in your browser (picked) | Clean & polish; subtitles Off | Free (standard) | Standard | Extra accurate; Start – free', async () => {
+  await check('a file the browser can open (WAV): noise removal Off | Free, in your browser (picked) | Clean & polish; subtitles Off | Free, in your browser | Standard | Extra accurate; Start – free', async () => {
     await choose('noisy.wav');
     const titles = async (g) => (await page.locator(`label.choice:has(input[name=${g}]) b`).allInnerTexts()).map((x) => x.replace(/\s*\u2713$/, ''));
     const n = await titles('noise'); const t = await titles('subs');
     if (JSON.stringify(n) !== JSON.stringify(['Off', 'Free, in your browser', 'Clean & polish'])) throw new Error(JSON.stringify(n));
-    if (JSON.stringify(t) !== JSON.stringify(['Off', 'Free (standard)', 'Standard', 'Extra accurate'])) throw new Error(JSON.stringify(t));
-    for (const [g, v] of [['noise', 'off'], ['noise', 'browser'], ['noise', 'polish'], ['subs', 'free'], ['subs', 'standard'], ['subs', 'accurate']]) if (await radio(g, v).isDisabled()) throw new Error(`${g}/${v} disabled`);
+    if (JSON.stringify(t) !== JSON.stringify(['Off', 'Free, in your browser', 'Standard', 'Extra accurate'])) throw new Error(JSON.stringify(t));
+    for (const [g, v] of [['noise', 'off'], ['noise', 'browser'], ['noise', 'polish'], ['subs', 'browser'], ['subs', 'standard'], ['subs', 'accurate']]) if (await radio(g, v).isDisabled()) throw new Error(`${g}/${v} disabled`);
     if (!(await radio('noise', 'browser').isChecked()) || !(await radio('subs', 'off').isChecked())) throw new Error('defaults: free noise removal on, subtitles off');
     if ((await start().innerText()).trim() !== 'Start – free') throw new Error('label: ' + (await start().innerText()));
     if (!/Extra accurate[\s\S]*any language/.test(await card('subs', 'accurate').innerText())) throw new Error('"any language" missing on Extra accurate');
@@ -186,20 +185,16 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'Gentle -> 12 dB';
   });
 
-  await check('subtitles only + Free on a short file: "Free: uses N of your M free minutes left today", Start – free, sends free:true, needs no credit', async () => {
+  await check('subtitles only, free in the browser: Start – free, no price, needs no credit, and no job is sent', async () => {
     await pick(page, 'noise', 'off');
-    await pick(page, 'subs', 'free');
-    const note = page.getByTestId('free-note');
-    await note.waitFor();
-    const t = await note.innerText();
-    if (!/^Free: uses 1 of your 60 free minutes left today$/.test(t.trim())) throw new Error(t);
-    if (await page.getByTestId('estimate').count()) throw new Error('a price is shown for a free job');
+    await pick(page, 'subs', 'browser');
+    if (await page.getByTestId('estimate').count()) throw new Error('a price is shown for free subtitles');
     if ((await start().innerText()).trim() !== 'Start – free' || !(await start().isEnabled())) throw new Error('start: ' + (await start().innerText()));
+    const before = posts.length;
     await start().click();
-    await page.getByTestId('job-error').waitFor();
-    const b = posts.at(-1);
-    if (b.free !== true || b.kind !== 'transcribe' || b.transcribeTier !== 'local' || b.denoiseTier) throw new Error(JSON.stringify(b));
-    return t.trim();
+    await page.getByTestId('subs-result').waitFor({ timeout: 300000 });
+    if (posts.length !== before) throw new Error(`a job was sent: ${JSON.stringify(posts.at(-1))}`);
+    return 'made in the browser';
   });
 
   await check('Clean & polish + Standard: one denoise_transcribe job (paid, estimate, "about $" on Start); Free subtitles stay possible', async () => {
@@ -211,37 +206,33 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     const sentence = 'We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.';
     await page.getByText(sentence, { exact: true }).waitFor();
     await page.getByTestId('estimate').waitFor();
-    if (await page.getByTestId('free-note').count()) throw new Error('a paid job is shown as free');
-    if (await radio('subs', 'free').isDisabled()) throw new Error('free subtitles should work together with Clean & polish');
+    if (await radio('subs', 'browser').isDisabled()) throw new Error('free subtitles should work together with Clean & polish');
     const label = (await start().innerText()).trim();
     if (!/^Start – about \$0\.00\d+$/.test(label)) throw new Error('label: ' + label);
     await page.screenshot({ path: join(SHOTS, 'cleanup-both.png'), fullPage: true });
     await start().click();
     await page.getByTestId('job-error').waitFor();
     const b = posts.at(-1);
-    if (b.free !== false || b.kind !== 'denoise_transcribe' || b.denoiseTier !== 'standard' || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
+    if ('free' in b || b.kind !== 'denoise_transcribe' || b.denoiseTier !== 'standard' || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
     return label;
   });
 
-  await check('Clean & polish + Free subtitles: one denoise_transcribe job marked free; only the cleanup is estimated and paid', async () => {
+  await check('Clean & polish + free subtitles in the browser: the job is only the cleanup, and the estimate says the subtitles are free', async () => {
     await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
     await freshApp();
     await choose('noisy.wav');
     await pick(page, 'noise', 'polish');
     await pick(page, 'subs', 'standard');
     const both = await page.getByTestId('estimate').innerText();
-    await pick(page, 'subs', 'free');
-    await page.getByText(/the subtitles are free/).waitFor();
-    const note = await page.getByTestId('free-note').innerText();
-    if (!/^Subtitles free: uses/.test(note.trim())) throw new Error('note: ' + note);
+    await pick(page, 'subs', 'browser');
+    await page.getByText(/the subtitles made on your device are free/).waitFor();
     const label = (await start().innerText()).trim();
     if (!/^Start – about \$/.test(label)) throw new Error('label: ' + label);
-    const cleanupOnly = await page.getByTestId('estimate').innerText();
-    if (cleanupOnly === both) throw new Error('the free subtitles are still priced');
+    if ((await page.getByTestId('estimate').innerText()) === both) throw new Error('the free subtitles are still priced');
     await start().click();
     await page.getByTestId('job-error').waitFor();
     const b = posts.at(-1);
-    if (b.free !== true || b.kind !== 'denoise_transcribe' || b.denoiseTier !== 'standard' || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
+    if ('free' in b || b.kind !== 'denoise' || b.denoiseTier !== 'standard' || b.transcribeTier) throw new Error(JSON.stringify(b));
     return label;
   });
 
@@ -251,7 +242,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await pick(page, 'noise', 'polish');
     await start().click();
     await page.getByTestId('job-error').waitFor();
-    if (posts.at(-1).kind !== 'denoise' || posts.at(-1).free !== false || posts.at(-1).transcribeTier) throw new Error(JSON.stringify(posts.at(-1)));
+    if (posts.at(-1).kind !== 'denoise' || 'free' in posts.at(-1) || posts.at(-1).transcribeTier) throw new Error(JSON.stringify(posts.at(-1)));
     await pick(page, 'noise', 'off');
     await page.getByText(/Choose at least one thing/).waitFor();
     if (await start().isEnabled()) throw new Error('start enabled with nothing chosen');
@@ -260,7 +251,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await page.getByTestId('estimate').waitFor();
     await start().click();
     await page.getByTestId('job-error').waitFor();
-    if (posts.at(-1).free !== false || posts.at(-1).kind !== 'transcribe' || posts.at(-1).transcribeTier !== 'premium') throw new Error(JSON.stringify(posts.at(-1)));
+    if ('free' in posts.at(-1) || posts.at(-1).kind !== 'transcribe' || posts.at(-1).transcribeTier !== 'premium') throw new Error(JSON.stringify(posts.at(-1)));
     return 'ok';
   });
 
@@ -272,7 +263,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await start().click();
     await page.getByTestId('job-error').waitFor();
     const b = posts.at(-1);
-    if (b.free !== false || b.kind !== 'transcribe' || b.denoiseTier || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
+    if ('free' in b || b.kind !== 'transcribe' || b.denoiseTier || b.transcribeTier !== 'local') throw new Error(JSON.stringify(b));
     await page.waitForSelector('[data-testid=result]', { timeout: 60000 }); // and the cleaned sound is ready to download
     return 'transcribe job + browser result';
   });
@@ -287,28 +278,6 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (!(await msg.getByRole('link', { name: 'Add credit' }).count())) throw new Error('no Add credit link');
     if (await start().isEnabled()) throw new Error('start enabled with too little balance');
     return (await msg.innerText()).trim();
-  });
-
-  await check('Free subtitles greyed out with a reason when the file is over the free limit, and when today\'s free minutes are too few', async () => {
-    await page.unroute('**/api/billing/pricing').catch(() => {});
-    await withPricing((j) => ({ ...j, free: { ...j.free, transcribeMaxFileSeconds: 5 } }));
-    await freshApp();
-    await choose('noisy.wav');
-    if (!(await radio('subs', 'free').isDisabled())) throw new Error('free subtitles enabled for a file over the limit');
-    const why = await card('subs', 'free').locator('small').innerText();
-    if (!/longer than the 1-minute free limit/.test(why)) throw new Error('reason: ' + why);
-    await page.unroute('**/api/billing/pricing');
-    await withMe((j) => ({ ...j, freeTranscribeSecondsLeft: 5 }));
-    await freshApp();
-    await choose('noisy.wav');
-    if (!(await radio('subs', 'free').isDisabled())) throw new Error('free subtitles enabled with too few minutes left');
-    const why2 = await card('subs', 'free').locator('small').innerText();
-    if (!/more than the 1 minute of free time you have left today/.test(why2)) throw new Error('reason: ' + why2);
-    await pick(page, 'noise', 'off');
-    await pick(page, 'subs', 'standard'); // still available at the usual price
-    await page.getByTestId('estimate').waitFor();
-    await page.unroute('**/api/me');
-    return `${why} | ${why2}`;
   });
 
   await check('a file the browser cannot open at all: Free noise removal is greyed out with the reason, Clean & polish is chosen, honest "rough guess" note', async () => {
@@ -397,28 +366,6 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (posts.at(-1).options.echo_reference_track !== false) throw new Error('echo requested without Clean & polish');
     await page.unroute('**/api/me');
     return `${b.filename}, ${b.sizeBytes} bytes of ${size}`;
-  });
-
-  await check('a real free job: Free badge on the card, and the free minutes left go down afterwards', async () => {
-    passThrough = true;
-    await freshApp();
-    await choose('noisy.wav');
-    await pick(page, 'noise', 'off');
-    await pick(page, 'subs', 'free');
-    await page.getByTestId('free-note').waitFor();
-    await start().click();
-    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    await page.getByTestId('free-badge').first().waitFor();
-    await choose('noisy.wav');
-    await pick(page, 'noise', 'off');
-    await pick(page, 'subs', 'free');
-    const t = (await page.getByTestId('free-note').innerText()).trim();
-    if (!/^Free: uses 1 of your 59 free minutes left today$/.test(t)) throw new Error(t);
-    await page.screenshot({ path: join(SHOTS, 'cleanup-after-free.png'), fullPage: true });
-    // let the job finish or cancel it so the worker is not left busy for the next suite
-    const id = await page.locator('[data-testid=job]').first().getAttribute('data-job-id');
-    await apiCall(page, 'POST', `jobs/${id}/cancel`).catch(() => {});
-    return t;
   });
 
   await check('WMA (the browser reads it through libav.js): its real length is shown, and Clean & polish cleans it on the server', async () => {

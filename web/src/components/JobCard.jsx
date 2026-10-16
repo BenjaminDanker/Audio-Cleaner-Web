@@ -26,8 +26,9 @@ function Countdown({ expiresAt }) {
   return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
 }
 
-/** The job's subtitles as WebVTT text (from its .vtt file, or its .srt one), for putting into a video here. */
-async function jobSubtitles(job) {
+/** The job's subtitles as WebVTT text (made in this browser, or from its .vtt file, or its .srt one), for putting into a video here. */
+async function jobSubtitles(job, local) {
+  if (local?.localVtt) return local.localVtt;
   const caps = job.outputs.filter((o) => o.kind === 'captions');
   const pick = caps.find((o) => /\.vtt$/i.test(o.name)) || caps.find((o) => /\.srt$/i.test(o.name));
   if (!pick) throw new Error('This job has no subtitles to put into the video.');
@@ -61,14 +62,15 @@ function RemuxPanel({ job, local, noPicture = false }) {
   const embed = !!local?.embed;
   if (!audioOut && !embed) return null;
   const choice = local?.output && FORMAT[local.output.format]?.kind === 'video' ? local.output : null;
-  const waitingForBrowser = !audioOut && local?.browserClean && !local?.cleanPcm; // the free cleanup in this tab isn't done yet
+  // the free cleanup or the free subtitles in this tab aren't done yet
+  const waitingForBrowser = (!audioOut && local?.browserClean && !local?.cleanPcm) || (embed && local?.browserSubs && !local?.localVtt);
 
   async function run(videoFile) {
     const abort = new AbortController();
     ctl.current = abort;
     setBusy(true); setErr(''); setNote(''); setProg(0);
     try {
-      const subtitles = embed ? await jobSubtitles(job) : '';
+      const subtitles = embed ? await jobSubtitles(job, local) : '';
       let audioFile = null;
       if (audioOut) {
         const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
@@ -95,8 +97,8 @@ function RemuxPanel({ job, local, noPicture = false }) {
     }
   }
 
-  const label = busy ? `Building video… ${Math.round(prog * 100)}%` : waitingForBrowser ? 'Waiting for the noise removal in your browser…' : null;
-  const what = audioOut ? 'cleaned audio' : local?.cleanPcm ? 'cleaned audio and subtitles' : 'subtitles';
+  const label = busy ? `Building video… ${Math.round(prog * 100)}%` : waitingForBrowser ? 'Waiting for your browser to finish…' : null;
+  const what = audioOut && embed ? 'cleaned audio and subtitles' : audioOut ? 'cleaned audio' : local?.cleanPcm ? 'cleaned audio and subtitles' : 'subtitles';
   return (
     <div className="stack" data-testid="remux">
       <div className="row">
@@ -141,7 +143,7 @@ export default function JobCard({ job, local, onChanged }) {
   const hasVideoOut = job.outputs.some((o) => o.kind === 'video');
   const hasAudioOut = job.outputs.some((o) => o.kind === 'audio');
   // Subtitles put into the video here, in the browser (chosen in the form in this tab); the server never needs the video for it.
-  const embedHere = !!local?.embed && job.outputs.some((o) => o.kind === 'captions');
+  const embedHere = !!local?.embed && (job.outputs.some((o) => o.kind === 'captions') || !!local?.browserSubs);
   const showRemux = job.status === 'done' && hasVideoInput && (local?.extracted !== false || embedHere) && local?.keepVideo !== false && !hasVideoOut && (hasAudioOut || embedHere);
   const chosenKind = FORMAT[local?.output?.format]?.kind;
   // A video type was chosen for a recording with no picture: the video (plain black picture) is made here from the cleaned sound.

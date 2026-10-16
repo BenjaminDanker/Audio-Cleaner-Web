@@ -6,7 +6,7 @@ import { operatorLine, SITE } from '../site.js';
 
 const SECTIONS = [
   ['who', 'Who we are'],
-  ['browser', 'Free noise removal in your browser'],
+  ['browser', 'Free noise removal and subtitles in your browser'],
   ['collect', 'What we collect'],
   ['files', 'Your files and transcripts'],
   ['live', 'Live audio'],
@@ -30,8 +30,8 @@ export default function Privacy() {
       <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{(form || email) && <> Contact: {form && <>use the {form}</>}{form && email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
       <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
 
-      <h2 id="browser">2. Free noise removal in your browser</h2>
-      <p>The free noise removal on the <Link to="/app">Cleanup page</Link> processes your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover itself and the public price list, none of which contain your data.</p>
+      <h2 id="browser">2. Free noise removal and subtitles in your browser</h2>
+      <p>The free noise removal and the free subtitles on the <Link to="/app">Cleanup page</Link> process your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover and the subtitle maker themselves, and the public price list, none of which contain your data.</p>
 
       <h2 id="collect">3. What we collect</h2>
       <ul>
@@ -79,7 +79,7 @@ export default function Privacy() {
         <li>Payment and ledger records: 7 years, as tax and accounting law requires (when an account is deleted they are kept without your name or email). Records that go with them, such as that you accepted the Terms, started a payment, turned automatic top-up on or off, or were refunded or credited, are kept just as long.</li>
         <li>Job records and live-session records (metadata only, no content): deleted 12 months after the job or session. File names are removed from your credit history after 12 months; what you paid stays there as a line without the name (date, kind of work, length, amount) for the 7 years above.</li>
         <li>Security logs, including IP addresses and browser types of sign-ins and live sessions: 90 days. The entries themselves (a sign-in, a key created, a contact message sent) are deleted after 12 months, without IP addresses after the first 90 days.</li>
-        <li>Sign-in sessions and sign-in links: deleted when they run out, and in any case within 30 days after that. Small bookkeeping rows: payment notification ids about 90 days, the counters for the free daily allowance 60 days.</li>
+        <li>Sign-in sessions and sign-in links: deleted when they run out, and in any case within 30 days after that. Small bookkeeping rows: payment notification ids about 90 days.</li>
         <li>Messages sent through the contact form: they are not in our database. The email we receive is kept for as long as we need it to answer you and deal with your request.</li>
         <li>Backups of our database: kept for 30 days, so data you deleted can remain in a backup until it expires.</li>
         <li>Uploaded files and results: as described in section 4.</li>

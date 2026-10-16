@@ -148,8 +148,9 @@ def seed(now):
                " created_at = ? WHERE id = ?", (now - 300, now - 200, now - 600, bad))
     bad2 = make_job(uid)
     db.execute("UPDATE jobs SET status = 'failed', error = 'Processing failed; you were not charged.', created_at = ? WHERE id = ?", (now - 600, bad2))
-    free = make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", free=True, claimed_seconds=120.0)
-    db.execute("UPDATE jobs SET status = 'queued', created_at = ? WHERE id = ?", (now - 100, free))
+    # a free job from before free subtitles moved to the browser (still in the queue when that version went live)
+    free = make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", claimed_seconds=120.0)
+    db.execute("UPDATE jobs SET status = 'queued', created_at = ?, free = 1, tier = 'local' WHERE id = ?", (now - 100, free))
     old = make_job(uid)  # outside a 1-day window
     db.execute("UPDATE jobs SET status = 'done', created_at = ?, started_at = ?, finished_at = ? WHERE id = ?",
                (now - 5 * 86400, now - 5 * 86400, now - 5 * 86400 + 50, old))
@@ -165,7 +166,7 @@ def seed(now):
                " VALUES (?, -6000, 'usage', 'stream', 's', 'x', 0, ?)", (uid, now - 100))
     db.execute("INSERT INTO payments(id, user_id, kind, status, amount_cents, created_at, updated_at) VALUES ('p1', ?, 'checkout', 'succeeded', 1000, ?, ?)",
                (uid, now - 100, now - 100))
-    db.execute("UPDATE free_usage SET seconds = 600 WHERE user_id = ? AND day = ?", (uid, jobs.utc_day()))  # the free job reserved 120 s
+    db.execute("INSERT INTO free_usage(user_id, day, seconds) VALUES (?,?,600)", (uid, jobs.utc_day()))
     return uid
 
 
