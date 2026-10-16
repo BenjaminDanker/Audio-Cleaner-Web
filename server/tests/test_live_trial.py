@@ -237,9 +237,13 @@ def test_a_new_session_after_the_trial_is_billed_normally(client, signed_in, fak
 
 def test_sessions_that_are_not_standard_are_billed_from_credit(client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # translations need the speech partner configured
+    from acw.config import get_settings
+
+    get_settings.cache_clear()
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    run_session(client, 1, {"translate": "de"})  # translations, once they exist
+    run_session(client, 1, {"translate": ["de"], "captions": "local"})  # translations
     s = the_session()
     assert s["trial_seconds"] == 0 and s["cost_micros"] > 0 and trial_left(uid) == 600
     assert routes._trial_eligible({}, "light", "local") and routes._trial_eligible({}, None, "local")
@@ -273,8 +277,12 @@ def test_extra_accurate_captions_are_billed_even_with_trial_seconds(client, sign
 
 # ---------------------------------------------------------------- one at a time, and not while live is busy
 
-def test_one_trial_session_at_a_time(client, signed_in, fake_worker):
+def test_one_trial_session_at_a_time(client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    from acw.config import get_settings
+
+    get_settings.cache_clear()
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     other = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000, 600.0)
     routes._open[uid] = [other]
@@ -284,7 +292,7 @@ def test_one_trial_session_at_a_time(client, signed_in, fake_worker):
         assert db.one("SELECT COUNT(*) n FROM stream_sessions")["n"] == 0
         # a paid session next to it is fine
         ledger.credit(uid, 5_000_000, "grant", "t", "g")
-        assert run_session(client, 1, {"translate": "de"})[0]["type"] == "ready"
+        assert run_session(client, 1, {"translate": ["de"], "captions": "local"})[0]["type"] == "ready"
         # and so is a trial session once the other one is gone
         routes._open[uid] = []
         assert run_session(client, 1)[0]["trial"] is True

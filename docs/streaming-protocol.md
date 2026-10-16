@@ -139,6 +139,23 @@ account (see `too_many_sessions`) is closed with WebSocket code 1001 and no even
 arrive once per utterance (~1-3 s after the speaker pauses); premium captions
 also stream partial text.
 
+### Translations (optional)
+
+Put `"translate": ["es", "de"]` (at most 3 languages, two-letter codes, not the spoken language) in `start`; it
+needs `captions`. `ready` echoes `"translate": [...]`. After every **final** caption, one event per language, in
+order per language, usually 1-2 s later:
+
+```json
+{"type": "translation", "lang": "es", "text": "...", "of": "l12", "start": 12.34, "end": 15.02}
+```
+
+`of` is the caption's `id`; `start`/`end` are copied from it. Partials are never translated. A line that fails is
+skipped; after 3 failures in a row that language stops for the session:
+`{"type": "warning", "code": "translation_unavailable", "lang": "de", "message": "..."}`.
+Billing: `stream_translate/standard` per second of **speech translated** (the caption's `end - start`), per
+language, taken from the balance when the session ends (not held up front). Sessions with translations are not
+covered by the free trial.
+
 ## 4. Control (text, client → server)
 
 ```json

@@ -22,7 +22,7 @@ from collections import OrderedDict, deque
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, cpusplit, db, metrics
+from .. import auth, cpusplit, db, metrics, translate
 from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
@@ -214,6 +214,7 @@ class Session:
         self.last_rx = time.monotonic()  # when the client last sent anything
         self.worker_task: asyncio.Task | None = None
         self.premium = None
+        self.translator = None  # LiveTranslator, when translations were asked for
         # The extra-accurate captions part of the rate, and the audio seconds at which it stopped working (None: still on).
         self.premium_rate = _premium_rate(cfg.get("captions"))
         self.premium_off_seconds: float | None = None
@@ -506,6 +507,22 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
                               "message": "Standard captions are English only. Extra-accurate captions work in other languages."})
         await ws.close(code=1008)
         return None
+    # Translations of the final captions (billed by the speech translated, per language, when the session ends).
+    try:
+        targets = translate.check_targets(cfg.get("translate"), language or ("en" if captions == "local" else None))
+    except ValueError as e:
+        await _send_json(ws, {"type": "error", "code": "bad_config", "message": f"Translations: {e}."})
+        await ws.close(code=1008)
+        return None
+    if targets and not captions:
+        await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Translations need captions: turn captions on too."})
+        await ws.close(code=1008)
+        return None
+    if targets and not get_settings().openai_api_key:
+        await _send_json(ws, {"type": "error", "code": "unavailable", "retryAfterSeconds": 300,
+                              "message": "Translations aren’t available right now. Try without them."})
+        await ws.close(code=1008)
+        return None
     try:
         rate = _rate_micros_per_minute(denoise, captions)
     except pricing.PricingError as e:
@@ -599,13 +616,22 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
                                   "message": "Live processing is busy or offline, try again soon."})
             await ws.close(code=1013)
             return sess
+        if targets:
+            from .live_translate import LiveTranslator
+
+            sess.translator = LiveTranslator(
+                targets, language or ("en" if captions == "local" else None), lambda ev: asyncio.ensure_future(_send_json(ws, ev))
+            )
+
+        def premium_event(ev: dict) -> None:
+            asyncio.ensure_future(_send_json(ws, ev))
+            if sess.translator is not None:
+                sess.translator.offer(ev)
+
         if captions == "premium":
             from .openai_live import PremiumCaptions
 
-            sess.premium = PremiumCaptions(
-                language, lambda ev: asyncio.ensure_future(_send_json(ws, ev)), user_hint=principal.user_id,
-                on_fail=sess.premium_failed,
-            )
+            sess.premium = PremiumCaptions(language, premium_event, user_hint=principal.user_id, on_fail=sess.premium_failed)
             await sess.premium.connect()
             if sess.premium.failed and sess.current_rate() == 0:
                 # Captions were all this session was for, and they don't work: nothing to bill, nothing to keep open.
@@ -624,6 +650,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             "usdPerMinute": sess.current_rate() / 1e6,
             "maxSessionSeconds": MAX_SESSION_SECONDS,
             **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
+            **({"translate": targets} if targets else {}),
             **({"trial": True, "trialSecondsLeft": int(sess.trial_budget)} if sess.trial else {}),
         })
         return sess
@@ -659,6 +686,11 @@ async def _run(sess: Session) -> None:
                     await ws.send_text(payload.decode())
                 except Exception:  # noqa: BLE001 - client gone; keep draining
                     pass
+                if sess.translator is not None:
+                    try:
+                        sess.translator.offer(json.loads(payload))
+                    except ValueError:
+                        pass
             elif kind == P.MSG_END:
                 return
 
@@ -872,6 +904,13 @@ async def _finish_inner(sess: Session) -> None:
             await sess.premium.close()
         except Exception:  # noqa: BLE001
             log.exception("closing premium captions")
+    translated = 0.0
+    if sess.translator is not None:
+        try:
+            await sess.translator.close()
+        except Exception:  # noqa: BLE001
+            log.exception("closing live translations")
+        translated = sess.translator.total_seconds()
     cost = 0
     try:
         if sess.hold_id and sess.paid_seconds > 0:
@@ -884,6 +923,16 @@ async def _finish_inner(sess: Session) -> None:
     finally:
         if sess.hold_id:
             await asyncio.to_thread(ledger.release_hold, sess.hold_id)  # nothing left reserved, whatever happened
+        if translated > 0:
+            # Per second of speech actually translated, all languages together; small, so taken after the session.
+            micros = pricing.cost_micros("stream_translate", "standard", translated)
+            try:
+                cost += await asyncio.to_thread(
+                    ledger.debit_available, sess.p.user_id, micros, "usage", "stream", f"{sess.id}:translate",
+                    f"Live caption translation ({translated / 60:.1f} min of speech)", allow_partial=True,
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("billing translations of stream session %s", sess.id)
         if sess.trial:
             try:
                 await asyncio.to_thread(sess.save_progress)  # the rest of the trial seconds this session used
