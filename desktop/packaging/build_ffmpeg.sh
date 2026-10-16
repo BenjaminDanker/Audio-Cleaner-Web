@@ -52,14 +52,17 @@ LAME_SHA256=ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e
 
 # ---- what the app needs from FFmpeg ----------------------------------------------------------
 # Container formats (acw_common.ffmpeg.ALLOWED_FORMATS) + raw PCM pipes + text subtitles.
-DEMUXERS="mov,matroska,avi,mpegts,mp3,wav,flac,ogg,aac,asf,flv,aiff,caf,w64,ac3,eac3,pcm_s16le,pcm_s24le,pcm_f32le,srt,webvtt"
-MUXERS="mp4,mov,ipod,matroska,webm,wav,flac,ogg,opus,null,mp3,pcm_s16le,pcm_s24le,pcm_f32le"
+DEMUXERS="mov,matroska,avi,mpegts,mp3,wav,flac,ogg,aac,asf,flv,aiff,caf,w64,ac3,eac3,pcm_s16le,pcm_s24le,pcm_f32le,srt,webvtt,rawvideo"
+MUXERS="mp4,mov,ipod,matroska,webm,wav,flac,ogg,opus,null,mp3,pcm_s16le,pcm_s24le,pcm_f32le,rawvideo"
 PROTOCOLS="file,pipe"
 # Audio decoders that are LGPL and common; pcm_*/adpcm_* are added from configure's own list below.
+# Video decoders for the preview (gui/video_preview.py decodes the picture itself, so it can drop frames on a slow
+# computer); all LGPL. AV1 is left to Qt's own player (FFmpeg's native AV1 decoder needs a GPU).
+VIDEO_DECODERS="rawvideo,h264,hevc,vp8,vp9,mpeg4,mpeg2video,mpeg1video,mjpeg,prores,dnxhd,h263,flv,msmpeg4v3,wmv3,vc1,theora"
 DECODERS="aac,aac_latm,mp1,mp1float,mp2,mp2float,mp3,mp3float,mp3adu,mp3adufloat,opus,vorbis,flac,alac,ac3,eac3,dca,truehd,mlp,wmav1,wmav2,wmapro,wmalossless,amrnb,amrwb,speex,gsm,gsm_ms,subrip,srt,webvtt,movtext,ass,ssa"
-ENCODERS="aac,flac,pcm_s16le,pcm_s24le,pcm_f32le,libopus,movtext,srt,subrip,webvtt"
+ENCODERS="aac,flac,pcm_s16le,pcm_s24le,pcm_f32le,libopus,movtext,srt,subrip,webvtt,rawvideo"
 # Graph plumbing + what -ac/-ar/-t and the CLI need (ffmpeg_select in configure adds a few video ones).
-FILTERS="abuffer,abuffersink,buffer,buffersink,aresample,aformat,anull,atrim,format,null,trim,asetpts,setpts,volume,pan,apad"
+FILTERS="abuffer,abuffersink,buffer,buffersink,aresample,aformat,anull,atrim,format,null,trim,asetpts,setpts,volume,pan,apad,scale,showinfo"
 
 usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" >&2; exit 2; }
 [ $# -eq 2 ] || usage
@@ -241,13 +244,13 @@ FF_CONFIGURE=(
   --disable-everything --disable-autodetect --disable-debug --disable-doc --disable-network
   --disable-shared --enable-static
   --disable-ffplay --enable-ffmpeg --enable-ffprobe
-  --disable-avdevice --disable-swscale
+  --disable-avdevice --enable-swscale
   --enable-avcodec --enable-avformat --enable-avfilter --enable-swresample
   --enable-parsers --enable-bsfs
   "--enable-protocol=$PROTOCOLS"
   "--enable-demuxer=$DEMUXERS"
   "--enable-muxer=$MUXERS"
-  "--enable-decoder=$DECODERS,$PCM_DECODERS"
+  "--enable-decoder=$DECODERS,$VIDEO_DECODERS,$PCM_DECODERS"
   "--enable-encoder=$ENCODERS"
   "--enable-filter=$FILTERS"
   --enable-libopus
