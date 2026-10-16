@@ -59,7 +59,7 @@ latency); standard live captions ~12 CPU-s.
   transcription jobs (acw-worker-gpu) whenever it is free.
 - **Refunds:** Stripe keeps its fee, so refunds now keep it too (deducted from
   the first refund of a payment), so a refund costs us nothing.
-- **Disputes:** $15 each. Prepaid credit, 3-D Secure and the $10 minimum keep
+- **Disputes:** $15 each. Prepaid credit, 3-D Secure and the $5 minimum keep
   them rare (docs/payments.md).
 - **Abuse of the free tier** (many accounts) costs queue time, not money.
   Paid jobs are taken first, and free jobs wait in line.

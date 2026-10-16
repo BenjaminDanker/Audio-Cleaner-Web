@@ -41,9 +41,12 @@ the $15 dispute fee dominate.
 - **Both credit and debit cards can be charged back.** The legal basis
   differs (Reg Z vs Reg E) but we receive the same dispute. Stripe charges
   $15 per dispute, plus $15 more if we contest it (refunded only if we win).
-- **3D Secure** is requested on every Checkout payment
-  (`request_three_d_secure=any`). That usually shifts fraud-dispute liability
-  to the card issuer, but it is not guaranteed.
+- **3D Secure** is left to Stripe and the bank
+  (`request_three_d_secure=automatic`): Radar and the issuer ask for it when
+  the risk or the law (EU/UK) calls for it. Forcing it on every payment
+  (`any`) made cards whose bank offers no challenge fail with "unable to
+  authenticate". When 3DS does run, fraud-dispute liability usually moves to
+  the card issuer, but it is not guaranteed.
   - Off-session reloads can't use 3DS.
   - EU/UK banks can still demand authentication on a reload
     (`authentication_required`). We then mark the reload failed and the

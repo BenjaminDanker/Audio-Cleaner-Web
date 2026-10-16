@@ -103,7 +103,7 @@ also removes the shared-UID risk with the Minecraft servers.
   address the same day keeps that day's usage (a hash of the address is kept until the next day).
 - Disputes and early fraud warnings suspend the account, release holds, zero
   the balance; EFWs up to $50 are refunded automatically.
-- 3DS requested on every Checkout payment; auto-reload has a monthly cap and
+- 3DS at Checkout whenever Stripe or the bank asks for it; auto-reload has a monthly cap and
   turns itself off after 3 failures.
 
 ## Known gaps / to do
