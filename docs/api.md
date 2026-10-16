@@ -68,7 +68,7 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
     "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
                 "language": "en" | null, "output_video": true, "embed_subtitles": true,
                 "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
-                "noise": "auto|light|heavy", "translate": ["es", "de"]}}
+                "noise": "auto|light|heavy", "polish": true, "restore_highs": true, "translate": ["es", "de"]}}
    ```
    `translate` (default `[]`, at most 3 languages, not the spoken one; needs a transcription kind): the subtitles and
    transcript are also made in those languages (`<stem>.<lang>.srt|vtt`, `<stem>.<lang>-transcript.txt`), priced per
@@ -77,7 +77,11 @@ Products/tiers: `denoise/standard`, `denoise/rebuild` (voice rebuilt, files up t
    `noise` (default `"auto"`) picks the noise remover: `light` = DeepFilterNet3, `heavy` = DPDFNet-8 (better
    when the noise is nearly as loud as the voice), `auto` = measured per file (`pipeline.HEAVY_BELOW_DB`).
    Band-limited recordings (phone calls, low-bitrate files) also get their missing highs restored (AP-BWE);
-   full-band recordings are never changed, and the job's `notice` says when it happened.
+   full-band recordings are never changed, and the job's `notice` says when it happened. `restore_highs` (default
+   `true`, must be a boolean) switches that off; the voice rebuild ignores it (it does that by itself).
+   `polish` (default `true`, must be a boolean) is the clarity chain after the noise removal (level matching,
+   high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is and
+   `loudness_lufs` then has no effect. Both options apply to the `denoise` part of a job; the price does not change.
    `denoiseTier: "rebuild"` (its own price) rebuilds the voice with Sidon instead: it also removes room echo and
    restores dull sound; `atten_lim_db` and `noise` do not apply to it.
    `echo_reference_track` (default `false`, must be a boolean) removes speaker echo from the first audio track

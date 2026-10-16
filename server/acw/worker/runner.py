@@ -209,6 +209,8 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             pipeline.CleanOptions(
                 atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
                 loudness_lufs=opts.get("loudness_lufs", -16.0),
+                polish=bool(opts.get("polish", True)),
+                restore_highs=bool(opts.get("restore_highs", True)),
                 noise=profile,
                 restore_voice=rebuild,
             ),

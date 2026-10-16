@@ -48,12 +48,14 @@ function syncLibav() {
 
 // The speech runtime for the free in-browser subtitles (ONNX Runtime Web, MIT, from node_modules): its WebAssembly files
 // are loaded at run time, so they are copied next to the noise remover's (same sign-in gate), in a folder named after
-// the version (cached for a week). Which of the two builds a browser takes: src/media/transcribe.worker.js.
+// the version (cached for a week). Only the plain build (no WebGPU) is used: src/media/transcribe.worker.js.
 const ortPkg = JSON.parse(readFileSync(join(root, 'node_modules', 'onnxruntime-web', 'package.json'), 'utf8'));
 const ortOut = join(out, 'ort');
 const ortDir = join(ortOut, ortPkg.version.replace(/[^A-Za-z0-9.-]/g, '-'));
-const ortFiles = ['ort-wasm-simd-threaded.asyncify.mjs', 'ort-wasm-simd-threaded.asyncify.wasm', 'ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm'];
+const ortFiles = ['ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.wasm'];
 function syncOrt() {
+  // files of an earlier release of this script (the WebGPU build) are not published any more
+  if (existsSync(ortDir)) for (const f of readdirSync(ortDir)) if (!ortFiles.includes(f)) rmSync(join(ortDir, f));
   if (ortFiles.every((f) => existsSync(join(ortDir, f)))) return;
   if (existsSync(ortOut)) for (const d of readdirSync(ortOut)) if (join(ortOut, d) !== ortDir) rmSync(join(ortOut, d), { recursive: true });
   mkdirSync(ortDir, { recursive: true });

@@ -12,8 +12,9 @@ cd "$REPO/web"
 npm ci --no-audit --no-fund
 npm run sync-dfn
 VITE_BASE=/audio/ npm run build
-# Pre-compress for Caddy's `precompressed` (the 14 MB wasm shrinks to ~4 MB).
-find dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.wasm' -o -name '*.svg' -o -name '*.json' -o -name '*.mjs' \) \
+# Pre-compress for Caddy's `precompressed` (the 14 MB wasm shrinks to ~4 MB, the 77 MB subtitle model to ~51 MB).
+# .tar.gz (the noise model) and media are already compressed: left alone.
+find dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.wasm' -o -name '*.svg' -o -name '*.json' -o -name '*.mjs' -o -name '*.onnx' \) \
   -exec gzip -kf9 {} \;
 
 DEST=vps:/var/www/audio/

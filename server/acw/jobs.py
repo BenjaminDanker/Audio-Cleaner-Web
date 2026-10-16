@@ -134,7 +134,8 @@ def job_seconds(job: dict) -> float:
         else:
             profile = params.get("noise_profile") or opts.get("noise", "auto")
             t += (SPEED["denoise_" + profile] if profile in ("light", "heavy") else SPEED["denoise_auto"]) * audio * channels
-            t += SPEED["highs"] * audio * channels
+            if opts.get("restore_highs", True):
+                t += SPEED["highs"] * audio * channels
     if opts.get("echo_reference_track"):
         t += SPEED["echo"] * audio * channels
     if params.get("transcribe_tier"):
@@ -296,6 +297,13 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if not isinstance(noise, str) or noise not in ("auto", "light", "heavy"):
         raise JobError("noise must be auto, light or heavy")
     out["noise"] = noise
+    # Even out the voice and set the loudness (on by default); bring back the missing highs of band-limited recordings
+    # (on by default; full-band recordings are never touched, and the voice rebuild does it by itself).
+    for key in ("polish", "restore_highs"):
+        flag = options.get(key, True)
+        if not isinstance(flag, bool):
+            raise JobError(f"{key} must be true or false")
+        out[key] = flag
     return out
 
 

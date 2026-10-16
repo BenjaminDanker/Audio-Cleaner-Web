@@ -58,6 +58,11 @@ def test_languages_are_checked():
         translate.check_targets(["en"], "en")
 
 
+def test_hungarian_romanian_and_thai_are_offered():
+    assert translate.check_targets(["hu", "ro", "th"], "en") == ["hu", "ro", "th"]
+    assert translate.LANGUAGE_NAMES["th"] == "Thai"
+
+
 def test_a_job_asks_for_translations_and_is_priced_per_language():
     uid = auth.get_or_create_user("t@example.com")["id"]
     ledger.credit(uid, 5_000_000, "grant", "t", "g")

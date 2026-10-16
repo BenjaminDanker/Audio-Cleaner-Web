@@ -15,7 +15,8 @@ const RATE16 = 16000;
 const VAD_FRAME = 320; // 20 ms at 16 kHz
 const END_SILENCE_MS = 600; // a pause this long ends an utterance
 const MAX_UTTERANCE_S = 10; // a long stretch of speech is cut here
-const PARTIAL_EVERY_MS = 1500; // while someone talks, the line so far is written again this often (when the maker is free)
+const PARTIAL_EVERY_MS = 1500; // while someone talks, the line so far is written again this often at the quickest (when the maker is free)
+const PARTIAL_GAP = 1.5; // ...and never sooner than this many times the last writing took, so a slow device is not kept busy back to back
 
 function peak(f32) {
   let p = 0;
@@ -34,6 +35,7 @@ class Captioner {
     this.mixed = language === 'mixed';
     this.language = this.mixed ? null : language || null;
     this.emit = emit;
+    // 48 -> 16 kHz on this thread: 0.07 ms per 20 ms frame (0.4% of one core), too little to be worth a second copy of the filter in the worklet
     this.resampler = new Resampler(48000, RATE16);
     this.frame = new Float32Array(0);
     this.utt = []; // Float32Array pieces of the current utterance
@@ -41,8 +43,9 @@ class Captioner {
     this.silentMs = 0;
     this.speaking = false;
     this.floor = 0.003; // running estimate of the room's level
-    this.lastPartial = 0;
-    this.busy = false;
+    this.lastPartialEnd = 0; // when the last partial line was finished (or when none has run yet: 0)
+    this.lastTakeMs = 0; // how long the last writing (a partial or a final) took
+    this.busy = false; // a partial is being written; there is never more than one
     this.id = 0;
     this.queue = Promise.resolve();
     this.closed = false;
@@ -76,9 +79,23 @@ class Captioner {
     const seconds = this.uttLen / RATE16;
     if (this.silentMs >= END_SILENCE_MS || seconds >= MAX_UTTERANCE_S) {
       this.finish();
-    } else if (!this.busy && seconds >= 1 && performance.now() - this.lastPartial >= PARTIAL_EVERY_MS) {
-      this.lastPartial = performance.now();
+    } else if (!this.busy && seconds >= 1 && performance.now() - this.lastPartialEnd >= this.partialEvery()) {
       this.partial();
+    }
+  }
+
+  /** Pause between two partial lines: the usual one, or longer when the last writing was slow (finals are never held back). */
+  partialEvery() {
+    return Math.max(PARTIAL_EVERY_MS, PARTIAL_GAP * this.lastTakeMs);
+  }
+
+  /** transcribeSpeech, remembering how long it took. */
+  async write(a, language) {
+    const t0 = performance.now();
+    try {
+      return await transcribeSpeech(a, language);
+    } finally {
+      this.lastTakeMs = performance.now() - t0;
     }
   }
 
@@ -100,11 +117,13 @@ class Captioner {
     this.busy = true;
     this.queue = this.queue.then(async () => {
       try {
-        const segs = await transcribeSpeech(a, await this.lang(a));
+        if (this.closed || id !== this.id) return; // the line ended while this waited its turn: the final replaces it
+        const segs = await this.write(a, await this.lang(a));
         const text = segs.map((s) => s.text).join(' ').trim();
         if (!this.closed && id === this.id && text) this.emit({ type: 'caption', id: `u${id}`, text, final: false });
       } catch { /* a partial that fails is simply skipped */ } finally {
         this.busy = false;
+        this.lastPartialEnd = performance.now();
       }
     });
   }
@@ -120,7 +139,7 @@ class Captioner {
     this.queue = this.queue.then(async () => {
       try {
         const language = this.mixed ? (this.language = await detectLanguage(a)) : await this.lang(a);
-        const segs = await transcribeSpeech(a, language);
+        const segs = await this.write(a, language);
         const text = segs.map((s) => s.text).join(' ').trim();
         this.emit({ type: 'caption', id: `u${id}`, text, final: true }); // an empty final removes the partial
       } catch (e) {

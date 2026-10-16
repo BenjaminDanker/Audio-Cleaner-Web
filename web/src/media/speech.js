@@ -10,6 +10,10 @@ import { Resampler } from './resample.js';
 
 const MODEL = 'whisper-base-1846881'; // the folder scripts/sync-dfn.mjs puts it in (SPEECH_ID)
 const MODEL_BYTES = 79664191; // the seven files together, for the progress readout
+const FILE_SIZES = { // their sizes (deploy/models.lock pins them), so the worker need not ask the server for each
+  'config.json': 2243, 'generation_config.json': 3832, 'preprocessor_config.json': 339, 'tokenizer.json': 2480466,
+  'tokenizer_config.json': 282682, 'encoder_model_quantized.onnx': 23201314, 'decoder_model_merged_quantized.onnx': 53693315,
+};
 const RATE = 16000;
 const WINDOW = 30 * RATE; // the model hears at most 30 s at a time
 const CUT_FROM = 20 * RATE; // a window ends at the quietest moment between 20 and 29.5 s
@@ -35,14 +39,6 @@ export const speechLoadState = () => snapshot;
 export function subscribeSpeechLoad(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
-}
-
-function plainWasmOnly() {
-  // Safari before 26 without WebGPU can't run the runtime's WebGPU-capable build (the library makes the same choice).
-  const ua = navigator.userAgent;
-  const safari = /Safari\//.test(ua) && !/Chrome|Chromium|Edg\//.test(ua);
-  const major = Number((ua.match(/Version\/(\d+)/) || [])[1] || 0);
-  return safari && major < 26 && !navigator.gpu;
 }
 
 /** Starts the worker and the model download once per page (later calls share it). Resolves when it can work. */
@@ -75,7 +71,7 @@ export function preloadSpeech() {
   e.ready.catch(() => { if (engine === e) stopSpeech(); });
   const origin = location.origin;
   worker.postMessage({
-    type: 'init', model: MODEL, plainWasm: plainWasmOnly(),
+    type: 'init', model: MODEL, fileSizes: FILE_SIZES,
     modelHost: `${origin}${import.meta.env.BASE_URL}dfn/models/`,
     ortBase: `${origin}${import.meta.env.BASE_URL}dfn/ort/${__ORT_DIR__}/`,
   });

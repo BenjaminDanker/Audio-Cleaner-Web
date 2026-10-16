@@ -2,9 +2,9 @@
 // the visitor's processor). One instance per page; it handles one request at a time, in order.
 //
 // Protocol (main -> worker):
-//   { type: 'init', modelHost, model, ortBase, plainWasm }   -> progress* then { type: 'ready' } | { type: 'error', message }
+//   { type: 'init', modelHost, model, ortBase, fileSizes }   -> progress* then { type: 'ready' } | { type: 'error', message }
 //        modelHost: absolute URL the model folder hangs off (the site's dfn/models/), model: its id there;
-//        ortBase: absolute URL of the runtime's folder; plainWasm: use the build without WebGPU support (older Safari)
+//        ortBase: absolute URL of the runtime's folder; fileSizes: { 'tokenizer.json': bytes, ... } of the model's files
 //   { type: 'detect', id, audio: Float32Array (16 kHz mono, up to 30 s) }   -> { type: 'language', id, language }
 //   { type: 'transcribe', id, audio, language }   -> { type: 'result', id, segments: [{start, end, text}] }  (seconds)
 //   any request can answer { type: 'error', id, message }
@@ -14,14 +14,32 @@ import { env, pipeline, Tensor } from '@huggingface/transformers';
 
 let asr = null;
 
-async function init({ modelHost, model, ortBase, plainWasm }) {
+/**
+ * The library asks for the first byte of every file (a Range request) just to learn its size for a progress total, which
+ * speech.js does not use; each of those is a round trip that the sign-in check on the server has to answer too. They are
+ * answered here from the sizes the page knows (a file it does not know goes to the network as usual), so every file is
+ * requested exactly once.
+ */
+function answerSizeProbes(fileSizes) {
+  const realFetch = env.fetch;
+  env.fetch = (input, init) => {
+    const range = new Headers(init?.headers).get('range');
+    const size = range === 'bytes=0-0' ? fileSizes?.[String(input).split('/').pop().split('?')[0]] : null;
+    if (!size) return realFetch(input, init);
+    return Promise.resolve(new Response(new Uint8Array(1), { status: 206, headers: { 'content-range': `bytes 0-0/${size}`, 'content-type': 'application/octet-stream' } }));
+  };
+}
+
+async function init({ modelHost, model, ortBase, fileSizes }) {
   env.allowLocalModels = false;
   env.allowRemoteModels = true;
   env.remoteHost = modelHost;
   env.remotePathTemplate = '{model}/';
   env.useBrowserCache = true; // the files stay in the browser's cache: the model is downloaded once
-  const build = plainWasm ? 'ort-wasm-simd-threaded' : 'ort-wasm-simd-threaded.asyncify';
-  env.backends.onnx.wasm.wasmPaths = { mjs: `${ortBase}${build}.mjs`, wasm: `${ortBase}${build}.wasm` };
+  answerSizeProbes(fileSizes);
+  // The model only ever runs on the processor (device 'wasm'), so the plain build is enough: the one with WebGPU/asyncify
+  // support is twice the size to download and about a fifth slower.
+  env.backends.onnx.wasm.wasmPaths = { mjs: `${ortBase}ort-wasm-simd-threaded.mjs`, wasm: `${ortBase}ort-wasm-simd-threaded.wasm` };
   // Load the runtime's glue code from our own address, not as a blob: the site's script policy allows only 'self'.
   // (The browser's HTTP cache keeps both files; the model files are what the library caches itself.)
   env.useWasmCache = false;

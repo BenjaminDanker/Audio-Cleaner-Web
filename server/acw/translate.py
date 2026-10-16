@@ -53,7 +53,7 @@ LANGUAGE_NAMES = {
     "nl": "Dutch", "pl": "Polish", "ru": "Russian", "uk": "Ukrainian", "tr": "Turkish", "ar": "Arabic",
     "hi": "Hindi", "ja": "Japanese", "ko": "Korean", "zh": "Chinese (Simplified)", "sv": "Swedish", "da": "Danish",
     "fi": "Finnish", "no": "Norwegian", "cs": "Czech", "el": "Greek", "he": "Hebrew", "id": "Indonesian",
-    "vi": "Vietnamese",
+    "vi": "Vietnamese", "hu": "Hungarian", "ro": "Romanian", "th": "Thai",
 }
 MAX_TARGETS = 3
 

@@ -652,7 +652,8 @@ When full, a new session is refused with the options that still fit; sessions th
 | `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
 
 Other queue limits: the job list shares one queue computation per second between all requests (`jobs.queue_snapshot`),
-the web page polls every 5 s while jobs only wait and every 1.5 s while one uploads or runs; extra-accurate
+the web page polls every 5 s while jobs only wait and every 1.5 s while one uploads or runs (every 15 s while its tab is
+in the background, and once at once when it is shown again); extra-accurate
 transcription and file translation have two places each (`PREMIUM_JOBS_AT_ONCE`, `TRANSLATION_JOBS_AT_ONCE` in
 `app.py`) so neither waits for the other; at most 8 requests to the text model run at once in the web process and a live
 translation line is retried once after 0.5 s and then skipped; a stage that runs past its time limit but is still

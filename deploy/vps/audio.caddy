@@ -23,6 +23,8 @@
         # primary-ram, nothing is stored on this VPS) use the bulk upstream too, so they never queue in front of live audio.
         @acw_download path_regexp ^/audio/api/(jobs/[0-9a-f]{32}/outputs/|downloads/)
         @acw_webhook path /audio/api/stripe/webhook
+        # The live WebSocket (audio frames; compression would only add delay) is never compressed.
+        @acw_ws path /audio/api/stream/ws
         handle @acw_upload {
             request_body {
                 max_size 4GB
@@ -63,6 +65,19 @@
                 }
             }
         }
+        handle @acw_ws {
+            request_body {
+                max_size 64KB
+            }
+            reverse_proxy 127.0.0.1:18790 {
+                header_up -X-Real-IP
+                flush_interval -1
+                transport http {
+                    dial_timeout 5s
+                    response_header_timeout 2m
+                }
+            }
+        }
         handle @acw_webhook {
             request_body {
                 max_size 1MB
@@ -77,6 +92,15 @@
             }
         }
         handle {
+            # The JSON answers (the job list is the big one: ~45 kB for 50 jobs, ~6-8x smaller compressed). Only JSON
+            # is compressed; uploads, result downloads and the WebSocket are handled above and left alone.
+            encode {
+                zstd
+                gzip
+                match {
+                    header Content-Type application/json*
+                }
+            }
             request_body {
                 max_size 64KB
             }
@@ -120,6 +144,10 @@
             uri /audio/api/auth/asset-check
         }
         header @acw_dfn Cache-Control "private, max-age=604800"
+        # The speech model's .onnx files are stored gzipped next to the originals (deploy/publish-web.sh) and served
+        # that way (file_server below); say what they are, since the extension is unknown to Caddy.
+        @acw_onnx path /audio/dfn/*.onnx
+        header @acw_onnx Content-Type application/octet-stream
         # Every app route serves index.html: never cache it, only hashed assets.
         @acw_html not path /audio/assets/* /audio/dfn/*
         header @acw_html Cache-Control "no-cache"

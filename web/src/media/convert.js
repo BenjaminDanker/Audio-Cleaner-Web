@@ -273,7 +273,7 @@ export function serverAudioFormat(id, file, info) {
 export const ISO639_2 = {
   en: 'eng', es: 'spa', fr: 'fra', de: 'deu', it: 'ita', pt: 'por', nl: 'nld', pl: 'pol', ru: 'rus', uk: 'ukr', tr: 'tur',
   ar: 'ara', hi: 'hin', ja: 'jpn', ko: 'kor', zh: 'zho', sv: 'swe', da: 'dan', fi: 'fin', no: 'nor', cs: 'ces', el: 'ell',
-  he: 'heb', id: 'ind', vi: 'vie',
+  he: 'heb', id: 'ind', vi: 'vie', hu: 'hun', ro: 'ron', th: 'tha',
 };
 
 /** Can a video file of this type made here carry subtitles that players show? Only MKV: there they are stored the way

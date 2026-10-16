@@ -107,6 +107,8 @@ export default function JobForm({ onSubmitted }) {
   const [echo, setEcho] = useState(false); // Clean & polish: remove speaker echo using the second audio track
   const [loudness, setLoudness] = useState('-16');
   const [noiseKind, setNoiseKind] = useState('auto');
+  const [polishVoice, setPolishVoice] = useState(true); // Clean & polish: even out the voice and set the loudness
+  const [restoreHighs, setRestoreHighs] = useState(true); // Clean & polish: bring back the highs of dull phone-quality recordings
   const [rebuild, setRebuild] = useState(false); // Clean & polish, voice rebuilt (its own price)
   const [strength, setStrength] = useState('max'); // Clean & polish
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
@@ -306,6 +308,8 @@ export default function JobForm({ onSubmitted }) {
         translate: translations,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
+        polish: polishVoice,
+        restore_highs: restoreHighs,
         atten_lim_db: strengthDb(strength),
         echo_reference_track: !!(wantsPolish && echo && hasSecondTrack),
       },
@@ -487,11 +491,25 @@ export default function JobForm({ onSubmitted }) {
                 )}
                 <div className="field">
                   <label htmlFor="loud">Loudness target</label>
-                  <select id="loud" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy}>
+                  <select id="loud" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy || !polishVoice}>
                     {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
                   </select>
                 </div>
               </div>
+              <label className="check">
+                <input type="checkbox" name="polish" checked={polishVoice} onChange={(e) => setPolishVoice(e.target.checked)} disabled={busy} />
+                <span>Polish the voice
+                  <span className="hint block" data-testid="polish-hint">Evens out the volume and sets the loudness above. Turn it off to keep the voice as it was recorded, just without the noise.</span>
+                </span>
+              </label>
+              {!(rebuild && rebuildRate) && (
+                <label className="check">
+                  <input type="checkbox" name="highs" checked={restoreHighs} onChange={(e) => setRestoreHighs(e.target.checked)} disabled={busy} />
+                  <span>Restore missing highs
+                    <span className="hint block" data-testid="highs-hint">For phone calls and other recordings that sound dull or muffled. Clear recordings are left as they are.</span>
+                  </span>
+                </label>
+              )}
               <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
               {hasSecondTrack && (
                 <label className="check">

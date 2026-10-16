@@ -12,6 +12,9 @@ for Audio Cleaner:
    VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), and for job uploads and result downloads
    VPS `127.0.0.1:18794` → primary-ram `127.0.0.1:8794` (`acw-tunnel-bulk` unit, its own connection and process so
    big transfers do not delay live audio; Caddy falls back to 18790 when it is down: docs/operations.md, "Bulk transfers").
+   Compression: Caddy compresses (zstd, gzip) only the small JSON answers of the API; the live WebSocket, uploads and
+   downloads are already compressed audio or need no delay and are passed through untouched. The static files are
+   pre-compressed by `deploy/publish-web.sh` (including the speech model's `.onnx` files, 77 MB -> ~51 MB on the wire).
 
 Nothing else of ours is on the VPS: no data, no secrets. When the home server
 or tunnel is down, Caddy answers API calls with a 503 maintenance JSON
