@@ -214,10 +214,16 @@ if (want('billing')) {
   await check('billing: custom amount validation + auto-reload text + ledger', async () => {
     await page.locator('label:has(input[value=custom])').click();
     const hint = page.locator('#custom-hint');
+    await page.getByLabel('Custom amount (USD)').fill('4.99');
+    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid under $5');
+    if (!/smallest top-up is \$5\.00/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
     await page.getByLabel('Custom amount (USD)').fill('5');
-    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid under $10');
+    if (/neg/.test(await hint.getAttribute('class'))) throw new Error('$5 should be valid');
     await page.getByLabel('Custom amount (USD)').fill('600');
     if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid over $500');
+    if (!/most you can add at once is \$500\.00/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
+    await page.getByLabel('Custom amount (USD)').fill('abc');
+    if (!/Enter an amount in dollars/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
     await page.getByLabel('Custom amount (USD)').fill('25');
     if (/neg/.test(await hint.getAttribute('class'))) throw new Error('$25 should be valid');
     if (!(await page.getByRole('button', { name: /^Pay/ }).isDisabled())) throw new Error('still disabled while payments are off');

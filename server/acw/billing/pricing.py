@@ -42,7 +42,7 @@ MIN_JOB_CHARGE_MICROS = 0
 
 # Top-up rules (cents). $10 minimum keeps Stripe's fixed fee and dispute
 # exposure reasonable (see docs/payments.md).
-TOPUP_MIN_CENTS = 1_000
+TOPUP_MIN_CENTS = 500
 TOPUP_MAX_CENTS = 50_000
 TOPUP_PRESETS_CENTS = [1_000, 2_000, 5_000, 10_000]
 

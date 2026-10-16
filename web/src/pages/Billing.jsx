@@ -141,7 +141,7 @@ export default function Billing() {
 }
 
 function TopUp({ pricing, unavailable }) {
-  const min = pricing?.topup?.minCents ?? 1000;
+  const min = pricing?.topup?.minCents ?? 500;
   const max = pricing?.topup?.maxCents ?? 50000;
   const presets = pricing?.topup?.presetsCents ?? [1000, 2000, 5000, 10000];
   const [choice, setChoice] = useState('2000'); // preset cents or 'custom'
@@ -190,7 +190,12 @@ function TopUp({ pricing, unavailable }) {
         <div className="field">
           <label htmlFor="custom-amt">Custom amount (USD)</label>
           <div className="inline-input">$<input id="custom-amt" className="input input-money" inputMode="decimal" value={custom} onChange={(e) => setCustom(e.target.value)} aria-invalid={!valid} aria-describedby="custom-hint" /></div>
-          <span id="custom-hint" className={valid ? 'hint' : 'hint neg'}>Between {moneyCents(min)} and {moneyCents(max)}.</span>
+          <span id="custom-hint" className={valid ? 'hint' : 'hint neg'} role={valid ? undefined : 'alert'}>
+            {valid ? `Between ${moneyCents(min)} and ${moneyCents(max)}.`
+              : !Number.isInteger(cents) ? 'Enter an amount in dollars, like 12.50.'
+              : cents < min ? `The smallest top-up is ${moneyCents(min)}.`
+              : `The most you can add at once is ${moneyCents(max)}.`}
+          </span>
         </div>
       )}
       <label className="check">
@@ -208,7 +213,7 @@ function TopUp({ pricing, unavailable }) {
 }
 
 function AutoReload({ autoReload, pricing, refresh, unavailable }) {
-  const min = pricing?.topup?.minCents ?? 1000;
+  const min = pricing?.topup?.minCents ?? 500;
   const max = pricing?.topup?.maxCents ?? 50000;
   const hasCard = !!autoReload?.hasCard;
   const [threshold, setThreshold] = useState('5');

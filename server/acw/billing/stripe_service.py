@@ -74,7 +74,9 @@ def _settle_authorized(pi, payment_id: str, user_id: str):
         return None
     charge_id = _id_of(_get(pi, "latest_charge"))
     country = _card_country(charge_id) if charge_id else None
-    if country in blocked_card_countries():
+    if country is None or country in blocked_card_countries():
+        # Not a card (no issuing country to check), or a card from a country we don't serve: never charged.
+        country = country or "unknown"
         client().v1.payment_intents.cancel(
             _get(pi, "id"), params={"cancellation_reason": "requested_by_customer"},
             options={"idempotency_key": f"blocked-country-cancel-{payment_id}"},
@@ -180,7 +182,11 @@ def create_checkout(user_id: str, amount_cents: int, save_card: bool) -> str:
             "mode": "payment",
             "customer": customer,
             "client_reference_id": user_id,
-            "payment_method_types": ["card"],
+            # Stripe no longer takes payment_method_types here: the methods come from a payment method configuration
+            # (ours offers cards only, see config). Without one, the account's default applies, and a payment that
+            # is not a card is refused before it is charged (_settle_authorized).
+            **({"payment_method_configuration": settings.stripe_payment_method_configuration}
+               if settings.stripe_payment_method_configuration else {}),
             "line_items": [
                 {
                     "quantity": 1,

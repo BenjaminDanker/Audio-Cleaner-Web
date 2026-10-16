@@ -71,6 +71,7 @@ class Settings:
     stripe_statement_descriptor: str
     stripe_automatic_tax: bool
     stripe_tax_code: str
+    stripe_payment_method_configuration: str | None
 
     openai_api_key: str | None
 
@@ -150,6 +151,9 @@ def get_settings() -> Settings:
         stripe_automatic_tax=_env_bool("STRIPE_AUTOMATIC_TAX", False),
         # Electronically supplied services; change if your tax advisor says otherwise.
         stripe_tax_code=_env("STRIPE_TAX_CODE", "txcd_10000000") or "txcd_10000000",
+        # A payment method configuration with cards only (incl. Apple Pay / Google Pay): payments are authorized,
+        # then the card's issuing country is checked before they are charged, which needs a card.
+        stripe_payment_method_configuration=_env("STRIPE_PAYMENT_METHOD_CONFIGURATION", "") or None,
         openai_api_key=_env("OPENAI_API_KEY"),
         turnstile_site_key=_env("TURNSTILE_SITE_KEY"),
         turnstile_secret=_env("TURNSTILE_SECRET"),

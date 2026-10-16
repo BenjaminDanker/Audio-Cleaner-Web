@@ -324,3 +324,48 @@ def test_auto_reload_by_us_card_is_captured_and_credited(user_with_pending_payme
     monkeypatch.setattr(stripe_service, "_record_tax_transaction", lambda _pid: None)
     assert stripe_service.run_auto_reload(uid) == "succeeded"
     assert ledger.balance(uid)["balance_micros"] == 20_000_000 and len(fake_pi.captures) == 1 and not fake_pi.cancels
+
+
+def test_checkout_uses_the_cards_only_configuration_and_not_payment_method_types(monkeypatch):
+    """Stripe refuses `payment_method_types` on Checkout Sessions now (it answered 400, the page showed a 500):
+    the payment methods come from a payment method configuration."""
+    from acw.config import get_settings
+
+    monkeypatch.setenv("STRIPE_PAYMENT_METHOD_CONFIGURATION", "pmc_cards_only")
+    get_settings.cache_clear()
+    uid = auth.get_or_create_user("cards@example.com")["id"]
+    sent = {}
+
+    def create(params=None, options=None):
+        sent.update(params)
+        return SimpleNamespace(id="cs_new", url="https://checkout.stripe.com/c/pay/cs_new")
+
+    real_client = stripe_service.client
+
+    def client():
+        c = real_client()
+        c.v1.checkout = SimpleNamespace(sessions=SimpleNamespace(create=create))
+        return c
+
+    monkeypatch.setattr(stripe_service, "client", client)
+    monkeypatch.setattr(stripe_service, "ensure_customer", lambda _uid: "cus_1")
+    url = stripe_service.create_checkout(uid, 500, False)  # $5 is the smallest top-up now
+    assert url.startswith("https://checkout.stripe.com/")
+    assert "payment_method_types" not in sent and sent["payment_method_configuration"] == "pmc_cards_only"
+    assert sent["payment_intent_data"]["capture_method"] == "manual"
+    with pytest.raises(ValueError):
+        stripe_service.create_checkout(uid, 499, False)
+
+
+def test_a_payment_that_is_not_a_card_is_never_charged(client, user_with_pending_payment, fake_pi):
+    """No card means no issuing country to check: the authorization is cancelled, nothing is charged."""
+    uid = user_with_pending_payment
+    fake_pi.country = None
+    assert _post(client, checkout_completed(uid)).status_code == 200
+    capturable = event("payment_intent.amount_capturable_updated", {
+        "id": "pi_1", "object": "payment_intent", "status": "requires_capture", "latest_charge": "ch_1",
+        "metadata": {"acw_kind": "checkout", "acw_payment_id": "pay1", "acw_user_id": uid}}, "evt_cap")
+    assert _post(client, capturable).status_code == 200
+    assert fake_pi.cancels and not fake_pi.captures and not fake_pi.refunds
+    assert ledger.balance(uid)["balance_micros"] == 0
+    assert db.one("SELECT status FROM payments WHERE id = 'pay1'")["status"] == "refused_region"
