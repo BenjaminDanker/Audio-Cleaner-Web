@@ -102,14 +102,22 @@ class SettingsPanel(QFrame):
         ))
 
         self._noise = _combo(NOISE_LABELS, "What kind of background noise the recording has. Automatic measures it.")
-        layout.addWidget(_Row(
+        noise_row = _Row(
             "Background noise",
             "Audio Cleaner has two ways of removing noise, each best at its own kind of recording.\n\n"
             "\u2022 Automatic: measures each file and picks for you\n"
             "\u2022 Light noise: hiss, hum, a quiet room or a fan. Keeps the voice the most natural.\n"
             "\u2022 Heavy noise: a caf\u00e9, traffic, a crowd or wind, with noise almost as loud as the voice",
             self._noise,
-        ))
+        )
+        # Rebuilding the voice replaces the noise removal, so the two settings above don't apply while it is on.
+        self._rebuild_note = QLabel("Noise reduction and Background noise aren\u2019t used while \u201cRebuild the voice\u201d "
+                                    "is on: it removes the noise its own way. Untick it below to use them.")
+        self._rebuild_note.setObjectName("Small")
+        self._rebuild_note.setWordWrap(True)
+        self._rebuild_note.hide()
+        noise_row.layout_.addWidget(self._rebuild_note)
+        layout.addWidget(noise_row)
 
         polish_row = _Row(
             "Voice polish",
@@ -297,7 +305,8 @@ class SettingsPanel(QFrame):
         """Height with every optional line showing (subtitle language, output folder), so the window can be
         sized once to fit them all."""
         spacing = self.layout().spacing() // 2 + 6
-        optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel, self.voice_panel)
+        optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel, self.voice_panel,
+                    self._rebuild_note)
         extra = sum(w.sizeHint().height() + spacing for w in optional if w.isHidden())
         return self.sizeHint().height() + extra
 
@@ -306,6 +315,7 @@ class SettingsPanel(QFrame):
         rebuilt = self._rebuild.isChecked()
         self._strength.setEnabled(not rebuilt)
         self._noise.setEnabled(not rebuilt)
+        self._rebuild_note.setVisible(rebuilt)
         wants_subs = self._subtitles.currentData() != "off"
         self._language.setVisible(wants_subs)
         dl = self.downloader

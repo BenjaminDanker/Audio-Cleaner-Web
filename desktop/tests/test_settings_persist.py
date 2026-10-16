@@ -164,3 +164,20 @@ def test_a_saved_setting_that_no_longer_exists_falls_back(qapp, tmp_path):
         assert s["strength"] == "max" and s["parallel"] == 0 and s["where"] == "next"
     finally:
         _close(w)
+
+
+def test_a_note_says_why_noise_settings_are_unavailable_while_rebuilding(qapp, tmp_path):
+    from PySide6.QtCore import QSettings
+
+    from audio_cleaner_desktop.gui.preferences import Preferences
+    from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
+
+    prefs = Preferences(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    panel = SettingsPanel(prefs)
+    try:
+        panel._rebuild.setChecked(True)
+        assert not panel._strength.isEnabled() and not panel._noise.isEnabled() and not panel._rebuild_note.isHidden()
+        panel._rebuild.setChecked(False)
+        assert panel._strength.isEnabled() and panel._noise.isEnabled() and panel._rebuild_note.isHidden()
+    finally:
+        panel.deleteLater()
