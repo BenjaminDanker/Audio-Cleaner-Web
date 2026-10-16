@@ -247,6 +247,7 @@ function LiveDemo({ pricing }) {
   const [denoise, setDenoise] = useState(true);
   const [captions, setCaptions] = useState('local'); // '' | 'local' (standard, English only) | 'premium' (extra accurate, any language)
   const [language, setLanguage] = useState('');
+  const [language2, setLanguage2] = useState(''); // a second language the speaker switches to (extra accurate)
   const [strength, setStrength] = useState('max');
   const [monitor, setMonitor] = useState('processed');
   const [state, setState] = useState('idle'); // idle | starting | live | stopping
@@ -272,7 +273,9 @@ function LiveDemo({ pricing }) {
   const priceKnown = !!pricing && (!denoise || !!den) && (!captions || !!cap);
   const offered = (!denoise || den?.available !== false) && (!captions || cap?.available !== false);
   const accurateListed = capRates.premium?.available !== false;
-  const spoken = captions === 'premium' ? language : 'en';
+  const paidLanguage = language === 'mixed' ? '' : language; // 'mixed' belongs to the free test
+  const mixed = captions === 'premium' && !!paidLanguage && !!language2 && language2 !== paidLanguage;
+  const spoken = captions === 'premium' ? (mixed ? '' : paidLanguage) : 'en';
   const liveTargets = captions ? targets.filter((t) => t && t !== spoken) : [];
   const onTrial = trialLiveSecondsLeft > 0 && captions !== 'premium' && liveTargets.length === 0; // the free trial covers Standard live only
   const translateRate = findRate(pricing, 'stream_translate', 'standard');
@@ -325,7 +328,8 @@ function LiveDemo({ pricing }) {
     try {
       session.current = await startLive({
         denoise: cfg.denoise, captions: cfg.captions || null,
-        language: cfg.captions === 'premium' ? language || null : null, // standard captions are English; the language only matters for extra accurate
+        // standard captions are English; the language only matters for extra accurate (a list for someone who switches)
+        language: cfg.captions === 'premium' ? (mixed ? [paidLanguage, language2] : paidLanguage || null) : null,
         translate: cfg.captions ? liveTargets : [],
         attenDb: strengthDb(strength), monitor,
         onEvent, onStats: setStats,
@@ -424,9 +428,11 @@ function LiveDemo({ pricing }) {
                     <label htmlFor="live-free-lang">Language you speak</label>
                     <select id="live-free-lang" className="select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
                       {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+                      <option value="mixed">I switch between languages</option>
                     </select>
                   </div>
                   <span className="hint" data-testid="free-captions-note">Each line shows after you pause. The first time, the caption maker downloads about 80 MB.</span>
+                  <GoodToKnow k="deviceCaptions" />
                 </>
               )}
             </>
@@ -452,15 +458,26 @@ function LiveDemo({ pricing }) {
             <>
               <div className="field">
                 <label htmlFor="live-lang">Language you speak</label>
-                <select id="live-lang" className="select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
+                <select id="live-lang" className="select" value={paidLanguage} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
                   {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
                 </select>
               </div>
+              {paidLanguage && (
+                <div className="field">
+                  <label htmlFor="live-lang-2">Also speaks</label>
+                  <select id="live-lang-2" className="select" value={language2} onChange={(e) => setLanguage2(e.target.value)} disabled={busy} data-testid="live-lang-2">
+                    <option value="">Only that language</option>
+                    {LANGUAGES.filter(([c]) => c && c !== paidLanguage).map(([c, n]) => <option key={c} value={c}>{n}</option>)}
+                  </select>
+                  <span className="hint">For switching between two languages while you talk: the captions follow along.</span>
+                </div>
+              )}
               <span className="hint" data-testid="premium-note">Extra accurate captions send your audio to a speech partner we work with, and show text as you speak. <Link to="/privacy">Privacy details</Link></span>
             </>
           )}
           {captions === 'local' && <span className="hint">Standard captions are English only. For another language, choose Extra accurate.</span>}
           {captions === 'local' && <GoodToKnow k="liveCaptions" />}
+          {captions === 'local' && <GoodToKnow k="deviceCaptions" />}
           {captions === 'premium' && <GoodToKnow k="liveAccurate" />}
           {captions && (
             <div className="field" data-testid="live-translate">

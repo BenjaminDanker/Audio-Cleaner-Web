@@ -29,7 +29,10 @@ function peak(f32) {
 /** Cuts the mic into utterances at pauses and has each written as a caption (partials while it goes on). */
 class Captioner {
   constructor(language, emit) {
-    this.language = language || null;
+    // 'mixed': someone who switches languages. Each finished line is detected again (one more pass of the model per
+    // line, on this device), partial lines use the last language heard.
+    this.mixed = language === 'mixed';
+    this.language = this.mixed ? null : language || null;
     this.emit = emit;
     this.resampler = new Resampler(48000, RATE16);
     this.frame = new Float32Array(0);
@@ -116,7 +119,8 @@ class Captioner {
     if (a.length < RATE16 * 0.3) return this.queue; // a click, not speech
     this.queue = this.queue.then(async () => {
       try {
-        const segs = await transcribeSpeech(a, await this.lang(a));
+        const language = this.mixed ? (this.language = await detectLanguage(a)) : await this.lang(a);
+        const segs = await transcribeSpeech(a, language);
         const text = segs.map((s) => s.text).join(' ').trim();
         this.emit({ type: 'caption', id: `u${id}`, text, final: true }); // an empty final removes the partial
       } catch (e) {

@@ -201,6 +201,36 @@ await check('live: translations in the paid test: the start asks for them, each 
   }
 });
 
+await check('live: extra accurate for someone who switches languages sends both (mocked server)', async () => {
+  let startMsg = null;
+  await page.routeWebSocket(/\/api\/stream\/ws/, (ws) => {
+    ws.onMessage((m) => {
+      if (typeof m !== 'string') return;
+      const j = JSON.parse(m);
+      if (j.type === 'start') {
+        startMsg = j;
+        ws.send(JSON.stringify({ type: 'ready', sessionId: 's2', sampleRate: 48000, hopSamples: 480, modelLatencyMs: 30, usdPerMinute: 0.03, maxSessionSeconds: 3600 }));
+      } else if (j.type === 'stop') ws.close();
+    });
+  });
+  try {
+    await page.goto(`${BASE}/app/live`);
+    await paidTest();
+    const accurate = page.locator('input[name=live-captions][value=premium]');
+    if (!(await accurate.count()) || await accurate.isDisabled()) return 'skipped: extra accurate is not offered on this test server';
+    await page.locator('label.choice', { has: accurate }).click();
+    await page.locator('#live-lang').selectOption('en');
+    await page.getByTestId('live-lang-2').selectOption('es');
+    await page.getByTestId('live-start').click();
+    await page.getByTestId('live-stop').waitFor({ timeout: 15000 });
+    await page.getByTestId('live-stop').click();
+    if (JSON.stringify(startMsg?.language) !== '["en","es"]' || startMsg.captions !== 'premium') throw new Error('start: ' + JSON.stringify(startMsg));
+    return 'language ' + JSON.stringify(startMsg.language);
+  } finally {
+    await page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => {});
+  }
+});
+
 await check('live: protocol sanity (start msg, ready, binary frames, stop)', async () => {
   const s = JSON.parse(wsFrames.start);
   if (s.sampleRate !== 48000 || s.version !== 1 || s.denoise !== 'light' || s.captions !== 'local') throw new Error(wsFrames.start);
