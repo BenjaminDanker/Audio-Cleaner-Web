@@ -85,8 +85,8 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ACW_DOWNLOAD_MBPS_TOTAL` | `6` | megabytes per second for all result downloads together (0 = no cap). Measured 2026-10-15: the home line is 1 Gbit/s both ways, but the VPS's own connection is the bottleneck: home->VPS about 9 MB/s (73 Mbit/s, even with 3 parallel streams), VPS->home about 11 MB/s. Downloads and the live audio replies share that home->VPS path, so this stays at about 70 % of it |
-| `ACW_UPLOAD_MBPS_TOTAL` / `ACW_UPLOAD_MBPS_USER` | `8` / `5` | megabytes per second for all uploads / per account (uploads come VPS->home, about 11 MB/s measured; 70 % leaves room for live audio) |
+| `ACW_TRANSFER_MBPS_TOTAL` | `5` | megabytes per second for result downloads, release downloads and uploads **together**, one budget per process (0 = no cap). Every transferred byte crosses the VPS twice (a download goes home -> VPS -> user, an upload user -> VPS -> home) and the VPS link is the bottleneck, not the home line: measured 2026-10-15 home->VPS about 9 MB/s (73 Mbit/s), VPS->home about 11 MB/s, and live audio shares both directions. The earlier separate caps (6 down + 8 up) could add up to 14 MB/s each way when an upload and a download ran together; 5 MB/s in total leaves about 4 MB/s in and 6 MB/s out for live and the website. The older `ACW_DOWNLOAD_MBPS_TOTAL` and `ACW_UPLOAD_MBPS_TOTAL` are still read when this one is not set (the smaller one counts) |
+| `ACW_UPLOAD_MBPS_USER` | `5` | megabytes per second for one account's uploads (inside the shared budget above) |
 
 **Rollout, in this order** (each step is safe on its own; nothing is applied by the repository):
 
@@ -124,7 +124,7 @@ what helps in any case. Setting up SQM on the home router remains the best secon
 
 Users and the apps never see the GitHub repository (it may become private). GitHub Releases stays where CI puts the build
 output; primary-ram keeps a verified copy and serves it under our own domain, from the bulk process (`acw-bulk`, so a
-download never queues in front of live audio, under the same byte-rate cap `ACW_DOWNLOAD_MBPS_TOTAL` as result downloads).
+download never queues in front of live audio, under the same shared transfer budget `ACW_TRANSFER_MBPS_TOTAL` as result downloads and uploads).
 **Nothing is stored on the VPS**: Caddy only proxies `^/audio/api/(jobs/<id>/outputs/|downloads/)` to the bulk upstream
 (`deploy/vps/audio.caddy`, falling back to the main process like the other bulk routes).
 

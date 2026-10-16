@@ -163,11 +163,13 @@ def test_download_cap_zero_means_unlimited(monkeypatch):
     assert DownloadBandwidth().total is None
 
 
-def test_download_cap_default_is_six_megabytes_per_second(monkeypatch):
+def test_download_cap_default_is_five_megabytes_per_second_shared_with_uploads(monkeypatch):
     from acw.security import DownloadBandwidth
 
     monkeypatch.delenv("ACW_DOWNLOAD_MBPS_TOTAL", raising=False)
-    assert DownloadBandwidth().total.rate == 6e6
+    monkeypatch.delenv("ACW_UPLOAD_MBPS_TOTAL", raising=False)
+    monkeypatch.delenv("ACW_TRANSFER_MBPS_TOTAL", raising=False)
+    assert DownloadBandwidth().total.rate == 5e6
 
 
 def test_the_cap_applies_under_the_base_path(monkeypatch):

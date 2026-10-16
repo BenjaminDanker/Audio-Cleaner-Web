@@ -155,8 +155,8 @@ also removes the shared-UID risk with the Minecraft servers.
   sums; the monitor mails when it fails). That does not survive losing the machine: the encrypted off-box copy is
   built in but switched off until you configure it (docs/operations.md, "Backups").
 - Uploads and live audio: **SEC-08 is done on the home side.** Uploads and result downloads run in their own process
-  (`acw-bulk`, `acw/bulk_app.py`: same authentication, body limits, upload caps and headers; a total download cap,
-  `ACW_DOWNLOAD_MBPS_TOTAL`, keeps downloads from filling the uplink the live replies use) and their own SSH connection
+  (`acw-bulk`, `acw/bulk_app.py`: same authentication, body limits, upload caps and headers; a shared transfer budget for uploads and downloads,
+  `ACW_TRANSFER_MBPS_TOTAL`, keeps transfers from filling the VPS link the live audio uses) and their own SSH connection
   (`acw-tunnel-bulk`, IPQoS throughput; the main tunnel is lowdelay). It takes effect when the VPS key, the bulk tunnel
   and the Caddy snippet are switched over (docs/operations.md, "Bulk transfers"; not applied by the repository); until
   then the main process serves the same routes as before. Still open from SEC-08: SQM on the home router, a smaller

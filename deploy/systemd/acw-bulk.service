@@ -10,7 +10,7 @@ WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app
 EnvironmentFile=%h/audio-cleaner/secrets/acw.env
 # Same hardening as acw-web. No live worker, no background loops: acw.bulk_app serves PUT /api/jobs/{id}/input,
-# GET /api/jobs/{id}/outputs/{name} and /api/health only. ACW_DOWNLOAD_MBPS_TOTAL / ACW_UPLOAD_MBPS_* (acw.env) cap the
+# GET /api/jobs/{id}/outputs/{name} and /api/health only. ACW_TRANSFER_MBPS_TOTAL / ACW_UPLOAD_MBPS_USER (acw.env) cap the
 # bytes per second (docs/operations.md, "Bulk transfers").
 ExecStart=%h/audio-cleaner/venv/bin/uvicorn acw.bulk_app:app --host 127.0.0.1 --port 8794 \
     --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \

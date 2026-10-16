@@ -205,13 +205,32 @@ class Throttle:
             await asyncio.sleep(-self.tokens / self.rate)
 
 
-class UploadBandwidth:
-    """Upload bandwidth caps: one for the whole process and one per account, so bulk uploads can't starve
-    live audio that shares the same tunnel and event loop (ACW_UPLOAD_MBPS_TOTAL / ACW_UPLOAD_MBPS_USER,
-    megabytes per second)."""
+TRANSFER_MBPS_DEFAULT = 5.0
 
-    def __init__(self) -> None:
-        self.total = Throttle(float(os.environ.get("ACW_UPLOAD_MBPS_TOTAL", "8")) * 1e6)
+
+def transfer_budget() -> Throttle | None:
+    """The one byte-rate budget that uploads and result downloads of a process share (ACW_TRANSFER_MBPS_TOTAL, megabytes
+    per second; 0 = none). Every transferred byte crosses the VPS twice (a download goes home -> VPS -> user, an upload
+    user -> VPS -> home) on a link of about 9 MB/s in and 11 MB/s out that live audio uses too, so separate caps of 8 and 6
+    added up to more than the link. The older ACW_DOWNLOAD_MBPS_TOTAL / ACW_UPLOAD_MBPS_TOTAL are still read when the new
+    variable is not set (the smaller one counts)."""
+    raw = os.environ.get("ACW_TRANSFER_MBPS_TOTAL")
+    if raw is None:
+        legacy = [float(v) for v in (os.environ.get("ACW_DOWNLOAD_MBPS_TOTAL"), os.environ.get("ACW_UPLOAD_MBPS_TOTAL")) if v is not None]
+        positive = [v for v in legacy if v > 0]
+        mbps = min(positive) if positive else (0.0 if legacy else TRANSFER_MBPS_DEFAULT)
+    else:
+        mbps = float(raw)
+    return Throttle(mbps * 1e6) if mbps > 0 else None
+
+
+class UploadBandwidth:
+    """Upload bandwidth caps: the process-wide transfer budget it shares with downloads and one cap per account, so bulk
+    uploads can't starve live audio that shares the same tunnel and event loop (ACW_TRANSFER_MBPS_TOTAL /
+    ACW_UPLOAD_MBPS_USER, megabytes per second)."""
+
+    def __init__(self, budget: Throttle | None | str = "own") -> None:
+        self.total = transfer_budget() if budget == "own" else budget
         self.per_user = float(os.environ.get("ACW_UPLOAD_MBPS_USER", "5")) * 1e6
         self._users: dict[str, Throttle] = {}
 
@@ -225,27 +244,25 @@ class UploadBandwidth:
 
     async def take(self, user: Throttle, n: int) -> None:
         await user.take(n)
-        await self.total.take(n)
-
-
-uploads = UploadBandwidth()
+        if self.total is not None:
+            await self.total.take(n)
 
 
 class DownloadBandwidth:
-    """One cap for all result downloads of a process (ACW_DOWNLOAD_MBPS_TOTAL, megabytes per second; 0 = none).
-    The home uplink carries live audio replies as well, so downloads must not be able to fill it. About 70 %
-    of the measured upload speed leaves room (docs/operations.md)."""
+    """Result and release downloads of a process draw on the same transfer budget as its uploads (see transfer_budget).
+    The home uplink carries live audio replies as well, so transfers must not be able to fill it."""
 
-    def __init__(self) -> None:
-        rate = float(os.environ.get("ACW_DOWNLOAD_MBPS_TOTAL", "6")) * 1e6
-        self.total = Throttle(rate) if rate > 0 else None
+    def __init__(self, budget: Throttle | None | str = "own") -> None:
+        self.total = transfer_budget() if budget == "own" else budget
 
     async def take(self, n: int) -> None:
         if self.total is not None:
             await self.total.take(n)
 
 
-downloads = DownloadBandwidth()
+_budget = transfer_budget()
+uploads = UploadBandwidth(_budget)
+downloads = DownloadBandwidth(_budget)  # the same object: uploads and downloads together stay under one rate
 
 
 def client_net(ip: str) -> str:
