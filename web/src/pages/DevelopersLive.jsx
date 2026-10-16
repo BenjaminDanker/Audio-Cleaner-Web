@@ -102,16 +102,18 @@ export default function DevelopersLive() {
         <p>Audio goes both ways as binary messages with a 16 byte header:</p>
         <Code label="Frame layout">{`offset size  field
 0      1     version = 1
-1      1     codec: 1 = pcm_s16le, 2 = f32le, 3 = opus
+1      1     codec: 1 = pcm_s16le, 2 = f32le, 3 = opus, 4 = silence
 2      2     flags: bit 0 = echo reference (section 5), other bits 0
 4      4     seq: frame counter, u32 little endian
 8      8     ts_us: your timestamp, u64 (opaque, we send it back)
-16     ...   mono 48 kHz samples, or exactly one Opus packet (codec 3)`}</Code>
+16     ...   mono 48 kHz samples, one Opus packet (codec 3), or a u16 sample count (codec 4)`}</Code>
         <ul>
           <li><b>Use Opus.</b> Send one 20 ms Opus packet (48 kHz mono, any bitrate; 48 to 64 kbps is plenty) in each frame. We answer with one Opus packet per frame at <code>opusBitrate</code>. That is about 60 kbps each way instead of about 770 kbps of PCM. Opus adds around 6.5 ms each way.</li>
           <li>A frame holds 10 to 100 ms of audio in 10 ms steps (a multiple of 480 samples). 20 ms (960 samples) is recommended.</li>
           <li>We return exactly one frame for each frame you send, with the same <code>seq</code> and <code>ts_us</code>, the same number of samples and the same codec. The cleaned audio is delayed by <code>modelLatencyMs</code> (30 ms for <code>light</code>), so your total delay is the network round trip plus that. Measure the round trip with <code>ts_us</code>.</li>
-          <li>With denoise off (captions only) the audio comes back unchanged and you can ignore it.</li>
+          <li>With denoise off (captions only) the audio comes back unchanged and you can ignore it, or start with <code>"returnAudio": false</code> and no audio comes back at all (events still do).</li>
+          <li><b>Silence is free.</b> When <code>ready</code> has <code>"silenceFrames": true</code>, send a muted or digitally silent stretch (every sample below 1e-5) as a silence frame instead: the header plus a u16 little-endian sample count (a multiple of 480, at most 4800). We answer it right away with the same silence frame. Silence frames keep the session alive but aren’t billed and cost no processing. Echo reference frames can be silence frames too.</li>
+          <li><b>Captions only? You pay for speech, not quiet.</b> With <code>denoise: null</code>, the quiet stretches the Standard captions skip (from 2 s after the last words until someone talks again) and the silence Extra accurate captions don’t send on aren’t billed.</li>
           <li>Send audio in real time (bursts up to 6 seconds are fine). Faster input ends the session with <code>too_fast</code>.</li>
         </ul>
       </Section>
