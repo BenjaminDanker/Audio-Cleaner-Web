@@ -449,7 +449,7 @@ def qt_notices(n: Notices) -> None:
 
 
 def write_readme(n: Notices) -> None:
-    from audio_cleaner_desktop import __version__  # noqa: PLC0415 - needs desktop/ on sys.path
+    from audio_cleaner_desktop import __version__, config  # noqa: PLC0415 - needs desktop/ on sys.path
 
     pyside = metadata.version("PySide6_Essentials")
     rows = "\n".join(f"  {name:<32}{desc}" for name, desc in sorted(n.index, key=lambda r: r[0].lower()) if name != "Qt-notice")
@@ -466,7 +466,7 @@ GPL-3.0.txt). Qt and PySide6 are linked dynamically: they are the separate libra
 folder (Qt6*.dll / libQt6*.so / QtCore etc. framework files, and the PySide6 / shiboken6 folders). You may replace
 them with your own build of Qt / PySide6 of a compatible version; the application will use the replacement.
 Source code of Qt for Python and Qt: https://download.qt.io/official_releases/QtForPython/ and https://code.qt.io .
-Written offer: if you cannot get the sources from there, ask Benjamin Danker (who gave you this app), who will send
+Written offer: if you cannot get the sources from there, ask us through {config.CONTACT_URL} and we will send
 you the complete corresponding source code of the Qt and PySide6 versions in this application, for three years
 after the version was released and for as long as we offer it. Qt is a registered trademark of The Qt Company Ltd.
 Qt's multimedia library also includes FFmpeg libraries (LGPL v2.1 or later, source: https://ffmpeg.org) that Qt

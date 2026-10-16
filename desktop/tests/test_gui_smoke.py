@@ -108,7 +108,7 @@ def test_about_dialog_has_the_notices(window):
 
     dialog = AboutDialog(window)
     texts = " ".join(label.text() for label in dialog.findChildren(QLabel))
-    assert "Free to use \u00b7 \u00a9 2026 Benjamin Danker" in texts
+    assert "Free to use \u00b7 \u00a9 2026 Audio Cleaner" in texts
     assert "GNU LGPL v3" in texts and "ffmpeg-buildinfo.txt" in texts
     dialog.close()
 

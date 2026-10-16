@@ -135,8 +135,10 @@ the checklist at the end).
 4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
    and `AudioCleaner-<version>-Mac-Intel.pkg` (GitHub shows each file's SHA-256 itself, so there is no separate
    checksum file) plus `update.json` and `update.json.sig` (the signed update information, see "Automatic updates"), and
-   marks the release as latest, so the link to share with friends is always
-   `https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/latest`. The app is not on the website and never
+   marks the release as latest. Don't share GitHub links (the repository stays out of sight); the links to share with
+   friends come from our download server and always give the newest version:
+   `https://mc-multi-world.space/audio/api/downloads/desktop/latest/windows`, `.../latest/mac-apple-silicon` and
+   `.../latest/mac-intel`. The app is not on the website and never
    contacts it or GitHub: it contacts our download server (update check and installers, models) and Hugging Face
    (Whisper). Nobody is meant to be pointed at GitHub: the server mirrors the three installers and the update
    information, so share the website's download links instead of the releases page.

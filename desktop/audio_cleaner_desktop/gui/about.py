@@ -57,7 +57,7 @@ class AboutDialog(QDialog):
         name.setObjectName("Heading")
         version = QLabel(f"Version {__version__}")
         version.setObjectName("Muted")
-        rights = QLabel("Free to use \u00b7 \u00a9 2026 Benjamin Danker")
+        rights = QLabel("Free to use \u00b7 \u00a9 2026 Audio Cleaner")
         widgets = [name, version, rights]
         if updates_on is not None:
             self.updates_label = QLabel(f"Updates: {'on' if updates_on else 'off'}")

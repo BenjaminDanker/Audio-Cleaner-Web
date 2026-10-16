@@ -1,6 +1,6 @@
 AUDIO CLEANER END USER LICENCE AGREEMENT
 
-Audio Cleaner ("the Software") is made by Benjamin Danker ("we", "us"). By installing or using the Software you agree
+Audio Cleaner ("the Software") is made by the Audio Cleaner team ("we", "us"). By installing or using the Software you agree
 to these terms. If you do not agree, do not install or use it.
 
 1. Free to use
@@ -50,4 +50,4 @@ it at any time. We may end this licence if you break these terms; you must then 
 This agreement is governed by the laws of the United States, without their conflict-of-law rules. Mandatory consumer
 protection rules of the country where you live remain unaffected.
 
-Copyright (c) 2026 Benjamin Danker. All rights reserved.
+Copyright (c) 2026 Audio Cleaner. All rights reserved.
