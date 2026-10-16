@@ -13,10 +13,16 @@ texts): such a model has an `archive`. The archive is downloaded once into `<arc
 SHA-256 checked), every member the models need is unpacked from it as a stream into the models' own `.partial`
 folders and checked again by size and SHA-256, the models are put in place and the archive is deleted. Downloading
 one model of an archive installs all the models that share it (one download).
+
+Changing a model (a new revision, a new archive) is safe: the old copy no longer matches the catalog, so it does not
+count as installed, and nothing half-finished from the old one is resumed (a `.partial` folder is pinned to the hashes
+it is for). The app downloads the new version by itself when the old one was there (outdated()), and removes what is
+left of the old one afterwards (remove_stale()).
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import ssl
@@ -31,9 +37,12 @@ from pathlib import Path
 
 from . import config
 
+log = logging.getLogger(__name__)
+
 _CHUNK = 1 << 20
 _TIMEOUT = 30
 _COMPLETE = ".complete"
+_PIN = ".pin"  # in a .partial folder: the hashes the download in it is for (see _claim)
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,31 @@ def _sizes_match(d: Path, model: SpeechModel) -> bool:
     return all((d / f.path).is_file() and (d / f.path).stat().st_size == f.size for f in model.files)
 
 
+def pin_token(model: SpeechModel) -> str:
+    """What a `.partial` folder of `model` is pinned to: the hashes of its files (an archive model: the archive's)."""
+    if model.archive is not None:
+        return model.archive.sha256
+    return "\n".join(f.sha256 for f in model.files)
+
+
+def _pinned(d: Path, token: str) -> bool:
+    try:
+        return (d / _PIN).read_text(encoding="utf-8").strip() == token
+    except OSError:
+        return False
+
+
+def _claim(d: Path, token: str) -> None:
+    """Use the partial folder `d` for a download of `token`. What it holds is resumed only when it was started for
+    exactly these hashes; anything else (another revision of the model, an older version of the app that wrote no pin)
+    is thrown away, so a stale half-download can never end up in a new model."""
+    if _pinned(d, token):
+        return
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / _PIN).write_text(token, encoding="utf-8")
+
+
 def _installer_copy_ok(d: Path, model: SpeechModel) -> bool:
     """The installer checked every file's SHA-256 before installing it and then wrote the `.complete` marker
     (the hashes it installed), which must match this catalog entry. An install made before the marker existed
@@ -215,6 +249,8 @@ def _archive_dir(archive: ModelArchive) -> Path:
 def _archive_have(archive: ModelArchive) -> int:
     """Bytes of the archive already on disk (a finished download, or what a resumed one starts from)."""
     d = _archive_dir(archive)
+    if not _pinned(d, archive.sha256):
+        return 0  # started for another archive (or by an older app): not resumed
     for p in (d / archive.name, d / (archive.name + ".part")):
         if p.is_file():
             return min(p.stat().st_size, archive.size)
@@ -231,10 +267,14 @@ def missing_bytes(model: SpeechModel) -> int:
             return 0  # setup installed all of it; the sha256 check happens when it is reused
         return model.archive.size - _archive_have(model.archive)
     part = models_dir() / f"{model.id}.partial"
+    pinned = _pinned(part, pin_token(model))
     have = 0
     for f in model.files:
         p = part / f.path
-        if p.is_file():
+        if not pinned:
+            if _installer_file(model, f) is not None:
+                have += f.size
+        elif p.is_file():
             have += min(p.stat().st_size, f.size)
         elif (part / (f.path + ".part")).is_file():
             have += min((part / (f.path + ".part")).stat().st_size, f.size)
@@ -276,7 +316,7 @@ def _sha256(path: Path, cancel: threading.Event | None) -> str:
 
 
 class _HttpsRedirects(urllib.request.HTTPRedirectHandler):
-    """Follow redirects (Hugging Face and GitHub hand out the files from a CDN), but never to plain http."""
+    """Follow redirects (Hugging Face and our download server may hand out the files from a CDN), but never to plain http."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urllib.parse.urlparse(newurl).scheme != "https" and urllib.parse.urlparse(req.full_url).scheme == "https":
@@ -388,8 +428,9 @@ def download(model: SpeechModel, progress: Progress | None = None, cancel: threa
         return location(model)
     root = models_dir()
     root.mkdir(parents=True, exist_ok=True)
-    _check_disk(root, missing_bytes(model))
     part = root / f"{model.id}.partial"
+    _claim(part, pin_token(model))
+    _check_disk(root, missing_bytes(model))
     opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _HttpsRedirects())
     done = 0
     for f in model.files:
@@ -404,6 +445,7 @@ def download(model: SpeechModel, progress: Progress | None = None, cancel: threa
 
 
 def _put_in_place(model: SpeechModel, part: Path, final: Path) -> Path:
+    (part / _PIN).unlink(missing_ok=True)
     (part / _COMPLETE).write_text("\n".join(f.sha256 for f in model.files), encoding="utf-8")
     if final.exists():
         shutil.rmtree(final)
@@ -478,7 +520,7 @@ def _download_from_archive(model: SpeechModel, progress: Progress | None, cancel
                     seeded.add((m.id, f.path))
         unpack = [(m, f) for m in todo for f in m.files if (m.id, f.path) not in seeded]
         if unpack:
-            arch_dir.mkdir(parents=True, exist_ok=True)
+            _claim(arch_dir, archive.sha256)
             # the archive and everything unpacked from it exist side by side until the archive is deleted
             _check_disk(root, archive.size - _archive_have(archive) + sum(f.size for _, f in unpack) + archive.unpacked_size)
             if not _verified_archive(archive, arch_path, cancel):
@@ -514,3 +556,101 @@ def remove(model: SpeechModel) -> None:
         dirs.append(_archive_dir(model.archive))
     for d in dirs:
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ---- when the catalog changes a model --------------------------------------------------------------------------------
+def _marker(d: Path) -> list[str] | None:
+    """The hashes in the `.complete` marker of model folder `d`, or None when there is no marker."""
+    try:
+        return sorted((d / _COMPLETE).read_text(encoding="utf-8").split())
+    except OSError:
+        return None
+
+
+def had_before(model: SpeechModel) -> bool:
+    """The user had this model: a complete copy (it has the marker that is only written once every file was checked)
+    from some version of the catalog entry is in the app's folder or the installer's. Says nothing about whether that
+    copy is the current one."""
+    return any(d is not None and _marker(d) is not None for d in (model_dir(model), installer_dir(model)))
+
+
+def needs_update(model: SpeechModel) -> bool:
+    """The user had an older copy of `model` and the current catalog entry is not installed: the app downloads the new
+    one by itself (a model the user never had is only offered, never forced)."""
+    return not is_installed(model) and had_before(model)
+
+
+def outdated(catalog: "list[SpeechModel] | tuple[SpeechModel, ...] | None" = None) -> list[SpeechModel]:
+    """The models that need_update(), in catalog order."""
+    return [m for m in (CATALOG.values() if catalog is None else catalog) if needs_update(m)]
+
+
+def _writable(path: Path) -> bool:
+    """`path` can be deleted: it and the folder it is in are writable by this user."""
+    return os.access(path, os.W_OK) and os.access(path.parent, os.W_OK)
+
+
+def _delete(path: Path, removed: list[Path]) -> None:
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        log.warning("could not delete the outdated model data %s", path, exc_info=True)
+        return
+    removed.append(path)
+
+
+def remove_stale(catalog: "list[SpeechModel] | tuple[SpeechModel, ...] | None" = None) -> list[Path]:
+    """Delete what older versions of the models left behind (up to 1.6 GB each), but only once the current ones are
+    there. Call it when no download is running. Returns what was deleted.
+
+    * A model folder (it has a `.complete` marker) in the app's models folder whose marker names other hashes than the
+      catalog's entry of that id goes when the current model is installed (in either place).
+    * A model folder of an id that is not in the catalog any more, and a `.partial` folder that is not the current
+      download of a catalog model or archive (another revision, an older archive), go when no model still waits for
+      its update.
+    * The same for the installer's folder ({app}\\models, /Library/Application Support/...), but only where this user
+      may delete: otherwise it stays (the next interactive setup forgets what is stale).
+    * Nothing else is touched: the LICENSES folder, folders without a marker and files are left alone, so a models
+      folder that also holds other things is safe.
+    """
+    cat = {m.id: m for m in (CATALOG.values() if catalog is None else catalog)}
+    archives = {Path(m.archive.name).stem: m.archive.sha256 for m in cat.values() if m.archive is not None}
+    waiting = any(needs_update(m) for m in cat.values())
+    removed: list[Path] = []
+
+    def stale_models(root: Path, own: bool) -> None:
+        try:
+            children = sorted(p for p in root.iterdir() if p.is_dir())
+        except OSError:
+            return
+        for d in children:
+            if own and d.name.endswith(".partial"):
+                stem = d.name[: -len(".partial")]
+                if stem in cat:
+                    keep = _pinned(d, pin_token(cat[stem]))
+                elif stem in archives:
+                    keep = _pinned(d, archives[stem])
+                else:
+                    keep = waiting  # an orphan: only after the updates are done
+                if not keep:
+                    _delete(d, removed)
+                continue
+            have = _marker(d)
+            if have is None:
+                continue  # not a model folder (LICENSES, .unpack, someone else's): never ours to delete
+            model = cat.get(d.name)
+            if model is not None:
+                if have == sorted(f.sha256 for f in model.files) or not is_installed(model):
+                    continue  # current, or its replacement is not here yet: this copy stays
+            elif waiting:
+                continue
+            if own or _writable(d):
+                _delete(d, removed)
+
+    stale_models(models_dir(), True)
+    installed = installer_models_dir()
+    if installed is not None and installed.resolve() != models_dir().resolve():
+        stale_models(installed, False)
+    return removed

@@ -121,6 +121,8 @@ def download_models() -> int:
         else:
             line.finish()
             print(f"{model.title}: done ({path})")
+    if worst == 0:
+        models.remove_stale()  # copies of older versions of a model, now that the current ones are there
     return worst
 
 

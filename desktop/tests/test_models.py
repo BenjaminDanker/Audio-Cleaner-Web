@@ -77,6 +77,7 @@ def test_an_interrupted_download_resumes(server):
     m = _model(server, {"big.bin": data})
     part = models.models_dir() / "test-model.partial"
     part.mkdir(parents=True)
+    (part / ".pin").write_text(models.pin_token(m))  # a partial download of this very model
     (part / "big.bin.part").write_bytes(data[:1_000_000])
     assert models.missing_bytes(m) == len(data) - 1_000_000
     models.download(m)
@@ -245,6 +246,7 @@ def test_an_interrupted_archive_download_resumes_and_is_verified(server, archive
     blob = _RangeHandler.files["/models.zip"]
     part = models.models_dir() / "models.partial"
     part.mkdir(parents=True)
+    (part / ".pin").write_text(archive.sha256)
     (part / "models.zip.part").write_bytes(blob[:100_000])
     assert models.missing_bytes(two) == archive.size - 100_000
     models.download(two)

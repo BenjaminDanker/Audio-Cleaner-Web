@@ -21,7 +21,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import models
+from . import config, models
 
 _EXE = ".exe" if os.name == "nt" else ""
 _FFMPEG = f"ffmpeg{_EXE}"
@@ -49,15 +49,14 @@ SPEECH_MODEL = models.SpeechModel(
 )
 models.register(SPEECH_MODEL)
 
-# The two ONNX models and their licence texts come in ONE zip archive on this repository's "models-v1" release:
+# The two ONNX models and their licence texts come in ONE zip archive on our download server (config.MODELS_URL):
 # AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by tools/export_apbwe_onnx.py, and
 # Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md). The archive holds
 #   README.txt, LICENSES/*, ap-bwe/{8k,12k,16k,24k}to48k.onnx, sidon/{sidon_fe,sidon_dec}.onnx
 # Each model keeps its own folder and checks; the downloaders unpack the members each model lists (models.py).
-_MODELS_RELEASE = "https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v1/"
 MODELS_ARCHIVE = models.ModelArchive(
     name="AudioCleaner-models-v1.zip",
-    url=_MODELS_RELEASE + "AudioCleaner-models-v1.zip",
+    url=config.MODELS_URL + "AudioCleaner-models-v1.zip",
     size=908538132,
     sha256="5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce",
     shared=tuple(

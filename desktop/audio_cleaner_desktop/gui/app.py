@@ -103,4 +103,5 @@ def run(files: list[str]) -> int:
     app.fileOpened.connect(lambda path: bring_forward(window, [path]))
     window.show()
     window.updater.schedule_startup_check()  # frozen app, setting on: a quiet check ~10 s from now
+    window.schedule_model_update()  # a model that changed since it was installed is fetched again, quietly
     return app.exec()

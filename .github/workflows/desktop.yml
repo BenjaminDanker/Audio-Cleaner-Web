@@ -53,9 +53,9 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # The models the installers download (resources.py): HEAD the models archive (AudioCleaner-models-v1.zip on the
-  # models-v1 release) and the speech model's files and compare the sizes with the catalog. Fails when one is
-  # missing (e.g. the archive was not uploaded to the release) or differs. Nothing needs this job, so a
+  # The models the installers download (resources.py): HEAD the models archive (AudioCleaner-models-v1.zip on our
+  # download server, which mirrors the models-v1 release) and the speech model's files and compare the sizes with
+  # the catalog. Fails when one is missing (e.g. the archive was not mirrored yet) or differs. Nothing needs this job, so a
   # red result here does not stop the builds or the release; look at it before announcing a build.
   model-urls:
     name: Model downloads exist
@@ -264,7 +264,7 @@ jobs:
 
       - name: Models for the frozen selftest (restoring highs, rebuilding the voice)
         # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime (one 0.9 GB archive, which
-        # the first download unpacks for both). The speech model is left out (1.6 GB). Does not fail the build when the release with the models is not there yet: the
+        # the first download unpacks for both). The speech model is left out (1.6 GB). Does not fail the build when the download server does not have the models yet: the
         # "Model downloads exist" job reports that.
         continue-on-error: true
         run: |
@@ -620,7 +620,7 @@ jobs:
             key="$RUNNER_TEMP/update-signing-key.pem"
             (umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
             if python3 "$GITHUB_WORKSPACE/desktop/packaging/make_update_manifest.py" check-key "$key"; then
-              python3 "$GITHUB_WORKSPACE/desktop/packaging/make_update_manifest.py" manifest --version "$version" --repo "$GITHUB_REPOSITORY" --dir .
+              python3 "$GITHUB_WORKSPACE/desktop/packaging/make_update_manifest.py" manifest --version "$version" --dir .
               openssl pkeyutl -sign -rawin -inkey "$key" -in update.json -out update.json.sig
               openssl pkey -in "$key" -pubout -out "$RUNNER_TEMP/update-public.pem"
               openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/update-public.pem" -in update.json -sigfile update.json.sig

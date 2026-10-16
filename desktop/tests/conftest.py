@@ -167,3 +167,9 @@ def qapp():
     except Exception as e:  # noqa: BLE001
         pytest.skip(f"Qt cannot start here: {e}")
     return app
+
+
+@pytest.fixture(autouse=True)
+def _models_in_a_scratch_folder(tmp_path, monkeypatch):
+    """No test downloads to, or tidies up in, the real models folder of whoever runs the tests."""
+    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "default-models"))

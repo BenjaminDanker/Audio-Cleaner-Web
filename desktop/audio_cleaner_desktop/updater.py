@@ -1,17 +1,17 @@
-"""Automatic updates: look for a newer version on GitHub, download it, and install it.
+"""Automatic updates: look for a newer version on our download server, download it, and install it.
 
 How it works (docs/desktop.md has the owner's side of it):
 
-* Every desktop release on GitHub carries two small files next to the installers: `update.json` (the version, the file
+* Every desktop release carries two small files next to the installers: `update.json` (the version, the file
   name, size and SHA-256 of the installer of each platform) and `update.json.sig`, a raw Ed25519 signature over the exact
-  bytes of `update.json`. CI makes the signature with a private key that only lives in a GitHub secret; the matching
+  bytes of `update.json`. CI makes the signature with a private key that never leaves CI; the matching
   public key is `PUBLIC_KEY` below. Without a valid signature nothing is accepted (an unsigned release simply never
-  updates anybody).
-* The newest release is always `.../releases/latest/download/update.json`. The app fetches it and the signature,
+  updates anybody). Our download server serves verified copies of these files (config.UPDATES_URL).
+* The newest release is always `<config.UPDATES_URL>update.json`. The app fetches it and the signature,
   verifies it, compares the version with its own (a manifest that is not newer is ignored), picks the file of this
   platform, and downloads that installer into `<app data>/updates/` with the model downloader's care (https only,
-  resumable, size and SHA-256 checked). The download URL is built from the version and the file name, never taken from
-  the manifest. Only the newest download is kept.
+  resumable, size and SHA-256 checked). The download URL is the server's folder plus the file name, never a URL
+  taken from the manifest. Only the newest download is kept.
 * Windows installs it when the app is closed (silently, over the existing install); a Mac opens the .pkg for the
   user, because the macOS installer asks for the password anyway.
 
@@ -45,11 +45,9 @@ from . import __version__, config, models
 
 log = logging.getLogger(__name__)
 
-REPO = "BenjaminDanker/Audio-Cleaner-Web"
-RELEASES_URL = f"https://github.com/{REPO}/releases"
-MANIFEST_URL = f"{RELEASES_URL}/latest/download/update.json"
-SIGNATURE_URL = f"{RELEASES_URL}/latest/download/update.json.sig"
-DOWNLOAD_BASE = f"{RELEASES_URL}/download"  # + /desktop-v<version>/<file name>
+MANIFEST_URL = config.UPDATES_URL + "update.json"
+SIGNATURE_URL = config.UPDATES_URL + "update.json.sig"
+DOWNLOAD_BASE = config.UPDATES_URL  # + <file name from the manifest>
 # The public half of the key CI signs update.json with (raw Ed25519, base64). To rotate the key see docs/desktop.md.
 PUBLIC_KEY = "lkLV2nf15eOuttdcqpieY2QJFyPsF4WOIwidisbp6Hw="
 MANIFEST_NAME = "update.json"
@@ -58,7 +56,7 @@ SIGNATURE_NAME = "update.json.sig"
 CHECK_EVERY = 24 * 3600  # seconds between automatic checks
 STARTUP_DELAY_MS = 10_000  # the first check waits this long after the window opened
 MAX_MANIFEST_BYTES = 64 * 1024
-MAX_INSTALLER_BYTES = 2 << 30  # GitHub's limit for a release file
+MAX_INSTALLER_BYTES = 2 << 30  # an installer is never bigger than this
 _TIMEOUT = 20
 
 PLATFORMS = ("windows-x86_64", "macos-arm64", "macos-x86_64")
@@ -84,7 +82,6 @@ class UpdateFile:
 class Manifest:
     version: str
     published: str
-    notes_url: str
     files: Mapping[str, UpdateFile]
 
 
@@ -93,7 +90,6 @@ class Update:
     """A verified newer version and the installer of this platform. `manifest` and `signature` are the exact bytes
     that were verified (kept next to the download, so a restart can verify them again without the network)."""
     version: str
-    notes_url: str
     file: UpdateFile
     manifest: bytes
     signature: bytes
@@ -144,9 +140,7 @@ def parse_manifest(data: bytes) -> Manifest:
         raise UpdateError("The update information is not in the expected form.")
     version = raw.get("version")
     parse_version(version)
-    notes = raw.get("notes_url")
-    if not isinstance(notes, str) or not notes.startswith(f"https://github.com/{REPO}/"):
-        raise UpdateError("The update information has an unexpected release page.")
+    # A "notes_url" in the manifest (older releases had one) is signed but never used: the app shows no release page.
     files: dict[str, UpdateFile] = {}
     for key, entry in raw["files"].items():
         if key not in PLATFORMS:
@@ -163,7 +157,7 @@ def parse_manifest(data: bytes) -> Manifest:
             raise UpdateError("The update information has an unexpected checksum.")
         files[key] = UpdateFile(name, size, sha)
     published = raw.get("published")
-    return Manifest(version, published if isinstance(published, str) else "", notes, files)
+    return Manifest(version, published if isinstance(published, str) else "", files)
 
 
 def decide(manifest_bytes: bytes, signature: bytes, current: str, key: str | None,
@@ -177,11 +171,11 @@ def decide(manifest_bytes: bytes, signature: bytes, current: str, key: str | Non
         return None
     if key is None or key not in manifest.files:
         raise UpdateError(f"Version {manifest.version} has no installer for this computer.")
-    return Update(manifest.version, manifest.notes_url, manifest.files[key], manifest_bytes, signature)
+    return Update(manifest.version, manifest.files[key], manifest_bytes, signature)
 
 
 def user_agent(version: str = __version__) -> str:
-    """What a download tells GitHub about us: the app and its version, as any browser would."""
+    """What a download tells our server about us: the app and its version, as any browser would."""
     return f"{config.APP_NAME.replace(' ', '')}/{version}"
 
 
@@ -193,11 +187,11 @@ def _get_small(url: str, limit: int, opener, agent: str) -> bytes:
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise UpdateError("No update information is published yet.") from e
-        raise UpdateError(f"GitHub answered with an error ({e.code}).") from e
+        raise UpdateError(f"The update server answered with an error ({e.code}).") from e
     except models.DownloadError as e:
         raise UpdateError(str(e)) from e
     except OSError as e:
-        raise UpdateError(f"GitHub could not be reached ({getattr(e, 'reason', e)}).") from e
+        raise UpdateError(f"The update server could not be reached ({getattr(e, 'reason', e)}).") from e
     if len(data) > limit:
         raise UpdateError("The update information is larger than expected, so it was ignored.")
     return data
@@ -268,7 +262,7 @@ def download(update: Update, folder: Path, progress: models.Progress | None = No
     folder.mkdir(parents=True, exist_ok=True)
     if not is_complete(dest, update.file, cancel):
         dest.unlink(missing_ok=True)
-        url = f"{base_url}/desktop-v{update.version}/{update.file.name}"
+        url = base_url.rstrip("/") + "/" + update.file.name
         models.fetch_file(url, dest, update.file.size, update.file.sha256, progress, cancel, agent or user_agent(), opener)
     _write_atomic(folder / MANIFEST_NAME, update.manifest)
     _write_atomic(folder / SIGNATURE_NAME, update.signature)

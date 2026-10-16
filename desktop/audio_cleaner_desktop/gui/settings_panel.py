@@ -249,10 +249,10 @@ class SettingsPanel(QFrame):
         ))
 
         self._updates = WrapCheck("Check for updates when Audio Cleaner starts")
-        self._updates.setToolTip("Looks on GitHub for a newer version a few seconds after the app starts, at most once a day")
+        self._updates.setToolTip("Looks for a newer version a few seconds after the app starts, at most once a day")
         updates_row = _Row(
             "Updates",
-            "When this is on, Audio Cleaner looks on GitHub for a newer version a few seconds after it starts (at most "
+            "When this is on, Audio Cleaner looks for a newer version a few seconds after it starts (at most "
             "once a day) and downloads it in the background. It sends nothing but a normal web request: your IP "
             "address and the version of this app.\n\n"
             "\u2022 Windows: the new version installs by itself when you close the app, over the old one. Your settings, "

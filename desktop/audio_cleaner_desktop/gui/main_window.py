@@ -40,6 +40,7 @@ SETTINGS_SHARE = 0.34  # of the window width
 SETTINGS_MIN_WIDTH = 340
 SETTINGS_MAX_WIDTH = 520
 SCRATCH_SAFETY = engine.SCRATCH_SAFETY
+MODEL_UPDATE_DELAY_MS = 6000  # a model whose catalog entry changed is fetched this long after the window opens
 SWEEP_DELAY_MS = 3000  # leftovers of an earlier run are swept this long after the window opens
 QUIT_WAIT_MS = 2500  # how long quitting waits for running files to stop before giving up on them
 
@@ -213,6 +214,7 @@ class MainWindow(QMainWindow):
         self.banner_update = Banner()
         self.banner_update.action.connect(self._update_action)
         self._model_queue: list[SpeechModelDownloader] = []
+        self._auto_models = False  # the queue is an update the app started by itself (quiet when it fails)
         layout.addWidget(self.banner_missing)
         layout.addWidget(self.banner_disk)
         layout.addWidget(self.banner_models)
@@ -510,8 +512,47 @@ class MainWindow(QMainWindow):
         finishes a download that failed there). Noise removal works meanwhile."""
         if self._missing:
             return
+        self._auto_models = False
         self._model_queue = [d for d in self._downloaders() if not d.ready]
         self._next_model()
+
+    def schedule_model_update(self, delay_ms: int = MODEL_UPDATE_DELAY_MS) -> None:
+        """Once, shortly after the window opened: see update_models()."""
+        QTimer.singleShot(delay_ms, self.update_models)
+
+    def update_models(self) -> None:
+        """A model the user had, whose catalog entry changed since (so the copy on disk no longer counts), is downloaded
+        again in the background: the features that need it keep working without a visit to Settings. Regardless of the
+        updates setting (the models are part of the app working), once per start: a failure (offline, metered, disk
+        full) is not retried by itself and shows in Settings as usual. A model the user never had is not fetched here.
+        When nothing is to be updated, the copies of older versions are cleaned up."""
+        if self._missing or self._closing or any(d.running for d in self._downloaders()):
+            return
+        queue = [d for d in self._downloaders() if models.needs_update(d.model)]
+        if not queue:
+            self._clean_old_models()
+            return
+        self._auto_models = True
+        self._model_queue = queue
+        self._next_model()
+
+    def _clean_old_models(self) -> None:
+        """Delete what older versions of the models left on disk, off the GUI thread and after any download that is
+        still finishing (models.remove_stale only deletes what the installed models have replaced)."""
+        def work() -> None:
+            for dl in self._downloaders():
+                dl.wait()
+            if self._closing:
+                return
+            try:
+                removed = models.remove_stale()
+            except Exception:  # noqa: BLE001 - tidying up must never bother anybody
+                logging.getLogger(__name__).exception("could not delete outdated models")
+                return
+            if removed:
+                logging.getLogger(__name__).info("deleted outdated model data: %s", [str(p) for p in removed])
+
+        threading.Thread(target=work, name="model-cleanup", daemon=True).start()
 
     def _next_model(self) -> None:
         queue = getattr(self, "_model_queue", [])
@@ -528,14 +569,23 @@ class MainWindow(QMainWindow):
     def _show_model_progress(self, done: int, total: int) -> None:
         left = models.download_bytes([d.model for d in getattr(self, "_model_queue", [])]) or total
         pct = int(100 * done / max(1, total))
-        self.banner_models.show_message(
-            f"Getting everything ready: downloading the models for subtitles, phone-quality recordings and "
-            f"rebuilding voices ({size_text(left)} in all, once; {pct}% of the current one). Noise removal works already.",
-            "info",
-        )
+        if self._auto_models:
+            text = (f"Updating the models for subtitles, phone-quality recordings and rebuilding voices "
+                    f"({size_text(left)} in all; {pct}% of the current one). Cleaning works meanwhile.")
+        else:
+            text = (f"Getting everything ready: downloading the models for subtitles, phone-quality recordings and "
+                    f"rebuilding voices ({size_text(left)} in all, once; {pct}% of the current one). Noise removal works already.")
+        self.banner_models.show_message(text, "info")
 
     def _model_download_finished(self, downloader: SpeechModelDownloader, ok: bool, message: str) -> None:
         queue = getattr(self, "_model_queue", [])
+        if not ok and self._auto_models:
+            # An update the app started itself gets one try per start: no banner, no retry. The reason is in Settings
+            # (the model's line there), where "Try again" starts it.
+            self._auto_models = False
+            queue.clear()
+            self.banner_models.hide()
+            return
         if not ok:
             if message:  # not a cancel on quit
                 self.banner_models.show_message(
@@ -548,7 +598,10 @@ class MainWindow(QMainWindow):
             self._next_model()
         else:
             self.banner_models.hide()
-            self._notify(config.APP_NAME, "Everything is ready: subtitles, restoring highs and rebuilding voices work now.")
+            if not self._auto_models:
+                self._notify(config.APP_NAME, "Everything is ready: subtitles, restoring highs and rebuilding voices work now.")
+            self._auto_models = False
+            self._clean_old_models()
         self._refresh_state()
 
     def _primary_clicked(self) -> None:

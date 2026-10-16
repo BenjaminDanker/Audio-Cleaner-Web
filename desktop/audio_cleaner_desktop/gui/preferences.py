@@ -54,7 +54,7 @@ class Preferences:
     output_folder = _Setting("")
     last_input_folder = _Setting("")
     check_updates = _Setting(True)  # look for a newer version when the app starts (updater.py)
-    update_last_check = _Setting(0.0)  # time.time() of the last check that reached GitHub
+    update_last_check = _Setting(0.0)  # time.time() of the last check that reached the update server
     update_install_tried = _Setting("")  # the version whose installer was started when the app last closed
 
     def __init__(self, store: QSettings | None = None):

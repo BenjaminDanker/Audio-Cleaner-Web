@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """The update manifest of a desktop release (what the app's updater reads), and a check of the signing key.
 
-    python make_update_manifest.py manifest --version 2.0.15 --repo OWNER/REPO --dir release [--out release/update.json]
+    python make_update_manifest.py manifest --version 2.0.15 --dir release [--out release/update.json] [--notes-url URL]
         writes update.json: {"files": {"macos-arm64": {"name", "sha256", "size"}, "macos-x86_64": {...},
-        "windows-x86_64": {...}}, "notes_url": ..., "published": ISO time, "version": ...} with the keys sorted. The
+        "windows-x86_64": {...}}, "published": ISO time, "version": ...} with the keys sorted (and "notes_url" when
+        --notes-url is given: apps from before the download server was introduced insist on one, the current app
+        ignores it, and none is wanted in a file our server publishes). The
         three installers (AudioCleaner-<version>-Windows.exe, -Mac-Apple-silicon.pkg, -Mac-Intel.pkg) must be in --dir.
     python make_update_manifest.py check-key KEY.pem
         exit 0 when the private key in KEY.pem is the one whose public half is embedded in the app
@@ -44,7 +46,7 @@ def sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def build_manifest(version: str, repo: str, folder: Path, published: str | None = None) -> bytes:
+def build_manifest(version: str, folder: Path, published: str | None = None, notes_url: str | None = None) -> bytes:
     """The bytes of update.json (these exact bytes are what gets signed)."""
     if _VERSION.fullmatch(version) is None:
         raise SystemExit(f"{version!r} is not a version number")
@@ -58,9 +60,10 @@ def build_manifest(version: str, repo: str, folder: Path, published: str | None 
     manifest = {
         "version": version,
         "published": when,
-        "notes_url": f"https://github.com/{repo}/releases/tag/desktop-v{version}",
         "files": files,
     }
+    if notes_url:
+        manifest["notes_url"] = notes_url
     return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
@@ -87,14 +90,14 @@ def main(argv: list[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("manifest")
     m.add_argument("--version", required=True)
-    m.add_argument("--repo", required=True)
+    m.add_argument("--notes-url", default=None)
     m.add_argument("--dir", required=True, type=Path)
     m.add_argument("--out", type=Path)
     c = sub.add_parser("check-key")
     c.add_argument("pem", type=Path)
     args = p.parse_args(argv)
     if args.cmd == "manifest":
-        data = build_manifest(args.version, args.repo, args.dir)
+        data = build_manifest(args.version, args.dir, notes_url=args.notes_url)
         out = args.out or args.dir / "update.json"
         out.write_bytes(data)
         print(f"wrote {out}")

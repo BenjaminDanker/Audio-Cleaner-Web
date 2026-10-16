@@ -1,6 +1,6 @@
 """Automatic updates: the signed manifest, the download, the 24 hour rule, the settings, the Windows command line,
 the installer script's relaunch entry and the release job's signing. No network (a local HTTP server stands in for
-GitHub) and never the real signing key: every test makes its own key pair."""
+the download server) and never the real signing key: every test makes its own key pair."""
 from __future__ import annotations
 
 import base64
@@ -31,7 +31,6 @@ if str(PACKAGING) not in sys.path:
 import make_update_manifest  # noqa: E402
 
 WIN = "windows-x86_64"
-NOTES = f"https://github.com/{updater.REPO}/releases/tag/desktop-v2.0.15"
 
 
 def _public(key: Ed25519PrivateKey) -> str:
@@ -42,7 +41,7 @@ def _manifest(version: str = "2.0.15", installer: bytes = b"installer-bytes" * 1
     """(update.json bytes, the installer they describe)."""
     name = f"AudioCleaner-{version}-Windows.exe"
     body = {
-        "version": version, "published": "2026-10-16T12:00:00Z", "notes_url": NOTES,
+        "version": version, "published": "2026-10-16T12:00:00Z",
         "files": {
             WIN: {"name": name, "size": len(installer), "sha256": hashlib.sha256(installer).hexdigest()},
             "macos-arm64": {"name": f"AudioCleaner-{version}-Mac-Apple-silicon.pkg", "size": 5, "sha256": "a" * 64},
@@ -70,7 +69,7 @@ def test_the_embedded_key_is_a_valid_ed25519_public_key():
 def test_a_good_signature_is_accepted(key):
     data, _ = _manifest()
     update = updater.decide(data, key.sign(data), "2.0.3", WIN, _public(key))
-    assert update.version == "2.0.15" and update.file.name == "AudioCleaner-2.0.15-Windows.exe" and update.notes_url == NOTES
+    assert update.version == "2.0.15" and update.file.name == "AudioCleaner-2.0.15-Windows.exe"
     assert update.manifest == data
 
 
@@ -123,7 +122,7 @@ def test_a_newer_manifest_without_a_file_for_this_platform_is_an_error(key):
 
 
 @pytest.mark.parametrize("change", [
-    {"version": "latest"}, {"version": "2"}, {"version": "2.0.x"}, {"notes_url": "https://evil.example/x"},
+    {"version": "latest"}, {"version": "2"}, {"version": "2.0.x"},
     {"files": []}, {"files": {WIN: "x"}},
     {"files": {WIN: {"name": "../evil.exe", "size": 5, "sha256": "a" * 64}}},
     {"files": {WIN: {"name": "sub/evil.exe", "size": 5, "sha256": "a" * 64}}},
@@ -151,7 +150,7 @@ def test_the_platform_key_names_one_of_the_three_installers():
     assert updater.platform_key() in (None, *updater.PLATFORMS)
 
 
-# ---- a local server standing in for GitHub ---------------------------------------------------------------------
+# ---- a local server standing in for the download server ---------------------------------------------------------------------
 class _Handler(http.server.BaseHTTPRequestHandler):
     files: dict[str, bytes] = {}
     requests: list[str] = []
@@ -192,14 +191,14 @@ def server(monkeypatch):
 def _publish(base: str, key: Ed25519PrivateKey, version: str = "2.0.15", installer: bytes = b"installer-bytes" * 1000,
              sign_with: Ed25519PrivateKey | None = None) -> bytes:
     data, installer = _manifest(version, installer)
-    _Handler.files["/latest/download/update.json"] = data
-    _Handler.files["/latest/download/update.json.sig"] = (sign_with or key).sign(data)
-    _Handler.files[f"/download/desktop-v{version}/AudioCleaner-{version}-Windows.exe"] = installer
+    _Handler.files["/desktop/update.json"] = data
+    _Handler.files["/desktop/update.json.sig"] = (sign_with or key).sign(data)
+    _Handler.files[f"/desktop/AudioCleaner-{version}-Windows.exe"] = installer
     return installer
 
 
 def _endpoints(base: str) -> dict:
-    return {"manifest_url": f"{base}/latest/download/update.json", "signature_url": f"{base}/latest/download/update.json.sig"}
+    return {"manifest_url": f"{base}/desktop/update.json", "signature_url": f"{base}/desktop/update.json.sig"}
 
 
 def test_check_fetches_and_verifies(server, key):
@@ -207,7 +206,7 @@ def test_check_fetches_and_verifies(server, key):
     update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
     assert update.version == "2.0.15"
     assert updater.check("2.0.15", WIN, public_key=_public(key), **_endpoints(server)) is None
-    assert all(r.startswith("/latest/download/update.json") for r in _Handler.requests)  # no query string, no extras
+    assert all(r.startswith("/desktop/update.json") for r in _Handler.requests)  # no query string, no extras
 
 
 def test_check_refuses_a_manifest_signed_by_someone_else(server, key):
@@ -219,7 +218,7 @@ def test_check_refuses_a_manifest_signed_by_someone_else(server, key):
 def test_check_says_so_when_nothing_is_published_or_the_server_is_down(server, key):
     with pytest.raises(updater.UpdateError, match="No update information is published yet"):
         updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
-    _Handler.files["/latest/download/update.json"] = b"{}"  # but no signature
+    _Handler.files["/desktop/update.json"] = b"{}"  # but no signature
     with pytest.raises(updater.UpdateError, match="No update information is published yet"):
         updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
     with pytest.raises(updater.UpdateError, match="could not be reached"):
@@ -228,8 +227,8 @@ def test_check_says_so_when_nothing_is_published_or_the_server_is_down(server, k
 
 
 def test_check_refuses_an_oversized_answer(server, key):
-    _Handler.files["/latest/download/update.json"] = b"x" * (updater.MAX_MANIFEST_BYTES + 1)
-    _Handler.files["/latest/download/update.json.sig"] = b"x" * 64
+    _Handler.files["/desktop/update.json"] = b"x" * (updater.MAX_MANIFEST_BYTES + 1)
+    _Handler.files["/desktop/update.json.sig"] = b"x" * 64
     with pytest.raises(updater.UpdateError, match="larger than expected"):
         updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
 
@@ -258,7 +257,7 @@ def test_download_verifies_keeps_the_manifest_and_deletes_older_downloads(server
     (folder / "notes.txt").write_text("not ours")
     update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
     seen = []
-    path = updater.download(update, folder, lambda d, t: seen.append((d, t)), base_url=f"{server}/download")
+    path = updater.download(update, folder, lambda d, t: seen.append((d, t)), base_url=f"{server}/desktop")
     assert path == folder / "AudioCleaner-2.0.15-Windows.exe" and path.read_bytes() == installer
     assert seen[-1] == (len(installer), len(installer))
     assert sorted(p.name for p in folder.iterdir()) == [
@@ -275,21 +274,21 @@ def test_an_interrupted_download_resumes_and_a_finished_one_is_not_fetched_again
     folder.mkdir()
     (folder / "AudioCleaner-2.0.15-Windows.exe.part").write_bytes(installer[:700_000])
     _Handler.requests.clear()
-    path = updater.download(update, folder, base_url=f"{server}/download")
+    path = updater.download(update, folder, base_url=f"{server}/desktop")
     assert path.read_bytes() == installer
-    assert _Handler.requests == ["/download/desktop-v2.0.15/AudioCleaner-2.0.15-Windows.exe bytes=700000-"]
+    assert _Handler.requests == ["/desktop/AudioCleaner-2.0.15-Windows.exe bytes=700000-"]
     _Handler.requests.clear()
-    updater.download(update, folder, base_url=f"{server}/download")
+    updater.download(update, folder, base_url=f"{server}/desktop")
     assert _Handler.requests == []
 
 
 def test_a_download_that_does_not_match_the_manifest_is_never_kept(server, key, tmp_path):
     _publish(server, key)
     update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
-    _Handler.files["/download/desktop-v2.0.15/AudioCleaner-2.0.15-Windows.exe"] = b"evil" * 3750  # same size, other bytes
+    _Handler.files["/desktop/AudioCleaner-2.0.15-Windows.exe"] = b"evil" * 3750  # same size, other bytes
     folder = tmp_path / "updates"
     with pytest.raises(models.DownloadError, match="did not download correctly"):
-        updater.download(update, folder, base_url=f"{server}/download")
+        updater.download(update, folder, base_url=f"{server}/desktop")
     assert not (folder / "AudioCleaner-2.0.15-Windows.exe").exists()
     assert not list(folder.glob("*.part")) and not (folder / "update.json").exists()
     assert updater.pending(folder, "2.0.3", WIN, _public(key)) is None
@@ -299,15 +298,15 @@ def test_the_download_url_comes_from_the_version_and_name_not_from_the_manifest(
     _publish(server, key)
     update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
     _Handler.requests.clear()
-    updater.download(update, tmp_path / "u", base_url=f"{server}/download")
-    assert [r.split()[0] for r in _Handler.requests] == ["/download/desktop-v2.0.15/AudioCleaner-2.0.15-Windows.exe"]
+    updater.download(update, tmp_path / "u", base_url=f"{server}/desktop")
+    assert [r.split()[0] for r in _Handler.requests] == ["/desktop/AudioCleaner-2.0.15-Windows.exe"]
 
 
 def test_pending_is_none_for_a_damaged_installer_and_cleans_up_after_an_install(server, key, tmp_path):
     installer = _publish(server, key)
     update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
     folder = tmp_path / "updates"
-    path = updater.download(update, folder, base_url=f"{server}/download")
+    path = updater.download(update, folder, base_url=f"{server}/desktop")
     path.write_bytes(installer[:-1] + b"X")  # same size, one byte changed
     assert updater.pending(folder, "2.0.3", WIN, _public(key)) is None
     path.write_bytes(installer)
@@ -316,7 +315,7 @@ def test_pending_is_none_for_a_damaged_installer_and_cleans_up_after_an_install(
     assert updater.pending(folder, "2.0.3", WIN, _public(key)) is None
     assert not list(folder.iterdir())  # an unusable saved manifest takes the download with it
     # the update was installed: the running app is now 2.0.15, so nothing is kept
-    path = updater.download(update, folder, base_url=f"{server}/download")
+    path = updater.download(update, folder, base_url=f"{server}/desktop")
     assert updater.pending(folder, "2.0.15", WIN, _public(key)) is None
     assert not path.exists() and not list(folder.iterdir())
 
@@ -342,7 +341,7 @@ def _controller(qapp, tmp_path, server, key, current="2.0.3", clock=None, **kw):
     prefs = kw.pop("prefs", None) or _prefs(tmp_path)
     ctl = updater.UpdateController(
         prefs, enabled=True, folder=tmp_path / "updates", current=current, key=WIN, public_key=_public(key),
-        download_base=f"{server}/download", clock=clock or (lambda: 1_000_000.0), **_endpoints(server), **kw)
+        download_base=f"{server}/desktop", clock=clock or (lambda: 1_000_000.0), **_endpoints(server), **kw)
     return ctl, prefs
 
 
@@ -379,7 +378,7 @@ def test_startup_check_downloads_once_a_day_and_remembers_the_update(qapp, tmp_p
     assert "2.0.15" in ctl.status and "ready" in ctl.status
     assert prefs.update_last_check == now[0]
 
-    # the same day, another start: no request to GitHub at all, the downloaded update is found on disk
+    # the same day, another start: no request to the server at all, the downloaded update is found on disk
     _Handler.requests.clear()
     now[0] += 3600
     ctl2, _ = _controller(qapp, tmp_path, server, key, clock=lambda: now[0], prefs=prefs)
@@ -396,7 +395,7 @@ def test_startup_check_downloads_once_a_day_and_remembers_the_update(qapp, tmp_p
     ctl3.readyChanged.connect(lambda: ready3.append(1))
     ctl3.startup_check()
     assert wait_until(lambda: ready3 and not ctl3.busy, timeout=30)
-    assert [r.split()[0] for r in _Handler.requests] == ["/latest/download/update.json", "/latest/download/update.json.sig"]
+    assert [r.split()[0] for r in _Handler.requests] == ["/desktop/update.json", "/desktop/update.json.sig"]
     assert prefs.update_last_check == now[0]
 
 
@@ -447,7 +446,7 @@ def test_nothing_happens_when_the_setting_is_off_or_from_source(qapp, tmp_path, 
     ctl.schedule_startup_check(0)
     assert ctl._thread is None and _Handler.requests == []
     # from source (not frozen) there is no automatic update, and "Check now" says why without any request
-    src = updater.UpdateController(_prefs(tmp_path), current="2.0.3", manifest_url=f"{server}/latest/download/update.json")
+    src = updater.UpdateController(_prefs(tmp_path), current="2.0.3", manifest_url=f"{server}/desktop/update.json")
     assert not src.enabled
     src.startup_check()
     src.check_now()
@@ -533,7 +532,7 @@ def _fake_ready(w, tmp_path, version="2.0.15"):
     path = tmp_path / f"AudioCleaner-{version}-Windows.exe"
     path.write_bytes(installer)
     entry = updater.UpdateFile(path.name, len(installer), hashlib.sha256(installer).hexdigest())
-    w.updater.ready_update = updater.Update(version, NOTES, entry, b"{}", b"")
+    w.updater.ready_update = updater.Update(version, entry, b"{}", b"")
     w.updater.ready_path = path
     w.updater.readyChanged.emit()
 
@@ -567,7 +566,7 @@ def test_closing_starts_the_installer_once_per_version(qapp, tmp_path, monkeypat
     entry_bytes = b"setup" * 50
     path = tmp_path / "AudioCleaner-2.0.15-Windows.exe"
     path.write_bytes(entry_bytes)
-    ctl.ready_update = updater.Update("2.0.15", NOTES, updater.UpdateFile(
+    ctl.ready_update = updater.Update("2.0.15", updater.UpdateFile(
         path.name, len(entry_bytes), hashlib.sha256(entry_bytes).hexdigest()), b"{}", b"")
     ctl.ready_path = path
 
@@ -662,11 +661,11 @@ def test_the_manifest_has_sorted_keys_and_the_sizes_and_hashes_of_the_installers
         name = pattern.format(version="2.0.15")
         contents[key] = f"installer {key}".encode()
         (tmp_path / name).write_bytes(contents[key])
-    data = make_update_manifest.build_manifest("2.0.15", "Owner/Repo", tmp_path, published="2026-10-16T12:00:00Z")
+    data = make_update_manifest.build_manifest("2.0.15", tmp_path, published="2026-10-16T12:00:00Z")
     body = json.loads(data)
-    assert list(body) == sorted(body) == ["files", "notes_url", "published", "version"]
+    assert list(body) == sorted(body) == ["files", "published", "version"]
     assert body["version"] == "2.0.15" and body["published"] == "2026-10-16T12:00:00Z"
-    assert body["notes_url"] == "https://github.com/Owner/Repo/releases/tag/desktop-v2.0.15"
+    assert "notes_url" not in body and "github" not in data.decode().lower()
     assert sorted(body["files"]) == ["macos-arm64", "macos-x86_64", "windows-x86_64"]
     for key, entry in body["files"].items():
         assert list(entry) == ["name", "sha256", "size"]
@@ -675,9 +674,9 @@ def test_the_manifest_has_sorted_keys_and_the_sizes_and_hashes_of_the_installers
     assert data == (json.dumps(body, indent=2, sort_keys=True) + "\n").encode()
     (tmp_path / "AudioCleaner-2.0.15-Mac-Intel.pkg").unlink()
     with pytest.raises(SystemExit, match="is missing"):
-        make_update_manifest.build_manifest("2.0.15", "Owner/Repo", tmp_path)
+        make_update_manifest.build_manifest("2.0.15", tmp_path)
     with pytest.raises(SystemExit):
-        make_update_manifest.build_manifest("latest", "Owner/Repo", tmp_path)
+        make_update_manifest.build_manifest("latest", tmp_path)
 
 
 @openssl
@@ -690,7 +689,7 @@ def test_a_manifest_signed_the_way_ci_does_it_verifies_in_the_app(tmp_path):
     for key, pattern in make_update_manifest.INSTALLERS.items():
         (tmp_path / pattern.format(version="2.0.15")).write_bytes(b"x" + key.encode())
     manifest = tmp_path / "update.json"
-    assert make_update_manifest.main(["manifest", "--version", "2.0.15", "--repo", updater.REPO, "--dir", str(tmp_path)]) == 0
+    assert make_update_manifest.main(["manifest", "--version", "2.0.15", "--dir", str(tmp_path)]) == 0
     sig = tmp_path / "update.json.sig"
     subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(pem), "-in", str(manifest), "-out", str(sig)],
                    check=True, capture_output=True)

@@ -20,7 +20,7 @@ QT_NOTICE = (
 ONLINE_NOTICE = (
     "Your files never leave your computer. Audio Cleaner goes online only to download its models (when you set it up "
     "or ask for them) and, if \u201cCheck for updates when Audio Cleaner starts\u201d is on in Settings, to look for a newer "
-    "version on GitHub and download it. Those requests contain no more than any web page request: your IP address and "
+    "version and download it. Those requests contain no more than any web page request: your IP address and "
     "the version of this app."
 )
 
@@ -63,7 +63,7 @@ class AboutDialog(QDialog):
             self.updates_label = QLabel(f"Updates: {'on' if updates_on else 'off'}")
             self.updates_label.setObjectName("Muted")
             self.updates_label.setToolTip(
-                "Looks for a newer version on GitHub when the app starts. Change it in Settings > Updates."
+                "Looks for a newer version when the app starts. Change it in Settings > Updates."
             )
             widgets.insert(2, self.updates_label)
         for w in widgets:

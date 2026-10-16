@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Check that every download of the model catalog (resources.py) exists and has the size the catalog says: the
-speech model's files on Hugging Face and the one models archive (AudioCleaner-models-v1.zip) on the GitHub release.
+speech model's files on Hugging Face and the one models archive (AudioCleaner-models-v1.zip) on our download server
+(config.MODELS_URL; the server mirrors the release asset, so while the mirror is not live this check fails on its own).
 
     python check_model_urls.py
 
 For each URL: HEAD, following redirects by hand, and compare the size (Hugging Face reports it as X-Linked-Size
-on the first answer, the CDN and GitHub as Content-Length at the end) with the catalog. Exits 1, listing every
+on the first answer, our server and the CDNs as Content-Length at the end) with the catalog. Exits 1, listing every
 download that is missing or differs: a release asset that was not uploaded makes the installers' downloads fail, and
 this is what finds out. (The SHA-256 is checked by the installers and the app when they download.)
 """
