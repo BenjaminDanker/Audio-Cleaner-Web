@@ -29,6 +29,9 @@ VERSION = 1
 CODEC_S16 = 1
 CODEC_F32 = 2
 CODEC_OPUS = 3
+# Silence: the header and a u16 sample count, no audio. Clients send it for a muted source or digital silence (only
+# when `ready` says "silenceFrames"); the server answers it with the same. Not billed and no processing.
+CODEC_SILENCE = 4
 CODECS = {"pcm_s16le": CODEC_S16, "f32le": CODEC_F32, "opus": CODEC_OPUS}
 OPUS_FRAME = 960  # 20 ms; Opus frames are opaque until the sandboxed worker decodes them
 MAX_OPUS_PACKET = 1275
@@ -51,6 +54,20 @@ def frame_header(data: bytes) -> tuple[int, int, int, int]:
     if version != VERSION:
         raise ProtocolError("unsupported frame version")
     return codec, seq, ts, flags
+
+
+def silence_samples(data: bytes) -> int:
+    """The sample count of a silence frame (codec 4)."""
+    if len(data) != HEADER.size + 2:
+        raise ProtocolError("bad silence frame")
+    n = int.from_bytes(data[HEADER.size:HEADER.size + 2], "little")
+    if n == 0 or n % HOP or n > MAX_FRAME_SAMPLES:
+        raise ProtocolError("frames must be 10-100 ms, in 10 ms steps, at 48 kHz")
+    return n
+
+
+def silence_frame(seq: int, ts: int, n: int, flags: int = 0) -> bytes:
+    return HEADER.pack(VERSION, CODEC_SILENCE, flags, seq & 0xFFFFFFFF, ts & 0xFFFFFFFFFFFFFFFF) + int(n).to_bytes(2, "little")
 
 
 def opus_payload(data: bytes) -> bytes:
@@ -105,6 +122,7 @@ MSG_EVENT = b"T"
 MSG_END = b"E"
 MSG_REF = b"R"  # web -> worker: echo-reference audio for a mic frame (same payload as MSG_AUDIO)
 MSG_TAP = b"P"  # worker -> web: the echo-free original (f32, before noise removal) for extra-accurate captions
+MSG_SILENCE = b"Z"  # web -> worker: u32 seq + u16 samples of silence (no reply): keeps the captions' clock right
 _IPC = struct.Struct("<cI")
 MAX_IPC = 4 * 1024 * 1024
 
@@ -139,6 +157,14 @@ def unpack_audio(payload: bytes) -> tuple[int, int, np.ndarray | bytes]:
     if kind == CODEC_OPUS:
         return seq, kind, bytes(payload[5:])
     return seq, IPC_F32, np.frombuffer(payload, dtype="<f4", offset=5).copy()
+
+
+def pack_silence(seq: int, n: int) -> bytes:
+    return struct.pack("<IH", seq, n)
+
+
+def unpack_silence(payload: bytes) -> tuple[int, int]:
+    return struct.unpack_from("<IH", payload)
 
 
 def pack_json(obj: dict) -> bytes:

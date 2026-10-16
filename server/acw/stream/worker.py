@@ -162,6 +162,7 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
         ref_opus: OpusCodec | None = None
         refs: OrderedDict[int, np.ndarray] = OrderedDict()  # echo reference by mic frame seq, until its mic frame comes
         tap_pcm = bool(cfg.get("tap_pcm"))
+        return_audio = cfg.get("return_audio", True) is not False  # captions-only clients don't need it back
 
         def take_reference(seq: int, kind: int, data) -> None:
             nonlocal ref_opus
@@ -189,7 +190,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                 # tells speech from background noise, so the decoder skips the silences between.
                 level = 20 * np.log10(float(np.sqrt(np.mean(y * y))) + 1e-9) if getattr(chain, "df", None) is not None else None
                 captioner.feed(x, level)
-            out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
+            if not return_audio:
+                out = P.pack_audio(seq, y[:0])  # an empty answer: the web side only times it
+            else:
+                out = P.pack_opus(seq, opus.encode(y)) if kind == P.CODEC_OPUS else P.pack_audio(seq, y)
             tap = P.pack_audio(seq, x) if tap_pcm else None  # extra-accurate captions hear the original, not the denoised audio
             return out, tap
 
@@ -202,6 +206,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
                     await P.send_msg(writer, P.MSG_AUDIO, out)
                     if tap is not None:
                         await P.send_msg(writer, P.MSG_TAP, tap)
+                elif kind == P.MSG_SILENCE:
+                    if captioner is not None:
+                        _seq, n = P.unpack_silence(payload)
+                        await loop.run_in_executor(executor, captioner.silence, n)
                 elif kind == P.MSG_REF:
                     if aec is not None:
                         seq, akind, data = P.unpack_audio(payload)

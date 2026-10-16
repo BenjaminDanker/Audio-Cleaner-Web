@@ -199,3 +199,125 @@ def test_digital_silence_is_not_run_through_the_live_model():
     assert not np.any(np.concatenate(out[engine.SILENT_SKIP_AFTER // 960:]))  # skipped: silence out
     assert len(calls) == 5 + engine.SILENT_SKIP_AFTER // 960  # the model only saw the first 200 ms of it
     assert np.any(chain.process(voice)) and len(calls) == 5 + engine.SILENT_SKIP_AFTER // 960 + 1  # sound: back at once
+
+
+# --------------------------------------------------------------- silence and audio nobody needs (2026-10-16)
+
+def _session(client, start, frames, wait=0.3):
+    """Start, send `frames` (bytes), stop; every JSON message and binary frame that came back."""
+    import time
+
+    from starlette.websockets import WebSocketDisconnect
+
+    from .conftest import ORIGIN
+
+    got, binary = [], []
+    with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
+        ws.send_text(json.dumps({"type": "start", "sampleRate": 48000, **start}))
+        got.append(ws.receive_json())
+        if got[0]["type"] != "ready":
+            return got, binary
+        for f in frames:
+            ws.send_bytes(f)
+        time.sleep(wait)
+        ws.send_text(json.dumps({"type": "stop"}))
+        try:
+            while True:
+                m = ws.receive()
+                if m.get("bytes") is not None:
+                    binary.append(m["bytes"])
+                elif m.get("text"):
+                    got.append(json.loads(m["text"]))
+                elif m["type"] == "websocket.close":
+                    break
+        except WebSocketDisconnect:
+            pass
+    return got, binary
+
+
+@pytest.fixture
+def echo_worker(monkeypatch):
+    """A worker that answers every audio frame with itself and records what it was sent."""
+    state = SimpleNamespace(sent=[], events=[])
+
+    async def open_conn(_path):
+        q = asyncio.Queue()
+        return SimpleNamespace(q=q, first=True), SimpleNamespace(q=q, close=lambda: None)
+
+    async def send(writer, kind, payload):
+        state.sent.append((kind, payload))
+        if kind == P.MSG_AUDIO:
+            await writer.q.put((P.MSG_AUDIO, payload))
+        elif kind == P.MSG_END:
+            for ev in state.events:
+                await writer.q.put((P.MSG_EVENT, P.pack_json(ev)))
+            await writer.q.put((P.MSG_END, b""))
+
+    async def read(reader):
+        if reader.first:
+            reader.first = False
+            return P.MSG_EVENT, P.pack_json({"type": "ready", "latencySamples": 0, "cores": [0, 1]})
+        return await reader.q.get()
+
+    monkeypatch.setattr(routes.asyncio, "open_unix_connection", open_conn)
+    monkeypatch.setattr(routes.P, "send_msg", send)
+    monkeypatch.setattr(routes.P, "read_msg", read)
+    return state
+
+
+def _pcm(seq):
+    return P.HEADER.pack(P.VERSION, P.CODEC_S16, 0, seq, seq * 20_000) + (np.full(960, 3000, "<i2")).tobytes()
+
+
+def test_silence_frames_are_answered_at_once_and_not_billed(client, signed_in, echo_worker):
+    uid, _ = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    frames = [_pcm(0), P.silence_frame(1, 20_000, 960), P.silence_frame(2, 40_000, 960), _pcm(3)]
+    got, binary = _session(client, {"denoise": "light"}, frames)
+    assert got[0]["silenceFrames"] is True
+    silent = [b for b in binary if P.frame_header(b)[0] == P.CODEC_SILENCE]
+    assert sorted(P.frame_header(b)[1] for b in silent) == [1, 2] and all(P.silence_samples(b) == 960 for b in silent)
+    kinds = [k for k, _ in echo_worker.sent]
+    assert kinds.count(P.MSG_AUDIO) == 2 and kinds.count(P.MSG_SILENCE) == 2  # the worker only hears how much
+    from acw import db
+
+    assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.04)  # the two real frames only
+
+
+def test_a_client_that_needs_no_audio_back_gets_none(client, signed_in, echo_worker):
+    uid, _ = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    got, binary = _session(client, {"denoise": "light", "returnAudio": False}, [_pcm(0), _pcm(1), P.silence_frame(2, 0, 960)])
+    assert got[0]["type"] == "ready" and binary == []
+    start = json.loads(next(p for k, p in echo_worker.sent if k == P.MSG_START))
+    assert start["return_audio"] is False
+
+
+def test_standard_captions_only_are_not_billed_for_the_silence_they_skipped(client, signed_in, echo_worker):
+    uid, _ = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    echo_worker.events = [{"type": "_idle", "samples": 960}]
+    got, _ = _session(client, {"denoise": None, "captions": "local"}, [_pcm(i) for i in range(3)])
+    assert not any(m.get("type") == "_idle" for m in got)  # internal: never reaches the client
+    from acw import db
+
+    assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.04)
+    # with noise removal the whole time is work: billed as before
+    db.execute("DELETE FROM stream_sessions")
+    _session(client, {"denoise": "light", "captions": "local"}, [_pcm(i) for i in range(3)])
+    assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.06)
+
+
+def test_the_captioner_ends_the_line_then_only_counts_silence_frames(monkeypatch):
+    from .test_capacity_limits import _captioner, _talk
+
+    c, events = _captioner(monkeypatch)
+    for _ in range(25):
+        c.feed(_talk())
+    c._take_audio()
+    before = c.stream.fed
+    c.silence(48_000 * 10)  # 10 s muted
+    c._take_audio()
+    assert abs((c.stream.fed - before) - engine.GATE_AFTER_S * 16_000) < 10  # trailing silence for the line to end
+    assert abs(c._fed - 10.5 * 16_000) < 40  # the clock still follows (the resampler holds back a few samples)
+    assert not any(e.get("type") == "_idle" for e in events)  # silence frames were never billed: nothing to give back

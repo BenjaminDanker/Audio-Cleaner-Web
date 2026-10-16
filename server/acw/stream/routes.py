@@ -235,6 +235,7 @@ class Session:
         self.hold_id: str | None = None
         self.held_seconds = 0.0
         self.samples = 0  # of audio processed; counted as integers so the billed seconds are exact
+        self.arrived = 0  # of microphone audio received, silence frames too (keeps the session alive, not billed)
         self.started = time.monotonic()
         self.frames: OrderedDict[int, tuple[int, int, float]] = OrderedDict()  # seq -> (codec, timestamp, sent at)
         self.frame_stats = metrics.FrameStats()
@@ -332,6 +333,10 @@ class Session:
             return False
         self.held_seconds += 60.0
         return True
+
+    def unbill(self, samples: int) -> None:
+        """Audio already counted that turned out to need no work (silence in a captions-only session)."""
+        self.samples = max(0, self.samples - max(0, samples))
 
     def paced(self, seconds: float, reference: bool = False) -> bool:
         bucket = self.pace[reference]
@@ -674,7 +679,8 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             return None
     sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language, "languages": spoken_list,
                                    "atten_lim_db": atten,
-                                   "echo_reference": cfg.get("echoReference") is True}, rate, trial_left)
+                                   "echo_reference": cfg.get("echoReference") is True,
+                                   "return_audio": cfg.get("returnAudio") is not False}, rate, trial_left)
     # Whatever goes wrong from here (the client vanishing, the worker, the database), _finish gives the hold back.
     _live_ids.add(sess.id)
     _open.setdefault(principal.user_id, []).append(sess)
@@ -767,6 +773,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             "modelLatencyMs": round(ready.get("latencySamples", 0) * 1000 / P.SAMPLE_RATE, 1),
             "usdPerMinute": sess.current_rate() / 1e6,
             "maxSessionSeconds": MAX_SESSION_SECONDS,
+            "silenceFrames": True,
             **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
             **({"translate": targets} if targets else {}),
             **({"trial": True, "trialSecondsLeft": int(sess.trial_budget)} if sess.trial else {}),
@@ -793,12 +800,19 @@ async def _run(sess: Session) -> None:
                     continue
                 codec, ts, sent_at = meta
                 sess.frame_stats.answer(time.monotonic() - sent_at)
-                await ws.send_bytes(P.encode_frame(codec, seq, ts, y))
+                if sess.cfg.get("return_audio", True):
+                    await ws.send_bytes(P.encode_frame(codec, seq, ts, y))
             elif kind == P.MSG_TAP:
                 # Extra-accurate captions listen to the echo-free original (before noise removal), like every
                 # other caption path: recognisers score worse on denoised speech. The worker sends it as a tap.
                 if sess.premium is not None:
-                    await sess.premium.feed(P.unpack_audio(payload)[2])
+                    tap = P.unpack_audio(payload)[2]
+                    if not await sess.premium.feed(tap) and sess.cfg["denoise"] is None:
+                        sess.unbill(len(tap))  # captions only, and nobody talking: nothing was sent out, nothing billed
+            elif kind == P.MSG_EVENT and payload.startswith(b'{"type":"_'):
+                ev = json.loads(payload)  # for us, not the client
+                if ev.get("type") == "_idle" and sess.cfg["denoise"] is None:
+                    sess.unbill(int(ev.get("samples", 0)))  # standard captions only: the silence the decoder skipped
             elif kind == P.MSG_EVENT:
                 try:
                     await ws.send_text(payload.decode())
@@ -831,7 +845,7 @@ async def _run(sess: Session) -> None:
                 sess.end_reason = "max_duration"
                 await _send_json(ws, {"type": "stopped", "reason": "max_duration"})
                 break
-            if duty.starved(now, sess.seconds):
+            if duty.starved(now, sess.arrived / P.SAMPLE_RATE):
                 sess.end_reason = "no_audio"
                 await _send_stopped(ws, "no_audio")
                 break
@@ -863,7 +877,10 @@ async def _run(sess: Session) -> None:
                 try:
                     codec, seq, ts, flags = P.frame_header(msg["bytes"])
                     reference = bool(flags & P.FLAG_REFERENCE)
-                    if codec == P.CODEC_OPUS:
+                    if codec == P.CODEC_SILENCE:
+                        n = P.silence_samples(msg["bytes"])
+                        ipc = None
+                    elif codec == P.CODEC_OPUS:
                         # Opaque here; decoded only inside the sandboxed worker.
                         pkt = P.opus_payload(msg["bytes"])
                         n = P.OPUS_FRAME
@@ -882,10 +899,18 @@ async def _run(sess: Session) -> None:
                     sess.end_reason = "too_fast"
                     break
                 if reference:  # what the speakers played: no reply, no billing; ignored unless the session asked for it
-                    if sess.cfg["echo_reference"]:
+                    if sess.cfg["echo_reference"] and ipc is not None:  # a silent reference is simply not sent
                         await P.send_msg(sess.writer, P.MSG_REF, ipc)
                     continue
                 last_mic = time.monotonic()
+                sess.arrived += n
+                if ipc is None:
+                    # Silence (a muted source, digital silence): answered at once, not billed, no processing. The
+                    # worker only hears how much, so the captions' times keep following the talk.
+                    if sess.cfg.get("return_audio", True):
+                        await ws.send_bytes(P.silence_frame(seq, ts, n))
+                    await P.send_msg(sess.writer, P.MSG_SILENCE, P.pack_silence(seq, n))
+                    continue
                 sess.samples += n
                 if sess.seconds >= MAX_SESSION_SECONDS:
                     sess.end_reason = "max_duration"

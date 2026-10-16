@@ -412,6 +412,8 @@ class StreamingCaptioner:
                     self._gated = False
                     self._pending.append(self._skipped)
                     self._pending.extend(self._preroll)
+                    if self._skipped:
+                        self.emit({"type": "_idle", "samples": self._skipped})  # not decoded: a captions-only session isn't billed for it
                     self._preroll, self._skipped = [], 0
                 self._pending.append(x48)
             return
@@ -426,6 +428,20 @@ class StreamingCaptioner:
             n = len(self._preroll.pop(0))
             self._skipped += n
             self.skipped_total += n
+
+    def silence(self, n: int) -> None:
+        """`n` samples of silence the client didn't send (a muted source, digital silence): the line still gets its
+        trailing silence (so it ends), the rest only moves the clock. Not billed in the first place."""
+        need = 0 if self._gated else max(0, int((GATE_AFTER_S - self._quiet) * SAMPLE_RATE))
+        fed = min(n, need)
+        self._quiet += n / SAMPLE_RATE
+        with self._pending_lock:
+            if fed:
+                self._pending.append(np.zeros(fed, np.float32))
+            if n > fed:
+                self._gated = True
+                self._pending.append(n - fed)  # silence marker: counted, not decoded
+                self.skipped_total += n - fed
 
     def _take_audio(self) -> None:  # decoder thread
         with self._pending_lock:
@@ -472,6 +488,11 @@ class StreamingCaptioner:
 
     def flush(self, timeout: float = 3.0) -> None:
         """End of stream: decode what is left and emit it as a final line."""
+        if self._gated:
+            skipped = self._skipped + sum(len(p) for p in self._preroll)
+            if skipped:
+                self.emit({"type": "_idle", "samples": skipped})
+            self._preroll, self._skipped = [], 0
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             with self._pending_lock:

@@ -96,11 +96,11 @@ or `{"type":"error","code":...,"message":...}` and closes. Every error event may
 ```
 offset size  field
 0      1     version = 1
-1      1     codec: 1 = pcm_s16le, 2 = f32le, 3 = opus
+1      1     codec: 1 = pcm_s16le, 2 = f32le, 3 = opus, 4 = silence
 2      2     flags: bit 0 = echo reference (section 5), other bits 0 (reserved)
 4      4     seq: u32 frame counter (little endian)
 8      8     ts_us: u64 client timestamp (opaque, echoed back)
-16     ...   mono 48 kHz samples, or exactly one Opus packet (codec 3)
+16     ...   mono 48 kHz samples, or exactly one Opus packet (codec 3), or a u16 sample count (codec 4)
 ```
 
 - **Opus (recommended):** each frame is one 20 ms Opus packet (48 kHz mono,
@@ -118,7 +118,16 @@ offset size  field
   client's total delay = network round trip + modelLatencyMs. Measure the
   round trip with `ts_us`.
 - When denoise is off (captions only) the audio comes back unchanged and
-  the client may simply ignore it.
+  the client may simply ignore it, or start with `"returnAudio": false`: then no audio frames come back at all
+  (events still do).
+- **Silence (codec 4).** When `ready` has `"silenceFrames": true`, a client may send, instead of an encoded frame,
+  a header plus a u16 little-endian sample count (480 × k, at most 4800) for audio that is silence: a muted source,
+  or digital silence (every |sample| < 1e-5). Echo-reference frames may be silence too. The server answers a
+  microphone silence frame at once with the same silence frame (unless `returnAudio` is false). Silence frames keep
+  the session alive but are **not billed** and cost no processing.
+- **Captions-only sessions are billed for speech, not quiet.** With `denoise: null`, the quiet stretches the
+  standard caption decoder skips (from 2 s after the last speech until the next) and the silence extra-accurate
+  captions don't send on are not billed.
 - Audio must arrive at about real time (bursts up to 6 s are tolerated);
   faster input ends the session with `too_fast`.
 

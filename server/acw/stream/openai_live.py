@@ -115,9 +115,11 @@ class PremiumCaptions:
         if not self.failed:
             self._fail()
 
-    async def feed(self, y48: np.ndarray) -> None:
+    async def feed(self, y48: np.ndarray) -> bool:
+        """Sends the audio on while someone talks. False when it was silence between turns (not sent, so a session
+        that is only these captions isn't billed for it)."""
         if self.ws is None or self.failed:
-            return
+            return True
         lp, self.zi = sosfilt(self.sos, y48, zi=self.zi)
         y24 = np.clip(lp[::2], -1.0, 1.0)
         pcm = (y24 * 32767.0).astype("<i2").tobytes()
@@ -125,7 +127,7 @@ class PremiumCaptions:
         rms = float(np.sqrt(np.mean(y48 * y48) + 1e-12))
         speaking = 20 * np.log10(rms) > self.SPEECH_DB
         if not speaking and not self.in_turn:
-            return  # don't bill the API for silence between turns
+            return False  # don't send (or bill) silence between turns
         try:
             self._pending += pcm
             self._pending_s += dur
@@ -147,6 +149,7 @@ class PremiumCaptions:
                 self.in_turn, self.turn_s, self.silence_s = False, 0.0, 0.0
         except Exception:  # noqa: BLE001
             self._fail()
+        return True
 
     async def close(self) -> None:
         if self.reader_task:
