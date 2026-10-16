@@ -151,6 +151,27 @@ def stage_limits(denoise_tier: str | None, seconds: float, max_seconds: float) -
     return int(seconds * CPU_PER_AUDIO_SECOND[tier] + STAGE_SLACK_SECONDS), int(wall)
 
 
+# The wall-clock limit of a stage assumes the job runs at the speed it was claimed with. When live audio or a game server
+# takes cores, the same work takes 2 to 3 times longer (a 90 min voice rebuild: 9,700 s at 4 threads, 20,000 to 29,000 s on
+# one core against a limit of 23,400 s), and killing it at the limit throws away hours of work. So at the limit a stage
+# that is still making progress gets more time, as much as its own progress says it needs (with some margin), but never
+# more than STRETCH_LIMIT times the original limit; a stage whose progress has not moved for STALL_SECONDS is stopped.
+STALL_SECONDS = 1800
+STRETCH_LIMIT = 3.0
+MIN_STRETCH_SECONDS = 60  # a stretch shorter than this is not worth it
+
+
+def stretched_limit(base: float, elapsed: float, start_progress: int, progress: int, since_progress: float) -> float | None:
+    """The new wall-clock limit of a stage (seconds from its start) for a stage that has run `elapsed` seconds, went from
+    `start_progress` to `progress` percent and last moved `since_progress` seconds ago; None when it should be stopped now."""
+    done = progress - start_progress
+    if done <= 0 or progress >= 100 or since_progress > STALL_SECONDS:
+        return None
+    projected = elapsed * (100 - start_progress) / done
+    limit = min(projected * 1.2 + STAGE_SLACK_SECONDS / 3, base * STRETCH_LIMIT)
+    return limit if limit > elapsed + MIN_STRETCH_SECONDS else None
+
+
 def queued_ids() -> list[str]:
     return [r["id"] for r in db.all_rows(f"SELECT j.id FROM jobs j WHERE j.status = 'queued' ORDER BY {QUEUE_ORDER}")]
 

@@ -122,6 +122,10 @@ def _housekeeping() -> None:
         ledger.reap_stale_holds,  # money reserved by things that are over
         stream_routes.close_orphans,  # live sessions nothing is running any more
         retention.sweep,  # privacy retention (docs/operations.md)
+        # Expired outputs, abandoned uploads, orphan directories, jobs whose worker died. The workers also call it, but
+        # only between jobs: while every worker is busy with a long file nothing else would run it. Safe to run from
+        # several processes at once: every step is a guarded UPDATE or an idempotent transaction (finish_failed).
+        jobs.sweep,
     )
     for step in steps:
         try:

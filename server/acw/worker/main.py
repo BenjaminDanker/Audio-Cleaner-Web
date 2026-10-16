@@ -243,6 +243,28 @@ class StageFailed(Exception):
         self.user_message = user_message
 
 
+OOM_MESSAGE = "This file needs more memory than we can give one job, so it could not be processed. Splitting it into shorter parts may help; you were not charged."
+INTERRUPTED_MESSAGE = "Processing was interrupted several times, so we stopped trying; you were not charged. If the file is very long, splitting it into shorter parts may help."
+# A job put back in the queue by a stopping worker keeps its attempt, so a deploy never costs it a retry. But a worker that
+# keeps stopping on the same job (for example systemd stopping the unit after the kernel killed the runner for memory)
+# must not run it forever: the job is failed at its MAX_INTERRUPTIONS-th interruption.
+MAX_INTERRUPTIONS = int(os.environ.get("ACW_MAX_INTERRUPTIONS", "3"))
+
+
+def oom_kills() -> int | None:
+    """How many processes the kernel's OOM killer has killed in this worker's cgroup (runners included) so far; None if unreadable."""
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            if line.startswith("0::"):
+                for ev in (Path("/sys/fs/cgroup") / line[3:].strip().lstrip("/") / "memory.events").read_text().splitlines():
+                    key, _, value = ev.partition(" ")
+                    if key == "oom_kill":
+                        return int(value)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
     env = {
         "PATH": "/usr/bin:/bin",
@@ -259,6 +281,7 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         env["LD_LIBRARY_PATH"] = _cuda_library_path()
     result_file = d / f"result-{stage}.json"
     result_file.unlink(missing_ok=True)
+    oom_before = oom_kills()
     proc = subprocess.Popen(
         [sys.executable, "-m", "acw.worker.runner", str(d), stage],
         stdout=subprocess.PIPE,
@@ -276,14 +299,31 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
             del stderr_tail[:-40]
 
     threading.Thread(target=drain_stderr, daemon=True).start()
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     last_update = 0.0
+    prog = {"first": None, "now": 0, "at": started}  # the stage's reported progress: where it began, where it is, when it last moved
+    killed_by_us = False
 
     data_dir = get_settings().data_dir
     pinned: set[int] | None = None
 
+    def more_time() -> bool:
+        """At the deadline: a main stage that is still making progress gets the time its progress says it needs
+        (jobs.stretched_limit), so a job that ran slower than planned (live audio took its cores) is not thrown away."""
+        nonlocal deadline
+        if stage != "main" or _stop.is_set() or prog["first"] is None:
+            return False
+        now = time.monotonic()
+        limit = jobs.stretched_limit(timeout, now - started, prog["first"], prog["now"], now - prog["at"])
+        if limit is None or started + limit <= deadline:
+            return False
+        log.info("job %s stage %s still at %s%% after %.0f s: limit %.0f s -> %.0f s", job["id"], stage, prog["now"], now - started, deadline - started, limit)
+        deadline = started + limit
+        return True
+
     def watchdog() -> None:
-        nonlocal pinned
+        nonlocal pinned, killed_by_us
         beat = 0.0
         while proc.poll() is None:
             # Off the live-audio cores while live sessions run (acw.cpusplit).
@@ -292,7 +332,8 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
             if want != pinned:
                 cpusplit.pin_tree(proc.pid, want)
                 pinned = want
-            if time.monotonic() > deadline or _stop.is_set():
+            if _stop.is_set() or (time.monotonic() > deadline and not more_time()):
+                killed_by_us = True
                 os.killpg(proc.pid, signal.SIGKILL)
                 return
             if time.monotonic() - beat > 20:
@@ -316,17 +357,29 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
             job["noise_profile"] = msg["noise"]
             jobs.update_params(job["id"], noise_profile=msg["noise"])
         now = time.monotonic()
+        try:
+            progress = max(0, min(100, int(msg.get("progress", 0))))
+        except (TypeError, ValueError, OverflowError):
+            progress = 0
+        if prog["first"] is None:
+            prog["first"] = prog["now"] = progress
+        if progress > prog["now"]:
+            prog["now"], prog["at"] = progress, now
         if now - last_update >= 1.0 or msg.get("progress") == 100:
             last_update = now
-            try:
-                progress = max(0, min(100, int(msg.get("progress", 0))))
-            except (TypeError, ValueError, OverflowError):
-                progress = 0
             db.execute(
                 "UPDATE jobs SET progress = ?, stage = ?, heartbeat_at = ? WHERE id = ?",
                 (progress, str(msg.get("stage", ""))[:40], db.now(), job["id"]),
             )
     proc.wait()
+    if not result_file.exists() and not killed_by_us and proc.returncode == -signal.SIGKILL:
+        # Killed from outside while we were not stopping it: the kernel's OOM killer when its counter moved. With
+        # OOMPolicy=stop systemd then stops this whole worker (SIGTERM), which would read as a deploy and put the same
+        # job back again and again.
+        after = oom_kills()
+        if oom_before is not None and after is not None and after > oom_before:
+            log.error("job %s stage %s was killed for lack of memory", job["id"], stage)
+            raise StageFailed(OOM_MESSAGE, "oom kill")
     if _stop.is_set() and not result_file.exists():
         raise Interrupted()
     if not result_file.exists():
@@ -534,8 +587,14 @@ def process(job: dict, extra: dict) -> None:
         _complete(job, d, res)
     except Interrupted:
         # Stopped by a restart or deploy, not a failure: back in the queue with the upload kept, no attempt used.
-        log.info("job %s put back in the queue (worker stopping)", job["id"])
-        jobs.requeue(job)
+        interruptions = int(json.loads(job["params_json"]).get("interruptions", 0)) + 1
+        if interruptions >= MAX_INTERRUPTIONS:
+            log.error("job %s interrupted %d times; failing it", job["id"], interruptions)
+            jobs.finish_failed(job, INTERRUPTED_MESSAGE)
+        else:
+            log.info("job %s put back in the queue (worker stopping, interruption %d)", job["id"], interruptions)
+            jobs.update_params(job["id"], interruptions=interruptions)
+            jobs.requeue(job)
     except StageFailed as e:
         jobs.finish_failed(job, e.user_message)
     except Exception:  # noqa: BLE001
