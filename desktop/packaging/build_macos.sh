@@ -55,10 +55,12 @@ PY="$WORK/venv/bin/python"
 
 echo "== vendor directory"
 export PYTHONPATH="$REPO/desktop:$REPO/common" ACW_DESKTOP_VENDOR="$WORK/vendor" ACW_ICON_DIR="$WORK/icons"
+"$PY" desktop/packaging/fetch_dpdfnet.py "$WORK/dpdfnet"
 whisper=(--download-whisper)
 [ -z "${WHISPER_MODEL_DIR:-}" ] || whisper=(--whisper-model "$WHISPER_MODEL_DIR")
 "$PY" desktop/packaging/prepare_vendor.py --libdf "$WORK/libdf/libdf.dylib" --ffmpeg-dir "$WORK/ffmpeg" \
   --model "$WORK/deepfilter/models/DeepFilterNet3_onnx.tar.gz" --deepfilter-src "$WORK/deepfilter" \
+  --dpdfnet "$WORK/dpdfnet/dpdfnet8_48khz_hr_batch.onnx" \
   --rust-target "$(rustc -vV | sed -n 's/^host: //p')" "${whisper[@]}" --out "$WORK/vendor"
 
 if [ "${SKIP_TESTS:-0}" != 1 ]; then

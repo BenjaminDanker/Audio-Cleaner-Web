@@ -1,0 +1,70 @@
+# Keeps the public repository of the desktop app up to date: whenever a push to on-prem changes the app's code, the
+# files on the allowlist (tools/public-desktop/sync.py: desktop/, common/, native/deepfilter/, plus the public README,
+# LICENSE and build workflow from tools/public-desktop/template/) are copied from that commit to the default branch of
+# the public repository as one commit "Sync from upstream <short sha>". One way only: nothing flows back, and a file the
+# allowlist does not name is never copied. The sync refuses (and the job fails, before anything is pushed) when the
+# export contains something that must not be public, see LEAK_PATTERNS in sync.py.
+#
+# Needs the secret PUBLIC_DESKTOP_DEPLOY_KEY: the private half of an SSH deploy key with write access to the public
+# repository and to nothing else (docs/desktop.md, "Public copy of the desktop code", says how to make it). Without the
+# secret the job only prints a warning. The public repository's own workflow builds the app there (no release, no
+# signing), so nothing in it needs a secret.
+# Every third-party action is pinned to a full commit SHA.
+name: Public desktop copy
+
+on:
+  push:
+    branches: [on-prem]
+    paths:
+      - "desktop/**"
+      - "common/**"
+      - "native/deepfilter/**"
+      - "tools/public-desktop/**"
+      - ".github/workflows/public-desktop.yml"
+  workflow_dispatch:
+
+# One copy at a time, none cancelled half way: a run that waits is replaced by a newer one (it has everything the
+# older one had).
+concurrency:
+  group: public-desktop
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Copy to the public repository
+    if: github.ref == 'refs/heads/on-prem'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PUBLIC_REPO: BenjaminDanker/Audio-Cleaner
+      HAVE_KEY: ${{ secrets.PUBLIC_DESKTOP_DEPLOY_KEY != '' }}
+    steps:
+      - name: The deploy key is missing
+        if: env.HAVE_KEY != 'true'
+        run: echo "::warning::The secret PUBLIC_DESKTOP_DEPLOY_KEY is not set, so nothing was copied (docs/desktop.md, Public copy of the desktop code)."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.HAVE_KEY == 'true'
+        with:
+          persist-credentials: false
+
+      - name: Check out the public repository (its default branch)
+        if: env.HAVE_KEY == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.PUBLIC_REPO }}
+          ssh-key: ${{ secrets.PUBLIC_DESKTOP_DEPLOY_KEY }}
+          path: public
+
+      - name: Copy the allowlisted files and commit
+        if: env.HAVE_KEY == 'true'
+        run: |
+          python3 tools/public-desktop/sync.py --target public --rev "$GITHUB_SHA" \
+            --git-name "github-actions[bot]" --git-email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Push without force, so a branch that moved on its own is not overwritten
+        if: env.HAVE_KEY == 'true'
+        run: git -C public push origin HEAD

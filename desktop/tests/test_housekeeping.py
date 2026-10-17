@@ -494,6 +494,10 @@ def test_about_points_to_the_licence_texts_that_came_with_the_models(qapp, tmp_p
     assert str(tmp_path / "models" / "LICENSES") in text()
 
 
+WEBSITE_JOBS = Path(__file__).resolve().parents[2] / "web" / "src" / "jobs.js"
+
+
+@pytest.mark.skipif(not WEBSITE_JOBS.is_file(), reason="the website's source is not part of this copy of the repository")
 def test_the_settings_use_the_websites_wording():
     from audio_cleaner_desktop.gui.settings_panel import LOUDNESS_LABELS
 
@@ -501,7 +505,7 @@ def test_the_settings_use_the_websites_wording():
         "podcast": "Podcast (−16 LUFS)", "youtube": "YouTube (−14 LUFS)", "broadcast": "Broadcast (−23 LUFS)",
         "keep": "Keep original loudness",
     }
-    web = (Path(__file__).resolve().parents[2] / "web" / "src" / "jobs.js").read_text(encoding="utf-8")
+    web = WEBSITE_JOBS.read_text(encoding="utf-8")
     for label in LOUDNESS_LABELS.values():
         assert label in web
 

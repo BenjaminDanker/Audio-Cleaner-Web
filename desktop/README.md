@@ -16,7 +16,8 @@ nothing but a normal web request with the app version).
   small speech model for the tests in `test-models/whisper-small/`.
   On Linux, missing pieces fall back to `~/audio-cleaner/{bin,models}`.
 
-Building and shipping installers is described in [`../docs/desktop.md`](../docs/desktop.md).
+Building the installers: each script in [`packaging/`](packaging/) starts with a comment that says how to run it
+(`build_ffmpeg.sh`, `prepare_vendor.py`, `audio_cleaner.spec`, `windows/AudioCleaner.iss`, `macos/make_pkg.sh`).
 
 ## Development setup
 

@@ -42,9 +42,9 @@ AUDIO_FORMATS = {
     "ogg": (".ogg", ["-c:a", "libopus", "-b:a", "128k"]),  # Opus in an Ogg file with the usual .ogg ending
 }
 
-# Speech segments sent to the transcription service (see server/acw/asr): 16 kHz mono mp3, 64 kbps. Measured with
+# Speech segments sent to the transcription service: 16 kHz mono mp3, 64 kbps. Measured with
 # the real API on LibriSpeech (clean, and mixed with noise at 5 dB SNR): the word error rate is the same as with the
-# ~160 kbps these used to be (docs/research/asr-chunk-encoding-2026-10.md), at 40% of the bytes.
+# ~160 kbps these used to be, at 40% of the bytes.
 ASR_CHUNK_EXT = ".mp3"
 ASR_CHUNK_ARGS = ["-c:a", "libmp3lame", "-b:a", "64k", "-ac", "1", "-ar", "16000"]
 # Chunks per FFmpeg run. One run for all of them is cheaper than one process each, but every chunk's trim filter

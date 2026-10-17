@@ -469,6 +469,63 @@ does not list fails with "Hashes are required in --require-hashes mode" and name
 PyPI; a package that was would need its own hashed line (see the docstring of `hash_lock.py`). pip itself is
 upgraded unpinned before the install (`python -m pip install --upgrade pip`).
 
+## Public copy of the desktop code
+
+The desktop app lives here, next to `common/` (shared with the website's server). People still use the old public
+repository (`BenjaminDanker/Audio-Cleaner`, once a different app called VideoDenoiser, releases v1.0.0 and v1.0.1), so
+the app's code is copied there automatically, one way, without mentioning this repository.
+
+* **What is copied** (`ALLOWLIST` in `tools/public-desktop/sync.py`): `desktop/` (app, packaging scripts, the licence
+  texts and EULA the installers ship, tests), all of `common/` (the app imports bwe, captions, clarity, dfn, dpdfnet,
+  ffmpeg, pipeline, restore and transcribe, which pull in aec and gpu; its tests are part of the desktop test run) and
+  `native/deepfilter/` (the libDF build). Nothing else: no `deploy/`, `server/`, `web/`, `docs/`, `obs-plugin/`,
+  `models.lock`. Files that exist only there live in `tools/public-desktop/template/`: `README.md`, `LICENSE` (this
+  repository's licence text without the line about `obs-plugin/`), `.gitignore`, `.gitattributes` and the build
+  workflow `.github/workflows/desktop.yml`. The old repository's own files (the VideoDenoiser source and models) are
+  removed from its tree by the first sync; they stay in its history and under the tags v1.0.0 and v1.0.1.
+* **How**: `.github/workflows/public-desktop.yml` runs on a push to `on-prem` that touches an allowlisted path (or by
+  hand) and runs `python3 tools/public-desktop/sync.py --target <checkout> --rev $GITHUB_SHA`. The script exports the
+  allowlisted paths of that commit (what is committed, not the working tree), scans the export (`LEAK_PATTERNS`: this
+  repository's name, the owner's account name, the server's IP, our login name and home folder, key paths, tokens, CI
+  secret names, paths of folders that are not copied) and stops with a list of file:line hits if anything matches,
+  replaces the checkout's tracked files with the export, and commits `Sync from upstream <short sha>` (no commit
+  when nothing changed). The workflow pushes without force to the public repository's default branch. Try it by hand
+  with `--dry-run` (reports, changes nothing) or `--export-only DIR` (just the export and the scan).
+* **Building there, not releasing**: the public copy's workflow (`tools/public-desktop/template/desktop.yml`) builds
+  and tests everything (FFmpeg, libDF, PyInstaller, the frozen selftest, installers, install and uninstall on Windows)
+  and keeps the installers as workflow artifacts for two weeks. It makes no GitHub Release, has no signing steps and
+  no secrets, and builds as version 2.0.0 instead of `2.0.<run number>`. Publishing releases there too would give
+  the old users a download page, but it would be a second source of installers: the signed `update.json` (key
+  `UPDATE_SIGNING_KEY`) is made only in the release job above and published by our download server, and the app trusts
+  only that, so a release in the public repository could never update anyone yet would look official next to the
+  download page. The README sends people to the download page instead. If you ever want releases there, add a release
+  job without `update.json`.
+  The heavy-noise model comes from `desktop/packaging/fetch_dpdfnet.py` (range requests into the models archive on the
+  download server, pinned by SHA-256) because `deploy/` is not copied: 15 MB per job, the only download from our
+  server in that workflow (the frozen selftest there runs without the 0.9 GB AP-BWE/Sidon archive).
+* **Keep in mind when editing**: anything under `desktop/`, `common/` and `native/deepfilter/` becomes public, so keep
+  names of servers, hosts, accounts and secrets out of comments and tests; the sync fails and lists file:line when it
+  finds one. Tests that read files outside the copied folders (the release job of `.github/workflows/desktop.yml`,
+  `web/src/jobs.js`) skip themselves when the file is not there. `tools/public-desktop/template/desktop.yml` is a
+  hand-kept adaptation of `.github/workflows/desktop.yml`: when you change a build step there, change it in the
+  template too.
+
+**Setting it up (owner, once):** use an SSH deploy key (limited to the one repository, does not expire, not tied to your
+account) and add its private half here as a secret.
+
+```sh
+ssh-keygen -t ed25519 -N '' -C public-desktop-sync -f /tmp/public-desktop-key
+gh repo deploy-key add /tmp/public-desktop-key.pub --repo BenjaminDanker/Audio-Cleaner --allow-write --title public-desktop-sync
+gh secret set PUBLIC_DESKTOP_DEPLOY_KEY --repo BenjaminDanker/Audio-Cleaner-Web < /tmp/public-desktop-key
+shred -u /tmp/public-desktop-key /tmp/public-desktop-key.pub
+```
+
+On the old repository (Settings): keep the default branch `main`, allow Actions (the first sync brings its build
+workflow), do not protect `main` in a way that blocks the deploy key (a deploy key cannot bypass branch protection), and
+set the description and website (https://mc-multi-world.space/audio/). Run "Public desktop copy" once with "Run
+workflow" on `on-prem` and look at the commit it pushed before announcing anything. To stop the copy, delete the secret
+or the workflow.
+
 ## Owner to-do before the first release
 
 * Upload the `models-v1` release (the single `AudioCleaner-models-v1.zip`, see above), let the mirror pick it up and

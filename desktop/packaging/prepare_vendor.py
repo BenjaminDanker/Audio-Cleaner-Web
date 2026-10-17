@@ -40,7 +40,7 @@ DESKTOP = HERE.parent
 SUPPLEMENTAL = HERE / "licenses"
 
 DFN_MODEL_SHA256 = "c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616"
-# Heavy-noise model (DPDFNet-8 48 kHz, Apache-2.0): fetched by deploy/fetch-dpdfnet.sh (same pin).
+# Heavy-noise model (DPDFNet-8 48 kHz, Apache-2.0): fetched by packaging/fetch_dpdfnet.py (same pin).
 DPDFNET_FILE = "dpdfnet8_48khz_hr_batch.onnx"
 DPDFNET_SHA256 = "b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa"
 LIB_NAMES = ("libdf.so", "libdf.dylib", "df.dll")
@@ -127,7 +127,7 @@ def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: 
     need_file(model, "DeepFilterNet3 model")
     if sha256_of(model) != DFN_MODEL_SHA256:
         fail(f"{model} is not the expected DeepFilterNet3_onnx.tar.gz (sha256 mismatch)")
-    need_file(dpdfnet, "DPDFNet-8 model (deploy/fetch-dpdfnet.sh)")
+    need_file(dpdfnet, "DPDFNet-8 model (packaging/fetch_dpdfnet.py)")
     if sha256_of(dpdfnet) != DPDFNET_SHA256:
         fail(f"{dpdfnet} is not the expected {DPDFNET_FILE} (sha256 mismatch)")
     models = out / "models"
@@ -502,7 +502,7 @@ def main() -> int:
     ap.add_argument("--ffmpeg-dir", type=Path, help="output directory of desktop/packaging/build_ffmpeg.sh")
     ap.add_argument("--model", type=Path, help="DeepFilterNet3_onnx.tar.gz")
     ap.add_argument("--dpdfnet", type=Path, default=Path.home() / "audio-cleaner" / "models" / "dpdfnet" / DPDFNET_FILE,
-                    help=f"{DPDFNET_FILE} (deploy/fetch-dpdfnet.sh; default: %(default)s)")
+                    help=f"{DPDFNET_FILE} (packaging/fetch_dpdfnet.py; default: %(default)s)")
     ap.add_argument("--whisper-model", type=Path, default=Path.home() / "audio-cleaner" / "models" / "whisper" / "small",
                     help="directory of Systran/faster-whisper-small (default: %(default)s)")
     ap.add_argument("--download-whisper", action="store_true", help=f"download {WHISPER_REPO}@{WHISPER_REVISION[:8]} with huggingface_hub (CI)")

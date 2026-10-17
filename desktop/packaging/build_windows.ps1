@@ -93,9 +93,11 @@ $icons = Join-Path $work 'icons'
 $env:PYTHONPATH = "$repo\desktop;$repo\common"
 $env:ACW_DESKTOP_VENDOR = $vendor
 $env:ACW_ICON_DIR = $icons
+Run $vpy @('desktop\packaging\fetch_dpdfnet.py', "$work\dpdfnet")
 $whisper = if ($WhisperModelDir) { @('--whisper-model', $WhisperModelDir) } else { @('--download-whisper') }
 Run $vpy (@('desktop\packaging\prepare_vendor.py', '--libdf', "$work\libdf\df.dll", '--ffmpeg-dir', $ffmpeg,
     '--model', "$work\deepfilter\models\DeepFilterNet3_onnx.tar.gz", '--deepfilter-src', "$work\deepfilter",
+    '--dpdfnet', "$work\dpdfnet\dpdfnet8_48khz_hr_batch.onnx",
     '--rust-target', 'x86_64-pc-windows-msvc', '--out', $vendor) + $whisper)
 
 if (-not $SkipTests) {
