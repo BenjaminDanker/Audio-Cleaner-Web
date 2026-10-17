@@ -26,9 +26,9 @@ export function moneyUsd(usd) {
   return usd2.format(usd || 0);
 }
 
-/** Per-minute rates: always 4 decimals. */
+/** Per-minute prices, the way they are shown first: whole cents where they are, otherwise up to 4 decimals ($0.01, $0.004). */
 export function rate(usd) {
-  return usd4.format(usd || 0);
+  return `$${(usd || 0).toFixed(4).replace(/(\.\d\d\d*?)0+$/, '$1')}`;
 }
 
 export function bytes(n) {

@@ -7,7 +7,7 @@
 #   deploy/fetch-models.sh --only GLOB        only targets matching GLOB, e.g. --only 'models/dpdfnet/*'
 #   deploy/fetch-models.sh --dest-dir DIR     with --only matching one file: put that file in DIR instead of ~/audio-cleaner/<target>
 #   deploy/fetch-models.sh --archive FILE     use this local copy of an archive (matched by file name) instead of downloading it,
-#                                             e.g. the models-v1 zip before it is published; repeatable
+#                                             e.g. the models zip before it is published; repeatable
 #   ACW_ARCHIVE_DIR=DIR deploy/fetch-models.sh   look for the archives in DIR (by file name) before downloading them
 #   deploy/fetch-models.sh --home DIR         install under DIR instead of ~/audio-cleaner (ACW_HOME does the same)
 #   deploy/fetch-models.sh --lock FILE        read another lock file

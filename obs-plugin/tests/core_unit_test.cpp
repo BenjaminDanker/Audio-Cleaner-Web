@@ -1927,19 +1927,12 @@ std::vector<float> advice_voice(double seconds, double snr_db, unsigned voice_se
 	return out;
 }
 
-void feed(InputAnalyser &a, const std::vector<float> &mic, const std::vector<float> *ref = nullptr)
+void feed(InputAnalyser &a, const std::vector<float> &mic)
 {
 	for (size_t i = 0; i + kFrameSamples <= mic.size(); i += kFrameSamples)
-		a.push(mic.data() + i, ref ? ref->data() + i : nullptr, kFrameSamples);
+		a.push(mic.data() + i, kFrameSamples);
 }
 
-bool has_note(const InputAdvice &a, const char *id)
-{
-	for (const AdviceNote &n : a.notes)
-		if (n.id == id)
-			return true;
-	return false;
-}
 }  // namespace
 
 // 48 kHz -> `rate` (linear interpolation is plenty for a level test).
@@ -1984,13 +1977,17 @@ static void test_room_test()
 		now.captions = "premium";
 		CHECK(r.suggest(now).changes.empty());  // already right
 	}
-	// a quiet room with noise removal on: it can go
+	// a quiet room: noise removal stays, at the gentlest strength (twenty seconds don't show a whole stream); off: on again
 	{
 		RoomTest r(48000, 1024);
 		feed(r, advice_voice(21.0, 60));
 		const RoomSuggestion s = r.suggest(AdviceContext{});
-		CHECK(s.heard_speech && !s.settings.denoise);
-		CHECK(s.changes.size() == 1 && s.changes[0].id == "room.denoise" && s.changes[0].arg == "on \xE2\x86\x92 off");
+		CHECK(s.heard_speech && s.settings.denoise && s.settings.atten_lim_db == 12);
+		CHECK(s.changes.size() == 1 && s.changes[0].id == "room.strength" && s.changes[0].arg == "Maximum \xE2\x86\x92 Gentle");
+		AdviceContext off;
+		off.denoise = false;
+		const RoomSuggestion t = r.suggest(off);
+		CHECK(t.settings.denoise && t.changes.size() == 1 && t.changes[0].arg == "off \xE2\x86\x92 on, Gentle");
 	}
 	// nobody spoke: nothing to suggest
 	{
@@ -2003,143 +2000,47 @@ static void test_room_test()
 
 static void test_input_advice()
 {
-	std::printf("input advice\n");
-	// not ready before ten seconds of audio
+	std::printf("input analyser: the measurements\n");
+	// not ready before the time asked for
 	{
-		InputAnalyser a(false);
+		InputAnalyser a(10.0);
 		feed(a, advice_voice(9.0, 40));
-		CHECK(!a.ready());
-		CHECK(!a.findings().ready);
-		CHECK(!InputAnalyser::advise(a.findings(), AdviceContext{}).ready);
+		CHECK(!a.ready() && !a.findings().ready);
 		feed(a, advice_voice(1.5, 40));
-		CHECK(a.ready());
-		CHECK(a.findings().ready);
+		CHECK(a.ready() && a.findings().ready);
+		CHECK(a.findings().seconds <= 10.0 + 1e-9);  // nothing more is kept, and pushing more is harmless
 	}
-	// a quiet room: noise removal can go; and it says so only while it is on
+	// the noise figure: a quiet room and a noisy one
 	{
-		InputAnalyser a(false);
-		feed(a, advice_voice(12.0, 60));
-		const InputFindings f = a.findings();
-		CHECK(f.has_speech);
-		CHECK(f.noise_db > 36);
-		AdviceContext ctx;
-		ctx.denoise = true;
-		InputAdvice adv = InputAnalyser::advise(f, ctx);
-		CHECK(adv.ready && adv.quiet_room);
-		CHECK(has_note(adv, "advice_quiet"));
-		ctx.denoise = false;
-		adv = InputAnalyser::advise(f, ctx);
-		CHECK(!has_note(adv, "advice_quiet") && !has_note(adv, "advice_noisy"));
-		CHECK(has_note(adv, "advice_fits"));
+		InputAnalyser q(12.0), n(12.0);
+		feed(q, advice_voice(12.0, 60));
+		feed(n, advice_voice(12.0, 3));
+		CHECK(q.findings().has_speech && q.findings().noise_db > 36);
+		CHECK(n.findings().has_speech && n.findings().noise_db < 19);
 	}
-	// a noisy room: the strongest strength, and a nudge when noise removal is off or set weaker
+	// nothing but a hum, or digital silence: no speech
 	{
-		InputAnalyser a(false);
-		feed(a, advice_voice(12.0, 3));
-		const InputFindings f = a.findings();
-		CHECK(f.noise_db < 19);
-		AdviceContext ctx;
-		ctx.denoise = false;
-		InputAdvice adv = InputAnalyser::advise(f, ctx);
-		CHECK(!adv.quiet_room && adv.atten_lim_db == 100 && has_note(adv, "advice_noisy"));
-		ctx.captions = "local";  // captions only: the sound is not what is being worked on, so no nagging about noise removal
-		CHECK(!has_note(InputAnalyser::advise(f, ctx), "advice_noisy"));
-		ctx.captions.clear();
-		ctx.denoise = true;
-		ctx.atten_lim_db = 12;
-		adv = InputAnalyser::advise(f, ctx);
-		CHECK(has_note(adv, "advice_strength"));
-		ctx.atten_lim_db = 100;
-		adv = InputAnalyser::advise(f, ctx);
-		CHECK(has_note(adv, "advice_fits"));
-		// captions: noisy room -> extra accurate is suggested for standard, nothing for extra accurate
-		ctx.captions = "local";
-		CHECK(has_note(InputAnalyser::advise(f, ctx), "advice_captions_up"));
-		ctx.captions = "premium";
-		CHECK(!has_note(InputAnalyser::advise(f, ctx), "advice_captions_up"));
-	}
-	// a clear voice in a quiet room does not need the extra accurate captions; another language does
-	{
-		InputAnalyser a(false);
-		feed(a, advice_voice(12.0, 45));
-		AdviceContext ctx;
-		ctx.denoise = false;
-		ctx.captions = "premium";
-		CHECK(has_note(InputAnalyser::advise(a.findings(), ctx), "advice_captions_down"));
-		ctx.language = "es";
-		CHECK(!has_note(InputAnalyser::advise(a.findings(), ctx), "advice_captions_down"));
-		ctx.captions = "local";
-		CHECK(has_note(InputAnalyser::advise(a.findings(), ctx), "advice_captions_up"));
-	}
-	// nothing but a hum: no speech, so it waits for one
-	{
-		InputAnalyser a(false);
+		InputAnalyser a(12.0);
 		std::vector<float> hum(12 * 48000);
 		for (size_t i = 0; i < hum.size(); ++i)
 			hum[i] = 0.01f * static_cast<float>(std::sin(2 * kAdvicePi * 50 * static_cast<double>(i) / 48000));
 		feed(a, hum);
-		const InputFindings f = a.findings();
-		CHECK(f.ready && !f.has_speech && !f.final);
-		CHECK(has_note(InputAnalyser::advise(f, AdviceContext{}), "advice_speak"));
-		// ... but it does not go on asking after it has stopped listening
-		feed(a, hum);
-		feed(a, hum);
-		const InputFindings g = a.findings();
-		CHECK(g.final && !g.has_speech);
-		CHECK(InputAnalyser::advise(g, AdviceContext{}).notes.empty());
-	}
-	// digital silence is not a room
-	{
-		InputAnalyser a(false);
-		feed(a, std::vector<float>(12 * 48000, 0.0f));
 		CHECK(a.findings().ready && !a.findings().has_speech);
+		InputAnalyser b(12.0);
+		feed(b, std::vector<float>(12 * 48000, 0.0f));
+		CHECK(b.findings().ready && !b.findings().has_speech);
 	}
 	// clipping
 	{
-		InputAnalyser a(false);
+		InputAnalyser a(12.0);
 		std::vector<float> x = advice_voice(12.0, 50, 3, 4, 0.5);
 		for (float &v : x)
 			v = std::max(-0.9995f, std::min(0.9995f, v * 6.0f));
 		feed(a, x);
 		CHECK(a.findings().clip_fraction > 0.01);
-		CHECK(has_note(InputAnalyser::advise(a.findings(), AdviceContext{}), "advice_clip"));
-		InputAnalyser b(false);
+		InputAnalyser b(12.0);
 		feed(b, advice_voice(12.0, 50));
 		CHECK(b.findings().clip_fraction == 0.0);
-	}
-	// speakers heard in the microphone: the played sound comes back later, quieter, under the speaker's own voice
-	{
-		const std::vector<float> played = advice_voice(12.0, 80, 5, 6, 0.1);
-		std::vector<float> mic = advice_voice(12.0, 50, 9, 10, 0.1);
-		const size_t delay = 48000 / 10;  // 100 ms
-		for (size_t i = delay; i < mic.size(); ++i)
-			mic[i] += 0.5f * played[i - delay];
-		InputAnalyser a(true);
-		feed(a, mic, &played);
-		InputFindings f = a.findings();
-		CHECK(f.echo_known);
-		CHECK(f.echo_share > 0.03);
-		AdviceContext ctx;
-		ctx.echo_requested = true;
-		ctx.echo_active = true;
-		CHECK(has_note(InputAnalyser::advise(f, ctx), "advice_echo_on"));
-		ctx.echo_active = false;
-		CHECK(has_note(InputAnalyser::advise(f, ctx), "advice_echo_off"));
-		// the same microphone with nothing related playing
-		InputAnalyser b(true);
-		feed(b, mic, nullptr);
-		CHECK(b.findings().echo_share < 0.03);
-		InputAnalyser c(true);
-		const std::vector<float> other = advice_voice(12.0, 80, 8, 12, 0.1);
-		feed(c, advice_voice(12.0, 50, 9, 10, 0.1), &other);
-		CHECK(c.findings().echo_share < 0.03);
-		CHECK(!InputAnalyser::advise(c.findings(), ctx).echo_heard);
-	}
-	// no more is kept after the limit, and pushing more is harmless
-	{
-		InputAnalyser a(true, 2.0, 3.0);
-		feed(a, advice_voice(10.0, 30));
-		CHECK(a.findings().seconds <= 3.0 + 1e-9);
 	}
 }
 

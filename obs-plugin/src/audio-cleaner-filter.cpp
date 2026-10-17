@@ -697,7 +697,6 @@ acw::AdviceContext advice_context(const Settings &s)
 	ctx.atten_lim_db = s.strength;
 	ctx.captions = s.effective_captions();
 	ctx.language = s.caption_language() == "auto" ? "" : s.caption_language();
-	ctx.echo_requested = !s.echo_source.empty();
 	return ctx;
 }
 

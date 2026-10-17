@@ -137,7 +137,7 @@ download never queues in front of live audio, under the same shared transfer bud
 | `/desktop/latest/windows`, `/mac-apple-silicon`, `/mac-intel` | the current installer, served directly |
 | `/obs-plugin/manifest.json`, `/obs-plugin/manifest.json.sig` | the plugin's signed manifest (the release assets `obs-plugin-manifest.json` and `.sig`) |
 | `/obs-plugin/<file>`, `/obs-plugin/latest/windows`, `/mac`, `/ubuntu-debian`, `/linux-other` | plugin packages; the website's buttons use `latest/...` |
-| `/models/<file>` | the model archive (`AudioCleaner-models-v1.zip`): every `models-v*` archive `deploy/models.lock` lists |
+| `/models/<file>` | the model archive (`AudioCleaner-models-v2.zip`): every `models-v*` archive `deploy/models.lock` lists |
 
 **How it works.** `acw-mirror.timer` starts `acw-mirror.service` (`python -m acw.admin mirror --once`, `acw/mirror.py`) a
 minute after it is enabled and then 10 minutes after each run. A run reads the GitHub REST API (`/repos/<repo>/releases`),
@@ -530,20 +530,20 @@ Only configuration changes (the shared host `mc-multi-world.space/audio` is the 
 ## Rebuilding native pieces and models
 
 `deploy/models.lock` lists every model and program file production uses: where it comes from (Hugging Face files on a
-pinned commit, a pinned DeepFilterNet commit, the `models-v1` release archive, a pinned FFmpeg build), its size and sha256.
+pinned commit, a pinned DeepFilterNet commit, the latest models release archive (`models-v2`: one complete set), a pinned FFmpeg build), its size and sha256.
 
 ```bash
 deploy/fetch-models.sh --check -v      # verify only (changes nothing); exit 1 if a required file is missing or wrong
 deploy/fetch-models.sh                 # download what is missing or wrong, verify, never touch a correct file (install.sh runs this)
 deploy/fetch-models.sh --with-optional # also the TorchScript Sidon weights (research fallback, 1 GB)
-ACW_ARCHIVE_DIR=~/audio-cleaner-models-release deploy/fetch-models.sh   # use a local copy of the models-v1 zip
+ACW_ARCHIVE_DIR=~/audio-cleaner-models-release deploy/fetch-models.sh   # use a local copy of the models zip
 ```
 
 - **Not downloadable** (marked `local` in the lock): `bin/libdf.so` (build it: `native/deepfilter/build.sh`),
   `bin/libdf-tract021.so` (older build used only by a native test), `models/sidon/sidon_fe_q8.onnx` (optional int8 variant:
   `tools/convert_sidon_onnx.py`), `wasm/df.js` and `wasm/df_bg.wasm` (browser build, same script). `--check` reports them
   missing if absent and "changed" (not an error) if a rebuild differs.
-- **AP-BWE and Sidon ONNX** come from the `models-v1` release archive of the Audio-Cleaner-Web repository (the conversions
+- **AP-BWE and Sidon ONNX** come from the `models-v2` release archive of the Audio-Cleaner-Web repository (the conversions
   `tools/export_apbwe_onnx.py` and `tools/convert_sidon_onnx.py` produced them). Until that release is published the
   fetch fails for them; use the local zip (`ACW_ARCHIVE_DIR` above).
 - **FFmpeg**: BtbN `autobuild-2026-10-09-14-16`, `ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1.tar.xz`, the build that runs

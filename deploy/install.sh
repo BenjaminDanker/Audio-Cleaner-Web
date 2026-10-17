@@ -236,7 +236,7 @@ if [ ! -x "$H/bin/acw-live" ] || [ "$(cat "$H/bin/acw-live.src" 2>/dev/null)" !=
   add_restart acw-stream.service
 fi
 # Every file in deploy/models.lock is present and has the recorded sha256 (downloads what is missing or wrong, never
-# touches a correct file; FFmpeg and the models-v1/v2 archives come from the lock's pinned URLs, or from
+# touches a correct file; FFmpeg and the models archive come from the lock's pinned URLs, or from
 # $ACW_ARCHIVE_DIR). Every feature needs its files: anything missing stops the deploy.
 bash "$REPO/deploy/fetch-models.sh" || { echo "models or programs missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2; exit 1; }
 

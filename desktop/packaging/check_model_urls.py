@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Check that every download of the model catalog (resources.py) exists and has the size the catalog says: the
-speech model's files on Hugging Face and the one models archive (AudioCleaner-models-v1.zip) on our download server
+speech model's files on Hugging Face and the one models archive (AudioCleaner-models-v2.zip) on our download server
 (config.MODELS_URL; the server mirrors the release asset, so while the mirror is not live this check fails on its own).
 
     python check_model_urls.py

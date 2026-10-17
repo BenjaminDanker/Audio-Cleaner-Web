@@ -267,7 +267,7 @@ def test_the_download_base_is_defined_in_one_place():
     assert updater.MANIFEST_URL == config.UPDATES_URL + "update.json"
     assert updater.SIGNATURE_URL == config.UPDATES_URL + "update.json.sig"
     assert updater.DOWNLOAD_BASE == config.UPDATES_URL
-    assert resources.MODELS_ARCHIVE.url == config.MODELS_URL + "AudioCleaner-models-v1.zip"
+    assert resources.MODELS_ARCHIVE.url == config.MODELS_URL + "AudioCleaner-models-v2.zip"
     # a domain move is one edit: nothing else spells the host out
     for path in list((DESKTOP / "audio_cleaner_desktop").rglob("*.py")) + list((DESKTOP / "packaging").glob("*.py")):
         if path.name != "config.py":

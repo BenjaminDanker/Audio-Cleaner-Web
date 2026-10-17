@@ -6,8 +6,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Analyser, EchoProbe, HEAVY_BELOW_DB, planWindows, RATE } from '../src/media/analysis.js';
-import { recommendForFile, recommendForLive, strengthFor, T } from '../src/recommend.js';
+import { Analyser, HEAVY_BELOW_DB, planWindows, RATE } from '../src/media/analysis.js';
+import { recommendForFile, roomChanges, strengthFor, T } from '../src/recommend.js';
 import { gauss, noisy, rng, voice } from './reco-audio.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -89,21 +89,6 @@ check('a long file is judged from about a minute spread over it (six stretches),
   assert.deepEqual(planWindows(40), [{ start: 0, length: 40 }]);
 });
 
-check('the speakers are found in the microphone when they are there, not when they are not', () => {
-  const played = voice(12, 5);
-  const mic = noisy(12, 40, 9);
-  const echoed = mic.map((a, i) => a + (i > 7200 ? 0.5 * played[i - 7200] : 0));
-  const probe = (m, ref) => {
-    const p = new EchoProbe({ minLagMs: 80, seconds: 12 });
-    for (let i = 0; i + 960 <= m.length; i += 960) { p.pushMic(m.subarray(i, i + 960)); p.pushRef(ref ? ref.subarray(i, i + 960) : null, 960); }
-    return p.result();
-  };
-  assert.ok(probe(echoed, played).explained > T.ECHO_SHARE);
-  assert.ok(Math.abs(probe(echoed, played).lagMs - 150) <= 10);
-  assert.ok(probe(mic, played).explained < T.ECHO_SHARE);
-  assert.ok(probe(mic, null).explained < T.ECHO_SHARE);
-});
-
 // ---- the advice ----------------------------------------------------------------------------------------------------------
 const REASONS = [];
 const rec = (x, ctx) => { const r = recommendForFile(analyse([x]), ctx); if (r) REASONS.push(...r.reasons, r.line); return r; };
@@ -160,29 +145,22 @@ check('very short or unreadable audio gives no advice', () => {
   assert.equal(recommendForFile(analyse([voice(1)])), null);
 });
 
-check('live: a quiet room can leave noise removal off; a noisy one is told how strong; echo and clipping are mentioned', () => {
-  const live = (x, echo, ctx) => { const r = recommendForLive(analyse([x]), echo, ctx); if (r) REASONS.push(...r.notes); return r; };
-  const quiet = live(noisy(12, 55), null, { mode: 'free', denoise: true, strength: 'max' });
-  assert.equal(quiet.denoise, false);
-  assert.match(quiet.line, /quiet/);
-  const loud = live(noisy(12, 6), null, { mode: 'free', denoise: true, strength: 'gentle' });
-  assert.equal(loud.denoise, true);
-  assert.equal(loud.strength, 'max');
-  assert.match(loud.line, /Maximum/);
-  const off = live(noisy(12, 6), null, { mode: 'free', denoise: false });
-  assert.match(off.line, /turn on noise removal/);
-  const echo = live(noisy(12, 55), { explained: 0.2, known: true }, { mode: 'paid', denoise: true, strength: 'max', captions: 'local' });
-  assert.equal(echo.echo, true);
-  assert.match(echo.line, /speakers/);
-  assert.equal(live(noisy(12, 55), { explained: 0, known: true }, { mode: 'free' }).echo, false);
-  const captions = live(noisy(12, 5), null, { mode: 'paid', denoise: true, strength: 'max', captions: 'local' });
-  assert.match(captions.line, /Extra accurate/);
-  const fine = live(noisy(12, 55), null, { mode: 'paid', denoise: false, captions: 'premium' });
-  assert.match(fine.line, /Standard captions are enough/);
-  const silent = recommendForLive(analyse([new Float32Array(12 * RATE)]), null, {});
-  assert.equal(silent.pending, true);
-  assert.equal(recommendForLive(analyse([new Float32Array(12 * RATE)]), null, { final: true }), null); // nothing more will be heard: stop asking
-  assert.equal(recommendForLive(analyse([voice(3)]), null, {}), null);
+check('live room test: noise removal stays on (a quiet room gets Gentle), the strength follows the noise, captions go up for noise', () => {
+  const room = (x, now) => { const r = roomChanges(analyse([x]), now); REASONS.push(...r.changes.map((c) => c.text), ...r.notes); return r; };
+  const quiet = room(noisy(20, 55), { denoise: true, strength: 'max', captions: '' });
+  assert.equal(quiet.settings.denoise, true);
+  assert.deepEqual(quiet.changes.map((c) => c.text), ['Noise removal strength: Maximum → Gentle']);
+  const loud = room(noisy(20, 6), { denoise: true, strength: 'gentle', captions: 'local' });
+  assert.equal(loud.settings.strength, 'max');
+  assert.equal(loud.settings.captions, 'premium');
+  assert.deepEqual(loud.changes.map((c) => c.key), ['strength', 'captions']);
+  const off = room(noisy(20, 6), { denoise: false, strength: 'max', captions: '' });
+  assert.equal(off.settings.denoise, true);
+  assert.match(off.changes[0].text, /off → on, Maximum/);
+  assert.deepEqual(room(noisy(20, 6), { denoise: true, strength: 'max', captions: 'premium' }).changes, []); // already right
+  const silent = roomChanges(analyse([new Float32Array(20 * RATE)]), { denoise: false, strength: 'max', captions: '' });
+  assert.equal(silent.heardSpeech, false);
+  assert.equal(silent.settings.denoise, false); // nothing heard: nothing changes
 });
 
 // ---- wording and the plugin's copy of the numbers -----------------------------------------------------------------------
@@ -203,12 +181,10 @@ check('the plugin uses the same thresholds as the website', () => {
   const web = readFileSync(join(ROOT, 'web', 'src', 'media', 'analysis.js'), 'utf8');
   assert.equal(num('kCleanAtLeast'), T.CLEAN_AT_LEAST);
   assert.equal(num('kMaxBelow'), T.MAX_BELOW);
-  assert.equal(num('kHeavyBelow'), HEAVY_BELOW_DB);
   assert.equal(num('kStrongBelow'), T.STRONG_BELOW);
   assert.equal(num('kBalancedBelow'), T.BALANCED_BELOW);
   assert.equal(num('kCaptionsNoisyBelow'), T.SUBS_NOISY_BELOW);
   assert.equal(num('kClipFraction'), T.CLIP_FRACTION);
-  assert.equal(num('kEchoShare'), T.ECHO_SHARE);
   assert.equal(num('kSpeechBandDyn'), Number(/SPEECH_BAND_DYN_DB\s*=\s*([\d.]+)/.exec(web)[1]));
 });
 

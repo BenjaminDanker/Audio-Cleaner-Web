@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { api, streamUrl } from '../api.js';
 import { GoodToKnow } from '../alternatives.jsx';
@@ -13,10 +13,9 @@ import { LANGUAGES } from '../jobs.js';
 import { startLocalLive } from '../live/local.js';
 import { applyCaption, startLive } from '../live/session.js';
 import { ROOM_TEST_SECONDS, testRoom } from '../live/roomtest.js';
-import { recommendForLive, roomChanges } from '../recommend.js';
-import Recommended from '../components/Recommended.jsx';
+import { roomChanges } from '../recommend.js';
 import StrengthPicker from '../components/StrengthPicker.jsx';
-import { STRENGTHS, strengthDb } from '../strengths.js';
+import { strengthDb } from '../strengths.js';
 
 export default function Live() {
   usePageTitle('Live & API keys');
@@ -135,7 +134,6 @@ function LiveDemo({ pricing }) {
   const [full, setFull] = useState(null); // {message, available:[{denoise?, captions?}], was:{denoise, captions}} when live is at capacity
   const [info, setInfo] = useState(null);
   const [stats, setStats] = useState(null);
-  const [heard, setHeard] = useState(null); // {stats, echo}: what the first seconds of the microphone showed (live/advice.js)
   const [lines, setLines] = useState([]); // caption lines {key, id, text, final}; partials are updated in place by id
   const [targets, setTargets] = useState(['', '', '']); // translations (paid test)
   const [translations, setTranslations] = useState({}); // caption id -> {lang: text}
@@ -191,12 +189,12 @@ function LiveDemo({ pricing }) {
 
   /** cfg: {denoise: tier id | null, captions: '' | 'local' | 'premium'} (defaults to what is selected right now). */
   async function start(cfg = { denoise: denoise ? 'light' : null, captions }) {
-    setError(''); setFull(null); setWarning(null); setStopped(null); setLines([]); setTranslations({}); setStats(null); setInfo(null); setHeard(null);
+    setError(''); setFull(null); setWarning(null); setStopped(null); setLines([]); setTranslations({}); setStats(null); setInfo(null);
     setState('starting');
     if (free) {
       try {
         session.current = await startLocalLive({
-          denoise, captions: freeCaps, language: language || null, attenDb: strengthDb(strength), monitor, onEvent, onStats: setStats, onAdvice: setHeard,
+          denoise, captions: freeCaps, language: language || null, attenDb: strengthDb(strength), monitor, onEvent, onStats: setStats,
         });
         setState('live');
       } catch (e) {
@@ -215,7 +213,7 @@ function LiveDemo({ pricing }) {
         language: cfg.captions === 'premium' ? (mixed ? [paidLanguage, language2] : paidLanguage || null) : null,
         translate: cfg.captions ? liveTargets : [],
         attenDb: strengthDb(strength), monitor,
-        onEvent, onStats: setStats, onAdvice: setHeard,
+        onEvent, onStats: setStats,
       });
       setState('live');
     } catch (e) {
@@ -319,11 +317,7 @@ function LiveDemo({ pricing }) {
       setError(answer.message || 'That change couldn’t be made. Your settings stay as they were.');
     }
   }
-  const roomReco = useMemo(
-    () => (heard ? recommendForLive(heard.stats, heard.echo, { mode, denoise, strength, captions: free ? '' : captions, language: free ? '' : paidLanguage, final: !!heard.final }) : null),
-    [heard, mode, denoise, strength, captions, paidLanguage, free],
-  );
-  const perHour = (r) => (r ? ` · ${moneyUsd(r.usdPerHour)} an hour` : '');
+  const perMinute = (r) => (r ? ` · ${rate(r.usdPerMinute)} a minute` : '');
   return (
     <section className="card stack" aria-labelledby="demo-h">
       <h2 id="demo-h" className="mb0">Try it with your microphone</h2>
@@ -356,7 +350,7 @@ function LiveDemo({ pricing }) {
         <Group id="grp-noise" title="Noise removal">
           <label className="check">
             <input type="checkbox" checked={denoise} disabled={locked || (busy && free)} onChange={(e) => { const v = e.target.checked; change({ denoise: v }, () => setDenoise(v), () => setDenoise(!v)); }} />
-            <span>Remove noise from my voice<span className="hint block">{free ? 'Free, done on your device.' : den ? `${moneyUsd(den.usdPerHour)} an hour` : 'Takes out hiss, hum and room noise.'}</span></span>
+            <span>Remove noise from my voice<span className="hint block">{free ? 'Free, done on your device.' : den ? `${rate(den.usdPerMinute)} a minute` : 'Takes out hiss, hum and room noise.'}</span></span>
           </label>
           <StrengthPicker
             name="live-str" value={strength} disabled={!denoise || state === 'starting'}
@@ -403,12 +397,12 @@ function LiveDemo({ pricing }) {
             </label>
             <label className="choice">
               <input type="radio" name="live-captions" value="local" checked={captions === 'local'} disabled={locked || capRates.local?.available === false} onChange={() => { const was = captions; change({ captions: 'local' }, () => setCaptions('local'), () => setCaptions(was)); }} />
-              <span><b>Standard</b><small>English only{perHour(capRates.local)}</small></span>
+              <span><b>Standard</b><small>English only{perMinute(capRates.local)}</small></span>
             </label>
             {(!pricing || capRates.premium) && (
               <label className="choice">
                 <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={locked || !accurateListed} onChange={() => { const was = captions; change({ captions: 'premium' }, () => setCaptions('premium'), () => setCaptions(was)); }} />
-                <span><b>Extra accurate</b><small>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</small></span>
+                <span><b>Extra accurate</b><small>Works in any language{perMinute(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</small></span>
               </label>
             )}
           </div>
@@ -454,7 +448,7 @@ function LiveDemo({ pricing }) {
                 </select>
               ))}
               {liveTargets.length > 0 && <GoodToKnow k="liveTranslations" />}
-              <span className="hint">Each line shows under the caption a moment later{translateRate ? `. ${moneyUsd(translateRate.usdPerHour)} an hour per language, counted by the speech translated` : ''}{onTrial || !liveTargets.length ? '' : '. Not covered by the free trial'}.</span>
+              <span className="hint">Each line shows under the caption a moment later{translateRate ? `. ${rate(translateRate.usdPerMinute)} a minute per language, counted by the speech translated` : ''}{onTrial || !liveTargets.length ? '' : '. Not covered by the free trial'}.</span>
             </div>
           )}
           </>
@@ -522,7 +516,7 @@ function LiveDemo({ pricing }) {
               <>
                 <p className="mb0"><b>For your room we’d change:</b></p>
                 <ul className="reco-why mb0" data-testid="room-changes">{r.changes.map((c) => <li key={c.key}>{c.text}</li>)}</ul>
-                {Math.abs(delta) >= 0.005 && <p className="small mb0" data-testid="room-price">That’s {moneyUsd(Math.abs(delta))} an hour {delta > 0 ? 'more' : 'less'}.</p>}
+                {Math.abs(delta) >= 0.005 && <p className="small mb0" data-testid="room-price">That’s {rate(Math.abs(delta) / 60)} a minute {delta > 0 ? 'more' : 'less'} ({moneyUsd(Math.abs(delta))} an hour).</p>}
                 {live && !free && <p className="small muted mb0">Your session keeps running; the new settings start at once.</p>}
               </>
             )}
@@ -551,13 +545,6 @@ function LiveDemo({ pricing }) {
       {warning && <div className="banner banner-warn" role="alert">{warning.text} {warning.credit && <Link to="/app/billing">Add credit</Link>}</div>}
       {stopped && <div className="banner banner-info" role="status">{stopped.text} {stopped.credit && <Link to="/app/billing">Add credit</Link>}</div>}
 
-      {live && roomReco && (
-        <Recommended
-          title="Recommended for your room" line={roomReco.line} testId="live-reco"
-          onApply={!roomReco.pending && roomReco.denoise && denoise && roomReco.strength !== strength ? () => { setStrength(roomReco.strength); session.current?.setAtten(strengthDb(roomReco.strength)); } : null}
-          applyLabel={`Use ${(STRENGTHS.find((x) => x.id === roomReco.strength) || {}).label || 'it'}`}
-        />
-      )}
 
       {(live || stats) && (
         <div className="grid grid-3" data-testid="live-stats" data-rtt={stats ? stats.rttAvg.toFixed(1) : ''} data-recv={stats?.recv ?? 0} data-sent={stats?.sent ?? 0}>

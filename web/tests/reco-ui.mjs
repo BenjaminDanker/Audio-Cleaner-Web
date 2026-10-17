@@ -172,60 +172,6 @@ async function open(page, path) {
   await ctx.close();
 }
 
-async function liveReco(mic, startStrength) {
-  const b = await chromium.launch({
-    headless: true,
-    args: ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${mic}`],
-  });
-  const c = await b.newContext({ viewport: { width: 1200, height: 1100 }, permissions: ['microphone'] });
-  const page = await c.newPage();
-  const problems = [];
-  page.on('pageerror', (e) => problems.push(e.message));
-  await page.route('**/audio/api/**', (route) => {
-    const p = new URL(route.request().url()).pathname.replace('/audio/api/', '');
-    if (p === 'me') return route.fulfill({ json: ME });
-    if (p === 'billing/pricing') return route.fulfill({ json: PRICING });
-    return route.fulfill({ status: 404, json: { detail: 'not mocked' } });
-  });
-  await page.goto(`${BASE}/app/live`);
-  await page.getByTestId('live-start').waitFor();
-  await page.locator('label.choice:has(input[name=live-free-captions][value=off])').click(); // no caption download needed
-  if (startStrength) await page.locator(`label:has(input[name=live-str][value=${startStrength}])`).click();
-  await page.getByTestId('live-start').click();
-  await page.getByTestId('live-stop').waitFor({ timeout: 60000 });
-  if (await page.getByTestId('live-reco').count()) throw new Error('shown before there was anything to say');
-  const t0 = Date.now();
-  await page.getByTestId('live-reco-line').waitFor({ timeout: 40000 });
-  const seconds = (Date.now() - t0) / 1000;
-  const line = await page.getByTestId('live-reco-line').textContent();
-  const apply = await page.getByTestId('live-reco-apply').count();
-  const strengthBefore = await page.evaluate(() => document.querySelector('input[name=live-str]:checked')?.value);
-  if (apply) await page.getByTestId('live-reco-apply').click();
-  const strengthAfter = await page.evaluate(() => document.querySelector('input[name=live-str]:checked')?.value);
-  await b.close();
-  return { seconds, line, apply, strengthBefore, strengthAfter, problems };
-}
-
-await check('live: about ten seconds in, a quiet room is told noise removal is not needed', async () => {
-  const r = await liveReco(MIC);
-  if (r.seconds > 14 || !/quiet/.test(r.line) || r.problems.length) throw new Error(JSON.stringify(r));
-  return `after ${r.seconds.toFixed(1)} s: ${r.line}`;
-});
-
-await check('live: a noisy room with the strength set too low is told which strength suits it, and the button applies it while live', async () => {
-  const r = await liveReco(MIC_NOISY, 'gentle');
-  if (r.problems.length) throw new Error(JSON.stringify(r));
-  if (!/Maximum noise removal suits/.test(r.line) || !r.apply) throw new Error(JSON.stringify(r));
-  if (r.strengthBefore !== 'gentle' || r.strengthAfter !== 'max') throw new Error(`${r.strengthBefore} -> ${r.strengthAfter}`);
-  return `${r.line} (${r.strengthBefore} -> ${r.strengthAfter})`;
-});
-
-await check('live: the right strength already set: the settings fit, no button', async () => {
-  const r = await liveReco(MIC_NOISY, 'max');
-  if (r.problems.length || r.apply || !/fit your room/.test(r.line)) throw new Error(JSON.stringify(r));
-  return r.line;
-});
-
 async function roomTest(mic, setup) {
   const b = await chromium.launch({
     headless: true,
@@ -273,16 +219,16 @@ await check('Test my room (paid test, noisy room, Gentle and Standard captions):
   if (r.problems.length) throw new Error(r.problems.join(' | '));
   if (r.seconds < 19 || r.seconds > 30) throw new Error(`took ${r.seconds} s`);
   if (!r.changes.some((t) => /strength: Gentle → Maximum/.test(t)) || !r.changes.some((t) => /Captions: Standard → Extra accurate/.test(t))) throw new Error(JSON.stringify(r.changes));
-  if (!/an hour more/.test(r.price)) throw new Error('price: ' + r.price);
+  if (!/a minute more/.test(r.price)) throw new Error('price: ' + r.price);
   if (r.after?.strength !== 'max' || r.after?.captions !== 'premium') throw new Error(JSON.stringify(r.after));
   return `${r.seconds.toFixed(1)} s: ${r.changes.join('; ')}; ${r.price}`;
 });
 
-await check('Test my room (free test, quiet room, noise removal on): noise removal can go', async () => {
+await check('Test my room (free test, quiet room): noise removal stays on, at Gentle', async () => {
   const r = await roomTest(MIC, async () => {});
   if (r.problems.length) throw new Error(r.problems.join(' | '));
-  if (JSON.stringify(r.changes) !== JSON.stringify(['Noise removal: on → off']) || r.price) throw new Error(JSON.stringify(r));
-  if (r.after?.denoise !== false) throw new Error(JSON.stringify(r.after));
+  if (JSON.stringify(r.changes) !== JSON.stringify(['Noise removal strength: Maximum → Gentle']) || r.price) throw new Error(JSON.stringify(r));
+  if (r.after?.denoise !== true || r.after?.strength !== 'gentle') throw new Error(JSON.stringify(r.after));
   return r.changes.join('; ');
 });
 

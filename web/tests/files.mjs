@@ -174,7 +174,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     // its own price tier; strength and Background noise do not apply then
     await page.getByRole('checkbox', { name: /Rebuild the voice/ }).check();
     if (await page.locator('#noisekind').count() || await page.getByTestId('strength-strength').count()) throw new Error('strength/noise still shown with rebuild');
-    if (!/an hour/.test(await page.getByTestId('rebuild-hint').innerText())) throw new Error('rebuild price missing');
+    if (!/a minute/.test(await page.getByTestId('rebuild-hint').innerText())) throw new Error('rebuild price missing');
     posts.length = 0;
     const [req] = await Promise.all([
       page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'),

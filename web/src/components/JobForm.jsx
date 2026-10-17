@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { Link } from 'react-router';
 import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
-import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, moneyUsd, shownName } from '../format.js';
+import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, rate, shownName } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
 import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
 import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from '../media/convert.js';
@@ -558,7 +558,7 @@ export default function JobForm({ onSubmitted }) {
                 />
                 <Choice
                   name="noise" value="polish" current={noise} onPick={pickNoise} disabled={info.hasAudio === false}
-                  title="Clean &amp; polish" hint={`Paid, done on our side: noise removed, voice evened out, loudness set${polishRate ? `. From ${moneyUsd(polishRate.usdPerHour)} an hour` : ''}`}
+                  title="Clean &amp; polish" hint={`Paid, done on our side: noise removed, voice evened out, loudness set${polishRate ? `. From ${rate(polishRate.usdPerMinute)} a minute` : ''}`}
                   reason="This file has no audio track." recommended={recNoise === 'polish'}
                 />
               </div>
@@ -596,7 +596,7 @@ export default function JobForm({ onSubmitted }) {
                   <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => { touch(); setRebuild(e.target.checked); }} disabled={busy} />
                   <span>Rebuild the voice (for echoey rooms)
                     <span className="hint block" data-testid="rebuild-hint">
-                      Also removes room echo and brings back dull, muffled sound. Slower, {moneyUsd(rebuildRate.usdPerHour)} an hour.
+                      Also removes room echo and brings back dull, muffled sound. Slower, {rate(rebuildRate.usdPerMinute)} a minute.
                       On very echoey recordings it can change a word, so listen before you publish.
                     </span>
                   </span>
@@ -662,7 +662,7 @@ export default function JobForm({ onSubmitted }) {
                 />
                 <Choice
                   name="subs" value="standard" current={subs} onPick={pickSubs}
-                  title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${moneyUsd(standardRate.usdPerHour)} an hour` : ''}`}
+                  title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${rate(standardRate.usdPerMinute)} a minute` : ''}`}
                   recommended={reco?.subs === 'standard'}
                 />
                 <Choice
@@ -705,7 +705,7 @@ export default function JobForm({ onSubmitted }) {
                     </div>
                     <span className="hint" data-testid="translate-hint">
                       {serverText
-                        ? `One set of subtitle files per language${translateRate ? `, ${moneyUsd(translateRate.usdPerHour)} an hour each` : ''}. Made from the transcript.`
+                        ? `One set of subtitle files per language${translateRate ? `, ${rate(translateRate.usdPerMinute)} a minute each` : ''}. Made from the transcript.`
                         : 'Translations come with Standard or Extra accurate subtitles.'}
                     </span>
                   </fieldset>

@@ -29,13 +29,12 @@
 #   Free subtitles        onnx-community/whisper-base (OpenAI Whisper base, MIT), 8-bit ONNX: runs in the visitor's
 #                         browser; web/scripts/sync-dfn.mjs copies it into the site (served from the VPS, signed-in only)
 #   AP-BWE, Sidon ONNX    our conversions (tools/export_apbwe_onnx.py, tools/convert_sidon_onnx.py), published as the
-#                         models-v1 release archive; the Sidon TorchScript files come from sarulab-speech/sidon-v0.1
+#                         models-v2 release archive (the one complete set: every model we convert ourselves); the Sidon TorchScript files come from sarulab-speech/sidon-v0.1
 #   FFmpeg / FFprobe      BtbN/FFmpeg-Builds autobuild-2026-10-09-14-16 (n8.1.3-16-ge0a878dd70, GPL, static).
 #                         BtbN prunes old daily builds: if this URL ever 404s, take a build that is still there,
 #                         replace the btbn-ffmpeg archive line and the two bin/ lines, and mirror the tarball in our own release.
 #
-archive  -         5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce  908538132 models-v1                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v1/AudioCleaner-models-v1.zip
-archive  -         315d667600d8e7c9b2760c7a4102201ff3260c0ec3fb4643d69377ee57ff301d   14777263 models-v2                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v2/AudioCleaner-models-v2.zip
+archive  -         1c58ce59bdb9dfd41c4aabd0ae93e113604f3c75ac664d1b9130f555ab650d04   922088329 models-v2                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v2/AudioCleaner-models-v2.zip
 archive  -         968255015cc65dd999a7eddf8016be89a8a1bbef063ea7d3e9c3a229b0f6faaf  150350364 btbn-ffmpeg                                          https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1.tar.xz
 
 
@@ -85,12 +84,12 @@ file     -         34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453
 
 member   -         329540e2635d1cceebf9ecb716b15e6bdfa434d43b8467138c946ecccc099890  172328840 bin/ffmpeg                                           btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffmpeg
 member   -         94ec62142287906e2c17711b06f1fbe4fd2a2632e241f2786b6cd6ef4ee5c7a2  172095304 bin/ffprobe                                          btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffprobe
-member   -         eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618  119093242 models/ap-bwe/12kto48k.onnx                          models-v1:ap-bwe/12kto48k.onnx
-member   -         ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44  119093242 models/ap-bwe/16kto48k.onnx                          models-v1:ap-bwe/16kto48k.onnx
-member   -         e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55  119093242 models/ap-bwe/24kto48k.onnx                          models-v1:ap-bwe/24kto48k.onnx
-member   -         788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3  119093242 models/ap-bwe/8kto48k.onnx                           models-v1:ap-bwe/8kto48k.onnx
-member   -         08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4  104975475 models/sidon/sidon_dec.onnx                          models-v1:sidon/sidon_dec.onnx
-member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75  397857704 models/sidon/sidon_fe.onnx                           models-v1:sidon/sidon_fe.onnx
+member   -         eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618  119093242 models/ap-bwe/12kto48k.onnx                          models-v2:ap-bwe/12kto48k.onnx
+member   -         ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44  119093242 models/ap-bwe/16kto48k.onnx                          models-v2:ap-bwe/16kto48k.onnx
+member   -         e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55  119093242 models/ap-bwe/24kto48k.onnx                          models-v2:ap-bwe/24kto48k.onnx
+member   -         788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3  119093242 models/ap-bwe/8kto48k.onnx                           models-v2:ap-bwe/8kto48k.onnx
+member   -         08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4  104975475 models/sidon/sidon_dec.onnx                          models-v2:sidon/sidon_dec.onnx
+member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75  397857704 models/sidon/sidon_fe.onnx                           models-v2:sidon/sidon_fe.onnx
 
 local    optional  f4dd2f350f3d41dee721567b7d5c351cb7122c27be9b8fc110ad7cf721e62b1f   15361376 bin/libdf-tract021.so                                older libDF build (tract 0.21), only used by native/deepfilter/test_native.py to compare outputs
 local    -         20383b5926de53220c65c7d0cb1895f73bf0b16947c920a588c1af6907f2c890   25399704 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte

@@ -143,8 +143,8 @@ def test_parse_lock_takes_only_models_releases(cfg):
         {"tag": "models-v1", "name": "AudioCleaner-models-v1.zip", "sha256": sha(MODELS), "size": len(MODELS)}]
     real = Path(__file__).resolve().parents[2] / "deploy" / "models.lock"
     found = mirror.parse_lock(real)
-    assert [f["name"] for f in found] == ["AudioCleaner-models-v1.zip", "AudioCleaner-models-v2.zip"]
-    assert found[0]["size"] == 908538132 and found[0]["sha256"] == "5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce"
+    assert [f["name"] for f in found] == ["AudioCleaner-models-v2.zip"]  # one complete, latest set
+    assert found[0]["size"] == 922088329 and found[0]["sha256"] == "1c58ce59bdb9dfd41c4aabd0ae93e113604f3c75ac664d1b9130f555ab650d04"
 
 
 # ---- bad releases: nothing is published ------------------------------------------------------------------------------

@@ -52,18 +52,20 @@ models.register(SPEECH_MODEL)
 # The two ONNX models and their licence texts come in ONE zip archive on our download server (config.MODELS_URL):
 # AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by tools/export_apbwe_onnx.py, and
 # Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md). The archive holds
-#   README.txt, LICENSES/*, ap-bwe/{8k,12k,16k,24k}to48k.onnx, sidon/{sidon_fe,sidon_dec}.onnx
+#   README.txt, LICENSES/*, ap-bwe/{8k,12k,16k,24k}to48k.onnx, sidon/{sidon_fe,sidon_dec}.onnx, and the heavy-noise model
+#   dpdfnet/dpdfnet8_48khz_hr_batch.onnx (bundled with the app anyway; the archive is the one complete set the server uses too)
 # Each model keeps its own folder and checks; the downloaders unpack the members each model lists (models.py).
 MODELS_ARCHIVE = models.ModelArchive(
-    name="AudioCleaner-models-v1.zip",
-    url=config.MODELS_URL + "AudioCleaner-models-v1.zip",
-    size=908538132,
-    sha256="5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce",
+    name="AudioCleaner-models-v2.zip",
+    url=config.MODELS_URL + "AudioCleaner-models-v2.zip",
+    size=922088329,
+    sha256="1c58ce59bdb9dfd41c4aabd0ae93e113604f3c75ac664d1b9130f555ab650d04",
     shared=tuple(
         models.ModelFile(f"LICENSES/{name}", "", size, sha, member=f"LICENSES/{name}")
         for name, size, sha in (
             ("AP-BWE-MIT.txt", 1817, "f05afcdb387530db09c6eb21c429a9d3417197da54cbc8e69f08affc62fb9beb"),
             ("AP-BWE-weights-LICENSE.txt", 175, "506d3a47a2c84814c8d6a84f0450a18fb9d67c03bb30d8b7e9d357d9540be2d3"),
+            ("DPDFNet-Apache-2.0.txt", 11357, "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"),
             ("Sidon-MIT.txt", 1722, "ba0678e7b808bfdf63e376a58586864a93e28345c7c6304fef743de9e1dbf15d"),
             ("Training-data-attribution.txt", 1605, "19bb96ffa127f60569675f31e263df72bd683f8d7ed1f2382f9f78843dfab16d"),
             ("w2v-BERT-2.0-MIT.txt", 1402, "5285eea4fed64499b8713ea99bf1aa947e6cf33c647ef8842b93adac9ce159bf"),

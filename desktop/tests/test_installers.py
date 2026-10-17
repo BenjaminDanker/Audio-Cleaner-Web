@@ -228,7 +228,7 @@ ditto() {{ "{sys.executable}" -I -c 'import sys, zipfile; zipfile.ZipFile(sys.ar
 def test_the_licences_of_the_archive_are_all_in_the_catalog():
     import zipfile
 
-    local = Path.home() / "audio-cleaner-models-release" / "AudioCleaner-models-v1.zip"
+    local = Path.home() / "audio-cleaner" / "research" / "keep" / "AudioCleaner-models-v2.zip"
     if not local.is_file():
         pytest.skip("the models archive is not on this computer")
     with zipfile.ZipFile(local) as z:

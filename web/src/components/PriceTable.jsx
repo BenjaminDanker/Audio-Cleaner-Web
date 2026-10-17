@@ -1,4 +1,4 @@
-import { BILLING_NOTE, moneyUsd } from '../format.js';
+import { BILLING_NOTE, moneyUsd, rate } from '../format.js';
 import { usePricing } from '../hooks.js';
 
 // What each service is, in one plain line. Keyed by "product/tier" (the ids the price list uses); the names and the
@@ -30,11 +30,6 @@ const GROUPS = [
 
 
 /** "$0.60 / hour" is the headline, the per-minute rate under it: "$0.01 / min", "$0.004 / min". */
-function perMinuteNote(usdPerMinute) {
-  const digits = Math.abs(usdPerMinute * 100 - Math.round(usdPerMinute * 100)) < 1e-9 ? 2 : 3;
-  return `$${usdPerMinute.toFixed(digits)} / min`;
-}
-
 /**
  * The price list. `only` limits it to some groups, e.g. only={['live']} on the Live page; `testId` goes on the table.
  * Rows that are not available are left out. A real table (two columns) so it reads well with a screen reader, and it
@@ -97,7 +92,6 @@ function GroupRows({ group, rates }) {
       <tr className="group"><th scope="rowgroup" colSpan={2}>{group.title}</th></tr>
       {rows.map((r) => {
         const desc = DESCRIPTIONS[`${r.product}/${r.tier}`];
-        const sub = perMinuteNote(r.usdPerMinute);
         return (
           <tr key={`${r.product}/${r.tier}`}>
             <th scope="row">
@@ -105,8 +99,8 @@ function GroupRows({ group, rates }) {
               {desc && <span className="small muted desc">{desc}</span>}
             </th>
             <td className="num">
-              <span className="price-main">{moneyUsd(r.usdPerHour)} / hour</span>
-              <span className="small muted price-sub">{sub}</span>
+              <span className="price-main">{rate(r.usdPerMinute)} / min</span>
+              <span className="small muted price-sub">{moneyUsd(r.usdPerHour)} / hour</span>
             </td>
           </tr>
         );

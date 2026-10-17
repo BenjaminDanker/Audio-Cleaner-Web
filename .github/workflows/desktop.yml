@@ -53,8 +53,8 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # The models the installers download (resources.py): HEAD the models archive (AudioCleaner-models-v1.zip on our
-  # download server, which mirrors the models-v1 release) and the speech model's files and compare the sizes with
+  # The models the installers download (resources.py): HEAD the models archive (AudioCleaner-models-v2.zip on our
+  # download server, which mirrors the models-v2 release) and the speech model's files and compare the sizes with
   # the catalog. Fails when one is missing (e.g. the archive was not mirrored yet) or differs. Nothing needs this job, so a
   # red result here does not stop the builds or the release; look at it before announcing a build.
   model-urls:

@@ -2,7 +2,6 @@
 #include "acw/session.hpp"
 
 #include "acw/backoff.hpp"
-#include "acw/input_advice.hpp"
 #include "acw/languages.hpp"
 #include "acw/opus_codec.hpp"
 #include "acw/output_stage.hpp"
@@ -273,9 +272,6 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	double rtt_avg = 0, rtt_last = 0;
 	bool insecure = false;
 
-	// A quick listen to the microphone: after ~10 s it suggests settings that fit the room (status line).
-	std::unique_ptr<InputAnalyser> analyser;
-
 	std::vector<float> rx;  // IX thread scratch
 
 	// -----------------------------------------------------------------------
@@ -308,8 +304,6 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		if (!cfg.captions.empty())
 			feat.translate = cfg.translate;
 		feat.echo_reference = cfg.echo && cfg.reference;
-		if (supported)
-			analyser = std::make_unique<InputAnalyser>(cfg.reference != nullptr);
 		if (supported && cfg.host_rate != kNetRate) {
 			resampled = true;
 			up = std::make_unique<RationalResampler>(cfg.host_rate, kNetRate);
@@ -477,8 +471,6 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			cur.silent = cur_peak < kSilenceLevel;
 			cur_peak = 0.0f;
 			cur.has_ref = cfg.reference && cfg.reference->pull(cur.ref, kFrameSamples);  // also keeps its clock moving
-			if (analyser && !muted)
-				analyser->push(cur.pcm, cur.has_ref ? cur.ref : nullptr, kFrameSamples);
 			counters.captured.fetch_add(1, std::memory_order_relaxed);
 			if (!streaming.load(std::memory_order_acquire))
 				continue;  // not connected: nothing to send (original audio is played)
@@ -1756,22 +1748,6 @@ std::string Session::status_line(const Localizer &loc) const
 			out += " Echo cancellation is on.";
 		else if (s.echo_requested)
 			out += " Echo cancellation is not available on this server.";
-		if (d.analyser && !s.link_too_slow) {
-			// What the first seconds of the microphone say about the room, as a short tip.
-			AdviceContext ac;
-			ac.denoise = f.denoise;
-			ac.atten_lim_db = d.atten_db.load();
-			ac.captions = f.captions;
-			ac.language = f.language;
-			ac.echo_requested = s.echo_requested;
-			ac.echo_active = s.echo_active;
-			const InputAdvice adv = InputAnalyser::advise(d.analyser->findings(), ac);
-			std::string tips;
-			for (const AdviceNote &n : adv.notes)
-				tips += (tips.empty() ? "" : " ") + say("status." + n.id, replace_first(n.text, "%1", n.arg), n.arg);
-			if (!tips.empty())
-				out += " " + say("status.advice_tip", "Tip:") + " " + tips;
-		}
 		break;
 	case SessionState::Backoff:
 		out = s.message.empty() ? s.detail : s.message;

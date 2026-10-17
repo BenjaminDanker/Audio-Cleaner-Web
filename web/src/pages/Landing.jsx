@@ -4,7 +4,7 @@ import { useAuth } from '../auth.jsx';
 import { IconBroadcast, IconSparkle, IconText, IconWave } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
-import { moneyCents, moneyUsd } from '../format.js';
+import { moneyCents, rate } from '../format.js';
 import { SITE } from '../site.js';
 
 /** Decorative before/after waveform (deterministic pseudo-noise, no assets). */
@@ -135,14 +135,14 @@ export default function Landing() {
             <article className="card product-card">
               <div className="icon"><IconSparkle /></div>
               <h3>Clean &amp; polish</h3>
-              <p>For long recordings and finished files: noise removed, voice evened out and loudness set for podcast, YouTube or broadcast.{polish && <> From {moneyUsd(polish.usdPerHour)} an hour.</>}</p>
+              <p>For long recordings and finished files: noise removed, voice evened out and loudness set for podcast, YouTube or broadcast.{polish && <> From {rate(polish.usdPerMinute)} a minute.</>}</p>
               <span className="spacer" />
               <Link to="/app" className="btn btn-secondary">Clean a file</Link>
             </article>
             <article className="card product-card">
               <div className="icon"><IconBroadcast /></div>
               <h3>Live for streamers</h3>
-              <p>Clean mic audio and live captions while you stream. Your first two hours of live are free, then you only pay for the minutes you are live.{live && <> From {moneyUsd(live.usdPerHour)} an hour.</>}</p>
+              <p>Clean mic audio and live captions while you stream. Your first two hours of live are free, then you only pay for the minutes you are live.{live && <> From {rate(live.usdPerMinute)} a minute.</>}</p>
               <span className="spacer" />
               <Link to="/app/live" className="btn btn-secondary">Try live</Link>
             </article>

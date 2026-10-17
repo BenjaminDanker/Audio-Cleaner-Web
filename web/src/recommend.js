@@ -29,8 +29,6 @@ export const T = {
   QUIET_LUFS: -32,
   LOUD_LUFS: -10,
   CLIP_FRACTION: 0.002,
-  /** the microphone is mostly the speakers' sound: share of its energy that the playback explains */
-  ECHO_SHARE: 0.03,
 };
 
 const STANDARD_LANGUAGES = new Set('en bg hr cs da nl et fi fr de el hu it lv lt mt pl pt ro sk sl es sv ru uk'.split(' '));
@@ -117,41 +115,19 @@ export function recommendForFile(stats, ctx = {}) {
 }
 
 /**
- * The same for a live microphone, about ten seconds in: noise removal (or none, in a quiet room), whether the speakers are heard in
- * the microphone, and the captions level, in one short line.
+ * The live settings that fit a room ("Test my room": twenty seconds of the microphone). Noise removal stays on however quiet the
+ * room sounded: twenty seconds don't show the keyboard, the game, the dog or the door of a whole stream, so a quiet room gets the
+ * gentlest strength instead of none. The OBS plugin decides the same way (obs-plugin/core/src/input_advice.cpp).
  * @param {object} stats Analyser.result() of the microphone
- * @param {{explained: number, known?: boolean}|null} echo EchoProbe.result(): the speakers' sound compared with the microphone
- * @param {{mode?: 'free'|'paid', denoise?: boolean, strength?: string, captions?: string, language?: string, final?: boolean}} ctx what is set now
- *   (final: nothing more will be heard, so there is no point asking for more speech)
- * @returns {null | {pending: boolean, denoise: boolean, strength: string, echo: boolean, captions: 'local'|'premium', notes: string[], line: string}}
+ * @param {string} language the spoken language ('' = not chosen)
+ * @returns {{strength: string, captions: 'local'|'premium'}}
  */
-export function recommendForLive(stats, echo = null, ctx = {}) {
-  if (!stats || !(stats.seconds >= 5)) return null;
-  if (!stats.hasSpeech) {
-    if (ctx.final) return null;
-    const line = 'Say a few words and we’ll suggest the best settings for your room.';
-    return { pending: true, denoise: true, strength: 'balanced', echo: false, captions: 'local', notes: [line], line };
-  }
+export function liveSettingsFor(stats, language = '') {
   const v = noiseVerdict(stats);
-  const notes = [];
-  if (v.clean) {
-    notes.push(ctx.denoise === false ? 'Your room is quiet, so you don’t need noise removal.' : 'Your room is quiet: you can leave noise removal off.');
-  } else if (ctx.denoise === false) {
-    notes.push(`Your room is noisy: turn on noise removal (${strengthName(v.strength)} suits it).`);
-  } else if (ctx.strength && ctx.strength !== v.strength) {
-    notes.push(`For your room, ${strengthName(v.strength)} noise removal suits it best.`);
-  }
-  const heardSpeakers = !!echo && echo.known !== false && echo.explained >= T.ECHO_SHARE;
-  if (heardSpeakers) notes.push('Your speakers can be heard in your microphone: wear headphones, or set “You hear” to Nothing.');
-  if (stats.clipFraction > T.CLIP_FRACTION) notes.push('Your microphone is too loud and distorts: turn it down.');
-  const lang = ctx.language || '';
-  const captions = stats.noiseDb < T.SUBS_NOISY_BELOW || (lang && !STANDARD_LANGUAGES.has(lang)) ? 'premium' : 'local';
-  if (ctx.mode === 'paid' && ctx.captions) {
-    if (ctx.captions === 'local' && captions === 'premium') notes.push('Extra accurate captions will catch more words here.');
-    else if (ctx.captions === 'premium' && captions === 'local') notes.push('Standard captions are enough for your clear voice.');
-  }
-  if (!notes.length) notes.push('The settings fit your room.');
-  return { pending: false, denoise: !v.clean, strength: v.strength || 'balanced', echo: heardSpeakers, captions, notes, line: notes.join(' ') };
+  return {
+    strength: v.clean ? 'gentle' : v.strength,
+    captions: stats.noiseDb < T.SUBS_NOISY_BELOW || (language && !STANDARD_LANGUAGES.has(language)) ? 'premium' : 'local',
+  };
 }
 
 const CAPTION_NAME = { local: 'Standard', premium: 'Extra accurate' };
@@ -164,27 +140,17 @@ const CAPTION_NAME = { local: 'Standard', premium: 'Extra accurate' };
  * @returns {{heardSpeech: boolean, settings: object, changes: {key: string, text: string}[], notes: string[]}}
  */
 export function roomChanges(stats, now) {
-  const r = { heardSpeech: !!stats?.hasSpeech, settings: { ...now }, changes: [], notes: [] };
-  if (!r.heardSpeech) return r;
-  const v = noiseVerdict(stats);
-  if (v.clean) {
-    r.settings.denoise = false;
-    if (now.denoise) r.changes.push({ key: 'denoise', text: 'Noise removal: on → off' });
-  } else {
-    r.settings.denoise = true;
-    r.settings.strength = v.strength;
-    if (!now.denoise) r.changes.push({ key: 'denoise', text: `Noise removal: off → on, ${strengthName(v.strength)}` });
-    else if (now.strength !== v.strength) {
-      r.changes.push({ key: 'strength', text: `Noise removal strength: ${strengthName(now.strength)} → ${strengthName(v.strength)}` });
-    }
+  const r = { heardSpeech: !!stats?.hasSpeech, settings: { ...now, denoise: true }, changes: [], notes: [] };
+  if (!r.heardSpeech) return { ...r, settings: { ...now } };
+  const fit = liveSettingsFor(stats, now.language || '');
+  r.settings.strength = fit.strength;
+  if (!now.denoise) r.changes.push({ key: 'denoise', text: `Noise removal: off → on, ${strengthName(fit.strength)}` });
+  else if (now.strength !== fit.strength) {
+    r.changes.push({ key: 'strength', text: `Noise removal strength: ${strengthName(now.strength)} → ${strengthName(fit.strength)}` });
   }
-  if (now.captions) {
-    const lang = now.language || '';
-    const want = stats.noiseDb < T.SUBS_NOISY_BELOW || (lang && !STANDARD_LANGUAGES.has(lang)) ? 'premium' : 'local';
-    if (want !== now.captions) {
-      r.settings.captions = want;
-      r.changes.push({ key: 'captions', text: `Captions: ${CAPTION_NAME[now.captions]} → ${CAPTION_NAME[want]}` });
-    }
+  if (now.captions && fit.captions !== now.captions) {
+    r.settings.captions = fit.captions;
+    r.changes.push({ key: 'captions', text: `Captions: ${CAPTION_NAME[now.captions]} → ${CAPTION_NAME[fit.captions]}` });
   }
   if (stats.clipFraction > T.CLIP_FRACTION) r.notes.push('Your microphone is too loud and distorts: turn it down.');
   return r;
