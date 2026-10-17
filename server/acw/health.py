@@ -13,7 +13,7 @@ from .config import get_settings
 REQUIRED_MODELS = (
     "DeepFilterNet3_onnx.tar.gz", "captions-en/encoder.int8.onnx", "dpdfnet/dpdfnet8_48khz_hr.onnx",
     "parakeet-v2/encoder-model.onnx", "parakeet-v3/encoder-model.onnx", "silero-vad", "whisper/large-v3-turbo",
-    "whisper/small", "sidon/sidon_fe.onnx", "ap-bwe/8kto48k.onnx",
+    "whisper/small", "whisper/base", "sidon/sidon_fe.onnx", "ap-bwe/8kto48k.onnx",
 )
 REQUIRED_BINARIES = ("ffmpeg", "ffprobe", "libdf.so")
 HEARTBEAT_STALE_S = 180

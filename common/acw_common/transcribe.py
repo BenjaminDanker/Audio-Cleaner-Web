@@ -89,13 +89,28 @@ def speech_sample(audio_16k: np.ndarray, seconds: float = 30.0, floor_dbfs: floa
     return np.concatenate(keep)
 
 
-def detect_language(audio_16k: np.ndarray, whisper_model_path: Path, threads: int = 4, model=None) -> str:
-    """Spoken language of the first 30 s of speech, by a small Whisper model."""
+# A cheap detector is trusted when it is this sure; otherwise the better one is asked (docs/research/heavy-2026-10.md).
+LANGUAGE_CONFIDENCE = 0.6
+
+
+def _detect(audio_16k: np.ndarray, path: Path, threads: int, model=None) -> tuple[str, float]:
     from faster_whisper import WhisperModel
 
     if model is None:
-        model = WhisperModel(str(whisper_model_path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
-    language, _prob, _all = model.detect_language(speech_sample(audio_16k).astype(np.float32, copy=False))
+        model = WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
+    language, prob, _all = model.detect_language(speech_sample(audio_16k).astype(np.float32, copy=False))
+    return language, float(prob)
+
+
+def detect_language(audio_16k: np.ndarray, whisper_model_path: Path, threads: int = 4, model=None,
+                    fallback_model_path: Path | None = None) -> str:
+    """Spoken language of the first 30 s of speech, by a small Whisper model. With `fallback_model_path` the
+    (cheaper) model in `whisper_model_path` decides alone when it is at least LANGUAGE_CONFIDENCE sure, and a
+    bigger one is asked when it is not (short clips, speech under other voices): same answers as the bigger model
+    alone at a quarter of the CPU on ordinary speech."""
+    language, prob = _detect(audio_16k, whisper_model_path, threads, model)
+    if fallback_model_path is not None and prob < LANGUAGE_CONFIDENCE:
+        language, _ = _detect(audio_16k, fallback_model_path, threads)
     return language
 
 
@@ -116,6 +131,16 @@ def _words(tokens, starts, seg_start: float, seg_end: float) -> list[Word]:
     return out
 
 
+# CPU settings measured in docs/research/heavy-2026-10.md (150 s of LibriSpeech, WER 5.28 % in every setting):
+# the encoder is compute bound and gains little from more than two threads (1: 0.294 CPU-s per audio second but
+# twice the wall time, 2: 0.314, 4: 0.37-0.43; the old setting with 4 threads and VAD batches of 8 was 0.44-0.50).
+_PARAKEET_CPU_THREADS = 2
+# ONNX Runtime copies the 2.4 GB of external weights into private memory and re-packs them for its kernels (2.7 GB of
+# anonymous memory per job). With prepacking off the weights are the file's own pages: shared by every concurrent
+# job, evictable, 0.27 GB of private memory per job, for 9 % more CPU.
+_PARAKEET_NO_PREPACK = True
+
+
 def transcribe_parakeet(
     audio_16k: np.ndarray,
     model_path: Path,
@@ -133,18 +158,28 @@ def transcribe_parakeet(
     import onnxruntime as ort
 
     so = ort.SessionOptions()
-    so.intra_op_num_threads = threads if device == "cpu" else 2
+    so.intra_op_num_threads = min(threads, _PARAKEET_CPU_THREADS) if device == "cpu" else 2
     so.inter_op_num_threads = 1
+    if device == "cpu" and _PARAKEET_NO_PREPACK:
+        so.add_session_config_entry("session.disable_prepacking", "1")
     providers = ["CPUExecutionProvider"]
     if device == "cuda":
         # HEURISTIC: the default EXHAUSTIVE cuDNN search re-runs for every new
         # input length (~50 s each on a GTX 960 instead of 0.2 s).
         providers = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
     model = onnx_asr.load_model("nemo-conformer-tdt", str(model_path), sess_options=so, providers=providers)
-    vad = onnx_asr.load_vad("silero", path=str(vad_path))
+    # The Silero VAD is a tiny network run on 32 ms frames: one thread is all it can use. Left to itself it
+    # sizes a thread pool from the CPU count (27 threads in the process at the peak, none of them useful).
+    if device == "cpu":
+        vad_so = ort.SessionOptions()
+        vad_so.intra_op_num_threads = 1
+        vad_so.inter_op_num_threads = 1
+        vad = onnx_asr.load_vad("silero", path=str(vad_path), sess_options=vad_so, providers=["CPUExecutionProvider"])
+    else:  # the GPU path is left exactly as it was
+        vad = onnx_asr.load_vad("silero", path=str(vad_path))
     total = len(audio_16k) / SAMPLE_RATE
     pieces = model.with_vad(vad, max_speech_duration_s=30, min_silence_duration_ms=500,
-                            batch_size=8 if device == "cpu" else 2).with_timestamps()
+                            batch_size=1 if device == "cpu" else 2).with_timestamps()
     out: list[Segment] = []
     for seg in pieces.recognize(audio_16k.astype(np.float32, copy=False)):
         if cancel is not None and cancel.is_set():

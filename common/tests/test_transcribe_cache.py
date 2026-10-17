@@ -50,3 +50,26 @@ def test_without_a_model_argument_it_still_loads_one_for_the_call(tmp_path, fake
     transcribe.transcribe(np.zeros(16000, np.float32), tmp_path, threads=1)
     transcribe.transcribe(np.zeros(16000, np.float32), tmp_path, threads=1)
     assert len(fake_whisper) == 2
+
+
+def test_language_detection_asks_the_bigger_model_only_when_unsure(tmp_path, monkeypatch):
+    asked = []
+
+    class Model:
+        def __init__(self, path, **kwargs):
+            self.path = path
+
+        def detect_language(self, audio):
+            asked.append(self.path)
+            lang, prob = {"sure": ("de", 0.9), "unsure": ("nl", 0.4), "big": ("fr", 0.95)}[self.path.rsplit("/", 1)[1]]
+            return lang, prob, None
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Model))
+    audio = np.ones(16000, np.float32) * 0.1
+    assert transcribe.detect_language(audio, tmp_path / "sure", fallback_model_path=tmp_path / "big") == "de"
+    assert [p.rsplit("/", 1)[1] for p in asked] == ["sure"]
+    asked.clear()
+    assert transcribe.detect_language(audio, tmp_path / "unsure", fallback_model_path=tmp_path / "big") == "fr"
+    assert [p.rsplit("/", 1)[1] for p in asked] == ["unsure", "big"]
+    asked.clear()
+    assert transcribe.detect_language(audio, tmp_path / "unsure") == "nl"  # no fallback given: the one model decides
