@@ -225,6 +225,9 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .product-card p { margin: 0; color: var(--muted); }
 .product-card .btn { margin-top: auto; align-self: flex-start; }
 .product-card .spacer { flex: 1; }
+/* Each way to get it, free or paid: the price, and under it what you get. */
+.product-card .ways { list-style: none; margin: 4px 0 8px; padding: 12px 0 0; border-top: 1px solid var(--border); display: grid; gap: 12px; font-size: 0.95rem; }
+.product-card .ways li { display: grid; gap: 4px; justify-items: start; }
 .steps { counter-reset: step; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); padding: 0; list-style: none; margin: 0; }
 .steps li { counter-increment: step; position: relative; padding: 20px 20px 20px 64px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .section.alt .steps li { background: var(--bg); }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { useAuth } from '../auth.jsx';
-import { IconBroadcast, IconSparkle, IconText, IconWave } from '../components/Icons.jsx';
+import { IconBroadcast, IconText, IconWave } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { moneyCents, rate } from '../format.js';
@@ -93,6 +93,7 @@ export default function Landing() {
   }, [hash]);
   const polish = findRate(pricing, 'denoise', 'standard');
   const live = findRate(pricing, 'stream_denoise', 'light');
+  const subs = findRate(pricing, 'transcribe', 'local');
   const email = SITE.supportEmail.trim();
   const { contact, signedIn, known } = useAuth();
   return (
@@ -122,36 +123,38 @@ export default function Landing() {
 
       <section className="section" id="products">
         <div className="container">
-          <h2 className="section-title">Four ways to get clean audio</h2>
-          <p className="section-lead">Start with the free one. Come back when you have a long file, want subtitles, or go live.</p>
-          <div className="grid grid-4">
+          <h2 className="section-title">Pick what you need</h2>
+          <p className="section-lead">Anything that runs in your browser is free. When we do the work for you, you pay by the minute, and only for what you use.</p>
+          <div className="grid grid-3">
             <article className="card product-card">
               <div className="icon"><IconWave /></div>
-              <h3>Free, in your browser <span className="badge badge-free">Free</span></h3>
-              <p>Drop in a file on the Cleanup page and get it back clean, right in your browser. Nothing is uploaded, and the only limit is how patient your computer is.</p>
-              <span className="spacer" />
-              <Link to="/app" className="btn btn-primary">Try it now</Link>
-            </article>
-            <article className="card product-card">
-              <div className="icon"><IconSparkle /></div>
-              <h3>Clean &amp; polish</h3>
-              <p>For long recordings and finished files: noise removed, voice evened out and loudness set for podcast, YouTube or broadcast.{polish && <> From {rate(polish.usdPerMinute)} a minute.</>}</p>
-              <span className="spacer" />
-              <Link to="/app" className="btn btn-secondary">Clean a file</Link>
-            </article>
-            <article className="card product-card">
-              <div className="icon"><IconBroadcast /></div>
-              <h3>Live for streamers</h3>
-              <p>Clean mic audio and live captions while you stream. Your first two hours of live are free, then you only pay for the minutes you are live.{live && <> From {rate(live.usdPerMinute)} a minute.</>}</p>
-              <span className="spacer" />
-              <Link to="/app/live" className="btn btn-secondary">Try live</Link>
+              <h3>Clean up a recording</h3>
+              <p>Hiss, hum, wind, keyboards and room noise come out; the voice stays natural. Audio or video, almost any format.</p>
+              <ul className="ways">
+                <li><span className="badge badge-free">Free</span><span>In your browser. Your file never leaves your device.</span></li>
+                <li><span className="badge">{polish ? `from ${rate(polish.usdPerMinute)}/min` : 'Paid'}</span><span><b>Clean &amp; polish</b>: stronger on heavy noise, the voice evened out, loudness set for podcast, YouTube or broadcast.</span></li>
+              </ul>
+              <Link to="/app" className="btn btn-primary">Clean a file</Link>
             </article>
             <article className="card product-card">
               <div className="icon"><IconText /></div>
-              <h3>Subtitles &amp; transcripts <span className="badge badge-free">Free in your browser</span></h3>
-              <p>Get TXT, SRT and VTT files from your recording, or have them put into your video. Free on your own device, or paid on our side: Standard, or Extra accurate for tricky audio.</p>
-              <span className="spacer" />
+              <h3>Subtitles &amp; transcripts</h3>
+              <p>SRT, VTT or plain text, or the subtitles put right into your video. Translations if you want them.</p>
+              <ul className="ways">
+                <li><span className="badge badge-free">Free</span><span>In your browser, for clear speech.</span></li>
+                <li><span className="badge">{subs ? `from ${rate(subs.usdPerMinute)}/min` : 'Paid'}</span><span><b>Standard</b>, or <b>Extra accurate</b> for accents, noisy rooms and specialist words.</span></li>
+              </ul>
               <Link to="/app" className="btn btn-secondary">Get subtitles</Link>
+            </article>
+            <article className="card product-card">
+              <div className="icon"><IconBroadcast /></div>
+              <h3>Go live</h3>
+              <p>Your mic cleaned up and captions on screen while you stream, in OBS or any browser tab.</p>
+              <ul className="ways">
+                <li><span className="badge badge-free">Free</span><span>Your first two hours.</span></li>
+                <li><span className="badge">{live ? `from ${rate(live.usdPerMinute)}/min` : 'Paid'}</span><span>After that, counted by the second while you&rsquo;re live.</span></li>
+              </ul>
+              <Link to="/app/live" className="btn btn-secondary">Try live</Link>
             </article>
           </div>
         </div>
@@ -162,7 +165,7 @@ export default function Landing() {
           <h2 className="section-title">How it works</h2>
           <p className="section-lead">Three steps, whichever way you go.</p>
           <ol className="steps">
-            <li><h3>Pick a way</h3><p>Free noise removal in your browser for quick jobs. Clean &amp; polish for long files, loudness and subtitles.</p></li>
+            <li><h3>Choose free or Clean &amp; polish</h3><p>Free runs in your browser. Clean &amp; polish does the work for you and adds loudness and stronger noise removal.</p></li>
             <li><h3>Drop in a file</h3><p>Audio or video. With video, only the sound is uploaded, so it stays small and quick.</p></li>
             <li><h3>Listen, then save</h3><p>Flip between the original and the clean version at the same spot. Then save the audio, or your video with the new sound.</p></li>
           </ol>
