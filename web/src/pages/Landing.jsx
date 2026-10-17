@@ -3,8 +3,8 @@ import { Link, useLocation, useNavigate } from 'react-router';
 import { useAuth } from '../auth.jsx';
 import { IconBroadcast, IconText, IconWave } from '../components/Icons.jsx';
 import PriceTable from '../components/PriceTable.jsx';
-import { findRate, usePageTitle, usePricing } from '../hooks.js';
-import { moneyCents, rate } from '../format.js';
+import { usePageTitle, usePricing } from '../hooks.js';
+import { moneyCents } from '../format.js';
 import { SITE } from '../site.js';
 
 /** Decorative before/after waveform (deterministic pseudo-noise, no assets). */
@@ -91,9 +91,6 @@ export default function Landing() {
     const timer = setTimeout(() => document.getElementById(id)?.scrollIntoView(), 50);
     return () => clearTimeout(timer);
   }, [hash]);
-  const polish = findRate(pricing, 'denoise', 'standard');
-  const live = findRate(pricing, 'stream_denoise', 'light');
-  const subs = findRate(pricing, 'transcribe', 'local');
   const email = SITE.supportEmail.trim();
   const { contact, signedIn, known } = useAuth();
   return (
@@ -132,7 +129,7 @@ export default function Landing() {
               <p>Hiss, hum, wind, keyboards and room noise come out; the voice stays natural. Audio or video, almost any format.</p>
               <ul className="ways">
                 <li><span className="badge badge-free">Free</span><span>In your browser. Your file never leaves your device.</span></li>
-                <li><span className="badge">{polish ? `from ${rate(polish.usdPerMinute)}/min` : 'Paid'}</span><span><b>Clean &amp; polish</b>: stronger on heavy noise, the voice evened out, loudness set for podcast, YouTube or broadcast.</span></li>
+                <li><span className="badge">Paid</span><span><b>Clean &amp; polish</b>: stronger on heavy noise, the voice evened out, loudness set for podcast, YouTube or broadcast.</span></li>
               </ul>
               <Link to="/app" className="btn btn-primary">Clean a file</Link>
             </article>
@@ -142,7 +139,7 @@ export default function Landing() {
               <p>SRT, VTT or plain text, or the subtitles put right into your video. Translations if you want them.</p>
               <ul className="ways">
                 <li><span className="badge badge-free">Free</span><span>In your browser, for clear speech.</span></li>
-                <li><span className="badge">{subs ? `from ${rate(subs.usdPerMinute)}/min` : 'Paid'}</span><span><b>Standard</b>, or <b>Extra accurate</b> for accents, noisy rooms and specialist words.</span></li>
+                <li><span className="badge">Paid</span><span><b>Standard</b>, or <b>Extra accurate</b> for accents, noisy rooms and specialist words.</span></li>
               </ul>
               <Link to="/app" className="btn btn-secondary">Get subtitles</Link>
             </article>
@@ -152,7 +149,7 @@ export default function Landing() {
               <p>Your mic cleaned up and captions on screen while you stream, in OBS or any browser tab.</p>
               <ul className="ways">
                 <li><span className="badge badge-free">Free</span><span>Your first two hours.</span></li>
-                <li><span className="badge">{live ? `from ${rate(live.usdPerMinute)}/min` : 'Paid'}</span><span>After that, counted by the second while you&rsquo;re live.</span></li>
+                <li><span className="badge">Paid</span><span>After that, by the second while you&rsquo;re live.</span></li>
               </ul>
               <Link to="/app/live" className="btn btn-secondary">Try live</Link>
             </article>
