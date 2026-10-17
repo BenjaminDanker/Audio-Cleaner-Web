@@ -105,6 +105,32 @@ fn calibrate(lib: &Path, model: &Path) -> f64 {
     reference * REFERENCE_FRAME_COST / best.max(1e-3)
 }
 
+/// calibrate(), remembered per CPU model in the data directory (written before the sandbox closes it), so a restart
+/// while the machine is busy doesn't measure, and keep, a lower capacity.
+fn calibrated(data_dir: &Path, lib: &Path, model: &Path) -> f64 {
+    if std::env::var("ACW_LIVE_UNITS_PER_CORE").is_ok() {
+        return calibrate(lib, model);
+    }
+    let cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string()))
+        .unwrap_or_default();
+    let key = format!("{cpu}|shared={}|reference={REFERENCE_UNITS_PER_CORE}", ffi::df_shares_model(lib));
+    let cache = data_dir.join("live-calibration-native.json");
+    if let Ok(text) = std::fs::read_to_string(&cache) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if v.get("key").and_then(|k| k.as_str()) == Some(key.as_str()) {
+                if let Some(u) = v.get("units_per_core").and_then(|u| u.as_f64()) {
+                    return u;
+                }
+            }
+        }
+    }
+    let u = calibrate(lib, model);
+    let _ = std::fs::write(&cache, serde_json::json!({"key": key, "units_per_core": (u * 1000.0).round() / 1000.0}).to_string());
+    u
+}
+
 fn thread_cpu_time() -> f64 {
     let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
@@ -136,7 +162,7 @@ fn main() {
     if !ffi::opus_available() {
         log!("libopus is missing: Opus sessions will fail");
     }
-    let upc = calibrate(&lib_df, &dfn_model);
+    let upc = calibrated(&data_dir, &lib_df, &dfn_model);
     let caption_cap = std::env::var("ACW_STREAM_MAX_CAPTION_STREAMS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&v| v > 0).unwrap_or(CAPTION_STREAMS_PER_CORE * live);
     let host = HostLoad::open();
     host.sample(&live_cpus);
@@ -184,6 +210,7 @@ fn main() {
         host,
     });
     captions::set_live_cpus(live_cpus.clone());
+    captions::preload(&engine.captions_dir);
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);

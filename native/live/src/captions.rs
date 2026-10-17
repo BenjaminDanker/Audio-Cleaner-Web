@@ -141,40 +141,70 @@ fn new_recognizer(model_dir: &Path, threads: i32) -> Result<Recognizer, String> 
     Ok(Recognizer(rec))
 }
 
-/// A recognizer group with room, made when all are full (each made group gets its decoder thread).
+/// A recognizer group with room. When all are full another is made, on its own thread, without holding up other
+/// sessions: while it is being made they join the least busy existing group (a little over its share for a moment).
+/// Only with no group at all does a session wait, at most CREATE_TIMEOUT; then it goes on without captions.
+const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+static CREATING: AtomicBool = AtomicBool::new(false);
+
 fn group_for(model_dir: &Path) -> Result<Arc<Group>, String> {
     let groups = GROUPS.get_or_init(|| Mutex::new(Vec::new()));
-    let mut gs = groups.lock().unwrap();
-    if let Some(g) = gs.iter().min_by_key(|g| g.members.lock().unwrap().len()) {
-        if g.members.lock().unwrap().len() < streams_per_recognizer() {
-            return Ok(g.clone());
+    let deadline = Instant::now() + CREATE_TIMEOUT;
+    loop {
+        let least = {
+            let gs = groups.lock().unwrap();
+            gs.iter().min_by_key(|g| g.members.lock().unwrap().len()).cloned()
+        };
+        let full = least.as_ref().map(|g| g.members.lock().unwrap().len() >= streams_per_recognizer()).unwrap_or(true);
+        if full && !CREATING.swap(true, Ordering::SeqCst) {
+            start_recognizer(model_dir);
         }
+        if let Some(g) = least {
+            return Ok(g);
+        }
+        if Instant::now() > deadline {
+            return Err("the caption model is taking too long to load".into());
+        }
+        thread::sleep(Duration::from_millis(50));
     }
-    let (tx, rx) = std::sync::mpsc::channel::<Result<Arc<Group>, String>>();
+}
+
+/// Load one more recognizer in the background (CREATING is set by the caller and cleared here).
+pub fn start_recognizer(model_dir: &Path) {
     let dir = model_dir.to_path_buf();
-    thread::Builder::new()
-        .name("live-captions".into())
-        .spawn(move || {
-            let cpus = LIVE_CPUS.lock().unwrap().clone();
-            if !cpus.is_empty() {
-                crate::admission::pin_current_thread(&cpus);
+    let spawned = thread::Builder::new().name("live-captions".into()).spawn(move || {
+        let cpus = LIVE_CPUS.lock().unwrap().clone();
+        if !cpus.is_empty() {
+            crate::admission::pin_current_thread(&cpus);
+        }
+        match new_recognizer(&dir, recognizer_threads()) {
+            Ok(rec) => {
+                let g = Arc::new(Group { rec, members: Mutex::new(HashMap::new()), tick: Mutex::new(()) });
+                let n = {
+                    let mut gs = GROUPS.get_or_init(|| Mutex::new(Vec::new())).lock().unwrap();
+                    gs.push(g.clone());
+                    gs.len()
+                };
+                log!("caption recognizer {n} ready");
+                CREATING.store(false, Ordering::SeqCst);
+                decoder_loop(g);
             }
-            match new_recognizer(&dir, recognizer_threads()) {
-                Ok(rec) => {
-                    let g = Arc::new(Group { rec, members: Mutex::new(HashMap::new()), tick: Mutex::new(()) });
-                    let _ = tx.send(Ok(g.clone()));
-                    decoder_loop(g);
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                }
+            Err(e) => {
+                log!("caption model could not be loaded: {e}");
+                CREATING.store(false, Ordering::SeqCst);
             }
-        })
-        .map_err(|e| e.to_string())?;
-    let g = rx.recv().map_err(|e| e.to_string())??;
-    log!("caption recognizer {} ready", gs.len() + 1);
-    gs.push(g.clone());
-    Ok(g)
+        }
+    });
+    if spawned.is_err() {
+        CREATING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// At start-up: the first recognizer, so the first captions session doesn't wait for it.
+pub fn preload(model_dir: &Path) {
+    if model_dir.join("encoder.int8.onnx").is_file() && !CREATING.swap(true, Ordering::SeqCst) {
+        start_recognizer(model_dir);
+    }
 }
 
 fn decoder_loop(g: Arc<Group>) {
