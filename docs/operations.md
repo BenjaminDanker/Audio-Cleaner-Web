@@ -637,6 +637,24 @@ cores; Opus through libopus (PyAV held the GIL for every encode); WebSocket comp
 frame: a quarter of the relay's work); standard captions skip silence (2 s after the last speech, with 0.3 s kept
 before the next words; word error rate unchanged on LibriSpeech with pauses); digital silence from a noise gate or a muted interface stops going through the noise model after 0.2 s.
 
+**Native live engine (native/live, `bin/acw-live`).** `python -m acw.stream.worker` (the `acw-stream` unit) starts
+it when it is installed; `ACW_LIVE_ENGINE=python` in `acw-worker.env` keeps the Python workers. `deploy/install.sh`
+builds it with `native/live/build.sh` when Rust is installed and its sources changed (it links the sherpa-onnx C
+library from the venv). Same Unix-socket protocol, same audio bit for bit, same captions; one process serves every
+live core: each session is a thread pinned to one core, lowest cores first (the `ready` event says which, and file
+jobs keep off it). Measured 2026-10-16 on 5 cores: 35 noise-removal sessions at p99 10 ms (0.14 cores each; the
+Python workers needed 0.20-0.24 and managed 5 per core), 45 fell behind. Units per core: 6.5 at the reference cost
+(about 6.9 on the 1700X), remembered in `data/live-calibration-native.json`. Caption models (about 220 MB each) are
+loaded in the background, the first at start; another is added when the others serve 10 streams each
+(`ACW_CAPTION_STREAMS_PER_MODEL`, `ACW_CAPTION_THREADS`). Echo cancellation is `sonora` (WebRTC AEC3 in Rust): 42.8 dB
+of echo removed on our test room, 9 ms delay like before.
+
+**Resource broker (`acw/broker.py`).** One ranked table decides who gets the machine: paid live, then paid file
+jobs, then free-trial live. Jobs keep off the cores live uses; a free-trial session only joins cores live already
+uses while paid jobs run. `python -m acw.admin capacity` (or `--json`) shows everything in one place: CPU per
+logical core, memory and disk against their reserves, every live engine's sessions/units/caption streams, running
+and queued jobs and the cores jobs may use.
+
 **After a libdf change, rebuild it:** `native/deepfilter/build.sh native`, then copy `out/libdf.so` (in the build
 directory, default `~/audio-cleaner/src/deepfilter-build/out/`) to `~/audio-cleaner/bin/` and restart `acw-stream`.
 Until then the old library keeps running at the old capacity (the calibration notices which one it is).
