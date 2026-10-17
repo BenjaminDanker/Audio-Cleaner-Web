@@ -1,7 +1,8 @@
 // Measures WAV files with the same code the browser uses (src/media/analysis.js) and prints one JSON object per file.
 // Used by the Python agreement test (server/tests/test_reco_agreement.py) and the calibration scripts.
-//   node tests/reco-cli.mjs [--sampled] file.wav...   (48 kHz, PCM16 or float32, mono or stereo)
+//   node tests/reco-cli.mjs [--sampled] [--first=SECONDS] [--reco] file.wav...   (48 kHz, PCM16 or float32, mono or stereo)
 // --sampled: only the stretches the browser would decode (planWindows), as it does for a long file.
+// --first=10: only the first 10 seconds, as the live test hears them.   --reco: also print the recommendation.
 import { readFileSync } from 'node:fs';
 import { Analyser, planWindows, RATE } from '../src/media/analysis.js';
 
@@ -58,9 +59,11 @@ if (process.argv[1] && process.argv[1].endsWith('reco-cli.mjs')) {
   const args = process.argv.slice(2);
   const sampled = args.includes('--sampled');
   const withReco = args.includes('--reco');
+  const first = Number((args.find((a) => a.startsWith('--first=')) || '').slice(8)) || 0;
   const { recommendForFile } = withReco ? await import('../src/recommend.js') : {};
   for (const f of args.filter((x) => !x.startsWith('--'))) {
-    const { planes } = readWav(f);
+    let { planes } = readWav(f);
+    if (first) planes = planes.map((p) => p.subarray(0, Math.round(first * RATE)));
     const stats = analysePlanes(planes, { sampled });
     const out = { file: f, ...stats };
     if (withReco) out.reco = recommendForFile(stats, { hasAudio: true, duration: planes[0].length / RATE, channels: planes.length });

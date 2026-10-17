@@ -495,8 +495,9 @@ export class Analyser {
  * the playback explains (0 to 1; roughly, 0.02 is an echo about 17 dB below the voice). Works on a 2 kHz copy (the low speech band).
  */
 export class EchoProbe {
-  constructor({ maxLagMs = 400, seconds = 10 } = {}) {
+  constructor({ minLagMs = 0, maxLagMs = 400, seconds = 10 } = {}) {
     this.dec = 24; // 48 kHz -> 2 kHz by averaging
+    this.minLag = Math.round((minLagMs / 1000) * (RATE / this.dec));
     this.maxLag = Math.round((maxLagMs / 1000) * (RATE / this.dec));
     this.cap = Math.round(seconds * (RATE / this.dec));
     this.mic = new Float32Array(this.cap);
@@ -543,7 +544,7 @@ export class EchoProbe {
     if (er < 1e-9 || em < 1e-9) return { explained: 0, lagMs: 0, known: true };
     let best = 0;
     let bestLag = 0;
-    for (let lag = 0; lag <= maxLag; lag++) {
+    for (let lag = this.minLag; lag <= maxLag; lag++) {
       let c = 0;
       let r2 = 0;
       for (let i = lag; i < n; i++) { c += mic[i] * ref[i - lag]; r2 += ref[i - lag] * ref[i - lag]; }

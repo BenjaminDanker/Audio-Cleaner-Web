@@ -481,3 +481,8 @@ pre.code code { background: none; padding: 0; font-size: inherit; overflow-wrap:
   .dev-table th, .dev-table td { padding: 2px 0; border-bottom: 0; min-width: 0; white-space: normal; }
   .dev-table td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
 }
+
+/* "Recommended for this file / for your room" */
+.reco { border-left: 3px solid var(--brand); background: var(--brand-soft); border-radius: 0 10px 10px 0; padding: 10px 14px; display: grid; gap: 6px; }
+.reco-why { margin: 0; padding-left: 1.1em; display: grid; gap: 2px; }
+.reco-badge { font-style: normal; font-weight: 600; font-size: 0.72rem; color: var(--brand); border: 1px solid currentColor; border-radius: 999px; padding: 0 7px; margin-bottom: 4px; align-self: flex-start; white-space: nowrap; }
