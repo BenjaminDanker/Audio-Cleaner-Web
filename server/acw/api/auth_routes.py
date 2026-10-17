@@ -335,6 +335,7 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
             "isAdmin": bool(user["is_admin"]),
             "status": user["status"],
             "tosAccepted": user["tos_version"] == auth.TOS_VERSION,
+            "tosVersion": auth.TOS_VERSION,
             "createdAt": user["created_at"],
         },
         "csrfToken": principal.csrf_token,

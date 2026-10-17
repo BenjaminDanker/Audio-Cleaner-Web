@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router';
-import { apiOffline, checkHealth } from '../api.js';
+import { api, apiOffline, checkHealth } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { balanceMoney } from '../format.js';
 import { loadPricing } from '../hooks.js';
@@ -158,16 +158,20 @@ function Footer() {
 }
 
 // Shown only to someone whose session began before the Terms last changed (signing in records agreement, so new
-// accounts never see it). Using the service records agreement to the new version, and the notice goes away.
+// accounts never see it). OK records agreement to the new version (as using the service does), so it doesn't come back.
 function TermsNotice() {
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [hidden, setHidden] = useState(false);
   if (!user || user.tosAccepted || hidden) return null;
+  const ok = () => {
+    setHidden(true);
+    api('account/tos', { method: 'POST', body: { version: user.tosVersion } }).then(refresh, () => {});
+  };
   return (
     <div className="container" data-testid="terms-notice">
       <div className="banner banner-info row-between" role="status">
         <span>We&rsquo;ve updated our <Link to="/terms">Terms of Service</Link>. Using the service from now on means you agree to the new version.</span>
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setHidden(true)}>OK</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={ok} data-testid="terms-ok">OK</button>
       </div>
     </div>
   );
