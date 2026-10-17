@@ -50,6 +50,9 @@ jobs:
 
       - name: Install the locked packages and the test tools
         run: |
+          # libopus: live Opus frames (the server loads it with ctypes, as on the host)
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libopus0
           python -m pip install --upgrade pip
           # Every file is checked against the sha256 recorded in the lock (deploy/hash_lock.py).
           pip install --require-hashes -r server/requirements.lock

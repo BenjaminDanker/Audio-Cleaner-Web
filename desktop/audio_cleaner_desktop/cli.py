@@ -284,7 +284,8 @@ def selftest(gui: bool = False) -> int:
         t = np.arange(3 * sr) / sr
         rng = np.random.default_rng(0)
         x = (0.2 * np.sin(2 * np.pi * 220 * t) + 0.03 * rng.standard_normal(t.size)).astype(np.float32)
-        y = pipeline.clean_audio(x, resources.libdf_path(), resources.model_path(), threads=1)
+        y = pipeline.clean_audio(x, resources.libdf_path(), resources.model_path(), threads=1,
+                                 heavy_model_path=resources.heavy_noise_model_path())
         if y.shape != (x.size, 1) or not np.isfinite(y).all():
             raise RuntimeError("the noise reduction engine returned unexpected audio")
         ff = engine.ffmpeg()

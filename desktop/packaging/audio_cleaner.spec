@@ -85,6 +85,9 @@ excludes = [f"PySide6.{m}" for m in UNUSED_QT] + [
     "tkinter", "_tkinter", "turtle",
     "av",  # PyAV bundles GPL x264/x265; replaced by rthook_av_stub.py
     "pytest", "setuptools", "pkg_resources", "distutils", "IPython", "matplotlib", "PIL", "sympy",
+    # cffi's helper for building C extensions (imports distutils); the app only loads cffi's compiled modules
+    # (through cryptography), never builds any.
+    "cffi._shimmed_dist_utils",
 ]
 
 a = Analysis(  # noqa: F821

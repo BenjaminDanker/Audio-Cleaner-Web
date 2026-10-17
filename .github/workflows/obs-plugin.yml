@@ -409,11 +409,12 @@ jobs:
           shopt -s nullglob
           one() { local m=("$@"); [ "${#m[@]}" -eq 1 ] || { echo "::error::expected one file, got: ${m[*]}"; exit 1; }; echo "${m[0]}"; }
           base="audio-cleaner-obs-plugin-$version"
-          mv "$(one *-windows-x64.zip)" "$base-windows.zip"
-          mv "$(one *-windows-setup.exe)" "$base-windows-setup.exe"
-          mv "$(one *-macos-universal.tar.xz)" "$base-mac.tar.xz"
-          mv "$(one *.deb)" "$base-ubuntu-debian.deb"
-          mv "$(one *-ubuntu-x86_64.tar.xz)" "$base-linux-other.tar.xz"
+          rename() { [ "$1" = "$2" ] || mv "$1" "$2"; }  # the installer is built under its final name already
+          rename "$(one *-windows-x64.zip)" "$base-windows.zip"
+          rename "$(one *-windows-setup.exe)" "$base-windows-setup.exe"
+          rename "$(one *-macos-universal.tar.xz)" "$base-mac.tar.xz"
+          rename "$(one *.deb)" "$base-ubuntu-debian.deb"
+          rename "$(one *-ubuntu-x86_64.tar.xz)" "$base-linux-other.tar.xz"
           # The complete source of this version (GPL-2.0-or-later): the plugin folder as built, nothing else.
           tar -C "$GITHUB_WORKSPACE" --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
             --transform "s|^obs-plugin|$base-source|" --exclude-vcs -czf "$base-source.tar.gz" obs-plugin
