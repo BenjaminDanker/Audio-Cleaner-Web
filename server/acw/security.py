@@ -17,7 +17,6 @@ import hmac
 import math
 import secrets
 import threading
-import logging
 import time
 import unicodedata
 from collections import OrderedDict
@@ -26,7 +25,6 @@ import anyio
 from fastapi import HTTPException, Request
 
 API_KEY_PREFIX = "acw_"
-log = logging.getLogger(__name__)
 
 
 def random_token(nbytes: int = 32) -> str:
@@ -48,23 +46,12 @@ def canonical_email(email: str) -> str:
     return f"{local}@{domain}"
 
 
-_warned_unkeyed = False
-
-
 def keyed_hash(purpose: str, value: str) -> str:
     """HMAC-SHA256 of `value` under the server secret, separated by `purpose`, for values that are stored only to
-    be matched later (so a copy of the database can't be used to test guesses). Without a configured secret
-    (a development setup) it is a plain SHA-256 and the first use logs a warning."""
-    global _warned_unkeyed
+    be matched later (so a copy of the database can't be used to test guesses)."""
     from .config import get_settings
 
-    s = get_settings()
-    if not s.session_secret_configured:
-        if not _warned_unkeyed:
-            _warned_unkeyed = True
-            log.warning("ACW_SESSION_SECRET is not set: %s hashes are unkeyed", purpose)
-        return sha256_hex(value)
-    return hmac.new(s.session_secret, f"{purpose}\0{value}".encode(), hashlib.sha256).hexdigest()
+    return hmac.new(get_settings().session_secret, f"{purpose}\0{value}".encode(), hashlib.sha256).hexdigest()
 
 
 def consteq(a: str, b: str) -> bool:

@@ -6,7 +6,7 @@
   user EMAIL                     show balance, status, recent activity
   suspend EMAIL REASON / unsuspend EMAIL
   stats [--days N]               plain-text report for the last N days (default 30): jobs by tier, queue wait and run
-                                 time percentiles, failures, live sessions, free minutes, usage (read-only)
+                                 time percentiles, failures, live sessions, usage (read-only)
   activity                       what is running now (file jobs, live sessions)
   live-count                     number of live sessions running now
   check-money                    balances and holds against the ledger (exit 1 on a mismatch)

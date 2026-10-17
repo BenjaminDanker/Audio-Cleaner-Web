@@ -607,53 +607,46 @@ all services together may use `ACW_MEMORY_PERCENT` (default 40) of RAM
 scales with cores and the start-up speed calibration. Moving to a bigger
 machine needs no edits: run `deploy/install.sh` there.
 
-**Live comes first.** Live audio runs in several worker processes (`acw-stream` starts them: one per
-pair of live cores, `ACW_STREAM_WORKERS` to change it; set it in `acw-worker.env`). Worker 1 listens on
-`data/stream.sock`, worker n on `data/stream-n.sock`; each is pinned to its own cores and the web process fills
-them in order, trying the next when one is full. Live may use all cores but `ACW_MIN_JOB_CORES` (default 1 per 8
-cores), which file jobs always keep; file jobs keep off the cores of the workers that have sessions plus one spare,
-re-pinned every second, so they slow down instead of slowing live audio (a job thread on a live core's other
-hyper-thread halves its speed). One Python process falls behind at about ten sessions however many cores it has
-(each session's thread needs the GIL around every native call): hence the workers.
+**Live comes first: the native live engine (native/live, `bin/acw-live`, the `acw-stream` unit).** One process
+serves every live session; `deploy/install.sh` builds it with `native/live/build.sh` when its sources change (it
+links the sherpa-onnx C library from the venv) and stops if the build fails. It refuses to start without libopus
+or a libdf that shares the model weights (`df_shares_model`, native/deepfilter/tract-0.23.patch). Each session is a
+thread pinned to one physical core, lowest cores first (the `ready` event says which); live may use all cores but
+`ACW_MIN_JOB_CORES` (default 1 per 8 cores), which file jobs always keep. File jobs keep off the cores with
+sessions plus one spare, re-pinned every second, so they slow down instead of slowing live audio (a job thread on a
+live core's other hyper-thread halves its speed).
 
-Capacity is in units (live denoise = 1, local captions = 0.7): each worker's cores x units per core, calibrated at
-start-up from how fast this CPU runs the model (reference 4.05 at 0.110 cores per session when libdf shares the model
-weights between sessions, `df_shares_model`; 2.4 for an older libdf; 4.3 on the 1700X; override
-`ACW_LIVE_UNITS_PER_CORE`), shrunk by other load measured on its cores. Measured 2026-10-16 (Opus, 20 ms frames,
-3 workers on 6 cores, round trip inside the server):
+Capacity is in units (live denoise = 1, a standard caption stream = 1.2, echo cancellation = 0.2): live cores x
+units per core, shrunk by other load measured on the live cores. Units per core are calibrated at start-up from how
+fast this CPU runs the model: 6.5 at the reference cost of 0.110 cores per session (about 6.9 on the 1700X),
+remembered per CPU in `data/live-calibration-native.json`. The web process also refuses new sessions when its own
+event loop lags (p90 over `ACW_LOOP_LAG_LIMIT_MS`, default 25). Caption models (about 220 MB each) are loaded in
+the background, the first at start; at most 5 streams each (`ACW_CAPTION_STREAMS_PER_MODEL`, `ACW_CAPTION_THREADS`),
+the next one loading before they are full. Echo cancellation is `sonora` (WebRTC AEC3 in Rust): 42.8 dB of echo
+removed on our test room.
 
-| sessions on 6 cores | p50 | p99 | captions behind (median) |
-|---|---|---|---|
-| 30 noise removal | 7 ms | 16 ms | |
-| 36 noise removal | falls behind | | |
-| 12 noise removal + standard captions | 6 ms | 14 ms | 0.12 s |
-| 18 noise removal + standard captions | 7 ms | 39 ms | 0.56 s |
-| 30 standard captions only (speech with pauses) | 1 ms | 3 ms | 0.31 s |
+Measured 2026-10-16 (Opus, 20 ms frames, round trip inside the server):
+
+| sessions on 5 cores | p99 | captions behind |
+|---|---|---|
+| 35 noise removal | 10 ms | |
+| 45 noise removal | falls behind | |
+| 12 noise removal + standard captions | | within 0.3 s |
+| 20 noise removal + standard captions | | falls behind |
 
 What made the difference (before: 15 noise-removal sessions on 7 cores): libdf kept a copy of the 8 MB model per
 session, so at 28 sessions each one cost 0.40 cores instead of 0.14 (the weights evicted one another from the CPU
-caches; native/deepfilter/tract-0.23.patch now shares one copy, bit-identical output); one Python process per pair of
-cores; Opus through libopus (PyAV held the GIL for every encode); WebSocket compression off (it deflated every audio
-frame: a quarter of the relay's work); standard captions skip silence (2 s after the last speech, with 0.3 s kept
-before the next words; word error rate unchanged on LibriSpeech with pauses); digital silence from a noise gate or a muted interface stops going through the noise model after 0.2 s.
-
-**Native live engine (native/live, `bin/acw-live`).** `python -m acw.stream.worker` (the `acw-stream` unit) starts
-it when it is installed; `ACW_LIVE_ENGINE=python` in `acw-worker.env` keeps the Python workers. `deploy/install.sh`
-builds it with `native/live/build.sh` when Rust is installed and its sources changed (it links the sherpa-onnx C
-library from the venv). Same Unix-socket protocol, same audio bit for bit, same captions; one process serves every
-live core: each session is a thread pinned to one core, lowest cores first (the `ready` event says which, and file
-jobs keep off it). Measured 2026-10-16 on 5 cores: 35 noise-removal sessions at p99 10 ms (0.14 cores each; the
-Python workers needed 0.20-0.24 and managed 5 per core), 45 fell behind. Units per core: 6.5 at the reference cost
-(about 6.9 on the 1700X), remembered in `data/live-calibration-native.json`. Caption models (about 220 MB each) are
-loaded in the background, the first at start; at most 5 streams each (`ACW_CAPTION_STREAMS_PER_MODEL`,
-`ACW_CAPTION_THREADS`), the next one loading before they are full. A caption stream counts 1.2 units (0.17 cores, more
-than the noise removal): 12 noise+caption sessions on 5 cores kept captions within 0.3 s, 20 fell behind. Echo cancellation is `sonora` (WebRTC AEC3 in Rust): 42.8 dB
-of echo removed on our test room, 9 ms delay like before.
+caches; the patch now shares one copy, bit-identical output); one native process instead of Python workers that
+each fell behind at about ten sessions (the GIL around every native call); Opus through libopus; WebSocket
+compression off (it deflated every audio frame: a quarter of the relay's work); standard captions skip silence (2 s
+after the last speech, with 0.3 s kept before the next words; word error rate unchanged on LibriSpeech with pauses);
+digital silence from a noise gate or a muted interface stops going through the noise model after 0.2 s, and clients
+that know they are silent send a 3-byte silence frame instead of audio.
 
 **Resource broker (`acw/broker.py`).** One ranked table decides who gets the machine: paid live, then paid file
 jobs, then free-trial live. Jobs keep off the cores live uses; a free-trial session only joins cores live already
 uses while paid jobs run. `python -m acw.admin capacity` (or `--json`) shows everything in one place: CPU per
-logical core, memory and disk against their reserves, every live engine's sessions/units/caption streams, running
+logical core, memory and disk against their reserves, the live engine's sessions/units/caption streams, running
 and queued jobs and the cores jobs may use.
 
 **After a libdf change, rebuild it:** `native/deepfilter/build.sh native`, then copy `out/libdf.so` (in the build

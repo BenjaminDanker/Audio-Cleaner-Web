@@ -80,8 +80,6 @@ class Settings:
     turnstile_secret: str | None
 
     admin_emails: list[str] = field(default_factory=list)
-    # False when the development fallback secret is in use (keyed hashes then fall back to plain ones, with a warning).
-    session_secret_configured: bool = False
 
     max_upload_bytes: int = 4 * 1024**3
     workers: int = 3  # file-job worker units (ACW_WORKERS), used for queue estimates
@@ -139,7 +137,6 @@ def get_settings() -> Settings:
         models_dir=Path(_env("ACW_MODELS_DIR", str(home / "models"))),
         web_dist=Path(web_dist) if web_dist else None,
         session_secret=secret.encode(),
-        session_secret_configured=bool(_env("ACW_SESSION_SECRET")),
         session_days=_env_int("ACW_SESSION_DAYS", 30),
         google_client_id=_env("GOOGLE_CLIENT_ID"),
         google_client_secret=_env("GOOGLE_CLIENT_SECRET"),

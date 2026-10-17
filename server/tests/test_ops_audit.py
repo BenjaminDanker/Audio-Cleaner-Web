@@ -337,18 +337,8 @@ def process_with(monkeypatch, uid, denoise_tier, noise):
         return {"ok": True, "outputs": [{"file": "out.wav", "kind": "audio"}], "noise": noise}
 
     monkeypatch.setattr(W, "run_stage", stage)
-    monkeypatch.setattr(W, "_use_available_tier", lambda j: j)  # the models are "there"; the stage says what really ran
     W.process(job, {})
     return dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
-
-
-def test_rebuild_that_did_not_run_is_billed_as_standard(monkeypatch):
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    row = process_with(monkeypatch, uid, "rebuild", noise="light")
-    assert row["status"] == "done" and row["tier"] == "standard"
-    assert row["cost_micros"] == pricing.cost_micros("denoise", "standard", 600)
-    assert "billed at its price" in json.loads(row["params_json"])["notice"]
 
 
 def test_rebuild_that_ran_is_billed_as_rebuild(monkeypatch):
@@ -441,9 +431,9 @@ def test_noise_strength_is_validated(value, expected):
 
 def test_job_noise_strength_nan_is_refused():
     with pytest.raises(jobs.JobError):
-        jobs.validate_options("denoise", "standard", None, {"atten_lim_db": float("nan")}, False)
+        jobs.validate_options("denoise", "standard", None, {"atten_lim_db": float("nan")})
     with pytest.raises(jobs.JobError):
-        jobs.validate_options("denoise", "standard", None, {"atten_lim_db": "x"}, False)
+        jobs.validate_options("denoise", "standard", None, {"atten_lim_db": "x"})
 
 
 def test_sessions_nobody_runs_are_closed_and_billed_by_the_sweeper():
@@ -538,47 +528,12 @@ def test_new_sessions_are_refused_while_draining(tmp_path):
 
 
 def test_premium_captions_hear_the_original_not_the_denoised_audio():
-    """Source check of the worker: the tap carries `x` (after echo removal, before noise removal) for both codecs."""
-    src = (Path(__file__).resolve().parents[1] / "acw/stream/worker.py").read_text()
-    assert "tap = P.pack_audio(seq, x) if tap_pcm else None" in src
+    """Source check of the live engine: the tap carries `x` (after echo removal, before noise removal)."""
+    src = (Path(__file__).resolve().parents[2] / "native/live/src/session.rs").read_text()
+    assert "ipc::MSG_TAP, &ipc::pack_audio(seq, &x)" in src
     routes_src = (Path(__file__).resolve().parents[1] / "acw/stream/routes.py").read_text()
     assert "sess.premium.feed(y)" not in routes_src
 
-
-def test_shared_caption_thread_survives_a_failing_session():
-    from acw.stream import engine
-
-    class Rec:
-        def __init__(self):
-            self.decoded = []
-
-        def is_ready(self, stream):
-            return stream == "good" and not self.decoded
-
-        def decode_streams(self, streams):
-            self.decoded += streams
-
-    class Cap:
-        def __init__(self, stream, fail):
-            self.stream, self.fail, self.closed, self.published = stream, fail, False, 0
-
-        def _take_audio(self):
-            if self.fail:
-                raise RuntimeError("bad stream")
-
-        def _publish(self, final=False):
-            self.published += 1
-
-    r = engine._StreamingRecognizer.__new__(engine._StreamingRecognizer)
-    r.rec, r._lock = Rec(), engine.threading.Lock()
-    good, bad = Cap("good", False), Cap("bad", True)
-    r._captioners = {good, bad}
-    r._tick()
-    assert bad.closed and bad not in r._captioners
-    assert good in r._captioners and good.published == 1 and r.rec.decoded == ["good"]
-
-
-# ---------------------------------------------------------------- ledger view, names (W-06, W-09, W-23)
 
 def test_ledger_history_has_friendly_labels_and_says_when_there_is_more():
     uid = user()

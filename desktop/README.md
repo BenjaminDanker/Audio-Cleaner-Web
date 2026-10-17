@@ -12,7 +12,7 @@ nothing but a normal web request with the app version).
 - `audio_cleaner_desktop/gui/` the window: queue, settings, preview, history, About
 - `audio_cleaner_desktop/cli.py` the `--cli` and `--selftest` modes
 - `vendor/` native pieces for running from source (git-ignored, filled by the packaging scripts):
-  `native/{libdf, ffmpeg, ffprobe}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr.onnx}`, `licenses/`, and a
+  `native/{libdf, ffmpeg, ffprobe}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr_batch.onnx}`, `licenses/`, and a
   small speech model for the tests in `test-models/whisper-small/`.
   On Linux, missing pieces fall back to `~/audio-cleaner/{bin,models}`.
 

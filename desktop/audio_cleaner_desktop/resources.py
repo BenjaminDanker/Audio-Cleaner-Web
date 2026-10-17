@@ -146,8 +146,7 @@ def model_path() -> Path:
 
 
 def heavy_noise_model_path() -> Path:
-    """DPDFNet-8 (48 kHz), the noise remover for recordings with heavy background noise. When it is
-    missing, heavy noise falls back to DeepFilterNet3 (pipeline.clean_audio)."""
+    """DPDFNet-8 (48 kHz), the noise remover for recordings with heavy background noise (ships with the app)."""
     from acw_common import dpdfnet
 
     return _locate("models", "models/dpdfnet", dpdfnet.MODEL_FILE) / dpdfnet.MODEL_FILE
@@ -217,13 +216,15 @@ def model_licenses_dir() -> Path | None:
 def check() -> list[str]:
     """File names of shipped components that are missing (empty when all present). The speech model is
     not one of them: it is downloaded when subtitles are first wanted (speech_ready())."""
-    from acw_common import dfn
+    from acw_common import dfn, dpdfnet
 
     missing = []
     if not libdf_path().is_file():
         missing.append(dfn.LIB_NAME)
     if not model_path().is_file():
         missing.append(dfn.MODEL_FILE)
+    if not heavy_noise_model_path().is_file():
+        missing.append(dpdfnet.MODEL_FILE)
     ff = ffmpeg_dir()
     missing += [n for n in (_FFMPEG, _FFPROBE) if not (ff / n).is_file()]
     return missing

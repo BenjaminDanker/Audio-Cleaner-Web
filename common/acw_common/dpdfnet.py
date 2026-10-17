@@ -1,8 +1,9 @@
 """DPDFNet-8 (48 kHz "HR" variant) speech enhancement via onnxruntime (CPU), no torch.
 
-Model: Ceva-IP/DPDFNet `onnx/dpdfnet8_48khz_hr.onnx` (Apache-2.0). It is a
-causal streaming model: one call takes one STFT frame plus the recurrent state
-and returns the enhanced frame plus the new state:
+Model: Ceva-IP/DPDFNet `onnx/dpdfnet8_48khz_hr.onnx` (Apache-2.0), run as our
+batched export of it (below). It is a causal streaming model: one call takes
+one STFT frame plus the recurrent state and returns the enhanced frame plus the
+new state (published batch-1 shapes):
 
     spec     (1, 1, 481, 2)  float32   real/imag of one rfft frame
     state_in (90228,)        float32   packed RNN + running-norm state
@@ -42,10 +43,10 @@ independent segments per call:
     state_in (B, 90228)      float32   one state row per segment
     -> spec_e (B, 1, 481, 2), state_out (B, 90228)
 
-and each row is exactly the batch-1 model on that segment, at 0.41 instead of
-0.73 CPU-seconds per audio second on one Zen 1 core (batch 8). The segments
-of a call are stepped in lock step; every worker thread owns one call at a
-time. If only the batch-1 file is installed it is used as before (batch of 1).
+and each row is exactly the published batch-1 model on that segment, at 0.41
+instead of 0.73 CPU-seconds per audio second on one Zen 1 core (batch 8). The
+segments of a call are stepped in lock step; every worker thread owns one call
+at a time.
 """
 from __future__ import annotations
 
@@ -66,8 +67,7 @@ HOP = 480
 BINS = WIN // 2 + 1
 # Output lags input by 4 hops (2 windows): STFT overlap + model look-ahead.
 MODEL_DELAY = 4 * HOP
-MODEL_FILE = "dpdfnet8_48khz_hr.onnx"
-BATCH_MODEL_FILE = "dpdfnet8_48khz_hr_batch.onnx"  # same network and weights, dynamic batch (tools/export_dpdfnet_batch.py)
+MODEL_FILE = "dpdfnet8_48khz_hr_batch.onnx"  # the published weights with a dynamic batch (tools/export_dpdfnet_batch.py)
 MAX_BATCH = 8  # segments per model call: 8 is within 3 % of the best per-frame cost measured (16)
 
 _BLOCK_FRAMES = 200  # frames (2 s) per FFT batch / cancel check / write
@@ -91,17 +91,6 @@ def unload() -> None:
         _models.clear()
 
 
-def resolve_model(path: str | Path) -> Path:
-    """The file actually run for `path`: the batched sibling `BATCH_MODEL_FILE` when `path` is the standard
-    model and the sibling is installed (set ACW_DPDFNET_BATCH=0 to force the batch-1 file), else `path`."""
-    p = Path(path)
-    if p.name == MODEL_FILE and os.environ.get("ACW_DPDFNET_BATCH", "1") != "0":
-        sib = p.with_name(BATCH_MODEL_FILE)
-        if sib.is_file():
-            return sib
-    return p
-
-
 class _Model:
     """One shared InferenceSession (run() is thread-safe) and the initial state of one stream."""
 
@@ -122,16 +111,14 @@ class _Model:
         self.init = state
         self.in_n, self.st_n = sess.get_inputs()[0].name, sess.get_inputs()[1].name
         self.out_names = [sess.get_outputs()[0].name, sess.get_outputs()[1].name]
-        self.batched = len(sess.get_inputs()[1].shape) == 2  # state (B, S) versus the flat (S,) of the batch-1 file
-        self.max_batch = MAX_BATCH if self.batched else 1
+        if len(sess.get_inputs()[1].shape) != 2:
+            raise ValueError(f"{path}: not the batched model ({MODEL_FILE}, tools/export_dpdfnet_batch.py)")
 
     def new_state(self, rows: int) -> np.ndarray:
-        return np.repeat(self.init[None, :], rows, axis=0) if self.batched else self.init.copy()
+        return np.repeat(self.init[None, :], rows, axis=0)
 
     def step(self, spec: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """spec (rows, 1, BINS, 2) -> (enhanced (rows, 1, BINS, 2), new state)."""
-        if not self.batched and spec.shape[0] != 1:
-            raise ValueError("the batch-1 model takes one row per call")
         return self.sess.run(self.out_names, {self.in_n: spec, self.st_n: state})
 
 
@@ -139,7 +126,7 @@ def _load(path: str) -> _Model:
     with _lock:
         hit = _models.get(path)
         if hit is None:
-            hit = _models[path] = _Model(str(resolve_model(path)))
+            hit = _models[path] = _Model(path)
         return hit
 
 
@@ -358,9 +345,9 @@ def denoise_array(
     ov = int(overlap_seconds * SAMPLE_RATE)
     seg, cut = _plan(n, chans, threads, int(segment_seconds * SAMPLE_RATE), ov)
     if not cut:
-        # whole channels as they are, no seams; the channels share a call when the model takes a batch
+        # whole channels as they are, no seams; the channels share a call
         rows = [_Row(c, 0, n, 0, n, 0, 0) for c in range(chans)]
-        groups = [rows[i:i + model.max_batch] for i in range(0, len(rows), model.max_batch)]
+        groups = [rows[i:i + MAX_BATCH] for i in range(0, len(rows), MAX_BATCH)]
         if threads > 1 and len(groups) > 1:
             with ThreadPoolExecutor(max_workers=min(threads, len(groups))) as pool:
                 list(pool.map(lambda g: _run_rows(model, x, g, out2, alpha, cancel, report), groups))
@@ -387,7 +374,7 @@ def denoise_array(
             rows.append(r)
     # batches of similar length, one per call; at least one per thread so every thread has work
     rows.sort(key=lambda r: -r.length)
-    nbatch = max(min(threads, len(rows)), math.ceil(len(rows) / model.max_batch))
+    nbatch = max(min(threads, len(rows)), math.ceil(len(rows) / MAX_BATCH))
     base, extra = divmod(len(rows), nbatch)
     groups, i = [], 0
     for g in range(nbatch):

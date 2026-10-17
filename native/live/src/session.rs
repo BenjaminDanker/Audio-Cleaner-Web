@@ -1,4 +1,4 @@
-//! One live session = one connection from the web process (server/acw/stream/worker.py `handle`, ported).
+//! One live session = one connection from the web process (server/acw/stream/routes.py).
 //! Its thread reads frames, processes them and answers in order; events (captions, warnings) go out through a
 //! small writer thread of their own, so a slow web process never holds up the caption decoders.
 
@@ -82,7 +82,7 @@ fn run(engine: &Arc<Engine>, cfg: &Value, core: usize, denoise: bool, mut reader
             return;
         }
     };
-    // Events: a bounded queue to a writer thread (a full queue drops the event, like the Python worker).
+    // Events: a bounded queue to a writer thread (a full queue drops the event: late captions are worthless).
     let (tx, rx) = sync_channel::<Vec<u8>>(EVENT_QUEUE);
     let ev_writer = writer.clone();
     let events_thread = std::thread::spawn(move || {

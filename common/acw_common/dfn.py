@@ -49,6 +49,8 @@ def model_delay(model_path: str | Path) -> int:
     hop = df.getint("hop_size")
     lookahead = max(df.getint("df_lookahead", 0), cfg.getint("deepfilternet", "conv_lookahead", fallback=0))
     return df.getint("fft_size") - hop + lookahead * hop
+
+
 _lib_lock = threading.Lock()
 _libs: dict[str, ctypes.CDLL] = {}
 
@@ -59,13 +61,10 @@ def _load(lib_path: str) -> ctypes.CDLL:
         if lib is not None:
             return lib
         lib = ctypes.CDLL(lib_path)
-        lib.df_create.restype = ctypes.c_void_p
-        lib.df_create.argtypes = [ctypes.c_char_p, ctypes.c_float, ctypes.c_char_p]
-        if hasattr(lib, "df_create_with_params"):
-            lib.df_create_with_params.restype = ctypes.c_void_p
-            lib.df_create_with_params.argtypes = [
-                ctypes.c_char_p, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_char_p,
-            ]
+        lib.df_create_with_params.restype = ctypes.c_void_p
+        lib.df_create_with_params.argtypes = [
+            ctypes.c_char_p, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_char_p,
+        ]
         lib.df_get_frame_length.restype = ctypes.c_size_t
         lib.df_get_frame_length.argtypes = [ctypes.c_void_p]
         lib.df_process_frame.restype = ctypes.c_float
@@ -83,16 +82,11 @@ def _load(lib_path: str) -> ctypes.CDLL:
 class DeepFilter:
     def __init__(self, lib_path: str | Path, model_path: str | Path, atten_lim_db: float = 100.0, post_filter_beta: float = 0.0):
         self._lib = _load(str(lib_path))
-        if hasattr(self._lib, "df_create_with_params"):
-            # Always run both decoder stages: skipping them on "clean" frames
-            # measurably hurts quality (PESQ 3.2 -> 2.1 in WorkAdventure's tests).
-            st = self._lib.df_create_with_params(
-                str(model_path).encode(), float(atten_lim_db), -math.inf, math.inf, math.inf, float(post_filter_beta), None
-            )
-        else:
-            st = self._lib.df_create(str(model_path).encode(), float(atten_lim_db), None)
-            if st and post_filter_beta:
-                self._lib.df_set_post_filter_beta(st, float(post_filter_beta))
+        # Always run both decoder stages: skipping them on "clean" frames
+        # measurably hurts quality (PESQ 3.2 -> 2.1 in WorkAdventure's tests).
+        st = self._lib.df_create_with_params(
+            str(model_path).encode(), float(atten_lim_db), -math.inf, math.inf, math.inf, float(post_filter_beta), None
+        )
         if not st:
             raise RuntimeError("could not load DeepFilterNet model")
         self._st = ctypes.c_void_p(st)

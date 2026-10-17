@@ -1,6 +1,6 @@
 """Tests for the optional Sidon restore step (acw_common.restore).
 
-They need the Sidon model files and onnxruntime (or torch): set ACW_SIDON_MODEL to the folder, or have
+They need the Sidon model files and onnxruntime: set ACW_SIDON_MODEL to the folder, or have
 it at ~/audio-cleaner/models/sidon (the server layout); otherwise the model tests are skipped. Each test
 runs a few seconds of audio on 2 threads (the model is slow: about real time on 4 threads)."""
 import os
@@ -17,7 +17,7 @@ from acw_common import restore as R  # noqa: E402
 
 SR = R.SAMPLE_RATE
 MODEL_DIR = Path(os.environ.get("ACW_SIDON_MODEL", Path.home() / "audio-cleaner" / "models" / "sidon"))
-needs_model = pytest.mark.skipif(not R.is_available(MODEL_DIR), reason="Sidon model files / runtime not available")
+needs_model = pytest.mark.skipif(not R.available(MODEL_DIR), reason="Sidon model files not available")
 THREADS = 2
 # A real speech clip (48 kHz mono wav) for the tests that need natural speech: the model is unstable on synthetic
 # buzz, which makes chunked-vs-whole comparisons meaningless.
@@ -49,7 +49,7 @@ def test_front_end_matches_transformers():
 
 
 def test_unavailable_without_files(tmp_path):
-    assert not R.is_available(tmp_path)
+    assert not R.available(tmp_path)
 
 
 @needs_model
@@ -141,29 +141,13 @@ def test_chunk_boundaries_do_not_click():
 @needs_model
 def test_decoder_blocks_with_context_equal_one_shot():
     """The decoder is convolutional: decoding in blocks with context frames and cropping is exact."""
-    be = R._backend(MODEL_DIR, THREADS, "auto", False)
+    be = R._backend(MODEL_DIR, THREADS)
     w16 = R._to_16k(speech_like(6.0))[: 300 * R.FEATURE_SAMPLES]
     feats = be.features(R._fbank(np.pad(w16, (R._FBANK_PAD, R._FBANK_PAD))))
     whole = be.decode(feats)
     ctx, a, b = R._DECODE_CONTEXT, 100, 220
     block = be.decode(feats[a - ctx : b + ctx])[ctx * R.DECODER_UPSAMPLE : (ctx + b - a) * R.DECODER_UPSAMPLE]
     assert np.abs(block - whole[a * R.DECODER_UPSAMPLE : b * R.DECODER_UPSAMPLE]).max() < 1e-4
-
-
-@needs_model
-def test_torchscript_backend_agrees_with_onnx():
-    """The fallback runs the official TorchScript files; both backends compute the same features."""
-    pytest.importorskip("torch")
-    if not (MODEL_DIR / R.FEATURE_FILE).is_file() or not (MODEL_DIR / R.ONNX_FE).is_file():
-        pytest.skip("need both the TorchScript and the ONNX files")
-    w16 = R._to_16k(speech_like(3.0))[: 150 * R.FEATURE_SAMPLES]
-    feats = R._fbank(np.pad(w16, (R._FBANK_PAD, R._FBANK_PAD)))
-    a = R._backend(MODEL_DIR, THREADS, "onnx", False).features(feats)
-    b = R._backend(MODEL_DIR, THREADS, "torch", False).features(feats)
-    cos = (a * b).sum(1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1))
-    assert cos.min() > 0.9999
-    y = R.restore(speech_like(1.5), MODEL_DIR, threads=THREADS, backend="torch")
-    assert np.isfinite(y).all()
 
 
 def test_import_is_lazy():

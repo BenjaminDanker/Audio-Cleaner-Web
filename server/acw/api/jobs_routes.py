@@ -11,7 +11,7 @@ import time
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import auth, db, jobs, keycaps, webhooks
 from ..billing import ledger
@@ -29,19 +29,22 @@ MIME = {
 
 
 class CreateJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # an unknown field (a typo, an old option) is an error, never ignored
+
     kind: str = Field(max_length=32)
     denoiseTier: str | None = Field(default=None, max_length=32)
     transcribeTier: str | None = Field(default=None, max_length=32)
     filename: str = Field(min_length=1, max_length=255)
     sizeBytes: int = Field(gt=0)
     durationSeconds: float = Field(gt=0)
-    free: bool = False
     displayName: str | None = Field(default=None, max_length=300)
     callbackUrl: str | None = Field(default=None, max_length=600)
     options: dict = Field(default_factory=dict)
 
 
 class EstimateJob(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     kind: str = Field(max_length=32)
     denoiseTier: str | None = Field(default=None, max_length=32)
     transcribeTier: str | None = Field(default=None, max_length=32)
@@ -108,7 +111,6 @@ def create(body: CreateJob, request: Request, response: Response, principal: aut
             size_bytes=body.sizeBytes,
             claimed_seconds=body.durationSeconds,
             options=body.options,
-            free=body.free,
             display_name=body.displayName,
             api_key_id=principal.api_key_id,
             callback_url=callback,

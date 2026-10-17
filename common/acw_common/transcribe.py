@@ -93,24 +93,21 @@ def speech_sample(audio_16k: np.ndarray, seconds: float = 30.0, floor_dbfs: floa
 LANGUAGE_CONFIDENCE = 0.6
 
 
-def _detect(audio_16k: np.ndarray, path: Path, threads: int, model=None) -> tuple[str, float]:
+def _detect(audio_16k: np.ndarray, path: Path, threads: int) -> tuple[str, float]:
     from faster_whisper import WhisperModel
 
-    if model is None:
-        model = WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
+    model = WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
     language, prob, _all = model.detect_language(speech_sample(audio_16k).astype(np.float32, copy=False))
     return language, float(prob)
 
 
-def detect_language(audio_16k: np.ndarray, whisper_model_path: Path, threads: int = 4, model=None,
-                    fallback_model_path: Path | None = None) -> str:
-    """Spoken language of the first 30 s of speech, by a small Whisper model. With `fallback_model_path` the
-    (cheaper) model in `whisper_model_path` decides alone when it is at least LANGUAGE_CONFIDENCE sure, and a
-    bigger one is asked when it is not (short clips, speech under other voices): same answers as the bigger model
-    alone at a quarter of the CPU on ordinary speech."""
-    language, prob = _detect(audio_16k, whisper_model_path, threads, model)
-    if fallback_model_path is not None and prob < LANGUAGE_CONFIDENCE:
-        language, _ = _detect(audio_16k, fallback_model_path, threads)
+def detect_language(audio_16k: np.ndarray, quick_model_path: Path, sure_model_path: Path, threads: int = 4) -> str:
+    """Spoken language of the first 30 s of speech. A quick Whisper model (base) decides when it is at least
+    LANGUAGE_CONFIDENCE sure; when it isn't (short clips, speech under other voices) a bigger one (small) does: the
+    bigger model's answers at about a quarter of its CPU (docs/research/heavy-2026-10.md)."""
+    language, prob = _detect(audio_16k, quick_model_path, threads)
+    if prob < LANGUAGE_CONFIDENCE:
+        language, _ = _detect(audio_16k, sure_model_path, threads)
     return language
 
 

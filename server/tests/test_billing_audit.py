@@ -23,7 +23,7 @@ def user(email="a@example.com"):
 
 def make_job(uid, **kw):
     args = dict(kind="denoise", denoise_tier="standard", transcribe_tier=None, filename="a.wav", size_bytes=1000,
-                claimed_seconds=600.0, options={}, free=False)
+                claimed_seconds=600.0, options={})
     return jobs.create_job(uid, **{**args, **kw})["id"]
 
 
@@ -158,14 +158,6 @@ def test_finish_failed_releases_the_hold_and_free_allowance_with_the_status():
     jobs.finish_failed(job, "Canceled.", status="canceled", only_from=("uploading", "queued"))
     assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "canceled"
     assert ledger.balance(uid)["held_micros"] == 0
-
-    # a free job from before free subtitles moved to the browser gives its reserved minutes back
-    fid = make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", claimed_seconds=600)
-    params = json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (fid,))["params_json"])
-    db.execute("UPDATE jobs SET free = 1, params_json = ? WHERE id = ?", (json.dumps({**params, "free_day": jobs.utc_day()}), fid))
-    db.execute("INSERT INTO free_usage(user_id, day, seconds) VALUES (?,?,600)", (uid, jobs.utc_day()))
-    jobs.finish_failed(dict(db.one("SELECT * FROM jobs WHERE id = ?", (fid,))), "x")
-    assert db.one("SELECT seconds FROM free_usage WHERE user_id = ?", (uid,))["seconds"] == 0
 
 
 def test_reaper_releases_holds_nothing_will_close():
@@ -434,39 +426,6 @@ def test_job_prices_are_fixed_at_creation(monkeypatch):
     W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
     assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == pricing.cost_micros(
         "denoise", "standard", 600, 10_000)
-
-
-def test_rebuild_without_models_is_billed_as_standard(monkeypatch, tmp_path):
-    from acw.config import get_settings
-    from acw.worker import main as W
-
-    monkeypatch.setenv("ACW_MODELS_DIR", str(tmp_path / "no-models"))
-    get_settings.cache_clear()
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    job, d = running_job(uid, denoise_tier="rebuild")
-    assert json.loads(job["params_json"])["rates"] == {"denoise": 30_000}
-    job = W._use_available_tier(job)
-    params = json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])
-    assert params["denoise_tier"] == "standard" and params["rates"] == {"denoise": 10_000}
-    assert "billed at its price" in params["notice"]
-    W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
-    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == pricing.cost_micros("denoise", "standard", 600)
-
-
-def test_rebuild_with_models_keeps_its_tier(monkeypatch, tmp_path):
-    from acw.config import get_settings
-    from acw.worker import main as W
-
-    (tmp_path / "sidon").mkdir()
-    for f in ("sidon_fe.onnx", "sidon_dec.onnx"):
-        (tmp_path / "sidon" / f).write_bytes(b"x")
-    monkeypatch.setenv("ACW_MODELS_DIR", str(tmp_path))
-    get_settings.cache_clear()
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    job, _ = running_job(uid, denoise_tier="rebuild")
-    assert W._use_available_tier(job) is job
 
 
 # ---------------------------------------------------------------- F6: limits per tier

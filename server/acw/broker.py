@@ -3,7 +3,7 @@
 Everything that uses our CPU, memory or GPU belongs to a class, and the classes are ranked in one table (CLASSES)
 instead of rules spread over the code:
 
-  live        paid live audio: real time, so it is placed first; file jobs move off its cores (cpusplit)
+  live        paid live audio: real time, so it is placed first; file jobs move off its cores (below)
   job         paid file jobs: batch work; it slows down (fewer cores) rather than stops when live needs room
   live_trial  free-trial live: real time too, but it never takes room from paid work: it only joins cores live
               already uses, or opens a new one while no paid job is running, and it stops at 70% of live capacity
@@ -21,12 +21,14 @@ shares the model weights), and a job's cost depends on its audio only, so capaci
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-from . import cpusplit, db, hostload, jobs
+from . import db, hostload, jobs
 from .config import get_settings
 
 
@@ -49,9 +51,110 @@ def outranks(a: str, b: str) -> bool:
     return CLASSES[a].rank < CLASSES[b].rank
 
 
+# ----------------------------------------------------------------------------------------------- the cores
+#
+# Live audio and file jobs keep off each other's physical cores: a job thread on a live core's other hyper-thread
+# halves the live thread's speed (one niced 6-thread job pushed 12 live sessions from ~5 ms to over 0.5 s; priorities
+# don't help). The live engine places each session on one core, lowest first, and says which in its `ready`; the web
+# process writes the cores in use to a small marker file; job workers read it every second and keep off those cores
+# and the next one (so a new session starts on a free core). With no live session jobs use every core. No privileges
+# needed: processes set their own CPU affinity.
+
+_CPU = Path("/sys/devices/system/cpu")
+
+
+@lru_cache(maxsize=1)
+def physical_cores() -> list[list[int]]:
+    """Logical CPUs grouped by physical core, in core order (the live engine computes the same)."""
+    cores: dict[tuple[int, int], list[int]] = {}
+    for cpu in sorted(os.sched_getaffinity(0) | set(range(os.cpu_count() or 1))):
+        topo = _CPU / f"cpu{cpu}" / "topology"
+        try:
+            key = (int((topo / "physical_package_id").read_text()), int((topo / "core_id").read_text()))
+        except (OSError, ValueError):
+            key = (0, cpu)
+        cores.setdefault(key, []).append(cpu)
+    return [sorted(v) for _, v in sorted(cores.items())]
+
+
+def max_live_cores() -> int:
+    """Physical cores live may use: all but ACW_MIN_JOB_CORES (default 1 per 8 cores), which file jobs keep."""
+    cores = len(physical_cores())
+    keep = int(os.environ.get("ACW_MIN_JOB_CORES", max(1, round(cores / 8))))
+    return cores - max(1, min(cores - 1, keep))
+
+
+def cpus_of(core_indexes) -> set[int]:
+    cores = physical_cores()
+    return {c for i in core_indexes if 0 <= i < len(cores) for c in cores[i]}
+
+
+def all_cpus() -> set[int]:
+    return {c for core in physical_cores() for c in core}
+
+
+def _marker(data_dir: Path) -> Path:
+    return data_dir / "live-cores"
+
+
+def publish_live_cores(cores, data_dir: Path | None = None) -> None:
+    """Written by the web process whenever the set of cores carrying live sessions changes."""
+    p = _marker(data_dir or get_settings().data_dir)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(",".join(str(c) for c in sorted(set(cores))))
+    tmp.replace(p)
+
+
+def live_cores(data_dir: Path | None = None) -> list[int]:
+    try:
+        text = _marker(data_dir or get_settings().data_dir).read_text().strip()
+        return [int(c) for c in text.split(",")] if text else []
+    except (OSError, ValueError):
+        return []
+
+
+def job_cpus(data_dir: Path | None = None) -> set[int]:
+    """The logical CPUs file jobs may use now: every core but those carrying live sessions and the next live one."""
+    busy = set(live_cores(data_dir))
+    if not busy:
+        return all_cpus()
+    spare = next((c for c in range(max_live_cores()) if c not in busy), None)
+    if spare is not None:
+        busy.add(spare)
+    return cpus_of(i for i in range(len(physical_cores())) if i not in busy) or all_cpus()
+
+
+def _descendants(pid: int) -> list[int]:
+    out, todo = [], [pid]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        try:
+            for task in os.listdir(f"/proc/{p}/task"):
+                todo.extend(int(c) for c in Path(f"/proc/{p}/task/{task}/children").read_text().split())
+        except OSError:
+            continue
+    return out
+
+
+def pin_tree(pid: int, cpus: set[int]) -> None:
+    """Set the CPU affinity of every thread of `pid` and its descendants (new threads and children inherit it)."""
+    for p in _descendants(pid):
+        try:
+            tasks = os.listdir(f"/proc/{p}/task")
+        except OSError:
+            continue
+        for tid in tasks:
+            try:
+                os.sched_setaffinity(int(tid), cpus)
+            except OSError:
+                pass  # thread exited
+
+
+# ------------------------------------------------------------------------------------------ admission
+
 # A job joins others already running only if this many cores are idle.
 MIN_IDLE_CORES = 2.0
-LIVE_TRIAL_FRACTION = cpusplit.TRIAL_CAPACITY_FRACTION
 
 
 def running_paid_jobs() -> int:
@@ -64,11 +167,6 @@ def live_options(cls: str) -> dict:
     if outranks("job", cls) and running_paid_jobs() > 0:
         return {"may_open_core": False}
     return {}
-
-
-def job_cpus(data_dir: Path | None = None) -> set[int]:
-    """The logical CPUs file jobs may use now: off the cores live uses (and one spare), see cpusplit."""
-    return cpusplit.job_cpus_now(data_dir or get_settings().data_dir)
 
 
 def admit_job(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set[int] | None = None,
@@ -97,43 +195,31 @@ def admit_job(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set
 
 # --------------------------------------------------------------------------------------------- the whole picture
 
-def live_engine_status(timeout: float = 2.0) -> list[dict]:
-    """Ask every live engine socket how it is doing (MSG_QUERY). An engine that doesn't answer is listed as down."""
-    from .stream.routes import worker_sockets
-
-    out = []
-    for path in worker_sockets():
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        try:
-            s.connect(str(path))
-            s.sendall(b"Q" + struct.pack("<I", 0))
-            head = b""
-            while len(head) < 5:
-                chunk = s.recv(5 - len(head))
-                if not chunk:
-                    raise ConnectionError("closed")
-                head += chunk
-            n = struct.unpack("<I", head[1:])[0]
-            body = b""
-            while len(body) < n:
-                chunk = s.recv(n - len(body))
-                if not chunk:
-                    raise ConnectionError("closed")
-                body += chunk
-            out.append({"socket": path.name, **json.loads(body)})
-        except (OSError, ValueError) as e:
-            out.append({"socket": path.name, "down": str(e)[:80]})
-        finally:
-            s.close()
-    return out
+def live_engine_status(timeout: float = 2.0) -> dict:
+    """Ask the live engine how it is doing (a MSG_QUERY on its socket); {"down": why} if it doesn't answer."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(str(get_settings().stream_worker_socket))
+        s.sendall(b"Q" + struct.pack("<I", 0))
+        data = b""
+        while len(data) < 5 or len(data) < 5 + struct.unpack("<I", data[1:5])[0]:
+            chunk = s.recv(65536)
+            if not chunk:
+                raise ConnectionError("closed")
+            data += chunk
+        return json.loads(data[5:])
+    except (OSError, ValueError) as e:
+        return {"down": str(e)[:80]}
+    finally:
+        s.close()
 
 
 def snapshot() -> dict:
     """Everything that competes for the machine, in one place."""
     s = get_settings()
     snap = hostload.get(s.data_dir).snapshot()
-    units, per_core, cores = cpusplit._read_marker(s.data_dir)
+    cores = live_cores(s.data_dir)
     running = [dict(r) for r in db.all_rows(
         "SELECT id, kind, json_extract(params_json, '$.denoise_tier') AS tier, started_at, worker_id FROM jobs WHERE status = 'running'")]
     queued = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'")["n"]
@@ -145,7 +231,7 @@ def snapshot() -> dict:
                 "perCpu": [round(b, 2) for b in snap.busy_per_cpu]},
         "memory": {"available": snap.mem_available, "sliceHeadroom": snap.slice_headroom, "reserve": jobs.MEM_RESERVE},
         "disk": {"free": snap.disk_free, "reserve": jobs.DISK_RESERVE},
-        "live": {"sessions": by_class, "units": units, "liveCores": cores, "engines": live_engine_status()},
+        "live": {"sessions": by_class, "liveCores": cores, "engine": live_engine_status()},
         "jobs": {"running": running, "queued": queued, "jobCpus": sorted(job_cpus(s.data_dir))},
     }
 
@@ -160,13 +246,13 @@ def format_snapshot(sn: dict) -> str:
                  + (f", {m['sliceHeadroom'] / gb:.1f} GB under the service limit" if m["sliceHeadroom"] is not None else ""))
     lines.append(f"Disk: {sn['disk']['free'] / gb:.0f} GB free")
     lv = sn["live"]
-    lines.append(f"Live: {lv['sessions'] or 'none'}; {lv['units']:.1f} units on cores {lv['liveCores'] or '-'}")
-    for e in lv["engines"]:
-        if "down" in e:
-            lines.append(f"  {e['socket']}: NOT ANSWERING ({e['down']})")
-        else:
-            lines.append(f"  {e['socket']} ({e.get('engine')}): {e['sessions']} sessions, {e['units']:.1f} of "
-                         f"{e['capacityUnits']:.1f} units, captions {e['captionStreams']}/{e['captionCap']}")
+    lines.append(f"Live: {lv['sessions'] or 'none'}; on cores {lv['liveCores'] or '-'}")
+    e = lv["engine"]
+    if "down" in e:
+        lines.append(f"  live engine NOT ANSWERING ({e['down']})")
+    else:
+        lines.append(f"  live engine: {e['sessions']} sessions, {e['units']:.1f} of {e['capacityUnits']:.1f} units, "
+                     f"captions {e['captionStreams']}/{e['captionCap']}")
     jb = sn["jobs"]
     lines.append(f"Jobs: {len(jb['running'])} running, {jb['queued']} queued; job CPUs {jb['jobCpus']}")
     for r in jb["running"]:

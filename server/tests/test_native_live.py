@@ -1,5 +1,6 @@
-"""The native live engine (native/live, bin/acw-live) against the Python worker it replaces: the same protocol and the
-same audio. Skipped where it isn't built (cargo build in native/live) or the models aren't installed."""
+"""The native live engine (native/live, bin/acw-live) through its socket: the audio it returns (against a reference
+built here from the same model library), echo removal, silence, returnAudio, admission, captions. Skipped where it
+isn't built (cargo build in native/live) or the models aren't installed."""
 import json
 import os
 import socket
@@ -13,37 +14,12 @@ import pytest
 
 from acw.stream import protocol as P
 
-REPO = Path(__file__).resolve().parents[2]
-HOME = Path.home() / "audio-cleaner"
-BINARY = next((p for p in (REPO / "native/live/target/release/acw-live", HOME / "bin/acw-live") if p.is_file()), None)
-MODELS = HOME / "models"
-LIBDF = HOME / "bin/libdf.so"
-
-pytestmark = pytest.mark.skipif(
-    BINARY is None or not (MODELS / "DeepFilterNet3_onnx.tar.gz").is_file() or not LIBDF.is_file(),
-    reason="native engine or models not available here",
-)
+from .conftest import LIVE_LIBDF, LIVE_MODELS
 
 
 @pytest.fixture
-def engine(tmp_path):
-    def start(**env):
-        sock = tmp_path / "stream.sock"
-        e = {**os.environ, "ACW_ENV": "development", "ACW_DATA_DIR": str(tmp_path), "ACW_STREAM_SOCKET": str(sock),
-             "ACW_BIN_DIR": str(LIBDF.parent), "ACW_MODELS_DIR": str(MODELS), "ACW_MIN_JOB_CORES": "1", **env}
-        proc = subprocess.Popen([str(BINARY)], env=e, stderr=subprocess.PIPE)
-        for _ in range(100):
-            if sock.exists():
-                break
-            time.sleep(0.05)
-        procs.append(proc)
-        return str(sock)
-
-    procs: list[subprocess.Popen] = []
-    yield start
-    for p in procs:
-        p.terminate()
-        p.wait(5)
+def engine(live_engine):
+    return live_engine
 
 
 def _msg(s, kind, payload):
@@ -101,16 +77,77 @@ def _speech(seconds=3.0):
     return x.astype(np.float32)
 
 
-def test_the_same_audio_as_the_python_chain(engine):
-    from acw.stream.engine import LiveChain
+def _reference_chain(x: np.ndarray, atten_db: float) -> np.ndarray:
+    """What the engine must return: DeepFilterNet3 (libdf), an 80 Hz high-pass (scipy) and the peak limiter."""
+    from scipy.signal import butter, sosfilt
 
+    from acw_common.dfn import DeepFilter
+
+    df = DeepFilter(LIVE_LIBDF, LIVE_MODELS / "DeepFilterNet3_onnx.tar.gz", atten_db)
+    y = sosfilt(butter(2, 80, btype="highpass", fs=48_000, output="sos"), df.process(x)).astype(np.float32)
+    ceiling, release, gain = np.float32(10 ** (-1 / 20)), np.float32(10 ** (6 / 20 / 100)), np.float32(1.0)
+    out = np.empty_like(y)
+    for i in range(0, len(y), 480):
+        hop = y[i:i + 480]
+        peak = float(np.max(np.abs(hop)))
+        target = np.float32(min(1.0, ceiling / peak) if peak > 0 else 1.0)
+        new = min(target, gain * release, np.float32(1.0))
+        ramp = (gain + (new - gain) * np.arange(480, dtype=np.float32) / np.float32(479)) if new < gain else np.full(480, new, np.float32)
+        out[i:i + 480] = np.clip(hop * ramp, -ceiling, ceiling)
+        gain = new
+    return out
+
+
+def test_the_audio_matches_the_reference_chain(engine):
     x = _speech()
     frames = [x[i:i + 960] for i in range(0, len(x), 960)]
     ready, out = _session(engine(), {"denoise": "light", "captions": None, "atten_lim_db": 24}, frames)
     assert ready["latencySamples"] == 1440 and ready["cores"] == [0]
-    chain = LiveChain(LIBDF, MODELS, "light", 24)
-    want = np.concatenate([chain.process(f) for f in frames])
-    assert np.array_equal(np.concatenate(out), want)  # bit for bit
+    y = np.concatenate(out)
+    want = _reference_chain(x, 24)
+    assert np.max(np.abs(y - want)) < 1e-6, np.max(np.abs(y - want))
+
+
+def test_digital_silence_is_answered_with_silence(engine):
+    x = _speech(1.0)
+    frames = [x[i:i + 960] for i in range(0, len(x), 960)] + [np.zeros(960, np.float32)] * 50
+    _, out = _session(engine(), {"denoise": "light"}, frames)
+    assert not np.any(np.concatenate(out[-35:]))  # after 0.2 s of it the model isn't run: exact silence
+
+
+@pytest.mark.skipif(not (LIVE_MODELS / "captions-en/encoder.int8.onnx").is_file(), reason="caption model missing")
+def test_standard_captions_keep_the_first_words(engine):
+    sample = Path.home() / "audio-cleaner/dev/live_opus.wav"
+    if not sample.is_file():
+        pytest.skip("speech sample missing")
+    raw = subprocess.run([str(Path.home() / "audio-cleaner/bin/ffmpeg"), "-v", "error", "-i", str(sample), "-ac", "1",
+                          "-ar", "48000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, np.float32)
+    x = x[:len(x) // 960 * 960]
+    s = socket.socket(socket.AF_UNIX)
+    s.connect(engine())
+    s.settimeout(30)
+    _msg(s, P.MSG_START, json.dumps({"denoise": None, "captions": "local"}).encode())
+    assert json.loads(_read(s)[1])["type"] == "ready"
+    events = []
+    for i in range(0, len(x), 960):
+        _msg(s, P.MSG_AUDIO, P.pack_audio(i // 960, x[i:i + 960]))
+        while True:
+            k, p = _read(s)
+            if k == P.MSG_AUDIO:
+                break
+            events.append(json.loads(p))
+        if i % (960 * 25) == 0:
+            time.sleep(0.1)
+    _msg(s, P.MSG_END, b"")
+    while True:
+        k, p = _read(s)
+        if k == P.MSG_END:
+            break
+        events.append(json.loads(p))
+    finals = [e["text"] for e in events if e.get("type") == "caption" and e.get("final")]
+    assert finals and finals[0].startswith("We will not be held responsible"), finals
+    assert any(e.get("type") == "caption" and not e.get("final") for e in events)  # partial lines while talking
 
 
 def test_echo_is_removed_and_the_voice_kept(engine):
@@ -133,7 +170,7 @@ def test_echo_is_removed_and_the_voice_kept(engine):
 def test_silence_return_audio_and_full(engine):
     x = _speech(1.0)
     frames = [x[i:i + 960] for i in range(0, len(x), 960)]
-    sock = engine(ACW_LIVE_UNITS_PER_CORE="1.0", ACW_MIN_JOB_CORES="999", ACW_LIVE_IGNORE_HOST_LOAD="1")  # one live core
+    sock = engine(ACW_LIVE_UNITS_PER_CORE="1.0", ACW_MIN_JOB_CORES="999")  # one live core
     _, out = _session(sock, {"denoise": "light", "return_audio": False}, frames[:10] + [None, None] + frames[10:20])
     assert len(out) == 20 and all(len(o) == 0 for o in out)  # answered (for timing), but empty; silence not answered
     # one core x 1 unit: a second session at once doesn't fit

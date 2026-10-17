@@ -165,7 +165,6 @@ CREATE TABLE IF NOT EXISTS jobs (
     user_id TEXT NOT NULL REFERENCES users(id),
     kind TEXT NOT NULL,                             -- denoise | transcribe | denoise_transcribe
     tier TEXT NOT NULL,
-    free INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,                           -- uploading | queued | running | cloud_asr | done | failed | canceled | expired
     params_json TEXT NOT NULL,
     next_stage TEXT NOT NULL DEFAULT 'probe',       -- probe | finalize
@@ -195,13 +194,6 @@ CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status, queued_at);
 -- the queue order counts a user's running jobs per queued row, and the job list polls it (16.7 ms -> 0.2 ms with 30,000 old jobs)
 CREATE INDEX IF NOT EXISTS jobs_user_status ON jobs(user_id, status);
 
-CREATE TABLE IF NOT EXISTS free_usage (
-    user_id TEXT NOT NULL REFERENCES users(id),
-    day TEXT NOT NULL,
-    seconds REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (user_id, day)
-);
-
 CREATE TABLE IF NOT EXISTS stream_sessions (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -230,12 +222,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS audit_user ON audit_log(user_id, id);
 
--- No longer written (it held a deleted account's free subtitle minutes for a day); emptied by auth.purge_expired.
-CREATE TABLE IF NOT EXISTS deleted_emails (
-    email_hash TEXT PRIMARY KEY,
-    day TEXT NOT NULL,
-    free_seconds REAL NOT NULL
-);
 """
 
 _local = threading.local()
@@ -355,8 +341,14 @@ MIGRATIONS = [
     ),
 ]
 
+# Columns that are gone: dropped from databases made before (jobs.free: free server-side subtitle minutes).
+DROPPED_COLUMNS = [("jobs", "free")]
+
 # Indexes on the columns above (a database made before them has no such column when SCHEMA runs, so they come after).
 POST_MIGRATION_SQL = [
+    # The free server-side subtitle minutes are gone (free subtitles are made in the browser).
+    "DROP TABLE IF EXISTS free_usage",
+    "DROP TABLE IF EXISTS deleted_emails",
     "CREATE INDEX IF NOT EXISTS jobs_api_key ON jobs(api_key_id, finished_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS stream_sessions_api_key ON stream_sessions(api_key_id, ended_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS job_callbacks_due ON job_callbacks(next_attempt_at) WHERE state = 'pending'",
@@ -370,6 +362,9 @@ def init_db() -> None:
         cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             c.execute(ddl)
+    for table, column in DROPPED_COLUMNS:
+        if column in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+            c.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
     for sql in POST_MIGRATION_SQL:
         c.execute(sql)
     c.execute(

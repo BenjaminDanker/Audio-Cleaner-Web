@@ -257,7 +257,7 @@ jobs:
             --libdf "build/libdf/${{ matrix.lib }}" \
             --ffmpeg-dir build/ffmpeg \
             --model build/libdf/DeepFilterNet3_onnx.tar.gz \
-            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr.onnx \
+            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr_batch.onnx \
             --deepfilter-notices build/libdf \
             --no-test-model \
             --out desktop/vendor
@@ -555,7 +555,7 @@ jobs:
             --libdf "build/libdf/${{ matrix.lib }}" \
             --ffmpeg-dir build/ffmpeg \
             --model build/libdf/DeepFilterNet3_onnx.tar.gz \
-            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr.onnx \
+            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr_batch.onnx \
             --deepfilter-notices build/libdf \
             --download-whisper \
             --out desktop/vendor

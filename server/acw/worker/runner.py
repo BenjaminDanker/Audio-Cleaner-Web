@@ -172,15 +172,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             lang = opts.get("language")
             if lang is None:
                 emit(stage="Detecting language", progress=base)
-                # Whisper base names the language as often as small does on ordinary speech and costs a quarter
-                # of the CPU; when it is unsure (short clips, speech under other voices) small decides, as
-                # before (docs/research/heavy-2026-10.md). Small alone while base is not installed.
-                lid_small = models / "whisper" / "small"
-                lid_base = models / "whisper" / "base"
-                if (lid_base / "model.bin").is_file():
-                    lang = transcribe.detect_language(speech_16k, lid_base, threads, fallback_model_path=lid_small)
-                else:
-                    lang = transcribe.detect_language(speech_16k, lid_small, threads)
+                lang = transcribe.detect_language(speech_16k, models / "whisper" / "base", models / "whisper" / "small", threads)
             engine = transcribe.pick_engine(lang)
             report = lambda f: emit(stage="Transcribing", progress=int(base + (asr_end - base) * f))  # noqa: E731
             if engine.startswith("parakeet"):

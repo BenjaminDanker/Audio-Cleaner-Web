@@ -1,6 +1,6 @@
-# Checks for the server, the shared audio code, the website and the deploy scripts: the server and common tests on
-# Python 3.12 with the locked packages (the same set production runs), the website build, and shellcheck on
-# deploy/*.sh. Tests that need FFmpeg, libDF or the models skip themselves here; they run on the production host.
+# Checks for the server, the shared audio code, the live engine, the website and the deploy scripts: the server and
+# common tests on Python 3.12 with the locked packages (the same set production runs), the live engine's unit tests
+# (native/live), the website build, and shellcheck on deploy/*.sh. Tests that need FFmpeg, libDF or the models skip themselves here; they run on the production host.
 # Every third-party action is pinned to a full commit SHA.
 name: Server and website
 
@@ -12,6 +12,7 @@ on:
       - "common/**"
       - "web/**"
       - "deploy/**"
+      - "native/live/**"
       - ".github/workflows/server.yml"
   pull_request:
     paths:
@@ -19,6 +20,7 @@ on:
       - "common/**"
       - "web/**"
       - "deploy/**"
+      - "native/live/**"
       - ".github/workflows/server.yml"
   workflow_dispatch:
 
@@ -61,6 +63,12 @@ jobs:
 
       - name: Common tests
         run: cd common && python -m pytest -q
+
+      - name: Live engine tests (native/live)
+        # The engine links the sherpa-onnx C library that the locked Python package ships (native/live/build.sh).
+        run: |
+          export SHERPA_ONNX_LIB_DIR="$(python -c 'import os, sherpa_onnx; print(os.path.join(os.path.dirname(sherpa_onnx.__file__), "lib"))')"
+          cd native/live && cargo test --release --locked
 
   web:
     name: Website builds

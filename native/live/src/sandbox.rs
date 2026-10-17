@@ -1,5 +1,5 @@
 //! After binding its socket the engine drops filesystem write access and reading outside the libraries and models
-//! (Landlock), like the Python worker (server/acw/worker/sandbox.py). The systemd unit already denies it the
+//! (Landlock), like the file-job runners (server/acw/worker/sandbox.py). The systemd unit already denies it the
 //! network (RestrictAddressFamilies=AF_UNIX) and privileged system calls.
 
 use std::path::{Path, PathBuf};

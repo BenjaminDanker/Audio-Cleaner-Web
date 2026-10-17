@@ -1,7 +1,7 @@
-//! Who gets in, and where each session runs (a port of server/acw/stream/worker.py's admission and
-//! server/acw/cpusplit.py's core layout, for one process that serves every live core).
+//! Who gets in, and where each session runs (the core layout matches server/acw/broker.py, which tells file jobs
+//! which cores to keep off).
 //!
-//! Capacity is in units (live denoise = 1, local captions = 0.7, echo cancellation = 0.2): live cores x units per
+//! Capacity is in units (live denoise = 1, local captions = 1.2, echo cancellation = 0.2): live cores x units per
 //! core, shrunk by other load measured on the live cores. Each session is placed on one physical core (its thread is
 //! pinned to that core's hyper-threads), filling the lowest cores first; the web process tells file jobs to keep off
 //! the cores in use (the session's core comes back in its `ready` event).
@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 pub const DENOISE_UNITS: f64 = 1.0;
 // A caption stream costs about 0.17 cores (its share of a recognizer) next to 0.14 for noise removal in this engine
-// (the Python worker's 0.7 was relative to its own, dearer, noise removal). Measured 2026-10-17: 12 noise+caption
+// Measured 2026-10-17: 12 noise+caption
 // sessions on 5 cores kept captions within 0.3 s, 20 fell 1.8 s behind.
 pub const CAPTIONS_LOCAL_UNITS: f64 = 1.2;
 pub const ECHO_UNITS: f64 = 0.2;
@@ -49,7 +49,7 @@ pub fn physical_cores() -> Vec<Vec<usize>> {
     }).collect()
 }
 
-/// Physical cores file jobs always keep (ACW_MIN_JOB_CORES, default 1 per 8 cores), as in cpusplit.min_job_cores.
+/// Physical cores file jobs always keep (ACW_MIN_JOB_CORES, default 1 per 8 cores), as in broker.max_live_cores.
 pub fn max_live_cores(cores: usize) -> usize {
     let default = ((cores as f64 / 8.0).round() as usize).max(1);
     let want = std::env::var("ACW_MIN_JOB_CORES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(default);

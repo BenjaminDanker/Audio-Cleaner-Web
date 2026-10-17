@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from acw_common import dpdfnet, pipeline
 
@@ -38,19 +39,13 @@ def test_the_estimate_reads_long_memmapped_audio_in_blocks(tmp_path):
     assert abs(pipeline.noise_estimate_db(mm) - pipeline.noise_estimate_db(x)) < 1.0
 
 
-def test_heavy_falls_back_to_deepfilternet_without_its_model(tmp_path, monkeypatch):
+def test_heavy_noise_runs_the_heavy_model(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(pipeline.dfn, "denoise_array", lambda x, *a, out=None, **k: calls.append("dfn") or out.__setitem__(slice(None), x))
     monkeypatch.setattr(pipeline.dpdfnet, "denoise_array", lambda x, *a, out=None, **k: calls.append("dpdfnet") or out.__setitem__(slice(None), x))
     report: dict = {}
-    pipeline.clean_audio(_speechlike(2, 0), "lib", "model", pipeline.CleanOptions(noise="heavy", polish=False),
-                         heavy_model_path=tmp_path / "missing.onnx", report=report)
-    assert calls == ["dfn"] and report == {"noise": "light", "highs": None}
-    calls.clear()
-    present = tmp_path / dpdfnet.MODEL_FILE
-    present.write_bytes(b"x")
     pipeline.clean_audio(_speechlike(2, 0), "lib", "model", pipeline.CleanOptions(noise="auto", polish=False),
-                         heavy_model_path=present, report=report)
+                         heavy_model_path=tmp_path / dpdfnet.MODEL_FILE, report=report)
     assert calls == ["dpdfnet"] and report == {"noise": "heavy", "highs": None}
 
 
@@ -76,17 +71,15 @@ def test_band_limited_recordings_get_their_highs_restored_full_band_ones_never(m
     assert report["highs"] is None
 
 
-def test_restore_voice_replaces_noise_removal_and_highs_when_its_models_are_there(monkeypatch, tmp_path):
+def test_restore_voice_replaces_noise_removal_and_highs(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(pipeline.dfn, "denoise_array", lambda x, *a, out=None, **k: calls.append("dfn") or out.__setitem__(slice(None), x))
     monkeypatch.setattr(pipeline.restore, "restore", lambda x, d, **k: calls.append("sidon") or x.copy())
     x = _speechlike(2, 10)
     report: dict = {}
-    monkeypatch.setattr(pipeline.restore, "available", lambda d: False)
-    pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(restore_voice=True, noise="light", polish=False),
-                         restore_model_dir=tmp_path, report=report)
-    assert calls == ["dfn"] and report["noise"] == "light"  # no models: the usual chain
-    calls.clear()
+    with pytest.raises(FileNotFoundError):  # asked for and not installed: an error, never a cheaper chain
+        pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(restore_voice=True, polish=False),
+                             restore_model_dir=tmp_path, report=report)
     monkeypatch.setattr(pipeline.restore, "available", lambda d: True)
     y = pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(restore_voice=True, polish=False),
                              restore_model_dir=tmp_path, report=report)

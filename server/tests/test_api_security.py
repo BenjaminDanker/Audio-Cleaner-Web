@@ -115,14 +115,14 @@ def test_upload_must_match_declared_size_and_cancel_refunds(client, signed_in):
     assert ledger.balance(uid) == {"balance_micros": 1_000_000, "held_micros": 0, "available_micros": 1_000_000}
 
 
-def test_jobs_on_our_side_are_never_free(client, signed_in):
-    """Free subtitles and free noise removal run in the browser: a job asking to be free is refused, whatever it is."""
+def test_unknown_job_fields_are_refused_not_ignored(client, signed_in):
+    """A field the API doesn't know (a typo, or the old "free": free subtitles run in the browser now) is an error:
+    ignoring it could start a paid job the caller didn't mean."""
     uid, h = signed_in
     ledger.credit(uid, 1_000_000, "grant", "t", "g")
     body = {"kind": "transcribe", "transcribeTier": "local", "free": True, "filename": "a.wav", "sizeBytes": 100, "durationSeconds": 60}
-    for extra in ({}, {"kind": "denoise_transcribe", "denoiseTier": "standard"}, {"kind": "denoise", "denoiseTier": "standard", "transcribeTier": None}):
-        r = client.post("/api/jobs", json={**body, **extra}, headers=h)
-        assert r.status_code == 400 and "browser" in r.json()["detail"]
+    r = client.post("/api/jobs", json=body, headers=h)
+    assert r.status_code == 422
     assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0
     assert "free" not in client.get("/api/billing/pricing").json()
 

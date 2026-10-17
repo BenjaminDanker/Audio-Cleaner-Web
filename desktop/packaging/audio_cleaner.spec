@@ -42,7 +42,7 @@ for f in sorted(need(VENDOR / "native").iterdir()):
 # restoring highs, rebuilding the voice: 2.5 GB) are downloaded by the installer's setup (installer_models.py)
 # or by the app (models.py), so the installer stays small. Refuse to bundle anything else.
 _shipped = sorted(p.name for p in need(VENDOR / "models").iterdir())
-if _shipped != ["DeepFilterNet3_onnx.tar.gz", "dpdfnet8_48khz_hr.onnx"]:
+if _shipped != ["DeepFilterNet3_onnx.tar.gz", "dpdfnet8_48khz_hr_batch.onnx"]:
     raise SystemExit(f"audio_cleaner.spec: vendor/models must only hold the two noise models, found {_shipped}")
 
 datas = [

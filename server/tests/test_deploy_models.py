@@ -241,10 +241,9 @@ def test_local_archive_copy_is_used_without_downloading(toy, tmp_path):
 def test_dpdfnet_wrapper_delegates(toy, tmp_path):
     text = (DEPLOY / "fetch-dpdfnet.sh").read_text()
     assert "--only 'models/dpdfnet/*'" in text and "--dest-dir" in text
-    # same pinned file as before the manifest existed
-    entry = [e for e in parse_lock(DEPLOY / "models.lock") if e["target"] == "models/dpdfnet/dpdfnet8_48khz_hr.onnx"][0]
-    assert entry["sha"] == "7b3afbb260a08fe9af3d16e3bda992971be1e7e951d1dee7c2d235f5c43f5631"
-    assert "dd6818d00f50c836fed43a6243ebe49116de5964" in entry["rest"]
+    entry = [e for e in parse_lock(DEPLOY / "models.lock") if e["target"] == "models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx"][0]
+    assert entry["sha"] == "b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa"
+    assert entry["kind"] == "member" and entry["rest"].startswith("models-v2:")
 
 
 # ------------------------------------------------------------------ pinned package hashes (SEC-26)

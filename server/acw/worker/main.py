@@ -21,9 +21,8 @@ import time
 from pathlib import Path
 
 import acw_common
-from acw_common import restore
 
-from .. import broker, cpusplit, db, hostload, jobs, metrics
+from .. import broker, db, hostload, jobs, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -179,8 +178,7 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
 
 
 def _max_seconds(job: dict, params: dict) -> int:
-    most = pricing.max_job_seconds(params["denoise_tier"])
-    return min(most, pricing.FREE_TRANSCRIBE_MAX_FILE_SECONDS) if job["free"] else most
+    return pricing.max_job_seconds(params["denoise_tier"])
 
 
 def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
@@ -303,10 +301,10 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         nonlocal pinned, killed_by_us
         beat = 0.0
         while proc.poll() is None:
-            # Off the live-audio cores while live sessions run (acw.cpusplit).
-            want = cpusplit.job_cpus_now(data_dir)
+            # Off the live-audio cores while live sessions run (resource broker).
+            want = broker.job_cpus(data_dir)
             if want != pinned:
-                cpusplit.pin_tree(proc.pid, want)
+                broker.pin_tree(proc.pid, want)
                 pinned = want
             if _stop.is_set() or (time.monotonic() > deadline and not more_time()):
                 killed_by_us = True
@@ -414,29 +412,9 @@ def _job_cost(job: dict, params: dict, seconds: float) -> int:
 
 
 def _reprice(job: dict, duration: float) -> None:
-    """Make the hold (or free allowance) match the real duration before the
-    expensive work starts."""
+    """Make the hold match the real duration before the expensive work starts."""
     params = json.loads(job["params_json"])
     db.execute("UPDATE jobs SET duration_seconds = ? WHERE id = ?", (duration, job["id"]))
-    if job["free"]:
-        # claimed_seconds is what is reserved today; keep it in step with the allowance, so a retry of the
-        # job (new attempt, job loaded again) doesn't take the difference a second time.
-        with db.tx() as c:
-            claimed = c.execute("SELECT claimed_seconds FROM jobs WHERE id = ?", (job["id"],)).fetchone()["claimed_seconds"]
-            delta = duration - claimed
-            if delta > 0:
-                day = params["free_day"]
-                row = c.execute("SELECT seconds FROM free_usage WHERE user_id = ? AND day = ?", (job["user_id"], day)).fetchone()
-                if (row["seconds"] if row else 0) + delta > pricing.FREE_TRANSCRIBE_SECONDS_PER_DAY + 30:
-                    raise StageFailed("This file is longer than your remaining free minutes today.")
-            c.execute("UPDATE jobs SET claimed_seconds = ? WHERE id = ?", (duration, job["id"]))
-            c.execute(
-                "UPDATE free_usage SET seconds = MAX(0, seconds + ?) WHERE user_id = ? AND day = ?",
-                (delta, job["user_id"], params["free_day"]),
-            )
-        job["claimed_seconds"] = duration
-        if not job["hold_id"]:
-            return  # free subtitles only; with a paid cleanup the hold is corrected below
     cost = _job_cost(job, params, duration)
     if cost > job["est_cost_micros"]:
         try:
@@ -496,36 +474,8 @@ def _complete(job: dict, d: Path, res: dict) -> None:
     metrics.job_ended(job["id"])
 
 
-def _bill_as_standard(job: dict, notice: str) -> dict:
-    """A voice-rebuilt job that did not get the rebuild is priced as the standard tier, at the standard tier's
-    price as it was when the job was created, and says so. The job record is updated and returned."""
-    params = json.loads(job["params_json"])
-    params = jobs.update_params(
-        job["id"], denoise_tier="standard", rates={**params.get("rates", {}), "denoise": pricing.rate("denoise", "standard").micros_per_minute}
-    )
-    tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
-    db.execute("UPDATE jobs SET tier = ? WHERE id = ?", (tier, job["id"]))
-    jobs.set_notice(job["id"], notice)
-    return {**job, "params_json": json.dumps(params), "tier": tier}
-
-
-NO_REBUILD_NOTICE = "Voice rebuilding wasn't available for this file, so it was cleaned with the standard option and billed at its price."
-
-
-def _use_available_tier(job: dict) -> dict:
-    """A voice-rebuilt job whose models are not installed would silently run the standard chain, so
-    it is billed as the standard tier (and says so) rather than charging for something it didn't get."""
-    params = json.loads(job["params_json"])
-    if params.get("denoise_tier") != "rebuild" or restore.available(get_settings().models_dir / "sidon"):
-        return job
-    log.error("job %s asked for voice rebuilding but the models are missing; billing the standard tier", job["id"])
-    return _bill_as_standard(job, NO_REBUILD_NOTICE)
-
-
 def process(job: dict, extra: dict) -> None:
     try:
-        if job["next_stage"] != "finalize":
-            job = _use_available_tier(job)
         d = _write_spec(job, extra, job.get("duration_seconds"))
         if job["next_stage"] == "finalize":
             res = run_stage(job, d, "finalize", 1800)
@@ -549,10 +499,6 @@ def process(job: dict, extra: dict) -> None:
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
-        if params.get("denoise_tier") == "rebuild" and job["kind"] != "transcribe" and res.get("noise") != "rebuilt":
-            # The rebuild did not run (the models vanished, or the chain fell back): never charge its price.
-            log.error("job %s asked for voice rebuilding but it did not run (%s); billing the standard tier", job["id"], res.get("noise"))
-            job = _bill_as_standard(job, NO_REBUILD_NOTICE)
         if res.get("needs_cloud_asr"):
             db.execute(
                 "UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', progress = 85,"

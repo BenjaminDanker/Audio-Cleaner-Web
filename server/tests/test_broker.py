@@ -18,16 +18,15 @@ def test_a_free_trial_session_does_not_open_a_core_while_paid_jobs_run(client, s
 
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     jid = jobs.create_job(uid, kind="denoise", denoise_tier="standard", transcribe_tier=None, filename="a.wav",
-                          size_bytes=1000, claimed_seconds=600.0, options={}, free=False)["id"]
+                          size_bytes=1000, claimed_seconds=600.0, options={})["id"]
     db.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (jid,))
     assert broker.live_options("live_trial") == {"may_open_core": False}
     assert broker.live_options("live") == {}  # paid live outranks jobs: it takes the room it needs
 
 
 def test_the_whole_picture_in_one_place(client, monkeypatch):
-    monkeypatch.setattr(broker, "live_engine_status", lambda timeout=2.0: [
-        {"socket": "stream.sock", "engine": "native", "sessions": 3, "units": 3.0, "capacityUnits": 45.5,
-         "captionStreams": 1, "captionCap": 35}])
+    monkeypatch.setattr(broker, "live_engine_status", lambda timeout=2.0: {
+        "engine": "native", "sessions": 3, "units": 3.0, "capacityUnits": 45.5, "captionStreams": 1, "captionCap": 35})
     sn = broker.snapshot()
     assert set(sn) >= {"classes", "cpu", "memory", "disk", "live", "jobs"}
     text = broker.format_snapshot(sn)

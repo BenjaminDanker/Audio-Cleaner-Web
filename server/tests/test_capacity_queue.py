@@ -5,9 +5,9 @@ from acw import auth, db, jobs
 def _add_job(job_id, user, status, t=0, started=None):
     now = db.now()
     db.execute(
-        "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes, claimed_seconds,"
-        " est_cost_micros, created_at, queued_at, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (job_id, user, "transcribe", "local", 0, status, '{"options": {}, "transcribe_tier": "local"}', "x.wav", 1000, 600, 0,
+        "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, input_name, input_bytes, claimed_seconds,"
+        " est_cost_micros, created_at, queued_at, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (job_id, user, "transcribe", "local", status, '{"options": {}, "transcribe_tier": "local"}', "x.wav", 1000, 600, 0,
          now, now + t, started),
     )
 

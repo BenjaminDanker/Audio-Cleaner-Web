@@ -1,7 +1,7 @@
 //! Acoustic echo cancellation: WebRTC's AEC3 through `sonora` (a pure-Rust port, BSD-3-Clause). It needs the
 //! far-end ("reference") signal: what went to the speakers, which the OBS plugin sends alongside the mic.
-//! Measured on our synthetic room echo (server/tests/test_echo_cancel.py's room()): 42.8 dB of echo removed, the
-//! near-end voice at 0.94 of its level, 1.1% of a core - better than the Python worker's (38 dB, ~2%).
+//! Measured on our synthetic room echo (server/tests/test_native_live.py's room): 42.8 dB of echo removed, the
+//! near-end voice at 0.94 of its level, 1.1% of a core (the canceller we used before did 38 dB at ~2%).
 
 use sonora::config::EchoCanceller as EcConfig;
 use sonora::{AudioProcessing, Config, StreamConfig};

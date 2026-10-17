@@ -16,7 +16,7 @@ KEYS = ("polish", "restore_highs")
 
 
 def _opts(**extra):
-    return jobs.validate_options("denoise", "standard", None, extra, False)
+    return jobs.validate_options("denoise", "standard", None, extra)
 
 
 def test_both_default_on_and_accept_booleans():

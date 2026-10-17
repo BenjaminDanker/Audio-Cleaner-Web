@@ -7,7 +7,7 @@ from acw import jobs
 
 
 def _opts(**extra):
-    return jobs.validate_options("denoise", "standard", None, extra, False)
+    return jobs.validate_options("denoise", "standard", None, extra)
 
 
 def test_noise_defaults_to_auto_and_accepts_the_three_choices():

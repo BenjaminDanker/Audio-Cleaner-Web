@@ -18,7 +18,8 @@
 #
 # Sources (all verified byte for byte against the files in production on 2026-10-15):
 #   DeepFilterNet3        github.com/Rikorose/DeepFilterNet, the commit libDF is built from (native/deepfilter/build.sh)
-#   DPDFNet-8             Ceva-IP/DPDFNet, Apache-2.0 (the batch variant is our own export of the same weights, see below)
+#   DPDFNet-8             Ceva-IP/DPDFNet, Apache-2.0: our export with a dynamic batch (tools/export_dpdfnet_batch.py) of the
+#                         published weights (Ceva-IP/DPDFNet commit dd6818d, code 9bd9844), published in the models-v2 release archive
 #   Whisper large-v3-turbo, small, base   CTranslate2 conversions (faster-whisper): dropbox-dash/faster-whisper-large-v3-turbo
 #                         (renamed from mobiuslabsgmbh/...), Systran/faster-whisper-small, Systran/faster-whisper-base
 #                         (base only detects the spoken language: runner.py, docs/research/heavy-2026-10.md)
@@ -34,6 +35,7 @@
 #                         replace the btbn-ffmpeg archive line and the two bin/ lines, and mirror the tarball in our own release.
 #
 archive  -         5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce  908538132 models-v1                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v1/AudioCleaner-models-v1.zip
+archive  -         315d667600d8e7c9b2760c7a4102201ff3260c0ec3fb4643d69377ee57ff301d   14777263 models-v2                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v2/AudioCleaner-models-v2.zip
 archive  -         968255015cc65dd999a7eddf8016be89a8a1bbef063ea7d3e9c3a229b0f6faaf  150350364 btbn-ffmpeg                                          https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1.tar.xz
 
 
@@ -49,7 +51,7 @@ file     -         27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a
 file     -         2e036e4dbacfdeb7242c7d4ec4149f4a16e86026048f94d1637e3a8ee9c6a573     282682 models/browser/whisper-base/tokenizer_config.json                    https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/tokenizer_config.json
 file     -         5862993336bf33acd23736071aae2b32261d3b1b2f37780194460d4ef974dd46   23201314 models/browser/whisper-base/onnx/encoder_model_quantized.onnx        https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/onnx/encoder_model_quantized.onnx
 file     -         fa3ef9902734ce5ae6f9ef2bdb2ba9a6c4b5785b09f4f420ce036573dc9d090b   53693315 models/browser/whisper-base/onnx/decoder_model_merged_quantized.onnx https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/onnx/decoder_model_merged_quantized.onnx
-file     -         7b3afbb260a08fe9af3d16e3bda992971be1e7e951d1dee7c2d235f5c43f5631   14857107 models/dpdfnet/dpdfnet8_48khz_hr.onnx                https://huggingface.co/Ceva-IP/DPDFNet/resolve/dd6818d00f50c836fed43a6243ebe49116de5964/onnx/dpdfnet8_48khz_hr.onnx
+member   -         b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa   14777093 models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx          models-v2:dpdfnet/dpdfnet8_48khz_hr_batch.onnx
 file     -         666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466         97 models/parakeet-v2/config.json                       https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/config.json
 file     -         cbb52a07bd70ab5b67f8439d4b3cd8704b18467b4430bcacb5adabe154b8d191   35792059 models/parakeet-v2/decoder_joint-model.onnx          https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/decoder_joint-model.onnx
 file     -         3987bcd28175d829d12888a996a84e8f62a0e374d9ffd640662c1515adc679d3   41770866 models/parakeet-v2/encoder-model.onnx                https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.onnx
@@ -92,7 +94,5 @@ member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452
 
 local    optional  f4dd2f350f3d41dee721567b7d5c351cb7122c27be9b8fc110ad7cf721e62b1f   15361376 bin/libdf-tract021.so                                older libDF build (tract 0.21), only used by native/deepfilter/test_native.py to compare outputs
 local    -         928894bad1373452e2978ea30f06273856775b9814c1e2fec42d040436361403   25395576 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte
-local    optional  3c34fa7296eef1121f76b4a0ed7c066706d53ac3c2bc7248e4f57132e469cf3b  276861944 models/sidon/sidon_fe_q8.onnx                        int8 variant of the Sidon feature extractor, made by tools/convert_sidon_onnx.py; not in models-v1; the product runs without it
-local    optional  b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa   14777093 models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx              DPDFNet-8 with a dynamic batch (same weights as dpdfnet8_48khz_hr.onnx, Ceva-IP/DPDFNet commit dd6818d, code 9bd9844), made by tools/export_dpdfnet_batch.py; 1.5x less CPU on long files, used instead of the batch-1 file when present (dpdfnet.resolve_model); not yet in a published archive, so it is only checked, not fetched
 local    optional  d99358ebe4081f13c0ba12cb79e9d77bc9707dfda9ad4151d5ef5f2afaee4caa      15013 wasm/df.js                                           browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
 local    optional  8ed0596104271ff3503d79ae1571b4e5674d20f32982d0781b80c70f1c4ac4c1   14028025 wasm/df_bg.wasm                                      browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh

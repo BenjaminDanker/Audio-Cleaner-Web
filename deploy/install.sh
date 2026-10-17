@@ -98,11 +98,6 @@ elif [ "$LOCK_SUM" != "$(cat "$H/data/lock.sha" 2>/dev/null || true)" ]; then
 fi
 APP_CHANGED=0
 [ -n "$CHANGED_APP$CHANGED_COMMON" ] && APP_CHANGED=1
-STREAM_CHANGED=0
-if [ -n "$CHANGED_COMMON" ] || [ "$LOCK_CHANGED" = 1 ] || \
-   printf '%s\n' "$CHANGED_APP" | grep -Eq '^(stream/(worker|engine|protocol)\.py|cpusplit\.py|hostload\.py|config\.py|worker/sandbox\.py)$'; then
-  STREAM_CHANGED=1
-fi
 
 # Sized from this machine, so a bigger CPU or more RAM is used without edits:
 # all Audio Cleaner services may use ACW_MEMORY_PERCENT of RAM (the rest stays
@@ -141,7 +136,6 @@ if [ "$APP_CHANGED" = 1 ] || [ "$LOCK_CHANGED" = 1 ]; then
   for i in $(seq 1 "$WORKERS"); do add_restart "acw-worker@$i.service"; done
   [ "$GPU" = 1 ] && add_restart acw-worker-gpu.service
 fi
-[ "$STREAM_CHANGED" = 1 ] && [ "$APP_CHANGED$LOCK_CHANGED" != "00" ] && add_restart acw-stream.service
 # A unit whose own unit file changed (never the others, in particular not the tunnel).
 for f in "$REPO"/deploy/systemd/acw-*.service; do
   name="$(basename "$f")"
@@ -223,32 +217,19 @@ install -m 600 "$REPO/deploy/models.lock" "$H/app/models.lock"
 chmod -R go-rwx "$H/app"
 
 # ---- 7. Models and programs: every file in deploy/models.lock is present and has the recorded sha256
-# (downloads what is missing or wrong, never touches a correct file; FFmpeg and the models-v1 archive come from
-# the lock's pinned URLs, or from $ACW_ARCHIVE_DIR). libdf.so is built here (native/deepfilter/build.sh).
-bash "$REPO/deploy/fetch-models.sh" || echo "warning: some models or programs are missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2
-for f in "$H/bin/ffmpeg" "$H/bin/ffprobe" "$H/bin/libdf.so" "$H/models/DeepFilterNet3_onnx.tar.gz"; do
-  [ -e "$f" ] || { echo "missing $f (deploy/fetch-models.sh, native/deepfilter/build.sh, docs/operations.md)" >&2; exit 1; }
-done
-# The native live engine (native/live): built here when Rust is available and its sources changed. Without it (or if
-# the build fails) live runs on the Python worker, at lower capacity.
-if command -v cargo >/dev/null 2>&1 || [ -f "$HOME/.cargo/env" ]; then
-  stamp="$(cd "$REPO/native/live" && cat Cargo.toml Cargo.lock build.rs src/*.rs 2>/dev/null | sha256sum | cut -c1-16)"
-  if [ ! -x "$H/bin/acw-live" ] || [ "$(cat "$H/bin/acw-live.src" 2>/dev/null)" != "$stamp" ]; then
-    if bash "$REPO/native/live/build.sh" "$H/bin"; then
-      echo "$stamp" > "$H/bin/acw-live.src"
-    else
-      echo "warning: the native live engine did not build; live keeps running on the Python worker" >&2
-    fi
-  fi
-else
-  echo "note: no Rust toolchain: live runs on the Python worker (install rustup to build native/live)" >&2
+# (downloads what is missing or wrong, never touches a correct file; FFmpeg and the models-v1/v2 archives come from
+# the lock's pinned URLs, or from $ACW_ARCHIVE_DIR). Every feature needs its files: anything missing stops the deploy.
+# libdf.so is built here (native/deepfilter/build.sh).
+bash "$REPO/deploy/fetch-models.sh" || { echo "models or programs missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2; exit 1; }
+# The live engine (native/live, bin/acw-live): rebuilt when its sources change. It is required: a failed build stops
+# the deploy (the running engine is left as it is).
+command -v cargo >/dev/null 2>&1 || source "$HOME/.cargo/env"
+stamp="$(cd "$REPO/native/live" && cat Cargo.toml Cargo.lock build.rs src/*.rs | sha256sum | cut -c1-16)"
+if [ ! -x "$H/bin/acw-live" ] || [ "$(cat "$H/bin/acw-live.src" 2>/dev/null)" != "$stamp" ]; then
+  bash "$REPO/native/live/build.sh" "$H/bin"
+  echo "$stamp" > "$H/bin/acw-live.src"
+  add_restart acw-stream.service
 fi
-[ -d "$H/models/whisper/large-v3-turbo" ] || echo "warning: whisper large-v3-turbo missing (local transcription will fail)" >&2
-[ -f "$H/models/whisper/base/model.bin" ] || echo "warning: whisper base missing (language detection falls back to the 4x dearer small model)" >&2
-[ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
-[ -f "$H/models/dpdfnet/dpdfnet8_48khz_hr.onnx" ] || echo "warning: DPDFNet model missing (heavy-noise recordings use DeepFilterNet3)" >&2
-[ -f "$H/models/sidon/sidon_fe.onnx" ] || echo "warning: Sidon ONNX models missing in $H/models/sidon (models-v1 archive; docs/research/restore-sidon.md); voice-rebuild jobs are billed at the standard price and say so" >&2
-[ -f "$H/models/ap-bwe/8kto48k.onnx" ] || echo "warning: AP-BWE models missing in $H/models/ap-bwe (models-v1 archive; tools/export_apbwe_onnx.py); band-limited recordings are not extended" >&2
 
 # ---- 8. Config
 if [ ! -f "$H/secrets/acw.env" ]; then

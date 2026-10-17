@@ -9,10 +9,10 @@ import pytest
 from starlette.websockets import WebSocketDisconnect
 
 from acw import auth, db
-from acw.billing import ledger, pricing
+from acw.billing import ledger
 from acw.config import get_settings
 from acw.stream import protocol as P
-from acw.stream import routes, worker
+from acw.stream import routes
 
 from .conftest import ORIGIN, login
 
@@ -310,22 +310,6 @@ def test_the_account_limit_still_counts_trial_sessions(client, signed_in, fake_w
         routes._live.pop(uid, None)
 
 
-def test_the_worker_turns_trial_sessions_away_above_70_percent(monkeypatch):
-    from acw import cpusplit
-
-    monkeypatch.setattr(worker, "_monitor", None)
-    monkeypatch.setattr(cpusplit, "units_per_core", lambda: 2.4)
-    cap = worker.capacity_units()
-    trial, paid = {"denoise": "light", "trial": True}, {"denoise": "light"}
-    monkeypatch.setattr(worker, "_units", 0.69 * cap)
-    assert not worker.trial_busy(trial)
-    monkeypatch.setattr(worker, "_units", 0.71 * cap)
-    assert worker.trial_busy(trial)
-    assert not worker.trial_busy(paid) and worker.admit(paid)[0]  # paid sessions are unaffected, up to full
-    monkeypatch.setattr(worker, "_units", 0.0)
-    assert not worker.trial_busy(trial)
-
-
 def test_a_busy_worker_gives_trial_busy_and_costs_no_trial_time(client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
@@ -369,12 +353,6 @@ def test_an_interrupted_session_that_had_moved_on_is_billed_only_after_the_trial
 
 
 # ---------------------------------------------------------------- unchanged by the trial
-
-def test_the_session_cleanup_runs():
-    db.execute("INSERT INTO deleted_emails(email_hash, day, free_seconds) VALUES ('x', '2026-01-01', 1)")
-    auth.purge_expired()
-    assert db.one("SELECT COUNT(*) n FROM deleted_emails")["n"] == 0
-
 
 def test_a_refund_never_pays_out_given_credit(monkeypatch):
     from acw.billing import stripe_service

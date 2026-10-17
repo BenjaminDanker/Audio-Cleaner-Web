@@ -66,7 +66,7 @@ The estimates shown to people and the slow-job monitor follow the work a job doe
 
 ## Live: the order
 
-`stream/worker.py`: echo canceller (when the client sends the speaker reference) → DeepFilterNet3 + high-pass +
+The live engine (`native/live`, `bin/acw-live`): echo canceller (when the client sends the speaker reference) → DeepFilterNet3 + high-pass +
 limiter → back to the client. Standard captions and the extra-accurate tap both take the signal after echo
 removal and before noise removal.
 

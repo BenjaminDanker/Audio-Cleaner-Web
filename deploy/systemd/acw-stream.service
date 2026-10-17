@@ -1,14 +1,13 @@
 [Unit]
-Description=Audio Cleaner live DSP worker (Unix socket only)
+Description=Audio Cleaner live engine (native/live: every live session; Unix socket only)
 OnFailure=acw-alert@%n.service
 
 [Service]
 Slice=acw.slice
 Type=simple
 WorkingDirectory=%h/audio-cleaner/app
-Environment=PYTHONPATH=%h/audio-cleaner/app
 EnvironmentFile=%h/audio-cleaner/secrets/acw-worker.env
-ExecStart=%h/audio-cleaner/venv/bin/python -m acw.stream.worker
+ExecStart=%h/audio-cleaner/bin/acw-live
 Restart=always
 RestartSec=2
 UMask=0077

@@ -550,7 +550,7 @@ def test_old_results_are_pruned_and_endless_waits_given_up():
 def test_only_the_web_process_delivers():
     root = Path(__file__).resolve().parents[1] / "acw"
     assert "webhooks.run_loop" in (root / "app.py").read_text()
-    for other in ("bulk_app.py", "worker/main.py", "stream/worker.py"):
+    for other in ("bulk_app.py", "worker/main.py", "worker/runner.py"):
         assert "webhooks" not in (root / other).read_text(), other
 
 

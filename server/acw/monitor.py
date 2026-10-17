@@ -499,7 +499,7 @@ def check_installation(now: int) -> list[Finding]:
     out: list[Finding] = []
     missing = health.missing_files()
     out.append(Finding("files_missing", bool(missing), "Model or program files are missing",
-                       "Missing under ~/audio-cleaner: " + ", ".join(missing[:12]) + ".\nJobs that need them fail or fall back.\n"))
+                       "Missing under ~/audio-cleaner: " + ", ".join(missing[:12]) + ".\nJobs that need them fail.\n"))
     out.append(Finding("stream_socket", not health.stream_worker_ok(), "The live audio worker does not answer",
                        "Connecting to the live worker's socket failed: live sessions cannot start.\n"
                        "Check: systemctl --user status acw-stream; journalctl --user -u acw-stream -n 60 --no-pager\n", confirm=2))

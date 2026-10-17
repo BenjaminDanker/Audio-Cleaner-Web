@@ -67,7 +67,7 @@ def test_a_job_asks_for_translations_and_is_priced_per_language():
     uid = auth.get_or_create_user("t@example.com")["id"]
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     base = dict(kind="transcribe", denoise_tier=None, transcribe_tier="local", filename="a.wav", size_bytes=1000,
-                claimed_seconds=600.0, free=False)
+                claimed_seconds=600.0)
     plain = jobs.create_job(uid, options={}, **base)["estCostMicros"]
     two = jobs.create_job(uid, options={"translate": ["es", "de"]}, **base)["estCostMicros"]
     assert two - plain == 2 * pricing.cost_micros("transcribe_translate", "standard", 600)
@@ -81,7 +81,7 @@ def _job_with_segments(tmp_path, langs):
     uid = auth.get_or_create_user("t2@example.com")["id"]
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     jid = jobs.create_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", filename="a.wav", size_bytes=1000,
-                          claimed_seconds=60.0, options={"translate": langs}, free=False)["id"]
+                          claimed_seconds=60.0, options={"translate": langs})["id"]
     d = jobs.job_dir(jid)
     segs = [{"start": 0.0, "end": 2.0, "text": "Hello there", "words": [[0, 1, "Hello"], [1, 2, "there"]]},
             {"start": 2.5, "end": 4.0, "text": "Good game", "words": []}]

@@ -1,15 +1,14 @@
 //! acw-live: every live session of Audio Cleaner in one native process.
 //!
-//! It replaces the Python stream worker (server/acw/stream/worker.py) behind the same Unix-socket protocol, so the
-//! web process doesn't change. Why: Python needs the GIL around every frame, so one Python process fell behind at
-//! about ten sessions and the work had to be split over several processes (each with its own caption model). Here a
-//! session is a thread that does all of its per-frame work (Opus, echo cancellation, noise removal, filters) without
-//! a lock, on its own core.
+//! The web process talks to it over a Unix socket (server/acw/stream/protocol.py, "IPC"). Every session is a thread
+//! that does all of its per-frame work (Opus, echo cancellation, noise removal, filters) without a shared lock, on
+//! its own core; the caption models are shared. (It replaced a Python worker that fell behind at about ten sessions
+//! per process because Python holds one lock around every frame.)
 //!
-//! Configuration is the same environment as the Python worker (ACW_HOME, ACW_DATA_DIR, ACW_BIN_DIR,
+//! Configuration comes from the environment, shared with the server (ACW_HOME, ACW_DATA_DIR, ACW_BIN_DIR,
 //! ACW_MODELS_DIR, ACW_STREAM_SOCKET, ACW_ENV, ACW_MIN_JOB_CORES, ACW_LIVE_UNITS_PER_CORE,
-//! ACW_STREAM_MAX_CAPTION_STREAMS). `python -m acw.stream.worker` starts this binary when it is installed
-//! (~/audio-cleaner/bin/acw-live) unless ACW_LIVE_ENGINE=python.
+//! ACW_STREAM_MAX_CAPTION_STREAMS). The acw-stream unit runs it (~/audio-cleaner/bin/acw-live, built by
+//! native/live/build.sh from deploy/install.sh).
 
 macro_rules! log {
     ($($arg:tt)*) => {{
@@ -22,6 +21,7 @@ mod aec;
 mod captions;
 mod dsp;
 mod ffi;
+mod gate;
 mod ipc;
 mod sandbox;
 mod session;
@@ -35,8 +35,7 @@ use std::time::Instant;
 
 use admission::{Admission, HostLoad};
 
-/// How far the echo canceller delays the mic: 432 samples (9 ms), measured with an impulse, the same as the
-/// Python worker's canceller.
+/// How far the echo canceller delays the mic: 432 samples (9 ms), measured with an impulse.
 pub const AEC_DELAY: usize = 432;
 
 /// Units one physical core carries with good latency in this engine (2026-10-16, Ryzen 7 1700X: see
@@ -85,7 +84,7 @@ fn calibrate(lib: &Path, model: &Path) -> f64 {
             return v;
         }
     }
-    let reference = if ffi::df_shares_model(lib) { REFERENCE_UNITS_PER_CORE } else { 2.4 };
+    let reference = REFERENCE_UNITS_PER_CORE;
     let Ok(mut df) = ffi::DeepFilter::new(lib, model, 100.0) else { return reference };
     let mut seed: u32 = 7;
     let x: Vec<f32> = (0..96_000)
@@ -115,7 +114,7 @@ fn calibrated(data_dir: &Path, lib: &Path, model: &Path) -> f64 {
         .ok()
         .and_then(|s| s.lines().find(|l| l.starts_with("model name")).map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string()))
         .unwrap_or_default();
-    let key = format!("{cpu}|shared={}|reference={REFERENCE_UNITS_PER_CORE}", ffi::df_shares_model(lib));
+    let key = format!("{cpu}|reference={REFERENCE_UNITS_PER_CORE}");
     let cache = data_dir.join("live-calibration-native.json");
     if let Ok(text) = std::fs::read_to_string(&cache) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -159,25 +158,22 @@ fn main() {
     let live_cores: Vec<Vec<usize>> = cores[..live].to_vec();
     let live_cpus: Vec<usize> = live_cores.iter().flatten().cloned().collect();
     admission::pin_current_thread(&live_cpus); // every thread started from here on inherits it
+    // The libraries this engine is built around: refuse to run without them rather than serve fewer sessions.
     if !ffi::opus_available() {
-        log!("libopus is missing: Opus sessions will fail");
+        log!("libopus (libopus.so.0) is missing");
+        std::process::exit(1);
+    }
+    if !ffi::df_shares_model(&lib_df) {
+        log!("{} is an old build: rebuild it with native/deepfilter/build.sh (one copy of the model for every session)", lib_df.display());
+        std::process::exit(1);
     }
     let upc = calibrated(&data_dir, &lib_df, &dfn_model);
     let caption_cap = std::env::var("ACW_STREAM_MAX_CAPTION_STREAMS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&v| v > 0).unwrap_or(CAPTION_STREAMS_PER_CORE * live);
     let host = HostLoad::open();
     host.sample(&live_cpus);
-    log!("live capacity: {live} cores x {upc:.2} units, {caption_cap} caption streams; shared model: {}", ffi::df_shares_model(&lib_df));
+    log!("live capacity: {live} cores x {upc:.2} units, {caption_cap} caption streams");
 
-    // Sockets left by the Python workers (stream-2.sock ...): this engine serves every core from one socket.
-    if let (Some(dir), Some(stem)) = (sock.parent(), sock.file_stem().and_then(|s| s.to_str())) {
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for e in rd.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with(&format!("{stem}-")) && name.ends_with(".sock") {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
+    if let Some(dir) = sock.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::remove_file(&sock);

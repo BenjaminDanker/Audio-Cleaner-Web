@@ -6,8 +6,7 @@ description = "Audio Cleaner live audio engine: every live session in one native
 license = "LicenseRef-Proprietary"
 publish = false
 
-# The engine speaks the stream worker's Unix-socket protocol (server/acw/stream/protocol.py), so the web process
-# can't tell it from the Python worker (server/acw/stream/worker.py), which stays as the fallback.
+# The web process talks to the engine over a Unix socket (server/acw/stream/protocol.py).
 # Build: native/live/build.sh (it points SHERPA_ONNX_LIB_DIR at the sherpa-onnx that the Python venv already has).
 
 [dependencies]

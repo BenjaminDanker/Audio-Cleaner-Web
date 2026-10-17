@@ -1,6 +1,6 @@
-"""Live audio across several worker processes (2026-10-16 efficiency audit): sessions fill the workers in order and
-move on when one is full, file jobs keep off the cores in use, and the cheaper per-session pieces (libopus, batched
-caption audio, several spoken languages)."""
+"""The web side of live sessions (2026-10-16/17 efficiency work): file jobs keep off the cores the live engine uses,
+silence frames, returnAudio, captions-only sessions billed for speech, extra-accurate audio in 100 ms pieces, several
+spoken languages."""
 import asyncio
 import json
 from types import SimpleNamespace
@@ -8,116 +8,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from acw import cpusplit
+from acw import broker
 from acw.billing import ledger
 from acw.config import get_settings
-from acw.stream import engine, routes
+from acw.stream import routes
 from acw.stream import protocol as P
 
-from .test_live_trial import run_session
-
-
-@pytest.fixture
-def workers(monkeypatch, tmp_path):
-    """Three live workers on their own sockets; `replies[name]` is what each answers to a start."""
-    monkeypatch.setenv("ACW_STREAM_SOCKET", str(tmp_path / "stream.sock"))
-    get_settings.cache_clear()
-    for name in ("stream.sock", "stream-2.sock", "stream-3.sock", "stream-x.sock"):
-        (tmp_path / name).touch()
-    cores = {"stream.sock": [0, 1], "stream-2.sock": [2, 3], "stream-3.sock": [4, 5]}
-    state = SimpleNamespace(replies={n: {"type": "ready", "latencySamples": 0, "cores": c} for n, c in cores.items()},
-                            tried=[], started={})
-
-    async def open_conn(path):
-        name = path.rsplit("/", 1)[-1]
-        state.tried.append(name)
-        if state.replies.get(name) is None:
-            raise ConnectionRefusedError(name)
-        ended = asyncio.Event()
-        return SimpleNamespace(name=name, first=True, ended=ended), SimpleNamespace(name=name, ended=ended, close=lambda: None)
-
-    async def send(writer, kind, payload):
-        if kind == P.MSG_START:
-            state.started[writer.name] = json.loads(payload)
-        elif kind == P.MSG_END:
-            writer.ended.set()
-
-    async def read(reader):
-        if reader.first:
-            reader.first = False
-            return P.MSG_EVENT, P.pack_json(state.replies[reader.name])
-        await reader.ended.wait()
-        return P.MSG_END, b""
-
-    monkeypatch.setattr(routes.asyncio, "open_unix_connection", open_conn)
-    monkeypatch.setattr(routes.P, "send_msg", send)
-    monkeypatch.setattr(routes.P, "read_msg", read)
-    return state
-
-
-def test_workers_are_found_by_their_sockets_in_order(workers):
-    assert [p.name for p in routes.worker_sockets()] == ["stream.sock", "stream-2.sock", "stream-3.sock"]
-
-
-def test_a_full_worker_passes_the_session_to_the_next(client, signed_in, workers):
-    uid, _ = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    workers.replies["stream.sock"] = {"type": "error", "code": "full", "available": [{"captions": "premium"}]}
-    workers.replies["stream-2.sock"] = None  # restarting
-    got = run_session(client, 0.1)
-    assert got[0]["type"] == "ready"
-    assert workers.tried == ["stream.sock", "stream-2.sock", "stream-3.sock"] and list(workers.started) == ["stream.sock", "stream-3.sock"]
-
-
-def test_when_every_worker_is_full_the_client_hears_what_still_fits(client, signed_in, workers):
-    uid, _ = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    for name in workers.replies:
-        workers.replies[name] = {"type": "error", "code": "full", "available": [{"captions": "premium"}]}
-    got = run_session(client, 0.1, {"captions": "local"})
-    assert got[0]["code"] == "full" and got[0]["available"] == [{"captions": "premium"}]
-
-
-def test_the_cores_in_use_are_published_for_file_jobs(client, signed_in, workers, monkeypatch):
-    uid, _ = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    seen = []
-    monkeypatch.setattr(cpusplit, "set_live_units", lambda d, units, per_core, cores=None: seen.append((units, sorted(cores or []))))
-    run_session(client, 0.1)
-    assert (1.0, [0, 1]) in seen and seen[-1] == (0.0, [])
-
-
-def test_live_cores_are_split_into_pairs(monkeypatch):
-    monkeypatch.setattr(cpusplit, "max_live_cores", lambda: 7)
-    monkeypatch.delenv("ACW_STREAM_WORKERS", raising=False)
-    assert cpusplit.stream_workers() == 4
-    assert [cpusplit.stream_worker_cores(i, 4) for i in range(1, 5)] == [[0, 1], [2, 3], [4, 5], [6]]
-    monkeypatch.setenv("ACW_STREAM_WORKERS", "1")
-    assert cpusplit.stream_workers() == 1 and cpusplit.stream_worker_cores(1, 1) == list(range(7))
-
-
-def test_file_jobs_keep_off_busy_workers_and_one_spare_core(tmp_path, monkeypatch):
-    monkeypatch.setattr(cpusplit, "physical_cores", lambda: [[i, i + 8] for i in range(8)])
-    monkeypatch.setattr(cpusplit, "max_live_cores", lambda: 7)
-    cpusplit.set_live_units(tmp_path, 3.0, 4.3, [2, 3])
-    assert cpusplit.job_cpus_now(tmp_path) == {c for i in (1, 4, 5, 6, 7) for c in (i, i + 8)}  # core 0: the spare
-    cpusplit.set_live_units(tmp_path, 0.0, 4.3, [])
-    assert cpusplit.job_cpus_now(tmp_path) == cpusplit.all_cpus()
-    (tmp_path / "live-units").write_text("3.0 2.4")  # written by an older web process: by units, as before
-    assert cpusplit.job_cpus_now(tmp_path) == cpusplit.job_cpus(3.0, 2.4)
-
-
-def test_libopus_round_trip_and_bad_packets():
-    if engine._libopus() is None:
-        pytest.skip("libopus not installed")
-    x = (0.3 * np.sin(np.arange(48_000) * 2 * np.pi * 440 / 48_000)).astype(np.float32)
-    enc, dec = engine.OpusCodec(96_000), engine.OpusCodec(encoder=False)
-    y = np.concatenate([dec.decode(enc.encode(x[i:i + 960])) for i in range(0, len(x), 960)])
-    assert len(y) == len(x) and abs(np.sqrt(np.mean(y[9600:] ** 2)) - np.sqrt(np.mean(x ** 2))) < 0.02
-    with pytest.raises(ValueError):
-        dec.decode(b"\xff\xff\xff")  # not a 20 ms packet
-    enc.close()
-    dec.close()
+from .test_live_trial import fake_worker, run_session  # noqa: F401 - fixture
 
 
 def test_extra_accurate_audio_goes_in_100_ms_pieces_and_is_committed_at_pauses():
@@ -148,7 +45,7 @@ def test_extra_accurate_audio_goes_in_100_ms_pieces_and_is_committed_at_pauses()
     assert sum(len(m["audio"]) for m in appends) * 3 // 4 == 40 * 480 * 2  # every 24 kHz sample went out once
 
 
-def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, workers, monkeypatch):
+def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -176,29 +73,6 @@ def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, w
     assert got[0]["code"] == "bad_config"
     got = run_session(client, 0.1, {"captions": "local", "language": ["en", "es"]})
     assert got[0]["code"] == "bad_config" and "English only" in got[0]["message"]
-
-
-def test_digital_silence_is_not_run_through_the_live_model():
-    calls = []
-
-    class FakeDf:
-        delay = 1440
-
-        def process(self, x):
-            calls.append(len(x))
-            return x.copy()
-
-    chain = engine.LiveChain.__new__(engine.LiveChain)
-    engine.LiveChain.__init__(chain, None, None, None)  # no model: then give it the fake one
-    chain.df = FakeDf()
-    voice = np.full(960, 0.1, np.float32)
-    zeros = np.zeros(960, np.float32)
-    for _ in range(5):
-        chain.process(voice)
-    out = [chain.process(zeros) for _ in range(50)]  # 1 s of a noise gate's silence
-    assert not np.any(np.concatenate(out[engine.SILENT_SKIP_AFTER // 960:]))  # skipped: silence out
-    assert len(calls) == 5 + engine.SILENT_SKIP_AFTER // 960  # the model only saw the first 200 ms of it
-    assert np.any(chain.process(voice)) and len(calls) == 5 + engine.SILENT_SKIP_AFTER // 960 + 1  # sound: back at once
 
 
 # --------------------------------------------------------------- silence and audio nobody needs (2026-10-16)
@@ -296,7 +170,7 @@ def test_a_client_that_needs_no_audio_back_gets_none(client, signed_in, echo_wor
 def test_standard_captions_only_are_not_billed_for_the_silence_they_skipped(client, signed_in, echo_worker):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    echo_worker.events = [{"type": "_idle", "samples": 960}]
+    echo_worker.events = [{"samples": 960, "type": "_idle"}]  # the engine writes keys in this order
     got, _ = _session(client, {"denoise": None, "captions": "local"}, [_pcm(i) for i in range(3)])
     assert not any(m.get("type") == "_idle" for m in got)  # internal: never reaches the client
     from acw import db
@@ -308,16 +182,19 @@ def test_standard_captions_only_are_not_billed_for_the_silence_they_skipped(clie
     assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.06)
 
 
-def test_the_captioner_ends_the_line_then_only_counts_silence_frames(monkeypatch):
-    from .test_capacity_limits import _captioner, _talk
+def test_the_cores_in_use_are_published_for_file_jobs(client, signed_in, echo_worker, monkeypatch):
+    uid, _ = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    seen = []
+    monkeypatch.setattr(broker, "publish_live_cores", lambda cores, data_dir=None: seen.append(sorted(cores)))
+    _session(client, {"denoise": "light"}, [_pcm(0)])
+    assert seen == [[0, 1], []]  # the engine said cores 0 and 1 (echo_worker's ready); free again afterwards
 
-    c, events = _captioner(monkeypatch)
-    for _ in range(25):
-        c.feed(_talk())
-    c._take_audio()
-    before = c.stream.fed
-    c.silence(48_000 * 10)  # 10 s muted
-    c._take_audio()
-    assert abs((c.stream.fed - before) - engine.GATE_AFTER_S * 16_000) < 10  # trailing silence for the line to end
-    assert abs(c._fed - 10.5 * 16_000) < 40  # the clock still follows (the resampler holds back a few samples)
-    assert not any(e.get("type") == "_idle" for e in events)  # silence frames were never billed: nothing to give back
+
+def test_file_jobs_keep_off_live_cores_and_one_spare(tmp_path, monkeypatch):
+    monkeypatch.setattr(broker, "physical_cores", lambda: [[i, i + 8] for i in range(8)])
+    monkeypatch.setattr(broker, "max_live_cores", lambda: 7)
+    broker.publish_live_cores([2, 3], tmp_path)
+    assert broker.job_cpus(tmp_path) == {c for i in (1, 4, 5, 6, 7) for c in (i, i + 8)}  # core 0: the spare
+    broker.publish_live_cores([], tmp_path)
+    assert broker.job_cpus(tmp_path) == broker.all_cpus()

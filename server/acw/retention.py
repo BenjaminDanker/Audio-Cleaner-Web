@@ -5,7 +5,6 @@
   * job records, live-session records, closed holds, routine audit rows, revoked API keys: deleted after 12 months
   * expired browser sessions, login links and sign-in states: deleted 30 days after they ran out
   * processed Stripe events: deleted after 90 days (Stripe retries for about 3 days); any other after 12 months
-  * the free daily allowance's per-day rows: deleted after 60 days
   * payment, ledger and refund records, and the audit rows that go with them: kept 7 years. NOTHING here touches
     them. `compact_money()` (python -m acw.admin compact-money, a yearly job for the owner once records are 7 years
     old) replaces a user's old ledger rows with one carried-forward row, so balances still add up.
@@ -21,7 +20,7 @@ import logging
 import re
 import shutil
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from . import db
 
@@ -34,7 +33,6 @@ RECORD_DAYS = 365  # jobs, live sessions, closed holds, routine audit rows, revo
 TOKEN_DAYS = 30  # expired browser sessions, login links, OAuth states
 STRIPE_EVENT_DAYS = 90
 STRIPE_EVENT_ANY_DAYS = 365
-FREE_USAGE_DAYS = 60
 MONEY_DAYS = 7 * 365 + 2  # payments, ledger, refunds and what goes with them (two days for leap years)
 
 BATCH = 2000
@@ -149,7 +147,6 @@ def run(now: int | None = None) -> dict[str, int]:
             "(processed_at IS NOT NULL AND received_at < ?) OR received_at < ?",
             (now - STRIPE_EVENT_DAYS * DAY, now - STRIPE_EVENT_ANY_DAYS * DAY),
         ),
-        "free_usage": _delete("free_usage", "day < ?", (_day(now - FREE_USAGE_DAYS * DAY),)),
     }
     return done
 
@@ -285,7 +282,6 @@ def compact_money(now: int | None = None, *, apply: bool = False) -> dict[str, i
             " AND NOT EXISTS (SELECT 1 FROM holds WHERE user_id = users.id)"
             " AND NOT EXISTS (SELECT 1 FROM jobs WHERE user_id = users.id)"
             " AND NOT EXISTS (SELECT 1 FROM stream_sessions WHERE user_id = users.id)"
-            " AND NOT EXISTS (SELECT 1 FROM free_usage WHERE user_id = users.id)"
             " AND NOT EXISTS (SELECT 1 FROM sessions WHERE user_id = users.id)"
             " AND NOT EXISTS (SELECT 1 FROM identities WHERE user_id = users.id)"
             " AND NOT EXISTS (SELECT 1 FROM api_keys WHERE user_id = users.id)"

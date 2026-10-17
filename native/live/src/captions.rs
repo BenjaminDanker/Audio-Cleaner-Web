@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use sherpa_onnx_sys as so;
 
-use crate::dsp::{Decimate3, SAMPLE_RATE};
+use crate::dsp::Decimate3;
+use crate::gate::{self, Gate, Piece};
 
 const INPUT_RATE: usize = 16_000;
 const TICK: Duration = Duration::from_millis(50);
@@ -30,29 +31,13 @@ fn recognizer_threads() -> i32 {
     std::env::var("ACW_CAPTION_THREADS").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(2)
 }
 
-// A caption stream is shed, not queued, when the decoder falls behind it.
-const MAX_BACKLOG: usize = 2 * SAMPLE_RATE;
-const KEEP_BACKLOG: usize = SAMPLE_RATE / 2;
-const RECOVERED_BACKLOG: usize = SAMPLE_RATE / 2;
 const CAPTIONS_BEHIND_MESSAGE: &str = "Captions are running behind because live is very busy, so some words are being skipped. They catch up on their own.";
-
-// Silence gate (engine.py): quieter than SPEECH_DBFS is silence; GATE_AFTER_S of it is decoded so the line ends; then
-// skipped (counted) until speech, with PREROLL_FRAMES of the quiet kept for the start of the next words.
-pub const SPEECH_DBFS: f32 = -50.0;
-pub const GATE_AFTER_S: f32 = 2.0;
-const PREROLL_FRAMES: usize = 15;
 
 pub type Emit = Arc<dyn Fn(Value) + Send + Sync>;
 
 struct Recognizer(*const so::OnlineRecognizer);
 unsafe impl Send for Recognizer {}
 unsafe impl Sync for Recognizer {}
-
-/// Audio waiting for the decoder: samples to decode, or (Skip) samples only counted.
-enum Piece {
-    Audio(Vec<f32>),
-    Skip(usize),
-}
 
 struct Shared {
     pending: Vec<Piece>,
@@ -79,14 +64,6 @@ pub struct Captioner {
     closed: AtomicBool,
     // the gate (session thread only, behind its own lock to keep Captioner Sync)
     gate: Mutex<Gate>,
-}
-
-struct Gate {
-    quiet: f32,
-    gated: bool,
-    preroll: Vec<Vec<f32>>,
-    skipped: usize,
-    skipped_total: usize,
 }
 
 struct Group {
@@ -258,10 +235,6 @@ fn decoder_loop(g: Arc<Group>) {
     }
 }
 
-fn dbfs(x: &[f32]) -> f32 {
-    let ms = x.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>() / x.len().max(1) as f64;
-    (20.0 * (ms.sqrt() + 1e-9).log10()) as f32
-}
 
 /// The model writes lowercase without punctuation: capitalise the line and "I" (alone, or in I'm, I've, I'll, I'd).
 pub fn tidy(text: &str) -> String {
@@ -302,7 +275,7 @@ impl Captioner {
             side: Mutex::new(DecoderSide { stream, to16k: Decimate3::new(), fed: 0, line_start: 0, last_text: String::new(), line: 0, behind: false }),
             emit,
             closed: AtomicBool::new(false),
-            gate: Mutex::new(Gate { quiet: 0.0, gated: false, preroll: Vec::new(), skipped: 0, skipped_total: 0 }),
+            gate: Mutex::new(Gate::default()),
         });
         group.members.lock().unwrap().insert(c.id, c.clone());
         Ok(c)
@@ -311,55 +284,17 @@ impl Captioner {
     /// `level_dbfs`: how loud the speech in this frame is (the denoised frame when noise removal runs), or the
     /// frame's own level.
     pub fn feed(&self, x48: &[f32], level_dbfs: Option<f32>) {
-        let level = level_dbfs.unwrap_or_else(|| dbfs(x48));
-        let mut g = self.gate.lock().unwrap();
-        if level >= SPEECH_DBFS {
-            g.quiet = 0.0;
-            let mut sh = self.shared.lock().unwrap();
-            if g.gated {
-                g.gated = false;
-                sh.pending.push(Piece::Skip(g.skipped));
-                for p in g.preroll.drain(..) {
-                    sh.pending.push(Piece::Audio(p));
-                }
-                if g.skipped > 0 {
-                    (self.emit)(json!({"type": "_idle", "samples": g.skipped})); // not decoded: a captions-only session isn't billed for it
-                }
-                g.skipped = 0;
-            }
-            sh.pending.push(Piece::Audio(x48.to_vec()));
-            return;
+        let fed = self.gate.lock().unwrap().feed(x48, level_dbfs.unwrap_or_else(|| gate::dbfs(x48)));
+        if fed.idle > 0 {
+            (self.emit)(json!({"type": "_idle", "samples": fed.idle})); // not decoded: a captions-only session isn't billed for it
         }
-        g.quiet += x48.len() as f32 / SAMPLE_RATE as f32;
-        if g.quiet <= GATE_AFTER_S {
-            self.shared.lock().unwrap().pending.push(Piece::Audio(x48.to_vec()));
-            return;
-        }
-        g.gated = true;
-        g.preroll.push(x48.to_vec());
-        if g.preroll.len() > PREROLL_FRAMES {
-            let n = g.preroll.remove(0).len();
-            g.skipped += n;
-            g.skipped_total += n;
-        }
+        self.shared.lock().unwrap().pending.extend(fed.pieces);
     }
 
-    /// `n` samples of silence the client didn't send (a muted source, digital silence): the line still gets its
-    /// trailing silence (so it ends), the rest only moves the clock. Not billed in the first place.
+    /// `n` samples the client sent as silence: see Gate::silence.
     pub fn silence(&self, n: usize) {
-        let mut g = self.gate.lock().unwrap();
-        let need = if g.gated { 0 } else { (((GATE_AFTER_S - g.quiet) * SAMPLE_RATE as f32).max(0.0)) as usize };
-        let fed = n.min(need);
-        g.quiet += n as f32 / SAMPLE_RATE as f32;
-        let mut sh = self.shared.lock().unwrap();
-        if fed > 0 {
-            sh.pending.push(Piece::Audio(vec![0.0; fed]));
-        }
-        if n > fed {
-            g.gated = true;
-            sh.pending.push(Piece::Skip(n - fed));
-            g.skipped_total += n - fed;
-        }
+        let pieces = self.gate.lock().unwrap().silence(n);
+        self.shared.lock().unwrap().pending.extend(pieces);
     }
 
     fn is_ready(&self, rec: *const so::OnlineRecognizer) -> bool {
@@ -373,30 +308,14 @@ impl Captioner {
             return;
         }
         let mut side = self.side.lock().unwrap();
-        let total: usize = items.iter().map(|p| if let Piece::Audio(a) = p { a.len() } else { 0 }).sum();
-        if total > MAX_BACKLOG {
-            // More than ~2 s behind (too many streams, or the box is busy): drop the oldest audio, say so once.
-            let skips: usize = items.iter().map(|p| if let Piece::Skip(n) = p { *n } else { 0 }).sum();
-            let mut kept: Vec<Vec<f32>> = Vec::new();
-            let mut have = 0;
-            for p in items.iter().rev() {
-                if let Piece::Audio(a) = p {
-                    if have >= KEEP_BACKLOG {
-                        break;
-                    }
-                    let take = (KEEP_BACKLOG - have).min(a.len());
-                    kept.push(a[a.len() - take..].to_vec());
-                    have += take;
-                }
-            }
-            kept.reverse();
-            items = vec![Piece::Skip(total - have + skips)];
-            items.extend(kept.into_iter().map(Piece::Audio));
-            if !side.behind {
-                side.behind = true;
-                (self.emit)(json!({"type": "warning", "code": "captions_behind", "message": CAPTIONS_BEHIND_MESSAGE}));
-            }
-        } else if total < RECOVERED_BACKLOG {
+        let waiting = gate::audio_len(&items);
+        let (shed, dropped) = gate::shed(items);
+        items = shed;
+        if dropped && !side.behind {
+            // More than ~2 s behind (too many streams, or the box is busy): the oldest audio went; say so once.
+            side.behind = true;
+            (self.emit)(json!({"type": "warning", "code": "captions_behind", "message": CAPTIONS_BEHIND_MESSAGE}));
+        } else if waiting < gate::RECOVERED_BACKLOG {
             side.behind = false;
         }
         let mut run: Vec<f32> = Vec::new();
@@ -452,16 +371,9 @@ impl Captioner {
 
     /// End of stream: decode what is left (up to `timeout` for the decoder to catch up) and emit the last line.
     pub fn flush(&self, timeout: Duration) {
-        {
-            let mut g = self.gate.lock().unwrap();
-            if g.gated {
-                let skipped = g.skipped + g.preroll.iter().map(|p| p.len()).sum::<usize>();
-                if skipped > 0 {
-                    (self.emit)(json!({"type": "_idle", "samples": skipped}));
-                }
-                g.preroll.clear();
-                g.skipped = 0;
-            }
+        let idle = self.gate.lock().unwrap().finish();
+        if idle > 0 {
+            (self.emit)(json!({"type": "_idle", "samples": idle}));
         }
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline && !self.shared.lock().unwrap().pending.is_empty() {
@@ -502,7 +414,7 @@ mod tests {
     use super::tidy;
 
     #[test]
-    fn tidy_like_python() {
+    fn tidy_capitalises_the_line_and_i() {
         assert_eq!(tidy("i think i'm right and i'll go i"), "I think I'm right and I'll go I");
         assert_eq!(tidy("it is ice"), "It is ice");
         assert_eq!(tidy("hi i'd say"), "Hi I'd say");

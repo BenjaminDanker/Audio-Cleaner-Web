@@ -57,7 +57,7 @@ class CleanOptions:
     # recordings are never touched. Needs the models (bwe_model_dir).
     restore_highs: bool = True
     # Rebuild the voice with Sidon (noise, room echo and missing highs in one; slow; the strength setting
-    # does not apply). Needs the models (restore_model_dir); without them the usual chain runs.
+    # does not apply). Needs the models (restore_model_dir).
     restore_voice: bool = False
 
 
@@ -194,16 +194,18 @@ def clean_audio(
     Setting `cancel` aborts with `Cancelled`. The result is written into `out`
     when given (same shape, float32; e.g. a memory-mapped file, so long inputs
     need little RAM), otherwise into a new array. `heavy_model_path` is the
-    DPDFNet-8 model (default: dpdfnet.default_model_path()); without it heavy noise
-    falls back to DeepFilterNet3. `bwe_model_dir` holds the AP-BWE models for restore_highs (skipped
-    without them). `restore_model_dir` holds Sidon's ONNX files for restore_voice. `report`, when given,
+    DPDFNet-8 model (default: dpdfnet.default_model_path()). `bwe_model_dir` holds the AP-BWE models for
+    restore_highs (the desktop app downloads them on request; None skips the step). `restore_model_dir` holds
+    Sidon's ONNX files, required for restore_voice. `report`, when given,
     gets {"noise": "light"|"heavy"|"rebuilt", "highs": None|"8k".."24k"}."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
         x = x[:, None]
     channels = x.shape[1]
-    if opts.restore_voice and restore_model_dir is not None and restore.available(restore_model_dir):
+    if opts.restore_voice:
+        if restore_model_dir is None or not restore.available(restore_model_dir):
+            raise FileNotFoundError(f"voice rebuilding needs Sidon's models (not in {restore_model_dir})")
         if report is not None:
             report.update(noise="rebuilt", highs=None)
         y = restore.restore(
@@ -218,8 +220,6 @@ def clean_audio(
         return y
     profile = choose_noise_profile(x, opts.noise)
     heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
-    if profile == "heavy" and not heavy.is_file():
-        profile = "light"
     highs = None  # the AP-BWE generator for a band-limited recording, measured on the original
     if opts.restore_highs and bwe_model_dir is not None and bwe.available(bwe_model_dir):
         highs = bwe.pick_model(bwe.effective_bandwidth(x))

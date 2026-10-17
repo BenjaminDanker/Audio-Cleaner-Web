@@ -645,13 +645,15 @@ def process(
                 x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
             report(decode_end)
             used: dict = {}
+            voice_dir = resources.voice_model_dir()
+            rebuild = options.rebuild_voice and voice_dir is not None
             y = pipeline.clean_audio(
                 x,
                 resources.libdf_path(),
                 resources.model_path(),
                 pipeline.CleanOptions(
                     atten_lim_db=options.atten_lim_db, polish=options.polish, loudness_lufs=options.loudness_lufs,
-                    noise=options.noise, restore_highs=options.restore_highs, restore_voice=options.rebuild_voice,
+                    noise=options.noise, restore_highs=options.restore_highs, restore_voice=rebuild,
                 ),
                 threads=threads,
                 progress=report.span(decode_end, clean_end),
@@ -659,10 +661,10 @@ def process(
                 out=pipeline.output_buffer(x, work),
                 heavy_model_path=resources.heavy_noise_model_path(),
                 bwe_model_dir=resources.highs_model_dir(),
-                restore_model_dir=resources.voice_model_dir(),
+                restore_model_dir=voice_dir,
                 report=used,
             )
-            if options.rebuild_voice and used.get("noise") != "rebuilt":
+            if options.rebuild_voice and not rebuild:
                 notice = "; ".join(filter(None, [notice, "the model that rebuilds the voice is not installed, so it was "
                                                  "cleaned the usual way. Download it in Settings to rebuild voices"]))
             if used.get("highs"):

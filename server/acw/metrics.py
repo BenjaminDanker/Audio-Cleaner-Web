@@ -4,7 +4,7 @@ session.
 
 Log lines are single-line JSON on stderr (journald), no user ids, e-mail addresses or file names:
 
-  {"event":"job_done","job":"…","kind":"denoise","tier":"standard","free":false,"audio_s":612.4,"queue_wait_s":35,
+  {"event":"job_done","job":"…","kind":"denoise","tier":"standard","audio_s":612.4,"queue_wait_s":35,
    "run_s":71,"cost_micros":61240,"noise":"heavy","attempts":1,"input_bytes":98765432,…}
   {"event":"job_failed",…,"status":"failed","error":"Processing failed; you were not charged."}
   {"event":"live_session_end","session":"…","denoise":"light","captions":"local","audio_s":3601.2,"wall_s":3640,
@@ -71,7 +71,6 @@ def job_fields(row: dict) -> dict:
         "job": row["id"],
         "kind": row["kind"],
         "tier": row["tier"],
-        "free": bool(row["free"]),
         "status": row["status"],
         "audio_s": round(float(row.get("duration_seconds") or row["claimed_seconds"] or 0), 1),
         "queue_wait_s": wait,
@@ -180,7 +179,7 @@ class Prom:
 
 def collect(prom: Prom, *, now: int | None = None, data_dir: Path | None = None) -> None:
     """The database part of the metrics file."""
-    from . import cpusplit, stats
+    from . import broker, stats
 
     now = db.now() if now is None else now
     q = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'queued'")["n"]
@@ -191,13 +190,11 @@ def collect(prom: Prom, *, now: int | None = None, data_dir: Path | None = None)
     live = db.one("SELECT COUNT(*) AS n FROM stream_sessions WHERE status = 'active'")["n"]
     prom.add("acw_live_sessions", "gauge", "Live sessions running now.", live)
     if data_dir is not None:
-        units, per_core = cpusplit.live_units(data_dir)
-        prom.add("acw_live_units", "gauge", "Live capacity units in use.", units)
-        try:
-            prom.add("acw_live_capacity_units", "gauge", "Live capacity units this machine carries (cores x units per core).",
-                     cpusplit.max_live_cores() * per_core)
-        except Exception:  # noqa: BLE001 - topology unreadable
-            pass
+        engine = broker.live_engine_status(timeout=1.0)  # the live engine's own count, from its socket
+        prom.add("acw_live_engine_up", "gauge", "The live engine answers (1) or not (0).", 0 if "down" in engine else 1)
+        prom.add("acw_live_units", "gauge", "Live capacity units in use.", engine.get("units"))
+        prom.add("acw_live_capacity_units", "gauge", "Live capacity units the engine accepts right now.", engine.get("capacityUnits"))
+        prom.add("acw_live_caption_streams", "gauge", "Standard caption streams running.", engine.get("captionStreams"))
     day = now - 86400
     for status, n in stats.finished_jobs_by_status(day).items():
         prom.add("acw_jobs_finished_24h", "gauge", "File jobs that ended in the last 24 hours, by final status.", n, status=status)

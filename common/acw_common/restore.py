@@ -11,20 +11,17 @@ Pipeline (the official demo recipe, made chunk-safe):
   -> feature extractor (8 w2v-BERT layers + LoRA, 50 features/s)
   -> DAC decoder (960 samples per feature, i.e. 48 kHz).
 
-The two networks run on onnxruntime (already a dependency of the app) from an ONNX conversion
-of the official TorchScript files, or, as a fallback, on torch from the TorchScript files.
-The feature extractor is windowed (`window_seconds`, linear cross-fade over the overlap) and
+The two networks run on onnxruntime (already a dependency of the app) from our ONNX conversion
+of the official TorchScript files (tools/convert_sidon_onnx.py). The feature extractor is windowed (`window_seconds`, linear cross-fade over the overlap) and
 the convolutional decoder runs on short blocks with context frames that are cropped away, so
 memory stays bounded for any file length. Per-window mean/variance normalisation of the fbank
 follows the official demo, which normalises per chunk.
 
-onnxruntime / torch are imported lazily, only when a model is loaded.
+onnxruntime is imported lazily, only when a model is loaded.
 """
 from __future__ import annotations
 
 import functools
-import hashlib
-import importlib.util
 import threading
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -36,18 +33,9 @@ from .dfn import Cancelled
 
 SAMPLE_RATE = 48_000
 MODEL_RATE = 16_000
-FEATURE_FILE = "feature_extractor_cpu.pt"
-DECODER_FILE = "decoder_cpu.pt"
-# ONNX conversion of the same weights (see docs/research/restore-sidon.md); the int8 file is optional.
+# ONNX conversion of sarulab-speech/sidon-v0.1 (see docs/research/restore-sidon.md).
 ONNX_FE = "sidon_fe.onnx"
-ONNX_FE_INT8 = "sidon_fe_q8.onnx"
 ONNX_DEC = "sidon_dec.onnx"
-# Pinned upstream revision of sarulab-speech/sidon-v0.1 and the sha256 of the CPU TorchScript files.
-HF_REVISION = "b3b02d8bbd55fdbc410e6e46e76ef95ace4fbf52"
-SHA256 = {
-    FEATURE_FILE: "fd9abc906a9048b3c047bd3d246a25f6485d09c2d6bb85e098f527f844efc019",
-    DECODER_FILE: "34dcc80fab75bd1336369ba5b2063f6da475887aa824db94b495c4059c5fdea4",
-}
 
 FEATURE_SAMPLES = 320  # 16 kHz samples per feature frame (20 ms)
 DECODER_UPSAMPLE = 960  # 48 kHz samples per feature frame
@@ -123,24 +111,11 @@ def _fbank(wave: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------------------------
-# Models: onnxruntime (preferred, already shipped with the app) or the official TorchScript files
+# Models
 # ---------------------------------------------------------------------------------------------
 
 _lock = threading.Lock()
 _backends: dict[tuple, "_Backend"] = {}
-
-
-class _Backend:
-    """features(feats (T, 160)) -> (T, 1024); decode(feats (T, 1024)) -> (T * 960,) float32."""
-
-    name = ""
-    workers = 1  # how many features() / decode() calls may run at the same time
-
-    def features(self, feats: np.ndarray) -> np.ndarray:
-        raise NotImplementedError
-
-    def decode(self, feats: np.ndarray) -> np.ndarray:
-        raise NotImplementedError
 
 
 # onnxruntime session settings (measured in docs/research/heavy-2026-10.md): the memory arena stays on (off: -0.3 GB
@@ -151,10 +126,10 @@ _MAX_WORKERS = 4  # concurrent window / block calls; each holds up to ~0.7 GB of
 _OPT_LEVEL = None
 
 
-class _OnnxBackend(_Backend):
-    name = "onnx"
+class _Backend:
+    """features(feats (T, 160)) -> (T, 1024); decode(feats (T, 1024)) -> (T * 960,) float32."""
 
-    def __init__(self, model_dir: Path, threads: int, int8: bool):
+    def __init__(self, model_dir: Path, threads: int):
         import onnxruntime as ort
 
         # `threads` is the size of the worker pool the caller runs the two networks on (restore._restore_mono):
@@ -175,8 +150,7 @@ class _OnnxBackend(_Backend):
                 so.graph_optimization_level = _OPT_LEVEL(ort)
             return ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
 
-        fe_file = ONNX_FE_INT8 if int8 and (model_dir / ONNX_FE_INT8).is_file() else ONNX_FE
-        self.fe = session(model_dir / fe_file)
+        self.fe = session(model_dir / ONNX_FE)
         self.dec = session(model_dir / ONNX_DEC)
 
     def features(self, feats):
@@ -186,58 +160,13 @@ class _OnnxBackend(_Backend):
         return self.dec.run(None, {"f": np.ascontiguousarray(feats.T)[None]})[0].reshape(-1)
 
 
-class _TorchBackend(_Backend):
-    name = "torchscript"
-
-    def __init__(self, model_dir: Path, threads: int):
-        import torch
-
-        self.torch = torch
-        torch.set_num_threads(threads)
-        self.fe = torch.jit.load(str(model_dir / FEATURE_FILE), map_location="cpu").eval()
-        self.dec = torch.jit.load(str(model_dir / DECODER_FILE), map_location="cpu").eval()
-
-    def features(self, feats):
-        with self.torch.inference_mode():
-            return self.fe(self.torch.from_numpy(feats)[None])["last_hidden_state"][0].numpy()
-
-    def decode(self, feats):
-        with self.torch.inference_mode():
-            return self.dec(self.torch.from_numpy(np.ascontiguousarray(feats.T))[None]).reshape(-1).numpy()
-
-
-def _has_onnx(d: Path) -> bool:
-    return (d / ONNX_FE).is_file() and (d / ONNX_DEC).is_file() and importlib.util.find_spec("onnxruntime") is not None
-
-
-def _has_torch(d: Path) -> bool:
-    return (d / FEATURE_FILE).is_file() and (d / DECODER_FILE).is_file() and importlib.util.find_spec("torch") is not None
-
-
-def is_available(model_dir: str | Path) -> bool:
-    """True if the model files and a runtime (onnxruntime or torch) are present. Imports nothing heavy."""
-    d = Path(model_dir)
-    return _has_onnx(d) or _has_torch(d)
-
-
-def _backend(model_dir: str | Path, threads: int, backend: str, int8: bool) -> _Backend:
-    d = Path(model_dir).resolve()
-    if backend == "auto":
-        backend = "onnx" if _has_onnx(d) else "torch"
-    key = (str(d), backend, threads if backend == "onnx" else 0, bool(int8) and backend == "onnx")
+def _backend(model_dir: str | Path, threads: int) -> _Backend:
+    key = (str(Path(model_dir).resolve()), threads)
     with _lock:
         b = _backends.get(key)
         if b is None:
-            if backend == "onnx":
-                b = _OnnxBackend(d, threads, int8)
-            elif backend == "torch":
-                b = _TorchBackend(d, threads)
-            else:
-                raise ValueError(f"unknown backend {backend!r}")
             _backends.clear()  # only ever keep one model set in RAM (~1 GB)
-            _backends[key] = b
-        if backend == "torch":
-            b.torch.set_num_threads(threads)
+            b = _backends[key] = _Backend(Path(key[0]), threads)
         return b
 
 
@@ -245,18 +174,6 @@ def unload() -> None:
     """Drop the cached models (about 1 GB of RAM)."""
     with _lock:
         _backends.clear()
-
-
-def verify_files(model_dir: str | Path) -> dict[str, bool]:
-    """sha256-check the TorchScript files against the pinned values (reads ~1 GB)."""
-    out = {}
-    for name, want in SHA256.items():
-        h = hashlib.sha256()
-        with open(Path(model_dir) / name, "rb") as f:
-            for block in iter(lambda: f.read(1 << 22), b""):
-                h.update(block)
-        out[name] = h.hexdigest() == want
-    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -326,7 +243,7 @@ def _restore_mono(
                 return
             s = e - ov
 
-    workers = max(1, getattr(be, "workers", 1))
+    workers = be.workers
     pool = ThreadPoolExecutor(workers) if workers > 1 else _InlinePool()
     try:
         win_iter = windows()
@@ -456,7 +373,7 @@ class _Mid:
 
 
 def available(model_dir: str | Path) -> bool:
-    """The ONNX models are there (the product never needs torch: TorchScript is a research fallback)."""
+    """The models are there (the desktop app downloads them when voice rebuilding is first wanted)."""
     d = Path(model_dir)
     return (d / ONNX_FE).is_file() and (d / ONNX_DEC).is_file()
 
@@ -469,8 +386,6 @@ def restore(
     cancel: threading.Event | None = None,
     out: np.ndarray | None = None,
     *,
-    int8: bool = False,
-    backend: str = "auto",
     stereo: str = "auto",
     window_seconds: float = _WINDOW_SECONDS,
     overlap_seconds: float = _OVERLAP_SECONDS,
@@ -483,14 +398,10 @@ def restore(
 
     * `progress(fraction)` is called after every ~6 s of audio; setting `cancel` raises
       `Cancelled` within one window (a few seconds of processing).
-    * `int8=True` uses the int8 feature extractor if `sidon_fe_q8.onnx` exists: 277 MB instead of
-      398 MB on disk and ~0.5 GB less RAM, same speed, ~5% feature error (no word changes in tests).
     * `stereo`: "auto" restores the mid signal once and writes it to both channels when the
       side signal is more than 20 dB below it, otherwise every channel separately; "channels"
       and "mid" force one or the other. More than two channels are always done separately.
-    * `backend`: "auto" (onnxruntime if the .onnx files exist, else torch + TorchScript),
-      "onnx" or "torch". Peak memory is bounded by the window size, not by the file length
-      (plus ~1 GB for the models).
+    Peak memory is bounded by the window size, not by the file length (plus ~1 GB for the models).
     """
     x = np.asarray(x)
     if x.dtype != np.float32 or x.ndim not in (1, 2):
@@ -501,7 +412,7 @@ def restore(
         raise ValueError("out must be float32 with the same shape as x")
     if len(x) == 0:
         return out
-    be = _backend(model_dir, threads, backend, int8)
+    be = _backend(model_dir, threads)
     kw = dict(window_seconds=window_seconds, overlap_seconds=overlap_seconds, decode_seconds=_DECODE_SECONDS,
               decode_context=_DECODE_CONTEXT)
 
@@ -540,4 +451,4 @@ def restore(
     return out
 
 
-__all__ = ["restore", "is_available", "unload", "verify_files", "Cancelled", "SAMPLE_RATE"]
+__all__ = ["restore", "available", "unload", "Cancelled", "SAMPLE_RATE"]

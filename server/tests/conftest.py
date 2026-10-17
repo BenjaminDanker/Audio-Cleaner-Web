@@ -22,9 +22,12 @@ def env(tmp_path, monkeypatch):
     from acw.config import get_settings
     from acw.security import limiter
 
+    from acw.stream import routes
+
     get_settings.cache_clear()
     db.reset_connection()
     limiter.reset()
+    routes._lag.samples.clear()  # how late the event loop ran in earlier tests says nothing about this one
     db.init_db()
     yield
     db.reset_connection()
@@ -67,3 +70,68 @@ def settle_payment(user_id, cents=1000):
     db.execute(
         "INSERT INTO payments(id, user_id, kind, status, amount_cents, created_at, updated_at)"
         " VALUES (?, ?, 'checkout', 'succeeded', ?, ?, ?)", (db.new_id(), user_id, cents, now, now))
+
+
+# ------------------------------------------------------------------------------------- the native live engine
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_HOME = Path.home() / "audio-cleaner"
+LIVE_ENGINE = next((p for p in (REPO_ROOT / "native/live/target/release/acw-live", _HOME / "bin/acw-live") if p.is_file()), None)
+LIVE_MODELS = _HOME / "models"
+
+
+def _shared_libdf() -> Path:
+    """The live engine needs a libdf that shares the model between sessions (df_shares_model): the installed one, or
+    the build output of native/deepfilter/build.sh until it is installed."""
+    import ctypes
+
+    for p in (_HOME / "bin/libdf.so", _HOME / "src/deepfilter-build/out/libdf.so"):
+        try:
+            if p.is_file() and hasattr(ctypes.CDLL(str(p)), "df_shares_model"):
+                return p
+        except OSError:
+            continue
+    return _HOME / "bin/libdf.so"
+
+
+LIVE_LIBDF = _shared_libdf()
+
+
+def live_engine_available() -> bool:
+    return LIVE_ENGINE is not None and (LIVE_MODELS / "DeepFilterNet3_onnx.tar.gz").is_file() and LIVE_LIBDF.is_file()
+
+
+@pytest.fixture
+def live_engine(tmp_path, monkeypatch):
+    """Starts the native live engine (native/live; skipped where it isn't built or the models aren't installed) on
+    its own socket and points the web side at it. Call it with extra environment: live_engine(ACW_...="...")."""
+    import subprocess
+    import time
+
+    if not live_engine_available():
+        pytest.skip("native live engine or models not available here")
+    procs = []
+
+    def start(**env):
+        sock = tmp_path / f"stream{len(procs)}.sock"
+        e = {**os.environ, "ACW_ENV": "development", "ACW_DATA_DIR": str(tmp_path), "ACW_STREAM_SOCKET": str(sock),
+             "ACW_BIN_DIR": str(LIVE_LIBDF.parent), "ACW_MODELS_DIR": str(LIVE_MODELS), "ACW_MIN_JOB_CORES": "1",
+             "ACW_LIVE_IGNORE_HOST_LOAD": "1", **env}
+        procs.append(subprocess.Popen([str(LIVE_ENGINE)], env=e, stderr=subprocess.DEVNULL))
+        for _ in range(200):
+            if sock.exists():
+                break
+            time.sleep(0.05)
+        monkeypatch.setenv("ACW_STREAM_SOCKET", str(sock))
+        from acw.config import get_settings
+
+        get_settings.cache_clear()
+        return str(sock)
+
+    yield start
+    for p in procs:
+        p.terminate()
+        p.wait(10)
+    from acw.config import get_settings
+
+    get_settings.cache_clear()  # the next test must not talk to this (stopped) engine

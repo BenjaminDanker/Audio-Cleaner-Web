@@ -96,12 +96,10 @@ MEM_RESERVE = 6 * GB
 # local transcription from ever running next to the web and live processes).
 SLICE_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
-# Order in which workers take queued jobs: paid before free (a paid cleanup with
-# free subtitles counts as paid), then the user with the fewest jobs already
-# running (so one big batch can't block everyone), then first come, first served.
+# Order in which workers take queued jobs: the user with the fewest jobs already running first (so one big batch
+# can't block everyone), then first come, first served.
 QUEUE_ORDER = (
-    "(j.free AND j.hold_id IS NULL), (SELECT COUNT(*) FROM jobs r WHERE r.user_id = j.user_id AND r.status IN ('running', 'cloud_asr')),"
-    " j.queued_at"
+    "(SELECT COUNT(*) FROM jobs r WHERE r.user_id = j.user_id AND r.status IN ('running', 'cloud_asr')), j.queued_at"
 )
 
 
@@ -245,12 +243,9 @@ def safe_stem(filename: str) -> str:
     return stem or "audio"
 
 
-def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str | None, options: dict, free: bool) -> dict:
+def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str | None, options: dict) -> dict:
     if kind not in KINDS:
         raise JobError("unknown job type")
-    if free:
-        # Free noise removal and free subtitles both run in the visitor's browser now; jobs here are always paid.
-        raise JobError("Free subtitles are made in your browser now (choose “Free, in your browser”). Jobs here are paid.")
     if kind in ("denoise", "denoise_transcribe"):
         pricing.rate("denoise", denoise_tier or "")
     if kind in ("transcribe", "denoise_transcribe"):
@@ -328,7 +323,7 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
     """The price of a job before it exists (no hold, nothing stored): the same checks and the same price as creating
     it, with the parts of the price listed. POST /api/jobs/estimate."""
     check_duration(kind, denoise_tier, duration_seconds)
-    opts = validate_options(kind, denoise_tier, transcribe_tier, options, False)
+    opts = validate_options(kind, denoise_tier, transcribe_tier, options)
     d_tier = denoise_tier if kind != "transcribe" else None
     t_tier = transcribe_tier if kind != "denoise" else None
     n = len(opts["translate"])
@@ -395,7 +390,6 @@ def create_job(
     size_bytes: int,
     claimed_seconds: float,
     options: dict,
-    free: bool,
     display_name: str | None = None,
     api_key_id: str | None = None,
     callback_url: str | None = None,
@@ -410,7 +404,7 @@ def create_job(
     check_duration(kind, denoise_tier, claimed_seconds)
     if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
         raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
-    opts = validate_options(kind, denoise_tier, transcribe_tier, options, free)
+    opts = validate_options(kind, denoise_tier, transcribe_tier, options)
     # The one hard limit: the upload and its scratch files must fit on disk, on top of what other uploads
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
@@ -466,10 +460,10 @@ def create_job(
                         f"This job costs about ${est / 1e6:.2f}; your available balance is ${e.available / 1e6:.2f}.", 402
                     ) from e
             c.execute(
-                "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes,"
+                "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, input_name, input_bytes,"
                 " claimed_seconds, hold_id, est_cost_micros, created_at, expires_at, api_key_id)"
-                " VALUES (?,?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?,?)",
-                (job_id, user_id, kind, tier, 0, json.dumps(params), filename[:200], size_bytes,
+                " VALUES (?,?,?,?, 'uploading', ?,?,?,?,?,?,?,?,?)",
+                (job_id, user_id, kind, tier, json.dumps(params), filename[:200], size_bytes,
                  claimed_seconds, hold_id, est, now, now + UPLOAD_FIRST_BYTE_SECONDS, api_key_id),
             )
             if callback_url:
@@ -527,13 +521,13 @@ def mark_uploaded(job_id: str) -> None:
 def finish_failed(
     job: dict, message: str, status: str = "failed", only_from: tuple[str, ...] | None = None, not_stage: str | None = None
 ) -> bool:
-    """Release money/quota and delete files. Safe to call twice. The status change, the hold and the free
-    allowance move in one transaction, so a crash can't leave money reserved for a finished job.
+    """Release money and delete files. Safe to call twice. The status change and the hold move in one
+    transaction, so a crash can't leave money reserved for a finished job.
     `only_from` limits it to jobs still in one of those states (cancel: not once a worker has started) and
     `not_stage` to jobs whose next stage is another one (cancel: not once the paid-for transcription is done).
     True when the job was moved to `status` by this call."""
     with db.tx() as c:
-        cur = c.execute("SELECT status, next_stage, free, claimed_seconds, params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+        cur = c.execute("SELECT status, next_stage FROM jobs WHERE id = ?", (job["id"],)).fetchone()
         if cur is None or cur["status"] in ("done", "failed", "canceled", "expired"):
             return False
         if only_from is not None and cur["status"] not in only_from:
@@ -546,12 +540,6 @@ def finish_failed(
         )
         if job.get("hold_id"):
             ledger.release_hold(job["hold_id"], c=c)
-        if cur["free"]:
-            # claimed_seconds is what is reserved: creation reserves it, the probe corrects it.
-            c.execute(
-                "UPDATE free_usage SET seconds = MAX(0, seconds - ?) WHERE user_id = ? AND day = ?",
-                (float(cur["claimed_seconds"]), job["user_id"], json.loads(cur["params_json"])["free_day"]),
-            )
     invalidate_queue_cache()
     shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
     metrics.job_ended(job["id"])
@@ -679,7 +667,6 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "id": job["id"],
         "kind": job["kind"],
         "tier": job["tier"],
-        "free": bool(job["free"]),
         "status": job["status"],
         "stage": job["stage"],
         "progress": job["progress"],

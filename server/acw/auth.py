@@ -316,4 +316,3 @@ def purge_expired() -> None:
     db.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
     db.execute("DELETE FROM login_tokens WHERE expires_at <= ?", (now - 86400,))
     db.execute("DELETE FROM oauth_states WHERE expires_at <= ?", (now,))
-    db.execute("DELETE FROM deleted_emails")  # left over from the free subtitle minutes (no longer written)

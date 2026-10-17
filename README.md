@@ -44,7 +44,7 @@ cd ../common && nice -n 10 ~/venvs/acw-dev/bin/python -m pytest -q
 
 # run locally (needs ~/audio-cleaner/{bin,models}, see docs/operations.md)
 export ACW_DATA_DIR=~/audio-cleaner/dev/data
-~/venvs/acw-dev/bin/python -m acw.stream.worker & ~/venvs/acw-dev/bin/python -m acw.worker.main &
+native/live/build.sh ~/audio-cleaner/bin && ~/audio-cleaner/bin/acw-live & ~/venvs/acw-dev/bin/python -m acw.worker.main &
 ~/venvs/acw-dev/bin/uvicorn acw.app:app --host 127.0.0.1 --port 8791
 ~/venvs/acw-dev/bin/python -m acw.admin login-link you@example.com
 ```

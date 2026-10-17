@@ -90,7 +90,7 @@ def test_garbage_upload_fails_cleanly_and_refunds(client, signed_in):
     assert not (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id).exists()
 
 
-def test_queue_order_paid_first_then_fair_per_user():
+def test_queue_order_is_fair_per_user():
     from acw import auth, db, jobs
     from acw.worker.main import claim
 
@@ -98,26 +98,26 @@ def test_queue_order_paid_first_then_fair_per_user():
     b = auth.get_or_create_user("b@example.com")["id"]
     now = db.now()
 
-    def add(job_id, user, free, t, status="queued"):
+    def add(job_id, user, t, status="queued"):
         db.execute(
-            "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes, claimed_seconds,"
-            " est_cost_micros, created_at, queued_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (job_id, user, "transcribe", "local", free, status, '{"options": {}}', "x.wav", 1000, 10, 0, now, now + t),
+            "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, input_name, input_bytes, claimed_seconds,"
+            " est_cost_micros, created_at, queued_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, user, "transcribe", "local", status, '{"options": {}}', "x.wav", 1000, 10, 0, now, now + t),
         )
 
-    add("free-early", b, 1, 0)
-    add("a-running", a, 0, 0, status="running")
-    add("a-second", a, 0, 1)
-    add("b-paid", b, 0, 2)
-    assert jobs.queued_ids() == ["b-paid", "a-second", "free-early"]
+    add("a-running", a, 0, status="running")
+    add("a-second", a, 1)
+    add("b-later", b, 2)
+    assert jobs.queued_ids() == ["b-later", "a-second"]  # a already has a job running
     assert jobs.public_job(dict(db.one("SELECT * FROM jobs WHERE id = 'a-second'")))["queuePosition"] == 2
-    assert claim("w1")["id"] == "b-paid"
+    assert claim("w1")["id"] == "b-later"
 
 
 def test_local_transcription_through_the_sandbox(client, signed_in):
     """Auto language -> detected English -> Parakeet v2 in the Landlocked runner."""
-    if not (Path.home() / "audio-cleaner/models/parakeet-v2/encoder-model.onnx").is_file():
-        pytest.skip("Parakeet model not installed")
+    models = Path.home() / "audio-cleaner/models"
+    if not all((models / m).is_file() for m in ("parakeet-v2/encoder-model.onnx", "whisper/base/model.bin")):
+        pytest.skip("Parakeet or Whisper base not installed")
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     data = Path(SAMPLE).read_bytes()

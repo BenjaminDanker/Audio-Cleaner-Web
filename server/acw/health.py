@@ -11,7 +11,7 @@ from .config import get_settings
 
 # Files the product needs, relative to the models directory / the bin directory.
 REQUIRED_MODELS = (
-    "DeepFilterNet3_onnx.tar.gz", "captions-en/encoder.int8.onnx", "dpdfnet/dpdfnet8_48khz_hr.onnx",
+    "DeepFilterNet3_onnx.tar.gz", "captions-en/encoder.int8.onnx", "dpdfnet/dpdfnet8_48khz_hr_batch.onnx",
     "parakeet-v2/encoder-model.onnx", "parakeet-v3/encoder-model.onnx", "silero-vad", "whisper/large-v3-turbo",
     "whisper/small", "whisper/base", "sidon/sidon_fe.onnx", "ap-bwe/8kto48k.onnx",
 )
@@ -28,19 +28,16 @@ def missing_files() -> list[str]:
 
 
 def stream_worker_ok(timeout: float = 2.0) -> bool:
-    """Every live worker answers on its socket (acw.stream.routes.worker_sockets)."""
-    from .stream.routes import worker_sockets
-
-    for path in worker_sockets():
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        try:
-            s.connect(str(path))
-        except OSError:
-            return False
-        finally:
-            s.close()
-    return True
+    """The live engine answers on its socket."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect(str(get_settings().stream_worker_socket))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def stale_running_jobs(now: int | None = None) -> int:

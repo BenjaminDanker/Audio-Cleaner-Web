@@ -41,8 +41,8 @@ SUPPLEMENTAL = HERE / "licenses"
 
 DFN_MODEL_SHA256 = "c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616"
 # Heavy-noise model (DPDFNet-8 48 kHz, Apache-2.0): fetched by deploy/fetch-dpdfnet.sh (same pin).
-DPDFNET_FILE = "dpdfnet8_48khz_hr.onnx"
-DPDFNET_SHA256 = "7b3afbb260a08fe9af3d16e3bda992971be1e7e951d1dee7c2d235f5c43f5631"
+DPDFNET_FILE = "dpdfnet8_48khz_hr_batch.onnx"
+DPDFNET_SHA256 = "b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa"
 LIB_NAMES = ("libdf.so", "libdf.dylib", "df.dll")
 FFMPEG_NOTICES = ("COPYING.LGPLv2.1", "FFmpeg-LICENSE.md", "ffmpeg-buildinfo.txt", "lame-COPYING", "opus-COPYING", "libvpx-COPYING")
 

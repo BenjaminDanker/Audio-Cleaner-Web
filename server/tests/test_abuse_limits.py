@@ -3,7 +3,6 @@ rate, free-trial farming, first-top-up limits, premium captions that break down,
 and what an API key may learn from /api/me."""
 import asyncio
 import json
-import logging
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -28,7 +27,7 @@ def user(email="a@example.com", credit=50_000_000):
 
 def make_job(uid, **kw):
     args = dict(kind="denoise", denoise_tier="standard", transcribe_tier=None, filename="a.wav", size_bytes=1000,
-                claimed_seconds=600.0, options={}, free=False)
+                claimed_seconds=600.0, options={})
     return jobs.create_job(uid, **{**args, **kw})["id"]
 
 
@@ -333,20 +332,6 @@ def test_the_trial_claim_is_keyed_with_the_server_secret(monkeypatch):
     monkeypatch.setenv("ACW_SESSION_SECRET", "t" * 40)
     get_settings.cache_clear()
     assert keyed_hash("welcome", "someone@example.com") != key
-
-
-def test_without_a_secret_the_claim_key_is_a_plain_hash_and_warns_once(monkeypatch, caplog):
-    import hashlib
-
-    from acw import security
-
-    _trial_on(monkeypatch, secret=None)
-    monkeypatch.setattr(security, "_warned_unkeyed", False)
-    with caplog.at_level(logging.WARNING, logger="acw.security"):
-        auth.get_or_create_user("one@example.com")
-        auth.get_or_create_user("two@example.com")
-    assert db.one("SELECT COUNT(*) n FROM welcome_claims WHERE email_hash = ?", (hashlib.sha256(b"one@example.com").hexdigest(),))["n"] == 1
-    assert len([r for r in caplog.records if "ACW_SESSION_SECRET" in r.getMessage()]) == 1
 
 
 def test_canonical_mailbox():

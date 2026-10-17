@@ -1,6 +1,5 @@
 """Retention and bounded storage: every rule in acw/retention.py, the money safeguards, the database compaction,
 the size alerts and the quiet access log."""
-import gzip
 import json
 import logging
 import re
@@ -144,19 +143,6 @@ def test_webhook_replays_are_still_recognized_inside_the_window(client):
     """Stripe retries for about 3 days; the event rows are kept 90."""
     assert retention.STRIPE_EVENT_DAYS >= 30 and retention.STRIPE_EVENT_DAYS * DAY > 3 * DAY * 10
 
-
-def test_free_usage_rows_after_60_days():
-    uid = user()
-    f = "INSERT INTO free_usage(user_id,day,seconds) VALUES (?,?,?)"
-    day = lambda n: time.strftime("%Y-%m-%d", time.gmtime(NOW - n * DAY))  # noqa: E731
-    db.execute(f, (uid, day(61), 10))
-    db.execute(f, (uid, day(60), 10))
-    db.execute(f, (uid, day(1), 10))
-    retention.run(NOW)
-    assert {r["day"] for r in db.all_rows("SELECT day FROM free_usage")} == {day(60), day(1)}
-
-
-# ---------------------------------------------------------------- file names in the credit history
 
 def test_file_names_leave_the_credit_history_after_a_year_amounts_stay():
     uid = user()

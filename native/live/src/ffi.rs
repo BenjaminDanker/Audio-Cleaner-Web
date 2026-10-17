@@ -1,4 +1,4 @@
-//! The two C libraries the Python worker also uses, loaded at run time the same way (no build-time dependency):
+//! The two C libraries the engine loads at run time (no build-time dependency):
 //! libdf (DeepFilterNet3, native/deepfilter: one copy of the model weights shared by every instance) and libopus.
 
 use std::ffi::{c_char, c_float, c_int, c_void, CString};

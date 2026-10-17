@@ -124,10 +124,10 @@ def test_a_parallel_request_with_the_same_key_is_caught_inside_the_transaction(c
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     first = jobs.create_job(uid, kind="denoise", denoise_tier="standard", transcribe_tier=None, filename="a.wav", size_bytes=1000,
-                            claimed_seconds=60.0, options={}, free=False, idempotency=("race", "h"))
+                            claimed_seconds=60.0, options={}, idempotency=("race", "h"))
     with pytest.raises(jobs.Replay) as r:
         jobs.create_job(uid, kind="denoise", denoise_tier="standard", transcribe_tier=None, filename="a.wav", size_bytes=1000,
-                        claimed_seconds=60.0, options={}, free=False, idempotency=("race", "h"))
+                        claimed_seconds=60.0, options={}, idempotency=("race", "h"))
     assert r.value.job_id == first["id"] and count("jobs") == 1 and count("holds") == 1
 
 
@@ -224,8 +224,8 @@ def test_the_cap_counts_real_cost_of_finished_jobs_and_ignores_failed_and_last_m
 
     def add(status, cost, est_cost, finished):
         db.execute(
-            "INSERT INTO jobs(id,user_id,kind,tier,free,status,params_json,input_name,input_bytes,claimed_seconds,est_cost_micros,"
-            "cost_micros,created_at,finished_at,api_key_id) VALUES (?,?,'denoise','standard',0,?,'{}','a',1,1,?,?,?,?,?)",
+            "INSERT INTO jobs(id,user_id,kind,tier,status,params_json,input_name,input_bytes,claimed_seconds,est_cost_micros,"
+            "cost_micros,created_at,finished_at,api_key_id) VALUES (?,?,'denoise','standard',?,'{}','a',1,1,?,?,?,?,?)",
             (db.new_id(), uid, status, est_cost, cost, finished or db.now(), finished, key_id))
 
     add("done", 90_000, 100_000, db.now())             # counts at its real cost

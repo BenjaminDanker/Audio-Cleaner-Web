@@ -67,14 +67,14 @@ def report(days: int = 30, now: int | None = None) -> dict:
     since = now - days * 86400
     rep: dict = {"days": days, "since": since, "now": now}
 
-    # --- file jobs, grouped by tier (free jobs apart)
+    # --- file jobs, grouped by tier
     groups: dict[str, dict] = defaultdict(lambda: {"status": Counter(), "wait": [], "run": [], "audio_done": 0.0, "run_done": 0.0})
     in_progress: Counter = Counter()
     errors: Counter = Counter()
     for r in db.all_rows(
-        f"SELECT tier, free, status, error, started_at, finished_at, COALESCE(duration_seconds, claimed_seconds) AS audio,"
+        f"SELECT tier, status, error, started_at, finished_at, COALESCE(duration_seconds, claimed_seconds) AS audio,"
         f" {WAIT_SQL} AS wait FROM jobs WHERE created_at >= ?", (since,)):
-        name = r["tier"] + (" (free)" if r["free"] else "")
+        name = r["tier"]
         g = groups[name]
         status = final_status(r["status"])
         g["status"][status] += 1
@@ -116,10 +116,8 @@ def report(days: int = 30, now: int | None = None) -> dict:
     rep["live"] = {**tot, "minutes": tot["seconds"] / 60, "end_reasons": live_end_reasons(since),
                    "tiers": {k: {"sessions": v[0], "minutes": v[1] / 60} for k, v in sorted(tiers.items())}}
 
-    # --- free allowance and money
+    # --- money
     day = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d")
-    rep["free_minutes"] = db.one("SELECT COALESCE(SUM(seconds), 0) AS s FROM free_usage WHERE day >= ?", (day,))["s"] / 60
-    rep["free_jobs"] = db.one("SELECT COUNT(*) AS n FROM jobs WHERE free = 1 AND created_at >= ?", (since,))["n"]
     usage = {r["ref_type"] or "other": -r["s"] for r in db.all_rows(
         "SELECT ref_type, SUM(amount_micros) AS s FROM ledger WHERE kind = 'usage' AND created_at >= ? GROUP BY ref_type", (since,))}
     rep["usage_usd"] = {k: v / 1e6 for k, v in sorted(usage.items())}
@@ -185,7 +183,6 @@ def render(rep: dict) -> str:
 
     out.append("")
     out.append("Free tier and money")
-    out.append(f"  free transcription: {rep['free_minutes']:.1f} minutes of the daily allowance used, {rep['free_jobs']} free jobs")
     if rep["usage_usd"]:
         parts = ", ".join(f"{k} ${v:,.2f}" for k, v in rep["usage_usd"].items())
         out.append(f"  usage charged: ${sum(rep['usage_usd'].values()):,.2f} ({parts}) from {rep['usage_users']} account(s)")

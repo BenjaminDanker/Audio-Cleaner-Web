@@ -150,8 +150,8 @@ def _check_speech_runtime() -> None:
 
 def _check_models() -> list[str]:
     """One second of audio through each model the app runs next to the always-installed ones. The noise
-    removers for heavy noise ship with the app (an error when they are missing from a frozen build); the
-    downloaded ones are only checked where they are installed. Returns what was skipped."""
+    remover for heavy noise ships with the app; the downloaded ones are only checked where they are installed.
+    Returns what was skipped."""
     from acw_common import aec, bwe, restore
 
     sr = pipeline.SAMPLE_RATE
@@ -160,18 +160,12 @@ def _check_models() -> list[str]:
     x = (0.2 * np.sin(2 * np.pi * 220 * t) + 0.03 * rng.standard_normal(t.size)).astype(np.float32)
     skipped = []
 
-    heavy = resources.heavy_noise_model_path()
-    if heavy.is_file():
-        y = pipeline.clean_audio(
-            x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="heavy", polish=False),
-            threads=1, heavy_model_path=heavy,
-        )
-        if y.shape != (x.size, 1) or not np.isfinite(y).all():
-            raise RuntimeError("the heavy-noise remover returned unexpected audio")
-    elif getattr(sys, "frozen", False):
-        raise RuntimeError(f"missing component: {heavy.name}")
-    else:
-        skipped.append("heavy-noise remover")
+    y = pipeline.clean_audio(
+        x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="heavy", polish=False),
+        threads=1, heavy_model_path=resources.heavy_noise_model_path(),
+    )
+    if y.shape != (x.size, 1) or not np.isfinite(y).all():
+        raise RuntimeError("the heavy-noise remover returned unexpected audio")
 
     echo = aec.cancel_echo(x, np.roll(x, 480))
     if echo.shape != x.shape or not np.isfinite(echo).all():

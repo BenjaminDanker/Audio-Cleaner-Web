@@ -17,7 +17,7 @@ def user(email="a@example.com"):
 
 def make_job(uid, **kw):
     args = dict(kind="denoise", denoise_tier="standard", transcribe_tier=None, filename="a.wav", size_bytes=1000,
-                claimed_seconds=600.0, options={}, free=False)
+                claimed_seconds=600.0, options={})
     return jobs.create_job(uid, **{**args, **kw})["id"]
 
 
@@ -63,7 +63,7 @@ def test_a_finished_job_writes_one_json_line(metric_lines):
     job["duration_seconds"] = 600
     W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
     [line] = [x for x in metric_lines() if x["event"] == "job_done"]
-    assert line["job"] == jid and line["tier"] == "standard" and line["kind"] == "denoise" and line["free"] is False
+    assert line["job"] == jid and line["tier"] == "standard" and line["kind"] == "denoise"
     assert line["audio_s"] == 600.0 and line["queue_wait_s"] == wait and line["noise"] == "heavy"
     assert line["cost_micros"] > 0 and line["run_s"] >= 0 and line["attempts"] == 1
     assert "user" not in json.dumps(line) and "@" not in json.dumps(line)
@@ -148,9 +148,8 @@ def seed(now):
                " created_at = ? WHERE id = ?", (now - 300, now - 200, now - 600, bad))
     bad2 = make_job(uid)
     db.execute("UPDATE jobs SET status = 'failed', error = 'Processing failed; you were not charged.', created_at = ? WHERE id = ?", (now - 600, bad2))
-    # a free job from before free subtitles moved to the browser (still in the queue when that version went live)
-    free = make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", claimed_seconds=120.0)
-    db.execute("UPDATE jobs SET status = 'queued', created_at = ?, free = 1, tier = 'local' WHERE id = ?", (now - 100, free))
+    queued = make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", claimed_seconds=120.0)
+    db.execute("UPDATE jobs SET status = 'queued', created_at = ?, tier = 'local' WHERE id = ?", (now - 100, queued))
     old = make_job(uid)  # outside a 1-day window
     db.execute("UPDATE jobs SET status = 'done', created_at = ?, started_at = ?, finished_at = ? WHERE id = ?",
                (now - 5 * 86400, now - 5 * 86400, now - 5 * 86400 + 50, old))
@@ -166,7 +165,6 @@ def seed(now):
                " VALUES (?, -6000, 'usage', 'stream', 's', 'x', 0, ?)", (uid, now - 100))
     db.execute("INSERT INTO payments(id, user_id, kind, status, amount_cents, created_at, updated_at) VALUES ('p1', ?, 'checkout', 'succeeded', 1000, ?, ?)",
                (uid, now - 100, now - 100))
-    db.execute("INSERT INTO free_usage(user_id, day, seconds) VALUES (?,?,600)", (uid, jobs.utc_day()))
     return uid
 
 
@@ -188,14 +186,13 @@ def test_stats_report_numbers():
     assert std["run_p50"] == 70 and std["run_p95"] == 90
     assert std["rtf"] == pytest.approx((60 + 70 + 80 + 90) / 2400)
     assert std["audio_hours_done"] == pytest.approx(2400 / 3600)
-    assert r["jobs"]["local (free)"]["status"] == {"queued": 1}
+    assert r["jobs"]["local"]["status"] == {"queued": 1}
     assert r["in_progress"] == {"queued": 1}
     assert r["failure_ratio"] == pytest.approx(2 / 6) and r["top_errors"] == [("Processing failed; you were not charged.", 2)]
     live = r["live"]
     assert live["sessions"] == 4 and live["minutes"] == pytest.approx(16.0)
     assert live["end_reasons"] == {"client_stop": 2, "idle_timeout": 1, "full": 1}
     assert live["frames"] == 48000 and live["late_frames"] == 4 and live["dropped_frames"] == 0
-    assert r["free_jobs"] == 1 and r["free_minutes"] == pytest.approx(10.0)
     assert r["usage_usd"] == {"job": pytest.approx(0.024), "stream": pytest.approx(0.006)}
     assert r["topups_usd"] == 10.0
     # a longer window includes the older job
@@ -207,7 +204,7 @@ def test_stats_text_report():
     seed(now)
     text = stats.render(stats.report(1, now))
     for needle in ("File jobs", "standard", "failure ratio: 33.3% (2 of 6 finished)", "Processing failed; you were not charged.",
-                   "Live sessions", "end reasons: client_stop 2, idle_timeout 1, full 1", "late (>100 ms) 4", "free transcription: 10.0 minutes",
+                   "Live sessions", "end reasons: client_stop 2, idle_timeout 1, full 1", "late (>100 ms) 4",
                    "usage charged: $0.03", "top-ups paid: $10.00", "RTF"):
         assert needle in text, needle
 

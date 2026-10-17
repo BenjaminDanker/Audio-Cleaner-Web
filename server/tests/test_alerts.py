@@ -158,14 +158,14 @@ def _user():
     return uid
 
 
-def _job(uid, status, *, queued_ago=0, started_ago=None, progress=0, seconds=600.0, free=0):
+def _job(uid, status, *, queued_ago=0, started_ago=None, progress=0, seconds=600.0):
     jid = db.new_id()
     now = db.now()
-    params = {"options": {}, "denoise_tier": "studio", "transcribe_tier": None, "input_ext": ".wav", "free_day": None}
+    params = {"options": {}, "denoise_tier": "studio", "transcribe_tier": None, "input_ext": ".wav"}
     db.execute(
-        "INSERT INTO jobs(id, user_id, kind, tier, free, status, params_json, input_name, input_bytes, claimed_seconds,"
-        " progress, created_at, queued_at, started_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (jid, uid, "denoise", "studio", free, status, json.dumps(params), "x.wav", 1, seconds, progress, now,
+        "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, input_name, input_bytes, claimed_seconds,"
+        " progress, created_at, queued_at, started_at, heartbeat_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (jid, uid, "denoise", "studio", status, json.dumps(params), "x.wav", 1, seconds, progress, now,
          now - queued_ago, None if started_ago is None else now - started_ago, now),
     )
     return jid

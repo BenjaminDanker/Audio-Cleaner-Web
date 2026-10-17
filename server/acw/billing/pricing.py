@@ -60,10 +60,6 @@ def topup_bonus_micros(amount_cents: int) -> int:
             return amount_cents * MICROS_PER_CENT * per_mille // 1000
     return 0
 
-# The free subtitle minutes on our side are gone (free subtitles run in the browser); a job created free before that
-# change still finishes under the limits it was created with (acw/worker/main.py).
-FREE_TRANSCRIBE_SECONDS_PER_DAY = 60 * 60
-FREE_TRANSCRIBE_MAX_FILE_SECONDS = 30 * 60
 
 # Hard limits
 MAX_JOB_SECONDS = 4 * 60 * 60

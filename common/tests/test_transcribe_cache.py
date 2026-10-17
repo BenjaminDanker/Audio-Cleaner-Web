@@ -66,10 +66,8 @@ def test_language_detection_asks_the_bigger_model_only_when_unsure(tmp_path, mon
 
     monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Model))
     audio = np.ones(16000, np.float32) * 0.1
-    assert transcribe.detect_language(audio, tmp_path / "sure", fallback_model_path=tmp_path / "big") == "de"
+    assert transcribe.detect_language(audio, tmp_path / "sure", tmp_path / "big") == "de"
     assert [p.rsplit("/", 1)[1] for p in asked] == ["sure"]
     asked.clear()
-    assert transcribe.detect_language(audio, tmp_path / "unsure", fallback_model_path=tmp_path / "big") == "fr"
+    assert transcribe.detect_language(audio, tmp_path / "unsure", tmp_path / "big") == "fr"
     assert [p.rsplit("/", 1)[1] for p in asked] == ["unsure", "big"]
-    asked.clear()
-    assert transcribe.detect_language(audio, tmp_path / "unsure") == "nl"  # no fallback given: the one model decides

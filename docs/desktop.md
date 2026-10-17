@@ -110,7 +110,7 @@ native/deepfilter/        reproducible libDF build (shared infrastructure)
 ```
 
 Frozen layout (under `sys._MEIPASS`, i.e. `_internal/` next to `AudioCleaner.exe`, or inside the `.app`):
-`native/{df.dll|libdf.dylib, ffmpeg[.exe], ffprobe[.exe]}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr.onnx}`,
+`native/{df.dll|libdf.dylib, ffmpeg[.exe], ffprobe[.exe]}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr_batch.onnx}`,
 `licenses/` (shown in About, together with the licence line of each downloaded model). Qt, FFmpeg and libDF stay separate files on purpose (LGPL, see
 the checklist at the end).
 
