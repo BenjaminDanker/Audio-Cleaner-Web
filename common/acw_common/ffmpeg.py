@@ -42,6 +42,16 @@ AUDIO_FORMATS = {
     "ogg": (".ogg", ["-c:a", "libopus", "-b:a", "128k"]),  # Opus in an Ogg file with the usual .ogg ending
 }
 
+# Speech segments sent to the transcription service (see server/acw/asr): 16 kHz mono mp3, 64 kbps. Measured with
+# the real API on LibriSpeech (clean, and mixed with noise at 5 dB SNR): the word error rate is the same as with the
+# ~160 kbps these used to be (docs/research/asr-chunk-encoding-2026-10.md), at 40% of the bytes.
+ASR_CHUNK_EXT = ".mp3"
+ASR_CHUNK_ARGS = ["-c:a", "libmp3lame", "-b:a", "64k", "-ac", "1", "-ar", "16000"]
+# Chunks per FFmpeg run. One run for all of them is cheaper than one process each, but every chunk's trim filter
+# sees all the audio of the run, so the cost grows with the square of the count: 504 chunks (70 min of audio) took
+# 83 s of CPU in one run, 17.5 s in runs of 32 (and 34.9 s with a process per chunk).
+ASR_CHUNKS_PER_RUN = 32
+
 
 class MediaError(Exception):
     """A user-facing problem with the input file."""
@@ -413,6 +423,58 @@ class FFmpeg:
                 err.seek(0)
                 raise RuntimeError(f"encode failed: {err.read()[-500:]!r}")
         return out
+
+    def write_audio_chunks(self, x: np.ndarray, sr: int, spans: list[tuple[int, int]], out_dir: Path, names: list[str]) -> list[Path]:
+        """Encode the sample ranges `spans` of mono `x` as ASR_CHUNK files `out_dir/<name>.mp3`, ASR_CHUNKS_PER_RUN
+        per FFmpeg run (each run reads only the samples of its chunks from one pipe) instead of one process per chunk."""
+        if len(names) != len(spans):
+            raise ValueError("one name per span")
+        outs: list[Path] = []
+        for i in range(0, len(spans), ASR_CHUNKS_PER_RUN):
+            outs += self._encode_chunk_run(x, sr, spans[i:i + ASR_CHUNKS_PER_RUN], out_dir, names[i:i + ASR_CHUNKS_PER_RUN])
+        return outs
+
+    def _encode_chunk_run(self, x: np.ndarray, sr: int, spans: list[tuple[int, int]], out_dir: Path, names: list[str]) -> list[Path]:
+        outs = [out_dir / f"{n}{ASR_CHUNK_EXT}" for n in names]
+        n = len(spans)
+        starts = np.concatenate([[0], np.cumsum([b - a for a, b in spans])]).tolist()
+        # asplit + atrim cut the concatenated speech into the chunks; asetpts restarts each chunk at 0.
+        graph = [f"[0:a]asplit={n}" + "".join(f"[s{i}]" for i in range(n)) if n > 1 else "[0:a]anull[s0]"]
+        graph += [f"[s{i}]atrim=start_sample={starts[i]}:end_sample={starts[i + 1]},asetpts=N/{sr}/TB[o{i}]" for i in range(n)]
+        script = out_dir / ".chunks-graph.txt"
+        script.write_text(";\n".join(graph), encoding="utf-8")
+        args = [self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
+                "-/filter_complex", path_arg(script)]
+        for i, out in enumerate(outs):
+            args += ["-map", f"[o{i}]", *ASR_CHUNK_ARGS, "-threads", "1", "-y", path_arg(out)]
+        block = sr * 10
+        try:
+            with tempfile.TemporaryFile() as err:
+                proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err, **_NO_WINDOW)
+                with self._guard(proc):
+                    try:
+                        for a, b in spans:
+                            for s in range(a, b, block):
+                                if self._cancelled():
+                                    raise Cancelled()
+                                proc.stdin.write(np.ascontiguousarray(x[s:min(s + block, b)], dtype=np.float32).tobytes())
+                        proc.stdin.close()
+                        proc.wait(timeout=3600)
+                    except (BrokenPipeError, OSError):
+                        proc.kill()
+                        proc.wait()
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill()
+                            proc.wait()
+                if self._cancelled():
+                    raise Cancelled()
+                if proc.returncode != 0:
+                    err.seek(0)
+                    raise RuntimeError(f"chunk encode failed: {err.read()[-500:]!r}")
+        finally:
+            script.unlink(missing_ok=True)
+        return outs
 
     def mux_video(
         self,

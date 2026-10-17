@@ -168,6 +168,36 @@ def test_mux_keeps_or_strips_metadata(tmp_path):
         assert ff.probe(out).has_video
 
 
+@needs_ff
+def test_asr_chunks_are_cut_exactly_and_in_batches(tmp_path, monkeypatch):
+    from acw_common import ffmpeg as ffmod
+
+    monkeypatch.setattr(ffmod, "ASR_CHUNKS_PER_RUN", 4)  # 10 chunks -> 3 runs, the last one holding 2
+    ff = FFmpeg(FF_DIR, threads=1)
+    sr = 16000
+    rng = np.random.default_rng(7)
+    x = (rng.standard_normal(sr * 40) * 0.02).astype(np.float32)
+    spans = []
+    for i in range(10):
+        a = sr * 4 * i + int(rng.integers(0, 4000))
+        spans.append((a, a + int(sr * rng.uniform(0.5, 3.0))))
+        x[spans[-1][0]:spans[-1][1]] += 0.3 * np.sin(2 * np.pi * (300 + 150 * i) * np.arange(spans[-1][1] - spans[-1][0]) / sr).astype(np.float32)
+    names = [f"{i:04d}" for i in range(10)]
+    files = ff.write_audio_chunks(x, sr, spans, tmp_path, names)
+    assert [f.name for f in files] == [f"{n}.mp3" for n in names]
+    assert not (tmp_path / ".chunks-graph.txt").exists()
+    for (a, b), f in zip(spans, files):
+        got = ff.decode(f, ff.probe(f), sr, 1, 10.0)[:, 0]
+        assert abs(len(got) - (b - a)) <= 1152  # mp3 frames pad the end
+        # it is this chunk's audio, from its first sample: the tone's frequency is the chunk's own
+        ref = x[a:b]
+        n = min(len(got), len(ref))
+        assert np.corrcoef(got[:n], ref[:n])[0, 1] > 0.9
+    assert ff.write_audio_chunks(x, sr, [], tmp_path, []) == []
+    with pytest.raises(ValueError):
+        ff.write_audio_chunks(x, sr, spans, tmp_path, names[:3])
+
+
 @needs_dfn
 def test_cancel_stops_quickly():
     import threading
