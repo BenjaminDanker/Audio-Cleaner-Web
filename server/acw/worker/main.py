@@ -30,33 +30,8 @@ log = logging.getLogger("acw.worker")
 _stop = threading.Event()
 
 
-# The GPU worker (acw-worker-gpu, its own venv with CUDA ONNX Runtime) only
-# takes local transcription jobs and runs Parakeet on the GPU; the CPU workers
-# leave those to it while it is idle. See docs/operations.md.
+# This process is the GPU worker (acw-worker-gpu): it takes the jobs broker.gpu_stages() names, one at a time.
 GPU_MODE = os.environ.get("ACW_WORKER_GPU") == "1"
-GPU_IDLE_FRESH_S = 6
-
-
-def _gpu_idle_marker() -> Path:
-    return get_settings().data_dir / "gpu-worker-idle"
-
-
-def gpu_worker_idle() -> bool:
-    try:
-        return time.time() - _gpu_idle_marker().stat().st_mtime < GPU_IDLE_FRESH_S
-    except OSError:
-        return False
-
-
-def is_local_transcription(job: dict) -> bool:
-    """A job the GPU worker takes. Not one with echo removal: the GPU venv has no echo canceller, so the CPU
-    workers keep those."""
-    params = json.loads(job["params_json"])
-    return (
-        params.get("transcribe_tier") == "local"
-        and not params.get("options", {}).get("echo_reference_track")
-        and job.get("next_stage") != "finalize"
-    )
 
 
 def _gpu_spec() -> dict:
@@ -69,6 +44,7 @@ def _gpu_spec() -> dict:
                         "/sys/devices", "/sys/module/nvidia", "/sys/module/nvidia_uvm", "/dev/char") if Path(p).exists()]
     return {
         "asr_device": "cuda",
+        "clean_device": "cuda",
         "gpu_devices": [*devices, "/proc/self"],
         "gpu_read": [*read, "/proc/self"],
         "address_space_bytes": 0,
@@ -128,9 +104,11 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 50"
     )]
     if GPU_MODE:
-        rows = [r for r in rows if is_local_transcription(r)]
-    elif gpu_worker_idle():
-        rows = [r for r in rows if not is_local_transcription(r)]  # the GPU worker takes these
+        rows = [r for r in rows if broker.gpu_stages(r)]
+    elif broker.gpu_worker_idle():
+        rows = [r for r in rows if not broker.gpu_stages(r)]  # the GPU worker takes these
+    elif broker.gpu_worker_up():
+        rows = [r for r in rows if not broker.gpu_only(r)]  # busy: it takes these when it is free again
     if not rows:
         return None
     snap = cpus = None
@@ -314,6 +292,8 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
                 beat = time.monotonic()
                 try:
                     db.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ?", (db.now(), job["id"]))
+                    if GPU_MODE:
+                        broker.mark_gpu_worker("alive")
                 except Exception:  # noqa: BLE001
                     pass
             time.sleep(1)
@@ -541,16 +521,20 @@ def main() -> None:
                 jobs.sweep()
             except Exception:  # noqa: BLE001
                 log.exception("sweep failed")
+        if GPU_MODE:
+            broker.mark_gpu_worker("alive")
         job = claim(worker_id, load)
         if job is None:
             if GPU_MODE:
-                _gpu_idle_marker().touch()
+                broker.mark_gpu_worker("idle")
             _stop.wait(2.0)
             continue
         if GPU_MODE:
-            _gpu_idle_marker().unlink(missing_ok=True)
+            broker.mark_gpu_worker("busy")
         log.info("job %s (%s) claimed with %s threads", job["id"], job["kind"], job["threads"])
         process(job, {**extra, "threads": job["threads"] or extra["threads"]})
+    if GPU_MODE:  # stopping: the CPU workers must not wait for a worker that is gone
+        broker.mark_gpu_worker("stopped")
 
 
 if __name__ == "__main__":

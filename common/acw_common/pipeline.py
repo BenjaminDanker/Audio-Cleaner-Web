@@ -59,6 +59,9 @@ class CleanOptions:
     # Rebuild the voice with Sidon (noise, room echo and missing highs in one; slow; the strength setting
     # does not apply). Needs the models (restore_model_dir).
     restore_voice: bool = False
+    # Where the models that have a GPU path run: "cpu" or "cuda" (DPDFNet-8, Sidon, AP-BWE; DeepFilterNet3 is CPU only).
+    # "cuda" never falls back to the CPU: without a usable card it raises.
+    device: str = "cpu"
 
 
 def noise_estimate_db(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> float:
@@ -209,7 +212,7 @@ def clean_audio(
         if report is not None:
             report.update(noise="rebuilt", highs=None)
         y = restore.restore(
-            x, restore_model_dir, threads=threads, cancel=cancel, out=out,
+            x, restore_model_dir, threads=threads, cancel=cancel, out=out, device=opts.device,
             progress=(lambda f: progress(0.95 * f)) if progress else None,
         )
         y = y[:, None] if y.ndim == 1 else y
@@ -248,7 +251,7 @@ def clean_audio(
             if profile == "heavy":
                 dpdfnet.denoise_array(
                     x[a:b, ch], atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel,
-                    out=y[a:b, ch], model_path=heavy,
+                    out=y[a:b, ch], model_path=heavy, device=opts.device,
                 )
             else:
                 dfn.denoise_array(
@@ -264,7 +267,7 @@ def clean_audio(
         for ch in todo:
             bwe.extend(
                 y[:, ch:ch + 1], bwe_model_dir, threads=threads, cancel=cancel, out=y[:, ch:ch + 1], model=highs,
-                progress=(lambda f: progress(share + (0.95 - share) * f)) if progress else None,
+                device=opts.device, progress=(lambda f: progress(share + (0.95 - share) * f)) if progress else None,
             )
     for c, src in enumerate(plan):
         if src is None:

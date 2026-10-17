@@ -149,5 +149,59 @@ def test_batched_rows_equal_rows_run_alone(monkeypatch):
     clean, noisy, gate = syllables(14.0, seed=7)
     got = dpdfnet.denoise_array(noisy, threads=2, segment_seconds=4, overlap_seconds=1.5)
     monkeypatch.setattr(dpdfnet, "MAX_BATCH", 1)
+    dpdfnet.unload()
     ref = dpdfnet.denoise_array(noisy, threads=2, segment_seconds=4, overlap_seconds=1.5)
+    dpdfnet.unload()
     assert np.abs(got - ref).max() < 1e-4
+
+
+class _FakeCard(dpdfnet._Model):
+    """The batched CPU model dressed as the card: it takes up to 64 rows per call, one group at a time."""
+
+    gpu = True
+    steps: list = []
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.max_batch = dpdfnet.GPU_ROWS[-1]
+        self._lock = threading.Lock()
+
+    def exclusive(self):
+        return self._lock
+
+    def step(self, spec, state):
+        _FakeCard.steps.append(spec.shape[0])
+        return super().step(spec, state)
+
+
+def test_gpu_path_streams_all_segments_in_one_group(monkeypatch):
+    """device="cuda": same segments and same output as the CPU path, but every segment of the file in one call (the card
+    wants rows), driven from one thread."""
+    clean, noisy, gate = syllables(32.0, seed=11)
+    monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
+    _FakeCard.steps.clear()
+    dpdfnet.unload()
+    kw = dict(threads=4, segment_seconds=10, overlap_seconds=1.5)
+    cpu = dpdfnet.denoise_array(noisy, **kw)
+    assert not _FakeCard.steps
+    gpu = dpdfnet.denoise_array(noisy, device="cuda", **kw)
+    dpdfnet.unload()
+    assert len(set(_FakeCard.steps)) == 1 and _FakeCard.steps[0] >= 3, _FakeCard.steps[:5]
+    assert np.abs(gpu - cpu).max() < 1e-4
+
+
+def test_gpu_path_groups_by_the_rows_the_card_takes(monkeypatch):
+    clean, noisy, gate = syllables(24.0, seed=5)
+    monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
+    monkeypatch.setattr(dpdfnet, "GPU_ROWS", (2, 4))  # a card that takes four rows at most
+    _FakeCard.steps.clear()
+    dpdfnet.unload()
+    stereo = np.stack([noisy, noisy[::-1].copy()], axis=1)
+    dpdfnet.denoise_array(stereo, device="cuda", threads=4, segment_seconds=10, overlap_seconds=1.5)
+    dpdfnet.unload()
+    assert set(_FakeCard.steps) == {4, 2}, set(_FakeCard.steps)  # 2 channels x 3 segments: a full group, then the rest
+
+
+def test_unknown_device_is_refused():
+    with pytest.raises(ValueError, match="device"):
+        dpdfnet.denoise_array(np.zeros(SR, np.float32), device="tpu")

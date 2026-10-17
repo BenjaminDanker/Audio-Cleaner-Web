@@ -124,17 +124,32 @@ _backends: dict[tuple, "_Backend"] = {}
 _ARENA = True
 _MAX_WORKERS = 4  # concurrent window / block calls; each holds up to ~0.7 GB of activations
 _OPT_LEVEL = None
+# CUDA provider options: the default exhaustive cuDNN search re-runs for every new input length, and the default arena
+# rounds every growth up to a power of two (peak 3.7 GB on a 4 GB card against 2.6 GB when it grows by what is asked).
+_CUDA_OPTIONS = {"cudnn_conv_algo_search": "HEURISTIC", "arena_extend_strategy": "kSameAsRequested"}
+# One call at a time: the card is the bottleneck (82 % busy), two in flight only add 1 GB of activations (docs/research/gpu-2026-10.md).
+_GPU_WORKERS = 1
 
 
 class _Backend:
     """features(feats (T, 160)) -> (T, 1024); decode(feats (T, 1024)) -> (T * 960,) float32."""
 
-    def __init__(self, model_dir: Path, threads: int):
+    def __init__(self, model_dir: Path, threads: int, device: str):
         import onnxruntime as ort
 
         # `threads` is the size of the worker pool the caller runs the two networks on (restore._restore_mono):
         # blocks and windows are independent, so the sessions themselves are single-threaded (docs/research/heavy-2026-10.md)
         self.workers = max(1, min(threads, _MAX_WORKERS))
+        if device == "cuda":
+            from .gpu import prepare_cuda
+
+            prepare_cuda()
+            self.workers = _GPU_WORKERS  # the card does the arithmetic, one call at a time
+            providers = [("CUDAExecutionProvider", dict(_CUDA_OPTIONS))]
+        elif device == "cpu":
+            providers = ["CPUExecutionProvider"]
+        else:
+            raise ValueError(f"unknown device {device!r}")
 
         def session(path: Path):
             so = ort.SessionOptions()
@@ -148,7 +163,10 @@ class _Backend:
                 so.enable_cpu_mem_arena = False  # the arena keeps the largest activations of every window alive
             if _OPT_LEVEL is not None:
                 so.graph_optimization_level = _OPT_LEVEL(ort)
-            return ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
+            sess = ort.InferenceSession(str(path), so, providers=providers)
+            if device == "cuda" and sess.get_providers()[0] != "CUDAExecutionProvider":
+                raise RuntimeError(f"CUDA is not usable for {path.name} (providers: {sess.get_providers()})")
+            return sess
 
         self.fe = session(model_dir / ONNX_FE)
         self.dec = session(model_dir / ONNX_DEC)
@@ -160,13 +178,13 @@ class _Backend:
         return self.dec.run(None, {"f": np.ascontiguousarray(feats.T)[None]})[0].reshape(-1)
 
 
-def _backend(model_dir: str | Path, threads: int) -> _Backend:
-    key = (str(Path(model_dir).resolve()), threads)
+def _backend(model_dir: str | Path, threads: int, device: str = "cpu") -> _Backend:
+    key = (str(Path(model_dir).resolve()), threads if device == "cpu" else 0, device)
     with _lock:
         b = _backends.get(key)
         if b is None:
             _backends.clear()  # only ever keep one model set in RAM (~1 GB)
-            b = _backends[key] = _Backend(Path(key[0]), threads)
+            b = _backends[key] = _Backend(Path(key[0]), threads, device)
         return b
 
 
@@ -386,6 +404,7 @@ def restore(
     cancel: threading.Event | None = None,
     out: np.ndarray | None = None,
     *,
+    device: str = "cpu",
     stereo: str = "auto",
     window_seconds: float = _WINDOW_SECONDS,
     overlap_seconds: float = _OVERLAP_SECONDS,
@@ -401,6 +420,8 @@ def restore(
     * `stereo`: "auto" restores the mid signal once and writes it to both channels when the
       side signal is more than 20 dB below it, otherwise every channel separately; "channels"
       and "mid" force one or the other. More than two channels are always done separately.
+    * `device`: "cpu", or "cuda" (onnxruntime-gpu; raises when CUDA cannot be used, the output equals the CPU's up
+      to float round-off).
     Peak memory is bounded by the window size, not by the file length (plus ~1 GB for the models).
     """
     x = np.asarray(x)
@@ -412,7 +433,7 @@ def restore(
         raise ValueError("out must be float32 with the same shape as x")
     if len(x) == 0:
         return out
-    be = _backend(model_dir, threads)
+    be = _backend(model_dir, threads, device)
     kw = dict(window_seconds=window_seconds, overlap_seconds=overlap_seconds, decode_seconds=_DECODE_SECONDS,
               decode_context=_DECODE_CONTEXT)
 

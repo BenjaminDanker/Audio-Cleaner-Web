@@ -172,11 +172,22 @@ def unload() -> None:
         _sessions.clear()
 
 
-def _session(path: str, threads: int):
+# CUDA provider options: the default exhaustive cuDNN search re-runs for every new input length, and the default
+# arena rounds every growth up to a power of two.
+_CUDA_OPTIONS = {"cudnn_conv_algo_search": "HEURISTIC", "arena_extend_strategy": "kSameAsRequested"}
+
+
+def _session(path: str, threads: int, device: str = "cpu"):
     """One cached onnxruntime session (the 119 MB graphs are not kept around: at most one at a time)."""
     import onnxruntime as ort
+    if device not in ("cpu", "cuda"):
+        raise ValueError(f"unknown device {device!r}")
+    if device == "cuda":
+        from .gpu import prepare_cuda
+
+        prepare_cuda()
     with _session_lock:
-        s = _sessions.get((path, threads))
+        s = _sessions.get((path, threads, device))
         if s is None:
             _sessions.clear()
             so = ort.SessionOptions()
@@ -186,7 +197,11 @@ def _session(path: str, threads: int):
             so.log_severity_level = 3
             # idle worker threads sleep instead of spinning while the numpy STFT part runs (and next to other services)
             so.add_session_config_entry("session.intra_op.allow_spinning", "0")
-            s = _sessions[(path, threads)] = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+            providers = [("CUDAExecutionProvider", dict(_CUDA_OPTIONS))] if device == "cuda" else ["CPUExecutionProvider"]
+            s = ort.InferenceSession(path, so, providers=providers)
+            if device == "cuda" and s.get_providers()[0] != "CUDAExecutionProvider":
+                raise RuntimeError(f"CUDA is not usable for {Path(path).name} (providers: {s.get_providers()})")
+            _sessions[(path, threads, device)] = s
         return s
 
 
@@ -282,7 +297,7 @@ def _run_block(sess, blk: np.ndarray, lr_rate: int, w_orig: np.ndarray, fill_hz:
 
 def extend(x: np.ndarray, model_dir: str | Path, threads: int = 4, progress=None, cancel=None, out=None, *,
            model: str | None = None, crossover_hz: float | None = None,
-           block_seconds: float = BLOCK_SECONDS) -> np.ndarray:
+           block_seconds: float = BLOCK_SECONDS, device: str = "cpu") -> np.ndarray:
     """Restore the highs of band-limited speech. `x` is float32 (n,) or (n, ch) at 48 kHz, ~[-1, 1].
 
     Returns an array of the same shape (written into `out` if given; `out` may be `x` itself). With
@@ -290,7 +305,8 @@ def extend(x: np.ndarray, model_dir: str | Path, threads: int = 4, progress=None
     full-band channel is passed through unchanged; pass model="8k".."24k" to force one. `crossover_hz`
     (default: 0.9 x the channel's measured cut-off, at most 0.95 x the generator's input Nyquist) is where
     the original spectrum hands over to the generated one. `progress(fraction)` is called after each block;
-    `cancel` is a threading.Event (or anything with is_set()) -> dfn.Cancelled.
+    `cancel` is a threading.Event (or anything with is_set()) -> dfn.Cancelled. `device` "cuda" runs the generator
+    on the GPU (onnxruntime-gpu; raises when CUDA cannot be used); the STFT and resampling around it stay on the CPU.
     """
     x = np.asarray(x)
     if x.dtype != np.float32:
@@ -322,7 +338,7 @@ def extend(x: np.ndarray, model_dir: str | Path, threads: int = 4, progress=None
             cross = min(0.9 * bw, 0.95 * lr_rate / 2) if bw < 0.95 * lr_rate / 2 else 0.85 * lr_rate / 2
         fill_hz = bw if bw < 0.92 * lr_rate / 2 else None
         w_orig = _ramp(lr_rate, cross)
-        sess = _session(str(model_path(model_dir, name)), threads)
+        sess = _session(str(model_path(model_dir, name)), threads, device)
         tail = None  # when writing into x itself: its original samples just before the block (the left context)
         for s in range(0, n, block):
             if cancel is not None and cancel.is_set():

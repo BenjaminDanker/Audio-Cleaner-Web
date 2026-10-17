@@ -369,7 +369,7 @@ if (want('flac')) {
     const bytes = readFileSync(file);
     const name = file.split('/').pop();
     const dur = 10.6;
-    const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: name, sizeBytes: bytes.length, durationSeconds: dur, free: false, options: { audio_format: 'wav', loudness_lufs: -16, atten_lim_db: 100, caption_formats: [] } });
+    const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: name, sizeBytes: bytes.length, durationSeconds: dur, options: { audio_format: 'wav', loudness_lufs: -16, atten_lim_db: 100, caption_formats: [] } });
     if (made.status !== 200) throw new Error('raw create: ' + JSON.stringify(made));
     const put = await page.evaluate(async ({ url, b64 }) => {
       const me = await (await fetch('/audio/api/me')).json();

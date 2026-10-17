@@ -138,7 +138,7 @@ await check('subtitles: Clean & polish with free subtitles: the job is only the 
   return JSON.stringify({ kind: b.kind, denoiseTier: b.denoiseTier });
 });
 
-await check('subtitles: our side refuses a free job (free subtitles are only made in the browser now)', async () => {
+await check('subtitles: our side has no free job (free subtitles are only made in the browser)', async () => {
   const r = await page.evaluate(async (base) => {
     const me = await (await fetch(`${base}/api/me`)).json();
     const res = await fetch(`${base}/api/jobs`, {
@@ -147,7 +147,7 @@ await check('subtitles: our side refuses a free job (free subtitles are only mad
     });
     return { status: res.status, body: await res.json() };
   }, BASE);
-  if (r.status !== 400 || !/browser/.test(r.body.detail)) throw new Error(JSON.stringify(r));
+  if (r.status !== 422 || JSON.stringify(r.body.fields) !== '["free"]') throw new Error(JSON.stringify(r));
   return r.body.detail;
 });
 

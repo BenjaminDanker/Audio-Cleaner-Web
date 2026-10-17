@@ -458,7 +458,7 @@ Take a backup first (`systemctl --user start acw-backup.service`).
 | `data/jobs/` | uploads, intermediate files, results | the upload is deleted when processing ends, results after 24 h (`jobs.sweep`), leftovers of failed or canceled jobs after an hour; a deleted account's files at once. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve watch it |
 | `data/acw.sqlite3` and `-wal` | the database, see above | the table above; the log file stays ~4 MB (SQLite checkpoints it by itself) |
 | `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
-| `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`) | rewritten in place, fixed names | a few KB in all |
+| `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`, `gpu-worker-alive`) | rewritten in place, fixed names | a few KB in all |
 | `/mnt/mc-storage/audio-cleaner-backups` | nightly snapshot, gzipped | the newest 30, plus at most 3 failed (`*.bad`) and `backup-status.json`; also pruned on a night when the backup fails. About a quarter of the database size each: ~250 MB x 30 = 7.5 GB at the worst example above. Not ours: a stray `Audio-Cleaner-desktop-repo.bundle` (16 MB) |
 | The off-machine copy (if set up) | one encrypted file a night | "the remote end keeps everything": prune it there (Backups) |
 | Journal (`journalctl --user`) | see below | size and age caps |
@@ -594,12 +594,20 @@ first served. The API reports `queuePosition` and `queueWaitSeconds`.
 
 **GPU worker (optional).** `deploy/setup-gpu.sh` builds `~/audio-cleaner/venv-gpu`
 (ONNX Runtime with CUDA, pinned for the GTX 960's sm_52), then
-`deploy/install.sh` enables `acw-worker-gpu`. It takes only local
-transcription jobs and runs Parakeet on the GPU (one at a time: the model
-needs ~3.7 of the 4 GB). While it is idle it refreshes
-`data/gpu-worker-idle`, and CPU workers leave transcription jobs to it. Its
-sandboxed runner may also open `/dev/nvidia*` and has no address-space limit
-(CUDA reserves huge virtual ranges).
+`deploy/install.sh` enables `acw-worker-gpu`. It takes the jobs whose heavy stages are much faster on the card
+(measurements and reasons: docs/research/gpu-2026-10.md; the rules are `broker.gpu_stages` and `broker.GPU_WORK`): local transcription (Parakeet), the heavy noise
+remover (DPDFNet-8: "heavy" or "auto" noise), the voice rebuild (Sidon), and the band extension
+of phone-quality recordings (AP-BWE) inside those jobs. Light cleaning (DeepFilterNet3), echo removal and
+Whisper stay on the CPU (a job with echo removal is never given to the GPU worker; an "auto" job that turns out
+light is cleaned by DeepFilterNet3 on the GPU worker's CPU threads). It runs one job at a time and a job's models
+use the card one after the other (Parakeet needs 3.3 of the 4 GB alone, Sidon 2.6 GB, DPDFNet 0.3-0.4 GB), so nothing
+shares it. While it is idle it refreshes `data/gpu-worker-idle`, and CPU workers leave GPU jobs to it; while it is
+busy they still take everything but the voice rebuild (hours of four cores on the CPU), which waits for the card as
+long as `data/gpu-worker-alive` is fresh (refreshed every 2 s, and every 20 s during a job; removed when the worker
+stops). A stage that cannot get the card (no card, CUDA library missing) fails the job with the usual "not charged"
+message instead of running slowly on the CPU. `python -m acw.admin capacity` shows the worker's state and the card's
+memory and load. Its sandboxed runner may also open `/dev/nvidia*` and has no address-space
+limit (CUDA reserves huge virtual ranges).
 
 **Sized from the machine.** `deploy/install.sh` reads the core count and RAM:
 all services together may use `ACW_MEMORY_PERCENT` (default 40) of RAM

@@ -1008,10 +1008,10 @@ def test_a_dropped_session_is_replaced_instead_of_refusing_the_user():
 def test_gpu_worker_leaves_echo_jobs_to_the_cpu_workers():
     import json
 
-    from acw.worker.main import is_local_transcription
+    from acw.broker import gpu_stages
 
     def job(**opts):
-        return {"params_json": json.dumps({"transcribe_tier": "local", "options": opts}), "next_stage": None}
+        return {"kind": "transcribe", "params_json": json.dumps({"transcribe_tier": "local", "options": opts}), "next_stage": None}
 
-    assert is_local_transcription(job())
-    assert not is_local_transcription(job(echo_reference_track=True))
+    assert gpu_stages(job()) == ["transcribe"]
+    assert not gpu_stages(job(echo_reference_track=True))

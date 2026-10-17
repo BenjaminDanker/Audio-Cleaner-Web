@@ -49,6 +49,33 @@ def test_heavy_noise_runs_the_heavy_model(tmp_path, monkeypatch):
     assert calls == ["dpdfnet"] and report == {"noise": "heavy", "highs": None}
 
 
+def test_device_reaches_every_stage_that_has_a_gpu_path(monkeypatch, tmp_path):
+    """CleanOptions.device goes to Sidon, AP-BWE and DPDFNet; DeepFilterNet3 has no device."""
+    from scipy.signal import butter, sosfilt
+
+    seen = {}
+    monkeypatch.setattr(pipeline.dfn, "denoise_array", lambda x, *a, out=None, **k: seen.setdefault("dfn", k) and out.__setitem__(slice(None), x))
+    monkeypatch.setattr(pipeline.dpdfnet, "denoise_array", lambda x, *a, out=None, **k: seen.__setitem__("dpdfnet", k["device"]) or out.__setitem__(slice(None), x))
+    monkeypatch.setattr(pipeline.bwe, "available", lambda d: True)
+    monkeypatch.setattr(pipeline.bwe, "extend", lambda y, d, **k: seen.__setitem__("bwe", k["device"]) or y)
+    monkeypatch.setattr(pipeline.restore, "available", lambda d: True)
+    monkeypatch.setattr(pipeline.restore, "restore", lambda x, d, **k: seen.__setitem__("sidon", k["device"]) or x.copy())
+    heavy = tmp_path / dpdfnet.MODEL_FILE
+    heavy.write_bytes(b"x")
+    full = _speechlike(4, 30) + (0.01 * np.random.default_rng(1).standard_normal(4 * SR)).astype(np.float32)
+    phone = sosfilt(butter(10, 3400, fs=SR, output="sos"), full).astype(np.float32)
+
+    def run(x, opts):
+        seen.clear()
+        pipeline.clean_audio(x, "lib", "model", opts, heavy_model_path=heavy, bwe_model_dir=tmp_path, restore_model_dir=tmp_path)
+        return dict(seen)
+
+    assert run(phone, pipeline.CleanOptions(noise="heavy", polish=False)) == {"dpdfnet": "cpu", "bwe": "cpu"}
+    assert run(phone, pipeline.CleanOptions(noise="heavy", polish=False, device="cuda")) == {"dpdfnet": "cuda", "bwe": "cuda"}
+    assert run(full, pipeline.CleanOptions(restore_voice=True, polish=False, device="cuda")) == {"sidon": "cuda"}
+    assert "device" not in run(full, pipeline.CleanOptions(noise="light", polish=False, device="cuda")).get("dfn", {})
+
+
 
 def test_band_limited_recordings_get_their_highs_restored_full_band_ones_never(monkeypatch, tmp_path):
     from scipy.signal import butter, sosfilt

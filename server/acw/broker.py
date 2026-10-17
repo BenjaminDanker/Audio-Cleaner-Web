@@ -12,7 +12,8 @@ A class outranks another when its rank is lower. The decisions read from the tab
   - job_cpus(): the cores jobs may use = everything minus the cores of classes that outrank jobs (plus a spare).
   - live_options(cls): what a new live session of that class may take (sent to the live engine with the start).
   - admit_job(): memory, disk and CPU room for a file job (worker/main.py claims through it).
-  - snapshot(): the whole picture in one place: live engine(s), per-core use, jobs, queue, memory, disk
+  - gpu_stages() / gpu_only(): which file jobs the GPU worker takes, and which the CPU workers leave to it.
+  - snapshot(): the whole picture in one place: live engine, per-core use, the card, jobs, queue, memory, disk
     (`python -m acw.admin capacity`, and the metrics file).
 
 Scaling is linear: a live session costs the same CPU however many run (the native engine has no shared lock and
@@ -24,6 +25,8 @@ import json
 import os
 import socket
 import struct
+import subprocess
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -151,6 +154,101 @@ def pin_tree(pid: int, cpus: set[int]) -> None:
                 pass  # thread exited
 
 
+# ------------------------------------------------------------------------------------------------ the GPU
+#
+# One card (GTX 960, 4 GB). What runs well on it was measured (docs/research/gpu-2026-10.md): the big models of file
+# jobs. Not live audio (one 10 ms frame costs 8.7 ms of card latency, a caption chunk more than the CPU spends on it),
+# not Whisper (the pinned CTranslate2 has no kernels for this card and turbo does not fit), not DeepFilterNet3 (its
+# runtime is CPU only), not echo removal (no echo canceller in the GPU venv). Every workload is compute bound (two
+# DPDFNet streams together are only 16 % faster than one) and Parakeet alone takes 3.3 of the 4 GB, so the card runs
+# one job at a time: the GPU worker (acw-worker-gpu, its own venv) claims one, its stages use the card one after
+# another. The CPU workers leave the card's jobs to it while it is idle, and the voice rebuild (hours of four cores on
+# the CPU) also while it is busy, as long as it is up.
+
+
+@dataclass(frozen=True)
+class GpuWork:
+    name: str
+    card_mb: int  # peak of the whole card while it runs
+    seconds_per_minute: float  # wall seconds per minute of audio (per channel cleaned)
+    host_cores: float  # CPU it still needs (decoding, framing, the decoder loop)
+
+
+GPU_WORK = {
+    "transcribe": GpuWork("Parakeet transcription", 3300, 2.0, 0.9),
+    "heavy": GpuWork("DPDFNet-8 heavy noise removal", 360, 9.7, 0.1),  # 5.5 s on 30 min files, 16 s on 2.5 min
+    "rebuild": GpuWork("Sidon voice rebuild", 2600, 8.2, 0.13),
+    "highs": GpuWork("AP-BWE highs restoration", 360, 5.0, 0.7),  # inside a job that is on the card anyway
+}
+GPU_IDLE_FRESH_S = 6
+GPU_ALIVE_FRESH_S = 90
+
+
+def gpu_stages(job: dict) -> list[str]:
+    """The GPU_WORK stages of `job` that make it a GPU job (empty: the CPU workers' job). A recording that turns out
+    lightly noisy under "auto" is cleaned by DeepFilterNet3 on the GPU worker's own CPU threads; band extension
+    follows a job to the card but is no reason to send it there."""
+    params = json.loads(job["params_json"])
+    opts = params.get("options", {})
+    if job.get("next_stage") == "finalize" or opts.get("echo_reference_track"):
+        return []
+    stages = ["transcribe"] if params.get("transcribe_tier") == "local" else []
+    if job["kind"] in ("denoise", "denoise_transcribe"):
+        if params.get("denoise_tier") == "rebuild":
+            stages.append("rebuild")
+        elif opts.get("noise", "auto") in ("auto", "heavy"):
+            stages.append("heavy")
+    return stages
+
+
+def gpu_only(job: dict) -> bool:
+    """A GPU job the CPU workers leave even while the GPU worker is busy (it is up): the voice rebuild."""
+    return "rebuild" in gpu_stages(job)
+
+
+def _gpu_marker(state: str) -> Path:
+    return get_settings().data_dir / f"gpu-worker-{state}"
+
+
+def mark_gpu_worker(state: str) -> None:
+    """The GPU worker says how it is: "alive" (at least every 20 s, also while a job runs), "idle" (every claim
+    that found nothing), "busy" (it took a job) or "stopped"."""
+    if state in ("alive", "idle"):
+        _gpu_marker(state).touch()
+    if state in ("busy", "stopped"):
+        _gpu_marker("idle").unlink(missing_ok=True)
+    if state == "stopped":
+        _gpu_marker("alive").unlink(missing_ok=True)
+
+
+def _fresh(marker: Path, seconds: float) -> bool:
+    try:
+        return time.time() - marker.stat().st_mtime < seconds
+    except OSError:
+        return False
+
+
+def gpu_worker_idle() -> bool:
+    return _fresh(_gpu_marker("idle"), GPU_IDLE_FRESH_S)
+
+
+def gpu_worker_up() -> bool:
+    return _fresh(_gpu_marker("alive"), GPU_ALIVE_FRESH_S)
+
+
+def gpu_card() -> dict:
+    """The card's memory and load now (nvidia-smi); {"down": why} without one."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip().splitlines()[0]
+        name, used, total, util = (v.strip() for v in out.split(","))
+        return {"name": name, "memoryUsedMb": int(used), "memoryTotalMb": int(total), "busyPercent": int(util)}
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError) as e:
+        return {"down": str(e)[:80]}
+
+
 # ------------------------------------------------------------------------------------------ admission
 
 # A job joins others already running only if this many cores are idle.
@@ -232,6 +330,7 @@ def snapshot() -> dict:
         "memory": {"available": snap.mem_available, "sliceHeadroom": snap.slice_headroom, "reserve": jobs.MEM_RESERVE},
         "disk": {"free": snap.disk_free, "reserve": jobs.DISK_RESERVE},
         "live": {"sessions": by_class, "liveCores": cores, "engine": live_engine_status()},
+        "gpu": {"worker": "idle" if gpu_worker_idle() else "busy" if gpu_worker_up() else "down", "card": gpu_card()},
         "jobs": {"running": running, "queued": queued, "jobCpus": sorted(job_cpus(s.data_dir))},
     }
 
@@ -253,6 +352,10 @@ def format_snapshot(sn: dict) -> str:
     else:
         lines.append(f"  live engine: {e['sessions']} sessions, {e['units']:.1f} of {e['capacityUnits']:.1f} units, "
                      f"captions {e['captionStreams']}/{e['captionCap']}")
+    g = sn["gpu"]
+    card = g["card"]
+    lines.append(f"GPU worker: {g['worker']}; " + (f"card NOT ANSWERING ({card['down']})" if "down" in card else
+                 f"{card['name']}: {card['memoryUsedMb']} of {card['memoryTotalMb']} MB, {card['busyPercent']}% busy"))
     jb = sn["jobs"]
     lines.append(f"Jobs: {len(jb['running'])} running, {jb['queued']} queued; job CPUs {jb['jobCpus']}")
     for r in jb["running"]:

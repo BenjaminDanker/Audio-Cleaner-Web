@@ -136,6 +136,7 @@ _PARAKEET_CPU_THREADS = 2
 # anonymous memory per job). With prepacking off the weights are the file's own pages: shared by every concurrent
 # job, evictable, 0.27 GB of private memory per job, for 9 % more CPU.
 _PARAKEET_NO_PREPACK = True
+_PARAKEET_GPU_BATCH = 2  # VAD pieces per encoder call on the card
 
 
 def transcribe_parakeet(
@@ -149,8 +150,8 @@ def transcribe_parakeet(
     cancel: threading.Event | None = None,
 ) -> list[Segment]:
     """Parakeet TDT with Silero VAD segmentation (<=30 s pieces at pauses) and
-    token timestamps. device "cuda" needs onnxruntime-gpu; it falls back to the
-    CPU if CUDA can't be used."""
+    token timestamps. device "cuda" needs onnxruntime-gpu and raises when the
+    encoder could not get the card (never a slow run on the CPU instead)."""
     import onnx_asr
     import onnxruntime as ort
 
@@ -161,22 +162,28 @@ def transcribe_parakeet(
         so.add_session_config_entry("session.disable_prepacking", "1")
     providers = ["CPUExecutionProvider"]
     if device == "cuda":
+        from .gpu import prepare_cuda
+
+        prepare_cuda()
         # HEURISTIC: the default EXHAUSTIVE cuDNN search re-runs for every new
-        # input length (~50 s each on a GTX 960 instead of 0.2 s).
-        providers = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC"}), "CPUExecutionProvider"]
+        # input length (~50 s each on a GTX 960 instead of 0.2 s). The arena grows by what is asked instead of by powers
+        # of two: same transcript, 0.3-0.6 GB less of the card (3.2 GB at the peak on 11 minutes of speech instead of 3.5).
+        providers = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC", "arena_extend_strategy": "kSameAsRequested"})]
     model = onnx_asr.load_model("nemo-conformer-tdt", str(model_path), sess_options=so, providers=providers)
-    # The Silero VAD is a tiny network run on 32 ms frames: one thread is all it can use. Left to itself it
-    # sizes a thread pool from the CPU count (27 threads in the process at the peak, none of them useful).
-    if device == "cpu":
-        vad_so = ort.SessionOptions()
-        vad_so.intra_op_num_threads = 1
-        vad_so.inter_op_num_threads = 1
-        vad = onnx_asr.load_vad("silero", path=str(vad_path), sess_options=vad_so, providers=["CPUExecutionProvider"])
-    else:  # the GPU path is left exactly as it was
-        vad = onnx_asr.load_vad("silero", path=str(vad_path))
+    if device == "cuda" and model.asr._encoder.get_providers()[0] != "CUDAExecutionProvider":
+        # onnxruntime only logs it when CUDA can't be loaded and runs on the CPU
+        raise RuntimeError(f"CUDA is not usable for Parakeet (providers: {model.asr._encoder.get_providers()})")
+    # The Silero VAD is a tiny network run on 32 ms frames: one thread on the CPU is all it can use, on either device.
+    # Left to itself it sizes a thread pool from the CPU count (27 threads in the process at the peak, none of them
+    # useful) and, with onnxruntime-gpu, runs on the card: 2.7x the CPU time and 1.6x the wall time for the same
+    # segments (150 s of speech on the GPU: 8.8 CPU-s and 9.7 s against 4.9 CPU-s and 5.9 s).
+    vad_so = ort.SessionOptions()
+    vad_so.intra_op_num_threads = 1
+    vad_so.inter_op_num_threads = 1
+    vad = onnx_asr.load_vad("silero", path=str(vad_path), sess_options=vad_so, providers=["CPUExecutionProvider"])
     total = len(audio_16k) / SAMPLE_RATE
     pieces = model.with_vad(vad, max_speech_duration_s=30, min_silence_duration_ms=500,
-                            batch_size=1 if device == "cpu" else 2).with_timestamps()
+                            batch_size=1 if device == "cpu" else _PARAKEET_GPU_BATCH).with_timestamps()
     out: list[Segment] = []
     for seg in pieces.recognize(audio_16k.astype(np.float32, copy=False)):
         if cancel is not None and cancel.is_set():

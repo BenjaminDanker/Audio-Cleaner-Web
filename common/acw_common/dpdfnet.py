@@ -47,9 +47,16 @@ and each row is exactly the published batch-1 model on that segment, at 0.41
 instead of 0.73 CPU-seconds per audio second on one Zen 1 core (batch 8). The
 segments of a call are stepped in lock step; every worker thread owns one call
 at a time.
+
+GPU (docs/research/gpu-2026-10.md): `device="cuda"` runs the batched file on the card (onnxruntime-gpu, CUDA graphs:
+one replay per 10 ms frame instead of ~600 kernel launches, 8.7 ms at 4 rows, 38 ms at 64) with the recurrent state
+kept on the card. The card is latency bound, so it wants as many segments as there are in the file in one call (up to
+64): same segmentation, same output (SNR > 90 dB against the CPU), about 0.11 s of wall time per second of audio on a
+10 minute file against 0.27 on four cores, and 0.06 when it has 64 segments, using one CPU thread.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import threading
@@ -70,6 +77,14 @@ MODEL_DELAY = 4 * HOP
 MODEL_FILE = "dpdfnet8_48khz_hr_batch.onnx"  # the published weights with a dynamic batch (tools/export_dpdfnet_batch.py)
 MAX_BATCH = 8  # segments per model call: 8 is within 3 % of the best per-frame cost measured (16)
 
+# Rows per call on the card: every size is its own CUDA graph (~90 MB of the card's memory, made when first used), and a
+# call is padded up to the next size. A call costs 8.7 ms a frame for one row and about 0.5 ms more for each further
+# row up to 12 (GTX 960: 4 rows 9.6 ms, 8 rows 11.0, 16 rows 14.8, 32 rows 23.2, 64 rows 38.4), so the sizes are close
+# together where a file usually lands (up to a few dozen segments) and a padded row is cheap.
+GPU_ROWS = (2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64)
+# The default cuDNN search is exhaustive; the arena grows by what is asked instead of by powers of two.
+_CUDA_OPTIONS = {"cudnn_conv_algo_search": "HEURISTIC", "arena_extend_strategy": "kSameAsRequested", "enable_cuda_graph": "1"}
+
 _BLOCK_FRAMES = 200  # frames (2 s) per FFT batch / cancel check / write
 _WINDOW = np.sin(0.5 * np.pi * np.sin(0.5 * np.pi * (np.arange(WIN) + 0.5) / HOP) ** 2).astype(np.float32)
 
@@ -82,17 +97,19 @@ def default_model_path() -> Path:
 
 
 _lock = threading.Lock()
-_models: dict[str, "_Model"] = {}
+_models: dict[tuple[str, str], "_Model"] = {}
 
 
 def unload() -> None:
-    """Drop the cached model sessions."""
+    """Drop the cached model sessions (and with them what the card holds)."""
     with _lock:
         _models.clear()
 
 
 class _Model:
     """One shared InferenceSession (run() is thread-safe) and the initial state of one stream."""
+
+    gpu = False
 
     def __init__(self, path: str):
         import onnxruntime as ort
@@ -101,7 +118,10 @@ class _Model:
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self.sess = sess = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self._open(ort, path, opts, ["CPUExecutionProvider"])
+
+    def _open(self, ort, path: str, opts, providers) -> None:
+        self.sess = sess = ort.InferenceSession(path, sess_options=opts, providers=providers)
         meta = sess.get_modelmeta().custom_metadata_map
         size = int(meta["state_size"])
         ne, ns = int(meta["erb_norm_state_size"]), int(meta["spec_norm_state_size"])
@@ -113,6 +133,11 @@ class _Model:
         self.out_names = [sess.get_outputs()[0].name, sess.get_outputs()[1].name]
         if len(sess.get_inputs()[1].shape) != 2:
             raise ValueError(f"{path}: not the batched model ({MODEL_FILE}, tools/export_dpdfnet_batch.py)")
+        self.max_batch = MAX_BATCH
+
+    def exclusive(self):
+        """Held while one group of segments is streamed through the model (the card's buffers are not shared)."""
+        return contextlib.nullcontext()
 
     def new_state(self, rows: int) -> np.ndarray:
         return np.repeat(self.init[None, :], rows, axis=0)
@@ -122,11 +147,96 @@ class _Model:
         return self.sess.run(self.out_names, {self.in_n: spec, self.st_n: state})
 
 
-def _load(path: str) -> _Model:
+class _Rung:
+    """One call size: its own session (onnxruntime 1.19 crashes with an illegal memory access when a session replays a
+    CUDA graph again after it captured one for another input size, so every size has a session of its own), the spec in
+    and out, and two state buffers that the two graphs read and write alternately (graph 0: a -> b, graph 1: b -> a)."""
+
+    def __init__(self, ort, sess, rows: int, state_size: int):
+        self.rows = rows
+        self.sess = sess
+        self.host_spec = np.zeros((rows, 1, BINS, 2), dtype=np.float32)
+        self.spec = ort.OrtValue.ortvalue_from_numpy(self.host_spec, "cuda", 0)
+        self.out = ort.OrtValue.ortvalue_from_numpy(np.zeros_like(self.host_spec), "cuda", 0)
+        zeros = np.zeros((rows, state_size), dtype=np.float32)
+        self.state = [ort.OrtValue.ortvalue_from_numpy(zeros, "cuda", 0) for _ in range(2)]
+        self.runs = []
+        for k in range(2):
+            io = sess.io_binding()
+            io.bind_ortvalue_input("spec", self.spec)
+            io.bind_ortvalue_input("state_in", self.state[k])
+            io.bind_ortvalue_output("spec_e", self.out)
+            io.bind_ortvalue_output("state_out", self.state[1 - k])
+            ro = ort.RunOptions()
+            ro.add_run_config_entry("gpu_graph_id", str(k))
+            self.runs.append((io, ro))
+
+
+class _GpuState:
+    """The state of a group of rows: it lives in a rung's buffers on the card, `parity` says which of the two
+    holds it now."""
+
+    def __init__(self, rung: _Rung, rows: int):
+        self.rung, self.rows, self.parity = rung, rows, 0
+
+
+class _GpuModel(_Model):
+    """The batched model on the card. Segments are streamed through it one group at a time (`exclusive`), the
+    group's state never leaves the card, and each 10 ms frame is one replay of a CUDA graph."""
+
+    gpu = True
+
+    def __init__(self, path: str):
+        import onnxruntime as ort
+
+        from .gpu import prepare_cuda
+
+        prepare_cuda()
+        opts = ort.SessionOptions()
+        opts.log_severity_level = 3
+        self._ort, self._path, self._opts = ort, path, opts
+        self._providers = [("CUDAExecutionProvider", dict(_CUDA_OPTIONS))]
+        self._open(ort, path, opts, self._providers)  # reads the metadata; the rungs run on sessions of their own
+        if self.sess.get_providers()[0] != "CUDAExecutionProvider":
+            raise RuntimeError(f"CUDA is not usable for DPDFNet (providers: {self.sess.get_providers()})")
+        self.max_batch = GPU_ROWS[-1]
+        self._rungs: dict[int, _Rung] = {}
+        self._run_lock = threading.Lock()
+
+    def exclusive(self):
+        return self._run_lock
+
+    def new_state(self, rows: int) -> _GpuState:
+        rung_rows = next((r for r in GPU_ROWS if r >= rows), None)
+        if rung_rows is None:
+            raise ValueError(f"at most {GPU_ROWS[-1]} rows per call")
+        rung = self._rungs.get(rung_rows)
+        if rung is None:
+            sess = self._ort.InferenceSession(self._path, sess_options=self._opts, providers=self._providers)
+            rung = self._rungs[rung_rows] = _Rung(self._ort, sess, rung_rows, len(self.init))
+        rung.host_spec[:] = 0.0  # rows beyond the group's are fed silence
+        rung.state[0].update_inplace(np.repeat(self.init[None, :], rung_rows, axis=0))
+        return _GpuState(rung, rows)
+
+    def step(self, spec: np.ndarray, state: _GpuState) -> tuple[np.ndarray, _GpuState]:
+        rung = state.rung
+        if spec.shape[0] != state.rows:
+            raise ValueError("the rows of a group are fixed")
+        rung.host_spec[:state.rows] = spec
+        rung.spec.update_inplace(rung.host_spec)
+        io, ro = rung.runs[state.parity]
+        rung.sess.run_with_iobinding(io, ro)
+        state.parity ^= 1
+        return rung.out.numpy()[:state.rows].copy(), state
+
+
+def _load(path: str, device: str = "cpu") -> _Model:
+    if device not in ("cpu", "cuda"):
+        raise ValueError(f"unknown device {device!r}")
     with _lock:
-        hit = _models.get(path)
+        hit = _models.get((path, device))
         if hit is None:
-            hit = _models[path] = _Model(path)
+            hit = _models[path, device] = (_GpuModel if device == "cuda" else _Model)(path)
         return hit
 
 
@@ -142,7 +252,7 @@ class _Stream:
 
     def __init__(self, model: _Model, first: np.ndarray):
         self._model = model
-        self.state = model.new_state(1)
+        self.state = None  # made by `push` (a stream that is only prepared / finished has none)
         n = min(HOP, max(len(first) - 1, 0))
         pad = np.zeros(HOP, dtype=np.float32)
         if n:
@@ -185,7 +295,7 @@ class _Stream:
         if inp is None:
             return np.zeros(0, dtype=np.float32)
         enh = np.empty_like(inp)
-        state = self.state
+        state = self.state if self.state is not None else self._model.new_state(1)
         for i in range(len(inp)):
             if cancel is not None and i % 50 == 0 and cancel.is_set():
                 raise Cancelled()
@@ -243,6 +353,11 @@ class _Row:
 
 
 def _run_rows(model: _Model, x, rows: list[_Row], out, alpha, cancel, report) -> list[_Sink]:
+    with model.exclusive():
+        return _stream_rows(model, x, rows, out, alpha, cancel, report)
+
+
+def _stream_rows(model: _Model, x, rows: list[_Row], out, alpha, cancel, report) -> list[_Sink]:
     """Stream the segments `rows` through the model together, one batched call per frame, and return their sinks.
     The rows advance in lock step; a row that is shorter than the longest is fed zeros after its end (those frames
     are computed and dropped), so rows of similar length should share a call. A row's result does not depend on
@@ -309,12 +424,16 @@ def denoise_array(
     model_path: str | Path | None = None,
     segment_seconds: float = 60.0,
     overlap_seconds: float = 2.0,
+    device: str = "cpu",
 ) -> np.ndarray:
     """Denoise 48 kHz float32 audio, (n,) or (n, channels), each channel on its
     own. Returns an array shaped like `x`; results go straight into `out` when
     given (any writable float32 array/memmap of x's shape), so memory use does
     not grow with the file length. `progress(fraction)` is called regularly;
-    setting `cancel` makes the call raise `Cancelled` within ~2 s of audio."""
+    setting `cancel` makes the call raise `Cancelled` within ~2 s of audio. `device` "cuda" streams the segments
+    through the batched model on the GPU, all of them in as few calls as fit (`threads` then only decides how a
+    short file is cut, as on the CPU, so the segments and the output are the same; it raises when CUDA is
+    missing)."""
     x = np.asarray(x) if not isinstance(x, np.ndarray) else x
     mono = x.ndim == 1
     if x.ndim not in (1, 2):
@@ -327,7 +446,8 @@ def denoise_array(
     if n == 0:
         return out
     path = str(model_path or default_model_path())
-    model = _load(path)
+    model = _load(path, device)
+    workers = 1 if model.gpu else threads  # one stream of CUDA calls drives the card
     alpha = 0.0 if atten_lim_db >= 100 else min(float(10.0 ** (-max(float(atten_lim_db), 0.0) / 20.0)), 1.0)
 
     total_work = n * chans
@@ -347,9 +467,9 @@ def denoise_array(
     if not cut:
         # whole channels as they are, no seams; the channels share a call
         rows = [_Row(c, 0, n, 0, n, 0, 0) for c in range(chans)]
-        groups = [rows[i:i + MAX_BATCH] for i in range(0, len(rows), MAX_BATCH)]
-        if threads > 1 and len(groups) > 1:
-            with ThreadPoolExecutor(max_workers=min(threads, len(groups))) as pool:
+        groups = [rows[i:i + model.max_batch] for i in range(0, len(rows), model.max_batch)]
+        if workers > 1 and len(groups) > 1:
+            with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as pool:
                 list(pool.map(lambda g: _run_rows(model, x, g, out2, alpha, cancel, report), groups))
         else:
             for g in groups:
@@ -374,13 +494,17 @@ def denoise_array(
             rows.append(r)
     # batches of similar length, one per call; at least one per thread so every thread has work
     rows.sort(key=lambda r: -r.length)
-    nbatch = max(min(threads, len(rows)), math.ceil(len(rows) / MAX_BATCH))
-    base, extra = divmod(len(rows), nbatch)
-    groups, i = [], 0
-    for g in range(nbatch):
-        size = base + (g < extra)
-        groups.append(rows[i:i + size])
-        i += size
+    if model.gpu:
+        # as full as the card takes: a call costs nearly the same for 4 rows as for 16
+        groups = [rows[i:i + model.max_batch] for i in range(0, len(rows), model.max_batch)]
+    else:
+        nbatch = max(min(threads, len(rows)), math.ceil(len(rows) / model.max_batch))
+        base, extra = divmod(len(rows), nbatch)
+        groups, i = [], 0
+        for g in range(nbatch):
+            size = base + (g < extra)
+            groups.append(rows[i:i + size])
+            i += size
 
     def work(group: list[_Row]) -> None:
         sinks = _run_rows(model, x, group, out2, alpha, cancel, report)
@@ -392,8 +516,8 @@ def denoise_array(
                 if i + 1 < len(bounds):
                     tails[c, i] = sink.tail_buf
 
-    if threads > 1 and len(groups) > 1:
-        with ThreadPoolExecutor(max_workers=min(threads, len(groups))) as pool:
+    if workers > 1 and len(groups) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as pool:
             list(pool.map(work, groups))
     else:
         for g in groups:
