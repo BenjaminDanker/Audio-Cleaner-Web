@@ -514,9 +514,14 @@ static void test_apply_windows()
 	fs::create_directories(s.dir / "pkg" / "audio-cleaner" / "bin" / "64bit");
 	write_file(s.dir / "pkg" / "audio-cleaner" / "bin" / "64bit" / "audio-cleaner.dll", "new");
 	write_file(s.dir / "pkg" / "audio-cleaner" / "data" / "locale" / "en-US.ini", "texts");
-	// tar.exe (bsdtar, part of Windows 10 and later) writes zip files with -a
+	// Windows' own tar.exe (bsdtar, part of Windows 10 and later) writes zip files with -a. Named by its full path: in
+	// a Git Bash (as on the CI runners) the first tar.exe on PATH is GNU tar, which takes the C: of the archive's path
+	// for a remote host and writes no zip.
+	const char *sysroot = std::getenv("SystemRoot");
+	const std::string tar = std::string(sysroot ? sysroot : "C:\\Windows") + "\\System32\\tar.exe";
 	const std::string zip = u8(s.dir / "update.zip");
-	CHECK(std::system(("tar.exe -a -c -f \"" + zip + "\" -C \"" + u8(s.dir / "pkg") + "\" audio-cleaner").c_str()) == 0);
+	// cmd.exe /c drops the outer quotes of the whole line: the program and the paths keep theirs
+	CHECK(std::system(("\"\"" + tar + "\" -a -c -f \"" + zip + "\" -C \"" + u8(s.dir / "pkg") + "\" audio-cleaner\"").c_str()) == 0);
 
 	const InstallTarget t = classify_install(HostOs::Windows, u8(installed / "bin" / "64bit" / "audio-cleaner.dll"));
 	CHECK(t.kind == InstallKind::WindowsFolder);

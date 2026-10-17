@@ -436,3 +436,90 @@ def test_a_self_service_refund_never_pays_out_the_bonus(monkeypatch):
     monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
     assert stripe_service.refund_unused(uid, "pay_b") == 5000 - 175
     assert ledger.balance(uid)["balance_micros"] == 0  # the bonus went with the payment, nothing left to spend
+
+
+def _fake_refunds(monkeypatch, fee_cents):
+    """Stripe as the self-serve refund calls it: the charge's fee, and refunds that go through."""
+    from types import SimpleNamespace
+
+    made = []
+
+    class Fake:
+        class v1:
+            class charges:
+                @staticmethod
+                def retrieve(_id, params=None):
+                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=fee_cents, currency="usd"))
+
+            class refunds:
+                @staticmethod
+                def create(params=None, options=None):
+                    made.append(params["amount"])
+                    return SimpleNamespace(id=f"re_{len(made)}")
+
+    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
+    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
+    return made
+
+
+def _paid(uid, pid, cents, age_days=0.0, charge="ch_x"):
+    at = db.now() - int(age_days * 86400)
+    db.execute(
+        "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
+        " VALUES (?, ?, 'checkout', 'succeeded', ?, 0, 0, ?, ?, ?)", (pid, uid, cents, charge, at, at))
+    ledger.credit(uid, cents * 10_000, "topup", "payment", pid)
+
+
+def _spend(uid, cents):
+    hold = ledger.create_hold(uid, cents * 10_000, "job", f"job-{cents}")
+    ledger.capture_hold(hold, cents * 10_000)
+
+
+def _refundable(client):
+    r = client.get("/api/billing/history")
+    assert r.status_code == 200, r.text
+    return {p["id"]: p for p in r.json()["payments"]}
+
+
+def test_history_says_what_refund_unused_would_take_back(client, signed_in, monkeypatch):
+    """The Billing page shows "Refund unused" only while refundable_cents > 0; the server works it out the way the
+    refund itself does: bought credit still there, at most what is left of the payment, recent card payments only."""
+    from .conftest import settle_payment
+
+    uid, _h = signed_in
+    _fake_refunds(monkeypatch, fee_cents=59)
+    _paid(uid, "pay_r", 1000)
+    p = _refundable(client)["pay_r"]
+    assert p["refundable_cents"] == 1000  # nothing spent: all of it
+    assert set(p) == {"id", "kind", "status", "amount_cents", "refunded_cents", "created_at", "refundable_cents"}
+    assert "stripe_charge" not in p and "ch_x" not in client.get("/api/billing/history").text
+
+    _spend(uid, 600)
+    assert _refundable(client)["pay_r"]["refundable_cents"] == 400  # partly spent: what was bought and is still there
+
+    # Given credit never counts: an admin grant and a top-up bonus add to the balance, not to what can be refunded.
+    ledger.credit(uid, 500 * 10_000, "grant", "admin", "g1")
+    ledger.credit(uid, 100 * 10_000, "grant", "payment_bonus", "pay_r")
+    assert ledger.balance(uid)["available_micros"] == 1000 * 10_000
+    assert _refundable(client)["pay_r"]["refundable_cents"] == 400
+
+    # Refunded down to nothing bought left (the page used to keep offering the button: refunded 400 < paid 1000).
+    assert stripe_service.refund_unused(uid, "pay_r") == 400 - 59
+    p = _refundable(client)["pay_r"]
+    assert p["refunded_cents"] < p["amount_cents"] and p["refundable_cents"] == 0
+    assert stripe_service.bought_micros(uid) == 0
+    with pytest.raises(ValueError):
+        stripe_service.refund_unused(uid, "pay_r")
+    # the grant is still there to spend, and still not refundable
+    assert ledger.balance(uid)["available_micros"] == 500 * 10_000
+
+    # More than 14 days old: refunded by support only. Recent but not a card charge (no charge id): no button either.
+    _paid(uid, "pay_old", 800, age_days=stripe_service.REFUND_DAYS + 1)
+    _paid(uid, "pay_new", 300, age_days=stripe_service.REFUND_DAYS - 1)
+    settle_payment(uid, 700)
+    shown = _refundable(client)
+    assert shown["pay_old"]["refundable_cents"] == 0
+    assert shown["pay_new"]["refundable_cents"] == 300  # capped by the payment, not by all the bought credit (1100)
+    assert [p["refundable_cents"] for k, p in shown.items() if k not in ("pay_r", "pay_old", "pay_new")] == [0]
+    # what the page offers is what the refund takes
+    assert stripe_service.refund_unused(uid, "pay_new") == 300 - 59

@@ -126,6 +126,7 @@ public:
 	std::atomic<int> opens{0}, starts{0}, mic{0}, refs{0};
 	// By kind: microphone frames that were silence frames (codec 4) or Opus (codec 3), reference frames that were silence frames.
 	std::atomic<int> silent_mic{0}, opus_mic{0}, silent_refs{0};
+	std::atomic<int64_t> last_opus_mic_seq{-1};  // sequence number of the latest encoded microphone frame
 	// true: honour "returnAudio": false (send no audio back), as the service does. Off by default: the other tests want the echo.
 	std::atomic<bool> honor_return_audio{false};
 
@@ -273,8 +274,12 @@ private:
 		const int n = ++mic;
 		if (codec == 4)
 			++silent_mic;
-		else if (codec == 3)
+		else if (codec == 3) {
 			++opus_mic;
+			uint32_t seq;
+			std::memcpy(&seq, &d[4], 4);  // little-endian, as the session writes it (and the tests run on)
+			last_opus_mic_seq = seq;
+		}
 		if (no_audio_back_)
 			return;
 		switch (mode.load()) {
@@ -929,7 +934,7 @@ static void test_never_breaks_the_stream()
 			double e = 0;
 			for (size_t k = 0; k < blk; ++k)
 				e += static_cast<double>(cap.out[i + k]) * cap.out[i + k];
-			min_rms = std::min(min_rms, std::sqrt(e / blk));
+			min_rms = (std::min)(min_rms, std::sqrt(e / blk));  // (std::min): windows.h (via IXNetSystem.h) defines a min() macro
 		}
 		std::printf("    quietest 10 ms block: rms %.4f (input 0.1)\n", min_rms);
 		CHECK(min_rms > 0.05);
@@ -1777,7 +1782,10 @@ static const char *kReadySilence =
 // (noise, or a constant level) and whether the source is muted can change while it runs. Optionally keeps what went in and came out.
 class Source {
 public:
-	explicit Source(Session &s, size_t chunk = 480, bool keep = false) : s_(s), chunk_(chunk), keep_(keep)
+	// before_block: called on the feeding thread before each block (n samples), as OBS's audio thread hands over every
+	// source's audio of a tick together (the echo reference included).
+	explicit Source(Session &s, size_t chunk = 480, bool keep = false, std::function<void(size_t)> before_block = nullptr)
+		: s_(s), chunk_(chunk), keep_(keep), before_(std::move(before_block))
 	{
 		th_ = std::thread([this] { run(); });
 	}
@@ -1806,6 +1814,8 @@ private:
 			for (float &v : blk)
 				v = nz ? nd(rng) + 0.001f : lv;
 			proc = blk;
+			if (before_)
+				before_(chunk_);
 			s_.process(proc.data(), proc.size(), muted.load());
 			if (keep_) {
 				cap.in.insert(cap.in.end(), blk.begin(), blk.end());
@@ -1818,6 +1828,7 @@ private:
 	Session &s_;
 	size_t chunk_;
 	bool keep_;
+	std::function<void(size_t)> before_;
 	std::atomic<bool> run_{true};
 	std::thread th_;
 };
@@ -1892,9 +1903,12 @@ static void test_silence_frames()
 		std::this_thread::sleep_for(milliseconds(800));
 		CHECK(srv.silent_mic.load() - silent_then <= 2);  // loud audio is not mistaken for silence
 		src.muted = true;
-		const int opus_then = srv.opus_mic.load();
+		const int64_t made = static_cast<int64_t>(s.snapshot().captured);  // frames finished before the mute: seq < made
 		CHECK(wait_until([&] { return srv.silent_mic.load() > silent_then + 40; }, 3000));
-		CHECK(srv.opus_mic.load() - opus_then <= 3);
+		// Frames finished before the mute go out as they are, however long they waited for the network thread (a few
+		// where its wake-ups come late, as on the macOS runners); of those after it, only the one being filled (and the
+		// next, when one block of audio ends one frame and starts another) can have sound in it.
+		CHECK(srv.last_opus_mic_seq.load() <= made + 1);
 		src.stop();
 		s.stop(0, 500);
 	}
@@ -1933,22 +1947,20 @@ static void test_silence_frames()
 		cfg.echo = true;
 		Session s(cfg, nullptr, nullptr);
 		s.start();
-		std::atomic<bool> run{true}, loud{false};
-		std::thread rth([&] {
-			std::vector<float> b(480);
-			float ph = 0;
-			auto t = steady_clock::now();
-			while (run) {
-				for (float &v : b) {
-					v = loud ? 0.3f * std::sin(ph) : 0.0f;
-					ph += 0.05f;
-				}
-				ref->push(b.data(), b.size());
-				t += milliseconds(10);
-				std::this_thread::sleep_until(t);
+		// The speakers' sound arrives with the microphone's, on the same thread (OBS's audio thread hands both over in
+		// the same tick). Fed from a thread of its own, a late wake-up of that thread on a slow runner leaves the
+		// reference short for a frame or two, and a reference that did not arrive is (rightly) silence.
+		std::atomic<bool> loud{false};
+		std::vector<float> rb;
+		float ph = 0;
+		Source src(s, 480, false, [&](size_t n) {
+			rb.resize(n);
+			for (float &v : rb) {
+				v = loud ? 0.3f * std::sin(ph) : 0.0f;
+				ph += 0.05f;
 			}
+			ref->push(rb.data(), rb.size());
 		});
-		Source src(s);
 		CHECK(wait_until([&] { return srv.mic.load() > 150; }, 8000));
 		if (takes) {
 			CHECK(srv.refs.load() > 100);
@@ -1964,8 +1976,6 @@ static void test_silence_frames()
 			CHECK(srv.refs.load() == 0);
 			CHECK(srv.silent_refs.load() == 0);
 		}
-		run = false;
-		rth.join();
 		src.stop();
 		s.stop(0, 500);
 	}
@@ -1981,13 +1991,23 @@ static void test_silence_frames()
 		s.start();
 		Source src(s, 480, true);
 		CHECK(wait_until([&] { return s.snapshot().used > 150; }, 10000));
+		const SessionSnapshot a = s.snapshot();
+		std::this_thread::sleep_for(milliseconds(600));  // covers the last half second looked at below
 		src.stop();
+		const SessionSnapshot b = s.snapshot();
 		const Capture &c = src.cap;
 		double peak = 0;
-		for (size_t i = c.out.size() - 24000; i < c.out.size(); ++i)  // the last half second
+		size_t loud = 0;
+		for (size_t i = c.out.size() - 24000; i < c.out.size(); ++i) {  // the last half second
 			peak = std::max<double>(peak, std::fabs(c.out[i]));
-		std::printf("  loud microphone, silence replies: output peak %.2g\n", peak);
-		CHECK(peak == 0.0);
+			loud += c.out[i] != 0.0f;
+		}
+		// A block whose reply came in time is zeros. One whose reply did not (late, or not even sent yet: on a slow
+		// runner whose timers wake the network thread late) plays the microphone, cross-faded at both ends.
+		const uint64_t missed = (b.late - a.late) + (b.passthrough - a.passthrough);
+		std::printf("  loud microphone, silence replies: output peak %.2g, %zu loud samples, %llu replies missed\n", peak,
+			    loud, static_cast<unsigned long long>(missed));
+		CHECK(loud <= missed * (kFrameSamples + 2 * kCrossfadeSamples));
 		CHECK(s.snapshot().bad_frames == 0);
 		s.stop(0, 500);
 	}
@@ -2065,6 +2085,45 @@ static void test_return_audio()
 	s2.stop(0, 500);
 }
 
+// How late this machine's timed waits wake up (ms, mean): a thread waits on a condition variable until the next 20 ms
+// step, as the network thread does between frames, for as long as `run` is set. A few hundredths of a ms on a quiet
+// Linux box; tens of ms on the macOS runners, whose timers are coalesced.
+class TimerProbe {
+public:
+	TimerProbe()
+	{
+		th_ = std::thread([this] {
+			std::mutex mu;
+			std::condition_variable cv;
+			std::unique_lock<std::mutex> lk(mu);
+			auto t = steady_clock::now();
+			while (run_) {
+				t += milliseconds(20);
+				cv.wait_until(lk, t, [] { return false; });
+				const auto late = steady_clock::now() - t;
+				late_us_ += duration_cast<microseconds>(late).count();
+				++n_;
+				if (late > milliseconds(20))
+					t = steady_clock::now();  // overslept a whole step: no catching up in a burst
+			}
+		});
+	}
+	~TimerProbe() { stop(); }
+	double stop()
+	{
+		run_ = false;
+		if (th_.joinable())
+			th_.join();
+		return n_ ? static_cast<double>(late_us_) / 1000.0 / static_cast<double>(n_) : 0.0;
+	}
+
+private:
+	std::atomic<bool> run_{true};
+	long long late_us_ = 0;
+	long long n_ = 0;
+	std::thread th_;
+};
+
 static void test_network_thread_sleeps()
 {
 	std::printf("network thread: sleeps until the next frame is due instead of polling\n");
@@ -2075,15 +2134,20 @@ static void test_network_thread_sleeps()
 		Source src(s, chunk);
 		CHECK(wait_until([&] { return s.snapshot().used > 20; }, 8000));
 		const SessionSnapshot a = s.snapshot();
+		TimerProbe probe;
 		std::this_thread::sleep_for(seconds(3));
 		const SessionSnapshot b = s.snapshot();
+		const double timer_late_ms = probe.stop();
 		const double loops_per_s = static_cast<double>(b.net_loops - a.net_loops) / 3.0;
 		const double frames_per_s = static_cast<double>(b.sent - a.sent) / 3.0;
-		std::printf("  chunks of %zu samples: %.0f loop rounds/s (was 500 with the 2 ms poll), %.1f frames/s, round trip %.2f ms, late %llu\n",
-			    chunk, loops_per_s, frames_per_s, b.rtt_avg_ms, static_cast<unsigned long long>(b.late - a.late));
+		std::printf("  chunks of %zu samples: %.0f loop rounds/s (was 500 with the 2 ms poll), %.1f frames/s, round trip %.2f ms, late %llu, timers wake %.2f ms late\n",
+			    chunk, loops_per_s, frames_per_s, b.rtt_avg_ms, static_cast<unsigned long long>(b.late - a.late),
+			    timer_late_ms);
 		CHECK(loops_per_s < 130.0);
 		CHECK(frames_per_s > 0.93 * 48000.0 / 960.0);  // every frame goes out, none is held back
-		CHECK(b.rtt_avg_ms < 30.0);
+		// The fake service answers at once, so the round trip is how long a finished frame waits for the network thread:
+		// it wakes when the frame is due, as late as this machine's timers make it (not at the next ping or watchdog).
+		CHECK(b.rtt_avg_ms < 30.0 + 3.0 * timer_late_ms);
 		CHECK(b.late - a.late <= 2 && b.dropped == 0);
 		src.stop();
 		s.stop(0, 500);

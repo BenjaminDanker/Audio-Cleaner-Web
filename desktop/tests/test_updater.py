@@ -570,7 +570,8 @@ def test_closing_starts_the_installer_once_per_version(qapp, tmp_path, monkeypat
         path.name, len(entry_bytes), hashlib.sha256(entry_bytes).hexdigest()), b"{}", b"")
     ctl.ready_path = path
 
-    assert not ctl.install_on_close()  # not Windows (these tests run on Linux, too): nothing starts
+    monkeypatch.setattr(updater.sys, "platform", "linux")
+    assert not ctl.install_on_close()  # not Windows: nothing starts
     monkeypatch.setattr(updater.sys, "platform", "win32")
     try:
         assert ctl.install_on_close() and started == [(path.name, False)]
@@ -652,7 +653,26 @@ def test_the_inno_script_relaunches_only_for_a_silent_update_that_asks_for_it():
 
 
 # ---- the release job and the manifest script -------------------------------------------------------------------------------
-openssl = pytest.mark.skipif(shutil.which("openssl") is None, reason="openssl is needed")
+def _openssl_3() -> str | None:
+    """An OpenSSL 3 (the release job signs with Ubuntu's: `pkeyutl -rawin`, Ed25519 over the raw file). macOS's own
+    openssl is LibreSSL, which has neither; Homebrew's openssl@3 is used when it is there."""
+    for candidate in (shutil.which("openssl"), "/opt/homebrew/opt/openssl@3/bin/openssl",
+                      "/usr/local/opt/openssl@3/bin/openssl"):
+        if not candidate or not Path(candidate).is_file():
+            continue
+        try:
+            version = subprocess.run([candidate, "version"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        match = re.match(r"OpenSSL (\d+)\.", version)
+        if match and int(match.group(1)) >= 3:
+            return candidate
+    return None
+
+
+OPENSSL = _openssl_3()
+openssl = pytest.mark.skipif(OPENSSL is None, reason="needs OpenSSL 3 (pkeyutl -rawin, as on the release job's Ubuntu); "
+                                                     "the openssl found is missing or older, or LibreSSL as on macOS")
 
 
 def test_the_manifest_has_sorted_keys_and_the_sizes_and_hashes_of_the_installers(tmp_path):
@@ -684,14 +704,14 @@ def test_a_manifest_signed_the_way_ci_does_it_verifies_in_the_app(tmp_path):
     """The CI command (openssl pkeyutl -sign -rawin) produces what the app's check accepts, and a manifest the app
     builds its trust on only with the matching key."""
     pem = tmp_path / "k.pem"
-    subprocess.run(["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(pem)], check=True, capture_output=True)
+    subprocess.run([OPENSSL, "genpkey", "-algorithm", "ed25519", "-out", str(pem)], check=True, capture_output=True)
     pub = make_update_manifest.public_key_of(pem)
     for key, pattern in make_update_manifest.INSTALLERS.items():
         (tmp_path / pattern.format(version="2.0.15")).write_bytes(b"x" + key.encode())
     manifest = tmp_path / "update.json"
     assert make_update_manifest.main(["manifest", "--version", "2.0.15", "--dir", str(tmp_path)]) == 0
     sig = tmp_path / "update.json.sig"
-    subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(pem), "-in", str(manifest), "-out", str(sig)],
+    subprocess.run([OPENSSL, "pkeyutl", "-sign", "-rawin", "-inkey", str(pem), "-in", str(manifest), "-out", str(sig)],
                    check=True, capture_output=True)
     assert sig.stat().st_size == 64
     update = updater.decide(manifest.read_bytes(), sig.read_bytes(), "2.0.3", WIN, pub)
@@ -731,6 +751,16 @@ def test_cryptography_is_pinned_with_hashes_for_every_platform():
     assert "cryptography==48.0.1" in blocks["cryptography"]  # the newest release that still has a macOS Intel wheel
 
 
+def _public_copy_leak_patterns() -> dict[str, str]:
+    """{why: pattern} of the public copy's leak scan (in this repository wherever the release job is)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("public_desktop_sync", ROOT / "tools" / "public-desktop" / "sync.py")
+    sync = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sync)
+    return {why: pattern for pattern, why in sync.LEAK_PATTERNS}
+
+
 @pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository publishes no releases")
 def test_the_release_is_copied_to_the_public_repository_without_the_update_files():
     release = WORKFLOW.split("\n  release:\n")[1]
@@ -760,5 +790,9 @@ def test_the_release_is_copied_to_the_public_repository_without_the_update_files
     assert "mc-multi-world.space" not in notes  # not offered on the website
     # and nothing about where the build runs: no private repository, commit or link
     assert "GITHUB_REPOSITORY" not in step and "GITHUB_SHA" not in step and "github.com" not in step
-    assert "Audio-Cleaner-Web" not in step and "Audio-Cleaner-Web" not in notes
+    # The public copy's leak scan (tools/public-desktop/sync.py) names the private repository; that name is not written
+    # here (this file is published), the scan's own pattern is used. The notes match none of its patterns.
+    leaks = _public_copy_leak_patterns()
+    assert not re.search(leaks["the name of the private repository"], step, re.I)
+    assert [why for pattern, why in leaks.items() if re.search(pattern, notes, re.I)] == []
     assert release.index("gh release create") < release.index("Copy the release to the public repository")

@@ -1,6 +1,7 @@
 """The Whisper model is loaded once for all the pieces of a recording, and can be dropped again."""
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -61,13 +62,13 @@ def test_language_detection_asks_the_bigger_model_only_when_unsure(tmp_path, mon
 
         def detect_language(self, audio):
             asked.append(self.path)
-            lang, prob = {"sure": ("de", 0.9), "unsure": ("nl", 0.4), "big": ("fr", 0.95)}[self.path.rsplit("/", 1)[1]]
+            lang, prob = {"sure": ("de", 0.9), "unsure": ("nl", 0.4), "big": ("fr", 0.95)}[Path(self.path).name]
             return lang, prob, None
 
     monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Model))
     audio = np.ones(16000, np.float32) * 0.1
     assert transcribe.detect_language(audio, tmp_path / "sure", tmp_path / "big") == "de"
-    assert [p.rsplit("/", 1)[1] for p in asked] == ["sure"]
+    assert [Path(p).name for p in asked] == ["sure"]
     asked.clear()
     assert transcribe.detect_language(audio, tmp_path / "unsure", tmp_path / "big") == "fr"
-    assert [p.rsplit("/", 1)[1] for p in asked] == ["unsure", "big"]
+    assert [Path(p).name for p in asked] == ["unsure", "big"]

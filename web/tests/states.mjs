@@ -107,33 +107,45 @@ if (want('busy')) {
 
 if (want('refund')) {
   const { browser, page } = await freshPage([], { storageState: await signedInState() });
-  await check('refund: confirmation shows "You\'ll get back about $X (unused $Y minus the card fee)"; success shows the exact refundedCents', async () => {
+  await check('refund: the button only while the server says some of the payment is unused (refundable_cents); confirmation shows "You\'ll get back about $X (unused $Y minus the card fee)"; success shows the exact refundedCents', async () => {
     const now = Math.floor(Date.now() / 1000);
-    await page.route('**/api/billing/history', (r) => r.fulfill({ json: { payments: [{ id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, created_at: now - 3600 }, { id: 'pay2', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 300, created_at: now - 7200 }], ledger: [] } }));
+    // pay1: unused $15 of $20; pay2: refunded before, $7 left; pay3: refunded down to a $0 balance ($4 of $10 refunded,
+    // the rest spent: refunded < paid, but nothing to refund); pay4: older than 14 days (the server says 0)
+    const payments = [
+      { id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, refundable_cents: 1500, created_at: now - 3600 },
+      { id: 'pay2', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 300, refundable_cents: 700, created_at: now - 7200 },
+      { id: 'pay3', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 400, refundable_cents: 0, created_at: now - 9000 },
+      { id: 'pay4', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 0, refundable_cents: 0, created_at: now - 20 * 86400 },
+    ];
+    await page.route('**/api/billing/history', (r) => r.fulfill({ json: { payments, ledger: [] } }));
     await page.route('**/api/billing/pricing', async (r) => { const res = await r.fetch(); await r.fulfill({ response: res, json: { ...(await res.json()), paymentsEnabled: true } }); });
     let posted = null;
     await page.route('**/api/billing/refund', (r) => { posted = r.request().postDataJSON(); return r.fulfill({ json: { refundedCents: 4321 } }); });
     await page.goto(`${BASE}/app/billing`);
     await page.getByRole('button', { name: 'Refund unused' }).first().waitFor();
-    const availCents = Math.round(Number((await page.getByTestId('available').innerText()).replace(/[^0-9.]/g, '')) * 100);
-    await page.getByRole('button', { name: 'Refund unused' }).first().click();
+    const buttons = page.getByRole('button', { name: 'Refund unused' });
+    if ((await buttons.count()) !== 2) throw new Error(`${await buttons.count()} refund buttons; want 2 (pay1, pay2)`);
+    const rows = page.locator('tr', { has: page.getByTestId('pay-status') });
+    for (const [i, want] of [[0, 1], [1, 1], [2, 0], [3, 0]]) {
+      const n = await rows.nth(i).getByRole('button', { name: 'Refund unused' }).count();
+      if (n !== want) throw new Error(`payment ${payments[i].id}: ${n} refund buttons, want ${want}`);
+    }
+    await buttons.first().click();
     const est = await page.getByTestId('refund-estimate').first().innerText();
-    const unused = Math.min(2000, availCents);
+    const unused = 1500; // what the server said, not the balance
     const fee = Math.ceil(2000 * 0.029 + 30);
     const money = (c) => `$${(c / 100).toFixed(2)}`;
-    const want = unused > fee ? `You’ll get back about ${money(unused - fee)} (unused ${money(unused)} minus the card fee of ${money(fee)}).` : null;
-    if (want ? est.trim() !== want : !/doesn.t cover the card fee/.test(est)) throw new Error(`"${est}" vs "${want}"`);
-    if (want) {
-      await page.getByRole('button', { name: 'Yes, refund' }).click();
-      await page.getByText('$43.21 is on its way back to your card').waitFor();
-      if (posted?.paymentId !== 'pay1') throw new Error('posted ' + JSON.stringify(posted));
-    }
-    // a second refund of a payment that was refunded before has no card fee
+    const want = `You’ll get back about ${money(unused - fee)} (unused ${money(unused)} minus the card fee of ${money(fee)}).`;
+    if (est.trim() !== want) throw new Error(`"${est}" vs "${want}"`);
+    await page.getByRole('button', { name: 'Yes, refund' }).click();
+    await page.getByText('$43.21 is on its way back to your card').waitFor();
+    if (posted?.paymentId !== 'pay1') throw new Error('posted ' + JSON.stringify(posted));
+    // a second refund of a payment that was refunded before has no card fee: all of its unused part
     await page.reload();
     await page.getByRole('button', { name: 'Refund unused' }).nth(1).click();
-    const est2 = await page.getByTestId('refund-estimate').innerText();
-    if (/card fee of/.test(est2) === true) throw new Error('fee charged again: ' + est2);
-    return est.trim();
+    const est2 = (await page.getByTestId('refund-estimate').innerText()).trim();
+    if (/card fee of/.test(est2) || !est2.includes(money(700))) throw new Error('second refund: ' + est2);
+    return `${est.trim()} / ${est2}`;
   });
   await browser.close();
 }

@@ -141,7 +141,7 @@ if (want('billing')) {
   await check('billing off: Pay, refund and card buttons disabled with notes; billing-rule note shown', async () => {
     const now = Math.floor(Date.now() / 1000);
     await page.route('**/api/billing/history', (r) => r.fulfill({ json: {
-      payments: [{ id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, created_at: now - 3600 }],
+      payments: [{ id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, refundable_cents: 2000, created_at: now - 3600 }],
       ledger: [],
     } }));
     await page.goto(`${BASE}/app/billing`);
@@ -154,7 +154,7 @@ if (want('billing')) {
     const notes = [await page.getByTestId('topup-off').innerText(), await page.getByTestId('refund-off').innerText()];
     // with payments on, nothing is disabled (pricing says so)
     await page.unroute('**/api/billing/history');
-    await page.route('**/api/billing/history', (r) => r.fulfill({ json: { payments: [{ id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, created_at: now - 3600 }], ledger: [] } }));
+    await page.route('**/api/billing/history', (r) => r.fulfill({ json: { payments: [{ id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, refundable_cents: 2000, created_at: now - 3600 }], ledger: [] } }));
     await page.route('**/api/billing/pricing', async (r) => {
       const res = await r.fetch();
       const j = await res.json();
