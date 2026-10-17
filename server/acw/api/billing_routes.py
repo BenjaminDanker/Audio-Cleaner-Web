@@ -124,16 +124,20 @@ def set_auto_reload(body: AutoReloadBody, request: Request, principal: auth.Prin
 @router.get("/history")
 def history(principal: auth.Principal = Depends(auth.require_session)) -> dict:
     payments = db.all_rows(
-        "SELECT id, kind, status, amount_cents, refunded_cents, created_at FROM payments"
+        "SELECT id, kind, status, amount_cents, refunded_cents, created_at, stripe_charge FROM payments"
         " WHERE user_id = ? AND status != 'pending' ORDER BY created_at DESC LIMIT 100",
         (principal.user_id,),
     )
     entries, more = ledger.history_page(principal.user_id)
+    bought = stripe_service.bought_micros(principal.user_id)
+    shown = ("id", "kind", "status", "amount_cents", "refunded_cents", "created_at")
     return {
         "balance": ledger.balance(principal.user_id),
         "ledger": entries,
         "ledgerHasMore": more,
-        "payments": [dict(p) for p in payments],
+        # refundable_cents: what "Refund unused" would take back now (0: no button), worked out as the refund does
+        "payments": [{**{k: p[k] for k in shown}, "refundable_cents": stripe_service.refundable_cents(p, bought)}
+                     for p in payments],
     }
 
 

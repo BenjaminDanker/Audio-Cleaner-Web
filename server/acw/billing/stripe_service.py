@@ -659,18 +659,32 @@ def take_back_bonus(user_id: str, payment_id: str, c=None) -> int:
         return work(c2)
 
 
-def refund_unused(user_id: str, payment_id: str, max_age_days: int = 14) -> int:
+REFUND_DAYS = 14  # self-serve refunds: payments of the last this many days
+
+
+def bought_micros(user_id: str) -> int:
+    """Credit bought and not used. Given credit (grants, bonuses) counts as spent last: a refund never pays it out.
+    Taking a payment's bonus back lowers the available and the given credit alike, so it doesn't change this."""
+    return max(0, ledger.balance(user_id)["available_micros"] - ledger.granted_micros(user_id))
+
+
+def refundable_cents(p, bought: int) -> int:
+    """What a self-serve refund of payment row `p` would take back now (cents, the card fee included), given the
+    user's bought_micros: 0 when it can't be refunded online (the Billing page shows the button only above 0)."""
+    if p["status"] != "succeeded" or not p["stripe_charge"] or db.now() - p["created_at"] > REFUND_DAYS * 86400:
+        return 0
+    return max(0, min(p["amount_cents"] - p["refunded_cents"], bought // MICROS_PER_CENT))
+
+
+def refund_unused(user_id: str, payment_id: str) -> int:
     """Self-serve refund of unused credit from one recent payment. Returns cents refunded."""
     p = db.one("SELECT * FROM payments WHERE id = ? AND user_id = ?", (payment_id, user_id))
     if p is None or p["status"] != "succeeded" or not p["stripe_charge"]:
         raise ValueError("This payment can't be refunded.")
-    if db.now() - p["created_at"] > max_age_days * 86400:
-        raise ValueError(f"Payments older than {max_age_days} days can't be refunded online; contact support.")
+    if db.now() - p["created_at"] > REFUND_DAYS * 86400:
+        raise ValueError(f"Payments older than {REFUND_DAYS} days can't be refunded online; contact support.")
     take_back_bonus(user_id, payment_id)
-    bal = ledger.balance(user_id)
-    # Given credit (grants) counts as spent last: a refund never pays it out as money.
-    bought = max(0, bal["available_micros"] - ledger.granted_micros(user_id))
-    refundable = min(p["amount_cents"] - p["refunded_cents"], bought // MICROS_PER_CENT)
+    refundable = refundable_cents(p, bought_micros(user_id))
     if refundable <= 0:
         raise ValueError("No unused credit to refund from this payment.")
     # Stripe keeps its processing fee when we refund, so it comes out of the

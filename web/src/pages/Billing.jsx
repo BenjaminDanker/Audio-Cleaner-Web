@@ -26,9 +26,10 @@ const STATUS = {
 /** The card processor keeps about 2.9% + 30 cents of every payment; the first refund of a payment takes that off. */
 const cardFeeCents = (paymentCents) => Math.ceil(paymentCents * 0.029 + 30);
 
-/** What a refund of this payment should return to the card, as an estimate: unused credit minus the card fee (first refund only). */
-function refundEstimate(p, availableMicros) {
-  const unused = Math.max(0, Math.min(p.amount_cents - (p.refunded_cents || 0), Math.floor((availableMicros || 0) / 10000)));
+/** What a refund of this payment should return to the card, as an estimate: its unused credit (the server works that out, as
+ *  the refund itself does) minus the card fee (first refund only). */
+function refundEstimate(p) {
+  const unused = p.refundable_cents || 0;
   const fee = (p.refunded_cents || 0) === 0 ? cardFeeCents(p.amount_cents) : 0;
   return { unused, fee, back: Math.max(0, unused - fee) };
 }
@@ -141,7 +142,7 @@ export default function Billing() {
 
       <TopUp pricing={pricing} unavailable={unavailable} limitCents={topupMaxCents} />
       <AutoReload autoReload={autoReload} pricing={pricing} refresh={refresh} unavailable={unavailable} limitCents={topupMaxCents} />
-      <History history={history} error={histErr} availableMicros={balance?.available_micros ?? 0} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
+      <History history={history} error={histErr} reload={() => { loadHistory(); refresh(); }} unavailable={unavailable} />
     </div>
   );
 }
@@ -350,7 +351,7 @@ function AutoReload({ autoReload, pricing, refresh, unavailable, limitCents }) {
   );
 }
 
-function History({ history, error, reload, unavailable, availableMicros }) {
+function History({ history, error, reload, unavailable }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState(null);
   const [confirmId, setConfirmId] = useState(null);
@@ -368,7 +369,6 @@ function History({ history, error, reload, unavailable, availableMicros }) {
       setBusy('');
     }
   }
-  const nowS = Date.now() / 1000;
   return (
     <section className="stack" aria-labelledby="hist-h">
       <h2 id="hist-h" className="mb0">History</h2>
@@ -384,7 +384,7 @@ function History({ history, error, reload, unavailable, availableMicros }) {
                 <thead><tr><th>Date</th><th>Type</th><th>Status</th><th className="num">Amount</th><th className="num">Refunded</th><th><span className="sr-only">Actions</span></th></tr></thead>
                 <tbody>
                   {history.payments.map((p) => {
-                    const eligible = p.status === 'succeeded' && nowS - p.created_at < REFUND_DAYS * 86400 && (p.refunded_cents || 0) < p.amount_cents;
+                    const eligible = (p.refundable_cents || 0) > 0; // recent, paid, and some of it still unused
                     return (
                       <tr key={p.id}>
                         <td className="nowrap">{dateTime(p.created_at)}</td>
@@ -395,7 +395,7 @@ function History({ history, error, reload, unavailable, availableMicros }) {
                         <td className="right">
                           {eligible && confirmId !== p.id && <button type="button" className="btn btn-secondary btn-sm" disabled={unavailable} aria-describedby={unavailable ? 'refund-off' : undefined} onClick={() => setConfirmId(p.id)}>Refund unused</button>}
                           {eligible && confirmId === p.id && (() => {
-                            const est = refundEstimate(p, availableMicros);
+                            const est = refundEstimate(p);
                             return (
                               <span className="row" data-testid="refund-confirm">
                                 <span className="small" data-testid="refund-estimate">
