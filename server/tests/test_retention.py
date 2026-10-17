@@ -153,21 +153,35 @@ def test_file_names_leave_the_credit_history_after_a_year_amounts_stay():
     ledger.capture_hold(h2, 100_000, "denoise + transcribe: legacy: name (with) parens.flac (0.2 min)")
     h3 = ledger.create_hold(uid, 1_000_000, "stream", "s1")
     ledger.capture_hold(h3, 50_000, "Live session (3.0 min)")
+    h4 = ledger.create_hold(uid, 1_000_000, "job", "j4")
+    ledger.capture_hold(h4, 200_000, "Denoising: private-interview.wav (5.0 min)")
     db.execute("UPDATE ledger SET created_at = ?", (NOW - 400 * DAY,))
     before = ledger.balance(uid)
-    assert retention.run(NOW)["usage_names"] == 2
+    assert retention.run(NOW)["usage_names"] == 3
     rows = [r["description"] for r in db.all_rows("SELECT description FROM ledger WHERE kind = 'usage' ORDER BY id")]
-    assert rows == ["Clean & polish (12.5 min)", "Clean & polish + Subtitles & transcript (0.2 min)", "Live session (3.0 min)"]
-    assert "secret" not in str(db.all_rows("SELECT * FROM ledger")) and "legacy" not in str([dict(r) for r in db.all_rows("SELECT * FROM ledger")])
+    # Rows written before the rename keep their old label ("Clean & polish"); legacy kind names get today's label.
+    assert rows == ["Clean & polish (12.5 min)", "Denoising + Subtitles & transcript (0.2 min)", "Live session (3.0 min)", "Denoising (5.0 min)"]
+    everything = str([dict(r) for r in db.all_rows("SELECT * FROM ledger")])
+    assert "secret" not in everything and "legacy" not in everything and "private-interview" not in everything
     assert ledger.balance(uid) == before and ledger.invariant_problems() == {"balance_mismatch": 0, "held_mismatch": 0}
     assert retention.run(NOW)["usage_names"] == 0
+
+
+def test_strip_file_name_keeps_the_label_the_row_was_written_with():
+    assert retention.strip_file_name("Clean & polish: talk.wav (1.2 min)") == "Clean & polish (1.2 min)"
+    assert retention.strip_file_name("Denoising: talk.wav (1.2 min)") == "Denoising (1.2 min)"
+    assert retention.strip_file_name("Denoising, voice rebuilt: a: b.wav (3 min)") == "Denoising, voice rebuilt (3 min)"
+    assert retention.strip_file_name("Voice rebuild + Leveling: a: b.wav (3 min)") == "Voice rebuild + Leveling (3 min)"
+    assert retention.strip_file_name("Leveling: talk.wav (1.2 min)") == "Leveling (1.2 min)"
+    assert retention.strip_file_name("denoise: talk.wav (1.2 min)") == "Denoising (1.2 min)"
+    assert retention.strip_file_name("Denoising (1.2 min)") is None
 
 
 def test_names_of_recent_usage_lines_stay():
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     h = ledger.create_hold(uid, 1_000_000, "job", "j1")
-    ledger.capture_hold(h, 400_000, "Clean & polish: recent.wav (1.0 min)")
+    ledger.capture_hold(h, 400_000, "Denoising: recent.wav (1.0 min)")
     assert retention.run()["usage_names"] == 0
     assert "recent.wav" in db.one("SELECT description FROM ledger WHERE kind = 'usage'")["description"]
 
@@ -178,7 +192,7 @@ def test_credit_history_still_renders_without_the_job_rows(client, signed_in):
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     jid = job(uid, "done", 0)
     hold = ledger.create_hold(uid, 1_000_000, "job", jid)
-    ledger.capture_hold(hold, 400_000, "Clean & polish: song.wav (2.0 min)")
+    ledger.capture_hold(hold, 400_000, "Denoising: song.wav (2.0 min)")
     db.execute("UPDATE ledger SET created_at = ?", (now - 400 * DAY,))
     db.execute("UPDATE jobs SET created_at = ?", (now - 400 * DAY,))
     retention.run(now)
@@ -186,7 +200,7 @@ def test_credit_history_still_renders_without_the_job_rows(client, signed_in):
     hist = client.get("/api/billing/history")
     assert hist.status_code == 200
     usage = [r for r in hist.json()["ledger"] if r["kind"] == "usage"]
-    assert usage and usage[0]["description"] == "Clean & polish (2.0 min)" and "song" not in hist.text
+    assert usage and usage[0]["description"] == "Denoising (2.0 min)" and "song" not in hist.text
 
 
 # ---------------------------------------------------------------- money is never touched by the sweep
@@ -198,7 +212,7 @@ def _money_user(email, rows):
         if amount > 0:
             ledger.credit(uid, amount, kind, "t", f"{email}-{age}-{amount}")
         else:
-            ledger.debit_available(uid, -amount, "usage", "job", f"{email}-{age}-{amount}", "Clean & polish: x.wav (1.0 min)")
+            ledger.debit_available(uid, -amount, "usage", "job", f"{email}-{age}-{amount}", "Denoising: x.wav (1.0 min)")
         db.execute("UPDATE ledger SET created_at = ? WHERE id = (SELECT MAX(id) FROM ledger WHERE user_id = ?)", (NOW - int(age * DAY), uid))
     return uid
 

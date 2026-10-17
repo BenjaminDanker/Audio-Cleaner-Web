@@ -105,7 +105,7 @@ check('a clean recording needs nothing; steady noise gets the free cleanup; a lo
   assert.equal(mild.noise, 'browser');
   assert.equal(mild.heavy, false);
   const heavy = rec(noisy(20, 3));
-  assert.equal(heavy.noise, 'polish');
+  assert.equal(heavy.noise, 'denoise');
   assert.equal(heavy.heavy, true);
   assert.equal(heavy.strength, 'max');
   assert.equal(strengthFor(T.CLEAN_AT_LEAST - 0.1), 'gentle');

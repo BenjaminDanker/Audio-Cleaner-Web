@@ -93,8 +93,12 @@ def test_suspended_account_cannot_hold():
 
 
 def test_pricing_rounds_up_to_whole_seconds():
-    assert pricing.cost_micros("denoise", "standard", 60) == 10_000
-    assert pricing.cost_micros("denoise", "standard", 0.2) == 167  # 1 s
-    assert pricing.job_cost_micros("denoise", "standard", None, 1) == 167  # per second, no minimum
+    assert pricing.cost_micros("denoise", "standard", 60) == 9_000
+    assert pricing.cost_micros("leveling", "standard", 60) == 1_000
+    assert pricing.cost_micros("denoise", "standard", 0.2) == 150  # 1 s
+    assert pricing.job_cost_micros("denoise", "standard", None, 1) == 150  # per second, no minimum
+    assert pricing.job_cost_micros("denoise", "standard", None, 1, leveling=True) == 150 + 17  # Leveling is its own line
+    assert pricing.job_cost_micros("denoise", "off", None, 60, leveling=True) == 1_000  # Leveling on its own
+    assert pricing.job_cost_micros("denoise", "off", None, 60) == 0
     with pytest.raises(pricing.PricingError):
         pricing.rate("stream_denoise", "high")  # no such tier

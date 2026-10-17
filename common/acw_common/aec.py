@@ -4,7 +4,7 @@ WebRTC's AEC3 (BSD), through the LiveKit Python SDK's AudioProcessingModule (Apa
 far-end ("reference") signal: what went to the speakers. Live, that is the desktop audio the OBS plugin
 sends alongside the mic; in a file, a second audio track with the desktop/speaker sound (OBS and many
 recorders can write one). Only echo cancellation is switched on here: noise removal is DeepFilterNet's
-job, and level is the polish step's.
+job, and level is the leveling step's.
 
 Works on 10 ms frames at 48 kHz mono. AEC3 estimates the echo delay itself (it adapts within a few
 seconds); measured on a synthetic room echo: about 38 dB of echo removed, the near-end voice unchanged,

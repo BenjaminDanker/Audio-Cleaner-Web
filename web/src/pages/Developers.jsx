@@ -91,7 +91,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
           head={['Field', 'What it is']}
           rows={[
             ['kind', '"denoise" cleans the sound, "transcribe" writes subtitles and a transcript, "denoise_transcribe" does both.'],
-            ['denoiseTier', 'For cleaning: "standard", or "rebuild" (the voice is rebuilt, which also takes out room echo; own price; files up to 90 minutes).'],
+            ['denoiseTier', 'For cleaning: "standard" (Denoising), "rebuild" (Voice rebuild: the voice is rebuilt, which also takes out room echo; own price; files up to 90 minutes), or "off" (no noise removal, only Leveling). Leveling (options.leveling, on by default) is its own price.'],
             ['transcribeTier', <>For subtitles: <code>"local"</code> (Standard) or <code>"premium"</code> (extra accurate; the audio goes to a speech partner, see the <Link to="/privacy">Privacy Policy</Link>).</>],
             ['filename', 'Its ending must be one we can read. Audio: wav, rf64, w64, mp3, mp2, mpa, m4a, m4b, m4r, aac, flac, ogg, oga, opus, spx, wma, aiff, aif, aifc, caf, au, snd, amr, ac3, eac3, dts, mka, wv, ape, tta, mpc. Video: mp4, m4v, mov, webm, mkv, avi, wmv, asf, flv, f4v, 3gp, 3g2, ts, mts, m2ts, mpg, mpeg, vob, mxf, dv, ogv, rm, rmvb. Anything else is refused with "Unsupported file type." Only the ending is used; the name never becomes a path.'],
             ['sizeBytes', 'The exact size of the upload: 1 byte up to 4 GiB. A file can weigh at most 40 MB per second of its length (small files, under 200 MB, are always fine).'],
@@ -110,7 +110,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
         <h3>3. Wait for it</h3>
         <p><code>GET /api/jobs/&#123;id&#125;</code> every few seconds (every 2 seconds is fine), or let us tell you with a <a href="#callbacks">finish notification</a>. To watch several jobs, <code>GET /api/jobs</code> lists your latest 50 in one request.</p>
         <Code label="A finished job">{`{
-  "id": "3f2c...", "kind": "denoise", "label": "Clean & polish",
+  "id": "3f2c...", "kind": "denoise", "label": "Denoising + Leveling",
   "status": "done", "stage": "Done", "progress": 100, "error": null,
   "inputName": "Interview with Sam", "durationSeconds": 1810.5,
   "estCostMicros": 301834, "costMicros": 301834,
@@ -162,7 +162,8 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
         <Code label="Price list">{`curl -s $BASE/api/billing/pricing
 {
   "rates": [
-    {"product": "denoise", "tier": "standard", "label": "Clean & polish", "usdPerMinute": 0.01, "usdPerHour": 0.6, "available": true},
+    {"product": "denoise", "tier": "standard", "label": "Denoising", "usdPerMinute": 0.009, "usdPerHour": 0.54, "available": true},
+    {"product": "leveling", "tier": "standard", "label": "Leveling", "usdPerMinute": 0.001, "usdPerHour": 0.06, "available": true},
     {"product": "transcribe_translate", "tier": "standard", "label": "Translated subtitles, per language", "usdPerMinute": 0.004, "...": "..."}
   ],
   "maxJobSeconds": 14400, "maxRebuildSeconds": 5400, "maxUploadBytes": 4294967296,
@@ -178,7 +179,8 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
 {
   "estCostMicros": 664036, "estCostUsd": 0.664036, "durationSeconds": 1810.5, "maxSeconds": 14400,
   "lines": [
-    {"item": "denoise",    "label": "Clean & polish",                     "quantity": 1, "usdPerMinute": 0.01,  "micros": 301834},
+    {"item": "denoise",    "label": "Denoising",                     "quantity": 1, "usdPerMinute": 0.009, "micros": 271650},
+    {"item": "leveling",   "label": "Leveling",                      "quantity": 1, "usdPerMinute": 0.001, "micros": 30184},
     {"item": "transcribe", "label": "Transcription",                      "quantity": 1, "usdPerMinute": 0.004, "micros": 120734},
     {"item": "translate",  "label": "Translated subtitles, per language", "quantity": 2, "usdPerMinute": 0.004, "micros": 241468}
   ],

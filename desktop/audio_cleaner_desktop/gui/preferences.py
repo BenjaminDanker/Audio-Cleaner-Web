@@ -44,7 +44,7 @@ class Preferences:
     # choices below are kept for when it is off.
     auto_settings = _Setting(True)
     strength = _Setting(engine.DEFAULT_STRENGTH, engine.STRENGTHS)
-    polish = _Setting(True)
+    leveling = _Setting(True)
     loudness = _Setting(engine.DEFAULT_LOUDNESS, engine.LOUDNESS_TARGETS)
     subtitles = _Setting("off", engine.SUBTITLE_MODES)
     language = _Setting("auto", ("auto", *engine.LANGUAGES))
@@ -68,7 +68,7 @@ class Preferences:
     def job_options(self) -> engine.JobOptions:
         auto = self.auto_settings
         return engine.JobOptions(
-            strength=engine.AUTO_STRENGTH if auto else self.strength, polish=self.polish, audio_format=self.audio_format,
+            strength=engine.AUTO_STRENGTH if auto else self.strength, leveling=self.leveling, audio_format=self.audio_format,
             loudness=self.loudness, subtitles=self.subtitles, language=self.language, noise="auto" if auto else self.noise,
             echo_track=self.echo_track, restore_highs=True if auto else self.restore_highs,
             rebuild_voice=False if auto else self.rebuild_voice, auto_rebuild=auto, video_size=self.video_size,

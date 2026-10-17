@@ -114,7 +114,7 @@ await check('subtitles: free noise removal and free subtitles together: the vide
   return j.streams.map((s) => `${s.codec_type}:${s.codec_name}`).join(', ');
 });
 
-await check('subtitles: Clean & polish with free subtitles: the job is only the cleanup (kind denoise, nothing free asked of our side)', async () => {
+await check('subtitles: Denoising with free subtitles: the job is only the cleanup (kind denoise, nothing free asked of our side)', async () => {
   admin('grant', EMAIL, '1', 'subtitles test'); // the cleanup is paid
   const posts = [];
   await page.route('**/api/jobs', (r) => {
@@ -125,9 +125,9 @@ await check('subtitles: Clean & polish with free subtitles: the job is only the 
   try {
     await page.goto(`${BASE}/app`);
     await dropFile(page, join(FILES, 'speech.wav'));
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await pick(page, 'subs', 'browser');
-    await page.getByTestId('polish-local-subs-note').waitFor();
+    await page.getByTestId('denoise-local-subs-note').waitFor();
     await page.getByTestId('start').click();
     await page.getByTestId('job-error').waitFor({ timeout: 60000 });
   } finally {

@@ -138,7 +138,7 @@ def test_mp3_stays_mp3(mp3_file, tmp_path):
 @pytest.mark.native
 def test_other_formats_are_written(mp3_file, tmp_path):
     for fmt, codec in (("wav", "pcm_s24le"), ("m4a", "aac"), ("opus", "opus"), ("mp3", "mp3")):
-        out = engine.process_file(mp3_file, engine.JobOptions(audio_format=fmt, polish=False), out_dir=tmp_path)
+        out = engine.process_file(mp3_file, engine.JobOptions(audio_format=fmt, leveling=False), out_dir=tmp_path)
         assert streams(out, "audio")[0]["codec_name"] == codec, fmt
 
 
@@ -339,7 +339,7 @@ def test_echo_removed_using_the_second_audio_track(tmp_path):
     subprocess.run([str(bundled_ffmpeg()), "-v", "error", "-y", "-i", str(tmp_path / "mic.wav"), "-i", str(tmp_path / "spk.wav"),
                     "-map", "0:a", "-map", "1:a", "-c:a", "flac", "-f", "matroska", str(two)], check=True)
     assert len([s for s in ffprobe_json(two)["streams"] if s["codec_type"] == "audio"]) == 2
-    out = engine.process(two, engine.JobOptions(echo_track=True, polish=False, strength="gentle", audio_format="wav"),
+    out = engine.process(two, engine.JobOptions(echo_track=True, leveling=False, strength="gentle", audio_format="wav"),
                               out_dir=tmp_path / "out")
     assert out.notice == "only the first audio track was cleaned; the other one wasn't kept in the result"
     rate, y = wavfile.read(out.output)

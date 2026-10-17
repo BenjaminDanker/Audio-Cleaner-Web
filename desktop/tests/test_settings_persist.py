@@ -38,7 +38,7 @@ def _click(check, on):
 def _shown(panel):
     """Everything the panel shows, read back from its widgets."""
     return {
-        "auto": panel._auto.isChecked(), "strength": panel._strength.value(), "polish": panel._polish.isChecked(),
+        "auto": panel._auto.isChecked(), "strength": panel._strength.value(), "leveling": panel._leveling.isChecked(),
         "loudness": panel._loudness.currentData(), "subtitles": panel._subtitles.currentData(),
         "language": panel._language.currentData(), "noise": panel._noise.currentData(),
         "echo": panel._echo.isChecked(), "highs": panel._highs.isChecked(), "rebuild": panel._rebuild.isChecked(),
@@ -52,7 +52,7 @@ def _change_everything(panel, folder, monkeypatch):
     _click(panel._auto, False)  # choosing by hand: strength, noise, highs and rebuild are enabled
     panel._strength._buttons["gentle"].click()  # while rebuild is still off: strength is enabled
     _pick(panel._noise, "heavy")
-    _click(panel._polish, False)  # greys the loudness list out
+    _click(panel._leveling, False)  # greys the loudness list out
     _pick(panel._loudness, "broadcast")  # still stored while greyed out
     _pick(panel._subtitles, "vtt")
     _pick(panel._language, "de")
@@ -67,7 +67,7 @@ def _change_everything(panel, folder, monkeypatch):
 
 
 EXPECTED = {
-    "auto": False, "strength": "gentle", "polish": False, "loudness": "broadcast", "subtitles": "vtt", "language": "de",
+    "auto": False, "strength": "gentle", "leveling": False, "loudness": "broadcast", "subtitles": "vtt", "language": "de",
     "noise": "heavy", "echo": True, "highs": False, "rebuild": True, "format": "flac", "video_size": "720", "parallel": 3,
     "where": "folder",
 }
@@ -107,7 +107,7 @@ def test_every_setting_survives_closing_and_reopening(qapp, tmp_path, monkeypatc
         assert panel._language.isVisibleTo(panel) and panel._folder_box.isVisibleTo(panel)
         # the job the next Clean starts with is built from the same values
         o = again.prefs.job_options()
-        assert (o.strength, o.polish, o.loudness, o.subtitles, o.language, o.noise) == (
+        assert (o.strength, o.leveling, o.loudness, o.subtitles, o.language, o.noise) == (
             "gentle", False, "broadcast", "vtt", "de", "heavy")
         assert (o.echo_track, o.restore_highs, o.rebuild_voice, o.audio_format) == (True, False, True, "flac")
         assert (o.video_size, o.short_side) == ("720", 720)
@@ -270,5 +270,24 @@ def test_the_video_size_choices_and_their_help(qapp, tmp_path):
         helps = [b._text for b in w.settings_panel.findChildren(InfoButton) if "Same as the original: the picture" in b._text]
         assert helps and "Bigger than the original only stretches the picture" in helps[0] and "stays tall" in helps[0]
         assert set(VIDEO_SIZE_LABELS) == set(box.itemData(i) for i in range(box.count()))
+    finally:
+        _close(w)
+
+
+def test_the_settings_use_the_same_words_as_the_website(qapp, tmp_path):
+    """Leveling and Rebuild the voice are named as on the website's form (the paid product is Denoising now)."""
+    from PySide6.QtWidgets import QLabel
+
+    from audio_cleaner_desktop.gui.settings_panel import _Row
+
+    ThemeWatcher(qapp)
+    w = _open(tmp_path)
+    try:
+        panel = w.settings_panel
+        assert panel._leveling.text() == "Leveling" and panel._rebuild.text() == "Rebuild the voice"
+        titles = [row.title.text() for row in panel.findChildren(_Row)]
+        assert "Leveling" in titles and "Voice polish" not in titles and "Polish" not in titles
+        everything = " ".join(c.text() for c in panel.findChildren(QLabel)) + panel._leveling.text() + panel._rebuild.text()
+        assert "Polish" not in everything and "Polish the voice" not in everything and "echoey rooms" not in everything and "Clean & polish" not in everything
     finally:
         _close(w)

@@ -53,9 +53,9 @@ AUDIT_WITH_MONEY = (
 _last: float | None = None  # monotonic time of the last sweep (None: not yet since start)
 _USAGE_DESC = re.compile(r"^(?P<label>[^:]+): .* (?P<mins>\(\d+(?:\.\d+)?\s*min\))$", re.S)
 _LEGACY_LABELS = {
-    "denoise": "Clean & polish",
+    "denoise": "Denoising",
     "transcribe": "Subtitles & transcript",
-    "denoise + transcribe": "Clean & polish + Subtitles & transcript",
+    "denoise + transcribe": "Denoising + Subtitles & transcript",
 }
 
 
@@ -77,8 +77,8 @@ def _day(ts: int) -> str:
 
 
 def strip_file_name(description: str) -> str | None:
-    """A usage line's description without the file name ("Clean & polish: talk.wav (1.2 min)" ->
-    "Clean & polish (1.2 min)"), or None when there is nothing to remove."""
+    """A usage line's description without the file name ("Denoising: talk.wav (1.2 min)" ->
+    "Denoising (1.2 min)"), or None when there is nothing to remove."""
     m = _USAGE_DESC.match(description or "")
     if not m:
         return None

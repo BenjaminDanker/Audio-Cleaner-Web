@@ -28,10 +28,9 @@ _FFMPEG = f"ffmpeg{_EXE}"
 _FFPROBE = f"ffprobe{_EXE}"
 _WHISPER_FILES = ("model.bin", "config.json", "tokenizer.json")
 
-# The speech model is in every release, as separate files (each under GitHub's 2 GB per file), named "whisper-<file>";
-# CI takes them from dropbox-dash/faster-whisper-large-v3-turbo at commit 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf on
-# Hugging Face and checks them against the hashes below.
-_TURBO = config.MODELS_URL + "whisper-"
+# The speech model comes straight from Hugging Face, pinned to one commit (its files are published there as they are;
+# only our own models ride in the releases).
+_TURBO = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/"
 SPEECH_MODEL = models.SpeechModel(
     id="whisper-large-v3-turbo",
     title="Speech model for subtitles",

@@ -59,7 +59,9 @@ class CleanOptions:
     # (strength_for its noise figure).
     atten_lim_db: float | None = 100.0
     # Run the clarity chain (level match, high-pass, compressor, loudness, limiter).
-    polish: bool = True
+    leveling: bool = True
+    # Remove the noise. False: the recording as it is, only leveled (Leveling on its own).
+    denoise: bool = True
     # Loudness target for the clarity chain; None keeps the level.
     loudness_lufs: float | None = -16.0
     # Which noise remover: "light" (DeepFilterNet3), "heavy" (DPDFNet-8) or "auto" (measured per recording).
@@ -244,7 +246,17 @@ def clean_audio(
             progress=(lambda f: progress(0.95 * f)) if progress else None,
         )
         y = y[:, None] if y.ndim == 1 else y
-        if opts.polish:
+        if opts.leveling:
+            y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
+        if progress:
+            progress(1.0)
+        return y
+    if not opts.denoise:  # Leveling on its own: the recording as it is, evened out and set to the loudness
+        if report is not None:
+            report.update(noise="none", highs=None)
+        y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
+        y[:] = x
+        if opts.leveling:
             y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
         if progress:
             progress(1.0)
@@ -309,8 +321,8 @@ def clean_audio(
         if src is None:
             y[:, c] = 0.0
         elif src != c:
-            y[:, c] = y[:, src]  # before the polish: its loudness is measured on both channels, as before
-    if opts.polish:
+            y[:, c] = y[:, src]  # before the leveling: its loudness is measured on both channels, as before
+    if opts.leveling:
         y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
     if progress:
         progress(1.0)

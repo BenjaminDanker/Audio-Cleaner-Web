@@ -17,9 +17,9 @@ const KIND = {
 export const ledgerKind = (l) => KIND[l?.kind] || l?.label || String(l?.kind || '');
 
 const WORK = {
-  denoise: 'Clean & polish',
+  denoise: 'Denoising',
   transcribe: 'Subtitles & transcript',
-  'denoise + transcribe': 'Clean & polish and subtitles',
+  'denoise + transcribe': 'Denoising and subtitles',
 };
 
 /**

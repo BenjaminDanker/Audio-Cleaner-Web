@@ -163,7 +163,7 @@ def _check_models() -> list[str]:
     skipped = []
 
     y = pipeline.clean_audio(
-        x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="heavy", polish=False),
+        x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="heavy", leveling=False),
         threads=1, heavy_model_path=resources.heavy_noise_model_path(),
     )
     if y.shape != (x.size, 1) or not np.isfinite(y).all():

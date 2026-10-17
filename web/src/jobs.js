@@ -1,4 +1,4 @@
-// Shared helpers for file jobs (Clean & polish, subtitles & transcripts): create -> upload -> poll.
+// Shared helpers for file jobs (Denoising, subtitles & transcripts): create -> upload -> poll.
 
 import { api, uploadBlob } from './api.js';
 import { extractAudio } from './media/extract.js';
@@ -54,7 +54,7 @@ const STAGES = {
   'preparing transcription': 'Getting ready to write the text',
   denoising: 'Cleaning the sound',
   cleaning: 'Cleaning the sound',
-  polishing: 'Polishing the voice',
+  leveling: 'Leveling the voice',
   'detecting language': 'Finding the language',
   transcribing: 'Writing the transcript',
   'transcribing (premium)': 'Writing the transcript',
@@ -104,8 +104,8 @@ export function queueText(job) {
 }
 
 export function kindLabel(job) {
-  const base = { denoise: 'Clean & polish', transcribe: 'Subtitles & transcript', denoise_transcribe: 'Clean & polish + subtitles & transcript' }[job.kind] || job.kind;
-  return base;
+  if (job.label) return job.label; // the server's name, the same words as the price list (Voice rebuild, extra accurate, ...)
+  return { denoise: 'Denoising', transcribe: 'Subtitles & transcript', denoise_transcribe: 'Denoising + subtitles & transcript' }[job.kind] || job.kind;
 }
 
 /**

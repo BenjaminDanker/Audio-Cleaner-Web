@@ -1,7 +1,7 @@
 """Code shared by the Audio Cleaner server and desktop app (desktop/).
 
     dfn       DeepFilterNet3 through libDF's C API (ctypes, no torch)
-    clarity   post-denoise polish chain (NumPy/SciPy)
+    clarity   post-denoise leveling chain (NumPy/SciPy)
     ffmpeg    ffprobe/ffmpeg wrappers (probe, decode, encode, remux)
     pipeline  the "Studio clean" chain built from the three above
 

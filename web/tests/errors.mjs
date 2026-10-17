@@ -32,7 +32,7 @@ await check('cleanup: a longer text file -> free noise removal greyed out with t
 await check('cleanup: zero balance -> warning + disabled start, link to billing', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
-  await pick(page, 'noise', 'polish');
+  await pick(page, 'noise', 'denoise');
   await page.getByTestId('estimate').waitFor();
   const w = await page.locator('main .banner-warn', { hasText: 'your balance is' }).innerText();
   if (!(await page.getByTestId('start').isDisabled())) throw new Error('start enabled');

@@ -102,12 +102,12 @@ async function open(page, path) {
     return `${Date.now() - t0} ms: ${s.line}`;
   });
 
-  await check('steady noise: the free cleanup in the browser, with a strength; much noise: Clean & polish', async () => {
+  await check('steady noise: the free cleanup in the browser, with a strength; much noise: Denoising', async () => {
     const mild = await open(page, FILES.mild);
     if (mild.noise !== 'browser' || !mild.lstrength || mild.lstrength === 'max') throw new Error(`mild: ${JSON.stringify(mild)}`);
     const loud = await open(page, FILES.loud);
-    if (loud.noise !== 'polish' || !/stronger noise remover/.test(loud.why.join(' '))) throw new Error(`loud: ${JSON.stringify(loud)}`);
-    if (!loud.badges.includes('reco-noise-polish') || !loud.badges.includes('reco-subs-accurate')) throw new Error(`badges ${loud.badges}`);
+    if (loud.noise !== 'denoise' || !/stronger noise remover/.test(loud.why.join(' '))) throw new Error(`loud: ${JSON.stringify(loud)}`);
+    if (!loud.badges.includes('reco-noise-denoise') || !loud.badges.includes('reco-subs-accurate')) throw new Error(`badges ${loud.badges}`);
     return `mild -> ${mild.noise}/${mild.lstrength}; loud -> ${loud.noise}/${loud.strength}`;
   });
 

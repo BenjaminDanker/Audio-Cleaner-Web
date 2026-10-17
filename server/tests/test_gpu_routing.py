@@ -40,6 +40,14 @@ def test_heavy_and_auto_cleaning_go_to_the_card_light_does_not():
     assert broker.gpu_stages(job_row(noise="light")) == []  # DeepFilterNet3 has no GPU path
 
 
+def test_leveling_on_its_own_is_cpu_work():
+    for noise in ("auto", "heavy", "light"):
+        assert broker.gpu_stages(job_row(tier="off", noise=noise)) == []
+        assert not broker.gpu_only(job_row(tier="off", noise=noise))
+    # with local subtitles the transcription is still GPU work, the leveling is not
+    assert broker.gpu_stages(job_row(tier="off", kind="denoise_transcribe", transcribe="local")) == ["transcribe"]
+
+
 def test_what_stays_with_the_cpu_workers():
     assert broker.gpu_stages(job_row(echo=True)) == []  # no echo canceller in the GPU venv
     assert broker.gpu_stages(job_row(kind="transcribe", transcribe="local", echo=True)) == []

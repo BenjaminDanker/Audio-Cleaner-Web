@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--strength", choices=list(STRENGTH_CHOICES), default=AUTO_STRENGTH,
         help="noise reduction strength; auto (default) picks the one that fits each file from how noisy it is",
     )
-    p.add_argument("--no-polish", action="store_true", help="skip level matching, compression and loudness normalisation")
+    p.add_argument("--no-leveling", action="store_true", help="skip level matching, compression and loudness normalisation")
     p.add_argument(
         "--audio-format", choices=list(AUDIO_CHOICES), default="same",
         help="format for audio files (video keeps its container); default: same as input",
@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--loudness", choices=list(LOUDNESS_TARGETS), default=DEFAULT_LOUDNESS,
-        help="loudness target of the polish step: podcast -16 LUFS, youtube -14, broadcast -23, keep (default: podcast)",
+        help="loudness target of the leveling step: podcast -16 LUFS, youtube -14, broadcast -23, keep (default: podcast)",
     )
     p.add_argument(
         "--subtitles", choices=list(SUBTITLE_MODES), default="off",
@@ -123,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         from . import cli
 
         options = JobOptions(
-            strength=args.strength, polish=not args.no_polish, audio_format=args.audio_format,
+            strength=args.strength, leveling=not args.no_leveling, audio_format=args.audio_format,
             loudness=args.loudness, subtitles=args.subtitles, language=args.language, noise=args.noise,
             echo_track=args.echo_track, restore_highs=not args.no_restore_highs, rebuild_voice=args.rebuild_voice,
             auto_rebuild=not args.no_auto_rebuild,

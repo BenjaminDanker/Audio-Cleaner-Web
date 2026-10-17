@@ -57,7 +57,7 @@ def test_clarity_keeps_shape_and_is_finite():
 def test_clean_audio_reduces_noise_in_pauses():
     clean, noisy = voiced_noise()
     progress = []
-    y = pipeline.clean_audio(noisy, LIB, MODEL, pipeline.CleanOptions(polish=False), threads=1, progress=progress.append)
+    y = pipeline.clean_audio(noisy, LIB, MODEL, pipeline.CleanOptions(leveling=False), threads=1, progress=progress.append)
     assert y.shape == (len(noisy), 1) and np.isfinite(y).all()
     assert progress[-1] == 1.0 and progress == sorted(progress)
     pauses = np.abs(clean) < 1e-4
@@ -69,6 +69,44 @@ def test_clean_audio_reduces_noise_in_pauses():
 
 
 @needs_dfn
+def test_clean_audio_without_denoising_and_without_leveling_returns_the_input(tmp_path):
+    _, noisy = voiced_noise(2.0)
+    missing = tmp_path / "no-such-library"  # no noise remover is loaded at all
+    report: dict = {}
+    progress = []
+    y = pipeline.clean_audio(noisy, missing, missing, pipeline.CleanOptions(denoise=False, leveling=False), threads=1,
+                             progress=progress.append, report=report)
+    assert y.shape == (len(noisy), 1) and y.dtype == np.float32
+    assert np.array_equal(y[:, 0], noisy)
+    assert report["noise"] == "none" and report["highs"] is None and "noise_db" not in report
+    assert progress and progress[-1] == 1.0
+    out = np.zeros(len(noisy), dtype=np.float32)  # written into the given array (a mono one too)
+    got = pipeline.clean_audio(noisy, missing, missing, pipeline.CleanOptions(denoise=False, leveling=False), out=out)
+    assert np.array_equal(out, noisy) and np.shares_memory(got, out)
+
+
+def test_clean_audio_without_denoising_only_levels_and_keeps_the_noise(tmp_path):
+    clean, noisy = voiced_noise(4.0)
+    missing = tmp_path / "no-such-library"
+    report: dict = {}
+    y = pipeline.clean_audio(noisy, missing, missing, pipeline.CleanOptions(denoise=False, leveling=True, loudness_lufs=-16.0),
+                             threads=1, report=report)
+    assert y.shape == (len(noisy), 1) and np.isfinite(y).all() and report["noise"] == "none"
+    assert not np.allclose(y[:, 0], noisy)  # evened out and set to the loudness
+    pauses = np.abs(clean) < 1e-4
+    voiced = np.abs(clean) > 0.05
+    gap_before = 20 * np.log10(np.sqrt(np.mean(noisy[voiced] ** 2)) / np.sqrt(np.mean(noisy[pauses] ** 2)))
+    gap_after = 20 * np.log10(np.sqrt(np.mean(y[voiced, 0] ** 2)) / np.sqrt(np.mean(y[pauses, 0] ** 2)))
+    assert gap_after < gap_before + 6  # the noise between syllables is still there (nothing like the 10+ dB denoising takes off)
+    stereo = np.stack([noisy, noisy * 0.5], axis=1)  # channels stay channels
+    z = pipeline.clean_audio(stereo, missing, missing, pipeline.CleanOptions(denoise=False, leveling=True), threads=1)
+    assert z.shape == stereo.shape and np.isfinite(z).all()
+
+
+def test_denoise_is_on_unless_turned_off():
+    assert pipeline.CleanOptions().denoise is True and pipeline.CleanOptions().leveling is True
+
+
 def test_reset_gives_the_output_of_a_fresh_instance():
     _, a = voiced_noise(seconds=3.0, seed=1)
     _, b = voiced_noise(seconds=3.0, seed=2)

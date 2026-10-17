@@ -198,6 +198,8 @@ def gpu_stages(job: dict) -> list[str]:
     if job["kind"] in ("denoise", "denoise_transcribe"):
         if params.get("denoise_tier") == "rebuild":
             stages.append("rebuild")
+        elif params.get("denoise_tier") == "off":
+            pass  # Leveling on its own: a little CPU work, no model
         elif opts.get("noise", "auto") in ("auto", "heavy"):
             stages.append("heavy")
     return stages

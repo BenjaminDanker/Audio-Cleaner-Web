@@ -25,7 +25,7 @@ if (want('basic')) {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
-    for (const s of ['$0.60 / hour', '$0.01 / min', 'Clean & polish', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    for (const s of ['$0.54 / hour', '$0.009 / min', 'Denoising', 'Leveling', '$0.06 / hour', '$0.001 / min', 'Voice rebuild', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
     if (/Available|Coming soon/.test(txt)) throw new Error('status column is back: ' + txt);
     return `${await page.locator('table tbody tr').count()} rows`;
   });
@@ -126,9 +126,9 @@ if (want('studio')) {
     }
   });
 
-  await check('clean & polish (wav) end-to-end, no Terms modal', async () => {
+  await check('Denoising (wav) end-to-end, no Terms modal', async () => {
     await dropFile(page, join(FILES, 'noisy.wav'));
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await page.getByTestId('estimate').waitFor();
     const est = await page.getByTestId('estimate').innerText();
     if (!/\$0\.0[0-9]+/.test(est)) throw new Error('estimate: ' + est);
@@ -150,9 +150,9 @@ if (want('studio')) {
     return await page.getByTestId('available').innerText();
   });
 
-  await check('clean & polish of VIDEO: audio-only upload + local remux', async () => {
+  await check('Denoising of VIDEO: audio-only upload + local remux', async () => {
     await dropFile(page, join(FILES, 'test.mp4'));
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await page.getByTestId('estimate').waitFor();
     await page.getByTestId('start').click();
     const msg = await page.getByTestId('submitted').innerText({ timeout: 60000 });
@@ -172,8 +172,8 @@ if (want('studio')) {
 
   await check('transcription + denoise (both) job: srt/vtt/txt outputs', async () => {
     await dropFile(page, join(FILES, 'noisy.wav'));
-    await pick(page, 'noise', 'polish');
-    await pick(page, 'subs', 'standard'); // Clean & polish + Standard: one denoise_transcribe job
+    await pick(page, 'noise', 'denoise');
+    await pick(page, 'subs', 'standard'); // Denoising + Standard: one denoise_transcribe job
     await page.getByTestId('estimate').waitFor();
     await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });

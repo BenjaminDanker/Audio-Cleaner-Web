@@ -351,9 +351,9 @@ def test_the_list_and_the_history_say_what_was_picked_for_each_file(qapp, tmp_pa
         assert by_name["c.wav"].message == "Gentle noise reduction picked for this file; missing highs restored"
         described = {e.name: describe_settings(e.settings, e.has_video) for e in w.history.search()}
         assert described == {
-            "a.wav": "Strong noise reduction (picked for this file), polished (podcast)",
-            "b.wav": "voice rebuilt (it sounded echoey), polished (podcast)",
-            "c.wav": "Gentle noise reduction (picked for this file), polished (podcast)",
+            "a.wav": "Strong noise reduction (picked for this file), leveled (podcast)",
+            "b.wav": "voice rebuilt (it sounded echoey), leveled (podcast)",
+            "c.wav": "Gentle noise reduction (picked for this file), leveled (podcast)",
         }
         assert {e.name: e.settings.get("picked_rebuild") for e in w.history.search()} == {"a.wav": None, "b.wav": "echoey", "c.wav": None}
     finally:

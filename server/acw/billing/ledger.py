@@ -382,7 +382,7 @@ def history_page(user_id: str, limit: int = 100) -> tuple[list[dict], bool]:
         s = stream_rows.get(r["ref_id"]) if r["ref_type"] == "stream" else None
         if j is not None:
             p = json.loads(j["params_json"])
-            r["label"] = jobs.job_label(j["kind"], p.get("denoise_tier"), p.get("transcribe_tier"))
+            r["label"] = jobs.job_label(j["kind"], p.get("denoise_tier"), p.get("transcribe_tier"), "leveling" in (p.get("rates") or {}))
             r["product"] = {"denoise": "clean", "transcribe": "transcript", "denoise_transcribe": "clean_transcript"}.get(j["kind"])
             r["tier"] = p.get("denoise_tier") or p.get("transcribe_tier")
             r["minutes"] = round((j["duration_seconds"] or 0) / 60, 1)

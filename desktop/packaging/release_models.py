@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Gather the model files that go into a desktop release, next to the installers (the app downloads its models from
-its own release: config.MODELS_URL):
-
-* the speech model for subtitles, as the files "whisper-<name>" (resources.SPEECH_MODEL), from Hugging Face at the
-  pinned commit (WHISPER_SOURCE);
-* the models archive (resources.MODELS_ARCHIVE), carried over from the newest release that already has it: first the
-  public repository's releases, then this repository's (where a new archive is uploaded once, see docs/desktop.md).
-
-Every file is checked against the size and SHA-256 pinned in resources.py; nothing else is ever published.
+"""Gather the models archive that goes into a desktop release, next to the installers (the app downloads it from its
+own release: config.MODELS_URL). It is resources.MODELS_ARCHIVE, carried over from the newest release that already has
+it: first the public repository's releases, then this repository's (where a new archive is uploaded once, see
+docs/desktop.md). It is checked against the size and SHA-256 pinned in resources.py. (The speech model for subtitles
+is not in the releases: the app downloads it from Hugging Face, pinned to one commit.)
 
     python release_models.py OUT_DIR                 download them into OUT_DIR (prints the file names)
     python release_models.py --check                 only check that every one can be found (no download)
@@ -29,8 +25,6 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).res
 
 from audio_cleaner_desktop import models, resources  # noqa: E402
 
-WHISPER_SOURCE = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/"
-WHISPER_PREFIX = "whisper-"
 API = "https://api.github.com"
 
 
@@ -78,11 +72,6 @@ def find_archive() -> tuple[str, dict]:
                      f"{os.environ.get('GITHUB_REPOSITORY')}: upload it once (docs/desktop.md, \"New models\")")
 
 
-def whisper_files() -> list[tuple[str, str, int, str]]:
-    """(release file name, source URL, size, sha256) of the speech model."""
-    return [(WHISPER_PREFIX + f.path, WHISPER_SOURCE + f.path, f.size, f.sha256) for f in resources.SPEECH_MODEL.files]
-
-
 class _AssetRedirects(urllib.request.HTTPRedirectHandler):
     """The asset API answers with a redirect to a signed download address on another host: https only, and the token
     is not sent there."""
@@ -115,14 +104,9 @@ def _download_asset(repo: str, asset: dict, dest: Path) -> None:
 
 def gather(out: Path) -> list[str]:
     out.mkdir(parents=True, exist_ok=True)
-    names = []
-    for name, url, size, sha in whisper_files():
-        models.fetch_file(url, out / name, size, sha)  # https only, size and SHA-256 checked
-        names.append(name)
     repo, asset = find_archive()
     _download_asset(repo, asset, out / resources.MODELS_ARCHIVE.name)
-    names.append(resources.MODELS_ARCHIVE.name)
-    return names
+    return [resources.MODELS_ARCHIVE.name]
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -164,10 +148,10 @@ def remote_size(url: str, head=http_head) -> tuple[int | None, str]:
 def check() -> list[str]:
     """What can't be found (empty when everything is there)."""
     problems = []
-    for name, url, size, _ in whisper_files():
-        got, why = remote_size(url)
-        if got != size:
-            problems.append(f"{name}: {url}: {why or f'{got} bytes there, {size} pinned'}")
+    for f in resources.SPEECH_MODEL.files:  # downloaded by the app from Hugging Face: the pinned files must be there
+        got, why = remote_size(f.url)
+        if got != f.size:
+            problems.append(f"{f.url}: {why or f'{got} bytes there, {f.size} pinned'}")
     try:
         find_archive()
     except SystemExit as e:

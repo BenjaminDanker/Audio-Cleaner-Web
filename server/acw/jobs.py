@@ -70,6 +70,7 @@ SPEED = {
     "denoise_heavy": 0.27,
     "denoise_rebuild": 0.14,  # on the card (the only place it runs): 8.2 s per minute (broker.GPU_WORK)
     "highs": 0.02,
+    "leveling": 0.01,  # Leveling on its own (with noise removal it is part of the denoise figures)
     "echo": 0.03,
     "transcribe_local": 0.12,
     "transcribe_premium": 0.08,
@@ -133,6 +134,8 @@ def job_seconds(job: dict) -> float:
     if job["kind"] in ("denoise", "denoise_transcribe"):
         if params.get("denoise_tier") == "rebuild":
             t += SPEED["denoise_rebuild"] * audio * channels
+        elif params.get("denoise_tier") == pricing.NO_DENOISE:
+            t += SPEED["leveling"] * audio * channels
         else:
             profile = params.get("noise_profile") or opts.get("noise", "auto")
             t += (SPEED["denoise_" + profile] if profile in ("light", "heavy") else SPEED["denoise_auto"]) * audio * channels
@@ -214,11 +217,15 @@ def display_name(job: dict) -> str:
     return json.loads(job["params_json"]).get("display_name") or job["input_name"]
 
 
-def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None) -> str:
-    """Customer-facing name of what a job does (the same words as the price list)."""
+def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, leveling: bool = False) -> str:
+    """Customer-facing name of what a job does (the same words as the price list). `leveling`: Leveling is part of it
+    (for a stored job: "leveling" in its pinned rates)."""
     parts = []
     if kind in ("denoise", "denoise_transcribe"):
-        parts.append("Clean & polish, voice rebuilt" if denoise_tier == "rebuild" else "Clean & polish")
+        if denoise_tier != pricing.NO_DENOISE:
+            parts.append("Voice rebuild" if denoise_tier == "rebuild" else "Denoising")
+        if leveling or denoise_tier == pricing.NO_DENOISE:
+            parts.append("Leveling")
     if kind in ("transcribe", "denoise_transcribe"):
         parts.append("Subtitles & transcript" + (", extra accurate" if transcribe_tier == "premium" else ""))
     return " + ".join(parts)
@@ -234,7 +241,7 @@ def safe_stem(filename: str) -> str:
 def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str | None, options: dict) -> dict:
     if kind not in KINDS:
         raise JobError("unknown job type")
-    if kind in ("denoise", "denoise_transcribe"):
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier != pricing.NO_DENOISE:
         pricing.rate("denoise", denoise_tier or "")
     if kind in ("transcribe", "denoise_transcribe"):
         pricing.rate("transcribe", transcribe_tier or "")
@@ -290,15 +297,17 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     out["noise"] = noise
     # Even out the voice and set the loudness (on by default); bring back the missing highs of band-limited recordings
     # (on by default; full-band recordings are never touched, and the voice rebuild does it by itself).
-    for key in ("polish", "restore_highs"):
+    for key in ("leveling", "restore_highs"):
         flag = options.get(key, True)
         if not isinstance(flag, bool):
             raise JobError(f"{key} must be true or false")
         out[key] = flag
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not out["leveling"]:
+        raise JobError("Choose Denoising, Voice rebuild or Leveling.")
     return out
 
 
-REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choose Clean & polish."
+REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choose Denoising."
 
 
 def check_duration(kind: str, denoise_tier: str | None, seconds: float) -> None:
@@ -323,13 +332,18 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
     d_tier = denoise_tier if kind != "transcribe" else None
     t_tier = transcribe_tier if kind != "denoise" else None
     n = len(opts["translate"])
-    rates = pricing.job_rates(kind, d_tier, t_tier, n)
-    total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n)
+    leveling = kind != "transcribe" and opts["leveling"]
+    rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling)
+    total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling)
     lines = []
     if "denoise" in rates:
         r = pricing.rate("denoise", d_tier)
         lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
                       "micros": pricing.cost_micros("denoise", d_tier, duration_seconds, rates["denoise"])})
+    if "leveling" in rates:
+        r = pricing.rate("leveling", "standard")
+        lines.append({"item": "leveling", "label": r.label, "quantity": 1, "usdPerMinute": rates["leveling"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("leveling", "standard", duration_seconds, rates["leveling"])})
     if "transcribe" in rates:
         r = pricing.rate("transcribe", t_tier)
         lines.append({"item": "transcribe", "label": r.label, "quantity": 1, "usdPerMinute": rates["transcribe"] / pricing.MICROS_PER_USD,
@@ -420,8 +434,10 @@ def create_job(
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     n_translate = len(opts["translate"])
-    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate)
-    est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate)
+    leveling = kind != "transcribe" and opts["leveling"]
+    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling)
+    est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
+                                  leveling)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
@@ -664,7 +680,7 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "progress": job["progress"],
         "error": job["error"],
         "inputName": params.get("display_name") or job["input_name"],
-        "label": job_label(job["kind"], params.get("denoise_tier"), params.get("transcribe_tier")),
+        "label": job_label(job["kind"], params.get("denoise_tier"), params.get("transcribe_tier"), "leveling" in (params.get("rates") or {})),
         "durationSeconds": job["duration_seconds"] or job["claimed_seconds"],
         "estCostMicros": job["est_cost_micros"],
         "costMicros": job["cost_micros"],

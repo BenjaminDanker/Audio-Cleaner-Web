@@ -75,7 +75,7 @@ function subsVerdict(info) {
 
 /** Can this browser do the noise removal for this file? `why` is the plain-words reason when it can't. */
 function browserVerdict(info) {
-  const paid = 'Clean & polish can (paid).';
+  const paid = 'Paid Denoising can do it.';
   if (!supported) return { ok: false, why: `This browser can’t run the noise remover. ${paid}` };
   if (info.hasAudio === false) return { ok: false, why: 'This file has no audio track.' };
   const readable = info.canDecode !== false && (info.viaMediabunny || info.viaLibav || info.duration != null);
@@ -98,7 +98,7 @@ function Choice({ name, value, current, onPick, disabled, title, hint, reason, r
 
 /**
  * The Cleanup form: drop one file, then choose what to do with it. Only what is possible for that file is offered.
- *   Noise removal:  Off | Free, in your browser (nothing uploaded) | Clean & polish (paid, on our side)
+ *   Noise removal:  Off | Free, in your browser (nothing uploaded) | Denoising (paid, on our side)
  *   Subtitles:      Off | Free, in your browser (nothing uploaded) | Standard (paid) | Extra accurate (paid)
  * Any combination works: the browser part runs here, in parallel with the job (if any) for the rest.
  * onSubmitted({id, ...}, {file, info, extracted, keepVideo})
@@ -112,17 +112,18 @@ export default function JobForm({ onSubmitted }) {
   const [file, setFile] = useState(null);
   const [info, setInfo] = useState(null);
   const [probing, setProbing] = useState(false);
-  const [noise, setNoise] = useState('off'); // 'off' | 'browser' | 'polish'
+  const [noise, setNoise] = useState('off'); // 'off' | 'browser' | 'denoise'
   const [subs, setSubs] = useState('off'); // 'off' | 'browser' | 'standard' | 'accurate'
   const [keepVideo, setKeepVideo] = useState(true);
   const [embed, setEmbed] = useState(false);
-  const [echo, setEcho] = useState(false); // Clean & polish: remove speaker echo using the second audio track
+  const [echo, setEcho] = useState(false); // Denoising: remove speaker echo using the second audio track
   const [loudness, setLoudness] = useState('-16');
   const [noiseKind, setNoiseKind] = useState('auto');
-  const [polishVoice, setPolishVoice] = useState(true); // Clean & polish: even out the voice and set the loudness
-  const [restoreHighs, setRestoreHighs] = useState(true); // Clean & polish: bring back the highs of dull phone-quality recordings
-  const [rebuild, setRebuild] = useState(false); // Clean & polish, voice rebuilt (its own price)
-  const [strength, setStrength] = useState('max'); // Clean & polish
+  const [leveling, setLeveling] = useState(true); // Leveling with Denoising or Voice rebuild: even out the voice, set the loudness
+  const [levelingAlone, setLevelingAlone] = useState(false); // Leveling on its own, with noise removal Off (paid)
+  const [restoreHighs, setRestoreHighs] = useState(true); // Denoising: bring back the highs of dull phone-quality recordings
+  const [rebuild, setRebuild] = useState(false); // Voice rebuild (its own price)
+  const [strength, setStrength] = useState('max'); // Denoising
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
   const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
   const [language, setLanguage] = useState('');
@@ -148,7 +149,7 @@ export default function JobForm({ onSubmitted }) {
   const listen = useRef(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'polish' });
+  const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'denoise' || (noise === 'off' && levelingAlone) });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
   const jobLocal = useRef(null); // {out, entry} of the job just started, so the sound cleaned here can join its subtitles
@@ -165,19 +166,21 @@ export default function JobForm({ onSubmitted }) {
   const verdict = info ? browserVerdict(info) : null;
   const sVerdict = info ? subsVerdict(info) : null;
   const wantsBrowser = noise === 'browser';
-  const wantsPolish = noise === 'polish';
+  const wantsDenoise = noise === 'denoise'; // Denoising (or Voice rebuild) on our side
+  const levelingOnly = noise === 'off' && levelingAlone && info?.hasAudio !== false; // Leveling on its own, on our side
+  const serverClean = wantsDenoise || levelingOnly; // a cleaned file comes from our side
   const wantsText = subs !== 'off'; // any subtitles: the language, formats and "into the video" choices apply
   const localSubs = subs === 'browser'; // made here, free
   const serverText = wantsText && !localSubs; // made on our side, paid
   const tier = subs === 'accurate' ? 'premium' : 'local'; // transcription level ids stay internal
-  const kind = wantsPolish && serverText ? 'denoise_transcribe' : wantsPolish ? 'denoise' : serverText ? 'transcribe' : null;
+  const kind = serverClean && serverText ? 'denoise_transcribe' : serverClean ? 'denoise' : serverText ? 'transcribe' : null;
   const translations = serverText ? targets.filter((t) => t && t !== language) : [];
   const isVideo = !!info?.hasVideo;
   const hasSecondTrack = (info?.audioTracks || 0) >= 2; // OBS and others can record mic and desktop sound as two tracks
   // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the
   // browser can't open goes up whole, and then our side puts them in. A recording with no picture can get them in the
   // plain black video made here when a video file type is picked.
-  const videoResult = isVideo ? !wantsPolish || choice.isVideoFile : wantsPolish && choice.isVideoFile;
+  const videoResult = isVideo ? !serverClean || choice.isVideoFile : serverClean && choice.isVideoFile;
   const embedOnServer = serverText && isVideo && !info?.viaMediabunny;
   const limit = buildLimit(); // null: this browser writes the result to disk, so any size works
   const tooBigHere = isVideo && !embedOnServer && file && limit != null && file.size > limit;
@@ -186,23 +189,25 @@ export default function JobForm({ onSubmitted }) {
   const embedNow = canEmbed && embed;
   const embedHere = embedNow && !embedOnServer;
   // A subtitles-only video keeps its own file type when that can carry them (WebM), else it becomes MKV.
-  const embedFormat = wantsPolish ? choice.format : isVideo ? defaultFormatId(file, info, true) : null;
+  const embedFormat = serverClean ? choice.format : isVideo ? defaultFormatId(file, info, true) : null;
 
   // Some formats (WMA, AMR, AVI, MPEG...) the browser can't read, but the server can. Then the length is a rough
   // guess from the file size (128 kbit/s) until the server measures it; the price is corrected to the real length.
   const lengthUnknown = !!(file && info && !probing && !info.duration && info.hasAudio !== false);
   const maxJob = pricing?.maxJobSeconds;
   const duration = info?.duration || (lengthUnknown ? Math.min(Math.max(30, (file.size * 8) / 128000), maxJob || 4 * 3600) : null);
-  const polishRate = findRate(pricing, 'denoise', 'standard');
+  const denoiseRate = findRate(pricing, 'denoise', 'standard');
   const rebuildOffered = findRate(pricing, 'denoise', 'rebuild');
   const rebuildRate = pricing?.rebuildAvailable ? rebuildOffered : null; // paused while its machine is unavailable
-  const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
+  const denoiseTier = levelingOnly ? 'off' : rebuild && rebuildRate ? 'rebuild' : 'standard';
+  const levelingRate = findRate(pricing, 'leveling', 'standard');
+  const withLeveling = serverClean && (levelingOnly || leveling); // Leveling is charged on its own line
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
   const fileReco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
   const reco = auto ? fileReco : null; // shown and marked only with "Automatic best settings" on
   rebuildOk.current = !!rebuildRate;
-  const recNoise = reco ? (reco.noise === 'browser' && verdict && !verdict.ok ? 'polish' : reco.noise) : null;
+  const recNoise = reco ? (reco.noise === 'browser' && verdict && !verdict.ok ? 'denoise' : reco.noise) : null;
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -214,19 +219,19 @@ export default function JobForm({ onSubmitted }) {
   const loadLeft = load.done ? 0 : load.secondsLeft;
   const eta = procEta == null ? null : procEta + (loadLeft || 0);
 
-  // For Clean & polish the file type in the list and "Keep the video" are the same decision: a video type keeps the picture.
+  // For Denoising the file type in the list and "Keep the video" are the same decision: a video type keeps the picture.
   useEffect(() => {
-    if (wantsPolish && isVideo && !info?.viaLibav && choice.outputs) setKeepVideo(choice.isVideoFile);
-  }, [wantsPolish, isVideo, info, choice.outputs, choice.isVideoFile]);
+    if (serverClean && isVideo && !info?.viaLibav && choice.outputs) setKeepVideo(choice.isVideoFile);
+  }, [serverClean, isVideo, info, choice.outputs, choice.isVideoFile]);
 
   const est = useMemo(() => {
     if (!kind) return 0;
-    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length });
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length]);
+    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling });
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
   const breakdown = useMemo(() => {
     if (kind !== 'denoise_transcribe' || !duration) return null;
-    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length]);
+    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
 
   async function choose(f) {
     if (f.size < TINY_FILE_BYTES) {
@@ -255,7 +260,7 @@ export default function JobForm({ onSubmitted }) {
     const i = await probeMedia(f);
     // The best choice that works for this file; a paid one is never switched on without the price being right there.
     const canBrowser = browserVerdict(i).ok;
-    setNoise(canBrowser ? 'browser' : i.hasAudio === false ? 'off' : 'polish');
+    setNoise(canBrowser ? 'browser' : i.hasAudio === false ? 'off' : 'denoise');
     setInfo(i);
     setProbing(false);
     // The noise remover is only fetched once it is clear that this file wants it (the quick listen below says), or when it can't be told.
@@ -286,13 +291,13 @@ export default function JobForm({ onSubmitted }) {
   /** Set the recommended choices (never anything paid that the file doesn't need). */
   function applyReco(r, i = info) {
     const canBrowser = i ? browserVerdict(i).ok : false;
-    const next = r.noise === 'browser' && !canBrowser ? 'polish' : r.noise;
+    const next = r.noise === 'browser' && !canBrowser ? 'denoise' : r.noise;
     setNoise(next);
     if (next === 'browser') warmUpDenoiser();
     touched.current = false;
     setCustom(false);
     if (next === 'browser') setLocalStrength(r.strength);
-    else if (next === 'polish') {
+    else if (next === 'denoise') {
       setStrength(r.strength);
       setRebuild(!!(r.rebuild && rebuildOk.current));
       setNoiseKind('auto');
@@ -358,8 +363,8 @@ export default function JobForm({ onSubmitted }) {
   if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
   if (info && !wantsBrowser && !localSubs && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
-  if (embedHere && wantsPolish && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
-  const canStart = (wantsBrowser || localSubs || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || est != null) && (!wantsPolish || choice.valid);
+  if (embedHere && serverClean && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
+  const canStart = (wantsBrowser || localSubs || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || est != null) && (!serverClean || choice.valid);
 
   async function runLocal(f, i, signal) {
     setLocalRunning(true);
@@ -396,7 +401,7 @@ export default function JobForm({ onSubmitted }) {
     setStep({ phase: 'create', frac: 0 });
     const body = {
       kind,
-      denoiseTier: wantsPolish ? denoiseTier : null,
+      denoiseTier: serverClean ? denoiseTier : null,
       transcribeTier: serverText ? tier : null,
       durationSeconds: duration || 1,
       options: {
@@ -408,10 +413,10 @@ export default function JobForm({ onSubmitted }) {
         translate: translations,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
-        polish: polishVoice,
+        leveling: levelingOnly || leveling,
         restore_highs: restoreHighs,
         atten_lim_db: strengthDb(strength),
-        echo_reference_track: !!(wantsPolish && echo && hasSecondTrack),
+        echo_reference_track: !!(wantsDenoise && echo && hasSecondTrack),
       },
     };
     try {
@@ -424,7 +429,7 @@ export default function JobForm({ onSubmitted }) {
       setResult(out);
       const entry = {
         file: f, info: i, extracted: out.extracted, keepVideo, embed: embedHere, browserClean: wantsBrowser, browserSubs: localSubs,
-        output: wantsPolish ? { name: choice.name.trim(), format: choice.format, size: choice.size } : null,
+        output: serverClean ? { name: choice.name.trim(), format: choice.format, size: choice.size } : null,
       };
       jobLocal.current = { out, entry };
       onSubmitted?.(out, entry);
@@ -557,14 +562,38 @@ export default function JobForm({ onSubmitted }) {
                   title="Free, in your browser" hint="Done on your own device. Nothing is uploaded." reason={verdict.why} recommended={recNoise === 'browser'}
                 />
                 <Choice
-                  name="noise" value="polish" current={noise} onPick={pickNoise} disabled={info.hasAudio === false}
-                  title="Clean &amp; polish" hint={`Paid, done on our side: noise removed, voice evened out, loudness set${polishRate ? `. From ${rate(polishRate.usdPerMinute)} a minute` : ''}`}
-                  reason="This file has no audio track." recommended={recNoise === 'polish'}
+                  name="noise" value="denoise" current={noise} onPick={pickNoise} disabled={info.hasAudio === false}
+                  title="Denoising" hint={`Paid, done on our side: the noise removed${denoiseRate ? `. ${rate(denoiseRate.usdPerMinute)} a minute` : ''}`}
+                  reason="This file has no audio track." recommended={recNoise === 'denoise'}
                 />
               </div>
             </fieldset>
+            {noise === 'off' && info.hasAudio !== false && (
+              <div className="stack">
+                <label className="check">
+                  <input type="checkbox" name="leveling-alone" checked={levelingAlone} onChange={(e) => setLevelingAlone(e.target.checked)} disabled={busy} />
+                  <span>Leveling
+                    <span className="hint block" data-testid="leveling-alone-hint">
+                      Paid, done on our side: evens out the volume and sets the loudness, without removing any noise.
+                      {levelingRate ? ` ${rate(levelingRate.usdPerMinute)} a minute.` : ''}
+                    </span>
+                  </span>
+                </label>
+                {levelingOnly && (
+                  <>
+                    <div className="field">
+                      <label htmlFor="loud-alone">Loudness target</label>
+                      <select id="loud-alone" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy}>
+                        {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+                      </select>
+                    </div>
+                    <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
+                  </>
+                )}
+              </div>
+            )}
             {wantsBrowser && <GoodToKnow k="browserDenoise" />}
-            {wantsPolish && <GoodToKnow k={rebuild && rebuildRate ? 'rebuild' : 'polish'} />}
+            {wantsDenoise && <GoodToKnow k={rebuild && rebuildRate ? 'rebuild' : 'denoise'} />}
 
             {wantsBrowser && (
               <div className="stack">
@@ -573,7 +602,7 @@ export default function JobForm({ onSubmitted }) {
                 {info.duration > LONG_SECONDS && (
                   <div className="banner banner-warn">
                     This is a long recording ({human(info.duration)}). Cleaning it here could take about {human(eta)} and needs a lot of memory.
-                    Keep this tab open, or choose Clean &amp; polish for long files.
+                    Keep this tab open, or choose Denoising for long files.
                   </div>
                 )}
                 {info.duration && !wavFits(info.duration, info.channels >= 2 ? 2 : 1, 24) && <p className="muted small mb0" data-testid="wav24-warn">For a recording this long, only the 16-bit WAV can be saved (a WAV file can’t be bigger than 4 GB).</p>}
@@ -581,12 +610,12 @@ export default function JobForm({ onSubmitted }) {
               </div>
             )}
 
-            {wantsPolish && (
+            {wantsDenoise && (
               <div className="stack">
               {rebuildOffered && !rebuildRate && (
                 <label className="check muted" data-testid="rebuild-paused">
                   <input type="checkbox" name="rebuild" checked={false} disabled />
-                  <span>Rebuild the voice (for echoey rooms)
+                  <span>Rebuild the voice
                     <span className="hint block">Paused right now. Try again later.</span>
                   </span>
                 </label>
@@ -594,9 +623,10 @@ export default function JobForm({ onSubmitted }) {
               {rebuildRate && (
                 <label className="check">
                   <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => { touch(); setRebuild(e.target.checked); }} disabled={busy} />
-                  <span>Rebuild the voice (for echoey rooms)
+                  <span>Rebuild the voice
                     <span className="hint block" data-testid="rebuild-hint">
-                      Also removes room echo and brings back dull, muffled sound. Slower, {rate(rebuildRate.usdPerMinute)} a minute.
+                      For recordings made in echoey rooms: removes the room echo and brings back dull, muffled sound. Slower,
+                      {' '}{rate(rebuildRate.usdPerMinute)} a minute.
                       On very echoey recordings it can change a word, so listen before you publish.
                     </span>
                   </span>
@@ -615,15 +645,15 @@ export default function JobForm({ onSubmitted }) {
                 )}
                 <div className="field">
                   <label htmlFor="loud">Loudness target</label>
-                  <select id="loud" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy || !polishVoice}>
+                  <select id="loud" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy || !leveling}>
                     {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
                   </select>
                 </div>
               </div>
               <label className="check">
-                <input type="checkbox" name="polish" checked={polishVoice} onChange={(e) => setPolishVoice(e.target.checked)} disabled={busy} />
-                <span>Polish the voice
-                  <span className="hint block" data-testid="polish-hint">Evens out the volume and sets the loudness above. Turn it off to keep the voice as it was recorded, just without the noise.</span>
+                <input type="checkbox" name="leveling" checked={leveling} onChange={(e) => setLeveling(e.target.checked)} disabled={busy} />
+                <span>Leveling
+                  <span className="hint block" data-testid="leveling-hint">Evens out the volume and sets the loudness above{levelingRate ? `, ${rate(levelingRate.usdPerMinute)} a minute more` : ''}. Turn it off to keep the voice as it was recorded, just without the noise.</span>
                 </span>
               </label>
               {!(rebuild && rebuildRate) && (
@@ -647,9 +677,9 @@ export default function JobForm({ onSubmitted }) {
               </div>
             )}
 
-            {hasSecondTrack && wantsBrowser && <p className="small muted mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Clean &amp; polish; the free cleanup in your browser can&rsquo;t do it.</p>}
+            {hasSecondTrack && wantsBrowser && <p className="small muted mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Denoising; the free cleanup in your browser can&rsquo;t do it.</p>}
 
-            {isVideo && wantsBrowser && info.viaLibav && <p className="small muted mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Clean &amp; polish gives you the whole video back.</p>}
+            {isVideo && wantsBrowser && info.viaLibav && <p className="small muted mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Denoising gives you the whole video back.</p>}
 
             <fieldset className="field" disabled={busy}>
               <legend className="label">Subtitles &amp; transcript</legend>
@@ -672,9 +702,9 @@ export default function JobForm({ onSubmitted }) {
                 />
               </div>
               {subs === 'accurate' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
-              {wantsPolish && serverText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
+              {serverClean && serverText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
               {wantsBrowser && serverText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
-              {wantsPolish && localSubs && <span className="hint" data-testid="polish-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
+              {serverClean && localSubs && <span className="hint" data-testid="denoise-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
             </fieldset>
             {subs === 'browser' && <GoodToKnow k="browserSubs" />}
             {subs === 'standard' && <GoodToKnow k="standardSubs" />}
@@ -728,14 +758,14 @@ export default function JobForm({ onSubmitted }) {
                       onChange={(e) => {
                         setEmbed(e.target.checked);
                         // the cleaned video becomes an MKV, the kind of file players show these subtitles from
-                        if (e.target.checked && wantsPolish && !embedOnServer && !canHoldSubtitles(choice.format) && choice.okIds?.includes('mkv')) choice.pickFormat('mkv');
+                        if (e.target.checked && serverClean && !embedOnServer && !canHoldSubtitles(choice.format) && choice.okIds?.includes('mkv')) choice.pickFormat('mkv');
                       }}
                     />
                     <span>Put the subtitles into the video
                       <span className="hint block" data-testid="embed-hint">
                         {embedOnServer
                           ? 'Your browser can’t open this video type, so it’s uploaded whole and we put them in on our side.'
-                          : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!wantsPolish && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
+                          : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!serverClean && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
                       </span>
                     </span>
                   </label>
@@ -747,7 +777,7 @@ export default function JobForm({ onSubmitted }) {
             {kind && duration && est != null && (
               <p className="mb0" data-testid="estimate">
                 <b>Estimated cost: {money(est)}</b>{' '}
-                <span className="muted">for {human(duration)} of audio{breakdown ? ` (clean & polish ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? ' (clean & polish; the subtitles made on your device are free)' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
+                <span className="muted">for {human(duration)} of audio{breakdown ? ` (cleaning ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? '; the subtitles made on your device are free' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
               </p>
             )}
             {lengthUnknown && <p className="mb0 muted small" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}

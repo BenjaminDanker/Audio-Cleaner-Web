@@ -14,7 +14,7 @@ from .speech_model import SpeechModelDownloader, SpeechModelPanel
 from .widgets import ElidedLabel, IconButton, Segmented, WrapCheck
 
 STRENGTH_LABELS = [("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Maximum")]
-# The same wording as the website's Clean & polish form.
+# The same wording as the website's Denoising form.
 LOUDNESS_LABELS = {
     "podcast": "Podcast (\u221216 LUFS)", "youtube": "YouTube (\u221214 LUFS)", "broadcast": "Broadcast (\u221223 LUFS)",
     "keep": "Keep original loudness",
@@ -149,8 +149,8 @@ class SettingsPanel(QFrame):
         noise_row.layout_.addWidget(self._rebuild_note)
         layout.addWidget(noise_row)
 
-        polish_row = _Row(
-            "Voice polish",
+        leveling_row = _Row(
+            "Leveling",
             "After the noise is gone, the voice is evened out so it sounds clear and steady:\n"
             "\u2022 quiet and loud parts of the recording are matched\n"
             "\u2022 a gentle compressor smooths loud and quiet words\n"
@@ -161,16 +161,16 @@ class SettingsPanel(QFrame):
             "\u2022 -16: podcasts, and a good choice for most things\n"
             "\u2022 -23: TV and radio broadcast\n"
             "Sites turn louder files down anyway, so pick where it will be played.\n\n"
-            "Turn polish off to keep only the noise removal.",
+            "Turn leveling off to keep only the noise removal.",
         )
-        self._polish = QCheckBox("Polish the voice")
-        self._polish.setToolTip("Even out the voice and set the loudness below")
-        polish_row.layout_.addWidget(self._polish)
+        self._leveling = QCheckBox("Leveling")
+        self._leveling.setToolTip("Even out the voice and set the loudness below")
+        leveling_row.layout_.addWidget(self._leveling)
         self._loudness = _combo(
             LOUDNESS_LABELS, "How loud the finished file is, in LUFS (closer to 0 is louder). Podcast suits most things."
         )
-        polish_row.layout_.addWidget(self._loudness)
-        layout.addWidget(polish_row)
+        leveling_row.layout_.addWidget(self._loudness)
+        layout.addWidget(leveling_row)
 
         self._subtitles = _combo(SUBTITLE_LABELS, "Write down what is said, as a subtitle file or inside the video")
         self._language = _combo(
@@ -197,7 +197,7 @@ class SettingsPanel(QFrame):
         self._highs.setToolTip("For phone calls and other recordings that sound dull or muffled")
         self._echo = WrapCheck("Remove speaker echo using the second audio track (your desktop sound)")
         self._echo.setToolTip("For recordings with your desktop sound on a second audio track")
-        self._rebuild = WrapCheck("Rebuild the voice (for echoey rooms)")
+        self._rebuild = WrapCheck("Rebuild the voice")
         self._rebuild.setToolTip("Also removes room echo and brings back dull sound. It takes several times longer. "
                                  "Noise reduction and Background noise do not apply then.")
         extra_row = _Row(
@@ -326,7 +326,7 @@ class SettingsPanel(QFrame):
         self._load()
         self._auto.toggled.connect(lambda v: self._store("auto_settings", v))
         self._strength.changed.connect(lambda v: self._store("strength", v))
-        self._polish.toggled.connect(lambda v: self._store("polish", v))
+        self._leveling.toggled.connect(lambda v: self._store("leveling", v))
         self._loudness.currentIndexChanged.connect(lambda _: self._store("loudness", self._loudness.currentData()))
         self._noise.currentIndexChanged.connect(lambda _: self._store("noise", self._noise.currentData()))
         self._echo.toggled.connect(lambda v: self._store("echo_track", v))
@@ -352,7 +352,7 @@ class SettingsPanel(QFrame):
         p = self._prefs
         self._auto.setChecked(p.auto_settings)
         self._strength.set_value(p.strength)
-        self._polish.setChecked(p.polish)
+        self._leveling.setChecked(p.leveling)
         _select(self._loudness, p.loudness)
         _select(self._noise, p.noise)
         self._echo.setChecked(p.echo_track)
@@ -401,7 +401,7 @@ class SettingsPanel(QFrame):
         return self.sizeHint().height() + extra
 
     def _refresh_enabled(self) -> None:
-        self._loudness.setEnabled(self._polish.isChecked())
+        self._loudness.setEnabled(self._leveling.isChecked())
         auto = self._auto.isChecked()
         rebuilt = self._rebuild.isChecked() and not auto  # always rebuilt (automatic rebuilds only some files)
         self._strength.setEnabled(not rebuilt and not auto)

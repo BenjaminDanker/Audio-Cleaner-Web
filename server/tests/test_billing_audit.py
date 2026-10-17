@@ -423,8 +423,24 @@ def test_job_prices_are_fixed_at_creation(monkeypatch):
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     job, d = running_job(uid)
-    assert json.loads(job["params_json"])["rates"] == {"denoise": 10_000}
+    assert json.loads(job["params_json"])["rates"] == {"denoise": 9_000, "leveling": 1_000}
     monkeypatch.setitem(pricing.RATES, ("denoise", "standard"), pricing.Rate("denoise", "standard", "x", 90_000))
+    monkeypatch.setitem(pricing.RATES, ("leveling", "standard"), pricing.Rate("leveling", "standard", "x", 50_000))
+    W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
+    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == (
+        pricing.cost_micros("denoise", "standard", 600, 9_000) + pricing.cost_micros("leveling", "standard", 600, 1_000))
+
+
+def test_an_older_job_without_a_leveling_price_never_pays_for_leveling():
+    from acw.worker import main as W
+
+    uid = user()
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    job, d = running_job(uid)
+    params = json.loads(job["params_json"])
+    params["rates"] = {"denoise": 10_000}  # made before Leveling had a price
+    job = {**job, "params_json": json.dumps(params)}
+    db.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (job["params_json"], job["id"]))
     W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
     assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == pricing.cost_micros(
         "denoise", "standard", 600, 10_000)

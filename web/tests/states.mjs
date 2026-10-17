@@ -53,7 +53,7 @@ if (want('prices')) {
       await page.goto(`${BASE}/#pricing`);
       await page.waitForSelector('[data-testid=prices] tbody tr');
       const t = await page.getByTestId('prices').innerText();
-      const need = ['Free', 'Files', 'Live streaming', 'Clean & polish', '$0.60 / hour', '$0.01 / min', '$0.24 / hour', 'Noise removed, voice evened out and loudness set, ready to publish', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Noise removal in your browser', 'Subtitles & transcripts in your browser', '$0.004 / min'];
+      const need = ['Free', 'Files', 'Live streaming', 'Denoising', 'Leveling', '$0.54 / hour', '$0.009 / min', '$0.06 / hour', '$0.001 / min', '$0.24 / hour', 'Background noise removed, the voice kept natural', 'The voice evened out and the loudness set', 'Subtitles and transcripts (SRT, VTT, TXT)', 'Noise removal in your browser', 'Subtitles & transcripts in your browser', '$0.004 / min'];
       if (/account/i.test(t)) throw new Error('the price list should not talk about accounts: ' + t);
       for (const n of need) if (!t.includes(n)) throw new Error(`missing "${n}" in: ${t}`);
       if (/Available|Coming soon|low latency/i.test(t) || t.includes('Live captions, extra accurate')) throw new Error('should not show: ' + t);
@@ -91,7 +91,7 @@ if (want('busy')) {
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('[data-testid=available]');
     await dropFile(page, join(FILES, 'noisy.mp3'));
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await page.getByTestId('estimate').waitFor();
     await page.getByRole('button', { name: /^Start – about/ }).click();
     const box = page.getByTestId('job-error');

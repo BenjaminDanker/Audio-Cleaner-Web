@@ -5,8 +5,8 @@
 export const ALTERNATIVES = {
   browserDenoise: 'Only a little fan or room hum? Your video editor’s or OBS’s own noise filter may be enough. This is for when those still leave hiss or noise behind.',
   deviceCaptions: 'Just want to read along yourself? Live Captions are built into Windows 11, Macs with Apple silicon, Chrome, Android and iPhone: free, on your device, and often about as accurate for clear English. Chrome can even translate them. They’re only on your screen, though, not in your stream, video or files for everyone.',
-  polish: 'Steady background noise and recording on your phone? YouTube Create’s free Audio cleanup can handle that. Clean & polish is for stubborn noise, uneven voices and loudness that’s ready to publish.',
-  rebuild: 'Only a bit noisy? Try plain Clean & polish (or the free cleanup) first. Rebuilding is for voices that are muffled, thin or echoey.',
+  denoise: 'Steady background noise and recording on your phone? YouTube Create’s free Audio cleanup can handle that. Denoising is for stubborn noise, uneven voices and loudness that’s ready to publish.',
+  rebuild: 'Only a bit noisy? Try plain Denoising (or the free cleanup) first. Rebuilding is for voices that are muffled, thin or echoey.',
   browserSubs: 'Posting to YouTube in English? Its automatic captions are free and fine for a first pass. These are for a file you can fix up and keep, or for other sites and apps.',
   standardSubs: 'Only need a rough transcript of an English YouTube video? YouTube’s automatic captions will do it for free. These make fewer mistakes, get names and punctuation right more often, and you keep the files.',
   accurateSubs: 'Clear speech that nobody will read closely? Standard is plenty. Extra accurate is for interviews, strong accents, noisy rooms, mixed languages, or anything that has to be right.',

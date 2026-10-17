@@ -286,10 +286,10 @@ await check('cancel: Cancel stops the work, nothing is saved, the form is usable
   return clicked ? 'canceled, nothing saved' : 'finished before the click (fast machine); no error';
 });
 
-await check('Clean & polish: the same name and type list is on the form, any sound type is listed (our side writes it), the video types depend on this browser', async () => {
+await check('Denoising: the same name and type list is on the form, any sound type is listed (our side writes it), the video types depend on this browser', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
-  await pick(page, 'noise', 'polish');
+  await pick(page, 'noise', 'denoise');
   const f = page.locator('[data-testid=output-fields]').first();
   await f.getByTestId('out-name').waitFor();
   if ((await f.getByTestId('out-name').inputValue()) !== 'noisy-cleaned.wav') throw new Error('default name');
@@ -303,10 +303,10 @@ await check('Clean & polish: the same name and type list is on the form, any sou
   return `list ${vals.join(', ')}`;
 });
 
-await check('Clean & polish of a video: it starts as a video type (the picture is kept); the file type alone decides, no extra box', async () => {
+await check('Denoising of a video: it starts as a video type (the picture is kept); the file type alone decides, no extra box', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'test.mp4'));
-  await pick(page, 'noise', 'polish');
+  await pick(page, 'noise', 'denoise');
   const f = page.locator('[data-testid=output-fields]').first();
   await page.waitForFunction(() => { const s = document.querySelector('[data-testid=out-format]'); return s && !s.disabled; });
   if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('the Keep-the-video box is back');
@@ -320,11 +320,11 @@ await check('Clean & polish of a video: it starts as a video type (the picture i
 });
 
 
-await check('Clean & polish of a sound file with a chosen name and type: the job file is saved under that name', async () => {
+await check('Denoising of a sound file with a chosen name and type: the job file is saved under that name', async () => {
   admin('grant', EMAIL, '5', 'convert test');
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
-  await pick(page, 'noise', 'polish');
+  await pick(page, 'noise', 'denoise');
   const f = page.locator('[data-testid=output-fields]').first();
   await f.getByTestId('out-name').fill('episode one.mp3');
   await page.getByTestId('start').click();
@@ -340,11 +340,11 @@ await check('Clean & polish of a sound file with a chosen name and type: the job
   return `${dl.suggestedFilename()} ${i.size} bytes ${i.a.codec_name}`;
 });
 
-await check('Clean & polish of a video with a chosen type and size: the cleaned sound is put back in the browser as asked', async () => {
+await check('Denoising of a video with a chosen type and size: the cleaned sound is put back in the browser as asked', async () => {
   if (!enc.avc && !enc.vp9) return 'SKIP (no video encoder in this Chromium)';
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'test.mp4'));
-  await pick(page, 'noise', 'polish');
+  await pick(page, 'noise', 'denoise');
   const f = page.locator('[data-testid=output-fields]').first();
   await page.waitForFunction(() => { const s = document.querySelector('[data-testid=out-size]'); return s && !s.disabled; }, null, { timeout: 15000 });
   await f.getByTestId('out-format').selectOption('mkv');

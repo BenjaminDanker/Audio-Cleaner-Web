@@ -4,7 +4,8 @@ import { usePricing } from '../hooks.js';
 // What each service is, in one plain line. Keyed by "product/tier" (the ids the price list uses); the names and the
 // prices themselves come from the server (GET /api/billing/pricing), so they can never disagree with the bill.
 const DESCRIPTIONS = {
-  'denoise/standard': 'Noise removed, voice evened out and loudness set, ready to publish',
+  'denoise/standard': 'Background noise removed, the voice kept natural',
+  'leveling/standard': 'The voice evened out and the loudness set for podcast, YouTube or broadcast; with Denoising or Voice rebuild, or on its own',
   'denoise/rebuild': 'For echoey rooms: the voice is rebuilt, which also removes room echo and restores dull sound',
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
   'transcribe/premium': 'The same files, best for accents, noisy rooms and specialist words',
@@ -24,7 +25,7 @@ const LABELS = {
 
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
-  { id: 'files', title: 'Files', products: ['denoise', 'transcribe', 'transcribe_translate'] },
+  { id: 'files', title: 'Files', products: ['denoise', 'leveling', 'transcribe', 'transcribe_translate'] },
   { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions', 'stream_translate'] },
 ];
 

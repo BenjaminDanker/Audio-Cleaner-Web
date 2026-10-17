@@ -235,7 +235,7 @@ def test_upload_works_and_keeps_the_files_in_the_job_directory(client, signed_in
     jid = r.json()["id"]
     assert client.put(f"/api/jobs/{jid}/input", content=data, headers=h).status_code == 200
     got = client.get(f"/api/jobs/{jid}", headers=h).json()
-    assert got["status"] == "queued" and got["inputName"] == "My recording.wav" and got["label"] == "Clean & polish"
+    assert got["status"] == "queued" and got["inputName"] == "My recording.wav" and got["label"] == "Denoising + Leveling"
     assert jobs.input_path(dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,)))).read_bytes() == data
 
 
@@ -347,7 +347,7 @@ def test_rebuild_that_ran_is_billed_as_rebuild(monkeypatch, gpu_up):
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     row = process_with(monkeypatch, uid, "rebuild", noise="rebuilt")
     assert row["status"] == "done" and row["tier"] == "rebuild"
-    assert row["cost_micros"] == pricing.cost_micros("denoise", "rebuild", 600)
+    assert row["cost_micros"] == pricing.cost_micros("denoise", "rebuild", 600) + pricing.cost_micros("leveling", "standard", 600)
 
 
 def test_estimates_follow_the_work_the_job_does():
@@ -537,7 +537,7 @@ def test_ledger_history_has_friendly_labels_and_says_when_there_is_more():
     rows, more = ledger.history_page(uid, 100)
     usage = next(r for r in rows if r["kind"] == "usage")
     assert not more
-    assert usage["label"] == "Clean & polish + Subtitles & transcript, extra accurate"
+    assert usage["label"] == "Denoising + Leveling + Subtitles & transcript, extra accurate"
     assert (usage["product"], usage["minutes"], usage["displayName"]) == ("clean_transcript", 2.0, "My talk.wav")
     assert "denoise" not in usage["description"] and "My talk.wav" in usage["description"]
     assert next(r for r in rows if r["kind"] == "topup")["label"] == "Top-up"

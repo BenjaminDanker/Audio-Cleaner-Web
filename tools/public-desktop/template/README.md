@@ -7,7 +7,7 @@ uploaded: after setup it works offline.
 - **Noise removal** that keeps the voice natural, with four strengths from Gentle to Maximum and a stronger remover
   for recordings where the noise is nearly as loud as the voice
 - **Automatic best settings**: each file is listened to first and gets the cleanup that fits it
-- **Voice polish**: evens out the voice and sets the loudness for podcasts, YouTube or broadcast
+- **Leveling**: evens out the voice and sets the loudness for podcasts, YouTube or broadcast
 - **Restores missing highs** of phone calls and other dull, low-quality recordings
 - **Rebuilds the voice** of recordings made in echoey rooms
 - **Removes speaker echo** when your recording has the desktop sound on its own audio track (OBS can record that)
@@ -126,7 +126,7 @@ Each of these starts with a comment that says how to run it on its own:
 
 - `desktop/`: the app. `audio_cleaner_desktop/engine.py` cleans one file, `gui/` is the window (PySide6), `cli.py` the
   command line; `packaging/` builds the installers; `tests/`
-- `common/`: the cleaning itself (`acw_common`): noise removal, voice polish, restoring highs, rebuilding the voice,
+- `common/`: the cleaning itself (`acw_common`): noise removal, leveling, restoring highs, rebuilding the voice,
   echo removal, subtitles, FFmpeg handling
 - `native/deepfilter/`: how the DeepFilterNet library is built
 

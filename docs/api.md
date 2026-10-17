@@ -95,15 +95,16 @@ Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.
 | POST | `/api/billing/checkout` | `{amountCents, saveCard}` → `{url}`; redirect the browser there. Returns to `/app/billing?checkout=success|cancel`. 400 above `topupMaxCents` of `/api/me` |
 | POST | `/api/billing/auto-reload` | `{enabled, thresholdCents, amountCents, monthlyCapCents, consent}`; `consent:true` required to enable, needs a saved card; `amountCents` is limited like a top-up (400) |
 | POST | `/api/billing/portal` | `{url}` Stripe customer portal (manage/remove cards, receipts) |
-| GET | `/api/billing/history` | `{balance, ledger:[...], ledgerHasMore, payments:[{id,kind,status,amount_cents,refunded_cents,created_at}]}`. The newest 100 ledger entries, each `{id,amount_micros,kind,description,balance_after_micros,created_at,label}` plus, for usage entries, `product` (`clean`, `transcript`, `clean_transcript`, `live`), `tier`, `minutes` and `displayName` (the file name as the person chose it). `label` is the customer-facing name ("Top-up", "Clean & polish + Subtitles & transcript"); `ledgerHasMore` says older entries exist. |
+| GET | `/api/billing/history` | `{balance, ledger:[...], ledgerHasMore, payments:[{id,kind,status,amount_cents,refunded_cents,created_at}]}`. The newest 100 ledger entries, each `{id,amount_micros,kind,description,balance_after_micros,created_at,label}` plus, for usage entries, `product` (`clean`, `transcript`, `clean_transcript`, `live`), `tier`, `minutes` and `displayName` (the file name as the person chose it). `label` is the customer-facing name ("Top-up", "Denoising + Subtitles & transcript"); `ledgerHasMore` says older entries exist. |
 | POST | `/api/billing/refund` | `{paymentId}` refunds unused credit from a payment < 14 days old |
 
 Price list (`rates`; per minute of audio, counted by the second, rounded up; amounts in the response are in dollars):
 
 | `product` / `tier` | What it is |
 |---|---|
-| `denoise` / `standard` | Clean & polish |
-| `denoise` / `rebuild` | Clean & polish, voice rebuilt (files up to 90 minutes) |
+| `denoise` / `standard` | Denoising |
+| `denoise` / `rebuild` | Voice rebuild (files up to 90 minutes) |
+| `leveling` / `standard` | Leveling: charged when `options.leveling` is true (the default) on a `denoise` job; `denoiseTier: "off"` makes a job that only levels |
 | `transcribe` / `local` | Subtitles & transcript |
 | `transcribe` / `premium` | Subtitles & transcript, extra accurate |
 | `transcribe_translate` / `standard` | one translation of the subtitles, **per language** |
@@ -145,14 +146,14 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
 
 ```json
 {"kind": "denoise" | "transcribe" | "denoise_transcribe",
- "denoiseTier": "standard" | "rebuild", "transcribeTier": "local" | "premium",
+ "denoiseTier": "standard" | "rebuild" | "off", "transcribeTier": "local" | "premium",
  "filename": "talk.mp4", "sizeBytes": 123456, "durationSeconds": 612.4,
  "displayName": "My talk.wav",
  "callbackUrl": "https://example.com/hooks/audio-cleaner",
  "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
              "language": "en" | null, "output_video": true, "embed_subtitles": true,
              "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
-             "noise": "auto|light|heavy", "polish": true, "restore_highs": true, "translate": ["es", "de"]}}
+             "noise": "auto|light|heavy", "leveling": true, "restore_highs": true, "translate": ["es", "de"]}}
 ```
 
 Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, **without** a leading slash
@@ -161,7 +162,7 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 | Field | Rules |
 |---|---|
 | `kind` | `denoise` (clean the sound), `transcribe` (subtitles and transcript), or both |
-| `denoiseTier` | required for `denoise` kinds: `standard`, or `rebuild` (its own price: the voice is rebuilt, which also removes room echo and restores dull sound; `atten_lim_db` and `noise` don't apply to it; files up to 90 minutes) |
+| `denoiseTier` | required for `denoise` kinds: `standard` (Denoising), `rebuild` (Voice rebuild, its own price: the voice is rebuilt, which also removes room echo and restores dull sound; `atten_lim_db` and `noise` don't apply to it; files up to 90 minutes), or `off` (no noise removal: only Leveling, which `options.leveling` must then be). Leveling (`options.leveling`, on by default) is its own line on the bill. |
 | `transcribeTier` | required for `transcribe` kinds: `local` (Standard) or `premium` (extra accurate; audio goes to a speech partner, see the privacy policy) |
 | `filename` | its extension must be one we read: audio `wav rf64 w64 mp3 mp2 mpa m4a m4b m4r aac flac ogg oga opus spx wma aiff aif aifc caf au snd amr ac3 eac3 dts mka wv ape tta mpc`, video `mp4 m4v mov webm mkv avi wmv asf flv f4v 3gp 3g2 ts mts m2ts mpg mpeg vob mxf dv ogv rm rmvb`; anything else is `400 Unsupported file type.` Only the extension is used; the name never becomes a path |
 | `sizeBytes` | 1 byte up to `maxUploadBytes` (4 GiB; `413` above); at most 40 MB per second of `durationSeconds` unless under 200 MB |
@@ -184,7 +185,7 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 | `atten_lim_db` | `100` | how much noise may be removed: any number, clamped to 6-100 dB. The website's strengths are 12 (gentle), 24, 40 and 100 (max). Doesn't apply to `rebuild` |
 | `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Included in the price. A single-track file is processed normally and `notice` says so |
 | `noise` | `auto` | `auto` (measured per file), `light`, `heavy` (better when the noise is nearly as loud as the voice). Doesn't apply to `rebuild` |
-| `polish` | `true` | the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. Same price |
+| `leveling` | `true` | Leveling (its own price): the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. |
 | `restore_highs` | `true` | band-limited recordings (phone calls, low-bitrate files) get their missing highs restored; full-band ones are never changed. `false` switches it off. Must be a boolean. Doesn't apply to `rebuild`. Same price |
 
 Highs of band-limited recordings (phone calls, low-bitrate files) are restored automatically; full-band recordings
@@ -215,7 +216,7 @@ job and holds nothing. Applies the same checks and limits, so it answers the sam
 
 ```json
 {"estCostMicros": 102167, "estCostUsd": 0.102167, "durationSeconds": 612.4, "maxSeconds": 14400,
- "lines": [{"item": "denoise", "label": "Clean & polish", "quantity": 1, "usdPerMinute": 0.01, "micros": 102167}],
+ "lines": [{"item": "denoise", "label": "Denoising", "quantity": 1, "usdPerMinute": 0.01, "micros": 102167}],
  "options": {"...": "the options with the defaults filled in"},
  "availableMicros": 5000000, "affordable": true,
  "keyLimit": {"monthlyCapMicros": 500000, "usedMicros": 0, "remainingMicros": 500000, "resetsAt": 1793491200}}

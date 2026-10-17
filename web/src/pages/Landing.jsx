@@ -46,7 +46,7 @@ const FAQ = [
   ['Does the free tool upload my audio?', 'No. It runs right in your browser, on your own device, and nothing about your file is sent anywhere. You do need a free account to use it, to keep bots away.'],
   ['How fast is it?', 'Usually a little over a minute of waiting for every ten minutes of audio on a normal laptop. You get a progress bar and an estimate, so you know what to expect.'],
   ['Is this always the best option?', 'No, and we’d rather tell you. YouTube already gives English uploads free automatic captions and free auto-translate, and big English channels get free live captions. OBS and NVIDIA Broadcast have free noise filters that are fine for mild noise, and Macs have Voice Isolation. If you only want captions on your own screen, Windows, Macs, Chrome and phones have free built-in Live Captions. Every option here has a “Good to know” note saying when something you already have is enough. We’re for stubborn noise, Twitch and other sites, files you keep, and fewer mistakes.'],
-  ['What is Clean & polish for?', 'Longer recordings and finished files. We remove the noise, even out the voice and set the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],
+  ['What is Denoising for?', 'Longer recordings and finished files. We remove the noise, Leveling evens out the voice and sets the loudness (podcast, YouTube or broadcast), and you can add subtitles and a transcript in the same go. Your computer stays free in the meantime.'],
   ['Which files work?', 'On the Cleanup page, almost any audio or video file: MP3, WAV, M4A/AAC, FLAC, OGG/Opus, WMA, AIFF, AMR, AC3, WavPack, MP4, MOV, MKV, WebM, AVI, WMV, FLV, MPEG, MTS/M2TS, 3GP, MXF and more. Noise removal in your browser takes the common ones your browser can open (MP3, WAV, M4A, FLAC, OGG, MP4, MOV, WebM, MKV). With video, the picture is left alone and only the sound is swapped.'],
   ['Why do you only upload the sound of my video?', 'To keep uploads small and quick. Your browser pulls the audio out of the video on your device and sends only that. The cleaned audio goes back into your video on your device too.'],
   ['How does paying work?', 'You add credit, then spend it by the minute of audio. No subscription. You can top up from $10, and switch on auto-reload (with a monthly limit you choose) if you like. Turn it off whenever you want.'],
@@ -129,7 +129,7 @@ export default function Landing() {
               <p>Hiss, hum, wind, keyboards and room noise come out; the voice stays natural. Audio or video, almost any format.</p>
               <ul className="ways">
                 <li><span className="badge badge-free">Free</span><span>In your browser. Your file never leaves your device.</span></li>
-                <li><span className="badge">Paid</span><span><b>Clean &amp; polish</b>: stronger on heavy noise, the voice evened out, loudness set for podcast, YouTube or broadcast.</span></li>
+                <li><span className="badge">Paid</span><span><b>Denoising</b>, stronger on heavy noise, and <b>Leveling</b>: the voice evened out, loudness set for podcast, YouTube or broadcast.</span></li>
               </ul>
               <Link to="/app" className="btn btn-primary">Clean a file</Link>
             </article>
@@ -162,7 +162,7 @@ export default function Landing() {
           <h2 className="section-title">How it works</h2>
           <p className="section-lead">Three steps, whichever way you go.</p>
           <ol className="steps">
-            <li><h3>Choose free or Clean &amp; polish</h3><p>Free runs in your browser. Clean &amp; polish does the work for you and adds loudness and stronger noise removal.</p></li>
+            <li><h3>Choose free or Denoising</h3><p>Free runs in your browser. Denoising does the work for you with stronger noise removal, and Leveling sets the loudness.</p></li>
             <li><h3>Drop in a file</h3><p>Audio or video. With video, only the sound is uploaded, so it stays small and quick.</p></li>
             <li><h3>Listen, then save</h3><p>Flip between the original and the clean version at the same spot. Then save the audio, or your video with the new sound.</p></li>
           </ol>

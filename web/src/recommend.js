@@ -56,7 +56,7 @@ function noiseVerdict(stats) {
  * @param {object} stats Analyser.result()
  * @param {{language?: string}} ctx language: what is picked for the subtitles ('' = detect automatically)
  * @returns {null | {
- *   noise: 'off'|'browser'|'polish', strength: string, heavy: boolean, restoreHighs: boolean, rebuild: boolean,
+ *   noise: 'off'|'browser'|'denoise', strength: string, heavy: boolean, restoreHighs: boolean, rebuild: boolean,
  *   subs: 'standard'|'accurate'|null, nothing: boolean, noSpeech: boolean, reasons: string[], line: string }}
  */
 export function recommendForFile(stats, ctx = {}) {
@@ -77,19 +77,19 @@ export function recommendForFile(stats, ctx = {}) {
   const quiet = stats.loudnessLufs != null && stats.loudnessLufs < T.QUIET_LUFS;
   const loud = stats.loudnessLufs != null && stats.loudnessLufs > T.LOUD_LUFS;
   let noise = 'off';
-  if (!v.clean) noise = v.heavy || phone || rebuild ? 'polish' : 'browser';
-  else if (phone || rebuild) noise = 'polish';
+  if (!v.clean) noise = v.heavy || phone || rebuild ? 'denoise' : 'browser';
+  else if (phone || rebuild) noise = 'denoise';
   const strength = v.strength || 'balanced';
 
   if (v.clean) reasons.push('It’s clean and quiet, so noise removal would change very little.');
-  else if (v.heavy) reasons.push('There is a lot of background noise, nearly as loud as the voice. Clean & polish uses a stronger noise remover for this, and it does clearly better than the free one.');
-  else reasons.push(`There is some background noise. ${noise === 'browser' ? 'The free cleanup in your browser handles it well.' : 'Clean & polish will take it out.'}`);
+  else if (v.heavy) reasons.push('There is a lot of background noise, nearly as loud as the voice. Denoising uses a stronger noise remover for this, and it does clearly better than the free one.');
+  else reasons.push(`There is some background noise. ${noise === 'browser' ? 'The free cleanup in your browser handles it well.' : 'Denoising will take it out.'}`);
   if (!v.clean) reasons.push(`${strengthName(strength)} is enough to take it out${strength === 'max' || strength === 'strong' ? '' : ' while keeping the voice natural'}.`);
   if (phone) reasons.push('It sounds like a phone call or a very small file: the high sounds are missing. Restoring them makes the voice clearer.');
   if (echoey) reasons.push('The voice sounds echoey, as if it was recorded in a big or bare room. Rebuilding the voice can take that out. Listen to the result before you publish.');
   else if (dull) reasons.push('The voice sounds muffled. Rebuilding the voice can bring the clarity back. Listen to the result before you publish.');
   if (stats.clipFraction > T.CLIP_FRACTION) reasons.push('The sound distorts in places because it was recorded too loud. Cleaning can’t fix that, so turn the microphone level down next time.');
-  if (quiet) reasons.push('It is very quiet. Clean & polish would also bring it up to a normal level.');
+  if (quiet) reasons.push('It is very quiet. Denoising would also bring it up to a normal level.');
   if (loud) reasons.push('It is already very loud.');
   if (stats.layout === 'one-side') reasons.push('Only one side of this stereo file has sound; the other side stays silent.');
 
@@ -107,7 +107,7 @@ export function recommendForFile(stats, ctx = {}) {
   if (nothing) bits.push('nothing needed');
   else {
     if (noise === 'off') bits.push('no noise removal');
-    else bits.push(`${noise === 'browser' ? 'free cleanup in your browser' : 'Clean & polish'}, ${strengthName(strength)}`);
+    else bits.push(`${noise === 'browser' ? 'free cleanup in your browser' : 'Denoising'}, ${strengthName(strength)}`);
     if (rebuild) bits.push('rebuild the voice');
     else if (phone) bits.push('restore the highs');
   }

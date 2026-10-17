@@ -45,22 +45,24 @@ Releases, and the app and the installers download everything else from there too
 * the three installers;
 * `update.json` and `update.json.sig`: installed apps read the newest release's (`config.LATEST_URL`, GitHub's fixed
   `releases/latest/download/` address) and download the installer from the release of the version it names;
-* the models: the speech model's files, named `whisper-<file>` (each under GitHub's 2 GB per file), and the models
-  archive `AudioCleaner-models-vN.zip` (AP-BWE and Sidon with their licence texts). The app and its installers download
-  them from the app's own release (`config.MODELS_URL` = `release_url(<the app's version>)`; a source checkout, which
-  has no release of its own, uses the newest release), so every version always gets exactly the models it was built
-  with. Releases there are never deleted.
+* our models: the archive `AudioCleaner-models-vN.zip` (AP-BWE and Sidon with their licence texts; we converted them,
+  nobody else publishes these files). The app and its installers download it from the app's own release
+  (`config.MODELS_URL` = `release_url(<the app's version>)`; a source checkout, which has no release of its own, uses the
+  newest release), so every version always gets exactly the models it was built with. Releases there are never
+  deleted.
+
+The speech model for subtitles (Whisper large-v3-turbo) is not in the releases: it is published on Hugging Face as it
+is, so the app downloads it from there, pinned to one commit (`_TURBO` in `resources.py`) and checked file by file.
 
 The repository is `__releases__` in `audio_cleaner_desktop/__init__.py`; CI writes the one it publishes to
 (`ACW_RELEASES_REPO`, the trial repository while `vars.PUBLIC_DESKTOP_REPO` is set) together with the version. Every file
 is checked against the size and SHA-256 pinned in `resources.py` before it is used, so nobody who can change a release
 file can make the app run anything else; the update information is also signed (below).
 
-**How the models get into a release.** `packaging/release_models.py` (in the release job) downloads the speech model's
-files from Hugging Face at the pinned commit (`WHISPER_SOURCE` there) and carries the models archive over from the
-newest release that already has it (the public repository's releases first, then this repository's), checking every
-file against its pin. The "Model downloads exist" job runs `release_models.py --check` on every build and goes red when
-something can't be found.
+**How the models get into a release.** `packaging/release_models.py` (in the release job) carries the models archive
+over from the newest release that already has it (the public repository's releases first, then this repository's),
+checking it against its pin. The "Model downloads exist" job runs `release_models.py --check` on every build (the
+archive in a release, and the speech model's pinned files on Hugging Face) and goes red when something can't be found.
 
 ### Changing a model safely
 
@@ -68,7 +70,7 @@ Never change a published file: every app version has its models' sizes and SHA-2
 
 1. New models archive: build it, name it `AudioCleaner-models-vN+1.zip` (a new name for new contents), and upload it
    once to this repository's newest desktop release: `gh release upload desktop-v<newest> AudioCleaner-models-vN+1.zip`.
-   For a Whisper revision, change `WHISPER_SOURCE` in `release_models.py` to the new Hugging Face commit id (never `main`).
+   For a Whisper revision, change the commit id in `_TURBO` in `resources.py` (never `main`).
 2. Update the catalog in `resources.py`: the archive's `name`, `url`, `size`, `sha256`, the `shared` licence files and
    each model file's `size`/`sha256`/`member`; for Whisper the files' sizes and hashes.
 3. Update `deploy/models.lock` (the server's copy of the models) the same way: the `archive` line and the `member` lines.

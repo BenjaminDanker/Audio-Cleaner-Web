@@ -834,11 +834,13 @@ def test_the_release_is_published_to_the_public_repository_with_everything_the_a
     assert 'if [ -z "$GH_TOKEN" ]' in step and "exit 0" in step  # no secret: skipped
     assert "trap '" in step and "ERR" in step
     assert 'tag="v$version"' in step and '--target "$branch"' in step and "--clobber" in step
-    # the models of this version (release_models.py: pinned, hash-checked) are gathered before anything is uploaded
+    # the models archive (release_models.py: pinned, hash-checked) is gathered before anything is uploaded; the speech
+    # model is not in the release (the app downloads it from Hugging Face)
     assert "python3 desktop/packaging/release_models.py release/models" in step
     assert step.index("release_models.py release/models") < step.index("gh release create")
     # everything the app and setup download: the installers, the signed update information (when this build has it)
-    # and the model files
+    # and the models archive (models/ holds nothing else)
+    assert "whisper" not in step.lower()
     files = re.search(r"files=\((.*?)\)", step).group(1).split()
     assert files == ['"AudioCleaner-$version-Windows.exe"', '"AudioCleaner-$version-Mac-Apple-silicon.pkg"',
                      '"AudioCleaner-$version-Mac-Intel.pkg"']
@@ -890,7 +892,7 @@ def test_the_app_is_built_for_the_repository_the_release_is_published_to():
     assert f"'{__releases__}'" in built_for  # with the same default as the source
 
 
-def test_the_model_check_job_looks_for_what_every_release_carries():
+def test_the_model_check_job_looks_for_the_models_archive_and_the_speech_model_s_source():
     if "\n  model-urls:\n" not in WORKFLOW:
         pytest.skip("this copy of the repository has no workflow")
     job = WORKFLOW.split("\n  model-urls:\n")[1].split("\n  ffmpeg:\n")[0]

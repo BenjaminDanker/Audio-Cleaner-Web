@@ -27,14 +27,14 @@ if (want('pure')) {
     for (const ok of ['/app', '/app/billing', '/terms?x=1']) if (!isSafeReturn(ok)) throw new Error(`${ok} should be accepted`);
     for (const bad of ['//evil.example', '/\\evil.example', '/app\\..\\x', '/login', '/login/verify', 'https://evil.example', '', null, '/app\n/x']) if (isSafeReturn(bad)) throw new Error(`${JSON.stringify(bad)} should be refused`);
     const t = ledgerText({ kind: 'usage', description: 'denoise + transcribe: noisy.flac (0.2 min)' });
-    if (t !== 'Clean & polish and subtitles: noisy.flac (0.2 min)') throw new Error(t);
+    if (t !== 'Denoising and subtitles: noisy.flac (0.2 min)') throw new Error(t);
     if (ledgerText({ kind: 'usage', description: 'transcribe: a.mp3 (12.5 min)' }) !== 'Subtitles & transcript: a.mp3 (12.5 min)') throw new Error('transcribe');
     if (ledgerText({ kind: 'usage', description: 'Live session (3.0 min, cut short by a restart)' }) !== 'Live session (3.0 min, ended early)') throw new Error('live');
     if (ledgerText({ kind: 'topup', description: 'Top-up $20.00' }) !== 'Top-up $20.00') throw new Error('topup');
     if (ledgerKind({ kind: 'usage' }) !== 'Used' || ledgerKind({ kind: 'grant' }) !== 'Credit added' || ledgerKind({ kind: 'weird' }) !== 'weird' || ledgerKind({ kind: 'weird', label: 'Weird' }) !== 'Weird') throw new Error('kinds');
     // newer servers send the pieces as fields
-    const f = ledgerText({ kind: 'usage', label: 'Clean & polish', product: 'clean', minutes: 0.2, displayName: 'noisy.wav', description: 'denoise: noisy.flac (0.2 min)' });
-    if (f !== 'Clean & polish: noisy.wav (0.2 min)') throw new Error(f);
+    const f = ledgerText({ kind: 'usage', label: 'Denoising', product: 'clean', minutes: 0.2, displayName: 'noisy.wav', description: 'denoise: noisy.flac (0.2 min)' });
+    if (f !== 'Denoising: noisy.wav (0.2 min)') throw new Error(f);
     if (ledgerText({ kind: 'usage', label: 'Live noise removal + Live captions', product: 'live', minutes: 3 }) !== 'Live noise removal + Live captions (3 min)') throw new Error('live fields');
     return 'ok';
   });
@@ -183,13 +183,33 @@ if (want('jobs') || want('billing') || want('files')) {
       await openApp(page);
       await page.getByTestId('job').first().waitFor();
       const lines = await page.locator('[data-testid=job] p[role=status]').allInnerTexts();
-      const all = (await page.locator('[data-testid=job]').allInnerTexts()).join('\n');
+      // the step lines only: a card's own title ("Denoising" is the product's name now) is not a raw step
+      const all = lines.join('\n');
       if (/premium|cloud asr|denoising|some brand new/i.test(all)) throw new Error('raw step shown: ' + all.slice(0, 400));
       const want = ['Writing the transcript · 85%', 'Writing the transcript · 40%', 'Cleaning the sound · 41%', 'Cleaning the sound · 12%', 'Just a moment…', '7% done'];
       for (const w of want) if (!lines.some((l) => l.trim() === w)) throw new Error(`missing "${w}" in ${JSON.stringify(lines)}`);
       const doubled = (await page.locator('[data-testid=job]').nth(4).innerText()).match(/Working on it/g)?.length || 0;
       if (doubled > 1) throw new Error('"Working on it" shown ' + doubled + ' times');
       return lines.map((l) => l.trim()).join(' | ');
+    });
+
+    await check('job cards name the work with the server\'s label (Voice rebuild + Leveling, Leveling) and fall back to Denoising; the Leveling step is shown in plain words', async () => {
+      await page.unroute('**/api/jobs');
+      const list = [
+        job('k1', { label: 'Voice rebuild + Leveling', status: 'queued' }),
+        job('k2', { label: 'Leveling', status: 'queued' }),
+        job('k3', { status: 'queued' }),
+        job('k4', { label: 'Denoising + Leveling', stage: 'Leveling', progress: 97 }),
+      ];
+      await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list } }) : r.continue()));
+      await openApp(page);
+      await page.getByTestId('job').first().waitFor();
+      const cards = await page.locator('[data-testid=job]').allInnerTexts();
+      const sub = (i) => (cards[i].match(/^(Voice rebuild \+ Leveling|Leveling|Denoising(?: \+ Leveling)?) · /m) || [])[1];
+      if (sub(0) !== 'Voice rebuild + Leveling' || sub(1) !== 'Leveling' || sub(2) !== 'Denoising' || sub(3) !== 'Denoising + Leveling') throw new Error(JSON.stringify(cards));
+      const lines = await page.locator('[data-testid=job] p[role=status]').allInnerTexts();
+      if (!lines.some((l) => l.trim() === 'Leveling the voice · 97%')) throw new Error(JSON.stringify(lines));
+      return cards.map((c) => c.split('\n').find((l) => / · /.test(l))).join(' | ');
     });
 
     await check('the job list shows the file as the visitor chose it (displayName), not the compressed upload name', async () => {
@@ -279,7 +299,7 @@ if (want('jobs') || want('billing') || want('files')) {
       await page.goto(`${BASE}/app/billing`);
       await page.getByTestId('ledger').waitFor();
       const first = await page.locator('[data-testid=ledger] tbody tr').first().innerText();
-      if (!/Clean & polish and subtitles: noisy\.flac \(0\.2 min\)/.test(first) || /denoise|usage/i.test(first)) throw new Error(first);
+      if (!/Denoising and subtitles: noisy\.flac \(0\.2 min\)/.test(first) || /denoise|usage/i.test(first)) throw new Error(first);
       const second = await page.locator('[data-testid=ledger] tbody tr').nth(1).innerText();
       if (!/Credit added/.test(second) || /grant/.test(second)) throw new Error(second);
       if (await page.getByText('Showing your 100 most recent entries.').count()) throw new Error('hint shown although the server said there is nothing older');
@@ -339,7 +359,7 @@ if (want('jobs') || want('billing') || want('files')) {
       await page.goto(`${BASE}/app`);
       await page.getByTestId('available').waitFor();
       await dropFile(page, join(FILES, 'noisy.wav'));
-      await pick(page, 'noise', 'polish');
+      await pick(page, 'noise', 'denoise');
       await page.getByText('couldn’t load the prices').waitFor({ timeout: 5000 });
       if (!(await page.getByRole('button', { name: 'Try again' }).count())) throw new Error('no retry button');
       if (await page.getByTestId('start').isEnabled()) throw new Error('Start is enabled without a price');

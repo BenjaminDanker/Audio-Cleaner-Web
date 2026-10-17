@@ -199,24 +199,30 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
         span = 85 - start
         rebuild = spec.get("denoise_tier") == "rebuild"
+        leveling_only = spec.get("denoise_tier") == "off"  # Leveling on its own: no noise removal
         # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
         # time estimate on it; clean_audio then uses the same choice.
-        profile = opts.get("noise", "auto") if rebuild else pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"))
-        emit(stage="Cleaning", progress=start + 2, **({} if rebuild else {"noise": profile}))
+        if rebuild or leveling_only:
+            profile = opts.get("noise", "auto")
+        else:
+            profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"))
+        emit(stage="Leveling" if leveling_only else "Cleaning", progress=start + 2,
+             **({} if rebuild or leveling_only else {"noise": profile}))
         used: dict = {}
         y = pipeline.clean_audio(
             x, spec["lib_path"], spec["dfn_model"],
             pipeline.CleanOptions(
                 atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
                 loudness_lufs=opts.get("loudness_lufs", -16.0),
-                polish=bool(opts.get("polish", True)),
+                leveling=bool(opts.get("leveling", True)),
                 restore_highs=bool(opts.get("restore_highs", True)),
                 noise=profile,
                 restore_voice=rebuild,
+                denoise=not leveling_only,
                 device=spec.get("clean_device", "cpu"),
             ),
             threads=threads,
-            progress=lambda f: emit(stage="Cleaning" if f < 0.95 else "Polishing", progress=int(start + 2 + span * f)),
+            progress=lambda f: emit(stage="Cleaning" if f < 0.95 else "Leveling", progress=int(start + 2 + span * f)),
             out=pipeline.output_buffer(x, job_dir),
             heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
             bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",

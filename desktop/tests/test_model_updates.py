@@ -292,16 +292,19 @@ def test_a_source_checkout_uses_the_newest_release():
     assert config.MODELS_URL == config.LATEST_URL
 
 
-def test_every_download_of_the_catalog_is_a_file_of_the_release():
-    for m in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
+def test_every_download_of_the_catalog_is_a_file_of_the_release_but_the_speech_model():
+    for m in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
         urls = [m.archive.url] if m.archive is not None else [f.url for f in m.files]
         for url in urls:
             assert url.startswith(config.MODELS_URL) and "/" not in url[len(config.MODELS_URL):], url
     assert resources.MODELS_ARCHIVE.url == config.MODELS_URL + "AudioCleaner-models-v2.zip"
-    # the speech model's files are named "whisper-<file>" in the release (release_models.py publishes them so)
-    assert [f.url for f in resources.SPEECH_MODEL.files] == [config.MODELS_URL + "whisper-" + f.path for f in resources.SPEECH_MODEL.files]
+    # the speech model comes from Hugging Face, every file pinned to one commit (the releases do not carry it)
+    hf = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/"
+    assert resources.SPEECH_MODEL.archive is None
+    assert [f.url for f in resources.SPEECH_MODEL.files] == [hf + f.path for f in resources.SPEECH_MODEL.files]
+    assert not any(f.url.startswith(config.MODELS_URL) for f in resources.SPEECH_MODEL.files)
     names = [u.rsplit("/", 1)[1] for u in [resources.MODELS_ARCHIVE.url, *(f.url for f in resources.SPEECH_MODEL.files)]]
-    assert len(set(names)) == len(names)  # one release holds them all: no two with the same name
+    assert len(set(names)) == len(names)
 
 
 def test_the_installers_and_the_release_use_the_same_addresses():
@@ -318,12 +321,13 @@ def test_the_installers_and_the_release_use_the_same_addresses():
     for f in resources.SPEECH_MODEL.files:
         assert f.url in windows and f.url in mac
     # what the installers download is exactly what the release job puts into the release
-    published = {name for name, *_ in release_models.whisper_files()} | {archive.name}
+    # (the release job puts the models archive into the release, nothing else; the speech model's files come from Hugging Face)
     urls = {u.rstrip(":.,") for u in re.findall(r"https://[^\s'\"]+", windows + mac)}  # (a log line ends one with ":")
-    assert {u for u in urls if not u.startswith(config.MODELS_URL)} == set()
-    assert {u[len(config.MODELS_URL):] for u in urls} == published
+    own = {u for u in urls if u.startswith(config.MODELS_URL)}
+    assert {u[len(config.MODELS_URL):] for u in own} == {archive.name}
+    assert urls - own == {f.url for f in resources.SPEECH_MODEL.files}
     for text in (windows, mac, installer_models.render_mac_preinstall()):
-        assert "huggingface" not in text and "mc-multi-world" not in text and "api/downloads" not in text
+        assert "mc-multi-world" not in text and "api/downloads" not in text
 
 
 def _private_repository_pattern() -> str | None:

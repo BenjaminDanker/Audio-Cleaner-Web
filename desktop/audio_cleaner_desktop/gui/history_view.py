@@ -48,8 +48,8 @@ def describe_settings(s: dict, has_video: bool) -> str:
         parts.append("speaker echo removed")
     if s.get("restore_highs") is False:
         parts.append("highs not restored")
-    if s.get("polish", True):
-        parts.append("polished (" + LOUDNESS_SHORT.get(s.get("loudness"), "podcast") + ")")
+    if s.get("leveling", True):
+        parts.append("leveled (" + LOUDNESS_SHORT.get(s.get("loudness"), "podcast") + ")")
     if not has_video and s.get("audio_format", "same") != "same":
         parts.append(FORMAT_LABELS[s["audio_format"]])
     if s.get("video_size", "same") != "same":
@@ -61,7 +61,7 @@ def describe_settings(s: dict, has_video: bool) -> str:
 
 def settings_dict(options: engine.JobOptions) -> dict:
     return {
-        "strength": options.strength, "polish": options.polish, "loudness": options.loudness,
+        "strength": options.strength, "leveling": options.leveling, "loudness": options.loudness,
         "audio_format": options.audio_format, "subtitles": options.subtitles, "language": options.language,
         "noise": options.noise, "echo_track": options.echo_track, "restore_highs": options.restore_highs,
         "rebuild_voice": options.rebuild_voice, "auto_rebuild": options.auto_rebuild, "video_size": options.video_size,

@@ -175,7 +175,7 @@ if (want('billing')) {
     await page.goto(`${BASE}/app`);
     await page.waitForSelector('[data-testid=available]');
     await dropFile(page, join(FILES, 'noisy.wav'));
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     const est = await page.getByTestId('estimate').innerText();
     if (!/Billed per second of audio, no minimum charge\./.test(est)) throw new Error(est);
     const m = /Estimated cost: \$([0-9.]+)/.exec(est);
@@ -388,7 +388,7 @@ if (want('flac')) {
       await page.waitForSelector('[data-testid=available]');
       await page.evaluate(() => { window.__puts.length = 0; });
       await dropFile(page, join(FILES, file));
-      await pick(page, 'noise', 'polish');
+      await pick(page, 'noise', 'denoise');
       await page.getByTestId('estimate').waitFor();
       await page.getByRole('button', { name: /^Start – about/ }).click();
       const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });
@@ -424,7 +424,7 @@ if (want('flac')) {
     await page.waitForSelector('[data-testid=available]');
     await page.evaluate(() => { window.__puts.length = 0; });
     await dropFile(page, join(FILES, 'noisy.mp3'));
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await page.getByTestId('estimate').waitFor();
     await page.getByRole('button', { name: /^Start – about/ }).click();
     const banner = await page.getByTestId('submitted').innerText({ timeout: 90000 });

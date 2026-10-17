@@ -162,8 +162,8 @@ def test_estimate_is_the_price_creating_the_job_would_hold(client, signed_in, gp
 def test_estimate_lists_the_parts_and_creates_nothing(client, signed_in):
     uid, h = signed_in
     e = est(client, h, kind="denoise_transcribe", transcribeTier="local", options={"translate": ["es", "de"]}).json()
-    assert [x["item"] for x in e["lines"]] == ["denoise", "transcribe", "translate"]
-    assert e["lines"][2]["quantity"] == 2 and e["estCostUsd"] == e["estCostMicros"] / 1e6
+    assert [x["item"] for x in e["lines"]] == ["denoise", "leveling", "transcribe", "translate"]
+    assert e["lines"][3]["quantity"] == 2 and e["estCostUsd"] == e["estCostMicros"] / 1e6
     assert e["maxSeconds"] == 4 * 3600 and e["options"]["translate"] == ["es", "de"]
     assert e["availableMicros"] == 0 and e["affordable"] is False
     assert count("jobs") == 0 and count("holds") == 0 and ledger.balance(uid)["held_micros"] == 0

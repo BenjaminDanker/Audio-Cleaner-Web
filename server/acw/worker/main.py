@@ -382,7 +382,8 @@ def _job_cost(job: dict, params: dict, seconds: float) -> int:
     # Translations: what was asked for until the job is done, then only the languages that were made.
     asked = params.get("options", {}).get("translate") or []
     made = params.get("translated", asked)
-    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"), len(made))
+    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"), len(made),
+                                   "leveling" in (params.get("rates") or {}))
 
 
 def _reprice(job: dict, duration: float) -> None:
@@ -442,7 +443,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
         if job["hold_id"]:
             cost = ledger.capture_hold(
                 job["hold_id"], _job_cost(job, params, duration),
-                f"{jobs.job_label(job['kind'], params['denoise_tier'], params['transcribe_tier'])}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
+                f"{jobs.job_label(job['kind'], params['denoise_tier'], params['transcribe_tier'], 'leveling' in (params.get('rates') or {}))}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
     metrics.job_ended(job["id"])

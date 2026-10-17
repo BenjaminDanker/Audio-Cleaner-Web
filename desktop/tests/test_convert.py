@@ -143,7 +143,7 @@ def test_sound_to_every_sound_type_by_its_ending(clip_wav, tmp_path, quick_clean
 
 @pytest.mark.native
 def test_the_whole_pipeline_with_a_chosen_name(clip_wav, tmp_path):
-    result = engine.process(clip_wav, engine.JobOptions(polish=False), out_dir=tmp_path, output_name="clean voice.mp3")
+    result = engine.process(clip_wav, engine.JobOptions(leveling=False), out_dir=tmp_path, output_name="clean voice.mp3")
     assert result.output.name == "clean voice.mp3" and stream_facts(result.output, "audio")[0]["codec_name"] == "mp3"
     assert length(result.output) == pytest.approx(3.0, abs=0.3)
 

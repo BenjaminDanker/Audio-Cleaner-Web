@@ -59,7 +59,7 @@ export function findRate(pricing, product, tier) {
 }
 
 /** Cost estimate in micros, mirrors server/acw/billing/pricing.py (per started second of audio, no minimum charge). */
-export function estimateMicros(pricing, { kind, denoiseTier = 'standard', transcribeTier = 'standard', seconds, translate = 0 }) {
+export function estimateMicros(pricing, { kind, denoiseTier = 'standard', transcribeTier = 'standard', seconds, translate = 0, leveling = false }) {
   if (!pricing || !seconds) return null;
   const secs = Math.max(0, Math.ceil(seconds));
   const cost = (product, tier) => {
@@ -68,7 +68,10 @@ export function estimateMicros(pricing, { kind, denoiseTier = 'standard', transc
     return Math.ceil((Math.round(r.usdPerMinute * 1e6) * secs) / 60);
   };
   let total = 0;
-  if (kind === 'denoise' || kind === 'denoise_transcribe') total += cost('denoise', denoiseTier);
+  if (kind === 'denoise' || kind === 'denoise_transcribe') {
+    if (denoiseTier !== 'off') total += cost('denoise', denoiseTier); // 'off': Leveling on its own
+    if (leveling) total += cost('leveling', 'standard');
+  }
   if (kind === 'transcribe' || kind === 'denoise_transcribe') {
     total += cost('transcribe', transcribeTier === 'premium' ? 'premium' : 'local');
     total += translate * cost('transcribe_translate', 'standard'); // per extra language

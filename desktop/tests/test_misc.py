@@ -40,14 +40,14 @@ def test_folders_are_searched_recursively(tmp_path):
 def test_preferences_round_trip_and_ignore_bad_values(tmp_path):
     store = QSettings(str(tmp_path / "p.ini"), QSettings.Format.IniFormat)
     prefs = Preferences(store)
-    assert (prefs.strength, prefs.polish, prefs.loudness, prefs.subtitles, prefs.parallel) == ("max", True, "podcast", "off", 0)
-    prefs.strength, prefs.polish, prefs.subtitles, prefs.parallel = "gentle", False, "embed", 3
+    assert (prefs.strength, prefs.leveling, prefs.loudness, prefs.subtitles, prefs.parallel) == ("max", True, "podcast", "off", 0)
+    prefs.strength, prefs.leveling, prefs.subtitles, prefs.parallel = "gentle", False, "embed", 3
     prefs.output_mode, prefs.output_folder = "folder", str(tmp_path)
     store.sync()
     again = Preferences(QSettings(str(tmp_path / "p.ini"), QSettings.Format.IniFormat))
-    assert (again.strength, again.polish, again.subtitles, again.parallel) == ("gentle", False, "embed", 3)
+    assert (again.strength, again.leveling, again.subtitles, again.parallel) == ("gentle", False, "embed", 3)
     assert again.output_dir() == Path(tmp_path)
-    assert again.job_options().subtitles == "embed" and again.job_options().polish is False
+    assert again.job_options().subtitles == "embed" and again.job_options().leveling is False
     store.setValue("strength", "bogus")
     store.setValue("parallel", "99")
     assert (again.strength, again.parallel) == ("max", 0)
@@ -76,9 +76,9 @@ def test_history_store(tmp_path):
 def test_history_wording():
     assert format_hours(0) == "0 min" and format_hours(1800) == "30 min" and format_hours(5400) == "1.5 h"
     assert format_spent(30) == "< 1 min" and format_spent(125 * 60) == "2 h 05 min"
-    text = describe_settings({"strength": "gentle", "polish": True, "loudness": "youtube", "subtitles": "srt"}, False)
-    assert text == "Gentle noise reduction, polished (YouTube), subtitles: srt file"
-    assert "polished" not in describe_settings({"strength": "max", "polish": False}, True)
+    text = describe_settings({"strength": "gentle", "leveling": True, "loudness": "youtube", "subtitles": "srt"}, False)
+    assert text == "Gentle noise reduction, leveled (YouTube), subtitles: srt file"
+    assert "leveled" not in describe_settings({"strength": "max", "leveling": False}, True)
 
 
 def test_automatic_best_settings_are_on_by_default_and_keep_the_manual_choices(tmp_path):
@@ -104,17 +104,17 @@ def test_automatic_best_settings_are_on_by_default_and_keep_the_manual_choices(t
 
 
 def test_history_says_which_strength_was_picked():
-    auto = {"strength": "auto", "noise": "auto", "polish": False}
+    auto = {"strength": "auto", "noise": "auto", "leveling": False}
     assert describe_settings({**auto, "picked_strength": "balanced"}, False) == "Balanced noise reduction (picked for this file)"
     assert describe_settings({**auto, "picked_strength": "max"}, False) == "Maximum noise reduction (picked for this file)"
     assert describe_settings(auto, False) == "noise reduction picked for the file"  # e.g. a run that failed
     assert describe_settings({**auto, "picked_strength": "bogus"}, False) == "noise reduction picked for the file"
     # a strength chosen by hand is what is shown, whatever else is stored
-    assert describe_settings({"strength": "gentle", "polish": False, "picked_strength": "max"}, False) == "Gentle noise reduction"
+    assert describe_settings({"strength": "gentle", "leveling": False, "picked_strength": "max"}, False) == "Gentle noise reduction"
     assert describe_settings({**auto, "rebuild_voice": True, "picked_strength": "max"}, False) == "voice rebuilt"
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "echoey"}, False) == "voice rebuilt (it sounded echoey)"
-    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "muffled", "polish": True, "loudness": "youtube"},
-                             False) == "voice rebuilt (it sounded muffled), polished (YouTube)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "muffled", "leveling": True, "loudness": "youtube"},
+                             False) == "voice rebuilt (it sounded muffled), leveled (YouTube)"
 
 
 def test_history_keeps_the_automatic_choices():

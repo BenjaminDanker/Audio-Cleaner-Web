@@ -1,6 +1,6 @@
-"""packaging/release_models.py: the models every release carries (the speech model's pinned files, the models archive
-carried over from the newest release that has it), gathered with every file checked, and the --check of the
-model-urls job. No real network: a fake GitHub API and a fake storage host on local ports, over TLS with a throwaway
+"""packaging/release_models.py: the models archive every release carries (carried over from the newest release that has
+it), gathered with the pinned size and SHA-256 checked, and the --check of the model-urls job (which also looks for the
+speech model's pinned files on Hugging Face: the app downloads those from there, they are not in the releases). No real network: a fake GitHub API and a fake storage host on local ports, over TLS with a throwaway
 certificate (the asset download refuses anything but https), and fakes for HEAD."""
 from __future__ import annotations
 
@@ -277,7 +277,7 @@ class _Host(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture
 def hosts(tmp_path, monkeypatch):
-    """Two https hosts: "api" on 127.0.0.1 (GitHub's API and Hugging Face) and "storage" on localhost (where GitHub
+    """Two https hosts: "api" on 127.0.0.1 (GitHub's API) and "storage" on localhost (where GitHub
     redirects asset downloads). The client trusts only the throwaway certificate."""
     cert, key = _certificate(tmp_path)
     server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -295,7 +295,6 @@ def hosts(tmp_path, monkeypatch):
     client_ctx = ssl.create_default_context(cafile=str(cert))
     monkeypatch.setattr(models, "_ssl_context", lambda: client_ctx)
     monkeypatch.setattr(release_models, "API", urls["api"])
-    monkeypatch.setattr(release_models, "WHISPER_SOURCE", urls["api"] + "/hf/resolve/abc/")
     # urlopen in _api has no context argument: give it one that trusts the certificate, as the system store would
     real_urlopen = urllib.request.urlopen
     monkeypatch.setattr(release_models.urllib.request, "urlopen", lambda req, timeout=None: real_urlopen(req, timeout=timeout, context=client_ctx))
@@ -305,6 +304,7 @@ def hosts(tmp_path, monkeypatch):
         httpd.server_close()
 
 
+HF = "https://huggingface.co/someone/some-model/resolve/" + "0" * 40 + "/"
 SPEECH = {"model.bin": b"weights " * 5000, "config.json": b'{"x": 1}'}
 ARCHIVE = b"PK zip of the models " * 3000
 
@@ -312,7 +312,7 @@ ARCHIVE = b"PK zip of the models " * 3000
 @pytest.fixture
 def catalog(monkeypatch):
     """A small speech model and models archive in place of the real (2.5 GB) ones."""
-    files = tuple(models.ModelFile(n, config.MODELS_URL + "whisper-" + n, len(d), hashlib.sha256(d).hexdigest()) for n, d in SPEECH.items())
+    files = tuple(models.ModelFile(n, HF + n, len(d), hashlib.sha256(d).hexdigest()) for n, d in SPEECH.items())
     monkeypatch.setattr(resources, "SPEECH_MODEL", models.SpeechModel("whisper-test", "t", "t", "MIT", files))
     archive = models.ModelArchive("AudioCleaner-models-v2.zip", config.MODELS_URL + "AudioCleaner-models-v2.zip",
                                   len(ARCHIVE), hashlib.sha256(ARCHIVE).hexdigest())
@@ -320,31 +320,27 @@ def catalog(monkeypatch):
     return archive
 
 
-def _publish(hosts, *, archive: bytes = ARCHIVE, speech: dict | None = None, storage: str | None = None) -> None:
+def _publish(hosts, *, archive: bytes = ARCHIVE, storage: str | None = None) -> None:
     r = hosts["routes"]
-    for name, data in (speech or SPEECH).items():
-        r[f"/hf/resolve/abc/{name}"] = (200, {}, data)
     listing = [_release("v2.0.41"), _release("v2.0.40", _asset(77, size=len(ARCHIVE)))]
     r[f"/repos/{PUBLIC}/releases?per_page=100&page=1"] = (200, {"Content-Type": "application/json"}, json.dumps(listing).encode())
     r[f"/repos/{PUBLIC}/releases/assets/77"] = (302, {"Location": (storage or hosts["storage"]) + "/blob/77?sig=1"}, b"")
     r["/blob/77?sig=1"] = (200, {}, archive)
 
 
-def test_gather_downloads_and_checks_every_file(hosts, catalog, tmp_path):
+def test_gather_downloads_and_checks_the_models_archive_only(hosts, catalog, tmp_path):
     _publish(hosts)
     out = tmp_path / "release" / "models"
     names = release_models.gather(out)
-    assert names == ["whisper-model.bin", "whisper-config.json", "AudioCleaner-models-v2.zip"]
-    assert sorted(p.name for p in out.iterdir()) == sorted(names)  # nothing else (no .part left)
-    for n, d in SPEECH.items():
-        assert (out / f"whisper-{n}").read_bytes() == d
+    assert names == ["AudioCleaner-models-v2.zip"]  # the speech model is not in the release
+    assert sorted(p.name for p in out.iterdir()) == names  # nothing else (no whisper-* files, no .part left)
     assert (out / "AudioCleaner-models-v2.zip").read_bytes() == ARCHIVE
     log = hosts["log"]
     asset = [e for e in log if e[1].endswith("/releases/assets/77")]
     assert asset == [("api", f"/repos/{PUBLIC}/releases/assets/77", "Bearer tok-public", "application/octet-stream")]
     blob = [e for e in log if e[1].startswith("/blob/")]
     assert len(blob) == 1 and blob[0][0] == "storage" and blob[0][2] is None  # the token never reaches the storage host
-    assert all(e[2] is None for e in log if e[1].startswith("/hf/"))  # nor Hugging Face
+    assert not [e for e in log if "/hf/" in e[1] or "whisper" in e[1]]  # nothing is fetched from Hugging Face
     assert [e[2] for e in log if "/releases?" in e[1]] == ["Bearer tok-public"]
 
 
@@ -364,15 +360,6 @@ def test_an_archive_of_another_size_is_refused(hosts, catalog, tmp_path):
     assert not (out / "AudioCleaner-models-v2.zip").exists() and not list(out.glob("*.part"))
 
 
-def test_a_speech_model_file_that_is_not_the_pinned_one_is_refused(hosts, catalog, tmp_path):
-    _publish(hosts, speech={**SPEECH, "model.bin": b"W" * len(SPEECH["model.bin"])})
-    out = tmp_path / "models"
-    with pytest.raises(models.DownloadError):
-        release_models.gather(out)
-    assert not (out / "whisper-model.bin").exists() and not list(out.glob("*.part"))
-    assert not [e for e in hosts["log"] if "/releases" in e[1]]  # it stopped before the archive
-
-
 def test_a_redirect_to_plain_http_is_refused(hosts, catalog, tmp_path):
     _publish(hosts, storage=hosts["storage"].replace("https://", "http://"))
     out = tmp_path / "models"
@@ -385,23 +372,23 @@ def test_a_redirect_to_plain_http_is_refused(hosts, catalog, tmp_path):
 def test_the_main_command_prints_the_files(hosts, catalog, tmp_path, capsys):
     _publish(hosts)
     assert release_models.main([str(tmp_path / "m")]) == 0
-    assert capsys.readouterr().out.split() == ["whisper-model.bin", "whisper-config.json", "AudioCleaner-models-v2.zip"]
+    assert capsys.readouterr().out.split() == ["AudioCleaner-models-v2.zip"]
 
 
 # ---- what the release carries is what the app downloads ------------------------------------------------------------------
-def test_the_speech_model_files_are_the_pinned_ones_under_the_names_the_app_asks_for():
-    assert release_models.WHISPER_SOURCE.startswith("https://huggingface.co/")
-    commit = release_models.WHISPER_SOURCE.rstrip("/").rsplit("/", 1)[1]
-    assert len(commit) == 40 and int(commit, 16) >= 0  # a pinned commit, not a branch
-    found = release_models.whisper_files()
-    assert [(n, size, sha) for n, _, size, sha in found] == [
-        ("whisper-" + f.path, f.size, f.sha256) for f in resources.SPEECH_MODEL.files]
-    assert [url for _, url, _, _ in found] == [release_models.WHISPER_SOURCE + f.path for f in resources.SPEECH_MODEL.files]
-    # each name in the release is the last part of the address the app and the installers download it from
-    assert [n for n, *_ in found] == [f.url.rsplit("/", 1)[1] for f in resources.SPEECH_MODEL.files]
-    assert all(f.size < 2 * 1024**3 for f in resources.SPEECH_MODEL.files)  # GitHub's limit per release file
+def test_the_speech_model_comes_from_hugging_face_and_the_release_only_carries_the_models_archive():
+    # not published in the releases any more: no gathering of its files, no pinned source in the packaging script
+    assert not hasattr(release_models, "WHISPER_SOURCE") and not hasattr(release_models, "whisper_files")
+    assert not hasattr(release_models, "WHISPER_PREFIX")
+    prefix = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/"
+    for f in resources.SPEECH_MODEL.files:
+        assert f.url.startswith(prefix) and f.url.endswith("/" + f.path)
+        commit = f.url[len(prefix):].split("/", 1)[0]
+        assert len(commit) == 40 and int(commit, 16) >= 0  # a pinned commit, not a branch
+        assert not f.url.startswith(config.MODELS_URL) and f.size > 0 and len(f.sha256) == 64
+    assert len({f.url.rsplit("/", 1)[0] for f in resources.SPEECH_MODEL.files}) == 1  # one commit for all of them
     assert resources.MODELS_ARCHIVE.url.rsplit("/", 1)[1] == resources.MODELS_ARCHIVE.name
-    assert resources.MODELS_ARCHIVE.size < 2 * 1024**3
+    assert resources.MODELS_ARCHIVE.size < 2 * 1024**3  # GitHub's limit per release file
 
 
 # ---- --check: HEAD sizes of the speech model's files, and find_archive ---------------------------------------------------
@@ -436,7 +423,7 @@ def test_remote_size_follows_redirects_by_hand():
 @pytest.fixture
 def heads(monkeypatch):
     """Every pinned speech model file answers HEAD with its pinned size (change `answers` to break one)."""
-    answers = {url: (200, {"content-length": str(size)}) for _, url, size, _ in release_models.whisper_files()}
+    answers = {f.url: (200, {"content-length": str(f.size)}) for f in resources.SPEECH_MODEL.files}
     seen = []
 
     def head(url):
@@ -465,7 +452,7 @@ def test_check_names_every_problem(heads, api, capsys):
     api({PUBLIC: [[]], OWN: [[]]})
     found = release_models.check()
     assert len(found) == 3
-    assert found[0].startswith("whisper-") and first in found[0] and "5 bytes there" in found[0] and "pinned" in found[0]
+    assert found[0].startswith(first) and "5 bytes there" in found[0] and "pinned" in found[0]
     assert second in found[1] and "HTTP 404" in found[1]
     assert resources.MODELS_ARCHIVE.name in found[2] and "upload it once" in found[2]
     assert release_models.main(["--check"]) == 1
@@ -495,7 +482,7 @@ def test_the_release_job_s_checkout_is_enough_and_needs_only_the_standard_librar
             "import os\n"
             "sys.path.insert(0, os.path.dirname(sys.argv[0]))\n"
             "import release_models\n"
-            "print(len(release_models.whisper_files()), release_models.resources.MODELS_ARCHIVE.name)\n"
+            "print(len(release_models.resources.SPEECH_MODEL.files), release_models.resources.MODELS_ARCHIVE.name)\n"
             "sys.exit(release_models.main([]))\n")
     script = tmp_path / "desktop" / "packaging" / "release_models.py"
     env = {k: v for k, v in os.environ.items() if k not in ENV and not k.startswith("PYTHON")}

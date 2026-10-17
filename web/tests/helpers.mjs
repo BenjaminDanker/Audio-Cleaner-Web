@@ -58,7 +58,7 @@ export async function check(name, fn) {
 export const summary = () => results;
 
 // ---- the Cleanup page's options (drop a file, then pick what to do) ----
-/** Click one of the option cards: group 'noise' (off | browser | polish) or 'subs' (off | browser | standard | accurate). */
+/** Click one of the option cards: group 'noise' (off | browser | denoise) or 'subs' (off | browser | standard | accurate). */
 export async function pick(page, group, value) {
   await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
 }
@@ -68,11 +68,11 @@ export async function settleRecommendation(page) {
 }
 /**
  * Puts the options back to what they were before files were measured: the free in-browser cleanup when the browser can do it (else
- * Clean & polish), Maximum strength, no rebuild. The checks that are about something else than the recommendation start from there.
+ * Denoising), Maximum strength, no rebuild. The checks that are about something else than the recommendation start from there.
  */
 export async function restoreOldDefaults(page) {
   const card = (v) => page.locator(`label.choice:has(input[name=noise][value=${v}]):not(.is-disabled)`);
-  const want = (await card('browser').count()) ? 'browser' : 'polish';
+  const want = (await card('browser').count()) ? 'browser' : 'denoise';
   if (!(await page.locator(`input[name=noise][value=${want}]`).isChecked())) await card(want).click();
   const max = page.locator(`input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max]`);
   if ((await max.count()) && !(await max.isChecked())) await page.locator(`label:has(input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max])`).click();

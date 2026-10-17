@@ -150,11 +150,14 @@ def test_a_release_build_and_its_installers_download_from_that_version_s_release
     assert built["released"] is True and built["releases"] == "someone/Trial-Repo" and built["version"] == v
     assert built["models_url"] == own
     assert built["archive"] == own + "AudioCleaner-models-v2.zip"
-    assert built["speech"] and all(u.startswith(own + "whisper-") for u in built["speech"])
+    hf = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/"
+    assert built["speech"] and all(u.startswith(hf) for u in built["speech"])  # Hugging Face, whatever the release is
     # updates: the newest release's signed update.json (its installer then comes from that version's release)
     assert built["manifest"] == "https://github.com/someone/Trial-Repo/releases/latest/download/update.json"
     for text in (built["windows"], built["mac"]):
         urls = {u.rstrip(":.,") for u in re.findall(r"https://[^\s'\"]+", text)}
-        assert urls and all(u.startswith(own) for u in urls), urls  # setup downloads from this version's release only
+        # setup downloads the models archive from this version's release, the speech model from Hugging Face; nothing else
+        assert urls and {u for u in urls if not u.startswith(own)} == set(built["speech"]), urls
+        assert {u for u in urls if u.startswith(own)} == {built["archive"]}
         assert built["archive"] in text and all(u in text for u in built["speech"])
-        assert "latest" not in text and "huggingface" not in text
+        assert "latest" not in text

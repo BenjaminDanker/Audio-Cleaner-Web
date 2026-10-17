@@ -1,7 +1,7 @@
 // The Cleanup page: signed-out /app fetches nothing from /dfn/; after a file is dropped only the options that are possible
-// for it are offered (with a short reason for the others): noise removal Off | Free, in your browser | Clean & polish, and
+// for it are offered (with a short reason for the others): noise removal Off | Free, in your browser | Denoising, and
 // subtitles Off | Free, in your browser | Standard | Extra accurate. Free subtitles make no job at all (tests/subtitles.mjs
-// covers them); Clean & polish + a subtitles level sends denoise_transcribe; one Start button says what it costs; Balance and
+// covers them); Denoising + a subtitles level sends denoise_transcribe; one Start button says what it costs; Balance and
 // "Good to know" sit below "Your jobs"; /transcribe and /free no longer exist.
 // Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output, and the fixtures.
 // Usage: node tests/files.mjs
@@ -125,18 +125,18 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     const y = async (name) => (await page.getByRole('heading', { name, exact: true }).boundingBox()).y;
     const [form, jobs, bal, tips] = [await y('Add a file'), await y('Your jobs'), await y('Balance'), await y('Good to know')];
     if (!(form < jobs && jobs < bal && jobs < tips)) throw new Error(`order: form ${form}, jobs ${jobs}, balance ${bal}, tips ${tips}`);
-    if (await page.locator('main input[type=checkbox][name=polish], main input[name=text]').count()) throw new Error('the two coarse boxes are back');
+    if (await page.locator('main input[type=checkbox][name=leveling], main input[name=text]').count()) throw new Error('the two coarse boxes are back');
     if (await page.locator('input[name=noise]').count()) throw new Error('options are shown before a file is dropped');
     return `order: form < jobs < balance, tips`;
   });
 
-  await check('a file the browser can open (WAV): noise removal Off | Free, in your browser (picked) | Clean & polish; subtitles Off | Free, in your browser | Standard | Extra accurate; Start – free', async () => {
+  await check('a file the browser can open (WAV): noise removal Off | Free, in your browser (picked) | Denoising; subtitles Off | Free, in your browser | Standard | Extra accurate; Start – free', async () => {
     await choose('noisy.wav');
     const titles = async (g) => (await page.locator(`label.choice:has(input[name=${g}]) b`).allInnerTexts()).map((x) => x.replace(/\s*\u2713$/, ''));
     const n = await titles('noise'); const t = await titles('subs');
-    if (JSON.stringify(n) !== JSON.stringify(['Off', 'Free, in your browser', 'Clean & polish'])) throw new Error(JSON.stringify(n));
+    if (JSON.stringify(n) !== JSON.stringify(['Off', 'Free, in your browser', 'Denoising'])) throw new Error(JSON.stringify(n));
     if (JSON.stringify(t) !== JSON.stringify(['Off', 'Free, in your browser', 'Standard', 'Extra accurate'])) throw new Error(JSON.stringify(t));
-    for (const [g, v] of [['noise', 'off'], ['noise', 'browser'], ['noise', 'polish'], ['subs', 'browser'], ['subs', 'standard'], ['subs', 'accurate']]) if (await radio(g, v).isDisabled()) throw new Error(`${g}/${v} disabled`);
+    for (const [g, v] of [['noise', 'off'], ['noise', 'browser'], ['noise', 'denoise'], ['subs', 'browser'], ['subs', 'standard'], ['subs', 'accurate']]) if (await radio(g, v).isDisabled()) throw new Error(`${g}/${v} disabled`);
     if (!(await radio('noise', 'browser').isChecked()) || !(await radio('subs', 'off').isChecked())) throw new Error('defaults: free noise removal on, subtitles off');
     if ((await start().innerText()).trim() !== 'Start – free') throw new Error('label: ' + (await start().innerText()));
     if (!/Extra accurate[\s\S]*any language/.test(await card('subs', 'accurate').innerText())) throw new Error('"any language" missing on Extra accurate');
@@ -144,7 +144,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'ok';
   });
 
-  await check('noise strength: the same four buttons as the desktop app (Gentle, Balanced, Strong, Maximum), Maximum to start with; Clean & polish with Gentle sends 12 dB, Background noise defaults to Automatic and Heavy is sent; Live has the same four', async () => {
+  await check('noise strength: the same four buttons as the desktop app (Gentle, Balanced, Strong, Maximum), Maximum to start with; Denoising with Gentle sends 12 dB, Background noise defaults to Automatic and Heavy is sent; Live has the same four', async () => {
     const labels = async (name) => page.getByTestId(`strength-${name}`).locator('.seg span').allInnerTexts();
     const four = JSON.stringify(['Gentle', 'Balanced', 'Strong', 'Maximum']);
     if (JSON.stringify(await labels('lstrength')) !== four) throw new Error('browser: ' + JSON.stringify(await labels('lstrength')));
@@ -152,8 +152,8 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } })); // enough for the estimate; the job itself is stopped by the test
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
-    if (JSON.stringify(await labels('strength')) !== four) throw new Error('polish: ' + JSON.stringify(await labels('strength')));
+    await pick(page, 'noise', 'denoise');
+    if (JSON.stringify(await labels('strength')) !== four) throw new Error('denoise: ' + JSON.stringify(await labels('strength')));
     await page.getByTestId('strength-strength').getByText('Gentle', { exact: true }).click();
     if (!/room sound/.test(await page.getByTestId('strength-strength').innerText())) throw new Error('no hint for Gentle');
     posts.length = 0;
@@ -173,7 +173,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await withPricing((j) => ({ ...j, rebuildAvailable: true }));
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     // its own price tier; strength and Background noise do not apply then
     await page.getByRole('checkbox', { name: /Rebuild the voice/ }).check();
     if (await page.locator('#noisekind').count() || await page.getByTestId('strength-strength').count()) throw new Error('strength/noise still shown with rebuild');
@@ -207,16 +207,16 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return 'made in the browser';
   });
 
-  await check('Clean & polish + Standard: one denoise_transcribe job (paid, estimate, "about $" on Start); Free subtitles stay possible', async () => {
+  await check('Denoising + Standard: one denoise_transcribe job (paid, estimate, "about $" on Start); Free subtitles stay possible', async () => {
     await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await pick(page, 'subs', 'standard');
     const sentence = 'We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.';
     await page.getByText(sentence, { exact: true }).waitFor();
     await page.getByTestId('estimate').waitFor();
-    if (await radio('subs', 'browser').isDisabled()) throw new Error('free subtitles should work together with Clean & polish');
+    if (await radio('subs', 'browser').isDisabled()) throw new Error('free subtitles should work together with Denoising');
     const label = (await start().innerText()).trim();
     if (!/^Start – about \$0\.00\d+$/.test(label)) throw new Error('label: ' + label);
     await page.screenshot({ path: join(SHOTS, 'cleanup-both.png'), fullPage: true });
@@ -227,11 +227,11 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return label;
   });
 
-  await check('Clean & polish + free subtitles in the browser: the job is only the cleanup, and the estimate says the subtitles are free', async () => {
+  await check('Denoising + free subtitles in the browser: the job is only the cleanup, and the estimate says the subtitles are free', async () => {
     await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await pick(page, 'subs', 'standard');
     const both = await page.getByTestId('estimate').innerText();
     await pick(page, 'subs', 'browser');
@@ -246,10 +246,10 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return label;
   });
 
-  await check('Clean & polish alone sends kind denoise; Extra accurate alone sends premium (paid); nothing chosen disables Start with the reason', async () => {
+  await check('Denoising alone sends kind denoise; Extra accurate alone sends premium (paid); nothing chosen disables Start with the reason', async () => {
     await page.reload();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await start().click();
     await page.getByTestId('job-error').waitFor();
     if (posts.at(-1).kind !== 'denoise' || 'free' in posts.at(-1) || posts.at(-1).transcribeTier) throw new Error(JSON.stringify(posts.at(-1)));
@@ -263,6 +263,60 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await page.getByTestId('job-error').waitFor();
     if ('free' in posts.at(-1) || posts.at(-1).kind !== 'transcribe' || posts.at(-1).transcribeTier !== 'premium') throw new Error(JSON.stringify(posts.at(-1)));
     return 'ok';
+  });
+
+  await check('Leveling: with Denoising it is a checkbox (on by default, price in the hint, sent as options.leveling); with noise removal Off a paid "Leveling" box makes a leveling-only job (denoiseTier off) with a loudness choice, output fields and a priced estimate', async () => {
+    await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'denoise');
+    const denoiseHint = await card('noise', 'denoise').locator('small').innerText();
+    if (!/\$0\.009 a minute/.test(denoiseHint)) throw new Error('Denoising hint lacks its own price: ' + denoiseHint);
+    const box = page.locator('input[type=checkbox][name=leveling]');
+    if (!(await box.isChecked())) throw new Error('Leveling should be on by default with Denoising');
+    const lh = await page.getByTestId('leveling-hint').innerText();
+    if (!/\$0\.001 a minute/.test(lh)) throw new Error('Leveling price missing: ' + lh);
+    if (await page.locator('input[name=leveling-alone]').count()) throw new Error('the Leveling-alone box shows with Denoising');
+    const withLev = await page.getByTestId('estimate').innerText();
+    posts.length = 0;
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    if (posts.at(-1).denoiseTier !== 'standard' || posts.at(-1).options.leveling !== true) throw new Error(JSON.stringify(posts.at(-1)));
+    await box.uncheck();
+    if ((await page.getByTestId('estimate').innerText()) === withLev) throw new Error('the estimate ignores Leveling');
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    if (posts.at(-1).options.leveling !== false || posts.at(-1).denoiseTier !== 'standard') throw new Error(JSON.stringify(posts.at(-1)));
+    // noise removal Off: Leveling on its own
+    await pick(page, 'noise', 'off');
+    const alone = page.locator('input[type=checkbox][name=leveling-alone]');
+    await alone.waitFor();
+    if (await alone.isChecked()) throw new Error('Leveling alone should start off');
+    if (!/\$0\.001 a minute/.test(await page.getByTestId('leveling-alone-hint').innerText())) throw new Error('Leveling-alone price missing');
+    if (await page.locator('#loud-alone, [data-testid=output-fields]').count()) throw new Error('Leveling fields shown before the box is ticked');
+    await page.getByText(/Choose at least one thing/).waitFor();
+    if (await start().isEnabled()) throw new Error('start enabled with nothing chosen');
+    await alone.check();
+    await page.locator('#loud-alone').waitFor();
+    await page.getByTestId('output-fields').waitFor();
+    await page.locator('#loud-alone').selectOption('-14');
+    await page.getByTestId('estimate').waitFor();
+    const label = (await start().innerText()).trim();
+    if (!/^Start – about \$0\.00\d+$/.test(label)) throw new Error('label: ' + label);
+    posts.length = 0;
+    await start().click();
+    await page.getByTestId('job-error').waitFor();
+    const b = posts.at(-1);
+    if (b.kind !== 'denoise' || b.denoiseTier !== 'off' || b.options.leveling !== true || b.options.loudness_lufs !== -14 || b.transcribeTier || 'free' in b) throw new Error(JSON.stringify(b));
+    // with free subtitles made here it is still a leveling-only job on our side
+    await pick(page, 'subs', 'browser');
+    await page.getByTestId('denoise-local-subs-note').waitFor();
+    // the box is not offered once a different noise choice is picked
+    await pick(page, 'noise', 'browser');
+    if (await page.locator('input[name=leveling-alone]').count()) throw new Error('the Leveling-alone box shows with the free cleanup');
+    await freshApp();
+    await choose('noisy.wav'); // the next checks continue with a WAV in the form (and the topped-up balance)
+    return `Start label ${label}`;
   });
 
   await check('Free noise removal in the browser + Standard subtitles: the job is a paid transcribe-only job (the browser part is free)', async () => {
@@ -282,7 +336,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await page.unroute('**/api/me');
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     const msg = page.locator('.banner-warn', { hasText: /your balance is/ });
     await msg.waitFor();
     if (!(await msg.getByRole('link', { name: 'Add credit' }).count())) throw new Error('no Add credit link');
@@ -290,13 +344,13 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return (await msg.innerText()).trim();
   });
 
-  await check('a file the browser cannot open at all: Free noise removal is greyed out with the reason, Clean & polish is chosen, honest "rough guess" note', async () => {
+  await check('a file the browser cannot open at all: Free noise removal is greyed out with the reason, Denoising is chosen, honest "rough guess" note', async () => {
     await freshApp();
     await choose('garbage.mp3');
     if (!(await radio('noise', 'browser').isDisabled())) throw new Error('free noise removal offered for a file the browser cannot open');
     const why = (await card('noise', 'browser').locator('small').innerText()).trim();
-    if (why !== 'Your browser can’t open this file type. Clean & polish can (paid).') throw new Error('reason: ' + why);
-    if (!(await radio('noise', 'polish').isChecked())) throw new Error('Clean & polish should be the starting choice');
+    if (why !== 'Your browser can’t open this file type. Paid Denoising can do it.') throw new Error('reason: ' + why);
+    if (!(await radio('noise', 'denoise').isChecked())) throw new Error('Denoising should be the starting choice');
     await page.getByTestId('length-unknown').waitFor({ timeout: 15000 });
     await page.screenshot({ path: join(SHOTS, 'cleanup-unreadable.png'), fullPage: true });
     return why;
@@ -327,25 +381,25 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     return hint;
   });
 
-  await check('two audio tracks (mic + desktop sound): the echo box appears only for Clean & polish; free cleanup says it cannot do it; one-track files never see it', async () => {
+  await check('two audio tracks (mic + desktop sound): the echo box appears only for Denoising; free cleanup says it cannot do it; one-track files never see it', async () => {
     await withMe((j) => ({ ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } }));
     const box = page.getByRole('checkbox', { name: /Remove speaker echo using the second audio track \(your desktop sound\)/ });
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     if (await box.count()) throw new Error('echo box offered for a one-track file');
     await page.getByRole('button', { name: 'Remove' }).click();
     for (const f of ['echo2.mp4', 'echo2.mka']) {
       await choose(f);
       if (!(await radio('noise', 'browser').isChecked())) throw new Error(`${f}: free cleanup should be the starting choice`);
       const note = (await page.getByTestId('echo-browser-note').innerText()).replace(/\s+/g, ' ');
-      if (!/second audio track[\s\S]*needs Clean & polish[\s\S]*free cleanup in your browser can.t do it/.test(note)) throw new Error('note: ' + note);
+      if (!/second audio track[\s\S]*needs Denoising[\s\S]*free cleanup in your browser can.t do it/.test(note)) throw new Error('note: ' + note);
       if (await box.count()) throw new Error(`${f}: the echo box shows for free cleanup`);
-      await pick(page, 'noise', 'polish');
+      await pick(page, 'noise', 'denoise');
       await box.waitFor();
       if (await box.isChecked()) throw new Error('echo box should start unticked');
       if (!/OBS can record your mic and your desktop audio on separate tracks/.test(await page.locator('label.check:has(input[name=echo])').innerText())) throw new Error('hint missing');
-      if (await page.getByTestId('echo-browser-note').count()) throw new Error('browser note still shown for Clean & polish');
+      if (await page.getByTestId('echo-browser-note').count()) throw new Error('browser note still shown for Denoising');
       if (f === 'echo2.mp4') await page.screenshot({ path: join(SHOTS, 'cleanup-echo.png'), fullPage: true });
       await page.getByRole('button', { name: 'Remove' }).click();
     }
@@ -358,7 +412,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     const box = page.getByRole('checkbox', { name: /Remove speaker echo/ });
     const size = (await import('node:fs')).statSync(join(FILES, 'echo2.mp4')).size;
     await choose('echo2.mp4');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await start().click();
     await page.getByTestId('job-error').waitFor();
     let b = posts.at(-1);
@@ -369,23 +423,23 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     b = posts.at(-1);
     if (b.kind !== 'denoise' || b.options.echo_reference_track !== true) throw new Error(JSON.stringify(b));
     if (!/\.mka$/.test(b.filename) || b.sizeBytes >= size) throw new Error(`upload: ${b.filename} ${b.sizeBytes} (original ${size})`);
-    await pick(page, 'noise', 'browser'); // ticked, then switched away from Clean & polish: not sent
+    await pick(page, 'noise', 'browser'); // ticked, then switched away from Denoising: not sent
     await pick(page, 'subs', 'standard');
     await start().click();
     await page.getByTestId('job-error').waitFor();
-    if (posts.at(-1).options.echo_reference_track !== false) throw new Error('echo requested without Clean & polish');
+    if (posts.at(-1).options.echo_reference_track !== false) throw new Error('echo requested without Denoising');
     await page.unroute('**/api/me');
     return `${b.filename}, ${b.sizeBytes} bytes of ${size}`;
   });
 
-  await check('WMA (the browser reads it through libav.js): its real length is shown, and Clean & polish cleans it on the server', async () => {
+  await check('WMA (the browser reads it through libav.js): its real length is shown, and Denoising cleans it on the server', async () => {
     passThrough = true;
     admin('grant', EMAIL, '5', 'files test: WMA');
     await freshApp();
     await choose('noisy.wma');
     if (await page.getByTestId('length-unknown').count()) throw new Error('length should be known');
     if (!(await radio('noise', 'browser').isChecked())) throw new Error('free noise removal should be the starting choice');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await page.getByTestId('estimate').waitFor();
     await start().click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
@@ -438,7 +492,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     admin('grant', EMAIL, '5', 'files test: echo');
     await freshApp();
     await choose('echo2.mp4');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await page.getByRole('checkbox', { name: /Remove speaker echo/ }).check();
     await start().click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
@@ -461,7 +515,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     forceEcho = true;
     await freshApp();
     await choose('noisy.wav');
-    await pick(page, 'noise', 'polish');
+    await pick(page, 'noise', 'denoise');
     await start().click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const notice = page.locator('[data-testid=job]').first().getByTestId('job-notice');

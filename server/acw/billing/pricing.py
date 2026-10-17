@@ -24,9 +24,12 @@ class Rate:
 # Labels are shown to customers: describe what they get, never how it's made.
 _RATE_LIST = [
     # File processing
-    Rate("denoise", "standard", "Clean & polish", 10_000),
-    # The voice is rebuilt (also removes room echo): ~30x the CPU of the standard tier. Placeholder price.
-    Rate("denoise", "rebuild", "Clean & polish, voice rebuilt", 30_000),
+    Rate("denoise", "standard", "Denoising", 9_000),
+    # The voice is rebuilt (also removes room echo), on the GPU only, one job at a time.
+    Rate("denoise", "rebuild", "Voice rebuild", 30_000),
+    # Leveling: evens out the voice and sets the loudness; with Denoising or Voice rebuild, or on its own ("off" noise tier).
+    # About 5 % of Denoising's CPU; Denoising + Leveling stays at the 0.60 USD an hour Denoising cost before.
+    Rate("leveling", "standard", "Leveling", 1_000),
     Rate("transcribe", "local", "Transcription", 4_000),
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Per extra language, on top of the transcription (text only goes to the speech partner; a few cents an hour).
@@ -92,12 +95,19 @@ def cost_micros(product: str, tier: str, seconds: float, micros_per_minute: int 
     return math.ceil((rate(product, tier).micros_per_minute if micros_per_minute is None else micros_per_minute) * secs / 60)
 
 
-def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, translate_languages: int = 0) -> dict[str, int]:
+# The noise tier of a job that only levels (no noise removal).
+NO_DENOISE = "off"
+
+
+def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, translate_languages: int = 0,
+              leveling: bool = False) -> dict[str, int]:
     """Micros per minute of each part of a job at today's prices. Stored with the job, so a price
     change never applies to a job that was already created. `translate` is per language."""
     out: dict[str, int] = {}
-    if kind in ("denoise", "denoise_transcribe") and denoise_tier:
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier and denoise_tier != NO_DENOISE:
         out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
+    if kind in ("denoise", "denoise_transcribe") and leveling:
+        out["leveling"] = rate("leveling", "standard").micros_per_minute
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
         out["transcribe"] = rate("transcribe", transcribe_tier).micros_per_minute
         if translate_languages:
@@ -107,14 +117,17 @@ def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, 
 
 def job_cost_micros(
     kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float, rates: dict[str, int] | None = None,
-    translate_languages: int = 0,
+    translate_languages: int = 0, leveling: bool = False,
 ) -> int:
     """`rates` (from job_rates) pins the prices; without it the current price list applies. `translate_languages`:
-    how many translations are charged (asked for when estimating, made when the job is done)."""
+    how many translations are charged (asked for when estimating, made when the job is done); `leveling`: whether Leveling
+    is (a job's charge: "leveling" in its pinned rates, so a job made before Leveling had a price never pays for it)."""
     rates = rates or {}
     total = 0
-    if kind in ("denoise", "denoise_transcribe") and denoise_tier:
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier and denoise_tier != NO_DENOISE:
         total += cost_micros("denoise", denoise_tier, seconds, rates.get("denoise"))
+    if kind in ("denoise", "denoise_transcribe") and leveling:
+        total += cost_micros("leveling", "standard", seconds, rates.get("leveling"))
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
         total += cost_micros("transcribe", transcribe_tier, seconds, rates.get("transcribe"))
         if translate_languages:
