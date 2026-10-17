@@ -170,3 +170,62 @@ def test_resolve_model_prefers_the_batched_sibling(monkeypatch, tmp_path):
     assert dpdfnet.resolve_model(tmp_path / "other.onnx") == tmp_path / "other.onnx"  # only the standard name is redirected
     monkeypatch.setenv("ACW_DPDFNET_BATCH", "0")
     assert dpdfnet.resolve_model(std) == std
+
+
+class _FakeCard(dpdfnet._Model):
+    """The batched CPU model dressed as the card: it takes up to 64 rows per call, one group at a time."""
+
+    gpu = True
+    steps: list = []
+
+    def __init__(self, path):
+        super().__init__(path)
+        assert self.batched
+        self.max_batch = dpdfnet.GPU_ROWS[-1]
+        self._lock = threading.Lock()
+
+    def exclusive(self):
+        return self._lock
+
+    def step(self, spec, state):
+        _FakeCard.steps.append(spec.shape[0])
+        return super().step(spec, state)
+
+
+def test_gpu_path_streams_all_segments_in_one_group(monkeypatch):
+    """device="cuda": same segments and same output as the CPU path, but every segment of the file in one call (the card
+    wants rows), driven from one thread."""
+    batch_file = dpdfnet.default_model_path().with_name(dpdfnet.BATCH_MODEL_FILE)
+    if not batch_file.is_file():
+        pytest.skip("batched DPDFNet model not installed")
+    clean, noisy, gate = syllables(32.0, seed=11)
+    monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
+    _FakeCard.steps.clear()
+    dpdfnet.unload()
+    kw = dict(threads=4, segment_seconds=10, overlap_seconds=1.5)
+    cpu = dpdfnet.denoise_array(noisy, **kw)
+    assert not _FakeCard.steps
+    gpu = dpdfnet.denoise_array(noisy, device="cuda", **kw)
+    dpdfnet.unload()
+    assert len(set(_FakeCard.steps)) == 1 and _FakeCard.steps[0] >= 3, _FakeCard.steps[:5]
+    assert np.abs(gpu - cpu).max() < 1e-4
+
+
+def test_gpu_path_groups_by_the_rows_the_card_takes(monkeypatch):
+    batch_file = dpdfnet.default_model_path().with_name(dpdfnet.BATCH_MODEL_FILE)
+    if not batch_file.is_file():
+        pytest.skip("batched DPDFNet model not installed")
+    clean, noisy, gate = syllables(24.0, seed=5)
+    monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
+    monkeypatch.setattr(dpdfnet, "GPU_ROWS", (2, 4))  # a card that takes four rows at most
+    _FakeCard.steps.clear()
+    dpdfnet.unload()
+    stereo = np.stack([noisy, noisy[::-1].copy()], axis=1)
+    dpdfnet.denoise_array(stereo, device="cuda", threads=4, segment_seconds=10, overlap_seconds=1.5)
+    dpdfnet.unload()
+    assert set(_FakeCard.steps) == {4, 2}, set(_FakeCard.steps)  # 2 channels x 3 segments: a full group, then the rest
+
+
+def test_unknown_device_is_refused():
+    with pytest.raises(ValueError, match="device"):
+        dpdfnet.denoise_array(np.zeros(SR, np.float32), device="tpu")
