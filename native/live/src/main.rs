@@ -41,7 +41,7 @@ pub const AEC_DELAY: usize = 432;
 
 /// Units one physical core carries with good latency in this engine (2026-10-16, Ryzen 7 1700X: see
 /// docs/operations.md), at the reference single-session model cost; other CPUs are scaled by calibrate().
-const REFERENCE_UNITS_PER_CORE: f64 = 4.05;
+const REFERENCE_UNITS_PER_CORE: f64 = 6.5; // 35 noise sessions on 5 cores at p99 10 ms, 45 fell behind (6.9 per core on the 1700X)
 const REFERENCE_FRAME_COST: f64 = 0.110;
 /// Standard caption streams per live core (each recognizer decodes ~13x real time; silence isn't decoded).
 const CAPTION_STREAMS_PER_CORE: usize = 5;
@@ -55,15 +55,23 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// What the resource broker and `python -m acw.admin capacity` show (server/acw/broker.py).
+    pub fn status(&self) -> serde_json::Value {
+        let a = self.admission.lock().unwrap();
+        serde_json::json!({
+            "type": "status", "engine": "native", "sessions": a.active, "units": a.units,
+            "capacityUnits": a.capacity(&self.host), "unitsPerCore": a.units_per_core,
+            "captionStreams": a.caption_streams, "captionCap": a.caption_cap,
+            "otherCores": self.host.other_cores(), "memoryAvailable": self.host.memory_available(),
+            "cores": a.cores.iter().enumerate().map(|(i, c)| serde_json::json!({"core": i, "cpus": c, "units": a.load_of(i)})).collect::<Vec<_>>(),
+        })
+    }
+
     /// The physical core index of live core `i` (live cores are the first ones).
     pub fn core_index(&self, i: usize) -> usize {
         i
     }
 
-    /// Keep the caption decoders on the cores that carry sessions (file jobs are moved off those).
-    pub fn repin_decoders(&self) {
-        captions::set_decoder_cpus(self.admission.lock().unwrap().busy_cpus());
-    }
 }
 
 fn env_path(key: &str, default: PathBuf) -> PathBuf {
@@ -175,7 +183,7 @@ fn main() {
         admission: Mutex::new(Admission::new(live_cores, upc, caption_cap)),
         host,
     });
-    engine.repin_decoders();
+    captions::set_live_cpus(live_cpus.clone());
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t);

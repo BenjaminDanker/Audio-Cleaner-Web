@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 
@@ -58,6 +59,8 @@ def main(argv: list[str] | None = None) -> None:
     p = sub.add_parser("stats", help="plain-text report from the database (read-only)")
     p.add_argument("--days", type=int, default=30, help="period in days (default 30)")
     sub.add_parser("activity", help="print what is running now: file jobs and live sessions")
+    p = sub.add_parser("capacity", help="the whole machine in one place: CPU per core, memory, live engines, jobs, queue")
+    p.add_argument("--json", action="store_true")
     sub.add_parser("live-count", help="print the number of live sessions running now")
     sub.add_parser("check-money", help="verify balances and holds against the ledger")
     p = sub.add_parser("verify-backup", help="check a backup file (.sqlite3.gz): integrity and ledger sums")
@@ -131,6 +134,11 @@ def main(argv: list[str] | None = None) -> None:
             "SELECT status, COUNT(*) AS n FROM jobs WHERE status IN ('uploading', 'queued', 'running', 'cloud_asr') GROUP BY status")}
         live = db.one("SELECT COUNT(*) AS n FROM stream_sessions WHERE status = 'active'")["n"]
         print("file jobs: " + (", ".join(f"{n} {s}" for s, n in sorted(rows.items())) or "none") + f"; live sessions: {live}")
+    elif a.cmd == "capacity":
+        from . import broker
+
+        sn = broker.snapshot()
+        print(json.dumps(sn, indent=1) if a.json else broker.format_snapshot(sn))
     elif a.cmd == "live-count":
         print(db.one("SELECT COUNT(*) AS n FROM stream_sessions WHERE status = 'active'")["n"])
     elif a.cmd == "check-money":

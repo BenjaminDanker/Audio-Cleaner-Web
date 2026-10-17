@@ -122,6 +122,7 @@ MSG_EVENT = b"T"
 MSG_END = b"E"
 MSG_REF = b"R"  # web -> worker: echo-reference audio for a mic frame (same payload as MSG_AUDIO)
 MSG_TAP = b"P"  # worker -> web: the echo-free original (f32, before noise removal) for extra-accurate captions
+MSG_QUERY = b"Q"  # web/admin -> worker: a status question instead of a session (answered with one MSG_EVENT)
 MSG_SILENCE = b"Z"  # web -> worker: u32 seq + u16 samples of silence (no reply): keeps the captions' clock right
 _IPC = struct.Struct("<cI")
 MAX_IPC = 4 * 1024 * 1024

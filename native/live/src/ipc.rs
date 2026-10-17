@@ -11,6 +11,7 @@ pub const MSG_END: u8 = b'E';
 pub const MSG_REF: u8 = b'R';
 pub const MSG_TAP: u8 = b'P';
 pub const MSG_SILENCE: u8 = b'Z';
+pub const MSG_QUERY: u8 = b'Q'; // a status question instead of a session: answered with one MSG_EVENT
 
 pub const MAX_IPC: usize = 4 * 1024 * 1024;
 

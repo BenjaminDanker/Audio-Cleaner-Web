@@ -224,10 +224,15 @@ impl Admission {
                 return Decision::Refuse(json!({"type": "error", "code": "full", "available": options}));
             }
         }
-        // Lowest core with room for it, else the least loaded: live stays packed on the first cores.
-        let core = (0..self.load.len())
-            .find(|&i| self.load[i] + units <= self.units_per_core)
-            .unwrap_or_else(|| (0..self.load.len()).min_by(|&a, &b| self.load[a].partial_cmp(&self.load[b]).unwrap()).unwrap_or(0));
+        // Lowest core with room for it, else the least loaded: live stays packed on the first cores. A session the
+        // broker says may not open a core (a free trial while paid jobs run) only joins cores live already uses.
+        let may_open = cfg.get("may_open_core").and_then(|v| v.as_bool()).unwrap_or(true);
+        let fits = |i: usize, load: &[f64]| load[i] + units <= self.units_per_core && (may_open || load[i] > 0.0);
+        let core = match (0..self.load.len()).find(|&i| fits(i, &self.load)) {
+            Some(c) => c,
+            None if !may_open => return Decision::Refuse(json!({"type": "error", "code": "trial_busy"})),
+            None => (0..self.load.len()).min_by(|&a, &b| self.load[a].partial_cmp(&self.load[b]).unwrap()).unwrap_or(0),
+        };
         self.load[core] += units;
         self.active += 1;
         self.units += units;
@@ -235,6 +240,10 @@ impl Admission {
             self.caption_streams += 1;
         }
         Decision::Admit(core)
+    }
+
+    pub fn load_of(&self, core: usize) -> f64 {
+        self.load.get(core).copied().unwrap_or(0.0)
     }
 
     pub fn release(&mut self, cfg: &Value, core: usize) {
@@ -247,15 +256,6 @@ impl Admission {
         if cfg.get("captions").and_then(|v| v.as_str()) == Some("local") {
             self.caption_streams = self.caption_streams.saturating_sub(1);
         }
-    }
-
-    /// The cores that carry sessions now (the caption decoders run on these).
-    pub fn busy_cpus(&self) -> Vec<usize> {
-        let mut v: Vec<usize> = (0..self.load.len()).filter(|&i| self.load[i] > 0.0).flat_map(|i| self.cores[i].clone()).collect();
-        if v.is_empty() {
-            v = self.cores.iter().flatten().cloned().collect();
-        }
-        v
     }
 }
 
@@ -285,6 +285,17 @@ mod tests {
         assert!(matches!(a.decide(&json!({"captions": "premium"}), &h), Decision::Admit(_))); // no units: never refused
         a.release(&d, 0);
         assert!(matches!(a.decide(&d, &h), Decision::Admit(0)));
+    }
+
+    #[test]
+    fn a_session_that_may_not_open_a_core_only_joins_used_ones() {
+        let mut a = Admission::new(vec![vec![0], vec![1]], 2.0, 10);
+        let h = host();
+        let trial = json!({"denoise": "light", "trial": true, "may_open_core": false});
+        assert!(matches!(a.decide(&trial, &h), Decision::Refuse(_))); // nothing runs yet: no core to join
+        assert!(matches!(a.decide(&json!({"denoise": "light"}), &h), Decision::Admit(0)));
+        assert!(matches!(a.decide(&trial, &h), Decision::Admit(0))); // joins core 0
+        assert!(matches!(a.decide(&trial, &h), Decision::Refuse(_))); // core 0 is full; core 1 would be new
     }
 
     #[test]

@@ -113,6 +113,13 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
     events: asyncio.Queue = asyncio.Queue(maxsize=200)
     try:
         kind, payload = await P.read_msg(reader)
+        if kind == P.MSG_QUERY:
+            await P.send_msg(writer, P.MSG_EVENT, P.pack_json({
+                "type": "status", "engine": "python", "worker": _index, "sessions": _active, "units": _units,
+                "capacityUnits": capacity_units(), "unitsPerCore": cpusplit.units_per_core(),
+                "captionStreams": _caption_streams, "captionCap": caption_cap(), "cores": [{"core": c} for c in _cores],
+            }))
+            return
         if kind != P.MSG_START:
             return
         cfg = json.loads(payload)
@@ -342,12 +349,25 @@ def supervise(workers: int) -> None:
             p.kill()
 
 
+def native_engine() -> str | None:
+    """The native live engine (native/live, installed as bin/acw-live) when it is there and not switched off
+    (ACW_LIVE_ENGINE=python): same protocol, every session in one process without the GIL."""
+    if os.environ.get("ACW_LIVE_ENGINE", "").lower() == "python":
+        return None
+    path = get_settings().bin_dir / "acw-live"
+    return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+
+
 def main() -> None:
     # Each session's thread needs the GIL back after every native call (model, codec): a shorter switch interval keeps
     # one session's Python work from holding the others' frames for up to the default 5 ms.
     sys.setswitchinterval(0.001)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     index = os.environ.get("ACW_STREAM_WORKER_INDEX", "")
+    native = None if index else native_engine()
+    if native:
+        log.info("starting the native live engine %s", native)
+        os.execv(native, [native])  # replaces this process: systemd keeps watching the same PID
     workers = cpusplit.stream_workers()
     if index.isdigit():
         asyncio.run(serve(int(index), workers))

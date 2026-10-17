@@ -37,6 +37,11 @@ pub fn handle(engine: Arc<Engine>, stream: UnixStream) {
         Ok(m) => m,
         Err(_) => return,
     };
+    if kind == ipc::MSG_QUERY {
+        let status = engine.status();
+        let _ = send(&writer, ipc::MSG_EVENT, status.to_string().as_bytes());
+        return;
+    }
     if kind != ipc::MSG_START {
         return;
     }
@@ -49,7 +54,8 @@ pub fn handle(engine: Arc<Engine>, stream: UnixStream) {
         let _ = send(&writer, ipc::MSG_EVENT, json!({"type": "error", "code": "bad_tier"}).to_string().as_bytes());
         return;
     }
-    let core = match engine.admission.lock().unwrap().decide(&cfg, &engine.host) {
+    let decision = engine.admission.lock().unwrap().decide(&cfg, &engine.host); // (the lock ends here)
+    let core = match decision {
         Decision::Admit(c) => c,
         Decision::Refuse(ev) => {
             if ev["code"] == "full" {
@@ -62,10 +68,8 @@ pub fn handle(engine: Arc<Engine>, stream: UnixStream) {
     };
     let cpus = engine.admission.lock().unwrap().cores[core].clone();
     pin_current_thread(&cpus);
-    engine.repin_decoders();
     run(&engine, &cfg, core, tier.is_some(), reader, writer);
     engine.admission.lock().unwrap().release(&cfg, core);
-    engine.repin_decoders();
 }
 
 fn run(engine: &Arc<Engine>, cfg: &Value, core: usize, denoise: bool, mut reader: UnixStream, writer: Arc<Mutex<UnixStream>>) {

@@ -229,6 +229,20 @@ bash "$REPO/deploy/fetch-models.sh" || echo "warning: some models or programs ar
 for f in "$H/bin/ffmpeg" "$H/bin/ffprobe" "$H/bin/libdf.so" "$H/models/DeepFilterNet3_onnx.tar.gz"; do
   [ -e "$f" ] || { echo "missing $f (deploy/fetch-models.sh, native/deepfilter/build.sh, docs/operations.md)" >&2; exit 1; }
 done
+# The native live engine (native/live): built here when Rust is available and its sources changed. Without it (or if
+# the build fails) live runs on the Python worker, at lower capacity.
+if command -v cargo >/dev/null 2>&1 || [ -f "$HOME/.cargo/env" ]; then
+  stamp="$(cd "$REPO/native/live" && cat Cargo.toml Cargo.lock build.rs src/*.rs 2>/dev/null | sha256sum | cut -c1-16)"
+  if [ ! -x "$H/bin/acw-live" ] || [ "$(cat "$H/bin/acw-live.src" 2>/dev/null)" != "$stamp" ]; then
+    if bash "$REPO/native/live/build.sh" "$H/bin"; then
+      echo "$stamp" > "$H/bin/acw-live.src"
+    else
+      echo "warning: the native live engine did not build; live keeps running on the Python worker" >&2
+    fi
+  fi
+else
+  echo "note: no Rust toolchain: live runs on the Python worker (install rustup to build native/live)" >&2
+fi
 [ -d "$H/models/whisper/large-v3-turbo" ] || echo "warning: whisper large-v3-turbo missing (local transcription will fail)" >&2
 [ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
 [ -f "$H/models/dpdfnet/dpdfnet8_48khz_hr.onnx" ] || echo "warning: DPDFNet model missing (heavy-noise recordings use DeepFilterNet3)" >&2

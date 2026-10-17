@@ -23,7 +23,7 @@ from collections import OrderedDict, deque
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, cpusplit, db, keycaps, metrics, translate
+from .. import auth, broker, cpusplit, db, keycaps, metrics, translate
 from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
@@ -732,6 +732,9 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             worker_cfg["tap_pcm"] = captions == "premium"
             worker_cfg["trial"] = sess.trial
             worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
+            # What this session's class may take (resource broker): a free-trial session doesn't open a new core
+            # while paid file jobs run.
+            worker_cfg.update(await asyncio.to_thread(broker.live_options, "live_trial" if sess.trial else "live"))
             if sess.trial and _live_units + cpusplit.session_units(worker_cfg) > trial_room():
                 ready = {"code": "trial_busy"}
             else:

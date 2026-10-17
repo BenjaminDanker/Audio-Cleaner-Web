@@ -21,7 +21,14 @@ use crate::dsp::{Decimate3, SAMPLE_RATE};
 
 const INPUT_RATE: usize = 16_000;
 const TICK: Duration = Duration::from_millis(50);
-pub const STREAMS_PER_RECOGNIZER: usize = 10;
+/// Streams one recognizer serves before another is made, and its decoder threads (ACW_CAPTION_STREAMS_PER_MODEL,
+/// ACW_CAPTION_THREADS).
+fn streams_per_recognizer() -> usize {
+    std::env::var("ACW_CAPTION_STREAMS_PER_MODEL").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(10)
+}
+fn recognizer_threads() -> i32 {
+    std::env::var("ACW_CAPTION_THREADS").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(2)
+}
 
 // A caption stream is shed, not queued, when the decoder falls behind it.
 const MAX_BACKLOG: usize = 2 * SAMPLE_RATE;
@@ -89,15 +96,13 @@ struct Group {
 }
 
 static GROUPS: OnceLock<Mutex<Vec<Arc<Group>>>> = OnceLock::new();
-static DECODER_CPUS: Mutex<(u64, Vec<usize>)> = Mutex::new((0, Vec::new()));
+static LIVE_CPUS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
-/// The CPUs the caption decoders should run on (the cores that carry sessions); they move at their next tick.
-pub fn set_decoder_cpus(cpus: Vec<usize>) {
-    let mut d = DECODER_CPUS.lock().unwrap();
-    if d.1 != cpus {
-        d.0 += 1;
-        d.1 = cpus;
-    }
+/// The CPUs the caption decoders may use: all live cores. A recognizer's worker threads take the affinity of the
+/// thread that creates it, so it is created on its decoder thread after that thread is allowed every live core
+/// (made from a session thread, pinned to one core, the whole recognizer would share that one core).
+pub fn set_live_cpus(cpus: Vec<usize>) {
+    *LIVE_CPUS.lock().unwrap() = cpus;
 }
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -141,29 +146,40 @@ fn group_for(model_dir: &Path) -> Result<Arc<Group>, String> {
     let groups = GROUPS.get_or_init(|| Mutex::new(Vec::new()));
     let mut gs = groups.lock().unwrap();
     if let Some(g) = gs.iter().min_by_key(|g| g.members.lock().unwrap().len()) {
-        if g.members.lock().unwrap().len() < STREAMS_PER_RECOGNIZER {
+        if g.members.lock().unwrap().len() < streams_per_recognizer() {
             return Ok(g.clone());
         }
     }
-    let g = Arc::new(Group { rec: new_recognizer(model_dir, 2)?, members: Mutex::new(HashMap::new()), tick: Mutex::new(()) });
-    let gt = g.clone();
-    thread::Builder::new().name("live-captions".into()).spawn(move || decoder_loop(gt)).map_err(|e| e.to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Arc<Group>, String>>();
+    let dir = model_dir.to_path_buf();
+    thread::Builder::new()
+        .name("live-captions".into())
+        .spawn(move || {
+            let cpus = LIVE_CPUS.lock().unwrap().clone();
+            if !cpus.is_empty() {
+                crate::admission::pin_current_thread(&cpus);
+            }
+            match new_recognizer(&dir, recognizer_threads()) {
+                Ok(rec) => {
+                    let g = Arc::new(Group { rec, members: Mutex::new(HashMap::new()), tick: Mutex::new(()) });
+                    let _ = tx.send(Ok(g.clone()));
+                    decoder_loop(g);
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    let g = rx.recv().map_err(|e| e.to_string())??;
     log!("caption recognizer {} ready", gs.len() + 1);
     gs.push(g.clone());
     Ok(g)
 }
 
 fn decoder_loop(g: Arc<Group>) {
-    let mut pinned = u64::MAX;
     loop {
         thread::sleep(TICK);
-        {
-            let d = DECODER_CPUS.lock().unwrap();
-            if d.0 != pinned && !d.1.is_empty() {
-                crate::admission::pin_current_thread(&d.1);
-                pinned = d.0;
-            }
-        }
         let _tick = g.tick.lock().unwrap();
         let active: Vec<Arc<Captioner>> = g.members.lock().unwrap().values().cloned().collect();
         if active.is_empty() {

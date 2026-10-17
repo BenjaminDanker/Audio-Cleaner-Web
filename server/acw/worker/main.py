@@ -23,7 +23,7 @@ from pathlib import Path
 import acw_common
 from acw_common import restore
 
-from .. import cpusplit, db, hostload, jobs, metrics
+from .. import broker, cpusplit, db, hostload, jobs, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -103,36 +103,14 @@ def _settings_extra() -> dict:
 PROBE_CPU_SECONDS = 3600
 PROBE_TIMEOUT = 900
 
-# A job joins others already running only if this many cores are idle.
-MIN_IDLE_CORES = 2.0
 MAX_JOB_THREADS = int(os.environ.get("ACW_JOB_THREADS_MAX", "6"))
 
 
 def admission(
     job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set[int] | None = None, gpu: bool = False
 ) -> tuple[bool, str, int]:
-    """Whether `job` may start now, why not, and how many threads it gets.
-
-    Memory and disk must fit with a reserve left for the rest of the host.
-    CPU only decides when other jobs are already running: with nothing running
-    the queue always moves (niced, so it yields to everything else)."""
-    mem, disk = jobs.job_needs(job)
-    if gpu:  # the model lives in GPU memory
-        mem = min(mem, jobs.JOB_MEM + jobs.GB)
-    now = db.now()
-    # Jobs started in the last minute may not have allocated their memory yet.
-    mem += sum(jobs.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
-    if snap.mem_available - mem < jobs.MEM_RESERVE or (snap.slice_headroom is not None and snap.slice_headroom - mem < jobs.SLICE_RESERVE):
-        return False, f"memory: {snap.memory_headroom / jobs.GB:.1f} GB free, job needs {mem / jobs.GB:.1f} GB", 0
-    if snap.disk_free - disk < jobs.DISK_RESERVE:
-        return False, f"disk: {snap.disk_free / jobs.GB:.0f} GB free, job needs {disk / jobs.GB:.1f} GB", 0
-    # Idle CPU among the cores jobs may use now (live audio may have taken some).
-    idle = snap.idle_cores
-    if cpus is not None and snap.busy_per_cpu:
-        idle = sum(1.0 - snap.busy_per_cpu[c] for c in cpus if c < len(snap.busy_per_cpu))
-    if running and idle < MIN_IDLE_CORES and not gpu:
-        return False, f"cpu: {idle:.1f} job cores idle", 0
-    return True, "", max(2, min(MAX_JOB_THREADS, int(idle) - 1))
+    """Whether `job` may start now, why not, and how many threads it gets: the resource broker decides."""
+    return broker.admit_job(job, snap, running, cpus, gpu=gpu, max_threads=MAX_JOB_THREADS)
 
 
 _last_wait_log = 0.0
@@ -159,7 +137,7 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
     snap = cpus = None
     if load is not None:
         snap = load.snapshot()
-        cpus = cpusplit.job_cpus_now(get_settings().data_dir)
+        cpus = broker.job_cpus(get_settings().data_dir)
 
     def running_jobs(c) -> list[dict]:
         return [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
