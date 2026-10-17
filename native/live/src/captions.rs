@@ -24,7 +24,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// Streams one recognizer serves before another is made, and its decoder threads (ACW_CAPTION_STREAMS_PER_MODEL,
 /// ACW_CAPTION_THREADS).
 fn streams_per_recognizer() -> usize {
-    std::env::var("ACW_CAPTION_STREAMS_PER_MODEL").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(10)
+    std::env::var("ACW_CAPTION_STREAMS_PER_MODEL").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(5)
 }
 fn recognizer_threads() -> i32 {
     std::env::var("ACW_CAPTION_THREADS").ok().and_then(|v| v.parse().ok()).filter(|&v| v > 0).unwrap_or(2)
@@ -141,31 +141,36 @@ fn new_recognizer(model_dir: &Path, threads: i32) -> Result<Recognizer, String> 
     Ok(Recognizer(rec))
 }
 
-/// A recognizer group with room. When all are full another is made, on its own thread, without holding up other
-/// sessions: while it is being made they join the least busy existing group (a little over its share for a moment).
-/// Only with no group at all does a session wait, at most CREATE_TIMEOUT; then it goes on without captions.
+/// A recognizer group with room. One recognizer decodes about 13x real time with 2 threads, but next to busy
+/// noise-removal threads less (measured 8.6x with 12 streams on one), so a recognizer serves at most
+/// streams_per_recognizer() streams. The next one starts loading (in the background, ~3 s) when the least busy group
+/// is two streams from full; a session that finds every group full while one is loading waits for it (at most
+/// FULL_WAIT), else it joins the least busy group for a while. With no group at all a session waits at most
+/// CREATE_TIMEOUT; then it goes on without captions.
 const CREATE_TIMEOUT: Duration = Duration::from_secs(30);
+const FULL_WAIT: Duration = Duration::from_secs(6);
 static CREATING: AtomicBool = AtomicBool::new(false);
 
 fn group_for(model_dir: &Path) -> Result<Arc<Group>, String> {
     let groups = GROUPS.get_or_init(|| Mutex::new(Vec::new()));
-    let deadline = Instant::now() + CREATE_TIMEOUT;
+    let start = Instant::now();
+    let per = streams_per_recognizer();
     loop {
-        let least = {
+        let (least, n) = {
             let gs = groups.lock().unwrap();
-            gs.iter().min_by_key(|g| g.members.lock().unwrap().len()).cloned()
+            let least = gs.iter().min_by_key(|g| g.members.lock().unwrap().len()).cloned();
+            let n = least.as_ref().map(|g| g.members.lock().unwrap().len()).unwrap_or(usize::MAX);
+            (least, n)
         };
-        let full = least.as_ref().map(|g| g.members.lock().unwrap().len() >= streams_per_recognizer()).unwrap_or(true);
-        if full && !CREATING.swap(true, Ordering::SeqCst) {
+        if (least.is_none() || n + 2 >= per) && !CREATING.swap(true, Ordering::SeqCst) {
             start_recognizer(model_dir);
         }
-        if let Some(g) = least {
-            return Ok(g);
+        match least {
+            Some(g) if n < per => return Ok(g),
+            Some(g) if !CREATING.load(Ordering::SeqCst) || start.elapsed() > FULL_WAIT => return Ok(g),
+            None if start.elapsed() > CREATE_TIMEOUT => return Err("the caption model is taking too long to load".into()),
+            _ => thread::sleep(Duration::from_millis(50)),
         }
-        if Instant::now() > deadline {
-            return Err("the caption model is taking too long to load".into());
-        }
-        thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -208,6 +213,10 @@ pub fn preload(model_dir: &Path) {
 }
 
 fn decoder_loop(g: Arc<Group>) {
+    // ACW_LIVE_DEBUG=1: every 10 s, how busy this decoder is (time decoding vs waiting, batch sizes).
+    let debug = std::env::var("ACW_LIVE_DEBUG").is_ok();
+    let (mut t_take, mut t_decode, mut t_publish, mut calls, mut batched, mut ticks) = (0f64, 0f64, 0f64, 0u64, 0u64, 0u64);
+    let mut since = Instant::now();
     loop {
         thread::sleep(TICK);
         let _tick = g.tick.lock().unwrap();
@@ -215,18 +224,36 @@ fn decoder_loop(g: Arc<Group>) {
         if active.is_empty() {
             continue;
         }
+        let t0 = Instant::now();
         for c in &active {
             c.take_audio();
         }
+        let t1 = Instant::now();
         let rec = g.rec.0;
         let mut ready: Vec<&Arc<Captioner>> = active.iter().filter(|c| c.is_ready(rec)).collect();
         while !ready.is_empty() {
             let streams: Vec<*const so::OnlineStream> = ready.iter().map(|c| c.side.lock().unwrap().stream).collect();
             unsafe { so::SherpaOnnxDecodeMultipleOnlineStreams(rec, streams.as_ptr(), streams.len() as i32) };
+            calls += 1;
+            batched += streams.len() as u64;
             ready.retain(|c| c.is_ready(rec));
         }
+        let t2 = Instant::now();
         for c in &active {
             c.publish(rec, false);
+        }
+        if debug {
+            ticks += 1;
+            t_take += (t1 - t0).as_secs_f64();
+            t_decode += (t2 - t1).as_secs_f64();
+            t_publish += t2.elapsed().as_secs_f64();
+            if since.elapsed() >= Duration::from_secs(10) {
+                let w = since.elapsed().as_secs_f64();
+                log!("captions: {} streams, {ticks} ticks, take {:.0}% decode {:.0}% publish {:.0}% of the time, {calls} decodes of {:.1} streams",
+                     active.len(), 100.0 * t_take / w, 100.0 * t_decode / w, 100.0 * t_publish / w, batched as f64 / calls.max(1) as f64);
+                (t_take, t_decode, t_publish, calls, batched, ticks) = (0.0, 0.0, 0.0, 0, 0, 0);
+                since = Instant::now();
+            }
         }
     }
 }

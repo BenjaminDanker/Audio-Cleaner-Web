@@ -133,7 +133,7 @@ def test_echo_is_removed_and_the_voice_kept(engine):
 def test_silence_return_audio_and_full(engine):
     x = _speech(1.0)
     frames = [x[i:i + 960] for i in range(0, len(x), 960)]
-    sock = engine(ACW_LIVE_UNITS_PER_CORE="1.0", ACW_MIN_JOB_CORES="999")  # one live core
+    sock = engine(ACW_LIVE_UNITS_PER_CORE="1.0", ACW_MIN_JOB_CORES="999", ACW_LIVE_IGNORE_HOST_LOAD="1")  # one live core
     _, out = _session(sock, {"denoise": "light", "return_audio": False}, frames[:10] + [None, None] + frames[10:20])
     assert len(out) == 20 and all(len(o) == 0 for o in out)  # answered (for timing), but empty; silence not answered
     # one core x 1 unit: a second session at once doesn't fit
