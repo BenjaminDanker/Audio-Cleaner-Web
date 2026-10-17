@@ -38,45 +38,42 @@ first. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image)
 step to download in. The .pkg is wrapped with `productbuild --distribution` (`packaging/macos/distribution.py`): it
 refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.5 GB and takes minutes.
 
-**Where the app downloads from.** Everything the app and the installers fetch except the Whisper files (Hugging Face,
-which says nothing about us) comes from our own domain, so users never see the GitHub repository (it may become
-private). The base address is written in ONE place, `config.DOWNLOADS_BASE` (`https://mc-multi-world.space/audio/api/downloads/`);
-`config.UPDATES_URL` (`desktop/`) and `config.MODELS_URL` (`models/`) are built from it, and the updater, the models
-catalog (`resources.py`), the Windows and macOS installers (generated from the catalog by `installer_models.py`) and
-`check_model_urls.py` all use those, so a domain move is one edit there. The server mirrors the GitHub releases and
-serves verified copies: `desktop/update.json`, `desktop/update.json.sig`, `desktop/<installer name from update.json>`
-and `models/AudioCleaner-models-v1.zip` (byte for byte the release asset: same size and SHA-256), with `Range`
-requests working (resumed downloads). Nothing that ships (app, installers, About, EULA, README, notices) names the
-repository; `test_model_updates.py` fails if it does. GitHub still builds and stores the releases (CI files and this
-documentation may name it).
+**Where the app downloads from: its own GitHub releases.** People get the installers from the public repository's
+Releases, and the app and the installers download everything else from there too. Every desktop release (tag
+`v<version>` in the public repository, made by the release job of `desktop.yml`) carries the whole version:
 
-**The `models-v1` release** (on GitHub, which the mirror reads) must hold the archive before the installers can fetch it: upload the one file
-`AudioCleaner-models-v1.zip` (908,538,132 bytes, sha256 `5592be63...81ce`; `README.txt`, `LICENSES/*`,
-`ap-bwe/{8k,12k,16k,24k}to48k.onnx`, `sidon/{sidon_fe,sidon_dec}.onnx`, deflate) to a release tagged `models-v1` with
-`--latest=false` (otherwise it takes over `releases/latest` from the app). Never replace the file under the same name
-with different content: the catalog pins its size and SHA-256 (change both in `resources.MODELS_ARCHIVE`, and the
-member sizes and hashes, when a new archive is published, preferably under a new tag such as `models-v2`). The
-"Model downloads exist" job in the workflow compares the size of the archive on our server (and of the speech model
-files on Hugging Face) with the catalog and goes red when it is missing, for instance because the mirror does not
-have it yet; it does not block the builds.
+* the three installers;
+* `update.json` and `update.json.sig`: installed apps read the newest release's (`config.LATEST_URL`, GitHub's fixed
+  `releases/latest/download/` address) and download the installer from the release of the version it names;
+* the models: the speech model's files, named `whisper-<file>` (each under GitHub's 2 GB per file), and the models
+  archive `AudioCleaner-models-vN.zip` (AP-BWE and Sidon with their licence texts). The app and its installers download
+  them from the app's own release (`config.MODELS_URL` = `release_url(<the app's version>)`; a source checkout, which
+  has no release of its own, uses the newest release), so every version always gets exactly the models it was built
+  with. Releases there are never deleted.
+
+The repository is `__releases__` in `audio_cleaner_desktop/__init__.py`; CI writes the one it publishes to
+(`ACW_RELEASES_REPO`, the trial repository while `vars.PUBLIC_DESKTOP_REPO` is set) together with the version. Every file
+is checked against the size and SHA-256 pinned in `resources.py` before it is used, so nobody who can change a release
+file can make the app run anything else; the update information is also signed (below).
+
+**How the models get into a release.** `packaging/release_models.py` (in the release job) downloads the speech model's
+files from Hugging Face at the pinned commit (`WHISPER_SOURCE` there) and carries the models archive over from the
+newest release that already has it (the public repository's releases first, then this repository's), checking every
+file against its pin. The "Model downloads exist" job runs `release_models.py --check` on every build and goes red when
+something can't be found.
 
 ### Changing a model safely
 
-Never replace an asset in an existing `models-vN` release (the mirror, the installers and every installed app have
-that name's size and SHA-256 pinned). Instead:
+Never change a published file: every app version has its models' sizes and SHA-256 pinned.
 
-1. Publish a new release `models-vN+1` (`--latest=false`) with the new archive `AudioCleaner-models-vN+1.zip`. For a
-   Whisper revision, pick the new Hugging Face commit id instead (never `main`).
-2. Update the catalog in `resources.py`: for an archive the `name` and `url` (`config.MODELS_URL + "AudioCleaner-models-vN+1.zip"`),
-   `size`, `sha256`, the `shared` licence files and the `size`/`sha256`/`member` of each model file; for Whisper the
-   revision in `_TURBO` and the files' sizes and hashes. Run `python desktop/packaging/check_model_urls.py` once the
-   mirror has the file. If the mirror is configured per tag, add the new tag there.
-3. Update `deploy/models.lock` (server side): the `archive` line for the models archive is
-   `archive  -  <sha256>  <size>  models-v1  https://github.com/.../releases/download/models-v1/AudioCleaner-models-v1.zip`;
-   add a line for `models-vN+1` with the new sha256, size, name and URL (keep the old line until every server is
-   updated), and change the `member` lines of the AP-BWE and Sidon files that come out of it to
-   `models-vN+1:<path inside the archive>` with their new sha256 and size.
-4. Ship a desktop build with the new catalog. A change to a Whisper file URL or hash works the same way.
+1. New models archive: build it, name it `AudioCleaner-models-vN+1.zip` (a new name for new contents), and upload it
+   once to this repository's newest desktop release: `gh release upload desktop-v<newest> AudioCleaner-models-vN+1.zip`.
+   For a Whisper revision, change `WHISPER_SOURCE` in `release_models.py` to the new Hugging Face commit id (never `main`).
+2. Update the catalog in `resources.py`: the archive's `name`, `url`, `size`, `sha256`, the `shared` licence files and
+   each model file's `size`/`sha256`/`member`; for Whisper the files' sizes and hashes.
+3. Update `deploy/models.lock` (the server's copy of the models) the same way: the `archive` line and the `member` lines.
+4. Push. The next desktop release carries the new archive; apps that update to it find that a model they had changed
+   and download the new one by themselves (`models.outdated`), and older versions keep downloading theirs.
 
 What users experience: the installed copy no longer matches the catalog (its `.complete` marker names the old hashes),
 so it does not count as installed. On the next start of the updated app, about 6 seconds after the window opens, the
@@ -137,9 +134,8 @@ the checklist at the end).
    checksum file) plus `update.json` and `update.json.sig` (the signed update information, see "Automatic updates"), and
    marks the release as latest. Don't share GitHub links of this repository (it stays out of sight). The app is not
    offered on the website: the installers people should get are the ones in the public repository's Releases
-   (`BenjaminDanker/Audio-Cleaner`, copied there by the step below). The app never contacts GitHub: it contacts our
-   download server (update check and installers, models) and Hugging Face (Whisper). The server mirrors the update
-   information and the installers for the app's updater only; it has no "latest installer" links.
+   (`BenjaminDanker/Audio-Cleaner`, published there by the step below with the update information and the models),
+   and that is also where installed apps get their updates and models.
 5. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a
    noisy video, clean it, turn on subtitles, open About.
 
@@ -152,18 +148,17 @@ An installed app looks for a newer version about 10 seconds after it starts (at 
 presses "Check now" in Settings), downloads it in the background and installs it. It only runs in the frozen app; from
 source nothing happens by itself. The code is `audio_cleaner_desktop/updater.py` (a Qt-free core plus the small
 `UpdateController` the window uses); the setting is "Check for updates when Audio Cleaner starts" in Settings (on by
-default), About shows "Updates: on/off", and the EULA and the About text say what is sent: a normal web request to our
-download server (the IP address, and the app version in the User-Agent), nothing else.
+default), About shows "Updates: on/off", and the EULA and the About text say what is sent: a normal web request to
+GitHub (the IP address, and the app version in the User-Agent), nothing else.
 
-**What the app does.** It fetches `https://mc-multi-world.space/audio/api/downloads/desktop/update.json`
-(`config.UPDATES_URL`) and `update.json.sig` (small, 20 s timeout, https only, the system certificate store), verifies the signature with the
+**What the app does.** It fetches `update.json` from the newest release (`config.LATEST_URL`) and `update.json.sig` (small, 20 s timeout, https only, the system certificate store), verifies the signature with the
 public key built into the app, and only then reads the manifest. It ignores a manifest whose version is not newer than
 its own (versions compare as numbers, so 2.0.15 is newer than 2.0.9), picks the file of its platform
 (`windows-x86_64`, `macos-arm64`, `macos-x86_64`) and downloads that installer into the app's data folder
 (`%LOCALAPPDATA%\Audio Cleaner\Audio Cleaner\updates`, `~/Library/Application Support/Audio Cleaner/Audio Cleaner/updates`)
 with the model downloader's code (`models.fetch_file`: https only, never a redirect to http, resumable, size and SHA-256
-checked, free space checked first). The download address is our server's folder plus the file name
-(`.../downloads/desktop/<file>`), not taken from the manifest. Only the newest download is kept;
+checked, free space checked first). The download address is the release of the version the manifest names plus the
+file name (`config.release_url(version)`), not taken from the manifest. Only the newest download is kept;
 the verified manifest is saved next to it, so the next start finds the download again without asking the server (and checks
 the signature and the file's hash once more). A manifest with a bad or missing signature, a size or hash that does not
 match, an unexpected file name, or no file for the platform is never used; every failure is a line in the log
@@ -192,10 +187,7 @@ bytes of the file: `openssl pkeyutl -sign -rawin -inkey KEY.pem -in update.json 
 private key is the GitHub Actions secret **`UPDATE_SIGNING_KEY`** (the PEM file, with its `-----BEGIN PRIVATE KEY-----`
 lines); a copy is kept offline, outside the repository. The release job builds `update.json` with
 `packaging/make_update_manifest.py` (version, publish time, and the name, size and SHA-256 of the three
-installers, keys sorted; no release page, because the file is published on our server and the app ignores one; apps
-from before the download server insisted on a `notes_url` pointing at GitHub, so while such apps still matter add
-`--notes-url https://github.com/<owner>/<repo>/releases/tag/desktop-v<version>` to the call in `desktop.yml`, which
-also puts the repository name into the mirrored file), signs it, checks the signature against the key's public half and uploads both files with the
+installers, keys sorted), signs it, checks the signature against the key's public half and uploads both files with the
 installers, for automatic and tagged releases alike. It fails closed: **without the secret, or with a key that is not
 the one built into the app, the release gets no `update.json`** (a warning or error annotation shows it) and no installed
 app updates itself; the installers are still published. The public key is `PUBLIC_KEY` in `updater.py` (raw Ed25519,
@@ -203,9 +195,9 @@ base64). Signature checking uses the `cryptography` package, pinned in `requirem
 that still ships a macOS Intel wheel; later releases dropped it) with `cffi` and `pycparser`; the frozen
 `--selftest` makes a key pair, signs and verifies to prove the bundled copy works.
 
-**Checking that updates are live.** After a build: the release page has `update.json` and `update.json.sig`, and once
-the mirror has run (every 10 minutes) `curl -sL https://mc-multi-world.space/audio/api/downloads/desktop/update.json` shows the version and
-hashes; `openssl pkeyutl -verify -rawin -pubin -inkey PUB.pem -in update.json -sigfile update.json.sig` says
+**Checking that updates are live.** After a build: the public repository's newest release has `update.json`,
+`update.json.sig` and the models, `curl -sL https://github.com/<owner>/<repo>/releases/latest/download/update.json` shows the
+version and hashes; `openssl pkeyutl -verify -rawin -pubin -inkey PUB.pem -in update.json -sigfile update.json.sig` says
 "Signature Verified Successfully" (PUB.pem: `openssl pkey -in KEY.pem -pubout`).
 
 **Rotating the key** (planned, or after a leak). 1. `openssl genpkey -algorithm ed25519 -out new.pem`.
@@ -218,8 +210,8 @@ get one last release signed with the OLD key whose app already contains the new 
 mistake in the order publishes no manifest instead of one nobody trusts. Users who miss the bridging release install
 the newest setup by hand.
 
-**If the secret leaks.** The key alone does not let anyone push a file to the apps: the manifest only names a file (the app builds the address itself, on our download server, and downloads it over https),
-so an attacker also needs to get a file onto the mirror, which only copies verified releases of the repository. Treat a leak as serious anyway: 1. delete the secret at once (a
+**If the secret leaks.** The key alone does not let anyone push a file to the apps: the manifest only names a file (the app builds the address itself, in the public repository's releases, and downloads it over https),
+so an attacker also needs to be able to change those releases. Treat a leak as serious anyway: 1. delete the secret at once (a
 release without the key gets no manifest); 2. look at the releases and the workflow runs for anything you did not
 make, and delete a release with an `update.json` you did not make (apps then see the previous release); 3. if only the
 key leaked, rotate it with the two pushes above; 4. if the GitHub account or a token leaked as well, nobody can say what
@@ -558,8 +550,8 @@ next release of the app. To stop the copies, delete the secrets or the workflows
 
 ## Owner to-do before the first release
 
-* Upload the `models-v1` release (the single `AudioCleaner-models-v1.zip`, see above), let the mirror pick it up and
-  check that the "Model downloads exist" job is green (it checks `models/AudioCleaner-models-v1.zip` on our server).
+* Check that the "Model downloads exist" job is green (`release_models.py --check`: the pinned speech model files on
+  Hugging Face, and the models archive in a release).
 
 * Set the Apple and Azure secrets if you want signed installers (optional).
 * Add the secret `UPDATE_SIGNING_KEY` (the contents of `~/audio-cleaner/secrets/update-signing-key.pem`) so releases get

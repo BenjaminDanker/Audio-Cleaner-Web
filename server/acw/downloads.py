@@ -7,7 +7,7 @@ agree on: the layout, the per-channel state file, and the strict allow-list.
   <data>/downloads/
       mirror-status.json              when each channel was last mirrored (read by the monitor)
       <channel>/state.json            what is served: written LAST, atomically, after every file is verified
-      <channel>/<directory>/<file>    desktop and obs-plugin: <directory> is the version; models: the release tag
+      <channel>/<directory>/<file>    <directory> is the version
       <channel>/.staging-*            downloads in progress (never served)
 
 state.json:  {"current": {"version", "published_at", "files": {name: {"size", "sha256", "dir", ...}}, "platforms": {...}},
@@ -28,14 +28,13 @@ from pathlib import Path
 
 from .config import get_settings
 
-CHANNELS = ("desktop", "obs-plugin", "models")
+CHANNELS = ("obs-plugin",)
 KEEP_PREVIOUS_S = 7 * 86400
 # Every served name, and every directory name, is checked against this before it is ever joined to a path.
 NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,150}")
 DIR_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,60}")
 # Manifest files, by channel: (stored name, public name). Served from `current` only.
 MANIFESTS = {
-    "desktop": (("update.json", "update.json"), ("update.json.sig", "update.json.sig")),
     "obs-plugin": (("obs-plugin-manifest.json", "manifest.json"), ("obs-plugin-manifest.json.sig", "manifest.json.sig")),
 }
 # Public platform names of the plugin's download buttons -> the keys of the plugin manifest.

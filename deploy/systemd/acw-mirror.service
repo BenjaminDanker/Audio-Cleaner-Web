@@ -1,5 +1,5 @@
 [Unit]
-Description=Audio Cleaner release mirror (copies the newest desktop, OBS plugin and model files from the build service, verifies them, publishes them for download)
+Description=Audio Cleaner release mirror (copies the newest OBS plugin release from the build service, verifies it, publishes it for download)
 OnFailure=acw-alert@%n.service
 
 [Service]

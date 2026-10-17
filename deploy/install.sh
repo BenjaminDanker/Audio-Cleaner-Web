@@ -269,8 +269,8 @@ done
 systemctl --user enable --now acw-backup.timer >/dev/null 2>&1
 # Health monitor + email alerts (acw-alert@.service is started by OnFailure=, never enabled)
 systemctl --user enable --now acw-monitor.timer >/dev/null 2>&1
-# Release mirror: copies, checks and publishes the newest desktop/plugin/model files every 10 minutes (the first run
-# starts a minute after the timer). Its first download of the model archive takes a while; nothing here waits for it.
+# Release mirror: copies, checks and publishes the newest OBS plugin release every 10 minutes (the first run starts a
+# minute after the timer).
 systemctl --user enable --now acw-mirror.timer >/dev/null 2>&1
 if [ "$BULK_TUNNEL" = 0 ]; then
   echo "note: acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'systemctl --user enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)" >&2

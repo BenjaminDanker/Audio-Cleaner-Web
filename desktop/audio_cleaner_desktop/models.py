@@ -316,7 +316,7 @@ def _sha256(path: Path, cancel: threading.Event | None) -> str:
 
 
 class _HttpsRedirects(urllib.request.HTTPRedirectHandler):
-    """Follow redirects (Hugging Face and our download server may hand out the files from a CDN), but never to plain http."""
+    """Follow redirects (GitHub hands out release files from its storage host), but never to plain http."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if urllib.parse.urlparse(newurl).scheme != "https" and urllib.parse.urlparse(req.full_url).scheme == "https":

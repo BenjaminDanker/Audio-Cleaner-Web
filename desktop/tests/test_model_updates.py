@@ -1,5 +1,6 @@
 """A model whose catalog entry changed: downloaded again by itself when the user had it, never forced when they did
-not, the outdated copy removed only once the new one is complete, and every download address on our own server."""
+not, the outdated copy removed only once the new one is complete, and every download address a file of the app's own
+GitHub release."""
 from __future__ import annotations
 
 import hashlib
@@ -260,46 +261,89 @@ def test_nothing_to_update_only_tidies_up(qapp, tmp_path, monkeypatch):
         _close(w)
 
 
-# ---- our own server for every download -----------------------------------------------------------------------------------------
-def test_the_download_base_is_defined_in_one_place():
-    assert config.DOWNLOADS_BASE == "https://mc-multi-world.space/audio/api/downloads/"
-    assert config.UPDATES_URL == config.DOWNLOADS_BASE + "desktop/" and config.MODELS_URL == config.DOWNLOADS_BASE + "models/"
-    assert updater.MANIFEST_URL == config.UPDATES_URL + "update.json"
-    assert updater.SIGNATURE_URL == config.UPDATES_URL + "update.json.sig"
-    assert updater.DOWNLOAD_BASE == config.UPDATES_URL
-    assert resources.MODELS_ARCHIVE.url == config.MODELS_URL + "AudioCleaner-models-v2.zip"
-    # a domain move is one edit: nothing else spells the host out
+# ---- every download from the app's own GitHub releases ---------------------------------------------------------------------
+def test_the_release_addresses_are_defined_in_one_place():
+    from audio_cleaner_desktop import __released__, __releases__, __version__
+
+    assert re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", __releases__)
+    assert config.RELEASES_URL == f"https://github.com/{__releases__}/releases/"
+    assert config.LATEST_URL == config.RELEASES_URL + "latest/download/"
+    assert config.release_url("2.0.41") == config.RELEASES_URL + "download/v2.0.41/"
+    assert config.MODELS_URL == (config.release_url(__version__) if __released__ else config.LATEST_URL)
+    assert updater.MANIFEST_URL == config.LATEST_URL + "update.json"  # the newest release's
+    assert updater.SIGNATURE_URL == config.LATEST_URL + "update.json.sig"
+    assert updater.DOWNLOAD_BASE is None  # the installer: from the release of the version the manifest names
+    for gone in ("DOWNLOADS_BASE", "UPDATES_URL"):
+        assert not hasattr(config, gone)
+    # a repository move is one edit (CI writes it into __init__.py): nothing else spells the repository or the host out
     for path in list((DESKTOP / "audio_cleaner_desktop").rglob("*.py")) + list((DESKTOP / "packaging").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if path.name != "__init__.py" or path.parent.name != "audio_cleaner_desktop":
+            assert __releases__ not in text and "releases/latest" not in text, path
         if path.name != "config.py":
-            assert "mc-multi-world" not in path.read_text(encoding="utf-8"), path
+            assert "mc-multi-world" not in text, path
 
 
-def test_every_download_of_the_catalog_is_on_our_server_or_hugging_face():
+def test_a_source_checkout_uses_the_newest_release():
+    # CI's version.py --write marks a release build; the committed source is not one (it has no release of its own)
+    from audio_cleaner_desktop import __released__
+
+    assert __released__ is False
+    assert config.MODELS_URL == config.LATEST_URL
+
+
+def test_every_download_of_the_catalog_is_a_file_of_the_release():
     for m in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
         urls = [m.archive.url] if m.archive is not None else [f.url for f in m.files]
         for url in urls:
-            assert url.startswith((config.MODELS_URL, "https://huggingface.co/")), url
+            assert url.startswith(config.MODELS_URL) and "/" not in url[len(config.MODELS_URL):], url
+    assert resources.MODELS_ARCHIVE.url == config.MODELS_URL + "AudioCleaner-models-v2.zip"
+    # the speech model's files are named "whisper-<file>" in the release (release_models.py publishes them so)
+    assert [f.url for f in resources.SPEECH_MODEL.files] == [config.MODELS_URL + "whisper-" + f.path for f in resources.SPEECH_MODEL.files]
+    names = [u.rsplit("/", 1)[1] for u in [resources.MODELS_ARCHIVE.url, *(f.url for f in resources.SPEECH_MODEL.files)]]
+    assert len(set(names)) == len(names)  # one release holds them all: no two with the same name
 
 
-def test_the_installers_and_the_model_check_use_the_same_addresses():
+def test_the_installers_and_the_release_use_the_same_addresses():
     import sys
 
     sys.path.insert(0, str(DESKTOP / "packaging"))
-    import check_model_urls
     import installer_models
+    import release_models
 
     archive = resources.MODELS_ARCHIVE
-    assert (archive.url, archive.size) in check_model_urls.catalog_files()
     windows = installer_models.render()
     mac = installer_models.render_mac()
     assert archive.url in windows and archive.url in mac
+    for f in resources.SPEECH_MODEL.files:
+        assert f.url in windows and f.url in mac
+    # what the installers download is exactly what the release job puts into the release
+    published = {name for name, *_ in release_models.whisper_files()} | {archive.name}
+    urls = {u.rstrip(":.,") for u in re.findall(r"https://[^\s'\"]+", windows + mac)}  # (a log line ends one with ":")
+    assert {u for u in urls if not u.startswith(config.MODELS_URL)} == set()
+    assert {u[len(config.MODELS_URL):] for u in urls} == published
     for text in (windows, mac, installer_models.render_mac_preinstall()):
-        assert "github" not in text.lower() and "BenjaminDanker" not in text
-    urls = set(re.findall(r"https://[^\s'\"]+", windows + mac))
-    assert {u.split("/")[2] for u in urls} == {"mc-multi-world.space", "huggingface.co"}
+        assert "huggingface" not in text and "mc-multi-world" not in text and "api/downloads" not in text
 
 
-def test_nothing_that_ships_names_the_github_repository():
+def _private_repository_pattern() -> str | None:
+    """The leak scan's pattern for the name of the private repository (tools/public-desktop/sync.py; the name is not
+    written here, this file is published). None in the public copy, which has no such tool (its scan already ran)."""
+    import importlib.util
+
+    sync = DESKTOP.parent / "tools" / "public-desktop" / "sync.py"
+    if not sync.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("public_desktop_sync", sync)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {why: pattern for pattern, why in module.LEAK_PATTERNS}["the name of the private repository"]
+
+
+def test_nothing_that_ships_names_the_private_repository_or_our_download_server():
+    from audio_cleaner_desktop import __releases__
+
+    owner = __releases__.split("/")[0]
     third_party = ("yxlu-0102", "sarulab-speech", "ceva-ip", "livekit", "xiph")  # other people's projects in notices
     shipped = [p for p in (DESKTOP / "audio_cleaner_desktop").rglob("*") if p.suffix in (".py", ".txt", ".md", ".json", ".qss", ".html")]
     shipped += [DESKTOP / "README.md", DESKTOP / "packaging" / "EULA.txt", *(DESKTOP / "packaging" / "licenses").glob("*")]
@@ -307,11 +351,16 @@ def test_nothing_that_ships_names_the_github_repository():
     shipped += list((DESKTOP / "packaging" / "windows").glob("*")) + list((DESKTOP / "packaging" / "macos").glob("*"))
     shipped = [p for p in shipped if p.is_file()]
     assert shipped
+    private = _private_repository_pattern()
+    named_owner = []
     for path in shipped:
         text = path.read_text(encoding="utf-8", errors="ignore")
-        assert "BenjaminDanker" not in text, path
+        if private is not None:
+            assert not re.search(private, text, re.I), path
+        assert "api/downloads" not in text, path  # our server serves nothing of the desktop app any more
+        if owner in text:
+            named_owner.append(path.relative_to(DESKTOP).as_posix())
         for m in re.finditer(r"github\.com/([\w.-]+)", text):
-            assert m[1].lower() in third_party, (path, m[0])
-        if path.suffix in (".py", ".txt", ".md") and path.parent.name != "licenses":
-            body = re.sub(r"GITHUB_\w+|\.github|github\.com/[\w.-]+", "", text)
-            assert "GitHub" not in body, path
+            assert m[1].lower() in third_party, (path, m[0])  # the app's own repository only through config.RELEASES_URL
+    # The public repository (where the releases are) is named in one place: the app's __init__.py, which CI rewrites.
+    assert named_owner == ["audio_cleaner_desktop/__init__.py"]

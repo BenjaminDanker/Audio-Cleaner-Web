@@ -1,11 +1,10 @@
 """Release downloads under our own domain: `GET|HEAD /api/downloads/...`.
 
-  desktop/update.json, update.json.sig     the signed update information of the desktop app (unchanged bytes)
-  desktop/<file>                           an installer the current (or the previous, for a week) manifest lists
   obs-plugin/manifest.json, manifest.json.sig, obs-plugin/<file>
   obs-plugin/latest/<platform>             windows | mac | ubuntu-debian | linux-other: the current package, for the
                                            website's buttons (served directly, never redirected)
-  models/<file>                            a model archive deploy/models.lock lists
+
+(The OBS plugin only: the desktop app gets its updates and models from its own GitHub releases.)
 
 Public: no sign-in, a rate limit per network (httpstack: all /api/ calls; here: starting file downloads) and the
 download byte-rate cap of the bulk process (acw/bulk_app.py applies it to these paths). The files were verified by
@@ -185,11 +184,6 @@ def _latest(channel: str, keys: dict[str, str], platform: str, request: Request)
     return resp
 
 
-@both("/desktop/{name}")
-def desktop_file(name: str, request: Request) -> Response:
-    return _get("desktop", _manifest_name("desktop", name) or name, request)
-
-
 @both("/obs-plugin/latest/{platform}")
 def obs_latest(platform: str, request: Request) -> Response:
     return _latest("obs-plugin", downloads.OBS_PLATFORMS, platform, request)
@@ -201,9 +195,4 @@ def obs_plugin_file(name: str, request: Request) -> Response:
     if stored is None and name in {m[0] for m in downloads.MANIFESTS["obs-plugin"]}:
         raise HTTPException(status_code=404, detail="Not found.")  # the stored names are not public
     return _get("obs-plugin", stored or name, request, public_name=name if stored else None)
-
-
-@both("/models/{name}")
-def model_file(name: str, request: Request) -> Response:
-    return _get("models", name, request)
 

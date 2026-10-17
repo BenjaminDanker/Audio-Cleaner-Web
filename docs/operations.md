@@ -132,20 +132,16 @@ download never queues in front of live audio, under the same shared transfer bud
 
 | Address | What |
 |---|---|
-| `/desktop/update.json`, `/desktop/update.json.sig` | the desktop app's signed update information, byte for byte as CI made it |
-| `/desktop/<file>` | an installer the current manifest lists (the previous version's for 7 days) |
 | `/obs-plugin/manifest.json`, `/obs-plugin/manifest.json.sig` | the plugin's signed manifest (the release assets `obs-plugin-manifest.json` and `.sig`) |
 | `/obs-plugin/<file>`, `/obs-plugin/latest/windows`, `/mac`, `/ubuntu-debian`, `/linux-other` | plugin packages; the website's buttons use `latest/...` |
-| `/models/<file>` | the model archive (`AudioCleaner-models-v2.zip`): every `models-v*` archive `deploy/models.lock` lists |
 
 **How it works.** `acw-mirror.timer` starts `acw-mirror.service` (`python -m acw.admin mirror --once`, `acw/mirror.py`) a
 minute after it is enabled and then 10 minutes after each run. A run reads the GitHub REST API (`/repos/<repo>/releases`),
-and per channel: the newest `desktop-v<version>` release (`update.json`, `.sig` and the installers it lists), the newest
-`obs-plugin-v<version>` release (manifest, `.sig`, the packages), and the `models-v*` archives named in `deploy/models.lock`
-(`install.sh` copies the lock to `~/audio-cleaner/app/models.lock`; size and sha256 come from it). Before anything is
-published: the Ed25519 signature of the manifest is checked with the public key built into the apps (the `cryptography`
+and takes the newest `obs-plugin-v<version>` release (manifest, `.sig`, the packages). (Only the plugin: the desktop
+app gets its updates and models from its own GitHub releases, docs/desktop.md.) Before anything is
+published: the Ed25519 signature of the manifest is checked with the public key built into the plugin (the `cryptography`
 package if installed, else `openssl`, 3.0 or newer), then every file's size and sha256 (and sha512 when the manifest gives
-it), the size caps (installer 1 GB, plugin 50 MB, models 2 GB), the file names (strict pattern), and that the version is not
+it), the size cap (50 MB), the file names (strict pattern), and that the version is not
 older than the one served. Downloads resume from a `.part` file; the disk must keep 5 GB free (`ACW_MIRROR_MIN_FREE_GB`).
 Then the files are moved to `data/downloads/<channel>/<version>/` and `state.json` (the list of names the routes may serve)
 is replaced atomically, last. A failure at any step publishes nothing: the previous version keeps being served, the error is
@@ -165,7 +161,7 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw-worker.env && set +a
 systemctl --user start acw-mirror.service                # the same as --once, with the unit's settings; journalctl --user -u acw-mirror
 ```
 
-A release must not be older than the served one: to roll the desktop app or the plugin back on purpose, publish a newer
+A release must not be older than the served one: to roll the plugin back on purpose, publish a newer
 version with the old contents, or delete `data/downloads/<channel>/state.json` and run `mirror --once` (the channel is
 empty for the minute it takes).
 
@@ -175,13 +171,13 @@ personal access tokens > repository access "Only select repositories" = this one
 `ACW_GITHUB_TOKEN_FILE` in `acw-worker.env`). It is sent only to `api.github.com`, never to the storage host the download
 redirects to, and never written to a log. Without the file the mirror reads anonymously (works while the repository is
 public; the limit is 60 requests an hour, a pass uses 3 to 5, so once every 10 minutes is close to it: add the token anyway).
-The file names the desktop app, the plugin and the website use are on our domain only; the repository name appears in one
+The file names the plugin and the website use are on our domain only; the repository name appears in one
 place (`DEFAULT_REPO` in `acw/mirror.py`, or `ACW_GITHUB_REPO`).
 
-**One-time:** deploy (`deploy/install.sh` enables the timer and installs `models.lock`), then update the VPS Caddy snippet as in
-"One-time setup" (the `downloads/` part of the bulk matcher; until then the downloads still work, through the main tunnel).
-Check: `curl -sI https://mc-multi-world.space/audio/api/downloads/desktop/update.json` after the first pass finished
-(`mirror --status`; the 0.9 GB model archive takes a few minutes on the first pass).
+**One-time:** deploy (`deploy/install.sh` enables the timer), then update the VPS Caddy snippet as in "One-time setup"
+(the `downloads/` part of the bulk matcher; until then the downloads still work, through the main tunnel).
+Check: `curl -sI https://mc-multi-world.space/audio/api/downloads/obs-plugin/manifest.json` after the first pass finished
+(`mirror --status`).
 
 ## Admin CLI
 

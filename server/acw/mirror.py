@@ -1,17 +1,16 @@
 """The release mirror: `python -m acw.admin mirror` (a oneshot run every 10 minutes by acw-mirror.timer).
 
-GitHub Releases is where CI puts the build output; users and the apps never talk to it. This job copies the
-newest release files to primary-ram, checks them, and only then lets acw/api/downloads_routes.py serve them under
-our own domain (the bulk process, so a download never queues in front of live audio). Nothing is stored on the VPS.
+The OBS plugin is offered on our website (the Live page), and installed plugins look for updates there: this job copies
+the newest plugin release from GitHub Releases (where CI puts it) to primary-ram, checks it, and only then lets
+acw/api/downloads_routes.py serve it under our own domain (the bulk process, so a download never queues in front of
+live audio). Nothing is stored on the VPS. (The desktop app gets everything from its own GitHub releases.)
 
-Three channels (acw/downloads.py describes the layout):
-  desktop     the newest `desktop-v<version>` release: update.json + update.json.sig and the installers it lists
+One channel (acw/downloads.py describes the layout):
   obs-plugin  the newest `obs-plugin-v<version>` release that has obs-plugin-manifest.json + .sig, and the packages it lists
-  models      every `models-v*` archive that deploy/models.lock lists (size and sha256 come from the lock)
 
 Before anything is published:
-  * the Ed25519 signature of update.json / obs-plugin-manifest.json is checked against the public key built into
-    the apps (raw signature over the exact bytes of the file),
+  * the Ed25519 signature of obs-plugin-manifest.json is checked against the public key built into the plugin (raw
+    signature over the exact bytes of the file),
   * every file's size and sha256 (and sha512 when the manifest gives it) are checked, and the size cap of its channel
   * the version must not be older than the one already served (no downgrades).
 A failed check publishes nothing; the previous version keeps being served and the monitor mails (mirror_stale).
@@ -39,7 +38,6 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
 
 import httpx
 
@@ -55,15 +53,13 @@ PUBLIC_KEY = "lkLV2nf15eOuttdcqpieY2QJFyPsF4WOIwidisbp6Hw="
 
 MB = 1024**2
 GB = 1024**3
-SIZE_CAP = {"desktop": 1 * GB, "obs-plugin": 50 * MB, "models": 2 * GB}
+SIZE_CAP = {"obs-plugin": 50 * MB}
 MANIFEST_MAX = 1 * MB
 STALE_RUN_S = 2 * 3600       # no successful run for this long: the monitor mails
 STALE_RELEASE_S = 3600       # a newer release has been on GitHub for this long without being served: the monitor mails
 KEEP_PREVIOUS_S = downloads.KEEP_PREVIOUS_S
 STALE_STAGING_S = 2 * 86400
-_DESKTOP_TAG = re.compile(r"desktop-v(\d+(?:\.\d+){1,3})")
 _OBS_TAG = re.compile(r"obs-plugin-v(\d+\.\d+\.\d+)")
-_MODELS_TAG = re.compile(r"models-v\d+[A-Za-z0-9._-]*")
 _HEX256 = re.compile(r"[0-9a-f]{64}")
 _HEX512 = re.compile(r"[0-9a-f]{128}")
 _PLATFORM_KEY = re.compile(r"[a-z0-9][a-z0-9_-]{0,30}")
@@ -79,7 +75,6 @@ class Config:
     api: str
     token: str | None
     public_key: str
-    lock_path: Path | None
     min_free: int
     root: Path
 
@@ -94,14 +89,11 @@ class Config:
             pass
         except OSError as e:
             log.warning("cannot read the GitHub token file (%s): reading anonymously", type(e).__name__)
-        lock = os.environ.get("ACW_MODELS_LOCK")
-        candidates = [Path(lock)] if lock else [s.home / "app" / "models.lock", Path(__file__).resolve().parents[2] / "deploy" / "models.lock"]
         return cls(
             repo=os.environ.get("ACW_GITHUB_REPO") or DEFAULT_REPO,
             api=(os.environ.get("ACW_GITHUB_API") or DEFAULT_API).rstrip("/"),
             token=token,
             public_key=os.environ.get("ACW_UPDATE_PUBLIC_KEY") or PUBLIC_KEY,
-            lock_path=next((p for p in candidates if p.is_file()), None),
             min_free=int(float(os.environ.get("ACW_MIRROR_MIN_FREE_GB", "5")) * GB),
             root=downloads.root(),
         )
@@ -549,20 +541,6 @@ def _sync_signed(ctx: Ctx, channel: str, release: dict, hint: str | None, manife
     return f"published {version}"
 
 
-def sync_desktop(ctx: Ctx) -> str:
-    cands = []
-    for rel in ctx.gh.releases():
-        m = _DESKTOP_TAG.fullmatch(str(rel.get("tag_name") or ""))
-        if m and not rel.get("draft"):
-            cands.append((downloads.vtuple(m.group(1)), m.group(1), rel))
-    for _, hint, rel in sorted(cands, key=lambda c: c[0], reverse=True):
-        assets = _assets(rel)
-        if "update.json" in assets and "update.json.sig" in assets:
-            return _sync_signed(ctx, "desktop", rel, hint, "update.json", "update.json.sig")
-        log.info("desktop: release %s has no signed update information yet; looking at older ones", hint)
-    return "no desktop release with update information yet"
-
-
 def sync_obs(ctx: Ctx) -> str:
     cands = []
     for rel in ctx.gh.releases():
@@ -577,75 +555,7 @@ def sync_obs(ctx: Ctx) -> str:
     return "no plugin release with a signed manifest yet"
 
 
-def parse_lock(path: Path) -> list[dict]:
-    """The `archive` lines of deploy/models.lock that come from a models-v* release:
-    [{"tag", "name", "sha256", "size"}]. Columns: kind flags sha256 size NAME URL."""
-    out = []
-    for line in path.read_text("utf-8").splitlines():
-        if not line.startswith("archive"):
-            continue
-        parts = line.split(None, 5)
-        if len(parts) != 6:
-            continue
-        _, _, sha, size, tag, url = parts
-        name = unquote(urlparse(url.strip()).path.rsplit("/", 1)[-1])
-        if _MODELS_TAG.fullmatch(tag) and _HEX256.fullmatch(sha) and size.isdigit() and downloads.NAME_RE.fullmatch(name):
-            out.append({"tag": tag, "name": name, "sha256": sha, "size": int(size)})
-    return out
-
-
-def sync_models(ctx: Ctx) -> str:
-    cfg, gh = ctx.cfg, ctx.gh
-    if cfg.lock_path is None:
-        raise MirrorError("deploy/models.lock was not found (ACW_MODELS_LOCK)")
-    wanted = parse_lock(cfg.lock_path)
-    if not wanted:
-        return "deploy/models.lock lists no models release"
-    channel = "models"
-    base = downloads.channel_dir(channel)
-    st = _state_or_empty(channel)
-    cur = st.get("current") if isinstance(st.get("current"), dict) else None
-    cur_files = (cur or {}).get("files") or {}
-    files: dict[str, dict] = {}
-    releases: dict[str, dict | None] = {}
-    fetched = []
-    for w in wanted:
-        if w["size"] > SIZE_CAP[channel]:
-            raise MirrorError(f"{w['name']} is larger than the {SIZE_CAP[channel] // MB} MB allowed for models")
-        entry = {"size": w["size"], "sha256": w["sha256"], "dir": w["tag"]}
-        if not ctx.force and cur_files.get(w["name"]) == entry and downloads.served_intact(channel, {w["name"]: entry}):
-            files[w["name"]] = entry
-            continue
-        _mark_seen(channel, w["tag"], ctx.now)
-        if w["tag"] not in releases:
-            releases[w["tag"]] = gh.release_by_tag(w["tag"])
-        rel = releases[w["tag"]]
-        asset = _assets(rel).get(w["name"]) if rel else None
-        if asset is None:
-            raise MirrorError(f"release {w['tag']} has no file {w['name']}")
-        if asset.get("size") != w["size"]:
-            raise MirrorError(f"{w['name']} on the release is {asset.get('size')} bytes, deploy/models.lock says {w['size']}")
-        base.mkdir(parents=True, exist_ok=True, mode=0o700)
-        staging = base / f".staging-{w['tag']}"
-        staging.mkdir(exist_ok=True, mode=0o700)
-        done = fetch_verified(cfg, gh, asset, staging, w["name"], w["size"], w["sha256"], None)
-        (base / w["tag"]).mkdir(exist_ok=True, mode=0o700)
-        os.replace(done, base / w["tag"] / w["name"])
-        _fsync_dir(base / w["tag"])
-        with contextlib.suppress(OSError):
-            staging.rmdir()
-        files[w["name"]] = entry
-        fetched.append(w["name"])
-    if files == cur_files and cur:
-        _mark_seen(channel, None, ctx.now)
-        return "models are up to date"
-    top = max((w["tag"] for w in wanted), key=lambda t: [int(x) if x.isdigit() else 0 for x in re.split(r"\D+", t)])
-    _publish(channel, {"version": top, "published_at": int(ctx.now), "files": files, "platforms": {}}, ctx.now)
-    log.info("models: now serving %s", ", ".join(sorted(files)))
-    return f"published {', '.join(fetched) or 'a changed list'}"
-
-
-CHANNEL_SYNC = (("desktop", sync_desktop), ("obs-plugin", sync_obs), ("models", sync_models))
+CHANNEL_SYNC = (("obs-plugin", sync_obs),)
 
 
 # ---- the run -------------------------------------------------------------------------------------------------------
@@ -734,7 +644,8 @@ def stale_problems(now: float | None = None) -> list[str]:
     """Why the mirror is not doing its job (empty: fine): a channel without a successful run for 2 h, or a release
     newer than the served one for more than an hour."""
     now = time.time() if now is None else now
-    chans = load_status().get("channels") or {}
+    # Only the channels mirrored now: a status file from before a channel was dropped (desktop, models) still lists it.
+    chans = {k: v for k, v in (load_status().get("channels") or {}).items() if k in downloads.CHANNELS}
     if not chans:
         return ["the mirror has never run"]
     out = []

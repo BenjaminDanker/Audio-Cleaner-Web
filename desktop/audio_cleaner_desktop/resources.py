@@ -28,7 +28,10 @@ _FFMPEG = f"ffmpeg{_EXE}"
 _FFPROBE = f"ffprobe{_EXE}"
 _WHISPER_FILES = ("model.bin", "config.json", "tokenizer.json")
 
-_TURBO = "https://huggingface.co/dropbox-dash/faster-whisper-large-v3-turbo/resolve/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf/"
+# The speech model is in every release, as separate files (each under GitHub's 2 GB per file), named "whisper-<file>";
+# CI takes them from dropbox-dash/faster-whisper-large-v3-turbo at commit 0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf on
+# Hugging Face and checks them against the hashes below.
+_TURBO = config.MODELS_URL + "whisper-"
 SPEECH_MODEL = models.SpeechModel(
     id="whisper-large-v3-turbo",
     title="Speech model for subtitles",
@@ -49,7 +52,7 @@ SPEECH_MODEL = models.SpeechModel(
 )
 models.register(SPEECH_MODEL)
 
-# The two ONNX models and their licence texts come in ONE zip archive on our download server (config.MODELS_URL):
+# The two ONNX models and their licence texts come in ONE zip archive, in every release (config.MODELS_URL):
 # AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by tools/export_apbwe_onnx.py, and
 # Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md). The archive holds
 #   README.txt, LICENSES/*, ap-bwe/{8k,12k,16k,24k}to48k.onnx, sidon/{sidon_fe,sidon_dec}.onnx, and the heavy-noise model
@@ -57,7 +60,7 @@ models.register(SPEECH_MODEL)
 # Each model keeps its own folder and checks; the downloaders unpack the members each model lists (models.py).
 MODELS_ARCHIVE = models.ModelArchive(
     name="AudioCleaner-models-v2.zip",
-    url=config.MODELS_URL + "AudioCleaner-models-v2.zip",
+    url=config.MODELS_URL + "AudioCleaner-models-v2.zip",  # in every release, next to the installers
     size=922088329,
     sha256="1c58ce59bdb9dfd41c4aabd0ae93e113604f3c75ac664d1b9130f555ab650d04",
     shared=tuple(

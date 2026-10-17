@@ -1,4 +1,4 @@
-"""Automatic updates: look for a newer version on our download server, download it, and install it.
+"""Automatic updates: look for a newer version in the app's GitHub releases, download it, and install it.
 
 How it works (docs/desktop.md has the owner's side of it):
 
@@ -6,12 +6,14 @@ How it works (docs/desktop.md has the owner's side of it):
   name, size and SHA-256 of the installer of each platform) and `update.json.sig`, a raw Ed25519 signature over the exact
   bytes of `update.json`. CI makes the signature with a private key that never leaves CI; the matching
   public key is `PUBLIC_KEY` below. Without a valid signature nothing is accepted (an unsigned release simply never
-  updates anybody). Our download server serves verified copies of these files (config.UPDATES_URL).
-* The newest release is always `<config.UPDATES_URL>update.json`. The app fetches it and the signature,
+  updates anybody), so whoever controls a download link still can't make the app install anything else.
+* The newest release's files are always at `<config.LATEST_URL>update.json`. The app fetches it and the signature,
   verifies it, compares the version with its own (a manifest that is not newer is ignored), picks the file of this
   platform, and downloads that installer into `<app data>/updates/` with the model downloader's care (https only,
-  resumable, size and SHA-256 checked). The download URL is the server's folder plus the file name, never a URL
-  taken from the manifest. Only the newest download is kept.
+  resumable, size and SHA-256 checked) from that version's release (config.release_url): the URL is built from the
+  version and the file name, never taken from the manifest. Only the newest download is kept. The models of the new
+  version come from its release too: the updated app finds that a model it had changed (models.outdated) and
+  downloads the new one by itself.
 * Windows installs it when the app is closed (silently, over the existing install); a Mac opens the .pkg for the
   user, because the macOS installer asks for the password anyway.
 
@@ -45,9 +47,9 @@ from . import __version__, config, models
 
 log = logging.getLogger(__name__)
 
-MANIFEST_URL = config.UPDATES_URL + "update.json"
-SIGNATURE_URL = config.UPDATES_URL + "update.json.sig"
-DOWNLOAD_BASE = config.UPDATES_URL  # + <file name from the manifest>
+MANIFEST_URL = config.LATEST_URL + "update.json"
+SIGNATURE_URL = config.LATEST_URL + "update.json.sig"
+DOWNLOAD_BASE = None  # the installer comes from the release of the version the manifest names (config.release_url)
 # The public half of the key CI signs update.json with (raw Ed25519, base64). To rotate the key see docs/desktop.md.
 PUBLIC_KEY = "lkLV2nf15eOuttdcqpieY2QJFyPsF4WOIwidisbp6Hw="
 MANIFEST_NAME = "update.json"
@@ -175,7 +177,7 @@ def decide(manifest_bytes: bytes, signature: bytes, current: str, key: str | Non
 
 
 def user_agent(version: str = __version__) -> str:
-    """What a download tells our server about us: the app and its version, as any browser would."""
+    """What a download tells the server about us: the app and its version, as any browser would."""
     return f"{config.APP_NAME.replace(' ', '')}/{version}"
 
 
@@ -254,7 +256,7 @@ def prune(folder: Path, keep: str | None) -> None:
 
 
 def download(update: Update, folder: Path, progress: models.Progress | None = None,
-             cancel: threading.Event | None = None, *, opener=None, base_url: str = DOWNLOAD_BASE,
+             cancel: threading.Event | None = None, *, opener=None, base_url: str | None = DOWNLOAD_BASE,
              agent: str | None = None) -> Path:
     """Download (or finish downloading) the installer of `update` into `folder`, check it, remember the verified
     manifest beside it and delete older downloads. Returns the installer's path. Raises DownloadError, Cancelled."""
@@ -262,7 +264,8 @@ def download(update: Update, folder: Path, progress: models.Progress | None = No
     folder.mkdir(parents=True, exist_ok=True)
     if not is_complete(dest, update.file, cancel):
         dest.unlink(missing_ok=True)
-        url = base_url.rstrip("/") + "/" + update.file.name
+        base = base_url if base_url is not None else config.release_url(update.version)
+        url = base.rstrip("/") + "/" + update.file.name
         models.fetch_file(url, dest, update.file.size, update.file.sha256, progress, cancel, agent or user_agent(), opener)
     _write_atomic(folder / MANIFEST_NAME, update.manifest)
     _write_atomic(folder / SIGNATURE_NAME, update.signature)
@@ -371,7 +374,7 @@ class UpdateController(QObject):
     def __init__(self, prefs, parent: QObject | None = None, *, enabled: bool | None = None, folder: Path | None = None,
                  current: str = __version__, key: str | None = None, clock: Callable[[], float] = time.time,
                  public_key: str = PUBLIC_KEY, manifest_url: str = MANIFEST_URL, signature_url: str = SIGNATURE_URL,
-                 download_base: str = DOWNLOAD_BASE):
+                 download_base: str | None = DOWNLOAD_BASE):
         super().__init__(parent)
         self._prefs = prefs
         self.enabled = is_frozen() if enabled is None else enabled

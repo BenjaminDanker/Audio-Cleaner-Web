@@ -7,7 +7,9 @@ X.Y.Z; X.Y must match the app's MAJOR.MINOR.
 
     python desktop/packaging/version.py            print the version (reads GITHUB_REF_TYPE, GITHUB_REF_NAME,
                                                    GITHUB_RUN_NUMBER; without them: the version in __init__.py)
-    python desktop/packaging/version.py --write    also write it into __init__.py (CI does this before building)
+    python desktop/packaging/version.py --write    also write it into __init__.py (CI does this before building),
+                                                   with __released__ = True and __releases__ = $ACW_RELEASES_REPO
+                                                   (the GitHub repository the release is published to) when set
 """
 from __future__ import annotations
 
@@ -44,7 +46,18 @@ def main(argv: list[str]) -> int:
     text = INIT.read_text(encoding="utf-8")
     version = build_version(*source_version(text), dict(os.environ))
     if "--write" in argv:
-        INIT.write_text(_LINE.sub(f'__version__ = "{version}"', text, count=1), encoding="utf-8")
+        text = _LINE.sub(f'__version__ = "{version}"', text, count=1)
+        text, n = re.subn(r"^__released__ = (True|False)$", "__released__ = True", text, count=1, flags=re.M)
+        if n != 1:
+            raise SystemExit(f"{INIT}: no line __released__ = True|False")
+        repo = os.environ.get("ACW_RELEASES_REPO")
+        if repo:
+            if not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", repo):
+                raise SystemExit(f"ACW_RELEASES_REPO {repo!r} is not owner/name")
+            text, n = re.subn(r'^__releases__ = ".*"$', f'__releases__ = "{repo}"', text, count=1, flags=re.M)
+            if n != 1:
+                raise SystemExit(f'{INIT}: no line __releases__ = "owner/name"')
+        INIT.write_text(text, encoding="utf-8")
     print(version)
     return 0
 

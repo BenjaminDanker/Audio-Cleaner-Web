@@ -5,7 +5,7 @@ WebSocket, so a big transfer could add latency to live sessions (head-of-line bl
 stream, one event loop, one home uplink). This process serves only
   * PUT  /api/jobs/{id}/input            the upload
   * GET  /api/jobs/{id}/outputs/{name}   a result download
-  * GET  /api/downloads/...              the release files (desktop installers, OBS plugin, model archive), mirrored
+  * GET  /api/downloads/...              the OBS plugin's release files, mirrored
                                          from the build service by acw/mirror.py and served from our own domain
   * GET  /api/health                     for the monitor and the VPS (answers {"ok": true})
 and nothing else (every other path is 404). It reuses the route functions of the main app, so authentication,

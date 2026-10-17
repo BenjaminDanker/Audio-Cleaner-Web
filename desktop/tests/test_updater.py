@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from PySide6.QtCore import QSettings
 
-from audio_cleaner_desktop import models, updater
+from audio_cleaner_desktop import config, models, updater
 from audio_cleaner_desktop.gui.preferences import Preferences
 from conftest import wait_until
 
@@ -300,6 +300,59 @@ def test_the_download_url_comes_from_the_version_and_name_not_from_the_manifest(
     _Handler.requests.clear()
     updater.download(update, tmp_path / "u", base_url=f"{server}/desktop")
     assert [r.split()[0] for r in _Handler.requests] == ["/desktop/AudioCleaner-2.0.15-Windows.exe"]
+
+
+def test_the_installer_comes_from_the_release_of_the_version_the_manifest_names(server, key, tmp_path, monkeypatch):
+    # The manifest is the newest release's (config.LATEST_URL); the installer is a file of that version's own release
+    # (config.release_url), whatever version the app itself is.
+    monkeypatch.setattr(config, "RELEASES_URL", f"{server}/releases/")
+    installer = _publish(server, key, version="2.0.15")
+    _Handler.files["/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe"] = installer
+    del _Handler.files["/desktop/AudioCleaner-2.0.15-Windows.exe"]
+    update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
+    _Handler.requests.clear()
+    path = updater.download(update, tmp_path / "u")  # no base_url: the default, as the app does it
+    assert path.read_bytes() == installer
+    assert [r.split()[0] for r in _Handler.requests] == ["/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe"]
+    # a newer manifest: the next version's release
+    installer = _publish(server, key, version="2.0.16", installer=b"newer" * 999)
+    _Handler.files["/releases/download/v2.0.16/AudioCleaner-2.0.16-Windows.exe"] = installer
+    update = updater.check("2.0.15", WIN, public_key=_public(key), **_endpoints(server))
+    _Handler.requests.clear()
+    assert updater.download(update, tmp_path / "u").read_bytes() == installer
+    assert [r.split()[0] for r in _Handler.requests] == ["/releases/download/v2.0.16/AudioCleaner-2.0.16-Windows.exe"]
+
+
+def test_the_release_download_url_is_https_github_built_from_version_and_name(key, tmp_path, monkeypatch):
+    data, _ = _manifest("2.0.15")
+    update = updater.decide(data, key.sign(data), "2.0.3", WIN, _public(key))
+    seen = []
+
+    def fake_fetch(url, *args, **kwargs):
+        seen.append(url)
+        raise models.DownloadError("stop here")
+
+    monkeypatch.setattr(models, "fetch_file", fake_fetch)
+    with pytest.raises(models.DownloadError):
+        updater.download(update, tmp_path / "u")
+    assert seen == [config.release_url("2.0.15") + "AudioCleaner-2.0.15-Windows.exe"]
+    assert seen[0].startswith(config.RELEASES_URL + "download/v2.0.15/") and seen[0].startswith("https://github.com/")
+    assert not (tmp_path / "u" / "update.json").exists()  # nothing is remembered without the installer
+
+
+def test_the_controller_downloads_from_the_release_by_default(qapp, tmp_path, server, key, monkeypatch):
+    monkeypatch.setattr(config, "RELEASES_URL", f"{server}/releases/")
+    installer = _publish(server, key)
+    _Handler.files["/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe"] = installer
+    del _Handler.files["/desktop/AudioCleaner-2.0.15-Windows.exe"]
+    ctl = updater.UpdateController(_prefs(tmp_path), enabled=True, folder=tmp_path / "updates", current="2.0.3", key=WIN,
+                                   public_key=_public(key), clock=lambda: 1_000_000.0, **_endpoints(server))
+    ready = []
+    ctl.readyChanged.connect(lambda: ready.append(ctl.ready_version))
+    ctl.startup_check()
+    assert wait_until(lambda: ready, timeout=30)
+    assert ready == ["2.0.15"] and ctl.ready_path.read_bytes() == installer
+    assert "/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe" in [r.split()[0] for r in _Handler.requests]
 
 
 def test_pending_is_none_for_a_damaged_installer_and_cleans_up_after_an_install(server, key, tmp_path):
@@ -736,7 +789,10 @@ def test_the_release_job_signs_the_manifest_and_fails_closed():
     assert 'if [ -z "$UPDATE_SIGNING_KEY" ]' in release and "::warning::" in release  # no secret: no manifest, a warning
     assert "check-key" in release  # a secret that is not the app's key publishes no manifest either
     assert 'rm -f "$key"' in release and "echo \"$UPDATE_SIGNING_KEY\"" not in release
-    assert "desktop/audio_cleaner_desktop/updater.py" in WORKFLOW.split("sparse-checkout: |")[1]
+    sparse = release.split("sparse-checkout: |")[1].split("sparse-checkout-cone-mode")[0].split()
+    # the app's modules (updater.py's key; resources.py, models.py and config.py for release_models.py) and the scripts
+    assert sparse == ["desktop/audio_cleaner_desktop/*.py", "desktop/packaging/version.py",
+                      "desktop/packaging/make_update_manifest.py", "desktop/packaging/release_models.py"]
     assert WORKFLOW.count("--require-hashes") >= 2 and "--require-hashes -r desktop/requirements.lock" in WORKFLOW
 
 
@@ -761,22 +817,44 @@ def _public_copy_leak_patterns() -> dict[str, str]:
     return {why: pattern for pattern, why in sync.LEAK_PATTERNS}
 
 
+def _step(job: str, name: str) -> str:
+    body = job.split(f"- name: {name}")[1]
+    return body.split("\n      - name:")[0].split("\n      - uses:")[0]
+
+
 @pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository publishes no releases")
-def test_the_release_is_copied_to_the_public_repository_without_the_update_files():
+def test_the_release_is_published_to_the_public_repository_with_everything_the_app_downloads():
     release = WORKFLOW.split("\n  release:\n")[1]
-    assert "- name: Copy the release to the public repository" in release
-    step = release.split("- name: Copy the release to the public repository")[1].split("\n      - name:")[0]
-    assert "GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step
+    name = "Publish the release to the public repository"
+    assert f"- name: {name}" in release and "Copy the release to the public repository" not in WORKFLOW
+    step = _step(release, name)
+    assert "GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step and "PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step
+    assert "OWN_TOKEN: ${{ github.token }}" in step  # reads this repository's releases (the models archive's first upload)
     assert "continue-on-error: true" in step and "::warning::" in step  # never fails the official release
     assert 'if [ -z "$GH_TOKEN" ]' in step and "exit 0" in step  # no secret: skipped
-    assert 'tag="v$version"' in step and "--latest" in step and '--target "$branch"' in step and "--clobber" in step
-    # only the installers go there: not the update information the installed apps read, nor its signature
-    assert "update.json" not in step and ".sig" not in step
+    assert "trap '" in step and "ERR" in step
+    assert 'tag="v$version"' in step and '--target "$branch"' in step and "--clobber" in step
+    # the models of this version (release_models.py: pinned, hash-checked) are gathered before anything is uploaded
+    assert "python3 desktop/packaging/release_models.py release/models" in step
+    assert step.index("release_models.py release/models") < step.index("gh release create")
+    # everything the app and setup download: the installers, the signed update information (when this build has it)
+    # and the model files
     files = re.search(r"files=\((.*?)\)", step).group(1).split()
     assert files == ['"AudioCleaner-$version-Windows.exe"', '"AudioCleaner-$version-Mac-Apple-silicon.pkg"',
                      '"AudioCleaner-$version-Mac-Intel.pkg"']
-    # The notes are written for the community. The installers live only in this repository's Releases (the desktop app
-    # is not on the website), so the notes say which file is for which computer, that setup downloads the models once
+    assert "[ ! -f update.json ] || files+=(update.json update.json.sig)" in step
+    assert 'for f in models/*; do files+=("$f"); done' in step
+    # made as a draft, filled, then published and marked latest: no app and no person ever sees half a release
+    create = step.index("gh release create")
+    upload = step.index('gh release upload "$tag"')
+    publish = step.index('gh release edit "$tag"')
+    assert create < upload < publish
+    assert "--draft " in step[create:upload] and "--latest" not in step[create:upload]
+    assert "--draft=false" in step[publish:] and "--latest" in step[publish:]
+    assert 'if ! gh release view "$tag"' in step  # a rerun reuses the release (its files are replaced)
+    # releases there are never removed: every version keeps its models (installed apps of that version download them)
+    assert "gh release delete" not in step and "automatic build" not in step
+    # The notes are written for the community: which file is for which computer, that setup downloads the models once
     # and that the app keeps itself up to date.
     notes = re.search(r'notes="(Audio Cleaner \$version\..*?[^\\])"\n', step, re.S).group(1)
     picks = dict(re.findall(r"^\s*- (.+?): (AudioCleaner-\$version-\S+)$", notes, re.M))
@@ -795,4 +873,28 @@ def test_the_release_is_copied_to_the_public_repository_without_the_update_files
     leaks = _public_copy_leak_patterns()
     assert not re.search(leaks["the name of the private repository"], step, re.I)
     assert [why for pattern, why in leaks.items() if re.search(pattern, notes, re.I)] == []
-    assert release.index("gh release create") < release.index("Copy the release to the public repository")
+    assert release.index("gh release create") < release.index(name)  # after the official release
+
+
+@pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository publishes no releases")
+def test_the_app_is_built_for_the_repository_the_release_is_published_to():
+    from audio_cleaner_desktop import __releases__
+
+    app = WORKFLOW.split("\n  app:\n")[1].split("\n  tests:\n")[0]
+    step = _step(app, "Version")
+    built_for = re.search(r"ACW_RELEASES_REPO: (\$\{\{.*?\}\})", step).group(1)
+    assert 'python desktop/packaging/version.py --write' in step
+    publish = _step(WORKFLOW.split("\n  release:\n")[1], "Publish the release to the public repository")
+    published_to = re.search(r"PUBLIC_REPO: (\$\{\{.*?\}\})", publish).group(1)
+    assert built_for == published_to  # the app looks for its releases (and models) where they are published
+    assert f"'{__releases__}'" in built_for  # with the same default as the source
+
+
+def test_the_model_check_job_looks_for_what_every_release_carries():
+    if "\n  model-urls:\n" not in WORKFLOW:
+        pytest.skip("this copy of the repository has no workflow")
+    job = WORKFLOW.split("\n  model-urls:\n")[1].split("\n  ffmpeg:\n")[0]
+    assert "run: python desktop/packaging/release_models.py --check" in job
+    assert "OWN_TOKEN: ${{ github.token }}" in job and "PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in job
+    assert "PUBLIC_REPO:" in job
+    assert "check_model_urls" not in WORKFLOW
