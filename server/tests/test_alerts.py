@@ -293,3 +293,221 @@ def test_check_failure_does_not_stop_the_others(mail, monkeypatch):
 def test_describe_host_runs():
     text = monitor.describe_host(sample_s=0.1)
     assert "CPU:" in text
+
+
+# --- the machine samples the monitor records for the dashboard ----------------------------
+
+def _quiet_run(monkeypatch, tmp_path):
+    """What test_run_end_to_end_mails_once_and_resolves sets up: no units, models or sockets of this computer."""
+    monkeypatch.setattr(monitor, "UNIT_DIR", tmp_path / "units")
+    monkeypatch.setattr(monitor, "expected_units", lambda: [])
+    monkeypatch.setattr(monitor, "check_backup", lambda: [])
+    monkeypatch.setattr(monitor, "check_installation", lambda now: [])
+    gb = 1024**3
+    monkeypatch.setattr(monitor.shutil, "disk_usage", lambda p: type("U", (), {"free": 100 * gb})())
+    monkeypatch.setattr(monitor, "meminfo", lambda: {"MemAvailable": 20 * gb, "MemTotal": 31 * gb, "SwapTotal": 0, "SwapFree": 0})
+
+
+def _snap():
+    return {
+        "cpu": {"cores": 8, "busy": 2.0}, "memory": {"available": 1, "sliceHeadroom": 2}, "disk": {"free": 3},
+        "live": {"sessions": {"live": 1}, "engine": {"units": 1.0, "capacityUnits": 4.0}},
+        "gpu": {"card": {"down": "none"}}, "jobs": {"running": [], "queued": 2},
+    }
+
+
+def _samples_in_db():
+    import sqlite3
+
+    from acw import samples
+
+    if not samples.path().exists():
+        return []
+    c = sqlite3.connect(samples.path())
+    try:
+        return c.execute("SELECT ts, cpu_busy, jobs_queued FROM samples").fetchall()
+    finally:
+        c.close()
+
+
+def test_record_sample_stores_one_row_and_is_never_a_finding(monkeypatch):
+    from acw import broker
+
+    monkeypatch.setattr(broker, "snapshot", _snap)
+    assert monitor.record_sample() == []
+    rows = _samples_in_db()
+    assert len(rows) == 1 and rows[0][1:] == (2.0, 2)
+
+
+def test_run_records_one_sample_per_pass(mail, monkeypatch, tmp_path):
+    from acw import broker
+
+    _quiet_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(broker, "snapshot", _snap)
+    findings = monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert len(_samples_in_db()) == 1
+    assert not any("sample" in f.kind for f in findings)
+    assert mail == []
+
+
+@pytest.mark.parametrize("what", ["snapshot", "record"])
+def test_a_failing_sample_never_becomes_a_finding_or_stops_the_other_checks(mail, monkeypatch, tmp_path, caplog, what):
+    from acw import broker, samples
+
+    _quiet_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(broker, "snapshot", _snap)
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(broker if what == "snapshot" else samples, what, boom)
+    with caplog.at_level("ERROR"):
+        findings = monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    kinds = {f.kind for f in findings}
+    assert not any("sample" in k for k in kinds)
+    assert not any(f.bad for f in findings)
+    assert {"queue_long", "disk_low"} <= kinds  # the checks around it still ran
+    assert any("check samples failed" in r.getMessage() for r in caplog.records)
+    assert mail == []
+    from acw import db
+
+    assert db.one("SELECT 1 FROM alert_state WHERE kind LIKE '%sample%'") is None
+
+
+# --- timer-started services: a clean run resolves the alert its failure opened ------------
+
+def test_timer_services_are_the_ones_the_timers_start():
+    assert monitor.TIMER_SERVICES == ("acw-mirror.service", "acw-backup.service", "acw-monitor.service")
+
+
+def test_check_timer_services():
+    states = {
+        "acw-mirror.service": {"ActiveState": "inactive", "SubState": "dead", "Result": "success"},
+        "acw-backup.service": {"ActiveState": "failed", "SubState": "failed", "Result": "exit-code"},
+        "acw-monitor.service": {"ActiveState": "activating", "SubState": "start", "Result": "success"},
+    }
+    f = monitor.check_timer_services(states)
+    assert [x.kind for x in f] == ["service:acw-backup.service", "service:acw-mirror.service", "service:acw-monitor.service"]
+    by = {x.kind: x for x in f}
+    assert by["service:acw-backup.service"].bad
+    assert not by["service:acw-mirror.service"].bad and not by["service:acw-monitor.service"].bad  # still running = fine
+    bad = by["service:acw-backup.service"]
+    assert bad.subject == "acw-backup.service failed" and "exit-code" in bad.body and "journalctl --user -u acw-backup.service" in bad.body
+    assert (bad.confirm, bad.clear) == (1, 2)
+
+
+@pytest.mark.parametrize("st,bad", [
+    ({"ActiveState": "failed", "Result": "exit-code"}, True),
+    ({"ActiveState": "failed", "Result": "success"}, True),  # failed state wins
+    ({"ActiveState": "failed"}, True),
+    ({"ActiveState": "inactive", "Result": "exit-code"}, True),
+    ({"ActiveState": "inactive", "Result": "signal"}, True),
+    ({"ActiveState": "inactive", "Result": "timeout"}, True),
+    ({"ActiveState": "inactive", "Result": "oom-kill"}, True),
+    ({"ActiveState": "inactive", "Result": "success"}, False),
+    ({"ActiveState": "inactive"}, False),  # no Result at all: ok
+    ({"ActiveState": "inactive", "Result": None}, False),
+    ({"ActiveState": "active", "Result": "success"}, False),
+    ({}, False),
+])
+def test_check_timer_services_results(st, bad):
+    [f] = monitor.check_timer_services({"acw-mirror.service": st})
+    assert f.kind == "service:acw-mirror.service" and f.bad is bad
+
+
+def test_check_timer_services_with_nothing():
+    assert monitor.check_timer_services({}) == []
+
+
+def _timer_units(monkeypatch, tmp_path, present, states):
+    """UNIT_DIR with the unit files `present`; systemd answers from `states` (and records which units were asked)."""
+    units = tmp_path / "units"
+    units.mkdir(exist_ok=True)
+    for u in present:
+        (units / u).write_text("[Service]\n")
+    asked = []
+
+    def fake(names):
+        asked.append(list(names))
+        return {n: states[n] for n in names if n in states}
+
+    monkeypatch.setattr(monitor, "unit_states", fake)
+    return asked
+
+
+def test_run_includes_timer_services_findings(mail, monkeypatch, tmp_path):
+    _quiet_run(monkeypatch, tmp_path)
+    asked = _timer_units(monkeypatch, tmp_path, ["acw-mirror.service", "acw-backup.service"], {
+        "acw-mirror.service": {"ActiveState": "inactive", "Result": "success"},
+        "acw-backup.service": {"ActiveState": "failed", "Result": "exit-code"},
+        "acw-monitor.service": {"ActiveState": "failed", "Result": "exit-code"},
+    })
+    findings = {f.kind: f for f in monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))}
+    assert ["acw-mirror.service", "acw-backup.service"] in asked  # only units that are installed are asked about
+    assert not any("acw-monitor.service" in a for a in asked if a)
+    assert not findings["service:acw-mirror.service"].bad and findings["service:acw-backup.service"].bad
+    assert "service:acw-monitor.service" not in findings
+    assert mail[-1][0] == "acw-backup.service failed"
+
+
+def test_run_without_timer_unit_files_asks_systemd_about_none(mail, monkeypatch, tmp_path):
+    _quiet_run(monkeypatch, tmp_path)
+    asked = _timer_units(monkeypatch, tmp_path, [], {})
+    findings = monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert not any(f.kind.startswith("service:") for f in findings)
+    assert not any(asked)
+
+
+def test_failure_alert_from_unit_failed_is_resolved_by_clean_timer_runs(mail, monkeypatch, tmp_path):
+    """OnFailure runs `acw.alerts unit-failed UNIT`; the monitor then resolves that alert after clean runs."""
+    _quiet_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(alerts.subprocess, "run", lambda *a, **kw: type("R", (), {"stdout": "ActiveState=failed"})())
+    state = {"acw-mirror.service": {"ActiveState": "failed", "Result": "exit-code"}}
+    _timer_units(monkeypatch, tmp_path, ["acw-mirror.service"], state)
+
+    assert alerts.main(["unit-failed", "acw-mirror.service"]) == 0
+    assert [m[0] for m in mail] == ["acw-mirror.service failed"]
+    assert db.one("SELECT active FROM alert_state WHERE kind = 'service:acw-mirror.service'")["active"] == 1
+
+    # still failed: the monitor keeps it open and does not mail again within the hour
+    monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert len(mail) == 1
+    assert db.one("SELECT active FROM alert_state WHERE kind = 'service:acw-mirror.service'")["active"] == 1
+
+    # the timer starts it again and it finishes cleanly: one clean pass is not enough ...
+    state["acw-mirror.service"] = {"ActiveState": "inactive", "Result": "success"}
+    monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert len(mail) == 1
+    assert db.one("SELECT active FROM alert_state WHERE kind = 'service:acw-mirror.service'")["active"] == 1
+    # ... the second one resolves it, with one mail
+    monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert [m[0] for m in mail] == ["acw-mirror.service failed", "Resolved: acw-mirror.service failed"]
+    assert db.one("SELECT active FROM alert_state WHERE kind = 'service:acw-mirror.service'")["active"] == 0
+    monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert len(mail) == 2
+
+
+def test_a_failing_run_in_between_restarts_the_clean_count(mail, monkeypatch, tmp_path):
+    _quiet_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(alerts.subprocess, "run", lambda *a, **kw: type("R", (), {"stdout": ""})())
+    state = {"acw-backup.service": {"ActiveState": "failed", "Result": "exit-code"}}
+    _timer_units(monkeypatch, tmp_path, ["acw-backup.service"], state)
+    alerts.unit_failed("acw-backup.service")
+    good = {"ActiveState": "inactive", "Result": "success"}
+    for st in (good, state["acw-backup.service"], good):
+        state["acw-backup.service"] = st
+        monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert len(mail) == 1 and db.one("SELECT active FROM alert_state WHERE kind = 'service:acw-backup.service'")["active"] == 1
+
+
+def test_a_systemd_error_in_the_timer_check_does_not_stop_the_others(mail, monkeypatch, tmp_path):
+    _quiet_run(monkeypatch, tmp_path)
+    _timer_units(monkeypatch, tmp_path, ["acw-mirror.service"], {})
+
+    def boom(names):
+        raise RuntimeError("systemctl missing")
+
+    monkeypatch.setattr(monitor, "unit_states", boom)
+    findings = monitor.run(ctx=lambda: "ctx", http=lambda u: (True, "ok"))
+    assert any(f.kind == "disk_low" for f in findings)
+    assert not any(f.kind.startswith("service:") for f in findings)
