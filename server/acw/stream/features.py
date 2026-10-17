@@ -103,7 +103,7 @@ def parse(msg: dict, current: Features | None = None) -> Features:
     except pricing.PricingError as e:
         raise FeatureError("bad_tier", str(e)) from None
     if rate == 0:
-        raise FeatureError("nothing_enabled", "Enable denoise and/or captions.")
+        raise FeatureError("nothing_enabled", "Turn on noise removal, captions or both: live needs at least one.")
     if captions == "local" and languages not in ((), ("en",)):
         raise FeatureError("bad_config", "Standard captions are English only. Extra-accurate captions work in other languages.")
     # Translations are checked against the caption language they would translate from, also when only that changed.

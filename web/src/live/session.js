@@ -93,6 +93,8 @@ export async function startLive(opts) {
   let lastStats = 0;
   const startedAt = performance.now();
   let statTimer = null;
+  const pendingChanges = new Map(); // config id -> resolve(answer)
+  let changeId = 0;
 
   const cleanup = () => {
     if (closed) return;
@@ -179,7 +181,14 @@ export async function startLive(opts) {
     };
     ws.onmessage = (e) => {
       if (typeof e.data === 'string') {
-        try { onEvent(JSON.parse(e.data)); } catch { /* ignore */ }
+        let m;
+        try { m = JSON.parse(e.data); } catch { return; }
+        if (m.type === 'config' && pendingChanges.has(m.id)) {
+          pendingChanges.get(m.id)(m);
+          pendingChanges.delete(m.id);
+          return;
+        }
+        onEvent(m);
         return;
       }
       const buf = e.data;
@@ -257,6 +266,24 @@ export async function startLive(opts) {
     },
     setAtten(db) {
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'config', attenLimDb: db }));
+    },
+    /** Change the session's settings while it runs ({denoise, captions, language, translate, echoReference}); resolves
+     * with the service's answer: {ok: true, usdPerMinute, ...} or {ok: false, code, message} (then nothing changed). */
+    reconfigure(changes) {
+      return new Promise((resolve) => {
+        if (ws?.readyState !== WebSocket.OPEN) {
+          resolve({ ok: false, message: 'Live isn’t connected.' });
+          return;
+        }
+        const id = `c${++changeId}`;
+        pendingChanges.set(id, resolve);
+        ws.send(JSON.stringify({ type: 'config', id, ...changes }));
+        setTimeout(() => {
+          if (!pendingChanges.has(id)) return;
+          pendingChanges.delete(id);
+          resolve({ ok: false, message: 'Live didn’t answer the change in time. Your settings stay as they were.' });
+        }, 8000);
+      });
     },
     stop() {
       if (closed || stopping) return;

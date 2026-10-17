@@ -167,6 +167,34 @@ await check('live: paid demo with fake mic, denoise + local captions', async () 
   return `RTT avg ${rtt.toFixed(1)} ms, frames sent ${sent} recv ${recv}; captions: ${cap ? JSON.stringify(cap) : 'NONE'}`;
 });
 
+await check('live: the paid test takes changes while it runs: captions off goes through, and a change it can\'t make is put back with the reason', async () => {
+  await page.goto(`${BASE}/app/live`);
+  await paidTest();
+  await page.getByTestId('live-start').click();
+  await page.getByTestId('live-stop').waitFor({ timeout: 30000 });
+  const recv = () => page.getByTestId('live-stats').getAttribute('data-recv').then(Number);
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid=live-stats]')?.getAttribute('data-recv')) > 50, null, { timeout: 30000 });
+  const before = Number(await page.getByTestId('live-price').getAttribute('data-usd-per-minute'));
+  const answers = () => wsFrames.textIn.filter((t) => t.startsWith('<{"type":"config"'));
+  const n = answers().length;
+  await page.locator('label.choice:has(input[name=live-captions][value=""])').click();
+  for (let i = 0; i < 50 && answers().length === n; i++) await page.waitForTimeout(100);
+  if (!answers().at(-1)?.includes('"ok":true')) throw new Error('captions off: ' + answers().at(-1));
+  const after = Number(await page.getByTestId('live-price').getAttribute('data-usd-per-minute'));
+  if (!(after < before)) throw new Error(`price ${before} -> ${after}`);
+  const r1 = await recv();
+  await page.waitForTimeout(1500);
+  if ((await recv()) <= r1) throw new Error('the audio stopped after the change');
+  // noise removal off as well would leave nothing to do: refused, and the box is ticked again
+  await page.getByRole('checkbox', { name: /Remove noise/ }).uncheck();
+  await page.getByTestId('live-error').waitFor({ timeout: 10000 });
+  if (!(await page.getByRole('checkbox', { name: /Remove noise/ }).isChecked())) throw new Error('noise removal was not put back');
+  const why = await page.getByTestId('live-error').innerText();
+  await page.getByTestId('live-stop').click();
+  await page.getByTestId('live-start').waitFor({ timeout: 15000 });
+  return `price ${before} -> ${after} a minute, audio kept flowing; refused: ${why}`;
+});
+
 await check('live: translations in the paid test: the start asks for them, each translated line shows under its caption (mocked server)', async () => {
   let startMsg = null;
   await page.routeWebSocket(/\/api\/stream\/ws/, (ws) => {

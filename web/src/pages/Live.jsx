@@ -245,6 +245,41 @@ function LiveDemo({ pricing }) {
 
   const live = state === 'live';
   const busy = state !== 'idle';
+  // A paid session takes changes while it runs; the free one in the browser is set up when it starts.
+  const locked = state === 'starting' || state === 'stopping' || (live && free);
+
+  /** What the paid session should do with these choices (anything not in `over` as it is selected now). */
+  function liveConfig(over = {}) {
+    const pick = (k, v) => (k in over ? over[k] : v);
+    const d = pick('denoise', denoise);
+    const c = pick('captions', captions);
+    const l1 = pick('language', paidLanguage);
+    const l2 = pick('language2', language2);
+    const tg = pick('targets', targets);
+    const both = c === 'premium' && !!l1 && !!l2 && l2 !== l1;
+    const sp = c === 'premium' ? (both ? '' : l1) : 'en';
+    return {
+      denoise: d ? 'light' : null,
+      captions: c || null,
+      language: c === 'premium' ? (both ? [l1, l2] : l1 || null) : null,
+      translate: c ? tg.filter((t) => t && t !== sp) : [],
+    };
+  }
+
+  /** A choice changed: before or without a paid session it is just set; while one runs it is sent to it, and put back
+   * (with the reason) if the service can't make it. Billing follows the change from that moment. */
+  async function change(over, set, undo) {
+    set();
+    if (!(live && !free && session.current)) return;
+    setError('');
+    const answer = await session.current.reconfigure(liveConfig(over));
+    if (answer.ok) {
+      setInfo((i) => (i ? { ...i, usdPerMinute: answer.usdPerMinute, trial: !!answer.trial } : i));
+    } else {
+      undo();
+      setError(answer.message || 'That change couldn’t be made. Your settings stay as they were.');
+    }
+  }
   const roomReco = useMemo(
     () => (heard ? recommendForLive(heard.stats, heard.echo, { mode, denoise, strength, captions: free ? '' : captions, language: free ? '' : paidLanguage, final: !!heard.final }) : null),
     [heard, mode, denoise, strength, captions, paidLanguage, free],
@@ -281,14 +316,14 @@ function LiveDemo({ pricing }) {
       <div className="opt-grid" data-testid="live-options">
         <Group id="grp-noise" title="Noise removal">
           <label className="check">
-            <input type="checkbox" checked={denoise} disabled={busy} onChange={(e) => setDenoise(e.target.checked)} />
+            <input type="checkbox" checked={denoise} disabled={locked || (busy && free)} onChange={(e) => { const v = e.target.checked; change({ denoise: v }, () => setDenoise(v), () => setDenoise(!v)); }} />
             <span>Remove noise from my voice<span className="hint block">{free ? 'Free, done on your device.' : den ? `${moneyUsd(den.usdPerHour)} an hour` : 'Takes out hiss, hum and room noise.'}</span></span>
           </label>
           <StrengthPicker
             name="live-str" value={strength} disabled={!denoise || state === 'starting'}
             onChange={(id) => { setStrength(id); session.current?.setAtten(strengthDb(id)); }}
           />
-          <span className="hint">You can change it while you talk.</span>
+          <span className="hint">{free ? 'You can change it while you talk.' : 'You can change any of these while you talk; the price follows from that moment.'}</span>
           {!free && <span className="hint">Echo from your speakers is removed automatically. With headphones you don’t need it.</span>}
           {!free && denoise && <GoodToKnow k="liveDenoise" />}
         </Group>
@@ -324,16 +359,16 @@ function LiveDemo({ pricing }) {
           <>
           <div className="choice-stack" role="radiogroup" aria-labelledby="grp-captions">
             <label className="choice">
-              <input type="radio" name="live-captions" value="" checked={captions === ''} disabled={busy} onChange={() => setCaptions('')} />
+              <input type="radio" name="live-captions" value="" checked={captions === ''} disabled={locked} onChange={() => { const was = captions; change({ captions: '' }, () => setCaptions(''), () => setCaptions(was)); }} />
               <span><b>Off</b><small>No captions</small></span>
             </label>
             <label className="choice">
-              <input type="radio" name="live-captions" value="local" checked={captions === 'local'} disabled={busy || capRates.local?.available === false} onChange={() => setCaptions('local')} />
+              <input type="radio" name="live-captions" value="local" checked={captions === 'local'} disabled={locked || capRates.local?.available === false} onChange={() => { const was = captions; change({ captions: 'local' }, () => setCaptions('local'), () => setCaptions(was)); }} />
               <span><b>Standard</b><small>English only{perHour(capRates.local)}</small></span>
             </label>
             {(!pricing || capRates.premium) && (
               <label className="choice">
-                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={busy || !accurateListed} onChange={() => setCaptions('premium')} />
+                <input type="radio" name="live-captions" value="premium" checked={captions === 'premium'} disabled={locked || !accurateListed} onChange={() => { const was = captions; change({ captions: 'premium' }, () => setCaptions('premium'), () => setCaptions(was)); }} />
                 <span><b>Extra accurate</b><small>Works in any language{perHour(capRates.premium)}{accurateListed ? '' : ' · coming soon'}</small></span>
               </label>
             )}
@@ -342,14 +377,14 @@ function LiveDemo({ pricing }) {
             <>
               <div className="field">
                 <label htmlFor="live-lang">Language you speak</label>
-                <select id="live-lang" className="select" value={paidLanguage} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
+                <select id="live-lang" className="select" value={paidLanguage} onChange={(e) => { const v = e.target.value; const was = language; change({ language: v }, () => setLanguage(v), () => setLanguage(was)); }} disabled={locked}>
                   {LANGUAGES.map(([c, n]) => <option key={c} value={c}>{n}</option>)}
                 </select>
               </div>
               {paidLanguage && (
                 <div className="field">
                   <label htmlFor="live-lang-2">Also speaks</label>
-                  <select id="live-lang-2" className="select" value={language2} onChange={(e) => setLanguage2(e.target.value)} disabled={busy} data-testid="live-lang-2">
+                  <select id="live-lang-2" className="select" value={language2} onChange={(e) => { const v = e.target.value; const was = language2; change({ language2: v }, () => setLanguage2(v), () => setLanguage2(was)); }} disabled={locked} data-testid="live-lang-2">
                     <option value="">Only that language</option>
                     {LANGUAGES.filter(([c]) => c && c !== paidLanguage).map(([c, n]) => <option key={c} value={c}>{n}</option>)}
                   </select>
@@ -368,8 +403,12 @@ function LiveDemo({ pricing }) {
               <span className="label">Also translate into</span>
               {targets.map((t, i) => (
                 <select
-                  key={i} className="select" aria-label={`Live translation language ${i + 1}`} value={t} disabled={busy}
-                  onChange={(e) => setTargets(targets.map((x, j) => (j === i ? e.target.value : x)))}
+                  key={i} className="select" aria-label={`Live translation language ${i + 1}`} value={t} disabled={locked}
+                  onChange={(e) => {
+                    const next = targets.map((x, j) => (j === i ? e.target.value : x));
+                    const was = targets;
+                    change({ targets: next }, () => setTargets(next), () => setTargets(was));
+                  }}
                 >
                   <option value="">{i === 0 ? 'No translation' : 'No other language'}</option>
                   {LANGUAGES.filter(([c]) => c && c !== spoken && (c === t || !targets.includes(c))).map(([c, n]) => <option key={c} value={c}>{n}</option>)}
