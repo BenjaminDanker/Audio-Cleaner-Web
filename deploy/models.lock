@@ -18,9 +18,10 @@
 #
 # Sources (all verified byte for byte against the files in production on 2026-10-15):
 #   DeepFilterNet3        github.com/Rikorose/DeepFilterNet, the commit libDF is built from (native/deepfilter/build.sh)
-#   DPDFNet-8             Ceva-IP/DPDFNet, Apache-2.0
-#   Whisper large-v3-turbo, small   CTranslate2 conversions (faster-whisper): dropbox-dash/faster-whisper-large-v3-turbo
-#                         (renamed from mobiuslabsgmbh/...), Systran/faster-whisper-small
+#   DPDFNet-8             Ceva-IP/DPDFNet, Apache-2.0 (the batch variant is our own export of the same weights, see below)
+#   Whisper large-v3-turbo, small, base   CTranslate2 conversions (faster-whisper): dropbox-dash/faster-whisper-large-v3-turbo
+#                         (renamed from mobiuslabsgmbh/...), Systran/faster-whisper-small, Systran/faster-whisper-base
+#                         (base only detects the spoken language: runner.py, docs/research/heavy-2026-10.md)
 #   Parakeet TDT v2, v3   istupakov/parakeet-tdt-0.6b-v{2,3}-onnx (onnx-asr layout), CC-BY-4.0
 #   Silero VAD            istupakov/silero-vad-onnx (what onnx-asr downloads), MIT
 #   Live captions         csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8
@@ -75,6 +76,10 @@ file     -         b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb
 file     -         3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671  483546902 models/whisper/small/model.bin                       https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/model.bin
 file     -         fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab    2203239 models/whisper/small/tokenizer.json                  https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json
 file     -         34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913     459861 models/whisper/small/vocabulary.txt                  https://huggingface.co/Systran/faster-whisper-small/resolve/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt
+file     -         56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a       2309 models/whisper/base/config.json                          https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/config.json
+file     -         d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9  145217532 models/whisper/base/model.bin                            https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/model.bin
+file     -         fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab    2203239 models/whisper/base/tokenizer.json                       https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/tokenizer.json
+file     -         34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913     459861 models/whisper/base/vocabulary.txt                       https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/vocabulary.txt
 
 member   -         329540e2635d1cceebf9ecb716b15e6bdfa434d43b8467138c946ecccc099890  172328840 bin/ffmpeg                                           btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffmpeg
 member   -         94ec62142287906e2c17711b06f1fbe4fd2a2632e241f2786b6cd6ef4ee5c7a2  172095304 bin/ffprobe                                          btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffprobe
@@ -88,5 +93,6 @@ member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452
 local    optional  f4dd2f350f3d41dee721567b7d5c351cb7122c27be9b8fc110ad7cf721e62b1f   15361376 bin/libdf-tract021.so                                older libDF build (tract 0.21), only used by native/deepfilter/test_native.py to compare outputs
 local    -         928894bad1373452e2978ea30f06273856775b9814c1e2fec42d040436361403   25395576 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte
 local    optional  3c34fa7296eef1121f76b4a0ed7c066706d53ac3c2bc7248e4f57132e469cf3b  276861944 models/sidon/sidon_fe_q8.onnx                        int8 variant of the Sidon feature extractor, made by tools/convert_sidon_onnx.py; not in models-v1; the product runs without it
+local    optional  b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa   14777093 models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx              DPDFNet-8 with a dynamic batch (same weights as dpdfnet8_48khz_hr.onnx, Ceva-IP/DPDFNet commit dd6818d, code 9bd9844), made by tools/export_dpdfnet_batch.py; 1.5x less CPU on long files, used instead of the batch-1 file when present (dpdfnet.resolve_model); not yet in a published archive, so it is only checked, not fetched
 local    optional  d99358ebe4081f13c0ba12cb79e9d77bc9707dfda9ad4151d5ef5f2afaee4caa      15013 wasm/df.js                                           browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
 local    optional  8ed0596104271ff3503d79ae1571b4e5674d20f32982d0781b80c70f1c4ac4c1   14028025 wasm/df_bg.wasm                                      browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
