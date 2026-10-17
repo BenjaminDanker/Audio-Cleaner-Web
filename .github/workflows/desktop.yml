@@ -663,7 +663,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          PUBLIC_REPO: BenjaminDanker/Audio-Cleaner
+          PUBLIC_REPO: ${{ vars.PUBLIC_DESKTOP_REPO || 'BenjaminDanker/Audio-Cleaner' }}  # a private trial repository when set
         run: |
           if [ -z "$GH_TOKEN" ]; then
             echo "::warning::The secret PUBLIC_RELEASE_TOKEN is not set, so this release was not copied to the public repository."

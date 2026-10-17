@@ -39,12 +39,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      PUBLIC_REPO: BenjaminDanker/Audio-Cleaner
-      HAVE_KEY: ${{ secrets.PUBLIC_DESKTOP_DEPLOY_KEY != '' }}
+      # A trial run goes to a private repository instead: set the variable PUBLIC_DESKTOP_REPO (owner/name) and give it its
+      # own deploy key in the secret PUBLIC_DESKTOP_TEST_DEPLOY_KEY (a deploy key belongs to one repository only).
+      PUBLIC_REPO: ${{ vars.PUBLIC_DESKTOP_REPO || 'BenjaminDanker/Audio-Cleaner' }}
+      HAVE_KEY: ${{ (vars.PUBLIC_DESKTOP_REPO != '' && secrets.PUBLIC_DESKTOP_TEST_DEPLOY_KEY != '') || (vars.PUBLIC_DESKTOP_REPO == '' && secrets.PUBLIC_DESKTOP_DEPLOY_KEY != '') }}
     steps:
       - name: The deploy key is missing
         if: env.HAVE_KEY != 'true'
-        run: echo "::warning::The secret PUBLIC_DESKTOP_DEPLOY_KEY is not set, so nothing was copied (docs/desktop.md, Public copy of the desktop code)."
+        run: echo "::warning::The deploy key for $PUBLIC_REPO is not set, so nothing was copied (docs/desktop.md, Public copy of the desktop code)."
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: env.HAVE_KEY == 'true'
@@ -56,7 +58,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.PUBLIC_REPO }}
-          ssh-key: ${{ secrets.PUBLIC_DESKTOP_DEPLOY_KEY }}
+          ssh-key: ${{ vars.PUBLIC_DESKTOP_REPO != '' && secrets.PUBLIC_DESKTOP_TEST_DEPLOY_KEY || secrets.PUBLIC_DESKTOP_DEPLOY_KEY }}
           path: public
 
       - name: Copy the allowlisted files and commit

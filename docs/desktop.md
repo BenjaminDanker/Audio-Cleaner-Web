@@ -507,6 +507,23 @@ the app's code and each release are copied there automatically, one way, without
   finds one. Tests that read files outside the copied folders (the release job of `.github/workflows/desktop.yml`,
   `web/src/jobs.js`) skip themselves when the file is not there (the public copy has no workflows).
 
+**A trial run in private first:** both the code sync and the release copy go to `vars.PUBLIC_DESKTOP_REPO` instead
+of the public repository while that variable is set, with the code sync using the secret
+`PUBLIC_DESKTOP_TEST_DEPLOY_KEY` (a deploy key belongs to one repository). Delete the variable and the next run goes to
+the public repository again.
+
+```sh
+gh repo create BenjaminDanker/Audio-Cleaner-trial --private
+git clone https://github.com/BenjaminDanker/Audio-Cleaner.git /tmp/acw-trial && git -C /tmp/acw-trial push --mirror git@github.com:BenjaminDanker/Audio-Cleaner-trial.git
+ssh-keygen -t ed25519 -N '' -C public-desktop-trial -f /tmp/trial-key
+gh repo deploy-key add /tmp/trial-key.pub --repo BenjaminDanker/Audio-Cleaner-trial --allow-write --title public-desktop-trial
+gh secret set PUBLIC_DESKTOP_TEST_DEPLOY_KEY --repo BenjaminDanker/Audio-Cleaner-Web < /tmp/trial-key
+shred -u /tmp/trial-key /tmp/trial-key.pub && rm -rf /tmp/acw-trial
+gh variable set PUBLIC_DESKTOP_REPO --repo BenjaminDanker/Audio-Cleaner-Web --body BenjaminDanker/Audio-Cleaner-trial
+# ... push on-prem, look at the trial repository; then:
+gh variable delete PUBLIC_DESKTOP_REPO --repo BenjaminDanker/Audio-Cleaner-Web
+```
+
 **Setting it up (owner, once):** two secrets in this repository. The code sync uses an SSH deploy key (limited to the
 one repository, does not expire, not tied to your account); the release copy uses a fine-grained personal access token.
 
