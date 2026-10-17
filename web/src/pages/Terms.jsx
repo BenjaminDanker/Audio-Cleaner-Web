@@ -81,7 +81,7 @@ export default function Terms() {
         <li>record or process other people&rsquo;s voices in violation of their privacy rights or applicable wiretapping and consent laws;</li>
         <li>harass, threaten, defraud or impersonate anyone;</li>
         <li>attack, probe or overload the Service, bypass rate limits, free allowances or billing, or resell access without our written permission;</li>
-        <li>reverse engineer the Service except where the law allows it, or use automated means other than our documented API keys.</li>
+        <li>reverse engineer the Service except where the law allows it, or use automated means other than our documented API keys (see <Link to="/developers">For developers</Link>).</li>
       </ul>
       <p>We apply rate limits to protect the Service for everyone. We may remove content, stop jobs or sessions, and suspend accounts that break these rules, without refund of credit where the breach is serious.</p>
 

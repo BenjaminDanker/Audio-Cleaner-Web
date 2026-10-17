@@ -48,6 +48,7 @@ export default function Privacy() {
         <li>Uploaded input files are <b>deleted when processing finishes</b> (or if the job fails or is canceled).</li>
         <li>Results (cleaned audio, captions, transcripts) are available for download for <b>24 hours</b> and then deleted. You can delete them sooner from the Cleanup page.</li>
         <li>We do not listen to your content, and we do <b>not use your audio or transcripts for training</b> models.</li>
+        <li>If you give a file job a <b>callback address</b> (through the API), we send that address a short message when the job ends: its id, status, the list of result files and the cost. No audio or text goes with it.</li>
         <li><b>Standard</b> transcription is done by us and the audio goes no further. <b>Extra accurate</b> transcription sends the audio to a third-party speech-recognition provider (our sub-processor), which returns the text. It is used only for extra accurate transcription and extra accurate live captions, and only when you choose them. When you choose translations, the text of your captions or transcript (never the audio) is sent to the same provider to be translated. It may process audio in the United States, and it does not use the audio for training. Only choose Extra accurate if you are comfortable with that.</li>
       </ul>
 
