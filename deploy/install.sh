@@ -244,6 +244,7 @@ else
   echo "note: no Rust toolchain: live runs on the Python worker (install rustup to build native/live)" >&2
 fi
 [ -d "$H/models/whisper/large-v3-turbo" ] || echo "warning: whisper large-v3-turbo missing (local transcription will fail)" >&2
+[ -f "$H/models/whisper/base/model.bin" ] || echo "warning: whisper base missing (language detection falls back to the 4x dearer small model)" >&2
 [ -f "$H/models/captions-en/encoder.int8.onnx" ] || echo "warning: captions-en model missing (standard live captions will fail)" >&2
 [ -f "$H/models/dpdfnet/dpdfnet8_48khz_hr.onnx" ] || echo "warning: DPDFNet model missing (heavy-noise recordings use DeepFilterNet3)" >&2
 [ -f "$H/models/sidon/sidon_fe.onnx" ] || echo "warning: Sidon ONNX models missing in $H/models/sidon (models-v1 archive; docs/research/restore-sidon.md); voice-rebuild jobs are billed at the standard price and say so" >&2
