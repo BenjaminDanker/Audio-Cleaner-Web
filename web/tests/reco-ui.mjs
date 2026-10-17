@@ -135,6 +135,27 @@ async function open(page, path) {
     return `back to ${back.noise}/${back.strength}`;
   });
 
+  await check('"Automatic best settings" switched off: nothing listened to or picked, remembered; on again picks the settings', async () => {
+    const s = await open(page, FILES.loud);
+    await page.getByTestId('auto-settings').click();
+    const off = await read(page);
+    if (off.line || off.badges.length) throw new Error('recommendation still shown: ' + JSON.stringify(off));
+    if (off.noise !== s.noise) throw new Error('the choices must stay as they were');
+    await page.goto(`${BASE}/app`);
+    await page.waitForSelector('input[type=file]', { timeout: 20000 });
+    await page.setInputFiles('input[type=file]', FILES.loud);
+    await page.getByTestId('start').waitFor({ timeout: 20000 });
+    await page.waitForTimeout(1500);
+    const fresh = await read(page);
+    if (fresh.line || fresh.badges.length || await page.getByTestId('reco-listening').count()) throw new Error('listened while off: ' + JSON.stringify(fresh));
+    if (await page.locator('input[name=auto]').isChecked()) throw new Error('the switch was not remembered');
+    await page.getByTestId('auto-settings').click();
+    await page.getByTestId('reco-line').waitFor({ timeout: 30000 });
+    const on = await read(page);
+    if (on.noise !== s.noise || on.strength !== s.strength) throw new Error(`${JSON.stringify(on)} vs ${JSON.stringify(s)}`);
+    return `off: ${fresh.noise}; on again: ${on.noise}/${on.strength}`;
+  });
+
   await check('picking the subtitle language moves the recommendation to Extra accurate for a language Standard is weaker in', async () => {
     await open(page, FILES.clean);
     if (!(await read(page)).badges.includes('reco-subs-standard')) throw new Error('standard not recommended first');

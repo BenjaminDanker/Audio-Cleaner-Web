@@ -23,6 +23,15 @@ import { recommendForFile } from '../recommend.js';
 
 
 const LONG_SECONDS = 2 * 3600; // in the browser, a recording this long takes a while
+const AUTO_KEY = 'acw.autoSettings'; // this browser's choice for "Automatic best settings" (on unless switched off)
+
+function storedAuto() {
+  try {
+    return localStorage.getItem(AUTO_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
 const MAX_SECONDS = 6 * 3600; // and this is the most the browser will take
 
 // The most a single upload can be, as the server's default allows it (the price list may say otherwise: maxUploadBytes).
@@ -130,6 +139,9 @@ export default function JobForm({ onSubmitted }) {
   const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
   const [stats, setStats] = useState(null); // what the quick listen to the file found (media/analysis.js); null: not (yet) measured
   const [listening, setListening] = useState(false);
+  const [auto, setAuto] = useState(storedAuto); // "Automatic best settings": listen to the file and pick the settings for it
+  const autoRef = useRef(auto);
+  autoRef.current = auto;
   const touched = useRef(false); // the person changed one of the recommended settings themselves: later findings leave them alone
   const [custom, setCustom] = useState(false); // ... the same, for showing the button that goes back to the recommendation
   const rebuildOk = useRef(false); // is the rebuild offered (the price list has it)?
@@ -187,7 +199,8 @@ export default function JobForm({ onSubmitted }) {
   const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
-  const reco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
+  const fileReco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
+  const reco = auto ? fileReco : null; // shown and marked only with "Automatic best settings" on
   rebuildOk.current = !!rebuildRate;
   const recNoise = reco ? (reco.noise === 'browser' && verdict && !verdict.ok ? 'polish' : reco.noise) : null;
 
@@ -246,7 +259,7 @@ export default function JobForm({ onSubmitted }) {
     setInfo(i);
     setProbing(false);
     // The noise remover is only fetched once it is clear that this file wants it (the quick listen below says), or when it can't be told.
-    if (i.hasAudio !== false) listenTo(f, i, canBrowser);
+    if (i.hasAudio !== false && autoRef.current) listenTo(f, i, canBrowser);
     else if (canBrowser) warmUpDenoiser();
   }
 
@@ -260,7 +273,7 @@ export default function JobForm({ onSubmitted }) {
       if (ctl.signal.aborted) return;
       setStats(found);
       const r = found ? recommendForFile(found, { language: '' }) : null;
-      if (r && !touched.current) applyReco(r, i);
+      if (r && !touched.current && autoRef.current) applyReco(r, i);
       else if (!r && canBrowser && !touched.current) warmUpDenoiser();
     } catch {
       /* canceled, or unreadable: the form just keeps its usual starting choices */
@@ -290,6 +303,26 @@ export default function JobForm({ onSubmitted }) {
   function pickSubs(v) {
     setSubs(v);
     if (v === 'browser') warmUpSpeech();
+  }
+
+  /** "Automatic best settings" on or off (remembered in this browser). Switched on with a file chosen, the file is listened
+   * to (if it wasn't yet) and its settings are picked; switched off, the current choices stay and nothing is listened to. */
+  function setAutoSettings(on) {
+    setAuto(on);
+    autoRef.current = on;
+    try {
+      localStorage.setItem(AUTO_KEY, on ? 'on' : 'off');
+    } catch {
+      /* not remembered: private window or storage blocked */
+    }
+    if (!on) {
+      listen.current?.abort();
+      setListening(false);
+      return;
+    }
+    if (!file || !info || info.hasAudio === false) return;
+    if (fileReco) applyReco(fileReco);
+    else if (!listening) listenTo(file, info, browserVerdict(info).ok);
   }
 
   /** The person chose something themselves: what the quick listen finds later no longer changes it. */
@@ -500,11 +533,21 @@ export default function JobForm({ onSubmitted }) {
 
         {file && info && !probing && (
           <>
-            <Recommended
-              title="Recommended for this file" line={reco?.line} reasons={reco?.reasons} listening={listening}
-              listeningText="Listening to a little of your file to suggest the best settings…"
-              onApply={custom && reco ? () => applyReco(reco) : null}
-            />
+            {info.hasAudio !== false && (
+              <label className="switch" data-testid="auto-settings">
+                <input type="checkbox" role="switch" name="auto" checked={auto} onChange={(e) => setAutoSettings(e.target.checked)} disabled={busy} />
+                <span><b>Automatic best settings</b>
+                  <span className="hint block">Listens to a little of your file and picks the settings it needs. You can still change anything.</span>
+                </span>
+              </label>
+            )}
+            {auto && (
+              <Recommended
+                title="Recommended for this file" line={reco?.line} reasons={reco?.reasons} listening={listening}
+                listeningText="Listening to a little of your file to suggest the best settings…"
+                onApply={custom && reco ? () => applyReco(reco) : null}
+              />
+            )}
             <fieldset className="field" disabled={busy}>
               <legend className="label">Noise removal</legend>
               <div className="choice-cards">
