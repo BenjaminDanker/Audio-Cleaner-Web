@@ -149,6 +149,47 @@ bool decode_frame(const uint8_t *data, size_t len, FrameHeader &hdr, float *out,
 	return false;
 }
 
+namespace {
+
+// "" -> null, "en" -> "en", "en,es" -> ["en","es"]: someone who switches between languages (extra-accurate captions
+// follow the switches), up to three.
+nlohmann::json language_json(const std::string &language)
+{
+	using nlohmann::json;
+	if (language.empty())
+		return json(nullptr);
+	if (language.find(',') == std::string::npos)
+		return json(language);
+	json list = json::array();
+	size_t from = 0;
+	while (from <= language.size()) {
+		const size_t comma = language.find(',', from);
+		const std::string one = language.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+		if (!one.empty() && list.size() < 3)
+			list.push_back(one);
+		if (comma == std::string::npos)
+			break;
+		from = comma + 1;
+	}
+	return list;
+}
+
+}  // namespace
+
+std::string make_change_message(const Features &f, const std::string &id)
+{
+	using nlohmann::json;
+	json j;
+	j["type"] = "config";
+	j["id"] = id;
+	j["denoise"] = f.denoise ? json("light") : json(nullptr);
+	j["captions"] = f.captions == "local" || f.captions == "premium" ? json(f.captions) : json(nullptr);
+	j["language"] = language_json(f.language);
+	j["translate"] = f.captions.empty() ? std::vector<std::string>{} : f.translate;
+	j["echoReference"] = f.echo_reference;
+	return j.dump();
+}
+
 std::string make_start_message(const StartParams &p)
 {
 	using nlohmann::json;
@@ -160,25 +201,7 @@ std::string make_start_message(const StartParams &p)
 		j["captions"] = p.captions;
 	else
 		j["captions"] = nullptr;
-	if (p.language.empty()) {
-		j["language"] = nullptr;
-	} else if (p.language.find(',') == std::string::npos) {
-		j["language"] = p.language;
-	} else {
-		// "en,es": someone who switches between languages (extra-accurate captions follow the switches)
-		json list = json::array();
-		size_t from = 0;
-		while (from <= p.language.size()) {
-			const size_t comma = p.language.find(',', from);
-			const std::string one = p.language.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
-			if (!one.empty() && list.size() < 3)
-				list.push_back(one);
-			if (comma == std::string::npos)
-				break;
-			from = comma + 1;
-		}
-		j["language"] = list;
-	}
+	j["language"] = language_json(p.language);
 	j["sampleRate"] = kNetRate;
 	j["codec"] = p.codec;
 	if (p.codec == "opus" && p.opus_bitrate > 0)
@@ -296,6 +319,22 @@ bool parse_event(const std::string &text, Event &ev)
 		integer("retryAfter", ra);  // seconds; the server may add it to any error
 		integer("retryAfterSeconds", ra);
 		ev.retry_after_s = std::min(3600, std::max(0, ra));
+	} else if (type == "config") {
+		ev.type = EventType::Config;
+		str("id", ev.id);
+		str("code", ev.code);
+		str("message", ev.message);
+		num("usdPerMinute", ev.usd_per_minute);
+		if (auto it = j.find("ok"); it != j.end() && it->is_boolean())
+			ev.ok = it->get<bool>();
+		if (auto it = j.find("echoReference"); it != j.end() && it->is_boolean())
+			ev.echo_reference = it->get<bool>();
+		if (auto it = j.find("translate"); it != j.end() && it->is_array()) {
+			ev.has_translate = true;
+			for (const auto &e : *it)
+				if (e.is_string() && ev.translate.size() < 8)
+					ev.translate.push_back(e.get<std::string>());
+		}
 	} else if (type == "pong") {
 		ev.type = EventType::Pong;
 		auto it = j.find("t");

@@ -36,9 +36,11 @@ struct SessionConfig {
 	std::string client = "obs-audio-cleaner/0.1.0";
 	std::string ca_file;               // optional CA bundle path ("" = system trust store)
 	int model_latency_samples = 1440;  // expected; replaced by the server's ready message
-	// Echo cancellation: what the speakers play (the owner pushes to it, at host_rate).
-	// Set = ask the server to remove that echo from the audio; sent next to each microphone frame.
+	// Echo cancellation: what the speakers play (the owner pushes to it, at host_rate), and whether to ask the server to
+	// remove that echo from the audio (sent next to each microphone frame). Echo removal can be switched on and off
+	// while the session runs (change()) as long as the buffer is there.
 	std::shared_ptr<ReferenceBuffer> reference;
+	bool echo = false;
 };
 
 // Blocked: the server refused the session for a reason only the user can fix (wrong key, no balance,
@@ -55,7 +57,7 @@ struct SessionSnapshot {
 	bool insecure = false;         // ws:// URL
 	bool passthrough_only = false; // unsupported configuration: audio is not altered
 	std::string codec;             // codec actually in use: "opus" or "pcm_s16le"
-	bool echo_requested = false;   // an echo reference is configured
+	bool echo_requested = false;   // echo removal is asked for
 	bool echo_active = false;      // ... and the server accepted it
 	double delay_ms = 0;           // total delay applied to the audio (0 when captions only)
 	double model_latency_ms = 0;
@@ -80,6 +82,8 @@ struct SessionSnapshot {
 	std::vector<std::string> translate_requested, translate_active, translate_failed;
 	bool translate_active_known = false;
 	bool captions_failed = false;  // a `captions_unavailable` warning: the captions stopped (the audio goes on)
+	// A change of settings the service could not make (its message): the session goes on as it was. "" = none.
+	std::string change_refused;
 	// Recent frames (last few seconds) that came back too late to be used. link_too_slow: most of them did,
 	// i.e. the connection (or the server) cannot keep up with the chosen delay.
 	bool link_too_slow = false;
@@ -132,6 +136,13 @@ public:
 
 	// Live strength change (sent to the server as a `config` message).
 	void set_atten_lim_db(int db);
+
+	// Changes what the session does (noise removal, captions, their language, translations, echo removal) without a
+	// new session: the audio goes on and the billing follows from that moment. False when `next` needs a new session:
+	// a setting that isn't one of those differs, or noise removal is switched on in a session that started without it
+	// (its audio was never delayed, so there is no room for the cleaned audio). If the service refuses the change, the
+	// session goes on as it was and snapshot().change_refused says why.
+	bool change(const SessionConfig &next);
 
 	// Blocked sessions try again now (after the user fixed the problem). Otherwise a no-op.
 	void retry_now();

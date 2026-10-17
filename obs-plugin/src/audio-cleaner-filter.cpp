@@ -246,7 +246,15 @@ struct Settings {
 
 	bool configured() const { return !api_key.empty() && (denoise || !effective_captions().empty()); }
 
-	// Changes that need a new session (the output delay D is fixed per session).
+	// Changes a running session can't take: a new session (the output delay D and the connection are fixed per session).
+	// The rest (noise removal, captions, languages, translations, echo removal) changes in place (Session::change).
+	bool same_connection_as(const Settings &o) const
+	{
+		return api_key == o.api_key && url == o.url && latency_ms == o.latency_ms && codec == o.codec && split == o.split &&
+		       live_only == o.live_only;
+	}
+
+	// Nothing the sessions do changes (the strength aside, which is sent on its own).
 	bool same_session_as(const Settings &o) const
 	{
 		const std::string cap = effective_captions();
@@ -467,12 +475,10 @@ void apply_outputs(ac_filter *f)
 
 // Called with the lock held. Creates the session for the current settings and starts its network thread
 // (it only connects once audio flows, so this costs nothing while the filter is idle).
-acw::Session *make_session_unchecked(ac_filter *f, bool right)
+// What a session of this filter does with the current settings (`right`: the right side's own session).
+acw::SessionConfig session_config(const ac_filter *f, bool right)
 {
 	const Settings &s = f->settings;
-	if (!f->enabled || !s.configured() || (s.live_only && !f->live_on))
-		return nullptr;  // nothing runs (and nothing is billed) while OBS neither streams nor records
-
 	acw::SessionConfig cfg;
 	cfg.url = s.url;
 	cfg.api_key = s.api_key;
@@ -485,9 +491,21 @@ acw::Session *make_session_unchecked(ac_filter *f, bool right)
 	cfg.delay_ms = s.latency_ms;
 	cfg.codec = s.codec == "pcm" ? acw::Codec::Pcm16 : acw::Codec::Opus;
 	cfg.host_rate = static_cast<int>(f->sample_rate);
-	if (!s.echo_source.empty() && !right)
+	if (!right) {
 		cfg.reference = f->reference;  // one listener per echo buffer: the left side's session (or the only one)
+		cfg.echo = !s.echo_source.empty();  // echo removal can be switched on and off while the session runs
+	}
 	cfg.client = std::string("obs-audio-cleaner/") + PLUGIN_VERSION;
+	return cfg;
+}
+
+acw::Session *make_session_unchecked(ac_filter *f, bool right)
+{
+	const Settings &s = f->settings;
+	if (!f->enabled || !s.configured() || (s.live_only && !f->live_on))
+		return nullptr;  // nothing runs (and nothing is billed) while OBS neither streams nor records
+
+	const acw::SessionConfig cfg = session_config(f, right);
 
 	// The session keeps the router (and the names) alive; neither calls into the filter.
 	std::shared_ptr<acw::CaptionRouter> router = f->router;
@@ -717,6 +735,20 @@ void rebuild_session(ac_filter *f)
 	apply_outputs(f);
 }
 
+// The running sessions take the new settings in place (no gap in the audio, billing follows). False when one can't
+// (noise removal switched on in a session that started captions only, which has no delay to fill): then a new one.
+// Called with the lock held.
+bool change_sessions(ac_filter *f)
+{
+	acw::Session *s = f->session.load();
+	acw::Session *sr = f->session_r.load();
+	if (!s || !f->settings.configured())
+		return false;  // nothing runs, or nothing should: rebuild_session decides
+	if ((sr == nullptr) != !(f->settings.split && f->channels >= 2))
+		return false;
+	return s->change(session_config(f, false)) && (!sr || sr->change(session_config(f, true)));
+}
+
 // Makes the filter's sessions follow the outputs: starts them when one starts, ends them when the grace period after the
 // last one has passed. Called with the lock held.
 void apply_live_locked(ac_filter *f)
@@ -870,8 +902,11 @@ void filter_update(void *data, obs_data_t *settings)
 	const Settings prev = f->settings;
 	f->settings = next;
 	if (!prev.same_session_as(next)) {
-		rebuild_session(f);  // also applies the outputs
-		return;
+		if (!prev.same_connection_as(next) || !change_sessions(f)) {
+			rebuild_session(f);  // also applies the outputs
+			return;
+		}
+		update_reference(f);  // echo removal on or off: the speakers' sound is captured, or not
 	}
 	if (prev.strength != next.strength) {
 		// Strength can change while streaming: no new session, no change of the delay.

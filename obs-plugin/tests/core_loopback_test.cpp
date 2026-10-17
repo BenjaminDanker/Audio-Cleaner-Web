@@ -114,6 +114,10 @@ public:
 	std::string after_ready;  // sent right after `ready` (several messages: one per line)
 	std::string close_reason; // non-empty: close the socket with this reason (code 1008) after `after_ready`
 	std::string last_start;
+	std::string last_change;  // the last `config` message with an id
+	// The answer to a change: "" = ok, with the session's settings as asked; otherwise this refusal's message.
+	std::string refuse_change;
+	std::atomic<int> changes{0};
 
 	std::atomic<int> opens{0}, starts{0}, mic{0}, refs{0};
 	// By kind: microphone frames that were silence frames (codec 4) or Opus (codec 3), reference frames that were silence frames.
@@ -214,6 +218,31 @@ private:
 				}
 			} else if (contains(msg->str, "\"ping\"")) {
 				ws.sendText(R"({"type":"pong","t":1})");
+			} else if (contains(msg->str, "\"config\"") && contains(msg->str, "\"id\"")) {
+				++changes;
+				const std::string &m = msg->str;
+				// the parts of the message the answer repeats: its id and the translations (an array of codes)
+				auto after = [&](const char *key, char end) {
+					const size_t at = m.find(key);
+					if (at == std::string::npos)
+						return std::string();
+					const size_t from = at + std::strlen(key);
+					return m.substr(from, m.find(end, from) - from + (end == ']' ? 1 : 0));
+				};
+				std::string refuse;
+				{
+					std::lock_guard<std::mutex> lk(mu);
+					last_change = m;
+					refuse = refuse_change;
+				}
+				std::string a = "{\"type\":\"config\",\"id\":\"" + after("\"id\":\"", '"') + "\",";
+				if (refuse.empty())
+					a += std::string("\"ok\":true,\"usdPerMinute\":") + (contains(m, "\"premium\"") ? "0.05" : "0.02") +
+					     ",\"translate\":" + after("\"translate\":", ']') +
+					     ",\"echoReference\":" + (contains(m, "\"echoReference\":true") ? "true" : "false") + "}";
+				else
+					a += "\"ok\":false,\"code\":\"full\",\"message\":\"" + refuse + "\"}";
+				ws.sendText(a);
 			}
 			return;
 		}
@@ -518,6 +547,7 @@ static void test_echo_and_keepalive()
 	auto ref = std::make_shared<ReferenceBuffer>(48000);
 	SessionConfig cfg = base_config(srv.url());
 	cfg.reference = ref;
+	cfg.echo = true;
 	Session s(cfg, nullptr, logs.cb());
 	s.start();
 	{
@@ -563,6 +593,84 @@ static void test_echo_and_keepalive()
 	}
 	(void)t0;
 	s2.stop(0, 500);
+}
+
+static void test_changes_while_live()
+{
+	std::printf("changes while live: captions, language, translations and echo removal change without a new session\n");
+	FakeServer srv;
+	auto ref = std::make_shared<ReferenceBuffer>(48000);
+	SessionConfig cfg = base_config(srv.url());
+	cfg.captions = "local";
+	cfg.reference = ref;  // the speakers' buffer is there; echo removal is off for now
+	{
+		std::lock_guard<std::mutex> lk(srv.mu);  // the service says echoReference only to a session that asked for it
+		srv.ready = R"({"type":"ready","sessionId":"s","sampleRate":48000,"hopSamples":480,"modelLatencyMs":39.0,)"
+			    R"("usdPerMinute":0.01,"maxSessionSeconds":43200,"silenceFrames":true,"changeable":true})";
+	}
+	Session s(cfg, nullptr, nullptr);
+	s.start();
+	{
+		Feeder f(s, ref);
+		CHECK(wait_until([&] { return s.snapshot().state == SessionState::Streaming; }, 5000));
+		CHECK(!s.snapshot().echo_active);
+		std::this_thread::sleep_for(milliseconds(500));
+		const int refs_before = srv.refs.load();
+		CHECK(refs_before == 0);  // no reference frames while echo removal is off
+
+		SessionConfig next = cfg;
+		next.captions = "premium";
+		next.language = "es";
+		next.translate = {"de"};
+		next.echo = true;
+		CHECK(s.change(next));
+		CHECK(wait_until([&] { return s.snapshot().usd_per_minute > 0.04; }, 5000));
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			CHECK(contains(srv.last_change, "\"captions\":\"premium\""));
+			CHECK(contains(srv.last_change, "\"language\":\"es\""));
+			CHECK(contains(srv.last_change, "\"echoReference\":true"));
+			CHECK(contains(srv.last_change, "\"denoise\":\"light\""));
+		}
+		CHECK(srv.opens.load() == 1);  // the same connection
+		const SessionSnapshot n = s.snapshot();
+		CHECK(n.echo_active && n.translate_active == std::vector<std::string>{"de"} && n.change_refused.empty());
+		CHECK(contains(s.status_line(), "Translating into German."));
+		CHECK(wait_until([&] { return srv.refs.load() > refs_before + 20; }, 5000));  // the speakers' sound goes out now
+
+		// Noise removal off, in a session that started with it: the delay stays, nothing new is needed.
+		next.denoise = false;
+		CHECK(s.change(next));
+		CHECK(wait_until([&] { return srv.changes.load() == 2; }, 5000));
+		CHECK(wait_until([&] { return !contains(s.status_line(), "being cleaned"); }, 5000));
+
+		// A change the service refuses: the session goes on as it was and says why.
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			srv.refuse_change = "Live is full right now.";
+		}
+		next.captions = "local";
+		next.language = "";
+		next.translate = {};
+		CHECK(s.change(next));
+		CHECK(wait_until([&] { return !s.snapshot().change_refused.empty(); }, 5000));
+		CHECK(contains(s.status_line(), "Live is full right now."));
+		CHECK(contains(s.status_line(), "Translating into German."));  // still the earlier settings
+		CHECK(srv.opens.load() == 1);
+		f.stop();
+		s.stop(0, 500);
+	}
+	// A session that started captions only has no delay to put cleaned audio in: noise removal needs a new one.
+	SessionConfig captions_only = base_config(srv.url());
+	captions_only.denoise = false;
+	captions_only.captions = "local";
+	Session c(captions_only, nullptr, nullptr);
+	SessionConfig with_noise = captions_only;
+	with_noise.denoise = true;
+	CHECK(!c.change(with_noise));
+	SessionConfig other = captions_only;
+	other.delay_ms = 250;
+	CHECK(!c.change(other));  // not something a running session changes
 }
 
 static void test_slow_link()
@@ -1776,6 +1884,7 @@ static void test_silence_frames()
 		auto ref = std::make_shared<ReferenceBuffer>(48000);
 		SessionConfig cfg = base_config(srv.url());
 		cfg.reference = ref;
+		cfg.echo = true;
 		Session s(cfg, nullptr, nullptr);
 		s.start();
 		std::atomic<bool> run{true}, loud{false};
@@ -1950,6 +2059,7 @@ int main(int argc, char **argv)
 		}
 	}
 	test_echo_and_keepalive();
+	test_changes_while_live();
 	test_slow_link();
 	test_server_errors();
 	test_stop_reasons();

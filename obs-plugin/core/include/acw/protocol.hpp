@@ -59,11 +59,27 @@ struct StartParams {
 };
 
 std::string make_start_message(const StartParams &p);
+
+// What a running session does, changeable while it runs (a `config` message with an id; the server answers it).
+struct Features {
+	bool denoise = true;                 // tier "light"
+	std::string captions;                // "", "local" or "premium"
+	std::string language;                // "" = auto; "en,es" = someone who switches between these
+	std::vector<std::string> translate;  // needs captions
+	bool echo_reference = false;
+	bool operator==(const Features &o) const
+	{
+		return denoise == o.denoise && captions == o.captions && language == o.language && translate == o.translate &&
+		       echo_reference == o.echo_reference;
+	}
+	bool operator!=(const Features &o) const { return !(*this == o); }
+};
+std::string make_change_message(const Features &f, const std::string &id);
 std::string make_ping_message(uint64_t t);
 std::string make_config_message(int atten_lim_db);
 std::string make_stop_message();
 
-enum class EventType { Unknown, Ready, Caption, Translation, Warning, Stopped, Error, Pong };
+enum class EventType { Unknown, Ready, Caption, Translation, Warning, Stopped, Error, Pong, Config };
 
 struct Event {
 	EventType type = EventType::Unknown;
@@ -90,6 +106,9 @@ struct Event {
 	std::string message;
 	int seconds_left = -1;
 	int retry_after_s = 0;  // optional hint on errors: do not retry sooner (0 = none)
+	// config (the answer to a change): ok, the id it answers; usd_per_minute, translate and echo_reference as now
+	bool ok = false;
+	std::string id;
 	// pong
 	uint64_t pong_t = 0;
 	bool has_pong_t = false;

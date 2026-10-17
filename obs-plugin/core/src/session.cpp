@@ -25,6 +25,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace acw {
@@ -237,6 +238,12 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	std::condition_variable done_cv;
 	bool net_done = false;
 	std::atomic<int> pending_atten{-1};
+	// A change of what the session does (change()): waiting to be sent, then sent and waiting for the answer.
+	std::mutex chg_mu;
+	std::optional<Features> pending_change;  // chg_mu
+	std::optional<Features> sent_change;     // chg_mu
+	std::string sent_change_id;              // chg_mu
+	uint32_t change_seq = 0;                 // chg_mu
 	std::atomic<bool> retry_req{false};
 	std::atomic<bool> link_slow{false};
 	std::atomic<int> late_x10{0};  // recent share of late frames, in 0.1 %
@@ -257,6 +264,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	bool translate_active_known = false;
 	std::vector<std::string> translate_failed;
 	bool captions_failed = false;
+	Features feat;               // what the session does now (as the service agreed to it)
+	std::string change_refused;  // why the last change could not be made ("" = it was, or none was asked)
 	std::vector<std::string> other_warnings;  // texts of warnings that have no plugin text of their own
 	double ping_rtt_ms = 0;
 	std::vector<float> rtt_ring;
@@ -293,6 +302,12 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			}
 		}
 
+		feat.denoise = cfg.denoise;
+		feat.captions = cfg.captions;
+		feat.language = cfg.language;
+		if (!cfg.captions.empty())
+			feat.translate = cfg.translate;
+		feat.echo_reference = cfg.echo && cfg.reference;
 		if (supported)
 			analyser = std::make_unique<InputAnalyser>(cfg.reference != nullptr);
 		if (supported && cfg.host_rate != kNetRate) {
@@ -522,7 +537,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		const uint64_t now_u = now_us();
 		Clock::time_point wake = now + std::chrono::milliseconds(250);  // the watchdogs below are checked at least this often
 		wake = std::min(wake, last_ping + std::chrono::milliseconds(kPingIntervalMs));
-		if (cfg.denoise)
+		if (stage)
 			wake = std::min(wake, last_window + std::chrono::seconds(1));
 		const uint64_t due = next_frame_due_us();
 		if (due != 0 && now_u < due + kStaleAudioUs) {
@@ -903,19 +918,25 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		// ---- start / ready --------------------------------------------------------
 		set_state(SessionState::Handshaking, "starting session", "Connecting...");
 		{
+			Features f;
+			{
+				std::lock_guard<std::mutex> lk(st_mu);
+				f = feat;
+			}
 			StartParams sp;
-			sp.denoise = cfg.denoise;
-			sp.captions = cfg.captions;
-			sp.language = cfg.language;
+			sp.denoise = f.denoise;
+			sp.captions = f.captions;
+			sp.language = f.language;
 			sp.atten_lim_db = atten_db.load();
 			sp.codec = use_opus ? "opus" : "pcm_s16le";
-			// Captions only: the returned audio is not used, so ask for the smallest stream.
-			sp.opus_bitrate = use_opus ? (cfg.denoise ? cfg.opus_bitrate : kOpusMinBitrate) : 0;
+			// Without an output delay (a session started captions only) the returned audio is not used: the smallest
+			// stream, or none at all.
+			sp.opus_bitrate = use_opus ? (stage ? cfg.opus_bitrate : kOpusMinBitrate) : 0;
 			sp.client = cfg.client;
-			sp.echo_reference = cfg.reference != nullptr;
-			sp.return_audio = cfg.denoise;  // captions only: nothing is done with the audio that would come back
-			if (!cfg.captions.empty())
-				sp.translate = cfg.translate;  // translations need captions
+			sp.echo_reference = f.echo_reference;
+			sp.return_audio = stage != nullptr;
+			if (!f.captions.empty())
+				sp.translate = f.translate;  // translations need captions
 			if (!ws.sendText(make_start_message(sp)).success) {
 				out.reason = "could not send start message";
 				out.message = "Could not send the start request. Trying again.";
@@ -963,7 +984,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			return out;
 		}
 		const double total_latency_ms = ml + opus_extra_latency * 1000.0 / kNetRate;
-		if (cfg.denoise && static_cast<double>(cfg.delay_ms) - total_latency_ms - kFramingMs <= 0.0) {
+		if (stage && static_cast<double>(cfg.delay_ms) - total_latency_ms - kFramingMs <= 0.0) {
 			// Even with a perfect network no processed frame could arrive in time.
 			out.reason = "model latency " + std::to_string(static_cast<int>(total_latency_ms)) + " ms does not fit the " +
 				     std::to_string(cfg.delay_ms) + " ms delay";
@@ -973,15 +994,17 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			ws.stop();
 			return out;
 		}
-		const bool send_ref = cfg.reference && ready.echo_reference;
-		echo_active.store(send_ref);
+		echo_active.store(cfg.reference && ready.echo_reference);  // follows changes (a `config` answer) from here
 		const bool send_silence = ready.silence_frames;  // silent blocks go out as silence frames, only if the service takes them
 		silence_active.store(send_silence);
-		if (cfg.reference && !send_ref)
-			log(LogLevel::Warning, "the server does not offer echo cancellation: continuing without it");
+		{
+			std::lock_guard<std::mutex> lk(st_mu);
+			if (feat.echo_reference && !ready.echo_reference)
+				log(LogLevel::Warning, "the server does not offer echo cancellation: continuing without it");
+		}
 		const int latency = static_cast<int>(std::lround(ml * (kNetRate / 1000.0))) + opus_extra_latency;
 		const int warm_frames = (latency + static_cast<int>(kFrameSamples) - 1) / static_cast<int>(kFrameSamples);
-		if (stage && cfg.denoise)
+		if (stage)
 			stage->set_model_latency(latency);
 		{
 			std::lock_guard<std::mutex> lk(st_mu);
@@ -1014,9 +1037,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		std::unique_ptr<OpusEnc> enc;
 		if (use_opus)
 			enc = std::make_unique<OpusEnc>(cfg.opus_bitrate);  // fresh state for every connection
-		std::unique_ptr<OpusEnc> ref_enc;  // the reference is a stream of its own
-		if (use_opus && send_ref)
-			ref_enc = std::make_unique<OpusEnc>(cfg.opus_bitrate);
+		std::unique_ptr<OpusEnc> ref_enc;  // the reference is a stream of its own (made when echo removal is first on)
 
 		while (!stopping()) {
 			{
@@ -1063,7 +1084,9 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				// The reference goes first, so the server has it when the microphone frame arrives. A silent reference
 				// is a silence frame, or (a server that does not take them) skipped. The microphone frames are never
 				// skipped, silent or not: they are what keeps the session alive on the server.
-				if (send_ref) {
+				if (echo_active.load(std::memory_order_relaxed)) {
+					if (use_opus && !ref_enc)
+						ref_enc = std::make_unique<OpusEnc>(cfg.opus_bitrate);
 					size_t rlen = 0;
 					if (f->has_ref)
 						rlen = encode(ref_enc.get(), f->ref, kFlagReference);
@@ -1097,12 +1120,21 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			}
 			if (now - last_window >= std::chrono::seconds(1)) {
 				last_window = now;
-				if (cfg.denoise)
+				if (stage)
 					update_late_window(window);
 			}
 			const int atten = pending_atten.exchange(-1);
 			if (atten >= 0)
 				ws.sendText(make_config_message(atten));
+			{
+				std::lock_guard<std::mutex> lk(chg_mu);
+				if (pending_change && !sent_change) {  // one change at a time: the next waits for the answer
+					sent_change_id = "c" + std::to_string(++change_seq);
+					sent_change = std::move(pending_change);
+					pending_change.reset();
+					ws.sendText(make_change_message(*sent_change, sent_change_id));
+				}
+			}
 
 			if (now_us() - att->last_rx_us.load(std::memory_order_relaxed) > uint64_t(kRxWatchdogMs) * 1000) {
 				out.reason = "no data from the server for " + std::to_string(kRxWatchdogMs / 1000) + " s";
@@ -1124,6 +1156,18 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 		streaming.store(false, std::memory_order_release);
 		origin_ticks.store(0, std::memory_order_release);
 		echo_active.store(false);
+		{
+			// A change the connection ended before answering: the next connection starts with it (or with the one
+			// asked for since), and the service checks it then.
+			std::lock_guard<std::mutex> lk(chg_mu);
+			std::optional<Features> next = pending_change ? pending_change : sent_change;
+			pending_change.reset();
+			sent_change.reset();
+			if (next) {
+				std::lock_guard<std::mutex> lk2(st_mu);
+				feat = *next;
+			}
+		}
 		silence_active.store(false);
 		link_slow.store(false);
 		late_x10.store(0);
@@ -1187,8 +1231,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			counters.bad_frames.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		if (!cfg.denoise) {
-			// Captions only: the audio that comes back is not used, so it is not decoded either.
+		if (!stage) {
+			// No output delay (started captions only): the audio that comes back is not used, so it is not decoded either.
 			if (data.size() <= kHeaderSize) {
 				counters.bad_frames.fetch_add(1, std::memory_order_relaxed);
 				return;
@@ -1220,7 +1264,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			counters.warmup_discarded.fetch_add(1, std::memory_order_relaxed);
 			return;
 		}
-		if (cfg.denoise)
+		if (stage)
 			store.publish(h.seq, rx.data());
 	}
 
@@ -1316,6 +1360,32 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			att.server_msg = ev.message;
 			att.retry_after_s = ev.retry_after_s;
 			att.cv.notify_all();
+			break;
+		}
+		case EventType::Config: {
+			// The answer to a change (change()): what the session does from now on, or why nothing changed.
+			std::optional<Features> asked;
+			{
+				std::lock_guard<std::mutex> lk(chg_mu);
+				if (!sent_change || ev.id != sent_change_id)
+					break;
+				asked = std::move(sent_change);
+				sent_change.reset();
+			}
+			cv.notify_all();  // a change waiting behind it can go out
+			std::lock_guard<std::mutex> lk(st_mu);
+			if (ev.ok) {
+				feat = *asked;
+				usd_per_minute = ev.usd_per_minute;
+				translate_active = ev.translate;
+				translate_active_known = ev.has_translate;
+				translate_failed.clear();
+				captions_failed = false;
+				change_refused.clear();
+				echo_active.store(cfg.reference && ev.echo_reference);
+			} else {
+				change_refused = ev.message.empty() ? "The service could not make that change." : ev.message;
+			}
 			break;
 		}
 		case EventType::Pong:
@@ -1491,6 +1561,38 @@ double Session::delay_seconds() const
 	return impl_->supported ? impl_->delay_sec : 0.0;
 }
 
+bool Session::change(const SessionConfig &next)
+{
+	Impl &d = *impl_;
+	const SessionConfig &c = d.cfg;
+	if (next.url != c.url || next.api_key != c.api_key || next.delay_ms != c.delay_ms || next.codec != c.codec ||
+	    next.host_rate != c.host_rate || next.reference != c.reference)
+		return false;
+	if (next.denoise && !d.stage && d.supported)
+		return false;  // noise removal in a session whose audio was never delayed: a new session (with the delay) it is
+	Features f;
+	f.denoise = next.denoise;
+	f.captions = next.captions;
+	f.language = next.language;
+	if (!next.captions.empty())
+		f.translate = next.translate;
+	f.echo_reference = next.echo && next.reference;
+	{
+		std::lock_guard<std::mutex> lk(d.st_mu);
+		if (!d.streaming.load()) {
+			d.feat = f;  // not connected: the next connection starts with it
+			d.change_refused.clear();
+			return true;
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lk(d.chg_mu);
+		d.pending_change = f;  // replaces one that hasn't gone out yet
+	}
+	d.cv.notify_all();
+	return true;
+}
+
 void Session::set_atten_lim_db(int db)
 {
 	db = std::min(100, std::max(6, db));
@@ -1547,11 +1649,15 @@ SessionSnapshot Session::snapshot() const
 			s.rtt_p95_ms = v[k];
 		}
 	}
-	if (!d.cfg.captions.empty())
-		s.translate_requested = d.cfg.translate;
+	{
+		std::lock_guard<std::mutex> lk(d.st_mu);
+		if (!d.feat.captions.empty())
+			s.translate_requested = d.feat.translate;
+		s.echo_requested = d.feat.echo_reference;
+		s.change_refused = d.change_refused;
+	}
 	s.insecure = d.insecure;
 	s.codec = d.use_opus ? "opus" : "pcm_s16le";
-	s.echo_requested = d.cfg.reference != nullptr;
 	s.echo_active = d.echo_active.load();
 	s.silence_active = d.silence_active.load();
 	s.passthrough_only = !d.supported;
@@ -1603,7 +1709,12 @@ std::string Session::status_line(const Localizer &loc) const
 {
 	const Impl &d = *impl_;
 	SessionSnapshot s = snapshot();
-	const bool cleaning = d.cfg.denoise && d.supported;
+	Features f;
+	{
+		std::lock_guard<std::mutex> lk(d.st_mu);
+		f = d.feat;
+	}
+	const bool cleaning = f.denoise && d.supported;
 	// A text in the user's language, or the built-in English one. "%1" is replaced by `arg`.
 	auto say = [&](const std::string &id, const std::string &builtin, const std::string &arg = std::string()) {
 		std::string t = loc ? loc(id) : std::string();
@@ -1624,7 +1735,7 @@ std::string Session::status_line(const Localizer &loc) const
 						    : " Check your internet connection.";
 		} else {
 			out = cleaning ? "Connected. Your audio is being cleaned." : "Connected.";
-			if (!d.cfg.captions.empty() && !s.captions_failed)
+			if (!f.captions.empty() && !s.captions_failed)
 				out += " Captions are running.";
 			// Translations: the ones the service switched on, and the ones it did not.
 			std::vector<std::string> on, off;
@@ -1648,10 +1759,10 @@ std::string Session::status_line(const Localizer &loc) const
 		if (d.analyser && !s.link_too_slow) {
 			// What the first seconds of the microphone say about the room, as a short tip.
 			AdviceContext ac;
-			ac.denoise = d.cfg.denoise;
+			ac.denoise = f.denoise;
 			ac.atten_lim_db = d.atten_db.load();
-			ac.captions = d.cfg.captions;
-			ac.language = d.cfg.language;
+			ac.captions = f.captions;
+			ac.language = f.language;
 			ac.echo_requested = s.echo_requested;
 			ac.echo_active = s.echo_active;
 			const InputAdvice adv = InputAnalyser::advise(d.analyser->findings(), ac);
@@ -1696,6 +1807,9 @@ std::string Session::status_line(const Localizer &loc) const
 		out += " " + say("warning.translation_unavailable",
 				 "Translation into " + language_name(l) + " stopped because the translation service had trouble; the other captions go on.",
 				 language_name(l));
+	if (!s.change_refused.empty())
+		out += " " + say("warning.change_refused", "That change could not be made: " + s.change_refused +
+								     " The session goes on with the earlier settings.", s.change_refused);
 	if (!s.warning.empty())
 		out += " " + s.warning;
 	if (s.insecure)

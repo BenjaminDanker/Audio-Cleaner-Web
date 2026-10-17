@@ -313,6 +313,7 @@ int main(int argc, char **argv)
 
 	SessionConfig cfg;
 	cfg.reference = reference;
+	cfg.echo = reference != nullptr;
 	cfg.url = a.url;
 	cfg.api_key = read_key(a.key_file);
 	cfg.denoise = a.denoise;
