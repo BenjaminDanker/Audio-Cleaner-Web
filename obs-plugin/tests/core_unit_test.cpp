@@ -4,6 +4,7 @@
 #include "acw/caption_pacer.hpp"
 #include "acw/caption_router.hpp"
 #include "acw/delayed_sender.hpp"
+#include "acw/input_advice.hpp"
 #include "acw/languages.hpp"
 #include "acw/live_gate.hpp"
 #include "acw/opus_codec.hpp"
@@ -1890,6 +1891,190 @@ static void test_resampler_reference()
 	}
 }
 
+// ---- input advice: a quick listen to the microphone ------------------------------------------------------------------
+namespace {
+constexpr double kAdvicePi = 3.14159265358979323846;
+
+// A voice-like signal: a few harmonics, switched on and off like words (60% on), at the given level, over steady noise
+// `snr_db` below it. noise_seed picks the noise; the voice is the same for the same `voice_seed`.
+std::vector<float> advice_voice(double seconds, double snr_db, unsigned voice_seed = 1, unsigned noise_seed = 2, double level = 0.1)
+{
+	const size_t n = static_cast<size_t>(seconds * 48000);
+	std::mt19937 rv(voice_seed), rn(noise_seed);
+	std::normal_distribution<double> g(0.0, 1.0);
+	std::vector<double> voice(n), noise(n);
+	const double f0 = 110 + static_cast<double>(voice_seed % 7) * 17;
+	double pv = 0, pn = 0;
+	for (size_t i = 0; i < n; ++i) {
+		const double t = static_cast<double>(i) / 48000;
+		double v = 0;
+		for (int k = 1; k <= 5; ++k)
+			v += std::sin(2 * kAdvicePi * f0 * k * t) / k;
+		// words: 0.35 s on, 0.25 s off, with a little jitter from the seed
+		const double ph = std::fmod(t + 0.013 * (voice_seed % 11), 0.6);
+		const double env = ph < 0.35 ? std::min(1.0, std::min(ph, 0.35 - ph) / 0.03) : 0.0;
+		voice[i] = v * env;
+		noise[i] = g(rn);
+		pv += voice[i] * voice[i];
+		pn += noise[i] * noise[i];
+	}
+	(void)rv;
+	const double gv = level / std::sqrt(pv / static_cast<double>(n));
+	const double gn = snr_db > 200 ? 0.0 : level * std::pow(10.0, -snr_db / 20) / std::sqrt(pn / static_cast<double>(n));
+	std::vector<float> out(n);
+	for (size_t i = 0; i < n; ++i)
+		out[i] = static_cast<float>(voice[i] * gv + noise[i] * gn);
+	return out;
+}
+
+void feed(InputAnalyser &a, const std::vector<float> &mic, const std::vector<float> *ref = nullptr)
+{
+	for (size_t i = 0; i + kFrameSamples <= mic.size(); i += kFrameSamples)
+		a.push(mic.data() + i, ref ? ref->data() + i : nullptr, kFrameSamples);
+}
+
+bool has_note(const InputAdvice &a, const char *id)
+{
+	for (const AdviceNote &n : a.notes)
+		if (n.id == id)
+			return true;
+	return false;
+}
+}  // namespace
+
+static void test_input_advice()
+{
+	std::printf("input advice\n");
+	// not ready before ten seconds of audio
+	{
+		InputAnalyser a(false);
+		feed(a, advice_voice(9.0, 40));
+		CHECK(!a.ready());
+		CHECK(!a.findings().ready);
+		CHECK(!InputAnalyser::advise(a.findings(), AdviceContext{}).ready);
+		feed(a, advice_voice(1.5, 40));
+		CHECK(a.ready());
+		CHECK(a.findings().ready);
+	}
+	// a quiet room: noise removal can go; and it says so only while it is on
+	{
+		InputAnalyser a(false);
+		feed(a, advice_voice(12.0, 60));
+		const InputFindings f = a.findings();
+		CHECK(f.has_speech);
+		CHECK(f.noise_db > 36);
+		AdviceContext ctx;
+		ctx.denoise = true;
+		InputAdvice adv = InputAnalyser::advise(f, ctx);
+		CHECK(adv.ready && adv.quiet_room);
+		CHECK(has_note(adv, "advice_quiet"));
+		ctx.denoise = false;
+		adv = InputAnalyser::advise(f, ctx);
+		CHECK(!has_note(adv, "advice_quiet") && !has_note(adv, "advice_noisy"));
+		CHECK(has_note(adv, "advice_fits"));
+	}
+	// a noisy room: the strongest strength, and a nudge when noise removal is off or set weaker
+	{
+		InputAnalyser a(false);
+		feed(a, advice_voice(12.0, 3));
+		const InputFindings f = a.findings();
+		CHECK(f.noise_db < 19);
+		AdviceContext ctx;
+		ctx.denoise = false;
+		InputAdvice adv = InputAnalyser::advise(f, ctx);
+		CHECK(!adv.quiet_room && adv.atten_lim_db == 100 && has_note(adv, "advice_noisy"));
+		ctx.denoise = true;
+		ctx.atten_lim_db = 12;
+		adv = InputAnalyser::advise(f, ctx);
+		CHECK(has_note(adv, "advice_strength"));
+		ctx.atten_lim_db = 100;
+		adv = InputAnalyser::advise(f, ctx);
+		CHECK(has_note(adv, "advice_fits"));
+		// captions: noisy room -> extra accurate is suggested for standard, nothing for extra accurate
+		ctx.captions = "local";
+		CHECK(has_note(InputAnalyser::advise(f, ctx), "advice_captions_up"));
+		ctx.captions = "premium";
+		CHECK(!has_note(InputAnalyser::advise(f, ctx), "advice_captions_up"));
+	}
+	// a clear voice in a quiet room does not need the extra accurate captions; another language does
+	{
+		InputAnalyser a(false);
+		feed(a, advice_voice(12.0, 45));
+		AdviceContext ctx;
+		ctx.denoise = false;
+		ctx.captions = "premium";
+		CHECK(has_note(InputAnalyser::advise(a.findings(), ctx), "advice_captions_down"));
+		ctx.language = "es";
+		CHECK(!has_note(InputAnalyser::advise(a.findings(), ctx), "advice_captions_down"));
+		ctx.captions = "local";
+		CHECK(has_note(InputAnalyser::advise(a.findings(), ctx), "advice_captions_up"));
+	}
+	// nothing but a hum: no speech, so it waits for one
+	{
+		InputAnalyser a(false);
+		std::vector<float> hum(12 * 48000);
+		for (size_t i = 0; i < hum.size(); ++i)
+			hum[i] = 0.01f * static_cast<float>(std::sin(2 * kAdvicePi * 50 * static_cast<double>(i) / 48000));
+		feed(a, hum);
+		const InputFindings f = a.findings();
+		CHECK(f.ready && !f.has_speech);
+		CHECK(has_note(InputAnalyser::advise(f, AdviceContext{}), "advice_speak"));
+	}
+	// digital silence is not a room
+	{
+		InputAnalyser a(false);
+		feed(a, std::vector<float>(12 * 48000, 0.0f));
+		CHECK(a.findings().ready && !a.findings().has_speech);
+	}
+	// clipping
+	{
+		InputAnalyser a(false);
+		std::vector<float> x = advice_voice(12.0, 50, 3, 4, 0.5);
+		for (float &v : x)
+			v = std::max(-0.9995f, std::min(0.9995f, v * 6.0f));
+		feed(a, x);
+		CHECK(a.findings().clip_fraction > 0.01);
+		CHECK(has_note(InputAnalyser::advise(a.findings(), AdviceContext{}), "advice_clip"));
+		InputAnalyser b(false);
+		feed(b, advice_voice(12.0, 50));
+		CHECK(b.findings().clip_fraction == 0.0);
+	}
+	// speakers heard in the microphone: the played sound comes back later, quieter, under the speaker's own voice
+	{
+		const std::vector<float> played = advice_voice(12.0, 80, 5, 6, 0.1);
+		std::vector<float> mic = advice_voice(12.0, 50, 9, 10, 0.1);
+		const size_t delay = 48000 / 10;  // 100 ms
+		for (size_t i = delay; i < mic.size(); ++i)
+			mic[i] += 0.5f * played[i - delay];
+		InputAnalyser a(true);
+		feed(a, mic, &played);
+		InputFindings f = a.findings();
+		CHECK(f.echo_known);
+		CHECK(f.echo_share > 0.03);
+		AdviceContext ctx;
+		ctx.echo_requested = true;
+		ctx.echo_active = true;
+		CHECK(has_note(InputAnalyser::advise(f, ctx), "advice_echo_on"));
+		ctx.echo_active = false;
+		CHECK(has_note(InputAnalyser::advise(f, ctx), "advice_echo_off"));
+		// the same microphone with nothing related playing
+		InputAnalyser b(true);
+		feed(b, mic, nullptr);
+		CHECK(b.findings().echo_share < 0.03);
+		InputAnalyser c(true);
+		const std::vector<float> other = advice_voice(12.0, 80, 8, 12, 0.1);
+		feed(c, advice_voice(12.0, 50, 9, 10, 0.1), &other);
+		CHECK(c.findings().echo_share < 0.03);
+		CHECK(!InputAnalyser::advise(c.findings(), ctx).echo_heard);
+	}
+	// no more is kept after the limit, and pushing more is harmless
+	{
+		InputAnalyser a(true, 2.0, 3.0);
+		feed(a, advice_voice(10.0, 30));
+		CHECK(a.findings().seconds <= 3.0 + 1e-9);
+	}
+}
+
 int main()
 {
 	test_spsc();
@@ -1912,6 +2097,7 @@ int main()
 	test_resampler_reference();
 	test_silence_protocol();
 	test_live_gate();
+	test_input_advice();
 	test_output_stage();
 	test_session_passthrough(48000, 150);
 	test_session_passthrough(44100, 150);
