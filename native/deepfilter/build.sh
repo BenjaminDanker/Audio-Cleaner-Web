@@ -92,7 +92,10 @@ git checkout --quiet --force "$COMMIT"
 git reset --quiet --hard "$COMMIT" # drops a previous patch application (target/ is untracked, kept)
 git apply "$HERE/tract-0.23.patch"
 cp "$HERE/Cargo.lock" Cargo.lock    # pinned dependency set (tract 0.23.8, wasm-bindgen 0.2.118, ...)
-echo "== DeepFilterNet $(git rev-parse --short HEAD) + tract-0.23.patch in $BUILD_DIR"
+# Committed on a local branch, so the checkout shows clean between builds (nothing in it is edited by hand).
+git checkout --quiet -B acw
+git -c user.name=build.sh -c user.email=build@localhost commit --quiet --no-verify -am "tract-0.23.patch + pinned Cargo.lock"
+echo "== DeepFilterNet ${COMMIT:0:7} + tract-0.23.patch in $BUILD_DIR"
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$BUILD_DIR/target}"
 mkdir -p "$OUT"
