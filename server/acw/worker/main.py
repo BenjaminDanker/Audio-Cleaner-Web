@@ -93,8 +93,7 @@ _last_wait_log = 0.0
 
 def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
     """Take the next queued job (jobs.QUEUE_ORDER) if the host has room for it.
-    The head of the queue waits rather than letting smaller jobs overtake it. At most one voice-rebuild job
-    runs at a time (it uses several cores for hours): further ones wait without holding up the rest.
+    The head of the queue waits rather than letting smaller jobs overtake it.
 
     The host is measured outside the database's write lock (a snapshot can sleep); the lock is only taken to
     check once more with fresh facts and to take the job."""
@@ -107,8 +106,8 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         rows = [r for r in rows if broker.gpu_stages(r)]
     elif broker.gpu_worker_idle():
         rows = [r for r in rows if not broker.gpu_stages(r)]  # the GPU worker takes these
-    elif broker.gpu_worker_up():
-        rows = [r for r in rows if not broker.gpu_only(r)]  # busy: it takes these when it is free again
+    else:
+        rows = [r for r in rows if not broker.gpu_only(r)]  # the voice rebuild waits for the card
     if not rows:
         return None
     snap = cpus = None
@@ -120,12 +119,7 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         return [dict(r) for r in c.execute("SELECT * FROM jobs WHERE status = 'running'").fetchall()]
 
     def pick(running: list[dict]) -> tuple[dict | None, str, int | None]:
-        candidates = rows
-        if any(jobs.is_rebuild(r) for r in running):
-            candidates = [r for r in rows if not jobs.is_rebuild(r)]
-        if not candidates:
-            return None, "another voice rebuild is running", None
-        row = candidates[0]
+        row = rows[0]
         if snap is None:
             return row, "", None
         ok, why, threads = admission(row, snap, running, cpus, gpu=GPU_MODE)
@@ -165,7 +159,7 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
     d = jobs.job_dir(job["id"])
     params = json.loads(job["params_json"])
     max_seconds = _max_seconds(job, params)
-    cpu_seconds = PROBE_CPU_SECONDS if billed is None else jobs.stage_limits(params["denoise_tier"], billed, max_seconds)[0]
+    cpu_seconds = PROBE_CPU_SECONDS if billed is None else jobs.stage_limits(billed, max_seconds)[0]
     spec = {
         **extra,
         "job_id": job["id"],
@@ -475,7 +469,7 @@ def process(job: dict, extra: dict) -> None:
         params = json.loads(job["params_json"])
         jobs.update_params(job["id"], channels=channels)
         d = _write_spec(job, extra, duration)
-        wall = jobs.stage_limits(params["denoise_tier"], duration, _max_seconds(job, params))[1]
+        wall = jobs.stage_limits(duration, _max_seconds(job, params))[1]
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
@@ -507,7 +501,7 @@ def process(job: dict, extra: dict) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     db.init_db()
-    worker_id = f"{socket.gethostname()}:{os.getpid()}"
+    worker_id = f"{broker.GPU_WORKER_PREFIX if GPU_MODE else ''}{socket.gethostname()}:{os.getpid()}"
     extra = _settings_extra()
     signal.signal(signal.SIGTERM, lambda *_: _stop.set())
     signal.signal(signal.SIGINT, lambda *_: _stop.set())

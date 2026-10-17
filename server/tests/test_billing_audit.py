@@ -430,7 +430,7 @@ def test_job_prices_are_fixed_at_creation(monkeypatch):
 
 # ---------------------------------------------------------------- F6: limits per tier
 
-def test_rebuild_is_limited_to_90_minutes():
+def test_rebuild_is_limited_to_90_minutes(gpu_up):
     uid = user()
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     with pytest.raises(jobs.JobError, match="up to 90 minutes"):
@@ -439,12 +439,10 @@ def test_rebuild_is_limited_to_90_minutes():
     make_job(uid, denoise_tier="standard", claimed_seconds=3 * 3600)
 
 
-def test_stage_limits_and_estimates_follow_the_tier():
-    cpu, wall = jobs.stage_limits("rebuild", 90 * 60, 90 * 60)
-    assert (cpu, wall) == (90 * 60 * 12 + 1800, 90 * 60 * 4 + 1800)
-    cpu_std, wall_std = jobs.stage_limits("standard", 4 * 3600, 4 * 3600)
-    assert wall_std == 4 * 3600 * 2 + 1800 and cpu_std < 4 * 3600 * 8 + 1800 + 1
-    assert jobs.stage_limits("standard", 600, 3600)[1] == 600 * 3 + 1800
+def test_stage_limits_and_estimates_follow_the_work():
+    cpu, wall = jobs.stage_limits(4 * 3600, 4 * 3600)
+    assert wall == 4 * 3600 * 2 + 1800 and cpu == 4 * 3600 * 8 + 1800
+    assert jobs.stage_limits(600, 3600)[1] == 600 * 3 + 1800
 
     def job(tier, noise="auto", channels=2):
         return {"kind": "denoise", "claimed_seconds": 3600, "duration_seconds": None, "next_stage": "probe",
@@ -453,9 +451,8 @@ def test_stage_limits_and_estimates_follow_the_tier():
 
     light, heavy, rebuild = (jobs.job_seconds(job("standard")), jobs.job_seconds(job("standard", "heavy")),
                              jobs.job_seconds(job("rebuild")))
-    assert light < heavy < rebuild
-    assert rebuild >= 3600  # about real time or slower
-    assert jobs.job_needs(job("rebuild"))[0] == jobs.JOB_MEM_REBUILD > jobs.job_needs(job("standard"))[0]
+    assert rebuild < heavy and light < heavy  # the rebuild runs on the card: 7.4x real time
+    assert jobs.job_needs(job("rebuild"))[0] == jobs.job_needs(job("standard"))[0] == jobs.JOB_MEM
 
 
 # ---------------------------------------------------------------- F5, F7, F10, F20: live sessions

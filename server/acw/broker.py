@@ -162,8 +162,10 @@ def pin_tree(pid: int, cpus: set[int]) -> None:
 # runtime is CPU only), not echo removal (no echo canceller in the GPU venv). Every workload is compute bound (two
 # DPDFNet streams together are only 16 % faster than one) and Parakeet alone takes 3.3 of the 4 GB, so the card runs
 # one job at a time: the GPU worker (acw-worker-gpu, its own venv) claims one, its stages use the card one after
-# another. The CPU workers leave the card's jobs to it while it is idle, and the voice rebuild (hours of four cores on
-# the CPU) also while it is busy, as long as it is up.
+# another. The CPU workers leave the card's jobs to it while it is idle (when it is busy they take them: the card is
+# faster, the CPU is not slow for these). The voice rebuild runs only on the card: 7.4x real time there against 0.74x
+# on four cores, which would hold a quarter of the machine for longer than the recording; while no GPU worker is up it
+# can't be ordered (creating one says so) and queued ones wait.
 
 
 @dataclass(frozen=True)
@@ -202,8 +204,15 @@ def gpu_stages(job: dict) -> list[str]:
 
 
 def gpu_only(job: dict) -> bool:
-    """A GPU job the CPU workers leave even while the GPU worker is busy (it is up): the voice rebuild."""
+    """A job only the GPU worker takes: the voice rebuild."""
     return "rebuild" in gpu_stages(job)
+
+
+GPU_WORKER_PREFIX = "gpu:"  # the worker_id of jobs the GPU worker runs starts with it
+
+
+def is_gpu_worker(worker_id: str | None) -> bool:
+    return bool(worker_id) and worker_id.startswith(GPU_WORKER_PREFIX)
 
 
 def _gpu_marker(state: str) -> Path:

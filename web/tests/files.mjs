@@ -165,7 +165,13 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     await start().click();
     await page.getByTestId('job-error').waitFor();
     if (posts.at(-1)?.options?.noise !== 'heavy') throw new Error('noise sent: ' + posts.at(-1)?.options?.noise);
-    // "Rebuild the voice": its own price tier; strength and Background noise do not apply then
+    // "Rebuild the voice" runs only on the GPU: paused while no GPU worker is up (this test server has none)
+    await page.getByTestId('rebuild-paused').waitFor();
+    await withPricing((j) => ({ ...j, rebuildAvailable: true }));
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'polish');
+    // its own price tier; strength and Background noise do not apply then
     await page.getByRole('checkbox', { name: /Rebuild the voice/ }).check();
     if (await page.locator('#noisekind').count() || await page.getByTestId('strength-strength').count()) throw new Error('strength/noise still shown with rebuild');
     if (!/an hour/.test(await page.getByTestId('rebuild-hint').innerText())) throw new Error('rebuild price missing');
@@ -176,6 +182,7 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     ]);
     if (req.postDataJSON()?.denoiseTier !== 'rebuild') throw new Error('denoiseTier sent: ' + req.postDataJSON()?.denoiseTier);
     await page.getByRole('checkbox', { name: /Rebuild the voice/ }).uncheck();
+    await page.unroute('**/api/billing/pricing');
     await page.unroute('**/api/me');
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('strength-live-str').waitFor();

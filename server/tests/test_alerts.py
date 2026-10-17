@@ -184,7 +184,7 @@ def test_queue_check(monkeypatch):
     # long estimated wait: a 20 h running job and a queued one behind it
     _job(uid, "running", started_ago=10, progress=1, seconds=20 * 3600)
     _job(uid, "queued", queued_ago=5 * 60)
-    monkeypatch.setattr(jobs, "queue_wait_seconds", lambda ahead: 50 * 60)
+    monkeypatch.setattr(jobs, "queue_snapshot", lambda: (["x"], {"x": 50 * 60}))
     assert monitor.check_queue(ctx)[0].bad
 
 

@@ -1,5 +1,6 @@
 """The job list poll (audit H2): an index for the queue order and one queue computation shared by all requests."""
 from acw import auth, db, jobs
+from acw.config import get_settings
 
 
 def _add_job(job_id, user, status, t=0, started=None):
@@ -38,8 +39,10 @@ def test_the_queue_snapshot_matches_the_slow_estimates_and_is_shared_for_a_secon
     jobs.invalidate_queue_cache()
     ids, waits = jobs.queue_snapshot()
     assert ids == jobs.queued_ids() and len(ids) == 3
-    for i, jid in enumerate(ids):
-        assert waits[jid] == jobs.queue_wait_seconds(ids[:i]), jid
+    work = jobs._seconds_left(dict(db.one("SELECT * FROM jobs WHERE id = 'run1'")), db.now())
+    for jid in ids:
+        assert waits[jid] == int(work / get_settings().workers), jid
+        work += jobs._seconds_left(dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,))), db.now())
     # a second call within the window does not touch the database at all
     def no_query(*a, **k):
         raise AssertionError("queried")

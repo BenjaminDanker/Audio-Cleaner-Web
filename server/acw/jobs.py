@@ -55,10 +55,6 @@ GB = 1024**3
 # Re-measured 2026-10-17 (docs/research/heavy-2026-10.md): a heavy stereo clean peaks at 0.2 GB of private memory
 # and 0.8 GB including the mapped scratch files, band extension adds 0.45; rounded up.
 JOB_MEM = 1 * GB
-# Sidon: models 1.2 GB, plus a pool of four single-threaded workers each holding up to 0.7 GB of activations (a
-# 16 s feature window, or a 10 s decoder block), at most two of them feature windows: peak 4.0 GB (it was 2.2 GB
-# with one four-thread session). Long stereo no longer adds per-channel copies of the whole file.
-JOB_MEM_REBUILD = int(4.5 * GB)
 # Parakeet fp32: 0.3 GB of private memory per job plus the 2.4 GB of weights, which are the model file's own page
 # cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
 LOCAL_ASR_MEM = int(3.2 * GB)
@@ -72,7 +68,7 @@ SPEED = {
     "denoise_light": 0.05,
     "denoise_auto": 0.15,
     "denoise_heavy": 0.27,
-    "denoise_rebuild": 0.9,
+    "denoise_rebuild": 0.14,  # on the card (the only place it runs): 8.2 s per minute (broker.GPU_WORK)
     "highs": 0.02,
     "echo": 0.03,
     "transcribe_local": 0.12,
@@ -81,8 +77,8 @@ SPEED = {
 MODEL_LOAD_SECONDS = 20  # every stage starts a fresh sandboxed process that loads its models
 # Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
 # cleaning, highs restoration and local transcription) and wall-clock seconds per second of audio.
-CPU_PER_AUDIO_SECOND = {"standard": 8, "rebuild": 12}
-WALL_PER_AUDIO_SECOND = {"standard": 3, "rebuild": 4}
+CPU_PER_AUDIO_SECOND = 8
+WALL_PER_AUDIO_SECOND = 3
 STAGE_SLACK_SECONDS = 1800
 # An upload that has not finished this long after its last bytes arrived is canceled (the clock restarts while data flows).
 UPLOAD_WINDOW_SECONDS = 3600
@@ -121,7 +117,7 @@ def job_needs(job: dict) -> tuple[int, int]:
         return int(0.3 * GB), 0
     params = json.loads(job["params_json"])
     seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
-    mem = (JOB_MEM_REBUILD if params.get("denoise_tier") == "rebuild" else JOB_MEM) + (
+    mem = JOB_MEM + (
         LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" else 0
     )
     return mem, scratch_bytes(job["kind"], seconds, echo=params.get("options", {}).get("echo_reference_track", False))
@@ -149,18 +145,10 @@ def job_seconds(job: dict) -> float:
     return t + MODEL_LOAD_SECONDS
 
 
-def is_rebuild(job: dict) -> bool:
-    """A voice-rebuild job that still has its heavy stage ahead (or is in it)."""
-    return job.get("next_stage") != "finalize" and json.loads(job["params_json"]).get("denoise_tier") == "rebuild"
-
-
-def stage_limits(denoise_tier: str | None, seconds: float, max_seconds: float) -> tuple[int, int]:
+def stage_limits(seconds: float, max_seconds: float) -> tuple[int, int]:
     """(CPU-seconds, wall-clock seconds) the main stage of a job of `seconds` of audio may use."""
-    tier = "rebuild" if denoise_tier == "rebuild" else "standard"
-    wall = seconds * WALL_PER_AUDIO_SECOND[tier] + STAGE_SLACK_SECONDS
-    if tier == "standard":
-        wall = min(wall, max_seconds * 2 + STAGE_SLACK_SECONDS)
-    return int(seconds * CPU_PER_AUDIO_SECOND[tier] + STAGE_SLACK_SECONDS), int(wall)
+    wall = min(seconds * WALL_PER_AUDIO_SECOND, max_seconds * 2) + STAGE_SLACK_SECONDS
+    return int(seconds * CPU_PER_AUDIO_SECOND + STAGE_SLACK_SECONDS), int(wall)
 
 
 # The wall-clock limit of a stage assumes the job runs at the speed it was claimed with. When live audio or a game server
@@ -310,7 +298,15 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     return out
 
 
+REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choose Clean & polish."
+
+
 def check_duration(kind: str, denoise_tier: str | None, seconds: float) -> None:
+    """The length of the file fits the job, and the job can be done now (the voice rebuild runs only on the GPU)."""
+    from .broker import gpu_worker_up
+
+    if denoise_tier == "rebuild" and kind != "transcribe" and not gpu_worker_up():
+        raise JobError(REBUILD_PAUSED)
     if not 0.5 <= seconds <= pricing.MAX_JOB_SECONDS:
         raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
     if denoise_tier == "rebuild" and kind != "transcribe" and seconds > pricing.MAX_REBUILD_SECONDS:
@@ -578,19 +574,6 @@ def _seconds_left(r: dict, now: int) -> float:
     return left
 
 
-def queue_wait_seconds(ahead: list[str]) -> int:
-    """Estimate until a job behind `ahead` starts: the work in front of it
-    (including what is running now) spread over the workers."""
-    rows = db.all_rows(
-        "SELECT * FROM jobs WHERE status IN ('running', 'cloud_asr')"
-        + (f" OR id IN ({','.join('?' * len(ahead))})" if ahead else ""),
-        tuple(ahead),
-    )
-    now = db.now()
-    work = sum(_seconds_left(dict(r), now) for r in rows)
-    return int(work / max(1, get_settings().workers))
-
-
 # Everyone looking at the job list sees the same queue. The ordering and the estimates cost a query per queued job
 # and run in the process that also relays live audio, so they are computed once a second for all requests
 # (a user's own changes drop the cache so they see them at once).
@@ -606,8 +589,8 @@ def invalidate_queue_cache() -> None:
 
 def queue_snapshot() -> tuple[list[str], dict[str, int]]:
     """(queued job ids in start order, estimated seconds until each starts), at most QUEUE_CACHE_SECONDS old.
-    One pass for the whole queue: the estimate for a job is the work running now plus the work queued in front of it,
-    spread over the workers (the same figure queue_wait_seconds gives)."""
+    One pass for the whole queue, in two lanes: a voice rebuild waits for the GPU worker's running job and the
+    rebuilds in front of it; any other job for the work running and queued in front of it on the CPU workers."""
     key = str(get_settings().db_path)
     with _queue_cache_lock:
         if _queue_cache["key"] == key and time.monotonic() - _queue_cache["at"] < QUEUE_CACHE_SECONDS:
@@ -615,14 +598,23 @@ def queue_snapshot() -> tuple[list[str], dict[str, int]]:
         # Computed under the lock: concurrent requests wait for one computation instead of each running their own.
         ids = queued_ids()
         now = db.now()
+        from .broker import gpu_only, is_gpu_worker
+
         workers = max(1, get_settings().workers)
         rows = {r["id"]: dict(r) for r in db.all_rows("SELECT * FROM jobs WHERE status IN ('running', 'cloud_asr', 'queued')")}
-        work = sum(_seconds_left(r, now) for r in rows.values() if r["status"] != "queued")
+        running = [r for r in rows.values() if r["status"] != "queued"]
+        gpu_work = sum(_seconds_left(r, now) for r in running if is_gpu_worker(r.get("worker_id")))
+        cpu_work = sum(_seconds_left(r, now) for r in running if not is_gpu_worker(r.get("worker_id")))
         waits: dict[str, int] = {}
         for jid in ids:
-            waits[jid] = int(work / workers)
-            if jid in rows:
-                work += _seconds_left(rows[jid], now)
+            r = rows.get(jid)
+            if r is not None and gpu_only(r):
+                waits[jid] = int(gpu_work)
+                gpu_work += _seconds_left(r, now)
+            else:
+                waits[jid] = int(cpu_work / workers)
+                if r is not None:
+                    cpu_work += _seconds_left(r, now)
         _queue_cache.update(key=key, at=time.monotonic(), ids=ids, waits=waits)
         return ids, waits
 

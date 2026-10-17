@@ -307,7 +307,7 @@ def check_queue(ctx: Callable[[], str]) -> list[Finding]:
     if ids:
         row = db.one("SELECT queued_at FROM jobs WHERE id = ?", (ids[0],))
         head_wait = max(0, now - (row["queued_at"] or now)) if row else 0
-        est = jobs.queue_wait_seconds(ids[:-1])
+        est = max(jobs.queue_snapshot()[1].values(), default=0)
     bad = bool(ids) and (head_wait > QUEUE_HEAD_WAIT_S or est > QUEUE_ESTIMATE_S)
     body = ""
     if bad:

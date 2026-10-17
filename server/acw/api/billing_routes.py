@@ -6,7 +6,7 @@ import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from .. import auth, db
+from .. import auth, broker, db
 from ..billing import ledger, pricing, stripe_service, trust
 from ..billing.pricing import MICROS_PER_CENT
 from ..config import get_settings
@@ -40,6 +40,7 @@ def get_pricing() -> dict:
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
         "maxUploadBytes": get_settings().max_upload_bytes,
         "maxRebuildSeconds": pricing.MAX_REBUILD_SECONDS,
+        "rebuildAvailable": broker.gpu_worker_up(),  # the voice rebuild runs only on the GPU
         "paymentsEnabled": stripe_service.enabled(),
         "taxAddedAtCheckout": get_settings().stripe_automatic_tax,
     }

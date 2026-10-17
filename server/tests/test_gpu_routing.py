@@ -67,9 +67,38 @@ def marker(name, age=0.0):
     os.utime(p, (t, t))
 
 
-def test_cpu_workers_take_everything_when_there_is_no_gpu_worker(models):
+def test_the_voice_rebuild_runs_only_on_the_card(models):
+    marker("gpu-worker-alive")
     rebuild = queued(models, denoise_tier="rebuild")
-    assert W.claim("cpu")["id"] == rebuild
+    heavy = queued(models, options={"noise": "heavy"})
+    assert W.claim("cpu")["id"] == heavy  # work-conserving: the CPU does a heavy clean while the card is busy
+    assert W.claim("cpu") is None  # never the rebuild
+    marker("gpu-worker-alive", age=300)  # the GPU worker went away: the rebuild still waits for it
+    assert W.claim("cpu") is None
+    assert db.one("SELECT status FROM jobs WHERE id = ?", (rebuild,))["status"] == "queued"
+
+
+def test_no_rebuild_can_be_ordered_while_no_gpu_worker_is_up(models, client, signed_in):
+    uid, h = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    with pytest.raises(jobs.JobError, match="paused"):
+        make_job(uid, denoise_tier="rebuild")
+    assert client.get("/api/billing/pricing").json()["rebuildAvailable"] is False
+    marker("gpu-worker-alive")
+    make_job(uid, denoise_tier="rebuild")
+    assert client.get("/api/billing/pricing").json()["rebuildAvailable"] is True
+
+
+def test_queue_estimates_have_a_gpu_lane(models):
+    marker("gpu-worker-alive")
+    first = queued(models, denoise_tier="rebuild")
+    second = queued(models, denoise_tier="rebuild")
+    plain = queued(models, options={"noise": "light"})
+    jobs.invalidate_queue_cache()
+    _, waits = jobs.queue_snapshot()
+    rebuild_seconds = jobs.job_seconds(dict(db.one("SELECT * FROM jobs WHERE id = ?", (first,))))
+    assert waits[first] == 0 and waits[second] == int(rebuild_seconds)  # rebuilds queue behind each other on the card
+    assert waits[plain] == 0  # the CPU workers have nothing in front of it
 
 
 def test_cpu_workers_leave_gpu_jobs_to_an_idle_gpu_worker(models):
@@ -82,18 +111,8 @@ def test_cpu_workers_leave_gpu_jobs_to_an_idle_gpu_worker(models):
     assert db.one("SELECT status FROM jobs WHERE id = ?", (heavy,))["status"] == "queued"
 
 
-def test_a_busy_gpu_worker_keeps_only_the_rebuild(models):
-    rebuild = queued(models, denoise_tier="rebuild")
-    heavy = queued(models, options={"noise": "heavy"})
-    marker("gpu-worker-alive")  # up, but not idle: it is running something
-    assert W.claim("cpu")["id"] == heavy  # work stays work-conserving: the CPU does a heavy clean while the card is busy
-    assert W.claim("cpu") is None
-    assert db.one("SELECT status FROM jobs WHERE id = ?", (rebuild,))["status"] == "queued"
-    marker("gpu-worker-alive", age=300)  # the GPU worker went away: nobody waits for it
-    assert W.claim("cpu")["id"] == rebuild
-
-
 def test_the_gpu_worker_takes_only_its_jobs(models, monkeypatch):
+    marker("gpu-worker-alive")
     light = queued(models, options={"noise": "light"})
     rebuild = queued(models, denoise_tier="rebuild")
     monkeypatch.setattr(W, "GPU_MODE", True)

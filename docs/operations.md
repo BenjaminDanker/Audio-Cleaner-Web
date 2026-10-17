@@ -602,9 +602,10 @@ Whisper stay on the CPU (a job with echo removal is never given to the GPU worke
 light is cleaned by DeepFilterNet3 on the GPU worker's CPU threads). It runs one job at a time and a job's models
 use the card one after the other (Parakeet needs 3.3 of the 4 GB alone, Sidon 2.6 GB, DPDFNet 0.3-0.4 GB), so nothing
 shares it. While it is idle it refreshes `data/gpu-worker-idle`, and CPU workers leave GPU jobs to it; while it is
-busy they still take everything but the voice rebuild (hours of four cores on the CPU), which waits for the card as
-long as `data/gpu-worker-alive` is fresh (refreshed every 2 s, and every 20 s during a job; removed when the worker
-stops). A stage that cannot get the card (no card, CUDA library missing) fails the job with the usual "not charged"
+busy they take everything but the voice rebuild. **The voice rebuild runs only on the card** (7.4x real time there,
+0.74x on four CPU cores): while no GPU worker is up (`data/gpu-worker-alive` older than 90 s; it is refreshed every
+2 s, and every 20 s during a job, and removed when the worker stops) the site shows it as paused, creating one is
+refused, and queued ones wait. Its queue estimate counts the card's own queue. A stage that cannot get the card (no card, CUDA library missing) fails the job with the usual "not charged"
 message instead of running slowly on the CPU. `python -m acw.admin capacity` shows the worker's state and the card's
 memory and load. Its sandboxed runner may also open `/dev/nvidia*` and has no address-space
 limit (CUDA reserves huge virtual ranges).

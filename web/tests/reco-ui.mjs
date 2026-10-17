@@ -14,7 +14,7 @@ const dir = mkdtempSync(join(tmpdir(), 'reco-ui-'));
 
 const rate = (product, tier, h) => ({ product, tier, usdPerHour: h, usdPerMinute: h / 60, available: true });
 const PRICING = {
-  maxJobSeconds: 36000, maxUploadBytes: 4 * 1024 ** 3,
+  maxJobSeconds: 36000, maxUploadBytes: 4 * 1024 ** 3, rebuildAvailable: true,
   rates: [
     rate('denoise', 'standard', 1.2), rate('denoise', 'rebuild', 3.0), rate('transcribe', 'local', 0.6), rate('transcribe', 'premium', 2.4),
     rate('transcribe_translate', 'standard', 0.6), rate('stream_denoise', 'light', 1.2), rate('stream_captions', 'local', 0.6),

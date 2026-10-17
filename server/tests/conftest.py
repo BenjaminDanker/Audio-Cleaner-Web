@@ -35,6 +35,14 @@ def env(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def gpu_up():
+    """The GPU worker is up (the voice rebuild can be ordered: it runs only on the card)."""
+    from acw import broker
+
+    broker.mark_gpu_worker("alive")
+
+
+@pytest.fixture
 def client():
     from fastapi.testclient import TestClient
 

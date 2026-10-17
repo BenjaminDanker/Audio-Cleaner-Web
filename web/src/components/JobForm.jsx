@@ -182,7 +182,8 @@ export default function JobForm({ onSubmitted }) {
   const maxJob = pricing?.maxJobSeconds;
   const duration = info?.duration || (lengthUnknown ? Math.min(Math.max(30, (file.size * 8) / 128000), maxJob || 4 * 3600) : null);
   const polishRate = findRate(pricing, 'denoise', 'standard');
-  const rebuildRate = findRate(pricing, 'denoise', 'rebuild');
+  const rebuildOffered = findRate(pricing, 'denoise', 'rebuild');
+  const rebuildRate = pricing?.rebuildAvailable ? rebuildOffered : null; // paused while its machine is unavailable
   const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
@@ -539,6 +540,14 @@ export default function JobForm({ onSubmitted }) {
 
             {wantsPolish && (
               <div className="stack">
+              {rebuildOffered && !rebuildRate && (
+                <label className="check muted" data-testid="rebuild-paused">
+                  <input type="checkbox" name="rebuild" checked={false} disabled />
+                  <span>Rebuild the voice (for echoey rooms)
+                    <span className="hint block">Paused right now. Try again later.</span>
+                  </span>
+                </label>
+              )}
               {rebuildRate && (
                 <label className="check">
                   <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => { touch(); setRebuild(e.target.checked); }} disabled={busy} />

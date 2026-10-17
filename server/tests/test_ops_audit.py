@@ -341,29 +341,12 @@ def process_with(monkeypatch, uid, denoise_tier, noise):
     return dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
 
 
-def test_rebuild_that_ran_is_billed_as_rebuild(monkeypatch):
+def test_rebuild_that_ran_is_billed_as_rebuild(monkeypatch, gpu_up):
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     row = process_with(monkeypatch, uid, "rebuild", noise="rebuilt")
     assert row["status"] == "done" and row["tier"] == "rebuild"
     assert row["cost_micros"] == pricing.cost_micros("denoise", "rebuild", 600)
-
-
-def test_only_one_voice_rebuild_runs_at_a_time():
-    from acw.worker import main as W
-
-    a, b, c = user("a@example.com"), user("b@example.com"), user("c@example.com")
-    for u in (a, b, c):
-        ledger.credit(u, 50_000_000, "grant", "t", "g" + u)
-    first, second = make_job(a, denoise_tier="rebuild"), make_job(b, denoise_tier="rebuild")
-    plain = make_job(c)
-    for j in (first, second, plain):
-        jobs.mark_uploaded(j)
-        db.execute("UPDATE jobs SET queued_at = ? WHERE id = ?", (db.now() - {first: 30, second: 20, plain: 10}[j], j))
-    assert W.claim("w1")["id"] == first
-    got = W.claim("w2")
-    assert got["id"] == plain  # the second rebuild waits; the others are not held up behind it
-    assert W.claim("w3") is None
 
 
 def test_estimates_follow_the_work_the_job_does():
@@ -378,10 +361,9 @@ def test_estimates_follow_the_work_the_job_does():
     assert heavy > 4 * light  # DPDFNet-8 is several times DeepFilterNet3
     assert jobs.job_seconds(job("heavy", channels=1)) < heavy  # per channel
     assert jobs.job_seconds(job(echo=True)) > jobs.job_seconds(job())
-    assert jobs.job_seconds(job(tier="rebuild")) >= 0.9 * 3600 * 2
+    assert jobs.job_seconds(job(tier="rebuild")) == pytest.approx(0.14 * 3600 * 2 + jobs.MODEL_LOAD_SECONDS)  # on the card
     assert jobs.job_seconds(job(kind="transcribe", transcribe="local")) < jobs.job_seconds(job(kind="transcribe", transcribe="local", channels=2)) + 1
     assert jobs.job_seconds(job(noise="heavy")) == pytest.approx(heavy)  # forced heavy needs no measurement
-    assert jobs.is_rebuild(job(tier="rebuild")) and not jobs.is_rebuild(job())
 
 
 def test_admission_decided_outside_the_write_lock(monkeypatch):

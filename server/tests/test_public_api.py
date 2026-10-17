@@ -138,7 +138,7 @@ def est(client, h, **over):
                        headers=h)
 
 
-def test_estimate_is_the_price_creating_the_job_would_hold(client, signed_in):
+def test_estimate_is_the_price_creating_the_job_would_hold(client, signed_in, gpu_up):
     uid, h = signed_in
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     cases = [
@@ -168,7 +168,7 @@ def test_estimate_lists_the_parts_and_creates_nothing(client, signed_in):
     assert count("jobs") == 0 and count("holds") == 0 and ledger.balance(uid)["held_micros"] == 0
 
 
-def test_estimate_refuses_what_creating_would_refuse(client, signed_in):
+def test_estimate_refuses_what_creating_would_refuse(client, signed_in, gpu_up):
     _, h = signed_in
     assert est(client, h, durationSeconds=0.1).status_code == 400
     assert est(client, h, durationSeconds=5 * 3600).status_code == 400
