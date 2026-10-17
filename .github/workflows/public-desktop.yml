@@ -64,8 +64,7 @@ jobs:
       - name: Copy the allowlisted files and commit
         if: env.HAVE_KEY == 'true'
         run: |
-          python3 tools/public-desktop/sync.py --target public --rev "$GITHUB_SHA" \
-            --git-name "github-actions[bot]" --git-email "41898282+github-actions[bot]@users.noreply.github.com"
+          python3 tools/public-desktop/sync.py --target public --rev "$GITHUB_SHA"  # committed as the author of that commit
 
       - name: Push without force, so a branch that moved on its own is not overwritten
         if: env.HAVE_KEY == 'true'

@@ -16,7 +16,8 @@ What happens (docs/desktop.md, "Public copy of the desktop code", has the owner'
    The public repository builds nothing itself (its installers are the releases that this repository's release job
    copies there), so the export has no workflow; a `.github/workflows/desktop.yml` left in the target from the time
    it did is removed (ABSENT).
-4. Changes are committed on the target's current branch as "Sync from upstream <short sha>". No change, no commit
+4. Changes are committed on the target's current branch as "Sync from upstream <short sha>", by the author of that
+   commit (the same person shows in both repositories). No change, no commit
    (running it twice in a row, or on a commit that touches nothing public, does nothing). The commit message says
    nothing about where the code comes from beyond that. This script never pushes; the workflow does.
 
@@ -94,6 +95,8 @@ LEAK_EXCEPTIONS = {
     "desktop/tests/test_model_updates.py": [r"BenjaminDanker"],
     # The README's link to the public repository's own releases page (where new users get the installers).
     "README.md": [r"BenjaminDanker"],
+    # Where the app finds its releases (installers, update.json, models): the public repository, by design.
+    "desktop/audio_cleaner_desktop/__init__.py": [r"BenjaminDanker"],
     # The test of our own release job (skipped when the workflow has no release job, as in the public copy) reads the
     # secret's NAME; a name is not a secret.
     "desktop/tests/test_updater.py": [r"UPDATE_SIGNING_KEY|\bsecrets\.[A-Za-z_]+"],
@@ -193,10 +196,11 @@ def replace_tree(target: Path, staged: Path) -> None:
     run(["git", "add", "-A"], target)
 
 
-def identity(target: Path, name: str | None, email: str | None) -> tuple[str, str]:
-    configured_name = run(["git", "config", "user.name"], target, check=False).strip()
-    configured_email = run(["git", "config", "user.email"], target, check=False).strip()
-    return (name or configured_name or FALLBACK_IDENTITY[0], email or configured_email or FALLBACK_IDENTITY[1])
+def identity(sha: str, name: str | None, email: str | None) -> tuple[str, str]:
+    """Who the copy is made by: the author of the copied commit (so the public repository shows the same person), or
+    --git-name / --git-email."""
+    author_name, author_email = run(["git", "-C", str(SOURCE), "log", "-1", "--format=%an%n%ae", sha]).splitlines()[:2]
+    return (name or author_name or FALLBACK_IDENTITY[0], email or author_email or FALLBACK_IDENTITY[1])
 
 
 def summary(target: Path) -> str:
@@ -219,8 +223,8 @@ def main(argv: list[str]) -> int:
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="say what would change, leave the target as it was")
     mode.add_argument("--no-commit", action="store_true", help="stage the change in the target but do not commit")
-    ap.add_argument("--git-name", help="author and committer name (default: the target's git config)")
-    ap.add_argument("--git-email", help="author and committer e-mail (default: the target's git config)")
+    ap.add_argument("--git-name", help="author and committer name (default: the author of REV)")
+    ap.add_argument("--git-email", help="author and committer e-mail (default: the author of REV)")
     ap.add_argument("--export-only", type=Path, metavar="DIR", help="only write the export to the (new, empty) DIR and scan it")
     a = ap.parse_args(argv)
 
@@ -268,7 +272,7 @@ def main(argv: list[str]) -> int:
         if a.no_commit:
             print("staged, not committed")
             return 0
-        name, email = identity(target, a.git_name, a.git_email)
+        name, email = identity(sha, a.git_name, a.git_email)
         env = {**os.environ, "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email, "GIT_COMMITTER_NAME": name, "GIT_COMMITTER_EMAIL": email}
         run(["git", "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", f"Sync from upstream {short}"], target, env=env)
         print(f"committed {run(['git', 'rev-parse', '--short', 'HEAD'], target).strip()} on {branch}: Sync from upstream {short}")
