@@ -129,7 +129,7 @@ def test_chunk_boundaries_do_not_click():
     limit = np.percentile(normal, 99)
     hop = win - ov
     window_seams = [k * hop + ov / 2 for k in (1, 2)]  # middle of each cross-fade
-    decode_seams = [R._DECODE_SECONDS * k for k in (1, 2)]
+    decode_seams = [R._DECODE_SECONDS * k for k in (1, 2) if R._DECODE_SECONDS * k < seconds - 1]
     for s in window_seams + decode_seams:
         i = int(s * SR)
         p, rms = peakiness(i)
@@ -198,3 +198,31 @@ def test_progress_and_cancel():
     pre.set()
     with pytest.raises(R.Cancelled):
         R.restore(x, MODEL_DIR, threads=THREADS, cancel=pre)
+
+
+def test_side_db_in_blocks_matches_the_whole_file_formula(monkeypatch):
+    rng = np.random.default_rng(3)
+    x = np.stack([rng.standard_normal(70_001), 0.3 * rng.standard_normal(70_001)], axis=1).astype(np.float32)
+    mid = 0.5 * (x[:, 0].astype(np.float64) + x[:, 1])
+    side = 0.5 * (x[:, 0].astype(np.float64) - x[:, 1])
+    want = 10 * np.log10((np.mean(side**2) + 1e-20) / (np.mean(mid**2) + 1e-20))
+    monkeypatch.setattr(R, "_BLOCK", 4096)  # many blocks, the last one short
+    assert abs(R._side_db(x) - want) < 1e-9
+
+
+def test_mid_view_is_the_float32_mid_signal():
+    rng = np.random.default_rng(4)
+    x = rng.standard_normal((1000, 2)).astype(np.float32)
+    mid = R._Mid(x)
+    want = np.ascontiguousarray(0.5 * (x[:, 0] + x[:, 1]))
+    assert len(mid) == 1000 and mid[10:700].dtype == np.float32
+    assert np.array_equal(mid[10:700], want[10:700]) and np.array_equal(mid[0:1000], want)
+
+
+@needs_model
+def test_worker_pool_gives_the_same_samples_as_one_thread():
+    """Windows and decoder blocks are independent: the pool of single-threaded sessions must not change the output."""
+    x = np.stack([speech_like(5.0, seed=5), speech_like(5.0, seed=6, f0=190.0)], axis=1)
+    one = R.restore(x, MODEL_DIR, threads=1)
+    many = R.restore(x, MODEL_DIR, threads=3)
+    assert np.array_equal(one, many)

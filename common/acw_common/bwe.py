@@ -18,7 +18,7 @@ the *original* spectrum back in below a crossover (just under the real cut-off o
 375 Hz wide) so everything the recording actually contains is kept (changes are STFT round-off, about -60 dB)
 and only the missing highs are synthesised.
 
-Long input is processed in blocks (default 3 s) with `CONTEXT` samples of overlap on each side; the model's
+Long input is processed in blocks (default 6 s) with `CONTEXT` samples of overlap on each side; the model's
 receptive field is only +-27 frames (2160 samples), so overlap-save is exact up to float round-off and no
 crossfade between blocks is needed; peak memory does not depend on the file length.
 """
@@ -39,8 +39,8 @@ SAMPLE_RATE = 48_000
 N_FFT, HOP, WIN = 1024, 80, 320
 N_BINS = N_FFT // 2 + 1
 _OFF = (N_FFT - WIN) // 2  # position of the Hann window inside the (zero padded) FFT frame
-CONTEXT = 4_000  # samples of overlap per block side (a multiple of HOP; receptive field + STFT is ~2.4k)
-BLOCK_SECONDS = 3.0
+CONTEXT = 2_560  # samples of overlap per block side (a multiple of HOP; receptive field + STFT is ~2.4k: output identical to 4000)
+BLOCK_SECONDS = 6.0  # longer blocks re-run less context (CONTEXT 2560 + 6 s: 7 % less CPU than 4000 + 3 s, same samples)
 CROSS_RAMP_BINS = 8  # width of the crossover between original and generated spectrum
 EDGE_DB = 20.0  # the edge is where the speech spectrum is this far below its passband level
 CLIFF_DB = 18.0  # ... and the level falls by at least this much from just below to just above the edge
@@ -184,6 +184,8 @@ def _session(path: str, threads: int):
             so.inter_op_num_threads = 1
             so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
             so.log_severity_level = 3
+            # idle worker threads sleep instead of spinning while the numpy STFT part runs (and next to other services)
+            so.add_session_config_entry("session.intra_op.allow_spinning", "0")
             s = _sessions[(path, threads)] = ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
         return s
 

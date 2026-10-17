@@ -26,6 +26,8 @@ import functools
 import hashlib
 import importlib.util
 import threading
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -132,6 +134,7 @@ class _Backend:
     """features(feats (T, 160)) -> (T, 1024); decode(feats (T, 1024)) -> (T * 960,) float32."""
 
     name = ""
+    workers = 1  # how many features() / decode() calls may run at the same time
 
     def features(self, feats: np.ndarray) -> np.ndarray:
         raise NotImplementedError
@@ -140,20 +143,36 @@ class _Backend:
         raise NotImplementedError
 
 
+# onnxruntime session settings (measured in docs/research/heavy-2026-10.md): the memory arena stays on (off: -0.3 GB
+# peak, +28 % CPU), and so does the default graph optimisation (the only level that saves memory, none, changes
+# the samples by up to 4e-5; basic and extended keep the memory and the samples).
+_ARENA = True
+_MAX_WORKERS = 4  # concurrent window / block calls; each holds up to ~0.7 GB of activations
+_OPT_LEVEL = None
+
+
 class _OnnxBackend(_Backend):
     name = "onnx"
 
     def __init__(self, model_dir: Path, threads: int, int8: bool):
         import onnxruntime as ort
 
+        # `threads` is the size of the worker pool the caller runs the two networks on (restore._restore_mono):
+        # blocks and windows are independent, so the sessions themselves are single-threaded (docs/research/heavy-2026-10.md)
+        self.workers = max(1, min(threads, _MAX_WORKERS))
+
         def session(path: Path):
             so = ort.SessionOptions()
-            so.intra_op_num_threads = threads
+            so.intra_op_num_threads = 1
             so.inter_op_num_threads = 1
             so.log_severity_level = 3
             so.enable_mem_pattern = False  # shapes vary with the file
             # idle worker threads sleep instead of spinning: this runs next to other services
             so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+            if not _ARENA:
+                so.enable_cpu_mem_arena = False  # the arena keeps the largest activations of every window alive
+            if _OPT_LEVEL is not None:
+                so.graph_optimization_level = _OPT_LEVEL(ort)
             return ort.InferenceSession(str(path), so, providers=["CPUExecutionProvider"])
 
         fe_file = ONNX_FE_INT8 if int8 and (model_dir / ONNX_FE_INT8).is_file() else ONNX_FE
@@ -271,7 +290,7 @@ def _restore_mono(
         if cancel is not None and cancel.is_set():
             raise Cancelled()
 
-    def window_feats(s: int, e: int) -> np.ndarray:
+    def window_feats(s: int, e: int, noise: np.ndarray) -> np.ndarray:
         """w2v-BERT features for frames [s, e), using real audio on both sides as context."""
         check_cancel()
         a48 = s * DECODER_UPSAMPLE - pad48
@@ -285,54 +304,115 @@ def _restore_mono(
         w16 = w16[keep - _FBANK_PAD : keep + (e - s) * FEATURE_SAMPLES + _FBANK_PAD].copy()
         if s == 0:  # file start: the official recipe zero-pads (no audio before sample 0)
             w16[:_FBANK_PAD] = 0
-        w16 += _DITHER * rng.standard_normal(len(w16)).astype(np.float32)
+        w16 += _DITHER * noise
         return be.features(_fbank(w16))
 
-    def feature_blocks():
-        """Yield (start_frame, features) finished blocks in order; windows are cross-faded over `ov` frames."""
-        tail = None
+    def decode_block(feats: np.ndarray, skip: int, o0: int, count: int) -> None:
+        """Decode `feats` (a block with `skip` frames of context before it), keep `count` frames of the block."""
+        check_cancel()
+        y = be.decode(feats)
+        lo = skip * DECODER_UPSAMPLE
+        seg = y[lo : lo + count * DECODER_UPSAMPLE]
+        m = min(len(seg), n - o0)
+        out[o0 : o0 + m] = seg[:m]
+
+    def windows():
+        """The (start, end) frames of the feature windows, in order; they overlap by `ov` frames."""
         s = 0
         while True:
             e = min(s + win, total)
-            cur = window_feats(s, e)
+            yield s, e
+            if e >= total:
+                return
+            s = e - ov
+
+    workers = max(1, getattr(be, "workers", 1))
+    pool = ThreadPoolExecutor(workers) if workers > 1 else _InlinePool()
+    try:
+        win_iter = windows()
+        pending_windows: deque = deque()  # (start, end, future of its features), in order
+        pending_decodes: deque = deque()  # (frames, future)
+        tail = None
+        buf = np.zeros((0, 1024), np.float32)
+        buf_start = 0  # feature index of buf[0]
+        written = 0  # features handed to the decoder so far
+        finished = 0  # features decoded and written
+        # Work in flight bounds the extra memory: a 16 s feature window needs ~0.7 GB of activations and a decoder
+        # block ~50 MB per second, all of it kept by onnxruntime's arena (turning the arena off costs 28 % CPU). The
+        # feature extractor is a fifth of the work, so two windows at a time keep the workers busy.
+        ahead = workers + 1
+        windows_ahead = min(_FE_AHEAD, ahead)
+
+        def drain(limit: int) -> None:
+            nonlocal finished
+            while len(pending_decodes) > limit:
+                frames, fut = pending_decodes.popleft()
+                fut.result()
+                finished += frames
+                if progress:
+                    progress(finished / n_feat)
+                check_cancel()
+
+        while True:
+            while len(pending_windows) < windows_ahead:  # the dither is drawn here, in window order, so it is reproducible
+                nxt = next(win_iter, None)
+                if nxt is None:
+                    break
+                ws, we = nxt
+                noise = rng.standard_normal((we - ws) * FEATURE_SAMPLES + 2 * _FBANK_PAD).astype(np.float32)
+                pending_windows.append((ws, we, pool.submit(window_feats, ws, we, noise)))
+            if not pending_windows:
+                break
+            start, e, fut = pending_windows.popleft()
+            cur = fut.result()
+            check_cancel()
             if tail is not None:
                 t = ((np.arange(len(tail), dtype=np.float32) + 1) / (len(tail) + 1))[:, None]
                 cur = np.concatenate([tail * (1 - t) + cur[: len(tail)] * t, cur[len(tail) :]])
             if e >= total:
-                yield s, cur
-                return
-            yield s, cur[:-ov]
-            tail = cur[-ov:]
-            s = e - ov
+                block = cur
+            else:
+                block = cur[:-ov]
+                tail = cur[-ov:]
+            if len(buf) == 0:
+                buf, buf_start = block, start
+            else:
+                buf = np.concatenate([buf, block])
+            while written < n_feat:
+                end = min(written + dec_n, n_feat)
+                if buf_start + len(buf) < min(end + ctx, total):
+                    break
+                a = max(0, written - ctx)
+                b = min(buf_start + len(buf), end + ctx)
+                pending_decodes.append((end - written, pool.submit(
+                    decode_block, buf[a - buf_start : b - buf_start], written - a, written * DECODER_UPSAMPLE,
+                    end - written)))
+                written = end
+                drop = (written - ctx) - buf_start
+                if drop > 0:
+                    buf, buf_start = buf[drop:], buf_start + drop
+                drain(ahead)
+                check_cancel()
+        drain(0)
+    except BaseException:
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
 
-    buf = np.zeros((0, 1024), np.float32)
-    buf_start = 0  # feature index of buf[0]
-    written = 0  # features decoded and written so far
-    for start, block in feature_blocks():
-        check_cancel()
-        if len(buf) == 0:
-            buf, buf_start = block, start
-        else:
-            buf = np.concatenate([buf, block])
-        while written < n_feat:
-            end = min(written + dec_n, n_feat)
-            if buf_start + len(buf) < min(end + ctx, total):
-                break
-            a = max(0, written - ctx)
-            b = min(buf_start + len(buf), end + ctx)
-            y = be.decode(buf[a - buf_start : b - buf_start])
-            lo = (written - a) * DECODER_UPSAMPLE
-            seg = y[lo : lo + (end - written) * DECODER_UPSAMPLE]
-            o0 = written * DECODER_UPSAMPLE
-            m = min(len(seg), n - o0)
-            out[o0 : o0 + m] = seg[:m]
-            written = end
-            drop = (written - ctx) - buf_start
-            if drop > 0:
-                buf, buf_start = buf[drop:], buf_start + drop
-            if progress:
-                progress(written / n_feat)
-            check_cancel()
+
+class _InlinePool:
+    """The ThreadPoolExecutor interface for one worker: runs the call in the caller's thread."""
+
+    def submit(self, fn, *args):
+        f: Future = Future()
+        try:
+            f.set_result(fn(*args))
+        except BaseException as exc:  # noqa: BLE001 - re-raised by result()
+            f.set_exception(exc)
+        return f
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        pass
 
 
 # Side energy this far below the mid energy: the recording is effectively mono (dual mic, mono source).
@@ -340,14 +420,39 @@ _MONO_SIDE_DB = -20.0
 # Tuned on speech: ~30 s windows keep the quadratic attention cheap and cancel latency low.
 _WINDOW_SECONDS = 16.0
 _OVERLAP_SECONDS = 2.0
-_DECODE_SECONDS = 6.0
-_DECODE_CONTEXT = 12  # frames (0.24 s) of decoder context per side, cropped away (10 already gives bit-identical output)
+_DECODE_SECONDS = 10.0  # 6 s re-decoded 24 context frames per 300 (8 %); 10 s with 10 context frames re-decode 4 %, same samples
+_DECODE_CONTEXT = 10  # frames (0.2 s) of decoder context per side, cropped away (12 gives bit-identical output too)
+_FE_AHEAD = 2  # feature windows in flight (see _restore_mono)
+_BLOCK = 1 << 20  # samples per step of the whole-file statistics: memory must not grow with the length of the file
 
 
 def _side_db(x: np.ndarray) -> float:
-    mid = 0.5 * (x[:, 0].astype(np.float64) + x[:, 1])
-    side = 0.5 * (x[:, 0].astype(np.float64) - x[:, 1])
-    return 10 * np.log10((np.mean(side**2) + 1e-20) / (np.mean(mid**2) + 1e-20))
+    """Side energy over mid energy in dB (stereo `x`, any length: works in blocks, so a memory-mapped hour-long
+    file needs a few MB, not the 8 bytes per sample and temporary of a whole-file computation)."""
+    mid_e = side_e = 0.0
+    for a in range(0, len(x), _BLOCK):
+        b = x[a : a + _BLOCK].astype(np.float64)
+        mid = 0.5 * (b[:, 0] + b[:, 1])
+        side = 0.5 * (b[:, 0] - b[:, 1])
+        mid_e += float(np.dot(mid, mid))
+        side_e += float(np.dot(side, side))
+    n = max(len(x), 1)
+    return 10 * np.log10((side_e / n + 1e-20) / (mid_e / n + 1e-20))
+
+
+class _Mid:
+    """The mid signal 0.5 * (left + right) of a stereo array, computed on demand for the slices that are read
+    (float32 like the whole-file version it replaces) instead of held as a second copy of the file."""
+
+    def __init__(self, x: np.ndarray):
+        self._x = x
+
+    def __len__(self) -> int:
+        return len(self._x)
+
+    def __getitem__(self, sl: slice) -> np.ndarray:
+        b = self._x[sl]
+        return np.float32(0.5) * (b[:, 0] + b[:, 1])
 
 
 def available(model_dir: str | Path) -> bool:
@@ -400,33 +505,29 @@ def restore(
     kw = dict(window_seconds=window_seconds, overlap_seconds=overlap_seconds, decode_seconds=_DECODE_SECONDS,
               decode_context=_DECODE_CONTEXT)
 
+    # (source, destination) pairs, made one at a time: the sources are views (or the on-demand mid), never copies
     if x.ndim == 1:
-        jobs = [(x, out)]
+        jobs = [lambda: (x, out)]
     else:
         ch = x.shape[1]
         mode = stereo
         if mode == "auto":
             mode = "mid" if ch == 2 and _side_db(x) < _MONO_SIDE_DB else "channels"
         if mode == "mid" and ch == 2:
-            jobs = [(np.ascontiguousarray(0.5 * (x[:, 0] + x[:, 1])), None)]
+            jobs = [lambda: (_Mid(x), out[:, 0])]
         else:
-            jobs = [(np.ascontiguousarray(x[:, c]), out[:, c]) for c in range(ch)]
-    for i, (src, dst) in enumerate(jobs):
-        target = dst if dst is not None else np.empty(len(src), np.float32)
+            jobs = [(lambda c=c: (x[:, c], out[:, c])) for c in range(ch)]
+    for i, job in enumerate(jobs):
+        src, dst = job()
         base = i / len(jobs)
 
         def prog(f, base=base):
             if progress:
                 progress(base + f / len(jobs))
 
-        if dst is not None and not dst.flags.c_contiguous:  # a column view of (n, ch): work in a temp
-            tmp = np.empty(len(src), np.float32)
-            _restore_mono(src, tmp, be, progress=prog, cancel=cancel, **kw)
-            dst[:] = tmp
-        else:
-            _restore_mono(src, target, be, progress=prog, cancel=cancel, **kw)
-        if dst is None:  # mid-only: same restored signal on both channels
-            out[:] = target[:, None]
+        _restore_mono(src, dst, be, progress=prog, cancel=cancel, **kw)
+        if x.ndim == 2 and len(jobs) == 1 and x.shape[1] == 2:  # mid-only: same restored signal on both channels
+            out[:, 1] = out[:, 0]
     if progress:
         progress(1.0)
     # restoration can overshoot a little; keep the file free of clipping
