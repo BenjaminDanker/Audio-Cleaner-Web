@@ -645,8 +645,9 @@ live core: each session is a thread pinned to one core, lowest cores first (the 
 jobs keep off it). Measured 2026-10-16 on 5 cores: 35 noise-removal sessions at p99 10 ms (0.14 cores each; the
 Python workers needed 0.20-0.24 and managed 5 per core), 45 fell behind. Units per core: 6.5 at the reference cost
 (about 6.9 on the 1700X), remembered in `data/live-calibration-native.json`. Caption models (about 220 MB each) are
-loaded in the background, the first at start; another is added when the others serve 10 streams each
-(`ACW_CAPTION_STREAMS_PER_MODEL`, `ACW_CAPTION_THREADS`). Echo cancellation is `sonora` (WebRTC AEC3 in Rust): 42.8 dB
+loaded in the background, the first at start; at most 5 streams each (`ACW_CAPTION_STREAMS_PER_MODEL`,
+`ACW_CAPTION_THREADS`), the next one loading before they are full. A caption stream counts 1.2 units (0.17 cores, more
+than the noise removal): 12 noise+caption sessions on 5 cores kept captions within 0.3 s, 20 fell behind. Echo cancellation is `sonora` (WebRTC AEC3 in Rust): 42.8 dB
 of echo removed on our test room, 9 ms delay like before.
 
 **Resource broker (`acw/broker.py`).** One ranked table decides who gets the machine: paid live, then paid file
