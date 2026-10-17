@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import threading
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -48,9 +49,9 @@ class FakeGitHub:
                 forced = outer.status_override.get(self.path)
                 if forced:
                     return self._send(forced, b'{"message":"nope"}')
-                m = re.fullmatch(rf"/repos/{REPO}/releases(?:/tags/([^/]+))?(?:\?.*)?", self.path)
+                m = re.fullmatch(rf"/repos/{REPO}/releases(?:/tags/([^/]+))?(?:\?(.*))?", self.path)
                 if m:
-                    return self._releases(m.group(1))
+                    return self._releases(m.group(1), urllib.parse.parse_qs(m.group(2) or ""))
                 m = re.fullmatch(rf"/repos/{REPO}/releases/assets/(\d+)", self.path)
                 if m:
                     if "octet-stream" not in (self.headers.get("Accept") or ""):
@@ -61,7 +62,7 @@ class FakeGitHub:
                     return self._blob(int(m.group(1)))
                 self._send(404, b'{"message":"Not Found"}')
 
-            def _releases(self, tag):
+            def _releases(self, tag, query):
                 def rel(t, r):
                     return {
                         "tag_name": t, "draft": r.get("draft", False), "prerelease": r.get("prerelease", False),
@@ -70,7 +71,12 @@ class FakeGitHub:
                                    for n, b in r["assets"].items()],
                     }
                 if tag is None:
-                    return self._send(200, json.dumps([rel(t, r) for t, r in outer.releases.items()]).encode(), {"Content-Type": "application/json"})
+                    # GitHub lists newest first; here the release added last is the newest. Paged like GitHub (default 30).
+                    per_page = int(query.get("per_page", ["30"])[0])
+                    page = int(query.get("page", ["1"])[0])
+                    listing = [rel(t, r) for t, r in reversed(list(outer.releases.items()))]
+                    chunk = listing[(page - 1) * per_page:page * per_page]
+                    return self._send(200, json.dumps(chunk).encode(), {"Content-Type": "application/json"})
                 if tag not in outer.releases:
                     return self._send(404, b'{"message":"Not Found"}')
                 self._send(200, json.dumps(rel(tag, outer.releases[tag])).encode(), {"Content-Type": "application/json"})

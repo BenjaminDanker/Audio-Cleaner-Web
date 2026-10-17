@@ -15,6 +15,10 @@
 #   is reported as "changed", not as an error: a rebuild legitimately differs); nothing fetches them.
 # To change a pin: download the new file, run sha256sum on it, and replace the URL, sha256 and size here.
 #   Keep Hugging Face URLs on a commit id, never "main".
+# Our models archive is released once per version, like the apps: models-vN holds the complete set and is never changed
+#   after it is published; new or changed models are a new release models-vN+1 (gh release create), which the server
+#   (here) and the desktop app (resources.MODELS_ARCHIVE) then pin. The download server serves every archive listed
+#   here, so keep an older archive line while an app version still in use pins it.
 #
 # Sources (all verified byte for byte against the files in production on 2026-10-15):
 #   DeepFilterNet3        github.com/Rikorose/DeepFilterNet, the commit libDF is built from (native/deepfilter/build.sh)

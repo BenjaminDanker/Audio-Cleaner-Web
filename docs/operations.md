@@ -140,8 +140,8 @@ download never queues in front of live audio, under the same shared transfer bud
 
 **How it works.** `acw-mirror.timer` starts `acw-mirror.service` (`python -m acw.admin mirror --once`, `acw/mirror.py`) a
 minute after it is enabled and then 10 minutes after each run. A run reads the GitHub REST API (`/repos/<repo>/releases`),
-and per channel: the newest `desktop-v<version>` release (`update.json`, `.sig` and the installers it lists), the
-`obs-plugin-latest` release (manifest, `.sig`, the packages), and the `models-v*` archives named in `deploy/models.lock`
+and per channel: the newest `desktop-v<version>` release (`update.json`, `.sig` and the installers it lists), the newest
+`obs-plugin-v<version>` release (manifest, `.sig`, the packages), and the `models-v*` archives named in `deploy/models.lock`
 (`install.sh` copies the lock to `~/audio-cleaner/app/models.lock`; size and sha256 come from it). Before anything is
 published: the Ed25519 signature of the manifest is checked with the public key built into the apps (the `cryptography`
 package if installed, else `openssl`, 3.0 or newer), then every file's size and sha256 (and sha512 when the manifest gives

@@ -6,7 +6,7 @@ our own domain (the bulk process, so a download never queues in front of live au
 
 Three channels (acw/downloads.py describes the layout):
   desktop     the newest `desktop-v<version>` release: update.json + update.json.sig and the installers it lists
-  obs-plugin  the `obs-plugin-latest` release: obs-plugin-manifest.json + .sig and the packages it lists
+  obs-plugin  the newest `obs-plugin-v<version>` release that has obs-plugin-manifest.json + .sig, and the packages it lists
   models      every `models-v*` archive that deploy/models.lock lists (size and sha256 come from the lock)
 
 Before anything is published:
@@ -62,7 +62,7 @@ STALE_RELEASE_S = 3600       # a newer release has been on GitHub for this long 
 KEEP_PREVIOUS_S = downloads.KEEP_PREVIOUS_S
 STALE_STAGING_S = 2 * 86400
 _DESKTOP_TAG = re.compile(r"desktop-v(\d+(?:\.\d+){1,3})")
-_OBS_TAG = "obs-plugin-latest"
+_OBS_TAG = re.compile(r"obs-plugin-v(\d+\.\d+\.\d+)")
 _MODELS_TAG = re.compile(r"models-v\d+[A-Za-z0-9._-]*")
 _HEX256 = re.compile(r"[0-9a-f]{64}")
 _HEX512 = re.compile(r"[0-9a-f]{128}")
@@ -181,9 +181,17 @@ class GitHub:
         except ValueError as e:
             raise MirrorError(f"the release service answered {path} with something that is not JSON") from e
 
-    def releases(self) -> list[dict]:
-        data = self._get_json(f"/repos/{self.cfg.repo}/releases", {"per_page": 50})
-        return [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+    def releases(self, pages: int = 5) -> list[dict]:
+        """Newest first, up to `pages` x 100: the apps each get a release per build, so one page could hide the
+        newest of the other channel, or the older signed ones to fall back to."""
+        out: list[dict] = []
+        for page in range(1, pages + 1):
+            data = self._get_json(f"/repos/{self.cfg.repo}/releases", {"per_page": 100, "page": page})
+            batch = [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+            out += batch
+            if len(batch) < 100:
+                break
+        return out
 
     def release_by_tag(self, tag: str) -> dict | None:
         data = self._get_json(f"/repos/{self.cfg.repo}/releases/tags/{tag}", missing_ok=True)
@@ -463,7 +471,7 @@ class Ctx:
 
 
 def _sync_signed(ctx: Ctx, channel: str, release: dict, hint: str | None, manifest_name: str, sig_name: str) -> str:
-    """Mirror one release of a signed channel. `hint` is the version in the release tag (desktop), else None."""
+    """Mirror one release of a signed channel. `hint` is the version in the release tag."""
     cfg, gh = ctx.cfg, ctx.gh
     base = downloads.channel_dir(channel)
     st = _state_or_empty(channel)
@@ -556,13 +564,17 @@ def sync_desktop(ctx: Ctx) -> str:
 
 
 def sync_obs(ctx: Ctx) -> str:
-    rel = ctx.gh.release_by_tag(_OBS_TAG)
-    if rel is None:
-        return "no obs-plugin-latest release yet"
-    assets = _assets(rel)
-    if "obs-plugin-manifest.json" not in assets or "obs-plugin-manifest.json.sig" not in assets:
-        return "the plugin release has no signed manifest yet"
-    return _sync_signed(ctx, "obs-plugin", rel, None, "obs-plugin-manifest.json", "obs-plugin-manifest.json.sig")
+    cands = []
+    for rel in ctx.gh.releases():
+        m = _OBS_TAG.fullmatch(str(rel.get("tag_name") or ""))
+        if m and not rel.get("draft"):
+            cands.append((downloads.vtuple(m.group(1)), m.group(1), rel))
+    for _, hint, rel in sorted(cands, key=lambda c: c[0], reverse=True):
+        assets = _assets(rel)
+        if "obs-plugin-manifest.json" in assets and "obs-plugin-manifest.json.sig" in assets:
+            return _sync_signed(ctx, "obs-plugin", rel, hint, "obs-plugin-manifest.json", "obs-plugin-manifest.json.sig")
+        log.info("obs-plugin: release %s has no signed manifest yet; looking at older ones", hint)
+    return "no plugin release with a signed manifest yet"
 
 
 def parse_lock(path: Path) -> list[dict]:

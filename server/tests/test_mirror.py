@@ -4,6 +4,7 @@ import os
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from acw import downloads, mirror
@@ -63,7 +64,8 @@ def desktop_release(gh, signer, version, *, tamper=None, size_lie=None, bad_sig=
     gh.add(f"desktop-v{version}", assets)
 
 
-def obs_release(gh, signer, version, *, with_sha512=True, big=False):
+def obs_release(gh, signer, version, *, with_sha512=True, big=False, tag=None, **kw):
+    """One release per version, obs-plugin-v<version>, as CI publishes it (`tag` overrides, e.g. for a mismatch)."""
     files, assets = {}, {}
     for key, ext in (("windows-x64", "zip"), ("macos", "tar.xz"), ("ubuntu-debian", "deb"), ("linux-other", "tar.xz")):
         name = f"audio-cleaner-obs-plugin-{version}-{key}.{ext}"
@@ -72,7 +74,7 @@ def obs_release(gh, signer, version, *, with_sha512=True, big=False):
         files[key] = {"name": name, "size": len(data), "sha256": sha(data), **({"sha512": sha(data, "sha512")} if with_sha512 else {})}
     manifest = json.dumps({"version": version, "files": files}, sort_keys=True, separators=(",", ":")).encode()
     assets["obs-plugin-manifest.json"], assets["obs-plugin-manifest.json.sig"] = manifest, signer.sign(manifest)
-    gh.add("obs-plugin-latest", assets, prerelease=True)
+    gh.add(tag or f"obs-plugin-v{version}", assets, **kw)
 
 
 MODELS = b"models archive " * 20000
@@ -122,10 +124,68 @@ def test_good_obs_release_with_sha512(cfg, gh, signer):
 
 
 def test_obs_release_without_a_manifest_yet_is_not_an_error(cfg, gh):
-    gh.add("obs-plugin-latest", {"audio-cleaner-obs-plugin-0.1.1-windows-x64.zip": b"z" * 100}, prerelease=True)
+    gh.add("obs-plugin-v0.1.1", {"audio-cleaner-obs-plugin-0.1.1-windows-x64.zip": b"z" * 100})
     res = run(cfg)
-    assert "no signed manifest yet" in res["obs-plugin"]
+    assert res["obs-plugin"] == "no plugin release with a signed manifest yet"
     assert mirror.load_status()["channels"]["obs-plugin"]["last_ok"]
+    assert served("obs-plugin") is None
+
+
+def test_newest_versioned_plugin_release_wins(cfg, gh, signer):
+    obs_release(gh, signer, "0.1.60")
+    obs_release(gh, signer, "0.1.9")     # numerically, not as text: 0.1.60 is newer than 0.1.9
+    obs_release(gh, signer, "0.1.61")
+    gh.add("obs-plugin-latest", {"audio-cleaner-obs-plugin-0.1.99-windows-x64.zip": b"z" * 100}, prerelease=True)  # the old rolling one
+    gh.add("obs-plugin-v0.1.70-rc1", {"obs-plugin-manifest.json": b"{}", "obs-plugin-manifest.json.sig": b"0" * 64})  # not a tag we follow
+    assert run(cfg)["obs-plugin"] == "published 0.1.61"
+    assert served("obs-plugin")["version"] == "0.1.61"
+    assert (cfg.root / "obs-plugin" / "0.1.61" / "obs-plugin-manifest.json").is_file()
+    assert not (cfg.root / "obs-plugin" / "0.1.60").exists()  # only the newest is mirrored
+    assert run(cfg)["obs-plugin"] == "0.1.61 is up to date"
+    obs_release(gh, signer, "0.1.62")
+    assert run(cfg)["obs-plugin"] == "published 0.1.62"
+
+
+def test_newer_plugin_release_without_a_manifest_falls_back_to_the_older_signed_one(cfg, gh, signer):
+    obs_release(gh, signer, "0.1.60")
+    gh.add("obs-plugin-v0.1.61", {"audio-cleaner-obs-plugin-0.1.61-windows-x64.zip": b"z" * 100})  # manifest not uploaded yet
+    obs_release(gh, signer, "0.1.62")
+    del gh.releases["obs-plugin-v0.1.62"]["assets"]["obs-plugin-manifest.json.sig"]  # a manifest without its signature
+    assert run(cfg)["obs-plugin"] == "published 0.1.60"
+    assert served("obs-plugin")["version"] == "0.1.60"
+
+
+def test_plugin_tag_and_manifest_version_mismatch_is_refused(cfg, gh, signer):
+    obs_release(gh, signer, "0.1.60")
+    run(cfg)
+    obs_release(gh, signer, "0.1.59", tag="obs-plugin-v0.1.61")  # a signed but older manifest under a newer tag
+    res = run(cfg)
+    assert res["obs-plugin"].startswith("FAILED")
+    assert "the manifest says version 0.1.59 but the release is 0.1.61" in res["obs-plugin"]
+    assert served("obs-plugin")["version"] == "0.1.60"
+    assert not (cfg.root / "obs-plugin" / "0.1.59").exists() and not (cfg.root / "obs-plugin" / "0.1.61").exists()
+
+
+def test_draft_plugin_releases_are_ignored(cfg, gh, signer):
+    obs_release(gh, signer, "0.1.60")
+    obs_release(gh, signer, "0.1.61", draft=True)
+    assert run(cfg)["obs-plugin"] == "published 0.1.60"
+    gh.releases.clear()
+    obs_release(gh, signer, "0.1.61", draft=True)
+    assert run(cfg)["obs-plugin"] == "no plugin release with a signed manifest yet"
+    assert served("obs-plugin")["version"] == "0.1.60"
+
+
+def test_no_plugin_release_keeps_the_served_files(cfg, gh, signer):
+    obs_release(gh, signer, "0.1.60")
+    run(cfg)
+    gh.releases.clear()
+    gh.add("obs-plugin-latest", {"audio-cleaner-obs-plugin-0.1.99-windows-x64.zip": b"z" * 100}, prerelease=True)
+    assert run(cfg)["obs-plugin"] == "no plugin release with a signed manifest yet"
+    assert served("obs-plugin")["version"] == "0.1.60"
+    d = cfg.root / "obs-plugin" / "0.1.60"
+    assert (d / "obs-plugin-manifest.json").is_file() and (d / "audio-cleaner-obs-plugin-0.1.60-windows-x64.zip").is_file()
+    assert mirror.verify_served() == []
 
 
 def test_models_archive_from_the_lock(cfg, gh):
@@ -261,9 +321,10 @@ def test_older_release_is_ignored(cfg, gh, signer):
     assert served("desktop")["version"] == "2.0.16"
 
 
-def test_plugin_manifest_older_than_served_is_ignored(cfg, gh, signer):
+def test_plugin_release_older_than_served_is_ignored(cfg, gh, signer):
     obs_release(gh, signer, "0.1.61")
     run(cfg)
+    gh.releases.clear()  # 0.1.61's release was deleted on GitHub; the newest left is older than what is served
     obs_release(gh, signer, "0.1.60")
     assert "older" in run(cfg)["obs-plugin"]
     assert served("obs-plugin")["version"] == "0.1.61"
@@ -344,10 +405,58 @@ def test_interrupted_download_resumes(cfg, gh, signer):
 
 
 def test_release_service_down_or_rate_limited(cfg, gh):
-    gh.status_override[f"/repos/{REPO}/releases?per_page=50"] = 403
+    gh.status_override[f"/repos/{REPO}/releases?per_page=100&page=1"] = 403
     res = run(cfg)
     assert "refused" in res["desktop"]
     assert mirror.load_status()["channels"]["desktop"]["error"]
+
+
+def _paged_client(cfg, pages: list[int]):
+    """A GitHub client on an httpx MockTransport whose release listing has pages of these sizes (then empty pages).
+    The desktop release desktop-v9.9.9 is the last one listed (the oldest), so it sits on the last non-empty page."""
+    total = sum(pages)
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/repos/{REPO}/releases"
+        page, per_page = int(request.url.params["page"]), int(request.url.params["per_page"])
+        calls.append((page, per_page))
+        start = sum(pages[:page - 1])
+        size = pages[page - 1] if page <= len(pages) else 0
+        rels = [{"tag_name": f"obs-plugin-v0.1.{total - i}", "draft": False, "assets": []} for i in range(start, start + size)]
+        if rels and start + size == total:
+            rels[-1]["tag_name"] = "desktop-v9.9.9"
+        return httpx.Response(200, json=rels)
+
+    return mirror.GitHub(cfg, client=httpx.Client(transport=httpx.MockTransport(handler))), calls
+
+
+def test_release_listing_reads_every_page(cfg):
+    gh, calls = _paged_client(cfg, [100, 30])
+    rels = gh.releases()
+    assert len(rels) == 130
+    assert calls == [(1, 100), (2, 100)]  # the short second page is the last one asked for
+    assert rels[-1]["tag_name"] == "desktop-v9.9.9"  # the newest desktop release, on page 2, is still seen
+    assert len({r["tag_name"] for r in rels}) == 130
+
+
+def test_release_listing_stops_at_an_empty_page_and_after_five(cfg):
+    gh, calls = _paged_client(cfg, [100])
+    assert len(gh.releases()) == 100
+    assert calls == [(1, 100), (2, 100)]
+    gh, calls = _paged_client(cfg, [100] * 7)
+    assert len(gh.releases()) == 500
+    assert [p for p, _ in calls] == [1, 2, 3, 4, 5]
+
+
+def test_desktop_release_behind_a_page_of_plugin_releases_is_found(cfg, gh, signer):
+    desktop_release(gh, signer, "2.0.15")
+    for n in range(120):  # newer than the desktop release, so it is on the second page of 100
+        gh.add(f"obs-plugin-v0.2.{n}", {f"audio-cleaner-obs-plugin-0.2.{n}-windows.zip": b"z"})
+    assert run(cfg)["desktop"] == "published 2.0.15"
+    pages = [p for _, p, _ in gh.log if p.startswith(f"/repos/{REPO}/releases?")]
+    assert f"/repos/{REPO}/releases?per_page=100&page=2" in pages
+    assert f"/repos/{REPO}/releases?per_page=100&page=3" not in pages
 
 
 # ---- monitor ---------------------------------------------------------------------------------------------------------

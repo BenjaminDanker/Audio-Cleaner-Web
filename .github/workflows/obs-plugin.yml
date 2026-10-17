@@ -11,8 +11,8 @@
 # Versions follow the desktop app: every build is MAJOR.MINOR.<run number> (MAJOR.MINOR from buildspec.json, 0.1.57),
 # a pushed tag obs-plugin-vX.Y.Z builds exactly X.Y.Z (cmake/ci-version.cmake). The number reaches the build as the
 # ACW_VERSION environment variable, so the plugin's compiled version, the package names, the .deb version and the
-# release title all say the same. The rolling obs-plugin-latest pre-release carries a signed obs-plugin-manifest.json that the plugin
-# reads through our download server (once per OBS start) to offer the update.
+# release title all say the same. Each version gets its own release, obs-plugin-v<version>, with a signed
+# obs-plugin-manifest.json that the plugin reads through our download server (once per OBS start) to offer the update.
 name: OBS plugin
 
 on:
@@ -356,12 +356,10 @@ jobs:
             obs-plugin/release/*-windows-setup.exe
 
   # ---------------------------------------------------------------------------
-  # Every successful build of main / on-prem replaces the "obs-plugin-latest" pre-release, so
-  # https://github.com/<repo>/releases/tag/obs-plugin-latest always has the newest plugin. It is a
-  # pre-release and never marked latest (the repository's releases/latest link belongs to the
-  # desktop app). Its title carries the version, and its signed obs-plugin-manifest.json (uploaded last, once the
-  # files are there) is what our download server mirrors and installed plugins read to offer the update. A hand-made
-  # obs-plugin-v<version> tag publishes a permanent release instead, without a manifest.
+  # Every successful build of main / on-prem (or a hand-made obs-plugin-v<version> tag) publishes its own release,
+  # obs-plugin-v<version>, never marked latest (the repository's releases/latest link belongs to the desktop app). Its
+  # signed obs-plugin-manifest.json (uploaded last, once the files are there) is what our download server mirrors from
+  # the newest release and installed plugins read to offer the update.
   release:
     name: GitHub Release
     if: >-
@@ -472,34 +470,26 @@ jobs:
             fi
             rm -f "$key"
           fi
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
-              --title "OBS plugin $version" --notes "$notes" "${files[@]}"
-          else
-            title="OBS plugin $version"
-            keep=("${files[@]}" "${signed[@]}")
-            # Update the existing release in place, so the download links never 404 while it changes.
-            update_in_place() {
-              gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/obs-plugin-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null || return 1
-              gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}" || return 1
-              gh release edit obs-plugin-latest --repo "$GITHUB_REPOSITORY" --title "$title" --notes "$notes" --prerelease --latest=false || return 1
-              # Files of an older version number (they have it in their name) go away, and so does an old manifest when
-              # this build has none (the old one would describe files that are gone).
-              gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' |
-                while read -r asset; do
-                  printf '%s\n' "${keep[@]}" | grep -qxF "$asset" ||
-                    gh release delete-asset obs-plugin-latest "$asset" --repo "$GITHUB_REPOSITORY" --yes
-                done
-              # The manifest last, so nobody is told about a version whose files are not there yet.
-              [ "${#signed[@]}" -eq 0 ] || gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${signed[@]}"
-            }
-            if gh release view obs-plugin-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && update_in_place; then
-              echo "updated obs-plugin-latest in place"
-            else
-              echo "creating obs-plugin-latest from scratch"
-              gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
-              gh release create obs-plugin-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
-                --title "$title" --notes "$notes" "${files[@]}"
-              [ "${#signed[@]}" -eq 0 ] || gh release upload obs-plugin-latest --repo "$GITHUB_REPOSITORY" --clobber "${signed[@]}"
+          # One release per version (obs-plugin-v<version>), like the desktop app's: older versions stay available.
+          # Not marked latest (the repository's releases/latest link belongs to the desktop app).
+          tag="obs-plugin-v$version"
+          title="OBS plugin $version"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A rerun of this build. Without a new manifest the old one would describe files that were just replaced.
+            if [ "${#signed[@]}" -eq 0 ]; then
+              for m in obs-plugin-manifest.json obs-plugin-manifest.json.sig; do
+                gh release delete-asset "$tag" "$m" --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+              done
             fi
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+              --title "$title" --notes "$notes" "${files[@]}"
+          else
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "$title" --notes "$notes" "${files[@]}"
           fi
+          # The manifest last, so nobody is told about a version whose files are not there yet.
+          [ "${#signed[@]}" -eq 0 ] || gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${signed[@]}"
+          # The rolling obs-plugin-latest pre-release that came before one release per version.
+          gh release delete obs-plugin-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true

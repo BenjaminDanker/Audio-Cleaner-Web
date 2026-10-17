@@ -12,7 +12,7 @@ Built against libobs 31.1.1; works with OBS 31 and newer (OBS refuses plugins bu
 
 Download the package for your platform from the Live page of the website (it comes from our own download server,
 `https://mc-multi-world.space/audio/api/downloads/obs-plugin/`), and unpack. For maintainers: CI publishes every build
-as the `obs-plugin-latest` pre-release, and the server mirrors it (docs/operations.md, "Release downloads").
+as its own release per version (`obs-plugin-v<version>`), and the server mirrors it (docs/operations.md, "Release downloads").
 OBS must be **version 31 or newer**; restart OBS afterwards.
 
 Every build has its own version number, `MAJOR.MINOR.<build number>` (for example 0.1.57; the release is titled
