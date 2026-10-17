@@ -6,6 +6,7 @@
 //   onStats({rttAvg (processing delay, ms), sent, recv, bufferMs, underruns, dropped, inLevel, outLevel, elapsed})
 
 import { DenoiseEngine } from '../media/denoise.js';
+import { LiveAdvisor } from './advice.js';
 import { Resampler } from '../media/resample.js';
 import { detectLanguage, preloadSpeech, transcribeSpeech } from '../media/speech.js';
 import captureUrl from './capture.worklet.js?url';
@@ -158,7 +159,7 @@ class Captioner {
 
 /**
  * @param {{denoise: boolean, captions: boolean, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
- *   onEvent: (ev:object)=>void, onStats:(s:object)=>void}} opts
+ *   onEvent: (ev:object)=>void, onStats:(s:object)=>void, onAdvice?: (found:{stats:object, echo:object|null})=>void}} opts
  */
 export async function startLocalLive(opts) {
   const { onEvent, onStats } = opts;
@@ -169,6 +170,7 @@ export async function startLocalLive(opts) {
   let playback = null;
   let engine = null;
   let captioner = null;
+  const advisor = opts.onAdvice ? new LiveAdvisor({ onAdvice: opts.onAdvice }) : null; // "Recommended for your room", ~10 s in
   let closed = false;
   let stopping = false;
   let sent = 0;
@@ -238,7 +240,11 @@ export async function startLocalLive(opts) {
       const f32 = e.data;
       inLevel = Math.max(inLevel * 0.85, peak(f32));
       sent++;
-      if (monitor === 'original') playback.port.postMessage({ type: 'frame', samples: f32.slice() });
+      advisor?.pushMic(f32);
+      if (monitor === 'original') {
+        advisor?.pushPlayed(null, f32.length); // the microphone itself: no use for telling an echo from the voice
+        playback.port.postMessage({ type: 'frame', samples: f32.slice() });
+      } else if (monitor === 'off') advisor?.pushPlayed(null, f32.length);
       captioner?.push(f32);
       if (engine) {
         const t0 = performance.now();
@@ -248,12 +254,18 @@ export async function startLocalLive(opts) {
           if (delays.length > 50) delays.shift();
           recv++;
           outLevel = Math.max(outLevel * 0.85, peak(out));
-          if (monitor === 'processed') playback.port.postMessage({ type: 'frame', samples: out }, [out.buffer]);
+          if (monitor === 'processed') {
+            advisor?.pushPlayed(out);
+            playback.port.postMessage({ type: 'frame', samples: out }, [out.buffer]);
+          }
         }, () => {});
       } else {
         recv++;
         outLevel = inLevel;
-        if (monitor === 'processed') playback.port.postMessage({ type: 'frame', samples: f32.slice() });
+        if (monitor === 'processed') {
+          advisor?.pushPlayed(null, f32.length); // nothing was changed, so it is the microphone itself again
+          playback.port.postMessage({ type: 'frame', samples: f32.slice() });
+        }
       }
     };
     statTimer = setInterval(emitStats, 250);

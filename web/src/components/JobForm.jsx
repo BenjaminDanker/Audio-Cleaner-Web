@@ -7,6 +7,7 @@ import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
 import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
 import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from '../media/convert.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
+import { analyseFile } from '../media/analyse.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
 import { preloadSpeech, speechLoadState, subscribeSpeechLoad, transcribeFile } from '../media/speech.js';
@@ -15,8 +16,10 @@ import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
 import SubtitlesResult, { SubtitlesProgress, subtitleFiles } from './SubtitlesResult.jsx';
 import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
+import Recommended from './Recommended.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
 import { strengthDb } from '../strengths.js';
+import { recommendForFile } from '../recommend.js';
 
 
 const LONG_SECONDS = 2 * 3600; // in the browser, a recording this long takes a while
@@ -75,11 +78,11 @@ function browserVerdict(info) {
 }
 
 /** One radio card. A card that can't be used stays visible, greyed out, with the reason where its hint would be. */
-function Choice({ name, value, current, onPick, disabled, title, hint, reason }) {
+function Choice({ name, value, current, onPick, disabled, title, hint, reason, recommended }) {
   return (
     <label className={`choice${disabled ? ' is-disabled' : ''}`}>
       <input type="radio" name={name} value={value} checked={current === value} onChange={() => onPick(value)} disabled={disabled} />
-      <span><b>{title}</b><small>{disabled && reason ? reason : hint}</small></span>
+      <span>{recommended && !disabled && <em className="reco-badge" data-testid={`reco-${name}-${value}`}>Recommended</em>}<b>{title}</b><small>{disabled && reason ? reason : hint}</small></span>
     </label>
   );
 }
@@ -125,6 +128,12 @@ export default function JobForm({ onSubmitted }) {
   const [subsProg, setSubsProg] = useState(null);
   const [subsResult, setSubsResult] = useState(null); // {file, info, files, embed, cleanPcm} from the free in-browser subtitles
   const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
+  const [stats, setStats] = useState(null); // what the quick listen to the file found (media/analysis.js); null: not (yet) measured
+  const [listening, setListening] = useState(false);
+  const touched = useRef(false); // the person changed one of the recommended settings themselves: later findings leave them alone
+  const [custom, setCustom] = useState(false); // ... the same, for showing the button that goes back to the recommendation
+  const rebuildOk = useRef(false); // is the rebuild offered (the price list has it)?
+  const listen = useRef(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'polish' });
@@ -132,7 +141,7 @@ export default function JobForm({ onSubmitted }) {
   const abort = useRef(null);
   const jobLocal = useRef(null); // {out, entry} of the job just started, so the sound cleaned here can join its subtitles
 
-  useEffect(() => () => abort.current?.abort(), []);
+  useEffect(() => () => { abort.current?.abort(); listen.current?.abort(); }, []);
   useEffect(() => () => { if (localResult?.result?.url) URL.revokeObjectURL(localResult.result.url); }, [localResult]);
   useEffect(() => {
     if (!busy) return undefined;
@@ -177,6 +186,9 @@ export default function JobForm({ onSubmitted }) {
   const denoiseTier = rebuild && rebuildRate ? 'rebuild' : 'standard';
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
+  const reco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
+  rebuildOk.current = !!rebuildRate;
+  const recNoise = reco ? (reco.noise === 'browser' && verdict && !verdict.ok ? 'polish' : reco.noise) : null;
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -220,14 +232,58 @@ export default function JobForm({ onSubmitted }) {
     setKeepVideo(true);
     setSubs('off');
     setNoise('off');
+    setStats(null);
+    setListening(false);
+    touched.current = false;
+    setCustom(false);
+    listen.current?.abort();
     setProbing(true);
     const i = await probeMedia(f);
     // The best choice that works for this file; a paid one is never switched on without the price being right there.
     const canBrowser = browserVerdict(i).ok;
     setNoise(canBrowser ? 'browser' : i.hasAudio === false ? 'off' : 'polish');
-    if (canBrowser) warmUpDenoiser();
     setInfo(i);
     setProbing(false);
+    // The noise remover is only fetched once it is clear that this file wants it (the quick listen below says), or when it can't be told.
+    if (i.hasAudio !== false) listenTo(f, i, canBrowser);
+    else if (canBrowser) warmUpDenoiser();
+  }
+
+  /** A quick listen to the file (about a minute of it, spread over the whole), so the settings can start out right. */
+  async function listenTo(f, i, canBrowser) {
+    const ctl = new AbortController();
+    listen.current = ctl;
+    setListening(true);
+    try {
+      const found = await analyseFile(f, i, { signal: ctl.signal });
+      if (ctl.signal.aborted) return;
+      setStats(found);
+      const r = found ? recommendForFile(found, { language: '' }) : null;
+      if (r && !touched.current) applyReco(r, i);
+      else if (!r && canBrowser && !touched.current) warmUpDenoiser();
+    } catch {
+      /* canceled, or unreadable: the form just keeps its usual starting choices */
+      if (canBrowser && !ctl.signal.aborted && !touched.current) warmUpDenoiser();
+    } finally {
+      if (listen.current === ctl) setListening(false);
+    }
+  }
+
+  /** Set the recommended choices (never anything paid that the file doesn't need). */
+  function applyReco(r, i = info) {
+    const canBrowser = i ? browserVerdict(i).ok : false;
+    const next = r.noise === 'browser' && !canBrowser ? 'polish' : r.noise;
+    setNoise(next);
+    if (next === 'browser') warmUpDenoiser();
+    touched.current = false;
+    setCustom(false);
+    if (next === 'browser') setLocalStrength(r.strength);
+    else if (next === 'polish') {
+      setStrength(r.strength);
+      setRebuild(!!(r.rebuild && rebuildOk.current));
+      setNoiseKind('auto');
+      if (r.restoreHighs) setRestoreHighs(true);
+    }
   }
 
   function pickSubs(v) {
@@ -235,13 +291,23 @@ export default function JobForm({ onSubmitted }) {
     if (v === 'browser') warmUpSpeech();
   }
 
+  /** The person chose something themselves: what the quick listen finds later no longer changes it. */
+  function touch() {
+    touched.current = true;
+    setCustom(true);
+  }
+
   function pickNoise(v) {
+    touch();
     setNoise(v);
     if (v === 'browser') warmUpDenoiser();
   }
 
   function reset() {
     abort.current?.abort();
+    listen.current?.abort();
+    setStats(null);
+    setListening(false);
     setFile(null);
     setInfo(null);
     setError('');
@@ -337,6 +403,7 @@ export default function JobForm({ onSubmitted }) {
   async function submit(e) {
     e.preventDefault();
     if (!canStart) return;
+    touched.current = true; // whatever the quick listen finds from here on must not change a run that has started
     const f = file;
     const i = info;
     const ctl = new AbortController();
@@ -432,18 +499,23 @@ export default function JobForm({ onSubmitted }) {
 
         {file && info && !probing && (
           <>
+            <Recommended
+              title="Recommended for this file" line={reco?.line} reasons={reco?.reasons} listening={listening}
+              listeningText="Listening to a little of your file to suggest the best settings…"
+              onApply={custom && reco ? () => applyReco(reco) : null}
+            />
             <fieldset className="field" disabled={busy}>
               <legend className="label">Noise removal</legend>
               <div className="choice-cards">
-                <Choice name="noise" value="off" current={noise} onPick={pickNoise} title="Off" hint="Leave the sound as it is" />
+                <Choice name="noise" value="off" current={noise} onPick={pickNoise} title="Off" hint="Leave the sound as it is" recommended={recNoise === 'off'} />
                 <Choice
                   name="noise" value="browser" current={noise} onPick={pickNoise} disabled={!verdict.ok}
-                  title="Free, in your browser" hint="Done on your own device. Nothing is uploaded." reason={verdict.why}
+                  title="Free, in your browser" hint="Done on your own device. Nothing is uploaded." reason={verdict.why} recommended={recNoise === 'browser'}
                 />
                 <Choice
                   name="noise" value="polish" current={noise} onPick={pickNoise} disabled={info.hasAudio === false}
                   title="Clean &amp; polish" hint={`Paid, done on our side: noise removed, voice evened out, loudness set${polishRate ? `. From ${moneyUsd(polishRate.usdPerHour)} an hour` : ''}`}
-                  reason="This file has no audio track."
+                  reason="This file has no audio track." recommended={recNoise === 'polish'}
                 />
               </div>
             </fieldset>
@@ -452,7 +524,7 @@ export default function JobForm({ onSubmitted }) {
 
             {wantsBrowser && (
               <div className="stack">
-                <StrengthPicker name="lstrength" value={localStrength} onChange={setLocalStrength} disabled={busy} />
+                <StrengthPicker name="lstrength" value={localStrength} onChange={(v) => { touch(); setLocalStrength(v); }} disabled={busy} />
                 {info.channels > 2 && <p className="small muted mb0">This file has {info.channels} channels; they will be mixed down to mono.</p>}
                 {info.duration > LONG_SECONDS && (
                   <div className="banner banner-warn">
@@ -469,7 +541,7 @@ export default function JobForm({ onSubmitted }) {
               <div className="stack">
               {rebuildRate && (
                 <label className="check">
-                  <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => setRebuild(e.target.checked)} disabled={busy} />
+                  <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => { touch(); setRebuild(e.target.checked); }} disabled={busy} />
                   <span>Rebuild the voice (for echoey rooms)
                     <span className="hint block" data-testid="rebuild-hint">
                       Also removes room echo and brings back dull, muffled sound. Slower, {moneyUsd(rebuildRate.usdPerHour)} an hour.
@@ -478,7 +550,7 @@ export default function JobForm({ onSubmitted }) {
                   </span>
                 </label>
               )}
-              {!(rebuild && rebuildRate) && <StrengthPicker name="strength" value={strength} onChange={setStrength} disabled={busy} />}
+              {!(rebuild && rebuildRate) && <StrengthPicker name="strength" value={strength} onChange={(v) => { touch(); setStrength(v); }} disabled={busy} />}
               <div className="form-grid">
                 {!(rebuild && rebuildRate) && (
                 <div className="field">
@@ -504,7 +576,7 @@ export default function JobForm({ onSubmitted }) {
               </label>
               {!(rebuild && rebuildRate) && (
                 <label className="check">
-                  <input type="checkbox" name="highs" checked={restoreHighs} onChange={(e) => setRestoreHighs(e.target.checked)} disabled={busy} />
+                  <input type="checkbox" name="highs" checked={restoreHighs} onChange={(e) => { touch(); setRestoreHighs(e.target.checked); }} disabled={busy} />
                   <span>Restore missing highs
                     <span className="hint block" data-testid="highs-hint">For phone calls and other recordings that sound dull or muffled. Clear recordings are left as they are.</span>
                   </span>
@@ -539,10 +611,12 @@ export default function JobForm({ onSubmitted }) {
                 <Choice
                   name="subs" value="standard" current={subs} onPick={pickSubs}
                   title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${moneyUsd(standardRate.usdPerHour)} an hour` : ''}`}
+                  recommended={reco?.subs === 'standard'}
                 />
                 <Choice
                   name="subs" value="accurate" current={subs} onPick={pickSubs}
                   title="Extra accurate" hint="Paid. Best for accents, noisy rooms and specialist words. Works in any language."
+                  recommended={reco?.subs === 'accurate'}
                 />
               </div>
               {subs === 'accurate' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}

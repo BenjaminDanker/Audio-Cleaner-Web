@@ -62,10 +62,32 @@ export const summary = () => results;
 export async function pick(page, group, value) {
   await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
 }
-/** Drop a file on the Cleanup page and wait until it has been looked at (the Start button shows up). */
-export async function dropFile(page, path) {
+/** The quick listen that picks the recommended choices ("Recommended for this file") is over. */
+export async function settleRecommendation(page) {
+  await page.waitForFunction(() => !document.querySelector('[data-testid=reco-listening]'), null, { timeout: 30000 });
+}
+/**
+ * Puts the options back to what they were before files were measured: the free in-browser cleanup when the browser can do it (else
+ * Clean & polish), Maximum strength, no rebuild. The checks that are about something else than the recommendation start from there.
+ */
+export async function restoreOldDefaults(page) {
+  const card = (v) => page.locator(`label.choice:has(input[name=noise][value=${v}]):not(.is-disabled)`);
+  const want = (await card('browser').count()) ? 'browser' : 'polish';
+  if (!(await page.locator(`input[name=noise][value=${want}]`).isChecked())) await card(want).click();
+  const max = page.locator(`input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max]`);
+  if ((await max.count()) && !(await max.isChecked())) await page.locator(`label:has(input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max])`).click();
+  const rebuild = page.locator('input[name=rebuild]');
+  if ((await rebuild.count()) && (await rebuild.isChecked())) await rebuild.uncheck();
+}
+/**
+ * Drop a file on the Cleanup page and wait until it has been looked at (the Start button shows up and the recommendation is in).
+ * The options are then put back to the old defaults (restoreOldDefaults); pass { recommended: true } to keep what was recommended.
+ */
+export async function dropFile(page, path, { recommended = false } = {}) {
   await page.setInputFiles('input[type=file]', path);
   await page.getByTestId('start').waitFor({ timeout: 20000 });
+  await settleRecommendation(page);
+  if (!recommended) await restoreOldDefaults(page);
   await page.waitForTimeout(300);
 }
 export const startButton = (page) => page.getByTestId('start');
