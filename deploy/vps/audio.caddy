@@ -19,8 +19,8 @@
     #     }
     handle /audio/api/* {
         @acw_upload path_regexp ^/audio/api/jobs/[0-9a-f]{32}/input$
-        # Result downloads and the release downloads (desktop installers, OBS plugin, model archive: the files live on
-        # primary-ram, nothing is stored on this VPS) use the bulk upstream too, so they never queue in front of live audio.
+        # Result downloads and the OBS plugin's downloads (the files live on primary-ram, nothing is stored on this VPS)
+        # use the bulk upstream too, so they never queue in front of live audio.
         @acw_download path_regexp ^/audio/api/(jobs/[0-9a-f]{32}/outputs/|downloads/)
         @acw_webhook path /audio/api/stripe/webhook
         # The live WebSocket (audio frames; compression would only add delay) is never compressed.
