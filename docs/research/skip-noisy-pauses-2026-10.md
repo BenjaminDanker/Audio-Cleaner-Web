@@ -62,7 +62,7 @@ hiss -40: 44.8; HVAC: 41.9; hum: 36.6 / 34.4; soft speech under pink: 29.5 / 35.
 
 A gate that predicts the pause residual before cutting (probes: the model run on 3 loud holes with 6 s of lead,
 level in / out; predicted output must be 52 dB under the speech level; holes with an event in them stay) opened
-exactly for those: hiss -50 / -60 / -70 skipped 13.0 / 11.5 / 9.6% at 51.5 / 51.7 / 49.5 dB, and stayed shut for
+exactly for those: hiss -50 / -60 / -70 skipped 13.0 / 11.5 / 9.6% at 51.5 / 51.7 / 49.5 dB (the last with the 60 s minimum of candidate holes relaxed), and stayed shut for
 all the others (including hiss -40 at 44.8 and HVAC at 41.9). 
 
 ## 3. Speech is never skipped
