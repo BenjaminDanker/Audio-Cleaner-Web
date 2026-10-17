@@ -496,7 +496,7 @@ def test_stage_limits_and_estimates_follow_the_tier():
                              jobs.job_seconds(job("rebuild")))
     assert light < heavy < rebuild
     assert rebuild >= 3600  # about real time or slower
-    assert jobs.job_needs(job("rebuild"))[0] == 3 * jobs.GB > jobs.job_needs(job("standard"))[0]
+    assert jobs.job_needs(job("rebuild"))[0] == jobs.JOB_MEM_REBUILD > jobs.job_needs(job("standard"))[0]
 
 
 # ---------------------------------------------------------------- F5, F7, F10, F20: live sessions

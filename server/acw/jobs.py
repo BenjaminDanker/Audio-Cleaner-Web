@@ -52,9 +52,16 @@ PLAUSIBLE_ANY_SIZE_BYTES = 200 * 1024**2
 # docs/operations.md). Decoded/cleaned audio are memory-mapped scratch files,
 # so RAM is flat per job and disk grows with length.
 GB = 1024**3
-JOB_MEM = int(1.5 * GB)
-JOB_MEM_REBUILD = 3 * GB  # Sidon peaks at ~2.5 GB
-LOCAL_ASR_MEM = int(4.5 * GB)  # Parakeet fp32 (Whisper turbo needs ~2 GB)
+# Re-measured 2026-10-17 (docs/research/heavy-2026-10.md): a heavy stereo clean peaks at 0.2 GB of private memory
+# and 0.8 GB including the mapped scratch files, band extension adds 0.45; rounded up.
+JOB_MEM = 1 * GB
+# Sidon: models 1.2 GB, plus a pool of four single-threaded workers each holding up to 0.7 GB of activations (a
+# 16 s feature window, or a 10 s decoder block), at most two of them feature windows: peak 4.0 GB (it was 2.2 GB
+# with one four-thread session). Long stereo no longer adds per-channel copies of the whole file.
+JOB_MEM_REBUILD = int(4.5 * GB)
+# Parakeet fp32: 0.3 GB of private memory per job plus the 2.4 GB of weights, which are the model file's own page
+# cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
+LOCAL_ASR_MEM = int(3.2 * GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
 # Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
 # monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
@@ -64,7 +71,7 @@ SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
 SPEED = {
     "denoise_light": 0.05,
     "denoise_auto": 0.15,
-    "denoise_heavy": 0.33,
+    "denoise_heavy": 0.27,
     "denoise_rebuild": 0.9,
     "highs": 0.02,
     "echo": 0.03,

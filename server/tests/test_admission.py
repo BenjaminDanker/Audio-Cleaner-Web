@@ -32,7 +32,7 @@ def test_cpu_only_matters_when_other_jobs_run():
 
 def test_waits_for_memory_and_disk():
     ok, why, _ = admission(job(transcribe="local"), snap(mem=5 * GB), [])
-    assert not ok and why.startswith("memory")  # 1.5 + 2.5 GB + 6 GB reserve > 5 GB
+    assert not ok and why.startswith("memory")  # 1 + 3.2 GB + 6 GB reserve > 5 GB
     ok, why, _ = admission(job(seconds=4 * 3600), snap(disk=15 * GB), [])
     assert not ok and why.startswith("disk")  # 4 h stereo scratch ~11 GB + 10 GB reserve
 
@@ -40,8 +40,8 @@ def test_waits_for_memory_and_disk():
 def test_a_job_leaves_the_minecraft_reopen_threshold_free():
     # the memory controller of the game servers reopens at 6 GiB available: a job must not take the host below it
     assert jobs.MEM_RESERVE == 6 * GB
-    assert admission(job(), snap(mem=7.6 * GB), [])[0]  # 1.5 GB job, 6.1 GB left
-    ok, why, _ = admission(job(), snap(mem=7.4 * GB), [])
+    assert admission(job(), snap(mem=7.1 * GB), [])[0]  # 1 GB job, 6.1 GB left
+    ok, why, _ = admission(job(), snap(mem=6.9 * GB), [])
     assert not ok and why.startswith("memory")
 
 

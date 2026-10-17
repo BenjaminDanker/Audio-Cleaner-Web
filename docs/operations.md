@@ -565,13 +565,13 @@ told the service is busy. Measured numbers, 2026-10-14:
 (12 GB on this 31 GB box; set at install), so Audio Cleaner can't take RAM the
 Minecraft servers need.
 - File jobs keep decoded and cleaned audio in memory-mapped scratch files in the
-  job directory, and the polish chain works in 10 s blocks. Admission reserves 1.5 GB per job (3 GB for the
-  voice-rebuild tier): an estimate used to decide when a job may start (`jobs.JOB_MEM`), not a limit. The real
+  job directory, and the polish chain works in 10 s blocks. Admission reserves 1 GB per job (4.5 GB for the
+  voice-rebuild tier, whose four single-threaded workers hold their own activations): an estimate used to decide when a job may start (`jobs.JOB_MEM`), not a limit. The real
   ceilings are the worker unit's MemoryMax (7 GB) and the runner's address-space limit (32 GB, memory-mapped
   scratch files included). Admission counts memory the way the kernel does: file cache in the slice is not "used".
   Scratch disk: ~0.7 GB per hour and channel, twice.
-- Local transcription adds the model (Parakeet ~4.3 GB on CPU, ~1 GB with the
-  GPU; Whisper turbo ~1.7 GB) and 16 kHz audio (~0.23 GB per hour). CPU worker
+- Local transcription adds the model (Parakeet 3.2 GB on CPU, of which 2.4 GB are the model file's own page cache,
+  shared by concurrent jobs; ~1 GB with the GPU; Whisper turbo ~1.7 GB) and 16 kHz audio (~0.23 GB per hour). CPU worker
   units: MemoryHigh 6G / MemoryMax 7G.
 - Live: one shared caption model (~0.3 GB) plus a few MB per session. Unit: 3G/4G.
 
