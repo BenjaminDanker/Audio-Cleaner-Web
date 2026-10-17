@@ -92,6 +92,8 @@ LEAK_PATTERNS = [
 LEAK_EXCEPTIONS = {
     # These tests assert that the shipped files do NOT name the account / the repository (they do not name it themselves).
     "desktop/tests/test_model_updates.py": [r"BenjaminDanker"],
+    # The README's link to the public repository's own releases page (where new users get the installers).
+    "README.md": [r"BenjaminDanker"],
     # The test of our own release job (skipped when the workflow has no release job, as in the public copy) reads the
     # secret's NAME; a name is not a secret.
     "desktop/tests/test_updater.py": [r"UPDATE_SIGNING_KEY|\bsecrets\.[A-Za-z_]+"],
