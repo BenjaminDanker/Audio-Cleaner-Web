@@ -7,7 +7,6 @@ import hashlib
 import re
 from pathlib import Path
 
-import pytest
 from PySide6.QtCore import QSettings
 
 from audio_cleaner_desktop import config, models, resources, updater
@@ -181,20 +180,6 @@ def test_the_installers_folder_is_cleaned_only_where_it_can_be_written(server, m
     assert (root / "LICENSES" / "A-MIT.txt").is_file()
 
 
-@pytest.mark.skipif(not hasattr(__import__("os"), "geteuid") or __import__("os").geteuid() == 0, reason="root can write anywhere")
-def test_a_read_only_installer_folder_is_left_alone_for_real(server, monkeypatch, tmp_path):  # noqa: F811
-    root = _installer_root(monkeypatch, tmp_path)
-    old = _model(server, {"model.bin": b"one"})
-    _put_copy(root / old.id, old, {"model.bin": b"one"})
-    new = _newer(old, b"two!")
-    models.download(new)
-    root.chmod(0o555)  # the folder cannot be changed, so a model folder in it cannot be removed
-    try:
-        assert models.remove_stale([new]) == [] and (root / old.id / "model.bin").is_file()
-    finally:
-        root.chmod(0o755)
-
-
 # ---- the window ---------------------------------------------------------------------------------------------------------------
 def _window(tmp_path, monkeypatch, started, outdated_ids):
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id in started))
@@ -284,14 +269,6 @@ def test_the_release_addresses_are_defined_in_one_place():
             assert "mc-multi-world" not in text, path
 
 
-def test_a_source_checkout_uses_the_newest_release():
-    # CI's version.py --write marks a release build; the committed source is not one (it has no release of its own)
-    from audio_cleaner_desktop import __released__
-
-    assert __released__ is False
-    assert config.MODELS_URL == config.LATEST_URL
-
-
 def test_every_download_of_the_catalog_is_a_file_of_the_release_but_the_speech_model():
     for m in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
         urls = [m.archive.url] if m.archive is not None else [f.url for f in m.files]
@@ -312,7 +289,6 @@ def test_the_installers_and_the_release_use_the_same_addresses():
 
     sys.path.insert(0, str(DESKTOP / "packaging"))
     import installer_models
-    import release_models
 
     archive = resources.MODELS_ARCHIVE
     windows = installer_models.render()

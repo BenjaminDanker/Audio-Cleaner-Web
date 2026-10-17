@@ -27,34 +27,23 @@ def models(tmp_path, monkeypatch):
     return d
 
 
-def test_the_voice_rebuild_goes_to_the_card():
-    assert broker.gpu_stages(job_row(tier="rebuild", noise="light")) == ["rebuild"]
-    assert broker.gpu_stages(job_row(tier="rebuild", kind="denoise_transcribe", transcribe="premium")) == ["rebuild"]
-    assert broker.gpu_only(job_row(tier="rebuild"))
-
-
-def test_heavy_and_auto_cleaning_go_to_the_card_light_does_not():
-    for noise in ("heavy", "auto"):
-        assert broker.gpu_stages(job_row(noise=noise)) == ["heavy"]
-        assert not broker.gpu_only(job_row(noise=noise))  # the CPU does it while the card is busy
-    assert broker.gpu_stages(job_row(noise="light")) == []  # DeepFilterNet3 has no GPU path
-
-
-def test_leveling_on_its_own_is_cpu_work():
-    for noise in ("auto", "heavy", "light"):
-        assert broker.gpu_stages(job_row(tier="off", noise=noise)) == []
-        assert not broker.gpu_only(job_row(tier="off", noise=noise))
-    # with local subtitles the transcription is still GPU work, the leveling is not
-    assert broker.gpu_stages(job_row(tier="off", kind="denoise_transcribe", transcribe="local")) == ["transcribe"]
-
-
-def test_what_stays_with_the_cpu_workers():
-    assert broker.gpu_stages(job_row(echo=True)) == []  # no echo canceller in the GPU venv
-    assert broker.gpu_stages(job_row(kind="transcribe", transcribe="local", echo=True)) == []
-    assert broker.gpu_stages(job_row(next_stage="finalize")) == []
-    assert broker.gpu_stages(job_row(kind="transcribe", transcribe="premium")) == []  # cloud transcription: nothing to run
-    assert broker.gpu_stages(job_row(kind="transcribe", transcribe="local")) == ["transcribe"]  # Parakeet
-    assert broker.gpu_stages(job_row(kind="denoise_transcribe", transcribe="local")) == ["transcribe", "heavy"]
+@pytest.mark.parametrize("row, stages, card_only", [
+    (job_row(tier="rebuild", noise="light"), ["rebuild"], True),  # the voice rebuild goes to the card only
+    (job_row(tier="rebuild", kind="denoise_transcribe", transcribe="premium"), ["rebuild"], True),
+    (job_row(noise="heavy"), ["heavy"], False),  # heavy and auto cleaning: the card, or the CPU while it is busy
+    (job_row(noise="auto"), ["heavy"], False),
+    (job_row(noise="light"), [], False),  # DeepFilterNet3 has no GPU path
+    (job_row(tier="off", noise="heavy"), [], False),  # leveling on its own is CPU work
+    (job_row(tier="off", kind="denoise_transcribe", transcribe="local"), ["transcribe"], False),  # local subtitles: Parakeet
+    (job_row(echo=True), [], False),  # no echo canceller in the GPU venv
+    (job_row(next_stage="finalize"), [], False),
+    (job_row(kind="transcribe", transcribe="premium"), [], False),  # cloud transcription: nothing to run here
+    (job_row(kind="transcribe", transcribe="local"), ["transcribe"], False),
+    (job_row(kind="denoise_transcribe", transcribe="local"), ["transcribe", "heavy"], False),
+])
+def test_which_stages_go_to_the_card(row, stages, card_only):
+    assert broker.gpu_stages(row) == stages
+    assert broker.gpu_only(row) is card_only
 
 
 def queued(models, **kw):
@@ -75,7 +64,7 @@ def marker(name, age=0.0):
     os.utime(p, (t, t))
 
 
-def test_the_voice_rebuild_runs_only_on_the_card(models):
+def test_the_card_runs_the_rebuilds_and_the_cpus_never_do(models, monkeypatch):
     marker("gpu-worker-alive")
     rebuild = queued(models, denoise_tier="rebuild")
     heavy = queued(models, options={"noise": "heavy"})
@@ -83,11 +72,23 @@ def test_the_voice_rebuild_runs_only_on_the_card(models):
     assert W.claim("cpu") is None  # never the rebuild
     marker("gpu-worker-alive", age=300)  # the GPU worker went away: the rebuild still waits for it
     assert W.claim("cpu") is None
-    assert db.one("SELECT status FROM jobs WHERE id = ?", (rebuild,))["status"] == "queued"
+    marker("gpu-worker-alive")
+    monkeypatch.setattr(W, "GPU_MODE", True)
+    assert W.claim("gpu")["id"] == rebuild
+
+
+def test_cpu_workers_leave_heavy_jobs_to_an_idle_card(models):
+    heavy = queued(models, options={"noise": "heavy"})
+    plain = queued(models, options={"noise": "light"})
+    marker("gpu-worker-idle")
+    marker("gpu-worker-alive")
+    assert W.claim("cpu")["id"] == plain  # the light job is theirs, the heavy one waits for the card
+    assert W.claim("cpu") is None
+    assert db.one("SELECT status FROM jobs WHERE id = ?", (heavy,))["status"] == "queued"
 
 
 def test_no_rebuild_can_be_ordered_while_no_gpu_worker_is_up(models, client, signed_in):
-    uid, h = signed_in
+    uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     with pytest.raises(jobs.JobError, match="paused"):
         make_job(uid, denoise_tier="rebuild")
@@ -107,29 +108,3 @@ def test_queue_estimates_have_a_gpu_lane(models):
     rebuild_seconds = jobs.job_seconds(dict(db.one("SELECT * FROM jobs WHERE id = ?", (first,))))
     assert waits[first] == 0 and waits[second] == int(rebuild_seconds)  # rebuilds queue behind each other on the card
     assert waits[plain] == 0  # the CPU workers have nothing in front of it
-
-
-def test_cpu_workers_leave_gpu_jobs_to_an_idle_gpu_worker(models):
-    heavy = queued(models, options={"noise": "heavy"})
-    plain = queued(models, options={"noise": "light"})
-    marker("gpu-worker-idle")
-    marker("gpu-worker-alive")
-    assert W.claim("cpu")["id"] == plain  # the light job is theirs, the heavy one waits for the card
-    assert W.claim("cpu") is None
-    assert db.one("SELECT status FROM jobs WHERE id = ?", (heavy,))["status"] == "queued"
-
-
-def test_the_gpu_worker_takes_only_its_jobs(models, monkeypatch):
-    marker("gpu-worker-alive")
-    light = queued(models, options={"noise": "light"})
-    rebuild = queued(models, denoise_tier="rebuild")
-    monkeypatch.setattr(W, "GPU_MODE", True)
-    got = W.claim("gpu")
-    assert got["id"] == rebuild
-    assert W.claim("gpu") is None
-    assert db.one("SELECT status FROM jobs WHERE id = ?", (light,))["status"] == "queued"
-
-
-def test_the_gpu_spec_names_the_card_for_cleaning_too():
-    spec = W._gpu_spec()
-    assert spec["asr_device"] == "cuda" and spec["clean_device"] == "cuda"

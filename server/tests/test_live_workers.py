@@ -77,10 +77,9 @@ def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, f
 
 # --------------------------------------------------------------- silence and audio nobody needs (2026-10-16)
 
-def _session(client, start, frames, wait=0.3):
-    """Start, send `frames` (bytes), stop; every JSON message and binary frame that came back."""
-    import time
-
+def _session(client, start, frames):
+    """Start, send `frames` (bytes), stop; every JSON message and binary frame that came back. Frames are answered in
+    order, so the stop comes after the last of them."""
     from starlette.websockets import WebSocketDisconnect
 
     from .conftest import ORIGIN
@@ -93,7 +92,6 @@ def _session(client, start, frames, wait=0.3):
             return got, binary
         for f in frames:
             ws.send_bytes(f)
-        time.sleep(wait)
         ws.send_text(json.dumps({"type": "stop"}))
         try:
             while True:

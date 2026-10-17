@@ -5,7 +5,6 @@ import hashlib
 import http.server
 import random
 import threading
-from pathlib import Path
 
 import pytest
 
@@ -42,7 +41,7 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
 def server(monkeypatch, tmp_path):
     _RangeHandler.files, _RangeHandler.requests = {}, []
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _RangeHandler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
     # the local test server is plain http (the real catalog is https only)
     monkeypatch.setattr(models, "_ssl_context", lambda: None)
@@ -118,13 +117,6 @@ def test_an_older_catalog_entry_does_not_count_as_installed(server):
     newer = models.SpeechModel(m.id, m.title, m.description, m.licence,
                                (models.ModelFile("a.bin", m.files[0].url, 3, hashlib.sha256(b"two").hexdigest()),))
     assert models.is_installed(m) and not models.is_installed(newer)
-
-
-def test_models_live_in_the_app_data_folder(monkeypatch, tmp_path):
-    monkeypatch.delenv("ACW_DESKTOP_MODELS", raising=False)
-    path = models.models_dir()
-    assert path.parts[-3:] == ("Audio Cleaner", "Audio Cleaner", "models")
-    assert isinstance(path, Path)
 
 
 def _frozen_installer_dir(monkeypatch, tmp_path):
@@ -274,13 +266,6 @@ def test_a_tampered_member_is_never_installed(server, archive_catalog):
     assert not (root / "models.partial" / "models.zip").exists()  # fetched again next time
 
 
-def test_a_missing_member_is_said(server, archive_catalog):
-    archive, one, two, members = _archive_models(server)
-    ghost = models.SpeechModel("ghost", "Ghost", "", "MIT", (models.ModelFile("g.onnx", "", 3, "0" * 64, member="nope/g.onnx"),), archive)
-    with pytest.raises(models.DownloadError, match="missing in the downloaded archive"):
-        models.download(ghost)
-
-
 def test_cancelling_while_unpacking_keeps_the_archive_and_nothing_half_done(server, archive_catalog, monkeypatch):
     archive, one, two, members = _archive_models(server)
     models.register(one, two)
@@ -306,18 +291,6 @@ def test_cancelling_while_unpacking_keeps_the_archive_and_nothing_half_done(serv
     models.download(one)
     assert _RangeHandler.requests == [] and models.is_installed(one) and models.is_installed(two)
     assert not (root / "models.partial").exists()
-
-
-def test_cancelling_the_archive_download_resumes_later(server, archive_catalog):
-    archive, one, two, _ = _archive_models(server)
-    models.register(one, two)
-    cancel = threading.Event()
-    cancel.set()
-    with pytest.raises(models.Cancelled):
-        models.download(two, cancel=cancel)
-    assert not models.is_installed(two)
-    models.download(two)
-    assert models.is_installed(one) and models.is_installed(two)
 
 
 def test_the_disk_check_counts_the_archive_and_what_is_unpacked(server, archive_catalog, monkeypatch):

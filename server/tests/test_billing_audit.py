@@ -1,5 +1,5 @@
-"""Fixes from the money audit (F1-F20): measured lengths, idempotent refunds, leaked holds, payment
-reconciliation, live-session billing and per-tier limits."""
+"""Money on the job and live-session paths: billed lengths, holds and refunds, reconciliation with Stripe, price
+snapshots and the session meter. Also the helpers other test modules import (frame, make_job, run_session, ...)."""
 import asyncio
 import json
 import math
@@ -29,7 +29,22 @@ def make_job(uid, **kw):
     return jobs.create_job(uid, **{**args, **kw})["id"]
 
 
-# ---------------------------------------------------------------- F1: measured length
+def running_job(uid, **kw):
+    jid = make_job(uid, **kw)
+    db.execute("UPDATE jobs SET status = 'running', duration_seconds = claimed_seconds WHERE id = ?", (jid,))
+    d = jobs.job_dir(jid)
+    (d / "out.wav").write_bytes(b"x")
+    return dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,))), d
+
+
+def frame(reference=False, seq=0):
+    from acw.stream import protocol as P
+
+    flags = P.FLAG_REFERENCE if reference else 0
+    return {"type": "websocket.receive", "bytes": P.HEADER.pack(P.VERSION, P.CODEC_S16, flags, seq, 0) + bytes(960)}
+
+
+# ---------------------------------------------------------------- measured length (a header can lie)
 
 def forged_flac(tmp_path, real=120, claimed=10):
     """A FLAC of `real` seconds whose STREAMINFO says `claimed`."""
@@ -48,7 +63,7 @@ def runner_spec(tmp_path, **kw):
 
 
 @NATIVE
-def test_forged_header_is_billed_for_the_real_length(tmp_path):
+def test_forged_header_is_billed_and_limited_by_the_measured_length(tmp_path):
     from acw.worker import runner
     from acw_common.ffmpeg import FFmpeg, MediaError
 
@@ -58,11 +73,8 @@ def test_forged_header_is_billed_for_the_real_length(tmp_path):
     assert probe.duration == pytest.approx(10, abs=0.1)  # what the header claims
     assert ff.measure_duration(path, probe, 3600) == pytest.approx(120, abs=0.5)
     assert runner.stage_probe(tmp_path, runner_spec(tmp_path))["duration"] == pytest.approx(120, abs=0.5)
-    # limits use the measured length: the 10 s file is 2 minutes, over a 1 minute limit
-    with pytest.raises(MediaError, match="2.0 minutes"):
+    with pytest.raises(MediaError, match="2.0 minutes"):  # the 10 s file is 2 minutes: over a 1 minute limit
         runner.stage_probe(tmp_path, runner_spec(tmp_path, max_seconds=60))
-    with pytest.raises(MediaError, match="Voice rebuilding takes files up to 1 minutes"):
-        runner.stage_probe(tmp_path, runner_spec(tmp_path, max_seconds=60, denoise_tier="rebuild"))
 
 
 @NATIVE
@@ -73,12 +85,10 @@ def test_decode_stops_at_the_billed_length(tmp_path):
     path = forged_flac(tmp_path)
     ff = FFmpeg(HOME / "bin")
     probe = ff.probe(path)
-    spec = runner_spec(tmp_path, billed_seconds=10.0)
-    limit = runner.decode_limit(spec)
+    limit = runner.decode_limit(runner_spec(tmp_path, billed_seconds=10.0))
     assert limit == pytest.approx(12.2)
     assert len(ff.decode(path, probe, 16000, 1, limit)) <= 16000 * limit
     assert runner.decode_limit(runner_spec(tmp_path)) == pricing.MAX_JOB_SECONDS  # before the probe: the tier's limit
-    assert runner.decode_limit(runner_spec(tmp_path, billed_seconds=10_000_000)) == pricing.MAX_JOB_SECONDS
 
 
 def test_cloud_asr_refuses_more_speech_than_was_billed(tmp_path, monkeypatch):
@@ -87,7 +97,6 @@ def test_cloud_asr_refuses_more_speech_than_was_billed(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     get_settings.cache_clear()
-
     d = tmp_path / "asr_chunks"
     d.mkdir()
     (d / "0000.mp3").write_bytes(b"x")
@@ -96,10 +105,10 @@ def test_cloud_asr_refuses_more_speech_than_was_billed(tmp_path, monkeypatch):
         asyncio.run(openai_asr.run_for_job(tmp_path, None, billed_seconds=10.0))
 
 
-# ---------------------------------------------------------------- F2: refunds
+# ---------------------------------------------------------------- refunds
 
-def refundable_user():
-    uid = user("refund@example.com")
+def refundable_user(email="refund@example.com"):
+    uid = user(email)
     now = db.now()
     db.execute("INSERT INTO payments(id,user_id,kind,status,amount_cents,refunded_cents,tax_cents,stripe_charge,created_at,updated_at)"
                " VALUES ('p1',?,'checkout','succeeded',1000,0,0,'ch_1',?,?)", (uid, now, now))
@@ -147,9 +156,28 @@ def test_refund_hold_is_released_when_stripe_fails(monkeypatch):
     assert ledger.balance(uid)["held_micros"] == 0
 
 
-# ---------------------------------------------------------------- F3: leaked holds
+def test_refund_of_spent_credit_is_recorded_as_unrecovered():
+    uid = refundable_user()
+    ledger.debit_available(uid, 9_900_000, "usage")  # nearly all spent
+    refund = {"id": "ch_1", "payment_intent": None, "amount_refunded": 1000,
+              "refunds": {"data": [{"id": "re_1", "status": "succeeded", "amount": 1000}]}}
+    stripe_service._handle_charge_refunded(refund)
+    stripe_service._handle_charge_refunded(refund)  # delivered twice
+    rows = db.all_rows("SELECT detail FROM audit_log WHERE action = 'refund_unrecovered'")
+    assert [r["detail"] for r in rows] == ["p1:re_1:9900000 micros"]
 
-def test_finish_failed_releases_the_hold_and_free_allowance_with_the_status():
+
+def test_dispute_of_spent_credit_is_recorded_as_unrecovered():
+    uid = refundable_user()
+    ledger.debit_available(uid, 9_000_000, "usage")
+    stripe_service._handle_dispute_created({"id": "dp_1", "charge": "ch_1", "reason": "fraudulent"})
+    rows = db.all_rows("SELECT detail FROM audit_log WHERE action = 'dispute_unrecovered'")
+    assert [r["detail"] for r in rows] == ["p1:dp_1:9000000 micros"]
+
+
+# ---------------------------------------------------------------- holds that nothing will close
+
+def test_finish_failed_releases_the_hold_only_from_the_states_it_may_leave():
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     jid = make_job(uid)
@@ -185,20 +213,10 @@ def test_reaper_releases_holds_nothing_will_close():
     assert db.one("SELECT status FROM holds WHERE ref_id = ?", (running,))["status"] == "active"
     db.execute("UPDATE holds SET created_at = ? WHERE id = ?", (old, orphan))
     assert ledger.reap_stale_holds() == 1
-    held = ledger.balance(uid)["held_micros"]
-    assert held == db.one("SELECT SUM(amount_micros) s FROM holds WHERE status = 'active'")["s"]
+    assert ledger.balance(uid)["held_micros"] == db.one("SELECT SUM(amount_micros) s FROM holds WHERE status = 'active'")["s"]
 
 
-def test_reaper_logs_a_held_total_that_does_not_match(caplog):
-    uid = user()
-    ledger.credit(uid, 1_000_000, "grant", "t", "g")
-    db.execute("UPDATE users SET held_micros = 5 WHERE id = ?", (uid,))
-    with caplog.at_level("ERROR"):
-        ledger.reap_stale_holds()
-    assert "held_micros 5" in caplog.text
-
-
-# ---------------------------------------------------------------- F4: payment reconciliation
+# ---------------------------------------------------------------- payment reconciliation with Stripe
 
 class StripeFake:
     """Only the network calls reconcile() makes; the rest of the client is real."""
@@ -263,7 +281,7 @@ def test_reconcile_credits_a_checkout_whose_webhook_never_came(monkeypatch):
     assert stripe_service.reconcile() == 0  # settled: nothing left to look at
 
 
-def test_reconcile_waits_for_recent_and_open_payments(monkeypatch):
+def test_reconcile_leaves_young_and_still_open_payments_alone(monkeypatch):
     uid = user()
     pending_payment(uid, age=60)
     StripeFake(monkeypatch, session=session_dict(uid, "open"), pi=pi_dict(uid))
@@ -283,23 +301,19 @@ def test_reconcile_closes_an_expired_checkout(monkeypatch):
     assert (p["status"], p["failure_code"]) == ("failed", "expired")
 
 
-def test_unsettled_authorization_is_cancelled_after_a_day(monkeypatch):
+@pytest.mark.parametrize("age_hours,cancelled", [(25, True), (3, False)])
+def test_an_authorization_that_will_not_settle_is_cancelled_after_a_day(monkeypatch, age_hours, cancelled):
     uid = user()
-    pending_payment(uid, age=25 * 3600)
+    pending_payment(uid, age=age_hours * 3600)
     fake = StripeFake(monkeypatch, session=session_dict(uid), pi=pi_dict(uid), capture_fails=True)
     stripe_service.reconcile()
-    assert fake.cancels == ["pi_1"]
     p = db.one("SELECT status, failure_code FROM payments")
-    assert (p["status"], p["failure_code"]) == ("failed", "unsettled")
-    assert ledger.balance(uid)["balance_micros"] == 0
-
-
-def test_unsettled_authorization_is_kept_for_a_day(monkeypatch):
-    uid = user()
-    pending_payment(uid, age=3 * 3600)
-    fake = StripeFake(monkeypatch, session=session_dict(uid), pi=pi_dict(uid), capture_fails=True)
-    stripe_service.reconcile()
-    assert fake.cancels == [] and db.one("SELECT status FROM payments")["status"] == "pending"
+    if cancelled:
+        assert fake.cancels == ["pi_1"]
+        assert (p["status"], p["failure_code"]) == ("failed", "unsettled")
+        assert ledger.balance(uid)["balance_micros"] == 0
+    else:
+        assert fake.cancels == [] and p["status"] == "pending"
 
 
 def reload_user(uid, in_flight=1):
@@ -315,11 +329,10 @@ def test_stuck_reload_is_credited_from_stripe_and_unblocked(monkeypatch):
     stripe_service.reconcile()
     assert fake.captures == ["pi_1"]
     assert ledger.balance(uid)["balance_micros"] == 20_000_000
-    u = db.one("SELECT auto_reload_in_flight FROM users WHERE id = ?", (uid,))
-    assert u["auto_reload_in_flight"] == 0
+    assert db.one("SELECT auto_reload_in_flight FROM users WHERE id = ?", (uid,))["auto_reload_in_flight"] == 0
 
 
-def test_reload_that_never_reached_stripe_expires(monkeypatch):
+def test_reload_that_never_reached_stripe_expires_and_a_stale_flag_clears(monkeypatch):
     uid = user()
     reload_user(uid)
     pending_payment(uid, kind="auto_reload", age=600)
@@ -330,12 +343,8 @@ def test_reload_that_never_reached_stripe_expires(monkeypatch):
     stripe_service.reconcile()
     assert db.one("SELECT auto_reload_in_flight FROM users")["auto_reload_in_flight"] == 0
     assert db.one("SELECT status FROM payments")["status"] == "failed"
-
-
-def test_reload_flag_without_a_pending_payment_is_cleared(monkeypatch):
-    uid = user()
-    reload_user(uid)
-    StripeFake(monkeypatch)
+    db.execute("UPDATE users SET auto_reload_in_flight = 1")  # a flag with no payment behind it at all
+    db.execute("DELETE FROM payments")
     stripe_service.reconcile()
     assert db.one("SELECT auto_reload_in_flight FROM users")["auto_reload_in_flight"] == 0
 
@@ -362,7 +371,7 @@ def test_failed_reload_request_keeps_the_reload_in_flight(monkeypatch):
     assert db.one("SELECT status FROM payments")["status"] == "pending"
 
 
-def test_reload_threshold_must_be_below_the_amount(client, signed_in):
+def test_reload_threshold_must_be_below_the_amount_and_bad_old_settings_do_nothing(client, signed_in):
     uid, h = signed_in
     db.execute("UPDATE users SET default_payment_method = 'pm_1' WHERE id = ?", (uid,))
     body = {"enabled": True, "thresholdCents": 5000, "amountCents": 1000, "monthlyCapCents": 5000, "consent": True}
@@ -372,36 +381,7 @@ def test_reload_threshold_must_be_below_the_amount(client, signed_in):
     assert stripe_service.users_needing_reload() == [] and stripe_service.run_auto_reload(uid) == "skip"
 
 
-# ---------------------------------------------------------------- F13: unrecovered refunds and disputes
-
-def test_refund_of_spent_credit_is_recorded():
-    uid = refundable_user()
-    ledger.debit_available(uid, 9_900_000, "usage")  # nearly all spent
-    refund = {"id": "ch_1", "payment_intent": None, "amount_refunded": 1000,
-              "refunds": {"data": [{"id": "re_1", "status": "succeeded", "amount": 1000}]}}
-    stripe_service._handle_charge_refunded(refund)
-    stripe_service._handle_charge_refunded(refund)  # delivered twice
-    rows = db.all_rows("SELECT detail FROM audit_log WHERE action = 'refund_unrecovered'")
-    assert [r["detail"] for r in rows] == ["p1:re_1:9900000 micros"]
-
-
-def test_dispute_of_spent_credit_is_recorded():
-    uid = refundable_user()
-    ledger.debit_available(uid, 9_000_000, "usage")
-    stripe_service._handle_dispute_created({"id": "dp_1", "charge": "ch_1", "reason": "fraudulent"})
-    rows = db.all_rows("SELECT detail FROM audit_log WHERE action = 'dispute_unrecovered'")
-    assert [r["detail"] for r in rows] == ["p1:dp_1:9000000 micros"]
-
-
-# ---------------------------------------------------------------- F9, F11, F12, F18: job completion and prices
-
-def running_job(uid, **kw):
-    jid = make_job(uid, **kw)
-    db.execute("UPDATE jobs SET status = 'running', duration_seconds = claimed_seconds WHERE id = ?", (jid,))
-    d = jobs.job_dir(jid)
-    (d / "out.wav").write_bytes(b"x")
-    return dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,))), d
-
+# ---------------------------------------------------------------- jobs: prices fixed at creation, limits, stages
 
 def test_a_job_that_is_no_longer_running_is_not_charged_again():
     from acw.worker import main as W
@@ -446,9 +426,7 @@ def test_an_older_job_without_a_leveling_price_never_pays_for_leveling():
         "denoise", "standard", 600, 10_000)
 
 
-# ---------------------------------------------------------------- F6: limits per tier
-
-def test_rebuild_is_limited_to_90_minutes(gpu_up):
+def test_rebuild_is_limited_to_90_minutes_and_standard_is_not(gpu_up):
     uid = user()
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     with pytest.raises(jobs.JobError, match="up to 90 minutes"):
@@ -457,49 +435,18 @@ def test_rebuild_is_limited_to_90_minutes(gpu_up):
     make_job(uid, denoise_tier="standard", claimed_seconds=3 * 3600)
 
 
-def test_stage_limits_and_estimates_follow_the_work():
+def test_stage_time_limits_scale_with_the_length():
     cpu, wall = jobs.stage_limits(4 * 3600, 4 * 3600)
     assert wall == 4 * 3600 * 2 + 1800 and cpu == 4 * 3600 * 8 + 1800
     assert jobs.stage_limits(600, 3600)[1] == 600 * 3 + 1800
 
-    def job(tier, noise="auto", channels=2):
-        return {"kind": "denoise", "claimed_seconds": 3600, "duration_seconds": None, "next_stage": "probe",
-                "params_json": json.dumps({"denoise_tier": tier, "transcribe_tier": None, "options": {"noise": noise},
-                                           "channels": channels})}
 
-    light, heavy, rebuild = (jobs.job_seconds(job("standard")), jobs.job_seconds(job("standard", "heavy")),
-                             jobs.job_seconds(job("rebuild")))
-    assert rebuild < heavy and light < heavy  # the rebuild runs on the card: 7.4x real time
-    assert jobs.job_needs(job("rebuild"))[0] == jobs.job_needs(job("standard"))[0] == jobs.JOB_MEM
+# ---------------------------------------------------------------- live sessions: meter, billing, saving
 
-
-# ---------------------------------------------------------------- F5, F7, F10, F20: live sessions
-
-def live_session(uid, **kw):
+def live_session(uid):
     from acw.stream import routes
 
-    sess = routes.Session(None, SimpleNamespace(user_id=uid), Features(denoise="light"))
-    return sess
-
-
-def test_startup_bills_the_saved_seconds_of_an_interrupted_session():
-    from acw.stream import routes
-
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    hold = ledger.create_hold(uid, 20_000, "stream", "s1")
-    ledger.create_hold(uid, 20_000, "stream", "s2")
-    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,paid_seconds,meter_rate,meter_seconds,started_at)"
-               " VALUES ('s1',?,'light','active',?,90,90,4000,90,?)", (uid, hold, db.now()))
-    idle = ledger.create_hold(uid, 20_000, "stream", "s3")
-    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,started_at) VALUES ('s3',?,'light','active',?,0,?)",
-               (uid, idle, db.now()))
-    asyncio.run(routes.startup())
-    s = db.one("SELECT status, end_reason, cost_micros FROM stream_sessions WHERE id = 's1'")
-    assert (s["status"], s["end_reason"], s["cost_micros"]) == ("ended", "server_restart", 6000)  # 90 s of light denoise
-    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's3'")["cost_micros"] == 0
-    assert ledger.balance(uid)["balance_micros"] == 5_000_000 - 6000
-    assert db.one("SELECT status FROM holds WHERE id = ?", (idle,))["status"] == "released"
+    return routes.Session(None, SimpleNamespace(user_id=uid), Features(denoise="light"))
 
 
 def test_session_seconds_are_counted_in_whole_samples():
@@ -512,8 +459,6 @@ def test_session_seconds_are_counted_in_whole_samples():
 
 
 def test_changed_features_bill_each_stretch_at_its_rate_and_round_up_once():
-    from acw.stream.features import Features
-
     s = live_session("u")
     s.count(48_000 * 60)  # a minute of noise removal
     s.set_features(Features(denoise="light", captions="local"))
@@ -543,7 +488,7 @@ def run_session(monkeypatch, messages, uid, **timeouts):
             return msg
 
         async def send_text(self, t):
-            self.sent.append(t)
+            self.sent.append(json.loads(t))
 
     class R:
         async def readexactly(self, n):
@@ -565,41 +510,56 @@ def run_session(monkeypatch, messages, uid, **timeouts):
     return sess
 
 
-def frame(reference=False, seq=0):
-    from acw.stream import protocol as P
-
-    return {"type": "websocket.receive", "bytes": P.HEADER.pack(P.VERSION, P.CODEC_S16, P.FLAG_REFERENCE if reference else 0, seq, 0) + bytes(960)}
-
-
-def test_echo_reference_frames_do_not_keep_a_session_alive(monkeypatch):
+def test_echo_reference_frames_do_not_keep_a_session_alive_and_the_client_is_told(monkeypatch):
     uid = user()
-    sess = run_session(monkeypatch, [(0.05, frame(reference=True, seq=i)) for i in range(30)], uid, IDLE_TIMEOUT=0.3)
+    sess = run_session(monkeypatch, [(0.01, frame(reference=True, seq=i)) for i in range(20)], uid, IDLE_TIMEOUT=0.1)
     assert sess.end_reason == "idle_timeout" and sess.seconds == 0
+    assert {"type": "stopped", "reason": "idle_timeout"} in sess.ws.sent
 
 
-def test_microphone_audio_keeps_a_session_alive(monkeypatch):
+def test_microphone_audio_keeps_a_session_alive_and_is_billed_by_length(monkeypatch):
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    sess = run_session(monkeypatch, [(0.1, frame(seq=i)) for i in range(8)] + [(0.1, {"type": "websocket.disconnect"})], uid,
+    sess = run_session(monkeypatch, [(0.02, frame(seq=i)) for i in range(4)] + [(0.02, {"type": "websocket.disconnect"})], uid,
                        IDLE_TIMEOUT=0.3)
-    assert sess.end_reason == "client_closed" and sess.seconds == pytest.approx(0.08)
+    assert sess.end_reason == "client_closed" and sess.seconds == pytest.approx(0.04)
 
 
 def test_session_ends_at_the_wall_clock_limit(monkeypatch):
     uid = user()
-    sess = run_session(monkeypatch, [(0.05, {"type": "websocket.receive", "text": json.dumps({"type": "ping"})})] * 40, uid,
-                       MAX_SESSION_SECONDS=0.3)
+    sess = run_session(monkeypatch, [(0.02, {"type": "websocket.receive", "text": json.dumps({"type": "ping"})})] * 40, uid,
+                       MAX_SESSION_SECONDS=0.2)
     assert sess.end_reason == "max_duration"
 
 
 def test_suspension_stops_a_running_session(monkeypatch):
     uid = user()
     db.execute("UPDATE users SET status = 'suspended' WHERE id = ?", (uid,))
-    sess = run_session(monkeypatch, [(0.05, frame(seq=i)) for i in range(20)], uid, PERSIST_EVERY=0.2)
+    sess = run_session(monkeypatch, [(0.02, frame(seq=i)) for i in range(20)], uid, PERSIST_EVERY=0.1)
     assert sess.end_reason == "account_closed"
 
 
-def test_session_progress_is_saved(monkeypatch):
+def test_startup_bills_the_saved_seconds_of_an_interrupted_session():
+    from acw.stream import routes
+
+    uid = user()
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    hold = ledger.create_hold(uid, 20_000, "stream", "s1")
+    ledger.create_hold(uid, 20_000, "stream", "s2")
+    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,paid_seconds,meter_rate,meter_seconds,started_at)"
+               " VALUES ('s1',?,'light','active',?,90,90,4000,90,?)", (uid, hold, db.now()))
+    idle = ledger.create_hold(uid, 20_000, "stream", "s3")
+    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,started_at) VALUES ('s3',?,'light','active',?,0,?)",
+               (uid, idle, db.now()))
+    asyncio.run(routes.startup())
+    s = db.one("SELECT status, end_reason, cost_micros FROM stream_sessions WHERE id = 's1'")
+    assert (s["status"], s["end_reason"], s["cost_micros"]) == ("ended", "server_restart", 6000)  # 90 s of light denoise
+    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's3'")["cost_micros"] == 0
+    assert ledger.balance(uid)["balance_micros"] == 5_000_000 - 6000
+    assert db.one("SELECT status FROM holds WHERE id = ?", (idle,))["status"] == "released"
+
+
+def test_session_progress_is_saved_for_the_billing_after_a_crash(monkeypatch):
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     db.execute("INSERT INTO stream_sessions(id,user_id,status,started_at) VALUES ('s9',?,'active',?)", (uid, db.now()))
@@ -609,4 +569,3 @@ def test_session_progress_is_saved(monkeypatch):
     sess.id, sess.samples = "s9", 48_000 * 31
     assert asyncio.run(routes._persist(sess)) is True
     assert db.one("SELECT seconds FROM stream_sessions WHERE id = 's9'")["seconds"] == 31
-

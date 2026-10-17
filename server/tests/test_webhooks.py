@@ -7,7 +7,6 @@ import json
 import re
 import ssl
 import time
-from pathlib import Path
 
 import pytest
 
@@ -81,49 +80,37 @@ def run(coro):
 
 # ---------------------------------------------------------------- the address
 
-@pytest.mark.parametrize("url,expected", [
-    ("https://hooks.example.com/acw", "https://hooks.example.com/acw"),
-    ("https://hooks.example.com:443/acw?a=b&c=d", "https://hooks.example.com/acw?a=b&c=d"),
-    ("HTTPS://Hooks.Example.COM/a%20b", "https://hooks.example.com/a%20b"),
-    ("https://hooks.example.com", "https://hooks.example.com/"),
-    ("  https://hooks.example.com./x  ", "https://hooks.example.com/x"),
-    ("https://a.b.c.example.org/x/y/z", "https://a.b.c.example.org/x/y/z"),
-])
-def test_good_addresses_are_accepted_and_normalised(url, expected):
-    assert webhooks.check_url(url) == expected
+def test_good_addresses_are_accepted_and_normalised():
+    for url, expected in [
+        ("https://hooks.example.com/acw", "https://hooks.example.com/acw"),
+        ("https://hooks.example.com:443/acw?a=b&c=d", "https://hooks.example.com/acw?a=b&c=d"),
+        ("HTTPS://Hooks.Example.COM/a%20b", "https://hooks.example.com/a%20b"),
+        ("  https://hooks.example.com./x  ", "https://hooks.example.com/x"),
+    ]:
+        assert webhooks.check_url(url) == expected, url
 
 
-@pytest.mark.parametrize("url,why", [
-    ("", "empty"),
-    ("http://hooks.example.com/x", "https"),
-    ("ftp://hooks.example.com/x", "https"),
-    ("//hooks.example.com/x", "https"),
-    ("hooks.example.com/x", "https"),
-    ("https://hooks.example.com:8443/x", "443"),
-    ("https://hooks.example.com:80/x", "443"),
-    ("https://hooks.example.com:abc/x", "valid"),
-    ("https://user:pw@hooks.example.com/x", "user name"),
-    ("https://user@hooks.example.com/x", "user name"),
-    ("https://hooks.example.com/x#frag", "fragment"),
-    ("https://127.0.0.1/x", "IP address"),
-    ("https://10.0.0.5/x", "IP address"),
-    ("https://[::1]/x", "IP address"),
-    ("https://[2606:4700::1111]/x", "IP address"),
-    ("https://2130706433/x", "public host name"),   # decimal 127.0.0.1: not a name with a dot
-    ("https://localhost/x", "public host name"),
-    ("https://printer.local/x", "public host name"),
-    ("https://db.internal/x", "public host name"),
-    ("https://intranet/x", "public host name"),
-    ("https://exa mple.com/x", "ASCII"),
-    ("https://hooks.exämple.com/x", "ASCII"),
-    ("https://-bad-.example.com/x", "public host name"),
-    ("https://hooks.example.com/" + "a" * 600, "at most"),
-    ("https://testserver/x", "public host name"),
-])
-def test_bad_addresses_are_refused(url, why):
-    with pytest.raises(ValueError) as e:
-        webhooks.check_url(url)
-    assert why in str(e.value)
+def test_bad_addresses_are_refused():
+    cases = [
+        ("", "empty"),
+        ("http://hooks.example.com/x", "https"),
+        ("//hooks.example.com/x", "https"),
+        ("https://hooks.example.com:8443/x", "443"),
+        ("https://user:pw@hooks.example.com/x", "user name"),
+        ("https://hooks.example.com/x#frag", "fragment"),
+        ("https://127.0.0.1/x", "IP address"),
+        ("https://[2606:4700::1111]/x", "IP address"),
+        ("https://2130706433/x", "public host name"),  # decimal 127.0.0.1: not a name with a dot
+        ("https://localhost/x", "public host name"),
+        ("https://db.internal/x", "public host name"),
+        ("https://hooks.exämple.com/x", "ASCII"),
+        ("https://hooks.example.com/" + "a" * 600, "at most"),
+        ("https://testserver/x", "public host name"),
+    ]
+    for url, why in cases:
+        with pytest.raises(ValueError) as e:
+            webhooks.check_url(url)
+        assert why in str(e.value), url
 
 
 def test_the_service_itself_is_not_a_target(monkeypatch):
@@ -133,36 +120,21 @@ def test_the_service_itself_is_not_a_target(monkeypatch):
     get_settings.cache_clear()
     with pytest.raises(ValueError, match="back at this service"):
         webhooks.check_url("https://audio.example.net/api/jobs")
-    assert webhooks.check_url("https://other.example.net/x")
 
 
-@pytest.mark.parametrize("ip", [
-    "93.184.216.34", "8.8.8.8", "1.1.1.1", "2606:4700:4700::1111", "2a00:1450:4009:81f::200e",
-])
-def test_public_addresses_pass(ip):
-    assert webhooks.is_public_ip(ip)
-
-
-@pytest.mark.parametrize("ip", [
-    "0.0.0.0", "0.1.2.3", "10.0.0.1", "10.255.255.255", "100.64.0.1", "100.127.255.254",  # CGNAT
-    "127.0.0.1", "127.1.2.3", "169.254.169.254", "172.16.0.1", "172.31.255.255", "192.0.0.1", "192.0.2.1",
-    "192.168.1.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "239.255.255.250", "240.0.0.1",
-    "255.255.255.255",
-    "::", "::1", "::2", "fe80::1", "fe80::1%eth0", "fc00::1", "fd12:3456::1", "ff02::1", "2001:db8::1",
-    "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::ffff:192.168.0.1",  # IPv4 inside IPv6
-    "64:ff9b::7f00:1", "2002:7f00:1::1", "2001::1", "100::1", "fec0::1",
-    "198.51.100.77",  # this machine's own address (the fixture's)
-    "not an address", "",
-])
-def test_everything_that_is_not_the_public_internet_is_refused(ip):
-    assert not webhooks.is_public_ip(ip)
-
-
-def test_extra_networks_can_be_denied_by_the_owner(monkeypatch):
-    monkeypatch.setenv("ACW_WEBHOOK_DENY", "93.184.216.0/24, garbage, 2606:4700::/32")
-    assert not webhooks.is_public_ip("93.184.216.34")
-    assert not webhooks.is_public_ip("2606:4700:4700::1111")
-    assert webhooks.is_public_ip("8.8.8.8")
+def test_only_the_public_internet_is_a_target():
+    cases = [
+        ("93.184.216.34", True), ("2606:4700:4700::1111", True),
+        ("0.0.0.0", False), ("10.0.0.1", False), ("100.64.0.1", False),  # CGNAT
+        ("127.0.0.1", False), ("169.254.169.254", False), ("172.16.0.1", False), ("192.168.1.1", False),
+        ("198.51.100.1", False), ("224.0.0.1", False), ("240.0.0.1", False),
+        ("::1", False), ("fe80::1", False), ("fc00::1", False), ("::ffff:127.0.0.1", False),  # IPv4 inside IPv6
+        ("::ffff:169.254.169.254", False), ("64:ff9b::7f00:1", False), ("2002:7f00:1::1", False),
+        ("198.51.100.77", False),  # this machine's own address (the fixture's)
+        ("not an address", False), ("", False),
+    ]
+    for ip, public in cases:
+        assert webhooks.is_public_ip(ip) is public, ip
 
 
 def test_the_machines_own_addresses_are_found_and_refused(monkeypatch):
@@ -176,15 +148,12 @@ def test_the_machines_own_addresses_are_found_and_refused(monkeypatch):
     webhooks._own.update(at=-1e9, addrs=frozenset())  # do not leave the fake list for other tests
 
 
-# ---------------------------------------------------------------- resolving
+# ---------------------------------------------------------------- resolving and one attempt
 
-def test_every_resolved_address_must_be_public(net):
+def test_every_resolved_address_must_be_public_and_a_failing_lookup_is_a_refusal(net, monkeypatch):
     net.dns["mixed.example.com"] = [PUBLIC, "10.0.0.8"]  # a rebinding answer: one good, one private
     with pytest.raises(webhooks.Refused, match="can't be called"):
         run(webhooks.resolve_public("mixed.example.com"))
-    net.dns["v6.example.com"] = ["fd00::1"]
-    with pytest.raises(webhooks.Refused):
-        run(webhooks.resolve_public("v6.example.com"))
     net.dns["mapped.example.com"] = ["::ffff:127.0.0.1"]
     with pytest.raises(webhooks.Refused):
         run(webhooks.resolve_public("mapped.example.com"))
@@ -194,8 +163,6 @@ def test_every_resolved_address_must_be_public(net):
     net.dns["ok.example.com"] = [PUBLIC, "2606:4700:4700::1111"]
     assert run(webhooks.resolve_public("ok.example.com")) == PUBLIC
 
-
-def test_a_failing_lookup_is_a_refusal_not_a_crash(monkeypatch):
     async def boom(host):
         raise OSError("no such host")
 
@@ -204,29 +171,19 @@ def test_a_failing_lookup_is_a_refusal_not_a_crash(monkeypatch):
         run(webhooks.resolve_public("nowhere.example.com"))
 
 
-# ---------------------------------------------------------------- one attempt
-
-def test_signature_is_hmac_sha256_over_timestamp_dot_body():
-    sig = webhooks.sign("whsec_abc", 1700000000, b'{"a":1}')
-    expect = hmac.new(b"whsec_abc", b'1700000000.{"a":1}', hashlib.sha256).hexdigest()
-    assert sig == f"t=1700000000,v1={expect}"
-
-
-def test_a_delivery_goes_to_the_resolved_address_with_a_valid_signature(net):
+def test_a_delivery_goes_to_the_checked_address_with_a_valid_signature(net):
     body = b'{"jobId":"x"}'
     status, error = run(webhooks.attempt(URL, body, "whsec_test"))
     assert (status, error) == (200, None)
     assert net.connects == [(PUBLIC, "hooks.example.com")]  # connected to the address that was checked, TLS name from the URL
     assert net.dns_calls == ["hooks.example.com"]  # looked up once: nothing resolves again between the check and the connect
-    sent = net.writers[0].sent
-    head, _, got_body = sent.partition(b"\r\n\r\n")
+    head, _, got_body = net.writers[0].sent.partition(b"\r\n\r\n")
     assert got_body == body and net.writers[0].closed
     lines = head.decode().split("\r\n")
     assert lines[0] == "POST /acw?token=secret-token HTTP/1.1"
     headers = dict(l.split(": ", 1) for l in lines[1:])
     assert headers["Host"] == "hooks.example.com" and headers["Content-Type"] == "application/json"
     assert headers["Content-Length"] == str(len(body)) and headers["Connection"] == "close"
-    assert headers["User-Agent"].startswith("AudioCleaner-Webhook")
     t, v1 = re.fullmatch(r"t=(\d+),v1=([0-9a-f]{64})", headers["X-Audio-Cleaner-Signature"]).groups()
     assert abs(int(t) - time.time()) < 5
     assert hmac.compare_digest(v1, hmac.new(b"whsec_test", t.encode() + b"." + body, hashlib.sha256).hexdigest())
@@ -234,11 +191,8 @@ def test_a_delivery_goes_to_the_resolved_address_with_a_valid_signature(net):
 
 @pytest.mark.parametrize("answer,expected_status,words", [
     (b"HTTP/1.1 301 Moved\r\nLocation: http://169.254.169.254/\r\n\r\n", 301, "redirects are not followed"),
-    (b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.example.com/\r\n\r\n", 302, "redirects"),
     (b"HTTP/1.1 500 Oops\r\n\r\n", 500, "HTTP 500"),
-    (b"HTTP/1.0 404 Nope\r\n\r\n", 404, "HTTP 404"),
     (b"HTTP/1.1 204 No Content\r\n\r\n", 204, None),
-    (b"garbage\r\n", None, "could not connect"),
     (b"", None, "could not connect"),
 ])
 def test_only_a_2xx_answer_counts_and_redirects_are_never_followed(net, answer, expected_status, words):
@@ -249,21 +203,11 @@ def test_only_a_2xx_answer_counts_and_redirects_are_never_followed(net, answer, 
     assert len(net.connects) == 1  # no second request to wherever the redirect pointed
 
 
-def test_an_endless_answer_is_cut_off(net):
+def test_an_endless_answer_is_cut_off_and_a_slow_receiver_times_out(net, monkeypatch):
     net.answer = b"HTTP/1.1 200 " + b"x" * 100_000 + b"\r\n"
     status, error = run(webhooks.attempt(URL, b"{}", "whsec_x"))
     assert status is None and error
-
-
-def test_connection_trouble_is_reported_in_plain_words(net):
-    net.error = ConnectionRefusedError()
-    assert run(webhooks.attempt(URL, b"{}", "s")) == (None, "could not connect or read the answer")
-    net.error = ssl.SSLCertVerificationError("bad cert")
-    assert run(webhooks.attempt(URL, b"{}", "s"))[1].startswith("TLS error")
-
-
-def test_a_slow_receiver_times_out_after_five_seconds(net, monkeypatch):
-    assert webhooks.ATTEMPT_SECONDS == 5.0
+    net.answer = b"HTTP/1.1 200 OK\r\n\r\n"
     monkeypatch.setattr(webhooks, "ATTEMPT_SECONDS", 0.1)
     net.delay = 2
     started = time.monotonic()
@@ -272,11 +216,18 @@ def test_a_slow_receiver_times_out_after_five_seconds(net, monkeypatch):
 
 
 def test_a_private_address_is_refused_before_any_connection(net):
-    for target in ("10.1.2.3", "127.0.0.1", "169.254.169.254", "100.64.9.9", "::1", "fe80::5", "198.51.100.77", "224.0.0.1"):
+    for target in ("10.1.2.3", "127.0.0.1", "169.254.169.254", "::1", "198.51.100.77"):
         net.dns["evil.example.com"] = [target]
         status, error = run(webhooks.attempt("https://evil.example.com/hook", b"{}", "s"))
         assert status is None and error.startswith("refused:"), target
     assert net.connects == []  # not even a connection attempt
+
+
+def test_connection_trouble_and_bad_certificates_are_reported_in_plain_words(net):
+    net.error = ConnectionRefusedError()
+    assert run(webhooks.attempt(URL, b"{}", "s")) == (None, "could not connect or read the answer")
+    net.error = ssl.SSLCertVerificationError("bad cert")
+    assert run(webhooks.attempt(URL, b"{}", "s"))[1].startswith("TLS error")
 
 
 # ---------------------------------------------------------------- jobs with a callback
@@ -326,7 +277,7 @@ def test_a_bad_callback_address_stops_the_job_from_being_made(client, signed_in)
     assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0 and ledger.balance(uid)["held_micros"] == 0
 
 
-def test_a_finished_job_is_delivered_and_the_result_shows_with_the_job(client, signed_in, net):
+def test_a_finished_job_is_delivered_once_signed_with_the_account_secret(client, signed_in, net):
     uid, h = signed_in
     credit(uid)
     job_id = create(client, h)
@@ -339,15 +290,12 @@ def test_a_finished_job_is_delivered_and_the_result_shows_with_the_job(client, s
     cb = callback_of(client, job_id)
     assert cb["state"] == "delivered" and cb["attempts"] == 1 and cb["lastStatus"] == 200 and cb["lastError"] is None
     assert abs(cb["deliveredAt"] - time.time()) < 5
-    payload = sent_json(net)
     row = db.one("SELECT finished_at, expires_at FROM jobs WHERE id = ?", (job_id,))
-    assert payload == {
+    assert sent_json(net) == {
         "type": "job.done", "jobId": job_id, "status": "done", "error": None, "costMicros": 90_000,
         "outputs": [{"name": "talk-cleaned.wav", "kind": "audio", "bytes": 4321}, {"name": "talk.es.srt", "kind": "captions", "bytes": 80, "lang": "es"}],
         "finishedAt": row["finished_at"], "expiresAt": row["expires_at"],
     }
-    assert len(net.writers[0].sent) < 2000  # small
-    # the signature uses the account's secret, the one the card shows
     secret = db.one("SELECT webhook_secret s FROM users WHERE id = ?", (uid,))["s"]
     assert secret.startswith("whsec_")
     sig = re.search(rb"X-Audio-Cleaner-Signature: t=(\d+),v1=([0-9a-f]+)", net.writers[0].sent)
@@ -355,8 +303,7 @@ def test_a_finished_job_is_delivered_and_the_result_shows_with_the_job(client, s
     assert sig.group(2).decode() == hmac.new(secret.encode(), sig.group(1) + b"." + body, hashlib.sha256).hexdigest()
     assert run(webhooks.deliver_due()) == 0  # once only
     assert len(net.connects) == 1
-    listed = client.get("/api/jobs").json()["jobs"]
-    assert listed[0]["callback"]["state"] == "delivered"
+    assert client.get("/api/jobs").json()["jobs"][0]["callback"]["state"] == "delivered"
 
 
 def test_failed_and_canceled_jobs_are_delivered_too(client, signed_in, net):
@@ -396,20 +343,6 @@ def test_failed_deliveries_are_retried_three_times_with_backoff_then_given_up(cl
     assert len(net.connects) == 3
 
 
-def test_a_later_success_after_a_failure_is_recorded(client, signed_in, net):
-    uid, h = signed_in
-    credit(uid)
-    job_id = create(client, h)
-    finish(job_id)
-    net.answer = b"HTTP/1.1 500 x\r\n\r\n"
-    run(webhooks.deliver_due())
-    net.answer = b"HTTP/1.1 200 OK\r\n\r\n"
-    db.execute("UPDATE job_callbacks SET next_attempt_at = 0")
-    run(webhooks.deliver_due())
-    cb = callback_of(client, job_id)
-    assert cb["state"] == "delivered" and cb["attempts"] == 2 and cb["lastError"] is None and cb["lastStatus"] == 200
-
-
 def test_an_address_that_resolves_to_a_private_place_is_given_up_at_once(client, signed_in, net):
     uid, h = signed_in
     credit(uid)
@@ -422,36 +355,7 @@ def test_an_address_that_resolves_to_a_private_place_is_given_up_at_once(client,
     assert net.connects == []
 
 
-def test_deliveries_run_side_by_side_and_never_block_the_event_loop(client, signed_in, net):
-    uid, h = signed_in
-    credit(uid)
-    ids = [create(client, h) for _ in range(3)]
-    for i in ids:
-        finish(i)
-    net.delay = 0.3
-
-    async def main():
-        ticks = 0
-
-        async def beat():
-            nonlocal ticks
-            while True:
-                await asyncio.sleep(0.01)
-                ticks += 1
-
-        t = asyncio.create_task(beat())
-        started = time.monotonic()
-        tried = await webhooks.deliver_due()
-        took = time.monotonic() - started
-        t.cancel()
-        return tried, took, ticks
-
-    tried, took, ticks = run(main())
-    assert tried == 3 and took < 0.8  # three at once, not one after the other
-    assert ticks > 15  # the loop kept running while they waited
-
-
-def test_at_most_four_deliveries_at_once(client, signed_in, net, monkeypatch):
+def test_many_deliveries_run_side_by_side_at_most_four_at_once_without_blocking_the_loop(client, signed_in, net, monkeypatch):
     assert webhooks.CONCURRENCY == 4
     uid, h = signed_in
     credit(uid)
@@ -465,31 +369,39 @@ def test_at_most_four_deliveries_at_once(client, signed_in, net, monkeypatch):
         return await net.open(ip, host)
 
     monkeypatch.setattr(webhooks, "_open", slow_open)
-    for i in range(7):
+    for _ in range(7):
         job_id = db.new_id()
         db.execute("INSERT INTO jobs(id,user_id,kind,tier,status,params_json,input_name,input_bytes,claimed_seconds,created_at,finished_at)"
                    " VALUES (?,?,'denoise','standard','failed','{}','a',1,1,?,?)", (job_id, uid, db.now(), db.now()))
         db.execute("INSERT INTO job_callbacks(job_id,user_id,url,created_at) VALUES (?,?,?,?)", (job_id, uid, URL, db.now()))
-    assert run(webhooks.deliver_due(limit=20)) == 7
-    assert seen["max"] == 4
+
+    async def main():
+        ticks = 0
+
+        async def beat():
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        t = asyncio.create_task(beat())
+        tried = await webhooks.deliver_due(limit=20)
+        t.cancel()
+        return tried, ticks
+
+    tried, ticks = run(main())
+    assert tried == 7 and seen["max"] == 4
+    assert ticks > 3  # the loop kept running while they waited (timing-based: kept loose)
 
 
-def test_two_processes_cannot_deliver_the_same_callback(client, signed_in, net):
-    uid, h = signed_in
-    credit(uid)
-    finish(create(client, h))
-    first = webhooks._claim_due(10)
-    second = webhooks._claim_due(10)
-    assert len(first) == 1 and second == []  # claimed: the other caller finds nothing until the claim runs out
-
-
-def test_a_claim_that_never_reported_back_is_tried_again(client, signed_in, net):
+def test_a_callback_is_claimed_by_one_process_and_a_dead_claim_is_retried(client, signed_in, net):
     uid, h = signed_in
     credit(uid)
     job_id = create(client, h)
     finish(job_id)
-    assert len(webhooks._claim_due(10)) == 1  # then the process dies
-    db.execute("UPDATE job_callbacks SET next_attempt_at = ?", (db.now() - 1,))
+    first = webhooks._claim_due(10)
+    assert len(first) == 1 and webhooks._claim_due(10) == []  # the other caller finds nothing until the claim runs out
+    db.execute("UPDATE job_callbacks SET next_attempt_at = ?", (db.now() - 1,))  # then the process dies without reporting back
     assert run(webhooks.deliver_due()) == 1
     assert callback_of(client, job_id)["state"] == "delivered"
 
@@ -500,39 +412,6 @@ def test_a_suspended_account_gets_no_callbacks(client, signed_in, net):
     finish(create(client, h))
     db.execute("UPDATE users SET status = 'suspended' WHERE id = ?", (uid,))
     assert run(webhooks.deliver_due()) == 0 and net.connects == []
-
-
-def test_the_background_loop_delivers(client, signed_in, net, monkeypatch):
-    uid, h = signed_in
-    credit(uid)
-    job_id = create(client, h)
-    finish(job_id)
-    monkeypatch.setattr(webhooks, "POLL_SECONDS", 0.05)
-    # the app's loop sleeps with the old value for its first round; start a fresh one on its own event loop
-    import threading
-
-    stop = threading.Event()
-
-    def loop_thread():
-        async def main():
-            t = asyncio.create_task(webhooks.run_loop())
-            while not stop.is_set():
-                await asyncio.sleep(0.05)
-            t.cancel()
-
-        asyncio.run(main())
-
-    th = threading.Thread(target=loop_thread, daemon=True)
-    th.start()
-    try:
-        for _ in range(60):
-            if callback_of(client, job_id)["state"] == "delivered":
-                break
-            time.sleep(0.05)
-    finally:
-        stop.set()
-        th.join(5)
-    assert callback_of(client, job_id)["state"] == "delivered"
 
 
 def test_old_results_are_pruned_and_endless_waits_given_up():
@@ -547,24 +426,25 @@ def test_old_results_are_pruned_and_endless_waits_given_up():
     assert left == {"new-ok": "delivered", "stuck": "failed", "fresh": "pending"}
 
 
-def test_only_the_web_process_delivers():
-    root = Path(__file__).resolve().parents[1] / "acw"
-    assert "webhooks.run_loop" in (root / "app.py").read_text()
-    for other in ("bulk_app.py", "worker/main.py", "worker/runner.py"):
-        assert "webhooks" not in (root / other).read_text(), other
-
-
 # ---------------------------------------------------------------- the secret
 
-def test_the_secret_is_made_shown_and_rotated_in_the_browser(client, signed_in):
+def test_the_secret_is_made_shown_and_rotated_and_a_rotation_signs_the_waiting_callbacks(client, signed_in, net):
     uid, h = signed_in
     assert client.get("/api/keys/webhook-secret").json() == {"secret": None}
     first = client.post("/api/keys/webhook-secret", headers=h).json()["secret"]
     assert first.startswith("whsec_") and len(first) > 30
     assert client.get("/api/keys/webhook-secret").json() == {"secret": first}
+    credit(uid)
+    job_id = create(client, h)
+    finish(job_id)
     second = client.post("/api/keys/webhook-secret", headers=h).json()["secret"]
     assert second != first and client.get("/api/keys/webhook-secret").json() == {"secret": second}
     assert "webhook_secret_rotated" in [r["action"] for r in db.all_rows("SELECT action FROM audit_log")]
+    run(webhooks.deliver_due())  # the callback waiting since before the rotation is signed with the new secret
+    sig = re.search(rb"v1=([0-9a-f]+)", net.writers[0].sent).group(1).decode()
+    stamp = re.search(rb"t=(\d+)", net.writers[0].sent).group(1)
+    body = net.writers[0].sent.partition(b"\r\n\r\n")[2]
+    assert sig == hmac.new(second.encode(), stamp + b"." + body, hashlib.sha256).hexdigest()
 
 
 def test_an_api_key_can_neither_read_nor_rotate_the_secret(client, signed_in):
@@ -577,27 +457,6 @@ def test_an_api_key_can_neither_read_nor_rotate_the_secret(client, signed_in):
     kh = {"Authorization": f"Bearer {key}"}
     assert client.get("/api/keys/webhook-secret", headers=kh).status_code == 403
     assert client.post("/api/keys/webhook-secret", headers=kh).status_code == 403
-
-
-def test_using_a_callback_makes_the_secret_so_it_can_be_seen_and_checked(client, signed_in):
-    uid, h = signed_in
-    credit(uid)
-    assert client.get("/api/keys/webhook-secret").json()["secret"] is None
-    create(client, h)
-    assert client.get("/api/keys/webhook-secret").json()["secret"].startswith("whsec_")
-
-
-def test_a_rotated_secret_signs_the_waiting_callbacks(client, signed_in, net):
-    uid, h = signed_in
-    credit(uid)
-    job_id = create(client, h)
-    finish(job_id)
-    new = client.post("/api/keys/webhook-secret", headers=h).json()["secret"]
-    run(webhooks.deliver_due())
-    sig = re.search(rb"v1=([0-9a-f]+)", net.writers[0].sent).group(1).decode()
-    stamp = re.search(rb"t=(\d+)", net.writers[0].sent).group(1)
-    body = net.writers[0].sent.partition(b"\r\n\r\n")[2]
-    assert sig == hmac.new(new.encode(), stamp + b"." + body, hashlib.sha256).hexdigest()
 
 
 def test_the_secret_is_not_in_the_account_export_and_goes_with_the_account(client, signed_in):

@@ -182,7 +182,8 @@ mod tests {
         let mut g = Gate::default();
         g.feed(&talk(), 0.0);
         let p = g.silence(48_000 * 10);
-        assert_eq!(p, vec![Piece::Audio(vec![0.0; (GATE_AFTER_S * 48_000.0) as usize - 960 * 0]), Piece::Skip(48_000 * 10 - (GATE_AFTER_S * 48_000.0) as usize)]);
+        let tail = (GATE_AFTER_S * 48_000.0) as usize;
+        assert_eq!(p, vec![Piece::Audio(vec![0.0; tail]), Piece::Skip(48_000 * 10 - tail)]);
         assert_eq!(g.finish(), 0); // silence frames were never billed: nothing to give back
     }
 

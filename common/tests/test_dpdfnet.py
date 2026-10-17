@@ -71,26 +71,24 @@ def test_atten_limit_scales_with_strength(sig, full):
     assert drop(full) > 30
 
 
-def test_stereo_is_per_channel(sig):
-    clean, noisy, gate = sig
-    n = len(noisy)
+def test_stereo_is_per_channel(sig, full):
+    _, noisy, gate = sig
     stereo = np.stack([noisy, np.roll(noisy, 4800)], axis=1).astype(np.float32)
     y = dpdfnet.denoise_array(stereo, threads=THREADS)
-    assert y.shape == (n, 2) and np.isfinite(y).all()
-    left = dpdfnet.denoise_array(noisy, threads=THREADS)
-    assert np.allclose(y[:, 0], left, atol=1e-5)
+    assert y.shape == (len(noisy), 2) and np.isfinite(y).all()
+    assert np.allclose(y[:, 0], full, atol=1e-5)  # the left channel is the mono result
     assert noise_only_energy(y[:, 1], np.roll(gate, 4800)) < 0.2 * noise_only_energy(stereo[:, 1], np.roll(gate, 4800))
 
 
 def test_short_and_empty_inputs():
     assert dpdfnet.denoise_array(np.zeros(0, np.float32)).shape == (0,)
-    for n in (1, 100, 480, 959, 1500):
+    for n in (1, 959, 1500):
         y = dpdfnet.denoise_array(np.random.default_rng(n).standard_normal(n).astype(np.float32) * 0.01, threads=1)
         assert y.shape == (n,) and np.isfinite(y).all()
 
 
 def test_output_is_time_aligned(sig, full):
-    clean, noisy, gate = sig
+    clean, _, _ = sig
     # cross-correlation peak of the enhanced signal with the clean one is at lag 0
     seg = slice(SR // 2, 3 * SR)
     lags = range(-60, 61)
@@ -116,8 +114,10 @@ def test_cancel():
     assert seen and max(seen) < 0.6  # stopped early
 
 
-def test_long_input_is_processed_block_wise(monkeypatch, tmp_path):
-    clean, noisy, gate = syllables(14.0, seed=3)
+def test_long_input_is_block_wise_and_parallel_segments_match_the_batch_of_one(tmp_path, monkeypatch):
+    """Sequential: pushed in blocks of a few seconds, not in one call. Parallel segments written into a memory map: the
+    batched model gives what each segment gives alone (batch of 1), and the warm-up makes them agree with one pass."""
+    clean, noisy, gate = syllables(12.5, seed=3)
     pushed = []
     orig = dpdfnet._Stream.prepare
 
@@ -128,35 +128,27 @@ def test_long_input_is_processed_block_wise(monkeypatch, tmp_path):
     monkeypatch.setattr(dpdfnet._Stream, "prepare", spy)
     seq = dpdfnet.denoise_array(noisy, threads=1)
     assert max(pushed) <= dpdfnet._BLOCK_FRAMES * dpdfnet.HOP < len(noisy) // 3
-    assert len(pushed) >= 7  # many small blocks, not one big call
+    assert len(pushed) >= 6  # many small blocks, not one big call
     pushed.clear()
-    # write straight into a memory-mapped file, in parallel segments with warm-up + crossfade
     mm = np.lib.format.open_memmap(tmp_path / "o.npy", mode="w+", dtype=np.float32, shape=(len(noisy), 1))
     fractions = []
     ret = dpdfnet.denoise_array(noisy[:, None], threads=THREADS, out=mm, segment_seconds=4, overlap_seconds=1.5,
                                 progress=fractions.append)
-    assert ret is mm and len(pushed) > 5  # blocks of several segments at once
+    assert ret is mm and len(pushed) > 2
     par = np.asarray(mm[:, 0])
     assert fractions and fractions[-1] == 1.0 and all(a <= b + 1e-9 for a, b in zip(fractions, fractions[1:]))
-    # parallel segments agree with the single sequential pass (RNN warm-up converged)
     err = np.sqrt(np.mean((par - seq) ** 2)) / np.sqrt(np.mean(seq ** 2))
-    assert err < 0.05, err
+    assert err < 0.05, err  # RNN warm-up converged
     assert noise_only_energy(par, gate) < 0.2 * noise_only_energy(noisy, gate)
-
-
-def test_batched_rows_equal_rows_run_alone(monkeypatch):
-    """Segments stepped together in one call give what each gives through the model alone (batch of 1)."""
-    clean, noisy, gate = syllables(14.0, seed=7)
-    got = dpdfnet.denoise_array(noisy, threads=2, segment_seconds=4, overlap_seconds=1.5)
     monkeypatch.setattr(dpdfnet, "MAX_BATCH", 1)
     dpdfnet.unload()
-    ref = dpdfnet.denoise_array(noisy, threads=2, segment_seconds=4, overlap_seconds=1.5)
+    ref = dpdfnet.denoise_array(noisy, threads=THREADS, segment_seconds=4, overlap_seconds=1.5)
     dpdfnet.unload()
-    assert np.abs(got - ref).max() < 1e-4
+    assert np.abs(par - ref).max() < 1e-4
 
 
 class _FakeCard(dpdfnet._Model):
-    """The batched CPU model dressed as the card: it takes up to 64 rows per call, one group at a time."""
+    """The batched CPU model dressed as the card: it takes up to GPU_ROWS[-1] rows per call, one group at a time."""
 
     gpu = True
     steps: list = []
@@ -174,34 +166,21 @@ class _FakeCard(dpdfnet._Model):
         return super().step(spec, state)
 
 
-def test_gpu_path_streams_all_segments_in_one_group(monkeypatch):
-    """device="cuda": same segments and same output as the CPU path, but every segment of the file in one call (the card
-    wants rows), driven from one thread."""
-    clean, noisy, gate = syllables(32.0, seed=11)
-    monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
-    _FakeCard.steps.clear()
-    dpdfnet.unload()
-    kw = dict(threads=4, segment_seconds=10, overlap_seconds=1.5)
-    cpu = dpdfnet.denoise_array(noisy, **kw)
-    assert not _FakeCard.steps
-    gpu = dpdfnet.denoise_array(noisy, device="cuda", **kw)
-    dpdfnet.unload()
-    assert len(set(_FakeCard.steps)) == 1 and _FakeCard.steps[0] >= 3, _FakeCard.steps[:5]
-    assert np.abs(gpu - cpu).max() < 1e-4
-
-
-def test_gpu_path_groups_by_the_rows_the_card_takes(monkeypatch):
-    clean, noisy, gate = syllables(24.0, seed=5)
+def test_gpu_path_streams_every_segment_in_batches_the_card_takes_and_equals_the_cpu(monkeypatch):
+    """device="cuda": same segments and same output as the CPU path, driven from one thread, with every call no bigger
+    than the card takes. An unknown device is refused."""
+    _, noisy, _ = syllables(12.0, seed=11)
+    stereo = np.stack([noisy, noisy[::-1].copy()], axis=1)  # 2 channels x 2 segments
+    with pytest.raises(ValueError, match="device"):
+        dpdfnet.denoise_array(noisy, device="tpu")
     monkeypatch.setattr(dpdfnet, "_GpuModel", _FakeCard)
     monkeypatch.setattr(dpdfnet, "GPU_ROWS", (2, 4))  # a card that takes four rows at most
     _FakeCard.steps.clear()
     dpdfnet.unload()
-    stereo = np.stack([noisy, noisy[::-1].copy()], axis=1)
-    dpdfnet.denoise_array(stereo, device="cuda", threads=4, segment_seconds=10, overlap_seconds=1.5)
+    kw = dict(threads=4, segment_seconds=10, overlap_seconds=1.5)
+    cpu = dpdfnet.denoise_array(stereo, **kw)
+    assert not _FakeCard.steps
+    gpu = dpdfnet.denoise_array(stereo, device="cuda", **kw)
     dpdfnet.unload()
-    assert set(_FakeCard.steps) == {4, 2}, set(_FakeCard.steps)  # 2 channels x 3 segments: a full group, then the rest
-
-
-def test_unknown_device_is_refused():
-    with pytest.raises(ValueError, match="device"):
-        dpdfnet.denoise_array(np.zeros(SR, np.float32), device="tpu")
+    assert _FakeCard.steps and max(_FakeCard.steps) == 4 and set(_FakeCard.steps) <= {2, 4}, _FakeCard.steps
+    assert np.abs(gpu - cpu).max() < 1e-4

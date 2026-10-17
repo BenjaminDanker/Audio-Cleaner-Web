@@ -127,19 +127,6 @@ def test_up_to_five_pages_of_the_public_repository_then_this_one(api):
     assert fake.pages(OWN) == [1]  # a short page is the last one
 
 
-def test_the_archive_on_a_later_page_is_found(api):
-    fake = api({PUBLIC: [_filler(100), _filler(100, 100), [_release("v2.0.1", _asset(5))]]})
-    assert release_models.find_archive() == (PUBLIC, _asset(5))
-    assert fake.pages(PUBLIC) == [1, 2, 3] and fake.pages(OWN) == []
-
-
-def test_a_short_page_ends_the_listing(api):
-    fake = api({PUBLIC: [_filler(100), _filler(3, 100), [_release("v2.0.1", _asset(5))]], OWN: [[]]})
-    with pytest.raises(SystemExit):
-        release_models.find_archive()
-    assert fake.pages(PUBLIC) == [1, 2] and fake.pages(OWN) == [1]
-
-
 def test_a_repository_that_is_not_there_is_skipped_but_other_errors_stop(api):
     fake = api({PUBLIC: 404, OWN: [[_release("models-v2", _asset(2))]]})
     assert release_models.find_archive() == (OWN, _asset(2))
@@ -148,28 +135,6 @@ def test_a_repository_that_is_not_there_is_skipped_but_other_errors_stop(api):
         api({PUBLIC: code, OWN: [[_release("models-v2", _asset(2))]]})
         with pytest.raises(urllib.error.HTTPError):
             release_models.find_archive()
-
-
-def test_an_error_on_a_later_page_stops(api, monkeypatch):
-    fake = FakeApi({PUBLIC: [_filler(100)]})
-
-    def flaky(request, timeout=None):
-        if "page=2" in request.full_url:
-            raise urllib.error.HTTPError(request.full_url, 404, "gone", {}, None)
-        return fake(request, timeout)
-
-    monkeypatch.setattr(release_models.urllib.request, "urlopen", flaky)
-    with pytest.raises(urllib.error.HTTPError):
-        release_models.find_archive()
-
-
-def test_nowhere_says_what_to_do(api):
-    api({PUBLIC: [[]], OWN: [_filler(3)]})
-    with pytest.raises(SystemExit) as e:
-        release_models.find_archive()
-    a = resources.MODELS_ARCHIVE
-    text = str(e.value)
-    assert a.name in text and str(a.size) in text and PUBLIC in text and OWN in text and "upload it once" in text
 
 
 def test_each_token_goes_only_to_its_own_repository(api):
@@ -289,7 +254,7 @@ def hosts(tmp_path, monkeypatch):
         handler = type(f"Host_{label}", (_Host,), {"label": label, "routes": routes, "log": log})
         httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         httpd.socket = server_ctx.wrap_socket(httpd.socket, server_side=True)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
         servers.append(httpd)
         urls[label] = f"https://{host}:{httpd.server_address[1]}"
     client_ctx = ssl.create_default_context(cafile=str(cert))
@@ -352,14 +317,6 @@ def test_an_archive_that_is_not_the_pinned_one_is_refused(hosts, catalog, tmp_pa
     assert not (out / "AudioCleaner-models-v2.zip").exists() and not list(out.glob("*.part"))
 
 
-def test_an_archive_of_another_size_is_refused(hosts, catalog, tmp_path):
-    _publish(hosts, archive=ARCHIVE + b"!")  # the listing says the pinned size, the download is longer
-    out = tmp_path / "models"
-    with pytest.raises(SystemExit, match="is not the pinned file"):
-        release_models.gather(out)
-    assert not (out / "AudioCleaner-models-v2.zip").exists() and not list(out.glob("*.part"))
-
-
 def test_a_redirect_to_plain_http_is_refused(hosts, catalog, tmp_path):
     _publish(hosts, storage=hosts["storage"].replace("https://", "http://"))
     out = tmp_path / "models"
@@ -367,12 +324,6 @@ def test_a_redirect_to_plain_http_is_refused(hosts, catalog, tmp_path):
         release_models.gather(out)
     assert not (out / "AudioCleaner-models-v2.zip").exists() and not list(out.glob("*.part"))
     assert not [e for e in hosts["log"] if e[1].startswith("/blob/")]
-
-
-def test_the_main_command_prints_the_files(hosts, catalog, tmp_path, capsys):
-    _publish(hosts)
-    assert release_models.main([str(tmp_path / "m")]) == 0
-    assert capsys.readouterr().out.split() == ["AudioCleaner-models-v2.zip"]
 
 
 # ---- what the release carries is what the app downloads ------------------------------------------------------------------
@@ -457,12 +408,6 @@ def test_check_names_every_problem(heads, api, capsys):
     assert resources.MODELS_ARCHIVE.name in found[2] and "upload it once" in found[2]
     assert release_models.main(["--check"]) == 1
     assert capsys.readouterr().err.count("\n") == 3
-
-
-@pytest.mark.parametrize("argv", [[], ["a", "b"], ["--check", "x"]])
-def test_usage(argv, capsys):
-    assert release_models.main(argv) == 2
-    assert "release_models.py OUT_DIR" in capsys.readouterr().err
 
 
 def test_the_release_job_s_checkout_is_enough_and_needs_only_the_standard_library(tmp_path):

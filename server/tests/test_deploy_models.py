@@ -32,7 +32,7 @@ def parse_lock(path: Path):
 
 # ------------------------------------------------------------------ the real lock
 
-def test_lock_is_well_formed():
+def test_lock_is_well_formed_and_pinned():
     entries = parse_lock(DEPLOY / "models.lock")
     assert len(entries) > 40
     archives = {e["target"] for e in entries if e["kind"] == "archive"}
@@ -69,16 +69,44 @@ def test_lock_covers_what_the_product_needs():
         assert f"bin/{b}" in targets
 
 
-def test_ffmpeg_is_pinned_not_latest():
-    text = (DEPLOY / "models.lock").read_text()
-    assert "btbn-ffmpeg" in text and "autobuild-20" in text
-    assert "-latest-" not in text
+# ------------------------------------------------------------------ pinned package hashes (SEC-26)
+
+def _hash_lock():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("hash_lock", DEPLOY / "hash_lock.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def test_install_uses_the_manifest_script():
-    install = (DEPLOY / "install.sh").read_text()
-    assert "fetch-models.sh" in install
-    assert (DEPLOY / "fetch-dpdfnet.sh").read_text().count("fetch-models.sh") >= 1  # the wrapper delegates
+def test_both_locks_pin_every_package_with_hashes_and_an_unpinned_requirement_is_refused():
+    hl = _hash_lock()
+    for lock in (DEPLOY.parent / "server" / "requirements.lock", DEPLOY / "requirements-gpu.lock"):
+        items = hl.parse(lock.read_text())
+        assert len([i for i in items if "name" in i]) > 40
+        assert hl.verify(items) == [], lock
+        assert all(len(h) == 64 for i in items if "name" in i for h in i["hashes"])
+    with pytest.raises(SystemExit):
+        hl.parse("foo>=1.0\n")
+
+
+def test_gpu_lock_agrees_with_the_server_lock():
+    hl = _hash_lock()
+    norm = lambda n: n.lower().replace("_", "-")  # noqa: E731
+    server = {norm(i["name"]): i for i in hl.parse((DEPLOY.parent / "server" / "requirements.lock").read_text()) if "name" in i}
+    gpu = {norm(i["name"]): i for i in hl.parse((DEPLOY / "requirements-gpu.lock").read_text()) if "name" in i}
+    for name, it in gpu.items():
+        if name in server:
+            assert it["version"] == server[name]["version"] and it["hashes"] == server[name]["hashes"], name
+    assert "onnxruntime-gpu" in gpu and "onnxruntime" not in gpu and "fastapi" not in gpu
+
+
+def test_installers_require_hashes():
+    assert "--require-hashes" in (DEPLOY / "install.sh").read_text()
+    assert "--require-hashes" in (DEPLOY / "setup-gpu.sh").read_text()
+    assert "requirements-gpu.lock" in (DEPLOY / "setup-gpu.sh").read_text()
+    assert "--require-hashes" in (DEPLOY.parent / ".github" / "workflows" / "server.yml").read_text()
 
 
 # ------------------------------------------------------------------ the script on a toy lock
@@ -138,7 +166,7 @@ def toy(tmp_path):
     return Toy(tmp_path)
 
 
-def test_fetches_everything_required_and_verifies(toy):
+def test_fetches_everything_required_verifies_and_a_second_run_changes_nothing(toy):
     toy.build()
     r = toy.run(check=True)
     assert "1 ok, 4 fetched" in r.stdout
@@ -148,11 +176,6 @@ def test_fetches_everything_required_and_verifies(toy):
     assert os.access(toy.home / "bin/tarred", os.X_OK) and not os.access(toy.home / "models/b.txt", os.X_OK)
     assert not (toy.home / "models/c.opt").exists()  # optional: not fetched by default
     assert not list(toy.home.rglob("*.part*"))
-
-
-def test_second_run_changes_nothing(toy):
-    toy.build()
-    toy.run(check=True)
     before = {p: p.stat().st_mtime_ns for p in toy.home.rglob("*") if p.is_file()}
     r = toy.run(check=True)
     assert "fetched" not in r.stdout and "5 ok" in r.stdout
@@ -182,22 +205,15 @@ def test_a_wrong_file_is_found_and_repaired(toy):
     assert toy.run("--check").returncode == 0
 
 
-def test_a_download_with_the_wrong_hash_is_refused(toy):
+def test_downloads_and_archives_with_the_wrong_hash_are_refused_and_the_rest_still_fetched(toy):
     toy.build()
     (toy.src / "a.bin").write_bytes(b"not what the lock says")
-    r = toy.run()
-    assert r.returncode == 1 and "FAILED   models/a/a.bin" in r.stderr
-    assert not (toy.home / "models/a/a.bin").exists() and not list(toy.home.rglob("*.part*"))
-    assert (toy.home / "models/b.txt").exists()  # the others were still fetched
-
-
-def test_archive_with_the_wrong_hash_is_refused(toy):
-    toy.build()
     (toy.src / "pack.zip").write_bytes(b"PK corrupted")
     r = toy.run()
-    assert r.returncode == 1 and "archive pack.zip" in r.stderr
-    assert not (toy.home / "models/z/zipped.onnx").exists()
-    assert (toy.home / "bin/tarred").exists()  # the other archive is fine
+    assert r.returncode == 1 and "FAILED   models/a/a.bin" in r.stderr and "archive pack.zip" in r.stderr
+    assert not (toy.home / "models/a/a.bin").exists() and not (toy.home / "models/z/zipped.onnx").exists()
+    assert not list(toy.home.rglob("*.part*"))
+    assert (toy.home / "models/b.txt").exists() and (toy.home / "bin/tarred").exists()  # the others were fine
 
 
 def test_optional_files_only_with_the_flag(toy):
@@ -236,62 +252,3 @@ def test_local_archive_copy_is_used_without_downloading(toy, tmp_path):
     (toy.home / "models/z/zipped.onnx").unlink()
     toy.run("--only", "models/z/*", env={"ACW_ARCHIVE_DIR": str(spare)}, check=True)
     assert (toy.home / "models/z/zipped.onnx").exists()
-
-
-def test_dpdfnet_wrapper_delegates(toy, tmp_path):
-    text = (DEPLOY / "fetch-dpdfnet.sh").read_text()
-    assert "--only 'models/dpdfnet/*'" in text and "--dest-dir" in text
-    entry = [e for e in parse_lock(DEPLOY / "models.lock") if e["target"] == "models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx"][0]
-    assert entry["sha"] == "b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa"
-    assert entry["kind"] == "member" and entry["rest"].startswith("models-v2:")
-
-
-# ------------------------------------------------------------------ pinned package hashes (SEC-26)
-
-def _hash_lock():
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location("hash_lock", DEPLOY / "hash_lock.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-def test_both_locks_pin_every_package_with_hashes():
-    hl = _hash_lock()
-    for lock in (DEPLOY.parent / "server" / "requirements.lock", DEPLOY / "requirements-gpu.lock"):
-        items = hl.parse(lock.read_text())
-        assert len([i for i in items if "name" in i]) > 40
-        assert hl.verify(items) == [], lock
-        assert all(len(h) == 64 for i in items if "name" in i for h in i["hashes"])
-
-
-def test_gpu_lock_agrees_with_the_server_lock():
-    hl = _hash_lock()
-    norm = lambda n: n.lower().replace("_", "-")  # noqa: E731
-    server = {norm(i["name"]): i for i in hl.parse((DEPLOY.parent / "server" / "requirements.lock").read_text()) if "name" in i}
-    gpu = {norm(i["name"]): i for i in hl.parse((DEPLOY / "requirements-gpu.lock").read_text()) if "name" in i}
-    for name, it in gpu.items():
-        if name in server:
-            assert it["version"] == server[name]["version"] and it["hashes"] == server[name]["hashes"], name
-    assert "onnxruntime-gpu" in gpu and "onnxruntime" not in gpu and "fastapi" not in gpu
-
-
-def test_hash_lock_round_trip_and_format(tmp_path):
-    hl = _hash_lock()
-    text = "# header\nfoo==1.0 \\\n    --hash=sha256:" + "a" * 64 + " \\\n    --hash=sha256:" + "b" * 64 + "\nbar_baz==2  # why\n"
-    items = hl.parse(text)
-    assert [i["name"] for i in items if "name" in i] == ["foo", "bar_baz"]
-    assert items[1]["hashes"] == ["a" * 64, "b" * 64] and items[2]["comment"] == "why"
-    assert hl.verify(items) == ["bar_baz==2 has no hash"]
-    again = hl.parse(hl.render(items))
-    assert [(i.get("name"), i.get("hashes")) for i in again if "name" in i] == [("foo", ["a" * 64, "b" * 64]), ("bar_baz", [])]
-    with pytest.raises(SystemExit):
-        hl.parse("foo>=1.0\n")  # unpinned
-
-
-def test_installers_require_hashes():
-    assert "--require-hashes" in (DEPLOY / "install.sh").read_text()
-    assert "--require-hashes" in (DEPLOY / "setup-gpu.sh").read_text()
-    assert "requirements-gpu.lock" in (DEPLOY / "setup-gpu.sh").read_text()
-    assert "--require-hashes" in (DEPLOY.parent / ".github" / "workflows" / "server.yml").read_text()

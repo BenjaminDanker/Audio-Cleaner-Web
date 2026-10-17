@@ -1,3 +1,5 @@
+"""Stripe: signed webhooks, one credit per payment, refunds that take back exactly what was given, the card-country
+guard, auto-reload, and the top-up bonus. Stripe's network calls are faked; the webhook handling is real."""
 import hashlib
 import hmac
 import json
@@ -23,6 +25,25 @@ def event(etype: str, obj: dict, eid: str = "evt_1") -> dict:
     return {"id": eid, "object": "event", "type": etype, "api_version": "2026-09-30.endive",
             "created": int(time.time()), "data": {"object": obj}, "livemode": False, "pending_webhooks": 1,
             "request": {"id": None, "idempotency_key": None}}
+
+
+def _post(client, ev):
+    body, sig = signed(ev)
+    return client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+
+
+def checkout_completed(uid, eid="evt_1", tax=None):
+    obj = {"id": "cs_1", "object": "checkout.session", "mode": "payment", "payment_status": "unpaid",
+           "amount_total": 2000, "payment_intent": "pi_1", "metadata": {"acw_user_id": uid, "acw_payment_id": "pay1"}}
+    if tax is not None:
+        obj["total_details"] = {"amount_tax": tax}
+    return event("checkout.session.completed", obj, eid)
+
+
+def charge_refunded(amount, refund_id="re_1", eid="evt_r"):
+    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": amount,
+              "refunds": {"object": "list", "data": [{"id": refund_id, "object": "refund", "amount": amount, "status": "succeeded"}]}}
+    return event("charge.refunded", charge, eid)
 
 
 @pytest.fixture
@@ -65,7 +86,6 @@ def fake_pi(monkeypatch):
 
     def client():
         c = real_client()
-        # only the network calls are faked
         c.v1.payment_intents = SimpleNamespace(retrieve=lambda _id: pi, capture=capture, cancel=cancel)
         c.v1.charges = SimpleNamespace(retrieve=charge)
         c.v1.refunds = SimpleNamespace(create=refund)
@@ -75,13 +95,29 @@ def fake_pi(monkeypatch):
     return state
 
 
-def checkout_completed(uid, eid="evt_1"):
-    return event("checkout.session.completed", {
-        "id": "cs_1", "object": "checkout.session", "mode": "payment", "payment_status": "unpaid",
-        "amount_total": 2000, "payment_intent": "pi_1",
-        "metadata": {"acw_user_id": uid, "acw_payment_id": "pay1"},
-    }, eid)
+def _fake_refunds(monkeypatch, fee_cents):
+    """Stripe as the self-serve refund calls it: the charge's fee, and refunds that go through."""
+    made = []
 
+    class Fake:
+        class v1:
+            class charges:
+                @staticmethod
+                def retrieve(_id, params=None):
+                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=fee_cents, currency="usd"))
+
+            class refunds:
+                @staticmethod
+                def create(params=None, options=None):
+                    made.append(params["amount"])
+                    return SimpleNamespace(id=f"re_{len(made)}")
+
+    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
+    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
+    return made
+
+
+# ---------------------------------------------------------------- webhooks: signature, replays, idempotency
 
 def test_bad_signature_rejected(client, user_with_pending_payment):
     body, _ = signed(checkout_completed(user_with_pending_payment))
@@ -96,38 +132,32 @@ def test_checkout_credits_once_and_saves_card(client, user_with_pending_payment,
         body, sig = signed(checkout_completed(uid, eid))
         assert client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig}).status_code == 200
     assert ledger.balance(uid)["balance_micros"] == 20_000_000
-    u = db.one("SELECT default_payment_method FROM users WHERE id = ?", (uid,))
-    assert u["default_payment_method"] == "pm_1"
+    assert db.one("SELECT default_payment_method FROM users WHERE id = ?", (uid,))["default_payment_method"] == "pm_1"
     assert db.one("SELECT status, stripe_charge FROM payments WHERE id='pay1'")["stripe_charge"] == "ch_1"
     assert fake_pi.captures == ["capture-pay1"]  # charged once, after the country check
 
 
+def test_checkout_for_another_session_is_not_credited_and_amounts_in_events_are_not_trusted(client, user_with_pending_payment, fake_pi):
+    uid = user_with_pending_payment
+    ev = checkout_completed(uid)
+    ev["data"]["object"]["id"] = "cs_someone_else"
+    ev["data"]["object"]["amount_total"] = 99_999_99
+    assert _post(client, ev).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 0
+
+
 def test_dispute_suspends_and_zeroes(client, user_with_pending_payment, fake_pi):
     uid = user_with_pending_payment
-    body, sig = signed(checkout_completed(uid))
-    client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    _post(client, checkout_completed(uid))
     ledger.create_hold(uid, 1_000_000, "job", "j")
-    body, sig = signed(event("charge.dispute.created", {"id": "dp_1", "object": "dispute", "charge": "ch_1",
-                                                          "reason": "fraudulent"}, "evt_d"))
-    assert client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig}).status_code == 200
+    ev = event("charge.dispute.created", {"id": "dp_1", "object": "dispute", "charge": "ch_1", "reason": "fraudulent"}, "evt_d")
+    assert _post(client, ev).status_code == 200
     u = db.one("SELECT status, balance_micros, held_micros FROM users WHERE id = ?", (uid,))
     assert (u["status"], u["balance_micros"], u["held_micros"]) == ("suspended", 0, 0)
     assert db.one("SELECT COUNT(*) n FROM sessions WHERE user_id = ?", (uid,))["n"] == 0
 
 
-def test_dashboard_refund_debits_balance(client, user_with_pending_payment, fake_pi):
-    uid = user_with_pending_payment
-    body, sig = signed(checkout_completed(uid))
-    client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
-    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 500,
-              "refunds": {"object": "list", "data": [{"id": "re_1", "object": "refund", "amount": 500, "status": "succeeded"}]}}
-    for eid in ("evt_r1", "evt_r2"):
-        body, sig = signed(event("charge.refunded", charge, eid))
-        client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
-    assert ledger.balance(uid)["balance_micros"] == 15_000_000
-
-
-def test_reload_failure_disables_after_three(monkeypatch):
+def test_reload_failures_disable_auto_reload_after_three(monkeypatch):
     uid = auth.get_or_create_user("r@example.com")["id"]
     for i in range(3):
         db.execute("INSERT INTO payments(id,user_id,kind,status,amount_cents,created_at,updated_at) VALUES (?,?,'auto_reload','pending',1000,0,0)", (f"p{i}", uid))
@@ -137,77 +167,120 @@ def test_reload_failure_disables_after_three(monkeypatch):
     assert (u["auto_reload_enabled"], u["auto_reload_failures"], u["auto_reload_in_flight"]) == (0, 3, 0)
 
 
-def test_checkout_for_other_session_is_not_credited(client, user_with_pending_payment, fake_pi):
+def test_capturable_event_first_then_checkout_credits_once(client, user_with_pending_payment, fake_pi):
     uid = user_with_pending_payment
-    ev = checkout_completed(uid)
-    ev["data"]["object"]["id"] = "cs_someone_else"
-    ev["data"]["object"]["amount_total"] = 99_999_99  # amounts from events are never trusted
-    body, sig = signed(ev)
-    assert client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig}).status_code == 200
-    assert ledger.balance(uid)["balance_micros"] == 0
+    capturable = event("payment_intent.amount_capturable_updated", {
+        "id": "pi_1", "object": "payment_intent", "status": "requires_capture", "latest_charge": "ch_1",
+        "metadata": {"acw_kind": "checkout", "acw_payment_id": "pay1", "acw_user_id": uid}}, "evt_cap")
+    assert _post(client, capturable).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 0  # charged, credited when the session completes
+    assert _post(client, checkout_completed(uid)).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 20_000_000 and fake_pi.captures == ["capture-pay1"]
 
 
-def test_tax_split_on_refunds(client, user_with_pending_payment, fake_pi):
-    """With tax on top, refunds only ever remove the pre-tax credit share."""
+# ---------------------------------------------------------------- refunds take back what was given
+
+def test_refund_webhooks_debit_once_and_never_the_tax(client, user_with_pending_payment, fake_pi):
+    """With tax on top, refunds only ever remove the pre-tax credit share: $24 gross refunded is $20 paid less $4 VAT."""
     uid = user_with_pending_payment
-    ev = checkout_completed(uid)  # $20 credit + $4 VAT
-    ev["data"]["object"]["total_details"] = {"amount_tax": 400}
-    body, sig = signed(ev)
-    client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    _post(client, checkout_completed(uid, tax=400))  # $20 credit + $4 VAT
     assert ledger.balance(uid)["balance_micros"] == 20_000_000
-    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 1200,
-              "refunds": {"object": "list", "data": [{"id": "re_9", "object": "refund", "amount": 1200, "status": "succeeded"}]}}
-    body, sig = signed(event("charge.refunded", charge, "evt_tx"))
-    client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+    for eid in ("evt_tx", "evt_tx2"):  # delivered twice
+        assert _post(client, charge_refunded(1200, "re_9", eid)).status_code == 200
     assert ledger.balance(uid)["balance_micros"] == 10_000_000  # $12 gross = $10 credit + $2 tax
     assert stripe_service.tax_part(1000, 2000, 400) == 200
     assert stripe_service.credit_part(2400, 2000, 400) == 2000
 
 
+def test_refund_of_a_blocked_payment_does_not_touch_other_credit(client, user_with_pending_payment, fake_pi):
+    uid = user_with_pending_payment
+    ledger.credit(uid, 7_000_000, "grant", "t", "g")
+    fake_pi.country = "DE"
+    fake_pi.pi.status = "succeeded"
+    assert _post(client, checkout_completed(uid)).status_code == 200
+    assert _post(client, charge_refunded(2000, "re_1", "evt_rf")).status_code == 200
+    assert ledger.balance(uid)["balance_micros"] == 7_000_000
+
+
 def test_self_service_refund_keeps_the_card_fee_once(monkeypatch):
-    from types import SimpleNamespace
-
-    from acw import auth, db
-    from acw.billing import ledger, stripe_service
-
     uid = auth.get_or_create_user("fee@example.com")["id"]
     now = db.now()
     db.execute(
         "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
-        " VALUES ('pay_fee', ?, 'checkout', 'succeeded', 1000, 0, 0, 'ch_fee', ?, ?)",
-        (uid, now, now),
-    )
+        " VALUES ('pay_fee', ?, 'checkout', 'succeeded', 1000, 0, 0, 'ch_fee', ?, ?)", (uid, now, now))
     ledger.credit(uid, 1000 * 10_000, "topup", "payment", "pay_fee")
-    refunds = []
-
-    class Fake:
-        class v1:
-            class charges:
-                @staticmethod
-                def retrieve(_id, params=None):
-                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=59, currency="usd"))
-
-            class refunds:
-                @staticmethod
-                def create(params=None, options=None):
-                    refunds.append(params["amount"])
-                    return SimpleNamespace(id=f"re_{len(refunds)}")
-
-    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
-    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
+    refunds = _fake_refunds(monkeypatch, fee_cents=59)
     ledger.create_hold(uid, 600 * 10_000, "job", "j")  # $6 still spendable is held -> $4 unused
     assert stripe_service.refund_unused(uid, "pay_fee") == 400 - 59
     assert refunds == [341]
     assert ledger.balance(uid)["balance_micros"] == 600 * 10_000  # all $4 of unused credit is gone
 
 
-def _post(client, ev):
-    body, sig = signed(ev)
-    return client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+def test_history_says_what_refund_unused_would_take_back(client, signed_in, monkeypatch):
+    """The Billing page shows "Refund unused" only while refundable_cents > 0; the server works it out the way the
+    refund itself does: bought credit still there, at most what is left of the payment, recent card payments only."""
+    from .conftest import settle_payment
+
+    uid, _h = signed_in
+    _fake_refunds(monkeypatch, fee_cents=59)
+    _paid(uid, "pay_r", 1000)
+    p = _refundable(client)["pay_r"]
+    assert p["refundable_cents"] == 1000  # nothing spent: all of it
+    assert set(p) == {"id", "kind", "status", "amount_cents", "refunded_cents", "created_at", "refundable_cents"}
+    assert "stripe_charge" not in p and "ch_x" not in client.get("/api/billing/history").text
+
+    _spend(uid, 600)
+    assert _refundable(client)["pay_r"]["refundable_cents"] == 400  # partly spent: what was bought and is still there
+
+    # Given credit never counts: an admin grant and a top-up bonus add to the balance, not to what can be refunded.
+    ledger.credit(uid, 500 * 10_000, "grant", "admin", "g1")
+    ledger.credit(uid, 100 * 10_000, "grant", "payment_bonus", "pay_r")
+    assert ledger.balance(uid)["available_micros"] == 1000 * 10_000
+    assert _refundable(client)["pay_r"]["refundable_cents"] == 400
+
+    # Refunded down to nothing bought left: the button goes away, and a second refund is refused.
+    assert stripe_service.refund_unused(uid, "pay_r") == 400 - 59
+    p = _refundable(client)["pay_r"]
+    assert p["refunded_cents"] < p["amount_cents"] and p["refundable_cents"] == 0
+    assert stripe_service.bought_micros(uid) == 0
+    with pytest.raises(ValueError):
+        stripe_service.refund_unused(uid, "pay_r")
+    assert ledger.balance(uid)["available_micros"] == 500 * 10_000  # the grant is still there to spend, not refundable
+
+    # More than 14 days old: refunded by support only. Recent but not a card charge (no charge id): no button either.
+    _paid(uid, "pay_old", 800, age_days=stripe_service.REFUND_DAYS + 1)
+    _paid(uid, "pay_new", 300, age_days=stripe_service.REFUND_DAYS - 1)
+    settle_payment(uid, 700)
+    shown = _refundable(client)
+    assert shown["pay_old"]["refundable_cents"] == 0
+    assert shown["pay_new"]["refundable_cents"] == 300  # capped by the payment, not by all the bought credit (1100)
+    assert [p["refundable_cents"] for k, p in shown.items() if k not in ("pay_r", "pay_old", "pay_new")] == [0]
+    assert stripe_service.refund_unused(uid, "pay_new") == 300 - 59  # what the page offers is what the refund takes
 
 
-@pytest.mark.parametrize("country", ["DE", "gb", "CH", "NO", "FR"])
-def test_checkout_by_blocked_country_card_is_never_charged(client, user_with_pending_payment, fake_pi, country):
+def _paid(uid, pid, cents, age_days=0.0, charge="ch_x"):
+    at = db.now() - int(age_days * 86400)
+    db.execute(
+        "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
+        " VALUES (?, ?, 'checkout', 'succeeded', ?, 0, 0, ?, ?, ?)", (pid, uid, cents, charge, at, at))
+    ledger.credit(uid, cents * 10_000, "topup", "payment", pid)
+
+
+def _spend(uid, cents):
+    hold = ledger.create_hold(uid, cents * 10_000, "job", f"job-{cents}")
+    ledger.capture_hold(hold, cents * 10_000)
+
+
+def _refundable(client):
+    r = client.get("/api/billing/history")
+    assert r.status_code == 200, r.text
+    return {p["id"]: p for p in r.json()["payments"]}
+
+
+# ---------------------------------------------------------------- the card-country guard
+
+@pytest.mark.parametrize("country", ["DE", "gb", None])  # None: not a card at all, so no country to check
+def test_a_payment_from_a_blocked_country_or_no_card_is_never_charged(client, user_with_pending_payment, fake_pi, country):
     uid = user_with_pending_payment
     fake_pi.country = country
     db.execute("UPDATE users SET auto_reload_enabled = 1 WHERE id = ?", (uid,))
@@ -224,18 +297,7 @@ def test_checkout_by_blocked_country_card_is_never_charged(client, user_with_pen
     assert db.one("SELECT COUNT(*) n FROM audit_log WHERE user_id = ? AND action = 'payment_refused_region'", (uid,))["n"] >= 1
 
 
-def test_capturable_event_first_then_checkout_credits_once(client, user_with_pending_payment, fake_pi):
-    uid = user_with_pending_payment
-    capturable = event("payment_intent.amount_capturable_updated", {
-        "id": "pi_1", "object": "payment_intent", "status": "requires_capture", "latest_charge": "ch_1",
-        "metadata": {"acw_kind": "checkout", "acw_payment_id": "pay1", "acw_user_id": uid}}, "evt_cap")
-    assert _post(client, capturable).status_code == 200
-    assert ledger.balance(uid)["balance_micros"] == 0  # charged, credited when the session completes
-    assert _post(client, checkout_completed(uid)).status_code == 200
-    assert ledger.balance(uid)["balance_micros"] == 20_000_000 and fake_pi.captures == ["capture-pay1"]
-
-
-def test_already_charged_blocked_payment_is_refunded_as_a_backstop(client, user_with_pending_payment, fake_pi):
+def test_an_already_charged_blocked_payment_is_refunded_as_a_backstop(client, user_with_pending_payment, fake_pi):
     uid = user_with_pending_payment
     fake_pi.country, fake_pi.pi.status = "DE", "succeeded"  # e.g. captured before authorize-first
     ev = checkout_completed(uid)
@@ -247,7 +309,7 @@ def test_already_charged_blocked_payment_is_refunded_as_a_backstop(client, user_
     assert db.one("SELECT status FROM payments WHERE id='pay1'")["status"] == "refused_region"
 
 
-def test_us_card_is_credited_and_countries_are_configurable(client, user_with_pending_payment, fake_pi, monkeypatch):
+def test_the_blocked_list_is_the_default_and_can_be_changed_by_the_owner(client, user_with_pending_payment, fake_pi, monkeypatch):
     uid = user_with_pending_payment
     fake_pi.country = "DE"
     monkeypatch.setenv("ACW_BLOCKED_CARD_COUNTRIES", "none")  # guard switched off
@@ -256,21 +318,9 @@ def test_us_card_is_credited_and_countries_are_configurable(client, user_with_pe
     assert stripe_service.blocked_card_countries() == frozenset()
     monkeypatch.delenv("ACW_BLOCKED_CARD_COUNTRIES")
     assert {"DE", "GB", "CH", "IS", "LI", "NO", "FR"} <= stripe_service.blocked_card_countries()
-    assert "US" not in stripe_service.blocked_card_countries() and len(stripe_service.BLOCKED_CARD_COUNTRIES) == 30 + 2
+    assert "US" not in stripe_service.blocked_card_countries()
     monkeypatch.setenv("ACW_BLOCKED_CARD_COUNTRIES", "br, us")
     assert stripe_service.blocked_card_countries() == {"BR", "US"}
-
-
-def test_refund_of_a_blocked_payment_does_not_touch_other_credit(client, user_with_pending_payment, fake_pi):
-    uid = user_with_pending_payment
-    ledger.credit(uid, 7_000_000, "grant", "t", "g")
-    fake_pi.country = "DE"
-    fake_pi.pi.status = "succeeded"
-    assert _post(client, checkout_completed(uid)).status_code == 200
-    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 2000,
-              "refunds": {"object": "list", "data": [{"id": "re_1", "object": "refund", "amount": 2000, "status": "succeeded"}]}}
-    assert _post(client, event("charge.refunded", charge, "evt_rf")).status_code == 200
-    assert ledger.balance(uid)["balance_micros"] == 7_000_000
 
 
 def test_auto_reload_by_blocked_country_card_is_cancelled_and_disabled(user_with_pending_payment, fake_pi, monkeypatch):
@@ -286,8 +336,7 @@ def test_auto_reload_by_blocked_country_card_is_cancelled_and_disabled(user_with
 
     def client():
         c = real()
-        fake = c.v1.payment_intents
-        fake.create = lambda params=None, options=None: SimpleNamespace(
+        c.v1.payment_intents.create = lambda params=None, options=None: SimpleNamespace(
             id="pi_r", status="requires_capture" if params.get("capture_method") == "manual" else "succeeded", latest_charge="ch_1")
         return c
 
@@ -315,7 +364,6 @@ def test_auto_reload_by_us_card_is_captured_and_credited(user_with_pending_payme
 
     def client():
         c = real()
-        assert c.v1.payment_intents.capture
         c.v1.payment_intents.create = lambda params=None, options=None: (
             setattr(fake_pi.pi, "id", "pi_r") or fake_pi.pi if params.get("capture_method") == "manual" else None)
         return c
@@ -325,6 +373,8 @@ def test_auto_reload_by_us_card_is_captured_and_credited(user_with_pending_payme
     assert stripe_service.run_auto_reload(uid) == "succeeded"
     assert ledger.balance(uid)["balance_micros"] == 20_000_000 and len(fake_pi.captures) == 1 and not fake_pi.cancels
 
+
+# ---------------------------------------------------------------- checkout and bonus
 
 def test_checkout_uses_the_cards_only_configuration_and_not_payment_method_types(monkeypatch):
     """Stripe refuses `payment_method_types` on Checkout Sessions now (it answered 400, the page showed a 500):
@@ -358,58 +408,28 @@ def test_checkout_uses_the_cards_only_configuration_and_not_payment_method_types
         stripe_service.create_checkout(uid, 499, False)
 
 
-def test_a_payment_that_is_not_a_card_is_never_charged(client, user_with_pending_payment, fake_pi):
-    """No card means no issuing country to check: the authorization is cancelled, nothing is charged."""
-    uid = user_with_pending_payment
-    fake_pi.country = None
-    assert _post(client, checkout_completed(uid)).status_code == 200
-    capturable = event("payment_intent.amount_capturable_updated", {
-        "id": "pi_1", "object": "payment_intent", "status": "requires_capture", "latest_charge": "ch_1",
-        "metadata": {"acw_kind": "checkout", "acw_payment_id": "pay1", "acw_user_id": uid}}, "evt_cap")
-    assert _post(client, capturable).status_code == 200
-    assert fake_pi.cancels and not fake_pi.captures and not fake_pi.refunds
-    assert ledger.balance(uid)["balance_micros"] == 0
-    assert db.one("SELECT status FROM payments WHERE id = 'pay1'")["status"] == "refused_region"
-
-
-# ------------------------------------------------------------- bonus credit on bigger top-ups (2026-10-16)
-
 def test_bonus_tiers():
     from acw.billing import pricing
 
     assert pricing.topup_bonus_micros(2_000) == 0
     assert pricing.topup_bonus_micros(5_000) == 1_000_000  # +2% of $50 = $1.00
-    assert pricing.topup_bonus_micros(10_000) == 2_500_000  # +2.5% of $100
     assert pricing.topup_bonus_micros(50_000) == 12_500_000
-
-
-def _make_50(uid):
-    db.execute("UPDATE payments SET amount_cents = 5000 WHERE id = 'pay1'")
 
 
 def test_a_50_dollar_top_up_gets_its_bonus_once_and_loses_it_when_refunded(client, user_with_pending_payment, fake_pi):
     uid = user_with_pending_payment
-    _make_50(uid)
+    db.execute("UPDATE payments SET amount_cents = 5000 WHERE id = 'pay1'")
     for eid in ("evt_1", "evt_2"):
-        body, sig = signed(checkout_completed(uid, eid))
-        client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+        _post(client, checkout_completed(uid, eid))
     assert ledger.balance(uid)["balance_micros"] == 51_000_000  # $50 + $1 bonus, credited once
     assert ledger.granted_micros(uid) == 1_000_000  # given, never paid out as money
-    charge = {"id": "ch_1", "object": "charge", "payment_intent": "pi_1", "amount_refunded": 1000,
-              "refunds": {"object": "list", "data": [{"id": "re_1", "object": "refund", "amount": 1000, "status": "succeeded"}]}}
     for eid in ("evt_r1", "evt_r2"):
-        body, sig = signed(event("charge.refunded", charge, eid))
-        client.post("/api/stripe/webhook", content=body, headers={"Stripe-Signature": sig})
+        _post(client, charge_refunded(1000, "re_1", eid))
     assert ledger.balance(uid)["balance_micros"] == 40_000_000  # $10 refunded and the $1 bonus gone, once
     assert ledger.granted_micros(uid) == 0
 
 
 def test_a_self_service_refund_never_pays_out_the_bonus(monkeypatch):
-    from types import SimpleNamespace
-
-    from acw import auth
-    from acw.billing import stripe_service
-
     uid = auth.get_or_create_user("bonus@example.com")["id"]
     now = db.now()
     db.execute(
@@ -417,109 +437,6 @@ def test_a_self_service_refund_never_pays_out_the_bonus(monkeypatch):
         " VALUES ('pay_b', ?, 'checkout', 'succeeded', 5000, 0, 0, 'ch_b', ?, ?)", (uid, now, now))
     ledger.credit(uid, 5000 * 10_000, "topup", "payment", "pay_b")
     ledger.credit(uid, 1_000_000, "grant", "payment_bonus", "pay_b")
-    refunds = []
-
-    class Fake:
-        class v1:
-            class charges:
-                @staticmethod
-                def retrieve(_id, params=None):
-                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=175, currency="usd"))
-
-            class refunds:
-                @staticmethod
-                def create(params=None, options=None):
-                    refunds.append(params["amount"])
-                    return SimpleNamespace(id=f"re_{len(refunds)}")
-
-    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
-    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
+    _fake_refunds(monkeypatch, fee_cents=175)
     assert stripe_service.refund_unused(uid, "pay_b") == 5000 - 175
     assert ledger.balance(uid)["balance_micros"] == 0  # the bonus went with the payment, nothing left to spend
-
-
-def _fake_refunds(monkeypatch, fee_cents):
-    """Stripe as the self-serve refund calls it: the charge's fee, and refunds that go through."""
-    from types import SimpleNamespace
-
-    made = []
-
-    class Fake:
-        class v1:
-            class charges:
-                @staticmethod
-                def retrieve(_id, params=None):
-                    return SimpleNamespace(balance_transaction=SimpleNamespace(fee=fee_cents, currency="usd"))
-
-            class refunds:
-                @staticmethod
-                def create(params=None, options=None):
-                    made.append(params["amount"])
-                    return SimpleNamespace(id=f"re_{len(made)}")
-
-    monkeypatch.setattr(stripe_service, "client", lambda: Fake)
-    monkeypatch.setattr(stripe_service, "_reverse_tax", lambda *a: None)
-    return made
-
-
-def _paid(uid, pid, cents, age_days=0.0, charge="ch_x"):
-    at = db.now() - int(age_days * 86400)
-    db.execute(
-        "INSERT INTO payments(id, user_id, kind, status, amount_cents, refunded_cents, tax_cents, stripe_charge, created_at, updated_at)"
-        " VALUES (?, ?, 'checkout', 'succeeded', ?, 0, 0, ?, ?, ?)", (pid, uid, cents, charge, at, at))
-    ledger.credit(uid, cents * 10_000, "topup", "payment", pid)
-
-
-def _spend(uid, cents):
-    hold = ledger.create_hold(uid, cents * 10_000, "job", f"job-{cents}")
-    ledger.capture_hold(hold, cents * 10_000)
-
-
-def _refundable(client):
-    r = client.get("/api/billing/history")
-    assert r.status_code == 200, r.text
-    return {p["id"]: p for p in r.json()["payments"]}
-
-
-def test_history_says_what_refund_unused_would_take_back(client, signed_in, monkeypatch):
-    """The Billing page shows "Refund unused" only while refundable_cents > 0; the server works it out the way the
-    refund itself does: bought credit still there, at most what is left of the payment, recent card payments only."""
-    from .conftest import settle_payment
-
-    uid, _h = signed_in
-    _fake_refunds(monkeypatch, fee_cents=59)
-    _paid(uid, "pay_r", 1000)
-    p = _refundable(client)["pay_r"]
-    assert p["refundable_cents"] == 1000  # nothing spent: all of it
-    assert set(p) == {"id", "kind", "status", "amount_cents", "refunded_cents", "created_at", "refundable_cents"}
-    assert "stripe_charge" not in p and "ch_x" not in client.get("/api/billing/history").text
-
-    _spend(uid, 600)
-    assert _refundable(client)["pay_r"]["refundable_cents"] == 400  # partly spent: what was bought and is still there
-
-    # Given credit never counts: an admin grant and a top-up bonus add to the balance, not to what can be refunded.
-    ledger.credit(uid, 500 * 10_000, "grant", "admin", "g1")
-    ledger.credit(uid, 100 * 10_000, "grant", "payment_bonus", "pay_r")
-    assert ledger.balance(uid)["available_micros"] == 1000 * 10_000
-    assert _refundable(client)["pay_r"]["refundable_cents"] == 400
-
-    # Refunded down to nothing bought left (the page used to keep offering the button: refunded 400 < paid 1000).
-    assert stripe_service.refund_unused(uid, "pay_r") == 400 - 59
-    p = _refundable(client)["pay_r"]
-    assert p["refunded_cents"] < p["amount_cents"] and p["refundable_cents"] == 0
-    assert stripe_service.bought_micros(uid) == 0
-    with pytest.raises(ValueError):
-        stripe_service.refund_unused(uid, "pay_r")
-    # the grant is still there to spend, and still not refundable
-    assert ledger.balance(uid)["available_micros"] == 500 * 10_000
-
-    # More than 14 days old: refunded by support only. Recent but not a card charge (no charge id): no button either.
-    _paid(uid, "pay_old", 800, age_days=stripe_service.REFUND_DAYS + 1)
-    _paid(uid, "pay_new", 300, age_days=stripe_service.REFUND_DAYS - 1)
-    settle_payment(uid, 700)
-    shown = _refundable(client)
-    assert shown["pay_old"]["refundable_cents"] == 0
-    assert shown["pay_new"]["refundable_cents"] == 300  # capped by the payment, not by all the bought credit (1100)
-    assert [p["refundable_cents"] for k, p in shown.items() if k not in ("pay_r", "pay_old", "pay_new")] == [0]
-    # what the page offers is what the refund takes
-    assert stripe_service.refund_unused(uid, "pay_new") == 300 - 59

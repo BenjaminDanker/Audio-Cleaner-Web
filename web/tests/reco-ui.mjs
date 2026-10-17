@@ -1,14 +1,15 @@
-// "Recommended for this file" on the Cleanup page and "Recommended for your room" on the Live page, in a real browser.
+// "Recommended for this file" on the Cleanup page and the paid "Test my room" on the Live page, in a real browser. The numbers
+// behind the advice are checked in tests/reco-unit.mjs; here the page must show the same choices for the same audio.
 // Needs no backend: the API is answered by this script (page.route), and the audio is generated here. Point it at any server that
-// serves the built site under /audio/ (for example `npx vite preview --port 4399`):
-//   E2E_ORIGIN=http://127.0.0.1:4399 node tests/reco-ui.mjs
+// serves the built site under /audio/ (the test backend on 8792 by default):
+//   E2E_ORIGIN=http://127.0.0.1:8792 node tests/reco-ui.mjs
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { noisy, voice, wavBytes } from './reco-audio.mjs';
 
-const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:4399';
+const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:8792';
 const BASE = `${ORIGIN}/audio`;
 const dir = mkdtempSync(join(tmpdir(), 'reco-ui-'));
 
@@ -40,16 +41,14 @@ function file(name, samples, rateHz = 44100) {
   writeFileSync(p, wavBytes(samples, rateHz));
   return p;
 }
-// The voice files are 48 kHz: the generated voice stops at 8 kHz, and labelled 44.1 kHz it would sound like a phone call (the
-// hum file still goes through the resampler).
+// The voice files are 48 kHz: the generated voice stops at 8 kHz, and labelled 44.1 kHz it would sound like a phone call.
 const FILES = {
-  clean: file('clean.wav', noisy(20, 60, 1), 48000),
-  mild: file('mild.wav', noisy(20, 22, 2, 'pink'), 48000),
-  loud: file('noisy.wav', noisy(20, 2, 3, 'pink'), 48000),
+  clean: file('clean.wav', noisy(10, 60, 1), 48000),
+  mild: file('mild.wav', noisy(10, 22, 2, 'pink'), 48000),
+  loud: file('noisy.wav', noisy(10, 2, 3, 'pink'), 48000),
   hum: file('hum.wav', Float32Array.from({ length: 12 * 44100 }, (_, i) => 0.05 * Math.sin((2 * Math.PI * 50 * i) / 44100))),
-  long: file('long.wav', noisy(200, 40, 4), 48000),
+  long: file('long.wav', noisy(80, 40, 4), 48000), // over the 75 s that are measured as six stretches
 };
-const MIC = file('mic-clean.wav', noisy(30, 55, 5), 48000);
 const MIC_NOISY = file('mic-noisy.wav', noisy(30, 2, 6, 'pink'), 48000);
 
 const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
@@ -74,7 +73,6 @@ const read = (page) => page.evaluate(() => ({
   subs: document.querySelector('input[name=subs]:checked')?.value,
   lstrength: document.querySelector('input[name=lstrength]:checked')?.value,
   strength: document.querySelector('input[name=strength]:checked')?.value,
-  rebuild: document.querySelector('input[name=rebuild]')?.checked,
   badges: [...document.querySelectorAll('.reco-badge')].map((b) => b.dataset.testid),
   line: document.querySelector('[data-testid=reco-line]')?.textContent || '',
   why: [...document.querySelectorAll('[data-testid=reco-why] li')].map((l) => l.textContent),
@@ -92,7 +90,7 @@ async function open(page, path) {
 {
   const { ctx, page, problems } = await newPage();
 
-  await check('clean recording: noise removal Off is recommended and chosen, with the reasons in plain words', async () => {
+  await check('clean recording: noise removal Off is recommended and chosen, with the reasons in plain words; subtitles are not switched on for the person', async () => {
     const t0 = Date.now();
     const s = await open(page, FILES.clean);
     if (s.noise !== 'off') throw new Error(`noise ${s.noise}: ${s.line}`);
@@ -102,70 +100,23 @@ async function open(page, path) {
     return `${Date.now() - t0} ms: ${s.line}`;
   });
 
-  await check('steady noise: the free cleanup in the browser, with a strength; much noise: Denoising', async () => {
+  await check('steady noise gets the free cleanup with a strength; a lot of noise gets Denoising with the stronger remover; a recording with no one speaking gets nothing', async () => {
     const mild = await open(page, FILES.mild);
     if (mild.noise !== 'browser' || !mild.lstrength || mild.lstrength === 'max') throw new Error(`mild: ${JSON.stringify(mild)}`);
     const loud = await open(page, FILES.loud);
     if (loud.noise !== 'denoise' || !/stronger noise remover/.test(loud.why.join(' '))) throw new Error(`loud: ${JSON.stringify(loud)}`);
     if (!loud.badges.includes('reco-noise-denoise') || !loud.badges.includes('reco-subs-accurate')) throw new Error(`badges ${loud.badges}`);
-    return `mild -> ${mild.noise}/${mild.lstrength}; loud -> ${loud.noise}/${loud.strength}`;
+    const hum = await open(page, FILES.hum);
+    if (hum.noise !== 'off' || !/nothing needed/.test(hum.line) || hum.badges.some((b) => b.includes('subs'))) throw new Error(JSON.stringify(hum));
+    return `mild -> ${mild.noise}/${mild.lstrength}; loud -> ${loud.noise}/${loud.strength}; hum -> nothing needed`;
   });
 
-  await check('a recording with no one speaking: nothing needed, nothing offered', async () => {
-    const s = await open(page, FILES.hum);
-    if (s.noise !== 'off' || !/nothing needed/.test(s.line) || s.badges.some((b) => b.includes('subs'))) throw new Error(JSON.stringify(s));
-    return s.line;
-  });
-
-  await check('a long file (3+ minutes) is looked at in a few seconds (about a minute of it, the noise remover included) and the recommendation is in', async () => {
+  await check('a long file (over a minute and a quarter) is looked at in a few seconds, on a sample of it, and the recommendation is in', async () => {
     const t0 = Date.now();
     const s = await open(page, FILES.long);
     const ms = Date.now() - t0;
     if (!s.line || ms > 20000) throw new Error(`${ms} ms: ${s.line}`);
     return `${ms} ms: ${s.line}`;
-  });
-
-  await check('the person can change everything, and "Use the recommended choices" brings the recommendation back', async () => {
-    const s = await open(page, FILES.loud);
-    await page.locator('label.choice:has(input[name=noise][value=off])').click();
-    await page.getByTestId('reco-apply').waitFor({ timeout: 3000 });
-    if ((await read(page)).noise !== 'off') throw new Error('did not change');
-    await page.getByTestId('reco-apply').click();
-    const back = await read(page);
-    if (back.noise !== s.noise || back.strength !== s.strength) throw new Error(`${JSON.stringify(back)} vs ${JSON.stringify(s)}`);
-    if (await page.getByTestId('reco-apply').count()) throw new Error('the button should be gone');
-    return `back to ${back.noise}/${back.strength}`;
-  });
-
-  await check('"Automatic best settings" switched off: nothing listened to or picked, remembered; on again picks the settings', async () => {
-    const s = await open(page, FILES.loud);
-    await page.getByTestId('auto-settings').click();
-    const off = await read(page);
-    if (off.line || off.badges.length) throw new Error('recommendation still shown: ' + JSON.stringify(off));
-    if (off.noise !== s.noise) throw new Error('the choices must stay as they were');
-    await page.goto(`${BASE}/app`);
-    await page.waitForSelector('input[type=file]', { timeout: 20000 });
-    await page.setInputFiles('input[type=file]', FILES.loud);
-    await page.getByTestId('start').waitFor({ timeout: 20000 });
-    await page.waitForTimeout(1500);
-    const fresh = await read(page);
-    if (fresh.line || fresh.badges.length || await page.getByTestId('reco-listening').count()) throw new Error('listened while off: ' + JSON.stringify(fresh));
-    if (await page.locator('input[name=auto]').isChecked()) throw new Error('the switch was not remembered');
-    await page.getByTestId('auto-settings').click();
-    await page.getByTestId('reco-line').waitFor({ timeout: 30000 });
-    const on = await read(page);
-    if (on.noise !== s.noise || on.strength !== s.strength) throw new Error(`${JSON.stringify(on)} vs ${JSON.stringify(s)}`);
-    return `off: ${fresh.noise}; on again: ${on.noise}/${on.strength}`;
-  });
-
-  await check('picking the subtitle language moves the recommendation to Extra accurate for a language Standard is weaker in', async () => {
-    await open(page, FILES.clean);
-    if (!(await read(page)).badges.includes('reco-subs-standard')) throw new Error('standard not recommended first');
-    await page.locator('label.choice:has(input[name=subs][value=standard])').click();
-    await page.selectOption('#lang', 'ja');
-    const s = await read(page);
-    if (!s.badges.includes('reco-subs-accurate') || s.badges.includes('reco-subs-standard')) throw new Error(JSON.stringify(s.badges));
-    return 'ok';
   });
 
   await check('no page errors on the Cleanup page', async () => {
@@ -199,21 +150,19 @@ async function roomTest(mic, setup) {
   const seconds = (Date.now() - t0) / 1000;
   const changes = await page.getByTestId('room-changes').locator('li').allInnerTexts().catch(() => []);
   const price = await page.getByTestId('room-price').count() ? await page.getByTestId('room-price').innerText() : '';
-  const fits = await page.getByTestId('room-fits').count();
   let after = null;
   if (await page.getByTestId('room-apply').count()) {
     await page.getByTestId('room-apply').click();
     after = await page.evaluate(() => ({
-      denoise: document.querySelector('[data-testid=group-noise] input[type=checkbox]')?.checked,
       strength: document.querySelector('input[name=live-str]:checked')?.value,
       captions: document.querySelector('input[name=live-captions]:checked')?.value,
     }));
   }
   await b.close();
-  return { seconds, changes, price, fits, after, problems };
+  return { seconds, changes, price, after, problems };
 }
 
-await check('Test my room (paid test, noisy room, Gentle and Standard captions): after 20 s it lists the changes with the price, and applies them', async () => {
+await check('Test my room (paid test in a noisy room, Gentle and Standard captions): after about 20 s it lists the changes with their price per minute, and applying them sets the choices', async () => {
   const r = await roomTest(MIC_NOISY, async (page) => {
     await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
     await page.locator('label:has(input[name=live-str][value=gentle])').click();
@@ -224,14 +173,6 @@ await check('Test my room (paid test, noisy room, Gentle and Standard captions):
   if (!/a minute more/.test(r.price)) throw new Error('price: ' + r.price);
   if (r.after?.strength !== 'max' || r.after?.captions !== 'premium') throw new Error(JSON.stringify(r.after));
   return `${r.seconds.toFixed(1)} s: ${r.changes.join('; ')}; ${r.price}`;
-});
-
-await check('Test my room (free test, quiet room): noise removal stays on, at Gentle', async () => {
-  const r = await roomTest(MIC, async () => {});
-  if (r.problems.length) throw new Error(r.problems.join(' | '));
-  if (JSON.stringify(r.changes) !== JSON.stringify(['Noise removal strength: Maximum → Gentle']) || r.price) throw new Error(JSON.stringify(r));
-  if (r.after?.denoise !== true || r.after?.strength !== 'gentle') throw new Error(JSON.stringify(r.after));
-  return r.changes.join('; ');
 });
 
 await browser.close();

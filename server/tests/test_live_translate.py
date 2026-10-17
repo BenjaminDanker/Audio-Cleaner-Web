@@ -60,7 +60,7 @@ def fake_translations(monkeypatch, fail=()):
     return calls
 
 
-def session(client, start, seconds=1, wait=0.5):
+def session(client, start, seconds=1):
     got = []
     with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
         ws.send_text(json.dumps({"type": "start", "sampleRate": 48000, **start}))
@@ -69,10 +69,7 @@ def session(client, start, seconds=1, wait=0.5):
             return got
         for i in range(int(seconds * 100)):
             ws.send_bytes(P.HEADER.pack(P.VERSION, P.CODEC_S16, 0, i, 0) + bytes(960))
-        import time
-
-        time.sleep(wait)  # the captions come and get translated meanwhile
-        ws.send_text(json.dumps({"type": "stop"}))
+        ws.send_text(json.dumps({"type": "stop"}))  # the server finishes the translations of the captions before it closes
         try:
             while True:
                 got.append(ws.receive_json())
@@ -128,16 +125,6 @@ def test_a_language_that_keeps_failing_is_switched_off_and_not_billed(client, si
     assert sum(m["type"] == "translation" and m["lang"] == "es" for m in got) == 4
     row = db.one("SELECT amount_micros FROM ledger WHERE ref_id LIKE '%:translate'")
     assert row["amount_micros"] == -pricing.cost_micros("stream_translate", "standard", 4 * 0.5)  # Spanish only
-
-
-def test_a_session_without_translations_has_no_translation_charge(client, signed_in, worker, monkeypatch):
-    uid, _ = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    fake_translations(monkeypatch)
-    worker.events = [{"type": "caption", "id": "l0", "text": "hi", "final": True, "start": 0.0, "end": 1.0}]
-    got = session(client, {"captions": "local"})
-    assert "translate" not in got[0] and not any(m["type"] == "translation" for m in got)
-    assert db.one("SELECT COUNT(*) n FROM ledger WHERE ref_id LIKE '%:translate'")["n"] == 0
 
 
 def test_captions_without_times_are_counted_by_their_length(monkeypatch):

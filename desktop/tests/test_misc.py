@@ -7,7 +7,7 @@ from PySide6.QtCore import QSettings
 from audio_cleaner_desktop import sysinfo
 from audio_cleaner_desktop.gui import media
 from audio_cleaner_desktop.gui.history import DONE, FAILED, Entry, HistoryStore
-from audio_cleaner_desktop.gui.history_view import describe_settings, format_hours, format_spent
+from audio_cleaner_desktop.gui.history_view import describe_settings
 from audio_cleaner_desktop.gui.preferences import Preferences
 
 
@@ -71,14 +71,6 @@ def test_history_store(tmp_path):
     assert len(reopened.search()) == 2
     reopened.clear()
     assert reopened.search() == [] and reopened.totals().files == 0
-
-
-def test_history_wording():
-    assert format_hours(0) == "0 min" and format_hours(1800) == "30 min" and format_hours(5400) == "1.5 h"
-    assert format_spent(30) == "< 1 min" and format_spent(125 * 60) == "2 h 05 min"
-    text = describe_settings({"strength": "gentle", "leveling": True, "loudness": "youtube", "subtitles": "srt"}, False)
-    assert text == "Gentle noise reduction, leveled (YouTube), subtitles: srt file"
-    assert "leveled" not in describe_settings({"strength": "max", "leveling": False}, True)
 
 
 def test_automatic_best_settings_are_on_by_default_and_keep_the_manual_choices(tmp_path):

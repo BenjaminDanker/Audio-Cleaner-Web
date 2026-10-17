@@ -2,7 +2,6 @@
 Synthetic recordings: a "speaker" signal, and a mic that hears it back through a small room."""
 import subprocess
 import threading
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -66,15 +65,22 @@ def ff():
     return FFmpeg(FF_DIR, threads=1)
 
 
-@needs_ff
-def test_second_track_cancels_the_echo_and_keeps_the_voice(ff, tmp_path):
+@pytest.fixture(scope="module")
+def room(ff, tmp_path_factory):
+    """The room recording as a file, its decoded mic track (x) and the echo-removed result (y), made once."""
+    d = tmp_path_factory.mktemp("echo")
     mic, far, near = room_recording(extra=123)  # not a whole number of 10 ms frames or blocks
-    src = make_file(ff, tmp_path / "rec.mkv", [mic, far])
+    src = make_file(ff, d / "rec.mkv", [mic, far])
     probe = ff.probe(src)
-    assert probe.audio_tracks == 2
-    x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=tmp_path)
-    assert x.shape[1] == 1
-    y = pipeline.remove_echo(ff, src, probe, x, 60, work_dir=tmp_path)
+    x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=d)
+    y = pipeline.remove_echo(ff, src, probe, x, 60, work_dir=d)
+    return dict(ff=ff, dir=d, src=src, probe=probe, x=x, y=y, far=far, near=near)
+
+
+@needs_ff
+def test_second_track_cancels_the_echo_and_keeps_the_voice(room):
+    x, y, near = room["x"], room["y"], room["near"]
+    assert room["probe"].audio_tracks == 2 and x.shape[1] == 1
     assert y.shape == x.shape and y.dtype == np.float32 and np.isfinite(y).all()  # same length
     assert rms_db(x[FAR_ONLY]) - rms_db(y[FAR_ONLY]) > 20  # echo mostly gone
     kept = y[NEAR_ONLY, 0]  # the person's own voice stays: same level, same spectrum (the canceller shifts phase a little)
@@ -103,16 +109,11 @@ def test_the_result_lines_up_in_time_with_the_recording(ff, tmp_path):
 
 
 @needs_ff
-def test_block_boundaries_do_not_change_the_result(ff, tmp_path, monkeypatch):
-    mic, far, _ = room_recording()
-    src = make_file(ff, tmp_path / "rec.mkv", [mic, far])
-    probe = ff.probe(src)
-    x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=tmp_path)
-    whole = pipeline.remove_echo(ff, src, probe, x, 60)
+def test_block_boundaries_do_not_change_the_result(room, monkeypatch):
     monkeypatch.setattr(pipeline, "ECHO_BLOCK", 3 * SR + 17)
-    blocks = pipeline.remove_echo(ff, src, probe, x, 60, work_dir=tmp_path)
-    assert blocks.shape == whole.shape
-    assert np.abs(blocks - whole).max() < 1e-6
+    blocks = pipeline.remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, work_dir=room["dir"])
+    assert blocks.shape == room["y"].shape
+    assert np.abs(blocks - room["y"]).max() < 1e-6
 
 
 @needs_ff
@@ -127,36 +128,8 @@ def test_one_track_files_are_left_alone(ff, tmp_path):
 
 
 @needs_ff
-def test_decode_picks_the_requested_track(ff, tmp_path):
-    mic, far, _ = room_recording()
-    src = make_file(ff, tmp_path / "rec.mkv", [mic, far])
-    probe = ff.probe(src)
-    ref = ff.decode_to_file(src, probe, SR, 1, 60, tmp_path / "ref.f32", track=1)
-    assert isinstance(ref, np.memmap) and len(ref) == len(far)
-    assert np.abs(ref[:, 0] - far).max() < 1e-4
-    assert np.abs(ff.decode(src, probe, SR, 1, 60, track=1)[:, 0] - far).max() < 1e-4
-    assert np.abs(ff.decode(src, probe, SR, 1, 60)[:, 0] - mic).max() < 1e-4
-
-
-@needs_ff
-def test_cancel_stops_echo_removal(ff, tmp_path):
-    mic, far, _ = room_recording()
-    src = make_file(ff, tmp_path / "rec.mkv", [mic, far])
-    probe = ff.probe(src)
-    x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=tmp_path)
+def test_cancel_stops_echo_removal(room):
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(pipeline.Cancelled):
-        pipeline.remove_echo(ff, src, probe, x, 60, cancel=cancel)
-
-
-def test_speech_16k_is_mono_third_length_and_seamless():
-    n = SR * 75 + 5  # crosses a block boundary, not a multiple of 3
-    t = np.arange(n) / SR
-    tone = (0.3 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
-    y = pipeline.to_speech_16k(np.stack([tone, tone], axis=1))
-    assert y.shape == (-(-n // 3),) and y.dtype == np.float32
-    cut = (pipeline.SAMPLE_RATE * 30) // 3
-    seam = y[cut - 200:cut + 200]
-    assert abs(np.sqrt(np.mean(seam**2)) - 0.3 / np.sqrt(2)) < 0.01
-    assert np.abs(np.diff(y[cut - 200:cut + 200])).max() < 0.3 * 2 * np.pi * 1000 / 16000 * 1.05
+        pipeline.remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, cancel=cancel)

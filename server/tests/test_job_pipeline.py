@@ -1,11 +1,12 @@
-"""End-to-end job pipeline through the real sandboxed runner.
+"""End-to-end job pipeline through the real sandboxed runner: one file job per kind, a file that is not media, and the queue.
 
 Needs the native pieces (~/audio-cleaner/bin, models) and a speech sample via
-ACW_TEST_AUDIO (not shipped: our sample is CC BY-NC). Skipped otherwise.
+ACW_TEST_AUDIO (not shipped: our sample is CC BY-NC). Skipped otherwise. The sample is cut to six seconds for the jobs here.
 """
 import asyncio
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,7 @@ import pytest
 from acw import db
 from acw.billing import ledger
 
-from .conftest import login, settle_payment
+from .conftest import settle_payment
 
 HOME = Path(os.environ.get("ACW_HOME", Path.home() / "audio-cleaner"))
 SAMPLE = os.environ.get("ACW_TEST_AUDIO", str(HOME / "src/DeepFilterNet/assets/noisy_snr0.wav"))
@@ -21,6 +22,14 @@ pytestmark = pytest.mark.skipif(
     not (Path(SAMPLE).exists() and (HOME / "bin/libdf.so").exists() and (HOME / "bin/ffmpeg").exists()),
     reason="native binaries/models or sample audio not available",
 )
+
+
+@pytest.fixture(scope="module")
+def sample(tmp_path_factory):
+    """The first six seconds of the speech sample."""
+    out = tmp_path_factory.mktemp("sample") / "talk.wav"
+    subprocess.run([str(HOME / "bin/ffmpeg"), "-v", "error", "-i", SAMPLE, "-t", "6", "-y", str(out)], check=True)
+    return out
 
 
 def _run_worker_once(expect_status):
@@ -34,17 +43,17 @@ def _run_worker_once(expect_status):
     return job["id"]
 
 
-def test_premium_transcription_stage_machine(client, signed_in, monkeypatch):
+def test_premium_transcription_stage_machine(client, signed_in, monkeypatch, sample):
     from acw.asr import openai_asr
     from acw_common.captions import Segment
 
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     settle_payment(uid)  # extra accurate needs a first top-up
-    data = Path(SAMPLE).read_bytes()
+    data = sample.read_bytes()
     r = client.post("/api/jobs", json={
         "kind": "denoise_transcribe", "denoiseTier": "standard", "transcribeTier": "premium",
-        "filename": "talk.wav", "sizeBytes": len(data), "durationSeconds": 10,
+        "filename": "talk.wav", "sizeBytes": len(data), "durationSeconds": 6,
         "options": {"audio_format": "mp3", "caption_formats": ["srt", "txt"]},
     }, headers=h)
     assert r.status_code == 200, r.text
@@ -109,21 +118,20 @@ def test_queue_order_is_fair_per_user():
     add("a-second", a, 1)
     add("b-later", b, 2)
     assert jobs.queued_ids() == ["b-later", "a-second"]  # a already has a job running
-    assert jobs.public_job(dict(db.one("SELECT * FROM jobs WHERE id = 'a-second'")))["queuePosition"] == 2
     assert claim("w1")["id"] == "b-later"
 
 
-def test_local_transcription_through_the_sandbox(client, signed_in):
+def test_local_transcription_through_the_sandbox(client, signed_in, sample):
     """Auto language -> detected English -> Parakeet v2 in the Landlocked runner."""
     models = Path.home() / "audio-cleaner/models"
     if not all((models / m).is_file() for m in ("parakeet-v2/encoder-model.onnx", "whisper/base/model.bin")):
         pytest.skip("Parakeet or Whisper base not installed")
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
-    data = Path(SAMPLE).read_bytes()
+    data = sample.read_bytes()
     r = client.post("/api/jobs", json={
         "kind": "transcribe", "transcribeTier": "local", "filename": "talk.wav", "sizeBytes": len(data),
-        "durationSeconds": 10, "options": {"caption_formats": ["srt"]},
+        "durationSeconds": 6, "options": {"caption_formats": ["srt"]},
     }, headers=h)
     assert r.status_code == 200, r.text
     job_id = r.json()["id"]

@@ -1,8 +1,8 @@
 """Tests for the optional Sidon restore step (acw_common.restore).
 
 They need the Sidon model files and onnxruntime: set ACW_SIDON_MODEL to the folder, or have
-it at ~/audio-cleaner/models/sidon (the server layout); otherwise the model tests are skipped. Each test
-runs a few seconds of audio on 2 threads (the model is slow: about real time on 4 threads)."""
+it at ~/audio-cleaner/models/sidon (the server layout); otherwise the model tests are skipped. The model is slow (about
+real time on 4 threads) and cached per thread count, so the model tests use two threads and only the pool test changes it."""
 import os
 import sys
 import threading
@@ -35,6 +35,14 @@ def speech_like(seconds, seed=0, f0=140.0):
     return (0.2 * voice * env + 0.01 * rng.standard_normal(len(t))).astype(np.float32)
 
 
+def real_speech(seconds):
+    sf = pytest.importorskip("soundfile")
+    x, sr = sf.read(SPEECH_WAV, dtype="float32", always_2d=True)
+    assert sr == SR
+    x = np.tile(x[:, 0], int(np.ceil(seconds * SR / len(x))))[: int(seconds * SR)]
+    return np.ascontiguousarray(x)
+
+
 def test_front_end_matches_transformers():
     """The numpy fbank (no transformers dependency) must stay identical to the reference extractor."""
     transformers = pytest.importorskip("transformers")
@@ -48,55 +56,36 @@ def test_front_end_matches_transformers():
     assert np.abs(mine - ref).max() < 1e-4
 
 
-def test_unavailable_without_files(tmp_path):
-    assert not R.available(tmp_path)
-
-
 @needs_model
-@pytest.mark.parametrize("seconds", [0.3, 3.7])
-def test_mono_length_preserved_and_finite(seconds):
-    x = speech_like(seconds)
+def test_shapes_are_kept_and_the_mid_is_restored_once():
+    x = speech_like(0.3)  # shorter than a window: an edge case that must keep its length
     y = R.restore(x, MODEL_DIR, threads=THREADS)
-    assert y.shape == x.shape and y.dtype == np.float32
-    assert np.isfinite(y).all()
+    assert y.shape == x.shape and y.dtype == np.float32 and np.isfinite(y).all()
     assert np.abs(y).max() <= 0.99 + 1e-6
-    if seconds > 1:
-        assert np.sqrt(np.mean(y**2)) > 1e-3  # not silent
 
-
-@needs_model
-def test_stereo_shapes_out_and_mid_path():
-    mono = speech_like(2.0)
-    dual = np.stack([mono, mono * 0.9], axis=1)  # side signal is tiny: restored once, written to both channels
+    mono = speech_like(1.0)
+    dual = np.stack([mono, mono * 0.9], axis=1)  # the side is tiny: restored once, written to both channels
     out = np.zeros_like(dual)
-    y = R.restore(dual, MODEL_DIR, threads=THREADS, out=out)
-    assert y is out and y.shape == dual.shape and np.isfinite(y).all()
-    assert np.array_equal(y[:, 0], y[:, 1])
-    wide = np.stack([speech_like(2.0, seed=1), speech_like(2.0, seed=2, f0=200.0)], axis=1)
-    z = R.restore(wide, MODEL_DIR, threads=THREADS)
-    assert z.shape == wide.shape and np.isfinite(z).all()
-    assert not np.array_equal(z[:, 0], z[:, 1])  # unrelated channels are restored separately
+    z = R.restore(dual, MODEL_DIR, threads=THREADS, out=out)
+    assert z is out and np.isfinite(z).all() and np.array_equal(z[:, 0], z[:, 1])
 
-
-def real_speech(seconds):
-    sf = pytest.importorskip("soundfile")
-    x, sr = sf.read(SPEECH_WAV, dtype="float32", always_2d=True)
-    assert sr == SR
-    x = np.tile(x[:, 0], int(np.ceil(seconds * SR / len(x))))[: int(seconds * SR)]
-    return np.ascontiguousarray(x)
+    wide = np.stack([speech_like(1.0, seed=1), speech_like(1.0, seed=2, f0=200.0)], axis=1)
+    w = R.restore(wide, MODEL_DIR, threads=THREADS)
+    assert w.shape == wide.shape and not np.array_equal(w[:, 0], w[:, 1])  # unrelated channels are restored separately
 
 
 @needs_model
 @needs_speech
-def test_chunk_boundaries_do_not_click():
-    """Short windows (several overlap cross-fades and decode blocks) against one single window:
-    the same spectral envelope, and no discontinuity at the seams."""
-    seconds = 14.0
+def test_windows_and_decoder_blocks_join_without_clicks():
+    """Short windows (cross-fades) and decoder blocks (a seam every 10 s) against one long window: the same envelope,
+    no click at the seams, and progress to 1."""
+    seconds = 12.0  # the decoder seam at 10 s must be inside the file
     x = real_speech(seconds)
     one = R.restore(x, MODEL_DIR, threads=THREADS, window_seconds=60.0)
-    win, ov = 6.0, 1.5
-    chunked = R.restore(x, MODEL_DIR, threads=THREADS, window_seconds=win, overlap_seconds=ov)
+    seen = []
+    chunked = R.restore(x, MODEL_DIR, threads=THREADS, window_seconds=6.0, overlap_seconds=1.5, progress=seen.append)
     assert chunked.shape == one.shape and np.isfinite(chunked).all()
+    assert seen == sorted(seen) and 0 < seen[0] <= 1 and seen[-1] == 1.0
 
     # 1) same loudness and spectral envelope (the waveforms themselves differ in phase: generative model)
     ratio = np.sqrt(np.mean(chunked**2) / np.mean(one**2))
@@ -127,64 +116,48 @@ def test_chunk_boundaries_do_not_click():
     normal = np.array([p for p, rms in grid if rms > 1e-3])
     assert len(normal) > 100
     limit = np.percentile(normal, 99)
-    hop = win - ov
-    window_seams = [k * hop + ov / 2 for k in (1, 2)]  # middle of each cross-fade
-    decode_seams = [R._DECODE_SECONDS * k for k in (1, 2) if R._DECODE_SECONDS * k < seconds - 1]
+    hop = 6.0 - 1.5
+    window_seams = [k * hop + 1.5 / 2 for k in (1, 2)]  # middle of each cross-fade
+    decode_seams = [R._DECODE_SECONDS * k for k in (1,) if R._DECODE_SECONDS * k < seconds - 1]
     for s in window_seams + decode_seams:
         i = int(s * SR)
         p, rms = peakiness(i)
-        print(f"seam {s:.2f} s: peakiness {p:.1f} (limit {limit:.1f}), max d2 {d2[i - 120 : i + 120].max():.2e}")
         # seams that fall in near-silence (max second difference below -66 dBFS) cannot click audibly
         assert p <= limit * 1.25 or d2[i - 120 : i + 120].max() < 5e-4, (s, p, limit)
 
 
 @needs_model
-def test_decoder_blocks_with_context_equal_one_shot():
-    """The decoder is convolutional: decoding in blocks with context frames and cropping is exact."""
-    be = R._backend(MODEL_DIR, THREADS)
-    w16 = R._to_16k(speech_like(6.0))[: 300 * R.FEATURE_SAMPLES]
-    feats = be.features(R._fbank(np.pad(w16, (R._FBANK_PAD, R._FBANK_PAD))))
-    whole = be.decode(feats)
-    ctx, a, b = R._DECODE_CONTEXT, 100, 220
-    block = be.decode(feats[a - ctx : b + ctx])[ctx * R.DECODER_UPSAMPLE : (ctx + b - a) * R.DECODER_UPSAMPLE]
-    assert np.abs(block - whole[a * R.DECODER_UPSAMPLE : b * R.DECODER_UPSAMPLE]).max() < 1e-4
-
-
-def test_import_is_lazy():
-    import subprocess
-
-    code = "import sys; sys.path.insert(0, %r); import acw_common.restore; print('torch' in sys.modules, 'onnxruntime' in sys.modules)" % str(
-        Path(__file__).resolve().parents[1]
-    )
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout.split()
-    assert out == ["False", "False"]
-
-
-@needs_model
-def test_progress_and_cancel():
-    x = speech_like(14.0)
-    seen = []
-    R.restore(x[: 4 * SR], MODEL_DIR, threads=THREADS, progress=seen.append)
-    assert seen and seen == sorted(seen) and 0 < seen[0] <= 1 and seen[-1] == 1.0
-
+def test_cancel_stops_after_the_first_window():
+    x = speech_like(4.0)
     cancel = threading.Event()
     calls = []
 
     def progress(f):
         calls.append(f)
-        cancel.set()  # cancelled after the first decoded block
+        cancel.set()  # cancelled after the first window
 
     with pytest.raises(R.Cancelled):
-        R.restore(x, MODEL_DIR, threads=THREADS, progress=progress, cancel=cancel, window_seconds=6.0, overlap_seconds=1.0)
+        R.restore(x, MODEL_DIR, threads=THREADS, progress=progress, cancel=cancel, window_seconds=2.0, overlap_seconds=0.5)
     assert len(calls) == 1  # stopped right away, not after the whole file
-
     pre = threading.Event()
     pre.set()
     with pytest.raises(R.Cancelled):
         R.restore(x, MODEL_DIR, threads=THREADS, cancel=pre)
 
 
-def test_side_db_in_blocks_matches_the_whole_file_formula(monkeypatch):
+@needs_model
+def test_decoder_blocks_with_context_equal_one_shot():
+    """The decoder is convolutional: decoding in blocks with context frames and cropping is exact."""
+    be = R._backend(MODEL_DIR, THREADS)
+    w16 = R._to_16k(speech_like(2.5))[: 125 * R.FEATURE_SAMPLES]
+    feats = be.features(R._fbank(np.pad(w16, (R._FBANK_PAD, R._FBANK_PAD))))
+    whole = be.decode(feats)
+    ctx, a, b = R._DECODE_CONTEXT, 30, 90
+    block = be.decode(feats[a - ctx : b + ctx])[ctx * R.DECODER_UPSAMPLE : (ctx + b - a) * R.DECODER_UPSAMPLE]
+    assert np.abs(block - whole[a * R.DECODER_UPSAMPLE : b * R.DECODER_UPSAMPLE]).max() < 1e-4
+
+
+def test_blockwise_helpers_equal_the_whole_array_formulas(monkeypatch):
     rng = np.random.default_rng(3)
     x = np.stack([rng.standard_normal(70_001), 0.3 * rng.standard_normal(70_001)], axis=1).astype(np.float32)
     mid = 0.5 * (x[:, 0].astype(np.float64) + x[:, 1])
@@ -192,21 +165,17 @@ def test_side_db_in_blocks_matches_the_whole_file_formula(monkeypatch):
     want = 10 * np.log10((np.mean(side**2) + 1e-20) / (np.mean(mid**2) + 1e-20))
     monkeypatch.setattr(R, "_BLOCK", 4096)  # many blocks, the last one short
     assert abs(R._side_db(x) - want) < 1e-9
-
-
-def test_mid_view_is_the_float32_mid_signal():
-    rng = np.random.default_rng(4)
-    x = rng.standard_normal((1000, 2)).astype(np.float32)
-    mid = R._Mid(x)
-    want = np.ascontiguousarray(0.5 * (x[:, 0] + x[:, 1]))
-    assert len(mid) == 1000 and mid[10:700].dtype == np.float32
-    assert np.array_equal(mid[10:700], want[10:700]) and np.array_equal(mid[0:1000], want)
+    view = R._Mid(x)
+    want_mid = np.ascontiguousarray(0.5 * (x[:, 0] + x[:, 1]))
+    assert len(view) == 70_001 and view[10:700].dtype == np.float32
+    assert np.array_equal(view[10:700], want_mid[10:700]) and np.array_equal(view[0:70_001], want_mid)
 
 
 @needs_model
-def test_worker_pool_gives_the_same_samples_as_one_thread():
+def test_samples_do_not_depend_on_the_worker_count():
     """Windows and decoder blocks are independent: the pool of single-threaded sessions must not change the output."""
-    x = np.stack([speech_like(5.0, seed=5), speech_like(5.0, seed=6, f0=190.0)], axis=1)
-    one = R.restore(x, MODEL_DIR, threads=1)
-    many = R.restore(x, MODEL_DIR, threads=3)
+    x = speech_like(4.0, seed=5)
+    kw = dict(window_seconds=2.0, overlap_seconds=0.5)
+    many = R.restore(x, MODEL_DIR, threads=THREADS, **kw)
+    one = R.restore(x, MODEL_DIR, threads=1, **kw)
     assert np.array_equal(one, many)

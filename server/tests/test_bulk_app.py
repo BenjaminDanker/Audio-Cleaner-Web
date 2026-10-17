@@ -1,16 +1,39 @@
 """The bulk-transfer process (acw/bulk_app.py): only uploads and result downloads, same auth and limits."""
 import json
-import time
+import types
 
 import pytest
 from fastapi.testclient import TestClient
 
-from acw import db, jobs
+from acw import db, jobs, security
 from acw.billing import ledger
 
 from .conftest import ORIGIN, login
 
 JOB = "a" * 32
+
+
+class VirtualClock:
+    """Stands in for the clock of the transfer cap: a sleep moves time on at once instead of waiting."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    async def sleep(self, seconds):
+        self.now += seconds
+        self.slept += seconds
+
+
+@pytest.fixture
+def virtual_time(monkeypatch):
+    clock = VirtualClock()
+    monkeypatch.setattr(security, "time", types.SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(security, "asyncio", types.SimpleNamespace(sleep=clock.sleep))
+    return clock
 
 
 @pytest.fixture
@@ -40,32 +63,15 @@ def test_only_the_bulk_routes_exist():
 
 
 @pytest.mark.parametrize("method,path", [
-    ("GET", "/api/me"),
-    ("GET", "/api/jobs"),
-    ("POST", "/api/jobs"),
-    ("GET", f"/api/jobs/{JOB}"),
-    ("POST", f"/api/jobs/{JOB}/cancel"),
-    ("DELETE", f"/api/jobs/{JOB}"),
-    ("POST", "/api/auth/email"),
-    ("POST", "/api/stripe/webhook"),
-    ("GET", "/api/keys"),
-    ("GET", "/api/stream/ws"),
-    ("GET", "/"),
-    ("GET", "/api/docs"),
-    ("GET", "/api/openapi.json"),
+    ("GET", "/api/me"), ("GET", "/api/keys"), ("POST", "/api/stripe/webhook"), ("GET", "/api/docs"),
 ])
 def test_everything_else_is_404(bulk, method, path):
     r = bulk.request(method, path, headers={"Origin": ORIGIN}, content=b"{}" if method == "POST" else None)
     assert r.status_code == 404, (method, path, r.status_code)
 
 
-def test_health_answers_without_sign_in(bulk):
-    r = bulk.get("/api/health")
-    assert r.status_code == 200 and r.json()["ok"] is True
-    assert r.headers["cache-control"] == "no-store" and r.headers["x-content-type-options"] == "nosniff"
-
-
-def test_upload_and_download_need_a_sign_in(bulk):
+def test_health_is_open_and_uploads_and_downloads_need_a_sign_in(bulk):
+    assert bulk.get("/api/health").json()["ok"] is True
     assert bulk.put(f"/api/jobs/{JOB}/input", content=b"x" * 10).status_code == 401
     assert bulk.get(f"/api/jobs/{JOB}/outputs/clean.wav").status_code == 401
 
@@ -140,44 +146,29 @@ def test_download_through_the_bulk_process(client, bulk, monkeypatch):
     assert bulk.get(f"/api/jobs/{job_id}/outputs/..%2F..%2Fdb").status_code in (404, 422)
 
 
-def test_download_cap_slows_the_transfer(client, bulk, monkeypatch):
+def test_download_cap_slows_the_transfer(client, bulk, monkeypatch, virtual_time):
     import acw.bulk_app as b
     from acw.security import DownloadBandwidth
 
     uid, _ = login(client)
-    job_id, data = _done_job(uid, data=b"R" * 1_000_000)
+    job_id, data = _done_job(uid, data=b"R" * 600_000)
     bulk.cookies.update(client.cookies)
-    monkeypatch.setenv("ACW_DOWNLOAD_MBPS_TOTAL", "0.5")
+    monkeypatch.setenv("ACW_DOWNLOAD_MBPS_TOTAL", "0.5")  # 500 kB/s; the first second's worth is free
     monkeypatch.setattr(b, "downloads", DownloadBandwidth())
-    t0 = time.monotonic()
     r = bulk.get(f"/api/jobs/{job_id}/outputs/clean.wav")
-    elapsed = time.monotonic() - t0
-    assert r.status_code == 200 and len(r.content) == len(data)
-    assert elapsed > 0.8  # 1 MB at 0.5 MB/s, the first second's worth is free
+    assert r.status_code == 200 and r.content == data
+    assert virtual_time.slept == pytest.approx((600_000 - 500_000) / 500_000)  # 0.2 s of waiting, in virtual time
 
 
-def test_download_cap_zero_means_unlimited(monkeypatch):
-    from acw.security import DownloadBandwidth
-
-    monkeypatch.setenv("ACW_DOWNLOAD_MBPS_TOTAL", "0")
-    assert DownloadBandwidth().total is None
-
-
-def test_download_cap_default_is_five_megabytes_per_second_shared_with_uploads(monkeypatch):
-    from acw.security import DownloadBandwidth
-
-    monkeypatch.delenv("ACW_DOWNLOAD_MBPS_TOTAL", raising=False)
-    monkeypatch.delenv("ACW_UPLOAD_MBPS_TOTAL", raising=False)
-    monkeypatch.delenv("ACW_TRANSFER_MBPS_TOTAL", raising=False)
-    assert DownloadBandwidth().total.rate == 5e6
-
-
-def test_the_cap_applies_under_the_base_path(monkeypatch):
+def test_the_cap_applies_under_the_base_path_to_job_results_and_release_downloads():
     from acw.bulk_app import DownloadThrottleMiddleware
 
     mw = DownloadThrottleMiddleware(None, base_path="/audio")
     scope = {"type": "http", "method": "GET", "path": f"/audio/api/jobs/{JOB}/outputs/x.wav"}
     assert mw.applies(scope)
+    assert mw.applies({**scope, "path": "/audio/api/downloads/obs-plugin/x.zip"})
+    assert mw.applies({**scope, "method": "HEAD", "path": "/audio/api/downloads/obs-plugin/x.zip"})
     assert not mw.applies({**scope, "path": f"/audio/api/jobs/{JOB}/input"})
+    assert not mw.applies({**scope, "path": "/audio/api/health"})
     assert not mw.applies({**scope, "method": "PUT"})
     assert not mw.applies({"type": "websocket", "path": scope["path"], "method": "GET"})

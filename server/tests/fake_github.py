@@ -106,7 +106,8 @@ class FakeGitHub:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.api = f"http://127.0.0.1:{self.server.server_port}"
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        # poll_interval: shutdown() waits up to one poll; the default 0.5 s would be paid by every test
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
 
     def asset_id(self, tag: str, name: str) -> int:

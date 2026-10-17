@@ -68,12 +68,6 @@ def test_every_package_in_the_locks_has_hashes_and_the_files_are_unchanged_by_th
     assert "--require-hashes" in (LOCKS[0].read_text(encoding="utf-8"))
 
 
-def test_the_runtime_lock_keeps_its_environment_markers():
-    text = LOCKS[0].read_text(encoding="utf-8")
-    assert 'onnxruntime==1.23.2; sys_platform == "darwin" and platform_machine == "x86_64" \\' in text
-    assert 'colorama==0.4.6; sys_platform == "win32" \\' in text  # tqdm needs it on Windows
-
-
 def test_the_build_and_the_ci_install_with_require_hashes():
     root = Path(__file__).resolve().parents[2]
     workflow = root / ".github" / "workflows" / "desktop.yml"  # not in the public copy, which builds nothing

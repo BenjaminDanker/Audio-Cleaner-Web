@@ -1,9 +1,8 @@
-// Copy check: visitors must not see how the service is built or what is inside it. Loads every public page (and, with the
-// local test backend, the signed-in ones) and fails if the visible text mentions model names, vendors, infrastructure
-// words or the words the site does not use ("premium", "upgrade", ...).
-// Not checked on purpose: /licenses (open-source attributions are required by those licences), /privacy and /terms
-// (they must name the kind of sub-processor), and the invisible bits of the page source.
-// Needs `npm run build` served by the test backend on 127.0.0.1:8792 (see helpers.mjs); fixtures are not needed.
+// The words and facts visitors read: the public and signed-in pages show no internals and none of the avoided words (the list
+// below is also what tests/reco-unit.mjs checks its sentences against); the legal pages have no unfinished placeholders, the
+// licences are real texts, and they say the service is not offered in the EU/EEA, the UK or Switzerland (and that such a card
+// is not charged); the privacy page's retention answers and the landing FAQ match what the server does; the job step names and the
+// ledger wording are plain. Needs the test backend (port 8792) with `npm run build` output; the signed-in parts use a fresh account.
 // Usage: node tests/copy.mjs
 import { join } from 'node:path';
 import { BASE, FILES, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
@@ -22,8 +21,8 @@ const BANNED = [
 /** Everything a visitor can read or hear on the page: the text, option labels, and the labels screen readers announce. */
 async function visibleText(page, { skipCode = false } = {}) {
   return page.evaluate((skipCode) => {
-    // The developer pages show the API's own field values (for example "premium") in code samples and code-styled names;
-    // those have to be spelled exactly, so code is left out of the scan there. Everything else on the page is checked.
+    // The developer pages show the API's own field values (for example "premium") in code samples; those have to be spelled
+    // exactly, so code is left out of the scan there. Everything else on the page is checked.
     let body = document.body.innerText;
     if (skipCode) {
       const clone = document.body.cloneNode(true);
@@ -33,7 +32,6 @@ async function visibleText(page, { skipCode = false } = {}) {
     const parts = [document.title, body];
     for (const o of document.querySelectorAll('option')) parts.push(o.textContent);
     for (const d of document.querySelectorAll('details')) parts.push(d.textContent); // closed answers are not in innerText
-    // what a search result or a shared link shows
     for (const m of document.querySelectorAll('meta[name=description],meta[property^="og:"],meta[name^="twitter:"]')) parts.push(m.getAttribute('content') || '');
     for (const e of document.querySelectorAll('[aria-label],[title],[placeholder],img[alt]')) {
       for (const a of ['aria-label', 'title', 'placeholder', 'alt']) if (e.getAttribute(a)) parts.push(e.getAttribute(a));
@@ -61,32 +59,42 @@ async function scan(page, path, waitFor, opts) {
 
 const { browser, page } = await launch();
 
-await check('copy: public pages show no internals and none of the avoided words', async () => {
+await check('copy: public pages (signed out, the sign-in page for /app and /app/live) show no internals and none of the avoided words', async () => {
   const bad = [];
   bad.push(...(await scan(page, '/', 'table tbody tr')));
   bad.push(...(await scan(page, '/#pricing', 'table tbody tr')));
-  bad.push(...(await scan(page, '/transcribe'))); // gone: the not-found page
-  bad.push(...(await scan(page, '/free'))); // gone: the not-found page
-  bad.push(...(await scan(page, '/app'))); // signed out: lands on the sign-in page
+  bad.push(...(await scan(page, '/app')));
   if (!/\/login/.test(page.url())) throw new Error('signed-out /app did not go to /login: ' + page.url());
-  bad.push(...(await scan(page, '/app/live'))); // signed out: lands on the sign-in page
+  bad.push(...(await scan(page, '/app/live')));
   if (!/\/login/.test(page.url())) throw new Error('signed-out /app/live did not go to /login: ' + page.url());
   bad.push(...(await scan(page, '/login')));
-  bad.push(...(await scan(page, '/contact'))); // here mail is not set up, so the calm "not switched on" page (the form's own words: tests/contact.mjs)
+  bad.push(...(await scan(page, '/contact')));
   bad.push(...(await scan(page, '/nope')));
   bad.push(...(await scan(page, '/developers', 'pre.code', { skipCode: true }))); // the API guide: code samples are exempt
   bad.push(...(await scan(page, '/developers/live', 'pre.code', { skipCode: true })));
   if (bad.length) throw new Error(bad.join(' | '));
-  return '12 pages clean';
+  return '10 pages clean';
 });
 
-await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets]) and no empty contact links', async () => {
+await check('copy: signed-in pages (Cleanup with a file and its options, Billing, Live, Account) show no internals', async () => {
+  await signIn(page, EMAIL);
+  const bad = [];
+  for (const p of ['/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'noisy.wav'));
+  await pick(page, 'subs', 'accurate');
+  bad.push(...findings(await visibleText(page)).map((x) => `/app with a file: ${x}`));
+  if (bad.length) throw new Error(bad.join(' | '));
+  return '4 pages + the options for a file clean';
+});
+
+await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets], "undefined") and no empty contact links', async () => {
   const bad = [];
   for (const path of ['/terms', '/privacy']) {
     await page.goto(`${BASE}${path}`);
     await page.waitForSelector('main h1');
     const text = await visibleText(page);
-    for (const re of [/to be confirmed/i, /\bTBD\b/, /\[[^\]\n]*\]/, /lorem ipsum/i, /\bundefined\b/, /\bnull\b/]) {
+    for (const re of [/to be confirmed/i, /\bTBD\b/, /\[[^\]\n]*\]/, /lorem ipsum/i, /\bundefined\b/, /\bnull\b/, /legal review|draft/i]) {
       const m = re.exec(text);
       if (m) bad.push(`${path}: "${m[0]}" in …${text.slice(Math.max(0, m.index - 50), m.index + 60).replace(/\s+/g, ' ')}…`);
     }
@@ -98,31 +106,78 @@ await check('legal: Terms and Privacy have no unfinished placeholders ("to be co
   return 'clean';
 });
 
-await check('landing: no "privacy promise" section; retention stays in the FAQ; Privacy and licences only in the footer', async () => {
+await check('legal: Terms and Privacy say the service is not offered in the EU/EEA, the UK or Switzerland, and that a card from there is cancelled before it is charged', async () => {
+  for (const p of ['/terms', '/privacy']) {
+    await page.goto(`${BASE}${p}`);
+    const t = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+    if (!/not available to people in the (European Union or European Economic Area \(EU\/EEA\)|EU\/EEA), the (United Kingdom|UK) or Switzerland/.test(t)) throw new Error(p + ': availability sentence missing');
+    if (!/card issued in one of those places is used, we cancel the payment before it is charged/.test(t)) throw new Error(p + ': not-charged sentence missing');
+  }
+  return 'ok';
+});
+
+await check('legal: every licence in the list links to a real licence text (not the app page), and the Creative Commons text is linked, not shipped', async () => {
+  await page.goto(`${BASE}/licenses`);
+  await page.waitForSelector('[data-testid=licenses] tbody tr');
+  const links = await page.locator('[data-testid=licenses] a[href*="/licenses/"]:not([href^="http"])').evaluateAll((as) => as.map((a) => a.getAttribute('href')));
+  if (links.length < 12) throw new Error(`only ${links.length} licence links`);
+  const seen = [...new Set(links)];
+  for (const href of seen) {
+    const res = await page.request.get(new URL(href, BASE + '/').href);
+    const body = await res.text();
+    if (!res.ok() || body.length < 500) throw new Error(`${href}: ${res.status()} ${body.length} bytes`);
+    if (/^\s*<!doctype html/i.test(body)) throw new Error(`${href}: got the app page`);
+    if (!/MIT|Apache|Mozilla Public|Lesser General Public|Permission is hereby granted|Creative Commons Attribution/.test(body.slice(0, 4000))) throw new Error(`${href}: does not look like a licence`);
+  }
+  await page.goto(`${BASE}/licenses`);
+  if (!(await page.locator('[data-testid=licenses] a[href^="https://creativecommons.org/licenses/by/4.0/"]').count())) throw new Error('no link to the CC BY 4.0 licence');
+  const main = await page.locator('main').innerText();
+  for (const need of ['mediabunny', 'React', 'React Router', 'Vite', 'Rust crates', 'sherpa-onnx', 'CC BY 4.0']) if (!main.includes(need)) throw new Error('missing ' + need);
+  return `${seen.length} licence files`;
+});
+
+await check('retention: the privacy page states the server\'s retention periods, the landing FAQ says results stay 24 hours, and there is no privacy promise section on the landing page', async () => {
   await page.goto(`${BASE}/`);
   await page.waitForSelector('table tbody tr');
   const t = await page.locator('main').textContent();
   if (/privacy promise/i.test(t) || (await page.locator('#privacy').count())) throw new Error('the privacy promise section is still on the landing page');
   if (!/Results stay for 24 hours/i.test(t) || !/train/i.test(t)) throw new Error('retention answer missing from the FAQ');
-  if (await page.locator('main a[href$="/privacy"]').count()) throw new Error('landing page still links to the privacy policy outside the footer');
-  if (await page.locator('main a[href$="/licenses"]').count()) throw new Error('/licenses linked outside the footer');
-  if (!(await page.locator('footer a[href$="/privacy"]').count()) || !(await page.locator('footer a[href$="/licenses"]').count())) throw new Error('footer lost its Privacy / licences links');
+  await page.goto(`${BASE}/privacy`);
+  const pr = await page.locator('#retention ~ ul').first().innerText();
+  for (const need of [/7 years/, /12 months/, /90 days/, /30 days/, /contact form/, /free live trial/]) if (!need.test(pr)) throw new Error(`Privacy retention lacks ${need}`);
   return 'ok';
 });
 
-await check('copy: signed-in pages (Cleanup with a file dropped, Billing, Live, Account) show no internals', async () => {
-  await signIn(page, EMAIL);
-  const bad = [];
-  for (const p of ['/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
-  // the options that appear after a file is dropped (WAV, WMA via libav.js, and an unreadable file: free noise removal greyed out with its reason)
-  for (const f of ['noisy.wav', 'noisy.wma', 'garbage.mp3']) {
+await check('running jobs: the server\'s step names are shown in plain words ("premium" and "cloud asr" never appear), an unknown step shows only the percentage', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const job = (id, extra) => ({ id, kind: 'denoise', free: false, status: 'running', inputName: `${id}.wav`, createdAt: now, durationSeconds: 60, progress: 0, stage: '', outputs: [], costMicros: 0, expiresAt: null, queuePosition: null, queueWaitSeconds: null, ...extra });
+  const list = [
+    job('j1', { status: 'cloud_asr', stage: 'cloud asr running', progress: 85 }),
+    job('j2', { stage: 'transcribing (premium)', progress: 40 }),
+    job('j3', { stage: 'Cleaning', progress: 41 }),
+    job('j4', { stage: 'some brand new step', progress: 7 }),
+  ];
+  await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list } }) : r.continue()));
+  try {
     await page.goto(`${BASE}/app`);
-    await dropFile(page, join(FILES, f));
-    await pick(page, 'subs', 'accurate');
-    bad.push(...findings(await visibleText(page)).map((x) => `/app with ${f}: ${x}`));
+    await page.getByTestId('job').first().waitFor();
+    const lines = (await page.locator('[data-testid=job] p[role=status]').allInnerTexts()).map((l) => l.trim());
+    const all = lines.join('\n');
+    if (/premium|cloud asr|some brand new/i.test(all)) throw new Error('raw step shown: ' + all.slice(0, 400));
+    for (const w of ['Writing the transcript · 85%', 'Writing the transcript · 40%', 'Cleaning the sound · 41%', '7% done']) if (!lines.includes(w)) throw new Error(`missing "${w}" in ${JSON.stringify(lines)}`);
+    return lines.join(' | ');
+  } finally {
+    await page.unroute('**/api/jobs');
   }
-  if (bad.length) throw new Error(bad.join(' | '));
-  return '4 pages + 3 option sets clean';
+});
+
+await check('ledger: the entries read as what happened (no "usage", "grant" or "weird" words), with the file name and minutes; a live session that was cut short says so', async () => {
+  const { ledgerKind, ledgerText } = await import('../src/ledger.js');
+  if (ledgerText({ kind: 'usage', description: 'denoise + transcribe: noisy.flac (0.2 min)' }) !== 'Denoising and subtitles: noisy.flac (0.2 min)') throw new Error('denoise + transcribe');
+  if (ledgerText({ kind: 'usage', description: 'Live session (3.0 min, cut short by a restart)' }) !== 'Live session (3.0 min, ended early)') throw new Error('live');
+  if (ledgerText({ kind: 'topup', description: 'Top-up $20.00' }) !== 'Top-up $20.00') throw new Error('topup');
+  if (ledgerKind({ kind: 'grant' }) !== 'Credit added' || ledgerKind({ kind: 'usage' }) !== 'Used') throw new Error('kinds');
+  return 'ok';
 });
 
 await browser.close();

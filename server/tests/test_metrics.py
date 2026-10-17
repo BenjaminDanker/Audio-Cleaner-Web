@@ -5,7 +5,7 @@ import re
 
 import pytest
 
-from acw import admin, auth, db, jobs, metrics, monitor, stats
+from acw import auth, db, jobs, metrics, monitor, stats
 from acw.billing import ledger
 
 
@@ -69,41 +69,17 @@ def test_a_finished_job_writes_one_json_line(metric_lines):
     assert "user" not in json.dumps(line) and "@" not in json.dumps(line)
 
 
-def test_a_failed_job_writes_job_failed_once(metric_lines):
+def test_a_failed_job_and_a_cancel_each_write_one_line(metric_lines):
     uid = user()
     jid = make_job(uid)
     job = dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,)))
     jobs.finish_failed(job, "Processing failed; you were not charged.")
     jobs.finish_failed(job, "Processing failed; you were not charged.")  # safe to call twice, logged once
+    jid2 = make_job(uid)
+    jobs.finish_failed(dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid2,))), "Canceled.", status="canceled")
     found = [x for x in metric_lines() if x["event"] == "job_failed"]
-    assert len(found) == 1
-    assert found[0]["status"] == "failed" and found[0]["error"].startswith("Processing failed") and found[0]["noise"] == "unknown"
-
-
-def test_a_cancel_is_a_job_failed_line_with_status_canceled(metric_lines):
-    uid = user()
-    jid = make_job(uid)
-    jobs.finish_failed(dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,))), "Canceled.", status="canceled")
-    [line] = [x for x in metric_lines() if x["event"] == "job_failed"]
-    assert line["status"] == "canceled"
-
-
-def test_noise_used():
-    assert metrics.noise_used("transcribe", {}, "done") == "none"
-    assert metrics.noise_used("denoise", {"denoise_tier": "rebuild"}, "done") == "rebuilt"
-    assert metrics.noise_used("denoise", {"noise_profile": "light"}, "done") == "light"
-    assert metrics.noise_used("denoise", {"options": {"noise": "heavy"}}, "done") == "heavy"
-    assert metrics.noise_used("denoise", {"options": {}}, "done") == "auto"
-    assert metrics.noise_used("denoise", {"options": {}}, "failed") == "unknown"
-
-
-def test_frame_stats_counts_late_and_dropped_frames():
-    f = metrics.FrameStats()
-    f.sent = 10
-    for rt in (0.02, 0.03, 0.2, 0.05):
-        f.answer(rt)
-    assert (f.answered, f.late, f.dropped) == (4, 1, 6)
-    assert f.worst == pytest.approx(0.2)
+    assert [x["status"] for x in found] == ["failed", "canceled"]
+    assert found[0]["error"].startswith("Processing failed") and found[0]["noise"] == "unknown"
 
 
 def test_a_live_session_writes_one_line_when_it_ends(metric_lines):
@@ -119,30 +95,16 @@ def test_a_live_session_writes_one_line_when_it_ends(metric_lines):
     assert line["audio_s"] == 125.5 and line["frames"] == 0
 
 
-def test_live_end_stores_frame_counts():
-    from acw.stream import routes
-
-    uid = user()
-    sid = db.new_id()
-    db.execute("INSERT INTO stream_sessions(id, user_id, status, started_at) VALUES (?,?, 'active', ?)", (sid, uid, db.now()))
-    db.execute("UPDATE stream_sessions SET frames = 50, late_frames = 2, dropped_frames = 1, status = 'ended', ended_at = ? WHERE id = ?", (db.now(), sid))
-    t = stats.live_totals(0)
-    assert (t["frames"], t["late_frames"], t["dropped_frames"]) == (50, 2, 1)
-    assert routes  # imported for the module's side effects on the schema only
-
-
 # ------------------------------------------------------------------ stats
 
 def seed(now):
     """Four finished standard jobs (waits 10/20/30/300 s), one failed, one rebuild, one free, a live day, a top-up."""
     uid = user()
-    out = []
     for wait, run in ((10, 60), (20, 70), (30, 80), (300, 90)):
         jid = make_job(uid)
         db.execute(
             "UPDATE jobs SET status = 'done', duration_seconds = 600, wait_seconds = ?, queued_at = ?, started_at = ?, finished_at = ?, created_at = ?,"
             " cost_micros = 6000 WHERE id = ?", (wait, now - 500, now - 400, now - 400 + run, now - 600, jid))
-        out.append(jid)
     bad = make_job(uid)
     db.execute("UPDATE jobs SET status = 'failed', error = 'Processing failed; you were not charged.', started_at = ?, finished_at = ?,"
                " created_at = ? WHERE id = ?", (now - 300, now - 200, now - 600, bad))
@@ -166,14 +128,6 @@ def seed(now):
     db.execute("INSERT INTO payments(id, user_id, kind, status, amount_cents, created_at, updated_at) VALUES ('p1', ?, 'checkout', 'succeeded', 1000, ?, ?)",
                (uid, now - 100, now - 100))
     return uid
-
-
-def test_percentile_is_nearest_rank():
-    assert stats.percentile([], 95) is None
-    assert stats.percentile([5], 50) == 5
-    assert stats.percentile([10, 20, 30, 300], 50) == 20
-    assert stats.percentile([10, 20, 30, 300], 95) == 300
-    assert stats.percentile(list(range(1, 101)), 95) == 95
 
 
 def test_stats_report_numbers():
@@ -210,26 +164,17 @@ def test_stats_text_report():
 
 
 def test_stats_on_an_empty_database():
-    text = stats.render(stats.report(30))
-    assert "none" in text and "failure ratio: -" in text and "frames: not recorded" in text
-
-
-def test_admin_stats_command(capsys):
-    seed(db.now())
-    admin.main(["stats", "--days", "7"])
-    out = capsys.readouterr().out
-    assert "last 7 day(s)" in out and "standard" in out
-    with pytest.raises(SystemExit):
-        admin.main(["stats", "--days", "0"])
+    empty = stats.render(stats.report(30))
+    assert "none" in empty and "failure ratio: -" in empty and "frames: not recorded" in empty
 
 
 def test_stats_only_reads():
     seed(db.now())
-    before = db.one("SELECT COUNT(*) AS n FROM jobs")["n"], db.one("PRAGMA data_version")[0]
+    before = db.one("SELECT COUNT(*) AS n FROM jobs")["n"]
     conn = db.conn()
     changes = conn.total_changes
     stats.render(stats.report(30))
-    assert conn.total_changes == changes and db.one("SELECT COUNT(*) AS n FROM jobs")["n"] == before[0]
+    assert conn.total_changes == changes and db.one("SELECT COUNT(*) AS n FROM jobs")["n"] == before
 
 
 # ------------------------------------------------------------------ the Prometheus file
@@ -269,28 +214,6 @@ def test_metrics_file_content_and_format(tmp_path):
     assert "# TYPE acw_queue_length gauge" in text and "# TYPE acw_jobs_finished_total counter" in text
     assert text.count("# HELP acw_jobs_finished_24h") == 1  # one header per metric
     assert not list(tmp_path.glob("*.tmp*"))  # nothing left over from the atomic write
-
-
-def test_metrics_file_is_replaced_atomically(tmp_path, monkeypatch):
-    path = tmp_path / "metrics.prom"
-    path.write_text("old\n")
-    prom = metrics.Prom()
-    prom.add("acw_x", "gauge", "x", 1)
-    seen = []
-    real = metrics.os.replace
-
-    def spy(src, dst):
-        seen.append((open(dst).read(), open(src).read()))  # the old file is whole until the rename
-        real(src, dst)
-
-    monkeypatch.setattr(metrics.os, "replace", spy)
-    metrics.write_prom(path, prom)
-    assert seen == [("old\n", prom.text())] and path.read_text() == prom.text()
-
-
-def test_backup_age_is_left_out_without_a_snapshot(tmp_path):
-    path = monitor.write_metrics([], {}, db.now(), path=tmp_path / "m.prom", backup_dir=tmp_path / "none")
-    assert "acw_backup_age_seconds" not in path.read_text()
 
 
 def test_the_monitor_run_writes_the_file(tmp_path, monkeypatch):

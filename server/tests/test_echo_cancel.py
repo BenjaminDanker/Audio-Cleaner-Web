@@ -1,12 +1,19 @@
-"""Live echo cancellation end to end: client -> /api/stream/ws -> the native live engine -> echo canceller."""
+"""Live echo cancellation end to end: client -> /api/stream/ws -> the native live engine -> echo canceller.
+
+The engine is one process per module (starting it takes seconds); each session on it is independent."""
+import os
+import subprocess
+import time
+
 import numpy as np
 import pytest
 
 from acw.billing import ledger
+from acw.config import get_settings
 from acw.stream import protocol as P
 
 from . import opus
-from .conftest import login
+from .conftest import LIVE_ENGINE, LIVE_LIBDF, LIVE_MODELS, live_engine_available, login
 from .test_api_security import make_key
 
 SAMPLE_RATE = 48_000
@@ -31,10 +38,39 @@ def rms(x):
     return float(np.sqrt(np.mean(np.square(x))))
 
 
+def start_engine(data_dir, **env):
+    """The native live engine on its own socket (native/live); returns (process, socket path)."""
+    sock = data_dir / "stream.sock"
+    e = {**os.environ, "ACW_ENV": "development", "ACW_DATA_DIR": str(data_dir), "ACW_STREAM_SOCKET": str(sock),
+         "ACW_BIN_DIR": str(LIVE_LIBDF.parent), "ACW_MODELS_DIR": str(LIVE_MODELS), "ACW_MIN_JOB_CORES": "1",
+         "ACW_LIVE_IGNORE_HOST_LOAD": "1", **env}
+    proc = subprocess.Popen([str(LIVE_ENGINE)], env=e, stderr=subprocess.DEVNULL)
+    for _ in range(400):
+        if sock.exists():
+            break
+        time.sleep(0.05)
+    return proc, str(sock)
+
+
+@pytest.fixture(scope="module")
+def engine(tmp_path_factory):
+    """One live engine for the module, and the web side pointed at it."""
+    if not live_engine_available():
+        pytest.skip("native live engine or models not available here")
+    proc, sock = start_engine(tmp_path_factory.mktemp("engine"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("ACW_STREAM_SOCKET", sock)
+        get_settings.cache_clear()
+        yield sock
+    proc.terminate()
+    proc.wait(10)
+    get_settings.cache_clear()
+
+
 @pytest.fixture
-def live(live_engine, monkeypatch):
+def live(engine, monkeypatch):
     monkeypatch.setattr("acw.stream.routes.PACE_BURST_SECONDS", 3600.0)  # the test sends faster than real time
-    return live_engine()
+    return engine
 
 
 def stream(client, mic, far, start, codec=P.CODEC_S16, send_reference="before"):
@@ -80,32 +116,28 @@ def stream(client, mic, far, start, codec=P.CODEC_S16, send_reference="before"):
     return ready, np.concatenate(out)
 
 
-@pytest.mark.parametrize("codec, min_db", [(P.CODEC_S16, 20), (P.CODEC_OPUS, 20)])
-def test_reference_removes_the_echo_and_keeps_the_voice(live, client, codec, min_db):
+@pytest.mark.parametrize("codec", [P.CODEC_S16, P.CODEC_OPUS])
+def test_reference_removes_the_echo_and_keeps_the_voice(live, client, codec):
     mic, far = room()
     ready, y = stream(client, mic, far, {"echoReference": True, "captions": "local", "language": "en"}, codec)
     assert ready["echoReference"] is True
     assert ready["modelLatencyMs"] == 39.0  # the same in every session: the model's 30 ms and the canceller's 9
     n = SAMPLE_RATE
     echo_only = slice(5 * n, 6 * n)  # after it has settled, before the voice starts
-    removed_db = 20 * np.log10(rms(mic[echo_only]) / rms(y[echo_only]))
-    assert removed_db > min_db, removed_db
+    assert 20 * np.log10(rms(mic[echo_only]) / rms(y[echo_only])) > 20
     voice = slice(-n, None)
     assert 0.8 < rms(y[voice]) / rms(mic[voice]) < 1.2  # the near-end voice is left alone
 
 
-def test_without_a_reference_the_audio_is_unchanged(live, client):
+def test_a_session_that_never_asked_for_a_reference_passes_audio_unchanged_and_ignores_reference_frames(live, client):
     mic, far = room(3)
-    ready, y = stream(client, mic, far, {}, send_reference=None)
+    ready, y = stream(client, mic, far, {}, send_reference="before")
     assert "echoReference" not in ready and ready["modelLatencyMs"] == 39.0
     d = 1872  # the session's delay: nothing runs, the audio only waits
     assert np.max(np.abs(y[d:] - mic[:-d])) < 1e-3
-    # reference frames from a session that never asked for them are ignored, not mixed in
-    ready, y = stream(client, mic, far, {}, send_reference="before")
-    assert np.max(np.abs(y[d:] - mic[:-d])) < 1e-3
 
 
-def test_late_reference_counts_as_silence(live, client):
+def test_a_late_reference_counts_as_silence(live, client):
     mic, far = room(3)
     _, y = stream(client, mic, far, {"echoReference": True}, send_reference="after")
     assert len(y) == len(mic) and 0.9 < rms(y) / rms(mic) < 1.1  # nothing to cancel against, one frame back each

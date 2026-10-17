@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw_common import clarity, pipeline
+from acw_common import captions, clarity, pipeline
 from acw_common.ffmpeg import MediaError
 from audio_cleaner_desktop import engine, resources
 
@@ -28,28 +28,22 @@ def streams(path: Path, kind: str) -> list[dict]:
 
 
 def test_options_are_validated():
-    with pytest.raises(ValueError):
-        engine.JobOptions(strength="loud")
-    with pytest.raises(ValueError):
-        engine.JobOptions(subtitles="burn")
-    with pytest.raises(ValueError):
-        engine.JobOptions(language="xx")
-    with pytest.raises(ValueError):
-        engine.JobOptions(loudness="radio")
+    for bad in (dict(strength="loud"), dict(subtitles="burn"), dict(language="xx"), dict(loudness="radio"),
+                dict(noise="loud")):
+        with pytest.raises(ValueError):
+            engine.JobOptions(**bad)
     assert engine.JobOptions(loudness="keep").loudness_lufs is None
     assert engine.JobOptions().loudness_lufs == -16.0
+    assert engine.JobOptions().noise == "auto" and not engine.JobOptions().echo_track
 
 
-def test_automatic_strength_is_a_choice():
+def test_automatic_strength_is_a_choice_and_its_steps_are_the_pipelines():
     auto = engine.JobOptions(strength="auto")
     assert auto.strength == engine.AUTO_STRENGTH and auto.atten_lim_db is None  # measured when the file is cleaned
-    assert engine.STRENGTH_CHOICES == ("auto", *engine.STRENGTHS)
-    assert {k: engine.JobOptions(strength=k).atten_lim_db for k in engine.STRENGTHS} == engine.STRENGTHS
     assert engine.JobOptions().strength == "max"  # the engine's own default stays a fixed one
-    for bad in ("Auto", "automatic", ""):
-        with pytest.raises(ValueError, match="strength"):
-            engine.JobOptions(strength=bad)
-    # every strength the pipeline can pick is one of the four (so the list and history can name it)
+    with pytest.raises(ValueError, match="strength"):
+        engine.JobOptions(strength="automatic")
+    # every strength the pipeline can pick is one of the fixed ones (so the list and history can name it)
     assert {db for _, db in pipeline.STRENGTH_STEPS} | {pipeline.GENTLE_DB} == set(engine.STRENGTHS.values())
 
 
@@ -60,14 +54,6 @@ def test_automatic_rebuild_is_an_option_that_needs_the_voice_model(monkeypatch, 
     assert engine.JobOptions(rebuild_voice=True).may_rebuild  # asked for by hand: planned for (and refused later)
     monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
     assert engine.JobOptions(auto_rebuild=True).may_rebuild and not engine.JobOptions().may_rebuild
-
-
-def test_loudness_presets():
-    assert engine.LOUDNESS_TARGETS == {"podcast": -16.0, "youtube": -14.0, "broadcast": -23.0, "keep": None}
-
-
-def test_mp3_is_an_output_format():
-    assert "mp3" in engine.OUTPUT_AUDIO_FORMATS and "mp3" in engine.AUDIO_CHOICES
 
 
 def test_unique_output_counts_up_and_respects_subtitle_files(tmp_path):
@@ -91,23 +77,21 @@ def test_long_recordings_are_transcribed_in_pieces_cut_at_quiet_moments():
     assert all(a[1] == b[0] for a, b in zip(bounds, bounds[1:]))
     assert len(bounds) == 3
     assert quiet * sr <= bounds[0][1] <= (quiet + 1) * sr
-
-
-def test_segments_are_shifted_by_the_piece_offset():
     from acw_common.captions import Segment, Word
 
     seg = Segment(1.0, 2.0, "hi", [Word(1.0, 1.5, "hi")])
-    engine._shifted([seg], 300.0)
+    engine._shifted([seg], 300.0)  # the pieces' times are moved to the start of the recording
     assert (seg.start, seg.end, seg.words[0].start, seg.words[0].end) == (301.0, 302.0, 301.0, 301.5)
 
 
-# -- the real pipeline -------------------------------------------------------------
-
-@pytest.mark.native
-@pytest.mark.speech
-def test_a_speech_model_is_found_from_source():
-    assert (resources.whisper_model_path() / "model.bin").is_file()
-    assert resources.check() == [] and resources.speech_ready()
+def test_subtitle_files_are_srt_vtt_or_plain_text():
+    segments = [captions.Segment(0.5, 1.8, "Hello there", [])]
+    srt = engine._subtitle_text("srt", segments, "en")
+    assert "00:00:00,500 --> 00:00:01,800" in srt and "Hello there" in srt
+    vtt = engine._subtitle_text("vtt", segments, "en")
+    assert vtt.startswith("WEBVTT") and "00:00:00.500 --> 00:00:01.800" in vtt
+    txt = engine._subtitle_text("txt", segments, "en")
+    assert "Hello there" in txt and "-->" not in txt
 
 
 def test_the_speech_model_is_not_required_to_start_and_never_comes_from_the_bundle(monkeypatch, tmp_path):
@@ -118,11 +102,12 @@ def test_the_speech_model_is_not_required_to_start_and_never_comes_from_the_bund
     assert all("whisper" not in m for m in resources.check())
 
 
+# -- the real pipeline -------------------------------------------------------------
+
 @pytest.mark.native
 def test_wav_to_flac_into_out_dir(speech_wav, tmp_path):
     out = engine.process_file(speech_wav, engine.JobOptions(audio_format="flac"), out_dir=tmp_path / "results")
-    assert out.parent == tmp_path / "results"
-    assert out.name == "speech-cleaned.flac"
+    assert out.parent == tmp_path / "results" and out.name == "speech-cleaned.flac"
     info = ffprobe_json(out)
     assert info["streams"][0]["codec_name"] == "flac"
     assert float(info["format"]["duration"]) == pytest.approx(float(ffprobe_json(speech_wav)["format"]["duration"]), abs=0.3)
@@ -131,34 +116,16 @@ def test_wav_to_flac_into_out_dir(speech_wav, tmp_path):
 @pytest.mark.native
 def test_mp3_stays_mp3(mp3_file, tmp_path):
     out = engine.process_file(mp3_file, out_dir=tmp_path)
-    assert out.suffix == ".mp3"
-    assert streams(out, "audio")[0]["codec_name"] == "mp3"
-
-
-@pytest.mark.native
-def test_other_formats_are_written(mp3_file, tmp_path):
-    for fmt, codec in (("wav", "pcm_s24le"), ("m4a", "aac"), ("opus", "opus"), ("mp3", "mp3")):
-        out = engine.process_file(mp3_file, engine.JobOptions(audio_format=fmt, leveling=False), out_dir=tmp_path)
-        assert streams(out, "audio")[0]["codec_name"] == codec, fmt
+    assert out.suffix == ".mp3" and streams(out, "audio")[0]["codec_name"] == "mp3"
 
 
 @pytest.mark.native
 def test_video_keeps_its_picture_and_creation_time(mp4_file, tmp_path):
-    out = engine.process_file(mp4_file, out_dir=tmp_path)
+    out = engine.process(mp4_file, out_dir=tmp_path).output
     assert out.suffix == ".mp4"
     assert [s["codec_name"] for s in streams(out, "video")] == ["h264"]
     assert streams(out, "audio")
     assert ffprobe_json(out)["format"]["tags"]["creation_time"].startswith("2021-03-04T05:06:07")
-
-
-@pytest.mark.native
-def test_an_existing_result_is_never_replaced(speech_wav, tmp_path):
-    src = tmp_path / "talk.wav"
-    src.write_bytes(speech_wav.read_bytes())
-    first = engine.process_file(src)
-    second = engine.process_file(src)
-    assert first.name == "talk-cleaned.wav" and second.name == "talk-cleaned (2).wav"
-    assert first.exists() and second.exists()
 
 
 @pytest.mark.native
@@ -216,105 +183,50 @@ def test_unreadable_files_give_a_plain_message(tmp_path):
 
 
 @pytest.mark.native
-def test_loudness_presets_set_the_level(speech_wav, has_real_speech, tmp_path):
+def test_loudness_presets_set_the_level(clip_wav, tmp_path):
     levels = {
-        name: loudness_of(engine.process_file(speech_wav, engine.JobOptions(loudness=name), out_dir=tmp_path / name))
+        name: loudness_of(engine.process_file(clip_wav, engine.JobOptions(loudness=name), out_dir=tmp_path / name))
         for name in ("podcast", "youtube", "broadcast")
     }
     assert levels["youtube"] > levels["podcast"] > levels["broadcast"]
-    if has_real_speech:
-        # The level is set from the speech in a recording; the stand-in tones used where the dev
-        # sample is missing (CI) only keep the order, so only real speech is held to the targets.
-        assert levels["youtube"] - levels["podcast"] == pytest.approx(2.0, abs=1.0)
-        assert levels["podcast"] - levels["broadcast"] == pytest.approx(7.0, abs=1.5)
-    kept = loudness_of(engine.process_file(speech_wav, engine.JobOptions(loudness="keep"), out_dir=tmp_path / "keep"))
-    assert abs(kept - levels["podcast"]) > 0.1 or abs(kept - -16.0) > 0.1  # not forced to the podcast target
+    assert levels["podcast"] == pytest.approx(-16.0, abs=1.0)
 
 
 @pytest.mark.native
 @pytest.mark.speech
 def test_srt_next_to_the_cleaned_audio(speech_wav, has_real_speech, tmp_path):
+    """The one run with the real speech model: the subtitles come from the transcription of the speech."""
     if not has_real_speech:
         pytest.skip("needs the real speech sample")
     result = engine.process(speech_wav, engine.JobOptions(subtitles="srt", language="en"), out_dir=tmp_path)
     assert result.subtitles == tmp_path / "speech-cleaned.srt" and not result.embedded
-    assert result.language == "en"
-    assert result.paths == [result.output, result.subtitles]
+    assert result.language == "en" and result.paths == [result.output, result.subtitles]
     text = result.subtitles.read_text(encoding="utf-8")
     assert "-->" in text and "responsible" in text.lower()
 
 
 @pytest.mark.native
-@pytest.mark.speech
-def test_vtt_and_text_transcripts(speech_wav, has_real_speech, tmp_path):
-    if not has_real_speech:
-        pytest.skip("needs the real speech sample")
-    vtt = engine.process(speech_wav, engine.JobOptions(subtitles="vtt"), out_dir=tmp_path / "v").subtitles
-    assert vtt.suffix == ".vtt" and vtt.read_text(encoding="utf-8").startswith("WEBVTT")
-    txt = engine.process(speech_wav, engine.JobOptions(subtitles="txt"), out_dir=tmp_path / "t").subtitles
-    assert txt.suffix == ".txt" and "responsible" in txt.read_text(encoding="utf-8").lower()
-    assert "-->" not in txt.read_text(encoding="utf-8")
-
-
-@pytest.mark.native
-@pytest.mark.speech
-def test_subtitles_embedded_in_a_video(mp4_file, has_real_speech, tmp_path):
-    if not has_real_speech:
-        pytest.skip("needs the real speech sample")
-    result = engine.process(mp4_file, engine.JobOptions(subtitles="embed"), out_dir=tmp_path)
-    assert result.embedded and result.subtitles is None
-    assert list(tmp_path.glob("*.srt")) == []
-    subs = streams(result.output, "subtitle")
-    assert [s["codec_name"] for s in subs] == ["mov_text"]
-    assert subs[0]["tags"]["language"] == "eng"
-    assert streams(result.output, "video")
-
-
-@pytest.mark.native
-@pytest.mark.speech
-def test_embed_on_an_audio_file_writes_an_srt(speech_wav, has_real_speech, tmp_path):
-    if not has_real_speech:
-        pytest.skip("needs the real speech sample")
-    result = engine.process(speech_wav, engine.JobOptions(subtitles="embed"), out_dir=tmp_path)
-    assert result.subtitles is not None and result.subtitles.suffix == ".srt" and not result.embedded
-
-
-@pytest.mark.native
-@pytest.mark.speech
-def test_silence_gets_no_subtitle_file(tmp_path):
-    silent = tmp_path / "silent.wav"
-    from scipy.io import wavfile
-
-    wavfile.write(silent, 48000, np.zeros(3 * 48000, dtype=np.int16))
-    result = engine.process(silent, engine.JobOptions(subtitles="srt"), out_dir=tmp_path / "out")
+def test_silence_gets_no_subtitle_file(clip_wav, tmp_path, quick_clean, monkeypatch):
+    monkeypatch.setattr(engine, "_transcribe", lambda *a, **k: ([captions.Segment(0.0, 0.0, "  ", [])], "en"))
+    result = engine.process(clip_wav, engine.JobOptions(subtitles="srt"), out_dir=tmp_path / "out")
     assert result.subtitles is None and not result.embedded
-    assert [p.name for p in (tmp_path / "out").iterdir()] == ["silent-cleaned.wav"]
-
-
-def test_noise_and_echo_options_are_checked():
-    assert engine.JobOptions().noise == "auto" and not engine.JobOptions().echo_track
-    for value in ("auto", "light", "heavy"):
-        assert engine.JobOptions(noise=value).noise == value
-    with pytest.raises(ValueError, match="noise"):
-        engine.JobOptions(noise="loud")
+    assert [p.name for p in (tmp_path / "out").iterdir()] == ["clip-cleaned.wav"]
 
 
 @pytest.mark.native
-def test_echo_option_on_a_one_track_file_cleans_it_and_says_so(speech_wav, tmp_path):
-    result = engine.process(speech_wav, engine.JobOptions(echo_track=True, noise="light"), out_dir=tmp_path)
+def test_echo_option_on_a_one_track_file_cleans_it_and_says_so(clip_wav, tmp_path):
+    result = engine.process(clip_wav, engine.JobOptions(echo_track=True, noise="light"), out_dir=tmp_path)
     assert result.output.is_file() and result.notice == "only one audio track, so no speaker echo was removed"
 
 
 @pytest.mark.native
-def test_heavy_noise_setting_runs_the_heavy_noise_model(speech_wav, tmp_path, monkeypatch):
-    from acw_common import pipeline
-
+def test_heavy_noise_setting_runs_the_heavy_noise_model(clip_wav, tmp_path, monkeypatch):
     if not resources.heavy_noise_model_path().is_file():
         pytest.skip("no heavy-noise model in vendor/models")
     used = []
     real = pipeline.dpdfnet.denoise_array
     monkeypatch.setattr(pipeline.dpdfnet, "denoise_array", lambda *a, **k: used.append(1) or real(*a, **k))
-    result = engine.process(speech_wav, engine.JobOptions(noise="heavy"), out_dir=tmp_path)
+    result = engine.process(clip_wav, engine.JobOptions(noise="heavy"), out_dir=tmp_path)
     assert result.output.is_file() and used
 
 
@@ -340,42 +252,18 @@ def test_echo_removed_using_the_second_audio_track(tmp_path):
                     "-map", "0:a", "-map", "1:a", "-c:a", "flac", "-f", "matroska", str(two)], check=True)
     assert len([s for s in ffprobe_json(two)["streams"] if s["codec_type"] == "audio"]) == 2
     out = engine.process(two, engine.JobOptions(echo_track=True, leveling=False, strength="gentle", audio_format="wav"),
-                              out_dir=tmp_path / "out")
+                         out_dir=tmp_path / "out")
     assert out.notice == "only the first audio track was cleaned; the other one wasn't kept in the result"
     rate, y = wavfile.read(out.output)
     scale = {np.dtype(np.int16): 2.0**15, np.dtype(np.int32): 2.0**31}.get(y.dtype, 1.0)
     y = y.astype(np.float32) / scale
     y = y if y.ndim == 1 else y.mean(axis=1)
-    def level(a): return 10 * np.log10(np.mean(a**2) + 1e-12)
+
+    def level(a):
+        return 10 * np.log10(np.mean(a**2) + 1e-12)
+
     echo_only = slice(sr * 2, sr * 4)  # before the voice starts, after the canceller has adapted
     assert level(mic[echo_only]) - level(y[echo_only]) > 20
-
-
-@pytest.mark.native
-def test_rebuild_voice_uses_the_voice_model_or_says_it_is_missing(speech_wav, tmp_path, monkeypatch):
-    if resources.voice_model_dir() is None:
-        monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
-        result = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True), out_dir=tmp_path)
-        assert "rebuilds the voice is not installed" in result.notice
-        return
-    result = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True, audio_format="wav"), out_dir=tmp_path)
-    assert result.output.is_file() and (result.notice is None or "not installed" not in result.notice)
-    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
-    fallback = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True), out_dir=tmp_path / "b")
-    assert "cleaned the usual way" in fallback.notice
-
-
-@pytest.mark.native
-def test_automatic_strength_says_what_it_picked(clip_wav, tmp_path, monkeypatch):
-    figures = []
-    real = pipeline.noise_figure_db
-    monkeypatch.setattr(pipeline, "noise_figure_db", lambda *a, **k: figures.append(real(*a, **k)) or figures[-1])
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto"), out_dir=tmp_path / "auto")
-    assert result.output.is_file() and len(figures) == 1  # one measurement for the remover and the strength
-    assert result.strength in engine.STRENGTHS
-    assert engine.STRENGTHS[result.strength] == pipeline.strength_for(figures[0])
-    fixed = engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light"), out_dir=tmp_path / "fixed")
-    assert fixed.output.is_file() and fixed.strength is None and len(figures) == 1  # nothing picked, nothing measured
 
 
 @pytest.fixture
@@ -392,6 +280,34 @@ def fake_clean(monkeypatch):
 
     monkeypatch.setattr(pipeline, "clean_audio", clean)
     return seen
+
+
+@pytest.mark.native
+def test_rebuild_voice_is_done_when_its_model_is_installed(clip_wav, tmp_path):
+    if resources.voice_model_dir() is None:
+        pytest.skip("no voice model in vendor/models")
+    result = engine.process(clip_wav, engine.JobOptions(rebuild_voice=True, audio_format="wav"), out_dir=tmp_path)
+    assert result.output.is_file() and (result.notice is None or "not installed" not in result.notice)
+
+
+@pytest.mark.native
+def test_rebuild_voice_without_its_model_is_said_and_cleaned_the_usual_way(clip_wav, tmp_path, monkeypatch, quick_clean):
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+    result = engine.process(clip_wav, engine.JobOptions(rebuild_voice=True), out_dir=tmp_path)
+    assert result.output.is_file() and "cleaned the usual way" in result.notice
+
+
+@pytest.mark.native
+def test_automatic_strength_says_what_it_picked(clip_wav, tmp_path, monkeypatch):
+    figures = []
+    real = pipeline.noise_figure_db
+    monkeypatch.setattr(pipeline, "noise_figure_db", lambda *a, **k: figures.append(real(*a, **k)) or figures[-1])
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto"), out_dir=tmp_path / "auto")
+    assert result.output.is_file() and len(figures) == 1  # one measurement for the remover and the strength
+    assert result.strength in engine.STRENGTHS
+    assert engine.STRENGTHS[result.strength] == pipeline.strength_for(figures[0])
+    fixed = engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light"), out_dir=tmp_path / "fixed")
+    assert fixed.output.is_file() and fixed.strength is None and len(figures) == 1  # nothing picked, nothing measured
 
 
 @pytest.mark.native

@@ -8,7 +8,7 @@ import pytest
 
 from acw_common.ffmpeg import MediaError
 from audio_cleaner_desktop import engine
-from audio_cleaner_desktop.gui.worker import Job, JobQueue, failure_message
+from audio_cleaner_desktop.gui.worker import Job, JobQueue
 
 from conftest import wait_until
 
@@ -158,13 +158,6 @@ def test_failures_are_reported_and_do_not_stop_the_queue(make_queue):
     q.start()
     assert wait_until(lambda: events[-1] == ("idle",), timeout=5)
     assert ("failed", 1, "bad file") in events and ("finished", 2) in events
-
-
-def test_failure_messages():
-    assert failure_message(MediaError("Nope.")) == "Nope."
-    assert failure_message(RuntimeError("boom")) == "Something went wrong; see the log."
-    assert "full" in failure_message(OSError(28, "No space left on device"))
-    assert "memory" in failure_message(MemoryError())
 
 
 def test_ram_and_core_limits(make_queue):

@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -10,8 +11,43 @@ sys.path[:0] = [str(ROOT / "server"), str(ROOT / "common")]
 ORIGIN = "http://testserver"
 
 
+_SCHEMA: list[Path] = []  # the database schema, built once per run (see _fresh_database)
+
+
+def _build_schema(path: Path) -> None:
+    from acw import db
+    from acw.config import get_settings
+
+    saved = os.environ.get("ACW_DB_PATH")
+    os.environ["ACW_DB_PATH"] = str(path)
+    get_settings.cache_clear()
+    db.reset_connection()
+    try:
+        db.init_db()
+        db.conn().execute("PRAGMA wal_checkpoint(TRUNCATE)")  # the schema must be in the main file, not in the WAL
+    finally:
+        db.reset_connection()
+        if saved is None:
+            os.environ.pop("ACW_DB_PATH", None)
+        else:
+            os.environ["ACW_DB_PATH"] = saved
+        get_settings.cache_clear()
+
+
+def _fresh_database(db_file: Path, factory) -> None:
+    """A database file with the current schema. Building the schema takes ~0.15 s, so it is built once per run and
+    copied into each test's data directory (init_db then only confirms it)."""
+    if not _SCHEMA or not _SCHEMA[0].is_file():
+        path = factory.mktemp("schema") / "acw.sqlite3"
+        _build_schema(path)
+        _SCHEMA[:] = [path]
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    if not db_file.exists():
+        shutil.copyfile(_SCHEMA[0], db_file)
+
+
 @pytest.fixture(autouse=True)
-def env(tmp_path, monkeypatch):
+def env(tmp_path, tmp_path_factory, monkeypatch):
     monkeypatch.setenv("ACW_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("ACW_PUBLIC_ORIGIN", ORIGIN)
     monkeypatch.delenv("ACW_BASE_PATH", raising=False)
@@ -28,6 +64,7 @@ def env(tmp_path, monkeypatch):
     db.reset_connection()
     limiter.reset()
     routes._lag.samples.clear()  # how late the event loop ran in earlier tests says nothing about this one
+    _fresh_database(get_settings().db_path, tmp_path_factory)
     db.init_db()
     yield
     db.reset_connection()

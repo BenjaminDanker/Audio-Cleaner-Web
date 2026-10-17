@@ -1,8 +1,7 @@
-"""The native live engine (native/live, bin/acw-live) through its socket: the audio it returns (against a reference
-built here from the same model library), echo removal, silence, returnAudio, admission, captions. Skipped where it
-isn't built (cargo build in native/live) or the models aren't installed."""
+"""The native live engine (native/live, bin/acw-live) through its socket: the audio it returns (against a reference built here
+from the same model library), digital silence, captions, and admission. Skipped where it isn't built (cargo build in
+native/live) or the models aren't installed. One engine per module; a second one with a single core for admission."""
 import json
-import os
 import socket
 import struct
 import subprocess
@@ -14,16 +13,31 @@ import pytest
 
 from acw.stream import protocol as P
 
-from .conftest import LIVE_LIBDF, LIVE_MODELS
-
+from .conftest import LIVE_LIBDF, LIVE_MODELS, live_engine_available
+from .test_echo_cancel import start_engine
 
 AEC_DELAY = 432  # the echo canceller's delay (native/live/src/main.rs)
 LATENCY = 1440 + AEC_DELAY
 
 
-@pytest.fixture
-def engine(live_engine):
-    return live_engine
+@pytest.fixture(scope="module")
+def engine(tmp_path_factory):
+    if not live_engine_available():
+        pytest.skip("native live engine or models not available here")
+    proc, sock = start_engine(tmp_path_factory.mktemp("native"))
+    yield sock
+    proc.terminate()
+    proc.wait(10)
+
+
+@pytest.fixture(scope="module")
+def one_core_engine(tmp_path_factory):
+    if not live_engine_available():
+        pytest.skip("native live engine or models not available here")
+    proc, sock = start_engine(tmp_path_factory.mktemp("native1"), ACW_LIVE_UNITS_PER_CORE="1.0", ACW_MIN_JOB_CORES="999")
+    yield sock
+    proc.terminate()
+    proc.wait(10)
 
 
 def _msg(s, kind, payload):
@@ -102,36 +116,32 @@ def _reference_chain(x: np.ndarray, atten_db: float) -> np.ndarray:
     return out
 
 
-def test_the_audio_matches_the_reference_chain(engine):
-    x = _speech()
+def test_the_audio_matches_the_reference_chain_and_digital_silence_is_answered_with_silence(engine):
+    x = _speech(2.0)
     frames = [x[i:i + 960] for i in range(0, len(x), 960)]
-    ready, out = _session(engine(), {"denoise": "light", "captions": None, "atten_lim_db": 24}, frames)
-    # Every session has the same delay, whatever runs (features can change mid-session): the model's 1440 samples and
-    # the echo canceller's 432, which a session without it spends in a delay line before the model.
+    ready, out = _session(engine, {"denoise": "light", "captions": None, "atten_lim_db": 24},
+                          frames + [np.zeros(960, np.float32)] * 50)
+    # every session has the same delay, whatever runs (features can change mid-session): the model's 1440 samples and
+    # the echo canceller's 432, which a session without it spends in a delay line before the model
     assert ready["latencySamples"] == LATENCY and ready["cores"] == [0]
-    y = np.concatenate(out)
+    y = np.concatenate(out[:len(frames)])
     want = _reference_chain(np.concatenate([np.zeros(AEC_DELAY, np.float32), x])[:len(x)], 24)
     assert np.max(np.abs(y - want)) < 1e-6, np.max(np.abs(y - want))
-
-
-def test_digital_silence_is_answered_with_silence(engine):
-    x = _speech(1.0)
-    frames = [x[i:i + 960] for i in range(0, len(x), 960)] + [np.zeros(960, np.float32)] * 50
-    _, out = _session(engine(), {"denoise": "light"}, frames)
-    assert not np.any(np.concatenate(out[-35:]))  # after 0.2 s of it the model isn't run: exact silence
+    assert not np.any(np.concatenate(out[-35:]))  # after 0.2 s of digital silence the model isn't run: exact silence
 
 
 @pytest.mark.skipif(not (LIVE_MODELS / "captions-en/encoder.int8.onnx").is_file(), reason="caption model missing")
 def test_standard_captions_keep_the_first_words(engine):
+    """The one real run of the caption model: the first words of a speech sample come out as captions."""
     sample = Path.home() / "audio-cleaner/dev/live_opus.wav"
     if not sample.is_file():
         pytest.skip("speech sample missing")
-    raw = subprocess.run([str(Path.home() / "audio-cleaner/bin/ffmpeg"), "-v", "error", "-i", str(sample), "-ac", "1",
+    raw = subprocess.run([str(Path.home() / "audio-cleaner/bin/ffmpeg"), "-v", "error", "-i", str(sample), "-t", "6", "-ac", "1",
                           "-ar", "48000", "-f", "f32le", "-"], capture_output=True, check=True).stdout
     x = np.frombuffer(raw, np.float32)
     x = x[:len(x) // 960 * 960]
     s = socket.socket(socket.AF_UNIX)
-    s.connect(engine())
+    s.connect(engine)
     s.settimeout(30)
     _msg(s, P.MSG_START, json.dumps({"denoise": None, "captions": "local"}).encode())
     assert json.loads(_read(s)[1])["type"] == "ready"
@@ -143,7 +153,7 @@ def test_standard_captions_keep_the_first_words(engine):
             if k == P.MSG_AUDIO:
                 break
             events.append(json.loads(p))
-        if i % (960 * 25) == 0:
+        if i % (960 * 25) == 0:  # a pause now and then: the caption model works in the background
             time.sleep(0.1)
     _msg(s, P.MSG_END, b"")
     while True:
@@ -156,31 +166,13 @@ def test_standard_captions_keep_the_first_words(engine):
     assert any(e.get("type") == "caption" and not e.get("final") for e in events)  # partial lines while talking
 
 
-def test_echo_is_removed_and_the_voice_kept(engine):
-    rng = np.random.default_rng(1)
-    n = 48_000 * 8
-    far = (np.convolve(rng.standard_normal(n), np.ones(8) / 8, mode="same") * 0.2).astype(np.float32)
-    mic = np.concatenate([np.zeros(1920, np.float32), far[:-1920]]) * 0.4
-    mic[-96_000:] += (0.2 * np.sin(2 * np.pi * 330 * np.arange(96_000) / 48_000)).astype(np.float32)
-    frames = [mic[i:i + 960] for i in range(0, n, 960)]
-    refs = [far[i:i + 960] for i in range(0, n, 960)]
-    ready, out = _session(engine(), {"denoise": None, "captions": None, "echo_reference": True}, frames, refs)
-    y = np.concatenate(out)
-    assert ready["latencySamples"] == LATENCY
-    rms = lambda v: float(np.sqrt(np.mean(np.square(v))))  # noqa: E731
-    echo = slice(5 * 48_000, 6 * 48_000)
-    assert 20 * np.log10(rms(mic[echo]) / rms(y[echo])) > 20
-    assert 0.8 < rms(y[-48_000:]) / rms(mic[-48_000:]) < 1.2
-
-
-def test_silence_return_audio_and_full(engine):
+def test_a_session_that_needs_no_audio_back_gets_none_and_a_second_session_does_not_fit_on_one_core(one_core_engine):
     x = _speech(1.0)
     frames = [x[i:i + 960] for i in range(0, len(x), 960)]
-    sock = engine(ACW_LIVE_UNITS_PER_CORE="1.0", ACW_MIN_JOB_CORES="999")  # one live core
+    sock = one_core_engine
     _, out = _session(sock, {"denoise": "light", "return_audio": False}, frames[:10] + [None, None] + frames[10:20])
     assert len(out) == 20 and all(len(o) == 0 for o in out)  # answered (for timing), but empty; silence not answered
-    # one core x 1 unit: a second session at once doesn't fit
-    s = socket.socket(socket.AF_UNIX)
+    s = socket.socket(socket.AF_UNIX)  # one core x 1 unit is taken by this one
     s.connect(sock)
     _msg(s, P.MSG_START, json.dumps({"denoise": "light"}).encode())
     assert json.loads(_read(s)[1])["type"] == "ready"

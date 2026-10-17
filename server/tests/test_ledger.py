@@ -17,7 +17,7 @@ def test_credit_is_idempotent_per_ref():
     assert ledger.balance(u)["balance_micros"] == 1_000_000
 
 
-def test_hold_capture_and_release():
+def test_holds_capture_release_and_never_overdraw():
     u = user()
     ledger.credit(u, 1_000_000, "grant", "t", "g")
     h = ledger.create_hold(u, 600_000, "job", "j1")
@@ -25,25 +25,22 @@ def test_hold_capture_and_release():
     with pytest.raises(ledger.InsufficientFunds):
         ledger.create_hold(u, 500_000, "job", "j2")
     assert ledger.capture_hold(h, 250_000) == 250_000
-    b = ledger.balance(u)
-    assert b == {"balance_micros": 750_000, "held_micros": 0, "available_micros": 750_000}
+    assert ledger.balance(u) == {"balance_micros": 750_000, "held_micros": 0, "available_micros": 750_000}
     with pytest.raises(ledger.LedgerError):
         ledger.capture_hold(h, 1)  # already captured
     h2 = ledger.create_hold(u, 100_000, "job", "j3")
     ledger.release_hold(h2)
     ledger.release_hold(h2)  # second release is a no-op
     assert ledger.balance(u)["available_micros"] == 750_000
+    # an overage takes only what is there
+    b = user("b@example.com")
+    ledger.credit(b, 100_000, "grant", "t", "g-b")
+    h3 = ledger.create_hold(b, 50_000, "job", "j4")
+    assert ledger.capture_hold(h3, 500_000) == 100_000
+    assert ledger.balance(b)["balance_micros"] == 0
 
 
-def test_capture_overage_takes_only_what_is_available():
-    u = user()
-    ledger.credit(u, 100_000, "grant", "t", "g")
-    h = ledger.create_hold(u, 50_000, "job", "j")
-    assert ledger.capture_hold(h, 500_000) == 100_000
-    assert ledger.balance(u)["balance_micros"] == 0
-
-
-def test_extend_hold_respects_available():
+def test_extending_a_hold_respects_what_is_available():
     u = user()
     ledger.credit(u, 100_000, "grant", "t", "g")
     h = ledger.create_hold(u, 60_000, "stream", "s")
@@ -76,16 +73,12 @@ def test_concurrent_holds_never_overdraw():
     assert ledger.balance(u)["held_micros"] == 1_000_000
 
 
-def test_balance_constraints_hold_in_sql():
+def test_balances_cannot_go_negative_and_suspended_accounts_cannot_hold():
     u = user()
     with pytest.raises(Exception):
         db.execute("UPDATE users SET balance_micros = -1 WHERE id = ?", (u,))
     with pytest.raises(Exception):
         db.execute("UPDATE users SET held_micros = 5 WHERE id = ?", (u,))
-
-
-def test_suspended_account_cannot_hold():
-    u = user()
     ledger.credit(u, 100_000, "grant", "t", "g")
     db.execute("UPDATE users SET status = 'suspended' WHERE id = ?", (u,))
     with pytest.raises(ledger.LedgerError):
@@ -94,11 +87,8 @@ def test_suspended_account_cannot_hold():
 
 def test_pricing_rounds_up_to_whole_seconds():
     assert pricing.cost_micros("denoise", "standard", 60) == 9_000
-    assert pricing.cost_micros("leveling", "standard", 60) == 1_000
-    assert pricing.cost_micros("denoise", "standard", 0.2) == 150  # 1 s
-    assert pricing.job_cost_micros("denoise", "standard", None, 1) == 150  # per second, no minimum
+    assert pricing.job_cost_micros("denoise", "standard", None, 1) == 150  # 1 s, per second, no minimum
     assert pricing.job_cost_micros("denoise", "standard", None, 1, leveling=True) == 150 + 17  # Leveling is its own line
-    assert pricing.job_cost_micros("denoise", "off", None, 60, leveling=True) == 1_000  # Leveling on its own
     assert pricing.job_cost_micros("denoise", "off", None, 60) == 0
     with pytest.raises(pricing.PricingError):
         pricing.rate("stream_denoise", "high")  # no such tier

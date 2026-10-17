@@ -1,4 +1,5 @@
-"""The Whisper model is loaded once for all the pieces of a recording, and can be dropped again."""
+"""The Whisper model is loaded once for all the pieces of a recording, and can be dropped again; the language is
+detected with the small model unless it is unsure."""
 import sys
 import types
 from pathlib import Path
@@ -28,7 +29,7 @@ def fake_whisper(monkeypatch):
     transcribe.unload()
 
 
-def test_one_load_serves_every_piece(tmp_path, fake_whisper):
+def test_one_load_serves_every_piece_and_a_call_without_a_model_loads_its_own(tmp_path, fake_whisper):
     model = transcribe.load_model(tmp_path, threads=2)
     assert transcribe.load_model(tmp_path, threads=2) is model and len(fake_whisper) == 1
     audio = np.zeros(16000, np.float32)
@@ -36,21 +37,10 @@ def test_one_load_serves_every_piece(tmp_path, fake_whisper):
         segs, language = transcribe.transcribe(audio, tmp_path, threads=2, model=model)
         assert segs[0].text == "hi" and language == "en"
     assert len(fake_whisper) == 1
-
-
-def test_another_thread_count_or_unload_loads_again(tmp_path, fake_whisper):
-    first = transcribe.load_model(tmp_path, threads=2)
-    assert transcribe.load_model(tmp_path, threads=3) is not first and len(fake_whisper) == 2
-    transcribe.unload()
-    transcribe.load_model(tmp_path, threads=3)
-    assert len(fake_whisper) == 3
-
-
-def test_without_a_model_argument_it_still_loads_one_for_the_call(tmp_path, fake_whisper):
-    """The server calls transcribe() like this."""
-    transcribe.transcribe(np.zeros(16000, np.float32), tmp_path, threads=1)
-    transcribe.transcribe(np.zeros(16000, np.float32), tmp_path, threads=1)
+    transcribe.transcribe(audio, tmp_path, threads=2)  # the server calls it like this: one load per call
     assert len(fake_whisper) == 2
+    transcribe.unload()
+    assert transcribe.load_model(tmp_path, threads=3) is not model and len(fake_whisper) == 3
 
 
 def test_language_detection_asks_the_bigger_model_only_when_unsure(tmp_path, monkeypatch):

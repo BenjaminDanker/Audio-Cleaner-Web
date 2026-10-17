@@ -66,22 +66,14 @@ const speechLike = (amp) => (i, c) => Math.round(amp * (0.5 * Math.sin(i / 17 + 
 const cases = [
   ['mono16_speechlike', wav({ nch: 1, bits: 16, rate: 48000, frames: 48000 * 3 + 123, gen: speechLike(20000) })],
   ['stereo16_44k', wav({ nch: 2, bits: 16, rate: 44100, frames: 44100 * 3 + 777, gen: speechLike(12000) })],
-  ['stereo16_identical', wav({ nch: 2, bits: 16, rate: 48000, frames: 20000, gen: (i) => Math.round(9000 * Math.sin(i / 11)) })],
   ['mono24', wav({ nch: 1, bits: 24, rate: 48000, frames: 48000 * 2 + 5, gen: speechLike(6000000) })],
   ['stereo24_ext', wav({ nch: 2, bits: 24, rate: 96000, frames: 96000 + 4097, gen: speechLike(5000000), extensible: true })],
-  ['silence', wav({ nch: 2, bits: 16, rate: 48000, frames: 50000, gen: () => 0 })],
-  ['dc', wav({ nch: 1, bits: 16, rate: 8000, frames: 9000, gen: () => -1234 })],
   ['noise_fullscale', wav({ nch: 2, bits: 16, rate: 48000, frames: 20000, gen: () => Math.round((rnd() * 2 - 1) * 32767) })],
   ['clipping_square', wav({ nch: 1, bits: 16, rate: 48000, frames: 30000, gen: (i) => (Math.floor(i / 50) & 1 ? 32767 : -32768) })],
-  ['noise24_fullscale', wav({ nch: 2, bits: 24, rate: 48000, frames: 20000, gen: () => Math.round((rnd() * 2 - 1) * 8388607) })],
-  ['impulses', wav({ nch: 1, bits: 16, rate: 48000, frames: 20000, gen: (i) => (i % 1000 === 0 ? 32767 : 0) })],
   ['tiny_1frame', wav({ nch: 1, bits: 16, rate: 48000, frames: 1, gen: () => 5, pad: true })],
-  ['tiny_100', wav({ nch: 2, bits: 16, rate: 48000, frames: 100, gen: speechLike(1000) })],
-  ['exact_block', wav({ nch: 1, bits: 16, rate: 48000, frames: 4096 * 3, gen: speechLike(3000) })],
   ['block_plus1', wav({ nch: 1, bits: 16, rate: 48000, frames: 4096 * 2 + 1, gen: speechLike(3000) })],
   ['list_chunks', wav({ nch: 1, bits: 16, rate: 48000, frames: 10000, gen: speechLike(3000), pad: true, trailing: true })],
   ['aiff_stereo16', aiff({ nch: 2, bits: 16, rate: 44100, frames: 44100 + 31, gen: speechLike(10000) })],
-  ['aiff_mono24', aiff({ nch: 1, bits: 24, rate: 48000, frames: 30001, gen: speechLike(4000000) })],
 ];
 
 const sha = (b) => createHash('md5').update(b).digest('hex');

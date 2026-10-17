@@ -1,7 +1,6 @@
-"""Capacity audit: sweeping from the web process (M1), OOM kills that must not loop (M3), stage time limits that follow
+"""Capacity audit: sweeping from two places at once (M1), OOM kills that must not loop (M3), stage time limits that follow
 the progress made (M2)."""
 import json
-import os
 import subprocess
 import sys
 import textwrap
@@ -10,22 +9,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from acw import app as acw_app
 from acw import db, jobs
 from acw.billing import ledger
 from tests.test_billing_audit import make_job, running_job, user
 
 
-# ---------------------------------------------------------------- M1: sweep from the web housekeeping
+# ---------------------------------------------------------------- M1: sweeps from the web and the worker at once
 
-def test_the_web_housekeeping_sweeps_jobs(monkeypatch):
-    calls = []
-    monkeypatch.setattr(jobs, "sweep", lambda: calls.append(1))
-    acw_app._housekeeping()
-    assert calls == [1]
-
-
-def test_sweeping_from_two_places_at_once_is_safe():
+def test_sweeping_from_several_threads_at_once_is_safe():
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     jid = make_job(uid)
@@ -49,7 +40,7 @@ def test_sweeping_from_two_places_at_once_is_safe():
     assert errors == []
     assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "canceled"
     assert db.one("SELECT status FROM holds WHERE id = ?", (hold,))["status"] != "active"  # released once, not twice
-    assert db.one("SELECT status, attempts FROM jobs WHERE id = ?", (stale,)).__getitem__("status") == "queued"
+    assert db.one("SELECT status, attempts FROM jobs WHERE id = ?", (stale,))["status"] == "queued"
     assert ledger.balance(uid)["held_micros"] > 0  # the stale job's hold is still reserved: it will run again
 
 
@@ -66,41 +57,30 @@ def _stage_with(monkeypatch, d, returncode, oom):
     return W
 
 
-def test_a_runner_killed_by_the_oom_killer_fails_the_job_with_a_plain_message(monkeypatch):
+@pytest.mark.parametrize("returncode, oom, outcome", [
+    (-9, [3, 4], "oom"),  # killed while the OOM counter moved: a plain memory failure, not charged
+    (-9, [3, 3], "interrupted"),  # killed with no OOM kill: an interruption, the job goes back in the queue
+    (1, [3, 9], "failed"),  # exited with an error, not killed: a plain failure
+])
+def test_a_runner_that_dies_is_an_oom_failure_an_interruption_or_a_plain_failure(monkeypatch, returncode, oom, outcome):
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     job, d = running_job(uid)
-    W = _stage_with(monkeypatch, d, -9, [3, 4])  # the counter moved while the stage ran
-    W._stop.set()  # and systemd then stops the worker: this must not read as a deploy
+    W = _stage_with(monkeypatch, d, returncode, oom)
+    if outcome != "failed":
+        W._stop.set()  # systemd is stopping the worker: a kill then must not read as a deploy unless the OOM counter moved
     try:
-        with pytest.raises(W.StageFailed) as e:
-            W.run_stage(job, d, "main", 10)
+        if outcome == "interrupted":
+            with pytest.raises(W.Interrupted):
+                W.run_stage(job, d, "main", 10)
+        else:
+            with pytest.raises(W.StageFailed) as e:
+                W.run_stage(job, d, "main", 10)
+            assert (e.value.user_message == W.OOM_MESSAGE) == (outcome == "oom")
+            if outcome == "oom":
+                assert "not charged" in W.OOM_MESSAGE and "memory" in W.OOM_MESSAGE
     finally:
         W._stop.clear()
-    assert e.value.user_message == W.OOM_MESSAGE and "not charged" in W.OOM_MESSAGE and "memory" in W.OOM_MESSAGE
-
-
-def test_a_killed_runner_without_an_oom_kill_is_still_an_interruption(monkeypatch):
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    job, d = running_job(uid)
-    W = _stage_with(monkeypatch, d, -9, [3, 3])
-    W._stop.set()
-    try:
-        with pytest.raises(W.Interrupted):
-            W.run_stage(job, d, "main", 10)
-    finally:
-        W._stop.clear()
-
-
-def test_a_stage_that_failed_for_other_reasons_is_not_an_oom(monkeypatch):
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    job, d = running_job(uid)
-    W = _stage_with(monkeypatch, d, 1, [3, 9])  # exit code 1, not a kill
-    with pytest.raises(W.StageFailed) as e:
-        W.run_stage(job, d, "main", 10)
-    assert e.value.user_message != W.OOM_MESSAGE
 
 
 def test_oom_kills_reads_the_cgroup_counter(monkeypatch, tmp_path):
@@ -146,21 +126,16 @@ def test_a_job_that_keeps_getting_interrupted_is_failed_not_requeued_forever(mon
 
 # ---------------------------------------------------------------- M2: limits that follow the progress
 
-def test_a_slow_stage_that_progresses_gets_the_time_it_needs_up_to_a_ceiling():
+def test_a_stage_gets_time_while_it_progresses_up_to_a_ceiling_and_not_when_stuck_or_finished():
     base = 23_400.0  # a 90 minute voice rebuild
-    # 70 percent done after the whole limit: it needs about 10,000 s more
+    # 70 percent done after the whole limit: it needs about 10,000 s more, up to the ceiling
     new = jobs.stretched_limit(base, base, 5, 70, 60)
     assert new is not None and base + 9_000 < new <= base * jobs.STRETCH_LIMIT
-    # almost finished: a little more is enough
-    assert jobs.stretched_limit(base, base, 5, 99, 60) < base * 1.3
-    # never beyond the ceiling, however slowly it moves
-    assert jobs.stretched_limit(base, base, 5, 6, 60) == base * jobs.STRETCH_LIMIT or jobs.stretched_limit(base, base, 5, 6, 60) is None
+    assert jobs.stretched_limit(base, base, 5, 99, 60) < base * 1.3  # almost finished: a little more is enough
+    assert jobs.stretched_limit(base, base, 5, 6, 60) == base * jobs.STRETCH_LIMIT  # however slowly: never beyond the ceiling
     assert jobs.stretched_limit(base, base * 3, 5, 6, 60) is None  # and once there, it is over
-
-
-def test_a_stage_that_stopped_moving_or_never_started_is_not_extended():
     base = 10_000.0
-    assert jobs.stretched_limit(base, base, 5, 60, jobs.STALL_SECONDS + 1) is None  # stuck
+    assert jobs.stretched_limit(base, base, 5, 60, jobs.STALL_SECONDS + 1) is None  # stopped moving: stuck
     assert jobs.stretched_limit(base, base, 5, 5, 0) is None  # no progress at all
     assert jobs.stretched_limit(base, base, 5, 100, 0) is None  # finished (its result is what is awaited)
 

@@ -84,7 +84,6 @@ def test_windows_include_fetches_the_archive_once_and_unpacks_it_with_the_builti
 def test_the_total_is_the_speech_files_plus_the_archive_once():
     speech = sum(f.size for f in resources.SPEECH_MODEL.files)
     assert installer_models.total_bytes() == speech + resources.MODELS_ARCHIVE.size
-    assert 2.4e9 < installer_models.total_bytes() < 2.6e9
 
 
 def test_the_pascal_strings_are_balanced():

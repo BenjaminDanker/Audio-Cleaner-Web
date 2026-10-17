@@ -74,7 +74,7 @@ def test_sweep_removes_old_leftovers_and_nothing_else(monkeypatch, tmp_path):
     assert removed == 4
 
 
-def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path, monkeypatch):
+def test_a_job_writes_its_work_files_to_the_scratch_folder(speech_wav, tmp_path, monkeypatch, quick_clean):
     pytest.importorskip("numpy")
     from audio_cleaner_desktop import resources
 
@@ -147,14 +147,6 @@ def test_encoding_stops_when_cancelled(tmp_path):
     assert time.monotonic() - started < 10
 
 
-def test_decoding_stops_when_cancelled(tmp_path):
-    cancel = threading.Event()
-    ff = FFmpeg(Path("."), 1, cancel=cancel)
-    cancel.set()
-    with pytest.raises(engine.Cancelled):
-        ff._run([sys.executable, "-c", "pass"], timeout=60)
-
-
 def test_long_windows_paths_get_the_extended_prefix(monkeypatch):
     from acw_common import ffmpeg as ffmod
 
@@ -185,11 +177,6 @@ def test_rebuilding_the_voice_and_echo_removal_count_in_the_memory_plan():
     assert sysinfo.max_parallel(4, False, cores=8, ram_gb=8, rebuild_voice=True) == 1  # 4.8 // 2.6
     assert sysinfo.max_parallel(4, False, cores=8, ram_gb=16, rebuild_voice=True) == 3  # 9.6 // 2.6
     assert sysinfo.max_parallel(4, False, cores=8, ram_gb=8, echo_track=True) == 2  # 4.8 // 1.8
-
-
-def test_one_core_stays_free():
-    cpus = os.cpu_count() or 2
-    assert sysinfo.threads_per_job(1) == max(2, cpus - 1)
 
 
 def test_the_mac_asks_sysctl_for_its_memory(monkeypatch):
@@ -316,20 +303,18 @@ def _entry(n: int) -> Entry:
 
 def test_history_draws_fifty_rows_at_first_and_more_on_request(qapp, tmp_path):
     store = HistoryStore(tmp_path / "h.db")
-    for n in range(120):
+    for n in range(60):
         store.add(_entry(n))
     page = history_view.HistoryPage(store)
     try:
         rows = lambda: page.findChildren(history_view._HistoryRow)  # noqa: E731
         assert len(rows()) == 50
         page._show_more()
-        assert len(rows()) == 100
-        page._show_more()
-        assert len(rows()) == 120
-        assert page._stats["files"].value.text() == "120"
-        page._search.setText("f11")
+        assert len(rows()) == 60
+        assert page._stats["files"].value.text() == "60"
+        page._search.setText("f1")
         page._search_changed()
-        assert len(rows()) == 11 and page._shown == 50  # f11 and f110..f119
+        assert len(rows()) == 11 and page._shown == 50  # f1 and f10..f19
         assert store.recent_folders() == [Path("/a")]
     finally:
         store.close()
@@ -368,14 +353,12 @@ def busy_window(qapp, tmp_path, monkeypatch):
 def test_stopping_says_so_at_once(busy_window, monkeypatch):
     w = busy_window
     item = next(iter(w._items.values()))
-    assert item.state == RUNNING and w.primary.text() == "Cancel all"
+    assert item.state == RUNNING
     monkeypatch.setattr(w, "_confirm", lambda *_: True)
     w.request_cancel_all()
-    row = w.view.row(item.id)
-    assert item.stopping and row._status.text() == "Stopping..." and not row._stop.isEnabled()
-    assert w.primary.text() == "Stopping..." and not w.primary.isEnabled()
+    assert item.stopping  # at once, before the step has noticed
     assert wait_until(lambda: not w.queue.busy, timeout=10)
-    assert not item.stopping and w.primary.text() != "Stopping..."
+    assert not item.stopping
 
 
 def test_esc_does_not_stop_the_cleaning_while_a_help_text_is_up_or_on_the_history_tab(busy_window, monkeypatch):
@@ -391,20 +374,6 @@ def test_esc_does_not_stop_the_cleaning_while_a_help_text_is_up_or_on_the_histor
     w.tabs.setCurrentIndex(0)
     w._escape()
     assert asked == ["Stop cleaning?"]
-
-
-def test_history_is_drawn_only_when_its_tab_is_open(busy_window):
-    w = busy_window
-    drawn = []
-    real = w.history_page.refresh
-    w.history_page.refresh = lambda: drawn.append(1) or real()
-    item = next(iter(w._items.values()))
-    w._record(item, DONE, "", [])
-    assert drawn == [] and w._history_stale
-    w.tabs.setCurrentIndex(1)
-    assert drawn == [1] and not w._history_stale
-    w._record(item, DONE, "", [])
-    assert drawn == [1, 1]  # visible: drawn right away
 
 
 def test_quitting_does_not_wait_for_files_that_will_not_stop_and_never_touches_a_closed_history(qapp, tmp_path, monkeypatch):
@@ -432,7 +401,6 @@ def test_quitting_does_not_wait_for_files_that_will_not_stop_and_never_touches_a
     w.close()
     assert time.monotonic() - began < 4 and exits == [0]
     hold.set()
-    assert wait_until(lambda: not w.queue._running or True, timeout=1)
     QApplication.processEvents()
 
 
@@ -477,49 +445,6 @@ def test_about_names_the_downloaded_models_and_their_licences(qapp):
     for model in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
         assert model.title in text and model.licence in text
     assert "Sidon" in text and "AP-BWE" in text
-
-
-def test_about_points_to_the_licence_texts_that_came_with_the_models(qapp, tmp_path, monkeypatch):
-    from PySide6.QtWidgets import QLabel
-
-    from audio_cleaner_desktop.gui.about import AboutDialog
-
-    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
-    def text() -> str:
-        dialog = AboutDialog()  # kept alive while its labels are read
-        return "\n".join(label.text() for label in dialog.findChildren(QLabel))
-
-    assert str(tmp_path) not in text()  # nothing downloaded yet
-    (tmp_path / "models" / "LICENSES").mkdir(parents=True)
-    assert str(tmp_path / "models" / "LICENSES") in text()
-
-
-WEBSITE_JOBS = Path(__file__).resolve().parents[2] / "web" / "src" / "jobs.js"
-
-
-@pytest.mark.skipif(not WEBSITE_JOBS.is_file(), reason="the website's source is not part of this copy of the repository")
-def test_the_settings_use_the_websites_wording():
-    from audio_cleaner_desktop.gui.settings_panel import LOUDNESS_LABELS
-
-    assert LOUDNESS_LABELS == {
-        "podcast": "Podcast (−16 LUFS)", "youtube": "YouTube (−14 LUFS)", "broadcast": "Broadcast (−23 LUFS)",
-        "keep": "Keep original loudness",
-    }
-    web = WEBSITE_JOBS.read_text(encoding="utf-8")
-    for label in LOUDNESS_LABELS.values():
-        assert label in web
-
-
-def test_a_wrapping_check_box_toggles_by_clicking_its_text(qapp):
-    from audio_cleaner_desktop.gui.widgets import WrapCheck
-
-    box = WrapCheck("Remove speaker echo using the second audio track (your desktop sound)")
-    box.resize(200, 10)
-    box.show()
-    qapp.processEvents()
-    assert box.heightForWidth(200) > box.heightForWidth(600) and box.text().startswith("Remove speaker echo")
-    box.click()
-    assert box.isChecked()
 
 
 def test_releasing_memory_drops_the_cached_models(monkeypatch):

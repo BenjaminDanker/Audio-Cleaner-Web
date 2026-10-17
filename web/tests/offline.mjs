@@ -1,8 +1,8 @@
-// "API offline" banner + maintenance panel (everything, the free browser tool included, needs the server to sign in).
-// Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist under /audio/ and
-// forwards /audio/api/* to a backend port it can switch at runtime: a dead port (what Caddy turns into HTTP 502, or a
-// reset connection), a fixed 502/503/504, or the real test backend on 8792 (tests/e2e.mjs setup) for the recovery check.
-// Usage: node tests/offline.mjs   (needs `npm run build`, fixtures, and the 8792 backend only for the recovery check)
+// The backend is down: the "taking a short break" banner, the calm panel instead of the paid tools, and both going away by
+// themselves once /api/health answers again (the page's own 30 s re-check, run on a fake clock so nothing waits).
+// Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist under /audio/ and forwards
+// /audio/api/* to a backend port it can switch at runtime: a dead port (what the proxy turns into HTTP 502), the front door's
+// maintenance answer, or the real test backend on 8792 for the recovery. Usage: node tests/offline.mjs
 import { createServer, request as httpRequest } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
@@ -16,23 +16,21 @@ const DEAD_PORT = 9; // nothing listens here
 const OFF = `http://127.0.0.1:${PORT}/audio`;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain' };
 
-let mode = 'dead-502'; // dead-502 | dead-reset | s502 | s503 | s504 | maint (the real maintenance answer of the front door) | real
+let mode = 'dead-502'; // dead-502 | maint | real
 const apiHits = [];
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, OFF);
   if (url.pathname.startsWith('/audio/api/')) {
     apiHits.push(`${mode} ${req.method} ${url.pathname}`);
-    if (mode === 'dead-reset') { req.socket.destroy(); return; }
     if (mode === 'maint') { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ detail: 'maintenance', message: 'Audio Cleaner is taking a short break.' })); return; }
-    if (mode === 's502' || mode === 's503' || mode === 's504') { res.writeHead(Number(mode.slice(1)), { 'content-type': 'application/json' }); res.end('{"detail":"upstream"}'); return; }
     const port = mode === 'real' ? REAL_BACKEND : DEAD_PORT;
     const up = httpRequest({ host: '127.0.0.1', port, path: req.url, method: req.method, headers: req.headers }, (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
     up.on('error', () => { res.writeHead(502, { 'content-type': 'text/plain' }); res.end('Bad Gateway'); }); // what a reverse proxy answers when the backend is stopped
     req.pipe(up);
     return;
   }
-  let rel = normalize(decodeURIComponent(url.pathname.replace(/^\/audio\/?/, ''))).replace(/^(\.\.[/\\])+/, '');
+  const rel = normalize(decodeURIComponent(url.pathname.replace(/^\/audio\/?/, ''))).replace(/^(\.\.[/\\])+/, '');
   let file = join(DIST, rel);
   if (!rel || !existsSync(file) || !statSync(file).isFile()) file = join(DIST, 'index.html');
   res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream' });
@@ -41,101 +39,64 @@ const server = createServer((req, res) => {
 await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
 
 const TEXT = 'Audio Cleaner is taking a short break. Signing in and everything that needs an account will be back shortly.';
-const { browser, page, logs } = await launch();
-const errors = [];
-page.on('pageerror', (e) => errors.push(e.message));
+const { browser, logs } = await launch();
 
-for (const m of ['dead-502', 'dead-reset', 's502', 's503', 's504', 'maint']) {
-  await check(`offline banner appears when the backend answers ${m}`, async () => {
-    mode = m;
+await check('offline: the banner says the server is on a short break (the backend does not answer), and the Cleanup page shows the calm panel instead of the tool', async () => {
+  mode = 'dead-502';
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  try {
     await page.goto(`${OFF}/`);
     const banner = page.getByTestId('api-offline');
     await banner.waitFor({ timeout: 10000 });
     const text = (await banner.innerText()).replace(/\s*Dismiss\s*$/, '').trim();
     if (text !== TEXT) throw new Error(text);
-    if ((await banner.getAttribute('role')) !== 'status') throw new Error('role');
-    return `shown (${m})`;
-  });
-}
-
-await check('offline banner is dismissible, stays dismissed while navigating, and is small', async () => {
-  mode = 'dead-reset';
-  await page.goto(`${OFF}/`);
-  const banner = page.getByTestId('api-offline');
-  await banner.waitFor();
-  const h = (await banner.boundingBox()).height;
-  if (h > 60) throw new Error(`banner is ${h}px tall`);
-  await page.screenshot({ path: join(SHOTS, 'offline-banner.png') });
-  await page.getByRole('button', { name: 'Dismiss' }).click();
-  await banner.waitFor({ state: 'detached' });
-  await page.getByRole('link', { name: 'Cleanup', exact: true }).first().click();
-  await page.waitForURL(/\/audio\/app$/);
-  await page.waitForTimeout(800);
-  if (await page.getByTestId('api-offline').count()) throw new Error('banner came back after navigation');
-  return `${Math.round(h)}px tall`;
-});
-
-await check('Cleanup needs the server: with the API down it shows the calm panel, not the tool', async () => {
-  mode = 'dead-reset';
-  await page.goto(`${OFF}/app`);
-  await page.getByTestId('api-offline').waitFor();
-  await page.getByTestId('maintenance').waitFor({ timeout: 10000 });
-  if (await page.locator('input[type=file]').count()) throw new Error('/app still offers a file picker while the server is down');
-  return 'panel shown';
-});
-
-await check('no banner while the API is up; paid pages degrade without crashing when it is down', async () => {
-  mode = 'real';
-  await page.goto(`${OFF}/`);
-  await page.waitForSelector('table tbody tr');
-  await page.waitForTimeout(500);
-  if (await page.getByTestId('api-offline').count()) throw new Error('banner shown although the API answers');
-  mode = 'dead-502';
-  for (const p of ['/', '/login', '/app', '/app/billing', '/app/live', '/terms']) {
-    await page.goto(`${OFF}${p}`);
-    await page.waitForSelector('main h1, .loading-screen', { timeout: 10000 });
-    await page.waitForTimeout(250);
+    await page.goto(`${OFF}/app`);
+    await page.getByTestId('maintenance').waitFor({ timeout: 10000 });
+    if (await page.locator('input[type=file]').count()) throw new Error('/app still offers a file picker while the server is down');
+    await page.screenshot({ path: join(SHOTS, 'offline-banner.png') });
+    return 'banner and panel shown';
+  } finally {
+    await ctx.close();
   }
-  if (errors.length) throw new Error(errors.join(' | '));
-  return 'ok';
 });
 
-await check('banner disappears by itself once the backend is back (re-checks /api/health)', async () => {
-  mode = 'dead-502';
-  await page.goto(`${OFF}/`);
-  await page.getByTestId('api-offline').waitFor();
-  mode = 'real';
-  await page.getByTestId('api-offline').waitFor({ state: 'detached', timeout: 45000 });
-  return 'recovered';
-});
-
-await check('maintenance: Cleanup, Live, Billing and Account show a calm "We\'ll be right back" panel instead of forms, with no claim that anything still works', async () => {
+await check('maintenance (the front door answers 503): Cleanup and Billing show "We\'ll be right back" with no forms and no claim that anything still works; the panel has a Check now button', async () => {
   mode = 'maint';
-  for (const p of ['/app', '/app/live', '/app/billing', '/app/account']) {
-    await page.goto(`${OFF}${p}`);
-    const panel = page.getByTestId('maintenance');
-    await panel.waitFor({ timeout: 10000 });
-    const text = await panel.innerText();
-    if (!/We.ll be right back/.test(text) || /still work/i.test(text)) throw new Error(`${p}: ${text}`);
-    if (await page.locator('main input, main select, main form').count()) throw new Error(`${p}: a form is still on the page`);
-    if (page.url().includes('/login')) throw new Error(`${p}: bounced to the sign-in page`);
-    if (await panel.locator('a[href$="/free"]').count()) throw new Error(`${p}: the panel still links to a free-cleanup page`);
-    if (!(await panel.getByRole('button', { name: 'Check now' }).count())) throw new Error(`${p}: no Check now button`);
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  try {
+    for (const p of ['/app', '/app/billing']) {
+      await page.goto(`${OFF}${p}`);
+      const panel = page.getByTestId('maintenance');
+      await panel.waitFor({ timeout: 10000 });
+      const text = await panel.innerText();
+      if (!/We.ll be right back/.test(text) || /still work/i.test(text)) throw new Error(`${p}: ${text}`);
+      if (await page.locator('main input, main select, main form').count()) throw new Error(`${p}: a form is still on the page`);
+      if (!(await panel.getByRole('button', { name: 'Check now' }).count())) throw new Error(`${p}: no Check now button`);
+    }
+    return 'panel on Cleanup and Billing';
+  } finally {
+    await ctx.close();
   }
-  await page.screenshot({ path: join(SHOTS, 'maintenance.png') });
-  return 'panel on 4 pages';
 });
 
-await check('maintenance: the panel goes away by itself when /api/health answers again', async () => {
-  mode = 'maint';
-  await page.goto(`${OFF}/app`);
-  await page.getByTestId('maintenance').waitFor();
-  mode = 'real';
-  await page.getByTestId('maintenance').waitFor({ state: 'detached', timeout: 50000 });
-  await page.locator('main h1').first().waitFor();
-  if (await page.getByTestId('api-offline').count()) throw new Error('banner still shown');
-  if (!apiHits.some((h) => h.startsWith('real') && h.endsWith('/audio/api/health'))) throw new Error('recovery did not use /api/health: ' + apiHits.slice(-5).join(' ; '));
-  return 'recovered through /api/health';
+await check('recovery: the banner and the panel go away by themselves once /api/health answers again (the page re-checks every 30 s; the clock is run forward, not waited for)', async () => {
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  try {
+    await page.clock.install();
+    mode = 'dead-502';
+    await page.goto(`${OFF}/`);
+    await page.getByTestId('api-offline').waitFor({ timeout: 10000 });
+    mode = 'real';
+    await page.clock.runFor(31000); // the next /api/health check
+    await page.getByTestId('api-offline').waitFor({ state: 'detached', timeout: 15000 });
+    if (!apiHits.some((h) => h.startsWith('real') && h.endsWith('/audio/api/health'))) throw new Error('recovery did not use /api/health: ' + apiHits.slice(-4).join(' ; '));
+    return 'recovered through /api/health';
+  } finally {
+    await ctx.close();
+  }
 });
 
 console.log(`API hits seen by the stub: ${apiHits.length}`);

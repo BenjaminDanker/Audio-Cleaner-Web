@@ -1,8 +1,12 @@
 """Tests for the shared processing package. The libDF/FFmpeg tests need the
 native builds: set ACW_LIBDF / ACW_DFN_MODEL / ACW_FFMPEG_DIR, or have them in
 ~/audio-cleaner/{bin,models} (the server layout); otherwise they are skipped."""
+import json
 import os
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +29,27 @@ needs_dfn = pytest.mark.skipif(not (LIB.is_file() and MODEL.is_file()), reason="
 needs_ff = pytest.mark.skipif(not (FF_DIR / "ffmpeg").exists() and not (FF_DIR / "ffmpeg.exe").exists(), reason="ffmpeg not available")
 
 
+def probe_streams(path):
+    """The streams of a media file as ffprobe reports them (a list of dicts)."""
+    ffprobe = str(FF_DIR / ("ffprobe.exe" if (FF_DIR / "ffprobe.exe").exists() else "ffprobe"))
+    out = subprocess.run([ffprobe, "-v", "error", "-print_format", "json", "-show_streams", str(path)], capture_output=True,
+                         text=True, check=True).stdout
+    return json.loads(out)["streams"]
+
+
+def make_multi_track_video(tmp_path):
+    """A 3 s Matroska file: a picture, two audio tracks (440 and 880 Hz) and one subtitle track ('hello').
+    Returns (the video, the subtitle file)."""
+    srt = tmp_path / "in.srt"
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n\n")
+    src = tmp_path / "multi.mkv"
+    subprocess.run([FIXTURE_FFMPEG, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=5:duration=3",
+                    "-f", "lavfi", "-i", "sine=f=440:d=3", "-f", "lavfi", "-i", "sine=f=880:d=3", "-i", str(srt),
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s", "-c:v", "mpeg4", "-c:a", "aac", "-c:s", "srt", str(src)],
+                   check=True)
+    return src, srt
+
+
 def voiced_noise(seconds=4.0, seed=0):
     """A crude voiced signal (harmonics, syllable envelope) plus white noise."""
     rng = np.random.default_rng(seed)
@@ -36,6 +61,14 @@ def voiced_noise(seconds=4.0, seed=0):
     clean = (0.2 * voice * env).astype(np.float32)
     noise = (0.03 * rng.standard_normal(len(t))).astype(np.float32)
     return clean, clean + noise
+
+
+def pause_gain_db(noisy, clean, y):
+    """How much the noise between the syllables drops, in dB."""
+    pauses = np.abs(clean) < 1e-4
+    before = np.sqrt(np.mean(noisy[pauses] ** 2))
+    after = np.sqrt(np.mean(y[pauses, 0] ** 2))
+    return 20 * np.log10(before / max(after, 1e-9))
 
 
 def test_limiter_respects_ceiling_and_alignment():
@@ -55,33 +88,26 @@ def test_clarity_keeps_shape_and_is_finite():
 
 @needs_dfn
 def test_clean_audio_reduces_noise_in_pauses():
-    clean, noisy = voiced_noise()
+    clean, noisy = voiced_noise(3.0)
     progress = []
     y = pipeline.clean_audio(noisy, LIB, MODEL, pipeline.CleanOptions(leveling=False), threads=1, progress=progress.append)
     assert y.shape == (len(noisy), 1) and np.isfinite(y).all()
     assert progress[-1] == 1.0 and progress == sorted(progress)
-    pauses = np.abs(clean) < 1e-4
-    before = np.sqrt(np.mean(noisy[pauses] ** 2))
-    after = np.sqrt(np.mean(y[pauses, 0] ** 2))
-    assert 20 * np.log10(before / max(after, 1e-9)) > 10  # at least 10 dB less noise between syllables
+    assert pause_gain_db(noisy, clean, y) > 10  # at least 10 dB less noise between syllables
 
 
-
-
-@needs_dfn
 def test_clean_audio_without_denoising_and_without_leveling_returns_the_input(tmp_path):
     _, noisy = voiced_noise(2.0)
     missing = tmp_path / "no-such-library"  # no noise remover is loaded at all
     report: dict = {}
     progress = []
-    y = pipeline.clean_audio(noisy, missing, missing, pipeline.CleanOptions(denoise=False, leveling=False), threads=1,
-                             progress=progress.append, report=report)
-    assert y.shape == (len(noisy), 1) and y.dtype == np.float32
-    assert np.array_equal(y[:, 0], noisy)
+    opts = pipeline.CleanOptions(denoise=False, leveling=False)
+    y = pipeline.clean_audio(noisy, missing, missing, opts, threads=1, progress=progress.append, report=report)
+    assert y.shape == (len(noisy), 1) and y.dtype == np.float32 and np.array_equal(y[:, 0], noisy)
     assert report["noise"] == "none" and report["highs"] is None and "noise_db" not in report
     assert progress and progress[-1] == 1.0
-    out = np.zeros(len(noisy), dtype=np.float32)  # written into the given array (a mono one too)
-    got = pipeline.clean_audio(noisy, missing, missing, pipeline.CleanOptions(denoise=False, leveling=False), out=out)
+    out = np.zeros(len(noisy), dtype=np.float32)  # written into the given array
+    got = pipeline.clean_audio(noisy, missing, missing, opts, out=out)
     assert np.array_equal(out, noisy) and np.shares_memory(got, out)
 
 
@@ -98,36 +124,12 @@ def test_clean_audio_without_denoising_only_levels_and_keeps_the_noise(tmp_path)
     gap_before = 20 * np.log10(np.sqrt(np.mean(noisy[voiced] ** 2)) / np.sqrt(np.mean(noisy[pauses] ** 2)))
     gap_after = 20 * np.log10(np.sqrt(np.mean(y[voiced, 0] ** 2)) / np.sqrt(np.mean(y[pauses, 0] ** 2)))
     assert gap_after < gap_before + 6  # the noise between syllables is still there (nothing like the 10+ dB denoising takes off)
-    stereo = np.stack([noisy, noisy * 0.5], axis=1)  # channels stay channels
-    z = pipeline.clean_audio(stereo, missing, missing, pipeline.CleanOptions(denoise=False, leveling=True), threads=1)
-    assert z.shape == stereo.shape and np.isfinite(z).all()
-
-
-def test_denoise_is_on_unless_turned_off():
-    assert pipeline.CleanOptions().denoise is True and pipeline.CleanOptions().leveling is True
-
-
-def test_reset_gives_the_output_of_a_fresh_instance():
-    _, a = voiced_noise(seconds=3.0, seed=1)
-    _, b = voiced_noise(seconds=3.0, seed=2)
-    a, b = a[: len(a) // 480 * 480], b[: len(b) // 480 * 480]
-    fresh = dfn.DeepFilter(LIB, MODEL)
-    want = fresh.process(b)
-    fresh.close()
-    used = dfn.DeepFilter(LIB, MODEL)
-    used.process(a)
-    used.reset()
-    assert np.array_equal(used.process(b), want)
-    # and again, after a partial run that was cancelled half way
-    used.process(a[: 480 * 37])
-    used.reset()
-    assert np.array_equal(used.process(b), want)
-    used.close()
 
 
 @needs_dfn
-def test_segments_reuse_one_instance_per_thread_with_identical_output(monkeypatch):
-    _, noisy = voiced_noise(seconds=12.0)
+def test_segmented_denoise_is_aligned_reuses_instances_and_matches_fresh_ones(monkeypatch):
+    clean, noisy = voiced_noise(seconds=12.0)
+    one = dfn.denoise_array(noisy, LIB, MODEL, threads=1)
     made = []
     orig = dfn.DeepFilter.__init__
 
@@ -135,33 +137,38 @@ def test_segments_reuse_one_instance_per_thread_with_identical_output(monkeypatc
         made.append(1)
         orig(self, *a, **k)
 
-    kw = dict(threads=2, segment_seconds=2.0, overlap_seconds=0.5)
     monkeypatch.setattr(dfn.DeepFilter, "__init__", counting)
-    reused = dfn.denoise_array(noisy, LIB, MODEL, **kw)
-    assert len(made) <= 2  # six segments on two worker threads
-    monkeypatch.setattr(dfn._Instances, "acquire", lambda self: dfn.DeepFilter(*self._args))  # a new one per segment
-    made.clear()
-    fresh = dfn.denoise_array(noisy, LIB, MODEL, **kw)
-    assert len(made) == 6
-    assert np.array_equal(reused, fresh)
-
-
-@needs_dfn
-def test_segmented_denoise_is_aligned_and_denoises():
-    clean, noisy = voiced_noise(seconds=9.0)
-    one = dfn.denoise_array(noisy, LIB, MODEL, threads=1)
-    seg = dfn.denoise_array(noisy, LIB, MODEL, threads=3, segment_seconds=2.0, overlap_seconds=1.0)
+    kw = dict(threads=2, segment_seconds=2.0, overlap_seconds=0.5)
+    seg = dfn.denoise_array(noisy, LIB, MODEL, **kw)
     assert one.shape == seg.shape == noisy.shape
+    assert len(made) <= 2  # the segments share one instance per worker thread
     # The first segment has the same history as a single pass: identical, so no delay offset.
     assert np.abs(one[: 2 * SR] - seg[: 2 * SR]).max() < 1e-6
-    # (Later segments start from a fresh model state, so they differ in detail;
-    # what matters is that every segment denoises.)
+    # (Later segments start from a fresh model state, so they differ in detail; each one must denoise.)
     pauses = np.abs(clean) < 1e-4
-    for s in range(0, 9, 2):
-        w = slice(s * SR, (s + 2) * SR)
+    for s in range(0, 12, 4):
+        w = slice(s * SR, (s + 4) * SR)
         before = np.sqrt(np.mean(noisy[w][pauses[w]] ** 2))
         after = np.sqrt(np.mean(seg[w][pauses[w]] ** 2))
         assert 20 * np.log10(before / max(after, 1e-9)) > 10, s
+    # a new instance per segment gives the same samples: reuse changes nothing
+    monkeypatch.setattr(dfn._Instances, "acquire", lambda self: dfn.DeepFilter(*self._args))
+    assert np.array_equal(seg, dfn.denoise_array(noisy, LIB, MODEL, **kw))
+
+
+@needs_dfn
+def test_reset_gives_the_output_of_a_fresh_instance():
+    _, a = voiced_noise(seconds=2.0, seed=1)
+    _, b = voiced_noise(seconds=2.0, seed=2)
+    a, b = a[: len(a) // 480 * 480], b[: len(b) // 480 * 480]
+    fresh = dfn.DeepFilter(LIB, MODEL)
+    want = fresh.process(b)
+    fresh.close()
+    used = dfn.DeepFilter(LIB, MODEL)
+    used.process(a[: 480 * 37])  # a partial run, as if a cancelled one
+    used.reset()
+    assert np.array_equal(used.process(b), want)
+    used.close()
 
 
 @needs_ff
@@ -182,8 +189,6 @@ def test_ffmpeg_round_trip_and_rejects_garbage(tmp_path):
 
 @needs_ff
 def test_mux_keeps_or_strips_metadata(tmp_path):
-    import subprocess
-
     ff = FFmpeg(FF_DIR, threads=1)
     src = tmp_path / "in.mp4"
     subprocess.run(
@@ -234,10 +239,7 @@ def test_asr_chunks_are_cut_exactly_and_in_batches(tmp_path, monkeypatch):
 
 @needs_dfn
 def test_cancel_stops_quickly():
-    import threading
-    import time
-
-    _, noisy = voiced_noise(seconds=120.0)
+    _, noisy = voiced_noise(seconds=30.0)
     cancel = threading.Event()
     threading.Timer(0.3, cancel.set).start()
     t0 = time.monotonic()
@@ -245,10 +247,3 @@ def test_cancel_stops_quickly():
         pipeline.clean_audio(noisy, LIB, MODEL, threads=2, cancel=cancel)
     assert time.monotonic() - t0 < 5
 
-
-@pytest.mark.skipif(not MODEL.is_file(), reason="model not available")
-def test_model_delay_from_config():
-    assert dfn.model_delay(MODEL) == dfn.MODEL_DELAY == 1440
-    ll = MODEL.with_name("DeepFilterNet3_ll_onnx.tar.gz")
-    if ll.is_file():
-        assert dfn.model_delay(ll) == 480

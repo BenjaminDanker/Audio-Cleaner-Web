@@ -70,43 +70,27 @@ def test_unknown_devices_are_refused():
 
 
 @CARD
-def test_dpdfnet_on_the_card_equals_the_cpu():
-    if not dpdfnet.default_model_path().is_file():
-        pytest.skip("DPDFNet model not installed")
-    x = speech(24)
-    kw = dict(threads=4, segment_seconds=10, overlap_seconds=1.5)
-    cpu = dpdfnet.denoise_array(x, **kw)
-    gpu = dpdfnet.denoise_array(x, device="cuda", **kw)
-    assert snr_db(cpu, gpu) > 80, snr_db(cpu, gpu)
-    # a second call reuses the CUDA graphs and starts from a clean state
-    again = dpdfnet.denoise_array(x, device="cuda", **kw)
-    assert np.array_equal(again, gpu)
-    # fewer rows than the first call used, in a graph of another size, then the first size again
-    short = dpdfnet.denoise_array(x[: 12 * SR], device="cuda", **kw)
-    assert snr_db(dpdfnet.denoise_array(x[: 12 * SR], **kw), short) > 80
-    assert np.array_equal(dpdfnet.denoise_array(x, device="cuda", **kw), gpu)
-    dpdfnet.unload()
+def test_each_model_on_the_card_equals_its_cpu_output():
+    """For each installed model the card gives the CPU's samples up to float round-off; a second call on the card,
+    which reuses its graphs, gives the same samples again."""
+    x = speech(12)
+    if dpdfnet.default_model_path().is_file():
+        kw = dict(threads=4, segment_seconds=10, overlap_seconds=1.5)
+        cpu = dpdfnet.denoise_array(x, **kw)
+        gpu = dpdfnet.denoise_array(x, device="cuda", **kw)
+        assert snr_db(cpu, gpu) > 80, snr_db(cpu, gpu)
+        assert np.array_equal(dpdfnet.denoise_array(x, device="cuda", **kw), gpu)
+        dpdfnet.unload()
+    if (MODELS / "ap-bwe" / "8kto48k.onnx").is_file():
+        import scipy.signal as ss
 
-
-@CARD
-def test_band_extension_on_the_card_equals_the_cpu():
-    if not (MODELS / "ap-bwe" / "8kto48k.onnx").is_file():
-        pytest.skip("AP-BWE models not installed")
-    import scipy.signal as ss
-
-    x = ss.sosfilt(ss.butter(10, 3800, "low", fs=SR, output="sos"), speech(8)).astype(np.float32)
-    cpu = bwe.extend(x, MODELS / "ap-bwe", model="8k")
-    gpu = bwe.extend(x, MODELS / "ap-bwe", model="8k", device="cuda")
-    assert snr_db(cpu, gpu) > 80, snr_db(cpu, gpu)
-    bwe.unload()
-
-
-@CARD
-def test_voice_rebuild_on_the_card_equals_the_cpu():
-    if not restore.available(MODELS / "sidon"):
-        pytest.skip("Sidon models not installed")
-    x = speech(8)
-    cpu = restore.restore(x, MODELS / "sidon", threads=2)
-    gpu = restore.restore(x, MODELS / "sidon", device="cuda")
-    assert snr_db(cpu, gpu) > 70, snr_db(cpu, gpu)
-    restore.unload()
+        low = ss.sosfilt(ss.butter(10, 3800, "low", fs=SR, output="sos"), x).astype(np.float32)
+        cpu = bwe.extend(low, MODELS / "ap-bwe", model="8k")
+        gpu = bwe.extend(low, MODELS / "ap-bwe", model="8k", device="cuda")
+        assert snr_db(cpu, gpu) > 80, snr_db(cpu, gpu)
+        bwe.unload()
+    if restore.available(MODELS / "sidon"):
+        cpu = restore.restore(x, MODELS / "sidon", threads=2)
+        gpu = restore.restore(x, MODELS / "sidon", device="cuda")
+        assert snr_db(cpu, gpu) > 70, snr_db(cpu, gpu)
+        restore.unload()

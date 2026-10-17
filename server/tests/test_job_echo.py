@@ -6,13 +6,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw import jobs
+from acw import db, jobs
 from acw.billing import ledger
 from acw_common.ffmpeg import FFmpeg
 
 from .test_job_pipeline import HOME, _run_worker_once
 
 SR = 48000
+SECONDS = 6  # the speaker talks for the first four, the person for the last two
 NATIVE = pytest.mark.skipif(
     not ((HOME / "bin/libdf.so").exists() and (HOME / "bin/ffmpeg").exists()), reason="native binaries/models not available"
 )
@@ -20,12 +21,12 @@ NATIVE = pytest.mark.skipif(
 
 def create(client, h, **options):
     return client.post("/api/jobs", json={
-        "kind": "denoise", "denoiseTier": "standard", "filename": "rec.mkv", "sizeBytes": 1000, "durationSeconds": 14,
+        "kind": "denoise", "denoiseTier": "standard", "filename": "rec.mkv", "sizeBytes": 1000, "durationSeconds": SECONDS,
         "options": options,
     }, headers=h)
 
 
-def test_option_defaults_off_validated_and_free_of_charge(client, signed_in):
+def test_the_option_is_taken_as_true_or_false_and_costs_nothing_extra(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     plain = create(client, h)
@@ -43,7 +44,7 @@ def test_echo_removal_needs_scratch_space():
     assert jobs.scratch_bytes("transcribe", hour) == 0 < jobs.scratch_bytes("transcribe", hour, echo=True)
 
 
-def _voice(f0, seed, seconds=14.0):
+def _voice(f0, seed, seconds):
     rng = np.random.default_rng(seed)
     t = np.arange(int(seconds * SR)) / SR
     phase = 2 * np.pi * np.cumsum(f0 * (1 + 0.15 * np.sin(2 * np.pi * 0.9 * t))) / SR
@@ -52,10 +53,10 @@ def _voice(f0, seed, seconds=14.0):
 
 
 def _recording(tmp_path, two_tracks):
-    """Speaker talks for 9 s (and the mic hears it back), then the person talks for 5 s."""
-    far, near = _voice(120, 1), _voice(210, 2)
-    far[9 * SR:] = 0
-    near[:9 * SR] = 0
+    """Speaker talks for the first four seconds (and the mic hears it back), then the person talks."""
+    far, near = _voice(120, 1, SECONDS), _voice(210, 2, SECONDS)
+    far[4 * SR:] = 0
+    near[:4 * SR] = 0
     ir = np.zeros(SR // 8, np.float32)
     ir[[int(0.04 * SR), int(0.047 * SR), int(0.06 * SR)]] = [0.5, 0.25, -0.12]
     mic = near + np.convolve(far, ir)[:len(far)].astype(np.float32)
@@ -71,7 +72,7 @@ def _recording(tmp_path, two_tracks):
 
 def _clean(client, h, data, **options):
     r = client.post("/api/jobs", json={
-        "kind": "denoise", "denoiseTier": "standard", "filename": "rec.mkv", "sizeBytes": len(data), "durationSeconds": 14,
+        "kind": "denoise", "denoiseTier": "standard", "filename": "rec.mkv", "sizeBytes": len(data), "durationSeconds": SECONDS,
         "options": {"output_video": False, "loudness_lufs": None, **options},
     }, headers=h)
     assert r.status_code == 200, r.text
@@ -90,12 +91,12 @@ def _speaker_vs_voice_db(wav_bytes, tmp_path):
     ff = FFmpeg(HOME / "bin")
     x = ff.decode(path, ff.probe(path), SR, 1, 60)[:, 0]
     rms = lambda s: 20 * np.log10(max(float(np.sqrt(np.mean(s**2))), 1e-9))  # noqa: E731
-    assert abs(len(x) - 14 * SR) < SR // 10  # length kept
-    return rms(x[6 * SR:8 * SR]) - rms(x[10 * SR:13 * SR])
+    assert abs(len(x) - SECONDS * SR) < SR // 10  # length kept
+    return rms(x[2 * SR:4 * SR]) - rms(x[4 * SR + SR // 2:SECONDS * SR])
 
 
 @NATIVE
-def test_second_track_removes_the_echo_in_the_cleaned_audio(client, signed_in, tmp_path):
+def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, signed_in, tmp_path):
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     data = _recording(tmp_path, two_tracks=True)

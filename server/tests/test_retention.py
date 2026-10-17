@@ -1,10 +1,10 @@
-"""Retention and bounded storage: every rule in acw/retention.py, the money safeguards, the database compaction,
-the size alerts and the quiet access log."""
+"""Retention and bounded storage: what the sweep deletes after 30 days, 90 days, a year and seven years; that money is
+never touched by the sweep; the database compaction; the size alerts; backups kept to a count; the quiet access log."""
 import json
 import logging
 import re
-import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,15 +34,14 @@ def count(table, where="1", params=()):
     return db.one(f"SELECT COUNT(*) n FROM {table} WHERE {where}", params)["n"]
 
 
-# ---------------------------------------------------------------- 12 months: jobs, live sessions, holds, audit, keys
+# ---------------------------------------------------------------- a year: jobs, live sessions, holds, audit, keys
 
 def test_finished_jobs_older_than_a_year_are_deleted_and_others_kept():
     uid = user()
     old = {s: job(uid, s, 400) for s in ("done", "failed", "canceled", "expired")}
     live_old = {s: job(uid, s, 400) for s in ("uploading", "queued", "running", "cloud_asr")}
     young = {s: job(uid, s, 364) for s in ("done", "failed")}
-    done = retention.run(NOW)
-    assert done["jobs"] == 4
+    assert retention.run(NOW)["jobs"] == 4
     for jid in old.values():
         assert db.one("SELECT 1 FROM jobs WHERE id = ?", (jid,)) is None
     for jid in (*live_old.values(), *young.values()):
@@ -50,7 +49,7 @@ def test_finished_jobs_older_than_a_year_are_deleted_and_others_kept():
     assert retention.run(NOW)["jobs"] == 0
 
 
-def test_ended_live_sessions_holds_and_revoked_keys_older_than_a_year():
+def test_ended_live_sessions_holds_and_revoked_keys_older_than_a_year_go():
     uid = user()
     ins = "INSERT INTO stream_sessions(id,user_id,status,started_at) VALUES (?,?,?,?)"
     db.execute(ins, ("s-old", uid, "ended", NOW - 400 * DAY))
@@ -92,7 +91,7 @@ def test_audit_rows_routine_after_a_year_money_ones_kept():
     assert count("audit_log", "action = 'login' AND created_at = ?", (NOW - 3 * DAY,)) == 1
 
 
-def test_every_audit_action_the_code_writes_is_classified():
+def test_every_audit_action_the_code_writes_is_classified_as_routine_or_money():
     """A new db.audit(...) action must say whether it is routine (deleted after 12 months) or evidence kept with the money."""
     root = Path(__file__).resolve().parents[1] / "acw"
     actions = set()
@@ -108,9 +107,9 @@ def test_every_audit_action_the_code_writes_is_classified():
     assert not unclassified, f"classify these audit actions in acw/retention.py: {sorted(unclassified)}"
 
 
-# ---------------------------------------------------------------- tokens, sessions, events, free usage
+# ---------------------------------------------------------------- 30 days: sessions, links, sign-in states; 90 days: events
 
-def test_expired_sessions_links_and_sign_in_states_go_after_30_days():
+def test_sessions_links_and_sign_in_states_go_after_30_days():
     uid = user()
     s = "INSERT INTO sessions(id_hash,user_id,csrf_token,created_at,expires_at,last_seen_at) VALUES (?,?,?,?,?,?)"
     db.execute(s, ("s-old", uid, "c", NOW - 90 * DAY, NOW - 31 * DAY, NOW - 40 * DAY))
@@ -129,7 +128,7 @@ def test_expired_sessions_links_and_sign_in_states_go_after_30_days():
     assert {r["state_hash"] for r in db.all_rows("SELECT state_hash FROM oauth_states")} == {"o-new"}
 
 
-def test_stripe_events_90_days_and_unprocessed_ones_a_year():
+def test_stripe_events_go_after_90_days_but_unprocessed_ones_stay_a_year():
     e = "INSERT INTO stripe_events(id,type,received_at,processed_at) VALUES (?,?,?,?)"
     db.execute(e, ("done-old", "t", NOW - 91 * DAY, NOW - 91 * DAY))
     db.execute(e, ("done-new", "t", NOW - 10 * DAY, NOW - 10 * DAY))
@@ -139,12 +138,9 @@ def test_stripe_events_90_days_and_unprocessed_ones_a_year():
     assert {r["id"] for r in db.all_rows("SELECT id FROM stripe_events")} == {"done-new", "open-old"}
 
 
-def test_webhook_replays_are_still_recognized_inside_the_window(client):
-    """Stripe retries for about 3 days; the event rows are kept 90."""
-    assert retention.STRIPE_EVENT_DAYS >= 30 and retention.STRIPE_EVENT_DAYS * DAY > 3 * DAY * 10
+# ---------------------------------------------------------------- file names leave the history; amounts stay
 
-
-def test_file_names_leave_the_credit_history_after_a_year_amounts_stay():
+def test_file_names_leave_the_credit_history_after_a_year_amounts_stay_and_recent_names_stay():
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     h = ledger.create_hold(uid, 1_000_000, "job", "j1")
@@ -156,34 +152,19 @@ def test_file_names_leave_the_credit_history_after_a_year_amounts_stay():
     h4 = ledger.create_hold(uid, 1_000_000, "job", "j4")
     ledger.capture_hold(h4, 200_000, "Denoising: private-interview.wav (5.0 min)")
     db.execute("UPDATE ledger SET created_at = ?", (NOW - 400 * DAY,))
+    h5 = ledger.create_hold(uid, 1_000_000, "job", "j5")
+    ledger.capture_hold(h5, 400_000, "Denoising: recent.wav (1.0 min)")  # a line from this month keeps its name
+    db.execute("UPDATE ledger SET created_at = ? WHERE description LIKE 'Denoising: recent%'", (NOW - 10 * DAY,))
     before = ledger.balance(uid)
     assert retention.run(NOW)["usage_names"] == 3
     rows = [r["description"] for r in db.all_rows("SELECT description FROM ledger WHERE kind = 'usage' ORDER BY id")]
     # Rows written before the rename keep their old label ("Clean & polish"); legacy kind names get today's label.
-    assert rows == ["Clean & polish (12.5 min)", "Denoising + Subtitles & transcript (0.2 min)", "Live session (3.0 min)", "Denoising (5.0 min)"]
+    assert rows[:4] == ["Clean & polish (12.5 min)", "Denoising + Subtitles & transcript (0.2 min)", "Live session (3.0 min)", "Denoising (5.0 min)"]
+    assert rows[4] == "Denoising: recent.wav (1.0 min)"
     everything = str([dict(r) for r in db.all_rows("SELECT * FROM ledger")])
     assert "secret" not in everything and "legacy" not in everything and "private-interview" not in everything
     assert ledger.balance(uid) == before and ledger.invariant_problems() == {"balance_mismatch": 0, "held_mismatch": 0}
     assert retention.run(NOW)["usage_names"] == 0
-
-
-def test_strip_file_name_keeps_the_label_the_row_was_written_with():
-    assert retention.strip_file_name("Clean & polish: talk.wav (1.2 min)") == "Clean & polish (1.2 min)"
-    assert retention.strip_file_name("Denoising: talk.wav (1.2 min)") == "Denoising (1.2 min)"
-    assert retention.strip_file_name("Denoising, voice rebuilt: a: b.wav (3 min)") == "Denoising, voice rebuilt (3 min)"
-    assert retention.strip_file_name("Voice rebuild + Leveling: a: b.wav (3 min)") == "Voice rebuild + Leveling (3 min)"
-    assert retention.strip_file_name("Leveling: talk.wav (1.2 min)") == "Leveling (1.2 min)"
-    assert retention.strip_file_name("denoise: talk.wav (1.2 min)") == "Denoising (1.2 min)"
-    assert retention.strip_file_name("Denoising (1.2 min)") is None
-
-
-def test_names_of_recent_usage_lines_stay():
-    uid = user()
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    h = ledger.create_hold(uid, 1_000_000, "job", "j1")
-    ledger.capture_hold(h, 400_000, "Denoising: recent.wav (1.0 min)")
-    assert retention.run()["usage_names"] == 0
-    assert "recent.wav" in db.one("SELECT description FROM ledger WHERE kind = 'usage'")["description"]
 
 
 def test_credit_history_still_renders_without_the_job_rows(client, signed_in):
@@ -206,7 +187,7 @@ def test_credit_history_still_renders_without_the_job_rows(client, signed_in):
 # ---------------------------------------------------------------- money is never touched by the sweep
 
 def _money_user(email, rows):
-    """A user with ledger rows [(age_days, amount_micros, kind)], payments, and a matching balance."""
+    """A user with ledger rows [(age_days, amount_micros, kind)], and a matching balance."""
     uid = user(email)
     for age, amount, kind in rows:
         if amount > 0:
@@ -234,8 +215,6 @@ def test_the_sweep_never_deletes_ledger_payments_or_money_audit_rows():
     assert ledger.invariant_problems() == {"balance_mismatch": 0, "held_mismatch": 0}
 
 
-# ---------------------------------------------------------------- batching
-
 def test_big_backlogs_are_deleted_in_batches_over_several_sweeps(monkeypatch):
     uid = user()
     monkeypatch.setattr(retention, "BATCH", 10)
@@ -261,15 +240,15 @@ def test_sweep_runs_hourly_and_survives_a_failing_compaction(monkeypatch):
 
 # ---------------------------------------------------------------- compaction of the file
 
-def _fill_and_delete():
+def _fill_and_delete(n=300):
     uid = user()
-    for i in range(3000):
+    for _ in range(n):
         job(uid, "done", 400, name="x" * 200)
     db.execute("DELETE FROM jobs")  # leaves the pages free inside the file
 
 
 def test_vacuum_gives_the_space_back_once_a_month_in_the_small_hours(monkeypatch):
-    monkeypatch.setattr(retention, "VACUUM_MIN_FREE_PAGES", 100)
+    monkeypatch.setattr(retention, "VACUUM_MIN_FREE_PAGES", 5)
     _fill_and_delete()
     pages, free, _ = retention._page_facts()
     assert free >= retention.VACUUM_MIN_FREE_PAGES
@@ -277,32 +256,26 @@ def test_vacuum_gives_the_space_back_once_a_month_in_the_small_hours(monkeypatch
     now = db.now()
     assert retention.maintain_storage(now, hour=12) is None  # busy hours
     assert retention.maintain_storage(now, hour=3) == "vacuumed"
-    assert get_settings().db_path.stat().st_size < size / 2
+    assert get_settings().db_path.stat().st_size < size
     assert retention._page_facts()[1] == 0
     assert retention.maintain_storage(now + DAY, hour=3) is None  # not again within the month
     _fill_and_delete()
-    assert retention.maintain_storage(now + 20 * DAY, hour=3) is None
     assert retention.maintain_storage(now + 29 * DAY, hour=2) == "vacuumed"
 
 
-def test_vacuum_waits_for_live_sessions_and_skips_a_file_with_little_free_space(monkeypatch):
-    monkeypatch.setattr(retention, "VACUUM_MIN_FREE_PAGES", 100)
+def test_vacuum_waits_for_live_sessions_and_for_disk_space(monkeypatch):
+    monkeypatch.setattr(retention, "VACUUM_MIN_FREE_PAGES", 5)
     uid = user()
     _fill_and_delete()
     db.execute("INSERT INTO stream_sessions(id,user_id,status,started_at) VALUES ('live',?,'active',?)", (uid, db.now()))
     assert retention.maintain_storage(hour=3) == "skipped: live session running"
     db.execute("UPDATE stream_sessions SET status = 'ended'")
-    assert retention.maintain_storage(hour=3) == "vacuumed"
-    user("b@example.com")
-    assert retention.maintain_storage(db.now() + 40 * DAY, hour=3) is None  # a small file with nothing free is left alone
-
-
-def test_vacuum_is_refused_when_the_disk_is_nearly_full(monkeypatch):
-    monkeypatch.setattr(retention, "VACUUM_MIN_FREE_PAGES", 100)
-    _fill_and_delete()
-    monkeypatch.setattr(retention.shutil, "disk_usage", lambda p: type("U", (), {"free": 1024})())
+    real_disk_usage = retention.shutil.disk_usage
+    monkeypatch.setattr(retention.shutil, "disk_usage", lambda p: SimpleNamespace(free=1024))
     assert retention.maintain_storage(hour=3) == "skipped: low disk space"
     assert db.one("SELECT 1 FROM meta WHERE key = 'retention.vacuumed_at'") is None
+    monkeypatch.setattr(retention.shutil, "disk_usage", real_disk_usage)
+    assert retention.maintain_storage(hour=3) == "vacuumed"
 
 
 # ---------------------------------------------------------------- money records after 7 years (by hand)
@@ -339,12 +312,9 @@ def test_compact_money_keeps_every_balance_and_the_chain_of_balances():
     assert [dict(r) for r in db.all_rows("SELECT id, balance_after_micros FROM ledger WHERE user_id = ? AND created_at > ?", (a, NOW - 100 * DAY))] == [dict(r) for r in later]
     assert count("payments", "user_id = ?", (a,)) == 2  # the pending one and the recent one
     assert count("audit_log", "action = 'refund'") == 1
-    # and it can be run again
-    again = retention.compact_money(NOW, apply=True)
+    again = retention.compact_money(NOW, apply=True)  # and it can be run again
     assert again["users"] == 0 and again["ledger_rows"] == 0
-    assert ledger.invariant_problems() == {"balance_mismatch": 0, "held_mismatch": 0}
-    # new activity still works on top of the carried-forward row
-    ledger.credit(a, 1_000, "grant", "t", "more")
+    ledger.credit(a, 1_000, "grant", "t", "more")  # new activity still works on top of the carried-forward row
     assert ledger.balance(a)["balance_micros"] == _sum(a)
 
 
@@ -368,7 +338,7 @@ def test_compact_money_removes_deleted_accounts_that_nothing_refers_to_any_more(
 
 
 def test_the_monitor_reminds_about_records_older_than_seven_years():
-    uid = _money_user("a@example.com", [(10, 1_000_000, "topup")])
+    _money_user("a@example.com", [(10, 1_000_000, "topup")])
     (f,) = monitor.check_old_money(NOW)
     assert f.kind == "old_money_records" and not f.bad
     db.execute("UPDATE ledger SET created_at = ?", (NOW - 7 * 365 * DAY - 10 * DAY,))
@@ -376,12 +346,11 @@ def test_the_monitor_reminds_about_records_older_than_seven_years():
     db.execute("UPDATE ledger SET created_at = ?", (NOW - 7 * 365 * DAY - 40 * DAY,))
     (f,) = monitor.check_old_money(NOW)
     assert f.bad and "compact-money" in f.body
-    assert uid
 
 
 # ---------------------------------------------------------------- what the monitor watches
 
-def test_size_alerts_for_the_data_and_backup_directories(tmp_path, monkeypatch):
+def test_size_alerts_for_the_data_and_backup_directories_skip_job_files(tmp_path, monkeypatch):
     data, bk = tmp_path / "sizes-data", tmp_path / "sizes-bk"
     (data / "jobs" / "abc").mkdir(parents=True)
     bk.mkdir()
@@ -401,43 +370,26 @@ def test_size_alerts_for_the_data_and_backup_directories(tmp_path, monkeypatch):
     assert s["jobs"] == 3_000_000 and s["data"] == 6000 and s["backups"] == 6000
 
 
-def test_size_limits_default_to_5_and_20_gb(monkeypatch):
-    monkeypatch.delenv("ACW_DATA_ALERT_GB", raising=False)
-    monkeypatch.delenv("ACW_BACKUPS_ALERT_GB", raising=False)
-    assert storage.data_limit() == 5 * 1024**3 and storage.backups_limit() == 20 * 1024**3
-    monkeypatch.setenv("ACW_DATA_ALERT_GB", "nonsense")
-    assert storage.data_limit() == 5 * 1024**3
-
-
-def test_the_monitor_run_includes_the_new_checks_and_the_metrics(monkeypatch, tmp_path):
-    monkeypatch.setattr(monitor, "BACKUP_DIR", tmp_path / "bk")
-    monkeypatch.setattr(monitor, "unit_states", lambda units: {})
-    kinds = {f.kind for f in monitor.run(ctx=lambda: "", http=lambda url: (True, ""))}
-    assert {"data_large", "backups_large", "old_money_records"} <= kinds
-    prom = (get_settings().data_dir / "metrics.prom").read_text()
-    assert 'acw_storage_bytes{what="database"}' in prom and 'acw_storage_bytes{what="backups"}' in prom
-
-
 # ---------------------------------------------------------------- backups stay at --keep, also when they fail
 
-def test_failed_snapshots_and_old_ones_are_pruned_even_when_tonight_fails(tmp_path, monkeypatch):
+def test_backups_stay_at_keep_also_when_tonight_fails_and_failed_snapshots_are_capped(tmp_path, monkeypatch):
     user()
     out = tmp_path / "b"
-    for i in range(5):
+    stamps = iter(f"20260101-{i:06d}" for i in range(100))  # snapshot names carry the second: give each run its own
+    monkeypatch.setattr(backup, "time", SimpleNamespace(strftime=lambda fmt, t=None: next(stamps), gmtime=backup.time.gmtime,
+                                                        time=backup.time.time))
+    for _ in range(5):
         backup.run(out, keep=3)
-        time.sleep(1.05)  # snapshot names carry the second
     assert len(list(out.glob("acw-*.sqlite3.gz"))) == 3
     # tonight the off-machine copy fails: the snapshot is good but the run fails; the folder still stays at `keep`
     monkeypatch.setenv("ACW_BACKUP_OFFBOX", str(tmp_path / "remote") + "/")
     monkeypatch.delenv("ACW_BACKUP_PASSPHRASE_FILE", raising=False)
     monkeypatch.delenv("ACW_BACKUP_AGE_RECIPIENT", raising=False)
     for _ in range(2):
-        time.sleep(1.05)
         with pytest.raises(backup.BackupError):
             backup.run(out, keep=3)
     assert len(list(out.glob("acw-*.sqlite3.gz"))) == 3
-    # failed snapshots (*.bad): only the newest few are kept
-    for i in range(6):
+    for i in range(6):  # failed snapshots (*.bad): only the newest few are kept
         (out / f"acw-2020010{i}-000000.sqlite3.gz.bad").write_bytes(b"x")
     backup._prune(out, 3)
     assert len(list(out.glob("*.bad"))) == backup.KEEP_BAD

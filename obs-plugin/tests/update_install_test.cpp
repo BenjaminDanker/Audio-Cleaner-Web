@@ -238,15 +238,15 @@ static void test_posix_scripts()
 		CHECK(shell_echo(sh_quote(n)) == n);
 
 	// A plugin folder in a path full of awkward characters; the swap happens only after the process is gone.
-	for (const char *folder : {"plugins", "my plugins", "it's \xC3\xBC \"q\" $x `y`"}) {
+	{
 		Scratch s;
-		const fs::path parent = s.dir / fs::u8path(folder);
+		const fs::path parent = s.dir / fs::u8path("it's \xC3\xBC \"q\" $x `y`");
 		const fs::path target = parent / "audio-cleaner", stage = parent / ".acw-update-t", work = s.dir / "work";
 		write_file(target / "bin" / "64bit" / "audio-cleaner.so", "old");
 		write_file(stage / "audio-cleaner" / "bin" / "64bit" / "audio-cleaner.so", "new");
 		write_file(work / "keep.txt", "x");
 		PosixScriptArgs a;
-		const pid_t sleeper = spawn_sleeper(2);
+		const pid_t sleeper = spawn_sleeper(1);
 		a.pid = sleeper;
 		a.target = u8(target);
 		a.staged = u8(stage / "audio-cleaner");
@@ -256,7 +256,7 @@ static void test_posix_scripts()
 		write_file(work / "s.sh", posix_update_script(a));
 		const int rc = std::system(("sh '" + u8(work / "s.sh") + "' >/dev/null 2>&1 &").c_str());
 		CHECK(rc == 0);
-		std::this_thread::sleep_for(std::chrono::milliseconds(700));
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
 		CHECK(read_file(target / "bin" / "64bit" / "audio-cleaner.so") == "old");  // still waiting for the process
 		int status = 0;
 		waitpid(sleeper, &status, 0);
@@ -381,13 +381,13 @@ static void test_apply_posix()
 		std::string work, err;
 		CHECK(make_update_work_dir(work, err));
 		ApplyRequest req = request_for(s.dir / "update.tar.xz", t, fs::u8path(work), s.dir / "log.txt");
-		const pid_t sleeper = spawn_sleeper(2);
+		const pid_t sleeper = spawn_sleeper(1);
 		req.pid = static_cast<unsigned long>(sleeper);
 		const ApplyResult r = apply_update(req);
 		CHECK(r.outcome == ApplyOutcome::InstallsOnExit);
 		if (r.outcome != ApplyOutcome::InstallsOnExit)
 			std::printf("  error: %s\n", r.error.c_str());
-		std::this_thread::sleep_for(std::chrono::milliseconds(600));
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
 		CHECK(probe(installed) == "old");  // OBS is still running: nothing has been touched
 		{
 			bool stage_found = false;
@@ -400,16 +400,12 @@ static void test_apply_posix()
 		CHECK(wait_until([&] { return probe(installed) == "new"; }, 15000));
 		CHECK(wait_until([&] { return !fs::exists(work); }, 5000));
 		CHECK(read_file(plugins / "other-plugin" / "keep") == "other");
-		bool leftovers = false;
-		for (const auto &e : fs::directory_iterator(plugins))
-			leftovers = leftovers || e.path().filename().u8string().compare(0, 12, ".acw-update-") == 0;
 		CHECK(wait_until([&] {
 			for (const auto &e : fs::directory_iterator(plugins))
 				if (e.path().filename().u8string().compare(0, 12, ".acw-update-") == 0)
 					return false;
 			return true;
 		}, 5000));
-		(void)leftovers;
 		CHECK(contains(read_file(s.dir / "log.txt"), "installed"));
 
 		// immediate mode (OBS in a sandbox): swapped when the call returns

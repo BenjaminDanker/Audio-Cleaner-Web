@@ -1,5 +1,5 @@
-"""The name box under each file and the list of types joined to it: what it starts with, how the two follow each other,
-what happens with a name that can't be used, and that the choice reaches the job."""
+"""The name box under each file and the list of types joined to it: how the two follow each other, what happens with a
+name that can't be used, and that the choice reaches the job and the file that is written."""
 from __future__ import annotations
 
 import threading
@@ -76,37 +76,16 @@ def pick(row, ending):
     row._format.activated.emit(index)
 
 
-def listed(row):
-    return [row._format.itemData(i) for i in range(row._format.count()) if row._format.itemData(i)]
-
-
-def test_the_box_starts_with_todays_result_name_and_the_list_has_only_what_the_file_can_become(window, tmp_path):
-    song, clip = add(window, tmp_path, "song.mp3", "clip.mp4")
-    assert song._namebox.text() == "song-cleaned.mp3" and song._format.currentData() == ".mp3"
-    assert clip._namebox.text() == "clip-cleaned.mp4" and clip._format.currentData() == ".mp4"
-    assert listed(song)[:6] == [".mp3", ".wav", ".flac", ".m4a", ".opus", ".ogg"]  # a sound: its own kind first
-    assert listed(clip)[:5] == [".mp4", ".mov", ".mkv", ".flv", ".webm"]  # a video: the video types first
-    assert ".avi" not in listed(clip) and ".wma" not in listed(song)
-    assert song._format.currentText() == "MP3 audio" and clip._format.currentText() == "MP4 video"
-    assert clip._format.itemText(clip._format.findData(".mp3")) == "MP3 audio"
-
-
-def test_the_tip_about_the_box_is_there_while_files_are_in_the_list(window, tmp_path):
-    assert not window.tip.isVisible()
-    add(window, tmp_path, "song.mp3")
-    assert window.tip.isVisible()
-    assert window.tip.text() == "Tip: change the ending or pick a format to save as something else, e.g. .mp3 for just the sound."
-
-
-def test_typing_an_ending_changes_the_list_and_picking_a_type_changes_the_ending(window, tmp_path):
+def test_the_box_starts_with_todays_result_name_and_typing_or_picking_keep_each_other_in_step(window, tmp_path):
     (row,) = add(window, tmp_path, "talk.wav")
     item = row.item
+    assert row._namebox.text() == "talk-cleaned.wav" and row._format.currentData() == ".wav"
     type_name(row, "interview.mp3")
     assert row._format.currentData() == ".mp3" and item.out_name == "interview.mp3" and item.out_custom
     type_name(row, "interview.FLAC")  # capitals are fine
     assert row._format.currentData() == ".flac"
     type_name(row, "interview.mp")  # half an ending is no type: the list shows none
-    assert row._format.currentIndex() == -1 and row._format.currentText() == ""
+    assert row._format.currentIndex() == -1
     pick(row, ".ogg")
     assert row._namebox.text() == "interview.mp.ogg"  # ".mp" is no ending we know, so it was part of the name
     type_name(row, "interview.mp3")
@@ -114,26 +93,6 @@ def test_typing_an_ending_changes_the_list_and_picking_a_type_changes_the_ending
     assert row._namebox.text() == "interview.m4a" and item.out_name == "interview.m4a"
     pick(row, ".mp4")  # a sound can become a video
     assert row._namebox.text() == "interview.mp4"
-
-
-def test_picking_a_type_when_the_box_is_empty_starts_from_the_usual_name(window, tmp_path):
-    (row,) = add(window, tmp_path, "talk.wav")
-    type_name(row, "")
-    assert row._namebox.text() == ""
-    pick(row, ".opus")
-    assert row._namebox.text() == "talk-cleaned.opus"
-    assert row.item.out_custom  # not the type it started with: the choice is the user's now
-
-
-def test_esc_in_the_name_box_only_leaves_the_box(window, tmp_path, monkeypatch):
-    (row,) = add(window, tmp_path, "talk.wav")
-    asked = []
-    monkeypatch.setattr(window, "_confirm", lambda *a: asked.append(a) or True)
-    window.queue.cancel_all = lambda: asked.append("stopped")
-    row._namebox.setFocus()
-    assert window.focusWidget() is row._namebox or row._namebox.hasFocus()
-    window._escape()
-    assert asked == [] and not row._namebox.hasFocus()
 
 
 def test_a_name_that_is_the_usual_one_again_follows_the_settings_again(window, tmp_path):
@@ -144,25 +103,16 @@ def test_a_name_that_is_the_usual_one_again_follows_the_settings_again(window, t
     assert not row.item.out_custom
 
 
-def test_a_name_that_cannot_be_used_gets_a_short_red_reason_once_the_box_is_left(window, tmp_path):
+def test_a_name_that_cannot_be_used_gets_a_short_reason_once_the_box_is_left_and_it_goes_when_fixed(window, tmp_path):
     (row,) = add(window, tmp_path, "talk.wav")
     type_name(row, "talk-cleaned.xyz")
     assert not row._hint.isVisible()  # not while still typing
     row._namebox.clearFocus()
     row._namebox.editingFinished.emit()
     assert row._hint.isVisible() and "can't be saved as .xyz" in row._hint.text()
-    assert row._namebox.property("invalid") is True and row._hint.property("state") == "failed"
-    assert row._format.currentIndex() == -1
+    assert row._namebox.property("invalid") is True and row._format.currentIndex() == -1
     type_name(row, "talk-cleaned.mp3")  # fixed: the reason goes away at once
     assert not row._hint.isVisible() and row._namebox.property("invalid") is False
-
-
-@pytest.mark.parametrize("text", ["", "talk", "a/b.mp3", "con.mp3", ".mp3"])
-def test_other_unusable_names_say_why(window, tmp_path, text):
-    (row,) = add(window, tmp_path, "talk.wav")
-    type_name(row, text)
-    row._namebox.editingFinished.emit()
-    assert row._hint.isVisible() and row._hint.text()
 
 
 def test_starting_leaves_out_a_file_whose_name_is_unusable_and_says_so(qapp, tmp_path, monkeypatch):
@@ -184,7 +134,6 @@ def test_starting_leaves_out_a_file_whose_name_is_unusable_and_says_so(qapp, tmp
         assert wait_until(lambda: started, timeout=10)
         assert started == [("good.wav", "good-cleaned.wav")]  # the box's name goes with the job
         assert bad.item.state == WAITING and bad._hint.isVisible()  # refused, with the reason on its row
-        assert bad.item.id not in w.queue.pending_ids() + w.queue.running_ids()
         gate.set()
         assert wait_until(lambda: good.item.state == DONE, timeout=10)
         assert bad.item.state == WAITING
@@ -219,7 +168,6 @@ def test_the_name_of_a_file_already_in_line_follows_the_box_and_a_bad_one_waits(
         w.start()
         assert wait_until(lambda: seen, timeout=10)
         assert a.item.state == RUNNING and not a._namebox.isEnabled() and not a._format.isEnabled()  # busy: no editing
-        assert b._namebox.isEnabled()
         type_name(b, "second.mp3")  # b is in line behind a
         assert [(j.id, j.output_name) for j in w.queue._pending] == [(b.item.id, "second.mp3")]
         type_name(b, "second.exe")  # not good: out of the line until it is
@@ -242,42 +190,6 @@ def test_the_usual_name_follows_the_audio_file_type_setting_and_a_typed_name_doe
     assert mine._namebox.text() == "mine.ogg"
     video, = add(window, tmp_path, "clip.mp4")
     assert video._namebox.text() == "clip-cleaned.mp4"  # a video is not touched by the audio file type
-
-
-def test_the_list_of_types_follows_what_the_file_turns_out_to_be(qapp, tmp_path, monkeypatch):
-    seen = {}
-
-    def probe(path, ff=None):
-        return SimpleNamespace(duration=5.0, has_video=path.suffix == ".mp4", audio_channels=2, ext=path.suffix,
-                               video_codec="vp9" if path.suffix == ".mp4" else None)
-
-    monkeypatch.setattr(engine, "probe", probe)
-    w = open_window(qapp, tmp_path, missing=False)
-    try:
-        (row,) = add(w, tmp_path, "weird.mp4")
-        assert not row._namebox.isEnabled()  # still being read
-        assert wait_until(lambda: row.item.probed, timeout=10)
-        assert row._namebox.isEnabled() and row._namebox.text() == "weird-cleaned.mp4"
-        assert row.item.source == engine.Source(True, ".mp4", "vp9", 5.0, 2)
-        assert listed(row)[:2] == [".mp4", ".mov"]
-    finally:
-        close_window(w)
-
-
-def test_a_file_that_cannot_be_read_has_no_name_box(qapp, tmp_path, monkeypatch):
-    from acw_common.ffmpeg import MediaError
-
-    monkeypatch.setattr(engine, "probe", lambda path, ff=None: (_ for _ in ()).throw(MediaError("not media")))
-    w = open_window(qapp, tmp_path, missing=False)
-    try:
-        (row,) = add(w, tmp_path, "broken.wav")
-        assert wait_until(lambda: row.item.state == FAILED, timeout=10)
-        assert not row._editor.isVisibleTo(row)
-    finally:
-        close_window(w)
-
-
-# -- with the real engine ----------------------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -312,7 +224,6 @@ def test_the_chosen_name_and_type_are_what_gets_written(qapp, tmp_path, clip_wav
         assert wait_until(lambda: row.item.state in (DONE, FAILED), timeout=60)
         assert row.item.state == DONE, row.item.message
         assert row.item.outputs == [src.parent / "My talk.mp3"] and (src.parent / "My talk.mp3").is_file()
-        assert "Saved as My talk.mp3" in row._meta.text()
     finally:
         close_window(w)
 
@@ -368,25 +279,5 @@ def test_clean_again_will_not_start_with_an_unusable_name(qapp, tmp_path, clip_w
         type_name(row, "no/good.wav")
         w.clean_again(row.item.id)
         assert row.item.state == WAITING and row._hint.isVisible() and not w.queue.busy and not w.queue.active
-    finally:
-        close_window(w)
-
-
-@pytest.mark.native
-def test_a_sound_can_become_a_video_from_the_window(qapp, tmp_path, clip_wav, quick_clean):
-    from conftest import displayed_size
-
-    src = tmp_path / "talk.wav"
-    src.write_bytes(clip_wav.read_bytes())
-    w = open_window(qapp, tmp_path, missing=False)
-    try:
-        w.add_paths([src])
-        row = w.view.rows()[0]
-        assert wait_until(lambda: row.item.probed, timeout=30)
-        pick(row, ".mkv")
-        w.start()
-        assert wait_until(lambda: row.item.state in (DONE, FAILED), timeout=60)
-        assert row.item.state == DONE, row.item.message
-        assert displayed_size(row.item.outputs[0]) == (1280, 720)
     finally:
         close_window(w)

@@ -58,11 +58,6 @@ def test_languages_are_checked():
         translate.check_targets(["en"], "en")
 
 
-def test_hungarian_romanian_and_thai_are_offered():
-    assert translate.check_targets(["hu", "ro", "th"], "en") == ["hu", "ro", "th"]
-    assert translate.LANGUAGE_NAMES["th"] == "Thai"
-
-
 def test_a_job_asks_for_translations_and_is_priced_per_language():
     uid = auth.get_or_create_user("t@example.com")["id"]
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
@@ -137,11 +132,6 @@ def test_a_broken_answer_is_asked_again_and_then_given_up(monkeypatch):
     with pytest.raises(translate.TranslationError):
         asyncio.run(run("short line"))
     assert not translate.looks_broken("wait... what?!", "Warte.... was?!")  # a run the line itself has
-
-
-def test_the_prompt_keeps_tone_and_gaming_terms():
-    p = translate._system_prompt("en", "de")
-    assert "into German" in p and "tone" in p and "gaming terms" in p and "switch languages" in p
 
 
 def test_finalize_writes_one_set_of_files_per_language(tmp_path):

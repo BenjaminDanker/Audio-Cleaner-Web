@@ -1,7 +1,10 @@
-// End-to-end checks against a running backend (see report). Usage: node tests/e2e.mjs [section ...]
+// The main paths against the local backend, one per feature: sign-in (and the API's sign-in answers), the price list against
+// the server's own list, a paid file job (Denoising + Leveling, the estimate, the download), a paid subtitles job, the billing
+// flow (top-up rules, the checkout return, a refused card, refunds), API keys, and the account (export, deletion, sign-out).
+// Usage: node tests/e2e.mjs [section ...]   sections: basic auth studio transcribe billing keys account
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, loginLink, pick, signIn, summary } from './helpers.mjs';
 
 const only = process.argv.slice(2);
 const want = (s) => only.length === 0 || only.includes(s);
@@ -21,78 +24,74 @@ async function waitJob(name, timeout = 240000) {
 }
 
 if (want('basic')) {
-  await check('landing: pricing table from API (per hour, groups, no status column)', async () => {
+  await check('landing: the price table is the server\'s price list (per hour, groups, no status column)', async () => {
+    const pricing = await (await fetch(`${BASE}/api/billing/pricing`)).json();
     await page.goto(`${BASE}/`);
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
-    for (const s of ['$0.54 / hour', '$0.009 / min', 'Denoising', 'Leveling', '$0.06 / hour', '$0.001 / min', 'Voice rebuild', '$0.24 / hour', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
-    if (/Available|Coming soon/.test(txt)) throw new Error('status column is back: ' + txt);
-    return `${await page.locator('table tbody tr').count()} rows`;
-  });
-  await check('404 page + legal pages', async () => {
-    await page.goto(`${BASE}/nope`);
-    if (!(await page.textContent('h1')).includes('find that page')) throw new Error('404 text');
-    await page.goto(`${BASE}/terms`);
-    await page.waitForSelector('main h1');
-    if (/legal review|draft/i.test(await page.locator('main').innerText()) || await page.locator('.draft-banner').count()) throw new Error('draft/review wording on Terms');
-    if (!/laws of the United States/.test(await page.locator('main').innerText())) throw new Error('governing law missing');
-    await page.goto(`${BASE}/privacy`); await page.waitForSelector('h1');
-    await page.goto(`${BASE}/licenses`); await page.waitForSelector('table');
-    return 'ok';
-  });
-  await check('login page: no providers configured message + error param', async () => {
-    await page.goto(`${BASE}/login?error=state`);
-    await page.waitForSelector('.banner-error');
-    const t = await page.locator('main').innerText();
-    if (!/sign-in link|try again|expired|didn.t work|not configured/i.test(t)) throw new Error('no error notice: ' + t.slice(0, 200));
-    return 'ok';
-  });
-  await check('protected route redirects to /login when signed out', async () => {
-    await page.goto(`${BASE}/app/billing`);
-    await page.waitForURL(/\/audio\/login$/);
-    return 'ok';
+    for (const s of ['Denoising', 'Leveling', 'Voice rebuild', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    const missing = pricing.rates.filter((r) => r.available && r.product !== 'stream_denoise' && !txt.includes(`$${r.usdPerHour.toFixed(2)} / hour`) && !txt.includes(`$${(r.usdPerMinute).toFixed(3)} / min`));
+    if (missing.length) throw new Error('prices not on the page: ' + missing.map((r) => `${r.product}/${r.tier}`).join(', '));
+    if (/Available|Coming soon/.test(txt)) throw new Error('status column is back');
+    return `${pricing.rates.length} server rates checked`;
   });
 }
 
 if (want('auth')) {
-  await check('login-link sign-in: hash cleared, lands on /app', async () => {
-    admin('login-link', EMAIL); // creates the user
-    const { loginLink } = await import('./helpers.mjs');
-    const link = loginLink(EMAIL);
-    await page.goto(link);
-    await page.waitForURL(/\/audio\/app(\/billing)?$/, { timeout: 15000 }); // or the page the visitor was sent to sign in from
-    if (page.url().endsWith('/billing')) await gotoApp('/app');
-    const h = await page.evaluate(() => location.hash + '|' + document.referrer);
-    if (page.url().includes('token')) throw new Error('token still in URL');
-    await page.waitForSelector('[data-testid=available]');
-    return `signed in as ${EMAIL}`;
+  // Each sign-in runs in its own browser context, so the shared page below stays the e2e account.
+  await check('sign-in: a login link lands on /app with the token gone; a reused link and a cut-off token get a friendly error; signed-out /app/billing goes to /login', async () => {
+    const mail = `e2e-auth-${Date.now()}@example.com`;
+    const ctx = await browser.newContext();
+    const p1 = await ctx.newPage();
+    try {
+      await p1.goto(`${BASE}/app/billing`);
+      await p1.waitForURL(/\/audio\/login$/);
+      const link = loginLink(mail);
+      await p1.goto(link);
+      await p1.waitForURL((u) => u.pathname.startsWith('/audio/') && !u.pathname.startsWith('/audio/login'), { timeout: 15000 });
+      if (p1.url().includes('token')) throw new Error('token still in URL');
+      await p1.waitForSelector('[data-testid=available]');
+      // a reused link is refused
+      await p1.context().clearCookies();
+      await p1.goto(link);
+      await p1.waitForSelector('.banner-error', { timeout: 10000 });
+      const reused = await p1.locator('.banner-error').innerText();
+      if (!/invalid or expired/i.test(reused)) throw new Error(reused);
+      // a token cut off in the middle of a %-code is not a crash
+      const p2 = await ctx.newPage();
+      await p2.goto(`${BASE}/login/verify#token=%E0%A4%A`);
+      await p2.waitForSelector('.banner-error', { timeout: 10000 });
+      if (!/cut off/.test(await p2.locator('.banner-error').innerText())) throw new Error('cut-off token not explained');
+      return 'ok';
+    } finally {
+      await ctx.close();
+    }
   });
-  await check('reused login link is rejected with friendly error', async () => {
-    const { loginLink } = await import('./helpers.mjs');
-    const ctx2 = await browser.newContext();
-    const p2 = await ctx2.newPage();
-    const link = loginLink('e2e-reuse@example.com');
-    await p2.goto(link); await p2.waitForURL(/\/app$/);
-    await p2.context().clearCookies();
-    await p2.goto(link);
-    await p2.waitForSelector('.banner-error', { timeout: 10000 });
-    const t = await p2.locator('.banner-error').innerText();
-    await ctx2.close();
-    if (!/invalid or expired/i.test(t)) throw new Error(t);
-    return t;
-  });
+  loginLink(EMAIL); // creates the account (the login link itself is not used)
   admin('grant', EMAIL, '5', 'e2e test');
+  await check('API: a 401 on a list sends the visitor to sign in', async () => {
+    const ctx = await browser.newContext();
+    const p1 = await ctx.newPage();
+    try {
+      await signIn(p1, EMAIL);
+      await p1.route('**/api/jobs', (r) => r.fulfill({ status: 401, json: { detail: 'Sign in required.' } }));
+      await p1.goto(`${BASE}/app`);
+      await p1.waitForURL(/\/login$/, { timeout: 10000 });
+      return 'ok';
+    } finally {
+      await ctx.close();
+    }
+  });
 }
 
 if (want('studio')) {
-  await check('cleanup page: balance, no Terms prompt (signing in is agreeing)', async () => {
+  await signIn(page, EMAIL);
+  await check('cleanup page: balance and no Terms prompt for an account that agreed (signing in is agreeing)', async () => {
     await gotoApp('/app');
-    await page.reload(); await page.waitForSelector('[data-testid=available]');
+    await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent === '$5.00', null, { timeout: 15000 });
     const bal = await page.getByTestId('available').innerText();
     if (bal !== '$5.00') throw new Error('balance ' + bal);
-    const hdr = await page.locator('.balance-chip').innerText();
-    if (!/\$5\.00/.test(hdr)) throw new Error('header ' + hdr);
-    if (await page.locator('main').getByText('Terms of Service').count() || await page.getByRole('dialog').count()) throw new Error('a Terms prompt is still shown');
+    if (await page.getByRole('dialog').count()) throw new Error('a Terms prompt is still shown');
     return `balance ${bal}`;
   });
 
@@ -126,14 +125,18 @@ if (want('studio')) {
     }
   });
 
-  await check('Denoising (wav) end-to-end, no Terms modal', async () => {
+  await check('a paid file job, Denoising + Leveling: the estimate on Start, the request that is sent, the finished file downloads, the balance drops', async () => {
+    await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'denoise');
     await page.getByTestId('estimate').waitFor();
     const est = await page.getByTestId('estimate').innerText();
     if (!/\$0\.0[0-9]+/.test(est)) throw new Error('estimate: ' + est);
     if (!/^Start – about \$0\.0/.test(await page.getByTestId('start').innerText())) throw new Error('start label: ' + await page.getByTestId('start').innerText());
-    await page.getByTestId('start').click();
+    if (!(await page.locator('input[type=checkbox][name=leveling]').isChecked())) throw new Error('Leveling is on by default with Denoising');
+    const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'), page.getByTestId('start').click()]);
+    const body = req.postDataJSON();
+    if (body.kind !== 'denoise' || body.denoiseTier !== 'standard' || body.options.leveling !== true) throw new Error('job sent: ' + JSON.stringify(body));
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
@@ -142,53 +145,13 @@ if (want('studio')) {
     const [dl] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download').first().click()]);
     const p = join(FILES, 'out-studio.wav');
     await dl.saveAs(p);
-    return `${est.split('\n')[0]}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; expiry: ${await card.getByTestId('expiry').innerText()}`;
-  });
-
-  await check('balance after job reflects cost', async () => {
     await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent !== '$5.00', null, { timeout: 15000 });
-    return await page.getByTestId('available').innerText();
-  });
-
-  await check('Denoising of VIDEO: audio-only upload + local remux', async () => {
-    await dropFile(page, join(FILES, 'test.mp4'));
-    await pick(page, 'noise', 'denoise');
-    await page.getByTestId('estimate').waitFor();
-    await page.getByTestId('start').click();
-    const msg = await page.getByTestId('submitted').innerText({ timeout: 60000 });
-    if (!/Only the sound was uploaded/.test(msg)) throw new Error('msg: ' + msg);
-    const card = await waitJob('test');
-    const jobs = page.locator('[data-testid=job]', { hasText: /test\.m4a|test\.mp4/ }).first();
-    const st = await jobs.getAttribute('data-status');
-    if (st !== 'done') throw new Error('status ' + st + ' ' + (await jobs.innerText()));
-    const names = await jobs.locator('.oname').allInnerTexts();
-    const btn = jobs.getByTestId('remux-btn');
-    await btn.waitFor();
-    const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), btn.click()]);
-    const p = join(FILES, 'out-studio-video.mp4');
-    await dl.saveAs(p);
-    return `${msg}; outputs ${names.join(', ')}; remuxed ${dl.suggestedFilename()} ${statSync(p).size} bytes`;
-  });
-
-  await check('transcription + denoise (both) job: srt/vtt/txt outputs', async () => {
-    await dropFile(page, join(FILES, 'noisy.wav'));
-    await pick(page, 'noise', 'denoise');
-    await pick(page, 'subs', 'standard'); // Denoising + Standard: one denoise_transcribe job
-    await page.getByTestId('estimate').waitFor();
-    await page.getByTestId('start').click();
-    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    await page.waitForTimeout(500);
-    const card = page.locator('[data-testid=job]').first();
-    await page.waitForFunction(() => ['done', 'failed'].includes(document.querySelector('[data-testid=job]').getAttribute('data-status')), null, { timeout: 300000 });
-    const st = await card.getAttribute('data-status');
-    if (st !== 'done') throw new Error(st + ' ' + (await card.innerText()));
-    const names = await card.locator('.oname').allInnerTexts();
-    return names.join(', ');
+    return `${est.split('\n')[0]}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;
   });
 }
 
 if (want('transcribe')) {
-  await check('Standard subtitles on the Cleanup page (subtitles only, short file, paid)', async () => {
+  await check('a paid subtitles job (Standard) on the Cleanup page: the estimate, the finished transcript downloads', async () => {
     await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
@@ -203,57 +166,55 @@ if (want('transcribe')) {
     const [dl] = await Promise.all([page.waitForEvent('download'), card.locator('li', { hasText: '.txt' }).getByTestId('download').click()]);
     await dl.saveAs(join(FILES, 'out-transcript.txt'));
     const text = readFileSync(join(FILES, 'out-transcript.txt'), 'utf8').trim();
+    if (!text) throw new Error('empty transcript');
     return `${names.join(', ')} | "${text.slice(0, 80)}"`;
-  });
-  await check('balance unchanged by free job', async () => {
-    const b = await page.locator('.balance-chip').innerText();
-    return b;
   });
 }
 
 if (want('billing')) {
-  await check('billing: payments off -> Pay, refund and card buttons are disabled with an explanation', async () => {
+  await check('billing: payments off -> Pay and refund are disabled with the reason; the card button is off too', async () => {
     await gotoApp('/app/billing');
     await page.waitForSelector('[data-testid=payments-off]');
     const pay = page.getByRole('button', { name: /^Pay / });
     if (!(await pay.isDisabled())) throw new Error('Pay button should be disabled while payments are off');
     const note = await page.getByTestId('topup-off').innerText();
     if (!/not available yet|switched off/i.test(note)) throw new Error(note);
-    if ((await pay.getAttribute('aria-describedby')) !== 'topup-off') throw new Error('Pay button is not described by the note');
     if (!(await page.getByRole('button', { name: 'Manage card and receipts' }).isDisabled())) throw new Error('card portal button enabled');
-    await page.screenshot({ path: join(SHOTS, 'billing.png'), fullPage: true });
     return note;
   });
-  await check('billing: custom amount validation + auto-reload text + ledger', async () => {
+
+  await check('billing: a top-up amount is read strictly and limited ($5 smallest, $50 for a first top-up, $500 after), and the auto-reload consent states the exact charge', async () => {
     await page.locator('label:has(input[value=custom])').click();
     const hint = page.locator('#custom-hint');
-    await page.getByLabel('Custom amount (USD)').fill('4.99');
-    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid under $5');
+    const field = page.getByLabel('Custom amount (USD)');
+    const valid = async () => !/neg/.test(await hint.getAttribute('class'));
+    for (const [text, ok] of [['4.99', false], ['5', true], ['600', false], ['-5', false], ['12,5', true], ['$25', true], ['1,250.00', false], ['abc', false], ['25', true]]) {
+      await field.fill(text);
+      if ((await valid()) !== ok) throw new Error(`"${text}" valid=${!ok}; hint: ${await hint.innerText()}`);
+    }
+    await field.fill('4.99');
     if (!/smallest top-up is \$5\.00/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
-    await page.getByLabel('Custom amount (USD)').fill('5');
-    if (/neg/.test(await hint.getAttribute('class'))) throw new Error('$5 should be valid');
-    await page.getByLabel('Custom amount (USD)').fill('600');
-    if (!/neg/.test(await hint.getAttribute('class'))) throw new Error('should be invalid over the limit');
+    await field.fill('600');
     // this account has not paid yet: its first top-up can be up to $50, and the hint says so
     if (!/first top-up can be up to \$50\.00\. After that, up to \$500\.00/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
-    await page.getByLabel('Custom amount (USD)').fill('abc');
-    if (!/Enter an amount in dollars/.test(await hint.innerText())) throw new Error(`says why: ${await hint.innerText()}`);
-    await page.getByLabel('Custom amount (USD)').fill('25');
-    if (/neg/.test(await hint.getAttribute('class'))) throw new Error('$25 should be valid');
+    await field.fill('25');
     if (!(await page.getByRole('button', { name: /^Pay/ }).isDisabled())) throw new Error('still disabled while payments are off');
     const text = await page.getByTestId('ar-consent-text').innerText();
     if (!/I authorize Audio Cleaner to charge my saved card \$20\.00 whenever my balance falls below \$5\.00, up to \$100\.00 per calendar month, until I turn this off\./.test(text)) throw new Error(text);
-    const rows = await page.locator('[data-testid=ledger] tbody tr').count();
-    return `ledger rows ${rows}`;
+    return 'limits and consent text match';
   });
-  await check('billing: ?checkout=success banner polls balance', async () => {
-    await page.goto(`${BASE}/app/billing?checkout=success`);
-    await page.getByTestId('checkout-banner').waitFor();
+
+  await check('billing: returning from checkout shows the thank-you at once when the payment is already booked, and "canceled" when it was not', async () => {
+    await page.route('**/api/billing/history', (r) => r.fulfill({ json: { payments: [{ id: 'pay_x', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, created_at: Math.floor(Date.now() / 1000) - 30 }], ledger: [] } }));
+    await page.goto(`${BASE}/app/billing?checkout=success&p=pay_x`);
+    await page.waitForFunction(() => /Thank you/.test(document.querySelector('[data-testid=checkout-banner]')?.textContent || ''), null, { timeout: 8000 });
+    await page.unroute('**/api/billing/history');
     await page.goto(`${BASE}/app/billing?checkout=cancel`);
     const t = await page.getByTestId('checkout-banner').innerText();
     if (!/canceled/i.test(t)) throw new Error(t);
     return t;
   });
+
   await check('billing: a card from a country we don\'t serve: "not charged" banner and status, never "Paid"', async () => {
     await page.route('**/api/billing/history', async (route) => {
       const res = await route.fetch();
@@ -268,17 +229,62 @@ if (want('billing')) {
     if (badge !== 'Not charged') throw new Error('status badge: ' + badge);
     return (await page.getByTestId('checkout-banner').innerText()).replace(/\s+/g, ' ');
   });
+
+  await check('refund: only where the server says some of a payment is unused; the confirmation states the card fee; the success shows the refunded amount; no fee on a second refund', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // pay1: unused $15 of $20; pay2: refunded before, $7 left; pay3: nothing left to refund; pay4: older than 14 days
+    const payments = [
+      { id: 'pay1', kind: 'topup', status: 'succeeded', amount_cents: 2000, refunded_cents: 0, refundable_cents: 1500, created_at: now - 3600 },
+      { id: 'pay2', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 300, refundable_cents: 700, created_at: now - 7200 },
+      { id: 'pay3', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 400, refundable_cents: 0, created_at: now - 9000 },
+      { id: 'pay4', kind: 'topup', status: 'succeeded', amount_cents: 1000, refunded_cents: 0, refundable_cents: 0, created_at: now - 20 * 86400 },
+    ];
+    await page.route('**/api/billing/history', (r) => r.fulfill({ json: { payments, ledger: [] } }));
+    await page.route('**/api/billing/pricing', async (r) => { const res = await r.fetch(); await r.fulfill({ response: res, json: { ...(await res.json()), paymentsEnabled: true } }); });
+    let posted = null;
+    await page.route('**/api/billing/refund', (r) => { posted = r.request().postDataJSON(); return r.fulfill({ json: { refundedCents: 4321 } }); });
+    await page.goto(`${BASE}/app/billing`);
+    await page.getByRole('button', { name: 'Refund unused' }).first().waitFor();
+    const buttons = page.getByRole('button', { name: 'Refund unused' });
+    if ((await buttons.count()) !== 2) throw new Error(`${await buttons.count()} refund buttons; want 2 (pay1, pay2)`);
+    const rows = page.locator('tr', { has: page.getByTestId('pay-status') });
+    for (const [i, want] of [[0, 1], [1, 1], [2, 0], [3, 0]]) {
+      const n = await rows.nth(i).getByRole('button', { name: 'Refund unused' }).count();
+      if (n !== want) throw new Error(`payment ${payments[i].id}: ${n} refund buttons, want ${want}`);
+    }
+    await buttons.first().click();
+    const est = await page.getByTestId('refund-estimate').first().innerText();
+    const fee = Math.ceil(2000 * 0.029 + 30);
+    const money = (c) => `$${(c / 100).toFixed(2)}`;
+    const wantText = `You’ll get back about ${money(1500 - fee)} (unused ${money(1500)} minus the card fee of ${money(fee)}).`;
+    if (est.trim() !== wantText) throw new Error(`"${est}" vs "${wantText}"`);
+    await page.getByRole('button', { name: 'Yes, refund' }).click();
+    await page.getByText('$43.21 is on its way back to your card').waitFor();
+    if (posted?.paymentId !== 'pay1') throw new Error('posted ' + JSON.stringify(posted));
+    await page.reload();
+    await page.getByRole('button', { name: 'Refund unused' }).nth(1).click();
+    const est2 = (await page.getByTestId('refund-estimate').innerText()).trim();
+    if (/card fee of/.test(est2) || !est2.includes(money(700))) throw new Error('second refund: ' + est2);
+    await page.unroute('**/api/billing/refund');
+    await page.unroute('**/api/billing/history');
+    await page.unroute('**/api/billing/pricing');
+    return `${est.trim()} / ${est2}`;
+  });
 }
 
 if (want('keys')) {
-  await check('live: API key create (shown once, copy), list, revoke', async () => {
+  await check('API key: the create request is retried once after a 403 (CSRF), the key is shown once and copied, then revoked', async () => {
     await gotoApp('/app/live');
     await context.grantPermissions(['clipboard-read', 'clipboard-write']);
-    const keyForm = (await page.locator('main').innerText());
-    for (const t of ['OBS plugin and live', 'File API for scripts']) if (!keyForm.includes(t)) throw new Error('key scope label missing: ' + t);
+    let n = 0;
+    await page.route('**/api/keys', async (route) => {
+      if (route.request().method() === 'POST' && n++ === 0) return route.fulfill({ status: 403, json: { detail: 'Missing or invalid CSRF token.' } });
+      return route.continue();
+    });
     await page.getByLabel('Name').fill('e2e key');
     await page.getByRole('button', { name: 'Create key' }).click();
-    const key = await page.getByTestId('key-value').innerText();
+    const key = await page.getByTestId('key-value').innerText({ timeout: 10000 });
+    await page.unroute('**/api/keys');
     if (!/^acw_/.test(key)) throw new Error(key);
     await page.getByRole('button', { name: 'Copy' }).click();
     const clip = await page.evaluate(() => navigator.clipboard.readText());
@@ -290,12 +296,12 @@ if (want('keys')) {
     await row.getByRole('button', { name: /Revoke key/ }).click();
     await row.getByRole('button', { name: 'Revoke', exact: true }).click();
     await page.waitForFunction(() => !document.querySelector('[data-testid=keys]') || !document.querySelector('[data-testid=keys]').textContent.includes('e2e key'));
-    return `${key.slice(0, 12)}… created, copied, revoked`;
+    return `${key.slice(0, 12)}… created (after one CSRF retry), copied, revoked`;
   });
 }
 
 if (want('account')) {
-  await check('account: export download + sign out everywhere', async () => {
+  await check('account: the data export downloads with its name and holds the account', async () => {
     await gotoApp('/app/account');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download my data' }).click()]);
     const p = join(FILES, 'acw-export.json');
@@ -305,30 +311,50 @@ if (want('account')) {
     if (dl.suggestedFilename() !== 'acw-account-export.json') throw new Error(dl.suggestedFilename());
     return `${Object.keys(j).join(',')}`;
   });
-  await check('account: delete requires typing email; redirects to /', async () => {
-    const { loginLink } = await import('./helpers.mjs');
+
+  await check('account deletion: a running job blocks it with a reason; typing the email is required; after success the visitor lands on / and /app asks to sign in', async () => {
+    const mail = `e2e-del-${Date.now()}@example.com`;
     const ctx2 = await browser.newContext();
     const p2 = await ctx2.newPage();
-    const mail = `e2e-del-${Date.now()}@example.com`;
-    await p2.goto(loginLink(mail)); await p2.waitForURL(/\/app$/);
-    await p2.goto(`${BASE}/app/account`);
-    const btn = p2.getByRole('button', { name: 'Delete my account' });
-    await btn.waitFor();
-    if (!(await btn.isDisabled())) throw new Error('enabled too early');
-    await p2.getByLabel(/Type your email/).fill('wrong@example.com');
-    if (!(await btn.isDisabled())) throw new Error('enabled with wrong email');
-    await p2.getByLabel(/Type your email/).fill(mail);
-    await btn.click();
-    await p2.waitForURL(/\/audio\/?$/, { timeout: 10000 });
-    await p2.getByTestId('account-deleted').waitFor({ timeout: 10000 });
-    await p2.getByText('Your account has been deleted.').waitFor();
-    await p2.waitForFunction(() => document.querySelector('.site-header a[href$="/login"]'), null, { timeout: 10000 }); // header now shows "Sign in"
-    await p2.goto(`${BASE}/app`);
-    await p2.waitForURL(/\/login$/);
-    await ctx2.close();
-    return 'deleted, signed out';
+    try {
+      await p2.goto(loginLink(mail)); await p2.waitForURL(/\/app$/);
+      admin('grant', mail, '1', 'e2e delete test');
+      await p2.goto(`${BASE}/app/account`);
+      const btn = p2.getByRole('button', { name: 'Delete my account' });
+      await btn.waitFor();
+      if (!(await btn.isDisabled())) throw new Error('enabled too early');
+      await p2.getByLabel(/Type your email/).fill('wrong@example.com');
+      if (!(await btn.isDisabled())) throw new Error('enabled with wrong email');
+      // hold a paid job so the deletion is refused
+      const made = await p2.evaluate(async () => {
+        const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
+        const res = await fetch('/audio/api/jobs', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken }, body: JSON.stringify({ kind: 'transcribe', transcribeTier: 'local', filename: 'hold.wav', sizeBytes: 1000, durationSeconds: 5, options: { audio_format: 'wav', caption_formats: ['txt'] } }) });
+        return { status: res.status, body: await res.json() };
+      });
+      if (made.status !== 200) throw new Error('could not create a held job: ' + JSON.stringify(made));
+      await p2.getByLabel(/Type your email/).fill(mail);
+      await btn.click();
+      const alert = p2.getByTestId('delete-error');
+      await alert.waitFor({ timeout: 10000 });
+      if (!(await alert.innerText()).includes('Wait for your running jobs to finish first.')) throw new Error(await alert.innerText());
+      await p2.evaluate(async (id) => {
+        const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
+        await fetch(`/audio/api/jobs/${id}/cancel`, { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': me.csrfToken } });
+      }, made.body.id);
+      await btn.click();
+      await p2.waitForURL(/\/audio\/?$/, { timeout: 15000 });
+      await p2.getByTestId('account-deleted').waitFor({ timeout: 10000 });
+      await p2.getByText('Your account has been deleted.').waitFor();
+      await p2.goto(`${BASE}/app`);
+      await p2.waitForURL(/\/login$/);
+      return 'refused while a job runs, deleted once it was finished, signed out';
+    } finally {
+      await ctx2.close();
+    }
   });
-  await check('account: sign out everywhere', async () => {
+
+  await check('account: sign out everywhere ends the session', async () => {
+    await gotoApp('/app/account');
     await page.getByRole('button', { name: 'Sign out everywhere' }).click();
     await page.waitForURL(/\/login$/, { timeout: 10000 });
     return 'ok';

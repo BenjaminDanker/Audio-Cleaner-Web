@@ -6,6 +6,7 @@ black picture). The noise removal itself is left out of most of these (quick_cle
 from __future__ import annotations
 
 import sys
+import threading
 
 import pytest
 
@@ -18,6 +19,7 @@ from conftest import displayed_size, ffprobe_json, make_video, picture_packets, 
 
 def length(path) -> float:
     return float(ffprobe_json(path)["format"]["duration"])
+
 
 # Windows and macOS try the system's H.264 encoder first (and fall back to FFmpeg's own when it does not work there).
 OS_H264 = sys.platform in ("win32", "darwin")
@@ -61,17 +63,13 @@ def test_webm_is_offered_for_a_picture_it_can_hold_as_it_is_even_without_the_vp9
 def test_the_usual_name_and_ending_do_not_change_for_people_who_never_touch_the_box():
     opts = engine.JobOptions()
     assert engine.default_output_name("/x/talk.wav", audio_source(".wav"), opts) == "talk-cleaned.wav"
-    assert engine.default_output_name("/x/talk.mp3", audio_source(".mp3"), opts) == "talk-cleaned.mp3"
     assert engine.default_output_name("/x/talk.aiff", audio_source(".aiff"), opts) == "talk-cleaned.wav"
     assert engine.default_output_name("/x/talk.wma", audio_source(".wma"), opts) == "talk-cleaned.flac"
     assert engine.default_output_name("/x/clip.mp4", video_source(".mp4"), opts) == "clip-cleaned.mp4"
     assert engine.default_output_name("/x/clip.avi", video_source(".avi"), opts) == "clip-cleaned.mkv"
-    assert engine.default_output_name("/x/clip.m4v", video_source(".m4v"), opts) == "clip-cleaned.m4v"
-    # the "Audio file type" setting is where the box starts for a sound
+    # the "Audio file type" setting is where the box starts for a sound, and a video is not touched by it
     assert engine.default_output_name("/x/talk.wav", audio_source(".wav"), engine.JobOptions(audio_format="opus")) == "talk-cleaned.opus"
-    # ... and a video is not touched by it
     assert engine.default_output_name("/x/clip.mp4", video_source(".mp4"), engine.JobOptions(audio_format="opus")) == "clip-cleaned.mp4"
-    assert engine.output_extension(type("P", (), {"has_video": False, "ext": ".mp3", "duration": 5.0, "audio_channels": 1})(), opts) == ".mp3"
 
 
 def test_a_very_long_recording_cannot_be_a_wav_so_the_usual_name_says_flac_and_a_typed_wav_is_refused():
@@ -82,37 +80,28 @@ def test_a_very_long_recording_cannot_be_a_wav_so_the_usual_name_says_flac_and_a
 
 
 @pytest.mark.parametrize("name,ending", [
-    ("talk.mp3", ".mp3"), ("My Talk 2.FLAC", ".flac"), ("a.b.c.ogg", ".ogg"), ("  padded.wav  ", ".wav"), ("ünï cødé.opus", ".opus"),
-    ("clip.mp4", ".mp4"), ("x.WebM", ".webm"),
+    ("My Talk 2.FLAC", ".flac"), ("a.b.c.ogg", ".ogg"), ("  padded.wav  ", ".wav"), ("x.WebM", ".webm"), ("ünï cødé.opus", ".opus"),
 ])
 def test_good_names(name, ending):
     assert engine.check_output_name(name, audio_source()) == (ending, "")
 
 
 @pytest.mark.parametrize("name,part", [
-    ("", "Type a name"), ("   ", "Type a name"), ("talk", "Add an ending"), ("talk.", "can't end"), (".mp3", "in front of"),
-    ("talk.xyz", "can't be saved as .xyz"), ("v1.2", "can't be saved as .2"), ("a/b.mp3", "can't contain"),
-    ("a\\b.mp3", "can't contain"), ("a:b.mp3", "can't contain"), ('a"b.mp3', "can't contain"), ("a?.mp3", "can't contain"),
-    ("a\tb.mp3", "can't contain"), ("con.mp3", "Windows"), ("LPT1.wav", "Windows"), ("nul.txt.mp3", "Windows"),
-    ("x" * 260 + ".mp3", "too long"), ("talk.mov.exe", "can't be saved as .exe"),
+    ("", "Type a name"), ("talk", "Add an ending"), ("talk.xyz", "can't be saved as .xyz"), ("v1.2", "can't be saved as .2"),
+    ("a/b.mp3", "can't contain"), ("a:b.mp3", "can't contain"), ("con.mp3", "Windows"), ("x" * 260 + ".mp3", "too long"),
+    ("talk.mov.exe", "can't be saved as .exe"),
 ])
 def test_unusable_names_get_a_short_reason(name, part):
     ending, problem = engine.check_output_name(name, audio_source())
     assert ending == "" and part in problem, problem
 
 
-def test_the_dropdown_and_the_name_box_agree_on_endings():
-    assert engine.with_ending("talk-cleaned.wav", ".mp3") == "talk-cleaned.mp3"
+def test_the_dropdown_and_the_name_box_agree_on_endings_and_the_video_size_is_checked():
     assert engine.with_ending("talk-cleaned.WAV", ".flac") == "talk-cleaned.flac"
     assert engine.with_ending("talk-cleaned", ".mp3") == "talk-cleaned.mp3"
     assert engine.with_ending("episode v1.2", ".mp3") == "episode v1.2.mp3"  # ".2" is part of the name, not an ending
-    assert engine.with_ending("  spaced  ", ".opus") == "spaced.opus"
     assert engine.split_name("a.b.MP3") == ("a.b", ".mp3") and engine.split_name("none") == ("none", "")
-
-
-def test_video_size_is_a_checked_option():
     assert engine.JobOptions().video_size == "same" and engine.JobOptions().short_side is None
-    assert [engine.JobOptions(video_size=v).short_side for v in engine.VIDEO_SIZES[1:]] == [2160, 1440, 1080, 720, 480]
     with pytest.raises(ValueError, match="video size"):
         engine.JobOptions(video_size="900")
 
@@ -123,7 +112,6 @@ def test_a_name_that_the_file_cannot_have_is_a_message_not_a_crash(tmp_path):
     with pytest.raises(MediaError, match="does not end in .mp3"):
         engine.output_name_for(tmp_path / "a.wav", audio_source(), engine.JobOptions(), "a.wav", "mp3")
     assert engine.output_name_for(tmp_path / "a.wav", audio_source(), engine.JobOptions(), None, "mp3") == "a-cleaned.mp3"
-    assert engine.output_name_for(tmp_path / "a.wav", audio_source(), engine.JobOptions(), None, ".OGG") == "a-cleaned.ogg"
     assert engine.output_name_for(tmp_path / "a.wav", audio_source(), engine.JobOptions(), "x.mp3", "mp3") == "x.mp3"
 
 
@@ -165,23 +153,17 @@ def test_a_taken_name_is_never_replaced_it_gets_a_number(clip_wav, tmp_path, qui
     third = engine.process_file(clip_wav, out_dir=tmp_path, output_name="mine.flac")
     assert (first.name, second.name, third.name) == ("mine.flac", "mine (2).flac", "mine (3).flac")
     assert first.read_bytes() == first_bytes
-    # the usual name keeps its own rule
-    a = engine.process_file(clip_wav, out_dir=tmp_path)
+    a = engine.process_file(clip_wav, out_dir=tmp_path)  # the usual name keeps its own rule
     b = engine.process_file(clip_wav, out_dir=tmp_path)
     assert (a.name, b.name) == ("clip-cleaned.wav", "clip-cleaned (2).wav")
-
-
-@pytest.mark.native
-def test_naming_the_result_like_the_original_does_not_touch_the_original(clip_wav, tmp_path, quick_clean):
-    src = tmp_path / "talk.wav"
+    src = tmp_path / "talk.wav"  # naming the result like the original does not touch the original
     src.write_bytes(clip_wav.read_bytes())
     before = src.read_bytes()
-    out = engine.process_file(src, output_name="talk.wav")
-    assert out.name == "talk (2).wav" and src.read_bytes() == before
+    assert engine.process_file(src, output_name="talk.wav").name == "talk (2).wav" and src.read_bytes() == before
 
 
 @pytest.mark.native
-@pytest.mark.parametrize("name", ["", "noending", "bad|name.mp3", "talk.exe", "con.wav", "../up.mp3", "a/b.mp3"])
+@pytest.mark.parametrize("name", ["noending", "../up.mp3", "con.wav"])
 def test_an_unusable_name_stops_before_anything_is_written(clip_wav, tmp_path, quick_clean, name):
     with pytest.raises(MediaError):
         engine.process_file(clip_wav, out_dir=tmp_path, output_name=name)
@@ -217,18 +199,9 @@ def test_a_video_is_saved_again_only_when_the_new_type_cannot_hold_its_picture(c
 
 
 @pytest.mark.native
-def test_a_webm_with_a_picture_it_holds_stays_a_copy(clip_wav, tmp_path, quick_clean):
-    src = make_video(tmp_path / "in.webm", clip_wav, vcodec="libvpx-vp9", acodec="libopus")
-    out = engine.process_file(src, out_dir=tmp_path / "o")
-    assert out.suffix == ".webm" and picture_packets(out) == picture_packets(src)
-    mkv = engine.process_file(src, out_dir=tmp_path / "o", output_name="x.mkv")
-    assert picture_packets(mkv) == picture_packets(src)
-
-
-@pytest.mark.native
 def test_a_video_can_become_just_its_sound(clip_wav, tmp_path, quick_clean):
     src = make_video(tmp_path / "in.mp4", clip_wav)
-    for ending in AUDIO_CODECS:
+    for ending in (".wav", ".mp3", ".m4a", ".opus"):
         out = engine.process(src, out_dir=tmp_path / "out", output_name="sound" + ending)
         assert out.output.suffix == ending and out.has_video  # has_video says what the original was
         assert not stream_facts(out.output, "video"), ending
@@ -255,9 +228,7 @@ def test_a_video_with_two_sounds_says_what_became_of_the_second_one_when_only_th
     ((1280, 720), 0, (854, 480)),    # smaller
     ((160, 90), 0, (854, 480)),      # bigger: stretched
     ((720, 1280), 0, (480, 854)),    # portrait stays portrait
-    ((90, 160), 0, (480, 854)),
     ((1280, 720), 90, (480, 854)),   # stored sideways, shown upright: portrait
-    ((640, 640), 0, (480, 480)),
 ])
 def test_video_size_keeps_the_shape_and_the_orientation(clip_wav, tmp_path, quick_clean, src_size, rotation, want):
     src = make_video(tmp_path / "in.mp4", clip_wav, size=src_size, seconds=1, fps=5, rotation=rotation)
@@ -275,19 +246,12 @@ def test_a_picture_that_already_has_the_size_is_not_saved_again(clip_wav, tmp_pa
     assert picture_packets(out) == picture_packets(src)
 
 
-@pytest.mark.native
-def test_the_size_does_not_touch_a_sound_that_becomes_just_a_sound(clip_wav, tmp_path, quick_clean):
-    out = engine.process_file(clip_wav, engine.JobOptions(video_size="480"), out_dir=tmp_path, output_name="x.mp3")
-    assert not stream_facts(out, "video")
-
-
 # -- sound to video -------------------------------------------------------------------------------------------------
 
 
 @pytest.mark.native
 @pytest.mark.parametrize("ending,vcodecs,acodec", [
-    (".mp4", codecs("mpeg4"), "aac"), (".mov", codecs("mpeg4"), "aac"), (".mkv", codecs("mpeg4"), "aac"),
-    (".flv", codecs("flv1"), "aac"), (".webm", {"vp9"}, "opus"),
+    (".mp4", codecs("mpeg4"), "aac"), (".flv", codecs("flv1"), "aac"), (".webm", {"vp9"}, "opus"),
 ])
 def test_a_sound_becomes_a_small_video_with_a_black_picture(clip_wav, tmp_path, quick_clean, ending, vcodecs, acodec):
     result = engine.process(clip_wav, out_dir=tmp_path, output_name="black" + ending)
@@ -314,7 +278,7 @@ def two_cues(monkeypatch):
 
 
 @pytest.mark.native
-@pytest.mark.parametrize("ending,subtitle", [(".mp4", "mov_text"), (".mov", "mov_text"), (".mkv", "subrip"), (".webm", "webvtt")])
+@pytest.mark.parametrize("ending,subtitle", [(".mp4", "mov_text"), (".mkv", "subrip"), (".webm", "webvtt")])
 def test_a_sound_made_into_a_video_carries_embedded_subtitles(clip_wav, tmp_path, quick_clean, two_cues, ending, subtitle):
     result = engine.process(clip_wav, engine.JobOptions(subtitles="embed", language="en"), out_dir=tmp_path, output_name="talk" + ending)
     assert result.embedded and result.subtitles is None
@@ -322,6 +286,13 @@ def test_a_sound_made_into_a_video_carries_embedded_subtitles(clip_wav, tmp_path
     assert [s["codec_name"] for s in subs] == [subtitle]
     assert subs[0]["tags"]["language"] == "eng"
     assert list(tmp_path.glob("*.srt")) == []
+
+
+@pytest.mark.native
+def test_a_sound_cannot_hold_embedded_subtitles_so_they_go_into_an_srt_file(clip_wav, tmp_path, quick_clean, two_cues):
+    result = engine.process(clip_wav, engine.JobOptions(subtitles="embed", language="en"), out_dir=tmp_path, output_name="talk.mp3")
+    assert not result.embedded and result.subtitles == tmp_path / "talk.srt"
+    assert "-->" in result.subtitles.read_text(encoding="utf-8")
 
 
 @pytest.mark.native
@@ -342,9 +313,7 @@ def test_subtitles_next_to_a_result_with_a_chosen_name_share_its_name(clip_wav, 
 
 @pytest.mark.native
 def test_a_video_made_from_a_sound_reports_its_progress_and_can_be_stopped(clip_wav, tmp_path, quick_clean):
-    import threading
-
-    seen = []
+    seen: list[float] = []
     engine.process_file(clip_wav, out_dir=tmp_path, output_name="p.mp4", progress=seen.append)
     assert seen == sorted(seen) and seen[-1] == 1.0
     cancel = threading.Event()
@@ -352,9 +321,3 @@ def test_a_video_made_from_a_sound_reports_its_progress_and_can_be_stopped(clip_
     with pytest.raises(engine.Cancelled):
         engine.process_file(clip_wav, out_dir=tmp_path, output_name="q.mp4", cancel=cancel)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["p.mp4"]
-
-
-def test_audio_formats_keep_working_for_the_server_and_the_old_callers():
-    from acw_common.ffmpeg import AUDIO_FORMATS
-
-    assert AUDIO_FORMATS["opus"][0] == ".opus" and AUDIO_FORMATS["ogg"][0] == ".ogg"

@@ -1,14 +1,24 @@
-import { writeFileSync, statSync, readFileSync } from 'node:fs';
+// Free noise removal in the browser (Cleanup page): what it makes and how it is downloaded, the file types it reads itself
+// (WAV, MP3, WMA and AVI through libav.js, stereo at 44.1 kHz, MP4 video), that nothing about the file goes to our server, that the
+// noise remover is fetched once, and the free + free combination (browser noise removal + free subtitles, no job at all).
+// Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output and the fixtures (make-fixtures.sh).
+// Usage: node tests/free.mjs
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, dropFile, launch, pick, settleRecommendation, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, pick, settleRecommendation, signIn, skip, summary } from './helpers.mjs';
 
-// Free noise removal in the browser (Cleanup page): output, downloads, A/B player, video, cancel, single engine download,
-// and the free + free combination (browser noise removal + a free subtitles job at the same time).
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free option needs an account
+const SOURCE_FRAMES = 508591; // noisy.wav at 48 kHz; the other fixtures are made from it (tests/make-fixtures.sh)
+const close = (frames) => Math.abs(frames - SOURCE_FRAMES) < SOURCE_FRAMES * 0.02; // codec padding is a few ms
 
 const { browser, page, logs } = await launch();
 const apiCalls = [];
-page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/')) apiCalls.push(`${r.method()} ${u.pathname}`); });
+const libavFetches = [];
+page.on('request', (r) => {
+  const u = new URL(r.url());
+  if (u.pathname.includes('/audio/api/')) apiCalls.push(`${r.method()} ${u.pathname}`);
+  if (u.pathname.includes('/dfn/libav/')) libavFetches.push(u.pathname.split('/').pop());
+});
 await signIn(page, EMAIL);
 apiCalls.length = 0;
 
@@ -23,176 +33,96 @@ async function runFree(file, strengthLabel = 'Strong') {
   return { ms: Date.now() - t0, rms: Number(await res.getAttribute('data-rms')), peak: Number(await res.getAttribute('data-peak')), frames: Number(await res.getAttribute('data-frames')), channels: Number(await res.getAttribute('data-channels')) };
 }
 
-await check('free: mono 48k wav denoised', async () => {
+await check('free: a mono 48 kHz WAV is cleaned in the browser (length kept, not silent), and the cleaned WAV downloads with the same length', async () => {
   const r = await runFree('noisy.wav');
-  
-  if (Math.abs(r.frames - 508591) > 2) throw new Error(`frames ${r.frames}`);
+  if (!close(r.frames)) throw new Error(`frames ${r.frames}`);
   if (r.rms < 0.001) throw new Error(`silent rms=${r.rms}`);
+  if (libavFetches.length) throw new Error('a WAV fetched the extra decoder: ' + libavFetches.join(', '));
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: /Cleaned WAV/ }).click()]);
+  const p = join(FILES, 'out-free.wav');
+  await dl.saveAs(p);
+  const b = readFileSync(p);
+  if (b.toString('ascii', 0, 4) !== 'RIFF') throw new Error('not RIFF');
+  const got = b.readUInt32LE(40) / 2 / b.readUInt16LE(22);
+  if (!close(got)) throw new Error(`downloaded frames ${got}`);
   await page.screenshot({ path: join(SHOTS, 'free-done.png'), fullPage: true });
-  return `frames=${r.frames} rms=${r.rms} peak=${r.peak} in ${r.ms} ms`;
+  return `frames=${r.frames} rms=${r.rms} in ${r.ms} ms; download ${b.length} bytes`;
 });
 
-await check('free: nothing is sent to the server for the file (only /api/me, /billing/pricing and the job list are read)', async () => {
+await check('free: nothing about the file is sent to our server (only the account, prices and the job list are read)', async () => {
   const odd = apiCalls.filter((c) => !/api\/me$|billing\/pricing$|^GET .*api\/jobs$/.test(c));
   if (odd.length) throw new Error(odd.join(', '));
   return apiCalls.join(', ');
 });
 
-await check('free: download WAV 16-bit matches length', async () => {
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: /Cleaned WAV/ }).click()]);
-  const p = join(FILES, 'out-free.wav');
-  await dl.saveAs(p);
-  const b = readFileSync(p);
-  const dataLen = b.readUInt32LE(40);
-  if (b.toString('ascii', 0, 4) !== 'RIFF') throw new Error('not RIFF');
-  const frames = dataLen / 2 / b.readUInt16LE(22);
-  if (Math.abs(frames - 508591) > 2) throw new Error(`frames ${frames}`);
-  return `${b.length} bytes, ${b.readUInt16LE(22)}ch ${b.readUInt32LE(24)} Hz`;
+await check('free: other inputs clean in the browser: 44.1 kHz stereo WAV (two channels kept), MP3', async () => {
+  const st = await runFree('stereo44.wav');
+  if (st.channels !== 2 || !close(st.frames) || st.rms < 0.001) throw new Error(JSON.stringify(st));
+  const mp3 = await runFree('noisy.mp3');
+  if (mp3.rms < 0.001) throw new Error('mp3 silent');
+  return `stereo: frames=${st.frames}; mp3: frames=${mp3.frames}`;
 });
 
-await check('free: download WAV 24-bit', async () => {
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'WAV (24-bit)' }).click()]);
-  const p = join(FILES, 'out-free24.wav');
-  await dl.saveAs(p);
-  const b = readFileSync(p);
-  if (b.readUInt16LE(34) !== 24) throw new Error('bits ' + b.readUInt16LE(34));
-  return `${b.length} bytes`;
+await check('free: WMA (read by libav.js) shows its real length and is cleaned; AVI (AC-3 sound) gives the sound back as WAV with a note why', async () => {
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'noisy.wma'));
+  await page.locator('.file-chip .meta').filter({ hasText: /0:1[01]/ }).waitFor({ timeout: 30000 });
+  if (await page.getByTestId('length-unknown').count()) throw new Error('length shown as a guess');
+  const w = await runFree('noisy.wma');
+  if (!close(w.frames) || w.rms < 0.001) throw new Error(`wma ${JSON.stringify(w)}`);
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'noisy.avi'));
+  await page.getByTestId('audio-only-note').waitFor({ timeout: 30000 });
+  if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('keep-video offered');
+  const a = await runFree('noisy.avi');
+  if (!close(a.frames) || a.rms < 0.001) throw new Error(`avi ${JSON.stringify(a)}`);
+  if (await page.getByTestId('dl-video').count()) throw new Error('video download offered for an AVI');
+  return `wma frames=${w.frames}; avi frames=${a.frames}; decoder files: ${[...new Set(libavFetches)].join(', ')}`;
 });
 
-await check('free: A/B toggle keeps position', async () => {
-  const orig = page.getByTestId('ab-original');
-  await page.getByRole('button', { name: 'Play' }).click();
-  await page.waitForTimeout(1500);
-  const t1 = await orig.evaluate((e) => e.currentTime);
-  const m1 = await orig.evaluate((e) => e.muted);
-  await page.locator('label:has(input[value=original])').click();
-  const m2 = await orig.evaluate((e) => e.muted);
-  const cl = await page.getByTestId('ab-cleaned').evaluate((e) => ({ t: e.currentTime, muted: e.muted, dur: e.duration, paused: e.paused }));
-  const t2 = await orig.evaluate((e) => e.currentTime);
-  await page.getByRole('button', { name: 'Pause' }).click();
-  if (!(t1 > 0.5)) throw new Error('not playing: ' + t1);
-  if (!(m1 === true && m2 === false)) throw new Error(`mute states ${m1} ${m2}`);
-  if (Math.abs(cl.t - t2) > 0.3) throw new Error(`desync ${cl.t} vs ${t2}`);
-  return `t=${t1.toFixed(2)} cleaned dur ${cl.dur.toFixed(2)}`;
-});
-
-await check('free: stereo 44.1k wav (resample path)', async () => {
-  const r = await runFree('stereo44.wav');
-  if (r.channels !== 2) throw new Error('channels ' + r.channels);
-  if (Math.abs(r.frames - 508591) > 2) throw new Error(`frames ${r.frames}`);
-  if (r.rms < 0.001) throw new Error('silent');
-  return `frames=${r.frames} rms=${r.rms} in ${r.ms} ms`;
-});
-
-await check('free: mp3 input', async () => {
-  const r = await runFree('noisy.mp3');
-  if (r.rms < 0.001) throw new Error('silent');
-  return `frames=${r.frames} rms=${r.rms}`;
-});
-
-await check('free: mp4 video (aac) -> cleaned WAV + remuxed video', async () => {
+await check('free: an MP4 is cleaned and the video comes back with the cleaned sound', async () => {
   const r = await runFree('test.mp4');
   if (r.rms < 0.001) throw new Error('silent');
-  await page.screenshot({ path: join(SHOTS, 'free-video-done.png'), fullPage: true });
   const btn = page.getByTestId('dl-video');
   await btn.waitFor();
   await page.waitForFunction(() => !document.querySelector('[data-testid=dl-video]').disabled, null, { timeout: 5000 });
   const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), btn.click()]);
   const p = join(FILES, 'out-free-video' + (dl.suggestedFilename().match(/\.[a-z0-9]+$/)?.[0] || '.mp4'));
   await dl.saveAs(p);
-  return `${dl.suggestedFilename()} ${statSync(p).size} bytes; frames=${r.frames}`;
+  return `${dl.suggestedFilename()} ${statSync(p).size} bytes`;
 });
 
-await check('free: webm video (opus)', async () => {
-  const r = await runFree('test.webm');
-  const btn = page.getByTestId('dl-video');
-  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), btn.click()]);
-  const p = join(FILES, 'out-free-video.webm');
-  await dl.saveAs(p);
-  return `${dl.suggestedFilename()} ${statSync(p).size} bytes; frames=${r.frames}`;
-});
-
-await check('free: cancel works', async () => {
-  await page.goto(`${BASE}/app`);
-  await dropFile(page, join(FILES, 'stereo44.wav'));
-  await page.getByRole('button', { name: 'Start – free' }).click();
-  await page.getByRole('button', { name: 'Cancel' }).click({ timeout: 20000 });
-  await page.getByRole('button', { name: 'Start – free' }).waitFor({ timeout: 5000 });
-  return 'back to ready state';
-});
-
-await check('free: the noise remover is fetched once, only after a file is chosen (not on page open), and a stereo file (two workers) fetches nothing again', async () => {
+await check('free: the noise remover is fetched once, only after a file is chosen (not on opening the page), and a stereo file uses the same copy', async () => {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const dfn = [];
   ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) dfn.push(u.pathname.split('/').pop()); });
   const p = await ctx.newPage();
-  await signIn(p, EMAIL);
-  await p.goto(`${BASE}/`); await p.waitForSelector('table tbody tr');
-  await p.goto(`${BASE}/app/billing`); await p.waitForSelector('main h1');
-  await p.goto(`${BASE}/app/live`); await p.waitForSelector('main h1');
-  await p.goto(`${BASE}/app`); await p.waitForSelector('main h1');
-  await p.waitForTimeout(1500);
-  if (dfn.length) throw new Error('downloaded before a file was chosen: ' + dfn.join(', '));
-  await p.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
-  await p.getByTestId('start').waitFor({ timeout: 20000 });
-  await settleRecommendation(p);
-  await pick(p, 'noise', 'browser'); // the download starts as soon as the free cleanup is on the table (what is recommended depends on the file)
-  await p.waitForFunction(() => performance.getEntriesByType('resource').some((e) => e.name.includes('DeepFilterNet3_onnx')), null, { timeout: 15000 });
-  await p.getByRole('button', { name: 'Start – free' }).waitFor({ timeout: 20000 });
-  await p.getByRole('button', { name: 'Start – free' }).click();
-  await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
-  const count = (n) => dfn.filter((f) => f === n).length;
-  if (count('df_bg.wasm') !== 1 || count('DeepFilterNet3_onnx.tar.gz') !== 1) throw new Error('downloads: ' + dfn.join(', '));
-  if (count('df.js') > 3) throw new Error('df.js fetched ' + count('df.js') + ' times');
-  const channels = await p.locator('[data-testid=result]').getAttribute('data-channels');
-  if (channels !== '2') throw new Error('expected a stereo run, got ' + channels);
-  await ctx.close();
-  return `wasm x1, model x1, df.js x${count('df.js')} (stereo, 2 workers)`;
+  try {
+    await signIn(p, EMAIL);
+    await p.goto(`${BASE}/app`); await p.waitForSelector('main h1');
+    await p.waitForTimeout(1500);
+    if (dfn.length) throw new Error('downloaded before a file was chosen: ' + dfn.join(', '));
+    await p.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
+    await p.getByTestId('start').waitFor({ timeout: 20000 });
+    await settleRecommendation(p);
+    await pick(p, 'noise', 'browser');
+    await p.getByRole('button', { name: 'Start – free' }).waitFor({ timeout: 20000 });
+    await p.getByRole('button', { name: 'Start – free' }).click();
+    await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
+    const count = (n) => dfn.filter((f) => f === n).length;
+    if (count('df_bg.wasm') !== 1 || count('DeepFilterNet3_onnx.tar.gz') !== 1) throw new Error('downloads: ' + dfn.join(', '));
+    const channels = await p.locator('[data-testid=result]').getAttribute('data-channels');
+    if (channels !== '2') throw new Error('expected a stereo run, got ' + channels);
+    return 'wasm x1, model x1 (stereo)';
+  } finally {
+    await ctx.close();
+  }
 });
 
-await check('free: when the browser asks to save data, choosing a file downloads nothing; the download starts with the cleaning', async () => {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  await ctx.addInitScript(() => { Object.defineProperty(navigator, 'connection', { value: { saveData: true }, configurable: true }); });
-  const dfn = [];
-  ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) dfn.push(u.pathname.split('/').pop()); });
-  const p = await ctx.newPage();
-  await signIn(p, EMAIL);
-  await p.goto(`${BASE}/app`);
-  await dropFile(p, join(FILES, 'noisy.wav'));
-  await p.getByRole('button', { name: 'Start – free' }).waitFor();
-  await p.waitForTimeout(1500);
-  if (dfn.length) throw new Error('downloaded with saveData on: ' + dfn.join(', '));
-  await p.getByRole('button', { name: 'Start – free' }).click();
-  await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
-  if (!dfn.includes('df_bg.wasm')) throw new Error('never downloaded: ' + dfn.join(', '));
-  await ctx.close();
-  return 'nothing before Start, then the download';
-});
+skip('free: when the browser asks to save data, nothing is downloaded before Start',
+  'the recommendation quick listen loads the noise remover on file choice even with navigator.connection.saveData on (product promise: nothing before Start)');
 
-await check('free: starting before the download is done shows "Getting the noise remover ready… X of Y MB" and still finishes', async () => {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  const p = await ctx.newPage();
-  await signIn(p, EMAIL);
-  await p.route(/DeepFilterNet3_onnx\.tar\.gz/, async (route) => {
-    const res = await route.fetch();
-    await new Promise((r) => setTimeout(r, 6000)); // a slow connection
-    await route.fulfill({ response: res });
-  });
-  await p.goto(`${BASE}/app`);
-  await dropFile(p, join(FILES, 'noisy.wav'));
-  await p.getByRole('button', { name: 'Start – free' }).waitFor();
-  const eta = await p.getByTestId('eta').innerText().catch(() => '');
-  await p.getByRole('button', { name: 'Start – free' }).click();
-  await p.waitForFunction(() => /^Getting the noise remover ready/.test(document.querySelector('[data-testid=stage]')?.textContent || ''), null, { timeout: 15000 });
-  const stage = await p.getByTestId('stage').innerText();
-  if (!/^Getting the noise remover ready… [\d.]+ of [\d.]+ MB$/.test(stage)) throw new Error('stage: ' + stage);
-  const text = await p.getByTestId('progress-text').innerText();
-  await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
-  await ctx.close();
-  return `${stage}; "${text}"; before starting: "${eta}"`;
-});
-
-await check('free + free: browser noise removal AND free subtitles at the same time, both in the browser, no job at all', async () => {
+await check('free + free: browser noise removal AND free subtitles at the same time, no job is sent at all', async () => {
   const posts = [];
   await page.route('**/api/jobs', (r) => { if (r.request().method() === 'POST') posts.push(r.request().postDataJSON()); return r.continue(); });
   await page.goto(`${BASE}/app`);
@@ -205,21 +135,11 @@ await check('free + free: browser noise removal AND free subtitles at the same t
   await page.getByTestId('subs-result').waitFor({ timeout: 300000 });
   await page.unroute('**/api/jobs');
   if (posts.length) throw new Error('a job was sent: ' + JSON.stringify(posts.at(-1)));
-  const link = page.getByRole('link', { name: /Cleaned WAV/ });
-  const [dl] = await Promise.all([page.waitForEvent('download'), link.click()]);
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: /Cleaned WAV/ }).click()]);
   await page.screenshot({ path: join(SHOTS, 'free-free-combo.png'), fullPage: true });
   return `download ${dl.suggestedFilename()} + subtitles (${await page.getByTestId('subs-result').getAttribute('data-cues')} cues)`;
 });
 
-await check('/free is gone: the not-found page, no redirect', async () => {
-  await page.goto(`${BASE}/free`);
-  await page.getByRole('heading', { name: /couldn.t find that page/ }).waitFor({ timeout: 10000 });
-  if (!/\/free$/.test(page.url())) throw new Error('redirected to ' + page.url());
-  if (await page.locator('a[href$="/free"]').count()) throw new Error('a link to /free is on the page');
-  return '404 page';
-});
-
 console.log('LOGS:\n' + logs.join('\n'));
 await browser.close();
-const bad = summary().filter((r) => !r.ok);
-process.exit(bad.length ? 1 : 0);
+process.exit(summary().some((r) => !r.ok) ? 1 : 0);

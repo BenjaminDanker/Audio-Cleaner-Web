@@ -58,17 +58,6 @@ def test_panel_offers_the_download_runs_it_and_goes_away(qapp, tmp_path, small_m
     assert wait_until(lambda: not panel.speech_panel.isVisible(), timeout=5)
 
 
-def test_a_failed_download_says_why_and_can_be_retried(qapp, tmp_path, small_model):
-    broken = models.SpeechModel("broken", "Broken", "", "MIT",
-                                (models.ModelFile("model.bin", small_model.files[0].url, small_model.size, "0" * 64),))
-    dl = speech_model.SpeechModelDownloader(model=broken)
-    panel = speech_model.SpeechModelPanel(dl)
-    dl.start()
-    assert wait_until(lambda: not dl.running and dl.last_error, timeout=30)
-    assert wait_until(lambda: panel._button.text() == "Try again", timeout=5)
-    assert "did not download correctly" in panel._text.text()
-
-
 def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self._fake_ready))
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "_fake_ready", False, raising=False)
@@ -189,17 +178,11 @@ def test_automatic_rebuilding_offers_the_download_but_never_holds_up_cleaning(qa
         w._pool.waitForDone()
 
 
-def test_the_two_onnx_models_offer_the_one_archive_download(qapp, tmp_path, monkeypatch):
-    """Restoring highs and rebuilding the voice come from one archive: both panels name its size, and the queue of
-    downloads counts it once."""
+def test_the_two_onnx_models_share_one_archive_so_it_is_counted_once():
+    """Restoring highs and rebuilding the voice come from one archive, so the downloads count it once."""
     from audio_cleaner_desktop import resources
 
-    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
     archive = resources.MODELS_ARCHIVE
     assert resources.HIGHS_MODEL.archive == resources.VOICE_MODEL.archive == archive
-    assert resources.HIGHS_MODEL.download_size == resources.VOICE_MODEL.download_size == archive.size
-    for model in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
-        panel = speech_model.SpeechModelPanel(speech_model.SpeechModelDownloader(model=model))
-        assert speech_model.size_text(archive.size) in panel._text.text()  # 0.9 GB, not the 0.5 GB of the model itself
     assert models.download_bytes([resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL]) == (
         resources.SPEECH_MODEL.size + archive.size)

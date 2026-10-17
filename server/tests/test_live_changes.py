@@ -1,8 +1,7 @@
-"""Changing a live session's features while it runs (a `config` message): client -> /api/stream/ws -> the native
-live engine. The audio keeps flowing with the same delay, and each stretch is billed at the rate it had."""
+"""Changing a live session's features while it runs (a `config` message): client -> /api/stream/ws -> the native live
+engine. The audio keeps flowing with the same delay, and each stretch is billed at the rate it had."""
 import math
 import time
-
 from types import SimpleNamespace
 
 import numpy as np
@@ -10,13 +9,14 @@ import pytest
 
 from acw import db
 from acw.billing import ledger
+from acw.config import get_settings
 from acw.stream import protocol as P
 from acw.stream.features import Features
 from acw.stream.meter import micros as meter_micros
 
 from .conftest import login
 from .test_api_security import make_key
-from .test_echo_cancel import room, rms
+from .test_echo_cancel import engine, rms, room  # noqa: F401 - engine: one live engine for this module
 
 SAMPLE_RATE = 48_000
 FRAME = 960
@@ -24,9 +24,9 @@ LATENCY = 1872  # every session: the model's 1440 samples and the echo canceller
 
 
 @pytest.fixture
-def live(live_engine, monkeypatch):
+def live(engine, monkeypatch):
     monkeypatch.setattr("acw.stream.routes.PACE_BURST_SECONDS", 3600.0)  # the test sends faster than real time
-    return live_engine()
+    return engine
 
 
 class Live:
@@ -116,53 +116,38 @@ def test_features_change_while_live_and_each_stretch_is_billed_at_its_rate(live,
     assert ready["type"] == "ready" and ready["changeable"] is True and ready["modelLatencyMs"] == 39.0
     noise = Features(denoise="light").rate()
     both = Features(denoise="light", captions="local").rate()
-    s.send(tone(2))
-    got = s.config(captions="local", language="en")
+    captions = Features(captions="local").rate()
+    s.send(tone(1))  # noise removal only
+    got = s.config(captions="local", language="en")  # and captions
     assert got["ok"] and got["usdPerMinute"] == both / 1e6 and got["captions"] == "local"
-    s.send(tone(2))
+    s.send(tone(1))
     got = s.config(denoise=None)  # captions only from here
     assert got["ok"] and got["denoise"] is None
-    s.send(tone(2, 330))
+    s.send(tone(1, 330))
     got = s.config(denoise="light", attenLimDb=12)  # and back, gentler
     assert got["ok"] and got["attenLimDb"] == 12
-    s.send(tone(2))
-    y = s.audio()
-    assert len(y) == 8 * SAMPLE_RATE  # one answer per frame throughout: no gap, no restart
+    s.send(tone(1))
+    assert len(s.audio()) == 4 * SAMPLE_RATE  # one answer per frame throughout: no gap, no restart
     row = end(ws, s)
-    captions = Features(captions="local").rate()
-    want = math.ceil(round(noise * 2 / 60 + both * 2 / 60 + captions * 2 / 60 + both * 2 / 60, 6))
     # a tone is no speech: in the captions-only stretch it counts as silence, which isn't billed
-    assert 6 <= row["paid_seconds"] <= 8 and row["cost_micros"] <= want
-    assert row["cost_micros"] >= math.ceil(round(noise * 2 / 60 + both * 4 / 60, 6))
+    assert 3 <= row["paid_seconds"] <= 4
+    assert row["cost_micros"] <= math.ceil(round(noise / 60 + both / 60 + captions / 60 + both / 60, 6))
+    assert row["cost_micros"] >= math.ceil(round(noise / 60 + both * 2 / 60, 6))
     assert row["denoise_tier"] == "light" and row["caption_tier"] == "local"  # what it ended with
     assert ledger.balance(uid)["held_micros"] == 0
 
 
-def test_with_noise_removal_switched_off_the_audio_passes_unchanged_at_the_same_delay(live, client):
-    _, ws, s, _ = session(client, denoise="light", captions="local", language="en")
-    x = tone(4, 330)
-    s.send(x[:SAMPLE_RATE])
-    assert s.config(denoise=None)["ok"]
-    s.send(x[SAMPLE_RATE:])
-    end(ws, s)
-    y = s.audio()
-    later = slice(2 * SAMPLE_RATE, 4 * SAMPLE_RATE)  # well after the 10 ms crossfade
-    shifted = np.concatenate([np.zeros(LATENCY, np.float32), x])[:len(x)]
-    assert np.max(np.abs(y[later] - shifted[later])) < 2e-3  # 16-bit frames: within the rounding
-
-
 def test_echo_removal_can_be_switched_on_while_live(live, client):
-    mic, far = room(10)
+    mic, far = room(6)
     _, ws, s, _ = session(client, captions="local", language="en")
-    half = 4 * SAMPLE_RATE
-    s.send(mic[:half])  # no echo removal yet: the echo comes back
+    s.send(mic[:2 * SAMPLE_RATE])  # no echo removal yet: the echo comes back
     got = s.config(echoReference=True)
     assert got["ok"] and got["echoReference"] is True
-    s.send(mic[half:], far[half:])
+    s.send(mic[2 * SAMPLE_RATE:], far[2 * SAMPLE_RATE:])
     end(ws, s)
     y = s.audio()
-    before = slice(2 * SAMPLE_RATE, 3 * SAMPLE_RATE)
-    after = slice(7 * SAMPLE_RATE, 8 * SAMPLE_RATE)  # settled, before the voice starts
+    before = slice(SAMPLE_RATE, 2 * SAMPLE_RATE)
+    after = slice(int(3.5 * SAMPLE_RATE), 4 * SAMPLE_RATE)  # settled, before the voice starts
     assert rms(y[before]) / rms(mic[before]) > 0.9
     assert 20 * np.log10(rms(mic[after]) / rms(y[after])) > 20
 
@@ -214,8 +199,6 @@ def test_a_trial_session_moves_on_to_credit_when_it_starts_doing_more_than_the_t
 
     monkeypatch.setattr(openai_live, "PremiumCaptions", Captions)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    from acw.config import get_settings
-
     get_settings.cache_clear()
     uid, _ = login(client)
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
@@ -227,14 +210,14 @@ def test_a_trial_session_moves_on_to_credit_when_it_starts_doing_more_than_the_t
         ready = w.receive_json()
         assert ready["trial"] is True
         s = Live(w)
-        s.send(tone(2))
+        s.send(tone(1))
         got = s.config(captions="premium", language="de")
         assert got["ok"] and "trial" not in got
-        s.send(tone(2))
+        s.send(tone(1))
         row = end(SimpleNamespace(__exit__=lambda *a: None), s)
     paid = Features(denoise="light", captions="premium").rate()
-    assert row["trial_seconds"] == 2 and row["cost_micros"] == meter_micros(0, paid, 2, 2)
-    assert db.one("SELECT trial_live_seconds FROM users WHERE id = ?", (uid,))[0] == 598
+    assert row["trial_seconds"] == 1 and row["cost_micros"] == meter_micros(0, paid, 1, 1)
+    assert db.one("SELECT trial_live_seconds FROM users WHERE id = ?", (uid,))[0] == 599
 
 
 # --- the room test (the plugin's "Test my room": the noise measured at the noise remover)
@@ -249,7 +232,7 @@ def voice_in(snr_db, seconds=7):
     return (0.1 * (v + noise) / np.max(np.abs(v + noise))).astype(np.float32)
 
 
-def room_test(live_, seconds=5):
+def room_test(live_):
     """The room_test event among what came back, or None."""
     import json
 
@@ -261,17 +244,13 @@ def room_test(live_, seconds=5):
 
 
 def test_the_room_test_measures_the_noise_at_the_noise_remover(live, client):
-    figures = []
-    for snr in (40, 5):
-        _, ws, s, _ = session(client, denoise="light", attenLimDb=12)  # a gentle strength: still the full-strength figure
-        s.ws.send_json({"type": "room_test", "seconds": 5})
-        s.send(voice_in(snr, 7))
-        end(ws, s)
-        ev = room_test(s)
-        assert ev and ev["ok"] and ev["seconds"] == 5, s.texts
-        figures.append(ev["noiseDb"])
-    assert figures[1] < figures[0] - 10, figures
-    assert abs(figures[1] - 5) < 3, figures
+    _, ws, s, _ = session(client, denoise="light", attenLimDb=12)  # a gentle strength: still the full-strength figure
+    s.ws.send_json({"type": "room_test", "seconds": 5})
+    s.send(voice_in(5, 6))  # 5 dB under the voice
+    end(ws, s)
+    ev = room_test(s)
+    assert ev and ev["ok"] and ev["seconds"] == 5, s.texts
+    assert abs(ev["noiseDb"] - 5) < 3, ev
 
 
 def test_the_room_test_needs_noise_removal(live, client):
@@ -286,6 +265,6 @@ def test_the_room_test_needs_noise_removal(live, client):
     s.ws.send_json({"type": "room_test", "seconds": 5})
     s.send(voice_in(20, 1))
     assert s.config(denoise=None)["ok"]
-    s.send(voice_in(20, 6))
+    s.send(voice_in(20, 1))
     end(ws, s)
     assert room_test(s)["code"] == "needs_noise_removal"

@@ -1,3 +1,4 @@
+"""Sign-in, sessions, CSRF and API keys; access between accounts; the money a job holds and returns; input checks."""
 from acw import auth, db
 from acw.billing import ledger
 from acw.security import new_api_key
@@ -14,16 +15,20 @@ def make_key(user_id, scopes="stream"):
     return key
 
 
-def test_login_token_is_single_use(client):
+def test_login_token_is_single_use_and_same_origin_only(client):
     tok = auth.create_login_token("x@example.com", "admin_login", "t")
+    assert client.post("/api/auth/email/verify", json={"token": tok}, headers={"Origin": "https://evil.example"}).status_code == 403
     assert client.post("/api/auth/email/verify", json={"token": tok}, headers={"Origin": ORIGIN}).status_code == 200
     assert client.post("/api/auth/email/verify", json={"token": tok}, headers={"Origin": ORIGIN}).status_code == 400
 
 
-def test_login_requires_same_origin(client):
+def test_session_cookie_is_httponly_and_only_its_hash_is_stored(client):
     tok = auth.create_login_token("x@example.com", "admin_login", "t")
-    r = client.post("/api/auth/email/verify", json={"token": tok}, headers={"Origin": "https://evil.example"})
-    assert r.status_code == 403
+    r = client.post("/api/auth/email/verify", json={"token": tok}, headers={"Origin": ORIGIN})
+    cookie = r.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie
+    raw = r.cookies.get("acw_session")
+    assert db.one("SELECT 1 FROM sessions WHERE id_hash = ?", (raw,)) is None
 
 
 def test_state_changes_need_csrf_and_origin(client):
@@ -35,34 +40,17 @@ def test_state_changes_need_csrf_and_origin(client):
     assert client.post("/api/account/tos", json=body, headers=h).status_code == 200
 
 
-def test_session_cookie_flags(client):
-    tok = auth.create_login_token("x@example.com", "admin_login", "t")
-    r = client.post("/api/auth/email/verify", json={"token": tok}, headers={"Origin": ORIGIN})
-    cookie = r.headers["set-cookie"].lower()
-    assert "httponly" in cookie and "samesite=lax" in cookie and "path=/" in cookie
-    # the session id is stored hashed
-    raw = r.cookies.get("acw_session")
-    assert db.one("SELECT 1 FROM sessions WHERE id_hash = ?", (raw,)) is None
-
-
-def test_api_key_cannot_use_browser_only_endpoints(client):
-    uid, _ = login(client)
+def test_api_keys_have_scopes_and_stop_working_when_revoked(client):
+    uid, h = login(client)
     key = make_key(uid, "stream,jobs")
     client.cookies.clear()
-    h = {"Authorization": f"Bearer {key}"}
-    assert client.get("/api/billing/history", headers=h).status_code == 403
-    assert client.post("/api/keys", json={"name": "x"}, headers=h).status_code == 403
-    assert client.get("/api/jobs", headers=h).status_code == 200
-
-
-def test_api_key_scopes_and_revocation(client):
-    uid, h = login(client)
-    key = make_key(uid, "stream")
-    client.cookies.clear()
-    assert client.get("/api/jobs", headers={"Authorization": f"Bearer {key}"}).status_code == 403
-    assert client.get("/api/jobs", headers={"Authorization": "Bearer acw_wrong"}).status_code == 401
+    kh = {"Authorization": f"Bearer {key}"}
+    assert client.get("/api/jobs", headers=kh).status_code == 200
+    assert client.get("/api/billing/history", headers=kh).status_code == 403  # browser-only
+    assert client.post("/api/keys", json={"name": "x"}, headers=kh).status_code == 403
+    assert client.get("/api/keys", headers={"Authorization": "Bearer acw_wrong"}).status_code == 401
     db.execute("UPDATE api_keys SET revoked_at = ? WHERE user_id = ?", (db.now(), uid))
-    assert client.get("/api/me", headers={"Authorization": f"Bearer {key}"}).status_code == 401
+    assert client.get("/api/me", headers=kh).status_code == 401
 
 
 def test_key_create_shows_key_once_and_stores_hash(client, signed_in):
@@ -89,33 +77,19 @@ def test_jobs_are_private_to_their_owner(client):
     assert client.put(f"/api/jobs/{job_id}/input", content=b"x" * 100, headers=h_b).status_code == 404
 
 
-def test_signing_in_accepts_the_terms_and_records_it(client):
+def test_terms_are_recorded_at_sign_in_and_again_when_they_change(client):
     uid, h = login(client, accept_tos=False)
-    me = client.get("/api/me", headers=h).json()
-    assert me["user"]["tosAccepted"]  # the sign-in page says signing in means agreeing
+    assert client.get("/api/me", headers=h).json()["user"]["tosAccepted"]  # signing in means agreeing
     assert db.one("SELECT count(*) AS n FROM audit_log WHERE user_id = ? AND action = 'tos_accepted'", (uid,))["n"] == 1
     body = {"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 100, "durationSeconds": 30}
-    assert client.post("/api/jobs", json=body, headers=h).status_code == 402  # no Terms step; just no credit
-    # A Terms update is accepted by continuing to use the service, and recorded again.
+    assert client.post("/api/jobs", json=body, headers=h).status_code == 402  # no credit; no Terms step either
     db.execute("UPDATE users SET tos_version = 'old' WHERE id = ?", (uid,))
-    client.post("/api/jobs", json=body, headers=h)
+    client.post("/api/jobs", json=body, headers=h)  # continuing to use the service accepts the new version
     assert db.one("SELECT tos_version FROM users WHERE id = ?", (uid,))["tos_version"] == auth.TOS_VERSION
     assert db.one("SELECT count(*) AS n FROM audit_log WHERE user_id = ? AND action = 'tos_accepted'", (uid,))["n"] == 2
 
 
-def test_the_terms_notice_ok_records_agreement(client):
-    """The website's Terms notice: /me says which version is current, and its OK button agrees to it (POST account/tos)."""
-    uid, h = login(client)
-    db.execute("UPDATE users SET tos_version = 'old' WHERE id = ?", (uid,))
-    me = client.get("/api/me", headers=h).json()["user"]
-    assert me["tosVersion"] == auth.TOS_VERSION and not me["tosAccepted"]
-    assert client.post("/api/account/tos", json={"version": "old"}, headers=h).status_code == 409  # not the current one
-    assert client.post("/api/account/tos", json={"version": me["tosVersion"]}, headers=h).json() == {"ok": True}
-    assert client.get("/api/me", headers=h).json()["user"]["tosAccepted"]
-    assert db.one("SELECT tos_version FROM users WHERE id = ?", (uid,))["tos_version"] == auth.TOS_VERSION
-
-
-def test_upload_must_match_declared_size_and_cancel_refunds(client, signed_in):
+def test_upload_must_match_declared_size_and_cancel_returns_the_money(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 1_000_000, "grant", "t", "g")
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav",
@@ -128,29 +102,25 @@ def test_upload_must_match_declared_size_and_cancel_refunds(client, signed_in):
 
 
 def test_unknown_job_fields_are_refused_not_ignored(client, signed_in):
-    """A field the API doesn't know (a typo, or the old "free": free subtitles run in the browser now) is an error:
-    ignoring it could start a paid job the caller didn't mean."""
+    """A typo, or a retired field such as "free": ignoring it could start a paid job the caller didn't mean."""
     uid, h = signed_in
     ledger.credit(uid, 1_000_000, "grant", "t", "g")
     body = {"kind": "transcribe", "transcribeTier": "local", "free": True, "filename": "a.wav", "sizeBytes": 100, "durationSeconds": 60}
-    r = client.post("/api/jobs", json=body, headers=h)
-    assert r.status_code == 422
+    assert client.post("/api/jobs", json=body, headers=h).status_code == 422
     assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0
-    assert "free" not in client.get("/api/billing/pricing").json()
 
 
-def test_bad_filenames_and_types_rejected(client, signed_in):
+def test_file_names_cannot_escape_and_bad_types_are_refused(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 1_000_000, "grant", "t", "g")
     base = {"kind": "denoise", "denoiseTier": "standard", "sizeBytes": 100, "durationSeconds": 30}
     assert client.post("/api/jobs", json={**base, "filename": "evil.exe"}, headers=h).status_code == 400
     r = client.post("/api/jobs", json={**base, "filename": "../../etc/passwd.wav"}, headers=h)
     assert r.status_code == 200
-    job = db.one("SELECT input_name FROM jobs WHERE id = ?", (r.json()["id"],))
-    assert job["input_name"] == "passwd.wav"
+    assert db.one("SELECT input_name FROM jobs WHERE id = ?", (r.json()["id"],))["input_name"] == "passwd.wav"
 
 
-def test_security_headers_present(client):
+def test_security_headers_are_on_every_answer(client):
     r = client.get("/api/health")
     assert r.headers["x-content-type-options"] == "nosniff"
     assert r.headers["x-frame-options"] == "DENY"
@@ -174,22 +144,17 @@ def test_export_and_delete_account(client, signed_in):
     u = db.one("SELECT email, status, balance_micros FROM users WHERE id = ?", (uid,))
     assert u["status"] == "deleted" and u["balance_micros"] == 0 and u["email"].endswith("@deleted.invalid")
     assert client.get("/api/me").json()["signedIn"] is False
-    # the address can sign up again as a fresh account
-    uid2, _ = login(client, "user@example.com")
+    uid2, _ = login(client, "user@example.com")  # the address can sign up again as a fresh account
     assert uid2 != uid
 
 
-def test_free_tool_assets_need_a_signed_in_browser(client):
-    from acw.security import limiter
+def test_free_tool_files_need_a_signed_in_browser_and_a_daily_cap(client):
+    from acw.security import LIMITS, limiter
 
     assert client.get("/api/auth/asset-check").status_code == 401
     _uid, h = login(client, "assets@example.com")
     assert client.get("/api/auth/asset-check", headers=h).status_code == 204
-    for _ in range(400):
-        r = client.get("/api/auth/asset-check", headers=h)
-        if r.status_code == 429:
-            break
-    assert r.status_code == 429  # daily cap per account
+    for _ in range(int(LIMITS["asset_fetch"][0])):
+        client.get("/api/auth/asset-check", headers=h)
+    assert client.get("/api/auth/asset-check", headers=h).status_code == 429  # daily cap per account
     limiter.reset()
-    me = client.get("/api/me", headers=h).json()
-    assert "freeTranscribeSecondsLeft" not in me

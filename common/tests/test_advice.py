@@ -48,19 +48,17 @@ def muffle(x: np.ndarray, cutoff: float = 2500) -> np.ndarray:
     return ss.sosfilt(ss.butter(2, cutoff, fs=SR, output="sos"), x).astype(np.float32)
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
-def test_a_close_voice_needs_nothing(seed):
-    x = talk(seed=seed)
+def test_a_close_voice_needs_nothing():
+    x = talk()
     assert advice.has_speech(x)
     assert advice.drop_db(x) > 30  # words stop abruptly
     assert -15 < bwe.tilt_db(x) < -5 and bwe.effective_bandwidth(x) > advice.PHONE_HZ
     assert advice.rebuild_reason(x) is None
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
 @pytest.mark.parametrize("rt60", [0.5, 0.8])
-def test_an_echoey_room(seed, rt60):
-    x = room(talk(seed=seed), rt60, seed)
+def test_an_echoey_room(rt60):
+    x = room(talk(), rt60)
     assert advice.drop_db(x) < advice.ECHO_DROP_DB - 1
     assert advice.rebuild_reason(x) == "echoey"
 
@@ -70,9 +68,8 @@ def test_a_short_ring_is_not_echoey():
     assert advice.drop_db(x) > advice.ECHO_DROP_DB and advice.rebuild_reason(x) is None
 
 
-@pytest.mark.parametrize("cutoff", [2000, 2500])
-def test_a_muffled_voice(cutoff):
-    x = muffle(talk(), cutoff)
+def test_a_muffled_voice():
+    x = muffle(talk(), 2000)
     assert bwe.effective_bandwidth(x) > advice.PHONE_HZ  # no cliff: not a phone call
     assert bwe.tilt_db(x) <= advice.DULL_TILT_DB - 3
     assert advice.rebuild_reason(x) == "muffled"

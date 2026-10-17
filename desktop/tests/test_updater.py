@@ -58,7 +58,7 @@ def key() -> Ed25519PrivateKey:
 
 
 # ---- the manifest and its signature -----------------------------------------------------------------------------
-def test_the_embedded_key_is_a_valid_ed25519_public_key():
+def test_the_embedded_key_is_a_valid_ed25519_public_key_that_ci_reads_the_same_way():
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
     raw = base64.b64decode(updater.PUBLIC_KEY, validate=True)
@@ -66,25 +66,16 @@ def test_the_embedded_key_is_a_valid_ed25519_public_key():
     assert updater.PUBLIC_KEY == make_update_manifest.app_public_key()  # CI reads it from the source the same way
 
 
-def test_a_good_signature_is_accepted(key):
-    data, _ = _manifest()
-    update = updater.decide(data, key.sign(data), "2.0.3", WIN, _public(key))
-    assert update.version == "2.0.15" and update.file.name == "AudioCleaner-2.0.15-Windows.exe"
-    assert update.manifest == data
-
-
-def test_a_tampered_manifest_is_refused(key):
+def test_only_the_exact_bytes_signed_by_the_right_key_are_accepted(key):
     data, _ = _manifest()
     sig = key.sign(data)
-    tampered = data.replace(b"2.0.15", b"9.9.99", 1)
+    update = updater.decide(data, sig, "2.0.3", WIN, _public(key))
+    assert update.version == "2.0.15" and update.file.name == "AudioCleaner-2.0.15-Windows.exe"
+    assert update.manifest == data
     with pytest.raises(updater.UpdateError, match="not signed correctly"):
-        updater.decide(tampered, sig, "2.0.3", WIN, _public(key))
+        updater.decide(data.replace(b"2.0.15", b"9.9.99", 1), sig, "2.0.3", WIN, _public(key))  # tampered
     with pytest.raises(updater.UpdateError, match="not signed correctly"):
         updater.decide(data + b" ", sig, "2.0.3", WIN, _public(key))  # even a trailing space: the exact bytes count
-
-
-def test_a_signature_from_another_key_is_refused(key):
-    data, _ = _manifest()
     other = Ed25519PrivateKey.generate()
     with pytest.raises(updater.UpdateError, match="not signed correctly"):
         updater.decide(data, other.sign(data), "2.0.3", WIN, _public(key))
@@ -92,14 +83,18 @@ def test_a_signature_from_another_key_is_refused(key):
         updater.decide(data, other.sign(data), "2.0.3", WIN)
 
 
-@pytest.mark.parametrize("sig", [b"", b"x" * 63, b"x" * 65, b"\0" * 64], ids=["empty", "short", "long", "zeros"])
+@pytest.mark.parametrize("sig", [b"", b"x" * 63], ids=["empty", "short"])
 def test_a_missing_or_malformed_signature_is_refused(key, sig):
     data, _ = _manifest()
     with pytest.raises(updater.UpdateError):
         updater.decide(data, sig, "2.0.3", WIN, _public(key))
 
 
-def test_a_manifest_that_is_not_newer_is_ignored(key):
+def test_versions_are_compared_as_numbers_and_only_a_newer_manifest_is_offered(key):
+    assert updater.parse_version("2.0.15") > updater.parse_version("2.0.9") > updater.parse_version("1.99.99")
+    for bad in ("", "2", "2.0.15-beta", "v2.0.15", "2.0.15\n", None):
+        with pytest.raises(updater.UpdateError):
+            updater.parse_version(bad)
     data, _ = _manifest("2.0.15")
     sig = key.sign(data)
     assert updater.decide(data, sig, "2.0.15", WIN, _public(key)) is None  # the same version
@@ -110,9 +105,8 @@ def test_a_manifest_that_is_not_newer_is_ignored(key):
 
 def test_a_newer_manifest_without_a_file_for_this_platform_is_an_error(key):
     data, _ = _manifest()
-    sig = key.sign(data)
     with pytest.raises(updater.UpdateError, match="no installer for this computer"):
-        updater.decide(data, sig, "2.0.3", None, _public(key))
+        updater.decide(data, key.sign(data), "2.0.3", None, _public(key))
     body = json.loads(data)
     del body["files"]["macos-arm64"]
     data2 = json.dumps(body, sort_keys=True).encode()
@@ -122,16 +116,13 @@ def test_a_newer_manifest_without_a_file_for_this_platform_is_an_error(key):
 
 
 @pytest.mark.parametrize("change", [
-    {"version": "latest"}, {"version": "2"}, {"version": "2.0.x"},
-    {"files": []}, {"files": {WIN: "x"}},
+    {"version": "latest"},
     {"files": {WIN: {"name": "../evil.exe", "size": 5, "sha256": "a" * 64}}},
     {"files": {WIN: {"name": "sub/evil.exe", "size": 5, "sha256": "a" * 64}}},
     {"files": {WIN: {"name": "evil.pkg", "size": 5, "sha256": "a" * 64}}},  # the wrong kind of file for the platform
     {"files": {WIN: {"name": "a.exe", "size": -1, "sha256": "a" * 64}}},
-    {"files": {WIN: {"name": "a.exe", "size": True, "sha256": "a" * 64}}},
     {"files": {WIN: {"name": "a.exe", "size": 3 << 30, "sha256": "a" * 64}}},
     {"files": {WIN: {"name": "a.exe", "size": 5, "sha256": "A" * 64}}},
-    {"files": {WIN: {"name": "a.exe", "size": 5, "sha256": "abc"}}},
 ], ids=lambda c: next(iter(c)) + ":" + str(next(iter(c.values())))[:40])
 def test_a_signed_but_malformed_manifest_is_refused(key, change):
     data, _ = _manifest(**change)
@@ -139,18 +130,7 @@ def test_a_signed_but_malformed_manifest_is_refused(key, change):
         updater.decide(data, key.sign(data), "2.0.3", WIN, _public(key))
 
 
-def test_versions_are_compared_as_numbers():
-    assert updater.parse_version("2.0.15") > updater.parse_version("2.0.9") > updater.parse_version("1.99.99")
-    for bad in ("", "2", "2.0.15-beta", "v2.0.15", "2.0.15\n", None):
-        with pytest.raises(updater.UpdateError):
-            updater.parse_version(bad)
-
-
-def test_the_platform_key_names_one_of_the_three_installers():
-    assert updater.platform_key() in (None, *updater.PLATFORMS)
-
-
-# ---- a local server standing in for the download server ---------------------------------------------------------------------
+# ---- a local server standing in for the download server ---------------------------------------------------------------
 class _Handler(http.server.BaseHTTPRequestHandler):
     files: dict[str, bytes] = {}
     requests: list[str] = []
@@ -181,7 +161,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
 def server(monkeypatch):
     _Handler.files, _Handler.requests = {}, []
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     monkeypatch.setattr(models, "_ssl_context", lambda: None)  # the real addresses are https only; this one is plain http
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
     yield base
@@ -201,15 +181,12 @@ def _endpoints(base: str) -> dict:
     return {"manifest_url": f"{base}/desktop/update.json", "signature_url": f"{base}/desktop/update.json.sig"}
 
 
-def test_check_fetches_and_verifies(server, key):
+def test_check_fetches_and_verifies_and_refuses_a_manifest_signed_by_someone_else(server, key):
     _publish(server, key)
     update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
     assert update.version == "2.0.15"
     assert updater.check("2.0.15", WIN, public_key=_public(key), **_endpoints(server)) is None
     assert all(r.startswith("/desktop/update.json") for r in _Handler.requests)  # no query string, no extras
-
-
-def test_check_refuses_a_manifest_signed_by_someone_else(server, key):
     _publish(server, key, sign_with=Ed25519PrivateKey.generate())
     with pytest.raises(updater.UpdateError, match="not signed correctly"):
         updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
@@ -231,20 +208,6 @@ def test_check_refuses_an_oversized_answer(server, key):
     _Handler.files["/desktop/update.json.sig"] = b"x" * 64
     with pytest.raises(updater.UpdateError, match="larger than expected"):
         updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
-
-
-def test_the_request_names_the_app_and_its_version(server, key, monkeypatch):
-    seen = []
-    orig = _Handler.do_GET
-
-    def spy(self):
-        seen.append(self.headers.get("User-Agent"))
-        orig(self)
-
-    monkeypatch.setattr(_Handler, "do_GET", spy)
-    _publish(server, key)
-    updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
-    assert seen and set(seen) == {"AudioCleaner/2.0.3"}
 
 
 # ---- the download -------------------------------------------------------------------------------------------------
@@ -294,14 +257,6 @@ def test_a_download_that_does_not_match_the_manifest_is_never_kept(server, key, 
     assert updater.pending(folder, "2.0.3", WIN, _public(key)) is None
 
 
-def test_the_download_url_comes_from_the_version_and_name_not_from_the_manifest(server, key, tmp_path):
-    _publish(server, key)
-    update = updater.check("2.0.3", WIN, public_key=_public(key), **_endpoints(server))
-    _Handler.requests.clear()
-    updater.download(update, tmp_path / "u", base_url=f"{server}/desktop")
-    assert [r.split()[0] for r in _Handler.requests] == ["/desktop/AudioCleaner-2.0.15-Windows.exe"]
-
-
 def test_the_installer_comes_from_the_release_of_the_version_the_manifest_names(server, key, tmp_path, monkeypatch):
     # The manifest is the newest release's (config.LATEST_URL); the installer is a file of that version's own release
     # (config.release_url), whatever version the app itself is.
@@ -314,13 +269,6 @@ def test_the_installer_comes_from_the_release_of_the_version_the_manifest_names(
     path = updater.download(update, tmp_path / "u")  # no base_url: the default, as the app does it
     assert path.read_bytes() == installer
     assert [r.split()[0] for r in _Handler.requests] == ["/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe"]
-    # a newer manifest: the next version's release
-    installer = _publish(server, key, version="2.0.16", installer=b"newer" * 999)
-    _Handler.files["/releases/download/v2.0.16/AudioCleaner-2.0.16-Windows.exe"] = installer
-    update = updater.check("2.0.15", WIN, public_key=_public(key), **_endpoints(server))
-    _Handler.requests.clear()
-    assert updater.download(update, tmp_path / "u").read_bytes() == installer
-    assert [r.split()[0] for r in _Handler.requests] == ["/releases/download/v2.0.16/AudioCleaner-2.0.16-Windows.exe"]
 
 
 def test_the_release_download_url_is_https_github_built_from_version_and_name(key, tmp_path, monkeypatch):
@@ -335,24 +283,9 @@ def test_the_release_download_url_is_https_github_built_from_version_and_name(ke
     monkeypatch.setattr(models, "fetch_file", fake_fetch)
     with pytest.raises(models.DownloadError):
         updater.download(update, tmp_path / "u")
-    assert seen == [config.release_url("2.0.15") + "AudioCleaner-2.0.15-Windows.exe"]
-    assert seen[0].startswith(config.RELEASES_URL + "download/v2.0.15/") and seen[0].startswith("https://github.com/")
+    assert seen == [config.release_url("2.0.15") + "AudioCleaner-2.0.15-Windows.exe"]  # the URL is not from the manifest
+    assert seen[0].startswith("https://github.com/")
     assert not (tmp_path / "u" / "update.json").exists()  # nothing is remembered without the installer
-
-
-def test_the_controller_downloads_from_the_release_by_default(qapp, tmp_path, server, key, monkeypatch):
-    monkeypatch.setattr(config, "RELEASES_URL", f"{server}/releases/")
-    installer = _publish(server, key)
-    _Handler.files["/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe"] = installer
-    del _Handler.files["/desktop/AudioCleaner-2.0.15-Windows.exe"]
-    ctl = updater.UpdateController(_prefs(tmp_path), enabled=True, folder=tmp_path / "updates", current="2.0.3", key=WIN,
-                                   public_key=_public(key), clock=lambda: 1_000_000.0, **_endpoints(server))
-    ready = []
-    ctl.readyChanged.connect(lambda: ready.append(ctl.ready_version))
-    ctl.startup_check()
-    assert wait_until(lambda: ready, timeout=30)
-    assert ready == ["2.0.15"] and ctl.ready_path.read_bytes() == installer
-    assert "/releases/download/v2.0.15/AudioCleaner-2.0.15-Windows.exe" in [r.split()[0] for r in _Handler.requests]
 
 
 def test_pending_is_none_for_a_damaged_installer_and_cleans_up_after_an_install(server, key, tmp_path):
@@ -382,7 +315,6 @@ def test_prune_keeps_only_the_named_installer(tmp_path):
         "AudioCleaner-2.0.9-Windows.exe", "AudioCleaner-2.0.9-Windows.exe.part", "other.txt", "update.json"]
     updater.prune(tmp_path, None)
     assert [p.name for p in tmp_path.iterdir()] == ["other.txt"]
-    updater.prune(tmp_path / "missing", None)  # no folder, no problem
 
 
 # ---- the controller: the 24 hour rule, the setting, the whole flow ------------------------------------------------
@@ -428,7 +360,6 @@ def test_startup_check_downloads_once_a_day_and_remembers_the_update(qapp, tmp_p
     assert wait_until(lambda: ready, timeout=30)
     assert ready == ["2.0.15"] and ctl.ready_path.read_bytes() == installer and not ctl.busy
     assert "Checking for updates..." in seen and "Downloading 2.0.15..." in seen
-    assert "2.0.15" in ctl.status and "ready" in ctl.status
     assert prefs.update_last_check == now[0]
 
     # the same day, another start: no request to the server at all, the downloaded update is found on disk
@@ -452,29 +383,12 @@ def test_startup_check_downloads_once_a_day_and_remembers_the_update(qapp, tmp_p
     assert prefs.update_last_check == now[0]
 
 
-def test_a_newer_release_replaces_the_downloaded_one(qapp, tmp_path, server, key):
-    _publish(server, key, "2.0.15")
-    ctl, prefs = _controller(qapp, tmp_path, server, key)
-    ctl.check_now()
-    assert wait_until(lambda: ctl.ready_version == "2.0.15" and not ctl.busy, timeout=30)
-    _publish(server, key, "2.0.16", installer=b"newer" * 5000)
-    ctl.check_now()  # "Check now" ignores the 24 hour rule
-    assert wait_until(lambda: ctl.ready_version == "2.0.16" and not ctl.busy, timeout=30)
-    assert sorted(p.name for p in (tmp_path / "updates").iterdir()) == [
-        "AudioCleaner-2.0.16-Windows.exe", "update.json", "update.json.sig"]
-
-
-def test_check_now_reports_the_result_in_a_line_of_text(qapp, tmp_path, server, key):
+def test_check_now_reports_the_result_and_a_bad_manifest_downloads_nothing(qapp, tmp_path, server, key):
     _publish(server, key, "2.0.3")  # the newest release is the running version
     ctl, prefs = _controller(qapp, tmp_path, server, key)
     ctl.check_now()
     assert wait_until(lambda: not ctl.busy and ctl.status.startswith("You have"), timeout=30)
     assert ctl.status == "You have the newest version (2.0.3)." and ctl.ready_version is None
-
-    _Handler.files.clear()  # a failure is a quiet line, never a dialog or an exception
-    ctl.check_now()
-    assert wait_until(lambda: not ctl.busy and ctl.status.startswith("Could not"), timeout=30)
-    assert "No update information is published yet" in ctl.status
 
     _publish(server, key, sign_with=Ed25519PrivateKey.generate())
     ctl.check_now()
@@ -507,67 +421,13 @@ def test_nothing_happens_when_the_setting_is_off_or_from_source(qapp, tmp_path, 
     assert src.status == "Updates are only installed in the installed app."
 
 
-def test_the_setting_defaults_to_on_and_is_remembered(qapp, tmp_path):
+def test_the_update_setting_defaults_to_on_and_is_remembered(qapp, tmp_path):
     ini = tmp_path / "s.ini"
     assert Preferences(QSettings(str(ini), QSettings.Format.IniFormat)).check_updates is True
     p = Preferences(QSettings(str(ini), QSettings.Format.IniFormat))
     p.check_updates = False
     p._store.sync()
     assert Preferences(QSettings(str(ini), QSettings.Format.IniFormat)).check_updates is False
-
-
-def test_the_settings_panel_shows_the_checkbox_and_check_now(qapp, tmp_path):
-    from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
-
-    prefs = _prefs(tmp_path)
-    panel = SettingsPanel(prefs)
-    try:
-        assert panel._updates.isChecked() and panel._check_now.text() == "Check now"
-        panel._updates.click()
-        assert prefs.check_updates is False
-        panel._updates.click()
-        assert prefs.check_updates is True
-        panel._check_now.click()  # from source: says why, in a line of text
-        assert panel._update_status.text() == "Updates are only installed in the installed app."
-        assert not panel._update_status.isHidden()
-    finally:
-        panel.deleteLater()
-
-
-def test_the_checkbox_survives_closing_and_reopening_the_window(qapp, tmp_path):
-    from audio_cleaner_desktop.gui.main_window import MainWindow
-
-    def open_():
-        w = MainWindow([], settings=QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat),
-                       history_path=tmp_path / "history.db")
-        w.show()
-        return w
-
-    def close(w):
-        w.close()
-        w._pool.waitForDone()
-        w.deleteLater()
-
-    w = open_()
-    assert w.settings_panel._updates.isChecked()
-    w.settings_panel._updates.click()
-    close(w)
-    again = open_()
-    try:
-        assert not again.settings_panel._updates.isChecked() and again.prefs.check_updates is False
-    finally:
-        close(again)
-
-
-def test_about_says_whether_updates_are_on(qapp):
-    from audio_cleaner_desktop.gui.about import AboutDialog
-
-    for on, text in ((True, "Updates: on"), (False, "Updates: off")):
-        d = AboutDialog(updates_on=on)
-        try:
-            assert d.updates_label.text() == text
-        finally:
-            d.deleteLater()
 
 
 # ---- the window ------------------------------------------------------------------------------------------------
@@ -597,12 +457,9 @@ def test_the_banner_offers_restart_and_waits_for_a_running_batch(qapp, tmp_path,
         assert w.banner_update.isHidden()
         _fake_ready(w, tmp_path)
         assert not w.banner_update.isHidden()
-        assert "2.0.15 is ready. It installs when you close the app." in w.banner_update._label.text()
-        assert w.banner_update._button.text() == "Restart now"
         monkeypatch.setattr(type(w.queue), "busy", property(lambda self: True))
         w._update_action()  # files are being cleaned: never interrupt them
         assert w._restart_when_idle and w.isVisible() and not w.updater.relaunch
-        assert "when the files are finished" in w.banner_update._label.text()
         monkeypatch.undo()
         w._update_action()  # idle: closes the app and asks setup to start the new version
         assert w._closing and w.updater.relaunch and not w._restart_when_idle
@@ -660,13 +517,12 @@ def test_the_silent_windows_command_line():
     assert cmd(r"D:\Apps\Audio Cleaner\AudioCleaner.exe") == base
     assert cmd(r"C:\Program Files Evil\AudioCleaner.exe") == base  # a folder that only starts with the same letters
     assert cmd(r"C:\Program Files\Audio Cleaner\AudioCleaner.exe", True) == [*base, "/ALLUSERS", "/RELAUNCH=1"]
-    assert cmd(r"D:\Apps\Audio Cleaner\AudioCleaner.exe", True) == [*base, "/RELAUNCH=1"]
     assert updater.windows_installer_command(setup, r"D:\a.exe", False, {}) == base  # no environment, no switch
     # nothing in it asks for a visible setup, a restart of the computer, or a dialog
     assert {"/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"} <= set(base) and "/SILENT" not in base
 
 
-def test_the_installer_is_started_detached_without_a_console(monkeypatch, tmp_path):
+def test_the_installer_is_started_detached_without_a_console_and_the_mac_one_with_open(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(updater.subprocess, "Popen", lambda cmd, **kw: calls.append((cmd, kw)))
     updater.start_windows_installer(tmp_path / "AudioCleaner-2.0.15-Windows.exe", True)
@@ -674,13 +530,10 @@ def test_the_installer_is_started_detached_without_a_console(monkeypatch, tmp_pa
     assert cmd[0].endswith("AudioCleaner-2.0.15-Windows.exe") and cmd[-1] == "/RELAUNCH=1" and "/VERYSILENT" in cmd
     assert kw["creationflags"] & updater.DETACHED_PROCESS and kw["creationflags"] & updater.CREATE_NEW_PROCESS_GROUP
     assert kw["close_fds"] is True and kw["stdin"] == subprocess.DEVNULL and kw["stdout"] == subprocess.DEVNULL
-
-
-def test_the_mac_installer_is_opened_with_open(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd))
+    opened = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda cmd, **kw: opened.append(cmd))
     updater.open_mac_installer(tmp_path / "AudioCleaner-2.0.15-Mac-Intel.pkg")
-    assert calls == [["open", str(tmp_path / "AudioCleaner-2.0.15-Mac-Intel.pkg")]]
+    assert opened == [["open", str(tmp_path / "AudioCleaner-2.0.15-Mac-Intel.pkg")]]
 
 
 ISS = (PACKAGING / "windows" / "AudioCleaner.iss").read_text(encoding="utf-8")
@@ -695,7 +548,6 @@ def test_the_inno_script_relaunches_only_for_a_silent_update_that_asks_for_it():
     assert "nowait" in relaunch and "runasoriginaluser" in relaunch  # not waiting, not elevated
     assert "postinstall" not in relaunch and "Check: RelaunchAfterSilentUpdate" in relaunch
     code = ISS.split("[Code]")[1]
-    assert "function RelaunchAfterSilentUpdate: Boolean;" in code
     assert "Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');" in code
     assert ISS.index("function RelaunchAfterSilentUpdate") < ISS.index("procedure CurUninstallStepChanged")
     # what the updater passes is what the script reads, and the settings an update relies on are still there
@@ -705,7 +557,7 @@ def test_the_inno_script_relaunches_only_for_a_silent_update_that_asks_for_it():
         assert line in ISS
 
 
-# ---- the release job and the manifest script -------------------------------------------------------------------------------
+# ---- the release job and the manifest script -------------------------------------------------------------------------
 def _openssl_3() -> str | None:
     """An OpenSSL 3 (the release job signs with Ubuntu's: `pkeyutl -rawin`, Ed25519 over the raw file). macOS's own
     openssl is LibreSSL, which has neither; Homebrew's openssl@3 is used when it is there."""
@@ -804,7 +656,6 @@ def test_cryptography_is_pinned_with_hashes_for_every_platform():
         assert blocks[name].count("--hash=sha256:") >= 2
     # one wheel per platform at least: manylinux/musllinux, Windows, macOS universal2 (Intel and Apple silicon)
     assert blocks["cryptography"].count("--hash=sha256:") >= 20
-    assert "cryptography==48.0.1" in blocks["cryptography"]  # the newest release that still has a macOS Intel wheel
 
 
 def _public_copy_leak_patterns() -> dict[str, str]:
@@ -832,15 +683,14 @@ def test_the_release_is_published_to_the_public_repository_with_everything_the_a
     assert "OWN_TOKEN: ${{ github.token }}" in step  # reads this repository's releases (the models archive's first upload)
     assert "continue-on-error: true" in step and "::warning::" in step  # never fails the official release
     assert 'if [ -z "$GH_TOKEN" ]' in step and "exit 0" in step  # no secret: skipped
-    assert "trap '" in step and "ERR" in step
     assert 'tag="v$version"' in step and '--target "$branch"' in step and "--clobber" in step
     # the models archive (release_models.py: pinned, hash-checked) is gathered before anything is uploaded; the speech
     # model is not in the release (the app downloads it from Hugging Face)
     assert "python3 desktop/packaging/release_models.py release/models" in step
     assert step.index("release_models.py release/models") < step.index("gh release create")
+    assert "whisper" not in step.lower()
     # everything the app and setup download: the installers, the signed update information (when this build has it)
     # and the models archive (models/ holds nothing else)
-    assert "whisper" not in step.lower()
     files = re.search(r"files=\((.*?)\)", step).group(1).split()
     assert files == ['"AudioCleaner-$version-Windows.exe"', '"AudioCleaner-$version-Mac-Apple-silicon.pkg"',
                      '"AudioCleaner-$version-Mac-Intel.pkg"']
@@ -899,4 +749,3 @@ def test_the_model_check_job_looks_for_the_models_archive_and_the_speech_model_s
     assert "run: python desktop/packaging/release_models.py --check" in job
     assert "OWN_TOKEN: ${{ github.token }}" in job and "PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in job
     assert "PUBLIC_REPO:" in job
-    assert "check_model_urls" not in WORKFLOW

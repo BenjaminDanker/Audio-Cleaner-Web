@@ -33,7 +33,7 @@ def trial_left(uid):
 
 # ---------------------------------------------------------------- the grant
 
-def test_a_new_account_gets_two_hours_once(monkeypatch):
+def test_a_new_account_gets_two_hours_once_per_mailbox_and_aliases_share_it(monkeypatch):
     _trial_on(monkeypatch)
     user = auth.get_or_create_user("new@example.com")
     assert user["trial_live_seconds"] == 7200
@@ -42,10 +42,6 @@ def test_a_new_account_gets_two_hours_once(monkeypatch):
     auth.get_or_create_user("NEW@example.com")  # signing in again: nothing more
     assert trial_left(user["id"]) == 100
     assert db.one("SELECT COUNT(*) n FROM welcome_claims WHERE email_hash LIKE '%new%'")["n"] == 0  # only a hash
-
-
-def test_aliases_of_one_mailbox_share_one_trial(monkeypatch):
-    _trial_on(monkeypatch)
     got = [auth.get_or_create_user(a)["trial_live_seconds"] for a in
            ("some.one@gmail.com", "someone+x@gmail.com", "someone@googlemail.com", "other@example.com")]
     assert got == [7200, 0, 0, 7200]
@@ -60,27 +56,13 @@ def test_deleting_the_account_and_coming_back_does_not_give_it_twice(client, mon
     assert uid2 != uid and trial_left(uid2) == 0
 
 
-def test_the_length_can_be_set_or_switched_off(monkeypatch):
-    _trial_on(monkeypatch, 600)
-    assert auth.get_or_create_user("a@example.com")["trial_live_seconds"] == 600
+def test_switched_off_no_trial_is_given_and_none_is_given_later(monkeypatch):
     _trial_on(monkeypatch, 0)
-    assert auth.get_or_create_user("b@example.com")["trial_live_seconds"] == 0
-    assert db.one("SELECT COUNT(*) n FROM welcome_claims")["n"] == 1  # off: nobody is marked as having had it
-
-
-def test_accounts_without_a_claim_get_nothing(monkeypatch):
     uid = auth.get_or_create_user("old@example.com")["id"]  # created while the trial was off
+    assert db.one("SELECT COUNT(*) n FROM welcome_claims")["n"] == 0  # off: nobody is marked as having had it
     _trial_on(monkeypatch)
     auth.get_or_create_user("old@example.com")
     assert trial_left(uid) == 0
-
-
-def test_me_shows_what_is_left(client, monkeypatch):
-    _trial_on(monkeypatch)
-    uid, _ = login(client, "me@example.com")
-    assert client.get("/api/me").json()["trialLiveSecondsLeft"] == 7200
-    db.execute("UPDATE users SET trial_live_seconds = 1234.6 WHERE id = ?", (uid,))
-    assert client.get("/api/me").json()["trialLiveSecondsLeft"] == 1234
 
 
 # ---------------------------------------------------------------- sessions (a fake live worker behind the real endpoint)
@@ -150,26 +132,20 @@ def the_session(wait=True):
     return dict(row)
 
 
-def test_a_trial_session_uses_trial_seconds_and_costs_nothing(client, signed_in, fake_worker):
+def test_a_trial_session_uses_trial_seconds_costs_nothing_and_leaves_credit_alone(client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    got = run_session(client, 3)
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")  # the trial is used before credit, and credit stays untouched
+    got = run_session(client, 2)
     assert got[0]["type"] == "ready" and got[0]["trial"] is True and got[0]["trialSecondsLeft"] == 600
     assert not [m for m in got if m.get("type") in ("warning", "stopped", "error")]
     s = the_session()
-    assert s["status"] == "ended" and s["seconds"] == pytest.approx(3) and s["trial_seconds"] == 3
+    assert s["status"] == "ended" and s["seconds"] == pytest.approx(2) and s["trial_seconds"] == 2
     assert s["cost_micros"] == 0 and s["hold_id"] is None
-    assert trial_left(uid) == 597
+    assert trial_left(uid) == 598
     assert db.one("SELECT COUNT(*) n FROM holds")["n"] == 0
-    assert ledger.balance(uid) == {"balance_micros": 0, "held_micros": 0, "available_micros": 0}
+    assert ledger.balance(uid) == {"balance_micros": 5_000_000, "held_micros": 0, "available_micros": 5_000_000}
     assert fake_worker.started[0]["trial"] is True
-
-
-def test_standard_captions_are_covered_too(client, signed_in, fake_worker):
-    uid, _ = signed_in
-    db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    run_session(client, 1, {"denoise": None, "captions": "local", "language": "en"})
-    assert the_session()["trial_seconds"] == 1 and trial_left(uid) == 599
 
 
 def test_trial_seconds_are_taken_off_while_the_session_runs(client, signed_in, fake_worker):
@@ -180,22 +156,13 @@ def test_trial_seconds_are_taken_off_while_the_session_runs(client, signed_in, f
     assert 0 < s["trial_seconds"] <= 2 and trial_left(uid) == pytest.approx(600 - s["trial_seconds"])  # saved with the frames
 
 
-def test_the_trial_is_used_before_credit_and_credit_stays_untouched(client, signed_in, fake_worker):
-    uid, _ = signed_in
-    db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    run_session(client, 2)
-    assert ledger.balance(uid)["balance_micros"] == 5_000_000
-
-
 def test_trial_low_warns_at_five_minutes_left(client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 299.5 WHERE id = ?", (uid,))
     got = run_session(client, 2)
     warnings = [m for m in got if m.get("type") == "warning"]
     assert len(warnings) == 1 and warnings[0]["code"] == "trial_low" and 296 <= warnings[0]["secondsLeft"] <= 299
-    # with plenty left there is no warning
-    db.execute("UPDATE users SET trial_live_seconds = 3600 WHERE id = ?", (uid,))
+    db.execute("UPDATE users SET trial_live_seconds = 3600 WHERE id = ?", (uid,))  # with plenty left there is no warning
     assert not [m for m in run_session(client, 1) if m.get("type") == "warning"]
 
 
@@ -225,34 +192,41 @@ def test_when_the_trial_ends_without_credit_the_session_stops(client, signed_in,
     assert s["end_reason"] == "trial_over" and s["cost_micros"] == 0 and s["trial_seconds"] == 1
     assert s["seconds"] < 1.1  # no audio was processed past the trial
     assert trial_left(uid) == 0 and db.one("SELECT COUNT(*) n FROM holds")["n"] == 0
-
-
-def test_a_new_session_after_the_trial_is_billed_normally(client, signed_in, fake_worker):
-    uid, _ = signed_in
-    got = run_session(client, 1)  # no trial seconds, no credit
+    got = run_session(client, 1)  # and with no trial and no credit, the next one is refused
     assert got[0]["code"] == "insufficient_funds"
+
+
+def test_a_session_after_the_trial_is_billed_from_credit(client, signed_in, fake_worker):
+    uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     run_session(client, 2)
     s = the_session()
     assert s["trial_seconds"] == 0 and s["cost_micros"] == meter_micros(0, Features(denoise="light").rate(), 2, 2)
 
 
-def test_sessions_that_are_not_standard_are_billed_from_credit(client, signed_in, fake_worker, monkeypatch):
+@pytest.mark.parametrize("denoise, captions, trial", [
+    ("light", "local", True), (None, "local", True), ("light", None, True),  # Standard noise removal and captions: covered
+    ("light", "premium", False),  # extra accurate captions: paid
+])
+def test_only_standard_live_is_covered_by_the_trial(denoise, captions, trial):
+    assert bool(routes._trial_eligible({}, denoise, captions)) is trial
+
+
+@pytest.mark.parametrize("translate", [["de"], "de"])
+def test_translations_are_not_covered_by_the_trial(translate):
+    assert not routes._trial_eligible({"translate": translate}, "light", None)
+    assert routes._trial_eligible({"translate": ""}, "light", None) and routes._trial_eligible({"translate": []}, "light", None)
+
+
+def test_sessions_with_translations_are_billed_from_credit(client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # translations need the speech partner configured
-    from acw.config import get_settings
-
     get_settings.cache_clear()
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    run_session(client, 1, {"translate": ["de"], "captions": "local"})  # translations
+    run_session(client, 1, {"translate": ["de"], "captions": "local"})
     s = the_session()
     assert s["trial_seconds"] == 0 and s["cost_micros"] > 0 and trial_left(uid) == 600
-    assert routes._trial_eligible({}, "light", "local") and routes._trial_eligible({}, None, "local")
-    assert not routes._trial_eligible({}, "light", "premium")  # extra accurate
-    assert not routes._trial_eligible({"translate": "de"}, "light", None)
-    assert not routes._trial_eligible({"translate": ["de"]}, None, "local")
-    assert routes._trial_eligible({"translate": ""}, "light", None) and routes._trial_eligible({"translate": []}, "light", None)
 
 
 def test_extra_accurate_captions_are_billed_even_with_trial_seconds(client, signed_in, fake_worker, monkeypatch):
@@ -279,11 +253,9 @@ def test_extra_accurate_captions_are_billed_even_with_trial_seconds(client, sign
 
 # ---------------------------------------------------------------- one at a time, and not while live is busy
 
-def test_one_trial_session_at_a_time(client, signed_in, fake_worker, monkeypatch):
+def test_one_trial_session_at_a_time_and_the_account_limit_counts_trial_sessions(client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    from acw.config import get_settings
-
     get_settings.cache_clear()
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     other = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), Features(denoise="light"), 600.0)
@@ -300,12 +272,7 @@ def test_one_trial_session_at_a_time(client, signed_in, fake_worker, monkeypatch
         assert run_session(client, 1)[0]["trial"] is True
     finally:
         routes._open.pop(uid, None)
-
-
-def test_the_account_limit_still_counts_trial_sessions(client, signed_in, fake_worker):
-    uid, _ = signed_in
-    db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    routes._live[uid] = routes.MAX_SESSIONS_PER_USER
+    routes._live[uid] = routes.MAX_SESSIONS_PER_USER  # the account limit still counts trial sessions
     try:
         assert run_session(client, 1)[0]["code"] == "too_many_sessions"
     finally:

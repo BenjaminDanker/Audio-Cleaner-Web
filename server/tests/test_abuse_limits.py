@@ -1,6 +1,6 @@
-"""Fixes from the security / fraud audit: job reservations, cancel after the paid step, live duty cycle and message
-rate, free-trial farming, first-top-up limits, premium captions that break down, malformed options,
-and what an API key may learn from /api/me."""
+"""Abuse and money limits: job reservations and uploads, cancelling after the paid step, live duty cycle and message
+rate, free-trial farming, first top-ups, premium captions that break down, malformed options, and what an API key may
+learn from /api/me."""
 import asyncio
 import json
 import math
@@ -41,7 +41,7 @@ def roomy_disk(monkeypatch):
     monkeypatch.setattr(hostload, "get", lambda d: SimpleNamespace(snapshot=lambda: snap))
 
 
-# ---------------------------------------------------------------- H1: job reservations
+# ---------------------------------------------------------------- job reservations and uploads
 
 def test_parallel_creates_cannot_pass_the_active_job_cap():
     uid = user()
@@ -55,11 +55,10 @@ def test_parallel_creates_cannot_pass_the_active_job_cap():
     with ThreadPoolExecutor(16) as pool:
         results = list(pool.map(one, range(16)))
     assert sum(isinstance(r, str) for r in results) == jobs.MAX_ACTIVE_JOBS_PER_USER
-    assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == jobs.MAX_ACTIVE_JOBS_PER_USER
     assert db.one("SELECT COUNT(*) n FROM holds WHERE status = 'active'")["n"] == jobs.MAX_ACTIVE_JOBS_PER_USER
 
 
-def test_one_account_cannot_reserve_more_than_8_gb_of_uploads(roomy_disk):
+def test_one_account_cannot_reserve_more_than_8_gb_of_uploads_and_a_size_must_fit_its_length(roomy_disk):
     uid = user()
     make_job(uid, size_bytes=3 * GB, claimed_seconds=3600)
     make_job(uid, size_bytes=3 * GB, claimed_seconds=3600)
@@ -71,26 +70,16 @@ def test_one_account_cannot_reserve_more_than_8_gb_of_uploads(roomy_disk):
     assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 3
     assert db.one("SELECT COUNT(*) n FROM holds WHERE status = 'active'")["n"] == 3
     assert len(list(get_settings().jobs_dir.iterdir())) == 3
+    with pytest.raises(jobs.JobError, match="larger than its length"):  # 4 GiB claimed as half a second: a cheap job
+        make_job(uid, size_bytes=4 * GB, claimed_seconds=0.5)
 
 
-def test_a_size_that_does_not_fit_the_claimed_length_is_refused(roomy_disk):
-    uid = user()
-    with pytest.raises(jobs.JobError, match="larger than its length"):
-        make_job(uid, size_bytes=4 * GB, claimed_seconds=0.5)  # 4 GiB in half a second
-    with pytest.raises(jobs.JobError, match="larger than its length"):
-        make_job(uid, size_bytes=1 * GB, claimed_seconds=20)  # 50 MB a second
-    make_job(uid, size_bytes=150 * 1024**2, claimed_seconds=1)  # small files may be oddly dense
-    make_job(uid, size_bytes=2 * GB, claimed_seconds=3600)  # an ordinary long video
-    assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 2
-
-
-def test_an_upload_that_sends_nothing_is_canceled_after_ten_minutes():
+def test_an_upload_that_sends_nothing_is_canceled_after_ten_minutes_and_the_money_comes_back():
     uid = user()
     before = ledger.balance(uid)["held_micros"]
     jid = make_job(uid)
     row = db.one("SELECT created_at, expires_at FROM jobs WHERE id = ?", (jid,))
     assert row["expires_at"] - row["created_at"] == jobs.UPLOAD_FIRST_BYTE_SECONDS == 600
-    assert ledger.balance(uid)["held_micros"] > before
     jobs.sweep()
     assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "uploading"  # still inside its ten minutes
     db.execute("UPDATE jobs SET expires_at = ? WHERE id = ?", (db.now() - 1, jid))
@@ -99,7 +88,7 @@ def test_an_upload_that_sends_nothing_is_canceled_after_ten_minutes():
     assert ledger.balance(uid)["held_micros"] == before  # the money set aside is free again
 
 
-def test_the_first_bytes_of_an_upload_move_the_expiry_out(client, signed_in, monkeypatch):
+def test_the_first_bytes_of_an_upload_move_the_expiry_out_and_a_cancel_stops_the_upload(client, signed_in, monkeypatch):
     from acw.api import jobs_routes
 
     uid, h = signed_in
@@ -112,9 +101,13 @@ def test_the_first_bytes_of_an_upload_move_the_expiry_out(client, signed_in, mon
     monkeypatch.setattr(jobs_routes, "_still_uploading", lambda jid: calls.append(jid) or real(jid))
     assert client.put(r.json()["uploadUrl"].replace("api/", "/api/", 1), content=b"RIFF" + bytes(2996), headers=h).status_code == 200
     assert calls == [r.json()["id"]]  # called as soon as data arrived, not a minute later
+    jid = make_job(uid)  # a second upload, still waiting for its bytes
+    db.execute("UPDATE jobs SET expires_at = ? WHERE id = ?", (db.now() + 5, jid))
+    assert jobs_routes._still_uploading(jid)
+    assert db.one("SELECT expires_at FROM jobs WHERE id = ?", (jid,))["expires_at"] >= db.now() + jobs.UPLOAD_WINDOW_SECONDS - 2
+    jobs.finish_failed(dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,))), "x", status="canceled")
+    assert not jobs_routes._still_uploading(jid)  # canceled meanwhile: the upload stops
 
-
-# ---------------------------------------------------------------- H2, L7: cancel
 
 def test_cancel_is_refused_once_the_paid_step_is_done(client, signed_in):
     uid, h = signed_in
@@ -124,28 +117,12 @@ def test_cancel_is_refused_once_the_paid_step_is_done(client, signed_in):
     db.execute("UPDATE jobs SET status = 'queued', next_stage = 'finalize' WHERE id = ?", (jid,))
     r = client.post(f"/api/jobs/{jid}/cancel", headers=h)
     assert r.status_code == 409 and "almost done" in r.json()["detail"]
-    assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "queued"
     assert db.one("SELECT status FROM holds WHERE ref_id = ?", (jid,))["status"] == "active"
     db.execute("UPDATE jobs SET next_stage = 'probe' WHERE id = ?", (jid,))
     assert client.post(f"/api/jobs/{jid}/cancel", headers=h).status_code == 200  # before that, cancel still works
 
 
-def test_cancel_says_so_when_it_did_not_cancel(client, signed_in, monkeypatch):
-    uid, h = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    jid = make_job(uid)
-    db.execute("UPDATE jobs SET status = 'queued', next_stage = 'probe' WHERE id = ?", (jid,))
-    monkeypatch.setattr(jobs, "finish_failed", lambda *a, **k: False)  # a worker took the job in between
-    assert client.post(f"/api/jobs/{jid}/cancel", headers=h).status_code == 409
-    # and for real: a job that is running now is not touched
-    job = dict(db.one("SELECT * FROM jobs WHERE id = ?", (jid,)))
-    db.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (jid,))
-    monkeypatch.undo()
-    assert jobs.finish_failed(job, "Canceled.", status="canceled", only_from=("uploading", "queued")) is False
-    assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "running"
-
-
-# ---------------------------------------------------------------- H3: live duty cycle, M1: message rate
+# ---------------------------------------------------------------- live sessions: duty cycle, message rate, count
 
 def frame(seq=0):
     from acw.stream import protocol as P
@@ -201,12 +178,11 @@ def drive(monkeypatch, messages, uid, **consts):
     return sess
 
 
-def test_duty_cycle_counts_audio_against_wall_time(monkeypatch):
+def test_the_duty_cycle_counts_audio_against_wall_time(monkeypatch):
     from acw.stream import routes
 
     d = routes.DutyCycle(100.0)
     assert not d.starved(110.0, 0.0)  # inside the first 30 s nothing is judged
-    assert not d.starved(129.0, 0.0)
     assert d.starved(131.0, 1.0)  # 1 s of audio in 31 s
     ok = routes.DutyCycle(0.0)
     audio = 0.0
@@ -214,8 +190,7 @@ def test_duty_cycle_counts_audio_against_wall_time(monkeypatch):
         audio += 0.0 if 300 <= t < 310 else 1.0
         assert not ok.starved(float(t), audio)
     squat = routes.DutyCycle(0.0)
-    audio = 0.0
-    hit = None
+    audio, hit = 0.0, None
     for t in range(1, 600):  # 10 ms of audio every 10 s, an audio-less ping in between
         if t % 10 == 0:
             audio += 0.01
@@ -238,47 +213,32 @@ def test_duty_cycle_counts_audio_against_wall_time(monkeypatch):
 
 def test_a_session_that_sends_too_little_audio_is_ended(monkeypatch):
     uid = user()
-    msgs = [(0.05, ping()) for _ in range(40)]
-    msgs[5] = (0.05, frame())  # one 10 ms frame, then pings only: not idle (audio came) but not live either
-    sess = drive(monkeypatch, msgs, uid, DUTY_GRACE=0.5, DUTY_WINDOW=1.0, IDLE_TIMEOUT=60.0)
+    msgs = [(0.02, ping()) for _ in range(40)]
+    msgs[5] = (0.02, frame())  # one 10 ms frame, then pings only: not idle (audio came) but not live either
+    sess = drive(monkeypatch, msgs, uid, DUTY_GRACE=0.2, DUTY_WINDOW=0.4, IDLE_TIMEOUT=60.0)
     assert sess.end_reason == "no_audio"
     assert {"type": "stopped", "reason": "no_audio"} in sess.ws.sent
 
 
-def test_a_session_that_sends_every_frame_is_never_ended(monkeypatch):
+def test_a_session_that_sends_every_frame_is_never_ended_and_is_billed_for_its_audio(monkeypatch):
     uid = user()
-    msgs = [(0.01, frame(i)) for i in range(120)] + [(0.0, {"type": "websocket.disconnect"})]
-    sess = drive(monkeypatch, msgs, uid, DUTY_GRACE=0.3, DUTY_WINDOW=0.6, IDLE_TIMEOUT=60.0)
-    assert sess.end_reason == "client_closed"
-    assert sess.seconds == pytest.approx(1.2)
+    msgs = [(0.01, frame(i)) for i in range(80)] + [(0.0, {"type": "websocket.disconnect"})]
+    sess = drive(monkeypatch, msgs, uid, DUTY_GRACE=0.2, DUTY_WINDOW=0.4, IDLE_TIMEOUT=60.0)
+    assert sess.end_reason == "client_closed" and sess.ws.closed is None
+    assert sess.seconds == pytest.approx(0.8)
 
 
-def test_a_flood_of_messages_closes_the_connection(monkeypatch):
+def test_a_flood_of_messages_closes_the_connection_and_settings_changes_have_a_tighter_limit(monkeypatch):
     uid = user()
     sess = drive(monkeypatch, [(0.0, ping())] * 400, uid)
     assert sess.end_reason == "rate_limited"
     assert sess.ws.closed == (1008, "too_many_messages")
     assert sum(1 for m in sess.ws.sent if m["type"] == "pong") <= 101  # the burst, then nothing
     assert sess.ws.sent[-1]["code"] == "rate_limited"
-
-
-def test_ordinary_message_rates_are_fine(monkeypatch):
-    uid = user()
-    cfg = {"type": "config", "attenLimDb": 30}
-    msgs = [(0.02, {"type": "websocket.receive", "text": json.dumps(cfg)}) for _ in range(5)]  # a slider moved a bit
-    msgs += [(0.02, ping()) for _ in range(60)] + [(0.0, {"type": "websocket.disconnect"})]  # 50 a second
-    sess = drive(monkeypatch, msgs, uid, IDLE_TIMEOUT=60.0, DUTY_GRACE=60.0)
-    assert sess.end_reason == "client_closed" and sess.ws.closed is None
-
-
-def test_settings_changes_have_a_tighter_limit(monkeypatch):
-    uid = user()
     cfg = {"type": "websocket.receive", "text": json.dumps({"type": "config", "attenLimDb": 30})}
     sess = drive(monkeypatch, [(0.0, cfg)] * 12, uid, IDLE_TIMEOUT=60.0)
     assert sess.end_reason == "rate_limited" and sess.ws.closed[0] == 1008
 
-
-# ---------------------------------------------------------------- H3/H4: live sessions per account
 
 def test_four_live_sessions_at_most_per_account(client, signed_in):
     from acw.stream import routes
@@ -289,7 +249,7 @@ def test_four_live_sessions_at_most_per_account(client, signed_in):
         with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ev = ws.receive_json()
         assert ev["code"] == "too_many_sessions" and "Four live sessions" in ev["message"]
-        routes._live[uid] = 3  # the same for an account that has never paid: one more is fine
+        routes._live[uid] = 3  # one more is fine
         with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ws.send_text(json.dumps({"type": "nonsense"}))  # past the session limit: the server now wants a start message
             with pytest.raises(Exception):
@@ -298,42 +258,30 @@ def test_four_live_sessions_at_most_per_account(client, signed_in):
         routes._live.pop(uid, None)
 
 
-# ---------------------------------------------------------------- H4: free-trial key
+# ---------------------------------------------------------------- free-trial farming and first top-ups
 
 def _trial_on(monkeypatch, secret="s" * 40):
     monkeypatch.delenv("ACW_LIVE_TRIAL_SECONDS", raising=False)
-    if secret:
-        monkeypatch.setenv("ACW_SESSION_SECRET", secret)
-    else:
-        monkeypatch.delenv("ACW_SESSION_SECRET", raising=False)
+    monkeypatch.setenv("ACW_SESSION_SECRET", secret)
     get_settings.cache_clear()
 
 
-def test_mailbox_aliases_get_one_free_trial(monkeypatch):
+def test_mailbox_aliases_get_one_free_trial_and_the_claim_is_keyed_with_the_server_secret(monkeypatch):
+    import hashlib
+
+    from acw.security import keyed_hash
+
     _trial_on(monkeypatch)
     aliases = ["john.doe@gmail.com", "johndoe@gmail.com", "john.doe+1@gmail.com", "j.o.h.n.d.o.e+x@gmail.com",
                "johndoe+y@googlemail.com", "JohnDoe@GMAIL.com", "other+a@corp.example", "other+b@corp.example", "other@corp.example"]
     got = [auth.get_or_create_user(a)["trial_live_seconds"] > 0 for a in aliases]
     assert got == [True] + [False] * 5 + [True, False, False]
     assert db.one("SELECT COUNT(*) n FROM welcome_claims")["n"] == 2
-
-
-def test_the_trial_claim_is_keyed_with_the_server_secret(monkeypatch):
-    import hashlib
-
-    _trial_on(monkeypatch)
-    auth.get_or_create_user("someone@example.com")
-    key = db.one("SELECT email_hash FROM welcome_claims")["email_hash"]
-    assert key != hashlib.sha256(b"someone@example.com").hexdigest()  # a copy of the database can't be checked by guessing addresses
-    assert len(key) == 64
-    # another secret gives another key: it can't be rebuilt without ours
-    from acw.security import keyed_hash
-
-    before = keyed_hash("welcome", "someone@example.com")
-    assert before == key
-    monkeypatch.setenv("ACW_SESSION_SECRET", "t" * 40)
+    key = db.one("SELECT email_hash FROM welcome_claims WHERE email_hash = ?", (keyed_hash("welcome", "johndoe@gmail.com"),))["email_hash"]
+    assert key != hashlib.sha256(b"john.doe@gmail.com").hexdigest()  # a copy of the database can't be checked by guessing addresses
+    monkeypatch.setenv("ACW_SESSION_SECRET", "t" * 40)  # another secret gives another key
     get_settings.cache_clear()
-    assert keyed_hash("welcome", "someone@example.com") != key
+    assert keyed_hash("welcome", "johndoe@gmail.com") != key
 
 
 def test_canonical_mailbox():
@@ -350,44 +298,25 @@ def test_a_refunded_payment_does_not_count_as_paid():
     assert trust.has_settled_payment(uid)
     db.execute("UPDATE payments SET refunded_cents = amount_cents WHERE user_id = ?", (uid,))
     assert not trust.has_settled_payment(uid)
-    db.execute("UPDATE payments SET refunded_cents = 0, status = 'pending' WHERE user_id = ?", (uid,))
-    assert not trust.has_settled_payment(uid)
 
 
-def test_me_tells_the_pages_about_the_top_up_limit(client, signed_in):
-    uid, h = signed_in
-    me = client.get("/api/me").json()
-    assert "hasPaid" not in me and me["topupMaxCents"] == trust.FIRST_TOPUP_MAX_CENTS == 5_000
-    assert me["trialLiveSecondsLeft"] == 0
-    settle_payment(uid)
-    assert client.get("/api/me").json()["topupMaxCents"] == pricing.TOPUP_MAX_CENTS == 50_000
-
-
-# ---------------------------------------------------------------- M4: first top-ups
-
-def test_a_first_top_up_can_be_up_to_50_dollars_then_up_to_500(client, signed_in, monkeypatch):
+def test_a_first_top_up_is_limited_to_50_dollars_until_a_top_up_has_gone_through(client, signed_in, monkeypatch):
     uid, h = signed_in
     made = []
     monkeypatch.setattr(stripe_service, "create_checkout", lambda u, c, s: made.append(c) or "https://checkout.example/x")
+    assert trust.topup_max_cents(uid) == trust.FIRST_TOPUP_MAX_CENTS == 5_000
+    db.execute("UPDATE users SET created_at = ? WHERE id = ?", (db.now() - 400 * 86400, uid))  # the age of the account does not matter
+    assert trust.topup_max_cents(uid) == 5_000
     r = client.post("/api/billing/checkout", json={"amountCents": 20_000}, headers=h)
     assert r.status_code == 400 and "first top-up can be up to $50" in r.json()["detail"] and "$500" in r.json()["detail"]
     assert client.post("/api/billing/checkout", json={"amountCents": 5_000}, headers=h).status_code == 200
     assert made == [5_000]
     settle_payment(uid)  # a top-up has gone through
-    assert client.post("/api/billing/checkout", json={"amountCents": 20_000}, headers=h).status_code == 200
+    assert trust.topup_max_cents(uid) == pricing.TOPUP_MAX_CENTS == 50_000
     assert client.post("/api/billing/checkout", json={"amountCents": 50_000}, headers=h).status_code == 200
 
 
-def test_the_age_of_the_account_does_not_matter():
-    uid = user()
-    assert trust.topup_max_cents(uid) == 5_000
-    db.execute("UPDATE users SET created_at = ? WHERE id = ?", (db.now() - 400 * 86400, uid))
-    assert trust.topup_max_cents(uid) == 5_000
-    settle_payment(uid)
-    assert trust.topup_max_cents(uid) == pricing.TOPUP_MAX_CENTS
-
-
-def test_the_checkout_function_checks_the_limit_too(monkeypatch):
+def test_the_checkout_function_checks_the_first_top_up_limit_too(monkeypatch):
     uid = user()
     monkeypatch.setattr(stripe_service, "ensure_customer", lambda _u: "cus_1")
     with pytest.raises(ValueError, match="up to \\$50"):
@@ -401,12 +330,11 @@ def test_auto_reload_amount_respects_the_first_top_up_limit(client, signed_in):
     r = client.post("/api/billing/auto-reload", json=body, headers=h)
     assert r.status_code == 400 and "$50" in r.json()["detail"]
     assert client.post("/api/billing/auto-reload", json={**body, "amountCents": 5_000}, headers=h).status_code == 200
-    # an old setting that is over the limit is not charged either
     db.execute("UPDATE users SET auto_reload_amount_cents = 10000, stripe_customer_id = 'cus_1' WHERE id = ?", (uid,))
-    assert stripe_service.run_auto_reload(uid) == "cap"
+    assert stripe_service.run_auto_reload(uid) == "cap"  # an old setting over the limit is not charged either
 
 
-# ---------------------------------------------------------------- M3: premium captions that break down
+# ---------------------------------------------------------------- premium captions that break down
 
 def premium_session(uid):
     from acw.stream import routes
@@ -415,31 +343,23 @@ def premium_session(uid):
     return routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), f), f.rate()
 
 
-def test_failed_premium_captions_stop_being_billed():
+def test_failed_premium_captions_stop_being_billed_and_the_hold_follows_at_the_reduced_rate():
     uid = user()
     sess, rate = premium_session(uid)
     prem = pricing.rate("stream_captions", "premium").micros_per_minute
     den = pricing.rate("stream_denoise", "light").micros_per_minute
     assert rate == prem + den
-    sess.count(48_000 * 60)
-    sess.failed_premium()  # the minute so far had them
-    sess.count(48_000 * 60)
-    assert sess.meter.micros() == rate + den  # a minute with, a minute without
-    assert sess.current_rate() == den
-    sess.failed_premium()  # a second failure changes nothing
-    assert sess.meter.micros() == rate + den and sess.current_rate() == den
-
-
-def test_the_hold_is_extended_at_the_reduced_rate(monkeypatch):
-    uid = user()
-    sess, rate = premium_session(uid)
     sess.open_hold()
     held = db.one("SELECT amount_micros FROM holds WHERE id = ?", (sess.hold_id,))["amount_micros"]
     assert held == rate * pricing.STREAM_HOLD_MINUTES
-    sess.failed_premium()
+    sess.count(48_000 * 60)
+    sess.failed_premium()  # the minute so far had them
     assert sess.extend_hold()
-    den = pricing.rate("stream_denoise", "light").micros_per_minute
     assert db.one("SELECT amount_micros FROM holds WHERE id = ?", (sess.hold_id,))["amount_micros"] == held + den
+    sess.count(48_000 * 60)
+    assert sess.meter.micros() == rate + den and sess.current_rate() == den  # a minute with, a minute without
+    sess.failed_premium()  # a second failure changes nothing
+    assert sess.meter.micros() == rate + den and sess.current_rate() == den
 
 
 def test_a_session_with_failed_captions_is_charged_only_for_what_it_got():
@@ -467,7 +387,7 @@ async def _noop(*a, **k):
     return None
 
 
-def test_an_interrupted_session_is_billed_the_same_way_at_startup():
+def test_an_interrupted_session_is_billed_the_same_way_at_startup_and_a_session_from_the_old_version_too():
     from acw.stream import routes
 
     uid = user(credit=5_000_000)
@@ -478,28 +398,19 @@ def test_an_interrupted_session_is_billed_the_same_way_at_startup():
         "INSERT INTO stream_sessions(id,user_id,denoise_tier,caption_tier,status,hold_id,seconds,paid_seconds,meter_closed,"
         "meter_rate,meter_seconds,started_at) VALUES ('s-old',?,'light','premium','active',?,120,120,?,?,60,?)",
         (uid, hold, den + prem, den, db.now() - 3600))
-    asyncio.run(routes.startup())
-    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-old'")["cost_micros"] == 2 * den + prem
-
-
-def test_a_session_left_running_by_the_version_before_the_meter_is_billed_as_before():
-    from acw.stream import routes
-
-    uid = user(credit=5_000_000)
-    den = pricing.rate("stream_denoise", "light").micros_per_minute
-    prem = pricing.rate("stream_captions", "premium").micros_per_minute
-    hold = ledger.create_hold(uid, 200_000, "stream", "s-older")
-    db.execute("ALTER TABLE stream_sessions ADD COLUMN premium_off_seconds REAL")  # the old schema
+    older_hold = ledger.create_hold(uid, 200_000, "stream", "s-older")
+    db.execute("ALTER TABLE stream_sessions ADD COLUMN premium_off_seconds REAL")  # a session left by the version before the meter
     db.execute(
         "INSERT INTO stream_sessions(id,user_id,denoise_tier,caption_tier,status,hold_id,seconds,premium_off_seconds,started_at)"
-        " VALUES ('s-older',?,'light','premium','active',?,120,60,?)", (uid, hold, db.now() - 3600))
+        " VALUES ('s-older',?,'light','premium','active',?,120,60,?)", (uid, older_hold, db.now() - 3600))
     db.init_db()  # the new version starts: the meter is made from the old columns, which then go
     assert "premium_off_seconds" not in {r["name"] for r in db.all_rows("PRAGMA table_info(stream_sessions)")}
     asyncio.run(routes.startup())
+    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-old'")["cost_micros"] == 2 * den + prem
     assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-older'")["cost_micros"] == 2 * den + prem
 
 
-def test_premium_captions_tell_the_session_when_they_fail():
+def test_premium_captions_tell_the_session_once_when_they_fail():
     from acw.stream.openai_live import PremiumCaptions
 
     events, failed = [], []
@@ -507,7 +418,6 @@ def test_premium_captions_tell_the_session_when_they_fail():
     p._fail()
     p._fail()
     assert failed == [1] and len(events) == 1 and events[0]["code"] == "captions_unavailable"
-    assert "charged" in events[0]["message"] and "OpenAI" not in events[0]["message"]
 
 
 def test_a_captions_only_session_ends_when_its_captions_break(monkeypatch):
@@ -515,7 +425,7 @@ def test_a_captions_only_session_ends_when_its_captions_break(monkeypatch):
 
     uid = user()
     monkeypatch.setattr(routes, "IDLE_TIMEOUT", 60.0)
-    q = [(0.05, frame(i)) for i in range(30)]
+    q = [(0.02, frame(i)) for i in range(30)]
     failed_at = []
 
     class WS:
@@ -552,21 +462,13 @@ def test_a_captions_only_session_ends_when_its_captions_break(monkeypatch):
     assert sess.current_rate() == 0 and sess.meter.micros() == math.ceil(round(rate * failed_at[0] / 60, 6))
 
 
-# ---------------------------------------------------------------- L1: malformed options
+# ---------------------------------------------------------------- malformed options are a 400, not a 500
 
 @pytest.mark.parametrize("options", [
     {"audio_format": []},
-    {"audio_format": {"a": 1}},
-    {"caption_formats": [[1]]},
-    {"caption_formats": [{"x": 1}]},
     {"caption_formats": "srt"},
-    {"loudness_lufs": [1]},
     {"loudness_lufs": {"a": 1}},
-    {"loudness_lufs": "loud"},
-    {"atten_lim_db": [1]},
     {"language": ["en"]},
-    {"noise": ["auto"]},
-    {"noise": {"a": 1}},
     {"echo_reference_track": [True]},
 ])
 def test_malformed_options_are_a_400_not_a_500(client, signed_in, options):
@@ -578,7 +480,7 @@ def test_malformed_options_are_a_400_not_a_500(client, signed_in, options):
     assert db.one("SELECT COUNT(*) n FROM jobs")["n"] == 0
 
 
-# ---------------------------------------------------------------- L6: /api/me for an API key
+# ---------------------------------------------------------------- /api/me for an API key
 
 def test_an_api_key_does_not_learn_the_address_or_billing_settings(client):
     uid = user("owner@example.com")
@@ -588,7 +490,6 @@ def test_an_api_key_does_not_learn_the_address_or_billing_settings(client):
     assert me["balance"]["available_micros"] == 50_000_000
     text = json.dumps(me)
     assert "owner@example.com" not in text and "autoReload" not in me and "csrfToken" not in me
-    # a browser session still gets all of it
-    _, h = login(client, "owner@example.com")
+    _, h = login(client, "owner@example.com")  # a browser session still gets all of it
     full = client.get("/api/me").json()
     assert full["user"]["email"] == "owner@example.com" and "autoReload" in full

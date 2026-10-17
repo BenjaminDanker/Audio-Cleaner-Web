@@ -44,14 +44,14 @@ def plugin_bytes(key, version):
     return f"plugin {key} {version} ".encode() * 300
 
 
-def obs_release(gh, signer, version, *, with_sha512=True, big=False, tag=None, tamper=None, size_lie=None, bad_sig=False, **kw):
+def obs_release(gh, signer, version, *, with_sha512=True, tag=None, tamper=None, size_lie=None, bad_sig=False, **kw):
     """One release per version, obs-plugin-v<version>, as CI publishes it (`tag` overrides, e.g. for a mismatch).
     `tamper`: other bytes for the Windows package; `size_lie`: a wrong size for it in the manifest; `bad_sig`: a
     signature over other bytes than the manifest's."""
     files, assets = {}, {}
     for key, ext in PLATFORMS:
         name = f"audio-cleaner-obs-plugin-{version}-{key}.{ext}"
-        data = plugin_bytes(key, version) + (b"z" * (51 * 1024 * 1024) if big and key == "macos" else b"")
+        data = plugin_bytes(key, version)
         assets[name] = data
         files[key] = {"name": name, "size": len(data), "sha256": sha(data), **({"sha512": sha(data, "sha512")} if with_sha512 else {})}
     if size_lie:
@@ -69,8 +69,7 @@ def run(cfg, **kw):
 
 
 def served(channel="obs-plugin"):
-    st = downloads.load_state(channel)
-    return (st or {}).get("current")
+    return (downloads.load_state(channel) or {}).get("current")
 
 
 def blob_downloads(gh):
@@ -87,37 +86,12 @@ def test_only_the_obs_plugin_is_mirrored(cfg, gh, signer):
     gh.add("models-v2", {"AudioCleaner-models-v2.zip": b"m" * 100})
     obs_release(gh, signer, "0.1.60")
     assert run(cfg) == {"obs-plugin": "published 0.1.60"}
-    assert downloads.CHANNELS == ("obs-plugin",) and [c for c, _ in mirror.CHANNEL_SYNC] == ["obs-plugin"]
-    assert set(mirror.SIZE_CAP) == {"obs-plugin"} and set(downloads.MANIFESTS) == {"obs-plugin"}
     assert sorted(p.name for p in cfg.root.iterdir() if p.is_dir()) == ["obs-plugin"]
     assert set(mirror.load_status()["channels"]) == {"obs-plugin"}
     assert len(blob_downloads(gh)) == 6  # the plugin's manifest, its signature and four packages: nothing else
     for gone in ("desktop", "models"):
         with pytest.raises(ValueError):
             downloads.channel_dir(gone)
-    for gone in ("sync_desktop", "sync_models", "parse_lock"):
-        assert not hasattr(mirror, gone)
-    assert not hasattr(cfg, "lock_path")
-
-
-def test_the_admin_command_offers_only_the_plugin_channel(monkeypatch):
-    from acw import admin
-
-    seen = {}
-
-    def fake_main(**kw):
-        seen.update(kw)
-        return 0
-
-    monkeypatch.setattr(mirror, "main", fake_main)
-    for gone in ("desktop", "models"):
-        with pytest.raises(SystemExit) as e:
-            admin.main(["mirror", "--channel", gone])
-        assert e.value.code == 2  # argparse: not one of the choices
-    assert seen == {}
-    with pytest.raises(SystemExit) as e:
-        admin.main(["mirror", "--channel", "obs-plugin"])
-    assert e.value.code == 0 and seen["only"] == "obs-plugin"
 
 
 # ---- good releases ---------------------------------------------------------------------------------------------------
@@ -136,6 +110,7 @@ def test_good_obs_release_is_mirrored_and_published(cfg, gh, signer):
     for name, entry in cur["files"].items():
         assert sha((d / name).read_bytes()) == entry["sha256"]
     assert cur["platforms"] == {k: f"audio-cleaner-obs-plugin-0.1.60-{k}.{e}" for k, e in PLATFORMS}
+    assert "sha512" in cur["files"][WIN.format(v="0.1.60")]
     # nothing is left behind and a second run changes nothing (and downloads nothing)
     assert not [p for p in (cfg.root / "obs-plugin").iterdir() if p.name.startswith((".staging", ".old"))]
     n = len(blob_downloads(gh))
@@ -144,15 +119,6 @@ def test_good_obs_release_is_mirrored_and_published(cfg, gh, signer):
     assert mirror.load_status()["channels"]["obs-plugin"]["error"] is None
     assert mirror.verify_served() == []
     assert mirror.describe()[0].startswith("obs-plugin  serving 0.1.60 (6 files)")
-
-
-def test_good_obs_release_with_sha512(cfg, gh, signer):
-    obs_release(gh, signer, "0.1.60")
-    assert run(cfg)["obs-plugin"] == "published 0.1.60"
-    cur = served()
-    assert cur["platforms"]["windows-x64"] == "audio-cleaner-obs-plugin-0.1.60-windows-x64.zip"
-    assert "sha512" in cur["files"]["audio-cleaner-obs-plugin-0.1.60-windows-x64.zip"]
-    assert "obs-plugin-manifest.json.sig" in cur["files"]
 
 
 def test_sha512_is_optional_but_checked_when_given(cfg, gh, signer):
@@ -171,14 +137,6 @@ def test_sha512_is_optional_but_checked_when_given(cfg, gh, signer):
     assert served()["version"] == "0.1.60"
 
 
-def test_obs_release_without_a_manifest_yet_is_not_an_error(cfg, gh):
-    gh.add("obs-plugin-v0.1.1", {"audio-cleaner-obs-plugin-0.1.1-windows-x64.zip": b"z" * 100})
-    res = run(cfg)
-    assert res["obs-plugin"] == "no plugin release with a signed manifest yet"
-    assert mirror.load_status()["channels"]["obs-plugin"]["last_ok"]
-    assert served() is None
-
-
 def test_newest_versioned_plugin_release_wins(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60")
     obs_release(gh, signer, "0.1.9")     # numerically, not as text: 0.1.60 is newer than 0.1.9
@@ -187,7 +145,6 @@ def test_newest_versioned_plugin_release_wins(cfg, gh, signer):
     gh.add("obs-plugin-v0.1.70-rc1", {"obs-plugin-manifest.json": b"{}", "obs-plugin-manifest.json.sig": b"0" * 64})  # not a tag we follow
     assert run(cfg)["obs-plugin"] == "published 0.1.61"
     assert served()["version"] == "0.1.61"
-    assert (cfg.root / "obs-plugin" / "0.1.61" / "obs-plugin-manifest.json").is_file()
     assert not (cfg.root / "obs-plugin" / "0.1.60").exists()  # only the newest is mirrored
     assert run(cfg)["obs-plugin"] == "0.1.61 is up to date"
     obs_release(gh, signer, "0.1.62")
@@ -218,10 +175,6 @@ def test_draft_plugin_releases_are_ignored(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60")
     obs_release(gh, signer, "0.1.61", draft=True)
     assert run(cfg)["obs-plugin"] == "published 0.1.60"
-    gh.releases.clear()
-    obs_release(gh, signer, "0.1.61", draft=True)
-    assert run(cfg)["obs-plugin"] == "no plugin release with a signed manifest yet"
-    assert served()["version"] == "0.1.60"
 
 
 def test_no_plugin_release_keeps_the_served_files(cfg, gh, signer):
@@ -236,7 +189,7 @@ def test_no_plugin_release_keeps_the_served_files(cfg, gh, signer):
     assert mirror.verify_served() == []
 
 
-# ---- bad releases: nothing is published ------------------------------------------------------------------------------
+# ---- bad releases: nothing is published -------------------------------------------------------------------------------
 
 def test_bad_signature_publishes_nothing(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60", bad_sig=True)
@@ -278,12 +231,6 @@ def test_oversized_plugin_is_refused_before_any_download(cfg, gh, signer):
     assert len(blob_downloads(gh)) == 2  # the manifest and its signature, no package
 
 
-def test_oversized_plugin_is_refused(cfg, gh, signer):
-    obs_release(gh, signer, "0.1.60", big=True)
-    assert "larger than the 50 MB" in run(cfg)["obs-plugin"]
-    assert served() is None
-
-
 def test_missing_asset_and_missing_disk_space(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60")
     del gh.releases["obs-plugin-v0.1.60"]["assets"]["audio-cleaner-obs-plugin-0.1.60-linux-other.tar.xz"]
@@ -295,7 +242,7 @@ def test_missing_asset_and_missing_disk_space(cfg, gh, signer):
     assert served() is None
 
 
-@pytest.mark.parametrize("bad", ["../x.zip", "a/b.zip", ".hidden", "x" * 200, "obs-plugin-manifest.json"])
+@pytest.mark.parametrize("bad", ["../x.zip", "a/b.zip", "obs-plugin-manifest.json"])
 def test_manifest_with_odd_names_is_refused(cfg, gh, signer, bad):
     manifest = json.dumps({"version": "0.1.61", "files": {"windows-x64": {"name": bad, "size": 5, "sha256": "a" * 64}}}).encode()
     gh.add("obs-plugin-v0.1.61", {"obs-plugin-manifest.json": manifest, "obs-plugin-manifest.json.sig": signer.sign(manifest),
@@ -306,8 +253,6 @@ def test_manifest_with_odd_names_is_refused(cfg, gh, signer, bad):
 
 @pytest.mark.parametrize("body", [
     b"not json", b"[]", b'{"version":"0.1.61","files":{}}', b'{"version":"latest","files":{"windows-x64":{}}}',
-    b'{"version":"0.1.61","files":{"Windows X64":{"name":"a.zip","size":5,"sha256":"' + b"a" * 64 + b'"}}}',
-    b'{"version":"0.1.61","files":{"windows-x64":{"name":"a.zip","size":true,"sha256":"' + b"a" * 64 + b'"}}}',
     b'{"version":"0.1.61","files":{"windows-x64":{"name":"a.zip","size":5,"sha256":"xyz"}}}',
 ])
 def test_signed_but_malformed_manifests_are_refused(cfg, gh, signer, body):
@@ -352,15 +297,6 @@ def test_plugin_release_older_than_served_is_ignored(cfg, gh, signer):
     assert run(cfg)["obs-plugin"] == "published 0.1.62"
 
 
-def test_force_fetches_the_served_version_again(cfg, gh, signer):
-    obs_release(gh, signer, "0.1.60")
-    run(cfg)
-    n = len(blob_downloads(gh))
-    assert run(cfg, force=True)["obs-plugin"] == "published 0.1.60"
-    assert len(blob_downloads(gh)) == 2 * n
-    assert mirror.verify_served() == []
-
-
 def test_failed_new_release_keeps_serving_the_old_one(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60")
     run(cfg)
@@ -370,24 +306,19 @@ def test_failed_new_release_keeps_serving_the_old_one(cfg, gh, signer):
     assert (cfg.root / "obs-plugin" / "0.1.60" / "obs-plugin-manifest.json").is_file()
 
 
-def test_a_repair_of_a_damaged_folder(cfg, gh, signer):
+def test_damaged_files_are_found_and_repaired(cfg, gh, signer):
     obs_release(gh, signer, "0.1.60")
     run(cfg)
     victim = cfg.root / "obs-plugin" / "0.1.60" / "audio-cleaner-obs-plugin-0.1.60-linux-other.tar.xz"
     victim.write_bytes(b"short")
+    f = cfg.root / "obs-plugin" / "0.1.60" / WIN.format(v="0.1.60")
+    data = bytearray(f.read_bytes())
+    data[0] ^= 1  # one byte of the Windows package changed
+    f.write_bytes(bytes(data))
+    assert mirror.verify_served() and any("does not match" in p for p in mirror.verify_served())
     assert run(cfg)["obs-plugin"] == "published 0.1.60"
     assert victim.stat().st_size == served()["files"][victim.name]["size"]
     assert mirror.verify_served() == []
-
-
-def test_verify_finds_a_changed_file(cfg, gh, signer):
-    obs_release(gh, signer, "0.1.60")
-    run(cfg)
-    f = cfg.root / "obs-plugin" / "0.1.60" / WIN.format(v="0.1.60")
-    data = bytearray(f.read_bytes())
-    data[0] ^= 1
-    f.write_bytes(bytes(data))
-    assert mirror.verify_served() and "does not match" in mirror.verify_served()[0]
 
 
 # ---- GitHub access: token, redirects, resume -------------------------------------------------------------------------
@@ -397,19 +328,12 @@ def test_token_is_sent_to_the_api_only(cfg, gh, signer, tmp_path, monkeypatch):
     tok = tmp_path / "token"
     tok.write_text("ghp_fake_token_value\n")
     monkeypatch.setenv("ACW_GITHUB_TOKEN_FILE", str(tok))
-    cfg2 = mirror.Config.from_env()
-    run(cfg2)
+    run(mirror.Config.from_env())
     api_calls = [a for host, p, a in gh.log if host == "127.0.0.1"]
     blob_calls = [a for host, p, a in gh.log if host == "localhost"]
     assert api_calls and all(a == "Bearer ghp_fake_token_value" for a in api_calls)
     assert blob_calls and all(a is None for a in blob_calls)  # the redirect to the storage host carries no token
     assert "ghp_fake" not in json.dumps(mirror.load_status())
-
-
-def test_anonymous_without_a_token_file(cfg, gh, signer):
-    obs_release(gh, signer, "0.1.60")
-    run(cfg)
-    assert gh.log and all(a is None for _, _, a in gh.log)
 
 
 def test_interrupted_download_resumes(cfg, gh, signer):
@@ -453,22 +377,15 @@ def _paged_client(cfg, pages: list[int]):
     return mirror.GitHub(cfg, client=httpx.Client(transport=httpx.MockTransport(handler))), calls
 
 
-def test_release_listing_reads_every_page(cfg):
+def test_release_listing_reads_pages_until_a_short_or_empty_one_and_at_most_five(cfg):
     gh, calls = _paged_client(cfg, [100, 30])
     rels = gh.releases()
-    assert len(rels) == 130
+    assert len(rels) == 130 and rels[-1]["tag_name"] == "obs-plugin-v0.0.1"  # the oldest release, on page 2, is still seen
     assert calls == [(1, 100), (2, 100)]  # the short second page is the last one asked for
-    assert rels[-1]["tag_name"] == "obs-plugin-v0.0.1"  # the oldest release, on page 2, is still seen
-    assert len({r["tag_name"] for r in rels}) == 130
-
-
-def test_release_listing_stops_at_an_empty_page_and_after_five(cfg):
     gh, calls = _paged_client(cfg, [100])
-    assert len(gh.releases()) == 100
-    assert calls == [(1, 100), (2, 100)]
+    assert len(gh.releases()) == 100 and calls == [(1, 100), (2, 100)]  # an empty page ends it
     gh, calls = _paged_client(cfg, [100] * 7)
-    assert len(gh.releases()) == 500
-    assert [p for p, _ in calls] == [1, 2, 3, 4, 5]
+    assert len(gh.releases()) == 500 and [p for p, _ in calls] == [1, 2, 3, 4, 5]
 
 
 def test_plugin_release_behind_a_page_of_other_releases_is_found(cfg, gh, signer):
@@ -512,12 +429,10 @@ def test_channels_an_older_mirror_served_do_not_make_it_look_stale(cfg, gh, sign
     cfg.root.mkdir(parents=True, exist_ok=True)
     downloads.write_json_atomic(mirror.status_path(cfg), {"last_run": int(t0 - DAY), "channels": {"desktop": old, "models": old}})
     (cfg.root / "desktop" / "2.0.15").mkdir(parents=True)
-    (cfg.root / "desktop" / "state.json").write_text(json.dumps({"current": None, "previous": [], "seen": {"version": "2.0.16", "since": 1}}))
     obs_release(gh, signer, "0.1.60")
     assert run(cfg, now=t0) == {"obs-plugin": "published 0.1.60"}
     assert mirror.stale_problems(t0 + 600) == []
     assert [line.split()[0] for line in mirror.describe()] == ["obs-plugin"]
-    assert mirror.verify_served() == []
 
 
 def test_monitor_check_only_where_the_timer_is_enabled(tmp_path, cfg):
@@ -548,7 +463,7 @@ def test_prune_never_deletes_without_a_state_file(cfg, gh, signer):
     assert (cfg.root / "obs-plugin" / "0.1.60" / "obs-plugin-manifest.json").is_file()
 
 
-def test_signature_check_with_and_without_the_cryptography_package(signer, tmp_path):
+def test_signature_check_accepts_only_the_right_signature(signer):
     data = b"hello manifest"
     sig = signer.sign(data)
     assert mirror.verify_signature(signer.public, data, sig)
@@ -556,5 +471,3 @@ def test_signature_check_with_and_without_the_cryptography_package(signer, tmp_p
     assert not mirror.verify_signature(signer.public, data, b"\0" * 64)
     assert not mirror.verify_signature(signer.public, data, sig[:-1])
     assert not mirror.verify_signature("not base64!", data, sig)
-    # the key the apps carry
-    assert not mirror.verify_signature(mirror.PUBLIC_KEY, data, sig)

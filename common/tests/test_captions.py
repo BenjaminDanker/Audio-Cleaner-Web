@@ -1,4 +1,6 @@
 """Captions for languages written without spaces, and that other languages are unchanged."""
+import pytest
+
 from acw_common import captions
 from acw_common.captions import Segment, Word
 
@@ -9,17 +11,13 @@ def chars(text, step=0.3):
     return [Word(i * step, (i + 1) * step, ch) for i, ch in enumerate(text)]
 
 
-def test_chinese_characters_are_joined_without_spaces_and_lines_break_by_width():
-    cues = captions.build_cues([Segment(0, 6.5, CHINESE, chars(CHINESE))], "zh")
+@pytest.mark.parametrize("language", ["zh", None])  # given, or guessed from the text
+def test_chinese_characters_are_joined_without_spaces_and_lines_break_by_width(language):
+    cues = captions.build_cues([Segment(0, 6.5, CHINESE, chars(CHINESE))], language)
     text = "".join("".join(c.lines) for c in cues)
     assert text == CHINESE and " " not in text
     assert all(len(line) * 2 <= captions.MAX_LINE for c in cues for line in c.lines)  # full-width characters
     assert all(len(c.lines) <= captions.MAX_LINES for c in cues)
-
-
-def test_the_language_can_be_guessed_from_the_text():
-    cues = captions.build_cues([Segment(0, 6, CHINESE, chars(CHINESE, 0.25))])
-    assert " " not in "".join("".join(c.lines) for c in cues)
 
 
 def test_thai_without_word_timings_is_wrapped_by_characters():

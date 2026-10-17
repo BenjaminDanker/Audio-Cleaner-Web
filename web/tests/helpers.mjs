@@ -1,4 +1,4 @@
-// Shared helpers for the Playwright end-to-end checks (see tests/e2e.mjs).
+// Shared helpers for the Playwright checks of the website (see the suites in this folder and web/package.json).
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -43,7 +43,7 @@ export async function signIn(page, email) {
   await page.waitForURL((u) => u.pathname.startsWith('/audio/') && !u.pathname.startsWith('/audio/login'), { timeout: 15000 });
 }
 
-let results = [];
+const results = [];
 export async function check(name, fn) {
   const t0 = Date.now();
   try {
@@ -53,7 +53,12 @@ export async function check(name, fn) {
   } catch (e) {
     results.push({ name, ok: false, detail: e.message });
     console.log(`FAIL ${name} -- ${e.message.split('\n')[0]}`);
+    if (e.message.includes('\n')) console.log(e.message.split('\n').slice(1, 12).map((l) => `     ${l}`).join('\n').slice(0, 1500));
   }
+}
+/** A check that cannot pass on the current product because of a known product bug: printed, never silently dropped. */
+export function skip(name, reason) {
+  console.log(`SKIP ${name} -- KNOWN PRODUCT BUG: ${reason}`);
 }
 export const summary = () => results;
 
@@ -90,4 +95,3 @@ export async function dropFile(page, path, { recommended = false } = {}) {
   if (!recommended) await restoreOldDefaults(page);
   await page.waitForTimeout(300);
 }
-export const startButton = (page) => page.getByTestId('start');
