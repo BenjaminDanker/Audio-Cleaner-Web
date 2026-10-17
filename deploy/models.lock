@@ -93,6 +93,6 @@ member   -         08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d65
 member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75  397857704 models/sidon/sidon_fe.onnx                           models-v1:sidon/sidon_fe.onnx
 
 local    optional  f4dd2f350f3d41dee721567b7d5c351cb7122c27be9b8fc110ad7cf721e62b1f   15361376 bin/libdf-tract021.so                                older libDF build (tract 0.21), only used by native/deepfilter/test_native.py to compare outputs
-local    -         928894bad1373452e2978ea30f06273856775b9814c1e2fec42d040436361403   25395576 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte
+local    -         20383b5926de53220c65c7d0cb1895f73bf0b16947c920a588c1af6907f2c890   25399704 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte
 local    optional  d99358ebe4081f13c0ba12cb79e9d77bc9707dfda9ad4151d5ef5f2afaee4caa      15013 wasm/df.js                                           browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
 local    optional  8ed0596104271ff3503d79ae1571b4e5674d20f32982d0781b80c70f1c4ac4c1   14028025 wasm/df_bg.wasm                                      browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh

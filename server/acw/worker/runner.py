@@ -255,7 +255,7 @@ ASR_MERGE_GAP_S = 0.4
 
 def _write_asr_chunks(ff, job_dir: Path, x16) -> None:
     """Cut 16 kHz audio into speech segments of at most ASR_SEGMENT_MAX_S
-    (Silero VAD, bundled with faster-whisper) and encode each as mp3."""
+    (Silero VAD, bundled with faster-whisper) and encode each as mp3 (64 kbps, a few chunks per FFmpeg run)."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     chunk_dir = job_dir / "asr_chunks"
@@ -273,10 +273,9 @@ def _write_asr_chunks(ff, job_dir: Path, x16) -> None:
             merged[-1][1] = b
         else:
             merged.append([a, b])
-    chunks = []
-    for i, (a, b) in enumerate(merged):
-        ff.write_audio(x16[a:b], sr, chunk_dir / f"{i:04d}", "mp3")
-        chunks.append({"file": f"{i:04d}.mp3", "offset": a / sr, "seconds": (b - a) / sr})
+    names = [f"{i:04d}" for i in range(len(merged))]
+    ff.write_audio_chunks(x16, sr, [(a, b) for a, b in merged], chunk_dir, names)
+    chunks = [{"file": f"{n}.mp3", "offset": a / sr, "seconds": (b - a) / sr} for n, (a, b) in zip(names, merged)]
     (chunk_dir / "index.json").write_text(json.dumps({"chunks": chunks}))
 
 

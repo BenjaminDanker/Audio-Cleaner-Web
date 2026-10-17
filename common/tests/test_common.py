@@ -66,6 +66,48 @@ def test_clean_audio_reduces_noise_in_pauses():
     assert 20 * np.log10(before / max(after, 1e-9)) > 10  # at least 10 dB less noise between syllables
 
 
+
+
+@needs_dfn
+def test_reset_gives_the_output_of_a_fresh_instance():
+    _, a = voiced_noise(seconds=3.0, seed=1)
+    _, b = voiced_noise(seconds=3.0, seed=2)
+    a, b = a[: len(a) // 480 * 480], b[: len(b) // 480 * 480]
+    fresh = dfn.DeepFilter(LIB, MODEL)
+    want = fresh.process(b)
+    fresh.close()
+    used = dfn.DeepFilter(LIB, MODEL)
+    used.process(a)
+    used.reset()
+    assert np.array_equal(used.process(b), want)
+    # and again, after a partial run that was cancelled half way
+    used.process(a[: 480 * 37])
+    used.reset()
+    assert np.array_equal(used.process(b), want)
+    used.close()
+
+
+@needs_dfn
+def test_segments_reuse_one_instance_per_thread_with_identical_output(monkeypatch):
+    _, noisy = voiced_noise(seconds=12.0)
+    made = []
+    orig = dfn.DeepFilter.__init__
+
+    def counting(self, *a, **k):
+        made.append(1)
+        orig(self, *a, **k)
+
+    kw = dict(threads=2, segment_seconds=2.0, overlap_seconds=0.5)
+    monkeypatch.setattr(dfn.DeepFilter, "__init__", counting)
+    reused = dfn.denoise_array(noisy, LIB, MODEL, **kw)
+    assert len(made) <= 2  # six segments on two worker threads
+    monkeypatch.setattr(dfn._Instances, "acquire", lambda self: dfn.DeepFilter(*self._args))  # a new one per segment
+    made.clear()
+    fresh = dfn.denoise_array(noisy, LIB, MODEL, **kw)
+    assert len(made) == 6
+    assert np.array_equal(reused, fresh)
+
+
 @needs_dfn
 def test_segmented_denoise_is_aligned_and_denoises():
     clean, noisy = voiced_noise(seconds=9.0)
@@ -120,6 +162,36 @@ def test_mux_keeps_or_strips_metadata(tmp_path):
                               capture_output=True, text=True).stdout.strip()
         assert (tags == "hello") == keep
         assert ff.probe(out).has_video
+
+
+@needs_ff
+def test_asr_chunks_are_cut_exactly_and_in_batches(tmp_path, monkeypatch):
+    from acw_common import ffmpeg as ffmod
+
+    monkeypatch.setattr(ffmod, "ASR_CHUNKS_PER_RUN", 4)  # 10 chunks -> 3 runs, the last one holding 2
+    ff = FFmpeg(FF_DIR, threads=1)
+    sr = 16000
+    rng = np.random.default_rng(7)
+    x = (rng.standard_normal(sr * 40) * 0.02).astype(np.float32)
+    spans = []
+    for i in range(10):
+        a = sr * 4 * i + int(rng.integers(0, 4000))
+        spans.append((a, a + int(sr * rng.uniform(0.5, 3.0))))
+        x[spans[-1][0]:spans[-1][1]] += 0.3 * np.sin(2 * np.pi * (300 + 150 * i) * np.arange(spans[-1][1] - spans[-1][0]) / sr).astype(np.float32)
+    names = [f"{i:04d}" for i in range(10)]
+    files = ff.write_audio_chunks(x, sr, spans, tmp_path, names)
+    assert [f.name for f in files] == [f"{n}.mp3" for n in names]
+    assert not (tmp_path / ".chunks-graph.txt").exists()
+    for (a, b), f in zip(spans, files):
+        got = ff.decode(f, ff.probe(f), sr, 1, 10.0)[:, 0]
+        assert abs(len(got) - (b - a)) <= 1152  # mp3 frames pad the end
+        # it is this chunk's audio, from its first sample: the tone's frequency is the chunk's own
+        ref = x[a:b]
+        n = min(len(got), len(ref))
+        assert np.corrcoef(got[:n], ref[:n])[0, 1] > 0.9
+    assert ff.write_audio_chunks(x, sr, [], tmp_path, []) == []
+    with pytest.raises(ValueError):
+        ff.write_audio_chunks(x, sr, spans, tmp_path, names[:3])
 
 
 @needs_dfn

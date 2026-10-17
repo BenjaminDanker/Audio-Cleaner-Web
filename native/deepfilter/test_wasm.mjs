@@ -126,6 +126,21 @@ df.df_free(st2);
 const fPer = fMs / nfr;
 console.log(`df_process_frame  (per frame):          ${fPer.toFixed(3)} ms/frame, RTF ${(fPer / (1e3 * hop / SR)).toFixed(4)}`);
 
+// 3) df_reset: a used state, reset, gives exactly the output of a fresh one
+{
+  const a = df.df_create_with_params(model, 100, -INF, INF, INF, 0);
+  const n = Math.min(nfr, 300) * hop;
+  df.df_process_frames(a, x.subarray(0, 100 * hop));
+  df.df_reset(a);
+  const yReset = df.df_process_frames(a, x.subarray(0, n));
+  df.df_free(a);
+  const b = df.df_create_with_params(model, 100, -INF, INF, INF, 0);
+  const yFresh = df.df_process_frames(b, x.subarray(0, n));
+  df.df_free(b);
+  for (let i = 0; i < n; i++) if (yReset[i] !== yFresh[i]) throw new Error('df_reset output differs from a fresh state at ' + i);
+  console.log(`df_reset: ${n / hop} frames after a reset are bit-identical to a fresh state`);
+}
+
 const finite = (a) => a.every(Number.isFinite);
 if (!finite(yBatch) || !finite(yFrame)) throw new Error('non-finite output');
 let maxd = 0, e = 0;

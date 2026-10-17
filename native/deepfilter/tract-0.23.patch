@@ -14,6 +14,10 @@ the pinned native/deepfilter/Cargo.lock.
     instance; capi.rs: df_shares_model() says so. Many concurrent instances no longer each keep
     ~8 MB of weights that evict one another from the CPU caches (live audio: 0.40 -> 0.14 cores per
     stream at 28 streams on 7 cores, bit-identical output).
+  * tract.rs/capi.rs/wasm.rs: df_reset(state) returns an instance to its just-created state (network
+    states, rolling spectrum buffers, STFT memories, running normalisation, silence counter; the
+    settings are kept) so one instance can be reused for many unrelated signals with the exact
+    output of a fresh one, without re-reading the model.
   * wasm.rs: df_create always-on stages; new df_create_with_params, df_process_frames (batch),
     df_free; errors are thrown as JS errors; console_error_panic_hook installed.
 diff --git a/Cargo.toml b/Cargo.toml
@@ -72,7 +76,7 @@ index c0f3271..f15663e 100644
  js-sys = { version = "0.3", optional = true }
  
 diff --git a/libDF/src/capi.rs b/libDF/src/capi.rs
-index 37f9afd..12e6088 100644
+index 37f9afd..8e65ef6 100644
 --- a/libDF/src/capi.rs
 +++ b/libDF/src/capi.rs
 @@ -1,10 +1,12 @@
@@ -330,7 +334,34 @@ index 37f9afd..12e6088 100644
  }
  
  /// Get the next log message. Must be freed via `df_free_log_msg(ptr)`
-@@ -156,18 +291,28 @@ pub unsafe extern "C" fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
+@@ -148,6 +283,26 @@ pub unsafe extern "C" fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
+     state.m.set_pf_beta(beta)
+ }
+ 
++/// Reset a model to the state right after creation, so that it can process the next, unrelated
++/// signal exactly like a fresh `df_create*` instance would (bit for bit) without paying for the
++/// creation again: network states, rolling spectrum buffers, STFT memories, running
++/// normalisation and the silence counter. The attenuation limit, thresholds and post filter set
++/// at creation (or since) are kept.
++///
++/// Returns:
++///     - 0 on success, -1 on failure (see `df_last_error()`; the state should then be freed).
++#[no_mangle]
++pub unsafe extern "C" fn df_reset(st: *mut DFState) -> i32 {
++    let Some(state) = st.as_mut() else {
++        set_last_error("df_reset: invalid state pointer");
++        return -1;
++    };
++    match guarded(|| state.m.reset().map_err(|e| format!("Failed to reset DF state: {e:#}"))) {
++        Some(()) => 0,
++        None => -1,
++    }
++}
++
+ /// Processes a chunk of samples.
+ ///
+ /// Args:
+@@ -156,18 +311,28 @@ pub unsafe extern "C" fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
  ///     - output: Output buffer of length df_get_frame_length()
  ///
  /// Returns:
@@ -365,7 +396,7 @@ index 37f9afd..12e6088 100644
  }
  
  /// Processes a filter bank sample and return raw gains and DF coefs.
-@@ -199,12 +344,12 @@ pub unsafe extern "C" fn df_process_frame_raw(
+@@ -199,12 +364,12 @@ pub unsafe extern "C" fn df_process_frame_raw(
      let mut out_coefs =
          ArrayViewMut4::from_shape_ptr((1, state.m.df_order, state.m.nb_df, 2), *out_coefs_p);
      if let Some(gains) = gains {
@@ -380,7 +411,7 @@ index 37f9afd..12e6088 100644
      } else {
          *out_coefs_p = std::ptr::null_mut();
      }
-@@ -249,5 +394,7 @@ pub unsafe extern "C" fn df_gain_size(st: *const DFState) -> DynArray {
+@@ -249,5 +414,7 @@ pub unsafe extern "C" fn df_gain_size(st: *const DFState) -> DynArray {
  /// Free a DeepFilterNet Model
  #[no_mangle]
  pub unsafe extern "C" fn df_free(model: *mut DFState) {
@@ -390,7 +421,7 @@ index 37f9afd..12e6088 100644
 +    }
  }
 diff --git a/libDF/src/tract.rs b/libDF/src/tract.rs
-index b39a987..fa40095 100644
+index b39a987..d9cf27e 100644
 --- a/libDF/src/tract.rs
 +++ b/libDF/src/tract.rs
 @@ -7,9 +7,10 @@ use std::time::Instant;
@@ -414,7 +445,15 @@ index b39a987..fa40095 100644
  
  #[derive(Clone)]
  pub struct DfTract {
-@@ -238,6 +239,59 @@ impl Default for DfTract {
+@@ -227,6 +228,7 @@ pub struct DfTract {
+     rolling_spec_buf_y: VecDeque<Tensor>, // Enhanced stage 1 spec buf
+     rolling_spec_buf_x: VecDeque<Tensor>, // Noisy spec buf
+     skip_counter: usize,  // Increment when wanting to skip processing due to low RMS
++    plans: SharedPlans,   // The shared read-only plans the three SimpleStates run (for `reset`)
+ }
+ 
+ #[cfg(all(not(feature = "capi"), feature = "default-model"))]
+@@ -238,6 +240,59 @@ impl Default for DfTract {
      }
  }
  
@@ -474,7 +513,7 @@ index b39a987..fa40095 100644
  impl DfTract {
      pub fn new(dfp: DfParams, rp: &RuntimeParams) -> Result<Self> {
          #[cfg(feature = "timings")]
-@@ -247,19 +301,10 @@ impl DfTract {
+@@ -247,19 +302,10 @@ impl DfTract {
          let df_cfg = config.section(Some("df")).unwrap();
          let ch = rp.n_ch;
  
@@ -491,14 +530,47 @@ index b39a987..fa40095 100644
 -        let enc = SimpleState::new(enc.into_runnable()?)?;
 -        let erb_dec = SimpleState::new(erb_dec.into_runnable()?)?;
 -        let df_dec = SimpleState::new(df_dec.into_runnable()?)?;
-+        let (enc, erb_dec, df_dec) = shared_plans([&dfp.enc, &dfp.erb_dec, &dfp.df_dec], model_cfg, df_cfg, ch, &rp.reduce_mask)?;
-+        let enc = SimpleState::new(&enc)?;
-+        let erb_dec = SimpleState::new(&erb_dec)?;
-+        let df_dec = SimpleState::new(&df_dec)?;
++        let plans = shared_plans([&dfp.enc, &dfp.erb_dec, &dfp.df_dec], model_cfg, df_cfg, ch, &rp.reduce_mask)?;
++        let enc = SimpleState::new(&plans.0)?;
++        let erb_dec = SimpleState::new(&plans.1)?;
++        let df_dec = SimpleState::new(&plans.2)?;
          #[cfg(feature = "timings")]
          let t1 = Instant::now();
  
-@@ -439,7 +484,7 @@ impl DfTract {
+@@ -358,6 +404,7 @@ impl DfTract {
+             post_filter: rp.post_filter,
+             post_filter_beta: rp.post_filter_beta,
+             skip_counter: 0,
++            plans,
+         };
+         m.init()?;
+         #[cfg(feature = "timings")]
+@@ -397,6 +444,24 @@ impl DfTract {
+         };
+     }
+ 
++    /// Return to the state right after `new`: a reused instance then produces exactly the output a
++    /// fresh one would (bit for bit). Resets the recurrent state of the three networks, the rolling
++    /// spectrum buffers, the STFT overlap memories and running normalisation of every channel, the
++    /// feature buffers and the low-RMS skip counter. Parameters (attenuation limit, thresholds, post
++    /// filter) are kept; the shared plans are not rebuilt, so this is much cheaper than `new`.
++    pub fn reset(&mut self) -> Result<()> {
++        self.enc = SimpleState::new(&self.plans.0)?;
++        self.erb_dec = SimpleState::new(&self.plans.1)?;
++        self.df_dec = SimpleState::new(&self.plans.2)?;
++        self.rolling_spec_buf_x.clear();
++        for state in self.df_states.iter_mut() {
++            state.reset();
++            state.init_norm_states(self.nb_df);
++        }
++        self.skip_counter = 0;
++        self.init()
++    }
++
+     pub fn init(&mut self) -> Result<()> {
+         let ch = self.ch;
+         let spec_shape = [ch, 1, 1, self.n_freqs, 2];
+@@ -439,7 +504,7 @@ impl DfTract {
      ///     - gains: Gain estimates of shape `[n_ch, 1, 1, n_erb]`.
      ///     - coefs: Real-valued DF coefficients estimates of shape `[n_ch, 1, 1, n_erb, 2]`.
      pub fn process_raw(&mut self) -> Result<(f32, Option<Tensor>, Option<Tensor>)> {
@@ -507,7 +579,7 @@ index b39a987..fa40095 100644
          let ch = spec.len_of(Axis(0));
  
          for (nsy_ch, mut erb_ch, mut cplx_ch, state) in izip!(
-@@ -457,12 +502,14 @@ impl DfTract {
+@@ -457,12 +522,14 @@ impl DfTract {
              );
          }
          // Run encoder
@@ -525,7 +597,7 @@ index b39a987..fa40095 100644
          let c0 = enc_emb.pop().unwrap();
          let emb = enc_emb.pop().unwrap();
  
-@@ -532,7 +579,7 @@ impl DfTract {
+@@ -532,7 +599,7 @@ impl DfTract {
          self.rolling_spec_buf_x.pop_front();
          for (ns_ch, mut rbuf, state) in izip!(
              noisy.axis_iter(Axis(0)),
@@ -534,7 +606,7 @@ index b39a987..fa40095 100644
              self.df_states.iter_mut(),
          ) {
              let spec = as_slice_mut_complex(rbuf.as_slice_mut().unwrap());
-@@ -552,9 +599,9 @@ impl DfTract {
+@@ -552,9 +619,9 @@ impl DfTract {
              .rolling_spec_buf_y
              .get_mut(self.df_order - 1)
              .unwrap()
@@ -546,7 +618,7 @@ index b39a987..fa40095 100644
              if gains.shape()[0] < noisy.shape()[0] {
                  // Mask was reduced to single channel
                  let gain_slc = gains.as_slice_mut().unwrap();
-@@ -600,14 +647,14 @@ impl DfTract {
+@@ -600,14 +667,14 @@ impl DfTract {
              self.rolling_spec_buf_x
                  .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
                  .unwrap()
@@ -563,7 +635,7 @@ index b39a987..fa40095 100644
              &[self.ch, self.n_freqs],
          )
          .into_dimensionality::<Ix2>()
-@@ -673,7 +720,7 @@ impl DfTract {
+@@ -673,7 +740,7 @@ impl DfTract {
  
      pub fn set_spec_buffer(&mut self, spec: ArrayView2<f32>) -> Result<()> {
          debug_assert_eq!(self.spec_buf.shape(), spec.shape());
@@ -572,7 +644,7 @@ index b39a987..fa40095 100644
          for (i_ch, mut b_ch) in spec.outer_iter().zip(buf.outer_iter_mut()) {
              for (&i, b) in i_ch.iter().zip(b_ch.iter_mut()) {
                  *b = i
-@@ -687,7 +734,7 @@ impl DfTract {
+@@ -687,7 +754,7 @@ impl DfTract {
              self.rolling_spec_buf_x
                  .get(self.lookahead.max(self.df_order) - self.lookahead - 1)
                  .unwrap()
@@ -581,7 +653,7 @@ index b39a987..fa40095 100644
                  .unwrap(),
              &[self.ch, self.n_freqs],
          )
-@@ -696,7 +743,7 @@ impl DfTract {
+@@ -696,7 +763,7 @@ impl DfTract {
      }
      pub fn get_spec_enh(&self) -> ArrayView2<Complex32> {
          as_arrayview_complex(
@@ -590,7 +662,7 @@ index b39a987..fa40095 100644
              &[self.ch, self.n_freqs],
          )
          .into_dimensionality::<Ix2>()
-@@ -704,7 +751,7 @@ impl DfTract {
+@@ -704,7 +771,7 @@ impl DfTract {
      }
      pub fn get_mut_spec_enh(&mut self) -> ArrayViewMut2<Complex32> {
          as_arrayview_mut_complex(
@@ -599,7 +671,7 @@ index b39a987..fa40095 100644
              &[self.ch, self.n_freqs],
          )
          .into_dimensionality::<Ix2>()
-@@ -738,16 +785,16 @@ fn df(
+@@ -738,16 +805,16 @@ fn df(
      debug_assert_eq!(ch, spec_out.shape()[0]);
      debug_assert!(spec.len() >= df_order);
      let mut o_f: ArrayViewMut2<Complex32> =
@@ -619,7 +691,7 @@ index b39a987..fa40095 100644
              .into_dimensionality::<Ix2>()
              .unwrap()
      });
-@@ -772,7 +819,7 @@ fn init_encoder_impl(
+@@ -772,7 +839,7 @@ fn init_encoder_impl(
      n_ch: usize,
  ) -> Result<TypedModel> {
      log::debug!("Start init encoder.");
@@ -628,7 +700,7 @@ index b39a987..fa40095 100644
  
      let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
      let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
-@@ -788,7 +835,7 @@ fn init_encoder_impl(
+@@ -788,7 +855,7 @@ fn init_encoder_impl(
          .with_input_fact(0, feat_erb)?
          .with_input_fact(1, feat_spec)?
          .with_input_names(["feat_erb", "feat_spec"])?
@@ -637,7 +709,7 @@ index b39a987..fa40095 100644
  
      m.analyse(true)?;
      let mut m = m.into_typed()?;
-@@ -821,7 +868,7 @@ fn init_erb_decoder_impl(
+@@ -821,7 +888,7 @@ fn init_erb_decoder_impl(
      mask_reduction: Option<ReduceMask>,
  ) -> Result<TypedModel> {
      log::debug!("Start init ERB decoder.");
@@ -646,7 +718,7 @@ index b39a987..fa40095 100644
  
      let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
      let layer_width = net_cfg.get("conv_ch").unwrap().parse::<usize>()?;
-@@ -854,7 +901,7 @@ fn init_erb_decoder_impl(
+@@ -854,7 +921,7 @@ fn init_erb_decoder_impl(
          .with_input_fact(3, e1)?
          .with_input_fact(4, e0)?
          .with_input_names(["emb", "e3", "e2", "e1", "e0"])?;
@@ -655,7 +727,7 @@ index b39a987..fa40095 100644
  
      m.analyse(true)?;
  
-@@ -900,7 +947,7 @@ fn init_erb_decoder_impl(
+@@ -900,7 +967,7 @@ fn init_erb_decoder_impl(
              _ => (),
          }
      }
@@ -664,7 +736,7 @@ index b39a987..fa40095 100644
  
      let m = m.into_optimized()?;
  
-@@ -934,7 +981,7 @@ fn init_df_decoder_impl(
+@@ -934,7 +1001,7 @@ fn init_df_decoder_impl(
      n_ch: usize,
  ) -> Result<TypedModel> {
      log::debug!("Start init DF decoder.");
@@ -673,7 +745,7 @@ index b39a987..fa40095 100644
  
      let nb_erb = df_cfg.get("nb_erb").unwrap().parse::<usize>()?;
      let nb_df = df_cfg.get("nb_df").unwrap().parse::<usize>()?;
-@@ -956,7 +1003,7 @@ fn init_df_decoder_impl(
+@@ -956,7 +1023,7 @@ fn init_df_decoder_impl(
          .with_input_fact(0, emb)?
          .with_input_fact(1, c0)?
          .with_input_names(["emb", "c0"])?
@@ -682,7 +754,7 @@ index b39a987..fa40095 100644
  
      m.analyse(true)?;
      let mut m = m.into_typed()?;
-@@ -1067,14 +1114,11 @@ pub fn as_arrayview_mut_complex<'a>(
+@@ -1067,14 +1134,11 @@ pub fn as_arrayview_mut_complex<'a>(
      }
  }
  pub fn tvalue_to_array_view_mut(x: &mut TValue) -> ArrayViewMutD<f32> {
@@ -703,10 +775,10 @@ index b39a987..fa40095 100644
      }
  }
 diff --git a/libDF/src/wasm.rs b/libDF/src/wasm.rs
-index 2e02095..b820540 100644
+index 2e02095..87fd7f1 100644
 --- a/libDF/src/wasm.rs
 +++ b/libDF/src/wasm.rs
-@@ -1,43 +1,116 @@
+@@ -1,43 +1,125 @@
  use std::boxed::Box;
  
 -use ndarray::prelude::*;
@@ -833,10 +905,19 @@ index 2e02095..b820540 100644
 +    if !st.is_null() {
 +        drop(Box::from_raw(st));
 +    }
++}
++
++/// Reset a model to the state right after creation: the next signal then gives exactly the output
++/// a fresh df_create() would, without loading the model again. Attenuation limit, thresholds and
++/// post filter are kept. Throws on failure.
++#[wasm_bindgen]
++pub unsafe fn df_reset(st: *mut DFState) -> Result<(), JsError> {
++    let state = st.as_mut().ok_or_else(|| JsError::new("Invalid pointer"))?;
++    state.0.reset().map_err(|e| JsError::new(&format!("Failed to reset DF state: {e:#}")))
  }
  
  /// Get DeepFilterNet frame size in samples.
-@@ -72,10 +145,9 @@ pub unsafe fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
+@@ -72,10 +154,9 @@ pub unsafe fn df_set_post_filter_beta(st: *mut DFState, beta: f32) {
  /// Args:
  ///     - df_state: Created via df_create()
  ///     - input: Input buffer of length df_get_frame_length()
@@ -848,7 +929,7 @@ index 2e02095..b820540 100644
  #[wasm_bindgen]
  pub unsafe fn df_process_frame(st: *mut DFState, input: &[f32]) -> js_sys::Float32Array {
      let state = st.as_mut().expect("Invalid pointer");
-@@ -86,3 +158,39 @@ pub unsafe fn df_process_frame(st: *mut DFState, input: &[f32]) -> js_sys::Float
+@@ -86,3 +167,39 @@ pub unsafe fn df_process_frame(st: *mut DFState, input: &[f32]) -> js_sys::Float
      let _lsnr = state.0.process(input, output_view).expect("Failed to process DF frame");
      js_sys::Float32Array::from(output.as_slice().unwrap())
  }
