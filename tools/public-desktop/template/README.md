@@ -9,7 +9,8 @@ Windows 10/11 and macOS 14 or newer (Apple silicon and Intel) are supported.
 
 ## Download
 
-The installers are on the download page: **https://mc-multi-world.space/audio/**
+The installers are on the download page: **https://mc-multi-world.space/audio/**, and the same files are attached to
+the newest release in this repository's Releases.
 
 Setup downloads the larger models once (about 2.5 GB in all); after that everything works offline. The app checks for a
 newer version when it starts, and you can switch that off in Settings.
@@ -52,13 +53,9 @@ them skip themselves when they are missing.
 
 ## Building the installers
 
-The easy way is the workflow in `.github/workflows/desktop.yml`: it builds FFmpeg and libDF, freezes the app with
-PyInstaller, checks the frozen program, builds the Windows installer (and installs and uninstalls it once) and the two
-Mac packages, and runs the tests. It runs on every update of this repository (or by hand from the Actions tab) and the
-installers come out as workflow artifacts. They are not signed, and they are a build for testing, not an official
-release: their version is always 2.0.0, so an official installer replaces them.
-
-To build by hand, the steps in order (each script starts with a comment that says how to run it):
+The installers on the download page and in this repository's Releases are the same files, built from this code for
+each release: nothing is built in this repository itself. To build them yourself, here are the steps in order (each
+script starts with a comment that says how to run it):
 
 1. libDF: `native/deepfilter/build.sh native` (needs Rust; Git Bash on Windows)
 2. FFmpeg: `desktop/packaging/build_ffmpeg.sh <windows-x86_64|macos-arm64|macos-x86_64> <out_dir>`

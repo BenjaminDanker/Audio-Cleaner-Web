@@ -473,15 +473,14 @@ upgraded unpinned before the install (`python -m pip install --upgrade pip`).
 
 The desktop app lives here, next to `common/` (shared with the website's server). People still use the old public
 repository (`BenjaminDanker/Audio-Cleaner`, once a different app called VideoDenoiser, releases v1.0.0 and v1.0.1), so
-the app's code is copied there automatically, one way, without mentioning this repository.
+the app's code and each release are copied there automatically, one way, without mentioning this repository.
 
 * **What is copied** (`ALLOWLIST` in `tools/public-desktop/sync.py`): `desktop/` (app, packaging scripts, the licence
   texts and EULA the installers ship, tests), all of `common/` (the app imports bwe, captions, clarity, dfn, dpdfnet,
   ffmpeg, pipeline, restore and transcribe, which pull in aec and gpu; its tests are part of the desktop test run) and
   `native/deepfilter/` (the libDF build). Nothing else: no `deploy/`, `server/`, `web/`, `docs/`, `obs-plugin/`,
   `models.lock`. Files that exist only there live in `tools/public-desktop/template/`: `README.md`, `LICENSE` (this
-  repository's licence text without the line about `obs-plugin/`), `.gitignore`, `.gitattributes` and the build
-  workflow `.github/workflows/desktop.yml`. The old repository's own files (the VideoDenoiser source and models) are
+  repository's licence text without the line about `obs-plugin/`), `.gitignore` and `.gitattributes`. The old repository's own files (the VideoDenoiser source and models) are
   removed from its tree by the first sync; they stay in its history and under the tags v1.0.0 and v1.0.1.
 * **How**: `.github/workflows/public-desktop.yml` runs on a push to `on-prem` that touches an allowlisted path (or by
   hand) and runs `python3 tools/public-desktop/sync.py --target <checkout> --rev $GITHUB_SHA`. The script exports the
@@ -491,27 +490,25 @@ the app's code is copied there automatically, one way, without mentioning this r
   replaces the checkout's tracked files with the export, and commits `Sync from upstream <short sha>` (no commit
   when nothing changed). The workflow pushes without force to the public repository's default branch. Try it by hand
   with `--dry-run` (reports, changes nothing) or `--export-only DIR` (just the export and the scan).
-* **Building there, not releasing**: the public copy's workflow (`tools/public-desktop/template/desktop.yml`) builds
-  and tests everything (FFmpeg, libDF, PyInstaller, the frozen selftest, installers, install and uninstall on Windows)
-  and keeps the installers as workflow artifacts for two weeks. It makes no GitHub Release, has no signing steps and
-  no secrets, and builds as version 2.0.0 instead of `2.0.<run number>`. Publishing releases there too would give
-  the old users a download page, but it would be a second source of installers: the signed `update.json` (key
-  `UPDATE_SIGNING_KEY`) is made only in the release job above and published by our download server, and the app trusts
-  only that, so a release in the public repository could never update anyone yet would look official next to the
-  download page. The README sends people to the download page instead. If you ever want releases there, add a release
-  job without `update.json`.
-  The heavy-noise model comes from `desktop/packaging/fetch_dpdfnet.py` (range requests into the models archive on the
-  download server, pinned by SHA-256) because `deploy/` is not copied: 15 MB per job, the only download from our
-  server in that workflow (the frozen selftest there runs without the 0.9 GB AP-BWE/Sidon archive).
+* **Releases are copied, nothing is built there**: the public repository has no build workflow (the sync deletes
+  `.github/workflows/desktop.yml` if it is there; `ABSENT` in `sync.py`). Its Releases hold the same installer files
+  as ours: the step "Copy the release to the public repository" of the release job in `.github/workflows/desktop.yml`
+  runs after our release is published and, with the secret `PUBLIC_RELEASE_TOKEN`, creates the release `v<version>`
+  there (the old tags are v1.0.0 and v1.0.1) on the default branch, marked latest, with the three installers
+  (`AudioCleaner-<version>-Windows.exe`, `-Mac-Apple-silicon.pkg`, `-Mac-Intel.pkg`) and short notes that point to the
+  download page. No `update.json`, no signature: those are for our download server, and the app trusts only the
+  signed manifest it serves, so a release there is a download for people, never an update source. A rerun updates the
+  release that exists (title, notes, files replaced with `--clobber`). Releases made from a branch push carry the
+  same hidden marker as ours, and only the newest 5 of those are kept there (v1.0.0, v1.0.1 and releases from a
+  `desktop-vX.Y.Z` tag have no marker and stay). Without the secret the step prints a warning and is skipped; any
+  error in it is a warning too and never fails the official release.
 * **Keep in mind when editing**: anything under `desktop/`, `common/` and `native/deepfilter/` becomes public, so keep
   names of servers, hosts, accounts and secrets out of comments and tests; the sync fails and lists file:line when it
   finds one. Tests that read files outside the copied folders (the release job of `.github/workflows/desktop.yml`,
-  `web/src/jobs.js`) skip themselves when the file is not there. `tools/public-desktop/template/desktop.yml` is a
-  hand-kept adaptation of `.github/workflows/desktop.yml`: when you change a build step there, change it in the
-  template too.
+  `web/src/jobs.js`) skip themselves when the file is not there (the public copy has no workflows).
 
-**Setting it up (owner, once):** use an SSH deploy key (limited to the one repository, does not expire, not tied to your
-account) and add its private half here as a secret.
+**Setting it up (owner, once):** two secrets in this repository. The code sync uses an SSH deploy key (limited to the
+one repository, does not expire, not tied to your account); the release copy uses a fine-grained personal access token.
 
 ```sh
 ssh-keygen -t ed25519 -N '' -C public-desktop-sync -f /tmp/public-desktop-key
@@ -520,11 +517,29 @@ gh secret set PUBLIC_DESKTOP_DEPLOY_KEY --repo BenjaminDanker/Audio-Cleaner-Web 
 shred -u /tmp/public-desktop-key /tmp/public-desktop-key.pub
 ```
 
-On the old repository (Settings): keep the default branch `main`, allow Actions (the first sync brings its build
-workflow), do not protect `main` in a way that blocks the deploy key (a deploy key cannot bypass branch protection), and
-set the description and website (https://mc-multi-world.space/audio/). Run "Public desktop copy" once with "Run
-workflow" on `on-prem` and look at the commit it pushed before announcing anything. To stop the copy, delete the secret
-or the workflow.
+The token (a deploy key cannot create releases through the API, so this one is needed; do it in the browser, signed in as
+BenjaminDanker):
+
+1. GitHub > your avatar > Settings > Developer settings > Personal access tokens > **Fine-grained tokens** >
+   Generate new token.
+2. Token name `audio-cleaner-release-copy`; Resource owner: BenjaminDanker; Expiration: the longest you accept (the
+   copy stops with a warning when the token expires, and `gh secret set` below replaces it).
+3. Repository access: **Only select repositories** > `BenjaminDanker/Audio-Cleaner` (the public one, not this one).
+4. Permissions > Repository permissions: **Contents: Read and write**. Nothing else is needed: creating and editing
+   releases, uploading and deleting their files, creating and deleting the tag and listing releases are all covered by
+   Contents, and Metadata (read) is added automatically. Leave everything else at "No access".
+5. Generate token, copy it, then on your computer (the command asks for the value, so it is not left in your shell
+   history):
+
+```sh
+gh secret set PUBLIC_RELEASE_TOKEN --repo BenjaminDanker/Audio-Cleaner-Web
+```
+
+On the old repository (Settings): keep the default branch `main`, do not protect `main` in a way that blocks the deploy
+key (a deploy key cannot bypass branch protection), and set the description and website
+(https://mc-multi-world.space/audio/). Run "Public desktop copy" once with "Run workflow" on `on-prem` and look at the
+commit it pushed (it also removes the old build workflow) before announcing anything; the first release is copied by the
+next release of the app. To stop the copies, delete the secrets or the workflows.
 
 ## Owner to-do before the first release
 

@@ -76,7 +76,8 @@ def test_the_runtime_lock_keeps_its_environment_markers():
 
 def test_the_build_and_the_ci_install_with_require_hashes():
     root = Path(__file__).resolve().parents[2]
-    for path in (root / ".github" / "workflows" / "desktop.yml", PACKAGING / "build_macos.sh", PACKAGING / "build_windows.ps1"):
+    workflow = root / ".github" / "workflows" / "desktop.yml"  # not in the public copy, which builds nothing
+    for path in (*([workflow] if workflow.is_file() else []), PACKAGING / "build_macos.sh", PACKAGING / "build_windows.ps1"):
         text = path.read_text(encoding="utf-8")
         assert "--require-hashes" in text and "requirements-build.lock" in text, path.name
         assert not re.search(r"pyinstaller==|pillow==|pytest==", text), path.name  # all pinned in the lock

@@ -6,13 +6,16 @@
 What happens (docs/desktop.md, "Public copy of the desktop code", has the owner's side of it):
 
 1. The files listed in ALLOWLIST, plus the files in tools/public-desktop/template/ (README, LICENSE, .gitignore,
-   .gitattributes and the build workflow, put where PLACEMENT says), are exported from the commit REV (default HEAD) of
+   and .gitattributes, put where PLACEMENT says), are exported from the commit REV (default HEAD) of
    THIS repository with `git archive`, so what is copied is exactly what is committed (never the working tree).
 2. The export is checked (REQUIRED files are there, nothing matches a LEAK pattern, no key-like file names). Any hit
    stops the sync before the target is touched; fix the file in this repository or, if the hit is harmless, add an
    exception to LEAK_EXCEPTIONS with the reason.
 3. Every tracked file of the target is replaced by the export, so a file deleted here is deleted there. The target keeps
    nothing of its own (its history and tags stay, the files do not); .git is never touched except by the commit.
+   The public repository builds nothing itself (its installers are the releases that this repository's release job
+   copies there), so the export has no workflow; a `.github/workflows/desktop.yml` left in the target from the time
+   it did is removed (ABSENT).
 4. Changes are committed on the target's current branch as "Sync from upstream <short sha>". No change, no commit
    (running it twice in a row, or on a commit that touches nothing public, does nothing). The commit message says
    nothing about where the code comes from beyond that. This script never pushes; the workflow does.
@@ -49,14 +52,17 @@ ALLOWLIST = [
 
 # Files that exist only in the public repository, written from TEMPLATE: template file -> where it goes.
 # The public repository's own README and LICENSE are replaced by these (the old VideoDenoiser files stay in its history
-# and under its v1.0.0 / v1.0.1 tags); a build workflow of the same name as ours, adapted (no signing, no release).
+# and under its v1.0.0 / v1.0.1 tags).
 PLACEMENT = {
     "README.md": "README.md",
     "LICENSE": "LICENSE",
     ".gitignore": ".gitignore",
     ".gitattributes": ".gitattributes",
-    "desktop.yml": ".github/workflows/desktop.yml",
 }
+
+# Paths that must not exist in the public repository: it builds nothing there, so the build workflow it once had is gone
+# (a tracked copy is dropped with the rest of the old tree; the check and the explicit removal make sure of it).
+ABSENT = [".github/workflows/desktop.yml"]
 
 # The sync is refused when one of these is missing from the export.
 REQUIRED = [
@@ -162,13 +168,7 @@ def _glob(rel: str, pattern: str) -> bool:
 def check_export(root: Path) -> list[str]:
     problems = [f"{name} is missing from the export" for name in REQUIRED if not (root / name).is_file()]
     problems += leak_scan(root)
-    workflow = root / ".github" / "workflows" / "desktop.yml"
-    if workflow.is_file():
-        # Every repository path the workflow names must be in the export (desktop/vendor is made by the build).
-        for token in sorted(set(re.findall(r"\b((?:desktop|common|native)/[A-Za-z0-9_./-]+)", workflow.read_text(encoding="utf-8")))):
-            token = token.rstrip(".")
-            if not token.startswith("desktop/vendor") and not (root / token).exists():
-                problems.append(f".github/workflows/desktop.yml names {token}, which is not in the export")
+    problems += [f"{name} must not be in the export (the public repository builds nothing)" for name in ABSENT if (root / name).exists()]
     return problems
 
 
@@ -186,6 +186,8 @@ def replace_tree(target: Path, staged: Path) -> None:
         except OSError:
             pass
     shutil.copytree(staged, target, dirs_exist_ok=True)
+    for rel in ABSENT:
+        (target / rel).unlink(missing_ok=True)
     run(["git", "add", "-A"], target)
 
 

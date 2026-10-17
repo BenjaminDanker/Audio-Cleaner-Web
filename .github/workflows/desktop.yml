@@ -13,6 +13,8 @@
 #            AZURE_SIGNING_PROFILE (Azure Artifact Signing)
 # The release job also signs update.json (the information the installed apps' update check reads) with the Ed25519 key in
 # the secret UPDATE_SIGNING_KEY; without that secret the release has no update.json and installed apps do not update.
+# The release job also copies each release (the installers only) to the public repository of the app's code, with the
+# secret PUBLIC_RELEASE_TOKEN; without it the copy is skipped with a warning.
 # Every third-party action is pinned to a full commit SHA.
 name: Desktop app
 
@@ -651,6 +653,64 @@ jobs:
           else
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest --title "$title" --notes "$notes" "${files[@]}"
           fi
+
+      # The same release, copied (not rebuilt) to the public repository of the app's code: tag v<version> on its default
+      # branch, only the installers (update.json and its signature are for our download server and stay out). It never
+      # fails the official release: without the secret PUBLIC_RELEASE_TOKEN (a token that can write to that one repository,
+      # docs/desktop.md, "Public copy of the desktop code") it only prints a warning, and any error in the copy is a warning
+      # too. A rerun updates the existing release and replaces its files, so it is safe to repeat.
+      - name: Copy the release to the public repository
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          PUBLIC_REPO: BenjaminDanker/Audio-Cleaner
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::The secret PUBLIC_RELEASE_TOKEN is not set, so this release was not copied to the public repository."
+            exit 0
+          fi
+          trap 'echo "::warning::Copying the release to the public repository failed (the official release is not affected); rerun the job to try again."; exit 0' ERR
+          version="$(python3 desktop/packaging/version.py)"
+          tag="v$version"
+          title="Audio Cleaner $version"
+          cd release
+          files=("AudioCleaner-$version-Windows.exe" "AudioCleaner-$version-Mac-Apple-silicon.pkg" "AudioCleaner-$version-Mac-Intel.pkg")
+          branch="$(gh api "repos/$PUBLIC_REPO" --jq .default_branch)"
+          notes="Audio Cleaner $version.
+
+          - Windows 10 or 11: AudioCleaner-$version-Windows.exe
+          - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
+          - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
+
+          These are the same installers as on the download page, https://mc-multi-world.space/audio/, where you can also
+          ask questions. Setup downloads the models once (about 2.5 GB in all), so keep the internet on while it installs;
+          after that everything works offline.
+
+          Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
+          # Same marker as above, so the clean-up below only ever removes releases made from branch pushes.
+          [ "$GITHUB_REF_TYPE" = tag ] || notes="$notes
+
+          <!-- automatic build -->"
+          if gh release view "$tag" --repo "$PUBLIC_REPO" > /dev/null 2>&1; then
+            gh release edit "$tag" --repo "$PUBLIC_REPO" --latest --title "$title" --notes "$notes"
+            gh release upload "$tag" --repo "$PUBLIC_REPO" --clobber "${files[@]}"
+          else
+            gh release create "$tag" --repo "$PUBLIC_REPO" --target "$branch" --latest --title "$title" --notes "$notes" "${files[@]}"
+          fi
+          # Keep only the newest 5 automatic copies there, like here (the v1.0.0 and v1.0.1 releases and every release
+          # made from a tag have no marker and stay).
+          kept=0
+          while read -r old; do
+            body="$(gh release view "$old" --repo "$PUBLIC_REPO" --json body --jq .body)"
+            if [[ "$body" == *'<!-- automatic build -->'* ]]; then
+              kept=$((kept + 1))
+              if [ "$kept" -gt 5 ]; then
+                echo "removing $old from the public repository"
+                gh release delete "$old" --repo "$PUBLIC_REPO" --yes --cleanup-tag
+              fi
+            fi
+          done < <(gh release list --repo "$PUBLIC_REPO" --limit 200 --json tagName,createdAt \
+            --jq 'sort_by(.createdAt) | reverse | .[] | .tagName')
 
       - name: Keep only the newest 5 automatic releases
         if: github.ref_type == 'branch'

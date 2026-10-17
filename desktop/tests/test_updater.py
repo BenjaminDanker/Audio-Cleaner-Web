@@ -706,7 +706,7 @@ _WORKFLOW_FILE = ROOT / ".github" / "workflows" / "desktop.yml"
 WORKFLOW = _WORKFLOW_FILE.read_text(encoding="utf-8") if _WORKFLOW_FILE.is_file() else ""
 
 
-@pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository builds the app but does not publish releases")
+@pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository has no release job")
 def test_the_release_job_signs_the_manifest_and_fails_closed():
     release = WORKFLOW.split("\n  release:\n")[1]
     assert "UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}" in release
@@ -729,3 +729,20 @@ def test_cryptography_is_pinned_with_hashes_for_every_platform():
     # one wheel per platform at least: manylinux/musllinux, Windows, macOS universal2 (Intel and Apple silicon)
     assert blocks["cryptography"].count("--hash=sha256:") >= 20
     assert "cryptography==48.0.1" in blocks["cryptography"]  # the newest release that still has a macOS Intel wheel
+
+
+@pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository publishes no releases")
+def test_the_release_is_copied_to_the_public_repository_without_the_update_files():
+    release = WORKFLOW.split("\n  release:\n")[1]
+    assert "- name: Copy the release to the public repository" in release
+    step = release.split("- name: Copy the release to the public repository")[1].split("\n      - name:")[0]
+    assert "GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step
+    assert "continue-on-error: true" in step and "::warning::" in step  # never fails the official release
+    assert 'if [ -z "$GH_TOKEN" ]' in step and "exit 0" in step  # no secret: skipped
+    assert 'tag="v$version"' in step and "--latest" in step and '--target "$branch"' in step and "--clobber" in step
+    assert "update.json" not in step  # only the installers go there
+    assert step.count("-Windows.exe") >= 1 and "-Mac-Apple-silicon.pkg" in step and "-Mac-Intel.pkg" in step
+    # the notes are written for the community: they point at the download page and say nothing about where the build runs
+    assert "https://mc-multi-world.space/audio/" in step
+    assert "GITHUB_REPOSITORY" not in step and "GITHUB_SHA" not in step and "github.com" not in step
+    assert release.index("gh release create") < release.index("Copy the release to the public repository")

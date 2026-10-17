@@ -1,14 +1,14 @@
 # Keeps the public repository of the desktop app up to date: whenever a push to on-prem changes the app's code, the
 # files on the allowlist (tools/public-desktop/sync.py: desktop/, common/, native/deepfilter/, plus the public README,
-# LICENSE and build workflow from tools/public-desktop/template/) are copied from that commit to the default branch of
+# LICENSE and the like from tools/public-desktop/template/) are copied from that commit to the default branch of
 # the public repository as one commit "Sync from upstream <short sha>". One way only: nothing flows back, and a file the
 # allowlist does not name is never copied. The sync refuses (and the job fails, before anything is pushed) when the
 # export contains something that must not be public, see LEAK_PATTERNS in sync.py.
 #
 # Needs the secret PUBLIC_DESKTOP_DEPLOY_KEY: the private half of an SSH deploy key with write access to the public
 # repository and to nothing else (docs/desktop.md, "Public copy of the desktop code", says how to make it). Without the
-# secret the job only prints a warning. The public repository's own workflow builds the app there (no release, no
-# signing), so nothing in it needs a secret.
+# secret the job only prints a warning. The public repository builds nothing: its Releases are the installers that
+# the release job of desktop.yml copies there (secret PUBLIC_RELEASE_TOKEN), and a workflow it had is removed by the sync.
 # Every third-party action is pinned to a full commit SHA.
 name: Public desktop copy
 
