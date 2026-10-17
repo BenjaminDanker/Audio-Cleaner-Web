@@ -27,6 +27,10 @@
 #include <optional>
 #include <thread>
 
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
+
 namespace acw {
 
 using Clock = std::chrono::steady_clock;
@@ -484,7 +488,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				continue;
 			}
 			*slot = cur;
-			queue.commit();  // the network thread polls the queue (a few ms): no wake-up call from here
+			queue.commit();  // no wake-up call from here (wait-free): the network thread wakes when this frame is due
 		}
 	}
 
@@ -593,6 +597,12 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 
 	void net_main()
 	{
+#ifdef __APPLE__
+		// This thread sends each frame when it is due and plays the answer back in time. macOS wakes threads of the
+		// default class tens of ms late when the machine is busy (measured on CI: replies missed their slot); the
+		// interactive class is woken on time. The audio thread is not touched.
+		pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
 		Backoff backoff(std::chrono::milliseconds(1000), std::chrono::milliseconds(60000));
 		// For refusals that come from limits on the server side (busy, two sessions at most, rate limit): each
 		// attempt counts against the account's hourly start allowance, so retry slowly.
