@@ -24,7 +24,7 @@
                 no network (seccomp AF_UNIX + Landlock)
    acw-worker@N file-job workers (no network); each job stage runs in a sandboxed runner
                 (Landlock + seccomp: no sockets, no links) that sees only its job directory
-   acw-worker-gpu  optional: takes only local-transcription jobs and runs Parakeet on the GPU
+   acw-worker-gpu  optional: takes the jobs with GPU stages (Parakeet, heavy noise removal, voice rebuild, band extension) and runs them on the GPU, one at a time
    acw-monitor  every 2 minutes: health, queue, money and backup checks → email; writes data/metrics.prom
    SQLite       ~/audio-cleaner/data/acw.sqlite3 (WAL, synchronous=FULL), nightly checked backup
 ```

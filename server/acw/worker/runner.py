@@ -221,6 +221,8 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 restore_highs=bool(opts.get("restore_highs", True)),
                 noise=profile,
                 restore_voice=rebuild,
+                device=spec.get("clean_device", "cpu"),
+                heavy_device=spec.get("heavy_device"),
             ),
             threads=threads,
             progress=lambda f: emit(stage="Cleaning" if f < 0.95 else "Polishing", progress=int(start + 2 + span * f)),

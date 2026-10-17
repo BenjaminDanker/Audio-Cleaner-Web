@@ -31,33 +31,77 @@ log = logging.getLogger("acw.worker")
 _stop = threading.Event()
 
 
-# The GPU worker (acw-worker-gpu, its own venv with CUDA ONNX Runtime) only
-# takes local transcription jobs and runs Parakeet on the GPU; the CPU workers
-# leave those to it while it is idle. See docs/operations.md.
+# The GPU worker (acw-worker-gpu, its own venv with CUDA ONNX Runtime) takes the jobs whose heavy stages run well on the
+# card (docs/research/gpu-2026-10.md): local transcription (Parakeet), the heavy noise remover (DPDFNet-8), the voice
+# rebuild (Sidon) and band extension (AP-BWE). It runs one job at a time (Parakeet alone needs 3.7 of the 4 GB; the
+# stages of one job run one after the other and give the card back). The CPU workers leave these jobs to it while it
+# is idle, and the voice rebuild also while it is busy (on the CPU that is hours of four cores). See docs/operations.md.
 GPU_MODE = os.environ.get("ACW_WORKER_GPU") == "1"
 GPU_IDLE_FRESH_S = 6
+GPU_ALIVE_FRESH_S = 90
 
 
 def _gpu_idle_marker() -> Path:
     return get_settings().data_dir / "gpu-worker-idle"
 
 
-def gpu_worker_idle() -> bool:
+def _gpu_alive_marker() -> Path:
+    return get_settings().data_dir / "gpu-worker-alive"
+
+
+def _fresh(marker: Path, seconds: float) -> bool:
     try:
-        return time.time() - _gpu_idle_marker().stat().st_mtime < GPU_IDLE_FRESH_S
+        return time.time() - marker.stat().st_mtime < seconds
     except OSError:
         return False
 
 
+def gpu_worker_idle() -> bool:
+    return _fresh(_gpu_idle_marker(), GPU_IDLE_FRESH_S)
+
+
+def gpu_worker_up() -> bool:
+    """The GPU worker is running, idle or busy (it touches the marker at least every 20 s, also while a job runs)."""
+    return _fresh(_gpu_alive_marker(), GPU_ALIVE_FRESH_S)
+
+
 def is_local_transcription(job: dict) -> bool:
-    """A job the GPU worker takes. Not one with echo removal: the GPU venv has no echo canceller, so the CPU
-    workers keep those."""
+    """A job whose transcription the GPU worker does. Not one with echo removal: the GPU venv has no echo canceller,
+    so the CPU workers keep those."""
     params = json.loads(job["params_json"])
     return (
         params.get("transcribe_tier") == "local"
         and not params.get("options", {}).get("echo_reference_track")
         and job.get("next_stage") != "finalize"
     )
+
+
+def is_gpu_denoise(job: dict, models_dir: Path | None = None) -> bool:
+    """A job whose cleaning has a stage on the card: the voice rebuild (Sidon), or the heavy noise remover, chosen
+    by the user or measured on the recording ("auto"; a recording that turns out light is cleaned by
+    DeepFilterNet3 on the worker's CPU threads, as everywhere). Heavy noise needs the batched DPDFNet file, which is
+    optional (deploy/models.lock): without it those jobs stay with the CPU workers. Light cleaning stays on the CPU,
+    band extension follows the job to the card where it goes."""
+    params = json.loads(job["params_json"])
+    opts = params.get("options", {})
+    if job["kind"] not in ("denoise", "denoise_transcribe") or job.get("next_stage") == "finalize" or opts.get("echo_reference_track"):
+        return False
+    if params.get("denoise_tier") == "rebuild":
+        return True
+    if opts.get("noise", "auto") not in ("auto", "heavy"):
+        return False
+    return heavy_device(models_dir) == "cuda"
+
+
+def is_gpu_job(job: dict, models_dir: Path | None = None) -> bool:
+    """A job the GPU worker takes (and, while it is idle, the CPU workers leave to it)."""
+    return is_local_transcription(job) or is_gpu_denoise(job, models_dir)
+
+
+def gpu_only(job: dict) -> bool:
+    """A GPU job the CPU workers do not take even while the GPU worker is busy (it is up): the voice rebuild takes
+    five times longer on the CPU, on four cores, for hours. When no GPU worker is up they take it as before."""
+    return jobs.is_rebuild(job) and is_gpu_denoise(job)
 
 
 def _gpu_spec() -> dict:
@@ -70,10 +114,20 @@ def _gpu_spec() -> dict:
                         "/sys/devices", "/sys/module/nvidia", "/sys/module/nvidia_uvm", "/dev/char") if Path(p).exists()]
     return {
         "asr_device": "cuda",
+        "clean_device": "cuda",
         "gpu_devices": [*devices, "/proc/self"],
         "gpu_read": [*read, "/proc/self"],
         "address_space_bytes": 0,
     }
+
+
+def heavy_device(models_dir: Path | None = None) -> str:
+    """Where the heavy noise remover runs in the GPU worker: on the card when the batched DPDFNet file is installed
+    (the card runs only that one), else on the worker's CPU threads like anywhere else. Looked at per job, so
+    installing the file takes effect without a restart."""
+    from acw_common import dpdfnet
+
+    return "cuda" if ((models_dir or get_settings().models_dir) / "dpdfnet" / dpdfnet.BATCH_MODEL_FILE).is_file() else "cpu"
 
 
 def _cuda_library_path() -> str:
@@ -129,9 +183,11 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
         f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 50"
     )]
     if GPU_MODE:
-        rows = [r for r in rows if is_local_transcription(r)]
+        rows = [r for r in rows if is_gpu_job(r)]
     elif gpu_worker_idle():
-        rows = [r for r in rows if not is_local_transcription(r)]  # the GPU worker takes these
+        rows = [r for r in rows if not is_gpu_job(r)]  # the GPU worker takes these
+    elif gpu_worker_up():
+        rows = [r for r in rows if not gpu_only(r)]  # busy: it takes these when it is free again
     if not rows:
         return None
     snap = cpus = None
@@ -316,6 +372,8 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
                 beat = time.monotonic()
                 try:
                     db.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ?", (db.now(), job["id"]))
+                    if GPU_MODE:
+                        _gpu_alive_marker().touch()
                 except Exception:  # noqa: BLE001
                     pass
             time.sleep(1)
@@ -595,6 +653,8 @@ def main() -> None:
                 jobs.sweep()
             except Exception:  # noqa: BLE001
                 log.exception("sweep failed")
+        if GPU_MODE:
+            _gpu_alive_marker().touch()
         job = claim(worker_id, load)
         if job is None:
             if GPU_MODE:
@@ -604,7 +664,10 @@ def main() -> None:
         if GPU_MODE:
             _gpu_idle_marker().unlink(missing_ok=True)
         log.info("job %s (%s) claimed with %s threads", job["id"], job["kind"], job["threads"])
-        process(job, {**extra, "threads": job["threads"] or extra["threads"]})
+        process(job, {**extra, "threads": job["threads"] or extra["threads"], **({"heavy_device": heavy_device()} if GPU_MODE else {})})
+    if GPU_MODE:  # stopping: the CPU workers must not wait for a worker that is gone
+        _gpu_idle_marker().unlink(missing_ok=True)
+        _gpu_alive_marker().unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
