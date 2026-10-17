@@ -61,12 +61,15 @@ const apiCall = (page, method, path, body) => page.evaluate(async ({ method, pat
     if (JSON.stringify(nav) !== JSON.stringify(['Cleanup', 'Live', 'Pricing'])) throw new Error(JSON.stringify(nav));
     return nav.join(' | ');
   });
-  await check('landing: product cards point to /app, /app, /app/live, /app (nothing to /free); hero line; availability answer', async () => {
+  await check('landing: one product card per job (recording, subtitles, live), each with its free and paid way, pointing to /app, /app, /app/live (nothing to /free, no prices); hero line; availability answer', async () => {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('.product-card');
     const cards = await page.locator('.product-card').evaluateAll((els) => els.map((e) => [e.querySelector('h3').textContent.replace(/\s+/g, ' ').trim(), new URL(e.querySelector('a').href).pathname]));
-    const want = [['Free, in your browser Free', '/audio/app'], ['Clean & polish', '/audio/app'], ['Live for streamers', '/audio/app/live'], ['Subtitles & transcripts Free in your browser', '/audio/app']];
+    const want = [['Clean up a recording', '/audio/app'], ['Subtitles & transcripts', '/audio/app'], ['Go live', '/audio/app/live']];
     if (JSON.stringify(cards) !== JSON.stringify(want)) throw new Error(JSON.stringify(cards));
+    const ways = await page.locator('.product-card').evaluateAll((els) => els.map((e) => [...e.querySelectorAll('.ways .badge')].map((b) => b.textContent.trim())));
+    if (JSON.stringify(ways) !== JSON.stringify([['Free', 'Paid'], ['Free', 'Paid'], ['Free', 'Paid']])) throw new Error('free and paid lines: ' + JSON.stringify(ways));
+    if (/\$\d/.test(await page.locator('.product-card').evaluateAll((els) => els.map((e) => e.textContent).join(' ')))) throw new Error('a price in the product cards');
     if (await page.locator('a[href$="/free"]').count()) throw new Error('a link to /free on the landing page');
     if (!(await page.locator('.hero').innerText()).includes('No watermark, no daily limit.')) throw new Error('hero line');
     if ((await page.getByRole('link', { name: 'See what it costs' }).getAttribute('href')) !== '#pricing') throw new Error('the second hero button should go to the prices');

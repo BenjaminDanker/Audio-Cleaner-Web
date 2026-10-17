@@ -91,7 +91,7 @@ or `{"type":"error","code":...,"message":...}` and closes. Every error event may
 | `key_spending_cap` | the API key has a monthly spending cap and the 5 minutes set aside up front would go over it. The message says how much is left and when the month starts over; the owner can raise the cap in the API keys card. Not for browser sessions or keys without a cap |
 | `tos` | the current Terms have not been accepted |
 | `trial_busy` | a free-trial session was turned away because live is busy (above about 70% of its capacity). Paid sessions are not affected. `retryAfterSeconds` 120 |
-| `rate_limited` | (during the session) too many text messages: more than 50 a second sustained (burst 100), or more than 5 `config` a second. The socket is closed with 1008 |
+| `rate_limited` | (during the session) too many text messages: more than 50 a second sustained (burst 100), or more than 5 `config` (and `room_test`) a second. The socket is closed with 1008 |
 | `too_many_sessions` | four live sessions per account (six per network) are already running, or a free-trial session is asked for while another one of the account is running. A session of yours that has been silent for 10 s is taken to be dropped and is replaced instead. `retryAfterSeconds` 30 |
 | `full` | live capacity is used up right now; `available` lists what still fits. `retryAfterSeconds` 60 |
 | `restarting` | the service is being updated: new sessions are refused for a minute or so. `retryAfterSeconds` 60 |
@@ -189,6 +189,7 @@ covered by the free trial.
 {"type": "ping", "t": 123}
 {"type": "config", "attenLimDb": 30}
 {"type": "config", "id": "c7", "captions": "premium", "language": ["en", "es"], "translate": ["de"]}
+{"type": "room_test", "seconds": 20}
 {"type": "stop"}
 ```
 
@@ -209,6 +210,17 @@ the session exactly as it was. Billing follows the change from the next audio on
 at the rate of the settings it was processed with. A free-trial session that turns on something the trial doesn't
 cover (extra-accurate captions, translations) carries on from credit (`trial` is no longer in the answer).
 A message with only `attenLimDb` and no `id` gets no answer (as before).
+
+**Measuring the room (`room_test`).** The OBS plugin's "Test my room": the server measures the noise at its noise
+remover over the next `seconds` (5-60, 20 if left out) of processed audio, and answers once with the noise figure,
+dB between the voice and what the noise remover at full strength takes out (the same figure the website's
+recommendations use; the session's strength doesn't change it). It needs noise removal on: if it is off, or switched
+off before the time is up, the answer says so. It counts against the same limit as `config` (5 a second).
+
+```json
+{"type": "room_test", "ok": true, "noiseDb": 17.4, "seconds": 20}
+{"type": "room_test", "ok": false, "code": "needs_noise_removal", "message": "The room test listens through noise removal: turn noise removal on first."}
+```
 
 The server closes the socket after 30 s without any message (see `idle_timeout` above for what keeps a
 session alive beyond that). On `stop` it

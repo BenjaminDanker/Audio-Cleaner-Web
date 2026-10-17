@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -203,6 +204,12 @@ static void test_protocol()
 	CHECK(ev.seconds_left == 1000000000);
 	CHECK(!parse_event("not json", ev));
 	CHECK(parse_event(R"({"type":"something_new"})", ev) && ev.type == EventType::Unknown);
+	// "Test my room": asked with the seconds, answered with the noise figure or why there is none
+	CHECK(make_room_test_message(20) == R"({"seconds":20,"type":"room_test"})");
+	CHECK(parse_event(R"({"type":"room_test","ok":true,"noiseDb":12.3,"seconds":20})", ev));
+	CHECK(ev.type == EventType::RoomTest && ev.ok && ev.has_noise_db && ev.noise_db == 12.3);
+	CHECK(parse_event(R"({"type":"room_test","ok":false,"code":"needs_noise_removal","message":"Turn it on."})", ev));
+	CHECK(ev.type == EventType::RoomTest && !ev.ok && !ev.has_noise_db && ev.code == "needs_noise_removal" && ev.message == "Turn it on.");
 }
 
 static void test_opus()
@@ -1956,19 +1963,24 @@ void feed(RoomTest &r, const std::vector<float> &mic, size_t block = 1024)
 
 static void test_room_test()
 {
-	std::printf("room test: twenty seconds of talking, then the changes that fit\n");
+	std::printf("room test: twenty seconds of talking and the service's noise figure, then the changes that fit\n");
 	// a noisy room heard at OBS's 44.1 kHz, Gentle set, Standard captions: Maximum and Extra accurate
 	{
 		RoomTest r(44100, 1024);
 		feed(r, at_rate(advice_voice(10.0, 3), 44100));
-		CHECK(!r.done() && r.seconds_left() > 9 && r.seconds_left() < 11);
+		CHECK(!r.heard() && !r.done() && r.seconds_left() > 9 && r.seconds_left() < 11);
 		feed(r, at_rate(advice_voice(10.5, 3, 1, 5), 44100));
-		CHECK(r.done() && r.seconds_left() == 0);
+		CHECK(r.heard() && r.seconds_left() == 0);
 		AdviceContext now;
 		now.atten_lim_db = 12;
 		now.captions = "local";
+		CHECK(!r.done() && !r.suggest(now).done && r.suggest(now).changes.empty());  // the noise figure is not in yet
+		r.set_noise(std::numeric_limits<double>::quiet_NaN());  // not a figure
+		CHECK(!r.done());
+		r.set_noise(2.5);
+		CHECK(r.done());
 		const RoomSuggestion s = r.suggest(now);
-		CHECK(s.done && s.heard_speech);
+		CHECK(s.done && s.heard_speech && s.error_code.empty());
 		CHECK(s.settings.denoise && s.settings.atten_lim_db == 100 && s.settings.captions == "premium");
 		CHECK(s.changes.size() == 2);
 		CHECK(s.changes.size() == 2 && s.changes[0].id == "room.strength" && s.changes[0].arg == "Gentle \xE2\x86\x92 Maximum");
@@ -1977,10 +1989,26 @@ static void test_room_test()
 		now.captions = "premium";
 		CHECK(r.suggest(now).changes.empty());  // already right
 	}
+	// the strength steps follow the figure (web/src/recommend.js strengthFor); Standard captions stay for anything but heavy noise
+	{
+		auto at = [](double nf) {
+			RoomTest t(48000, 1024);
+			feed(t, advice_voice(21.0, 30));
+			t.set_noise(nf);
+			AdviceContext now;
+			now.captions = "local";
+			return t.suggest(now);
+		};
+		CHECK(at(14.9).settings.atten_lim_db == 100 && at(15).settings.atten_lim_db == 40);
+		CHECK(at(19.9).settings.atten_lim_db == 40 && at(20).settings.atten_lim_db == 24);
+		CHECK(at(23.9).settings.atten_lim_db == 24 && at(24).settings.atten_lim_db == 12 && at(60).settings.atten_lim_db == 12);
+		CHECK(at(3.9).settings.captions == "premium" && at(4).settings.captions == "local");
+	}
 	// a quiet room: noise removal stays, at the gentlest strength (twenty seconds don't show a whole stream); off: on again
 	{
 		RoomTest r(48000, 1024);
 		feed(r, advice_voice(21.0, 60));
+		r.set_noise(40.0);
 		const RoomSuggestion s = r.suggest(AdviceContext{});
 		CHECK(s.heard_speech && s.settings.denoise && s.settings.atten_lim_db == 12);
 		CHECK(s.changes.size() == 1 && s.changes[0].id == "room.strength" && s.changes[0].arg == "Maximum \xE2\x86\x92 Gentle");
@@ -1993,8 +2021,21 @@ static void test_room_test()
 	{
 		RoomTest r(48000, 1024);
 		feed(r, std::vector<float>(48000 * 21, 0.001f));
+		r.set_noise(99.0);
 		const RoomSuggestion s = r.suggest(AdviceContext{});
 		CHECK(s.done && !s.heard_speech && s.changes.empty());
+	}
+	// the service could not measure (noise removal is off): done once the stretch is heard, with its words and no changes
+	{
+		RoomTest r(48000, 1024);
+		r.set_failed("needs_noise_removal", "The room test listens through noise removal: turn noise removal on first.");
+		CHECK(!r.done());
+		feed(r, advice_voice(21.0, 3));
+		r.set_noise(2.0);  // too late: the first answer stands
+		r.set_failed("other", "");
+		const RoomSuggestion s = r.suggest(AdviceContext{});
+		CHECK(r.done() && s.done && s.error_code == "needs_noise_removal" && s.changes.empty() && !s.heard_speech);
+		CHECK(s.error_message.find("turn noise removal on") != std::string::npos);
 	}
 }
 
@@ -2010,13 +2051,12 @@ static void test_input_advice()
 		CHECK(a.ready() && a.findings().ready);
 		CHECK(a.findings().seconds <= 10.0 + 1e-9);  // nothing more is kept, and pushing more is harmless
 	}
-	// the noise figure: a quiet room and a noisy one
+	// speech is heard in a quiet room and in a noisy one
 	{
 		InputAnalyser q(12.0), n(12.0);
 		feed(q, advice_voice(12.0, 60));
 		feed(n, advice_voice(12.0, 3));
-		CHECK(q.findings().has_speech && q.findings().noise_db > 36);
-		CHECK(n.findings().has_speech && n.findings().noise_db < 19);
+		CHECK(q.findings().has_speech && n.findings().has_speech);
 	}
 	// nothing but a hum, or digital silence: no speech
 	{

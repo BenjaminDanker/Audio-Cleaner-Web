@@ -1,5 +1,5 @@
 //! Per-session processing: noise removal (DeepFilterNet3, an 80 Hz high-pass and a peak limiter), switchable
-//! mid-session at a fixed delay, and the 48 -> 16 kHz converter for the captions.
+//! mid-session at a fixed delay, the room test's noise meter, and the 48 -> 16 kHz converter for the captions.
 
 use std::path::{Path, PathBuf};
 
@@ -74,6 +74,42 @@ impl DelayLine {
     }
 }
 
+/// The room test's noise figure (the plugin's "Test my room"), the same as pipeline.noise_figure_db and the website's
+/// NoiseFigure: dB between the voice and what DeepFilterNet3 at full strength takes out, 99 when there is nothing to hear.
+/// It is measured at the remover itself, whatever the session's strength: libDF limits the attenuation by mixing the input
+/// back in, out = (1 - a) * full + a * input with a = 10^(-limit/20) (tract.rs, after the post filter), so with the input
+/// `xd` lined up with the output `y`, full strength keeps (y - a*xd) / (1 - a) and takes out (xd - y) / (1 - a).
+pub struct NoiseMeter {
+    voice: f64,
+    removed: f64,
+    /// samples measured so far
+    pub samples: usize,
+}
+
+impl NoiseMeter {
+    pub fn new() -> Self {
+        Self { voice: 0.0, removed: 0.0, samples: 0 }
+    }
+
+    /// One block: the remover's input, delayed by its latency, and its raw output at an attenuation limit of `atten_lim_db`.
+    pub fn add(&mut self, xd: &[f32], y: &[f32], atten_lim_db: f32) {
+        let a = if atten_lim_db >= 100.0 { 0.0 } else { 10f64.powf(-atten_lim_db as f64 / 20.0) };
+        for (&x, &y) in xd.iter().zip(y) {
+            let (x, y) = (x as f64, y as f64);
+            self.voice += (y - a * x) * (y - a * x);
+            self.removed += (x - y) * (x - y);
+        }
+        self.samples += xd.len().min(y.len());
+    }
+
+    pub fn figure_db(&self) -> f64 {
+        if self.voice + self.removed <= 0.0 {
+            return 99.0;
+        }
+        (10.0 * ((self.voice + 1e-12) / (self.removed + 1e-12)).log10()).min(99.0)
+    }
+}
+
 /// Noise removal (DeepFilterNet3, an 80 Hz high-pass and a peak limiter), switchable mid-session. The output is always
 /// delayed by the model's delay, whether the model runs or not, so a client's timing never changes with the settings:
 /// without the model the audio passes through a delay line of the same length.
@@ -93,6 +129,8 @@ pub struct LiveChain {
     silent_run: usize,
     pub skipped: usize,
     y: Vec<f32>,
+    /// the room test, while one runs (session.rs sets it): fed with every block the model hears
+    pub meter: Option<NoiseMeter>,
 }
 
 /// How much of the latest input a model switched on mid-session hears first (its output for it is thrown away): its
@@ -119,6 +157,7 @@ impl LiveChain {
             silent_run: 0,
             skipped: 0,
             y: Vec::new(),
+            meter: None,
         })
     }
 
@@ -171,7 +210,7 @@ impl LiveChain {
         if self.df.is_none() {
             return dry;
         }
-        let wet = self.denoise(x);
+        let wet = self.denoise(x, &dry);
         let Some(fade) = self.fade.as_mut() else { return wet };
         let (out, done) = fade.mix(&dry, &wet);
         if done {
@@ -183,7 +222,8 @@ impl LiveChain {
         out
     }
 
-    fn denoise(&mut self, x: &[f32]) -> Vec<f32> {
+    /// `dry`: the same block delayed by the model's latency, lined up with its output (for the room test).
+    fn denoise(&mut self, x: &[f32], dry: &[f32]) -> Vec<f32> {
         let df = self.df.as_mut().expect("the model runs");
         if x.iter().all(|v| v.abs() < SILENT_PEAK) {
             self.silent_run += x.len();
@@ -196,6 +236,9 @@ impl LiveChain {
         }
         self.y.resize(x.len(), 0.0);
         df.process(x, &mut self.y);
+        if let Some(m) = self.meter.as_mut() {
+            m.add(dry, &self.y, self.atten_lim_db);
+        }
         let [b0, b1, b2, _, a1, a2] = HPF;
         let mut out = vec![0f32; x.len()];
         for (o, &v) in out.iter_mut().zip(self.y.iter()) {
@@ -303,6 +346,55 @@ mod tests {
         let mut d = DelayLine::new(3);
         assert_eq!(d.process(&[1.0, 2.0]), vec![0.0, 0.0]);
         assert_eq!(d.process(&[3.0, 4.0]), vec![0.0, 1.0]);
+    }
+
+    /// libdf and the model where the engine is installed (~/audio-cleaner, or ACW_BIN_DIR / ACW_MODELS_DIR); None when absent.
+    fn libdf_and_model() -> Option<(PathBuf, PathBuf)> {
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("audio-cleaner");
+        let dir = |k: &str, d: &str| std::env::var_os(k).map(PathBuf::from).unwrap_or_else(|| home.join(d));
+        let lib = dir("ACW_BIN_DIR", "bin").join("libdf.so");
+        let model = dir("ACW_MODELS_DIR", "models").join("DeepFilterNet3_onnx.tar.gz");
+        (lib.is_file() && model.is_file()).then_some((lib, model))
+    }
+
+    #[test]
+    fn the_room_test_reads_the_full_strength_figure_at_any_strength() {
+        let Some((lib, model)) = libdf_and_model() else {
+            eprintln!("skipped: libdf or the model is not installed");
+            return;
+        };
+        // a harmonic voice in words, under white noise about 10 dB down
+        let mut seed = 1u32;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32 - 0.5
+        };
+        let x: Vec<f32> = (0..8 * SAMPLE_RATE)
+            .map(|i| {
+                let t = i as f32 / SAMPLE_RATE as f32;
+                let word = (std::f32::consts::PI * 2.5 * t).sin().max(0.0);
+                let v: f32 = (1..12).map(|k| (2.0 * std::f32::consts::PI * 140.0 * k as f32 * t).sin() / k as f32).sum();
+                0.1 * v * word + 0.03 * noise()
+            })
+            .collect();
+        let figure = |atten: f32| {
+            let mut chain = LiveChain::new(&lib, &model, true, atten).unwrap();
+            chain.meter = Some(NoiseMeter::new());
+            for block in x.chunks(4 * HOP) {
+                chain.process(block);
+            }
+            let m = chain.meter.unwrap();
+            assert_eq!(m.samples, x.len());
+            m.figure_db()
+        };
+        let (gentle, full) = (figure(12.0), figure(100.0));
+        assert!(full < 30.0, "{full}");
+        assert!((gentle - full).abs() < 0.5, "{gentle} at 12 dB, {full} at 100 dB");
+        let mut quiet = NoiseMeter::new();
+        quiet.add(&[0.0; HOP], &[0.0; HOP], 100.0);
+        assert_eq!(quiet.figure_db(), 99.0);
     }
 
     #[test]

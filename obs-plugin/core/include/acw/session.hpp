@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -88,6 +89,10 @@ struct SessionSnapshot {
 	// i.e. the connection (or the server) cannot keep up with the chosen delay.
 	bool link_too_slow = false;
 	double late_percent = 0;
+	// "Test my room" (request_room_test()): the noise figure the service measured at its noise remover (dB between the
+	// voice and what it takes out), NaN until it is known; or why there is none (the service's code and message).
+	double room_noise_db = std::numeric_limits<double>::quiet_NaN();
+	std::string room_code, room_message;
 };
 
 enum class LogLevel { Debug, Info, Warning, Error };
@@ -136,6 +141,12 @@ public:
 
 	// Live strength change (sent to the server as a `config` message).
 	void set_atten_lim_db(int db);
+
+	// "Test my room": asks the service to measure the noise at its noise remover over the next `seconds` (5-60) of audio
+	// (a `room_test` message, sent again if the connection is made anew before the answer). Forgets the last result;
+	// snapshot() has the new one when it comes. Needs noise removal on: otherwise the answer is room_code
+	// "needs_noise_removal".
+	void request_room_test(int seconds = 20);
 
 	// Changes what the session does (noise removal, captions, their language, translations, echo removal) without a
 	// new session: the audio goes on and the billing follows from that moment. False when `next` needs a new session:

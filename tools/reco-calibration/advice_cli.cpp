@@ -1,5 +1,6 @@
 // Build:  g++ -std=c++17 -O2 -I obs-plugin/core/include tools/reco-calibration/advice_cli.cpp obs-plugin/core/src/input_advice.cpp -o $RECO_ROOT/reco/advice_cli
-// Runs acw::InputAnalyser on mono/stereo 48 kHz WAV files (PCM16 / float32), whole file as "microphone", second file optional reference.
+// Runs acw::InputAnalyser on mono/stereo 48 kHz WAV files (PCM16 / float32), whole file as "microphone" (LIMIT_S: only the
+// first seconds). Prints: file, speech heard (1/0), clipped fraction. The noise figure is not the plugin's: the live engine measures it.
 #include "acw/input_advice.hpp"
 #include <cstdio>
 #include <cstdlib>
@@ -29,10 +30,10 @@ static bool read_wav(const char *p, std::vector<float> &out) {
 int main(int argc, char **argv) {
 	for (int a = 1; a < argc; ++a) {
 		std::vector<float> x; if (!read_wav(argv[a], x)) { std::fprintf(stderr, "cannot read %s\n", argv[a]); continue; }
-		InputAnalyser an(false, 1.0, 100000.0);  // keep everything
-		const size_t lim = std::getenv("LIMIT_S") ? static_cast<size_t>(std::atof(std::getenv("LIMIT_S")) * 48000) : x.size();
-		for (size_t i = 0; i + 960 <= std::min(x.size(), lim); i += 960) an.push(x.data() + i, nullptr, 960);
+		const size_t lim = std::min(x.size(), std::getenv("LIMIT_S") ? static_cast<size_t>(std::atof(std::getenv("LIMIT_S")) * 48000) : x.size());
+		InputAnalyser an(static_cast<double>(lim / 480) / 100.0);  // all of it
+		for (size_t i = 0; i + 960 <= lim; i += 960) an.push(x.data() + i, 960);
 		InputFindings f = an.findings();
-		std::printf("%s %.4f %.3f %d %.6f\n", argv[a], f.noise_db, f.floor_dbfs, f.has_speech ? 1 : 0, f.clip_fraction);
+		std::printf("%s %d %.6f\n", argv[a], f.has_speech ? 1 : 0, f.clip_fraction);
 	}
 }

@@ -77,9 +77,11 @@ struct Features {
 std::string make_change_message(const Features &f, const std::string &id);
 std::string make_ping_message(uint64_t t);
 std::string make_config_message(int atten_lim_db);
+// "Test my room": the service measures the noise at its noise remover for `seconds` and answers with a `room_test` event.
+std::string make_room_test_message(int seconds);
 std::string make_stop_message();
 
-enum class EventType { Unknown, Ready, Caption, Translation, Warning, Stopped, Error, Pong, Config };
+enum class EventType { Unknown, Ready, Caption, Translation, Warning, Stopped, Error, Pong, Config, RoomTest };
 
 struct Event {
 	EventType type = EventType::Unknown;
@@ -109,6 +111,9 @@ struct Event {
 	// config (the answer to a change): ok, the id it answers; usd_per_minute, translate and echo_reference as now
 	bool ok = false;
 	std::string id;
+	// room_test: ok, and the noise figure (dB) or why there is none (code, message)
+	double noise_db = 0.0;
+	bool has_noise_db = false;
 	// pong
 	uint64_t pong_t = 0;
 	bool has_pong_t = false;

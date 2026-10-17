@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::admission::{pin_current_thread, Decision};
 use crate::aec::EchoCanceller;
 use crate::captions::{Captioner, Emit};
-use crate::dsp::{Crossfade, DelayLine, LiveChain};
+use crate::dsp::{Crossfade, DelayLine, LiveChain, NoiseMeter, SAMPLE_RATE};
 use crate::ffi::{OpusDecoder, OpusEncoder, OPUS_FRAME};
 use crate::ipc::{self, Audio};
 use crate::Engine;
@@ -91,6 +91,12 @@ fn denoise(cfg: &Value) -> bool {
     cfg.get("denoise").and_then(|v| v.as_str()) == Some("light")
 }
 
+/// The room test (the plugin's "Test my room", MSG_CONFIG room_test_seconds) listens through noise removal.
+fn room_test_refused() -> Value {
+    json!({"type": "room_test", "ok": false, "code": "needs_noise_removal",
+           "message": "The room test listens through noise removal: turn noise removal on first."})
+}
+
 fn start_captioner(engine: &Engine, emit: &Emit, at: u64, first_line: u64) -> Option<Arc<Captioner>> {
     match Captioner::new(&engine.captions_dir, emit.clone(), at, first_line) {
         Ok(c) => Some(c),
@@ -151,6 +157,7 @@ fn run(engine: &Arc<Engine>, mut cfg: Value, mut core: usize, mut reader: UnixSt
     let mut pcm = [0f32; OPUS_FRAME];
     let mut samples: u64 = 0; // 48 kHz samples of the session so far, sound and silence (the captions' clock)
     let mut next_line: u64 = 0; // caption lines: a captioner started later goes on counting
+    let mut room_test: Option<usize> = None; // seconds asked for, while chain.meter measures them
 
     loop {
         let (kind, payload) = match ipc::read_msg(&mut reader) {
@@ -202,6 +209,14 @@ fn run(engine: &Arc<Engine>, mut cfg: Value, mut core: usize, mut reader: UnixSt
                     None => dry,
                 };
                 let y = chain.process(&x);
+                if let (Some(n), Some(m)) = (room_test, chain.meter.as_ref()) {
+                    if m.samples >= n * SAMPLE_RATE {
+                        let db = (m.figure_db() * 10.0).round() / 10.0;
+                        emit(json!({"type": "room_test", "ok": true, "noiseDb": db, "seconds": n}));
+                        chain.meter = None;
+                        room_test = None;
+                    }
+                }
                 if let Some(c) = captioner.as_ref() {
                     // The original (echo removed): recognizers do better on it than on denoised audio. The denoised
                     // level tells speech from background noise, so the decoder skips the silences between.
@@ -271,6 +286,15 @@ fn run(engine: &Arc<Engine>, mut cfg: Value, mut core: usize, mut reader: UnixSt
                 if let Some(db) = c.get("atten_lim_db").and_then(|v| v.as_f64()) {
                     chain.set_atten_lim(db as f32);
                 }
+                if let Some(n) = c.get("room_test_seconds").and_then(|v| v.as_f64()) {
+                    // measured at the noise remover (NoiseMeter): the processed seconds count, not the silence it skips
+                    if chain.denoising() {
+                        chain.meter = Some(NoiseMeter::new());
+                        room_test = Some(n.clamp(5.0, 60.0).round() as usize);
+                    } else {
+                        emit(room_test_refused());
+                    }
+                }
                 let Some(id) = c.get("id").cloned() else { continue }; // the strength alone: nothing to answer
                 let mut new = cfg.clone();
                 for k in FEATURES {
@@ -293,6 +317,11 @@ fn run(engine: &Arc<Engine>, mut cfg: Value, mut core: usize, mut reader: UnixSt
                             if let Err(e) = chain.set_denoise(denoise(&new)) {
                                 log!("noise removal could not start: {e}");
                                 new["denoise"] = Value::Null;
+                            }
+                            if room_test.is_some() && !chain.denoising() {
+                                chain.meter = None;
+                                room_test = None;
+                                emit(room_test_refused());
                             }
                             match (captioner.is_some(), local_captions(&new)) {
                                 (false, true) => captioner = start_captioner(engine, &emit, samples, next_line),

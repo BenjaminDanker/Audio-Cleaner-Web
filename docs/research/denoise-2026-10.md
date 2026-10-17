@@ -72,7 +72,8 @@ attenuation unlimited, SI-SDR against the clean speech; noise estimate = 90th mi
 | 23-30 | 45 | 21.48 | 20.94 | 36 % |
 
 Speech level on clean input is unchanged by both (-0.3 / -0.2 dB). Decision: recordings (website Clean &
-polish, desktop app) choose per file with `pipeline.HEAVY_BELOW_DB = 19` ("Background noise: Automatic"),
+polish, desktop app) choose per file with `pipeline.HEAVY_BELOW_DB = 19` ("Background noise: Automatic"; since
+2026-10-17 on the noise remover's own figure, `pipeline.noise_figure_db`, with the cut kept at 19: docs/research/recommend-2026-10.md),
 and users can force Light (DeepFilterNet3) or Heavy (DPDFNet-8). Live streams and the in-browser tool keep
 DeepFilterNet3 (DPDFNet-8 costs ~7x the CPU per stream). CPU for files: DPDFNet-8 RTF 0.85 on 1 thread,
 0.33 on 4 (60 s clip).

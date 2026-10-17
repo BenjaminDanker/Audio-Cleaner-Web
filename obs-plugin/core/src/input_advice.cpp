@@ -3,17 +3,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace acw {
 
 namespace {
 
 // Thresholds: the same as web/src/recommend.js (T), calibrated in docs/research/recommend-2026-10.md.
-constexpr double kCleanAtLeast = 29.0;      // noise figure from which the room counts as quiet
-constexpr double kMaxBelow = 18.0;          // strength steps by noise figure: Maximum below this, then Strong, Balanced, Gentle
-constexpr double kStrongBelow = 21.0;
-constexpr double kBalancedBelow = 27.0;
-constexpr double kCaptionsNoisyBelow = 18.0;
+constexpr double kCleanAtLeast = 24.5;      // noise figure from which the room counts as quiet
+constexpr double kMaxBelow = 15.0;          // strength steps by noise figure: Maximum below this, then Strong, Balanced, Gentle
+constexpr double kStrongBelow = 20.0;
+constexpr double kBalancedBelow = 24.0;
+constexpr double kCaptionsNoisyBelow = 4.0;
 constexpr double kSpeechBandDyn = 6.8;      // the speech band's level moves at least this much (dB) when someone speaks
 constexpr double kClipFraction = 0.002;
 constexpr int kMinSilenceLevels = 10;
@@ -153,23 +154,15 @@ InputFindings InputAnalyser::findings() const
 	f.seconds = n / 100.0;
 	if (n < need_levels_)
 		return f;
-	std::vector<float> loud, band;
-	loud.reserve(n);
+	std::vector<float> band;
 	band.reserve(n);
 	for (uint32_t i = 0; i < n; ++i)
-		if (levels_[i] > kSilenceDb) {
-			loud.push_back(levels_[i]);
+		if (levels_[i] > kSilenceDb)
 			band.push_back(band_levels_[i]);
-		}
 	f.ready = true;
 	const uint64_t samples = samples_.load(std::memory_order_relaxed);
 	f.clip_fraction = samples ? static_cast<double>(clipped_.load(std::memory_order_relaxed)) / samples : 0.0;
-	if (static_cast<int>(loud.size()) >= kMinSilenceLevels) {
-		std::sort(loud.begin(), loud.end());
-		const double p10 = percentile(loud, 10), p90 = percentile(loud, 90);
-		f.noise_db = p90 - p10;
-		f.floor_dbfs = p10;
-		f.level_dbfs = p90;
+	if (static_cast<int>(band.size()) >= kMinSilenceLevels) {
 		std::sort(band.begin(), band.end());
 		f.has_speech = percentile(band, 90) - percentile(band, 10) >= kSpeechBandDyn;
 	}
@@ -179,7 +172,7 @@ InputFindings InputAnalyser::findings() const
 // ------------------------------------------------------------------------------------------------- RoomTest
 
 RoomTest::RoomTest(int rate, size_t max_block, double seconds)
-	: seconds_(seconds), a_(seconds)
+	: seconds_(seconds), a_(seconds), noise_db_(std::numeric_limits<double>::quiet_NaN())
 {
 	if (rate != 48000) {
 		rs_ = std::make_unique<RationalResampler>(rate, 48000);
@@ -189,7 +182,7 @@ RoomTest::RoomTest(int rate, size_t max_block, double seconds)
 
 void RoomTest::push(const float *mic, size_t n)
 {
-	if (done())
+	if (a_.ready())
 		return;
 	if (!rs_) {
 		a_.push(mic, n);
@@ -204,24 +197,54 @@ double RoomTest::seconds_left() const
 	return std::max(0.0, seconds_ - a_.seconds_heard());
 }
 
-bool RoomTest::done() const
+void RoomTest::set_noise(double noise_db)
+{
+	if (std::isfinite(noise_db))
+		noise_db_.store(noise_db);
+}
+
+void RoomTest::set_failed(const std::string &code, const std::string &message)
+{
+	std::lock_guard<std::mutex> lk(mu_);
+	if (failed_.load())
+		return;
+	code_ = code.empty() ? "failed" : code;
+	message_ = message;
+	failed_.store(true);
+}
+
+bool RoomTest::heard() const
 {
 	return a_.ready();
+}
+
+bool RoomTest::done() const
+{
+	return a_.ready() && (failed_.load() || !std::isnan(noise_db_.load()));
 }
 
 RoomSuggestion RoomTest::suggest(const AdviceContext &now) const
 {
 	RoomSuggestion r;
 	r.settings = now;
+	r.done = done();
+	if (!r.done)
+		return r;
+	if (failed_.load()) {
+		std::lock_guard<std::mutex> lk(mu_);
+		r.error_code = code_;
+		r.error_message = message_;
+		return r;
+	}
 	const InputFindings f = a_.findings();
-	r.done = f.ready;
-	r.heard_speech = f.ready && f.has_speech;
+	r.heard_speech = f.has_speech;
 	if (!r.heard_speech)
 		return r;
+	const double noise_db = noise_db_.load();
 	auto change = [&](const char *id, const char *what, const std::string &from, const std::string &to) {
 		r.changes.push_back({std::string("room.") + id, std::string(what) + ": %1", from + " \xE2\x86\x92 " + to});
 	};
-	const int strength = f.noise_db >= kCleanAtLeast ? 12 : strength_for(f.noise_db);
+	const int strength = noise_db >= kCleanAtLeast ? 12 : strength_for(noise_db);
 	r.settings.denoise = true;
 	r.settings.atten_lim_db = strength;
 	if (!now.denoise)
@@ -229,7 +252,7 @@ RoomSuggestion RoomTest::suggest(const AdviceContext &now) const
 	else if (now.atten_lim_db != strength)
 		change("strength", "Noise removal strength", strength_name(now.atten_lim_db), strength_name(strength));
 	if (!now.captions.empty()) {
-		const std::string fit = f.noise_db < kCaptionsNoisyBelow || !english_only(now.language) ? "premium" : "local";
+		const std::string fit = noise_db < kCaptionsNoisyBelow || !english_only(now.language) ? "premium" : "local";
 		if (fit != now.captions) {
 			auto name = [](const std::string &c) { return c == "premium" ? "Extra accurate" : "Standard"; };
 			r.settings.captions = fit;

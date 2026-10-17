@@ -96,21 +96,34 @@ if (want('studio')) {
     return `balance ${bal}`;
   });
 
-  await check('Terms changed since this session began: a notice (not a gate) until the new version is agreed by using the service', async () => {
+  await check('Terms changed since this session began: a notice (not a gate); OK agrees to the new version, so it stays gone after a reload', async () => {
     if (await page.getByTestId('terms-notice').count()) throw new Error('notice shown to an account that has agreed');
+    let agreed = null; // the version the OK button agreed to (the account here has agreed already: /me is made to say otherwise until then)
     await page.route('**/api/me', async (route) => {
       const res = await route.fetch();
       const j = await res.json();
-      await route.fulfill({ response: res, json: j.user ? { ...j, user: { ...j.user, tosAccepted: false } } : j });
+      await route.fulfill({ response: res, json: j.user ? { ...j, user: { ...j.user, tosAccepted: !!j.user.tosVersion && agreed === j.user.tosVersion } } : j });
     });
-    await page.reload();
-    await page.getByTestId('terms-notice').waitFor();
-    const t = await page.getByTestId('terms-notice').innerText();
-    await page.unroute('**/api/me');
-    await page.reload();
-    await page.getByTestId('available').waitFor();
-    if (await page.getByTestId('terms-notice').count()) throw new Error('notice still shown');
-    return t.replace(/\s+/g, ' ');
+    await page.route('**/api/account/tos', async (route) => {
+      agreed = route.request().postDataJSON()?.version ?? null;
+      await route.continue();
+    });
+    try {
+      await page.reload();
+      await page.getByTestId('terms-notice').waitFor();
+      const t = await page.getByTestId('terms-notice').innerText();
+      const [res] = await Promise.all([page.waitForResponse('**/api/account/tos'), page.getByTestId('terms-ok').click()]);
+      if (!res.ok()) throw new Error(`account/tos answered ${res.status()}`);
+      if (!agreed) throw new Error('OK did not send the current Terms version');
+      await page.getByTestId('terms-notice').waitFor({ state: 'detached' });
+      await page.reload();
+      await page.getByTestId('available').waitFor();
+      if (await page.getByTestId('terms-notice').count()) throw new Error('notice back after a reload');
+      return `${t.replace(/\s+/g, ' ')} (agreed to ${agreed})`;
+    } finally {
+      await page.unroute('**/api/me');
+      await page.unroute('**/api/account/tos');
+    }
   });
 
   await check('clean & polish (wav) end-to-end, no Terms modal', async () => {

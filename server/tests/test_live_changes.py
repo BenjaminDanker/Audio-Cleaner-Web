@@ -235,3 +235,57 @@ def test_a_trial_session_moves_on_to_credit_when_it_starts_doing_more_than_the_t
     paid = Features(denoise="light", captions="premium").rate()
     assert row["trial_seconds"] == 2 and row["cost_micros"] == meter_micros(0, paid, 2, 2)
     assert db.one("SELECT trial_live_seconds FROM users WHERE id = ?", (uid,))[0] == 598
+
+
+# --- the room test (the plugin's "Test my room": the noise measured at the noise remover)
+
+def voice_in(snr_db, seconds=7):
+    """Bursts of a harmonic voice with white noise `snr_db` under it (the voice of common/tests/test_noise_profile.py: the
+    noise remover keeps it as a voice; a buzz of many harmonics it would partly take out as noise)."""
+    rng = np.random.default_rng(2)
+    t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
+    v = sum(np.sin(2 * np.pi * f * t) / k for k, f in enumerate((140, 280, 420, 560), 1)) * (np.sin(2 * np.pi * 1.5 * t) > -0.3)
+    noise = rng.standard_normal(len(t)) * np.sqrt(np.mean(v ** 2)) * 10 ** (-snr_db / 20)
+    return (0.1 * (v + noise) / np.max(np.abs(v + noise))).astype(np.float32)
+
+
+def room_test(live_, seconds=5):
+    """The room_test event among what came back, or None."""
+    import json
+
+    for text in live_.texts:
+        ev = json.loads(text)
+        if ev.get("type") == "room_test":
+            return ev
+    return None
+
+
+def test_the_room_test_measures_the_noise_at_the_noise_remover(live, client):
+    figures = []
+    for snr in (40, 5):
+        _, ws, s, _ = session(client, denoise="light", attenLimDb=12)  # a gentle strength: still the full-strength figure
+        s.ws.send_json({"type": "room_test", "seconds": 5})
+        s.send(voice_in(snr, 7))
+        end(ws, s)
+        ev = room_test(s)
+        assert ev and ev["ok"] and ev["seconds"] == 5, s.texts
+        figures.append(ev["noiseDb"])
+    assert figures[1] < figures[0] - 10, figures
+    assert abs(figures[1] - 5) < 3, figures
+
+
+def test_the_room_test_needs_noise_removal(live, client):
+    _, ws, s, _ = session(client, captions="local", language="en")
+    s.ws.send_json({"type": "room_test"})
+    ev = s.ws.receive_json()
+    assert ev == {"type": "room_test", "ok": False, "code": "needs_noise_removal",
+                  "message": "The room test listens through noise removal: turn noise removal on first."}
+    end(ws, s)
+    # switched off before it is over: the same answer, from the engine
+    _, ws, s, _ = session(client, denoise="light", captions="local", language="en")
+    s.ws.send_json({"type": "room_test", "seconds": 5})
+    s.send(voice_in(20, 1))
+    assert s.config(denoise=None)["ok"]
+    s.send(voice_in(20, 6))
+    end(ws, s)
+    assert room_test(s)["code"] == "needs_noise_removal"

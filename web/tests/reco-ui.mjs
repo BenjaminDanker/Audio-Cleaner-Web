@@ -40,15 +40,17 @@ function file(name, samples, rateHz = 44100) {
   writeFileSync(p, wavBytes(samples, rateHz));
   return p;
 }
+// The voice files are 48 kHz: the generated voice stops at 8 kHz, and labelled 44.1 kHz it would sound like a phone call (the
+// hum file still goes through the resampler).
 const FILES = {
-  clean: file('clean.wav', noisy(20, 60, 1)),
-  mild: file('mild.wav', noisy(20, 22, 2, 'pink')),
-  loud: file('noisy.wav', noisy(20, 6, 3, 'pink')),
+  clean: file('clean.wav', noisy(20, 60, 1), 48000),
+  mild: file('mild.wav', noisy(20, 22, 2, 'pink'), 48000),
+  loud: file('noisy.wav', noisy(20, 2, 3, 'pink'), 48000),
   hum: file('hum.wav', Float32Array.from({ length: 12 * 44100 }, (_, i) => 0.05 * Math.sin((2 * Math.PI * 50 * i) / 44100))),
   long: file('long.wav', noisy(200, 40, 4), 48000),
 };
 const MIC = file('mic-clean.wav', noisy(30, 55, 5), 48000);
-const MIC_NOISY = file('mic-noisy.wav', noisy(30, 6, 6, 'pink'), 48000);
+const MIC_NOISY = file('mic-noisy.wav', noisy(30, 2, 6, 'pink'), 48000);
 
 const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
 
@@ -115,11 +117,11 @@ async function open(page, path) {
     return s.line;
   });
 
-  await check('a long file (3+ minutes) is looked at in about a second and the recommendation is in', async () => {
+  await check('a long file (3+ minutes) is looked at in a few seconds (about a minute of it, the noise remover included) and the recommendation is in', async () => {
     const t0 = Date.now();
     const s = await open(page, FILES.long);
     const ms = Date.now() - t0;
-    if (!s.line || ms > 8000) throw new Error(`${ms} ms: ${s.line}`);
+    if (!s.line || ms > 20000) throw new Error(`${ms} ms: ${s.line}`);
     return `${ms} ms: ${s.line}`;
   });
 

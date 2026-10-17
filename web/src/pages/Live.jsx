@@ -237,9 +237,9 @@ function LiveDemo({ pricing }) {
     setError('');
     const ctl = new AbortController();
     roomStop.current = ctl;
-    setRoom({ progress: 0 });
+    setRoom({ preparing: true, progress: 0 });
     try {
-      const stats = await testRoom({ onProgress: (f) => setRoom({ progress: f }), signal: ctl.signal });
+      const stats = await testRoom({ onListening: () => setRoom({ progress: 0 }), onProgress: (f) => setRoom({ progress: f }), signal: ctl.signal });
       setRoom({ result: roomChanges(stats, { denoise, strength, captions: free ? '' : captions, language: free ? '' : paidLanguage }) });
     } catch (e) {
       setRoom(null);
@@ -499,8 +499,10 @@ function LiveDemo({ pricing }) {
 
       {room && !room.result && (
         <div className="banner banner-info stack" role="status" data-testid="room-listening">
-          <p className="mb0"><b>Listening for {ROOM_TEST_SECONDS} seconds.</b> Talk the way you do on stream: your usual voice, with your game, music, fans and keyboard as usual. Nothing is sent anywhere and it costs nothing.</p>
-          <progress max={1} value={room.progress} aria-label="Room test progress" />
+          {room.preparing
+            ? <p className="mb0"><b>Getting the noise remover ready…</b> It listens with you, right here in your browser (about 22 MB, fetched once).</p>
+            : <p className="mb0"><b>Listening for {ROOM_TEST_SECONDS} seconds.</b> Talk the way you do on stream: your usual voice, with your game, music, fans and keyboard as usual. Nothing is sent anywhere and it costs nothing.</p>}
+          {!room.preparing && <progress max={1} value={room.progress} aria-label="Room test progress" />}
           <div className="row"><button type="button" className="btn btn-ghost btn-sm" onClick={() => roomStop.current?.abort()}>Cancel</button></div>
         </div>
       )}

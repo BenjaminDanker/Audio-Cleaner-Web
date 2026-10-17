@@ -35,11 +35,10 @@ ECHO_BLOCK = SAMPLE_RATE * 30
 Progress = Callable[[float], None]
 
 NOISE_PROFILES = ("auto", "light", "heavy")
-# "auto" picks the heavy-noise model below this many dB between the speech peaks (90th percentile of
-# 10 ms frame energies) and the background (10th percentile); the estimate reads about 9 dB above the
-# true signal-to-noise ratio. Measured on 200 VoiceBank-DEMAND clips (SI-SDR against the clean speech):
-# DPDFNet-8 was better on 97 % of clips below 14 dB and ~70 % from 14 to 19 dB, even at 19-21 dB, and
-# DeepFilterNet3 better above 21 dB (docs/research/denoise-2026-10.md).
+# "auto" picks the heavy-noise model below this noise figure (noise_figure_db: dB between the voice and the noise the
+# light remover takes out). Calibrated on 552 mixes (12 LibriSpeech clips x 7 kinds of noise x 0-30 dB, SI-SDR of both
+# removers against the clean clip): this cut picks the remover that does better on 72 % of the mixes worth cleaning
+# (docs/research/recommend-2026-10.md).
 HEAVY_BELOW_DB = 19.0
 
 
@@ -64,26 +63,41 @@ class CleanOptions:
     device: str = "cpu"
 
 
-def noise_estimate_db(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> float:
-    """dB between speech peaks and background: the 90th minus the 10th percentile of 10 ms frame energies
-    (mono mix). Read block by block, so a memory-mapped recording is never loaded at once."""
-    frame = SAMPLE_RATE // 100
-    energies = []
-    for a in range(0, len(x), block):
-        b = x[a:a + block]
-        b = b.mean(axis=1) if b.ndim == 2 else b
-        n = len(b) // frame
-        if n:
-            energies.append(10 * np.log10(np.mean(np.square(b[:n * frame].reshape(n, frame), dtype=np.float64), axis=1) + 1e-12))
-    if not energies:
+def measure_windows(n: int, total_seconds: float = 60.0, count: int = 6) -> list[tuple[int, int]]:
+    """The parts of a recording of `n` samples that are measured: all of a short one, otherwise `count` stretches spread
+    evenly over it, `total_seconds` together. The website measures the same ones (web/src/media/analysis.js planWindows)."""
+    duration = n / SAMPLE_RATE
+    if n <= 0:
+        return []
+    if duration <= total_seconds * 1.25:
+        return [(0, n)]
+    length = total_seconds / count
+    out = []
+    for i in range(count):
+        mid = (i + 0.5) * duration / count
+        start = min(duration - length, max(0.0, mid - length / 2))
+        a = int(round(start * SAMPLE_RATE))
+        out.append((a, min(n, a + int(round(length * SAMPLE_RATE)))))
+    return out
+
+
+def noise_figure_db(x: np.ndarray, lib_path: str | Path, model_path: str | Path,
+                    cancel: threading.Event | None = None) -> float:
+    """dB between the voice and the noise in it, as the noise remover itself hears it: DeepFilterNet3 at full strength
+    runs over the measured parts of the recording (measure_windows, mono mix), and what it keeps is compared with what
+    it takes out, over all of it: wind, keyboards, chatter and steady hiss alike, under the words and between them.
+    99 when there is nothing to hear. The website (web/src/media/analysis.js NoiseFigure, with the same model in the
+    browser) and the live engine (native/live NoiseMeter) measure the same way. Setting `cancel` raises `Cancelled`."""
+    voice = removed = 0.0
+    for a, b in measure_windows(len(x)):
+        seg = np.asarray(x[a:b], dtype=np.float32)
+        seg = seg.mean(axis=1, dtype=np.float32) if seg.ndim == 2 else seg
+        y = dfn.denoise_array(np.ascontiguousarray(seg), lib_path, model_path, atten_lim_db=100.0, threads=1, cancel=cancel)
+        voice += float(np.sum(np.square(y, dtype=np.float64)))
+        removed += float(np.sum(np.square(seg.astype(np.float64) - y)))
+    if voice + removed <= 0:
         return 99.0
-    e = np.concatenate(energies)
-    # Digital silence (a noise gate, a muted stretch) says nothing about the noise under the speech: a gated recording
-    # with 10 dB SNR measured 98 dB with it counted, and went to the light model.
-    e = e[e > SILENCE_DB]
-    if len(e) < 10:
-        return 99.0
-    return float(np.percentile(e, 90) - np.percentile(e, 10))
+    return float(min(99.0, 10 * np.log10((voice + 1e-12) / (removed + 1e-12))))
 
 
 # Frame energy (dBFS, 10 ms frames) below which audio is digital silence: a noise gate's output, a muted stretch.
@@ -159,11 +173,12 @@ def sound_spans(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> list[tuple[int,
     return spans
 
 
-def choose_noise_profile(x: np.ndarray, wanted: str = "auto") -> str:
-    """"light" or "heavy" for this recording ("auto" measures it)."""
+def choose_noise_profile(x: np.ndarray, lib_path: str | Path, model_path: str | Path, wanted: str = "auto",
+                         cancel: threading.Event | None = None) -> str:
+    """"light" or "heavy" for this recording ("auto" measures it: noise_figure_db)."""
     if wanted in ("light", "heavy"):
         return wanted
-    return "heavy" if noise_estimate_db(x) < HEAVY_BELOW_DB else "light"
+    return "heavy" if noise_figure_db(x, lib_path, model_path, cancel) < HEAVY_BELOW_DB else "light"
 
 
 def done_end(spans: list[tuple[int, int]], a: int) -> slice:
@@ -221,7 +236,7 @@ def clean_audio(
         if progress:
             progress(1.0)
         return y
-    profile = choose_noise_profile(x, opts.noise)
+    profile = choose_noise_profile(x, lib_path, model_path, opts.noise, cancel)
     heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
     highs = None  # the AP-BWE generator for a band-limited recording, measured on the original
     if opts.restore_highs and bwe_model_dir is not None and bwe.available(bwe_model_dir):

@@ -6,9 +6,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Analyser, HEAVY_BELOW_DB, planWindows, RATE } from '../src/media/analysis.js';
+import { HEAVY_BELOW_DB, planWindows, RATE } from '../src/media/analysis.js';
 import { recommendForFile, roomChanges, strengthFor, T } from '../src/recommend.js';
 import { gauss, noisy, rng, voice } from './reco-audio.mjs';
+import { analysePlanes, loadDfn } from './reco-cli.mjs';
+
+await loadDfn(); // the site's own noise remover (public/dfn), which measures the noise
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 let failed = 0;
@@ -22,26 +25,28 @@ function check(name, fn) {
   }
 }
 
-// ---- generated material (tests/reco-audio.mjs) -----------------------------------------------------------------------------
-function analyse(planes, sampled = false) {
-  const ch = planes.length;
-  const a = new Analyser({ channels: ch });
-  const frames = planes[0].length;
-  const wins = sampled ? planWindows(frames / RATE) : [{ start: 0, length: frames / RATE }];
-  wins.forEach((w, k) => {
-    if (k) a.segment();
-    const from = Math.round(w.start * RATE);
-    const to = Math.min(frames, from + Math.round(w.length * RATE));
-    for (let p = from; p < to; p += 24000) a.push(planes.map((x) => x.subarray(p, Math.min(to, p + 24000))));
-  });
-  return a.result();
-}
+// ---- generated material (tests/reco-audio.mjs), measured as the browser does (tests/reco-cli.mjs) ---------------------------
+const analyse = (planes, sampled = false) => analysePlanes(planes, { sampled });
 
 // ---- measuring -------------------------------------------------------------------------------------------------------
 check('the noise figure falls as the noise rises, and 99 for pure silence', () => {
   const figs = [45, 30, 20, 10, 3].map((snr) => analyse([noisy(20, snr)]).noiseDb);
   for (let i = 1; i < figs.length; i++) assert.ok(figs[i] < figs[i - 1], figs.join(' '));
   assert.equal(analyse([new Float32Array(5 * RATE)]).noiseDb, 99);
+});
+
+check('noise that comes and goes counts: clicks between the words lower the figure as much as steady noise does', () => {
+  const v = noisy(20, 50, 5);
+  const r = rng(6);
+  const clicks = Float32Array.from(v);
+  for (let k = 0; k < 120; k++) { // keyboard-like: 120 sharp clicks of 15 ms, quiet in between
+    const at = Math.floor(r() * (v.length - 720));
+    for (let i = 0; i < 720; i++) clicks[at + i] += 0.25 * gauss(r) * Math.exp(-i / 150);
+  }
+  const quiet = analyse([v]).noiseDb;
+  const clicky = analyse([clicks]).noiseDb;
+  assert.ok(clicky < quiet - 8, `${quiet} -> ${clicky}`);
+  assert.ok(clicky < T.CLEAN_AT_LEAST, String(clicky));
 });
 
 check('speech is told from steady sounds: a hum, a fan, and a tone have none', () => {
@@ -137,7 +142,7 @@ check('subtitles: Standard for a clear voice, Extra accurate for noise or a lang
   assert.equal(rec(noisy(20, 55), { language: '' }).subs, 'standard');
   assert.equal(rec(noisy(20, 55), { language: 'es' }).subs, 'standard');
   assert.equal(rec(noisy(20, 55), { language: 'ja' }).subs, 'accurate');
-  assert.equal(rec(noisy(20, 5)).subs, 'accurate');
+  assert.equal(rec(noisy(20, 2)).subs, 'accurate');
 });
 
 check('very short or unreadable audio gives no advice', () => {
@@ -150,14 +155,14 @@ check('live room test: noise removal stays on (a quiet room gets Gentle), the st
   const quiet = room(noisy(20, 55), { denoise: true, strength: 'max', captions: '' });
   assert.equal(quiet.settings.denoise, true);
   assert.deepEqual(quiet.changes.map((c) => c.text), ['Noise removal strength: Maximum → Gentle']);
-  const loud = room(noisy(20, 6), { denoise: true, strength: 'gentle', captions: 'local' });
+  const loud = room(noisy(20, 2), { denoise: true, strength: 'gentle', captions: 'local' });
   assert.equal(loud.settings.strength, 'max');
   assert.equal(loud.settings.captions, 'premium');
   assert.deepEqual(loud.changes.map((c) => c.key), ['strength', 'captions']);
   const off = room(noisy(20, 6), { denoise: false, strength: 'max', captions: '' });
   assert.equal(off.settings.denoise, true);
   assert.match(off.changes[0].text, /off → on, Maximum/);
-  assert.deepEqual(room(noisy(20, 6), { denoise: true, strength: 'max', captions: 'premium' }).changes, []); // already right
+  assert.deepEqual(room(noisy(20, 2), { denoise: true, strength: 'max', captions: 'premium' }).changes, []); // already right
   const silent = roomChanges(analyse([new Float32Array(20 * RATE)]), { denoise: false, strength: 'max', captions: '' });
   assert.equal(silent.heardSpeech, false);
   assert.equal(silent.settings.denoise, false); // nothing heard: nothing changes

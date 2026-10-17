@@ -1,24 +1,25 @@
 // "Recommended for this file" and "Recommended for your room": turns the measurements of src/media/analysis.js into choices
 // and the reasons for them, in plain words (the copy rules of tests/copy.mjs apply: no model names, no jargon).
 //
-// The numbers below were calibrated against what the server actually does (docs/research/recommend-2026-10.md): the noise
-// figure is the one pipeline.noise_estimate_db gives, "much noise" is only ever said where pipeline.choose_noise_profile would
-// pick the stronger remover, and the strength is the gentlest one that removes about as much noise as the strongest.
-// The OBS plugin (obs-plugin/core/src/input_advice.cpp) uses the same numbers: tests/reco-unit.mjs checks that they agree.
+// The numbers below were calibrated against what the server's noise removers actually achieve (docs/research/recommend-2026-10.md):
+// the noise figure is the noise remover's own (voice against what it takes out: pipeline.noise_figure_db), "much noise" is only
+// ever said where pipeline.choose_noise_profile would pick the stronger remover, and the strength is the gentlest one that removes
+// about as much noise as the strongest. The OBS plugin (obs-plugin/core/src/input_advice.cpp) uses the same numbers:
+// tests/reco-unit.mjs checks that they agree.
 import { HEAVY_BELOW_DB } from './media/analysis.js';
 import { STRENGTHS } from './strengths.js';
 
 export const T = {
-  /** noise figure (dB between the voice and the background) from which the sound counts as clean: nothing to remove */
-  CLEAN_AT_LEAST: 29,
-  /** only call it "much noise" when the server's own estimate would pick the stronger remover, with this much to spare */
-  HEAVY_MARGIN_DB: 1.5,
+  /** noise figure (dB between the voice and what the noise remover takes out) from which the sound counts as clean */
+  CLEAN_AT_LEAST: 24.5,
+  /** only call it "much noise" when the server's own figure would pick the stronger remover, with this much to spare */
+  HEAVY_MARGIN_DB: 1,
   /** strength by noise figure: Maximum below the first number, then Strong, Balanced, and Gentle from the last (see strengthFor) */
-  MAX_BELOW: 18,
-  STRONG_BELOW: 21,
-  BALANCED_BELOW: 27,
+  MAX_BELOW: 15,
+  STRONG_BELOW: 20,
+  BALANCED_BELOW: 24,
   /** below this noise figure the standard subtitles make clearly more mistakes */
-  SUBS_NOISY_BELOW: 18,
+  SUBS_NOISY_BELOW: 4,
   /** the speech stops at this frequency or lower: a phone call or a very small file (bwe.pick_model would use its 8k or 12k generator) */
   PHONE_HZ: 6600,
   /** the level can't fall faster than this within 60 ms (dB): the voice rings on, as in a large or bare room (analysis.js: dropOf) */
@@ -59,7 +60,7 @@ function noiseVerdict(stats) {
  *   subs: 'standard'|'accurate'|null, nothing: boolean, noSpeech: boolean, reasons: string[], line: string }}
  */
 export function recommendForFile(stats, ctx = {}) {
-  if (!stats || !(stats.seconds >= 2)) return null;
+  if (!stats || !(stats.seconds >= 2) || stats.noiseDb == null) return null;
   if (!stats.hasSpeech) {
     return {
       noise: 'off', strength: 'balanced', heavy: false, restoreHighs: false, rebuild: false, subs: null, nothing: true, noSpeech: true,
@@ -82,7 +83,7 @@ export function recommendForFile(stats, ctx = {}) {
 
   if (v.clean) reasons.push('It’s clean and quiet, so noise removal would change very little.');
   else if (v.heavy) reasons.push('There is a lot of background noise, nearly as loud as the voice. Clean & polish uses a stronger noise remover for this, and it does clearly better than the free one.');
-  else reasons.push(`There is some steady background noise. ${noise === 'browser' ? 'The free cleanup in your browser handles it well.' : 'Clean & polish will take it out.'}`);
+  else reasons.push(`There is some background noise. ${noise === 'browser' ? 'The free cleanup in your browser handles it well.' : 'Clean & polish will take it out.'}`);
   if (!v.clean) reasons.push(`${strengthName(strength)} is enough to take it out${strength === 'max' || strength === 'strong' ? '' : ' while keeping the voice natural'}.`);
   if (phone) reasons.push('It sounds like a phone call or a very small file: the high sounds are missing. Restoring them makes the voice clearer.');
   if (echoey) reasons.push('The voice sounds echoey, as if it was recorded in a big or bare room. Rebuilding the voice can take that out. Listen to the result before you publish.');

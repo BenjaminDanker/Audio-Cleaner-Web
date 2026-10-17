@@ -201,7 +201,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         rebuild = spec.get("denoise_tier") == "rebuild"
         # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
         # time estimate on it; clean_audio then uses the same choice.
-        profile = opts.get("noise", "auto") if rebuild else pipeline.choose_noise_profile(x, opts.get("noise", "auto"))
+        profile = opts.get("noise", "auto") if rebuild else pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"))
         emit(stage="Cleaning", progress=start + 2, **({} if rebuild else {"noise": profile}))
         used: dict = {}
         y = pipeline.clean_audio(

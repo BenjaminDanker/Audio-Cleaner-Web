@@ -879,7 +879,7 @@ async def _run(sess: Session) -> None:
                 except ValueError:
                     continue
                 t = c.get("type") if isinstance(c, dict) else None
-                if t == "config" and not configs.take():
+                if t in ("config", "room_test") and not configs.take():
                     sess.end_reason = "rate_limited"
                     await _send_json(ws, {"type": "error", "code": "rate_limited", "message": "Too many settings changes."})
                     await ws.close(code=1008, reason="too_many_config_messages")
@@ -896,9 +896,25 @@ async def _run(sess: Session) -> None:
                     if strength is not None:
                         sess.features = replace(sess.features, atten_lim_db=strength)
                         await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"atten_lim_db": strength}))
+                elif t == "room_test":
+                    await _room_test(sess, c.get("seconds"))
     finally:
         # Not cancelled here: _finish lets it drain the worker's last captions.
         pass
+
+
+ROOM_TEST_NEEDS_NOISE_REMOVAL = {"type": "room_test", "ok": False, "code": "needs_noise_removal",
+                                 "message": "The room test listens through noise removal: turn noise removal on first."}
+
+
+async def _room_test(sess, seconds) -> None:
+    """The plugin's "Test my room": the engine measures the noise at the noise remover for `seconds` (5-60, 20 by default)
+    of processed audio and answers with a room_test event (forwarded as it is)."""
+    if sess.features.denoise is None:
+        await _send_json(sess.ws, ROOM_TEST_NEEDS_NOISE_REMOVAL)
+        return
+    n = seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and math.isfinite(seconds) else 20
+    await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"room_test_seconds": int(min(60, max(5, round(n))))}))
 
 
 async def _send_stopped(ws: WebSocket, reason: str) -> None:

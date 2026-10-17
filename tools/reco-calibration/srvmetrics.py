@@ -1,4 +1,4 @@
-"""Server-side measurements for the calibration set: noise estimate, bandwidth, and SI-SDR (against the clean clip) of the
+"""Server-side measurements for the calibration set: noise figure (pipeline.noise_figure_db), bandwidth, and SI-SDR (against the clean clip) of the
 noisy input and of DeepFilterNet3 at 12/24/40/100 dB attenuation limits and DPDFNet-8, as pipeline.clean_audio runs them."""
 import os as _os
 from pathlib import Path as _Path
@@ -39,7 +39,7 @@ def one(m):
         c, _ = sf.read(S / m['clean'], dtype='float32')
         c = c[:len(x)]
         r = dict(m)
-        r['nd'] = pipeline.noise_estimate_db(x)
+        r['nd'] = pipeline.noise_figure_db(x, LIB, MODEL)
         r['bw'] = bwe.effective_bandwidth(x)
         r['sisdr_in'] = sisdr(x, c)
         for db in (12, 24, 40, 100):

@@ -65,6 +65,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -349,6 +350,8 @@ struct ac_filter {
 	std::atomic<acw::RoomTest *> room{nullptr};
 	std::vector<acw::RoomTest *> retired_rooms;
 	bool room_told = false;  // the dialog was redrawn with the result
+	acw::Session *room_session = nullptr;  // the session that measures the noise for it (nullptr: it was replaced)
+	const char *room_refusal = nullptr;    // why the last press did not start a test (a locale key), until settings change
 
 	std::vector<float> mono;  // preallocated scratch for the downmix
 	std::vector<float> right; // ... and for the right side when it has its own session
@@ -687,6 +690,25 @@ void end_room_test(ac_filter *f)
 	if (acw::RoomTest *old = f->room.exchange(nullptr))
 		f->retired_rooms.push_back(old);  // freed by the next tick, when the audio thread can no longer hold it
 	f->room_told = false;
+	f->room_session = nullptr;
+}
+
+// The room test's noise figure comes from the session (it is measured at the service's noise remover). Called with the
+// lock held.
+void poll_room_test(ac_filter *f, acw::RoomTest *room)
+{
+	if (room->done())
+		return;
+	acw::Session *s = f->session.load();
+	if (!s || s != f->room_session) {
+		room->set_failed("session_changed", "");  // a new session started meanwhile: the test is over
+		return;
+	}
+	const acw::SessionSnapshot snap = s->snapshot();
+	if (!std::isnan(snap.room_noise_db))
+		room->set_noise(snap.room_noise_db);
+	else if (!snap.room_code.empty())
+		room->set_failed(snap.room_code, snap.room_message);
 }
 
 // What the filter is set to, in the terms of the room test's suggestions.
@@ -717,6 +739,8 @@ void filter_tick(void *data, float seconds)
 	update_reference(f);
 	reap_retired_taps(f, elapsed, false);
 	reap_graveyard(f);
+	if (acw::RoomTest *room = f->room.load())
+		poll_room_test(f, room);
 	if (acw::RoomTest *room = f->room.load(); room && room->done() && !f->room_told) {
 		f->room_told = true;
 		obs_source_update_properties(f->context);  // an open dialog shows the result
@@ -732,6 +756,8 @@ void retire_session(ac_filter *f, acw::Session *old)
 {
 	if (!old)
 		return;
+	if (old == f->room_session)
+		f->room_session = nullptr;  // a room test it was measuring for can't get its answer any more
 	old->request_stop();
 	if (f->in_audio.load(std::memory_order_seq_cst)) {
 		f->graveyard.push_back(old);  // freed by the next tick
@@ -941,6 +967,7 @@ void filter_update(void *data, obs_data_t *settings)
 	std::lock_guard<std::mutex> lk(f->mu);
 	const Settings prev = f->settings;
 	f->settings = next;
+	f->room_refusal = nullptr;  // the settings it was about may have changed
 	if (!prev.same_session_as(next)) {
 		if (!prev.same_connection_as(next) || !change_sessions(f)) {
 			rebuild_session(f);  // also applies the outputs
@@ -1306,10 +1333,18 @@ std::string room_text(ac_filter *f)
 	std::lock_guard<std::mutex> lk(f->mu);
 	acw::RoomTest *room = f->room.load();
 	if (!room)
-		return T_("AudioCleaner.Room.Hint");
-	if (!room->done())
+		return T_(f->room_refusal ? f->room_refusal : "AudioCleaner.Room.Hint");
+	if (!room->heard())
 		return replace_all(T_("AudioCleaner.Room.Listening"), "%1", std::to_string(static_cast<int>(room->seconds_left() + 0.5)));
+	if (!room->done())
+		return T_("AudioCleaner.Room.Measuring");
 	const acw::RoomSuggestion r = room->suggest(advice_context(f->settings));
+	if (r.error_code == "needs_noise_removal")
+		return T_("AudioCleaner.Room.NeedsNoiseRemoval");
+	if (r.error_code == "session_changed")
+		return T_("AudioCleaner.Room.Interrupted");
+	if (!r.error_code.empty())
+		return replace_all(T_("AudioCleaner.Room.Failed"), "%1", r.error_message.empty() ? r.error_code : r.error_message);
 	if (!r.heard_speech)
 		return T_("AudioCleaner.Room.NoSpeech");
 	std::string out;
@@ -1340,9 +1375,20 @@ bool room_test_clicked(obs_properties_t *, obs_property_t *, void *data)
 	if (!f)
 		return false;
 	{
+		// The noise is measured at the service's noise remover: that needs a connected session with noise removal on.
 		std::lock_guard<std::mutex> lk(f->mu);
 		end_room_test(f);
-		f->room.store(new acw::RoomTest(static_cast<int>(f->sample_rate), kMaxBlock));
+		acw::Session *s = f->session.load();
+		if (!s || s->snapshot().state != acw::SessionState::Streaming) {
+			f->room_refusal = "AudioCleaner.Room.NeedsSession";
+		} else if (!f->settings.denoise) {
+			f->room_refusal = "AudioCleaner.Room.NeedsNoiseRemoval";
+		} else {
+			f->room_refusal = nullptr;
+			f->room.store(new acw::RoomTest(static_cast<int>(f->sample_rate), kMaxBlock));
+			f->room_session = s;
+			s->request_room_test(static_cast<int>(acw::kRoomTestSeconds));
+		}
 	}
 	obs_source_update_properties(f->context);
 	return false;  // redrawn above

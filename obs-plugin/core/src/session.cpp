@@ -237,6 +237,7 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	std::condition_variable done_cv;
 	bool net_done = false;
 	std::atomic<int> pending_atten{-1};
+	std::atomic<int> pending_room{0};  // seconds of a room test waiting to be asked for (0 = none)
 	// A change of what the session does (change()): waiting to be sent, then sent and waiting for the answer.
 	std::mutex chg_mu;
 	std::optional<Features> pending_change;  // chg_mu
@@ -266,6 +267,9 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 	Features feat;               // what the session does now (as the service agreed to it)
 	std::string change_refused;  // why the last change could not be made ("" = it was, or none was asked)
 	std::vector<std::string> other_warnings;  // texts of warnings that have no plugin text of their own
+	int room_asked = 0;  // seconds of the room test asked for and not answered yet (0 = none)
+	double room_noise_db = std::numeric_limits<double>::quiet_NaN();
+	std::string room_code, room_message;
 	double ping_rtt_ms = 0;
 	std::vector<float> rtt_ring;
 	size_t rtt_n = 0;
@@ -1118,6 +1122,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 			const int atten = pending_atten.exchange(-1);
 			if (atten >= 0)
 				ws.sendText(make_config_message(atten));
+			if (const int room = pending_room.exchange(0); room > 0)
+				ws.sendText(make_room_test_message(room));
 			{
 				std::lock_guard<std::mutex> lk(chg_mu);
 				if (pending_change && !sent_change) {  // one change at a time: the next waits for the answer
@@ -1279,6 +1285,8 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				translate_failed.clear();
 				captions_failed = false;
 				other_warnings.clear();
+				if (room_asked > 0)
+					pending_room.store(room_asked);  // the room test the last connection did not finish starts over
 			}
 			std::lock_guard<std::mutex> lk(att.mu);
 			att.ready_ev = ev;
@@ -1377,6 +1385,19 @@ struct Session::Impl : std::enable_shared_from_this<Session::Impl> {
 				echo_active.store(cfg.reference && ev.echo_reference);
 			} else {
 				change_refused = ev.message.empty() ? "The service could not make that change." : ev.message;
+			}
+			break;
+		}
+		case EventType::RoomTest: {
+			std::lock_guard<std::mutex> lk(st_mu);
+			if (room_asked == 0)
+				break;  // forgotten meanwhile
+			room_asked = 0;
+			if (ev.ok && ev.has_noise_db) {
+				room_noise_db = ev.noise_db;
+			} else {
+				room_code = ev.code.empty() ? "failed" : ev.code;
+				room_message = ev.message;
 			}
 			break;
 		}
@@ -1593,6 +1614,21 @@ void Session::set_atten_lim_db(int db)
 	impl_->cv.notify_all();
 }
 
+void Session::request_room_test(int seconds)
+{
+	Impl &d = *impl_;
+	seconds = std::min(60, std::max(5, seconds));
+	{
+		std::lock_guard<std::mutex> lk(d.st_mu);
+		d.room_asked = seconds;
+		d.room_noise_db = std::numeric_limits<double>::quiet_NaN();
+		d.room_code.clear();
+		d.room_message.clear();
+	}
+	d.pending_room.store(seconds);
+	d.cv.notify_all();
+}
+
 std::vector<float> Session::rtt_history() const
 {
 	std::lock_guard<std::mutex> lk(impl_->st_mu);
@@ -1647,6 +1683,9 @@ SessionSnapshot Session::snapshot() const
 			s.translate_requested = d.feat.translate;
 		s.echo_requested = d.feat.echo_reference;
 		s.change_refused = d.change_refused;
+		s.room_noise_db = d.room_noise_db;
+		s.room_code = d.room_code;
+		s.room_message = d.room_message;
 	}
 	s.insecure = d.insecure;
 	s.codec = d.use_opus ? "opus" : "pcm_s16le";

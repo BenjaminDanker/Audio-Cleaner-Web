@@ -233,6 +233,14 @@ std::string make_config_message(int atten_lim_db)
 	return j.dump();
 }
 
+std::string make_room_test_message(int seconds)
+{
+	nlohmann::json j;
+	j["type"] = "room_test";
+	j["seconds"] = seconds;
+	return j.dump();
+}
+
 std::string make_stop_message()
 {
 	return "{\"type\":\"stop\"}";
@@ -334,6 +342,16 @@ bool parse_event(const std::string &text, Event &ev)
 			for (const auto &e : *it)
 				if (e.is_string() && ev.translate.size() < 8)
 					ev.translate.push_back(e.get<std::string>());
+		}
+	} else if (type == "room_test") {
+		ev.type = EventType::RoomTest;
+		str("code", ev.code);
+		str("message", ev.message);
+		if (auto it = j.find("ok"); it != j.end() && it->is_boolean())
+			ev.ok = it->get<bool>();
+		if (auto it = j.find("noiseDb"); it != j.end() && it->is_number() && std::isfinite(it->get<double>())) {
+			ev.noise_db = it->get<double>();
+			ev.has_noise_db = true;
 		}
 	} else if (type == "pong") {
 		ev.type = EventType::Pong;

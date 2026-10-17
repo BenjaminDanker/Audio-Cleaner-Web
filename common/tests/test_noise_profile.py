@@ -6,6 +6,8 @@ import pytest
 
 from acw_common import dpdfnet, pipeline
 
+from test_common import LIB, MODEL, needs_dfn
+
 SR = pipeline.SAMPLE_RATE
 
 
@@ -20,27 +22,49 @@ def _speechlike(seconds: float, snr_db: float, seed: int = 0) -> np.ndarray:
     return (0.1 * (voice + noise) / np.max(np.abs(voice + noise))).astype(np.float32)
 
 
-def test_the_estimate_follows_the_noise_level():
-    quiet, loud = pipeline.noise_estimate_db(_speechlike(10, 20)), pipeline.noise_estimate_db(_speechlike(10, 0))
+def _figure(x):
+    return pipeline.noise_figure_db(x, LIB, MODEL)
+
+
+@needs_dfn
+def test_the_figure_follows_the_noise_level():
+    quiet, loud = _figure(_speechlike(10, 20)), _figure(_speechlike(10, 0))
     assert quiet > loud + 8
 
 
+@needs_dfn
+def test_noise_that_comes_and_goes_counts_too():
+    """Clicks, gusts and chatter leave quiet moments between them: the quietest frames say nothing about them."""
+    rng = np.random.default_rng(3)
+    x = _speechlike(10, 40)
+    steady = _figure(x)
+    bursts = np.zeros_like(x)
+    for at in rng.integers(0, len(x) - SR // 10, 40):  # 40 loud bursts of 50 ms
+        bursts[at:at + SR // 20] += (0.05 * rng.standard_normal(SR // 20)).astype(np.float32)
+    assert _figure(x + bursts) < steady - 10
+
+
+@needs_dfn
 def test_auto_picks_heavy_only_for_noisy_recordings_and_choices_can_be_forced():
-    assert pipeline.choose_noise_profile(_speechlike(10, 25)) == "light"
-    assert pipeline.choose_noise_profile(_speechlike(10, -2)) == "heavy"
-    assert pipeline.choose_noise_profile(_speechlike(10, -2), "light") == "light"
-    assert pipeline.choose_noise_profile(_speechlike(10, 25), "heavy") == "heavy"
+    assert pipeline.choose_noise_profile(_speechlike(10, 30), LIB, MODEL) == "light"
+    assert pipeline.choose_noise_profile(_speechlike(10, -2), LIB, MODEL) == "heavy"
+    assert pipeline.choose_noise_profile(_speechlike(10, -2), "lib", "model", "light") == "light"  # nothing measured
+    assert pipeline.choose_noise_profile(_speechlike(10, 30), "lib", "model", "heavy") == "heavy"
 
 
-def test_the_estimate_reads_long_memmapped_audio_in_blocks(tmp_path):
+@needs_dfn
+def test_a_long_stereo_recording_is_measured_in_six_stretches_of_its_mono_mix(tmp_path):
     x = _speechlike(130, 5)
+    assert [(b - a) / SR for a, b in pipeline.measure_windows(len(x))] == [10.0] * 6
     mm = np.lib.format.open_memmap(tmp_path / "x.npy", mode="w+", dtype=np.float32, shape=(len(x), 2))
     mm[:, 0] = mm[:, 1] = x
-    assert abs(pipeline.noise_estimate_db(mm) - pipeline.noise_estimate_db(x)) < 1.0
+    assert abs(_figure(mm) - _figure(x)) < 0.01
+    assert _figure(np.zeros(SR, np.float32)) == 99.0
 
 
 def test_heavy_noise_runs_the_heavy_model(tmp_path, monkeypatch):
     calls = []
+    monkeypatch.setattr(pipeline, "noise_figure_db", lambda x, lib, model, cancel=None: 5.0)
     monkeypatch.setattr(pipeline.dfn, "denoise_array", lambda x, *a, out=None, **k: calls.append("dfn") or out.__setitem__(slice(None), x))
     monkeypatch.setattr(pipeline.dpdfnet, "denoise_array", lambda x, *a, out=None, **k: calls.append("dpdfnet") or out.__setitem__(slice(None), x))
     report: dict = {}
@@ -115,16 +139,14 @@ def test_restore_voice_replaces_noise_removal_and_highs(monkeypatch, tmp_path):
 
 # --- work only where it changes something (2026-10-16 efficiency audit)
 
+@needs_dfn
 def test_gated_silence_does_not_hide_the_noise():
-    from acw_common import pipeline
-
     rng = np.random.default_rng(0)
-    sr = pipeline.SAMPLE_RATE
-    t = np.arange(4 * sr) / sr
+    t = np.arange(4 * SR) / SR
     voice = (0.3 * np.sin(2 * np.pi * 200 * t) * (np.sin(2 * np.pi * 2 * t) > 0)).astype(np.float32)
     noisy = voice + (0.1 * rng.standard_normal(len(t))).astype(np.float32)  # about 10 dB SNR
-    gated = np.concatenate([noisy, np.zeros(3 * sr, np.float32)])  # a noise gate's digital silence after it
-    assert abs(pipeline.noise_estimate_db(gated) - pipeline.noise_estimate_db(noisy)) < 3
+    gated = np.concatenate([noisy, np.zeros(3 * SR, np.float32)])  # a noise gate's digital silence after it
+    assert abs(_figure(gated) - _figure(noisy)) < 1
 
 
 def test_channel_plan():

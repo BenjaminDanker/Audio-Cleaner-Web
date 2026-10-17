@@ -5,6 +5,20 @@
 // --first=10: only the first 10 seconds, as the live test hears them.   --reco: also print the recommendation.
 import { readFileSync } from 'node:fs';
 import { Analyser, planWindows, RATE } from '../src/media/analysis.js';
+import { DfnStream, Pairer } from '../src/media/dfnstream.js';
+
+const DFN = new URL('../public/dfn/', import.meta.url);
+let dfn = null;
+
+/** The site's own noise remover (public/dfn: df.js, df_bg.wasm, the model), loaded once in Node. */
+export async function loadDfn() {
+  if (!dfn) {
+    const mod = await import(new URL('df.js', DFN).href);
+    mod.initSync({ module: readFileSync(new URL('df_bg.wasm', DFN)) });
+    dfn = { mod, model: new Uint8Array(readFileSync(new URL('DeepFilterNet3_onnx.tar.gz', DFN))) };
+  }
+  return dfn;
+}
 
 export function readWav(path) {
   const b = readFileSync(path);
@@ -40,7 +54,8 @@ export function readWav(path) {
   return { planes, rate: fmt.rate };
 }
 
-/** Feeds `planes` to an Analyser in 1 s pieces, the whole file or just the sampled stretches. */
+/** Feeds `planes` to an Analyser in 1 s pieces, the whole file or just the sampled stretches, with the noise remover running
+ *  on the mono mix of each stretch as the browser's measuring worker does (analyse.worker.js). Call loadDfn() first. */
 export function analysePlanes(planes, { sampled = false } = {}) {
   const ch = Math.min(planes.length, 2);
   const a = new Analyser({ channels: ch });
@@ -50,7 +65,20 @@ export function analysePlanes(planes, { sampled = false } = {}) {
     if (k) a.segment();
     const from = Math.round(w.start * RATE);
     const to = Math.min(frames, from + Math.round(w.length * RATE));
-    for (let p = from; p < to; p += RATE) a.push(planes.slice(0, ch).map((x) => x.subarray(p, Math.min(to, p + RATE))));
+    const cleaner = new DfnStream(dfn.mod, dfn.model, 100);
+    const pairs = new Pairer((x, y) => a.addCleaned(x, y));
+    for (let p = from; p < to; p += RATE) {
+      const piece = planes.slice(0, ch).map((x) => x.subarray(p, Math.min(to, p + RATE)));
+      a.push(piece);
+      let mono = piece[0];
+      if (ch === 2) {
+        mono = new Float32Array(piece[0].length);
+        for (let i = 0; i < mono.length; i++) mono[i] = (piece[0][i] + piece[1][i]) * 0.5;
+      }
+      pairs.feed(mono, cleaner.process(mono));
+    }
+    pairs.feed(null, cleaner.flush());
+    cleaner.free();
   });
   return a.result();
 }
@@ -61,6 +89,7 @@ if (process.argv[1] && process.argv[1].endsWith('reco-cli.mjs')) {
   const withReco = args.includes('--reco');
   const first = Number((args.find((a) => a.startsWith('--first=')) || '').slice(8)) || 0;
   const { recommendForFile } = withReco ? await import('../src/recommend.js') : {};
+  await loadDfn();
   for (const f of args.filter((x) => !x.startsWith('--'))) {
     let { planes } = readWav(f);
     if (first) planes = planes.map((p) => p.subarray(0, Math.round(first * RATE)));

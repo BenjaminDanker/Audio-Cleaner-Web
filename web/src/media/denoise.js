@@ -10,10 +10,10 @@ function dfnBase() {
 
 // ---- one shared download ---------------------------------------------------------------------------------------
 // The noise remover is three files (df.js, df_bg.wasm, the model; about 22 MB together). They are fetched ONCE per page
-// load, in the background, as soon as a file has been chosen that the free in-browser cleanup can handle (see
-// JobForm; skipped when the browser asks to save data). Nothing is downloaded on any other page, and nothing before a
-// file is chosen. The wasm is compiled once, the compiled Module and the model bytes are handed to every worker, so a
-// stereo file (two workers) never downloads or compiles anything twice. df.js is only warmed into the HTTP cache here:
+// load, in the background, as soon as a file has been chosen (the free in-browser cleanup, and the quick listen behind
+// "Automatic best settings": analyse.js), or when "Test my room" starts on the Live page. Nothing is downloaded before.
+// The wasm is compiled once, the compiled Module and the model bytes are handed to every worker, so a stereo file (two
+// workers) never downloads or compiles anything twice. df.js is only warmed into the HTTP cache here:
 // it is a module, so each worker imports it by URL (a cache hit, about 15 kB).
 //
 // Repeat visits: every URL carries ?v=<hash of the files> (__DFN_VERSION__), so a changed file is a new URL. The front
@@ -127,6 +127,11 @@ export function preloadDenoiser() {
   state.promise.catch(() => {}); // whoever needs the result handles the error; this just avoids an unhandled rejection
   notify(true);
   return state.promise;
+}
+
+/** What a worker needs to run the noise remover itself (the measuring worker, analyse.js): the shared download plus where df.js is. */
+export function denoiserAssets() {
+  return preloadDenoiser().then(({ module, model }) => ({ module, model, dfnBase: dfnBase(), version: __DFN_VERSION__ }));
 }
 
 class ChannelWorker {

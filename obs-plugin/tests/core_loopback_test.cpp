@@ -118,6 +118,10 @@ public:
 	// The answer to a change: "" = ok, with the session's settings as asked; otherwise this refusal's message.
 	std::string refuse_change;
 	std::atomic<int> changes{0};
+	// The answer to "Test my room" (a `room_test` message), and the last one asked.
+	std::string room_answer = R"({"type":"room_test","ok":true,"noiseDb":12.5,"seconds":20})";
+	std::string last_room_test;
+	std::atomic<int> room_tests{0};
 
 	std::atomic<int> opens{0}, starts{0}, mic{0}, refs{0};
 	// By kind: microphone frames that were silence frames (codec 4) or Opus (codec 3), reference frames that were silence frames.
@@ -218,6 +222,15 @@ private:
 				}
 			} else if (contains(msg->str, "\"ping\"")) {
 				ws.sendText(R"({"type":"pong","t":1})");
+			} else if (contains(msg->str, "\"room_test\"")) {
+				++room_tests;
+				std::string a;
+				{
+					std::lock_guard<std::mutex> lk(mu);
+					last_room_test = msg->str;
+					a = room_answer;
+				}
+				ws.sendText(a);
 			} else if (contains(msg->str, "\"config\"") && contains(msg->str, "\"id\"")) {
 				++changes;
 				const std::string &m = msg->str;
@@ -671,6 +684,39 @@ static void test_changes_while_live()
 	SessionConfig other = captions_only;
 	other.delay_ms = 250;
 	CHECK(!c.change(other));  // not something a running session changes
+}
+
+static void test_room_test()
+{
+	std::printf("room test: the service measures the noise and the snapshot has its figure, or why there is none\n");
+	FakeServer srv;
+	Session s(base_config(srv.url()), nullptr, nullptr);
+	CHECK(std::isnan(s.snapshot().room_noise_db) && s.snapshot().room_code.empty());
+	s.start();
+	{
+		Feeder f(s, nullptr);
+		CHECK(wait_until([&] { return s.snapshot().state == SessionState::Streaming; }, 5000));
+		s.request_room_test(99);  // 5-60 s
+		CHECK(wait_until([&] { return !std::isnan(s.snapshot().room_noise_db); }, 5000));
+		CHECK(s.snapshot().room_noise_db == 12.5 && s.snapshot().room_code.empty());
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			CHECK(contains(srv.last_room_test, "\"seconds\":60"));
+			srv.room_answer = R"({"type":"room_test","ok":false,"code":"needs_noise_removal","message":"Turn noise removal on first."})";
+		}
+		s.request_room_test();
+		CHECK(std::isnan(s.snapshot().room_noise_db));  // the last result is forgotten at once
+		CHECK(wait_until([&] { return !s.snapshot().room_code.empty(); }, 5000));
+		const SessionSnapshot n = s.snapshot();
+		CHECK(n.room_code == "needs_noise_removal" && n.room_message == "Turn noise removal on first." && std::isnan(n.room_noise_db));
+		CHECK(srv.room_tests.load() == 2);
+		{
+			std::lock_guard<std::mutex> lk(srv.mu);
+			CHECK(contains(srv.last_room_test, "\"seconds\":20"));
+		}
+		f.stop();
+	}
+	s.stop(0, 500);
 }
 
 static void test_slow_link()
@@ -2060,6 +2106,7 @@ int main(int argc, char **argv)
 	}
 	test_echo_and_keepalive();
 	test_changes_while_live();
+	test_room_test();
 	test_slow_link();
 	test_server_errors();
 	test_stop_reasons();

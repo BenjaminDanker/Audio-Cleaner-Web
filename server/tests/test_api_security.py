@@ -103,6 +103,18 @@ def test_signing_in_accepts_the_terms_and_records_it(client):
     assert db.one("SELECT count(*) AS n FROM audit_log WHERE user_id = ? AND action = 'tos_accepted'", (uid,))["n"] == 2
 
 
+def test_the_terms_notice_ok_records_agreement(client):
+    """The website's Terms notice: /me says which version is current, and its OK button agrees to it (POST account/tos)."""
+    uid, h = login(client)
+    db.execute("UPDATE users SET tos_version = 'old' WHERE id = ?", (uid,))
+    me = client.get("/api/me", headers=h).json()["user"]
+    assert me["tosVersion"] == auth.TOS_VERSION and not me["tosAccepted"]
+    assert client.post("/api/account/tos", json={"version": "old"}, headers=h).status_code == 409  # not the current one
+    assert client.post("/api/account/tos", json={"version": me["tosVersion"]}, headers=h).json() == {"ok": True}
+    assert client.get("/api/me", headers=h).json()["user"]["tosAccepted"]
+    assert db.one("SELECT tos_version FROM users WHERE id = ?", (uid,))["tos_version"] == auth.TOS_VERSION
+
+
 def test_upload_must_match_declared_size_and_cancel_refunds(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 1_000_000, "grant", "t", "g")

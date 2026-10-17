@@ -1,7 +1,7 @@
-"""The website's "Recommended for this file" measures audio in the browser (web/src/media/analysis.js). Its noise figure, bandwidth and
-channel layout are meant to be the very numbers the server uses to decide how to clean a file, so that "heavy noise" is only ever
-recommended where the server would pick the stronger noise remover. This runs the browser code under Node (web/tests/reco-cli.mjs)
-and the server functions on the same files and fails when they drift apart.
+"""The website's "Recommended for this file" measures audio in the browser (web/src/media/analysis.js, with the noise remover's
+WebAssembly build). Its noise figure, bandwidth and channel layout are meant to be the very numbers the server uses to decide how to
+clean a file, so that "heavy noise" is only ever recommended where the server would pick the stronger noise remover. This runs the
+browser code under Node (web/tests/reco-cli.mjs) and the server functions on the same files and fails when they drift apart.
 
 Files: noisy mixes made here, plus every WAV in $ACW_RECO_FILES when set (48 kHz; the calibration material).
 Needs `node` (18 or newer); skipped without it."""
@@ -21,11 +21,23 @@ from scipy.signal import butter, sosfilt
 
 from acw_common import bwe, pipeline
 
+from .conftest import LIVE_LIBDF, LIVE_MODELS
+
 ROOT = Path(__file__).resolve().parents[2]
+MODEL = LIVE_MODELS / "DeepFilterNet3_onnx.tar.gz"
 CLI = ROOT / "web" / "tests" / "reco-cli.mjs"
 SR = 48000
 
-pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
+pytestmark = [pytest.mark.skipif(shutil.which("node") is None, reason="needs node"),
+              pytest.mark.skipif(not (LIVE_LIBDF.is_file() and MODEL.is_file()), reason="needs libdf and the model")]
+
+
+def _figure(x):
+    return pipeline.noise_figure_db(x, LIVE_LIBDF, MODEL)
+
+
+def _server_heavy(x):
+    return pipeline.choose_noise_profile(x, LIVE_LIBDF, MODEL) == "heavy"
 
 
 def _write(path: Path, x: np.ndarray) -> np.ndarray:
@@ -111,16 +123,15 @@ def measured(tmp_path_factory):
     return [(Path(r["file"]), r, files[Path(r["file"])]) for r in rows]
 
 
-def test_noise_figure_matches_noise_estimate_db(measured):
+def test_noise_figure_matches_noise_figure_db(measured):
+    """The same noise remover (WebAssembly in the browser, the native library on the server) on the same audio."""
     for path, js, x in measured:
-        py = pipeline.noise_estimate_db(x)
-        assert js["noiseDb"] == pytest.approx(py, abs=0.01), path.name
+        assert js["noiseDb"] == pytest.approx(_figure(x), abs=0.05), path.name
 
 
 def test_heavy_is_recommended_exactly_where_the_server_picks_it(measured):
     for path, js, x in measured:
-        server_heavy = pipeline.choose_noise_profile(x) == "heavy"
-        assert (js["noiseDb"] < pipeline.HEAVY_BELOW_DB) == server_heavy, path.name
+        assert (js["noiseDb"] < pipeline.HEAVY_BELOW_DB) == _server_heavy(x), path.name
 
 
 def test_the_heavy_cut_is_the_same_number():
@@ -128,8 +139,6 @@ def test_the_heavy_cut_is_the_same_number():
     assert float(re.search(r"HEAVY_BELOW_DB\s*=\s*([\d.]+)", src).group(1)) == pipeline.HEAVY_BELOW_DB
     silence = float(re.search(r"SILENCE_DB\s*=\s*(-?[\d.]+)", src).group(1))
     assert silence == pipeline.SILENCE_DB
-    cpp = (ROOT / "obs-plugin" / "core" / "src" / "input_advice.cpp").read_text()
-    assert float(re.search(r"kHeavyBelow\s*=\s*([\d.]+)", cpp).group(1)) == pipeline.HEAVY_BELOW_DB
 
 
 def test_bandwidth_and_the_restore_choice_match(measured):
@@ -160,9 +169,9 @@ def test_loudness_is_close_to_bs1770(measured):
             assert js["loudnessLufs"] == pytest.approx(ref, abs=0.3), path.name
 
 
-def test_a_long_file_is_judged_from_a_sample_the_same_way(tmp_path):
-    """Only ~60 s of a long recording are measured; the noise figure from them must be near the whole file's, and
-    'heavy' may only be recommended where the server would pick it."""
+def test_a_long_file_is_judged_from_the_same_sample(tmp_path):
+    """Only ~60 s of a long recording are measured, the same six stretches in the browser and on the server, so the figures
+    agree and 'heavy' is only recommended where the server picks it."""
     voice = _voice(240, 5)
     for snr in (3, 12, 18, 21, 28, 40):
         x = _mix(voice, snr, "pink", 11)
@@ -172,7 +181,7 @@ def test_a_long_file_is_judged_from_a_sample_the_same_way(tmp_path):
         assert out.returncode == 0, out.stderr[-2000:]
         js = json.loads(out.stdout.splitlines()[0])
         assert js["segments"] == 6 and 55 <= js["seconds"] <= 61
-        py = pipeline.noise_estimate_db(xs)
-        assert abs(js["noiseDb"] - py) < 3.0, (snr, js["noiseDb"], py)
+        py = _figure(xs)
+        assert abs(js["noiseDb"] - py) < 0.1, (snr, js["noiseDb"], py)
         if js["reco"] and js["reco"]["heavy"]:
-            assert pipeline.choose_noise_profile(xs) == "heavy", snr
+            assert _server_heavy(xs), snr

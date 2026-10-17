@@ -1,17 +1,20 @@
-// Measuring a recording, quickly: the numbers behind "Recommended for this file" (src/recommend.js).
-// Pure functions and one class, no browser APIs, so a worker, the Live page and the Node tests all run the same code.
+// Measuring a recording, quickly: the numbers behind "Recommended for this file" and "Test my room" (src/recommend.js).
+// Pure functions and classes, no browser APIs, so a worker, the Live page and the Node tests all run the same code.
 //
-// The noise figure is the one the server uses to choose its noise remover (common/acw_common/pipeline.py:
-// noise_estimate_db, bandwidth: bwe.effective_bandwidth). tests/test_reco_agreement.py runs this module and the Python
-// functions on the same files and fails when they drift apart. Keep the two in step.
+// The noise figure is measured by the noise remover itself: it runs at full strength over the audio (in a worker, or Node), and
+// what it keeps (the voice) is compared with what it takes out (NoiseFigure), so wind, keyboards and chatter count as much as a
+// steady hiss. The server measures the same way to choose its noise remover (common/acw_common/pipeline.py: noise_figure_db,
+// measure_windows; bandwidth: bwe.effective_bandwidth). tests/test_reco_agreement.py runs this module and the Python functions on
+// the same files and fails when they drift apart. Keep the two in step.
 //
 //   const a = new Analyser({ channels: 2 });
 //   a.push([left, right]);            // 48 kHz Float32Arrays of equal length; call as often as you like
+//   a.addCleaned(mono, cleaned);      // the mono mix and what the noise remover (100 dB) made of it, lined up
 //   a.segment();                      // the next push does not continue the last one (a different part of the file)
 //   const stats = a.result();
 
 export const RATE = 48000;
-/** The server's "heavy noise" cut: noise_estimate_db below this goes to the stronger noise remover (pipeline.HEAVY_BELOW_DB). */
+/** The server's "heavy noise" cut: a noise figure below this goes to the stronger noise remover (pipeline.HEAVY_BELOW_DB). */
 export const HEAVY_BELOW_DB = 19.0;
 /** Frame energy (dBFS, 10 ms frames) below which audio counts as digital silence (pipeline.SILENCE_DB). */
 export const SILENCE_DB = -90.0;
@@ -216,6 +219,36 @@ export function planWindows(duration, total = 60, count = 6) {
   });
 }
 
+// ---- the noise figure (pipeline.noise_figure_db) --------------------------------------------------------------------
+/** dB between the voice and the noise in it: what the noise remover (at full strength) keeps against what it takes out. */
+export class NoiseFigure {
+  constructor() {
+    this.voice = 0;
+    this.removed = 0;
+    this.measured = false;
+  }
+
+  /** @param {Float32Array} x the audio  @param {Float32Array} y the noise remover's output for it, lined up, as long */
+  add(x, y) {
+    let v = 0;
+    let r = 0;
+    for (let i = 0; i < x.length; i++) {
+      v += y[i] * y[i];
+      const d = x[i] - y[i];
+      r += d * d;
+    }
+    this.voice += v;
+    this.removed += r;
+    this.measured = true;
+  }
+
+  /** 99 when there was nothing to hear. */
+  db() {
+    if (this.voice + this.removed <= 0) return 99;
+    return Math.min(99, 10 * Math.log10((this.voice + 1e-12) / (this.removed + 1e-12)));
+  }
+}
+
 // ---- the analyser --------------------------------------------------------------------------------------------------
 export class Analyser {
   /** @param {{channels?: number}} opts channels: 1 or 2 (what push() gets) */
@@ -249,6 +282,12 @@ export class Analyser {
     this.subs = [];
     this.blocks = [];
     this.segments = 1;
+    this.noise = new NoiseFigure();
+  }
+
+  /** The mono mix of what was pushed and the noise remover's output for it (lined up, as long): the noise figure. */
+  addCleaned(x, y) {
+    this.noise.add(x, y);
   }
 
   /** The next push() is a different part of the file: nothing continues across the join. */
@@ -441,7 +480,6 @@ export class Analyser {
     const p10 = enough ? percentile(sorted, 10) : NaN;
     const p90 = enough ? percentile(sorted, 90) : NaN;
     const p95 = enough ? percentile(sorted, 95) : NaN;
-    const noiseDb = enough ? p90 - p10 : 99; // as pipeline.noise_estimate_db
     // Share of the frames that are clearly above the room: speech, as far as a level alone can tell.
     const gate = enough ? Math.max(p10 + 12, p95 - 25) : Infinity;
     let above = 0;
@@ -468,7 +506,7 @@ export class Analyser {
     return {
       seconds,
       segments: this.segments,
-      noiseDb, // 90th minus 10th percentile of the 10 ms levels, as the server measures it
+      noiseDb: this.noise.measured ? this.noise.db() : null, // null: the noise remover didn't run (no recommendation then)
       floorDb: p10,
       levelDb: p90,
       peakDb: p95,

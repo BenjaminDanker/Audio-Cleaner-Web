@@ -90,7 +90,7 @@ export default function DevelopersLive() {
             ['full', 'Live capacity is used up right now; "available" lists what still fits. Retry after 60 seconds.'],
             ['restarting', 'The service is being updated; new sessions are refused for a minute or so. Retry after 60 seconds.'],
             ['unavailable', 'Live processing is busy or offline (or extra accurate captions aren’t available). Retry after 30 seconds (300 for captions).'],
-            ['rate_limited', 'During the session: too many text messages (more than 50 a second for a while, a burst of 100, or more than 5 config messages a second). The socket closes with 1008.'],
+            ['rate_limited', 'During the session: too many text messages (more than 50 a second for a while, a burst of 100, or more than 5 config or room_test messages a second). The socket closes with 1008.'],
             ['bad_frame', 'During the session: an audio frame we couldn’t read (wrong header, size or codec). The session ends.'],
             ['too_fast', 'During the session: audio arrived faster than real time (bursts up to 6 seconds are fine). The session ends.'],
             ['worker_lost', 'During the session: our processing stopped unexpectedly. The session ends; start again.'],
@@ -160,8 +160,10 @@ export default function DevelopersLive() {
         <Code label="Control messages">{`{"type": "ping", "t": 123}
 {"type": "config", "attenLimDb": 30}
 {"type": "config", "id": "c7", "captions": "premium", "language": ["en", "es"], "translate": ["de"]}
+{"type": "room_test", "seconds": 20}
 {"type": "stop"}`}</Code>
         <p><b>Change anything while live.</b> <code>config</code> takes the same settings as <code>start</code> (<code>denoise</code>, <code>captions</code>, <code>language</code>, <code>translate</code>, <code>echoReference</code>, <code>attenLimDb</code>); what you leave out stays. The audio keeps flowing with the same delay, and you pay for each stretch at the price of the settings it had. Add an <code>id</code> and we answer with the settings now (<code>{'{"type":"config","id":"c7","ok":true,"usdPerMinute":0.0255,...}'}</code>), or with <code>ok: false</code>, a <code>code</code> and a <code>message</code> if it can&rsquo;t be done (live is full, the balance can&rsquo;t cover it, a setting we can&rsquo;t use); then nothing changes. A free-time session that turns on something the free time doesn&rsquo;t cover carries on from your credit.</p>
+        <p><b>Measure the room.</b> <code>room_test</code> measures the background noise over the next <code>seconds</code> (5 to 60, 20 if you leave it out) of audio and answers once: <code>{'{"type":"room_test","ok":true,"noiseDb":17.4,"seconds":20}'}</code>. <code>noiseDb</code> is how far the voice stands above the noise that noise removal takes out, the same figure our own recommendations use, whatever strength you picked. Under about 15 the room is very noisy, from about 24 it is quiet. It needs noise removal on; if it is off, or you switch it off before the time is up, you get <code>ok: false</code> with <code>code: "needs_noise_removal"</code> and a <code>message</code>. It counts toward the same limit as <code>config</code>.</p>
         <p> On <code>stop</code> we send the captions that are still waiting, then close. We close the socket after 30 seconds with no message at all (see <code>idle_timeout</code> for what keeps a session alive beyond that). You pay for processed audio seconds only, rounded up to the next second when the session ends.</p>
       </Section>
 
