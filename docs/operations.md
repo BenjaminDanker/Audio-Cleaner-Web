@@ -657,9 +657,9 @@ uses while paid jobs run. `python -m acw.admin capacity` (or `--json`) shows eve
 logical core, memory and disk against their reserves, the live engine's sessions/units/caption streams, running
 and queued jobs and the cores jobs may use.
 
-**After a libdf change, rebuild it:** `native/deepfilter/build.sh native`, then copy `out/libdf.so` (in the build
-directory, default `~/audio-cleaner/src/deepfilter-build/out/`) to `~/audio-cleaner/bin/` and restart `acw-stream`.
-Until then the old library keeps running at the old capacity (the calibration notices which one it is).
+**libDF** (`bin/libdf.so`) is built by `deploy/install.sh` (`native/deepfilter/build.sh native` in
+`~/audio-cleaner/src/deepfilter-build`) whenever `native/deepfilter` changes, then installed and `acw-stream` restarted.
+The engine and file jobs need its additions (`df_shares_model`, `df_reset`, `df_create_with_params`).
 
 When full, a new session is refused with the options that still fit; sessions that only use the external
 (extra-accurate) captions are never limited by the stream workers. Other limits (all overridable in `acw.env`):

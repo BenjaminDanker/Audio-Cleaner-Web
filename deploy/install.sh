@@ -216,20 +216,29 @@ git -C "$REPO" rev-parse --short HEAD > "$H/app/VERSION"
 install -m 600 "$REPO/deploy/models.lock" "$H/app/models.lock"
 chmod -R go-rwx "$H/app"
 
-# ---- 7. Models and programs: every file in deploy/models.lock is present and has the recorded sha256
-# (downloads what is missing or wrong, never touches a correct file; FFmpeg and the models-v1/v2 archives come from
-# the lock's pinned URLs, or from $ACW_ARCHIVE_DIR). Every feature needs its files: anything missing stops the deploy.
-# libdf.so is built here (native/deepfilter/build.sh).
-bash "$REPO/deploy/fetch-models.sh" || { echo "models or programs missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2; exit 1; }
-# The live engine (native/live, bin/acw-live): rebuilt when its sources change. It is required: a failed build stops
-# the deploy (the running engine is left as it is).
+# ---- 7. Native code, models and programs.
+# libDF (native/deepfilter: the pinned DeepFilterNet commit + tract-0.23.patch, bin/libdf.so) and the live engine
+# (native/live, bin/acw-live) are rebuilt when their sources change. Both are required: a failed build stops the
+# deploy and leaves the running ones as they are. File jobs load libDF per stage, so only the engine restarts.
 command -v cargo >/dev/null 2>&1 || source "$HOME/.cargo/env"
+stamp="$(cat "$REPO/native/deepfilter/build.sh" "$REPO/native/deepfilter/tract-0.23.patch" "$REPO/native/deepfilter/Cargo.lock" | sha256sum | cut -c1-16)"
+if [ ! -f "$H/bin/libdf.so" ] || [ "$(cat "$H/bin/libdf.so.src" 2>/dev/null)" != "$stamp" ]; then
+  BUILD_DIR="$H/src/deepfilter-build" OUT="$H/src/deepfilter-build/out" bash "$REPO/native/deepfilter/build.sh" native
+  install -m 755 "$H/src/deepfilter-build/out/libdf.so" "$H/bin/.libdf.so.new"
+  mv -f "$H/bin/.libdf.so.new" "$H/bin/libdf.so"
+  echo "$stamp" > "$H/bin/libdf.so.src"
+  add_restart acw-stream.service
+fi
 stamp="$(cd "$REPO/native/live" && cat Cargo.toml Cargo.lock build.rs src/*.rs | sha256sum | cut -c1-16)"
 if [ ! -x "$H/bin/acw-live" ] || [ "$(cat "$H/bin/acw-live.src" 2>/dev/null)" != "$stamp" ]; then
   bash "$REPO/native/live/build.sh" "$H/bin"
   echo "$stamp" > "$H/bin/acw-live.src"
   add_restart acw-stream.service
 fi
+# Every file in deploy/models.lock is present and has the recorded sha256 (downloads what is missing or wrong, never
+# touches a correct file; FFmpeg and the models-v1/v2 archives come from the lock's pinned URLs, or from
+# $ACW_ARCHIVE_DIR). Every feature needs its files: anything missing stops the deploy.
+bash "$REPO/deploy/fetch-models.sh" || { echo "models or programs missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2; exit 1; }
 
 # ---- 8. Config
 if [ ! -f "$H/secrets/acw.env" ]; then
