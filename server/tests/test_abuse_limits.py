@@ -3,6 +3,7 @@ rate, free-trial farming, first-top-up limits, premium captions that break down,
 and what an API key may learn from /api/me."""
 import asyncio
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -11,6 +12,7 @@ import pytest
 from acw import auth, db, jobs
 from acw.billing import ledger, pricing, stripe_service, trust
 from acw.config import get_settings
+from acw.stream.features import Features
 
 from .conftest import ORIGIN, login, settle_payment
 from .test_api_security import make_key
@@ -192,9 +194,9 @@ def drive(monkeypatch, messages, uid, **consts):
 
     monkeypatch.setattr(routes.P, "read_msg", never)
     monkeypatch.setattr(routes.P, "send_msg", noop)
-    sess = routes.Session(FakeWS(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000)
+    sess = routes.Session(FakeWS(), SimpleNamespace(user_id=uid), Features(denoise="light"))
     sess.reader, sess.writer = R(), SimpleNamespace(close=lambda: None)
-    sess.held_seconds = 300.0
+    sess.held_micros = sess.current_rate() * 5
     asyncio.run(routes._run(sess))
     return sess
 
@@ -409,9 +411,8 @@ def test_auto_reload_amount_respects_the_first_top_up_limit(client, signed_in):
 def premium_session(uid):
     from acw.stream import routes
 
-    rate = routes._rate_micros_per_minute("light", "premium")
-    sess = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), {"denoise": "light", "captions": "premium", "echo_reference": False}, rate)
-    return sess, rate
+    f = Features(denoise="light", captions="premium")
+    return routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), f), f.rate()
 
 
 def test_failed_premium_captions_stop_being_billed():
@@ -420,13 +421,13 @@ def test_failed_premium_captions_stop_being_billed():
     prem = pricing.rate("stream_captions", "premium").micros_per_minute
     den = pricing.rate("stream_denoise", "light").micros_per_minute
     assert rate == prem + den
-    sess.samples = 48_000 * 60
-    sess.premium_failed()  # the minute so far had them
-    sess.samples += 48_000 * 60
-    assert sess.micros_for(sess.seconds) == rate + den  # a minute with, a minute without
+    sess.count(48_000 * 60)
+    sess.failed_premium()  # the minute so far had them
+    sess.count(48_000 * 60)
+    assert sess.meter.micros() == rate + den  # a minute with, a minute without
     assert sess.current_rate() == den
-    sess.premium_failed()  # a second failure changes nothing
-    assert sess.premium_off_seconds == 60
+    sess.failed_premium()  # a second failure changes nothing
+    assert sess.meter.micros() == rate + den and sess.current_rate() == den
 
 
 def test_the_hold_is_extended_at_the_reduced_rate(monkeypatch):
@@ -435,7 +436,7 @@ def test_the_hold_is_extended_at_the_reduced_rate(monkeypatch):
     sess.open_hold()
     held = db.one("SELECT amount_micros FROM holds WHERE id = ?", (sess.hold_id,))["amount_micros"]
     assert held == rate * pricing.STREAM_HOLD_MINUTES
-    sess.premium_failed()
+    sess.failed_premium()
     assert sess.extend_hold()
     den = pricing.rate("stream_denoise", "light").micros_per_minute
     assert db.one("SELECT amount_micros FROM holds WHERE id = ?", (sess.hold_id,))["amount_micros"] == held + den
@@ -452,11 +453,12 @@ def test_a_session_with_failed_captions_is_charged_only_for_what_it_got():
     sess.open_hold()
     sess.writer = None
     sess.ws = SimpleNamespace(close=_noop)
-    sess.samples = 48_000 * 120
-    sess.premium_off_seconds = 60.0
+    sess.count(48_000 * 60)
+    sess.failed_premium()
+    sess.count(48_000 * 60)
     asyncio.run(routes._finish_inner(sess))
     den = pricing.rate("stream_denoise", "light").micros_per_minute
-    assert db.one("SELECT cost_micros, premium_off_seconds FROM stream_sessions WHERE id = 's-prem'")["cost_micros"] == rate + den
+    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-prem'")["cost_micros"] == rate + den
     assert ledger.balance(uid)["balance_micros"] == 5_000_000 - rate - den
     assert ledger.balance(uid)["held_micros"] == 0
 
@@ -469,14 +471,32 @@ def test_an_interrupted_session_is_billed_the_same_way_at_startup():
     from acw.stream import routes
 
     uid = user(credit=5_000_000)
-    hold = ledger.create_hold(uid, 200_000, "stream", "s-old")
-    db.execute(
-        "INSERT INTO stream_sessions(id,user_id,denoise_tier,caption_tier,status,hold_id,seconds,premium_off_seconds,started_at)"
-        " VALUES ('s-old',?,'light','premium','active',?,120,60,?)", (uid, hold, db.now() - 3600))
-    asyncio.run(routes.startup())
     den = pricing.rate("stream_denoise", "light").micros_per_minute
     prem = pricing.rate("stream_captions", "premium").micros_per_minute
+    hold = ledger.create_hold(uid, 200_000, "stream", "s-old")
+    db.execute(  # a minute with the captions, then they broke down: the meter as the session saved it
+        "INSERT INTO stream_sessions(id,user_id,denoise_tier,caption_tier,status,hold_id,seconds,paid_seconds,meter_closed,"
+        "meter_rate,meter_seconds,started_at) VALUES ('s-old',?,'light','premium','active',?,120,120,?,?,60,?)",
+        (uid, hold, den + prem, den, db.now() - 3600))
+    asyncio.run(routes.startup())
     assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-old'")["cost_micros"] == 2 * den + prem
+
+
+def test_a_session_left_running_by_the_version_before_the_meter_is_billed_as_before():
+    from acw.stream import routes
+
+    uid = user(credit=5_000_000)
+    den = pricing.rate("stream_denoise", "light").micros_per_minute
+    prem = pricing.rate("stream_captions", "premium").micros_per_minute
+    hold = ledger.create_hold(uid, 200_000, "stream", "s-older")
+    db.execute("ALTER TABLE stream_sessions ADD COLUMN premium_off_seconds REAL")  # the old schema
+    db.execute(
+        "INSERT INTO stream_sessions(id,user_id,denoise_tier,caption_tier,status,hold_id,seconds,premium_off_seconds,started_at)"
+        " VALUES ('s-older',?,'light','premium','active',?,120,60,?)", (uid, hold, db.now() - 3600))
+    db.init_db()  # the new version starts: the meter is made from the old columns, which then go
+    assert "premium_off_seconds" not in {r["name"] for r in db.all_rows("PRAGMA table_info(stream_sessions)")}
+    asyncio.run(routes.startup())
+    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-older'")["cost_micros"] == 2 * den + prem
 
 
 def test_premium_captions_tell_the_session_when_they_fail():
@@ -496,6 +516,7 @@ def test_a_captions_only_session_ends_when_its_captions_break(monkeypatch):
     uid = user()
     monkeypatch.setattr(routes, "IDLE_TIMEOUT", 60.0)
     q = [(0.05, frame(i)) for i in range(30)]
+    failed_at = []
 
     class WS:
         sent = []
@@ -506,7 +527,8 @@ def test_a_captions_only_session_ends_when_its_captions_break(monkeypatch):
             d, m = q.pop(0)
             await asyncio.sleep(d)
             if len(q) == 20:
-                sess.premium_failed()
+                failed_at.append(sess.seconds)
+                sess.failed_premium()
             return m
 
         async def send_text(self, t):
@@ -521,12 +543,13 @@ def test_a_captions_only_session_ends_when_its_captions_break(monkeypatch):
     monkeypatch.setattr(routes.P, "read_msg", never)
     monkeypatch.setattr(routes.P, "send_msg", _noop)
     rate = pricing.rate("stream_captions", "premium").micros_per_minute
-    sess = routes.Session(WS(), SimpleNamespace(user_id=uid), {"denoise": None, "captions": "premium", "echo_reference": False}, rate)
-    sess.reader, sess.writer, sess.held_seconds = SimpleNamespace(), SimpleNamespace(close=lambda: None), 300.0
+    sess = routes.Session(WS(), SimpleNamespace(user_id=uid), Features(captions="premium"))
+    sess.reader, sess.writer = SimpleNamespace(), SimpleNamespace(close=lambda: None)
+    sess.held_micros = sess.current_rate() * 5
     asyncio.run(routes._run(sess))
     assert sess.end_reason == "captions_unavailable"
     assert {"type": "stopped", "reason": "captions_unavailable"} in WS.sent
-    assert sess.micros_for(sess.seconds) == routes._micros(0, sess.seconds) + routes._micros(rate, sess.premium_off_seconds)
+    assert sess.current_rate() == 0 and sess.meter.micros() == math.ceil(round(rate * failed_at[0] / 60, 6))
 
 
 # ---------------------------------------------------------------- L1: malformed options

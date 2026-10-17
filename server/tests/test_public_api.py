@@ -9,6 +9,7 @@ from starlette.websockets import WebSocketDisconnect
 from acw import db, jobs, keycaps
 from acw.billing import ledger
 from acw.security import sha256_hex
+from acw.stream.features import Features
 
 from .conftest import login
 from .test_api_security import make_key
@@ -300,7 +301,7 @@ def live_session(uid, key_id, rate=4000):
     from acw.stream import routes
 
     p = SimpleNamespace(user_id=uid, api_key_id=key_id)
-    return routes.Session(SimpleNamespace(), p, {"denoise": "light", "captions": None, "echo_reference": False}, rate)
+    return routes.Session(SimpleNamespace(), p, Features(denoise="light"))
 
 
 def test_a_live_session_cannot_reserve_past_the_cap():
@@ -351,10 +352,10 @@ def test_the_billing_tick_warns_then_stops_a_capped_session():
     sess.open_hold()
     db.execute("INSERT INTO stream_sessions(id,user_id,api_key_id,denoise_tier,status,hold_id,started_at) VALUES ('s1',?,'k1','light','active',?,?)",
                (uid, sess.hold_id, db.now()))
-    sess.samples = 48_000 * 60 * 4 + 48_000 * 30  # 4.5 minutes of the 5 held: the next minute is due
+    sess.count(48_000 * 60 * 4 + 48_000 * 30)  # 4.5 minutes of the 5 held: the next minute is due
     assert asyncio.run(routes._billing_tick(sess)) is True
     assert sent[0]["type"] == "warning" and sent[0]["code"] == "key_spending_cap"
-    sess.samples = 48_000 * 60 * 5
+    sess.count(48_000 * 30)  # all 5 used
     assert asyncio.run(routes._billing_tick(sess)) is False
     assert sent[-1] == {"type": "stopped", "reason": "key_spending_cap"} and sess.end_reason == "key_spending_cap"
 

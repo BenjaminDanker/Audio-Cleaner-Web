@@ -25,15 +25,33 @@ CONTEXT_LINES = 3
 
 class LiveTranslator:
     def __init__(self, targets: list[str], source: str | None, emit):
-        self.targets = list(targets)
         self.source = source
         self.emit = emit  # emit(event dict); called on the event loop
-        self.seconds = {t: 0.0 for t in self.targets}  # of speech translated, per language
+        self.seconds: dict[str, float] = {}  # of speech translated, per language (also for languages switched off since)
         self.off: set[str] = set()
-        self._queues = {t: asyncio.Queue(maxsize=QUEUE_LINES) for t in self.targets}
+        self._queues: dict[str, asyncio.Queue] = {}
+        self._tasks: dict[str, asyncio.Task] = {}
         self._context: list[str] = []
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(15, connect=5))
-        self._tasks = [asyncio.create_task(self._run(t)) for t in self.targets]
+        self.set_targets(targets, source)
+
+    @property
+    def targets(self) -> list[str]:
+        return list(self._queues)
+
+    def set_targets(self, targets: list[str], source: str | None) -> None:
+        """Translate into `targets` from the next line on (the session's settings changed). A language added again
+        after it stopped working gets another try."""
+        self.source = source
+        for t in [t for t in self._queues if t not in targets]:
+            self._tasks.pop(t).cancel()
+            del self._queues[t]
+        for t in targets:
+            if t not in self._queues or self._tasks[t].done():
+                self.off.discard(t)
+                self.seconds.setdefault(t, 0.0)
+                self._queues[t] = asyncio.Queue(maxsize=QUEUE_LINES)
+                self._tasks[t] = asyncio.create_task(self._run(t))
 
     def offer(self, ev: dict) -> None:
         """A caption event from the recognizer: final ones are queued for every language that is still on."""
@@ -58,6 +76,8 @@ class LiveTranslator:
             cid, text, start, end, context, queued_at = await q.get()
             if time.monotonic() - queued_at > MAX_LINE_AGE:
                 continue  # it waited behind slow answers: showing it now would only confuse
+            if lang not in self._queues:
+                return  # switched off
             try:
                 out = await translate.translate_line(self._http, text, self.source, lang, context)
             except Exception:  # noqa: BLE001 - one line failing must not end the session
@@ -91,9 +111,9 @@ class LiveTranslator:
             await asyncio.wait_for(asyncio.gather(*(self._drain(t) for t in self.targets)), timeout=wait)
         except asyncio.TimeoutError:
             pass
-        for task in self._tasks:
+        for task in self._tasks.values():
             task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         await self._http.aclose()
 
     async def _drain(self, lang: str) -> None:

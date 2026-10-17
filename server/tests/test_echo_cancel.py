@@ -85,7 +85,7 @@ def test_reference_removes_the_echo_and_keeps_the_voice(live, client, codec, min
     mic, far = room()
     ready, y = stream(client, mic, far, {"echoReference": True, "captions": "local", "language": "en"}, codec)
     assert ready["echoReference"] is True
-    assert ready["modelLatencyMs"] == 9.0  # the canceller's own delay is part of what clients budget for
+    assert ready["modelLatencyMs"] == 39.0  # the same in every session: the model's 30 ms and the canceller's 9
     n = SAMPLE_RATE
     echo_only = slice(5 * n, 6 * n)  # after it has settled, before the voice starts
     removed_db = 20 * np.log10(rms(mic[echo_only]) / rms(y[echo_only]))
@@ -97,11 +97,12 @@ def test_reference_removes_the_echo_and_keeps_the_voice(live, client, codec, min
 def test_without_a_reference_the_audio_is_unchanged(live, client):
     mic, far = room(3)
     ready, y = stream(client, mic, far, {}, send_reference=None)
-    assert "echoReference" not in ready and ready["modelLatencyMs"] == 0.0
-    assert np.max(np.abs(y - mic)) < 1e-3
+    assert "echoReference" not in ready and ready["modelLatencyMs"] == 39.0
+    d = 1872  # the session's delay: nothing runs, the audio only waits
+    assert np.max(np.abs(y[d:] - mic[:-d])) < 1e-3
     # reference frames from a session that never asked for them are ignored, not mixed in
     ready, y = stream(client, mic, far, {}, send_reference="before")
-    assert np.max(np.abs(y - mic)) < 1e-3
+    assert np.max(np.abs(y[d:] - mic[:-d])) < 1e-3
 
 
 def test_late_reference_counts_as_silence(live, client):

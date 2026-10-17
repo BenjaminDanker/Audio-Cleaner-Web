@@ -17,6 +17,10 @@ from acw.stream import protocol as P
 from .conftest import LIVE_LIBDF, LIVE_MODELS
 
 
+AEC_DELAY = 432  # the echo canceller's delay (native/live/src/main.rs)
+LATENCY = 1440 + AEC_DELAY
+
+
 @pytest.fixture
 def engine(live_engine):
     return live_engine
@@ -102,9 +106,11 @@ def test_the_audio_matches_the_reference_chain(engine):
     x = _speech()
     frames = [x[i:i + 960] for i in range(0, len(x), 960)]
     ready, out = _session(engine(), {"denoise": "light", "captions": None, "atten_lim_db": 24}, frames)
-    assert ready["latencySamples"] == 1440 and ready["cores"] == [0]
+    # Every session has the same delay, whatever runs (features can change mid-session): the model's 1440 samples and
+    # the echo canceller's 432, which a session without it spends in a delay line before the model.
+    assert ready["latencySamples"] == LATENCY and ready["cores"] == [0]
     y = np.concatenate(out)
-    want = _reference_chain(x, 24)
+    want = _reference_chain(np.concatenate([np.zeros(AEC_DELAY, np.float32), x])[:len(x)], 24)
     assert np.max(np.abs(y - want)) < 1e-6, np.max(np.abs(y - want))
 
 
@@ -160,7 +166,7 @@ def test_echo_is_removed_and_the_voice_kept(engine):
     refs = [far[i:i + 960] for i in range(0, n, 960)]
     ready, out = _session(engine(), {"denoise": None, "captions": None, "echo_reference": True}, frames, refs)
     y = np.concatenate(out)
-    assert ready["latencySamples"] == 432
+    assert ready["latencySamples"] == LATENCY
     rms = lambda v: float(np.sqrt(np.mean(np.square(v))))  # noqa: E731
     echo = slice(5 * 48_000, 6 * 48_000)
     assert 20 * np.log10(rms(mic[echo]) / rms(y[echo])) > 20

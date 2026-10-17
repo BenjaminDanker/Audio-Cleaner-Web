@@ -13,6 +13,7 @@ import pytest
 
 from acw import auth, db, jobs
 from acw.billing import ledger, pricing
+from acw.stream.features import Features
 from tests.test_billing_audit import frame, make_job, run_session, running_job, user
 from tests.conftest import ORIGIN, login, settle_payment
 
@@ -406,9 +407,9 @@ def test_idle_limit_is_short_because_both_clients_keep_sending_frames():
 @pytest.mark.parametrize("value,expected", [(100, 100.0), (3, 6.0), (500, 100.0), ("30", 30.0), (float("nan"), None),
                                             (float("inf"), None), ("abc", None), (None, None), ([1], None)])
 def test_noise_strength_is_validated(value, expected):
-    from acw.stream import routes
+    from acw.stream.features import atten
 
-    assert routes._atten(value) == expected
+    assert atten(value) == expected
 
 
 def test_job_noise_strength_nan_is_refused():
@@ -425,8 +426,8 @@ def test_sessions_nobody_runs_are_closed_and_billed_by_the_sweeper():
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     old, fresh, mine = ledger.create_hold(uid, 20_000, "stream", "o"), ledger.create_hold(uid, 20_000, "stream", "f"), ledger.create_hold(uid, 20_000, "stream", "m")
     for sid, hold, age, secs in (("o", old, 600, 60), ("f", fresh, 5, 0), ("m", mine, 600, 0)):
-        db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,started_at) VALUES (?,?,'light','active',?,?,?)",
-                   (sid, uid, hold, secs, db.now() - age))
+        db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,paid_seconds,meter_rate,meter_seconds,started_at)"
+                   " VALUES (?,?,'light','active',?,?,?,4000,?,?)", (sid, uid, hold, secs, secs, secs, db.now() - age))
     routes._live_ids.add("m")
     try:
         assert routes.close_orphans() == 1
@@ -444,7 +445,7 @@ def test_api_key_revocation_stops_a_running_session():
     uid = user()
     db.execute("INSERT INTO api_keys(id,user_id,name,prefix,key_hash,scopes,created_at) VALUES ('k1',?,'k','acw_xxxx','h','stream',?)", (uid, db.now()))
     db.execute("INSERT INTO stream_sessions(id,user_id,status,started_at) VALUES ('sx',?,'active',?)", (uid, db.now()))
-    sess = routes.Session(None, SimpleNamespace(user_id=uid, api_key_id="k1", session_hash=None), {"echo_reference": False}, 4000)
+    sess = routes.Session(None, SimpleNamespace(user_id=uid, api_key_id="k1", session_hash=None), Features(denoise="light"))
     sess.id = "sx"
     assert asyncio.run(routes._persist(sess)) is True
     db.execute("UPDATE api_keys SET revoked_at = ? WHERE id = 'k1'", (db.now(),))
@@ -458,7 +459,7 @@ def test_logging_out_stops_a_running_session():
     db.execute("INSERT INTO sessions(id_hash,user_id,csrf_token,created_at,expires_at,last_seen_at) VALUES ('hh',?,'c',?,?,?)",
                (uid, db.now(), db.now() + 1000, db.now()))
     db.execute("INSERT INTO stream_sessions(id,user_id,status,started_at) VALUES ('sy',?,'active',?)", (uid, db.now()))
-    sess = routes.Session(None, SimpleNamespace(user_id=uid, api_key_id=None, session_hash="hh"), {"echo_reference": False}, 4000)
+    sess = routes.Session(None, SimpleNamespace(user_id=uid, api_key_id=None, session_hash="hh"), Features(denoise="light"))
     sess.id = "sy"
     assert asyncio.run(routes._persist(sess)) is True
     db.execute("DELETE FROM sessions WHERE id_hash = 'hh'")
@@ -957,9 +958,9 @@ def test_a_dropped_session_is_replaced_instead_of_refusing_the_user():
             closed.append(code)
 
     async def go():
-        old = routes.Session(WS(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000)
+        old = routes.Session(WS(), SimpleNamespace(user_id=uid), Features(denoise="light"))
         old.last_rx -= 60  # nothing from it for a minute, though the server never saw the socket close
-        live = routes.Session(WS(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000)
+        live = routes.Session(WS(), SimpleNamespace(user_id=uid), Features(denoise="light"))
         routes._open[uid] = [old, live]
         routes._live[uid] = routes.MAX_SESSIONS_PER_USER
 
@@ -980,7 +981,7 @@ def test_a_dropped_session_is_replaced_instead_of_refusing_the_user():
     assert ok and old.end_reason == "replaced" and closed == [1001]
 
     # a session that is talking is never replaced
-    routes._open[uid] = [routes.Session(WS(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000)]
+    routes._open[uid] = [routes.Session(WS(), SimpleNamespace(user_id=uid), Features(denoise="light"))]
     try:
         assert asyncio.run(routes._evict_stale(uid)) is False
     finally:

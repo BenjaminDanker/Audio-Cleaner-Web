@@ -64,9 +64,9 @@ export default function DevelopersLive() {
         <p><b>Free live time.</b> Every account gets two hours of Standard live once. A session that only uses <code>denoise: "light"</code> and/or <code>captions: "local"</code> runs on those seconds while there are any: nothing is set aside or charged, and the seconds come off the free time. Extra accurate captions and translations are always paid. One free session can run at a time, and free sessions wait while live is busy. The <code>ready</code> message of a free session has <code>"trial": true</code> and <code>trialSecondsLeft</code>.</p>
         <p>We answer with:</p>
         <Code label="Ready message">{`{"type": "ready", "sessionId": "...", "sampleRate": 48000, "hopSamples": 480,
- "modelLatencyMs": 30.0, "usdPerMinute": 0.01, "maxSessionSeconds": 43200,
+ "modelLatencyMs": 39.0, "usdPerMinute": 0.01, "maxSessionSeconds": 43200,
  "echoReference": true}`}</Code>
-        <p><code>echoReference</code> is only there (true) when you asked for it and we will use it. <code>modelLatencyMs</code> is the delay the cleaning adds, 9 ms more with echo cancellation. Or we answer <code>{'{"type":"error","code":...,"message":...}'}</code> and close.</p>
+        <p><code>echoReference</code> is only there (true) when you asked for it and we will use it. <code>modelLatencyMs</code> is the delay we add: the same 39 ms in every session, whatever is switched on, so you can change the settings while live without your timing changing. Or we answer <code>{'{"type":"error","code":...,"message":...}'}</code> and close.</p>
         <p>When the setup you asked for doesn&rsquo;t fit right now (live has a measured capacity), we refuse and list what would still work:</p>
         <Code label="A full setup">{`{"type": "error", "code": "full", "available": [{"captions": "premium"}],
  "message": "Live noise removal is full right now. Still available: extra-accurate captions. Try again in a few minutes."}`}</Code>
@@ -110,7 +110,7 @@ export default function DevelopersLive() {
         <ul>
           <li><b>Use Opus.</b> Send one 20 ms Opus packet (48 kHz mono, any bitrate; 48 to 64 kbps is plenty) in each frame. We answer with one Opus packet per frame at <code>opusBitrate</code>. That is about 60 kbps each way instead of about 770 kbps of PCM. Opus adds around 6.5 ms each way.</li>
           <li>A frame holds 10 to 100 ms of audio in 10 ms steps (a multiple of 480 samples). 20 ms (960 samples) is recommended.</li>
-          <li>We return exactly one frame for each frame you send, with the same <code>seq</code> and <code>ts_us</code>, the same number of samples and the same codec. The cleaned audio is delayed by <code>modelLatencyMs</code> (30 ms for <code>light</code>), so your total delay is the network round trip plus that. Measure the round trip with <code>ts_us</code>.</li>
+          <li>We return exactly one frame for each frame you send, with the same <code>seq</code> and <code>ts_us</code>, the same number of samples and the same codec. The cleaned audio is delayed by <code>modelLatencyMs</code> (39 ms), so your total delay is the network round trip plus that. Measure the round trip with <code>ts_us</code>.</li>
           <li>With denoise off (captions only) the audio comes back unchanged and you can ignore it, or start with <code>"returnAudio": false</code> and no audio comes back at all (events still do).</li>
           <li><b>Silence is free.</b> When <code>ready</code> has <code>"silenceFrames": true</code>, send a muted or digitally silent stretch (every sample below 1e-5) as a silence frame instead: the header plus a u16 little-endian sample count (a multiple of 480, at most 4800). We answer it right away with the same silence frame. Silence frames keep the session alive but aren’t billed and cost no processing. Echo reference frames can be silence frames too.</li>
           <li><b>Captions only? You pay for speech, not quiet.</b> With <code>denoise: null</code>, the quiet stretches the Standard captions skip (from 2 s after the last words until someone talks again) and the silence Extra accurate captions don’t send on aren’t billed.</li>
@@ -159,8 +159,10 @@ export default function DevelopersLive() {
       <Section id="control" title="4. Messages to us">
         <Code label="Control messages">{`{"type": "ping", "t": 123}
 {"type": "config", "attenLimDb": 30}
+{"type": "config", "id": "c7", "captions": "premium", "language": ["en", "es"], "translate": ["de"]}
 {"type": "stop"}`}</Code>
-        <p><code>config</code> changes the noise strength while live. On <code>stop</code> we send the captions that are still waiting, then close. We close the socket after 30 seconds with no message at all (see <code>idle_timeout</code> for what keeps a session alive beyond that). You pay for processed audio seconds only, rounded up to the next second when the session ends.</p>
+        <p><b>Change anything while live.</b> <code>config</code> takes the same settings as <code>start</code> (<code>denoise</code>, <code>captions</code>, <code>language</code>, <code>translate</code>, <code>echoReference</code>, <code>attenLimDb</code>); what you leave out stays. The audio keeps flowing with the same delay, and you pay for each stretch at the price of the settings it had. Add an <code>id</code> and we answer with the settings now (<code>{'{"type":"config","id":"c7","ok":true,"usdPerMinute":0.0255,...}'}</code>), or with <code>ok: false</code>, a <code>code</code> and a <code>message</code> if it can&rsquo;t be done (live is full, the balance can&rsquo;t cover it, a setting we can&rsquo;t use); then nothing changes. A free-time session that turns on something the free time doesn&rsquo;t cover carries on from your credit.</p>
+        <p> On <code>stop</code> we send the captions that are still waiting, then close. We close the socket after 30 seconds with no message at all (see <code>idle_timeout</code> for what keeps a session alive beyond that). You pay for processed audio seconds only, rounded up to the next second when the session ends.</p>
       </Section>
 
       <Section id="echo" title="5. Echo cancellation (optional)">

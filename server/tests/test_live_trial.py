@@ -13,6 +13,8 @@ from acw.billing import ledger
 from acw.config import get_settings
 from acw.stream import protocol as P
 from acw.stream import routes
+from acw.stream.features import Features
+from acw.stream.meter import micros as meter_micros
 
 from .conftest import ORIGIN, login
 
@@ -206,9 +208,9 @@ def test_when_the_trial_ends_the_session_moves_on_to_credit(client, signed_in, f
     assert ("warning", "trial_used_up_now_paid") in types and ("stopped", "trial_over") not in types
     assert all(t[0] != "error" for t in types)
     s = the_session()
-    rate = routes._rate_micros_per_minute("light", None)
+    rate = Features(denoise="light").rate()
     assert s["seconds"] == pytest.approx(2.5) and s["trial_seconds"] == 1 and s["end_reason"] == "client_stop"
-    assert s["cost_micros"] == routes._micros(rate, 1.5)  # only what came after the trial
+    assert s["cost_micros"] == meter_micros(0, rate, 1.5, 1.5)  # only what came after the trial
     assert ledger.balance(uid)["balance_micros"] == 5_000_000 - s["cost_micros"]
     assert ledger.balance(uid)["held_micros"] == 0
     assert trial_left(uid) == 0
@@ -232,7 +234,7 @@ def test_a_new_session_after_the_trial_is_billed_normally(client, signed_in, fak
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     run_session(client, 2)
     s = the_session()
-    assert s["trial_seconds"] == 0 and s["cost_micros"] == routes._micros(routes._rate_micros_per_minute("light", None), 2)
+    assert s["trial_seconds"] == 0 and s["cost_micros"] == meter_micros(0, Features(denoise="light").rate(), 2, 2)
 
 
 def test_sessions_that_are_not_standard_are_billed_from_credit(client, signed_in, fake_worker, monkeypatch):
@@ -284,7 +286,7 @@ def test_one_trial_session_at_a_time(client, signed_in, fake_worker, monkeypatch
 
     get_settings.cache_clear()
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    other = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000, 600.0)
+    other = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), Features(denoise="light"), 600.0)
     routes._open[uid] = [other]
     try:
         got = run_session(client, 1)
@@ -329,8 +331,9 @@ def test_an_interrupted_trial_session_keeps_the_seconds_that_were_saved():
     db.execute("UPDATE users SET trial_live_seconds = 500 WHERE id = ?", (uid,))
     db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,seconds,trial_seconds,started_at)"
                " VALUES ('s-t',?,'light','active',100,100,?)", (uid, db.now() - 3600))
-    sess = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), {}, 4000, 600.0)
-    sess.id, sess.samples = "s-t", 48_000 * 100
+    sess = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), Features(denoise="light"), 600.0)
+    sess.id = "s-t"
+    sess.count(48_000 * 100)
     sess.save_progress()  # what the session did every 30 seconds
     sess.save_progress()  # twice is not charged twice
     assert trial_left(uid) == 500 - 100
@@ -344,11 +347,11 @@ def test_an_interrupted_session_that_had_moved_on_is_billed_only_after_the_trial
     uid = auth.get_or_create_user("o2@example.com")["id"]
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     hold = ledger.create_hold(uid, 200_000, "stream", "s-m")
-    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,trial_seconds,started_at)"
-               " VALUES ('s-m',?,'light','active',?,130,100,?)", (uid, hold, db.now() - 3600))
+    rate = Features(denoise="light").rate()
+    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,trial_seconds,paid_seconds,meter_rate,"
+               "meter_seconds,started_at) VALUES ('s-m',?,'light','active',?,130,100,30,?,30,?)", (uid, hold, rate, db.now() - 3600))
     asyncio.run(routes.startup())
-    rate = routes._rate_micros_per_minute("light", None)
-    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-m'")["cost_micros"] == routes._micros(rate, 30)
+    assert db.one("SELECT cost_micros FROM stream_sessions WHERE id = 's-m'")["cost_micros"] == meter_micros(0, rate, 30, 30)
     assert ledger.balance(uid)["held_micros"] == 0
 
 

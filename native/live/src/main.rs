@@ -65,12 +65,6 @@ impl Engine {
             "cores": a.cores.iter().enumerate().map(|(i, c)| serde_json::json!({"core": i, "cpus": c, "units": a.load_of(i)})).collect::<Vec<_>>(),
         })
     }
-
-    /// The physical core index of live core `i` (live cores are the first ones).
-    pub fn core_index(&self, i: usize) -> usize {
-        i
-    }
-
 }
 
 fn env_path(key: &str, default: PathBuf) -> PathBuf {

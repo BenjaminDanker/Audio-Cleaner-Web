@@ -44,12 +44,11 @@ pub fn df_shares_model(path: &Path) -> bool {
     df_lib(path).map(|l| l.shares_model).unwrap_or(false)
 }
 
-/// One stateful DeepFilterNet3 instance (one mono stream, 48 kHz, 480-sample hops). Both decoder stages always run
+/// One stateful DeepFilterNet3 instance (one mono stream, 48 kHz, 480-sample hops; output delayed by `model_delay`). Both decoder stages always run
 /// (skipping them on "clean" frames measurably hurts quality: acw_common/dfn.py).
 pub struct DeepFilter {
     lib: &'static DfLib,
     st: *mut c_void,
-    pub delay: usize,
 }
 
 // The state is only used by the thread that owns the session.
@@ -58,13 +57,12 @@ unsafe impl Send for DeepFilter {}
 impl DeepFilter {
     pub fn new(lib_path: &Path, model: &Path, atten_lim_db: f32) -> Result<Self, String> {
         let lib = df_lib(lib_path)?;
-        let delay = model_delay(model)?;
         let p = CString::new(model.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
         let st = unsafe { (lib.create)(p.as_ptr(), atten_lim_db, f32::NEG_INFINITY, f32::INFINITY, f32::INFINITY, 0.0, std::ptr::null()) };
         if st.is_null() {
             return Err("could not load DeepFilterNet model".into());
         }
-        Ok(Self { lib, st, delay })
+        Ok(Self { lib, st })
     }
 
     pub fn set_atten_lim(&mut self, db: f32) {

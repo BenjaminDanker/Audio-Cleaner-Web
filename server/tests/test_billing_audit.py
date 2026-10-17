@@ -2,6 +2,7 @@
 reconciliation, live-session billing and per-tier limits."""
 import asyncio
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 
 from acw import auth, db, jobs
 from acw.billing import ledger, pricing, stripe_service
+from acw.stream.features import Features
 
 HOME = Path(os.environ.get("ACW_HOME", Path.home() / "audio-cleaner"))
 FFMPEG = HOME / "bin/ffmpeg"
@@ -460,7 +462,7 @@ def test_stage_limits_and_estimates_follow_the_work():
 def live_session(uid, **kw):
     from acw.stream import routes
 
-    sess = routes.Session(None, SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000)
+    sess = routes.Session(None, SimpleNamespace(user_id=uid), Features(denoise="light"))
     return sess
 
 
@@ -471,8 +473,8 @@ def test_startup_bills_the_saved_seconds_of_an_interrupted_session():
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     hold = ledger.create_hold(uid, 20_000, "stream", "s1")
     ledger.create_hold(uid, 20_000, "stream", "s2")
-    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,started_at) VALUES ('s1',?,'light','active',?,90,?)",
-               (uid, hold, db.now()))
+    db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,paid_seconds,meter_rate,meter_seconds,started_at)"
+               " VALUES ('s1',?,'light','active',?,90,90,4000,90,?)", (uid, hold, db.now()))
     idle = ledger.create_hold(uid, 20_000, "stream", "s3")
     db.execute("INSERT INTO stream_sessions(id,user_id,denoise_tier,status,hold_id,seconds,started_at) VALUES ('s3',?,'light','active',?,0,?)",
                (uid, idle, db.now()))
@@ -487,10 +489,23 @@ def test_startup_bills_the_saved_seconds_of_an_interrupted_session():
 def test_session_seconds_are_counted_in_whole_samples():
     s = live_session("u")
     for _ in range(3000):  # exactly 60 s of 20 ms Opus frames
-        s.samples += 960
-    assert s.seconds == 60 and s.micros_for(s.seconds) == 4000
-    s.samples += 1
-    assert s.micros_for(s.seconds) == 4067  # the 61st second has started
+        s.count(960)
+    assert s.seconds == 60 and s.meter.micros() == 4000
+    s.count(1)
+    assert s.meter.micros() == 4067  # the 61st second has started
+
+
+def test_changed_features_bill_each_stretch_at_its_rate_and_round_up_once():
+    from acw.stream.features import Features
+
+    s = live_session("u")
+    s.count(48_000 * 60)  # a minute of noise removal
+    s.set_features(Features(denoise="light", captions="local"))
+    s.count(48_000 * 30 + 1)  # half a minute and a sample with Standard captions too
+    both = Features(denoise="light", captions="local").rate()
+    assert s.meter.micros() == 4000 + math.ceil(both * 31 / 60)  # the started second at the rate it ended with
+    s.set_features(Features(denoise="light"))
+    assert s.meter.micros() == math.ceil(4000 + both * (30 + 1 / 48_000) / 60 + 4000 * (1 - 1 / 48_000) / 60)
 
 
 def run_session(monkeypatch, messages, uid, **timeouts):
@@ -526,10 +541,10 @@ def run_session(monkeypatch, messages, uid, **timeouts):
 
     monkeypatch.setattr(routes.P, "read_msg", never)
     monkeypatch.setattr(routes.P, "send_msg", noop)
-    sess = routes.Session(FakeWS(), SimpleNamespace(user_id=uid), {"echo_reference": False}, 4000)
+    sess = routes.Session(FakeWS(), SimpleNamespace(user_id=uid), Features(denoise="light"))
     sess.reader = R()
     sess.writer = SimpleNamespace(close=lambda: None)
-    sess.held_seconds = 300.0
+    sess.held_micros = sess.current_rate() * 5
     asyncio.run(routes._run(sess))
     return sess
 

@@ -248,6 +248,47 @@ impl Admission {
         Decision::Admit(core)
     }
 
+    /// A running session's features change from `old` to `new`: Ok(the core it runs on from now: another one when its own
+    /// has no room for the added work), or the refusal. Nothing changes when it is refused.
+    pub fn change(&mut self, old: &Value, new: &Value, core: usize, host: &HostLoad) -> Result<usize, Value> {
+        let (before, after) = (session_units(old), session_units(new));
+        let local = |c: &Value| c.get("captions").and_then(|v| v.as_str()) == Some("local");
+        let cap = self.capacity(host);
+        if local(new) && !local(old) && self.caption_streams >= self.caption_cap {
+            return Err(json!({"type": "error", "code": "full"}));
+        }
+        if after > before {
+            let total = self.units - before + after;
+            if total > cap {
+                return Err(json!({"type": "error", "code": "full"}));
+            }
+            if new.get("trial").and_then(|v| v.as_bool()).unwrap_or(false) && total > TRIAL_CAPACITY_FRACTION * cap {
+                return Err(json!({"type": "error", "code": "trial_busy"}));
+            }
+        }
+        if let Some(l) = self.load.get_mut(core) {
+            *l = (*l - before).max(0.0);
+        }
+        let may_open = new.get("may_open_core").and_then(|v| v.as_bool()).unwrap_or(true);
+        let target = if self.load.get(core).is_some_and(|l| l + after <= self.units_per_core) {
+            core
+        } else {
+            (0..self.load.len())
+                .find(|&i| self.load[i] + after <= self.units_per_core && (may_open || self.load[i] > 0.0))
+                .unwrap_or(core)
+        };
+        if let Some(l) = self.load.get_mut(target) {
+            *l += after;
+        }
+        self.units = (self.units - before + after).max(0.0);
+        match (local(old), local(new)) {
+            (false, true) => self.caption_streams += 1,
+            (true, false) => self.caption_streams = self.caption_streams.saturating_sub(1),
+            _ => {}
+        }
+        Ok(target)
+    }
+
     pub fn load_of(&self, core: usize) -> f64 {
         self.load.get(core).copied().unwrap_or(0.0)
     }
@@ -302,6 +343,25 @@ mod tests {
         assert!(matches!(a.decide(&json!({"denoise": "light"}), &h), Decision::Admit(0)));
         assert!(matches!(a.decide(&trial, &h), Decision::Admit(0))); // joins core 0
         assert!(matches!(a.decide(&trial, &h), Decision::Refuse(_))); // core 0 is full; core 1 would be new
+    }
+
+    #[test]
+    fn a_running_session_can_add_work_where_there_is_room_and_moves_core_when_its_own_is_full() {
+        let mut a = Admission::new(vec![vec![0], vec![1]], 3.0, 1);
+        let h = host();
+        let noise = json!({"denoise": "light"});
+        let both = json!({"denoise": "light", "captions": "local"});
+        assert!(matches!(a.decide(&noise, &h), Decision::Admit(0)));
+        assert!(matches!(a.decide(&noise, &h), Decision::Admit(0)));
+        assert_eq!(a.change(&noise, &both, 0, &h), Ok(1)); // core 0 has no room for 2.2 units: moved to core 1
+        assert_eq!((a.load_of(0), a.caption_streams), (1.0, 1));
+        assert!(matches!(a.change(&noise, &both, 0, &h), Err(_))); // the one caption stream is taken
+        assert_eq!(a.load_of(0), 1.0); // unchanged when refused
+        assert_eq!(a.change(&both, &noise, 1, &h), Ok(1)); // less work stays where it is
+        assert_eq!((a.load_of(1), a.caption_streams), (1.0, 0));
+        a.release(&noise, 1);
+        a.release(&noise, 0);
+        assert_eq!((a.units, a.active), (0.0, 0));
     }
 
     #[test]

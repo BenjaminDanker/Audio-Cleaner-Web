@@ -294,8 +294,12 @@ MIGRATIONS = [
     ("stream_sessions", "frames", "ALTER TABLE stream_sessions ADD COLUMN frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "late_frames", "ALTER TABLE stream_sessions ADD COLUMN late_frames INTEGER NOT NULL DEFAULT 0"),
     ("stream_sessions", "dropped_frames", "ALTER TABLE stream_sessions ADD COLUMN dropped_frames INTEGER NOT NULL DEFAULT 0"),
-    # Seconds of audio processed when the extra-accurate captions of a session broke down: billed without them from there.
-    ("stream_sessions", "premium_off_seconds", "ALTER TABLE stream_sessions ADD COLUMN premium_off_seconds REAL"),
+    # A live session's billing (stream/meter.py): its paid seconds, and the meter (micros of the stretches before the
+    # last change of its features, the rate since, and the paid seconds at that rate). A restart bills from these.
+    ("stream_sessions", "paid_seconds", "ALTER TABLE stream_sessions ADD COLUMN paid_seconds REAL NOT NULL DEFAULT 0"),
+    ("stream_sessions", "meter_closed", "ALTER TABLE stream_sessions ADD COLUMN meter_closed REAL NOT NULL DEFAULT 0"),
+    ("stream_sessions", "meter_rate", "ALTER TABLE stream_sessions ADD COLUMN meter_rate INTEGER"),
+    ("stream_sessions", "meter_seconds", "ALTER TABLE stream_sessions ADD COLUMN meter_seconds REAL NOT NULL DEFAULT 0"),
     # The free live trial: a one-way hash of each mailbox that has had it, so deleting the account and signing up
     # again doesn't give it twice. Kept for good (a hash, no account link).
     (
@@ -341,8 +345,29 @@ MIGRATIONS = [
     ),
 ]
 
-# Columns that are gone: dropped from databases made before (jobs.free: free server-side subtitle minutes).
-DROPPED_COLUMNS = [("jobs", "free")]
+# Columns that are gone: dropped from databases made before (jobs.free: free server-side subtitle minutes;
+# stream_sessions.premium_off_seconds: replaced by the meter, see _meter_running_sessions).
+DROPPED_COLUMNS = [("jobs", "free"), ("stream_sessions", "premium_off_seconds")]
+
+
+def _meter_running_sessions(c) -> None:
+    """Live sessions still marked active from before the meter (an unclean stop of the old version): their meter from
+    the old columns, so the restart bills them as before. Runs once: the old column is dropped right after."""
+    if "premium_off_seconds" not in {r["name"] for r in c.execute("PRAGMA table_info(stream_sessions)")}:
+        return
+    from .billing import pricing
+
+    def rate(product: str, tier: str | None) -> int:
+        return pricing.rate(product, tier).micros_per_minute if tier else 0
+
+    for r in c.execute("SELECT id, seconds, trial_seconds, denoise_tier, caption_tier, premium_off_seconds FROM stream_sessions"
+                       " WHERE status = 'active' AND meter_rate IS NULL").fetchall():
+        full = rate("stream_denoise", r["denoise_tier"]) + rate("stream_captions", r["caption_tier"])
+        premium = rate("stream_captions", r["caption_tier"]) if r["caption_tier"] == "premium" else 0
+        paid = max(0.0, r["seconds"] - r["trial_seconds"])
+        before = paid if r["premium_off_seconds"] is None or not premium else min(paid, r["premium_off_seconds"])
+        c.execute("UPDATE stream_sessions SET paid_seconds = ?, meter_closed = ?, meter_rate = ?, meter_seconds = ? WHERE id = ?",
+                  (paid, full * before / 60, full - premium if before < paid else full, paid - before, r["id"]))
 
 # Indexes on the columns above (a database made before them has no such column when SCHEMA runs, so they come after).
 POST_MIGRATION_SQL = [
@@ -362,6 +387,7 @@ def init_db() -> None:
         cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             c.execute(ddl)
+    _meter_running_sessions(c)
     for table, column in DROPPED_COLUMNS:
         if column in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
             c.execute(f"ALTER TABLE {table} DROP COLUMN {column}")

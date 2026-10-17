@@ -3,6 +3,8 @@
 Billing: a rolling hold covers the next few minutes; it is topped up as audio
 flows and captured at the exact processed duration when the session ends. A
 session stops (after a warning) when the balance cannot cover the next minute.
+Its features (stream/features.py) can change while it runs (a `config` message): each stretch of audio is billed
+at the rate of the features it had (stream/meter.py).
 
 Free trial: a session that is only Standard noise removal and/or Standard captions runs on the account's free
 trial seconds (users.trial_live_seconds) while there are any: no hold, nothing charged. When they run out the
@@ -20,6 +22,7 @@ import math
 import os
 import time
 from collections import OrderedDict, deque
+from dataclasses import replace
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -28,6 +31,10 @@ from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
 from . import protocol as P
+from .features import FeatureError, Features, atten
+from .features import parse as parse_features
+from .meter import Meter
+from .meter import micros as meter_micros
 
 log = logging.getLogger("acw.stream")
 router = APIRouter(tags=["stream"])
@@ -104,25 +111,20 @@ def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
     Sessions started less than `min_age` seconds ago are left alone (their handler may still be setting up)."""
     n = 0
     for row in db.all_rows(
-        "SELECT id, hold_id, seconds, denoise_tier, caption_tier, premium_off_seconds, trial_seconds FROM stream_sessions"
+        "SELECT id, hold_id, meter_closed, meter_rate, meter_seconds, paid_seconds FROM stream_sessions"
         " WHERE status = 'active' AND started_at <= ?",
         (db.now() - min_age,),
     ):
         if row["id"] in _live_ids:
             continue
         cost = 0
-        # The free trial seconds were taken off the account when they were saved: only the rest is billed.
-        paid = max(0.0, row["seconds"] - row["trial_seconds"])
         if row["hold_id"]:
             try:
-                if paid > 0:
+                if row["paid_seconds"] > 0:
                     cost = ledger.capture_hold(
                         row["hold_id"],
-                        _split_micros(
-                            _rate_micros_per_minute(row["denoise_tier"], row["caption_tier"]),
-                            _premium_rate(row["caption_tier"]), paid, row["premium_off_seconds"],
-                        ),
-                        f"Live session ({paid / 60:.1f} min, cut short)",
+                        meter_micros(row["meter_closed"], row["meter_rate"] or 0, row["meter_seconds"], row["paid_seconds"]),
+                        f"Live session ({row['paid_seconds'] / 60:.1f} min, cut short)",
                     )
             except Exception:  # noqa: BLE001
                 log.exception("billing stale stream session")
@@ -139,42 +141,6 @@ def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
 
 async def shutdown() -> None:
     return None
-
-
-def _rate_micros_per_minute(denoise: str | None, captions: str | None) -> int:
-    total = 0
-    if denoise:
-        total += pricing.rate("stream_denoise", denoise).micros_per_minute
-    if captions:
-        total += pricing.rate("stream_captions", captions).micros_per_minute
-    return total
-
-
-def _atten(value) -> float | None:
-    """Noise-strength limit in dB, 6 to 100; None when it isn't a finite number."""
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return None
-    return min(max(v, 6.0), 100.0) if math.isfinite(v) else None
-
-
-def _micros(rate: int, seconds: float) -> int:
-    """Price of `seconds` of live audio at `rate` micros per minute (whole seconds, rounded up)."""
-    return math.ceil(rate * math.ceil(round(seconds, 6)) / 60)
-
-
-def _premium_rate(captions: str | None) -> int:
-    """Micros per minute of the extra-accurate captions part of a session's rate (0 without them)."""
-    return pricing.rate("stream_captions", "premium").micros_per_minute if captions == "premium" else 0
-
-
-def _split_micros(rate: int, premium_rate: int, seconds: float, premium_off_seconds: float | None) -> int:
-    """Price of a session of `seconds`. The extra-accurate captions part (`premium_rate` of `rate`) stops at
-    `premium_off_seconds` when they broke down: only what was actually provided is billed."""
-    if not premium_rate or premium_off_seconds is None:
-        return _micros(rate, seconds)
-    return _micros(rate - premium_rate, seconds) + _micros(premium_rate, min(seconds, premium_off_seconds))
 
 
 class TokenBucket:
@@ -216,15 +182,19 @@ async def _send_json(ws: WebSocket, obj: dict) -> None:
 
 
 class Session:
-    def __init__(self, ws: WebSocket, principal: auth.Principal, cfg: dict, rate: int, trial_budget: float = 0.0):
+    def __init__(self, ws: WebSocket, principal: auth.Principal, features: Features, trial_budget: float = 0.0,
+                 return_audio: bool = True):
         self.ws = ws
         self.p = principal
-        self.cfg = cfg
-        self.rate = rate  # micros per minute
+        self.features = features
+        self.return_audio = return_audio
+        self.meter = Meter(features.rate())
+        self.premium_failed = False  # the extra-accurate captions broke down: not billed from then on
         self.id = db.new_id()
         self.hold_id: str | None = None
-        self.held_seconds = 0.0
+        self.held_micros = 0  # reserved by the hold so far
         self.samples = 0  # of audio processed; counted as integers so the billed seconds are exact
+        self.trial_samples = 0
         self.arrived = 0  # of microphone audio received, silence frames too (keeps the session alive, not billed)
         self.started = time.monotonic()
         self.frames: OrderedDict[int, tuple[int, int, float]] = OrderedDict()  # seq -> (codec, timestamp, sent at)
@@ -234,14 +204,12 @@ class Session:
         self.next_extend_try = 0.0
         self.end_reason = "client_closed"
         self.reader = self.writer = None
-        self.worker_cores: list[int] = []  # the physical cores of the live worker running this session
+        self.worker_cores: list[int] = []  # the physical core of the live engine running this session
         self.last_rx = time.monotonic()  # when the client last sent anything
         self.worker_task: asyncio.Task | None = None
         self.premium = None
         self.translator = None  # LiveTranslator, when translations were asked for
-        # The extra-accurate captions part of the rate, and the audio seconds at which it stopped working (None: still on).
-        self.premium_rate = _premium_rate(cfg.get("captions"))
-        self.premium_off_seconds: float | None = None
+        self.config_waiters: dict[str, asyncio.Future] = {}  # the engine's answers to feature changes, by id
         # Free trial: the trial seconds the account had when this session started (0: not a trial session), how many
         # of the session's seconds are already taken off the account, and whether it has moved on to paid billing.
         self.trial_budget = trial_budget
@@ -253,10 +221,6 @@ class Session:
     @property
     def seconds(self) -> float:
         return self.samples / P.SAMPLE_RATE
-
-    @seconds.setter
-    def seconds(self, value: float) -> None:
-        self.samples = round(value * P.SAMPLE_RATE)
 
     @property
     def trial(self) -> bool:
@@ -270,40 +234,69 @@ class Session:
     @property
     def trial_used(self) -> float:
         """Seconds of this session paid for by the trial: whole seconds, like the paid ones, up to what the account had."""
-        return min(float(math.ceil(round(self.seconds, 6))), self.trial_budget) if self.trial_budget else 0.0
+        return min(float(math.ceil(round(self.trial_samples / P.SAMPLE_RATE, 6))), self.trial_budget) if self.trial_budget else 0.0
 
     @property
     def paid_seconds(self) -> float:
-        return max(0.0, self.seconds - self.trial_used)
+        return self.meter.total / P.SAMPLE_RATE
 
-    def micros_for(self, seconds: float) -> int:
-        return _split_micros(self.rate, self.premium_rate, seconds, self.premium_off_seconds)
+    def count(self, n: int) -> None:
+        """`n` samples of audio processed: on the trial while it lasts, then paid."""
+        self.samples += n
+        if self.on_trial:
+            take = min(n, max(0, round(self.trial_budget * P.SAMPLE_RATE) - self.trial_samples))
+            self.trial_samples += take
+            n -= take
+        self.meter.add(n)
+
+    def unbill(self, samples: int) -> None:
+        """Audio already counted that turned out to need no work (silence in a captions-only session)."""
+        n = self.meter.remove(samples)
+        rest = min(max(0, samples) - n, self.trial_samples) if self.on_trial else 0
+        self.trial_samples -= rest
+        self.samples = max(0, self.samples - n - rest)
 
     def current_rate(self) -> int:
-        """Micros per minute being provided right now (without the captions that broke down)."""
-        return self.rate - (self.premium_rate if self.premium_off_seconds is not None else 0)
+        """Micros per minute being provided right now."""
+        return self.meter.rate
 
-    def premium_failed(self) -> None:
+    def remaining_seconds(self) -> float:
+        """Seconds of audio the hold still covers at the current rate."""
+        rate = self.current_rate()
+        return math.inf if rate == 0 else (self.held_micros - self.meter.micros()) * 60 / rate
+
+    def failed_premium(self) -> None:
         """The extra-accurate captions stopped working: they are not billed from this point."""
-        if self.premium_off_seconds is None and self.premium_rate:
-            self.premium_off_seconds = self.seconds
+        if not self.premium_failed and self.features.captions == "premium":
+            self.premium_failed = True
+            self.meter.set_rate(self.meter.rate - self.features.premium_rate())
+
+    def set_features(self, features: Features) -> None:
+        """From now on the session does `features`: the audio so far keeps its rate."""
+        self.features = features
+        self.premium_failed = False
+        self.meter.set_rate(features.rate())
 
     def open_hold(self) -> None:
         minutes = pricing.STREAM_HOLD_MINUTES
+        amount = self.current_rate() * minutes
         # A key with a monthly spending cap is checked in the same transaction that reserves the money.
         with db.tx() as c:
-            keycaps.check(c, getattr(self.p, "api_key_id", None), self.rate * minutes)
-            self.hold_id = ledger.create_hold(self.p.user_id, self.rate * minutes, "stream", self.id, c=c)
-        self.held_seconds = minutes * 60.0
+            keycaps.check(c, getattr(self.p, "api_key_id", None), amount)
+            self.hold_id = ledger.create_hold(self.p.user_id, amount, "stream", self.id, c=c)
+        self.held_micros = amount
 
     def save_progress(self) -> None:
-        """Save the time processed so far (a restart bills it, see close_orphans) and take the trial seconds used
-        since the last save off the account, together."""
+        """Save the time processed so far and the meter (a restart bills it, see close_orphans) and take the trial
+        seconds used since the last save off the account, together."""
         used = self.trial_used
+        f = self.features
         with db.tx() as c:
             c.execute(
-                "UPDATE stream_sessions SET seconds = ?, premium_off_seconds = ?, trial_seconds = ?, hold_id = ? WHERE id = ?",
-                (self.seconds, self.premium_off_seconds, used, self.hold_id, self.id),
+                "UPDATE stream_sessions SET seconds = ?, paid_seconds = ?, trial_seconds = ?, hold_id = ?, meter_closed = ?,"
+                " meter_rate = ?, meter_seconds = ?, denoise_tier = ?, caption_tier = ? WHERE id = ?",
+                (self.seconds, self.paid_seconds, used, self.hold_id, self.meter.closed, self.meter.rate, self.meter.seconds,
+                 f.denoise, f.captions, self.id),
             )
             if used > self.trial_charged:
                 c.execute("UPDATE users SET trial_live_seconds = MAX(0, trial_live_seconds - ?) WHERE id = ?",
@@ -311,7 +304,8 @@ class Session:
         self.trial_charged = max(self.trial_charged, used)
 
     def switch_to_paid(self) -> bool:
-        """The trial seconds are used up: carry on from the account's credit. False if it can't cover it."""
+        """The trial seconds are used up, or the session now does more than the trial covers: carry on from the
+        account's credit. False if it can't cover it."""
         try:
             self.open_hold()
         except (ledger.InsufficientFunds, ledger.LedgerError):
@@ -333,12 +327,8 @@ class Session:
         except keycaps.KeyCapReached:
             self.capped = True
             return False
-        self.held_seconds += 60.0
+        self.held_micros += self.current_rate()
         return True
-
-    def unbill(self, samples: int) -> None:
-        """Audio already counted that turned out to need no work (silence in a captions-only session)."""
-        self.samples = max(0, self.samples - max(0, samples))
 
     def paced(self, seconds: float, reference: bool = False) -> bool:
         bucket = self.pace[reference]
@@ -590,74 +580,23 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await ws.close(code=1008)
         return None
     await asyncio.to_thread(auth.accept_terms, principal.user_id, "continued use", ip)
-    denoise = cfg.get("denoise")
-    captions = cfg.get("captions")
-    # The spoken language: one code, or for people who switch between languages a list of up to three (extra-accurate
-    # captions follow the switches; translations then translate whatever was said).
-    spoken = cfg.get("language")
-    spoken_list = spoken if isinstance(spoken, list) else ([] if spoken is None else [spoken])
-    if (not all(isinstance(x, str) and 2 <= len(x) <= 3 and x.isalpha() for x in spoken_list) or len(spoken_list) > 3
-            or cfg.get("sampleRate", P.SAMPLE_RATE) != P.SAMPLE_RATE):
-        await _send_json(ws, {"type": "error", "code": "bad_config",
-                              "message": "48 kHz audio and a 2-3 letter language code (or a list of up to three)."})
-        await ws.close(code=1008)
-        return None
-    spoken_list = list(dict.fromkeys(x.lower() for x in spoken_list))
-    language = spoken_list[0] if len(spoken_list) == 1 else None  # one language for sure, else None
-    if captions == "local" and spoken_list not in ([], ["en"]):
-        await _send_json(ws, {"type": "error", "code": "bad_config",
-                              "message": "Standard captions are English only. Extra-accurate captions work in other languages."})
-        await ws.close(code=1008)
-        return None
-    # Translations of the final captions (billed by the speech translated, per language, when the session ends).
     try:
-        targets = translate.check_targets(cfg.get("translate"), language or ("en" if captions == "local" and not spoken_list else None))
-    except ValueError as e:
-        await _send_json(ws, {"type": "error", "code": "bad_config", "message": f"Translations: {e}."})
-        await ws.close(code=1008)
-        return None
-    if targets and not captions:
-        await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Translations need captions: turn captions on too."})
-        await ws.close(code=1008)
-        return None
-    if targets and not get_settings().openai_api_key:
-        await _send_json(ws, {"type": "error", "code": "unavailable", "retryAfterSeconds": 300,
-                              "message": "Translations aren’t available right now. Try without them."})
-        await ws.close(code=1008)
-        return None
-    try:
-        rate = _rate_micros_per_minute(denoise, captions)
-    except pricing.PricingError as e:
-        await _send_json(ws, {"type": "error", "code": "bad_tier", "message": str(e)})
-        await ws.close(code=1008)
-        return None
-    if rate == 0:
-        await _send_json(ws, {"type": "error", "code": "nothing_enabled", "message": "Enable denoise and/or captions."})
-        await ws.close(code=1008)
-        return None
-    if captions == "premium" and not get_settings().openai_api_key:
-        await _send_json(ws, {"type": "error", "code": "unavailable", "retryAfterSeconds": 300,
-                              "message": "Premium captions are not available right now."})
-        await ws.close(code=1008)
-        return None
-
-    atten = _atten(cfg.get("attenLimDb", 100.0))
-    if atten is None or not all(v is None or isinstance(v, str) for v in (denoise, captions)):
-        await _send_json(ws, {"type": "error", "code": "bad_config", "message": "Check the noise strength and the options you chose."})
+        if cfg.get("sampleRate", P.SAMPLE_RATE) != P.SAMPLE_RATE:
+            raise FeatureError("bad_config", "Send 48 kHz audio.")
+        features = parse_features(cfg)
+    except FeatureError as e:
+        await _send_json(ws, e.event())
         await ws.close(code=1008)
         return None
     # The free trial pays for Standard live while the account has trial seconds left; anything else is billed.
     trial_left = 0.0
-    if _trial_eligible(cfg, denoise, captions):
+    if features.trial_eligible():
         trial_left = await asyncio.to_thread(_trial_seconds_left, principal.user_id)
         if trial_left > 0 and not await _trial_slot(principal.user_id):
             await _send_json(ws, {"type": "error", "code": "too_many_sessions", "message": TRIAL_ONE_AT_A_TIME_MESSAGE})
             await ws.close(code=1008)
             return None
-    sess = Session(ws, principal, {"denoise": denoise, "captions": captions, "language": language, "languages": spoken_list,
-                                   "atten_lim_db": atten,
-                                   "echo_reference": cfg.get("echoReference") is True,
-                                   "return_audio": cfg.get("returnAudio") is not False}, rate, trial_left)
+    sess = Session(ws, principal, features, trial_left, return_audio=cfg.get("returnAudio") is not False)
     # Whatever goes wrong from here (the client vanishing, the worker, the database), _finish gives the hold back.
     _live_ids.add(sess.id)
     _open.setdefault(principal.user_id, []).append(sess)
@@ -669,8 +608,7 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             _live_ids.discard(sess.id)
             _open.get(principal.user_id, []).remove(sess)
             await _send_json(ws, {"type": "error", "code": "insufficient_funds",
-                                  "message": f"Live processing reserves {pricing.STREAM_HOLD_MINUTES} minutes up front "
-                                             f"(${rate * pricing.STREAM_HOLD_MINUTES / 1e6:.2f}); available ${e.available / 1e6:.2f}."})
+                                  "message": _hold_message(sess.current_rate(), e.available)})
             await ws.close(code=1008)
             return None
         except keycaps.KeyCapReached as e:
@@ -686,16 +624,14 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             return None
         await asyncio.to_thread(
             db.execute,
-            "INSERT INTO stream_sessions(id, user_id, api_key_id, denoise_tier, caption_tier, status, hold_id, client_ip, started_at)"
-            " VALUES (?,?,?,?,?, 'active', ?,?,?)",
-            (sess.id, principal.user_id, principal.api_key_id, denoise, captions, sess.hold_id, ip[:64], db.now()),
+            "INSERT INTO stream_sessions(id, user_id, api_key_id, denoise_tier, caption_tier, status, hold_id, client_ip, started_at,"
+            " meter_rate) VALUES (?,?,?,?,?, 'active', ?,?,?,?)",
+            (sess.id, principal.user_id, principal.api_key_id, features.denoise, features.captions, sess.hold_id, ip[:64],
+             db.now(), sess.current_rate()),
         )
         try:
-            worker_cfg = dict(sess.cfg)
-            if captions != "local":
-                worker_cfg["captions"] = None
-            worker_cfg["tap_pcm"] = captions == "premium"
-            worker_cfg["trial"] = sess.trial
+            worker_cfg = features.worker(sess.trial)
+            worker_cfg["return_audio"] = sess.return_audio
             worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
             # What this session's class may take (resource broker): a free-trial session doesn't open a new core
             # while paid file jobs run, and the engine keeps it below 70% of live capacity.
@@ -723,23 +659,9 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
                                   "message": "Live processing is busy or offline, try again soon."})
             await ws.close(code=1013)
             return sess
-        if targets:
-            from .live_translate import LiveTranslator
-
-            sess.translator = LiveTranslator(
-                targets, language or ("en" if captions == "local" else None), lambda ev: asyncio.ensure_future(_send_json(ws, ev))
-            )
-
-        def premium_event(ev: dict) -> None:
-            asyncio.ensure_future(_send_json(ws, ev))
-            if sess.translator is not None:
-                sess.translator.offer(ev)
-
-        if captions == "premium":
-            from .openai_live import PremiumCaptions
-
-            sess.premium = PremiumCaptions(spoken_list, premium_event, user_hint=principal.user_id, on_fail=sess.premium_failed)
-            await sess.premium.connect()
+        _set_translations(sess, features)
+        if features.captions == "premium":
+            sess.premium = await _open_premium(sess, features)
             if sess.premium.failed and sess.current_rate() == 0:
                 # Captions were all this session was for, and they don't work: nothing to bill, nothing to keep open.
                 sess.end_reason = "captions_unavailable"
@@ -757,8 +679,9 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
             "usdPerMinute": sess.current_rate() / 1e6,
             "maxSessionSeconds": MAX_SESSION_SECONDS,
             "silenceFrames": True,
-            **({"echoReference": True} if sess.cfg["echo_reference"] else {}),
-            **({"translate": targets} if targets else {}),
+            "changeable": True,  # its features can change while it runs (config)
+            **({"echoReference": True} if features.echo_reference else {}),
+            **({"translate": list(features.translate)} if features.translate else {}),
             **({"trial": True, "trialSecondsLeft": int(sess.trial_budget)} if sess.trial else {}),
         })
         return sess
@@ -766,6 +689,39 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         sess.end_reason = "start_failed"
         await _finish(sess)
         raise
+
+
+def _hold_message(rate: int, available: int) -> str:
+    return (f"Live processing reserves {pricing.STREAM_HOLD_MINUTES} minutes up front "
+            f"(${rate * pricing.STREAM_HOLD_MINUTES / 1e6:.2f}); available ${available / 1e6:.2f}.")
+
+
+def _event_out(sess: Session):
+    """Sends an event to the client and, for captions, to the translator."""
+    def emit(ev: dict) -> None:
+        asyncio.ensure_future(_send_json(sess.ws, ev))
+        if sess.translator is not None:
+            sess.translator.offer(ev)
+    return emit
+
+
+async def _open_premium(sess: Session, features: Features):
+    from .openai_live import PremiumCaptions
+
+    premium = PremiumCaptions(list(features.languages), _event_out(sess), user_hint=sess.p.user_id, on_fail=sess.failed_premium)
+    await premium.connect()
+    return premium
+
+
+def _set_translations(sess: Session, features: Features) -> None:
+    """Translate the captions into `features.translate` from now on (none: whatever runs stops)."""
+    if sess.translator is None:
+        if not features.translate:
+            return
+        from .live_translate import LiveTranslator
+
+        sess.translator = LiveTranslator([], None, lambda ev: asyncio.ensure_future(_send_json(sess.ws, ev)))
+    sess.translator.set_targets(list(features.translate), features.caption_language)
 
 
 async def _run(sess: Session) -> None:
@@ -783,19 +739,23 @@ async def _run(sess: Session) -> None:
                     continue
                 codec, ts, sent_at = meta
                 sess.frame_stats.answer(time.monotonic() - sent_at)
-                if sess.cfg.get("return_audio", True):
+                if sess.return_audio:
                     await ws.send_bytes(P.encode_frame(codec, seq, ts, y))
             elif kind == P.MSG_TAP:
                 # Extra-accurate captions listen to the echo-free original (before noise removal), like every
                 # other caption path: recognisers score worse on denoised speech. The worker sends it as a tap.
                 if sess.premium is not None:
                     tap = P.unpack_audio(payload)[2]
-                    if not await sess.premium.feed(tap) and sess.cfg["denoise"] is None:
+                    if not await sess.premium.feed(tap) and sess.features.denoise is None:
                         sess.unbill(len(tap))  # captions only, and nobody talking: nothing was sent out, nothing billed
             elif kind == P.MSG_EVENT and b'"type":"_' in payload:
                 ev = json.loads(payload)  # "_..." events are for us, never for the client
-                if ev.get("type") == "_idle" and sess.cfg["denoise"] is None:
+                if ev.get("type") == "_idle" and sess.features.denoise is None:
                     sess.unbill(int(ev.get("samples", 0)))  # standard captions only: the silence the decoder skipped
+                elif ev.get("type") == "_config":
+                    waiter = sess.config_waiters.pop(str(ev.get("id")), None)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(ev)
             elif kind == P.MSG_EVENT:
                 try:
                     await ws.send_text(payload.decode())
@@ -832,7 +792,7 @@ async def _run(sess: Session) -> None:
                 sess.end_reason = "no_audio"
                 await _send_stopped(ws, "no_audio")
                 break
-            if sess.premium_rate and sess.premium_off_seconds is not None and sess.current_rate() == 0:
+            if sess.premium_failed and sess.current_rate() == 0:
                 # The captions this session was started for broke down and there is nothing else to provide.
                 sess.end_reason = "captions_unavailable"
                 await _send_stopped(ws, "captions_unavailable")
@@ -882,7 +842,7 @@ async def _run(sess: Session) -> None:
                     sess.end_reason = "too_fast"
                     break
                 if reference:  # what the speakers played: no reply, no billing; ignored unless the session asked for it
-                    if sess.cfg["echo_reference"] and ipc is not None:  # a silent reference is simply not sent
+                    if sess.features.echo_reference and ipc is not None:  # a silent reference is simply not sent
                         await P.send_msg(sess.writer, P.MSG_REF, ipc)
                     continue
                 last_mic = time.monotonic()
@@ -890,11 +850,11 @@ async def _run(sess: Session) -> None:
                 if ipc is None:
                     # Silence (a muted source, digital silence): answered at once, not billed, no processing. The
                     # worker only hears how much, so the captions' times keep following the talk.
-                    if sess.cfg.get("return_audio", True):
+                    if sess.return_audio:
                         await ws.send_bytes(P.silence_frame(seq, ts, n))
                     await P.send_msg(sess.writer, P.MSG_SILENCE, P.pack_silence(seq, n))
                     continue
-                sess.samples += n
+                sess.count(n)
                 if sess.seconds >= MAX_SESSION_SECONDS:
                     sess.end_reason = "max_duration"
                     await _send_json(ws, {"type": "stopped", "reason": "max_duration"})
@@ -929,10 +889,13 @@ async def _run(sess: Session) -> None:
                 elif t == "stop":
                     sess.end_reason = "client_stop"
                     break
+                elif t == "config" and set(c) - {"type", "attenLimDb"}:  # a feature, or an id to answer to
+                    await _reconfigure(sess, c)
                 elif t == "config" and "attenLimDb" in c:
-                    atten = _atten(c["attenLimDb"])
-                    if atten is not None:
-                        await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"atten_lim_db": atten}))
+                    strength = atten(c["attenLimDb"])
+                    if strength is not None:
+                        sess.features = replace(sess.features, atten_lim_db=strength)
+                        await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"atten_lim_db": strength}))
     finally:
         # Not cancelled here: _finish lets it drain the worker's last captions.
         pass
@@ -969,6 +932,105 @@ async def _persist(sess: Session) -> bool:
     return await asyncio.to_thread(work)
 
 
+CONFIG_TIMEOUT = 5.0  # seconds the live engine has to answer a feature change
+CHANGE_REFUSED = {
+    "full": "Live is full right now, so this change can't be made. Your current settings keep running.",
+    "trial_busy": "Free trial sessions can't take on more while live is busy. Your current settings keep running.",
+    "unavailable": "That change can't be made right now. Your current settings keep running.",
+}
+
+
+async def _engine_config(sess: Session, f: Features, trial: bool) -> str | None:
+    """Tell the live engine the session now does `f`; None when it did, else why not (full, trial_busy, unavailable)."""
+    cid = db.new_id()
+    waiter = asyncio.get_running_loop().create_future()
+    sess.config_waiters[cid] = waiter
+    options = await asyncio.to_thread(broker.live_options, "live_trial" if trial else "live")
+    await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({
+        **f.worker(trial), "id": cid, "may_open_core": options.get("may_open_core", True),
+    }))
+    try:
+        ev = await asyncio.wait_for(waiter, CONFIG_TIMEOUT)
+    except asyncio.TimeoutError:
+        sess.config_waiters.pop(cid, None)
+        return "unavailable"
+    if not ev.get("ok"):
+        return str(ev.get("code") or "full")
+    cores = [int(c) for c in ev.get("cores") or []]
+    if cores != sess.worker_cores:  # the engine moved it to a core with room: file jobs keep off that one now
+        _session_cores(sess, -1)
+        sess.worker_cores = cores
+        _session_cores(sess, +1)
+    return None
+
+
+async def _reconfigure(sess: Session, msg: dict) -> None:
+    """A `config` message that changes what the session does (stream/features.py). The extra-accurate captions, the
+    live engine, the billing and the translations switch together, from the next audio on, or nothing changes and the
+    client is told why. The audio so far keeps the rate it had."""
+    cid = msg.get("id")
+    reply = {"type": "config", **({"id": cid} if isinstance(cid, (str, int)) and len(str(cid)) <= 64 else {})}
+    old = sess.features
+    trial_before = sess.on_trial
+
+    async def refuse(code: str, message: str, retry: int | None = None) -> None:
+        await _send_json(sess.ws, {**reply, "ok": False, "code": code, "message": message,
+                                   **({"retryAfterSeconds": retry} if retry else {})})
+
+    try:
+        new = parse_features(msg, old)
+    except FeatureError as e:
+        await refuse(e.code, e.message, e.retry_after)
+        return
+    if new != old:
+        to_paid = trial_before and not new.trial_eligible()  # the trial covers Standard live only
+        premium = None
+        if new.captions == "premium" and (old.captions != "premium" or new.languages != old.languages or sess.premium_failed):
+            premium = await _open_premium(sess, new)
+            if premium.failed:
+                await premium.close()
+                await refuse("unavailable", "Extra-accurate captions are unavailable right now. Try again in a few minutes.", 60)
+                return
+        why = await _engine_config(sess, new, trial_before and not to_paid)
+        if why is not None:
+            if premium is not None:
+                await premium.close()
+            await refuse(why, CHANGE_REFUSED.get(why, CHANGE_REFUSED["unavailable"]), 60)
+            return
+        sess.set_features(new)
+        paid_ok = True
+        if to_paid:
+            paid_ok = await asyncio.to_thread(sess.switch_to_paid)
+        elif not sess.on_trial and sess.remaining_seconds() < 4 * 60:
+            paid_ok = await asyncio.to_thread(sess.extend_hold)  # costs more per minute now: the hold must still cover it
+        if not paid_ok:
+            sess.set_features(old)
+            await _engine_config(sess, old, trial_before)
+            if premium is not None:
+                await premium.close()
+            if sess.capped:
+                await refuse("key_spending_cap", "This API key's monthly spending limit doesn't leave room for these settings.")
+            else:
+                bal = await asyncio.to_thread(ledger.balance, sess.p.user_id)
+                await refuse("insufficient_funds", _hold_message(new.rate(), bal["available_micros"]))
+            return
+        if premium is not None or new.captions != "premium":
+            if sess.premium is not None:
+                await sess.premium.close()
+            sess.premium = premium
+        _set_translations(sess, new)
+        await asyncio.to_thread(sess.save_progress)
+    elif new.atten_lim_db != old.atten_lim_db:
+        sess.features = new
+        await P.send_msg(sess.writer, P.MSG_CONFIG, P.pack_json({"atten_lim_db": new.atten_lim_db}))
+    f = sess.features
+    await _send_json(sess.ws, {
+        **reply, "ok": True, "usdPerMinute": sess.current_rate() / 1e6, "denoise": f.denoise, "captions": f.captions,
+        "language": list(f.languages), "translate": list(f.translate), "echoReference": f.echo_reference,
+        "attenLimDb": f.atten_lim_db, **({"trial": True} if sess.on_trial else {}),
+    })
+
+
 async def _billing_tick(sess: Session) -> bool:
     if sess.on_trial:
         left = sess.trial_budget - sess.seconds
@@ -986,7 +1048,7 @@ async def _billing_tick(sess: Session) -> bool:
         await _send_json(sess.ws, {"type": "warning", "code": "trial_used_up_now_paid",
                                    "message": "Your free trial is used up. Live now runs on your credit.",
                                    "usdPerMinute": sess.current_rate() / 1e6})
-    remaining = sess.held_seconds - sess.paid_seconds
+    remaining = sess.remaining_seconds()
     if remaining < 4 * 60 and time.monotonic() >= sess.next_extend_try:
         ok = await asyncio.to_thread(sess.extend_hold)
         if not ok:
@@ -995,13 +1057,13 @@ async def _billing_tick(sess: Session) -> bool:
                 sess.warned = True
                 await _send_json(sess.ws, {"type": "warning", "code": "key_spending_cap",
                                            "message": "This API key is about to reach its monthly spending limit; live processing will stop soon.",
-                                           "secondsLeft": int(remaining)})
+                                           "secondsLeft": int(max(0, remaining))})
             elif not sess.warned:
                 sess.warned = True
                 bal = await asyncio.to_thread(ledger.balance, sess.p.user_id)
                 await _send_json(sess.ws, {"type": "warning", "code": "low_balance",
                                            "message": "Your balance is running out; live processing will stop soon.",
-                                           "secondsLeft": int(remaining), "availableMicros": bal["available_micros"]})
+                                           "secondsLeft": int(max(0, remaining)), "availableMicros": bal["available_micros"]})
     if remaining <= 0:
         sess.end_reason = "key_spending_cap" if sess.capped else "insufficient_funds"
         await _send_json(sess.ws, {"type": "stopped", "reason": sess.end_reason})
@@ -1047,7 +1109,7 @@ async def _finish_inner(sess: Session) -> None:
         if sess.hold_id and sess.paid_seconds > 0:
             paid = sess.paid_seconds
             cost = await asyncio.to_thread(
-                ledger.capture_hold, sess.hold_id, sess.micros_for(paid), f"Live session ({paid / 60:.1f} min)",
+                ledger.capture_hold, sess.hold_id, sess.meter.micros(), f"Live session ({paid / 60:.1f} min)",
             )
     except Exception:  # noqa: BLE001 - e.g. the account was suspended and its holds released
         log.exception("billing stream session %s", sess.id)
@@ -1072,10 +1134,11 @@ async def _finish_inner(sess: Session) -> None:
         fs = sess.frame_stats
         await asyncio.to_thread(
             db.execute,
-            "UPDATE stream_sessions SET status = 'ended', seconds = ?, trial_seconds = ?, cost_micros = ?, end_reason = ?,"
-            " ended_at = ?, frames = ?, late_frames = ?, dropped_frames = ?, premium_off_seconds = ? WHERE id = ?",
-            (sess.seconds, sess.trial_used, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped,
-             sess.premium_off_seconds, sess.id),
+            "UPDATE stream_sessions SET status = 'ended', seconds = ?, paid_seconds = ?, trial_seconds = ?, cost_micros = ?,"
+            " end_reason = ?, ended_at = ?, frames = ?, late_frames = ?, dropped_frames = ?, meter_closed = ?, meter_rate = ?,"
+            " meter_seconds = ? WHERE id = ?",
+            (sess.seconds, sess.paid_seconds, sess.trial_used, cost, sess.end_reason, db.now(), fs.sent, fs.late, fs.dropped,
+             sess.meter.closed, sess.meter.rate, sess.meter.seconds, sess.id),
         )
         await asyncio.to_thread(metrics.live_ended, sess.id, fs, time.monotonic() - sess.started)
     try:

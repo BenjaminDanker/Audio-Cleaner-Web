@@ -262,7 +262,9 @@ pub fn tidy(text: &str) -> String {
 }
 
 impl Captioner {
-    pub fn new(model_dir: &Path, emit: Emit) -> Result<Arc<Self>, String> {
+    /// `at`: 48 kHz samples of the session so far (captions switched on mid-session keep the session's clock), and
+    /// `first_line` the number of the first caption line (after the lines of an earlier captioner of the session).
+    pub fn new(model_dir: &Path, emit: Emit, at: u64, first_line: u64) -> Result<Arc<Self>, String> {
         let group = group_for(model_dir)?;
         let stream = unsafe { so::SherpaOnnxCreateOnlineStream(group.rec.0) };
         if stream.is_null() {
@@ -272,7 +274,15 @@ impl Captioner {
             group: group.clone(),
             id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             shared: Mutex::new(Shared { pending: Vec::new() }),
-            side: Mutex::new(DecoderSide { stream, to16k: Decimate3::new(), fed: 0, line_start: 0, last_text: String::new(), line: 0, behind: false }),
+            side: Mutex::new(DecoderSide {
+                stream,
+                to16k: Decimate3::new(),
+                fed: at / 3,
+                line_start: at / 3,
+                last_text: String::new(),
+                line: first_line,
+                behind: false,
+            }),
             emit,
             closed: AtomicBool::new(false),
             gate: Mutex::new(Gate::default()),
@@ -391,6 +401,12 @@ impl Captioner {
             }
         }
         self.publish(rec, true);
+    }
+
+    /// The number a line after this captioner's last one would get.
+    pub fn next_line(&self) -> u64 {
+        let side = self.side.lock().unwrap();
+        side.line + u64::from(!side.last_text.is_empty())
     }
 
     pub fn close(&self) {

@@ -66,13 +66,14 @@ Clients should retry no sooner than a minute later (`retryAfterSeconds`, see the
 
 ```json
 {"type": "ready", "sessionId": "...", "sampleRate": 48000, "hopSamples": 480,
- "modelLatencyMs": 30.0, "usdPerMinute": 0.01, "maxSessionSeconds": 43200,
- "echoReference": true}
+ "modelLatencyMs": 39.0, "usdPerMinute": 0.01, "maxSessionSeconds": 43200,
+ "silenceFrames": true, "changeable": true, "echoReference": true}
 ```
 
 `echoReference` is only present (true) when the start message asked for it and
-the server will use it. `modelLatencyMs` includes the delay of echo
-cancellation (9 ms) in that case.
+the server will use it. `modelLatencyMs` is the same in every session (39 ms: the noise removal's 30 and the
+echo canceller's 9, whether they run or not), so a session can switch either on or off while it runs without
+its timing changing (`changeable`, section 4).
 
 `usdPerMinute` is the price of this session's setup per minute of audio (all the parts added up, the free trial aside);
 5 minutes of it are set aside when the session starts and charged by the second of processed audio when it ends.
@@ -122,7 +123,7 @@ offset size  field
   (960 samples) is recommended.
 - The server returns exactly one frame per input frame, same `seq`/`ts_us`
   and the same number of samples, in the same codec. Processed audio is
-  delayed by `modelLatencyMs` (30 ms for `light`) inside the stream, so the
+  delayed by `modelLatencyMs` (39 ms) inside the stream, so the
   client's total delay = network round trip + modelLatencyMs. Measure the
   round trip with `ts_us`.
 - When denoise is off (captions only) the audio comes back unchanged and
@@ -187,8 +188,27 @@ covered by the free trial.
 ```json
 {"type": "ping", "t": 123}
 {"type": "config", "attenLimDb": 30}
+{"type": "config", "id": "c7", "captions": "premium", "language": ["en", "es"], "translate": ["de"]}
 {"type": "stop"}
 ```
+
+**Changing a running session (`config`).** Any of `denoise`, `captions`, `language`, `translate`, `echoReference`
+and `attenLimDb` can change while the session runs, with the same values and rules as in `start`; what a message
+leaves out stays as it is. The audio keeps flowing with the same delay. With an `id` (up to 64 characters) the
+server answers with the session's settings now, or why nothing changed:
+
+```json
+{"type": "config", "id": "c7", "ok": true, "usdPerMinute": 0.0255, "denoise": "light", "captions": "premium",
+ "language": ["en", "es"], "translate": ["de"], "echoReference": false, "attenLimDb": 30}
+{"type": "config", "id": "c7", "ok": false, "code": "full", "message": "...", "retryAfterSeconds": 60}
+```
+
+Codes: those of `start` (`bad_config`, `bad_tier`, `nothing_enabled`, `unavailable`, `insufficient_funds`,
+`key_spending_cap`), and `full` / `trial_busy` when live has no room for the added work. A refused change leaves
+the session exactly as it was. Billing follows the change from the next audio on: each stretch of audio is charged
+at the rate of the settings it was processed with. A free-trial session that turns on something the trial doesn't
+cover (extra-accurate captions, translations) carries on from credit (`trial` is no longer in the answer).
+A message with only `attenLimDb` and no `id` gets no answer (as before).
 
 The server closes the socket after 30 s without any message (see `idle_timeout` above for what keeps a
 session alive beyond that). On `stop` it

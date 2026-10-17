@@ -1,9 +1,9 @@
-//! Per-session processing, a line-by-line port of server/acw/stream/engine.py (LiveChain, Decimate3): DeepFilterNet3,
-//! an 80 Hz high-pass and a peak limiter, and the 48 -> 16 kHz converter for the captions.
+//! Per-session processing: noise removal (DeepFilterNet3, an 80 Hz high-pass and a peak limiter), switchable
+//! mid-session at a fixed delay, and the 48 -> 16 kHz converter for the captions.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::ffi::{DeepFilter, HOP};
+use crate::ffi::{model_delay, DeepFilter, HOP};
 
 pub const SAMPLE_RATE: usize = 48_000;
 
@@ -16,47 +16,175 @@ const HPF: [f64; 6] = [0.9926225427561193, -1.9852450855122385, 0.99262254275611
 const SILENT_PEAK: f32 = 1e-5;
 const SILENT_SKIP_AFTER: usize = SAMPLE_RATE / 5;
 
+/// A short crossfade from one signal to another (10 ms), for a part of the chain switched on or off mid-session.
+pub struct Crossfade {
+    to_wet: bool,
+    pos: usize,
+}
+
+pub const FADE: usize = HOP;
+
+impl Crossfade {
+    pub fn new(to_wet: bool) -> Self {
+        Self { to_wet, pos: 0 }
+    }
+
+    /// Turn around a fade that hasn't finished (switched back before it ended): it continues from where it is.
+    pub fn reverse(&mut self) {
+        self.to_wet = !self.to_wet;
+        self.pos = FADE - self.pos.min(FADE);
+    }
+
+    pub fn to_wet(&self) -> bool {
+        self.to_wet
+    }
+
+    /// `dry` and `wet` of one block mixed along the fade; true once it is over.
+    pub fn mix(&mut self, dry: &[f32], wet: &[f32]) -> (Vec<f32>, bool) {
+        let out = dry
+            .iter()
+            .zip(wet)
+            .map(|(&d, &w)| {
+                let t = (self.pos.min(FADE) as f32) / FADE as f32;
+                self.pos += 1;
+                let g = if self.to_wet { t } else { 1.0 - t };
+                d * (1.0 - g) + w * g
+            })
+            .collect();
+        (out, self.pos >= FADE)
+    }
+}
+
+/// A fixed delay: what goes in comes out `delay` samples later (silence before the first input).
+pub struct DelayLine {
+    buf: Vec<f32>,
+    delay: usize,
+}
+
+impl DelayLine {
+    pub fn new(delay: usize) -> Self {
+        Self { buf: vec![0.0; delay], delay }
+    }
+
+    pub fn process(&mut self, x: &[f32]) -> Vec<f32> {
+        self.buf.extend_from_slice(x);
+        let out: Vec<f32> = self.buf.drain(..x.len()).collect();
+        debug_assert_eq!(self.buf.len(), self.delay);
+        out
+    }
+}
+
+/// Noise removal (DeepFilterNet3, an 80 Hz high-pass and a peak limiter), switchable mid-session. The output is always
+/// delayed by the model's delay, whether the model runs or not, so a client's timing never changes with the settings:
+/// without the model the audio passes through a delay line of the same length.
 pub struct LiveChain {
-    pub df: Option<DeepFilter>,
+    lib: PathBuf,
+    model: PathBuf,
+    atten_lim_db: f32,
+    df: Option<DeepFilter>,
+    pub latency_samples: usize,
+    dry: DelayLine,
+    history: Vec<f32>, // the latest input, to warm the model up when it is switched on
+    fade: Option<Crossfade>,
     z: [f64; 2], // the high-pass state (direct form II transposed, like scipy's sosfilt)
     gain: f32,
     ceiling: f32,
     release: f32,
-    pub latency_samples: usize,
     silent_run: usize,
     pub skipped: usize,
     y: Vec<f32>,
 }
 
+/// How much of the latest input a model switched on mid-session hears first (its output for it is thrown away): its
+/// state then follows the room's noise when it starts being heard.
+const WARM_UP: usize = 30 * HOP;
+
 impl LiveChain {
-    pub fn new(lib: &Path, model: Option<&Path>, atten_lim_db: f32) -> Result<Self, String> {
-        let df = match model {
-            Some(m) => Some(DeepFilter::new(lib, m, atten_lim_db)?),
-            None => None,
-        };
-        let latency_samples = df.as_ref().map(|d| d.delay).unwrap_or(0);
+    pub fn new(lib: &Path, model: &Path, denoise: bool, atten_lim_db: f32) -> Result<Self, String> {
+        let latency_samples = model_delay(model)?;
+        let df = if denoise { Some(DeepFilter::new(lib, model, atten_lim_db)?) } else { None };
         Ok(Self {
+            lib: lib.to_path_buf(),
+            model: model.to_path_buf(),
+            atten_lim_db,
             df,
+            latency_samples,
+            dry: DelayLine::new(latency_samples),
+            history: Vec::new(),
+            fade: None,
             z: [0.0; 2],
             gain: 1.0,
             ceiling: 10f32.powf(-1.0 / 20.0),
             release: 10f32.powf(6.0 / 20.0 / 100.0), // recover ~6 dB per second at 100 hops/s
-            latency_samples,
             silent_run: 0,
             skipped: 0,
             y: Vec::new(),
         })
     }
 
-    pub fn set_atten_lim(&mut self, db: f32) {
-        if let Some(df) = self.df.as_mut() {
-            df.set_atten_lim(db.clamp(6.0, 100.0));
+    /// Noise removal is on (or fading in).
+    pub fn denoising(&self) -> bool {
+        match &self.fade {
+            Some(f) => f.to_wet(),
+            None => self.df.is_some(),
         }
     }
 
-    /// N*480 samples in, N*480 out (delayed by `latency_samples`). Without the model the audio passes unchanged.
+    pub fn set_atten_lim(&mut self, db: f32) {
+        self.atten_lim_db = db.clamp(6.0, 100.0);
+        if let Some(df) = self.df.as_mut() {
+            df.set_atten_lim(self.atten_lim_db);
+        }
+    }
+
+    /// Switch noise removal on or off from the next block, with a 10 ms crossfade.
+    pub fn set_denoise(&mut self, on: bool) -> Result<(), String> {
+        if on == self.denoising() {
+            return Ok(());
+        }
+        if let Some(f) = self.fade.as_mut() {
+            f.reverse(); // switched back before the last change finished fading
+            return Ok(());
+        }
+        if on {
+            let mut df = DeepFilter::new(&self.lib, &self.model, self.atten_lim_db)?;
+            let n = (self.history.len() / HOP) * HOP;
+            if n > 0 {
+                let warm = &self.history[self.history.len() - n..];
+                let mut out = vec![0f32; n];
+                df.process(warm, &mut out);
+            }
+            self.df = Some(df);
+            self.silent_run = 0;
+        }
+        self.fade = Some(Crossfade::new(on));
+        Ok(())
+    }
+
+    /// N*480 samples in, N*480 out, delayed by `latency_samples`.
     pub fn process(&mut self, x: &[f32]) -> Vec<f32> {
-        let Some(df) = self.df.as_mut() else { return x.to_vec() };
+        let dry = self.dry.process(x);
+        self.history.extend_from_slice(x);
+        if self.history.len() > 2 * WARM_UP {
+            self.history.drain(..self.history.len() - WARM_UP);
+        }
+        if self.df.is_none() {
+            return dry;
+        }
+        let wet = self.denoise(x);
+        let Some(fade) = self.fade.as_mut() else { return wet };
+        let (out, done) = fade.mix(&dry, &wet);
+        if done {
+            if !fade.to_wet() {
+                self.df = None;
+            }
+            self.fade = None;
+        }
+        out
+    }
+
+    fn denoise(&mut self, x: &[f32]) -> Vec<f32> {
+        let df = self.df.as_mut().expect("the model runs");
         if x.iter().all(|v| v.abs() < SILENT_PEAK) {
             self.silent_run += x.len();
             if self.silent_run > SILENT_SKIP_AFTER {
@@ -171,10 +299,21 @@ mod tests {
     }
 
     #[test]
-    fn limiter_holds_the_ceiling_without_a_model() {
-        // no model: unchanged; the limiter only runs with the model, so test its maths through a chain whose df is None
-        let mut c = LiveChain::new(Path::new("/nonexistent"), None, 100.0).unwrap();
-        let x = vec![0.5f32; 960];
-        assert_eq!(c.process(&x), x);
+    fn delay_line_delays_by_its_length() {
+        let mut d = DelayLine::new(3);
+        assert_eq!(d.process(&[1.0, 2.0]), vec![0.0, 0.0]);
+        assert_eq!(d.process(&[3.0, 4.0]), vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn crossfade_goes_from_dry_to_wet_in_one_hop_and_can_turn_around() {
+        let dry = vec![0.0f32; FADE];
+        let wet = vec![1.0f32; FADE];
+        let mut f = Crossfade::new(true);
+        let (half, done) = f.mix(&dry[..FADE / 2], &wet[..FADE / 2]);
+        assert!(!done && half[0] == 0.0 && half.windows(2).all(|w| w[1] >= w[0]));
+        f.reverse();
+        let (rest, done) = f.mix(&dry[..FADE / 2], &wet[..FADE / 2]);
+        assert!(done && (rest[0] - half[FADE / 2 - 1]).abs() < 0.01 && rest.last().unwrap() < &0.01);
     }
 }
