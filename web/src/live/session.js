@@ -3,6 +3,7 @@
 // <- processed frames -> playback worklet (jitter buffer) -> speakers
 
 import { streamUrl } from '../api.js';
+import { LiveAdvisor } from './advice.js';
 import captureUrl from './capture.worklet.js?url';
 import playbackUrl from './playback.worklet.js?url';
 
@@ -63,7 +64,7 @@ export function applyCaption(items, ev, max = 200) {
 
 /**
  * @param {{denoise: 'light'|null (the noise-removal tier id), captions: 'local'|'premium'|null, language: string|null, attenDb: number, monitor: 'off'|'original'|'processed',
- *   onEvent: (ev:object)=>void, onStats:(s:object)=>void}} opts
+ *   onEvent: (ev:object)=>void, onStats:(s:object)=>void, onAdvice?: (found:{stats:object, echo:object|null})=>void}} opts
  *   Server events reach `onEvent` as parsed JSON ('ready', 'caption', 'warning', 'stopped', 'error', plus a local 'closed');
  *   feed 'caption' events to applyCaption().
  */
@@ -75,6 +76,7 @@ export async function startLive(opts) {
   let ws = null;
   let capture = null;
   let playback = null;
+  const advisor = opts.onAdvice ? new LiveAdvisor({ onAdvice: opts.onAdvice }) : null; // "Recommended for your room", ~10 s in
   let closed = false;
   let stopping = false;
   let ready = false;
@@ -198,7 +200,10 @@ export async function startLive(opts) {
         f32 = new Float32Array(buf.slice(HEADER));
       }
       outLevel = Math.max(outLevel * 0.85, peak(f32));
-      if (monitor === 'processed') playback.port.postMessage({ type: 'frame', samples: f32 }, [f32.buffer]);
+      if (monitor === 'processed') {
+        advisor?.pushPlayed(f32);
+        playback.port.postMessage({ type: 'frame', samples: f32 }, [f32.buffer]);
+      }
     };
 
     playback.port.onmessage = (e) => {
@@ -212,7 +217,11 @@ export async function startLive(opts) {
     capture.port.onmessage = (e) => {
       const f32 = e.data;
       inLevel = Math.max(inLevel * 0.85, peak(f32));
-      if (monitor === 'original') playback.port.postMessage({ type: 'frame', samples: f32.slice() });
+      if (ready && !stopping) advisor?.pushMic(f32);
+      if (monitor === 'original') {
+        if (ready && !stopping) advisor?.pushPlayed(null, f32.length); // the microphone itself: no use for telling an echo from the voice
+        playback.port.postMessage({ type: 'frame', samples: f32.slice() });
+      } else if (monitor === 'off' && ready && !stopping) advisor?.pushPlayed(null, f32.length);
       if (!ready || stopping || ws.readyState !== WebSocket.OPEN) return;
       const out = new ArrayBuffer(HEADER + FRAME * 2);
       const dv = new DataView(out);
