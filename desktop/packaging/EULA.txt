@@ -1,53 +1,49 @@
-AUDIO CLEANER END USER LICENCE AGREEMENT
+AUDIO CLEANER LICENCE
 
-Audio Cleaner ("the Software") is made by the Audio Cleaner team ("we", "us"). By installing or using the Software you agree
-to these terms. If you do not agree, do not install or use it.
+Audio Cleaner is free, open source software under the MIT License (below). You may use it on any number of computers,
+for personal or commercial work, and copy, change and share it, as that licence says.
 
-1. Free to use
-You may install and use the Software on your own computers, for personal or commercial work, at no charge. The Software
-works offline: it does not upload your files and does not collect personal data. The only times it goes online are
-the model downloads described in point 3 and the update check described next.
+What it does online
+Audio Cleaner works offline: it does not upload your files and does not collect personal data. It goes online only
+for two things:
+- Models. Setup (or Settings, later) downloads the models for subtitles, restoring highs and rebuilding the voice,
+  once.
+- Updates. When it starts, it checks the download server for a newer version and, if there is one, downloads it (on
+  Windows it is installed when you close the app; on a Mac you are asked to open the installer). This is a normal web
+  request: the server sees your IP address and the version of the app, and nothing else is sent. You can turn this
+  off in Settings ("Check for updates when Audio Cleaner starts") and update by installing a new version yourself.
 
-Updates. When it starts, the Software checks the download server for a newer version and, if there is one, downloads it (on Windows
-it is installed when you close the Software; on a Mac you are asked to open the installer). This is a normal web
-request: the server sees your IP address and the version of the Software, and nothing else is sent. You can turn this off
-in Settings ("Check for updates when Audio Cleaner starts"); you can then update by installing a new version yourself.
+Open source components
+Audio Cleaner contains third-party open source components, among them Qt (LGPL v3), FFmpeg (LGPL v2.1), DeepFilterNet
+(MIT / Apache 2.0), DPDFNet (Apache 2.0), WebRTC (BSD) and others, and the models it downloads are OpenAI Whisper (MIT),
+AP-BWE (MIT), Sidon (MIT) and Meta's w2v-BERT 2.0 (MIT). Each is licensed under its own terms, listed in the About
+window and in the "licenses" folder of the installation. Where those licences give you rights, for example to replace
+the Qt or FFmpeg files with your own builds, they apply.
 
-2. What you may not do
-You may not sell, rent, lease or sublicense the Software, or publish modified versions of it. You may share the
-unmodified installer with others, exactly as you received it. You may not try to reverse engineer,
-decompile or disassemble the Software, except to the extent that applicable law allows this despite this restriction,
-and except that nothing in this agreement limits your rights under the licences of the open source components (point 3),
-including the right to modify those components and to reverse engineer the Software for debugging such modifications.
+Your files
+You keep all rights to your own audio and video files and to the results. You are responsible for having the right to
+process the files you put into Audio Cleaner. Automatic subtitles and noise reduction can contain errors: check the
+results before you rely on them.
 
-3. Open source components
-The Software contains third-party open source components, among them Qt (LGPL v3), FFmpeg (LGPL v2.1), DeepFilterNet
-(MIT / Apache 2.0), DPDFNet (Apache 2.0), WebRTC (BSD) and others. Setup also downloads models that the Software runs:
-OpenAI Whisper (MIT), AP-BWE (MIT), Sidon (MIT) and Meta's w2v-BERT 2.0 (MIT). They are licensed under their own terms,
-which are listed in the About window and in the "licenses" folder of the installation, and not under this agreement. Where those licences give
-you rights, for example to replace the Qt or FFmpeg files with your own builds, they apply.
 
-4. Your files
-You keep all rights to your own audio and video files and to the results. We claim none. You are responsible for having
-the right to process the files you put into the Software. Automatic subtitles and noise reduction can contain errors:
-check the results before you rely on them.
+MIT License
 
-5. No warranty
-The Software is provided "as is", without warranty of any kind, express or implied, including fitness for a particular
-purpose, accuracy, or that it will run without interruption or errors. Some laws do not allow excluding certain
-warranties; in that case the exclusion applies only as far as the law permits.
+Copyright (c) 2025-2026 The Audio Cleaner authors
 
-6. Limit of liability
-As far as the law permits, we are not liable for any indirect or consequential loss, lost data or lost profit arising
-from the use of the Software, and our total liability for any claim is limited to the amount you paid for the
-Software (it is free, so nothing). Nothing in this agreement limits liability that cannot be limited by law, such as liability for intent or for injury to life, body or health.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-7. Changes and ending
-We may release new versions, or stop offering the Software, at any time. You may stop using the Software and uninstall
-it at any time. We may end this licence if you break these terms; you must then uninstall the Software.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-8. Law
-This agreement is governed by the laws of the United States, without their conflict-of-law rules. Mandatory consumer
-protection rules of the country where you live remain unaffected.
-
-Copyright (c) 2026 Audio Cleaner. All rights reserved.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

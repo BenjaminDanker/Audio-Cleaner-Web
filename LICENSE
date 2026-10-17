@@ -7,6 +7,10 @@ or in part, including as a network service) without prior written
 permission from the copyright holder.
 
 Exceptions:
+  * The desktop app is open source under the MIT License: desktop/, and
+    common/ and native/deepfilter/ that it is built from (see
+    tools/public-desktop/template/LICENSE). They are published as the
+    repository https://github.com/BenjaminDanker/Audio-Cleaner.
   * obs-plugin/ is licensed under the GNU General Public License v2.0 or
     later (see obs-plugin/LICENSE), because it links against libobs.
   * Third-party components keep their own licences (see the Licenses page of

@@ -352,9 +352,9 @@ to 2 GiB each.
   be replaced. Keep the tarball URLs alive or attach the three source archives to each GitHub Release. Do not add
   `--enable-gpl`, `--enable-nonfree` or libx264/libfdk to the build.
 * Qt's multimedia plugin brings its own FFmpeg libraries (LGPL); they are separate files and covered by the Qt notice.
-* `EULA.txt` must keep the carve-outs for the open source components and must not forbid reverse engineering for
-  debugging replaced LGPL libraries. FFmpeg and the downloaded models (Whisper, AP-BWE, Sidon, w2v-BERT 2.0) are
-  named in it.
+* `EULA.txt` (what the installers show) is the app's MIT License with what the app does online, the open source
+  components (FFmpeg and the downloaded models Whisper, AP-BWE, Sidon, w2v-BERT 2.0 named) and a note on the user's
+  files. It must not add restrictions that the MIT License or the LGPL components' licences don't allow.
 * The downloaded models carry notices too: `AP-BWE-MIT.txt` (code and weights), `Sidon-MIT.txt`,
   `w2v-BERT-2.0-MIT.txt` (Meta) and `Training-data-attribution.txt` (CC BY 4.0: VCTK, FLEURS-R, LibriTTS-R) ship in
   `licenses/` and are shown in About, and the same files (plus `AP-BWE-weights-LICENSE.txt`) are in the `LICENSES/` folder of the models archive, which

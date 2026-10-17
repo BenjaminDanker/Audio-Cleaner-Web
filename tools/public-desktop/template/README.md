@@ -134,7 +134,9 @@ Each of these starts with a comment that says how to run it on its own:
 
 Noise removal uses [DeepFilterNet](https://github.com/Rikorose/DeepFilterNet) (MIT / Apache-2.0) and
 [DPDFNet](https://github.com/ceva-ip/DPDFNet) (Apache-2.0). The notices of every component in the app are in
-`desktop/packaging/licenses` and in the app's About box. The terms for this code are in [LICENSE](LICENSE).
+`desktop/packaging/licenses` and in the app's About box.
+
+Audio Cleaner is open source under the [MIT License](LICENSE).
 
 ## Questions and problems
 

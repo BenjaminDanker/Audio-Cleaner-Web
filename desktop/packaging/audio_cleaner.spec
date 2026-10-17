@@ -130,7 +130,7 @@ if sys.platform == "win32":
                 StringStruct("FileDescription", APP_NAME),
                 StringStruct("FileVersion", __version__),
                 StringStruct("InternalName", EXE_NAME),
-                StringStruct("LegalCopyright", "Copyright (c) 2026 Audio Cleaner"),
+                StringStruct("LegalCopyright", "Copyright (c) 2025-2026 The Audio Cleaner authors"),
                 StringStruct("OriginalFilename", f"{EXE_NAME}.exe"),
                 StringStruct("ProductName", APP_NAME),
                 StringStruct("ProductVersion", __version__),
@@ -183,7 +183,7 @@ if sys.platform == "darwin":
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "14.0",  # PySide6 6.12 and onnxruntime 1.31 wheels need macOS 14
             "LSApplicationCategoryType": "public.app-category.video",
-            "NSHumanReadableCopyright": "Copyright (c) 2026 Audio Cleaner",
+            "NSHumanReadableCopyright": "Copyright (c) 2025-2026 The Audio Cleaner authors",
             # "Open With" and dropping files on the Dock icon: Finder only offers the app for these types.
             # Alternate rank: Audio Cleaner is offered but never becomes the default player.
             "CFBundleDocumentTypes": [{

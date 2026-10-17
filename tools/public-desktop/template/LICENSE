@@ -1,16 +1,21 @@
-Copyright (c) 2025-2026 Benjamin Danker. All rights reserved.
+MIT License
 
-This repository is published for transparency. Unless a file or directory
-states otherwise, no licence is granted: you may view the source code, but
-you may not copy, modify, distribute, sublicense, host, or run it (in whole
-or in part, including as a network service) without prior written
-permission from the copyright holder.
+Copyright (c) 2025-2026 The Audio Cleaner authors
 
-Exception:
-  * Third-party components keep their own licences (see the Licenses page of
-    the website and the notices in desktop/packaging/licenses).
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-The installers in this repository's Releases are covered by the end user licence
-agreement that setup shows (desktop/packaging/EULA.txt).
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

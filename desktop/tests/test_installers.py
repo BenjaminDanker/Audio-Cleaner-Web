@@ -267,6 +267,54 @@ def test_mac_welcome_text_names_the_download(tmp_path):
     xml.dom.minidom.parse(str(out / "distribution.xml"))
 
 
+COPYRIGHT = "Copyright (c) 2025-2026 The Audio Cleaner authors"
+MIT_LICENSE = f"""MIT License
+
+{COPYRIGHT}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+
+def test_the_eula_is_the_mit_license_and_keeps_the_open_source_rights():
+    eula = (PACKAGING / "EULA.txt").read_text(encoding="utf-8")
+    assert eula.endswith(MIT_LICENSE)  # the full MIT License with our copyright line, word for word
+    assert "Permission is hereby granted, free of charge" in eula
+    eula = " ".join(eula.split())  # the prose is wrapped at fixed width
+    assert "FFmpeg (LGPL v2.1)" in eula and "Qt (LGPL v3)" in eula
+    for model in ("Whisper", "AP-BWE", "Sidon", "w2v-BERT 2.0"):  # the models setup downloads
+        assert model in eula, model
+    assert "replace the Qt or FFmpeg files with your own builds" in eula  # the LGPL right to swap the libraries
+    assert "checks the download server for a newer version" in eula and "your IP address" in eula  # says what goes online
+    for restriction in ("may not", "reverse engineer", "decompile", "all rights reserved", "end this licence"):
+        assert restriction not in eula.lower(), restriction  # no terms on top of the MIT License
+
+
+def test_the_public_license_is_the_mit_license():
+    root = PACKAGING.parents[1]
+    # Here the public repository's LICENSE is the template; in the public repository it is the LICENSE at the top.
+    template = root / "tools" / "public-desktop" / "template" / "LICENSE"
+    assert (template if template.is_file() else root / "LICENSE").read_text(encoding="utf-8") == MIT_LICENSE
+    spec = (PACKAGING / "audio_cleaner.spec").read_text(encoding="utf-8")
+    assert f'"LegalCopyright", "{COPYRIGHT}"' in spec and f'"NSHumanReadableCopyright": "{COPYRIGHT}"' in spec
+
+
 def test_the_catalog_check_finds_missing_and_wrong_sized_files():
     answers = {
         "https://a/ok": [(200, {"content-length": "10"})],
