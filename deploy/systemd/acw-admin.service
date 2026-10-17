@@ -1,0 +1,32 @@
+[Unit]
+Description=Audio Cleaner owner dashboard (127.0.0.1:8796, read-only; open it over SSH: ssh -L 8796:127.0.0.1:8796)
+OnFailure=acw-alert@%n.service
+After=network-online.target
+
+[Service]
+Slice=acw.slice
+Type=simple
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+EnvironmentFile=%h/audio-cleaner/secrets/acw.env
+# Loopback only and never forwarded (the tunnels carry 8790 and 8794); acw.admin_app refuses any other Host and only
+# reads (the database is opened read-only).
+ExecStart=%h/audio-cleaner/venv/bin/uvicorn acw.admin_app:app --host 127.0.0.1 --port 8796 --no-server-header \
+    --timeout-keep-alive 30 --limit-concurrency 20 --no-access-log
+Restart=always
+RestartSec=5
+Nice=10
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=400M
+TasksMax=50
+
+[Install]
+WantedBy=default.target

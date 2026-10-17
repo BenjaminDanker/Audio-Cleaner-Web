@@ -1,0 +1,29 @@
+:root { --bg: #f6f7fb; --panel: #fff; --text: #141a2b; --muted: #5d6680; --border: #dde1ec; --accent: #3a5bd9; --bad: #c0392b; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11141c; --panel: #1a1f2b; --text: #e7eaf2; --muted: #9aa3b8; --border: #2c3344; --accent: #7c97ff; --bad: #ff7b6b; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+header { position: sticky; top: 0; z-index: 2; background: var(--panel); border-bottom: 1px solid var(--border); padding: 12px 20px; }
+h1 { font-size: 18px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin: 28px 0 10px; }
+h3 { font-size: 13px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+main { padding: 0 20px 40px; max-width: 1400px; margin: 0 auto; }
+.range { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.presets { display: inline-flex; gap: 4px; }
+button { font: inherit; padding: 5px 10px; border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px; cursor: pointer; }
+button.on, #apply { background: var(--accent); color: #fff; border-color: var(--accent); }
+input { font: inherit; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); }
+.muted { color: var(--muted); }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.card .v { font-size: 20px; font-weight: 700; }
+.card .l { color: var(--muted); font-size: 12px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; margin-top: 12px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-top: 12px; overflow-x: auto; }
+.grid2 .panel { margin-top: 0; }
+canvas { max-height: 280px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+.bad { color: var(--bad); }

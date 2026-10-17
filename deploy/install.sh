@@ -119,7 +119,7 @@ WORKERS_CONF="$(printf '[Service]\nEnvironment=ACW_WORKERS=%d\n' "$WORKERS")"
 GPU=0
 if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1 && [ -x "$H/venv-gpu/bin/python" ]; then GPU=1; fi
 
-UNITS="acw-stream.service acw-web.service acw-bulk.service acw-tunnel.service"
+UNITS="acw-stream.service acw-web.service acw-bulk.service acw-tunnel.service acw-admin.service"
 # The bulk tunnel needs the VPS key to allow its port first (docs/operations.md, "Bulk transfers"), otherwise it
 # fails and alerts in a loop. So it is part of the deploy only once you enabled it (systemctl --user enable --now
 # acw-tunnel-bulk); from then on it is checked, restarted when its unit file changes and rolled back like the rest.
@@ -138,6 +138,7 @@ add_restart() {
 if [ "$APP_CHANGED" = 1 ] || [ "$LOCK_CHANGED" = 1 ]; then
   add_restart acw-web.service
   add_restart acw-bulk.service
+  add_restart acw-admin.service
   for i in $(seq 1 "$WORKERS"); do add_restart "acw-worker@$i.service"; done
   [ "$GPU" = 1 ] && add_restart acw-worker-gpu.service
 fi

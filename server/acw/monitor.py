@@ -569,6 +569,14 @@ def write_metrics(findings: list[Finding], states: dict[str, dict[str, str]], no
 
 # --- driver -----------------------------------------------------------------
 
+def record_sample() -> list[Finding]:
+    """One row of machine figures for the admin dashboard's graphs (acw/samples.py); never a finding."""
+    from . import broker, samples
+
+    samples.record(samples.from_snapshot(broker.snapshot()))
+    return []
+
+
 def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[bool, str]] = http_ok) -> list[Finding]:
     """One monitoring pass. Returns all findings (for tests); mails via acw.alerts."""
     settings = get_settings()
@@ -610,6 +618,7 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
     guarded("slow_jobs", lambda: check_slow_jobs(host_ctx))
     guarded("resources", resources)
     guarded("live_full", check_full)
+    guarded("samples", record_sample)
     guarded("backup", check_backup)
     guarded("backup_result", check_backup_result)
     guarded("stuck_states", lambda: check_stuck_states(now))

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audio Cleaner dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Audio Cleaner dashboard</h1>
+  <div class="range">
+    <span class="presets">
+      <button data-days="1">24 hours</button><button data-days="7">7 days</button><button data-days="30" class="on">30 days</button>
+      <button data-days="90">90 days</button><button data-days="365">1 year</button><button data-days="0">All</button>
+    </span>
+    <label>From <input type="datetime-local" id="from"></label>
+    <label>To <input type="datetime-local" id="to"></label>
+    <button id="apply">Show</button>
+    <span id="status" class="muted"></span>
+  </div>
+</header>
+<main>
+  <h2>Money</h2>
+  <section class="cards" id="money"></section>
+  <section class="grid2">
+    <div class="panel"><h3>Top-ups, spending and refunds (USD)</h3><canvas id="cMoney"></canvas></div>
+    <div class="panel"><h3>Spending by product (USD)</h3><canvas id="cProducts"></canvas></div>
+  </section>
+
+  <h2>Users</h2>
+  <section class="cards" id="users"></section>
+  <section class="grid2">
+    <div class="panel"><h3>Sign-ups and active users</h3><canvas id="cUsers"></canvas></div>
+    <div class="panel"><h3>Users who spent credit, by product</h3><canvas id="cUsersByProduct"></canvas></div>
+  </section>
+  <div class="panel"><h3>Top users in this range</h3><table id="topUsers"></table></div>
+
+  <h2>Usage</h2>
+  <section class="cards" id="usage"></section>
+  <section class="grid2">
+    <div class="panel"><h3>Jobs done and failed, live hours</h3><canvas id="cUsage"></canvas></div>
+    <div class="panel"><h3>Jobs by type</h3><table id="jobTypes"></table></div>
+  </section>
+
+  <h2>Machine</h2>
+  <section class="grid2">
+    <div class="panel"><h3>CPU (cores busy) and GPU (% busy)</h3><canvas id="cCpu"></canvas></div>
+    <div class="panel"><h3>Memory (GB)</h3><canvas id="cMem"></canvas></div>
+    <div class="panel"><h3>Queue and live</h3><canvas id="cQueue"></canvas></div>
+    <div class="panel"><h3>Disk free (GB)</h3><canvas id="cDisk"></canvas></div>
+  </section>
+
+  <h2>Problems</h2>
+  <section class="grid2">
+    <div class="panel"><h3>Why jobs failed</h3><table id="failReasons"></table></div>
+    <div class="panel"><h3>Live sessions that ended badly</h3><table id="liveEnds"></table></div>
+    <div class="panel"><h3>Alerts</h3><table id="alerts"></table></div>
+    <div class="panel"><h3>Payment problems</h3><table id="moneyProblems"></table></div>
+  </section>
+  <div class="panel"><h3>Failed jobs</h3><table id="failedJobs"></table></div>
+</main>
+<script src="/static/chart.umd.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

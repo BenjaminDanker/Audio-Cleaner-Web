@@ -179,6 +179,22 @@ place (`DEFAULT_REPO` in `acw/mirror.py`, or `ACW_GITHUB_REPO`).
 Check: `curl -sI https://mc-multi-world.space/audio/api/downloads/obs-plugin/manifest.json` after the first pass finished
 (`mirror --status`).
 
+## Owner dashboard
+
+Money, users, usage, errors and the machine for any time range, in a browser: `acw-admin.service`
+(`acw/admin_app.py`, page in `acw/admin_ui/`). It listens on **127.0.0.1:8796 only** and nothing forwards to it (the
+tunnels carry 8790 and 8794; the VPS knows nothing of it), it refuses any request whose Host isn't this machine's
+loopback address (no DNS rebinding), and it only reads (the database is opened read-only; there is nothing to change).
+Open it over SSH from your PC:
+
+```bash
+ssh -L 8796:127.0.0.1:8796 silver@primary-ram      # then open http://localhost:8796
+```
+
+The machine graphs come from `data/samples.sqlite3` (`acw/samples.py`): the monitor records one row every 2 minutes
+(CPU, memory, GPU, disk, queue, live), kept a little over a year. Card fees are an estimate (2.9 % + 30 c); Stripe's
+dashboard has the exact ones.
+
 ## Admin CLI
 
 ```bash
@@ -560,7 +576,7 @@ told the service is busy. Measured numbers, 2026-10-14:
 (12 GB on this 31 GB box; set at install), so Audio Cleaner can't take RAM the
 Minecraft servers need.
 - File jobs keep decoded and cleaned audio in memory-mapped scratch files in the
-  job directory, and the polish chain works in 10 s blocks. Admission reserves 1 GB per job (4.5 GB for the
+  job directory, and the leveling chain works in 10 s blocks. Admission reserves 1 GB per job (4.5 GB for the
   voice-rebuild tier, whose four single-threaded workers hold their own activations): an estimate used to decide when a job may start (`jobs.JOB_MEM`), not a limit. The real
   ceilings are the worker unit's MemoryMax (7 GB) and the runner's address-space limit (32 GB, memory-mapped
   scratch files included). Admission counts memory the way the kernel does: file cache in the slice is not "used".
