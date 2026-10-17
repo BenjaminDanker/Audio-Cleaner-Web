@@ -6,7 +6,7 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
 - ✅ Services on primary-ram (systemd user units, sandboxed workers, tunnel)
 - ✅ VPS tunnel key restricted to one port, no shell
 - ✅ VPS Caddy `/audio` route, site published (https://mc-multi-world.space/audio/)
-- ⬜ Own domain or subdomain (DNS A record → 216.250.115.225), then set
+- ⬜ Own domain or subdomain (DNS A record → the VPS address), then set
   `ACW_PUBLIC_ORIGIN`/`ACW_BASE_PATH` and the Caddy site block. Separates
   cookies/origin from the pet-companion checkout pages.
 - ⬜ Optional hardening with sudo: dedicated `audiocleaner` system user + system units (docs/security.md)

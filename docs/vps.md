@@ -1,6 +1,6 @@
 # The VPS (edge) — what lives there and how to rebuild it
 
-The VPS (`mc-multi-world.space`, 216.250.115.225, Caddy 2.11) does two things
+The VPS (`mc-multi-world.space`, Caddy 2.11) does two things
 for Audio Cleaner:
 
 1. Serves the **static website** from `/var/www/audio` (~30 MB: the app, the
@@ -43,8 +43,9 @@ pointing at it, and Caddy installed (`sudo apt install caddy` or Caddy's apt
 repo) with a site block for the domain that ends in the catch-all
 `handle { respond "not found" 404 }` the installer looks for.
 
-1. On primary-ram, point the `vps` SSH alias (`~/.ssh/config`) and
-   `deploy/systemd/acw-tunnel.service` (`silver@<new IP>`) at the new host.
+1. On primary-ram, point the `vps` SSH alias (`~/.ssh/config`) and `ACW_VPS` in
+   `~/audio-cleaner/secrets/vps.env` (`<user>@<new address>`, see `deploy/vps.env.example`; the tunnel
+   units read it, the address is never in the repo) at the new host.
 2. On the new VPS, allow the tunnel key to open exactly two listening ports and
    nothing else. Append this line to `~/.ssh/authorized_keys` (the public key is
    `~/.ssh/acw_tunnel.pub` on primary-ram):
@@ -55,7 +56,7 @@ repo) with a site block for the domain that ends in the catch-all
 
        ssh vps 'mkdir -p ~/acw'
        scp ~/repos/Audio-Cleaner-Web/deploy/vps/audio.caddy ~/repos/Audio-Cleaner-Web/deploy/vps/install-audio-route.sh vps:~/acw/
-       ssh -i ~/.ssh/acw_tunnel -o IdentitiesOnly=yes silver@<new IP> true   # answer "yes"; it exits (command=/bin/false)
+       ssh -F none -i ~/.ssh/acw_tunnel -o IdentitiesOnly=yes -o HostKeyAlias=vps <user>@<new address> true   # answer "yes"; it exits (command=/bin/false)
 
 4. On the new VPS: `sudo bash ~/acw/install-audio-route.sh`
 5. On primary-ram:
@@ -66,3 +67,15 @@ repo) with a site block for the domain that ends in the catch-all
 
 6. Update the Google OAuth redirect URI and the Stripe webhook endpoint only if
    the domain changed (both use `https://<domain>/audio/...`).
+
+## SSH: keys only
+
+The VPS must not accept passwords. Cloud images ship `/etc/ssh/sshd_config.d/50-cloud-init.conf`
+with `PasswordAuthentication yes`, and sshd keeps the first value it reads, so a `no` further down
+(`sshd_config`, `60-cloudimg-settings.conf`) does nothing. A file that sorts first wins:
+
+    echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-keys-only.conf
+    sudo sshd -t && sudo systemctl reload ssh
+    sudo sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'   # all "no"
+
+Check from a second terminal that key login still works before closing the first one.

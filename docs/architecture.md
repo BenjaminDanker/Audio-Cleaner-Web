@@ -4,7 +4,7 @@
  Browser / OBS plugin
         │ HTTPS / WSS
         ▼
- VPS 216.250.115.225 (Caddy, mc-multi-world.space)
+ VPS (Caddy, mc-multi-world.space)
    /audio/*        → static site from /var/www/audio (incl. free WASM denoiser)
    /audio/api/*    → 127.0.0.1:18790 ──────────────┐   request bodies capped (64 KB; 4 GB only for the upload route)
    job uploads and result downloads                 │

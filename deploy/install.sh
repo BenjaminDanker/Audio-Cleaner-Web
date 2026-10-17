@@ -74,6 +74,11 @@ PY
 
 mkdir -p "$H"/{app/acw,app/acw_common,bin,models,data,secrets}
 chmod 700 "$H/data" "$H/secrets"
+# The tunnels' destination (user@address of the VPS) lives here, not in the repo.
+if ! grep -Eq '^ACW_VPS=[^@[:space:]]+@[^[:space:]]+$' "$H/secrets/vps.env" 2>/dev/null || grep -q '^ACW_VPS=user@vps-address$' "$H/secrets/vps.env"; then
+  echo "error: $H/secrets/vps.env needs ACW_VPS=<user>@<VPS address> (see deploy/vps.env.example)" >&2
+  exit 1
+fi
 
 # ---- 2. What would change?
 changed_files() {  # changed_files SRC DST: paths (relative) rsync would add, change or delete

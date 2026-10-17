@@ -493,7 +493,7 @@ days, decides, which makes the logs shorter and never longer than the Privacy Po
 
 Only configuration changes (the shared host `mc-multi-world.space/audio` is the weak point, see security.md):
 
-1. DNS: an A record for the new name to the VPS (216.250.115.225); a Caddy site block for it with the contents of
+1. DNS: an A record for the new name to the VPS address; a Caddy site block for it with the contents of
    `deploy/vps/audio.caddy` but **without** the `/audio` prefix (routes at `/`, root `/var/www/audio`, same CSP).
 2. `~/audio-cleaner/secrets/acw.env` and `acw-worker.env`: `ACW_PUBLIC_ORIGIN=https://new.name`, `ACW_BASE_PATH=` (empty).
    The session cookie then becomes `__Host-acw_session` (Secure, `Path=/`, no Domain) by itself; everybody signs in again.

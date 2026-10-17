@@ -6,6 +6,8 @@ After=network-online.target
 [Service]
 Slice=acw.slice
 Type=simple
+# The VPS (user@address) is not in the repo: ACW_VPS in this file (deploy/vps.env.example).
+EnvironmentFile=%h/audio-cleaner/secrets/vps.env
 # -F none: ignore ~/.ssh/config (its "vps" host disables forwardings).
 # The key is restricted on the VPS to its listen ports (18790 here, 18794 for acw-tunnel-bulk), no shell.
 # IPQoS=lowdelay marks this connection (live audio, sign-in, API) as the latency-sensitive one; acw-tunnel-bulk is throughput.
@@ -13,7 +15,7 @@ ExecStart=/usr/bin/ssh -F none -N -T -i %h/.ssh/acw_tunnel -o IdentitiesOnly=yes
     -o HostKeyAlias=vps -o StrictHostKeyChecking=yes -o BatchMode=yes \
     -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
     -o IPQoS=lowdelay \
-    -R 127.0.0.1:18790:127.0.0.1:8790 silver@216.250.115.225
+    -R 127.0.0.1:18790:127.0.0.1:8790 ${ACW_VPS}
 Restart=always
 RestartSec=5
 
