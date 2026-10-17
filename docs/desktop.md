@@ -135,13 +135,11 @@ the checklist at the end).
 4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
    and `AudioCleaner-<version>-Mac-Intel.pkg` (GitHub shows each file's SHA-256 itself, so there is no separate
    checksum file) plus `update.json` and `update.json.sig` (the signed update information, see "Automatic updates"), and
-   marks the release as latest. Don't share GitHub links (the repository stays out of sight); the links to share with
-   friends come from our download server and always give the newest version:
-   `https://mc-multi-world.space/audio/api/downloads/desktop/latest/windows`, `.../latest/mac-apple-silicon` and
-   `.../latest/mac-intel`. The app is not on the website and never
-   contacts it or GitHub: it contacts our download server (update check and installers, models) and Hugging Face
-   (Whisper). Nobody is meant to be pointed at GitHub: the server mirrors the three installers and the update
-   information, so share the website's download links instead of the releases page.
+   marks the release as latest. Don't share GitHub links of this repository (it stays out of sight). The app is not
+   offered on the website: the installers people should get are the ones in the public repository's Releases
+   (`BenjaminDanker/Audio-Cleaner`, copied there by the step below). The app never contacts GitHub: it contacts our
+   download server (update check and installers, models) and Hugging Face (Whisper). The server mirrors the update
+   information and the installers for the app's updater only; it has no "latest installer" links.
 5. Smoke-test the downloads on a clean Windows and a clean Mac (arm64 and Intel if you can) before announcing: open a
    noisy video, clean it, turn on subtitles, open About.
 
@@ -495,9 +493,9 @@ the app's code and each release are copied there automatically, one way, without
   as ours: the step "Copy the release to the public repository" of the release job in `.github/workflows/desktop.yml`
   runs after our release is published and, with the secret `PUBLIC_RELEASE_TOKEN`, creates the release `v<version>`
   there (the old tags are v1.0.0 and v1.0.1) on the default branch, marked latest, with the three installers
-  (`AudioCleaner-<version>-Windows.exe`, `-Mac-Apple-silicon.pkg`, `-Mac-Intel.pkg`) and short notes that point to the
-  download page. No `update.json`, no signature: those are for our download server, and the app trusts only the
-  signed manifest it serves, so a release there is a download for people, never an update source. A rerun updates the
+  (`AudioCleaner-<version>-Windows.exe`, `-Mac-Apple-silicon.pkg`, `-Mac-Intel.pkg`) and short notes that say which file is for which computer. No `update.json`, no signature: those are for our
+  download server, and the app trusts only the signed manifest it serves, so a release there is a download for people,
+  never an update source. A rerun updates the
   release that exists (title, notes, files replaced with `--clobber`). Releases made from a branch push carry the
   same hidden marker as ours, and only the newest 5 of those are kept there (v1.0.0, v1.0.1 and releases from a
   `desktop-vX.Y.Z` tag have no marker and stay). Without the secret the step prints a warning and is skipped; any

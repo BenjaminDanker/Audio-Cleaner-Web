@@ -9,8 +9,8 @@ Windows 10/11 and macOS 14 or newer (Apple silicon and Intel) are supported.
 
 ## Download
 
-The installers are on the download page: **https://mc-multi-world.space/audio/**, and the same files are attached to
-the newest release in this repository's Releases.
+The installers are in this repository's Releases: **https://github.com/BenjaminDanker/Audio-Cleaner/releases/latest**.
+Pick the Windows `.exe`, or the Mac `.pkg` for Apple silicon (M1 and newer) or for an Intel Mac.
 
 Setup downloads the larger models once (about 2.5 GB in all); after that everything works offline. The app checks for a
 newer version when it starts, and you can switch that off in Settings.
@@ -53,8 +53,8 @@ them skip themselves when they are missing.
 
 ## Building the installers
 
-The installers on the download page and in this repository's Releases are the same files, built from this code for
-each release: nothing is built in this repository itself. To build them yourself, here are the steps in order (each
+The installers in this repository's Releases are built from this code for each release: nothing is built in this
+repository itself. To build them yourself, here are the steps in order (each
 script starts with a comment that says how to run it):
 
 1. libDF: `native/deepfilter/build.sh native` (needs Rust; Git Bash on Windows)
@@ -69,7 +69,8 @@ script starts with a comment that says how to run it):
 
 ## Questions and problems
 
-The download page has a contact form. Issues here are welcome too, for problems in the code or the build.
+Questions are welcome through the contact form at https://mc-multi-world.space/audio/contact. Issues here are welcome
+too, for problems in the code or the build.
 
 This repository is updated in whole snapshots, so a pull request cannot be merged here as it is; if you have a fix,
 open an issue that describes it and it will be applied.

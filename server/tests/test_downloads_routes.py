@@ -175,7 +175,7 @@ def test_a_resumed_download_reassembles(c):
     "/desktop/%00", "/models/AudioCleaner-models-v1.zip%00",
     "/desktop/a/b", "/models/models-v1/AudioCleaner-models-v1.zip", "/desktop/2.0.15/update.json",
     "/obs-plugin/latest", "/obs-plugin/latest/", "/obs-plugin/latest/win.zip", "/obs-plugin/latest/freebsd",
-    "/obs-plugin/latest/windows-x64", "/desktop/latest", "/desktop/latest/linux", "/desktop/latest/windows-x86_64", "/other/x",
+    "/obs-plugin/latest/windows-x64", "/desktop/latest", "/desktop/latest/linux", "/desktop/latest/windows", "/desktop/latest/windows-x86_64", "/other/x",
 ])
 def test_unknown_and_unsafe_names_are_404(c, path):
     r = c.get(BASE + path, follow_redirects=False)
@@ -258,13 +258,12 @@ def test_latest_plugin_links_serve_the_file_directly(c, platform, key):
     assert c.get(f"{BASE}/obs-plugin/{name}").content == data  # and by its own name
 
 
-def test_latest_desktop_links(c):
-    r = c.get(f"{BASE}/desktop/latest/windows", follow_redirects=False)
-    assert r.status_code == 200 and r.content == EXE and "location" not in r.headers
-    assert r.headers["content-disposition"] == 'attachment; filename="AudioCleaner-2.0.15-Windows.exe"'
-    assert c.get(f"{BASE}/desktop/latest/mac-intel").content == PKG
-    assert c.get(f"{BASE}/desktop/latest/mac-apple-silicon").status_code == 404  # not in this fake manifest
-    assert c.head(f"{BASE}/desktop/latest/windows").headers["content-length"] == str(len(EXE))
+@pytest.mark.parametrize("platform", ["windows", "mac-intel", "mac-apple-silicon"])
+def test_desktop_has_no_latest_links(c, platform):
+    # New users get the installers from the public repository's Releases; only the updater reads this channel.
+    assert c.get(f"{BASE}/desktop/latest/{platform}", follow_redirects=False).status_code == 404
+    assert c.head(f"{BASE}/desktop/latest/{platform}").status_code == 404
+    assert c.get(f"{BASE}/desktop/AudioCleaner-2.0.15-Windows.exe").content == EXE  # the updater's own downloads still work
 
 
 def test_latest_follows_the_current_version(c):

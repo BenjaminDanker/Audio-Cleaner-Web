@@ -134,7 +134,6 @@ download never queues in front of live audio, under the same shared transfer bud
 |---|---|
 | `/desktop/update.json`, `/desktop/update.json.sig` | the desktop app's signed update information, byte for byte as CI made it |
 | `/desktop/<file>` | an installer the current manifest lists (the previous version's for 7 days) |
-| `/desktop/latest/windows`, `/mac-apple-silicon`, `/mac-intel` | the current installer, served directly |
 | `/obs-plugin/manifest.json`, `/obs-plugin/manifest.json.sig` | the plugin's signed manifest (the release assets `obs-plugin-manifest.json` and `.sig`) |
 | `/obs-plugin/<file>`, `/obs-plugin/latest/windows`, `/mac`, `/ubuntu-debian`, `/linux-other` | plugin packages; the website's buttons use `latest/...` |
 | `/models/<file>` | the model archive (`AudioCleaner-models-v2.zip`): every `models-v*` archive `deploy/models.lock` lists |

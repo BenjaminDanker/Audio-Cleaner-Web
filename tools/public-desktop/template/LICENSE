@@ -10,7 +10,7 @@ Exception:
   * Third-party components keep their own licences (see the Licenses page of
     the website and the notices in desktop/packaging/licenses).
 
-The installers on the download page are covered by the end user licence
+The installers in this repository's Releases are covered by the end user licence
 agreement that setup shows (desktop/packaging/EULA.txt).
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.

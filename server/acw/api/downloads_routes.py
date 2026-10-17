@@ -5,7 +5,6 @@
   obs-plugin/manifest.json, manifest.json.sig, obs-plugin/<file>
   obs-plugin/latest/<platform>             windows | mac | ubuntu-debian | linux-other: the current package, for the
                                            website's buttons (served directly, never redirected)
-  desktop/latest/<platform>                windows | mac-apple-silicon | mac-intel: the current installer, same way
   models/<file>                            a model archive deploy/models.lock lists
 
 Public: no sign-in, a rate limit per network (httpstack: all /api/ calls; here: starting file downloads) and the
@@ -184,11 +183,6 @@ def _latest(channel: str, keys: dict[str, str], platform: str, request: Request)
     resp = serve(channel, entry, request)
     resp.headers["Cache-Control"] = REVALIDATE  # the same address gets a new file when a new version is published
     return resp
-
-
-@both("/desktop/latest/{platform}")
-def desktop_latest(platform: str, request: Request) -> Response:
-    return _latest("desktop", downloads.DESKTOP_PLATFORMS, platform, request)
 
 
 @both("/desktop/{name}")
