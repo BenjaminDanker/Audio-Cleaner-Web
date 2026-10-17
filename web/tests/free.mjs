@@ -1,6 +1,6 @@
 import { writeFileSync, statSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, pick, settleRecommendation, signIn, summary } from './helpers.mjs';
 
 // Free noise removal in the browser (Cleanup page): output, downloads, A/B player, video, cancel, single engine download,
 // and the free + free combination (browser noise removal + a free subtitles job at the same time).
@@ -134,6 +134,9 @@ await check('free: the noise remover is fetched once, only after a file is chose
   await p.waitForTimeout(1500);
   if (dfn.length) throw new Error('downloaded before a file was chosen: ' + dfn.join(', '));
   await p.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
+  await p.getByTestId('start').waitFor({ timeout: 20000 });
+  await settleRecommendation(p);
+  await pick(p, 'noise', 'browser'); // the download starts as soon as the free cleanup is on the table (what is recommended depends on the file)
   await p.waitForFunction(() => performance.getEntriesByType('resource').some((e) => e.name.includes('DeepFilterNet3_onnx')), null, { timeout: 15000 });
   await p.getByRole('button', { name: 'Start – free' }).waitFor({ timeout: 20000 });
   await p.getByRole('button', { name: 'Start – free' }).click();
@@ -155,7 +158,7 @@ await check('free: when the browser asks to save data, choosing a file downloads
   const p = await ctx.newPage();
   await signIn(p, EMAIL);
   await p.goto(`${BASE}/app`);
-  await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+  await dropFile(p, join(FILES, 'noisy.wav'));
   await p.getByRole('button', { name: 'Start – free' }).waitFor();
   await p.waitForTimeout(1500);
   if (dfn.length) throw new Error('downloaded with saveData on: ' + dfn.join(', '));
@@ -176,7 +179,7 @@ await check('free: starting before the download is done shows "Getting the noise
     await route.fulfill({ response: res });
   });
   await p.goto(`${BASE}/app`);
-  await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+  await dropFile(p, join(FILES, 'noisy.wav'));
   await p.getByRole('button', { name: 'Start – free' }).waitFor();
   const eta = await p.getByTestId('eta').innerText().catch(() => '');
   await p.getByRole('button', { name: 'Start – free' }).click();
