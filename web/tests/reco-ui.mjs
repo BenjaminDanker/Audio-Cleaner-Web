@@ -226,6 +226,66 @@ await check('live: the right strength already set: the settings fit, no button',
   return r.line;
 });
 
+async function roomTest(mic, setup) {
+  const b = await chromium.launch({
+    headless: true,
+    args: ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${mic}`],
+  });
+  const c = await b.newContext({ viewport: { width: 1200, height: 1100 }, permissions: ['microphone'] });
+  const page = await c.newPage();
+  const problems = [];
+  page.on('pageerror', (e) => problems.push(e.message));
+  await page.route('**/audio/api/**', (route) => {
+    const p = new URL(route.request().url()).pathname.replace('/audio/api/', '');
+    if (p === 'me') return route.fulfill({ json: ME });
+    if (p === 'billing/pricing') return route.fulfill({ json: PRICING });
+    return route.fulfill({ status: 404, json: { detail: 'not mocked' } });
+  });
+  await page.goto(`${BASE}/app/live`);
+  await page.getByTestId('live-start').waitFor();
+  await setup(page);
+  const t0 = Date.now();
+  await page.getByTestId('room-test').click();
+  await page.getByTestId('room-listening').waitFor();
+  await page.getByTestId('room-result').waitFor({ timeout: 40000 });
+  const seconds = (Date.now() - t0) / 1000;
+  const changes = await page.getByTestId('room-changes').locator('li').allInnerTexts().catch(() => []);
+  const price = await page.getByTestId('room-price').count() ? await page.getByTestId('room-price').innerText() : '';
+  const fits = await page.getByTestId('room-fits').count();
+  let after = null;
+  if (await page.getByTestId('room-apply').count()) {
+    await page.getByTestId('room-apply').click();
+    after = await page.evaluate(() => ({
+      denoise: document.querySelector('[data-testid=group-noise] input[type=checkbox]')?.checked,
+      strength: document.querySelector('input[name=live-str]:checked')?.value,
+      captions: document.querySelector('input[name=live-captions]:checked')?.value,
+    }));
+  }
+  await b.close();
+  return { seconds, changes, price, fits, after, problems };
+}
+
+await check('Test my room (paid test, noisy room, Gentle and Standard captions): after 20 s it lists the changes with the price, and applies them', async () => {
+  const r = await roomTest(MIC_NOISY, async (page) => {
+    await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
+    await page.locator('label:has(input[name=live-str][value=gentle])').click();
+  });
+  if (r.problems.length) throw new Error(r.problems.join(' | '));
+  if (r.seconds < 19 || r.seconds > 30) throw new Error(`took ${r.seconds} s`);
+  if (!r.changes.some((t) => /strength: Gentle → Maximum/.test(t)) || !r.changes.some((t) => /Captions: Standard → Extra accurate/.test(t))) throw new Error(JSON.stringify(r.changes));
+  if (!/an hour more/.test(r.price)) throw new Error('price: ' + r.price);
+  if (r.after?.strength !== 'max' || r.after?.captions !== 'premium') throw new Error(JSON.stringify(r.after));
+  return `${r.seconds.toFixed(1)} s: ${r.changes.join('; ')}; ${r.price}`;
+});
+
+await check('Test my room (free test, quiet room, noise removal on): noise removal can go', async () => {
+  const r = await roomTest(MIC, async () => {});
+  if (r.problems.length) throw new Error(r.problems.join(' | '));
+  if (JSON.stringify(r.changes) !== JSON.stringify(['Noise removal: on → off']) || r.price) throw new Error(JSON.stringify(r));
+  if (r.after?.denoise !== false) throw new Error(JSON.stringify(r.after));
+  return r.changes.join('; ');
+});
+
 await browser.close();
 console.log(results.every(Boolean) ? '\nall passed' : '\nsome failed');
 process.exit(results.every(Boolean) ? 0 : 1);

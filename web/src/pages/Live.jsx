@@ -12,7 +12,8 @@ import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
 import { startLocalLive } from '../live/local.js';
 import { applyCaption, startLive } from '../live/session.js';
-import { recommendForLive } from '../recommend.js';
+import { ROOM_TEST_SECONDS, testRoom } from '../live/roomtest.js';
+import { recommendForLive, roomChanges } from '../recommend.js';
 import Recommended from '../components/Recommended.jsx';
 import StrengthPicker from '../components/StrengthPicker.jsx';
 import { STRENGTHS, strengthDb } from '../strengths.js';
@@ -140,6 +141,8 @@ function LiveDemo({ pricing }) {
   const [translations, setTranslations] = useState({}); // caption id -> {lang: text}
   const [warning, setWarning] = useState(null); // {text, credit}
   const [stopped, setStopped] = useState(null); // {text, credit}
+  const [room, setRoom] = useState(null); // "Test my room": {progress} while it listens, then {result} (recommend.js roomChanges)
+  const roomStop = useRef(null);
   const session = useRef(null);
   const logRef = useRef(null);
   const free = mode === 'free';
@@ -229,6 +232,42 @@ function LiveDemo({ pricing }) {
       else if (e?.name === 'NotFoundError') setError('We couldn’t find a microphone.');
       else setError(ERROR_TEXT[e?.code] ?? e.message ?? 'Couldn\'t start.');
     }
+  }
+
+  /** "Test my room": twenty seconds of talking the way they do on stream, then the changes that fit (put in place on confirmation). */
+  async function runRoomTest() {
+    setError('');
+    const ctl = new AbortController();
+    roomStop.current = ctl;
+    setRoom({ progress: 0 });
+    try {
+      const stats = await testRoom({ onProgress: (f) => setRoom({ progress: f }), signal: ctl.signal });
+      setRoom({ result: roomChanges(stats, { denoise, strength, captions: free ? '' : captions, language: free ? '' : paidLanguage }) });
+    } catch (e) {
+      setRoom(null);
+      if (e?.name === 'AbortError') return;
+      if (e?.name === 'NotAllowedError') setError('Microphone access was blocked. Allow it in your browser and try again.');
+      else if (e?.name === 'NotFoundError') setError('We couldn’t find a microphone.');
+      else setError(e?.message || 'The room test couldn’t run.');
+    } finally {
+      roomStop.current = null;
+    }
+  }
+
+  /** Puts the room test's settings in place: a running paid session takes them at once (the price follows from then). */
+  function applyRoomSettings(r) {
+    const s = r.settings;
+    setRoom(null);
+    if (s.denoise && s.strength !== strength) {
+      setStrength(s.strength);
+      session.current?.setAtten(strengthDb(s.strength));
+    }
+    const was = { denoise, captions };
+    change(
+      { denoise: s.denoise, captions: s.captions },
+      () => { setDenoise(s.denoise); if (!free) setCaptions(s.captions); },
+      () => { setDenoise(was.denoise); setCaptions(was.captions); },
+    );
   }
 
   function tryOption(opt) {
@@ -461,7 +500,40 @@ function LiveDemo({ pricing }) {
         {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => start()} disabled={busy || !mediaOk || (free ? !denoise && !freeCaps : (!denoise && !captions) || !priceKnown || !offered)} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
         {(live || state === 'stopping') && <button type="button" className="btn btn-danger btn-lg" onClick={stop} disabled={state === 'stopping'} data-testid="live-stop">{state === 'stopping' ? 'Stopping…' : 'Stop'}</button>}
         {live && <span className="badge badge-ok" role="status">Live</span>}
+        <button type="button" className="btn btn-secondary" onClick={runRoomTest} disabled={!mediaOk || !!room || locked || (live && free)} data-testid="room-test">Test my room ({ROOM_TEST_SECONDS} s)</button>
       </div>
+
+      {room && !room.result && (
+        <div className="banner banner-info stack" role="status" data-testid="room-listening">
+          <p className="mb0"><b>Listening for {ROOM_TEST_SECONDS} seconds.</b> Talk the way you do on stream: your usual voice, with your game, music, fans and keyboard as usual. Nothing is sent anywhere and it costs nothing.</p>
+          <progress max={1} value={room.progress} aria-label="Room test progress" />
+          <div className="row"><button type="button" className="btn btn-ghost btn-sm" onClick={() => roomStop.current?.abort()}>Cancel</button></div>
+        </div>
+      )}
+      {room?.result && (() => {
+        const r = room.result;
+        const price = (d, c) => (d && den ? den.usdPerMinute : 0) + (c && capRates[c] ? capRates[c].usdPerMinute : 0);
+        const delta = free ? 0 : (price(r.settings.denoise, r.settings.captions) - price(denoise, captions)) * 60;
+        return (
+          <div className="reco stack" data-testid="room-result" aria-live="polite">
+            {!r.heardSpeech && <p className="mb0">We couldn’t hear you speak. Test again and talk for the whole {ROOM_TEST_SECONDS} seconds.</p>}
+            {r.heardSpeech && !r.changes.length && <p className="mb0" data-testid="room-fits"><b>Your settings already fit your room.</b></p>}
+            {r.changes.length > 0 && (
+              <>
+                <p className="mb0"><b>For your room we’d change:</b></p>
+                <ul className="reco-why mb0" data-testid="room-changes">{r.changes.map((c) => <li key={c.key}>{c.text}</li>)}</ul>
+                {Math.abs(delta) >= 0.005 && <p className="small mb0" data-testid="room-price">That’s {moneyUsd(Math.abs(delta))} an hour {delta > 0 ? 'more' : 'less'}.</p>}
+                {live && !free && <p className="small muted mb0">Your session keeps running; the new settings start at once.</p>}
+              </>
+            )}
+            {r.notes.map((n) => <p key={n} className="small mb0">{n}</p>)}
+            <div className="row">
+              {r.changes.length > 0 && <button type="button" className="btn btn-primary btn-sm" onClick={() => applyRoomSettings(r)} data-testid="room-apply">Use these settings</button>}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setRoom(null)} data-testid="room-keep">{r.changes.length ? 'Keep mine' : 'Close'}</button>
+            </div>
+          </div>
+        );
+      })()}
 
       {full && (
         <div className="banner banner-warn stack" role="alert" data-testid="live-full">

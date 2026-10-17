@@ -153,3 +153,39 @@ export function recommendForLive(stats, echo = null, ctx = {}) {
   if (!notes.length) notes.push('The settings fit your room.');
   return { pending: false, denoise: !v.clean, strength: v.strength || 'balanced', echo: heardSpeakers, captions, notes, line: notes.join(' ') };
 }
+
+const CAPTION_NAME = { local: 'Standard', premium: 'Extra accurate' };
+
+/**
+ * "Test my room": the settings that fit what the microphone heard, as changes to `now`.
+ * @param {object} stats Analyser.result() of the room test
+ * @param {{denoise: boolean, strength: string, captions: ''|'local'|'premium', language?: string}} now what is set (captions '' = off, or
+ *   the free test, where the captions aren't a choice of level)
+ * @returns {{heardSpeech: boolean, settings: object, changes: {key: string, text: string}[], notes: string[]}}
+ */
+export function roomChanges(stats, now) {
+  const r = { heardSpeech: !!stats?.hasSpeech, settings: { ...now }, changes: [], notes: [] };
+  if (!r.heardSpeech) return r;
+  const v = noiseVerdict(stats);
+  if (v.clean) {
+    r.settings.denoise = false;
+    if (now.denoise) r.changes.push({ key: 'denoise', text: 'Noise removal: on → off' });
+  } else {
+    r.settings.denoise = true;
+    r.settings.strength = v.strength;
+    if (!now.denoise) r.changes.push({ key: 'denoise', text: `Noise removal: off → on, ${strengthName(v.strength)}` });
+    else if (now.strength !== v.strength) {
+      r.changes.push({ key: 'strength', text: `Noise removal strength: ${strengthName(now.strength)} → ${strengthName(v.strength)}` });
+    }
+  }
+  if (now.captions) {
+    const lang = now.language || '';
+    const want = stats.noiseDb < T.SUBS_NOISY_BELOW || (lang && !STANDARD_LANGUAGES.has(lang)) ? 'premium' : 'local';
+    if (want !== now.captions) {
+      r.settings.captions = want;
+      r.changes.push({ key: 'captions', text: `Captions: ${CAPTION_NAME[now.captions]} → ${CAPTION_NAME[want]}` });
+    }
+  }
+  if (stats.clipFraction > T.CLIP_FRACTION) r.notes.push('Your microphone is too loud and distorts: turn it down.');
+  return r;
+}
