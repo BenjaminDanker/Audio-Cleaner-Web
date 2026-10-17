@@ -7,8 +7,7 @@ server (resources.MODELS_ARCHIVE; the archive holds it next to the AP-BWE and Si
 Only the one member (15 MB) is read: the server answers HTTP range requests, so the zip's table of contents and that
 member are fetched without the rest of the 0.9 GB archive. A server that ignores ranges gets a full download instead.
 The result is checked against the pinned SHA-256 (prepare_vendor.DPDFNET_SHA256); a file that is already right is left
-alone. This is the way to get the file when only desktop/, common/ and native/ are at hand (the full repository has
-deploy/fetch-dpdfnet.sh, which reads the same pin from deploy/models.lock).
+alone.
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Audio Cleaner.app and a .dmg on a Mac, the same steps as .github/workflows/desktop.yml.
+# Builds Audio Cleaner.app and its installer package (.pkg) on a Mac, the same steps as the release build.
 #
 #   desktop/packaging/build_macos.sh
 #
@@ -10,10 +10,10 @@
 #   WORK_DIR             build directory                      (default <repo>/build/macos)
 #   WHISPER_MODEL_DIR    local copy of Systran/faster-whisper-small (default: downloaded at the pinned revision)
 #   SKIP_TESTS=1         skip pytest
-#   MACOS_SIGN_IDENTITY  "Developer ID Application: Name (TEAMID)" (in your keychain) -> sign the app and the dmg
+#   MACOS_SIGN_IDENTITY  "Developer ID Application: Name (TEAMID)" (in your keychain) -> sign the app
 #   NOTARY_PROFILE       `xcrun notarytool store-credentials` profile (or APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD)
 #                        -> notarize and staple (needs MACOS_SIGN_IDENTITY)
-# Result: $WORK_DIR/out/AudioCleaner-macOS-<arm64|x86_64>.dmg
+# Result: $WORK_DIR/out/AudioCleaner-macOS-<arm64|x86_64>.pkg
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

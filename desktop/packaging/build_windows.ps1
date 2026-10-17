@@ -1,5 +1,5 @@
 <#
-Builds the Audio Cleaner installer on Windows 10/11 x64, the same steps as .github/workflows/desktop.yml.
+Builds the Audio Cleaner installer on Windows 10/11 x64, the same steps as the release build.
 
     powershell -ExecutionPolicy Bypass -File desktop\packaging\build_windows.ps1 [-WorkDir DIR] [-WhisperModelDir DIR]
                                                                                [-FfmpegDir DIR] [-SkipTests]
@@ -10,7 +10,7 @@ Inno Setup 6 (`winget install JRSoftware.InnoSetup`) and MSYS2 (`winget install 
 natively with mingw-w64; skip it with -FfmpegDir pointing at an FFmpeg built by build_ffmpeg.sh on Linux).
 
 Result: <WorkDir>\out\AudioCleaner-Setup-x64.exe
-Optional signing with a certificate in the Windows store or a signtool-compatible setup is not scripted here; see docs/desktop.md.
+Code signing (a certificate in the Windows store, signtool) is not scripted here: the installer is built unsigned.
 #>
 param(
     [string]$WorkDir,

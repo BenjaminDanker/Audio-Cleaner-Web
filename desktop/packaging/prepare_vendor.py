@@ -229,8 +229,8 @@ def deepfilter_notices(n: Notices, notices_dir: Path) -> None:
 
 
 def rust_crates(src: Path, rust_target: str | None) -> str:
-    """Notices for the crates of deep_filter's C API build. `cargo tree` gives the exact feature-aware list
-    (as web/scripts/gen-rust-licenses.mjs does for the WebAssembly build); `cargo metadata` locates the sources."""
+    """Notices for the crates of deep_filter's C API build. `cargo tree` gives the exact feature-aware list;
+    `cargo metadata` locates the sources."""
     cargo = shutil.which("cargo") or str(Path.home() / ".cargo" / "bin" / "cargo")
     host = rust_target or os.environ.get("CARGO_BUILD_TARGET")
     if not host:
