@@ -29,10 +29,23 @@ noise is reduced by roughly at most `atten_lim_db`; >= 100 means no blending.
 
 `denoise_array` mirrors `dfn.denoise_array` (minus lib/model path arguments,
 which default to the server layout). Audio is processed block-wise so memory
-stays flat for long files; with `threads > 1` the input is cut into segments
-that run in parallel (one onnxruntime call per frame is tiny, so intra-op
-threading does not help) with 2 s of warm-up context and a short equal-power
-crossfade, exactly like the DeepFilterNet path.
+stays flat for long files; the input is cut into segments with 2 s of warm-up
+context and a short equal-power crossfade, exactly like the DeepFilterNet path.
+
+Batching (docs/research/heavy-2026-10.md): one onnxruntime call per frame is
+tiny and latency bound, so intra-op threading does not help, but the recurrent
+layers are starved at batch 1. `dpdfnet8_48khz_hr_batch.onnx` (made by
+tools/export_dpdfnet_batch.py from the same weights) takes a batch of
+independent segments per call:
+
+    spec     (B, 1, 481, 2)  float32
+    state_in (B, 90228)      float32   one state row per segment
+    -> spec_e (B, 1, 481, 2), state_out (B, 90228)
+
+and each row is exactly the batch-1 model on that segment, at 0.41 instead of
+0.73 CPU-seconds per audio second on one Zen 1 core (batch 8). The segments
+of a call are stepped in lock step; every worker thread owns one call at a
+time. If only the batch-1 file is installed it is used as before (batch of 1).
 """
 from __future__ import annotations
 
@@ -54,6 +67,8 @@ BINS = WIN // 2 + 1
 # Output lags input by 4 hops (2 windows): STFT overlap + model look-ahead.
 MODEL_DELAY = 4 * HOP
 MODEL_FILE = "dpdfnet8_48khz_hr.onnx"
+BATCH_MODEL_FILE = "dpdfnet8_48khz_hr_batch.onnx"  # same network and weights, dynamic batch (tools/export_dpdfnet_batch.py)
+MAX_BATCH = 8  # segments per model call: 8 is within 3 % of the best per-frame cost measured (16)
 
 _BLOCK_FRAMES = 200  # frames (2 s) per FFT batch / cancel check / write
 _WINDOW = np.sin(0.5 * np.pi * np.sin(0.5 * np.pi * (np.arange(WIN) + 0.5) / HOP) ** 2).astype(np.float32)
@@ -67,7 +82,7 @@ def default_model_path() -> Path:
 
 
 _lock = threading.Lock()
-_models: dict[str, tuple] = {}
+_models: dict[str, "_Model"] = {}
 
 
 def unload() -> None:
@@ -76,28 +91,55 @@ def unload() -> None:
         _models.clear()
 
 
-def _load(path: str):
-    """One shared InferenceSession per model file (run() is thread-safe) and its initial state."""
-    import onnxruntime as ort
+def resolve_model(path: str | Path) -> Path:
+    """The file actually run for `path`: the batched sibling `BATCH_MODEL_FILE` when `path` is the standard
+    model and the sibling is installed (set ACW_DPDFNET_BATCH=0 to force the batch-1 file), else `path`."""
+    p = Path(path)
+    if p.name == MODEL_FILE and os.environ.get("ACW_DPDFNET_BATCH", "1") != "0":
+        sib = p.with_name(BATCH_MODEL_FILE)
+        if sib.is_file():
+            return sib
+    return p
 
-    with _lock:
-        hit = _models.get(path)
-        if hit is not None:
-            return hit
+
+class _Model:
+    """One shared InferenceSession (run() is thread-safe) and the initial state of one stream."""
+
+    def __init__(self, path: str):
+        import onnxruntime as ort
+
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+        self.sess = sess = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
         meta = sess.get_modelmeta().custom_metadata_map
         size = int(meta["state_size"])
         ne, ns = int(meta["erb_norm_state_size"]), int(meta["spec_norm_state_size"])
         state = np.zeros(size, dtype=np.float32)
         state[:ne] = [float(v) for v in meta["erb_norm_init"].split(",")]
         state[ne:ne + ns] = [float(v) for v in meta["spec_norm_init"].split(",")]
-        hit = (sess, state, sess.get_inputs()[0].name, sess.get_inputs()[1].name,
-               sess.get_outputs()[0].name, sess.get_outputs()[1].name)
-        _models[path] = hit
+        self.init = state
+        self.in_n, self.st_n = sess.get_inputs()[0].name, sess.get_inputs()[1].name
+        self.out_names = [sess.get_outputs()[0].name, sess.get_outputs()[1].name]
+        self.batched = len(sess.get_inputs()[1].shape) == 2  # state (B, S) versus the flat (S,) of the batch-1 file
+        self.max_batch = MAX_BATCH if self.batched else 1
+
+    def new_state(self, rows: int) -> np.ndarray:
+        return np.repeat(self.init[None, :], rows, axis=0) if self.batched else self.init.copy()
+
+    def step(self, spec: np.ndarray, state: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """spec (rows, 1, BINS, 2) -> (enhanced (rows, 1, BINS, 2), new state)."""
+        if not self.batched and spec.shape[0] != 1:
+            raise ValueError("the batch-1 model takes one row per call")
+        return self.sess.run(self.out_names, {self.in_n: spec, self.st_n: state})
+
+
+def _load(path: str) -> _Model:
+    with _lock:
+        hit = _models.get(path)
+        if hit is None:
+            hit = _models[path] = _Model(str(resolve_model(path)))
         return hit
 
 
@@ -106,14 +148,14 @@ def _col(x, ch, a, b) -> np.ndarray:
 
 
 class _Stream:
-    """Stateful frame-by-frame enhancer for one mono channel. `push` takes any
-    number of input samples and returns the finished (not yet delay-trimmed)
-    time-domain samples, a multiple of HOP per frame consumed. The first
-    HOP samples of the input stream are preceded by a HOP-long reflection."""
+    """Frame-by-frame enhancer for one mono stream. `prepare` takes any number of input samples (a multiple of
+    HOP once running) and returns their STFT frames, `finish` takes the model's frames for them back and returns
+    the finished (not yet delay-trimmed) time-domain samples, HOP per frame. The first HOP samples of the input
+    stream are preceded by a HOP-long reflection. `push` does both with the model for a stream on its own."""
 
-    def __init__(self, model, first: np.ndarray):
-        self._sess, self._init, self._in_n, self._st_n, self._out_n, self._ost_n = model
-        self.state = self._init.copy()
+    def __init__(self, model: _Model, first: np.ndarray):
+        self._model = model
+        self.state = model.new_state(1)
         n = min(HOP, max(len(first) - 1, 0))
         pad = np.zeros(HOP, dtype=np.float32)
         if n:
@@ -121,27 +163,27 @@ class _Stream:
         self._buf = pad
         self._ola = np.zeros(WIN, dtype=np.float32)  # pending overlap-add tail (HOP valid + HOP not yet complete)
 
-    def push(self, x: np.ndarray, cancel: threading.Event | None = None) -> np.ndarray:
+    def prepare(self, x: np.ndarray, out: np.ndarray | None = None) -> np.ndarray | None:
+        """STFT frames of the next samples as (k, 1, BINS, 2) float32 (into `out` when given), None if less than
+        one frame is complete yet."""
         buf = np.concatenate([self._buf, x]) if len(self._buf) else x
         k = (len(buf) - WIN) // HOP + 1 if len(buf) >= WIN else 0
         if k <= 0:
             self._buf = buf
-            return np.zeros(0, dtype=np.float32)
+            return None
         frames = np.lib.stride_tricks.as_strided(buf, (k, WIN), (buf.strides[0] * HOP, buf.strides[0]))
         spec = scipy.fft.rfft(frames * _WINDOW, axis=1)
-        inp = np.empty((k, 1, 1, BINS, 2), dtype=np.float32)
-        inp[:, 0, 0, :, 0] = spec.real
-        inp[:, 0, 0, :, 1] = spec.imag
-        enh = np.empty((k, BINS), dtype=np.complex64)
-        run, state = self._sess.run, self.state
-        names = [self._out_n, self._ost_n]
-        for i in range(k):
-            if cancel is not None and i % 50 == 0 and cancel.is_set():
-                raise Cancelled()
-            o, state = run(names, {self._in_n: inp[i], self._st_n: state})
-            enh[i] = o[0, 0, :, 0] + 1j * o[0, 0, :, 1]
-        self.state = state
-        td = scipy.fft.irfft(enh, n=WIN, axis=1).astype(np.float32) * _WINDOW
+        inp = np.empty((k, 1, BINS, 2), dtype=np.float32) if out is None else out
+        inp[:, 0, :, 0] = spec.real
+        inp[:, 0, :, 1] = spec.imag
+        self._buf = buf[k * HOP:].copy()
+        return inp
+
+    def finish(self, enhanced: np.ndarray) -> np.ndarray:
+        """(k, 1, BINS, 2) model output -> k * HOP samples."""
+        k = enhanced.shape[0]
+        enh = enhanced[:, 0, :, 0] + 1j * enhanced[:, 0, :, 1]
+        td = scipy.fft.irfft(enh.astype(np.complex64, copy=False), n=WIN, axis=1).astype(np.float32) * _WINDOW
         out = np.empty(k * HOP, dtype=np.float32)
         ola = self._ola
         for i in range(k):
@@ -149,8 +191,21 @@ class _Stream:
             out[i * HOP:(i + 1) * HOP] = ola[:HOP]
             ola[:HOP] = ola[HOP:]
             ola[HOP:] = 0.0
-        self._buf = buf[k * HOP:].copy()
         return out
+
+    def push(self, x: np.ndarray, cancel: threading.Event | None = None) -> np.ndarray:
+        inp = self.prepare(x)
+        if inp is None:
+            return np.zeros(0, dtype=np.float32)
+        enh = np.empty_like(inp)
+        state = self.state
+        for i in range(len(inp)):
+            if cancel is not None and i % 50 == 0 and cancel.is_set():
+                raise Cancelled()
+            o, state = self._model.step(inp[i:i + 1], state)
+            enh[i] = o[0]
+        self.state = state
+        return self.finish(enh)
 
 
 class _Sink:
@@ -188,30 +243,72 @@ class _Sink:
             self.tail_buf[t0 - self.e:t1 - self.e] = seg[t0 - lo:t1 - lo]
 
 
-def _run_segment(model, x, ch, out, lo, hi, s, e, head, tail, alpha, cancel, report) -> _Sink:
-    """Stream x[lo:hi] (channel ch) through the model; results for [s, e) go to `out`
-    (plus `head`/`tail` crossfade samples kept in the returned sink)."""
-    st = _Stream(model, _col(x, ch, lo, min(hi, lo + HOP + 1)))
-    sink = _Sink(x, ch, out, lo, s, e, head, tail, alpha)
+class _Row:
+    """One segment: stream x[lo:hi] of channel `ch`; its results for [s, e) go to the output (plus `head` / `tail`
+    crossfade samples kept in the sink)."""
+
+    def __init__(self, ch, lo, hi, s, e, head, tail):
+        self.ch, self.lo, self.hi, self.s, self.e, self.head, self.tail = ch, lo, hi, s, e, head, tail
+
+    @property
+    def length(self) -> int:
+        return self.hi - self.lo
+
+
+def _run_rows(model: _Model, x, rows: list[_Row], out, alpha, cancel, report) -> list[_Sink]:
+    """Stream the segments `rows` through the model together, one batched call per frame, and return their sinks.
+    The rows advance in lock step; a row that is shorter than the longest is fed zeros after its end (those frames
+    are computed and dropped), so rows of similar length should share a call. A row's result does not depend on
+    the others."""
+    nb = len(rows)
+    streams = [_Stream(model, _col(x, r.ch, r.lo, min(r.hi, r.lo + HOP + 1))) for r in rows]
+    sinks = [_Sink(x, r.ch, out, r.lo, r.s, r.e, r.head, r.tail, alpha) for r in rows]
     block = _BLOCK_FRAMES * HOP
-    need = (hi - lo) + HOP + MODEL_DELAY  # stream samples needed to cover x[lo:hi]
-    produced, p = 0, lo
-    zeros = np.zeros(block, dtype=np.float32)
+    need = max(r.length for r in rows) + HOP + MODEL_DELAY  # stream samples needed to cover every row
+    pos = [r.lo for r in rows]
+    state = model.new_state(nb)
+    produced = 0
     while produced < need:
         if cancel is not None and cancel.is_set():
             raise Cancelled()
-        if p < hi:
-            q = min(hi, p + block)
-            chunk = _col(x, ch, p, q)
-            p = q
-        else:
-            chunk = zeros  # flush the look-ahead
-        y = st.push(chunk, cancel)
-        produced += len(y)
-        a = sink.pos
-        sink.write(y)
-        report(max(0, min(sink.pos, e) - max(a, s)))
-    return sink
+        size = min(block, -(-(need - produced) // HOP) * HOP)  # the last push is as short as it can be
+        k = size // HOP
+        spec = np.zeros((k, nb, 1, BINS, 2), dtype=np.float32)
+        for j, (r, st) in enumerate(zip(rows, streams)):
+            chunk = np.zeros(size, dtype=np.float32)
+            q = min(r.hi, pos[j] + size)
+            if q > pos[j]:
+                chunk[:q - pos[j]] = _col(x, r.ch, pos[j], q)
+                pos[j] = q
+            frames = st.prepare(chunk)
+            if frames is None or len(frames) != k:  # cannot happen: a push of k * HOP samples yields k frames
+                raise RuntimeError("DPDFNet framing out of step")
+            spec[:, j] = frames
+        enh = np.empty_like(spec)
+        for i in range(k):
+            if cancel is not None and i % 50 == 0 and cancel.is_set():
+                raise Cancelled()
+            o, state = model.step(spec[i], state)
+            enh[i] = o
+        produced += size
+        for j, (st, sink) in enumerate(zip(streams, sinks)):
+            y = st.finish(enh[:, j])
+            a = sink.pos
+            sink.write(y)
+            report(max(0, min(sink.pos, rows[j].e) - max(a, rows[j].s)))
+    return sinks
+
+
+def _plan(n: int, chans: int, threads: int, seg: int, ov: int) -> tuple[int, bool]:
+    """(segment length in samples, whether to cut the channels into segments at all). The segmentation does not
+    depend on the model file: the segments, their warm-up and their crossfades are what they always were, so the
+    output of the batched model equals that of the batch-1 model; batching only changes how many are stepped
+    together. (Shorter segments would batch short files too, but every segmentation changes the output a little:
+    the recurrent state after a 2 s warm-up is not the state of a continuous pass.)"""
+    if threads > 1:
+        # make sure the work actually spreads over the threads
+        seg = max(10 * SAMPLE_RATE, min(seg, math.ceil(n * chans / threads / HOP) * HOP))
+    return seg, threads > 1 and n > seg + ov
 
 
 def denoise_array(
@@ -258,38 +355,62 @@ def denoise_array(
                 f = min(done / total_work, 1.0)
             progress(f)
 
-    seg = int(segment_seconds * SAMPLE_RATE)
     ov = int(overlap_seconds * SAMPLE_RATE)
-    if threads > 1:
-        # make sure the work actually spreads over the threads
-        seg = max(10 * SAMPLE_RATE, min(seg, math.ceil(n * chans / threads / HOP) * HOP))
-    if threads <= 1 or n <= seg + ov:
-        for c in range(chans):
-            _run_segment(model, x, c, out2, 0, n, 0, n, 0, 0, alpha, cancel, report)
+    seg, cut = _plan(n, chans, threads, int(segment_seconds * SAMPLE_RATE), ov)
+    if not cut:
+        # whole channels as they are, no seams; the channels share a call when the model takes a batch
+        rows = [_Row(c, 0, n, 0, n, 0, 0) for c in range(chans)]
+        groups = [rows[i:i + model.max_batch] for i in range(0, len(rows), model.max_batch)]
+        if threads > 1 and len(groups) > 1:
+            with ThreadPoolExecutor(max_workers=min(threads, len(groups))) as pool:
+                list(pool.map(lambda g: _run_rows(model, x, g, out2, alpha, cancel, report), groups))
+        else:
+            for g in groups:
+                _run_rows(model, x, g, out2, alpha, cancel, report)
         if progress:
             progress(1.0)
         return out
 
     bounds = [(s, min(s + seg, n)) for s in range(0, n, seg)]
     fade = min(int(0.05 * SAMPLE_RATE), ov)
+    # What a segment needs after its end: the crossfade samples and the look-ahead of the model (the model and the
+    # STFT are causal), nothing more; the full overlap is only needed before the start, to warm the state up.
+    tail_ctx = min(ov, fade + MODEL_DELAY + 3 * WIN)
     heads: dict[tuple[int, int], np.ndarray] = {}
     tails: dict[tuple[int, int], np.ndarray] = {}
+    rows = []
+    index: dict[int, tuple[int, int]] = {}
+    for c in range(chans):
+        for i, (s, e) in enumerate(bounds):
+            r = _Row(c, max(0, s - ov), min(n, e + tail_ctx), s, e, fade if i > 0 else 0, fade if i + 1 < len(bounds) else 0)
+            index[id(r)] = (c, i)
+            rows.append(r)
+    # batches of similar length, one per call; at least one per thread so every thread has work
+    rows.sort(key=lambda r: -r.length)
+    nbatch = max(min(threads, len(rows)), math.ceil(len(rows) / model.max_batch))
+    base, extra = divmod(len(rows), nbatch)
+    groups, i = [], 0
+    for g in range(nbatch):
+        size = base + (g < extra)
+        groups.append(rows[i:i + size])
+        i += size
 
-    def work(job: tuple[int, int]) -> None:
-        c, i = job
-        s, e = bounds[i]
-        lo, hi = max(0, s - ov), min(n, e + ov)
-        sink = _run_segment(model, x, c, out2, lo, hi, s, e,
-                            fade if i > 0 else 0, fade if i + 1 < len(bounds) else 0, alpha, cancel, report)
+    def work(group: list[_Row]) -> None:
+        sinks = _run_rows(model, x, group, out2, alpha, cancel, report)
         with lock:
-            if i > 0:
-                heads[c, i] = sink.head_buf
-            if i + 1 < len(bounds):
-                tails[c, i] = sink.tail_buf
+            for r, sink in zip(group, sinks):
+                c, i = index[id(r)]
+                if i > 0:
+                    heads[c, i] = sink.head_buf
+                if i + 1 < len(bounds):
+                    tails[c, i] = sink.tail_buf
 
-    jobs = [(c, i) for c in range(chans) for i in range(len(bounds))]
-    with ThreadPoolExecutor(max_workers=threads) as pool:
-        list(pool.map(work, jobs))
+    if threads > 1 and len(groups) > 1:
+        with ThreadPoolExecutor(max_workers=min(threads, len(groups))) as pool:
+            list(pool.map(work, groups))
+    else:
+        for g in groups:
+            work(g)
 
     if fade:
         ramp = np.sin(np.linspace(0, np.pi / 2, fade, dtype=np.float32)) ** 2

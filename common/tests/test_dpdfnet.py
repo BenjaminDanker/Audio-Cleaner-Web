@@ -119,13 +119,13 @@ def test_cancel():
 def test_long_input_is_processed_block_wise(monkeypatch, tmp_path):
     clean, noisy, gate = syllables(14.0, seed=3)
     pushed = []
-    orig = dpdfnet._Stream.push
+    orig = dpdfnet._Stream.prepare
 
-    def spy(self, x, cancel=None):
+    def spy(self, x, out=None):
         pushed.append(len(x))
-        return orig(self, x, cancel)
+        return orig(self, x, out)
 
-    monkeypatch.setattr(dpdfnet._Stream, "push", spy)
+    monkeypatch.setattr(dpdfnet._Stream, "prepare", spy)
     seq = dpdfnet.denoise_array(noisy, threads=1)
     assert max(pushed) <= dpdfnet._BLOCK_FRAMES * dpdfnet.HOP < len(noisy) // 3
     assert len(pushed) >= 7  # many small blocks, not one big call
@@ -135,10 +135,38 @@ def test_long_input_is_processed_block_wise(monkeypatch, tmp_path):
     fractions = []
     ret = dpdfnet.denoise_array(noisy[:, None], threads=THREADS, out=mm, segment_seconds=4, overlap_seconds=1.5,
                                 progress=fractions.append)
-    assert ret is mm and len(pushed) > 10
+    assert ret is mm and len(pushed) > 5  # blocks of several segments at once
     par = np.asarray(mm[:, 0])
     assert fractions and fractions[-1] == 1.0 and all(a <= b + 1e-9 for a, b in zip(fractions, fractions[1:]))
     # parallel segments agree with the single sequential pass (RNN warm-up converged)
     err = np.sqrt(np.mean((par - seq) ** 2)) / np.sqrt(np.mean(seq ** 2))
     assert err < 0.05, err
     assert noise_only_energy(par, gate) < 0.2 * noise_only_energy(noisy, gate)
+
+
+def test_batched_model_gives_the_batch1_result(monkeypatch, tmp_path):
+    """Segments stepped together through the batched model equal the same segments through the batch-1 file."""
+    batch_file = dpdfnet.default_model_path().with_name(dpdfnet.BATCH_MODEL_FILE)
+    if not batch_file.is_file():
+        pytest.skip("batched DPDFNet model not installed")
+    clean, noisy, gate = syllables(14.0, seed=7)
+    monkeypatch.setenv("ACW_DPDFNET_BATCH", "0")
+    dpdfnet.unload()
+    ref = dpdfnet.denoise_array(noisy, threads=2, segment_seconds=4, overlap_seconds=1.5)
+    monkeypatch.setenv("ACW_DPDFNET_BATCH", "1")
+    dpdfnet.unload()
+    got = dpdfnet.denoise_array(noisy, threads=2, segment_seconds=4, overlap_seconds=1.5)
+    dpdfnet.unload()
+    assert np.abs(got - ref).max() < 1e-4
+
+
+def test_resolve_model_prefers_the_batched_sibling(monkeypatch, tmp_path):
+    std = tmp_path / dpdfnet.MODEL_FILE
+    std.write_bytes(b"x")
+    monkeypatch.delenv("ACW_DPDFNET_BATCH", raising=False)
+    assert dpdfnet.resolve_model(std) == std  # nothing else installed
+    (tmp_path / dpdfnet.BATCH_MODEL_FILE).write_bytes(b"y")
+    assert dpdfnet.resolve_model(std) == tmp_path / dpdfnet.BATCH_MODEL_FILE
+    assert dpdfnet.resolve_model(tmp_path / "other.onnx") == tmp_path / "other.onnx"  # only the standard name is redirected
+    monkeypatch.setenv("ACW_DPDFNET_BATCH", "0")
+    assert dpdfnet.resolve_model(std) == std
