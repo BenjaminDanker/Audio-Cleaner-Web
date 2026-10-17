@@ -38,7 +38,7 @@ def _click(check, on):
 def _shown(panel):
     """Everything the panel shows, read back from its widgets."""
     return {
-        "strength": panel._strength.value(), "polish": panel._polish.isChecked(),
+        "auto": panel._auto.isChecked(), "strength": panel._strength.value(), "polish": panel._polish.isChecked(),
         "loudness": panel._loudness.currentData(), "subtitles": panel._subtitles.currentData(),
         "language": panel._language.currentData(), "noise": panel._noise.currentData(),
         "echo": panel._echo.isChecked(), "highs": panel._highs.isChecked(), "rebuild": panel._rebuild.isChecked(),
@@ -49,6 +49,7 @@ def _shown(panel):
 
 
 def _change_everything(panel, folder, monkeypatch):
+    _click(panel._auto, False)  # choosing by hand: strength, noise, highs and rebuild are enabled
     panel._strength._buttons["gentle"].click()  # while rebuild is still off: strength is enabled
     _pick(panel._noise, "heavy")
     _click(panel._polish, False)  # greys the loudness list out
@@ -66,7 +67,7 @@ def _change_everything(panel, folder, monkeypatch):
 
 
 EXPECTED = {
-    "strength": "gentle", "polish": False, "loudness": "broadcast", "subtitles": "vtt", "language": "de",
+    "auto": False, "strength": "gentle", "polish": False, "loudness": "broadcast", "subtitles": "vtt", "language": "de",
     "noise": "heavy", "echo": True, "highs": False, "rebuild": True, "format": "flac", "video_size": "720", "parallel": 3,
     "where": "folder",
 }
@@ -86,6 +87,7 @@ def test_every_setting_survives_closing_and_reopening(qapp, tmp_path, monkeypatc
     panel = w.settings_panel
     # a fresh install shows the defaults
     assert _shown(panel)["strength"] == "max" and _shown(panel)["where"] == "next" and _shown(panel)["highs"]
+    assert _shown(panel)["auto"]  # automatic best settings, until unticked
     assert _shown(panel)["video_size"] == "same"  # the picture is left as it is unless asked
     _change_everything(panel, folder, monkeypatch)
     want = {**EXPECTED, "folder": str(folder)}
@@ -127,6 +129,7 @@ def test_other_values_survive_too(qapp, tmp_path, monkeypatch):
     folder.mkdir()
     w = _open(tmp_path)
     p = w.settings_panel
+    _click(p._auto, False)
     p._strength._buttons["balanced"].click()
     _pick(p._noise, "light")
     _pick(p._loudness, "youtube")
@@ -149,6 +152,7 @@ def test_other_values_survive_too(qapp, tmp_path, monkeypatch):
         assert s["strength"] == "balanced" and s["noise"] == "light" and s["loudness"] == "youtube"
         assert s["subtitles"] == "embed" and s["language"] == "auto" and not s["echo"] and s["highs"] and not s["rebuild"]
         assert s["format"] == "opus" and s["parallel"] == 0 and s["where"] == "next" and s["video_size"] == "2160"
+        assert not s["auto"]
         assert again.prefs.output_folder == str(folder) and again.prefs.output_dir() is None
         again.settings_panel._where._buttons["folder"].click()  # the folder is offered again without asking
         assert again.prefs.output_dir() == folder
@@ -179,12 +183,75 @@ def test_a_note_says_why_noise_settings_are_unavailable_while_rebuilding(qapp, t
     from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
 
     prefs = Preferences(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    prefs.auto_settings = False  # rebuild chosen by hand
     panel = SettingsPanel(prefs)
     try:
         panel._rebuild.setChecked(True)
         assert not panel._strength.isEnabled() and not panel._noise.isEnabled() and not panel._rebuild_note.isHidden()
         panel._rebuild.setChecked(False)
         assert panel._strength.isEnabled() and panel._noise.isEnabled() and panel._rebuild_note.isHidden()
+    finally:
+        panel.deleteLater()
+
+
+def test_automatic_best_settings_choose_for_each_file_while_on(qapp, tmp_path, monkeypatch):
+    from PySide6.QtCore import QSettings
+
+    from audio_cleaner_desktop.gui.preferences import Preferences
+    from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
+
+    # neither the highs model nor the voice model is installed here
+    monkeypatch.setattr(resources, "highs_model_dir", lambda: None)
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+    ini = tmp_path / "s.ini"
+    prefs = Preferences(QSettings(str(ini), QSettings.Format.IniFormat))
+    panel = SettingsPanel(prefs)
+
+    def enabled():
+        return {name: getattr(panel, "_" + name).isEnabled() for name in ("strength", "noise", "highs", "rebuild")}
+
+    def notes():
+        return {name: not getattr(panel, name).isHidden() for name in ("_auto_note", "_auto_extra_note", "_rebuild_note")}
+
+    try:
+        # on for a fresh install: what it decides is greyed out, with notes saying why, and the models it may use offered
+        assert panel._auto.isChecked() and prefs.auto_settings
+        assert enabled() == dict.fromkeys(("strength", "noise", "highs", "rebuild"), False)
+        assert notes() == {"_auto_note": True, "_auto_extra_note": True, "_rebuild_note": False}
+        assert not panel.highs_panel.isHidden() and not panel.voice_panel.isHidden()
+        _click(panel._auto, False)
+        assert prefs.auto_settings is False
+        assert enabled() == dict.fromkeys(("strength", "noise", "highs", "rebuild"), True)
+        assert notes() == {"_auto_note": False, "_auto_extra_note": False, "_rebuild_note": False}
+        assert panel.voice_panel.isHidden()  # rebuild is not ticked: its model isn't asked for
+        assert not panel.highs_panel.isHidden()  # restoring the highs is ticked (the default), its model is missing
+        panel._strength._buttons["strong"].click()
+        _pick(panel._noise, "light")
+        _click(panel._highs, False)
+        o = prefs.job_options()
+        assert (o.strength, o.noise, o.restore_highs, o.rebuild_voice, o.auto_rebuild) == ("strong", "light", False, False, False)
+        assert panel.highs_panel.isHidden()
+        _click(panel._rebuild, True)  # by hand: rebuilt always, the noise settings don't apply
+        assert notes() == {"_auto_note": False, "_auto_extra_note": False, "_rebuild_note": True}
+        assert not panel._strength.isEnabled() and not panel.voice_panel.isHidden()
+        _click(panel._auto, True)  # ticked rebuild doesn't count while automatic: only some files are rebuilt
+        assert notes() == {"_auto_note": True, "_auto_extra_note": True, "_rebuild_note": False}
+        o = prefs.job_options()
+        assert (o.strength, o.noise, o.restore_highs, o.rebuild_voice, o.auto_rebuild) == ("auto", "auto", True, False, True)
+        # the hand-made choices are kept for when it is off
+        assert panel._strength.value() == "strong" and panel._noise.currentData() == "light"
+        assert not panel._highs.isChecked() and panel._rebuild.isChecked()
+        _click(panel._auto, False)
+        assert prefs.job_options().rebuild_voice and notes()["_rebuild_note"]
+        _click(panel._rebuild, False)
+    finally:
+        panel.deleteLater()
+    # off is remembered, and the panel opens with the controls enabled
+    prefs = Preferences(QSettings(str(ini), QSettings.Format.IniFormat))
+    panel = SettingsPanel(prefs)
+    try:
+        assert not panel._auto.isChecked() and all(enabled().values()) and not any(notes().values())
+        assert panel._strength.value() == "strong"
     finally:
         panel.deleteLater()
 

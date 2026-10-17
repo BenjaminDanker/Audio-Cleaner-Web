@@ -94,6 +94,20 @@ class SettingsPanel(QFrame):
         title.setObjectName("CardTitle")
         layout.addWidget(title)
 
+        self._auto = WrapCheck("Pick the cleanup settings for each file")
+        self._auto.setToolTip("Each file gets the noise reduction and extra cleanup that fit it")
+        layout.addWidget(_Row(
+            "Automatic best settings",
+            "Each file is listened to before it is cleaned and gets what fits it:\n"
+            "\u2022 Noise reduction: Gentle for a quiet recording, up to Maximum for a noisy one\n"
+            "\u2022 Background noise: the way of removing noise that suits it\n"
+            "\u2022 Missing highs: brought back when they are missing (phone calls, small files)\n"
+            "\u2022 Rebuild the voice: when it sounds echoey or muffled (needs its model, downloaded once)\n\n"
+            "The noise is measured by the noise remover itself, so wind, keyboards and chatter count as much as a "
+            "steady hiss. The list shows what each file got. Untick it to choose these yourself.",
+            self._auto,
+        ))
+
         self._strength = Segmented(STRENGTH_LABELS)
         self._strength.setToolTip("How much background noise to remove. Gentle sounds the most natural.")
         layout.addWidget(_Row(
@@ -116,6 +130,16 @@ class SettingsPanel(QFrame):
             "\u2022 Heavy noise: a caf\u00e9, traffic, a crowd or wind, with noise almost as loud as the voice",
             self._noise,
         )
+        self._auto_note = QLabel("Picked for each file while \u201cAutomatic best settings\u201d is on.")
+        self._auto_extra_note = QLabel("Restoring the highs and rebuilding the voice are picked for each file while "
+                                       "\u201cAutomatic best settings\u201d is on.")
+        self._auto_extra_note.setObjectName("Small")
+        self._auto_extra_note.setWordWrap(True)
+        self._auto_extra_note.hide()
+        self._auto_note.setObjectName("Small")
+        self._auto_note.setWordWrap(True)
+        self._auto_note.hide()
+        noise_row.layout_.addWidget(self._auto_note)
         # Rebuilding the voice replaces the noise removal, so the two settings above don't apply while it is on.
         self._rebuild_note = QLabel("Noise reduction and Background noise aren\u2019t used while \u201cRebuild the voice\u201d "
                                     "is on: it removes the noise its own way. Untick it below to use them.")
@@ -192,6 +216,7 @@ class SettingsPanel(QFrame):
             "recordings it can change a word, so listen before you publish. The Noise reduction and Background "
             "noise settings do not apply to it.",
         )
+        extra_row.layout_.addWidget(self._auto_extra_note)
         extra_row.layout_.addWidget(self._highs)
         self.highs_panel = SpeechModelPanel(
             self.highs_downloader, need="Restoring the highs needs an extra model", what="the model that restores highs",
@@ -299,6 +324,7 @@ class SettingsPanel(QFrame):
         layout.addStretch(1)
 
         self._load()
+        self._auto.toggled.connect(lambda v: self._store("auto_settings", v))
         self._strength.changed.connect(lambda v: self._store("strength", v))
         self._polish.toggled.connect(lambda v: self._store("polish", v))
         self._loudness.currentIndexChanged.connect(lambda _: self._store("loudness", self._loudness.currentData()))
@@ -324,6 +350,7 @@ class SettingsPanel(QFrame):
 
     def _load(self) -> None:
         p = self._prefs
+        self._auto.setChecked(p.auto_settings)
         self._strength.set_value(p.strength)
         self._polish.setChecked(p.polish)
         _select(self._loudness, p.loudness)
@@ -369,24 +396,29 @@ class SettingsPanel(QFrame):
         sized once to fit them all."""
         spacing = self.layout().spacing() // 2 + 6
         optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel, self.voice_panel,
-                    self._rebuild_note, self._update_status)
+                    self._rebuild_note, self._auto_note, self._auto_extra_note, self._update_status)
         extra = sum(w.sizeHint().height() + spacing for w in optional if w.isHidden())
         return self.sizeHint().height() + extra
 
     def _refresh_enabled(self) -> None:
         self._loudness.setEnabled(self._polish.isChecked())
-        rebuilt = self._rebuild.isChecked()
-        self._strength.setEnabled(not rebuilt)
-        self._noise.setEnabled(not rebuilt)
+        auto = self._auto.isChecked()
+        rebuilt = self._rebuild.isChecked() and not auto  # always rebuilt (automatic rebuilds only some files)
+        self._strength.setEnabled(not rebuilt and not auto)
+        self._noise.setEnabled(not rebuilt and not auto)
+        self._highs.setEnabled(not auto)
+        self._rebuild.setEnabled(not auto)
         self._rebuild_note.setVisible(rebuilt)
+        self._auto_note.setVisible(auto)
+        self._auto_extra_note.setVisible(auto)
         wants_subs = self._subtitles.currentData() != "off"
         self._language.setVisible(wants_subs)
         dl = self.downloader
         self.speech_panel.setVisible(dl.running or bool(dl.last_error) or (wants_subs and not dl.ready))
         hd = self.highs_downloader
-        self.highs_panel.setVisible(hd.running or bool(hd.last_error) or (self._highs.isChecked() and not hd.ready))
+        self.highs_panel.setVisible(hd.running or bool(hd.last_error) or ((auto or self._highs.isChecked()) and not hd.ready))
         vd = self.voice_downloader
-        self.voice_panel.setVisible(vd.running or bool(vd.last_error) or (rebuilt and not vd.ready))
+        self.voice_panel.setVisible(vd.running or bool(vd.last_error) or ((auto or rebuilt) and not vd.ready))
         folder_mode = self._where.value() == "folder"
         self._folder_box.setVisible(folder_mode)
         self._folder.setText(self._prefs.output_folder)

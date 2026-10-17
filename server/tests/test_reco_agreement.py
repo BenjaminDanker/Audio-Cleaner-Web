@@ -17,9 +17,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, fftconvolve, sosfilt
 
-from acw_common import bwe, pipeline
+from acw_common import advice, bwe, pipeline
 
 from .conftest import LIVE_LIBDF, LIVE_MODELS
 
@@ -77,6 +77,34 @@ def _voice(seconds: float, seed: int = 0) -> np.ndarray:
     return v * env
 
 
+def _talk(seconds: float, seed: int = 0) -> np.ndarray:
+    """Close-up words with pauses whose spectrum reaches the top (a glottal pulse train and hiss, 10 ms ramps): the voice
+    the room and the low-pass below are put on, so that echoey and muffled are judged on both sides."""
+    rng = np.random.default_rng(seed)
+    n = int(seconds * SR)
+    f0 = 120 * (1 + 0.15 * np.sin(2 * np.pi * 0.4 * np.arange(n) / SR + seed))
+    pulses = np.zeros(n)
+    pulses[np.nonzero(np.diff(np.floor(np.cumsum(f0) / SR)))[0]] = 1.0
+    voiced = sosfilt(butter(2, 900, fs=SR, output="sos"), pulses)
+    v = voiced / np.std(voiced) + 0.6 * sosfilt(butter(2, 3000, "high", fs=SR, output="sos"), rng.standard_normal(n))
+    env = np.zeros(n)
+    pos = int(0.2 * SR)
+    while pos + SR // 2 < n:
+        w = int(rng.uniform(0.2, 0.5) * SR)
+        env[pos:pos + w] = np.minimum(1, np.minimum(np.arange(w), np.arange(w)[::-1]) / (SR / 100))
+        pos += w + int(rng.uniform(0.3, 0.8) * SR)
+    x = v * env
+    return 0.3 * x / np.max(np.abs(x)) + 3e-4 * rng.standard_normal(n)
+
+
+def _room(x: np.ndarray, rt60: float, seed: int = 0) -> np.ndarray:
+    m = int(rt60 * 1.5 * SR)
+    h = np.random.default_rng(seed + 50).standard_normal(m) * 10 ** (-3 * np.arange(m) / SR / rt60)
+    h[0] = 1.0
+    y = fftconvolve(x, h)[:len(x)]
+    return 0.3 * y / np.max(np.abs(y)) + 3e-4 * np.random.default_rng(seed).standard_normal(len(y))
+
+
 def _mix(voice: np.ndarray, snr_db: float, kind: str, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed + 100)
     n = len(voice)
@@ -112,6 +140,14 @@ def measured(tmp_path_factory):
     files[d / "dual.wav"] = _write(d / "dual.wav", np.stack([clean, clean], axis=1))
     files[d / "oneside.wav"] = _write(d / "oneside.wav", np.stack([clean, np.zeros_like(clean)], axis=1))
     files[d / "silence.wav"] = _write(d / "silence.wav", np.zeros(5 * SR))
+    # what rebuilding the voice is for (advice.rebuild_reason): a close voice, the same in two rooms, and muffled
+    for seed in (0, 1):
+        talk = _talk(20, seed)
+        files[d / f"close{seed}.wav"] = _write(d / f"close{seed}.wav", talk)
+        for rt in (0.3, 0.8):
+            files[d / f"room{rt}_{seed}.wav"] = _write(d / f"room{rt}_{seed}.wav", _room(talk, rt, seed))
+        for fc in (2000, 3000):
+            files[d / f"muffled{fc}_{seed}.wav"] = _write(d / f"muffled{fc}_{seed}.wav", sosfilt(butter(2, fc, fs=SR, output="sos"), talk))
     extra = os.environ.get("ACW_RECO_FILES")
     if extra:
         for p in sorted(Path(extra).glob("*.wav")):
@@ -141,11 +177,75 @@ def test_the_heavy_cut_is_the_same_number():
     assert silence == pipeline.SILENCE_DB
 
 
+def test_the_strength_steps_are_the_same_numbers():
+    """The desktop's automatic strength (pipeline.strength_for) picks what the website recommends (recommend.js
+    strengthFor) and the OBS plugin suggests (input_advice.cpp strength_for): the same cuts and the same strengths."""
+    js = (ROOT / "web" / "src" / "recommend.js").read_text()
+    cpp = (ROOT / "obs-plugin" / "core" / "src" / "input_advice.cpp").read_text()
+    web_db = {m[1]: float(m[2]) for m in re.finditer(r"id: '(\w+)',[^}]*?\bdb: ([\d.]+)", (ROOT / "web" / "src" / "strengths.js").read_text())}
+    belows = [b for b, _ in pipeline.STRENGTH_STEPS]
+    assert [float(re.search(rf"\b{name}:\s*([\d.]+)", js).group(1)) for name in ("MAX_BELOW", "STRONG_BELOW", "BALANCED_BELOW")] == belows
+    assert [float(re.search(rf"\b{name}\s*=\s*([\d.]+)", cpp).group(1)) for name in ("kMaxBelow", "kStrongBelow", "kBalancedBelow")] == belows
+    # what each step gives: the website's strength ids (in strengthFor's order) and the plugin's numbers
+    picks = re.search(r"function strengthFor\(noiseDb\) \{(.*?)\n\}", js, re.S).group(1)
+    assert [web_db[i] for i in re.findall(r"'(\w+)'", picks)] == [db for _, db in pipeline.STRENGTH_STEPS] + [pipeline.GENTLE_DB]
+    plugin = re.search(r"int strength_for\(double noise_db\)\s*\{(.*?)\n\}", cpp, re.S).group(1)
+    assert [float(n) for n in re.findall(r"(?:return|\?|:)\s*(\d+)\s*;?", plugin)] == [db for _, db in pipeline.STRENGTH_STEPS] + [pipeline.GENTLE_DB]
+
+
+def test_the_advice_thresholds_are_the_same_numbers():
+    """advice.py decides what the website recommends (recommend.js T, analysis.js) with the same numbers."""
+    js = (ROOT / "web" / "src" / "recommend.js").read_text()
+    analysis = (ROOT / "web" / "src" / "media" / "analysis.js").read_text()
+
+    def t(name):
+        return float(re.search(rf"\b{name}:\s*(-?[\d.]+)", js).group(1))
+
+    assert (t("ECHO_DROP_DB"), t("DULL_TILT_DB"), t("PHONE_HZ")) == (advice.ECHO_DROP_DB, advice.DULL_TILT_DB, advice.PHONE_HZ)
+    assert float(re.search(r"SPEECH_BAND_DYN_DB\s*=\s*([\d.]+)", analysis).group(1)) == advice.SPEECH_BAND_DYN_DB
+    # the speech band's filters and the 60 ms of dropOf
+    assert (re.search(r"BAND_HP = biquad\('high', (\d+)\)", analysis).group(1), re.search(r"BAND_LP = biquad\('low', (\d+)\)", analysis).group(1)) == ("150", "3500")
+    assert int(re.search(r"function dropOf\(.*?const W = (\d+);", analysis, re.S).group(1)) == advice._DROP_FRAMES
+
+
 def test_bandwidth_and_the_restore_choice_match(measured):
     for path, js, x in measured:
         py = bwe.effective_bandwidth(x)
         assert js["bandwidthHz"] == pytest.approx(py, abs=1.0), path.name
         assert bwe.pick_model(js["bandwidthHz"]) == bwe.pick_model(py), path.name
+
+
+def _js_reason(js: dict) -> str | None:
+    """recommend.js recommendForFile's rebuild decision, from the browser's figures (the numbers are checked to be the
+    same as advice's in test_the_advice_thresholds_are_the_same_numbers)."""
+    if not js["hasSpeech"]:
+        return None
+    if js["dropDb"] is not None and js["dropDb"] < advice.ECHO_DROP_DB:
+        return "echoey"
+    if js["bandwidthHz"] > advice.PHONE_HZ and js["tiltDb"] is not None and js["tiltDb"] <= advice.DULL_TILT_DB:
+        return "muffled"
+    return None
+
+
+def test_speech_echo_and_muffling_are_judged_the_same(measured):
+    """advice.py (what the desktop app rebuilds) against the browser's figures (what the website recommends). Every file
+    here is short enough to be measured as one stretch: the browser also counts level drops across the joins of the
+    stretches of a long file, Python within each stretch only, so long files can differ by a few drops."""
+    reasons = set()
+    for path, js, x in measured:
+        assert js["hasSpeech"] == advice.has_speech(x), path.name
+        py_drop = advice.drop_db(x)
+        assert (js["dropDb"] is None) == (py_drop is None), (path.name, js["dropDb"], py_drop)
+        if py_drop is not None:
+            assert js["dropDb"] == pytest.approx(py_drop, abs=1.0), path.name
+        py_tilt = bwe.tilt_db(x)
+        assert (js["tiltDb"] is None) == (py_tilt is None), path.name
+        if py_tilt is not None:
+            assert js["tiltDb"] == pytest.approx(py_tilt, abs=0.5), path.name
+        reason = advice.rebuild_reason(x)
+        assert reason == _js_reason(js), (path.name, js["dropDb"], js["tiltDb"], js["bandwidthHz"])
+        reasons.add(reason)
+    assert reasons == {None, "echoey", "muffled"}  # the files cover every answer
 
 
 def test_channel_layout_matches_the_servers_plan(measured):

@@ -33,8 +33,15 @@ def format_spent(seconds: float) -> str:
 def describe_settings(s: dict, has_video: bool) -> str:
     if s.get("rebuild_voice"):
         parts = ["voice rebuilt"]
+    elif s.get("picked_rebuild"):
+        parts = [f"voice rebuilt (it sounded {s['picked_rebuild']})"]
     else:
-        parts = [dict(STRENGTH_LABELS).get(s.get("strength"), "Maximum") + " noise reduction"]
+        picked = s.get("picked_strength") if s.get("strength") == engine.AUTO_STRENGTH else None
+        if s.get("strength") == engine.AUTO_STRENGTH:
+            parts = [f"{dict(STRENGTH_LABELS)[picked]} noise reduction (picked for this file)" if picked in engine.STRENGTHS
+                     else "noise reduction picked for the file"]
+        else:
+            parts = [dict(STRENGTH_LABELS).get(s.get("strength"), "Maximum") + " noise reduction"]
     if s.get("noise", "auto") != "auto":
         parts.append(f"for {s['noise']} noise")
     if s.get("echo_track"):
@@ -57,7 +64,7 @@ def settings_dict(options: engine.JobOptions) -> dict:
         "strength": options.strength, "polish": options.polish, "loudness": options.loudness,
         "audio_format": options.audio_format, "subtitles": options.subtitles, "language": options.language,
         "noise": options.noise, "echo_track": options.echo_track, "restore_highs": options.restore_highs,
-        "rebuild_voice": options.rebuild_voice, "video_size": options.video_size,
+        "rebuild_voice": options.rebuild_voice, "auto_rebuild": options.auto_rebuild, "video_size": options.video_size,
     }
 
 

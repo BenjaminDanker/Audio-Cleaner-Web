@@ -740,9 +740,25 @@ def test_the_release_is_copied_to_the_public_repository_without_the_update_files
     assert "continue-on-error: true" in step and "::warning::" in step  # never fails the official release
     assert 'if [ -z "$GH_TOKEN" ]' in step and "exit 0" in step  # no secret: skipped
     assert 'tag="v$version"' in step and "--latest" in step and '--target "$branch"' in step and "--clobber" in step
-    assert "update.json" not in step  # only the installers go there
-    assert step.count("-Windows.exe") >= 1 and "-Mac-Apple-silicon.pkg" in step and "-Mac-Intel.pkg" in step
-    # the notes are written for the community: they point at the download page and say nothing about where the build runs
-    assert "https://mc-multi-world.space/audio/" in step
+    # only the installers go there: not the update information the installed apps read, nor its signature
+    assert "update.json" not in step and ".sig" not in step
+    files = re.search(r"files=\((.*?)\)", step).group(1).split()
+    assert files == ['"AudioCleaner-$version-Windows.exe"', '"AudioCleaner-$version-Mac-Apple-silicon.pkg"',
+                     '"AudioCleaner-$version-Mac-Intel.pkg"']
+    # The notes are written for the community. The installers live only in this repository's Releases (the desktop app
+    # is not on the website), so the notes say which file is for which computer, that setup downloads the models once
+    # and that the app keeps itself up to date.
+    notes = re.search(r'notes="(Audio Cleaner \$version\..*?[^\\])"\n', step, re.S).group(1)
+    picks = dict(re.findall(r"^\s*- (.+?): (AudioCleaner-\$version-\S+)$", notes, re.M))
+    assert set(picks.values()) == {f.strip('"') for f in files}  # every installer is named, once
+    by_file = {f: computer for computer, f in picks.items()}
+    assert "Windows" in by_file["AudioCleaner-$version-Windows.exe"]
+    assert "Apple silicon" in by_file["AudioCleaner-$version-Mac-Apple-silicon.pkg"]
+    assert "Intel" in by_file["AudioCleaner-$version-Mac-Intel.pkg"]
+    assert "Pick the file that matches your computer" in notes and "About This Mac" in notes
+    assert "downloads the models once" in notes and "updates itself" in notes
+    assert "mc-multi-world.space" not in notes  # not offered on the website
+    # and nothing about where the build runs: no private repository, commit or link
     assert "GITHUB_REPOSITORY" not in step and "GITHUB_SHA" not in step and "github.com" not in step
+    assert "Audio-Cleaner-Web" not in step and "Audio-Cleaner-Web" not in notes
     assert release.index("gh release create") < release.index("Copy the release to the public repository")

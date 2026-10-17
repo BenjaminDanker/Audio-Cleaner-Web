@@ -121,20 +121,14 @@ def effective_bandwidth(x: np.ndarray, sr: int = SAMPLE_RATE) -> float:
     block by block, never copied. Channels are averaged, so call it per channel for tracks with different
     content.
     """
-    x = np.asarray(x)
-    if x.ndim == 2 and x.shape[1] == 1:
-        x = x[:, 0]
     nyq = sr / 2
-    r = _ltas_db(x, sr)
+    r = _smoothed_ltas(x, sr)
     if r is None:
         return nyq
     f, db = r
-    # smooth in the dB domain with a ~200 Hz running median (kills single-bin tones and gaps)
-    db = scipy.signal.medfilt(db, max(3, int(round(200 / f[1])) | 1))
 
     def mean(lo, hi):
-        sel = (f >= lo) & (f < hi)
-        return db[sel].mean() if sel.any() else np.nan
+        return _band_mean(f, db, lo, hi)
 
     ref = mean(600, 2400)
     top = min(nyq * 0.95, 20_000.0)
@@ -149,6 +143,35 @@ def effective_bandwidth(x: np.ndarray, sr: int = SAMPLE_RATE) -> float:
         j = np.where((f >= fe * 0.9) & (db < local - 12.0))[0]
         return float(f[j[0]])
     return nyq
+
+
+def _smoothed_ltas(x: np.ndarray, sr: int):
+    """(frequencies, dB) of the long-term spectrum of the speech in `x`, smoothed; None when there is too little."""
+    x = np.asarray(x)
+    if x.ndim == 2 and x.shape[1] == 1:
+        x = x[:, 0]
+    r = _ltas_db(x, sr)
+    if r is None:
+        return None
+    f, db = r
+    # smooth in the dB domain with a ~200 Hz running median (kills single-bin tones and gaps)
+    return f, scipy.signal.medfilt(db, max(3, int(round(200 / f[1])) | 1))
+
+
+def _band_mean(f: np.ndarray, db: np.ndarray, lo: float, hi: float) -> float:
+    sel = (f >= lo) & (f < hi)
+    return db[sel].mean() if sel.any() else np.nan
+
+
+def tilt_db(x: np.ndarray, sr: int = SAMPLE_RATE) -> float | None:
+    """How far the top of the speech band (4-8 kHz) sits below its middle (0.6-2.4 kHz), dB, on the same smoothed
+    spectrum as effective_bandwidth: very negative for a muffled voice. None when there is too little speech. The
+    website measures the same (web/src/media/analysis.js bandwidthOf, tiltDb)."""
+    r = _smoothed_ltas(x, sr)
+    if r is None:
+        return None
+    f, db = r
+    return float(_band_mean(f, db, 4000, 8000) - _band_mean(f, db, 600, 2400))
 
 
 def pick_model(bandwidth_hz: float) -> str | None:

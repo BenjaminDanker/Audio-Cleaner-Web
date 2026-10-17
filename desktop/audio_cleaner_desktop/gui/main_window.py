@@ -28,7 +28,7 @@ from .history_view import HistoryPage, format_spent, settings_dict
 from .player import PreviewPane
 from .preferences import Preferences
 from .queue_view import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING, WAITING, FileItem, FileRow, QueueView
-from .settings_panel import SettingsPanel
+from .settings_panel import STRENGTH_LABELS, SettingsPanel
 from .speech_model import SpeechModelDownloader, size_text
 from .theme import set_property
 from .widgets import Banner
@@ -540,7 +540,7 @@ class MainWindow(QMainWindow):
             return
         if self.prefs.subtitles != "off" and not self.speech_download.ready and not self._ask_for_model(self.speech_download):
             return
-        if self.prefs.rebuild_voice and not self.voice_download.ready and not self._ask_for_model(self.voice_download):
+        if self.prefs.job_options().rebuild_voice and not self.voice_download.ready and not self._ask_for_model(self.voice_download):
             return
         self._batch_started = time.monotonic()
         self._batch_done = self._batch_failed = 0
@@ -771,6 +771,9 @@ class MainWindow(QMainWindow):
             notes.append(f"the earlier version is in the {shell.TRASH_NAME}")
         if item.options and item.options.subtitles != "off" and result.subtitles is None and not result.embedded:
             notes.append("no speech found for subtitles")
+        item.picked_strength, item.picked_rebuild = result.strength, result.rebuilt
+        if result.strength:
+            notes.append(f"{dict(STRENGTH_LABELS)[result.strength]} noise reduction picked for this file")
         if result.notice:
             notes.append(result.notice)
         item.message = "; ".join(notes)
@@ -831,7 +834,10 @@ class MainWindow(QMainWindow):
         elapsed = time.monotonic() - item.started_at if item.started_at else 0.0
         self.history.add(Entry(
             name=item.path.name, source=str(item.path), duration=item.duration, has_video=item.has_video,
-            settings=settings_dict(options), seconds_taken=elapsed, outputs=outputs, status=status, message=message,
+            settings={**settings_dict(options), **({"picked_strength": item.picked_strength}
+                                                    if status == DONE and item.picked_strength else {}),
+                      **({"picked_rebuild": item.picked_rebuild} if status == DONE and item.picked_rebuild else {})},
+            seconds_taken=elapsed, outputs=outputs, status=status, message=message,
         ))
         if self.tabs.currentIndex() == 1:
             self.history_page.refresh()
@@ -1000,7 +1006,7 @@ class MainWindow(QMainWindow):
             if item.state == WAITING and item.duration:
                 folder = out_dir or item.path.parent
                 by_folder.setdefault(folder, []).append(engine.estimated_scratch_gb(item.duration, item.channels))
-        at_once = self.queue.limit(subtitles, self.prefs.rebuild_voice, self.prefs.echo_track)
+        at_once = self.queue.limit(subtitles, self.prefs.job_options().may_rebuild, self.prefs.echo_track)
         scratch = engine.scratch_root()  # where the work files go on Windows and macOS, while it has room
         for folder, needs in by_folder.items():
             need = sum(sorted(needs, reverse=True)[:at_once]) * SCRATCH_SAFETY

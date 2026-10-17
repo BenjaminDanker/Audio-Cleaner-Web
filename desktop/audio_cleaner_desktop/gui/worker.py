@@ -112,7 +112,7 @@ class JobQueue(QObject):
     def limit_for(self, jobs: list[Job]) -> int:
         return self.limit(
             any(j.options.subtitles != "off" for j in jobs),
-            any(j.options.rebuild_voice for j in jobs),
+            any(j.options.may_rebuild for j in jobs),
             any(j.options.echo_track for j in jobs),
         )
 

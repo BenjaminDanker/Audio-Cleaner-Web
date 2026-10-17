@@ -10,7 +10,8 @@ quiet_popen.install()  # first, before the heavier imports below (the frozen app
 
 from . import __version__, config  # noqa: E402
 from .engine import (  # noqa: E402
-    AUDIO_CHOICES, AUDIO_ENDINGS, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTHS, SUBTITLE_MODES, VIDEO_ENDINGS,
+    AUDIO_CHOICES, AUDIO_ENDINGS, AUTO_STRENGTH, DEFAULT_LOUDNESS, LANGUAGES, LOUDNESS_TARGETS, STRENGTH_CHOICES, SUBTITLE_MODES,
+    VIDEO_ENDINGS,
     VIDEO_SIZES, JobOptions,
 )
 
@@ -31,7 +32,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="download the models for subtitles, restoring highs and rebuilding the voice (about 2.5 GB, once) and exit",
     )
     p.add_argument("-o", "--output-dir", metavar="OUTDIR", help="write results here (default: next to each original)")
-    p.add_argument("--strength", choices=list(STRENGTHS), default="max", help="noise reduction strength (default: max)")
+    p.add_argument(
+        "--strength", choices=list(STRENGTH_CHOICES), default=AUTO_STRENGTH,
+        help="noise reduction strength; auto (default) picks the one that fits each file from how noisy it is",
+    )
     p.add_argument("--no-polish", action="store_true", help="skip level matching, compression and loudness normalisation")
     p.add_argument(
         "--audio-format", choices=list(AUDIO_CHOICES), default="same",
@@ -78,6 +82,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="rebuild the voice instead of filtering noise: also removes room echo; slow, needs its model",
     )
     p.add_argument(
+        "--no-auto-rebuild", action="store_true",
+        help="do not rebuild the voice of files that sound echoey or muffled (by default they are, when its model is installed)",
+    )
+    p.add_argument(
         "--parallel", type=int, choices=range(0, 5), default=1, metavar="N",
         help="files cleaned at once, 1-4, or 0 for Automatic (default: 1); never more than the memory allows",
     )
@@ -118,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             strength=args.strength, polish=not args.no_polish, audio_format=args.audio_format,
             loudness=args.loudness, subtitles=args.subtitles, language=args.language, noise=args.noise,
             echo_track=args.echo_track, restore_highs=not args.no_restore_highs, rebuild_voice=args.rebuild_voice,
+            auto_rebuild=not args.no_auto_rebuild,
             video_size=args.video_size,
         )
         if args.output_name is not None and len(args.files) != 1:

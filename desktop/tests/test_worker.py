@@ -177,3 +177,18 @@ def test_ram_and_core_limits(make_queue):
     assert q.limit(subtitles=False) == 4  # Auto: 16 // 3 = 5, capped at 4
     q.set_machine(cores=4, ram_gb=64)
     assert q.limit(subtitles=False) == 1
+
+
+def test_automatic_rebuilding_is_planned_for_only_where_the_voice_model_is_installed(make_queue, monkeypatch, tmp_path):
+    from audio_cleaner_desktop import resources
+
+    q, *_ = make_queue(parallel=4)
+    q.set_machine(cores=16, ram_gb=8)
+    plain, rebuilt = q.limit(subtitles=False), q.limit(subtitles=False, rebuild_voice=True)
+    assert rebuilt < plain  # rebuilding needs more memory per file
+    auto = [Job(1, Path("a.wav"), engine.JobOptions()), Job(2, Path("b.wav"), engine.JobOptions(auto_rebuild=True))]
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+    assert q.limit_for(auto) == plain  # without the model nothing is rebuilt
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    assert q.limit_for(auto) == rebuilt  # any file may be
+    assert q.limit_for(auto[:1]) == plain

@@ -42,6 +42,8 @@ class FileItem:
     started_at: float = 0.0
     probed: bool = False
     options: engine.JobOptions | None = None
+    picked_strength: str | None = None  # what "Automatic best settings" picked for the last run (engine.JobResult.strength)
+    picked_rebuild: str | None = None  # ... and why it rebuilt the voice (engine.JobResult.rebuilt)
     # Cleaned files from the previous run of this row and their (size, mtime_ns) when they were made:
     # "Clean again" puts the new result in their place once it is finished (the old one goes to the bin).
     made: dict[Path, tuple[int, int]] = field(default_factory=dict)

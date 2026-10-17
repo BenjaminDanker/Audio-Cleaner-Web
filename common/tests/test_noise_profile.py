@@ -70,7 +70,67 @@ def test_heavy_noise_runs_the_heavy_model(tmp_path, monkeypatch):
     report: dict = {}
     pipeline.clean_audio(_speechlike(2, 0), "lib", "model", pipeline.CleanOptions(noise="auto", polish=False),
                          heavy_model_path=tmp_path / dpdfnet.MODEL_FILE, report=report)
-    assert calls == ["dpdfnet"] and report == {"noise": "heavy", "highs": None}
+    assert calls == ["dpdfnet"] and report == {"noise": "heavy", "highs": None, "atten_lim_db": 100.0, "noise_db": 5.0}
+
+
+
+# --- automatic best settings: the strength that fits the recording, from the same measurement
+
+def test_strength_steps_by_noise_figure():
+    assert [pipeline.strength_for(db) for db in (-5.0, 0.0, 14.9)] == [100.0, 100.0, 100.0]
+    assert [pipeline.strength_for(db) for db in (15.0, 17.0, 19.99)] == [40.0, 40.0, 40.0]
+    assert [pipeline.strength_for(db) for db in (20.0, 22.0, 23.9)] == [24.0, 24.0, 24.0]
+    assert [pipeline.strength_for(db) for db in (24.0, 30.0, 99.0)] == [12.0, 12.0, 12.0]  # 99: a silent recording
+    assert pipeline.GENTLE_DB == 12.0 and [db for _, db in pipeline.STRENGTH_STEPS] == [100.0, 40.0, 24.0]
+    belows = [b for b, _ in pipeline.STRENGTH_STEPS]
+    assert belows == sorted(belows)  # steps in order, or strength_for would skip one
+
+
+def _fake_removers(monkeypatch, figure):
+    measured, used = [], []
+    monkeypatch.setattr(pipeline, "noise_figure_db", lambda x, lib, model, cancel=None: measured.append(1) or figure)
+    for mod, name in ((pipeline.dfn, "dfn"), (pipeline.dpdfnet, "dpdfnet")):
+        monkeypatch.setattr(mod, "denoise_array", lambda x, *a, out=None, _n=name, **k:
+                            used.append((_n, k["atten_lim_db"])) or out.__setitem__(slice(None), x))
+    return measured, used
+
+
+@pytest.mark.parametrize(("figure", "remover", "strength"), [
+    (5.0, "dpdfnet", 100.0), (17.0, "dpdfnet", 40.0), (19.5, "dfn", 40.0), (22.0, "dfn", 24.0), (30.0, "dfn", 12.0)])
+def test_automatic_strength_is_measured_once_with_the_remover_choice(monkeypatch, tmp_path, figure, remover, strength):
+    measured, used = _fake_removers(monkeypatch, figure)
+    report: dict = {}
+    pipeline.clean_audio(_speechlike(2, 10), "lib", "model", pipeline.CleanOptions(noise="auto", atten_lim_db=None, polish=False),
+                         heavy_model_path=tmp_path / dpdfnet.MODEL_FILE, report=report)
+    assert len(measured) == 1 and used == [(remover, strength)]
+    assert report == {"noise": "heavy" if remover == "dpdfnet" else "light", "highs": None,
+                      "atten_lim_db": strength, "noise_db": figure}
+
+
+def test_automatic_strength_with_a_forced_remover_still_measures_once(monkeypatch, tmp_path):
+    measured, used = _fake_removers(monkeypatch, 21.234)
+    report: dict = {}
+    pipeline.clean_audio(_speechlike(2, 10), "lib", "model", pipeline.CleanOptions(noise="heavy", atten_lim_db=None, polish=False),
+                         heavy_model_path=tmp_path / dpdfnet.MODEL_FILE, report=report)
+    assert len(measured) == 1 and used == [("dpdfnet", 24.0)]
+    assert report["noise"] == "heavy" and report["atten_lim_db"] == 24.0 and report["noise_db"] == 21.2  # rounded
+
+
+def test_a_chosen_remover_and_strength_measure_nothing(monkeypatch):
+    measured, used = _fake_removers(monkeypatch, 5.0)
+    report: dict = {}
+    pipeline.clean_audio(_speechlike(2, 10), "lib", "model", pipeline.CleanOptions(noise="light", atten_lim_db=40.0, polish=False),
+                         report=report)
+    assert measured == [] and used == [("dfn", 40.0)]
+    assert report == {"noise": "light", "highs": None, "atten_lim_db": 40.0}  # no noise_db: nothing was measured
+
+
+def test_every_channel_gets_the_one_strength(monkeypatch):
+    """A stereo recording is measured once (its mono mix) and both sides are cleaned with the same strength."""
+    measured, used = _fake_removers(monkeypatch, 18.0)
+    x = np.stack([_speechlike(2, 10, seed=1), _speechlike(2, 10, seed=2)], 1)
+    pipeline.clean_audio(x, "lib", "model", pipeline.CleanOptions(noise="light", atten_lim_db=None, polish=False))
+    assert len(measured) == 1 and used == [("dfn", 40.0), ("dfn", 40.0)]
 
 
 def test_device_reaches_every_stage_that_has_a_gpu_path(monkeypatch, tmp_path):

@@ -79,3 +79,48 @@ def test_history_wording():
     text = describe_settings({"strength": "gentle", "polish": True, "loudness": "youtube", "subtitles": "srt"}, False)
     assert text == "Gentle noise reduction, polished (YouTube), subtitles: srt file"
     assert "polished" not in describe_settings({"strength": "max", "polish": False}, True)
+
+
+def test_automatic_best_settings_are_on_by_default_and_keep_the_manual_choices(tmp_path):
+    store = QSettings(str(tmp_path / "p.ini"), QSettings.Format.IniFormat)
+    prefs = Preferences(store)
+    assert prefs.auto_settings is True
+    o = prefs.job_options()
+    assert (o.strength, o.noise, o.atten_lim_db) == ("auto", "auto", None)
+    assert (o.restore_highs, o.rebuild_voice, o.auto_rebuild) == (True, False, True)
+    # chosen by hand: kept, but not used while it is on
+    prefs.strength, prefs.noise, prefs.restore_highs, prefs.rebuild_voice = "gentle", "heavy", False, True
+    o = prefs.job_options()
+    assert (o.strength, o.noise, o.restore_highs, o.rebuild_voice, o.auto_rebuild) == ("auto", "auto", True, False, True)
+    prefs.auto_settings = False
+    store.sync()
+    again = Preferences(QSettings(str(tmp_path / "p.ini"), QSettings.Format.IniFormat))
+    assert again.auto_settings is False
+    o = again.job_options()
+    assert (o.strength, o.noise, o.atten_lim_db) == ("gentle", "heavy", 12.0)
+    assert (o.restore_highs, o.rebuild_voice, o.auto_rebuild) == (False, True, False)
+    again.auto_settings = True
+    assert (again.job_options().strength, again.job_options().noise) == ("auto", "auto")
+
+
+def test_history_says_which_strength_was_picked():
+    auto = {"strength": "auto", "noise": "auto", "polish": False}
+    assert describe_settings({**auto, "picked_strength": "balanced"}, False) == "Balanced noise reduction (picked for this file)"
+    assert describe_settings({**auto, "picked_strength": "max"}, False) == "Maximum noise reduction (picked for this file)"
+    assert describe_settings(auto, False) == "noise reduction picked for the file"  # e.g. a run that failed
+    assert describe_settings({**auto, "picked_strength": "bogus"}, False) == "noise reduction picked for the file"
+    # a strength chosen by hand is what is shown, whatever else is stored
+    assert describe_settings({"strength": "gentle", "polish": False, "picked_strength": "max"}, False) == "Gentle noise reduction"
+    assert describe_settings({**auto, "rebuild_voice": True, "picked_strength": "max"}, False) == "voice rebuilt"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "echoey"}, False) == "voice rebuilt (it sounded echoey)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "muffled", "polish": True, "loudness": "youtube"},
+                             False) == "voice rebuilt (it sounded muffled), polished (YouTube)"
+
+
+def test_history_keeps_the_automatic_choices():
+    from audio_cleaner_desktop import engine
+    from audio_cleaner_desktop.gui.history_view import settings_dict
+
+    s = settings_dict(engine.JobOptions(strength="auto", auto_rebuild=True))
+    assert (s["strength"], s["noise"], s["auto_rebuild"], s["rebuild_voice"]) == ("auto", "auto", True, False)
+    assert settings_dict(engine.JobOptions())["auto_rebuild"] is False

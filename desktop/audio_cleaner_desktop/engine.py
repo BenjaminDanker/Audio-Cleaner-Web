@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from acw_common import captions, pipeline, transcribe
+from acw_common import advice, captions, pipeline, transcribe
 from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult, VideoOut
 
 from . import models, resources
@@ -39,6 +39,9 @@ Cancelled = pipeline.Cancelled
 # and matches Studio clean's default on the server (same pipeline).
 STRENGTHS: dict[str, float] = {"gentle": 12.0, "balanced": 24.0, "strong": 40.0, "max": 100.0}
 DEFAULT_STRENGTH = "max"
+# "auto": each file gets the strength that fits how noisy it is (pipeline.strength_for, measured by the noise remover).
+AUTO_STRENGTH = "auto"
+STRENGTH_CHOICES = (AUTO_STRENGTH, *STRENGTHS)
 OUTPUT_AUDIO_FORMATS = ("wav", "flac", "mp3", "m4a", "opus")
 AUDIO_CHOICES = ("same", *OUTPUT_AUDIO_FORMATS)
 # Every ending a result can have. Sound: the name in acw_common.ffmpeg.AUDIO_FORMATS; video: the container.
@@ -115,12 +118,14 @@ class JobOptions:
     echo_track: bool = False  # remove speaker echo using the file's second audio track (when it has one)
     restore_highs: bool = True  # bring back the highs of phone-quality recordings (needs HIGHS_MODEL)
     rebuild_voice: bool = False  # Sidon instead of noise removal: also removes room echo; slow (VOICE_MODEL)
+    # Rebuild the voice of a file that sounds echoey or muffled (advice.rebuild_reason), when VOICE_MODEL is installed.
+    auto_rebuild: bool = False
     video_size: str = "same"  # of a video result: "same", or the pixels of the shorter side (VIDEO_SIZES)
 
     def __post_init__(self) -> None:
         if self.noise not in pipeline.NOISE_PROFILES:
             raise ValueError(f"unknown noise setting {self.noise!r}")
-        if self.strength not in STRENGTHS:
+        if self.strength not in STRENGTH_CHOICES:
             raise ValueError(f"unknown strength {self.strength!r}")
         if self.audio_format not in AUDIO_CHOICES:
             raise ValueError(f"unknown audio format {self.audio_format!r}")
@@ -134,12 +139,18 @@ class JobOptions:
             raise ValueError(f"unknown video size {self.video_size!r}")
 
     @property
-    def atten_lim_db(self) -> float:
-        return STRENGTHS[self.strength]
+    def atten_lim_db(self) -> float | None:
+        """None: the one that fits each file (measured when it is cleaned)."""
+        return None if self.strength == AUTO_STRENGTH else STRENGTHS[self.strength]
 
     @property
     def loudness_lufs(self) -> float | None:
         return LOUDNESS_TARGETS[self.loudness]
+
+    @property
+    def may_rebuild(self) -> bool:
+        """The voice may be rebuilt (what the memory planning has to allow for)."""
+        return self.rebuild_voice or (self.auto_rebuild and resources.voice_model_dir() is not None)
 
     @property
     def short_side(self) -> int | None:
@@ -156,6 +167,8 @@ class JobResult:
     embedded: bool = False  # subtitles went into the video
     language: str | None = None  # language the speech was transcribed in
     notice: str | None = None  # something the user should know about how the file was cleaned
+    strength: str | None = None  # the strength picked for this file (STRENGTHS key) when it was set to automatic
+    rebuilt: str | None = None  # why the voice was rebuilt automatically ("echoey", "muffled"); None when it wasn't
 
     @property
     def paths(self) -> list[Path]:
@@ -646,7 +659,9 @@ def process(
             report(decode_end)
             used: dict = {}
             voice_dir = resources.voice_model_dir()
-            rebuild = options.rebuild_voice and voice_dir is not None
+            reason = advice.rebuild_reason(x) if options.auto_rebuild and not options.rebuild_voice else None
+            _check_cancel(cancel)
+            rebuild = (options.rebuild_voice or reason is not None) and voice_dir is not None
             y = pipeline.clean_audio(
                 x,
                 resources.libdf_path(),
@@ -664,6 +679,14 @@ def process(
                 restore_model_dir=voice_dir,
                 report=used,
             )
+            picked = None
+            if options.strength == AUTO_STRENGTH and "atten_lim_db" in used:
+                picked = next((k for k, db in STRENGTHS.items() if db == used["atten_lim_db"]), None)
+            if reason and rebuild:
+                notice = "; ".join(filter(None, [notice, f"the voice was rebuilt because it sounded {reason}"]))
+            elif reason:
+                notice = "; ".join(filter(None, [notice, f"it sounds {reason}: download the model that rebuilds the voice "
+                                                 "in Settings and clean it again to fix that"]))
             if options.rebuild_voice and not rebuild:
                 notice = "; ".join(filter(None, [notice, "the model that rebuilds the voice is not installed, so it was "
                                                  "cleaned the usual way. Download it in Settings to rebuild voices"]))
@@ -719,7 +742,7 @@ def process(
     report(1.0)
     return JobResult(
         final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language,
-        notice=notice,
+        notice=notice, strength=picked, rebuilt=reason if rebuild else None,
     )
 
 

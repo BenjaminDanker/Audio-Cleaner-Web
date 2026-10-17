@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QMessageBox
 from audio_cleaner_desktop import models
 from audio_cleaner_desktop.gui import speech_model
 from audio_cleaner_desktop.gui.main_window import MainWindow
+from audio_cleaner_desktop.gui.preferences import Preferences
 from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
 
 from conftest import wait_until
@@ -124,7 +125,9 @@ def test_rebuilding_the_voice_offers_its_download_and_start_asks_instead_of_down
     shown = []
     monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Yes)
     monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
-    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db")
+    settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
+    Preferences(settings).auto_settings = False  # rebuilding chosen by hand
+    w = MainWindow([], settings=settings, history_path=tmp_path / "h.db")
     try:
         w.show()
         panel = w.settings_panel
@@ -141,6 +144,45 @@ def test_rebuilding_the_voice_offers_its_download_and_start_asks_instead_of_down
         assert shown and "model that rebuilds the voice was not installed" in shown[-1] and not w.queue.active
         assert started == ["rebuild-voice"]
         assert "rebuilding voices" in w.banner_models._label.text()
+    finally:
+        w.queue.shutdown()
+        w.history.close()
+        w._pool.waitForDone()
+
+
+def test_automatic_rebuilding_offers_the_download_but_never_holds_up_cleaning(qapp, tmp_path, monkeypatch):
+    """With Automatic best settings the voice is rebuilt only where its model is installed, so a missing model is offered
+    in Settings but Clean doesn't stop to ask for it."""
+    from types import SimpleNamespace
+
+    from audio_cleaner_desktop import engine
+    from audio_cleaner_desktop.gui import main_window
+
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id != "rebuild-voice"))
+    shown = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
+    monkeypatch.setattr(main_window.resources, "check", lambda: [])
+    ran = []
+
+    def runner(path, options, **_):
+        ran.append((options.auto_rebuild, options.rebuild_voice))
+        out = path.with_name("a-cleaned.wav")
+        out.write_bytes(b"x")
+        return engine.JobResult(out, 5.0, False)
+
+    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db",
+                   runner=runner)
+    try:
+        w.show()
+        panel = w.settings_panel
+        assert w.prefs.auto_settings and panel.voice_panel.isVisible()  # offered
+        src = tmp_path / "a.wav"
+        src.write_bytes(b"RIFF")
+        w.add_paths([src])
+        assert wait_until(lambda: all(i.probed for i in w._items.values()), timeout=10)
+        w.start()
+        assert wait_until(lambda: ran, timeout=10) and ran == [(True, False)] and not shown
     finally:
         w.queue.shutdown()
         w.history.close()

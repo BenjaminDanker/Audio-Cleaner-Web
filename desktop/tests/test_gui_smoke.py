@@ -49,6 +49,10 @@ def test_clean_a_file_end_to_end(window, speech_wav, tmp_path):
     assert window.status.text() == "1 file cleaned"
     entries = window.history.search()
     assert len(entries) == 1 and entries[0].status == "done" and entries[0].outputs == [str(item.outputs[0])]
+    # Automatic best settings (on by default) picked the strength, and the list and the history say which
+    assert item.picked_strength in engine.STRENGTHS and item.picked_rebuild is None
+    assert "noise reduction picked for this file" in item.message
+    assert entries[0].settings["strength"] == "auto" and entries[0].settings["picked_strength"] == item.picked_strength
     from scipy.io import wavfile
 
     rate, samples = wavfile.read(speech_wav, mmap=True)
@@ -209,6 +213,7 @@ def fake_bin(tmp_path, monkeypatch):
 def test_clean_again_keeps_the_row_and_the_name(window, speech_wav, tmp_path, fake_bin):
     src = tmp_path / "talk.wav"
     src.write_bytes(speech_wav.read_bytes())
+    window.prefs.auto_settings = False  # the strength chosen below is the one used
     window.add_paths([src])
     window.start()
     item = next(iter(window._items.values()))
@@ -289,6 +294,7 @@ def test_changed_settings_reach_waiting_files_and_a_running_one_can_restart_with
         (tmp_path / name).write_bytes(b"x")
     monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
     w.prefs.parallel = 1
+    w.prefs.auto_settings = False  # Background noise is chosen by hand
     w._settings_changed()
     w.add_paths([tmp_path / "a.wav", tmp_path / "b.wav"])
     assert wait_until(lambda: all(i.probed for i in w._items.values()), timeout=10)
@@ -307,3 +313,50 @@ def test_changed_settings_reach_waiting_files_and_a_running_one_can_restart_with
     assert calls[1] == ("a.wav", "heavy")  # straight back in, before b, with the new setting
     monkeypatch.setattr(w, "_confirm", lambda title, text: True)
     w.close()
+
+
+def test_the_list_and_the_history_say_what_was_picked_for_each_file(qapp, tmp_path, monkeypatch):
+    from audio_cleaner_desktop.gui import main_window
+    from audio_cleaner_desktop.gui.history_view import describe_settings
+
+    picks = {
+        "a.wav": dict(strength="strong"),
+        "b.wav": dict(rebuilt="echoey", notice="the voice was rebuilt because it sounded echoey"),
+        "c.wav": dict(strength="gentle", notice="missing highs restored"),
+    }
+    seen = []
+
+    def runner(path, options, *, cancel, progress, **_):
+        seen.append((options.strength, options.noise, options.auto_rebuild, options.rebuild_voice, options.restore_highs))
+        out = path.with_name(path.stem + "-cleaned.wav")
+        out.write_bytes(b"x")
+        return engine.JobResult(out, 5.0, False, **picks[path.name])
+
+    monkeypatch.setattr(main_window.resources, "check", lambda: [])
+    monkeypatch.setattr(engine, "probe", lambda path, ff=None: SimpleNamespace(duration=5.0, has_video=False, audio_channels=1))
+    settings = QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)
+    w = MainWindow([], settings=settings, history_path=tmp_path / "h.db", runner=runner)
+    w.show()
+    try:
+        for name in picks:
+            (tmp_path / name).write_bytes(b"x")
+        w.add_paths([tmp_path / name for name in picks])
+        assert wait_until(lambda: all(i.probed for i in w._items.values()), timeout=10)
+        w.start()
+        assert wait_until(lambda: all(i.state in (DONE, FAILED) for i in w._items.values()), timeout=20)
+        assert seen == [("auto", "auto", True, False, True)] * 3  # what Automatic best settings sends
+        by_name = {i.path.name: i for i in w._items.values()}
+        assert by_name["a.wav"].message == "Strong noise reduction picked for this file"
+        assert by_name["b.wav"].message == "the voice was rebuilt because it sounded echoey"
+        assert by_name["c.wav"].message == "Gentle noise reduction picked for this file; missing highs restored"
+        described = {e.name: describe_settings(e.settings, e.has_video) for e in w.history.search()}
+        assert described == {
+            "a.wav": "Strong noise reduction (picked for this file), polished (podcast)",
+            "b.wav": "voice rebuilt (it sounded echoey), polished (podcast)",
+            "c.wav": "Gentle noise reduction (picked for this file), polished (podcast)",
+        }
+        assert {e.name: e.settings.get("picked_rebuild") for e in w.history.search()} == {"a.wav": None, "b.wav": "echoey", "c.wav": None}
+    finally:
+        monkeypatch.setattr(w, "_confirm", lambda title, text: True)
+        w.close()
+        w._pool.waitForDone()

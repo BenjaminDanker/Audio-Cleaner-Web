@@ -40,12 +40,24 @@ NOISE_PROFILES = ("auto", "light", "heavy")
 # removers against the clean clip): this cut picks the remover that does better on 72 % of the mixes worth cleaning
 # (docs/research/recommend-2026-10.md).
 HEAVY_BELOW_DB = 19.0
+# The gentlest strength (attenuation limit, dB) that removes about as much as the strongest, by noise figure: Maximum
+# below the first figure, Strong below the second, Balanced below the third, Gentle from there (also for a clean
+# recording). The same numbers as the website (web/src/recommend.js T) and the OBS plugin (input_advice.cpp), from the
+# same calibration (docs/research/recommend-2026-10.md).
+STRENGTH_STEPS = ((15.0, 100.0), (20.0, 40.0), (24.0, 24.0))
+GENTLE_DB = 12.0
+
+
+def strength_for(noise_db: float) -> float:
+    """The attenuation limit (dB) that fits a recording with this noise figure."""
+    return next((db for below, db in STRENGTH_STEPS if noise_db < below), GENTLE_DB)
 
 
 @dataclass
 class CleanOptions:
-    # Maximum noise attenuation in dB; 100 = no limit. Lower keeps more ambience.
-    atten_lim_db: float = 100.0
+    # Maximum noise attenuation in dB; 100 = no limit. Lower keeps more ambience. None: the one that fits the recording
+    # (strength_for its noise figure).
+    atten_lim_db: float | None = 100.0
     # Run the clarity chain (level match, high-pass, compressor, loudness, limiter).
     polish: bool = True
     # Loudness target for the clarity chain; None keeps the level.
@@ -215,7 +227,8 @@ def clean_audio(
     DPDFNet-8 model (default: dpdfnet.default_model_path()). `bwe_model_dir` holds the AP-BWE models for
     restore_highs (the desktop app downloads them on request; None skips the step). `restore_model_dir` holds
     Sidon's ONNX files, required for restore_voice. `report`, when given,
-    gets {"noise": "light"|"heavy"|"rebuilt", "highs": None|"8k".."24k"}."""
+    gets {"noise": "light"|"heavy"|"rebuilt", "highs": None|"8k".."24k"}, plus (unless
+    rebuilt) "atten_lim_db" (the strength used) and, when the noise was measured, "noise_db" (noise_figure_db)."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
@@ -236,7 +249,12 @@ def clean_audio(
         if progress:
             progress(1.0)
         return y
-    profile = choose_noise_profile(x, lib_path, model_path, opts.noise, cancel)
+    # One measurement serves both automatic choices: which remover, and how strong.
+    figure = None
+    if opts.noise == "auto" or opts.atten_lim_db is None:
+        figure = noise_figure_db(x, lib_path, model_path, cancel)
+    profile = opts.noise if opts.noise != "auto" else ("heavy" if figure < HEAVY_BELOW_DB else "light")
+    atten = opts.atten_lim_db if opts.atten_lim_db is not None else strength_for(figure)
     heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
     highs = None  # the AP-BWE generator for a band-limited recording, measured on the original
     if opts.restore_highs and bwe_model_dir is not None and bwe.available(bwe_model_dir):
@@ -244,6 +262,9 @@ def clean_audio(
     if report is not None:
         report["noise"] = profile
         report["highs"] = highs
+        report["atten_lim_db"] = atten
+        if figure is not None:
+            report["noise_db"] = round(figure, 1)
     share = 0.8 if highs else 0.95  # of the progress bar for noise removal
     y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
     # Work only where it changes something: a channel that duplicates the other is cleaned once, a silent one not at
@@ -265,12 +286,12 @@ def clean_audio(
                 y[done_end(spans, a), ch] = 0.0  # the silence before this span
             if profile == "heavy":
                 dpdfnet.denoise_array(
-                    x[a:b, ch], atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog, cancel=cancel,
+                    x[a:b, ch], atten_lim_db=atten, threads=threads, progress=prog, cancel=cancel,
                     out=y[a:b, ch], model_path=heavy, device=opts.device,
                 )
             else:
                 dfn.denoise_array(
-                    x[a:b, ch], lib_path, model_path, atten_lim_db=opts.atten_lim_db, threads=threads, progress=prog,
+                    x[a:b, ch], lib_path, model_path, atten_lim_db=atten, threads=threads, progress=prog,
                     cancel=cancel, out=y[a:b, ch],
                 )
             done += b - a

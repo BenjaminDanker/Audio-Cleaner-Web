@@ -61,7 +61,7 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     sysinfo.lower_priority()
     at_once = min(len(inputs), sysinfo.max_parallel(
-        parallel, options.subtitles != "off", rebuild_voice=options.rebuild_voice, echo_track=options.echo_track))
+        parallel, options.subtitles != "off", rebuild_voice=options.may_rebuild, echo_track=options.echo_track))
     threads = sysinfo.threads_per_job(at_once)
     print_lock = threading.Lock()
 
@@ -81,7 +81,9 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
             print(f"{label}  failed: {e}", file=sys.stderr)
             return 1
         line.finish()
-        note = f"  ({result.notice})" if result.notice else ""
+        notes = [*([f"{result.strength} noise reduction picked for this file"] if result.strength else []),
+                 *([result.notice] if result.notice else [])]
+        note = f"  ({'; '.join(notes)})" if notes else ""
         with print_lock:
             print(f"{label}  ->  " + ", ".join(str(p) for p in result.paths) + note)
         return 0

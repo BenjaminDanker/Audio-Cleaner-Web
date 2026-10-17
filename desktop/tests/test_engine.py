@@ -40,6 +40,28 @@ def test_options_are_validated():
     assert engine.JobOptions().loudness_lufs == -16.0
 
 
+def test_automatic_strength_is_a_choice():
+    auto = engine.JobOptions(strength="auto")
+    assert auto.strength == engine.AUTO_STRENGTH and auto.atten_lim_db is None  # measured when the file is cleaned
+    assert engine.STRENGTH_CHOICES == ("auto", *engine.STRENGTHS)
+    assert {k: engine.JobOptions(strength=k).atten_lim_db for k in engine.STRENGTHS} == engine.STRENGTHS
+    assert engine.JobOptions().strength == "max"  # the engine's own default stays a fixed one
+    for bad in ("Auto", "automatic", ""):
+        with pytest.raises(ValueError, match="strength"):
+            engine.JobOptions(strength=bad)
+    # every strength the pipeline can pick is one of the four (so the list and history can name it)
+    assert {db for _, db in pipeline.STRENGTH_STEPS} | {pipeline.GENTLE_DB} == set(engine.STRENGTHS.values())
+
+
+def test_automatic_rebuild_is_an_option_that_needs_the_voice_model(monkeypatch, tmp_path):
+    assert engine.JobOptions().auto_rebuild is False  # the engine rebuilds nothing unless asked
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+    assert not engine.JobOptions(auto_rebuild=True).may_rebuild
+    assert engine.JobOptions(rebuild_voice=True).may_rebuild  # asked for by hand: planned for (and refused later)
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    assert engine.JobOptions(auto_rebuild=True).may_rebuild and not engine.JobOptions().may_rebuild
+
+
 def test_loudness_presets():
     assert engine.LOUDNESS_TARGETS == {"podcast": -16.0, "youtube": -14.0, "broadcast": -23.0, "keep": None}
 
@@ -341,3 +363,72 @@ def test_rebuild_voice_uses_the_voice_model_or_says_it_is_missing(speech_wav, tm
     monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
     fallback = engine.process(speech_wav, engine.JobOptions(rebuild_voice=True), out_dir=tmp_path / "b")
     assert "cleaned the usual way" in fallback.notice
+
+
+@pytest.mark.native
+def test_automatic_strength_says_what_it_picked(clip_wav, tmp_path, monkeypatch):
+    figures = []
+    real = pipeline.noise_figure_db
+    monkeypatch.setattr(pipeline, "noise_figure_db", lambda *a, **k: figures.append(real(*a, **k)) or figures[-1])
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto"), out_dir=tmp_path / "auto")
+    assert result.output.is_file() and len(figures) == 1  # one measurement for the remover and the strength
+    assert result.strength in engine.STRENGTHS
+    assert engine.STRENGTHS[result.strength] == pipeline.strength_for(figures[0])
+    fixed = engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light"), out_dir=tmp_path / "fixed")
+    assert fixed.output.is_file() and fixed.strength is None and len(figures) == 1  # nothing picked, nothing measured
+
+
+@pytest.fixture
+def fake_clean(monkeypatch):
+    """clean_audio recording what it was asked for; the noise removal reports a Balanced strength."""
+    seen = []
+
+    def clean(x, lib, model, opts, *, report=None, **_):
+        seen.append(opts)
+        if report is not None:
+            report.update(noise="rebuilt", highs=None) if opts.restore_voice else report.update(
+                noise="light", highs=None, atten_lim_db=24.0, noise_db=21.0)
+        return np.array(x, dtype=np.float32)
+
+    monkeypatch.setattr(pipeline, "clean_audio", clean)
+    return seen
+
+
+@pytest.mark.native
+@pytest.mark.parametrize("reason", ["echoey", "muffled"])
+def test_a_file_that_needs_it_gets_its_voice_rebuilt(clip_wav, tmp_path, monkeypatch, fake_clean, reason):
+    asked = []
+    monkeypatch.setattr(engine.advice, "rebuild_reason", lambda x: asked.append(len(x)) or reason)
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
+    assert len(asked) == 1 and fake_clean[-1].restore_voice
+    assert result.rebuilt == reason and result.strength is None  # rebuilt: no noise reduction strength was used
+    assert result.notice == f"the voice was rebuilt because it sounded {reason}"
+    # without the model: cleaned the usual way, and told how to fix it
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "b")
+    assert not fake_clean[-1].restore_voice and fake_clean[-1].atten_lim_db is None
+    assert result.rebuilt is None and result.strength == "balanced"
+    assert result.notice == f"it sounds {reason}: download the model that rebuilds the voice in Settings and clean it again to fix that"
+
+
+@pytest.mark.native
+def test_automatic_rebuild_leaves_other_files_and_choices_alone(clip_wav, tmp_path, monkeypatch, fake_clean):
+    asked = []
+    monkeypatch.setattr(engine.advice, "rebuild_reason", lambda x: asked.append(1) and None)
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
+    assert asked and not fake_clean[-1].restore_voice and result.rebuilt is None and result.notice is None
+    assert result.strength == "balanced"
+    asked.clear()
+    engine.process(clip_wav, engine.JobOptions(), out_dir=tmp_path / "b")  # not asked for: not measured
+    result = engine.process(clip_wav, engine.JobOptions(rebuild_voice=True, auto_rebuild=True), out_dir=tmp_path / "c")
+    assert not asked  # rebuilt anyway: nothing to decide
+    assert fake_clean[-1].restore_voice and result.rebuilt is None and result.notice is None
+
+
+@pytest.mark.native
+def test_automatic_rebuild_on_a_real_file(clip_wav, tmp_path):
+    """The real measurement on the way: the noisy tone of clip_wav has no words, so it is never rebuilt."""
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path)
+    assert result.output.is_file() and result.rebuilt is None and result.strength in engine.STRENGTHS
