@@ -160,11 +160,13 @@ class _Model:
 
 
 class _Rung:
-    """The buffers and CUDA graphs of one call size: the spec in and out, and two state buffers that the graph reads
-    and writes alternately (graph 2k: a -> b, graph 2k + 1: b -> a)."""
+    """One call size: its own session (onnxruntime 1.19 crashes with an illegal memory access when a session replays a
+    CUDA graph again after it captured one for another input size, so every size has a session of its own), the spec in
+    and out, and two state buffers that the two graphs read and write alternately (graph 0: a -> b, graph 1: b -> a)."""
 
-    def __init__(self, ort, sess, rows: int, state_size: int, ids: tuple[int, int]):
+    def __init__(self, ort, sess, rows: int, state_size: int):
         self.rows = rows
+        self.sess = sess
         self.host_spec = np.zeros((rows, 1, BINS, 2), dtype=np.float32)
         self.spec = ort.OrtValue.ortvalue_from_numpy(self.host_spec, "cuda", 0)
         self.out = ort.OrtValue.ortvalue_from_numpy(np.zeros_like(self.host_spec), "cuda", 0)
@@ -178,7 +180,7 @@ class _Rung:
             io.bind_ortvalue_output("spec_e", self.out)
             io.bind_ortvalue_output("state_out", self.state[1 - k])
             ro = ort.RunOptions()
-            ro.add_run_config_entry("gpu_graph_id", str(ids[k]))
+            ro.add_run_config_entry("gpu_graph_id", str(k))
             self.runs.append((io, ro))
 
 
@@ -204,8 +206,9 @@ class _GpuModel(_Model):
         prepare_cuda()
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        self._ort = ort
-        self._open(ort, path, opts, [("CUDAExecutionProvider", dict(_CUDA_OPTIONS))])
+        self._ort, self._path, self._opts = ort, path, opts
+        self._providers = [("CUDAExecutionProvider", dict(_CUDA_OPTIONS))]
+        self._open(ort, path, opts, self._providers)  # reads the metadata; the rungs run on sessions of their own
         if self.sess.get_providers()[0] != "CUDAExecutionProvider":
             raise RuntimeError(f"CUDA is not usable for DPDFNet (providers: {self.sess.get_providers()})")
         if not self.batched:
@@ -223,8 +226,8 @@ class _GpuModel(_Model):
             raise ValueError(f"at most {GPU_ROWS[-1]} rows per call")
         rung = self._rungs.get(rung_rows)
         if rung is None:
-            k = len(self._rungs)
-            rung = self._rungs[rung_rows] = _Rung(self._ort, self.sess, rung_rows, len(self.init), (2 * k, 2 * k + 1))
+            sess = self._ort.InferenceSession(self._path, sess_options=self._opts, providers=self._providers)
+            rung = self._rungs[rung_rows] = _Rung(self._ort, sess, rung_rows, len(self.init))
         rung.host_spec[:] = 0.0  # rows beyond the group's are fed silence
         rung.state[0].update_inplace(np.repeat(self.init[None, :], rung_rows, axis=0))
         return _GpuState(rung, rows)
@@ -236,7 +239,7 @@ class _GpuModel(_Model):
         rung.host_spec[:state.rows] = spec
         rung.spec.update_inplace(rung.host_spec)
         io, ro = rung.runs[state.parity]
-        self.sess.run_with_iobinding(io, ro)
+        rung.sess.run_with_iobinding(io, ro)
         state.parity ^= 1
         return rung.out.numpy()[:state.rows].copy(), state
 
