@@ -225,6 +225,25 @@ def check_services(states: dict[str, dict[str, str]], prev: dict, now: int) -> t
     return findings, hist
 
 
+# Services their timers start now and then (stopped in between, so check_services can't judge them): a failed run
+# opens a "service:<unit>" alert through OnFailure (acw.alerts unit-failed); the next clean run resolves it here.
+TIMER_SERVICES = ("acw-mirror.service", "acw-backup.service", "acw-monitor.service")
+
+
+def check_timer_services(states: dict[str, dict[str, str]]) -> list[Finding]:
+    """A timer-started service whose last run failed (still failed now) is bad; one whose last run finished cleanly
+    is good, which clears the alert its failure opened."""
+    findings = []
+    for unit, st in sorted(states.items()):
+        failed = st.get("ActiveState") == "failed" or st.get("Result") not in ("success", None)
+        findings.append(Finding(
+            f"service:{unit}", failed, f"{unit} failed",
+            f"The last run of {unit} failed (result: {st.get('Result')}).\n"
+            f"Check: journalctl --user -u {unit} -n 80 --no-pager\n",
+        ))
+    return findings
+
+
 def http_ok(url: str, timeout: float = 10.0) -> tuple[bool, str]:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "acw-monitor"})
@@ -611,6 +630,8 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
         return f
 
     guarded("services", services)
+    guarded("timer_services", lambda: check_timer_services(unit_states(
+        [u for u in TIMER_SERVICES if (UNIT_DIR / u).exists()])))
     guarded("health", lambda: check_health(http))
     guarded("bulk", lambda: check_bulk(http))
     guarded("mirror", check_mirror)
