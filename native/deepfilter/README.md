@@ -31,7 +31,13 @@ Neither embeds the DFN3 model: pass `DeepFilterNet3_onnx.tar.gz` at runtime
 * **wasm.rs**: `df_create` (always-on stages) and new `df_create_with_params(model_bytes,
   atten_lim, min_db_thresh, max_db_erb_thresh, max_db_df_thresh, post_filter_beta)`, new batch
   `df_process_frames(st, input)` (N*hop samples in one call, returns a `Float32Array`), new
-  `df_free`; failures are thrown as JS `Error`s; `console_error_panic_hook` is installed.
+  `df_free`, new `df_reset(st)`; failures are thrown as JS `Error`s; `console_error_panic_hook`
+  is installed.
+* **tract.rs / capi.rs / wasm.rs**: `df_reset(st)` returns an instance to its just-created state
+  (the three networks' tract states, rolling spectrum buffers, STFT memories, running
+  normalisation, skip counter; attenuation/thresholds/post filter are kept) so one instance can be
+  reused for many unrelated signals with bit-identical output to a fresh one: 0.02 ms instead of
+  ~39 ms for `df_create` (model re-read and hashed).
 
 `Cargo.lock` here is the pinned dependency set used by the build (`cargo build --locked`).
 
@@ -95,6 +101,7 @@ void   df_set_atten_lim(DFState *st, float lim_db);
 void   df_set_post_filter_beta(DFState *st, float beta);
 char  *df_next_log_msg(DFState *st);  void df_free_log_msg(char *msg);
 float  df_process_frame_raw(DFState *st, float *input, float **gains, float **coefs);
+int    df_reset(DFState *st);          /* back to the just-created state; 0 ok, -1 error */
 void   df_free(DFState *st);
 ```
 

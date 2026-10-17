@@ -66,6 +66,52 @@ def test_clean_audio_reduces_noise_in_pauses():
     assert 20 * np.log10(before / max(after, 1e-9)) > 10  # at least 10 dB less noise between syllables
 
 
+needs_reset = pytest.mark.skipif(
+    not (LIB.is_file() and hasattr(dfn._load(str(LIB)), "df_reset")), reason="libDF build without df_reset")
+
+
+@needs_dfn
+@needs_reset
+def test_reset_gives_the_output_of_a_fresh_instance():
+    _, a = voiced_noise(seconds=3.0, seed=1)
+    _, b = voiced_noise(seconds=3.0, seed=2)
+    a, b = a[: len(a) // 480 * 480], b[: len(b) // 480 * 480]
+    fresh = dfn.DeepFilter(LIB, MODEL)
+    want = fresh.process(b)
+    fresh.close()
+    used = dfn.DeepFilter(LIB, MODEL)
+    used.process(a)
+    used.reset()
+    assert np.array_equal(used.process(b), want)
+    # and again, after a partial run that was cancelled half way
+    used.process(a[: 480 * 37])
+    used.reset()
+    assert np.array_equal(used.process(b), want)
+    used.close()
+
+
+@needs_dfn
+@needs_reset
+def test_segments_reuse_one_instance_per_thread_with_identical_output(monkeypatch):
+    _, noisy = voiced_noise(seconds=12.0)
+    made = []
+    orig = dfn.DeepFilter.__init__
+
+    def counting(self, *a, **k):
+        made.append(1)
+        orig(self, *a, **k)
+
+    kw = dict(threads=2, segment_seconds=2.0, overlap_seconds=0.5)
+    monkeypatch.setattr(dfn.DeepFilter, "__init__", counting)
+    reused = dfn.denoise_array(noisy, LIB, MODEL, **kw)
+    assert len(made) <= 2  # six segments on two worker threads
+    monkeypatch.setattr(dfn.DeepFilter, "can_reset", property(lambda self: False))
+    made.clear()
+    fresh = dfn.denoise_array(noisy, LIB, MODEL, **kw)
+    assert len(made) == 6  # without df_reset: one per segment (as before)
+    assert np.array_equal(reused, fresh)
+
+
 @needs_dfn
 def test_segmented_denoise_is_aligned_and_denoises():
     clean, noisy = voiced_noise(seconds=9.0)

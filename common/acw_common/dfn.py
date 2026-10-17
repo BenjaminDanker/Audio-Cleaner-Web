@@ -76,6 +76,9 @@ def _load(lib_path: str) -> ctypes.CDLL:
         lib.df_set_post_filter_beta.argtypes = [ctypes.c_void_p, ctypes.c_float]
         lib.df_free.restype = None
         lib.df_free.argtypes = [ctypes.c_void_p]
+        if hasattr(lib, "df_reset"):  # builds with tract-0.23.patch's df_reset: reuse an instance for a new signal
+            lib.df_reset.restype = ctypes.c_int
+            lib.df_reset.argtypes = [ctypes.c_void_p]
         _libs[lib_path] = lib
         return lib
 
@@ -100,6 +103,16 @@ class DeepFilter:
         self.delay = model_delay(str(model_path))
         self._in = np.zeros(self.hop, dtype=np.float32)
         self._out = np.zeros(self.hop, dtype=np.float32)
+
+    @property
+    def can_reset(self) -> bool:
+        return hasattr(self._lib, "df_reset")
+
+    def reset(self) -> None:
+        """Back to the state right after creation (the output for the next signal is then bit for bit what a
+        new instance gives, without re-reading the model). Needs a library with `df_reset`; see `can_reset`."""
+        if self._lib.df_reset(self._st) != 0:
+            raise RuntimeError("could not reset DeepFilterNet state")
 
     def set_atten_lim(self, db: float) -> None:
         self._lib.df_set_atten_lim(self._st, float(db))
@@ -135,10 +148,54 @@ class DeepFilter:
             pass
 
 
-def _denoise_contiguous(lib_path, model_path, x: np.ndarray, atten_lim_db: float, cancel=None) -> np.ndarray:
+class _Instances:
+    """One DeepFilter per worker thread for the segments of one `denoise_array` call, reset between segments
+    (a library with `df_reset`) instead of created per segment: creation re-reads the model file and hashes its
+    weights each time. Without `df_reset` every segment gets (and frees) its own instance as before."""
+
+    def __init__(self, lib_path, model_path, atten_lim_db: float):
+        self._args = (lib_path, model_path, atten_lim_db)
+        self._local = threading.local()
+        self._all: list[DeepFilter] = []
+        self._lock = threading.Lock()
+
+    def acquire(self) -> DeepFilter:
+        df = getattr(self._local, "df", None)
+        if df is not None:
+            try:
+                df.reset()
+                return df
+            except RuntimeError:  # unusable after a failed reset: replace it
+                self._drop(df)
+        df = DeepFilter(*self._args)
+        if df.can_reset:
+            self._local.df = df
+            with self._lock:
+                self._all.append(df)
+        return df
+
+    def release(self, df: DeepFilter) -> None:
+        if getattr(self._local, "df", None) is not df:  # not kept for reuse
+            df.close()
+
+    def _drop(self, df: DeepFilter) -> None:
+        self._local.df = None
+        with self._lock:
+            if df in self._all:
+                self._all.remove(df)
+        df.close()
+
+    def close(self) -> None:
+        with self._lock:
+            instances, self._all = self._all, []
+        for df in instances:
+            df.close()
+
+
+def _denoise_contiguous(inst: _Instances, x: np.ndarray, cancel=None) -> np.ndarray:
     if cancel is not None and cancel.is_set():
         raise Cancelled()
-    df = DeepFilter(lib_path, model_path, atten_lim_db)
+    df = inst.acquire()
     try:
         hop, delay = df.hop, df.delay
         n = len(x)
@@ -148,7 +205,7 @@ def _denoise_contiguous(lib_path, model_path, x: np.ndarray, atten_lim_db: float
         y = df.process(padded, cancel)
         return y[delay:delay + n]
     finally:
-        df.close()
+        inst.release(df)
 
 
 def denoise_array(
@@ -177,8 +234,12 @@ def denoise_array(
         out = np.empty(n, dtype=np.float32)
     seg = int(segment_seconds * SAMPLE_RATE)
     ov = int(overlap_seconds * SAMPLE_RATE)
+    inst = _Instances(lib_path, model_path, atten_lim_db)
     if n <= seg + 2 * ov or threads <= 1:
-        out[:] = _denoise_contiguous(lib_path, model_path, np.ascontiguousarray(x, dtype=np.float32), atten_lim_db, cancel)
+        try:
+            out[:] = _denoise_contiguous(inst, np.ascontiguousarray(x, dtype=np.float32), cancel)
+        finally:
+            inst.close()
         if progress:
             progress(1.0)
         return out
@@ -194,7 +255,7 @@ def denoise_array(
         nonlocal done
         s, e = bounds[i]
         lo, hi = max(0, s - ov), min(n, e + ov)
-        y = _denoise_contiguous(lib_path, model_path, np.ascontiguousarray(x[lo:hi], dtype=np.float32), atten_lim_db, cancel)
+        y = _denoise_contiguous(inst, np.ascontiguousarray(x[lo:hi], dtype=np.float32), cancel)
         core = y[s - lo:e - lo]
         head = fade if i > 0 else 0
         out[s + head:e] = core[head:]
@@ -207,8 +268,11 @@ def denoise_array(
             if progress:
                 progress(done / len(bounds))
 
-    with ThreadPoolExecutor(max_workers=threads) as pool:
-        list(pool.map(work, range(len(bounds))))
+    try:
+        with ThreadPoolExecutor(max_workers=threads) as pool:
+            list(pool.map(work, range(len(bounds))))
+    finally:
+        inst.close()
 
     if fade:
         ramp = np.sin(np.linspace(0, np.pi / 2, fade, dtype=np.float32)) ** 2
