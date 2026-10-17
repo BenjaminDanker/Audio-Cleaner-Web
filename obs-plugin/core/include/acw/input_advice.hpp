@@ -20,6 +20,7 @@ namespace acw {
 
 struct InputFindings {
 	bool ready = false;          // enough microphone audio was heard to say anything
+	bool final = false;          // all that will be kept has been kept (nothing more is listened to)
 	double seconds = 0;          // of audio measured (muted stretches do not count)
 	bool has_speech = false;     // someone spoke (the level moved up and down)
 	double noise_db = 99;        // dB between the voice and the background

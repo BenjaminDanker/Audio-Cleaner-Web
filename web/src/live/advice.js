@@ -7,7 +7,7 @@ const FIRST_AT = 10; // seconds
 const LAST_AT = 20;
 
 export class LiveAdvisor {
-  /** @param {{onAdvice: (found: {stats: object, echo: object|null}) => void, withEcho?: boolean}} opts */
+  /** @param {{onAdvice: (found: {stats: object, echo: object|null, final: boolean}) => void, withEcho?: boolean}} opts */
   constructor({ onAdvice, withEcho = true }) {
     this.onAdvice = onAdvice;
     this.a = new Analyser({ channels: 1 });
@@ -37,7 +37,7 @@ export class LiveAdvisor {
   _report(stage) {
     this.stage = stage;
     try {
-      this.onAdvice({ stats: this.a.result(), echo: this.echo ? this.echo.result() : null });
+      this.onAdvice({ stats: this.a.result(), echo: this.echo ? this.echo.result() : null, final: stage === 2 });
     } catch { /* advice is a nicety: never let it disturb the audio */ }
   }
 }

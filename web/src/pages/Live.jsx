@@ -246,7 +246,7 @@ function LiveDemo({ pricing }) {
   const live = state === 'live';
   const busy = state !== 'idle';
   const roomReco = useMemo(
-    () => (heard ? recommendForLive(heard.stats, heard.echo, { mode, denoise, strength, captions: free ? '' : captions, language: free ? '' : paidLanguage }) : null),
+    () => (heard ? recommendForLive(heard.stats, heard.echo, { mode, denoise, strength, captions: free ? '' : captions, language: free ? '' : paidLanguage, final: !!heard.final }) : null),
     [heard, mode, denoise, strength, captions, paidLanguage, free],
   );
   const perHour = (r) => (r ? ` · ${moneyUsd(r.usdPerHour)} an hour` : '');

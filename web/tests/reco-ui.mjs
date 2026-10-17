@@ -151,7 +151,7 @@ async function open(page, path) {
   await ctx.close();
 }
 
-async function liveReco(mic) {
+async function liveReco(mic, startStrength) {
   const b = await chromium.launch({
     headless: true,
     args: ['--autoplay-policy=no-user-gesture-required', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-audio-capture=${mic}`],
@@ -169,6 +169,7 @@ async function liveReco(mic) {
   await page.goto(`${BASE}/app/live`);
   await page.getByTestId('live-start').waitFor();
   await page.locator('label.choice:has(input[name=live-free-captions][value=off])').click(); // no caption download needed
+  if (startStrength) await page.locator(`label:has(input[name=live-str][value=${startStrength}])`).click();
   await page.getByTestId('live-start').click();
   await page.getByTestId('live-stop').waitFor({ timeout: 60000 });
   if (await page.getByTestId('live-reco').count()) throw new Error('shown before there was anything to say');
@@ -190,12 +191,18 @@ await check('live: about ten seconds in, a quiet room is told noise removal is n
   return `after ${r.seconds.toFixed(1)} s: ${r.line}`;
 });
 
-await check('live: a noisy room is told the strength, and the button applies it while live', async () => {
-  const r = await liveReco(MIC_NOISY);
+await check('live: a noisy room with the strength set too low is told which strength suits it, and the button applies it while live', async () => {
+  const r = await liveReco(MIC_NOISY, 'gentle');
   if (r.problems.length) throw new Error(JSON.stringify(r));
-  if (!/noise removal/.test(r.line) && !/suits/.test(r.line) && !/settings fit/.test(r.line)) throw new Error(r.line);
-  if (r.apply && r.strengthAfter === r.strengthBefore) throw new Error('the button did nothing');
+  if (!/Maximum noise removal suits/.test(r.line) || !r.apply) throw new Error(JSON.stringify(r));
+  if (r.strengthBefore !== 'gentle' || r.strengthAfter !== 'max') throw new Error(`${r.strengthBefore} -> ${r.strengthAfter}`);
   return `${r.line} (${r.strengthBefore} -> ${r.strengthAfter})`;
+});
+
+await check('live: the right strength already set: the settings fit, no button', async () => {
+  const r = await liveReco(MIC_NOISY, 'max');
+  if (r.problems.length || r.apply || !/fit your room/.test(r.line)) throw new Error(JSON.stringify(r));
+  return r.line;
 });
 
 await browser.close();

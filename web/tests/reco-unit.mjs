@@ -181,6 +181,7 @@ check('live: a quiet room can leave noise removal off; a noisy one is told how s
   assert.match(fine.line, /Standard captions are enough/);
   const silent = recommendForLive(analyse([new Float32Array(12 * RATE)]), null, {});
   assert.equal(silent.pending, true);
+  assert.equal(recommendForLive(analyse([new Float32Array(12 * RATE)]), null, { final: true }), null); // nothing more will be heard: stop asking
   assert.equal(recommendForLive(analyse([voice(3)]), null, {}), null);
 });
 

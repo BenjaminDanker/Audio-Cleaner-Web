@@ -168,6 +168,7 @@ InputFindings InputAnalyser::findings() const
 	InputFindings f;
 	const uint32_t n = n_levels_.load(std::memory_order_acquire);
 	f.seconds = n / 100.0;
+	f.final = n >= levels_.size();
 	if (n < need_levels_)
 		return f;
 	std::vector<float> loud, band;
@@ -230,7 +231,9 @@ InputAdvice InputAnalyser::advise(const InputFindings &f, const AdviceContext &c
 	a.ready = true;
 	a.captions = ctx.captions.empty() ? "local" : ctx.captions;
 	if (!f.has_speech) {
-		a.notes.push_back({"advice_speak", "Speak for a few seconds and this will suggest the best settings for your room.", ""});
+		// nobody spoke while it listened: ask once more while it still listens, then say nothing (it will not listen again)
+		if (!f.final)
+			a.notes.push_back({"advice_speak", "Speak for a few seconds and this will suggest the best settings for your room.", ""});
 		return a;
 	}
 	const bool clean = f.noise_db >= kCleanAtLeast;
@@ -239,7 +242,7 @@ InputAdvice InputAnalyser::advise(const InputFindings &f, const AdviceContext &c
 	if (clean) {
 		if (ctx.denoise)
 			a.notes.push_back({"advice_quiet", "Your room is quiet, so noise removal is not needed. Turn it off to save credit.", ""});
-	} else if (!ctx.denoise) {
+	} else if (!ctx.denoise && ctx.captions.empty()) {  // (with captions only, the sound is not what the person is after)
 		a.notes.push_back({"advice_noisy", "Your room is noisy. Turn on noise removal (%1 suits it).", strength_name(a.atten_lim_db)});
 	} else if (ctx.atten_lim_db != a.atten_lim_db) {
 		a.notes.push_back({"advice_strength", "For your room, set the noise removal strength to %1.", strength_name(a.atten_lim_db)});

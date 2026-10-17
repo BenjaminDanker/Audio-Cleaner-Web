@@ -121,12 +121,14 @@ export function recommendForFile(stats, ctx = {}) {
  * the microphone, and the captions level, in one short line.
  * @param {object} stats Analyser.result() of the microphone
  * @param {{explained: number, known?: boolean}|null} echo EchoProbe.result(): the speakers' sound compared with the microphone
- * @param {{mode?: 'free'|'paid', denoise?: boolean, strength?: string, captions?: string, language?: string}} ctx what is set now
+ * @param {{mode?: 'free'|'paid', denoise?: boolean, strength?: string, captions?: string, language?: string, final?: boolean}} ctx what is set now
+ *   (final: nothing more will be heard, so there is no point asking for more speech)
  * @returns {null | {pending: boolean, denoise: boolean, strength: string, echo: boolean, captions: 'local'|'premium', notes: string[], line: string}}
  */
 export function recommendForLive(stats, echo = null, ctx = {}) {
   if (!stats || !(stats.seconds >= 5)) return null;
   if (!stats.hasSpeech) {
+    if (ctx.final) return null;
     const line = 'Say a few words and we’ll suggest the best settings for your room.';
     return { pending: true, denoise: true, strength: 'balanced', echo: false, captions: 'local', notes: [line], line };
   }

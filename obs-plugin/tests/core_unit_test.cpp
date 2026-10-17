@@ -1983,6 +1983,9 @@ static void test_input_advice()
 		ctx.denoise = false;
 		InputAdvice adv = InputAnalyser::advise(f, ctx);
 		CHECK(!adv.quiet_room && adv.atten_lim_db == 100 && has_note(adv, "advice_noisy"));
+		ctx.captions = "local";  // captions only: the sound is not what is being worked on, so no nagging about noise removal
+		CHECK(!has_note(InputAnalyser::advise(f, ctx), "advice_noisy"));
+		ctx.captions.clear();
 		ctx.denoise = true;
 		ctx.atten_lim_db = 12;
 		adv = InputAnalyser::advise(f, ctx);
@@ -2017,8 +2020,14 @@ static void test_input_advice()
 			hum[i] = 0.01f * static_cast<float>(std::sin(2 * kAdvicePi * 50 * static_cast<double>(i) / 48000));
 		feed(a, hum);
 		const InputFindings f = a.findings();
-		CHECK(f.ready && !f.has_speech);
+		CHECK(f.ready && !f.has_speech && !f.final);
 		CHECK(has_note(InputAnalyser::advise(f, AdviceContext{}), "advice_speak"));
+		// ... but it does not go on asking after it has stopped listening
+		feed(a, hum);
+		feed(a, hum);
+		const InputFindings g = a.findings();
+		CHECK(g.final && !g.has_speech);
+		CHECK(InputAnalyser::advise(g, AdviceContext{}).notes.empty());
 	}
 	// digital silence is not a room
 	{

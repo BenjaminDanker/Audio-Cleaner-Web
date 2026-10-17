@@ -133,13 +133,7 @@ this mainly catches speakers that its own canceller does not cope with.
   bandwidth rule. Full-band speech was only available as two synthetic voices and two long clips.
 * "Best choice" is SI-SDR and pause noise, not listening. Preference for gentler or stronger removal is a matter of taste.
 * The Extra accurate subtitles and the voice rebuild were not run. Sidon was not measured against the thresholds above.
-* The loopback tests of the plugin (`core_loopback_test`) fail two timing checks about service warnings when the machine is loaded; the
-  unmodified branch fails them too.
-
-## Reproduce
-
-All of it is in `tools/reco-calibration/` (set `RECO_ROOT` to a folder with `libri/stream16k.wav` and `effiles/`; the models are read from
-`~/audio-cleaner/`). In this order: `mkset.py` (mixes), `mkdeg.py` (band-limited, codec, reverb, muffled), `mknospeech.py`, `mklong.py`;
-`srvmetrics.py` then `srv2.py` (the server's removers on every mix; hours of CPU, run niced), `wer.py` (Standard subtitles); then
-`reco_eval.py`, `eval_long.py` (needs `advice_cli.cpp` built, see its first line), `eval_deg.py`, `agree_all.py`; `sweep.py` and
-`an_strength2.py` are the threshold searches.
+* `core_loopback_test` has two timing-dependent checks about service warnings (`translation_unavailable`, `captions_unavailable`
+  arriving right after `ready`, around lines 977 and 998): they fail on the unmodified branch too when that group is repeated (12
+  failures in 6 repeats), and in full runs they pass or fail with the machine's load. The warning probably arrives before the network
+  thread has finished handling `ready`, which then clears it. Not touched here.
