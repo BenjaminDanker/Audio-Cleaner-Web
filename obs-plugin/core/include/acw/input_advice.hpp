@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "acw/resampler.hpp"
+
 namespace acw {
 
 struct InputFindings {
@@ -69,6 +71,9 @@ public:
 
 	bool ready() const;
 
+	// Seconds of audio measured so far (cheap, any thread).
+	double seconds_heard() const;
+
 	// Any thread. The comparison with the speakers takes a few milliseconds; it is done at most once per five seconds
 	// of new audio and remembered.
 	InputFindings findings() const;
@@ -99,6 +104,39 @@ private:
 	mutable std::mutex mu_;
 	mutable uint32_t echo_at_ = 0;        // n_2k_ when the comparison was last made
 	mutable double echo_share_ = 0;
+};
+
+// "Test my room": the person talks the way they do on stream (their game, music and fans as usual) for kRoomTestSeconds;
+// then the settings that fit, as changes to what the filter is set to now. Fed from the filter's audio at OBS's rate.
+constexpr double kRoomTestSeconds = 20.0;
+
+struct RoomSuggestion {
+	bool done = false;                 // the whole stretch was heard
+	bool heard_speech = false;
+	AdviceContext settings;            // what to set: the current settings with the changes made
+	std::vector<AdviceNote> changes;   // one per change, in words: id "room.<what>", arg "<from> → <to>"
+	std::vector<AdviceNote> notes;     // what only the person can do (the microphone is too loud, the speakers are heard)
+};
+
+class RoomTest {
+public:
+	// `rate`: the sample rate of the audio pushed; `max_block`: the most samples one push() gets.
+	RoomTest(int rate, size_t max_block, double seconds = kRoomTestSeconds);
+
+	// Audio thread: wait-free, no allocation.
+	void push(const float *mic, size_t n);
+
+	double seconds() const { return seconds_; }
+	double seconds_left() const;
+	bool done() const;
+
+	RoomSuggestion suggest(const AdviceContext &now) const;
+
+private:
+	double seconds_;
+	InputAnalyser a_;
+	std::unique_ptr<RationalResampler> rs_;  // to 48 kHz, when OBS runs at another rate
+	std::vector<float> buf_;
 };
 
 }  // namespace acw

@@ -163,6 +163,11 @@ bool InputAnalyser::ready() const
 	return n_levels_.load(std::memory_order_acquire) >= need_levels_;
 }
 
+double InputAnalyser::seconds_heard() const
+{
+	return n_levels_.load(std::memory_order_acquire) / 100.0;
+}
+
 InputFindings InputAnalyser::findings() const
 {
 	InputFindings f;
@@ -271,6 +276,75 @@ InputAdvice InputAnalyser::advise(const InputFindings &f, const AdviceContext &c
 	if (a.notes.empty())
 		a.notes.push_back({"advice_fits", "The settings fit your room.", ""});
 	return a;
+}
+
+// ------------------------------------------------------------------------------------------------- RoomTest
+
+RoomTest::RoomTest(int rate, size_t max_block, double seconds)
+	: seconds_(seconds), a_(false, seconds, seconds)
+{
+	if (rate != 48000) {
+		rs_ = std::make_unique<RationalResampler>(rate, 48000);
+		buf_.assign(rs_->max_output(max_block), 0.0f);
+	}
+}
+
+void RoomTest::push(const float *mic, size_t n)
+{
+	if (done())
+		return;
+	if (!rs_) {
+		a_.push(mic, nullptr, n);
+		return;
+	}
+	const size_t m = rs_->process(mic, std::min(n, buf_.size() - 2), buf_.data());
+	a_.push(buf_.data(), nullptr, m);
+}
+
+double RoomTest::seconds_left() const
+{
+	return std::max(0.0, seconds_ - a_.seconds_heard());
+}
+
+bool RoomTest::done() const
+{
+	return a_.ready();
+}
+
+RoomSuggestion RoomTest::suggest(const AdviceContext &now) const
+{
+	RoomSuggestion r;
+	r.settings = now;
+	const InputFindings f = a_.findings();
+	r.done = f.ready;
+	r.heard_speech = f.ready && f.has_speech;
+	if (!r.heard_speech)
+		return r;
+	const InputAdvice adv = InputAnalyser::advise(f, now);
+	auto change = [&](const char *id, const char *what, const std::string &from, const std::string &to) {
+		r.changes.push_back({std::string("room.") + id, std::string(what) + ": %1", from + " \xE2\x86\x92 " + to});
+	};
+	if (adv.quiet_room) {
+		r.settings.denoise = false;
+		if (now.denoise)
+			change("denoise", "Noise removal", "on", "off");
+	} else {
+		r.settings.denoise = true;
+		r.settings.atten_lim_db = adv.atten_lim_db;
+		if (!now.denoise)
+			change("denoise", "Noise removal", "off", std::string("on, ") + strength_name(adv.atten_lim_db));
+		else if (now.atten_lim_db != adv.atten_lim_db)
+			change("strength", "Noise removal strength", strength_name(now.atten_lim_db), strength_name(adv.atten_lim_db));
+	}
+	if (!now.captions.empty() && adv.captions != now.captions) {
+		auto name = [](const std::string &c) { return c == "premium" ? "Extra accurate" : "Standard"; };
+		r.settings.captions = adv.captions;
+		change("captions", "Captions", name(now.captions), name(adv.captions));
+	}
+	for (const AdviceNote &n : adv.notes)
+		if (n.id == "advice_clip" || n.id == "advice_echo_off")
+			r.notes.push_back(n);
+	return r;
 }
 
 }  // namespace acw

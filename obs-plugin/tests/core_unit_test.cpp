@@ -1942,6 +1942,65 @@ bool has_note(const InputAdvice &a, const char *id)
 }
 }  // namespace
 
+// 48 kHz -> `rate` (linear interpolation is plenty for a level test).
+std::vector<float> at_rate(const std::vector<float> &x, int rate)
+{
+	std::vector<float> y(static_cast<size_t>(static_cast<double>(x.size()) * rate / 48000));
+	for (size_t i = 0; i < y.size(); ++i) {
+		const double p = static_cast<double>(i) * 48000 / rate;
+		const size_t k = static_cast<size_t>(p);
+		const double t = p - static_cast<double>(k);
+		y[i] = static_cast<float>(x[k] * (1 - t) + (k + 1 < x.size() ? x[k + 1] : 0.0f) * t);
+	}
+	return y;
+}
+
+void feed(RoomTest &r, const std::vector<float> &mic, size_t block = 1024)
+{
+	for (size_t i = 0; i < mic.size(); i += block)
+		r.push(mic.data() + i, std::min(block, mic.size() - i));
+}
+
+static void test_room_test()
+{
+	std::printf("room test: twenty seconds of talking, then the changes that fit\n");
+	// a noisy room heard at OBS's 44.1 kHz, Gentle set, Standard captions: Maximum and Extra accurate
+	{
+		RoomTest r(44100, 1024);
+		feed(r, at_rate(advice_voice(10.0, 3), 44100));
+		CHECK(!r.done() && r.seconds_left() > 9 && r.seconds_left() < 11);
+		feed(r, at_rate(advice_voice(10.5, 3, 1, 5), 44100));
+		CHECK(r.done() && r.seconds_left() == 0);
+		AdviceContext now;
+		now.atten_lim_db = 12;
+		now.captions = "local";
+		const RoomSuggestion s = r.suggest(now);
+		CHECK(s.done && s.heard_speech);
+		CHECK(s.settings.denoise && s.settings.atten_lim_db == 100 && s.settings.captions == "premium");
+		CHECK(s.changes.size() == 2);
+		CHECK(s.changes.size() == 2 && s.changes[0].id == "room.strength" && s.changes[0].arg == "Gentle \xE2\x86\x92 Maximum");
+		CHECK(s.changes.size() == 2 && s.changes[1].id == "room.captions" && s.changes[1].arg == "Standard \xE2\x86\x92 Extra accurate");
+		now.atten_lim_db = 100;
+		now.captions = "premium";
+		CHECK(r.suggest(now).changes.empty());  // already right
+	}
+	// a quiet room with noise removal on: it can go
+	{
+		RoomTest r(48000, 1024);
+		feed(r, advice_voice(21.0, 60));
+		const RoomSuggestion s = r.suggest(AdviceContext{});
+		CHECK(s.heard_speech && !s.settings.denoise);
+		CHECK(s.changes.size() == 1 && s.changes[0].id == "room.denoise" && s.changes[0].arg == "on \xE2\x86\x92 off");
+	}
+	// nobody spoke: nothing to suggest
+	{
+		RoomTest r(48000, 1024);
+		feed(r, std::vector<float>(48000 * 21, 0.001f));
+		const RoomSuggestion s = r.suggest(AdviceContext{});
+		CHECK(s.done && !s.heard_speech && s.changes.empty());
+	}
+}
+
 static void test_input_advice()
 {
 	std::printf("input advice\n");
@@ -2107,6 +2166,7 @@ int main()
 	test_silence_protocol();
 	test_live_gate();
 	test_input_advice();
+	test_room_test();
 	test_output_stage();
 	test_session_passthrough(48000, 150);
 	test_session_passthrough(44100, 150);

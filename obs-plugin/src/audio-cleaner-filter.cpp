@@ -57,6 +57,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "acw/caption_router.hpp"
 #include "acw/languages.hpp"
 #include "acw/reference.hpp"
+#include "acw/input_advice.hpp"
 #include "acw/session.hpp"
 
 #include <algorithm>
@@ -102,6 +103,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_STATUS "status"
 #define S_REFRESH "refresh_status"
 #define S_RETRY "retry_now"
+#define S_ROOM_INFO "room_info"
+#define S_ROOM_TEST "room_test"
+#define S_ROOM_APPLY "room_apply"
+#define S_ROOM_KEEP "room_keep"
 #define S_ADVANCED "advanced"
 #define S_DETAILS "details"
 #define S_CHECK_UPDATES "check_updates"  // shows the plugin-wide setting (update-notice.cpp); the filter's copy is unused
@@ -339,6 +344,11 @@ struct ac_filter {
 	std::atomic<acw::Session *> session_r{nullptr};
 	std::atomic<bool> in_audio{false};
 	std::vector<acw::Session *> graveyard;  // sessions that could not be freed safely yet
+
+	// "Test my room": the audio thread feeds the running test; a finished or replaced one is freed like a session.
+	std::atomic<acw::RoomTest *> room{nullptr};
+	std::vector<acw::RoomTest *> retired_rooms;
+	bool room_told = false;  // the dialog was redrawn with the result
 
 	std::vector<float> mono;  // preallocated scratch for the downmix
 	std::vector<float> right; // ... and for the right side when it has its own session
@@ -658,7 +668,7 @@ void update_reference(ac_filter *f)
 // Frees sessions that had to wait for the audio thread. Called with the lock held.
 void reap_graveyard(ac_filter *f)
 {
-	if (f->graveyard.empty() || f->in_audio.load(std::memory_order_seq_cst))
+	if ((f->graveyard.empty() && f->retired_rooms.empty()) || f->in_audio.load(std::memory_order_seq_cst))
 		return;
 	// Not inside filter_audio() now, and every later call sees the newer session (seq_cst): safe to free.
 	for (acw::Session *old : f->graveyard) {
@@ -666,6 +676,29 @@ void reap_graveyard(ac_filter *f)
 		delete old;
 	}
 	f->graveyard.clear();
+	for (acw::RoomTest *old : f->retired_rooms)
+		delete old;
+	f->retired_rooms.clear();
+}
+
+// Ends the room test (its result goes with it). Called with the lock held.
+void end_room_test(ac_filter *f)
+{
+	if (acw::RoomTest *old = f->room.exchange(nullptr))
+		f->retired_rooms.push_back(old);  // freed by the next tick, when the audio thread can no longer hold it
+	f->room_told = false;
+}
+
+// What the filter is set to, in the terms of the room test's suggestions.
+acw::AdviceContext advice_context(const Settings &s)
+{
+	acw::AdviceContext ctx;
+	ctx.denoise = s.denoise;
+	ctx.atten_lim_db = s.strength;
+	ctx.captions = s.effective_captions();
+	ctx.language = s.caption_language() == "auto" ? "" : s.caption_language();
+	ctx.echo_requested = !s.echo_source.empty();
+	return ctx;
 }
 
 void apply_live_locked(ac_filter *f);
@@ -685,6 +718,10 @@ void filter_tick(void *data, float seconds)
 	update_reference(f);
 	reap_retired_taps(f, elapsed, false);
 	reap_graveyard(f);
+	if (acw::RoomTest *room = f->room.load(); room && room->done() && !f->room_told) {
+		f->room_told = true;
+		obs_source_update_properties(f->context);  // an open dialog shows the result
+	}
 	live_state_poll();      // an output that started without us hearing of it
 	apply_live_locked(f);   // ... and the end of the grace period after the last output stopped
 }
@@ -886,6 +923,10 @@ void filter_destroy(void *data)
 			delete s;
 		}
 		f->graveyard.clear();
+		delete f->room.exchange(nullptr);  // no audio comes any more (the filter is gone from the chain)
+		for (acw::RoomTest *r : f->retired_rooms)
+			delete r;
+		f->retired_rooms.clear();
 		detach_reference(f);
 		reap_retired_taps(f, 0.0f, true);
 	}
@@ -928,6 +969,11 @@ obs_audio_data *filter_audio(void *data, obs_audio_data *audio)
 	auto *f = static_cast<ac_filter *>(data);
 
 	f->in_audio.store(true, std::memory_order_seq_cst);
+	if (acw::RoomTest *room = f->room.load(std::memory_order_seq_cst); room && audio->frames > 0 && audio->data[0]) {
+		const float *mic = reinterpret_cast<const float *>(audio->data[0]);  // the first channel: the microphone as heard
+		for (size_t done = 0; done < audio->frames; done += kMaxBlock)
+			room->push(mic + done, std::min<size_t>(audio->frames - done, kMaxBlock));
+	}
 	acw::Session *s = f->session.load(std::memory_order_seq_cst);
 	acw::Session *sr = f->session_r.load(std::memory_order_seq_cst);
 	if (s && audio->frames > 0) {
@@ -1255,11 +1301,101 @@ bool create_overlay_clicked(obs_properties_t *props, obs_property_t *, void *dat
 	return true;
 }
 
+// "Test my room": what to do, how long is left, or what it found (with the changes it would make).
+std::string room_text(ac_filter *f)
+{
+	std::lock_guard<std::mutex> lk(f->mu);
+	acw::RoomTest *room = f->room.load();
+	if (!room)
+		return T_("AudioCleaner.Room.Hint");
+	if (!room->done())
+		return replace_all(T_("AudioCleaner.Room.Listening"), "%1", std::to_string(static_cast<int>(room->seconds_left() + 0.5)));
+	const acw::RoomSuggestion r = room->suggest(advice_context(f->settings));
+	if (!r.heard_speech)
+		return T_("AudioCleaner.Room.NoSpeech");
+	std::string out;
+	for (const acw::AdviceNote &c : r.changes) {
+		const std::string key = "AudioCleaner.Room.Change." + c.id.substr(c.id.find('.') + 1);  // room.<what>
+		const char *own = obs_module_text(key.c_str());
+		out += (out.empty() ? "" : "; ") + replace_all(own && key != own ? own : c.text, "%1", c.arg);
+	}
+	out = out.empty() ? T_("AudioCleaner.Room.Fits") : replace_all(T_("AudioCleaner.Room.Changes"), "%1", out);
+	for (const acw::AdviceNote &n : r.notes) {
+		const std::string own = localized("status." + n.id);
+		out += " " + replace_all(own.empty() ? n.text : own, "%1", n.arg);
+	}
+	return out;
+}
+
+// The room test has a result with changes to make.
+bool room_has_changes(ac_filter *f)
+{
+	std::lock_guard<std::mutex> lk(f->mu);
+	acw::RoomTest *room = f->room.load();
+	return room && room->done() && !room->suggest(advice_context(f->settings)).changes.empty();
+}
+
+bool room_test_clicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	auto *f = static_cast<ac_filter *>(data);
+	if (!f)
+		return false;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);
+		end_room_test(f);
+		f->room.store(new acw::RoomTest(static_cast<int>(f->sample_rate), kMaxBlock));
+	}
+	obs_source_update_properties(f->context);
+	return false;  // redrawn above
+}
+
+// Puts the room test's settings in place: the running session takes them without a restart (filter_update).
+bool room_apply_clicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	auto *f = static_cast<ac_filter *>(data);
+	if (!f)
+		return false;
+	acw::RoomSuggestion r;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);
+		acw::RoomTest *room = f->room.load();
+		if (!room || !room->done())
+			return false;
+		r = room->suggest(advice_context(f->settings));
+		end_room_test(f);
+	}
+	if (obs_data_t *d = obs_source_get_settings(f->context)) {
+		obs_data_set_bool(d, S_DENOISE, r.settings.denoise);
+		obs_data_set_int(d, S_STRENGTH, r.settings.atten_lim_db);
+		if (r.settings.captions == "local" || r.settings.captions == "premium")
+			obs_data_set_string(d, S_CAPTIONS, r.settings.captions.c_str());
+		obs_source_update(f->context, d);  // filter_update: the session changes in place
+		obs_data_release(d);
+	}
+	obs_source_update_properties(f->context);
+	return false;
+}
+
+bool room_keep_clicked(obs_properties_t *, obs_property_t *, void *data)
+{
+	auto *f = static_cast<ac_filter *>(data);
+	if (!f)
+		return false;
+	{
+		std::lock_guard<std::mutex> lk(f->mu);
+		end_room_test(f);
+	}
+	obs_source_update_properties(f->context);
+	return false;
+}
+
 // Puts the current status into the dialog.
 void refresh_texts(ac_filter *f, obs_properties_t *props)
 {
 	if (obs_property_t *st = obs_properties_get(props, S_STATUS))
 		obs_property_set_description(st, status_text(f).c_str());
+	if (obs_property_t *room = obs_properties_get(props, S_ROOM_INFO))
+		obs_property_set_description(room, room_text(f).c_str());
 	if (obs_property_t *grp = obs_properties_get(props, S_CAPTIONS_GROUP)) {  // e.g. a text source made meanwhile
 		Settings cur;
 		{
@@ -1550,6 +1686,15 @@ obs_properties_t *filter_properties(void *data)
 	obs_property_text_set_info_word_wrap(status, true);
 	obs_properties_add_button2(p, S_REFRESH, T_("AudioCleaner.RefreshStatus"), refresh_status_clicked, f);
 	obs_properties_add_button2(p, S_RETRY, T_("AudioCleaner.RetryNow"), retry_clicked, f);
+
+	// "Test my room": twenty seconds of talking, then the settings that fit, put in place on request.
+	obs_property_t *room = obs_properties_add_text(p, S_ROOM_INFO, f ? room_text(f).c_str() : T_("AudioCleaner.Room.Hint"), OBS_TEXT_INFO);
+	obs_property_text_set_info_word_wrap(room, true);
+	obs_properties_add_button2(p, S_ROOM_TEST, T_("AudioCleaner.Room.Test"), room_test_clicked, f);
+	if (f && room_has_changes(f)) {
+		obs_properties_add_button2(p, S_ROOM_APPLY, T_("AudioCleaner.Room.Apply"), room_apply_clicked, f);
+		obs_properties_add_button2(p, S_ROOM_KEEP, T_("AudioCleaner.Room.Keep"), room_keep_clicked, f);
+	}
 
 	// Things most people never touch.
 	obs_properties_t *adv = obs_properties_create();
