@@ -350,6 +350,10 @@ dialog.modal h2 { margin-top: 0; }
 
 /* ---------- Legal prose ---------- */
 .prose { max-width: 760px; }
+/* The licences table: four columns side by side, long licence names wrapping. */
+table.licenses th[scope="row"] { width: 24%; }
+table.licenses td:nth-child(2) { width: 15%; }
+table.licenses td:nth-child(4) { width: 18%; }
 .prose h2 { margin-top: 1.8em; font-size: 1.35rem; }
 .prose h3 { margin-top: 1.2em; }
 .prose ul, .prose ol { padding-left: 1.3em; margin: 0 0 1em; }

@@ -98,6 +98,7 @@
 		#     frame-src https://challenges.cloudflare.com;
 		#     connect-src (add) https://challenges.cloudflare.com;
 		# (frame-src is not in the policy yet: add it; without it default-src 'self' blocks the widget's frame.)
+		# Turning Turnstile on also means naming Cloudflare in the Privacy Policy again (sub-processors, cookies section).
 		# connect-src: the free tools download their models from Hugging Face (web/src/media/models.js), which hands
 		# the files out from its storage hosts under hf.co.
 		header {
