@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the website and publish it to the VPS (/var/www/audio, served by Caddy).
-# Requires the one-time VPS setup (deploy/vps/install-audio-route.sh). deploy/install.sh runs this
+# Requires the one-time VPS setup (deploy/vps/setup.sh, docs/vps.md). deploy/install.sh runs this
 # by itself when web/ changed, so you rarely need to call it directly.
 #
 # Visitors never see a half-published site: the new hashed files go in first (the old page does not point
