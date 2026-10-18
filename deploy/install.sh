@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install or update Audio Cleaner on primary-ram (no sudo needed).
-#   deploy/install.sh                    sync code, deps, units; restart what changed; publish the website if web/ changed
+#   deploy/install.sh                    sync code, deps, units; restart what changed; publish the website if web/ changed;
+#                                        then the smoke test (deploy/smoke.py: the live site from outside)
 #   deploy/install.sh --no-restart       copy everything, restart nothing
 #   deploy/install.sh --wait-live[=SECS] refuse new live sessions and wait (default 600 s) for the running ones to end
 #   deploy/install.sh --force            deploy even if the checks below say no
@@ -328,5 +329,12 @@ if [ "$STATUS" = 0 ]; then
   else
     echo "website unchanged (already published)"
   fi
+fi
+
+# ---- 14. Smoke test: what users and the apps reach, from outside (deploy/smoke.py). It changes nothing; a failure here
+# is reported (and fails the deploy's exit status) but rolls nothing back: it can also be Hugging Face or a certificate.
+if [ "$STATUS" = 0 ] && [ "$RESTART" = 1 ]; then
+  echo "smoke test:"
+  python3 "$REPO/deploy/smoke.py" --quiet || { STATUS=1; echo "the smoke test found problems (above); the deploy itself is in place" >&2; }
 fi
 exit "$STATUS"

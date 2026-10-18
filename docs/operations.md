@@ -27,6 +27,9 @@ script refuses another history, so an old checkout can't overwrite newer code):
 ```bash
 cd ~/repos/Audio-Cleaner-Web && git checkout on-prem && git merge --ff-only desktop-merge   # or pull
 deploy/install.sh                      # check, back up, copy, restart what changed, verify, publish the site if web/ changed
+python3 deploy/smoke.py               # the live site from outside: pages, headers, API, live, downloads, Stripe and Google
+                                       # addresses, the old address, certificates, the models on Hugging Face, the tunnels
+                                       # (install.sh runs it at the end; it changes nothing)
 deploy/install.sh --wait-live          # stop new live sessions and wait (up to 10 min) for the running ones first
 deploy/install.sh --wait-live=1800     # ... or for as long as you say
 deploy/install.sh --no-restart         # copy everything, restart nothing
