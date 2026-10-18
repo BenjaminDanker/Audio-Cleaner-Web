@@ -91,12 +91,13 @@ check('a long file is judged from about a minute spread over it (six stretches),
 const REASONS = [];
 const rec = (x, ctx) => { const r = recommendForFile(analyse([x]), ctx); if (r) REASONS.push(...r.reasons, r.line); return r; };
 
-check('a clean recording needs nothing; steady noise gets the free cleanup; a lot of noise gets the paid one with a stronger remover', () => {
+check('automatic settings always pick Denoising (never Off or the free cleanup) with Leveling: Gentle for a clean recording, the measured strength for noise, Max with a stronger remover for a lot', () => {
   const clean = rec(noisy(10, 55));
-  assert.equal(clean.noise, 'off');
+  assert.deepEqual([clean.noise, clean.strength, clean.leveling, clean.nothing], ['denoise', 'gentle', true, false]);
   const mild = rec(noisy(10, 22));
-  assert.equal(mild.noise, 'browser');
+  assert.equal(mild.noise, 'denoise');
   assert.equal(mild.heavy, false);
+  assert.ok(mild.leveling && mild.strength !== 'max' && mild.strength !== 'gentle', mild.strength);
   const heavy = rec(noisy(10, 3));
   assert.equal(heavy.noise, 'denoise');
   assert.equal(heavy.heavy, true);
@@ -123,12 +124,11 @@ check('the strength steps get gentler as the noise gets lighter', () => {
   }
 });
 
-check('no speech: nothing to clean or write down', () => {
+check('no speech: still Denoising (Balanced) and Leveling, but no subtitles', () => {
   const hum = Float32Array.from({ length: 12 * RATE }, (_, i) => 0.02 * Math.sin((2 * Math.PI * 50 * i) / RATE));
   const r = rec(hum);
   assert.equal(r.noSpeech, true);
-  assert.equal(r.nothing, true);
-  assert.equal(r.subs, null);
+  assert.deepEqual([r.noise, r.strength, r.leveling, r.nothing, r.subs], ['denoise', 'balanced', true, false, null]);
 });
 
 check('subtitles: Standard for a clear voice, Extra accurate for noise or a language Standard is weaker in', () => {

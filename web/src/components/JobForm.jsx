@@ -338,7 +338,7 @@ export default function JobForm({ onSubmitted }) {
     }
     if (!skip.has('rebuild')) setRebuild(!!(r.rebuild && rebuildOk.current && next === 'denoise'));
     if (r.restoreHighs && !skip.has('highs')) setRestoreHighs(true);
-    if (!skip.has('leveling')) setLeveling(r.noise === 'browser' || !!r.leveling);
+    if (!skip.has('leveling')) setLeveling(!!r.leveling);
     if (!skip.has('subs') && i?.hasAudio !== false) setSubs(r.subs || 'off');
     setNoiseKind('auto');
     appliedRef.current = true;
@@ -401,8 +401,6 @@ export default function JobForm({ onSubmitted }) {
   function pickNoise(v) {
     touch('noise');
     setNoise(v);
-    // "Off" leaves the sound alone, so nothing paid is left switched on behind it; Denoising comes with Leveling (unless the person chose)
-    if (!manual.current.has('leveling') && v !== 'browser') setLeveling(v === 'denoise');
     if (v === 'browser') warmUpDenoiser();
   }
 

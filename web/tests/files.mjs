@@ -155,7 +155,6 @@ await check('leveling alone, subtitles alone, and both together each send exactl
   if (b.kind !== 'transcribe' || b.denoiseTier || b.transcribeTier !== 'local' || 'free' in b) throw new Error('free cleanup + standard: ' + JSON.stringify(b));
 
   await pick(page, 'noise', 'off');
-  await page.locator('input[name=leveling-alone]').uncheck(); // ticked in the step above: it would add a leveling tier to this job
   await pick(page, 'subs', 'accurate');
   await page.getByTestId('estimate').waitFor();
   await start().click();

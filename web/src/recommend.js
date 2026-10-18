@@ -63,9 +63,9 @@ export function recommendForFile(stats, ctx = {}) {
   if (!stats || !(stats.seconds >= 2) || stats.noiseDb == null) return null;
   if (!stats.hasSpeech) {
     return {
-      noise: 'off', strength: 'balanced', heavy: false, restoreHighs: false, rebuild: false, leveling: false, subs: null, nothing: true, noSpeech: true,
-      reasons: ['We could hardly hear anyone speaking in this file, so there is nothing to clean up or write down.'],
-      line: 'nothing needed, we could hardly hear anyone speaking',
+      noise: 'denoise', strength: 'balanced', heavy: false, restoreHighs: false, rebuild: false, leveling: true, subs: null, nothing: false, noSpeech: true,
+      reasons: ['We could hardly hear anyone speaking in this file, so there is nothing to write down: no subtitles.'],
+      line: 'Denoising (Balanced), leveling, no subtitles (we could hardly hear anyone speaking)',
     };
   }
   const reasons = [];
@@ -76,45 +76,38 @@ export function recommendForFile(stats, ctx = {}) {
   const rebuild = echoey || dull;
   const quiet = stats.loudnessLufs != null && stats.loudnessLufs < T.QUIET_LUFS;
   const loud = stats.loudnessLufs != null && stats.loudnessLufs > T.LOUD_LUFS;
-  let noise = 'off';
-  if (!v.clean) noise = v.heavy || phone || rebuild ? 'denoise' : 'browser';
-  else if (phone || rebuild) noise = 'denoise';
-  const strength = v.strength || 'balanced';
+  // Automatic best settings choose among the paid options, the best one for every feature: Denoising (or Voice rebuild
+  // when the voice needs rebuilding) at the strength the noise needs, Leveling, the subtitle kind that suits the speech.
+  // The loudness target stays the default (YouTube).
+  const noise = 'denoise';
+  const strength = v.clean ? 'gentle' : v.strength || 'balanced';
 
-  if (v.clean) reasons.push('It’s clean and quiet, so noise removal would change very little.');
-  else if (v.heavy) reasons.push('There is a lot of background noise, nearly as loud as the voice. Denoising uses a stronger noise remover for this, and it does clearly better than the free one.');
-  else reasons.push(`There is some background noise. ${noise === 'browser' ? 'The free cleanup in your browser handles it well.' : 'Denoising will take it out.'}`);
+  if (v.clean) reasons.push('It’s clean and quiet: Denoising takes out what little there is, gently.');
+  else if (v.heavy) reasons.push('There is a lot of background noise, nearly as loud as the voice: Denoising uses its stronger noise remover for this.');
+  else reasons.push('There is some background noise: Denoising takes it out.');
   if (!v.clean) reasons.push(`${strengthName(strength)} is enough to take it out${strength === 'max' || strength === 'strong' ? '' : ' while keeping the voice natural'}.`);
   if (phone) reasons.push('It sounds like a phone call or a very small file: the high sounds are missing. Restoring them makes the voice clearer.');
-  if (echoey) reasons.push('The voice sounds echoey, as if it was recorded in a big or bare room. Rebuilding the voice can take that out. Listen to the result before you publish.');
-  else if (dull) reasons.push('The voice sounds muffled. Rebuilding the voice can bring the clarity back. Listen to the result before you publish.');
+  if (echoey) reasons.push('The voice sounds echoey, as if it was recorded in a big or bare room. Rebuilding the voice takes that out. Listen to the result before you publish.');
+  else if (dull) reasons.push('The voice sounds muffled. Rebuilding the voice brings the clarity back. Listen to the result before you publish.');
   if (stats.clipFraction > T.CLIP_FRACTION) reasons.push('The sound distorts in places because it was recorded too loud. Cleaning can’t fix that, so turn the microphone level down next time.');
-  if (quiet) reasons.push('It is very quiet. Denoising would also bring it up to a normal level.');
-  if (loud) reasons.push('It is already very loud.');
+  if (quiet) reasons.push('It is very quiet: Leveling brings it up to a normal level.');
+  if (loud) reasons.push('It is very loud: Leveling brings it down to a normal level.');
   if (stats.layout === 'one-side') reasons.push('Only one side of this stereo file has sound; the other side stays silent.');
 
-  // subtitles: which kind to use if you want them
+  // subtitles: the paid kind that suits the speech
   const lang = ctx.language || '';
   const notStandard = !!lang && !STANDARD_LANGUAGES.has(lang);
   const busy = stats.noiseDb < T.SUBS_NOISY_BELOW;
   const subs = busy || notStandard ? 'accurate' : 'standard';
   if (notStandard) reasons.push('For subtitles in this language, Extra accurate gets more words right.');
-  else if (busy) reasons.push('For subtitles, Extra accurate is the safer choice: the noisy background would make Standard miss words.');
-  else reasons.push('For subtitles, Standard is plenty: the speech is clear.');
+  else if (busy) reasons.push('For subtitles, Extra accurate: the noisy background would make Standard miss words.');
+  else reasons.push('For subtitles, Standard: the speech is clear.');
 
-  const nothing = noise === 'off' && !rebuild && !phone && !quiet;
-  // Leveling is done on our side, next to Denoising or on its own: it is set where the sound needs it (and with Denoising, where it is cheap).
-  const leveling = noise === 'denoise' || (noise === 'off' && (quiet || loud));
-  const bits = [];
-  if (nothing) bits.push('nothing needed');
-  else {
-    if (noise === 'off') bits.push('no noise removal');
-    else bits.push(`${noise === 'browser' ? 'free cleanup in your browser' : 'Denoising'} (${strengthName(strength)})`);
-    if (rebuild) bits.push('rebuild the voice');
-    else if (phone) bits.push('restore the highs');
-  }
-  if (leveling) bits.push('leveling');
-  bits.push(`${subs === 'accurate' ? 'Extra accurate' : 'Standard'} subtitles`);
+  const leveling = true;
+  const nothing = false;
+  const bits = [rebuild ? 'Voice rebuild' : `Denoising (${strengthName(strength)})`];
+  if (!rebuild && phone) bits.push('restore the highs');
+  bits.push('leveling', `${subs === 'accurate' ? 'Extra accurate' : 'Standard'} subtitles`);
   return { noise, strength, heavy: v.heavy && !v.clean, restoreHighs: phone, rebuild, leveling, subs, nothing, noSpeech: false, reasons, line: bits.join(', ') };
 }
 

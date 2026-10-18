@@ -77,9 +77,13 @@ export async function waitResult(page, testid, timeout = 300000) {
 }
 
 // ---- the Cleanup page's options (drop a file, then pick what to do) ----
-/** Click one of the option cards: group 'noise' (off | browser | denoise) or 'subs' (off | browser | standard | accurate). */
+/**
+ * Click one of the option cards: group 'noise' (off | browser | denoise) or 'subs' (off | browser | standard | accurate).
+ * Leveling is a plain checkbox that no noise choice changes, so picking noise Off also unticks "Leveling on its own" (else a free job would be a paid one).
+ */
 export async function pick(page, group, value) {
   await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
+  if (group === 'noise' && value === 'off') await page.locator('input[name=leveling-alone]').uncheck();
 }
 /** The quick listen that sets the best choices ("Automatic best settings") is over. */
 export async function settleRecommendation(page) {

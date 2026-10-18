@@ -74,7 +74,6 @@ async function newPage(extraArgs = {}) {
 const read = (page) => page.evaluate(() => ({
   noise: document.querySelector('input[name=noise]:checked')?.value,
   subs: document.querySelector('input[name=subs]:checked')?.value,
-  lstrength: document.querySelector('input[name=lstrength]:checked')?.value,
   strength: document.querySelector('input[name=strength]:checked')?.value,
   recommended: document.querySelectorAll('.reco-badge, [data-testid^=reco-noise], [data-testid^=reco-subs]').length > 0 || /Recommended/.test(document.querySelector('form')?.innerText || ''),
   leveling: !!document.querySelector('input[name=leveling]:checked, input[name=leveling-alone]:checked'),
@@ -98,28 +97,41 @@ async function open(page, path) {
 {
   const { ctx, page, problems } = await newPage();
 
-  await check('clean recording: noise removal Off is set, with the reasons in plain words; Standard subtitles stay on, Leveling is off, the loudness target is YouTube; nothing is marked "Recommended"', async () => {
+  await check('clean recording: Denoising at Gentle is set, with the reasons in plain words; Standard subtitles and Leveling are on, the loudness target is YouTube; nothing is marked "Recommended"', async () => {
     const t0 = Date.now();
     const s = await open(page, FILES.clean);
-    if (s.noise !== 'off') throw new Error(`noise ${s.noise}: ${s.line}`);
+    if (s.noise !== 'denoise' || s.strength !== 'gentle') throw new Error(`noise ${s.noise}/${s.strength}: ${s.line}`);
     if (s.recommended) throw new Error('something is still marked Recommended');
     if (!/clean and quiet/.test(s.why.join(' '))) throw new Error(s.why.join(' | '));
     if (s.subs !== 'standard') throw new Error(`subtitles ${s.subs}`);
-    if (s.leveling || s.rebuild) throw new Error(`leveling ${s.leveling} rebuild ${s.rebuild}`);
+    if (!s.leveling || s.rebuild) throw new Error(`leveling ${s.leveling} rebuild ${s.rebuild}`);
     if (s.loudness !== '-14') throw new Error(`loudness ${s.loudness}`);
     if (!/Set automatically for this file/.test(s.status)) throw new Error(`status: ${s.status}`);
     return `${Date.now() - t0} ms: ${s.line}`;
   });
 
-  await check('steady noise sets the free cleanup with a strength; a lot of noise sets Denoising with Extra accurate subtitles and Leveling; a recording with no one speaking sets nothing paid', async () => {
+  await check('steady noise sets Denoising with a strength below Maximum; a lot of noise sets Denoising at Maximum with Extra accurate subtitles and Leveling; a recording with no one speaking sets Denoising, Leveling and no subtitles', async () => {
     const mild = await open(page, FILES.mild);
-    if (mild.noise !== 'browser' || !mild.lstrength || mild.lstrength === 'max') throw new Error(`mild: ${JSON.stringify(mild)}`);
+    if (mild.noise !== 'denoise' || !mild.strength || mild.strength === 'max' || !mild.leveling) throw new Error(`mild: ${JSON.stringify(mild)}`);
     const loud = await open(page, FILES.loud);
     if (loud.noise !== 'denoise' || !/stronger noise remover/.test(loud.why.join(' '))) throw new Error(`loud: ${JSON.stringify(loud)}`);
     if (loud.subs !== 'accurate' || !loud.leveling || loud.strength !== 'max') throw new Error(`loud: ${JSON.stringify(loud)}`);
     const hum = await open(page, FILES.hum);
-    if (hum.noise !== 'off' || !/nothing needed/.test(hum.line) || hum.subs !== 'off' || hum.leveling) throw new Error(JSON.stringify(hum));
-    return `mild -> ${mild.noise}/${mild.lstrength}; loud -> ${loud.noise}/${loud.strength}/${loud.subs}; hum -> nothing needed`;
+    if (hum.noise !== 'denoise' || hum.strength !== 'balanced' || !/no subtitles/.test(hum.line) || hum.subs !== 'off' || !hum.leveling) throw new Error(JSON.stringify(hum));
+    return `mild -> ${mild.noise}/${mild.strength}; loud -> ${loud.noise}/${loud.strength}/${loud.subs}; hum -> ${hum.line}`;
+  });
+
+  await check('Leveling is a plain checkbox: picking Off or Denoising leaves it as it is', async () => {
+    await open(page, FILES.clean);
+    for (const v of ['off', 'denoise']) {
+      await page.locator(`label.choice:has(input[name=noise][value=${v}])`).click();
+      if (!(await read(page)).leveling) throw new Error(`Leveling switched off by ${v}`);
+    }
+    await page.locator('input[name=leveling]').uncheck();
+    for (const v of ['off', 'denoise']) {
+      await page.locator(`label.choice:has(input[name=noise][value=${v}])`).click();
+      if ((await read(page)).leveling) throw new Error(`Leveling switched on by ${v}`);
+    }
   });
 
   await check('Undo puts the choices back to the usual start and switches the automatic setting off (remembered for the next file)', async () => {
