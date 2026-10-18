@@ -9,9 +9,7 @@ and nothing else (every other path is 404). It reuses the main app's live code (
 billing, admission by this loop's own lag, the live engine connection. Besides its sessions it runs only the sweep
 that closes and bills its own sessions whose handler is gone. Its own tunnel (acw-tunnel-live) carries it to the VPS.
 
-The main app keeps serving the WebSocket too, so nothing breaks before the VPS sends it here, and if this process or
-its tunnel is down the VPS falls back to the main one. Each session records which process runs it
-(stream_sessions.owner), so neither process ever closes the other's sessions.
+It is the only process that runs live sessions: the main app has no live code running.
 """
 from __future__ import annotations
 
@@ -40,7 +38,6 @@ async def _orphan_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()  # the same additive schema step every process runs
-    stream_routes.set_role("live")
     await stream_routes.startup()
     task = asyncio.create_task(_orphan_loop())
     try:

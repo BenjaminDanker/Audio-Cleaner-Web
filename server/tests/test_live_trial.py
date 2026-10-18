@@ -100,11 +100,11 @@ def frame_bytes(seq):
     return P.HEADER.pack(P.VERSION, P.CODEC_S16, 0, seq, 0) + bytes(960)  # 10 ms
 
 
-def run_session(client, seconds, start=None, stop=True):
+def run_session(live_client, seconds, start=None, stop=True):
     """Start a session, send `seconds` of audio, and return every message it got back until it was closed."""
     start = {"type": "start", "denoise": "light", "sampleRate": 48000, **(start or {})}
     got = []
-    with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
+    with live_client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
         ws.send_text(json.dumps(start))
         got.append(ws.receive_json())
         if got[0]["type"] != "ready":
@@ -132,11 +132,11 @@ def the_session(wait=True):
     return dict(row)
 
 
-def test_a_trial_session_uses_trial_seconds_costs_nothing_and_leaves_credit_alone(client, signed_in, fake_worker):
+def test_a_trial_session_uses_trial_seconds_costs_nothing_and_leaves_credit_alone(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     ledger.credit(uid, 5_000_000, "grant", "t", "g")  # the trial is used before credit, and credit stays untouched
-    got = run_session(client, 2)
+    got = run_session(live_client, 2)
     assert got[0]["type"] == "ready" and got[0]["trial"] is True and got[0]["trialSecondsLeft"] == 600
     assert not [m for m in got if m.get("type") in ("warning", "stopped", "error")]
     s = the_session()
@@ -148,29 +148,29 @@ def test_a_trial_session_uses_trial_seconds_costs_nothing_and_leaves_credit_alon
     assert fake_worker.started[0]["trial"] is True
 
 
-def test_trial_seconds_are_taken_off_while_the_session_runs(client, signed_in, fake_worker):
+def test_trial_seconds_are_taken_off_while_the_session_runs(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    run_session(client, 2, stop=False)  # the client just vanishes
+    run_session(live_client, 2, stop=False)  # the client just vanishes
     s = the_session(wait=False)  # a vanished client: the row stays "active" for the restart cleanup
     assert 0 < s["trial_seconds"] <= 2 and trial_left(uid) == pytest.approx(600 - s["trial_seconds"])  # saved with the frames
 
 
-def test_trial_low_warns_at_five_minutes_left(client, signed_in, fake_worker):
+def test_trial_low_warns_at_five_minutes_left(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 299.5 WHERE id = ?", (uid,))
-    got = run_session(client, 2)
+    got = run_session(live_client, 2)
     warnings = [m for m in got if m.get("type") == "warning"]
     assert len(warnings) == 1 and warnings[0]["code"] == "trial_low" and 296 <= warnings[0]["secondsLeft"] <= 299
     db.execute("UPDATE users SET trial_live_seconds = 3600 WHERE id = ?", (uid,))  # with plenty left there is no warning
-    assert not [m for m in run_session(client, 1) if m.get("type") == "warning"]
+    assert not [m for m in run_session(live_client, 1) if m.get("type") == "warning"]
 
 
-def test_when_the_trial_ends_the_session_moves_on_to_credit(client, signed_in, fake_worker):
+def test_when_the_trial_ends_the_session_moves_on_to_credit(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 1 WHERE id = ?", (uid,))
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    got = run_session(client, 2.5)
+    got = run_session(live_client, 2.5)
     types = [(m["type"], m.get("code") or m.get("reason")) for m in got[1:]]
     assert ("warning", "trial_used_up_now_paid") in types and ("stopped", "trial_over") not in types
     assert all(t[0] != "error" for t in types)
@@ -183,23 +183,23 @@ def test_when_the_trial_ends_the_session_moves_on_to_credit(client, signed_in, f
     assert trial_left(uid) == 0
 
 
-def test_when_the_trial_ends_without_credit_the_session_stops(client, signed_in, fake_worker):
+def test_when_the_trial_ends_without_credit_the_session_stops(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 1 WHERE id = ?", (uid,))
-    got = run_session(client, 3)
+    got = run_session(live_client, 3)
     assert {"type": "stopped", "reason": "trial_over"} in got
     s = the_session()
     assert s["end_reason"] == "trial_over" and s["cost_micros"] == 0 and s["trial_seconds"] == 1
     assert s["seconds"] < 1.1  # no audio was processed past the trial
     assert trial_left(uid) == 0 and db.one("SELECT COUNT(*) n FROM holds")["n"] == 0
-    got = run_session(client, 1)  # and with no trial and no credit, the next one is refused
+    got = run_session(live_client, 1)  # and with no trial and no credit, the next one is refused
     assert got[0]["code"] == "insufficient_funds"
 
 
-def test_a_session_after_the_trial_is_billed_from_credit(client, signed_in, fake_worker):
+def test_a_session_after_the_trial_is_billed_from_credit(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    run_session(client, 2)
+    run_session(live_client, 2)
     s = the_session()
     assert s["trial_seconds"] == 0 and s["cost_micros"] == meter_micros(0, Features(denoise="light").rate(), 2, 2)
 
@@ -218,18 +218,18 @@ def test_translations_are_not_covered_by_the_trial(translate):
     assert routes._trial_eligible({"translate": ""}, "light", None) and routes._trial_eligible({"translate": []}, "light", None)
 
 
-def test_sessions_with_translations_are_billed_from_credit(client, signed_in, fake_worker, monkeypatch):
+def test_sessions_with_translations_are_billed_from_credit(client, live_client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # translations need the speech partner configured
     get_settings.cache_clear()
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    run_session(client, 1, {"translate": ["de"], "captions": "local"})
+    run_session(live_client, 1, {"translate": ["de"], "captions": "local"})
     s = the_session()
     assert s["trial_seconds"] == 0 and s["cost_micros"] > 0 and trial_left(uid) == 600
 
 
-def test_extra_accurate_captions_are_billed_even_with_trial_seconds(client, signed_in, fake_worker, monkeypatch):
+def test_extra_accurate_captions_are_billed_even_with_trial_seconds(client, live_client, signed_in, fake_worker, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     get_settings.cache_clear()
     from acw.stream import openai_live
@@ -244,16 +244,16 @@ def test_extra_accurate_captions_are_billed_even_with_trial_seconds(client, sign
     monkeypatch.setattr(openai_live.PremiumCaptions, "close", close)
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
-    assert run_session(client, 1, {"captions": "premium", "language": "en"})[0]["code"] == "insufficient_funds"
+    assert run_session(live_client, 1, {"captions": "premium", "language": "en"})[0]["code"] == "insufficient_funds"
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    run_session(client, 1, {"captions": "premium", "language": "en"})
+    run_session(live_client, 1, {"captions": "premium", "language": "en"})
     s = the_session()
     assert s["trial_seconds"] == 0 and s["cost_micros"] > 0 and trial_left(uid) == 600
 
 
 # ---------------------------------------------------------------- one at a time, and not while live is busy
 
-def test_one_trial_session_at_a_time_and_the_account_limit_counts_trial_sessions(client, signed_in, fake_worker, monkeypatch):
+def test_one_trial_session_at_a_time_and_the_account_limit_counts_trial_sessions(client, live_client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     get_settings.cache_clear()
@@ -261,29 +261,29 @@ def test_one_trial_session_at_a_time_and_the_account_limit_counts_trial_sessions
     other = routes.Session(SimpleNamespace(), SimpleNamespace(user_id=uid), Features(denoise="light"), 600.0)
     routes._open[uid] = [other]
     try:
-        got = run_session(client, 1)
+        got = run_session(live_client, 1)
         assert got[0]["code"] == "too_many_sessions" and "one live session at a time" in got[0]["message"]
         assert db.one("SELECT COUNT(*) n FROM stream_sessions")["n"] == 0
         # a paid session next to it is fine
         ledger.credit(uid, 5_000_000, "grant", "t", "g")
-        assert run_session(client, 1, {"translate": ["de"], "captions": "local"})[0]["type"] == "ready"
+        assert run_session(live_client, 1, {"translate": ["de"], "captions": "local"})[0]["type"] == "ready"
         # and so is a trial session once the other one is gone
         routes._open[uid] = []
-        assert run_session(client, 1)[0]["trial"] is True
+        assert run_session(live_client, 1)[0]["trial"] is True
     finally:
         routes._open.pop(uid, None)
     routes._live[uid] = routes.MAX_SESSIONS_PER_USER  # the account limit still counts trial sessions
     try:
-        assert run_session(client, 1)[0]["code"] == "too_many_sessions"
+        assert run_session(live_client, 1)[0]["code"] == "too_many_sessions"
     finally:
         routes._live.pop(uid, None)
 
 
-def test_a_busy_worker_gives_trial_busy_and_costs_no_trial_time(client, signed_in, fake_worker):
+def test_a_busy_worker_gives_trial_busy_and_costs_no_trial_time(client, live_client, signed_in, fake_worker):
     uid, _ = signed_in
     db.execute("UPDATE users SET trial_live_seconds = 600 WHERE id = ?", (uid,))
     fake_worker.reply = {"type": "error", "code": "trial_busy"}
-    got = run_session(client, 1)
+    got = run_session(live_client, 1)
     assert got[0]["code"] == "trial_busy" and got[0]["retryAfterSeconds"] > 0
     assert got[0]["message"] == ("Free trial sessions are paused while live is busy. "
                                  "Try again in a few minutes, or add credit to go live now.")

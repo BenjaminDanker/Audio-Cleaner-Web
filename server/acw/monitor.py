@@ -311,8 +311,7 @@ def check_live(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Pat
     ok, why = ok_fn(url)
     return [Finding(
         "health_live", not ok, "Audio Cleaner live process is not answering",
-        f"{url} failed ({why}). acw-live is down or stuck: new live sessions go to the main process once the VPS "
-        "notices (a few seconds to a minute); sessions that were running on it have ended.\n"
+        f"{url} failed ({why}). acw-live is down or stuck: live is unavailable (no new sessions; running ones have ended).\n"
         "Check: systemctl --user status acw-live; journalctl --user -u acw-live -n 80 --no-pager\n",
         confirm=2,
     )]

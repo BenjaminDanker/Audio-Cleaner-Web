@@ -240,17 +240,17 @@ def test_a_flood_of_messages_closes_the_connection_and_settings_changes_have_a_t
     assert sess.end_reason == "rate_limited" and sess.ws.closed[0] == 1008
 
 
-def test_four_live_sessions_at_most_per_account(client, signed_in):
+def test_four_live_sessions_at_most_per_account(client, live_client, signed_in):
     from acw.stream import routes
 
     uid, h = signed_in
     routes._live[uid] = 4
     try:
-        with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
+        with live_client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ev = ws.receive_json()
         assert ev["code"] == "too_many_sessions" and "Four live sessions" in ev["message"]
         routes._live[uid] = 3  # one more is fine
-        with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
+        with live_client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
             ws.send_text(json.dumps({"type": "nonsense"}))  # past the session limit: the server now wants a start message
             with pytest.raises(Exception):
                 ws.receive_json()

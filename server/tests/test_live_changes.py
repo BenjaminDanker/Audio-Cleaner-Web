@@ -70,13 +70,13 @@ class Live:
         return np.concatenate(self.out)
 
 
-def session(client, credit=5_000_000, **start):
+def session(client, live_client, credit=5_000_000, **start):
     uid, _ = login(client)
     if credit:
         ledger.credit(uid, credit, "grant", "t", "g")
     key = make_key(uid)
     client.cookies.clear()
-    ws = client.websocket_connect("/api/stream/ws", headers={"Authorization": f"Bearer {key}"})
+    ws = live_client.websocket_connect("/api/stream/ws", headers={"Authorization": f"Bearer {key}"})
     w = ws.__enter__()
     w.send_json({"type": "start", "version": 1, "sampleRate": SAMPLE_RATE, **start})
     ready = w.receive_json()
@@ -111,8 +111,8 @@ def tone(seconds, f=220.0):
     return (0.2 * np.sin(2 * np.pi * f * t)).astype(np.float32)
 
 
-def test_features_change_while_live_and_each_stretch_is_billed_at_its_rate(live, client):
-    uid, ws, s, ready = session(client, denoise="light")
+def test_features_change_while_live_and_each_stretch_is_billed_at_its_rate(live, client, live_client):
+    uid, ws, s, ready = session(client, live_client, denoise="light")
     assert ready["type"] == "ready" and ready["changeable"] is True and ready["modelLatencyMs"] == 39.0
     noise = Features(denoise="light").rate()
     both = Features(denoise="light", captions="local").rate()
@@ -137,9 +137,9 @@ def test_features_change_while_live_and_each_stretch_is_billed_at_its_rate(live,
     assert ledger.balance(uid)["held_micros"] == 0
 
 
-def test_echo_removal_can_be_switched_on_while_live(live, client):
+def test_echo_removal_can_be_switched_on_while_live(live, client, live_client):
     mic, far = room(6)
-    _, ws, s, _ = session(client, captions="local", language="en")
+    _, ws, s, _ = session(client, live_client, captions="local", language="en")
     s.send(mic[:2 * SAMPLE_RATE])  # no echo removal yet: the echo comes back
     got = s.config(echoReference=True)
     assert got["ok"] and got["echoReference"] is True
@@ -152,9 +152,9 @@ def test_echo_removal_can_be_switched_on_while_live(live, client):
     assert 20 * np.log10(rms(mic[after]) / rms(y[after])) > 20
 
 
-def test_a_change_that_can_not_be_made_leaves_the_session_as_it_was(live, client, monkeypatch):
+def test_a_change_that_can_not_be_made_leaves_the_session_as_it_was(live, client, live_client, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    _, ws, s, ready = session(client, denoise="light")
+    _, ws, s, ready = session(client, live_client, denoise="light")
     s.send(tone(1))
     got = s.config(captions="premium")
     assert not got["ok"] and got["code"] == "unavailable" and "Extra-accurate" in got["message"]
@@ -167,10 +167,10 @@ def test_a_change_that_can_not_be_made_leaves_the_session_as_it_was(live, client
     assert row["cost_micros"] == meter_micros(0, Features(denoise="light").rate(), 2, 2)
 
 
-def test_a_change_the_balance_can_not_cover_is_refused(live, client):
+def test_a_change_the_balance_can_not_cover_is_refused(live, client, live_client):
     noise = Features(denoise="light").rate()
     # the hold of the noise removal and a little more: not the next minute at the higher rate
-    _, ws, s, _ = session(client, credit=noise * 5 + 1000, denoise="light")
+    _, ws, s, _ = session(client, live_client, credit=noise * 5 + 1000, denoise="light")
     s.send(tone(2))
     got = s.config(captions="local", language="en")
     assert not got["ok"] and got["code"] == "insufficient_funds"
@@ -179,7 +179,7 @@ def test_a_change_the_balance_can_not_cover_is_refused(live, client):
     assert row["caption_tier"] is None and row["cost_micros"] == meter_micros(0, noise, 3, 3)
 
 
-def test_a_trial_session_moves_on_to_credit_when_it_starts_doing_more_than_the_trial_covers(live, client, monkeypatch):
+def test_a_trial_session_moves_on_to_credit_when_it_starts_doing_more_than_the_trial_covers(live, client, live_client, monkeypatch):
     from acw.stream import openai_live
 
     class Captions:  # extra-accurate captions without the network
@@ -205,7 +205,7 @@ def test_a_trial_session_moves_on_to_credit_when_it_starts_doing_more_than_the_t
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     key = make_key(uid)
     client.cookies.clear()
-    with client.websocket_connect("/api/stream/ws", headers={"Authorization": f"Bearer {key}"}) as w:
+    with live_client.websocket_connect("/api/stream/ws", headers={"Authorization": f"Bearer {key}"}) as w:
         w.send_json({"type": "start", "version": 1, "sampleRate": SAMPLE_RATE, "denoise": "light"})
         ready = w.receive_json()
         assert ready["trial"] is True
@@ -243,8 +243,8 @@ def room_test(live_):
     return None
 
 
-def test_the_room_test_measures_the_noise_at_the_noise_remover(live, client):
-    _, ws, s, _ = session(client, denoise="light", attenLimDb=12)  # a gentle strength: still the full-strength figure
+def test_the_room_test_measures_the_noise_at_the_noise_remover(live, client, live_client):
+    _, ws, s, _ = session(client, live_client, denoise="light", attenLimDb=12)  # a gentle strength: still the full-strength figure
     s.ws.send_json({"type": "room_test", "seconds": 5})
     s.send(voice_in(5, 6))  # 5 dB under the voice
     end(ws, s)
@@ -253,15 +253,15 @@ def test_the_room_test_measures_the_noise_at_the_noise_remover(live, client):
     assert abs(ev["noiseDb"] - 5) < 3, ev
 
 
-def test_the_room_test_needs_noise_removal(live, client):
-    _, ws, s, _ = session(client, captions="local", language="en")
+def test_the_room_test_needs_noise_removal(live, client, live_client):
+    _, ws, s, _ = session(client, live_client, captions="local", language="en")
     s.ws.send_json({"type": "room_test"})
     ev = s.ws.receive_json()
     assert ev == {"type": "room_test", "ok": False, "code": "needs_noise_removal",
                   "message": "The room test listens through noise removal: turn noise removal on first."}
     end(ws, s)
     # switched off before it is over: the same answer, from the engine
-    _, ws, s, _ = session(client, denoise="light", captions="local", language="en")
+    _, ws, s, _ = session(client, live_client, denoise="light", captions="local", language="en")
     s.ws.send_json({"type": "room_test", "seconds": 5})
     s.send(voice_in(20, 1))
     assert s.config(denoise=None)["ok"]

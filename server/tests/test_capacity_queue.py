@@ -22,16 +22,20 @@ def test_user_and_status_lookups_use_an_index_and_a_database_made_before_it_gets
     assert "jobs_user_status" in plan
 
 
-def test_the_sweep_indexes_and_the_session_owner_exist_on_a_new_database_and_on_an_old_one():
+def test_the_sweep_indexes_exist_on_a_new_database_and_on_an_old_one():
     want = {"stream_sessions_active", "sessions_expiry", "login_tokens_expiry", "oauth_states_expiry"}
     have = lambda: {r["name"] for r in db.all_rows("SELECT name FROM sqlite_master WHERE type = 'index'")}  # noqa: E731
-    owner = lambda: "owner" in {r["name"] for r in db.all_rows("PRAGMA table_info(stream_sessions)")}  # noqa: E731
-    assert want <= have() and owner()  # a new database
+    assert want <= have()  # a new database
     for name in want:
         db.execute(f"DROP INDEX {name}")
-    db.execute("ALTER TABLE stream_sessions DROP COLUMN owner")  # a database from before them
+    db.init_db()  # a database from before them
+    assert want <= have()
+
+
+def test_init_db_drops_the_session_owner_column_of_an_old_database():
+    db.execute("ALTER TABLE stream_sessions ADD COLUMN owner TEXT")  # the column the live process used to record
     db.init_db()
-    assert want <= have() and owner()
+    assert "owner" not in {r["name"] for r in db.all_rows("PRAGMA table_info(stream_sessions)")}
 
 
 def test_the_queue_is_computed_once_a_second_and_matches_the_slow_estimates(monkeypatch):

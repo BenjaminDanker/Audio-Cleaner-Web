@@ -45,7 +45,7 @@ def test_extra_accurate_audio_goes_in_100_ms_pieces_and_is_committed_at_pauses()
     assert sum(len(m["audio"]) for m in appends) * 3 // 4 == 40 * 480 * 2  # every 24 kHz sample went out once
 
 
-def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, fake_worker, monkeypatch):
+def test_a_speaker_may_switch_between_up_to_three_languages(client, live_client, signed_in, fake_worker, monkeypatch):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
@@ -67,17 +67,17 @@ def test_a_speaker_may_switch_between_up_to_three_languages(client, signed_in, f
             pass
 
     monkeypatch.setattr("acw.stream.openai_live.PremiumCaptions", FakePremium)
-    got = run_session(client, 0.1, {"denoise": None, "captions": "premium", "language": ["en", "ES"], "translate": ["es"]})
+    got = run_session(live_client, 0.1, {"denoise": None, "captions": "premium", "language": ["en", "ES"], "translate": ["es"]})
     assert got[0]["type"] == "ready" and made == [["en", "es"]]  # a target that is one of the spoken languages is fine
-    got = run_session(client, 0.1, {"captions": "premium", "language": ["en", "es", "de", "fr"]})
+    got = run_session(live_client, 0.1, {"captions": "premium", "language": ["en", "es", "de", "fr"]})
     assert got[0]["code"] == "bad_config"
-    got = run_session(client, 0.1, {"captions": "local", "language": ["en", "es"]})
+    got = run_session(live_client, 0.1, {"captions": "local", "language": ["en", "es"]})
     assert got[0]["code"] == "bad_config" and "English only" in got[0]["message"]
 
 
 # --------------------------------------------------------------- silence and audio nobody needs (2026-10-16)
 
-def _session(client, start, frames):
+def _session(live_client, start, frames):
     """Start, send `frames` (bytes), stop; every JSON message and binary frame that came back. Frames are answered in
     order, so the stop comes after the last of them."""
     from starlette.websockets import WebSocketDisconnect
@@ -85,7 +85,7 @@ def _session(client, start, frames):
     from .conftest import ORIGIN
 
     got, binary = [], []
-    with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
+    with live_client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
         ws.send_text(json.dumps({"type": "start", "sampleRate": 48000, **start}))
         got.append(ws.receive_json())
         if got[0]["type"] != "ready":
@@ -141,11 +141,11 @@ def _pcm(seq):
     return P.HEADER.pack(P.VERSION, P.CODEC_S16, 0, seq, seq * 20_000) + (np.full(960, 3000, "<i2")).tobytes()
 
 
-def test_silence_frames_are_answered_at_once_and_not_billed(client, signed_in, echo_worker):
+def test_silence_frames_are_answered_at_once_and_not_billed(client, live_client, signed_in, echo_worker):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     frames = [_pcm(0), P.silence_frame(1, 20_000, 960), P.silence_frame(2, 40_000, 960), _pcm(3)]
-    got, binary = _session(client, {"denoise": "light"}, frames)
+    got, binary = _session(live_client, {"denoise": "light"}, frames)
     assert got[0]["silenceFrames"] is True
     silent = [b for b in binary if P.frame_header(b)[0] == P.CODEC_SILENCE]
     assert sorted(P.frame_header(b)[1] for b in silent) == [1, 2] and all(P.silence_samples(b) == 960 for b in silent)
@@ -156,38 +156,37 @@ def test_silence_frames_are_answered_at_once_and_not_billed(client, signed_in, e
     assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.04)  # the two real frames only
 
 
-def test_a_client_that_needs_no_audio_back_gets_none(client, signed_in, echo_worker):
+def test_a_client_that_needs_no_audio_back_gets_none(client, live_client, signed_in, echo_worker):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    got, binary = _session(client, {"denoise": "light", "returnAudio": False}, [_pcm(0), _pcm(1), P.silence_frame(2, 0, 960)])
+    got, binary = _session(live_client, {"denoise": "light", "returnAudio": False}, [_pcm(0), _pcm(1), P.silence_frame(2, 0, 960)])
     assert got[0]["type"] == "ready" and binary == []
     start = json.loads(next(p for k, p in echo_worker.sent if k == P.MSG_START))
     assert start["return_audio"] is False
 
 
-def test_standard_captions_only_are_not_billed_for_the_silence_they_skipped(client, signed_in, echo_worker):
+def test_standard_captions_only_are_not_billed_for_the_silence_they_skipped(client, live_client, signed_in, echo_worker):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     echo_worker.events = [{"samples": 960, "type": "_idle"}]  # the engine writes keys in this order
-    got, _ = _session(client, {"denoise": None, "captions": "local"}, [_pcm(i) for i in range(3)])
+    got, _ = _session(live_client, {"denoise": None, "captions": "local"}, [_pcm(i) for i in range(3)])
     assert not any(m.get("type") == "_idle" for m in got)  # internal: never reaches the client
     from acw import db
 
     assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.04)
     # with noise removal the whole time is work: billed as before
     db.execute("DELETE FROM stream_sessions")
-    _session(client, {"denoise": "light", "captions": "local"}, [_pcm(i) for i in range(3)])
+    _session(live_client, {"denoise": "light", "captions": "local"}, [_pcm(i) for i in range(3)])
     assert db.one("SELECT seconds FROM stream_sessions")["seconds"] == pytest.approx(0.06)
 
 
-def test_the_cores_in_use_are_published_for_file_jobs(client, signed_in, echo_worker, monkeypatch):
+def test_the_cores_in_use_are_published_for_file_jobs(client, live_client, signed_in, echo_worker, monkeypatch):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     seen = []
-    monkeypatch.setattr(broker, "publish_live_cores", lambda cores, data_dir=None, role="web": seen.append(sorted(cores)))
-    _session(client, {"denoise": "light"}, [_pcm(0)])
+    monkeypatch.setattr(broker, "publish_live_cores", lambda cores, data_dir=None: seen.append(sorted(cores)))
+    _session(live_client, {"denoise": "light"}, [_pcm(0)])
     assert seen == [[0, 1], []]  # the engine said cores 0 and 1 (echo_worker's ready); free again afterwards
-    assert db.one("SELECT owner FROM stream_sessions")["owner"] == "web"  # the session records which process ran it
 
 
 def test_file_jobs_keep_off_live_cores_and_one_spare(tmp_path, monkeypatch):

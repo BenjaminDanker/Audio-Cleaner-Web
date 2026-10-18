@@ -66,7 +66,7 @@ Ports on primary-ram (all loopback) and how they reach the VPS:
 
 | Unit | Listens on (home) | VPS side | Carries |
 |---|---|---|---|
-| `acw-web` | `127.0.0.1:8790` | `127.0.0.1:18790` via `acw-tunnel` (`-o IPQoS=lowdelay`) | everything except the bulk routes and live: sign-in, API, billing (and the live WebSocket when `acw-live` can't be reached) |
+| `acw-web` | `127.0.0.1:8790` | `127.0.0.1:18790` via `acw-tunnel` (`-o IPQoS=lowdelay`) | everything except the bulk routes and live: sign-in, API, billing |
 | `acw-live` | `127.0.0.1:8795` | `127.0.0.1:18795` via `acw-tunnel-live` (`-o IPQoS=lowdelay`) | the live WebSocket (`/api/stream/ws`) only |
 | `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`), result downloads (`GET /api/jobs/{id}/outputs/{name}`) and the release downloads (`GET /api/downloads/...`) only |
 | `acw-mirror.timer` | none (a oneshot every 10 minutes) | nothing: it only fetches from the release service | copies the newest release files to `data/downloads/` ("Release downloads") |
@@ -77,28 +77,17 @@ Check from the VPS with `curl -s 127.0.0.1:18790/audio/api/health`, `curl -s 127
 ## Live process (the live WebSocket on its own process and tunnel)
 
 Why: the live WebSocket relays every session's audio frames on one event loop (one core). In `acw-web` that loop also
-runs every sign-in, page visit and job-list poll, so heavy API traffic made running sessions late (admission only
-refuses new ones). `acw-live` (`acw/live_app.py`) runs the same live code on a loop of its own and serves nothing else;
-its admission measures its own loop. Each session records which process runs it (`stream_sessions.owner`), and each
-process closes and bills only its own orphaned sessions and publishes its own cores (`data/live-cores*`), so both can
-serve live at once: `acw-web` keeps serving the WebSocket, as the fallback.
+ran every sign-in, page visit and job-list poll, so heavy API traffic made running sessions late (admission only
+refuses new ones). `acw-live` (`acw/live_app.py`) is the only process that runs live sessions: the live WebSocket and
+the sweep that closes and bills sessions whose handler is gone, on a loop of its own; its admission measures that loop.
+`acw-web` has no live code running. The VPS sends `/audio/api/stream/ws` to `127.0.0.1:18795` (`acw-tunnel-live`) only.
 
-**Rollout, in this order:**
+Set up once (done 2026-10-18): the `acw_tunnel` key on the VPS lists `permitlisten="127.0.0.1:18795"` (next to 18790 and
+18794), and `systemctl --user enable --now acw-tunnel-live`. When `acw-live` or its tunnel is down, live is down: the
+monitor mails (`health_live`, and the units like any other).
 
-1. **Home side.** `deploy/install.sh --wait-live`: starts `acw-live` and installs `acw-tunnel-live` **without enabling
-   it**. Check: `curl -s 127.0.0.1:8795/audio/api/health` answers `{"ok":true,"process":"live"}`.
-2. **VPS key.** Add `permitlisten="127.0.0.1:18795"` to the `acw_tunnel` key's line in `~/.ssh/authorized_keys` on the VPS
-   (next to the 18790 and 18794 ones, as in "Bulk transfers" step 2).
-3. **Live tunnel.** On primary-ram: `systemctl --user enable --now acw-tunnel-live`, then on the VPS
-   `curl -s 127.0.0.1:18795/audio/api/health`. From now on the deploy, rollback and monitor treat it like the other units,
-   and a deploy that only restarts `acw-web` no longer cuts live sessions.
-4. **Caddy.** Copy `deploy/vps/audio.caddy` and run `install-audio-route.sh` as in "Bulk transfers" step 4: the WebSocket
-   then goes to `127.0.0.1:18795` first and falls back to `127.0.0.1:18790`.
-5. **Check.** Start a live session; `journalctl --user -u acw-live -f` shows it, and
-   `sqlite3 ~/audio-cleaner/data/acw.sqlite3 "SELECT owner, status FROM stream_sessions ORDER BY started_at DESC LIMIT 3"`
-   says `live`.
-
-Back out: the Caddy backup as in "Bulk transfers", and `systemctl --user disable --now acw-tunnel-live`.
+Check: `curl -s 127.0.0.1:8795/audio/api/health` here and `curl -s 127.0.0.1:18795/audio/api/health` on the VPS answer
+`{"ok":true,"process":"live"}`.
 
 ## Bulk transfers (uploads and downloads on their own process and tunnel)
 
@@ -252,7 +241,7 @@ live) and top-ups paid. Percentiles are nearest-rank. "Queue wait" is the time u
 in `jobs.wait_seconds`; older jobs fall back to `started_at - queued_at`), "run" is start to finish.
 
 **One JSON log line per finished job and live session** in the journal of the process that ended it (`acw-worker@N` for
-jobs, `acw-web` for live sessions); no user ids, addresses or file names:
+jobs, `acw-live` for live sessions); no user ids, addresses or file names:
 
 ```bash
 journalctl --user --since -1d -o cat | grep '"event":"job_'           # job_done and job_failed
@@ -671,7 +660,7 @@ live core's other hyper-thread halves its speed).
 Capacity is in units (live denoise = 1, a standard caption stream = 1.2, echo cancellation = 0.2): live cores x
 units per core, shrunk by other load measured on the live cores. Units per core are calibrated at start-up from how
 fast this CPU runs the model: 6.5 at the reference cost of 0.110 cores per session (about 6.9 on the 1700X),
-remembered per CPU in `data/live-calibration-native.json`. The live process (`acw-live`, or `acw-web` standing in) also
+remembered per CPU in `data/live-calibration-native.json`. The live process (`acw-live`) also
 refuses new sessions when its own event loop lags (p90 over `ACW_LOOP_LAG_LIMIT_MS`, default 25). Caption models (about 220 MB each) are loaded in
 the background, the first at start; at most 5 streams each (`ACW_CAPTION_STREAMS_PER_MODEL`, `ACW_CAPTION_THREADS`),
 the next one loading before they are full. Echo cancellation is `sonora` (WebRTC AEC3 in Rust): 42.8 dB of echo
@@ -711,7 +700,7 @@ When full, a new session is refused with the options that still fit; sessions th
 | Variable | Default | Meaning |
 |---|---|---|
 | `ACW_STREAM_MAX_CAPTION_STREAMS` | 5 per core of the worker | Standard caption streams per worker (in `acw-worker.env`). Each worker's caption decoder does about 13x real time in total; silence isn't decoded, but a stream can talk all the time. At the cap a new one goes to the next worker, or is offered extra-accurate captions. A stream that still falls more than 2 s behind drops its oldest audio and the client gets one `captions_behind` warning per incident |
-| `ACW_LOOP_LAG_LIMIT_MS` | `25` | the live process (`acw-live`; the web process when it stands in for it) relays all live audio on one event loop: new live sessions are refused while it runs a 100 ms timer this late (p90 over 10 s). Running sessions are never cut. About 1.5% of a core per Opus session (2% per PCM session) was measured on 2026-10-18, so this rarely triggers |
+| `ACW_LOOP_LAG_LIMIT_MS` | `25` | the live process (`acw-live`) relays all live audio on one event loop: new live sessions are refused while it runs a 100 ms timer this late (p90 over 10 s). Running sessions are never cut. About 1.5% of a core per Opus session (2% per PCM session) was measured on 2026-10-18, so this rarely triggers |
 | `ACW_MAX_LIVE_SESSIONS` | `300` | sanity bound on live sessions in the web process (below uvicorn's `--limit-concurrency 500`) |
 | `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
 

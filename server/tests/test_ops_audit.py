@@ -416,11 +416,11 @@ def test_a_client_that_vanishes_while_starting_gets_its_hold_back(monkeypatch):
     assert not routes._live_ids
 
 
-def ws_denied(client, headers=None):
+def ws_denied(live_client, headers=None):
     from starlette.testclient import WebSocketDenialResponse
 
     try:
-        with client.websocket_connect("/api/stream/ws", headers=headers or {}) as ws:
+        with live_client.websocket_connect("/api/stream/ws", headers=headers or {}) as ws:
             return None, ws.receive_json()
     except WebSocketDenialResponse as e:
         return e.status_code, dict(e.headers)
@@ -435,29 +435,29 @@ def api_key(uid, scopes="stream"):
     return key
 
 
-def test_the_live_handshake_says_why_it_refuses_and_when_to_come_back(client):
+def test_the_live_handshake_says_why_it_refuses_and_when_to_come_back(client, live_client):
     from acw.config import get_settings
     from acw.security import limiter
 
     uid = user()
-    assert ws_denied(client)[0] == 401  # no credentials
-    assert ws_denied(client, {"Authorization": "Bearer acw_nonsense"})[0] == 401  # unknown key
+    assert ws_denied(live_client)[0] == 401  # no credentials
+    assert ws_denied(live_client, {"Authorization": "Bearer acw_nonsense"})[0] == 401  # unknown key
     revoked = api_key(uid)
     db.execute("UPDATE api_keys SET revoked_at = ?", (db.now(),))
-    assert ws_denied(client, {"Authorization": f"Bearer {revoked}"})[0] == 401
-    assert ws_denied(client, {"Authorization": f"Bearer {api_key(uid, 'jobs')}"})[0] == 403  # wrong scope
+    assert ws_denied(live_client, {"Authorization": f"Bearer {revoked}"})[0] == 401
+    assert ws_denied(live_client, {"Authorization": f"Bearer {api_key(uid, 'jobs')}"})[0] == 403  # wrong scope
     suspended = api_key(user("s@example.com"))
     db.execute("UPDATE users SET status = 'suspended' WHERE email = 's@example.com'")
-    assert ws_denied(client, {"Authorization": f"Bearer {suspended}"})[0] == 403
+    assert ws_denied(live_client, {"Authorization": f"Bearer {suspended}"})[0] == 403
     # the hour's starts are used up: 429 with the wait
     key = api_key(uid)
     limiter.hit(f"stream_start:{uid}", 60, 60 / 3600, cost=60)
-    status, headers = ws_denied(client, {"Authorization": f"Bearer {key}"})
+    status, headers = ws_denied(live_client, {"Authorization": f"Bearer {key}"})
     assert status == 429 and int(headers["retry-after"]) >= 1
     limiter.reset()
     # draining for a restart: refused with a retry time
     (get_settings().data_dir / "drain").touch()
-    status, event = ws_denied(client, {"Authorization": f"Bearer {api_key(uid)}"})
+    status, event = ws_denied(live_client, {"Authorization": f"Bearer {api_key(uid)}"})
     assert status is None and event["code"] == "restarting" and event["retryAfterSeconds"] == 60
 
 

@@ -89,6 +89,19 @@ def client():
         yield c
 
 
+@pytest.fixture
+def live_client(client):
+    """acw.live_app's client: the live WebSocket is served by that process only (the main app has no WebSocket route).
+    It shares the cookie jar of `client`, so a browser signed in with `client` can open live sessions."""
+    from fastapi.testclient import TestClient
+
+    from acw.live_app import create_live_app
+
+    with TestClient(create_live_app(), base_url=ORIGIN) as c:
+        c._cookies = client._cookies  # one jar for both: the cookies setter would copy it
+        yield c
+
+
 def login(client, email="user@example.com", accept_tos=True):
     from acw import auth
 

@@ -60,9 +60,9 @@ def fake_translations(monkeypatch, fail=()):
     return calls
 
 
-def session(client, start, seconds=1):
+def session(live_client, start, seconds=1):
     got = []
-    with client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
+    with live_client.websocket_connect("/api/stream/ws", headers={"origin": ORIGIN}) as ws:
         ws.send_text(json.dumps({"type": "start", "sampleRate": 48000, **start}))
         got.append(ws.receive_json())
         if got[0]["type"] != "ready":
@@ -78,18 +78,18 @@ def session(client, start, seconds=1):
     return got
 
 
-def test_what_a_start_may_ask_for(client, signed_in, worker):
+def test_what_a_start_may_ask_for(client, live_client, signed_in, worker):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     for start, why in (({"denoise": "light", "translate": ["es"]}, "need captions"),
                        ({"captions": "local", "translate": ["en"]}, "same as the spoken"),
                        ({"captions": "local", "translate": ["xx"]}, "unknown"),
                        ({"captions": "local", "translate": ["es", "de", "fr", "it"]}, "at most 3")):
-        got = session(client, start)
+        got = session(live_client, start)
         assert got[0]["code"] == "bad_config" and why in got[0]["message"], (start, got)
 
 
-def test_final_captions_are_translated_in_order_and_billed_by_speech(client, signed_in, worker, monkeypatch):
+def test_final_captions_are_translated_in_order_and_billed_by_speech(client, live_client, signed_in, worker, monkeypatch):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     calls = fake_translations(monkeypatch)
@@ -99,7 +99,7 @@ def test_final_captions_are_translated_in_order_and_billed_by_speech(client, sig
         {"type": "caption", "id": "l1", "text": "good game", "final": True, "start": 3.0, "end": 4.5},
     ]
     before = ledger.balance(uid)["balance_micros"]
-    got = session(client, {"captions": "local", "translate": ["es", "de"]})
+    got = session(live_client, {"captions": "local", "translate": ["es", "de"]})
     assert got[0]["type"] == "ready" and got[0]["translate"] == ["es", "de"]
     tr = [m for m in got if m["type"] == "translation"]
     assert [(m["lang"], m["of"], m["text"]) for m in tr if m["lang"] == "es"] == [("es", "l0", "[es] hello there"), ("es", "l1", "[es] good game")]
@@ -112,13 +112,13 @@ def test_final_captions_are_translated_in_order_and_billed_by_speech(client, sig
     assert before - ledger.balance(uid)["balance_micros"] == db.one("SELECT cost_micros FROM stream_sessions")["cost_micros"]
 
 
-def test_a_language_that_keeps_failing_is_switched_off_and_not_billed(client, signed_in, worker, monkeypatch):
+def test_a_language_that_keeps_failing_is_switched_off_and_not_billed(client, live_client, signed_in, worker, monkeypatch):
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     fake_translations(monkeypatch, fail={"de"})
     worker.events = [{"type": "caption", "id": f"l{i}", "text": f"line {i}", "final": True, "start": float(i), "end": i + 0.5}
                      for i in range(4)]
-    got = session(client, {"captions": "local", "translate": ["es", "de"]})
+    got = session(live_client, {"captions": "local", "translate": ["es", "de"]})
     warn = [m for m in got if m.get("code") == "translation_unavailable"]
     assert len(warn) == 1 and warn[0]["lang"] == "de" and "not charged" in warn[0]["message"]
     assert not any(m["type"] == "translation" and m["lang"] == "de" for m in got)

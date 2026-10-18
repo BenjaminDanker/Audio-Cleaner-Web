@@ -96,30 +96,24 @@ def all_cpus() -> set[int]:
     return {c for core in physical_cores() for c in core}
 
 
-def _marker(data_dir: Path, role: str = "web") -> Path:
-    return data_dir / ("live-cores" if role == "web" else f"live-cores-{role}")
+def _marker(data_dir: Path) -> Path:
+    return data_dir / "live-cores"
 
 
-def publish_live_cores(cores, data_dir: Path | None = None, role: str = "web") -> None:
-    """Written by a process that runs live sessions (the live process, and the main web process when it stands in for
-    it) whenever the set of cores carrying its sessions changes: one file per process, read together."""
-    p = _marker(data_dir or get_settings().data_dir, role)
+def publish_live_cores(cores, data_dir: Path | None = None) -> None:
+    """Written by the live process whenever the set of cores carrying live sessions changes."""
+    p = _marker(data_dir or get_settings().data_dir)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(",".join(str(c) for c in sorted(set(cores))))
     tmp.replace(p)
 
 
 def live_cores(data_dir: Path | None = None) -> list[int]:
-    cores: set[int] = set()
-    for p in (data_dir or get_settings().data_dir).glob("live-cores*"):
-        if p.suffix == ".tmp":
-            continue
-        try:
-            text = p.read_text().strip()
-            cores.update(int(c) for c in text.split(",") if c)
-        except (OSError, ValueError):
-            continue
-    return sorted(cores)
+    try:
+        text = _marker(data_dir or get_settings().data_dir).read_text().strip()
+        return [int(c) for c in text.split(",")] if text else []
+    except (OSError, ValueError):
+        return []
 
 
 def job_cpus(data_dir: Path | None = None) -> set[int]:

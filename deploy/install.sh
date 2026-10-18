@@ -9,8 +9,8 @@
 # Before anything is touched it prints the commit and what is running, and refuses (unless --force) when
 #   * the working tree has uncommitted changes,
 #   * the commit is not a descendant of the deployed one (app/VERSION): that would downgrade the service,
-#   * live sessions are running and the live process, the live worker or (until the live tunnel is enabled) the web
-#     process would restart (they cut every live session),
+#   * live sessions are running and the live process, its tunnel or the live worker would restart (they cut every
+#     live session),
 #   * the database backup taken just before the change fails its checks.
 # It restarts only what changed: the web process, the live process (acw-live), the bulk-transfer process
 # (uploads/downloads, acw-bulk) and the file workers when the application code or the locked packages changed, the live worker only when code it uses
@@ -120,18 +120,13 @@ WORKERS_CONF="$(printf '[Service]\nEnvironment=ACW_WORKERS=%d\n' "$WORKERS")"
 GPU=0
 if command -v nvidia-smi >/dev/null && nvidia-smi >/dev/null 2>&1 && [ -x "$H/venv-gpu/bin/python" ]; then GPU=1; fi
 
-UNITS="acw-stream.service acw-web.service acw-live.service acw-bulk.service acw-tunnel.service acw-admin.service"
+UNITS="acw-stream.service acw-web.service acw-live.service acw-bulk.service acw-tunnel.service acw-tunnel-live.service acw-admin.service"
 # The bulk tunnel needs the VPS key to allow its port first (docs/operations.md, "Bulk transfers"), otherwise it
 # fails and alerts in a loop. So it is part of the deploy only once you enabled it (systemctl --user enable --now
 # acw-tunnel-bulk); from then on it is checked, restarted when its unit file changes and rolled back like the rest.
 BULK_TUNNEL=0
 systemctl --user is-enabled --quiet acw-tunnel-bulk.service 2>/dev/null && BULK_TUNNEL=1
 [ "$BULK_TUNNEL" = 1 ] && UNITS="$UNITS acw-tunnel-bulk.service"
-# The same for the live tunnel (port 18795, docs/operations.md, "Live process"). Until it is enabled, live sessions
-# reach the main web process (acw-web serves the WebSocket too), so restarting that one still cuts them.
-LIVE_TUNNEL=0
-systemctl --user is-enabled --quiet acw-tunnel-live.service 2>/dev/null && LIVE_TUNNEL=1
-[ "$LIVE_TUNNEL" = 1 ] && UNITS="$UNITS acw-tunnel-live.service"
 for i in $(seq 1 "$WORKERS"); do UNITS="$UNITS acw-worker@$i.service"; done
 [ "$GPU" = 1 ] && UNITS="$UNITS acw-worker-gpu.service"
 
@@ -158,7 +153,6 @@ for f in "$REPO"/deploy/systemd/acw-*.service; do
       acw-alert@.service) ;;  # started on demand
       acw-mirror.service) ;;  # run by its timer (a restart would start a download here and now)
       acw-tunnel-bulk.service) [ "$BULK_TUNNEL" = 1 ] && add_restart "$name" ;;  # only once the VPS allows its port
-      acw-tunnel-live.service) [ "$LIVE_TUNNEL" = 1 ] && add_restart "$name" ;;
       *) add_restart "$name" ;;
     esac
   fi
@@ -175,19 +169,13 @@ else
   echo "--no-restart: nothing is restarted"
 fi
 
-# ---- 3. Live sessions: a live, stream or live-tunnel restart cuts all of them, and so does a web or main-tunnel restart
-# while live still goes through those (a bulk restart only ends uploads/downloads)
+# ---- 3. Live sessions: a live, stream or live-tunnel restart cuts all of them (a web or bulk restart does not)
 DRAINING=0
 cleanup() { [ "$DRAINING" = 1 ] && drain_off; true; }
 trap cleanup EXIT
 if [ "$RESTART" = 1 ]; then
   cuts_live=0
-  for u in ${RESTART_UNITS[@]+"${RESTART_UNITS[@]}"}; do
-    case "$u" in
-      acw-live.service|acw-stream.service|acw-tunnel-live.service) cuts_live=1 ;;
-      acw-web.service|acw-tunnel.service) [ "$LIVE_TUNNEL" = 1 ] || cuts_live=1 ;;
-    esac
-  done
+  for u in ${RESTART_UNITS[@]+"${RESTART_UNITS[@]}"}; do case "$u" in acw-live.service|acw-stream.service|acw-tunnel-live.service) cuts_live=1 ;; esac; done
   LIVE="$(live_sessions)"
   if [ "$cuts_live" = 1 ] && [ "$LIVE" != "0" ]; then
     if [ -n "$WAIT_LIVE" ]; then
@@ -287,9 +275,6 @@ systemctl --user enable --now acw-monitor.timer >/dev/null 2>&1
 # Release mirror: copies, checks and publishes the newest OBS plugin release every 10 minutes (the first run starts a
 # minute after the timer).
 systemctl --user enable --now acw-mirror.timer >/dev/null 2>&1
-if [ "$LIVE_TUNNEL" = 0 ]; then
-  echo "note: acw-tunnel-live (live sessions on their own process and SSH connection) is installed but not enabled: after the VPS key allows port 18795 and the VPS route is updated, run 'systemctl --user enable --now acw-tunnel-live' (docs/operations.md, Live process)" >&2
-fi
 if [ "$BULK_TUNNEL" = 0 ]; then
   echo "note: acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'systemctl --user enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)" >&2
 fi
@@ -311,7 +296,7 @@ if [ "$RESTART" = 1 ]; then
   for u in $UNITS; do
     systemctl --user is-active --quiet "$u" || add_restart "$u"
   done
-  # The live worker first: the web and live processes connect to it.
+  # The live worker first: the live process connects to it.
   ordered=()
   for u in ${RESTART_UNITS[@]+"${RESTART_UNITS[@]}"}; do [ "$u" = acw-stream.service ] && ordered+=("$u"); done
   for u in ${RESTART_UNITS[@]+"${RESTART_UNITS[@]}"}; do [ "$u" != acw-stream.service ] && ordered+=("$u"); done

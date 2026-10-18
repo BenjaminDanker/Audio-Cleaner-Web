@@ -21,7 +21,6 @@ from . import translate
 from .asr import openai_asr
 from .billing import ledger, stripe_service
 from .config import get_settings
-from .stream import routes as stream_routes
 
 log = logging.getLogger("acw")
 
@@ -142,8 +141,7 @@ def _housekeeping() -> None:
             " WHERE status = 'cloud_asr' AND stage IN ('Transcribing', 'Translating') AND heartbeat_at < ?",
             (db.now() - 600,),
         ),
-        ledger.reap_stale_holds,  # money reserved by things that are over
-        stream_routes.close_orphans,  # live sessions nothing is running any more
+        ledger.reap_stale_holds,  # money reserved by things that are over (live sessions: the live process, acw.live_app)
         retention.sweep,  # privacy retention (docs/operations.md)
         # Expired outputs, abandoned uploads, orphan directories, jobs whose worker died. The workers also call it, but
         # only between jobs: while every worker is busy with a long file nothing else would run it. Safe to run from
@@ -186,13 +184,11 @@ async def lifespan(app: FastAPI):
         log.exception("alert start-up check failed")
     # Job callbacks (docs/api.md) go out from this process only: the workers and the bulk process have no network.
     tasks = [asyncio.create_task(_cloud_asr_loop()), asyncio.create_task(_housekeeping_loop()), asyncio.create_task(webhooks.run_loop())]
-    await stream_routes.startup()
     try:
         yield
     finally:
         for t in tasks:
             t.cancel()
-        await stream_routes.shutdown()
         try:
             alerts.web_stopping()  # clean-stop marker: its absence at next start means a crash
         except Exception:  # noqa: BLE001
@@ -232,7 +228,6 @@ def create_app() -> FastAPI:
         downloads_routes.router,
         jobs_routes.router,
         keys_routes.router,
-        stream_routes.router,
     ):
         app.include_router(r)
 

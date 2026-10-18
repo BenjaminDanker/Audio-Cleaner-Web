@@ -75,7 +75,6 @@ TRIAL_LOW_WARN_SECONDS = 300
 TRIAL_BUSY_MESSAGE = "Free trial sessions are paused while live is busy. Try again in a few minutes, or add credit to go live now."
 TRIAL_ONE_AT_A_TIME_MESSAGE = "Your free trial covers one live session at a time. Stop the other one first, or add credit to run both."
 
-_role = "web"  # which process this is: "live" (acw.live_app), or the main web process standing in for it (set_role)
 _live: dict[str, int] = {}  # user_id -> active sessions in this process
 _live_ip: dict[str, int] = {}  # client address -> active sessions in this process
 _live_ids: set[str] = set()  # ids of the sessions this process is running (the rest "active" in the database are orphans)
@@ -89,13 +88,7 @@ def _session_cores(sess: "Session", delta: int) -> None:
         _busy_cores[c] = max(0, _busy_cores.get(c, 0) + delta)
     after = {c for c, n in _busy_cores.items() if n > 0}
     if after != before:
-        broker.publish_live_cores(after, role=_role)
-
-
-def set_role(role: str) -> None:
-    """Called once by the app that serves live sessions (before startup)."""
-    global _role
-    _role = role
+        broker.publish_live_cores(after)
 
 
 def drain_requested() -> bool:
@@ -107,22 +100,21 @@ async def startup() -> None:
     global _lag_task
     if _lag_task is None or _lag_task.done():
         _lag_task = asyncio.get_running_loop().create_task(_lag.run())
-    broker.publish_live_cores([], role=_role)
+    broker.publish_live_cores([])
     # Sessions left "active" by a previous run of this process never reached _finish.
     await asyncio.to_thread(close_orphans, 0, "server_restart")
 
 
 def close_orphans(min_age: int = 120, reason: str = "session_lost") -> int:
-    """Bill the time that was saved (at most PERSIST_EVERY seconds behind) and close "active" sessions of this
-    process (owner) that no live handler in it runs: left by a restart, or by a handler that died without finishing.
-    Sessions of the other process are its own business; the main web process also takes those from before the
-    owner was recorded. Sessions started less than `min_age` seconds ago are left alone (their handler may still be
-    setting up)."""
+    """Bill the time that was saved (at most PERSIST_EVERY seconds behind) and close "active" sessions that
+    no live handler in this process (the live process, acw.live_app: the only one that runs live sessions) owns: left
+    by a restart, or by a handler that died without finishing. Sessions started less than `min_age` seconds ago are
+    left alone (their handler may still be setting up)."""
     n = 0
     for row in db.all_rows(
         "SELECT id, hold_id, meter_closed, meter_rate, meter_seconds, paid_seconds FROM stream_sessions"
-        " WHERE status = 'active' AND started_at <= ? AND (owner = ? OR (owner IS NULL AND ? = 'web'))",
-        (db.now() - min_age, _role, _role),
+        " WHERE status = 'active' AND started_at <= ?",
+        (db.now() - min_age,),
     ):
         if row["id"] in _live_ids:
             continue
@@ -634,9 +626,9 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         await asyncio.to_thread(
             db.execute,
             "INSERT INTO stream_sessions(id, user_id, api_key_id, denoise_tier, caption_tier, status, hold_id, client_ip, started_at,"
-            " meter_rate, owner) VALUES (?,?,?,?,?, 'active', ?,?,?,?,?)",
+            " meter_rate) VALUES (?,?,?,?,?, 'active', ?,?,?,?)",
             (sess.id, principal.user_id, principal.api_key_id, features.denoise, features.captions, sess.hold_id, ip[:64],
-             db.now(), sess.current_rate(), _role),
+             db.now(), sess.current_rate()),
         )
         try:
             worker_cfg = features.worker(sess.trial)

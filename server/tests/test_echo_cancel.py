@@ -73,7 +73,7 @@ def live(engine, monkeypatch):
     return engine
 
 
-def stream(client, mic, far, start, codec=P.CODEC_S16, send_reference="before"):
+def stream(client, live_client, mic, far, start, codec=P.CODEC_S16, send_reference="before"):
     """Sends mic (and far as the reference, before or after its mic frame, or not at all) frame by frame; returns (ready message, processed audio)."""
     uid, _ = login(client)
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
@@ -90,7 +90,7 @@ def stream(client, mic, far, start, codec=P.CODEC_S16, send_reference="before"):
         body = coder.encode(x) if coder else (x * 32767).astype("<i2").tobytes()
         return P.HEADER.pack(P.VERSION, codec, flags, seq, seq * 20_000) + body
 
-    with client.websocket_connect("/api/stream/ws", headers={"Authorization": f"Bearer {key}"}) as ws:
+    with live_client.websocket_connect("/api/stream/ws", headers={"Authorization": f"Bearer {key}"}) as ws:
         ws.send_json({"type": "start", "version": 1, "denoise": None, "captions": "local", "sampleRate": SAMPLE_RATE, **start})
         ready = ws.receive_json()
         assert ready["type"] == "ready", ready
@@ -117,9 +117,9 @@ def stream(client, mic, far, start, codec=P.CODEC_S16, send_reference="before"):
 
 
 @pytest.mark.parametrize("codec", [P.CODEC_S16, P.CODEC_OPUS])
-def test_reference_removes_the_echo_and_keeps_the_voice(live, client, codec):
+def test_reference_removes_the_echo_and_keeps_the_voice(live, client, live_client, codec):
     mic, far = room()
-    ready, y = stream(client, mic, far, {"echoReference": True, "captions": "local", "language": "en"}, codec)
+    ready, y = stream(client, live_client, mic, far, {"echoReference": True, "captions": "local", "language": "en"}, codec)
     assert ready["echoReference"] is True
     assert ready["modelLatencyMs"] == 39.0  # the same in every session: the model's 30 ms and the canceller's 9
     n = SAMPLE_RATE
@@ -129,15 +129,15 @@ def test_reference_removes_the_echo_and_keeps_the_voice(live, client, codec):
     assert 0.8 < rms(y[voice]) / rms(mic[voice]) < 1.2  # the near-end voice is left alone
 
 
-def test_a_session_that_never_asked_for_a_reference_passes_audio_unchanged_and_ignores_reference_frames(live, client):
+def test_a_session_that_never_asked_for_a_reference_passes_audio_unchanged_and_ignores_reference_frames(live, client, live_client):
     mic, far = room(3)
-    ready, y = stream(client, mic, far, {}, send_reference="before")
+    ready, y = stream(client, live_client, mic, far, {}, send_reference="before")
     assert "echoReference" not in ready and ready["modelLatencyMs"] == 39.0
     d = 1872  # the session's delay: nothing runs, the audio only waits
     assert np.max(np.abs(y[d:] - mic[:-d])) < 1e-3
 
 
-def test_a_late_reference_counts_as_silence(live, client):
+def test_a_late_reference_counts_as_silence(live, client, live_client):
     mic, far = room(3)
-    _, y = stream(client, mic, far, {"echoReference": True}, send_reference="after")
+    _, y = stream(client, live_client, mic, far, {"echoReference": True}, send_reference="after")
     assert len(y) == len(mic) and 0.9 < rms(y) / rms(mic) < 1.1  # nothing to cancel against, one frame back each

@@ -302,12 +302,12 @@ def test_the_billing_tick_warns_then_stops_a_capped_session():
     assert sent[-1] == {"type": "stopped", "reason": "key_spending_cap"} and sess.end_reason == "key_spending_cap"
 
 
-def test_starting_live_with_a_capped_key_says_why_and_a_roomier_cap_starts(client, signed_in, fake_worker):  # noqa: F811
+def test_starting_live_with_a_capped_key_says_why_and_a_roomier_cap_starts(client, live_client, signed_in, fake_worker):  # noqa: F811
     uid, _ = signed_in
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     kh = key_headers(uid, "stream", monthly_cap_micros=10_000)  # less than the five minutes live reserves
     client.cookies.clear()
-    with client.websocket_connect("/api/stream/ws", headers=kh) as ws:
+    with live_client.websocket_connect("/api/stream/ws", headers=kh) as ws:
         ws.send_text(json.dumps({"type": "start", "denoise": "light", "sampleRate": 48000}))
         err = ws.receive_json()
         assert err["type"] == "error" and err["code"] == "key_spending_cap" and "monthly spending limit" in err["message"]
@@ -315,7 +315,7 @@ def test_starting_live_with_a_capped_key_says_why_and_a_roomier_cap_starts(clien
             ws.receive_json()
     assert count("stream_sessions") == 0 and ledger.balance(uid)["held_micros"] == 0
     db.execute("UPDATE api_keys SET monthly_cap_micros = 1000000")
-    with client.websocket_connect("/api/stream/ws", headers=kh) as ws:
+    with live_client.websocket_connect("/api/stream/ws", headers=kh) as ws:
         ws.send_text(json.dumps({"type": "start", "denoise": "light", "sampleRate": 48000}))
         assert ws.receive_json()["type"] == "ready"
         ws.send_text(json.dumps({"type": "stop"}))

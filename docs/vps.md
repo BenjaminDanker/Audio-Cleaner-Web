@@ -11,8 +11,8 @@ for Audio Cleaner:
 2. **Forwards** `/audio/api/*` (and the live WebSocket) to the home server
    through SSH reverse tunnels that primary-ram opens:
    VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), for the live WebSocket
-   VPS `127.0.0.1:18795` → primary-ram `127.0.0.1:8795` (`acw-tunnel-live`, its own connection and process, falling
-   back to 18790: docs/operations.md, "Live process"), and for job uploads and result downloads
+   VPS `127.0.0.1:18795` → primary-ram `127.0.0.1:8795` (`acw-tunnel-live`, its own connection and process:
+   docs/operations.md, "Live process"), and for job uploads and result downloads
    VPS `127.0.0.1:18794` → primary-ram `127.0.0.1:8794` (`acw-tunnel-bulk` unit, its own connection and process so
    big transfers do not delay live audio; Caddy falls back to 18790 when it is down: docs/operations.md, "Bulk transfers").
    Compression: Caddy compresses (zstd, gzip) only the small JSON answers of the API; the live WebSocket, uploads and

@@ -1,7 +1,7 @@
     # ---- Audio Cleaner (/audio) --------------------------------------------
     # API: SSH reverse tunnel from primary-ram (127.0.0.1:18790).
-    # The live WebSocket: its own tunnel and process (127.0.0.1:18795 -> acw-live), so API traffic never makes live audio
-    # late; if that upstream is down it falls back to 18790 (the main process serves it too).
+    # The live WebSocket: its own tunnel and process (127.0.0.1:18795 -> acw-live, the only process that runs live), so
+    # API traffic never makes live audio late.
     # Uploads, result downloads and release downloads (/audio/api/downloads/): their own tunnel and process (127.0.0.1:18794 -> acw-bulk), so a big transfer
     # never queues in front of live audio; if that upstream is down they fall back to 18790 (the main process
     # serves the same routes). Before using this file, the key must be allowed to listen on 18794 and 18795
@@ -72,14 +72,7 @@
             request_body {
                 max_size 64KB
             }
-            reverse_proxy 127.0.0.1:18795 127.0.0.1:18790 {
-                lb_policy first
-                lb_try_duration 3s
-                lb_try_interval 250ms
-                fail_duration 30s
-                health_uri /audio/api/health
-                health_interval 10s
-                health_timeout 3s
+            reverse_proxy 127.0.0.1:18795 {
                 header_up -X-Real-IP
                 flush_interval -1
                 transport http {
