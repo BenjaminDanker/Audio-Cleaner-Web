@@ -25,6 +25,6 @@ for fc in (1200, 2000, 3000):
 for fc in (3400, 4000, 5500, 7000, 9500):
     a, n = rate(lambda r: r['cat']=='bandlimit' and r['cut']==fc, lambda x: x['restoreHighs']); b, _ = rate(lambda r: r['cat']=='bandlimit' and r['cut']==fc, lambda x: x['noise']=='polish')
     py = collections.Counter(str(bwe.pick_model(r['bandwidthHz'])) for r in rows if r['cat']=='bandlimit' and r['cut']==fc)
-    print(f'band-limited at {fc} Hz: phone-like (restore highs, Clean & polish) {a}/{n}; server generator {dict(py)}')
+    print(f'band-limited at {fc} Hz: phone-like (restore highs, Denoising) {a}/{n}; server generator {dict(py)}')
 for tag in ('amr', 'g722', 'mp3_32', 'opus_12'):
     a, n = rate(lambda r: r['cat']=='codec' and r['tag']==tag, lambda x: x['restoreHighs']); print(f'codec {tag}: phone-like {a}/{n}')

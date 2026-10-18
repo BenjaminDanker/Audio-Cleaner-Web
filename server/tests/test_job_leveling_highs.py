@@ -28,12 +28,6 @@ def test_both_default_on_and_only_booleans_are_taken():
                 _opts(**{key: value})
 
 
-def test_the_old_polish_name_is_leveling_and_leveling_wins_when_both_are_sent():
-    assert _opts(polish=False)["leveling"] is False  # clients from before 2026-10-17
-    assert _opts(polish=False, leveling=True)["leveling"] is True
-    assert _opts(polish=True, leveling=False)["leveling"] is False
-
-
 def create(client, h, **options):
     return client.post("/api/jobs", json={
         "kind": "denoise", "denoiseTier": "standard", "filename": "rec.wav", "sizeBytes": 1000, "durationSeconds": 14,
@@ -94,12 +88,12 @@ def test_the_worker_passes_both_options_on(client, signed_in, tmp_path):
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     data = _phone_call(tmp_path)
-    job, polished = _run(client, h, data)  # both on
+    job, leveled = _run(client, h, data)  # both on
     assert "high frequencies were restored" in (job["notice"] or "")
     job, as_is = _run(client, h, data, leveling=False, restore_highs=False)  # both off
     assert job["notice"] is None  # no highs restored
     # the leveling step pulls the voice to the loudness target; without it the level stays where the noise remover left it
-    assert abs(_level_db(polished, tmp_path) - _level_db(as_is, tmp_path)) > 1.0
+    assert abs(_level_db(leveled, tmp_path) - _level_db(as_is, tmp_path)) > 1.0
 
 
 # ---------------------------------------------------------------- Leveling on its own (noise tier "off")
