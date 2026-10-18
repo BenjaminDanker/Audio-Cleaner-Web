@@ -115,6 +115,7 @@ const startFree = async (p, file) => {
   await p.getByTestId('start').waitFor({ timeout: 20000 });
   await settleRecommendation(p);
   await pick(p, 'noise', 'browser');
+  await pick(p, 'subs', 'off'); // Standard subtitles (paid) are on from the start
   await p.getByRole('button', { name: 'Start – free' }).click();
 };
 const keptFiles = (p) => p.evaluate(async () => (await (await caches.open('acw-models')).keys()).map((r) => r.url.split('/').pop()));
@@ -168,6 +169,7 @@ await check('free: when the browser asks to save data, nothing is downloaded bef
     await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
     await p.getByTestId('start').waitFor({ timeout: 20000 });
     await pick(p, 'noise', 'browser');
+    await pick(p, 'subs', 'off');
     await p.waitForTimeout(2000);
     if (site.length || Object.keys(models.hits).length) throw new Error(`downloaded before Start: ${site.join(', ')} ${Object.keys(models.hits)}`);
     await p.getByRole('button', { name: 'Start – free' }).click();

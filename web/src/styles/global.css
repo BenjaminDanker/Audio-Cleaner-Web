@@ -489,8 +489,7 @@ pre.code code { background: none; padding: 0; font-size: inherit; overflow-wrap:
   .dev-table td[data-label]::before { content: attr(data-label) ": "; color: var(--muted); font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
 }
 
-/* "Recommended for this file / for your room" */
-.reco { border-left: 3px solid var(--brand); background: var(--brand-soft); border-radius: 0 10px 10px 0; padding: 10px 14px; display: grid; gap: 6px; }
+/* The "Automatic best settings" switch */
 .switch { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; }
 .switch input { appearance: none; flex: none; width: 36px; height: 20px; border-radius: 999px; background: var(--border); position: relative; margin: 2px 0 0; cursor: pointer; transition: background 0.15s; }
 .switch input::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform 0.15s; }
@@ -498,4 +497,42 @@ pre.code code { background: none; padding: 0; font-size: inherit; overflow-wrap:
 .switch input:checked::after { transform: translateX(16px); }
 .switch input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reco-why { margin: 0; padding-left: 1.1em; display: grid; gap: 2px; }
-.reco-badge { font-style: normal; font-weight: 600; font-size: 0.72rem; color: var(--brand); border: 1px solid currentColor; border-radius: 999px; padding: 0 7px; margin-bottom: 4px; align-self: flex-start; white-space: nowrap; }
+
+/* ---------- The Cleanup form after a file is chosen: one column, one step after another ---------- */
+.job-form { gap: 0; }
+.job-form > * + * { margin-top: 16px; }
+.job-form .step { padding-top: 22px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 12px; }
+.job-form > .step { margin-top: 22px; }
+.job-form .step-h { margin: 0; font-size: 1.08rem; line-height: 1.3; }
+.job-form .step-lead { margin: -6px 0 0; }
+.job-form .step-sub { display: flex; flex-direction: column; gap: 16px; padding: 4px 0 4px 16px; border-left: 3px solid var(--border); }
+.job-form .step-sub > .field > label, .job-form .step-sub > .field > .label, .job-form .step-sub legend.label { font-weight: 600; font-size: 0.93rem; }
+.job-form .hint { font-size: 0.86rem; line-height: 1.45; }
+.job-form .hint.good-to-know { border-left-width: 2px; }
+.job-form .step-sub .good-to-know { padding-left: 0; border-left: 0; }
+.job-form .choice-cards { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.job-form .choice > span { flex-direction: column; gap: 2px; padding: 11px 14px 11px 44px; position: relative; border-radius: 10px; }
+.job-form .choice > span::before { content: ''; position: absolute; left: 14px; top: 14px; width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--muted); background: var(--surface); }
+.job-form .choice input:checked + span::before { border-color: var(--brand); background: radial-gradient(circle, var(--brand) 0 4.5px, var(--surface) 5.5px); }
+.job-form .choice input:disabled + span::before { border-style: dashed; opacity: 0.6; }
+.job-form .choice > span b { font-size: 0.97rem; }
+.job-form .check { gap: 12px; }
+.job-form .check > span > b { font-weight: 600; font-size: 0.97rem; display: block; }
+.job-form .check .hint.block { margin-top: 2px; }
+.job-form .checks .check > span { font-weight: 600; }
+.job-form .sel-row { display: grid; gap: 8px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
+.job-form .namefmt { max-width: none; }
+.job-form .step-end { gap: 12px; }
+.job-form .step-end .btn-lg { width: auto; }
+.auto-bar { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.auto-bar .switch b { font-size: 1rem; }
+.auto-line { margin: 0; padding-left: 46px; font-size: 0.9rem; line-height: 1.5; display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
+.auto-line .btn { flex: none; margin: -4px 0; }
+.auto-why { padding-left: 46px; font-size: 0.9rem; }
+.auto-why summary { cursor: pointer; color: var(--link); width: fit-content; }
+.auto-why .reco-why { margin-top: 6px; }
+@media (max-width: 560px) {
+  .job-form .step-sub { padding-left: 12px; }
+  .auto-line, .auto-why { padding-left: 0; }
+  .job-form .step-end .btn-lg { width: 100%; }
+}

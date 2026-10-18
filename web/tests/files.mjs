@@ -270,7 +270,7 @@ const jobOutputHash = (id) => page.evaluate(async (id) => {
 /** Uploads the raw file through the API, bypassing the browser's FLAC step (the reference for "same result as before"); no audio_format, so it is the API default. */
 const rawJob = async (file) => {
   const bytes = readFileSync(file);
-  const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options: { loudness_lufs: -16, atten_lim_db: 100, caption_formats: [] } });
+  const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options: { loudness_lufs: -14, atten_lim_db: 100, caption_formats: [] } });
   if (made.status !== 200) throw new Error('raw create: ' + JSON.stringify(made));
   const put = await page.evaluate(async ({ url, b64 }) => {
     const me = await (await fetch('/api/me')).json();

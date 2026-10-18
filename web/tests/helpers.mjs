@@ -81,13 +81,13 @@ export async function waitResult(page, testid, timeout = 300000) {
 export async function pick(page, group, value) {
   await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
 }
-/** The quick listen that picks the recommended choices ("Recommended for this file") is over. */
+/** The quick listen that sets the best choices ("Automatic best settings") is over. */
 export async function settleRecommendation(page) {
   await page.waitForFunction(() => !document.querySelector('[data-testid=reco-listening]'), null, { timeout: 30000 });
 }
 /**
- * Puts the options back to what they were before files were measured: the free in-browser cleanup when the browser can do it (else
- * Denoising), Maximum strength, no rebuild. The checks that are about something else than the recommendation start from there.
+ * Puts the options back to what they were before the paid defaults: the free in-browser cleanup when the browser can do it (else
+ * Denoising), Maximum strength, no rebuild, subtitles Off. The checks that are about something else than the automatic settings start from there.
  */
 export async function restoreOldDefaults(page) {
   const card = (v) => page.locator(`label.choice:has(input[name=noise][value=${v}]):not(.is-disabled)`);
@@ -97,6 +97,8 @@ export async function restoreOldDefaults(page) {
   if ((await max.count()) && !(await max.isChecked())) await page.locator(`label:has(input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max])`).click();
   const rebuild = page.locator('input[name=rebuild]');
   if ((await rebuild.count()) && (await rebuild.isChecked())) await rebuild.uncheck();
+  // the subtitles start out Off, as before the paid defaults
+  if (!(await page.locator('input[name=subs][value=off]').isChecked())) await page.locator('label.choice:has(input[name=subs][value=off])').click();
 }
 /**
  * Drop a file on the Cleanup page and wait until it has been looked at (the Start button shows up and the recommendation is in).

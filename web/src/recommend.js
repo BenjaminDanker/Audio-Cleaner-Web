@@ -56,14 +56,14 @@ function noiseVerdict(stats) {
  * @param {object} stats Analyser.result()
  * @param {{language?: string}} ctx language: what is picked for the subtitles ('' = detect automatically)
  * @returns {null | {
- *   noise: 'off'|'browser'|'denoise', strength: string, heavy: boolean, restoreHighs: boolean, rebuild: boolean,
+ *   noise: 'off'|'browser'|'denoise', strength: string, heavy: boolean, restoreHighs: boolean, rebuild: boolean, leveling: boolean,
  *   subs: 'standard'|'accurate'|null, nothing: boolean, noSpeech: boolean, reasons: string[], line: string }}
  */
 export function recommendForFile(stats, ctx = {}) {
   if (!stats || !(stats.seconds >= 2) || stats.noiseDb == null) return null;
   if (!stats.hasSpeech) {
     return {
-      noise: 'off', strength: 'balanced', heavy: false, restoreHighs: false, rebuild: false, subs: null, nothing: true, noSpeech: true,
+      noise: 'off', strength: 'balanced', heavy: false, restoreHighs: false, rebuild: false, leveling: false, subs: null, nothing: true, noSpeech: true,
       reasons: ['We could hardly hear anyone speaking in this file, so there is nothing to clean up or write down.'],
       line: 'nothing needed, we could hardly hear anyone speaking',
     };
@@ -103,16 +103,19 @@ export function recommendForFile(stats, ctx = {}) {
   else reasons.push('For subtitles, Standard is plenty: the speech is clear.');
 
   const nothing = noise === 'off' && !rebuild && !phone && !quiet;
+  // Leveling is done on our side, next to Denoising or on its own: it is set where the sound needs it (and with Denoising, where it is cheap).
+  const leveling = noise === 'denoise' || (noise === 'off' && (quiet || loud));
   const bits = [];
   if (nothing) bits.push('nothing needed');
   else {
     if (noise === 'off') bits.push('no noise removal');
-    else bits.push(`${noise === 'browser' ? 'free cleanup in your browser' : 'Denoising'}, ${strengthName(strength)}`);
+    else bits.push(`${noise === 'browser' ? 'free cleanup in your browser' : 'Denoising'} (${strengthName(strength)})`);
     if (rebuild) bits.push('rebuild the voice');
     else if (phone) bits.push('restore the highs');
   }
-  bits.push(`${subs === 'accurate' ? 'Extra accurate' : 'Standard'} subtitles if you want them`);
-  return { noise, strength, heavy: v.heavy && !v.clean, restoreHighs: phone, rebuild, subs, nothing, noSpeech: false, reasons, line: bits.join('; ') };
+  if (leveling) bits.push('leveling');
+  bits.push(`${subs === 'accurate' ? 'Extra accurate' : 'Standard'} subtitles`);
+  return { noise, strength, heavy: v.heavy && !v.clean, restoreHighs: phone, rebuild, leveling, subs, nothing, noSpeech: false, reasons, line: bits.join(', ') };
 }
 
 /**

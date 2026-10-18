@@ -16,7 +16,6 @@ import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
 import SubtitlesResult, { SubtitlesProgress, subtitleFiles } from './SubtitlesResult.jsx';
 import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
-import Recommended from './Recommended.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
 import { strengthDb } from '../strengths.js';
 import { recommendForFile } from '../recommend.js';
@@ -86,12 +85,33 @@ function browserVerdict(info) {
   return { ok: true, why: '' };
 }
 
-/** One radio card. A card that can't be used stays visible, greyed out, with the reason where its hint would be. */
-function Choice({ name, value, current, onPick, disabled, title, hint, reason, recommended }) {
+/** One radio row of a list. A row that can't be used stays visible, greyed out, with the reason where its hint would be. */
+function Choice({ name, value, current, onPick, disabled, title, hint, reason }) {
   return (
     <label className={`choice${disabled ? ' is-disabled' : ''}`}>
       <input type="radio" name={name} value={value} checked={current === value} onChange={() => onPick(value)} disabled={disabled} />
-      <span>{recommended && !disabled && <em className="reco-badge" data-testid={`reco-${name}-${value}`}>Recommended</em>}<b>{title}</b><small>{disabled && reason ? reason : hint}</small></span>
+      <span><b>{title}</b><small>{disabled && reason ? reason : hint}</small></span>
+    </label>
+  );
+}
+
+/** One step of the form: a title (and a line under it), then what belongs to it. */
+function Step({ title, lead, children, testId }) {
+  return (
+    <section className="step" aria-label={title} data-testid={testId}>
+      <h3 className="step-h">{title}</h3>
+      {lead && <p className="hint step-lead">{lead}</p>}
+      {children}
+    </section>
+  );
+}
+
+/** A tick box with its explanation under it (every on/off choice looks like this). */
+function Toggle({ name, checked, onChange, disabled, title, hint, hintId, muted }) {
+  return (
+    <label className={`check${muted ? ' muted' : ''}`}>
+      <input type="checkbox" name={name} checked={checked} onChange={onChange} disabled={disabled} />
+      <span><b>{title}</b>{hint && <span className="hint block" data-testid={hintId}>{hint}</span>}</span>
     </label>
   );
 }
@@ -112,15 +132,14 @@ export default function JobForm({ onSubmitted }) {
   const [file, setFile] = useState(null);
   const [info, setInfo] = useState(null);
   const [probing, setProbing] = useState(false);
-  const [noise, setNoise] = useState('off'); // 'off' | 'browser' | 'denoise'
-  const [subs, setSubs] = useState('off'); // 'off' | 'browser' | 'standard' | 'accurate'
+  const [noise, setNoise] = useState('denoise'); // 'off' | 'browser' | 'denoise'
+  const [subs, setSubs] = useState('standard'); // 'off' | 'browser' | 'standard' | 'accurate'
   const [keepVideo, setKeepVideo] = useState(true);
   const [embed, setEmbed] = useState(false);
   const [echo, setEcho] = useState(false); // Denoising: remove speaker echo using the second audio track
-  const [loudness, setLoudness] = useState('-16');
+  const [loudness, setLoudness] = useState('-14'); // the YouTube target
   const [noiseKind, setNoiseKind] = useState('auto');
-  const [leveling, setLeveling] = useState(true); // Leveling with Denoising or Voice rebuild: even out the voice, set the loudness
-  const [levelingAlone, setLevelingAlone] = useState(false); // Leveling on its own, with noise removal Off (paid)
+  const [leveling, setLeveling] = useState(true); // Leveling (paid, on our side): even out the voice, set the loudness. With noise removal Off it runs on its own.
   const [restoreHighs, setRestoreHighs] = useState(true); // Denoising: bring back the highs of dull phone-quality recordings
   const [rebuild, setRebuild] = useState(false); // Voice rebuild (its own price)
   const [strength, setStrength] = useState('max'); // Denoising
@@ -143,13 +162,17 @@ export default function JobForm({ onSubmitted }) {
   const [auto, setAuto] = useState(storedAuto); // "Automatic best settings": listen to the file and pick the settings for it
   const autoRef = useRef(auto);
   autoRef.current = auto;
-  const touched = useRef(false); // the person changed one of the recommended settings themselves: later findings leave them alone
-  const [custom, setCustom] = useState(false); // ... the same, for showing the button that goes back to the recommendation
+  const manual = useRef(new Set()); // the settings the person changed themselves: what the quick listen finds leaves them alone
+  const [custom, setCustom] = useState(false); // ... the same, for showing the line that goes back to the automatic choices
+  const [applied, setApplied] = useState(false); // the automatic choices were set for this file
+  const appliedRef = useRef(false);
+  const undoTo = useRef(null); // the choices from before they were set automatically
+  const now = useRef({}); // the current choices, for the listen that finishes later
   const rebuildOk = useRef(false); // is the rebuild offered (the price list has it)?
   const listen = useRef(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'denoise' || (noise === 'off' && levelingAlone) });
+  const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'denoise' || (noise === 'off' && leveling) });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
   const jobLocal = useRef(null); // {out, entry} of the job just started, so the sound cleaned here can join its subtitles
@@ -167,7 +190,7 @@ export default function JobForm({ onSubmitted }) {
   const sVerdict = info ? subsVerdict(info) : null;
   const wantsBrowser = noise === 'browser';
   const wantsDenoise = noise === 'denoise'; // Denoising (or Voice rebuild) on our side
-  const levelingOnly = noise === 'off' && levelingAlone && info?.hasAudio !== false; // Leveling on its own, on our side
+  const levelingOnly = noise === 'off' && leveling && info?.hasAudio !== false; // Leveling on its own, on our side
   const serverClean = wantsDenoise || levelingOnly; // a cleaned file comes from our side
   const wantsText = subs !== 'off'; // any subtitles: the language, formats and "into the video" choices apply
   const localSubs = subs === 'browser'; // made here, free
@@ -201,13 +224,13 @@ export default function JobForm({ onSubmitted }) {
   const rebuildRate = pricing?.rebuildAvailable ? rebuildOffered : null; // paused while its machine is unavailable
   const denoiseTier = levelingOnly ? 'off' : rebuild && rebuildRate ? 'rebuild' : 'standard';
   const levelingRate = findRate(pricing, 'leveling', 'standard');
-  const withLeveling = serverClean && (levelingOnly || leveling); // Leveling is charged on its own line
+  const withLeveling = serverClean && leveling; // Leveling is charged on its own line
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
   const fileReco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
-  const reco = auto ? fileReco : null; // shown and marked only with "Automatic best settings" on
+  const reco = auto ? fileReco : null; // used only with "Automatic best settings" on
   rebuildOk.current = !!rebuildRate;
-  const recNoise = reco ? (reco.noise === 'browser' && verdict && !verdict.ok ? 'denoise' : reco.noise) : null;
+  now.current = { noise, strength, localStrength, rebuild, restoreHighs, leveling, subs, noiseKind };
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -249,24 +272,35 @@ export default function JobForm({ onSubmitted }) {
     setEmbed(false);
     setEcho(false);
     setKeepVideo(true);
-    setSubs('off');
-    setNoise('off');
+    // every file starts from the usual choices: Denoising, Standard subtitles, Leveling, no rebuild
+    setSubs('standard');
+    setNoise('denoise');
+    setStrength('max');
+    setLocalStrength('max');
+    setRebuild(false);
+    setRestoreHighs(true);
+    setLeveling(true);
+    setNoiseKind('auto');
     setStats(null);
     setListening(false);
-    touched.current = false;
+    manual.current = new Set();
+    appliedRef.current = false;
+    undoTo.current = null;
+    setApplied(false);
     setCustom(false);
     listen.current?.abort();
     setProbing(true);
     const i = await probeMedia(f);
-    // The best choice that works for this file; a paid one is never switched on without the price being right there.
+    // Denoising and Standard subtitles are the usual start, with the price right there; a file with no sound has nothing to do.
     const canBrowser = browserVerdict(i).ok;
-    setNoise(canBrowser ? 'browser' : i.hasAudio === false ? 'off' : 'denoise');
+    if (i.hasAudio === false) {
+      setNoise('off');
+      setSubs('off');
+    }
     setInfo(i);
     setProbing(false);
-    // The noise remover is only fetched once it is clear that this file wants it (the quick listen below says), or when it can't be told.
     // The quick listen needs the noise remover too, so a browser that asks to save data skips it: nothing is downloaded before Start.
     if (i.hasAudio !== false && autoRef.current && !navigator.connection?.saveData) listenTo(f, i, canBrowser);
-    else if (canBrowser) warmUpDenoiser();
   }
 
   /** A quick listen to the file (about a minute of it, spread over the whole), so the settings can start out right. */
@@ -279,34 +313,46 @@ export default function JobForm({ onSubmitted }) {
       if (ctl.signal.aborted) return;
       setStats(found);
       const r = found ? recommendForFile(found, { language: '' }) : null;
-      if (r && !touched.current && autoRef.current) applyReco(r, i);
-      else if (!r && canBrowser && !touched.current) warmUpDenoiser();
+      if (r && autoRef.current) applyReco(r, i);
+      else if (!r && canBrowser) warmUpDenoiser();
     } catch {
       /* canceled, or unreadable: the form just keeps its usual starting choices */
-      if (canBrowser && !ctl.signal.aborted && !touched.current) warmUpDenoiser();
     } finally {
       if (listen.current === ctl) setListening(false);
     }
   }
 
-  /** Set the recommended choices (never anything paid that the file doesn't need). */
-  function applyReco(r, i = info) {
+  /** Set the best choices for the file, except the ones the person changed themselves (`again`: those too). */
+  function applyReco(r, i = info, again = false) {
+    if (again) manual.current = new Set();
+    const skip = manual.current;
     const canBrowser = i ? browserVerdict(i).ok : false;
     const next = r.noise === 'browser' && !canBrowser ? 'denoise' : r.noise;
-    setNoise(next);
-    if (next === 'browser') warmUpDenoiser();
-    touched.current = false;
-    setCustom(false);
-    if (next === 'browser') setLocalStrength(r.strength);
-    else if (next === 'denoise') {
+    if (!undoTo.current) undoTo.current = { ...now.current };
+    if (!skip.has('noise')) setNoise(next);
+    const noiseNow = skip.has('noise') ? now.current.noise : next;
+    if (noiseNow === 'browser') warmUpDenoiser();
+    if (!skip.has('strength')) {
       setStrength(r.strength);
-      setRebuild(!!(r.rebuild && rebuildOk.current));
-      setNoiseKind('auto');
-      if (r.restoreHighs) setRestoreHighs(true);
+      setLocalStrength(r.strength);
     }
+    if (!skip.has('rebuild')) setRebuild(!!(r.rebuild && rebuildOk.current && next === 'denoise'));
+    if (r.restoreHighs && !skip.has('highs')) setRestoreHighs(true);
+    if (!skip.has('leveling')) setLeveling(r.noise === 'browser' || !!r.leveling);
+    if (!skip.has('subs') && i?.hasAudio !== false) setSubs(r.subs || 'off');
+    setNoiseKind('auto');
+    appliedRef.current = true;
+    setApplied(true);
+    setCustom(skip.size > 0);
   }
 
+  // another language for the subtitles can change which kind of subtitles is best (unless the person chose)
+  useEffect(() => {
+    if (auto && fileReco && appliedRef.current && !manual.current.has('subs') && info?.hasAudio !== false) setSubs(fileReco.subs || 'off');
+  }, [fileReco]); // eslint-disable-line react-hooks/exhaustive-deps
+
   function pickSubs(v) {
+    touch('subs');
     setSubs(v);
     if (v === 'browser') warmUpSpeech();
   }
@@ -326,20 +372,37 @@ export default function JobForm({ onSubmitted }) {
       setListening(false);
       return;
     }
+    manual.current = new Set();
     if (!file || !info || info.hasAudio === false) return;
-    if (fileReco) applyReco(fileReco);
+    if (fileReco) applyReco(fileReco, info, true);
     else if (!listening) listenTo(file, info, browserVerdict(info).ok);
   }
 
+  /** "Undo": the choices go back to what they were before they were set automatically, and the automatic setting is switched off. */
+  function undoAuto() {
+    const u = undoTo.current;
+    if (u) {
+      setNoise(u.noise); setStrength(u.strength); setLocalStrength(u.localStrength); setRebuild(u.rebuild);
+      setRestoreHighs(u.restoreHighs); setLeveling(u.leveling); setSubs(u.subs); setNoiseKind(u.noiseKind);
+    }
+    undoTo.current = null;
+    appliedRef.current = false;
+    setApplied(false);
+    setCustom(false);
+    setAutoSettings(false);
+  }
+
   /** The person chose something themselves: what the quick listen finds later no longer changes it. */
-  function touch() {
-    touched.current = true;
-    setCustom(true);
+  function touch(key) {
+    manual.current.add(key);
+    if (appliedRef.current) setCustom(true);
   }
 
   function pickNoise(v) {
-    touch();
+    touch('noise');
     setNoise(v);
+    // "Off" leaves the sound alone, so nothing paid is left switched on behind it; Denoising comes with Leveling (unless the person chose)
+    if (!manual.current.has('leveling') && v !== 'browser') setLeveling(v === 'denoise');
     if (v === 'browser') warmUpDenoiser();
   }
 
@@ -348,6 +411,10 @@ export default function JobForm({ onSubmitted }) {
     listen.current?.abort();
     setStats(null);
     setListening(false);
+    appliedRef.current = false;
+    undoTo.current = null;
+    setApplied(false);
+    setCustom(false);
     setFile(null);
     setInfo(null);
     setError('');
@@ -361,7 +428,7 @@ export default function JobForm({ onSubmitted }) {
   const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
   if (kind && file && file.size > maxUpload && !canShrink) problems.push(`This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.`);
   if (kind && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
-  if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}.`);
+  if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`);
   if (info && !wantsBrowser && !localSubs && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
   if (embedHere && serverClean && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
@@ -414,7 +481,7 @@ export default function JobForm({ onSubmitted }) {
         translate: translations,
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
-        leveling: levelingOnly || leveling,
+        leveling,
         restore_highs: restoreHighs,
         atten_lim_db: strengthDb(strength),
         echo_reference_track: !!(wantsDenoise && echo && hasSecondTrack),
@@ -443,7 +510,8 @@ export default function JobForm({ onSubmitted }) {
   async function submit(e) {
     e.preventDefault();
     if (!canStart) return;
-    touched.current = true; // whatever the quick listen finds from here on must not change a run that has started
+    listen.current?.abort(); // whatever the quick listen finds from here on must not change a run that has started
+    manual.current = new Set(['noise', 'strength', 'rebuild', 'highs', 'leveling', 'subs']);
     const f = file;
     const i = info;
     const ctl = new AbortController();
@@ -512,9 +580,14 @@ export default function JobForm({ onSubmitted }) {
 
   const pct = step?.frac != null ? Math.round(step.frac * 100) : null;
   const startLabel = !(wantsBrowser || localSubs || kind) ? 'Start' : !kind ? 'Start – free' : est ? `Start – about ${money(est)}` : 'Start';
+  const showLeveling = info && info.hasAudio !== false && noise !== 'browser';
+  const rebuilding = rebuild && !!rebuildRate;
+  const autoLine = listening
+    ? 'Listening to a little of your file to pick the best settings…'
+    : applied && reco ? (custom ? 'Set automatically, then changed by you.' : 'Set automatically for this file.') : '';
   return (
     <>
-      <form className="card stack" onSubmit={submit} aria-labelledby="newjob-h">
+      <form className="card stack job-form" onSubmit={submit} aria-labelledby="newjob-h">
         <h2 id="newjob-h" className="mb0">Add a file</h2>
 
         {!file && !busy && <FileDrop onFile={choose} accept={SERVER_FORMATS} hint="or click to pick one. Almost any audio or video file: MP3, WAV, M4A, FLAC, WMA, AMR, MP4, MOV, MKV, AVI, WMV, MPEG and more." />}
@@ -535,186 +608,164 @@ export default function JobForm({ onSubmitted }) {
             {!busy && <button type="button" className="btn btn-ghost btn-sm" onClick={reset}>Remove</button>}
           </div>
         )}
-        {info?.hasVideo && info.viaMediabunny && <p className="small muted mb0">This is a video, so only its sound is uploaded when we do the work on our side. That keeps it small and quick, and the picture never leaves your device.</p>}
+        {info?.hasVideo && info.viaMediabunny && <p className="hint mb0">This is a video, so only its sound is uploaded when we do the work on our side. That keeps it small and quick, and the picture never leaves your device.</p>}
 
         {file && info && !probing && (
           <>
             {info.hasAudio !== false && (
-              <label className="switch" data-testid="auto-settings">
-                <input type="checkbox" role="switch" name="auto" checked={auto} onChange={(e) => setAutoSettings(e.target.checked)} disabled={busy} />
-                <span><b>Automatic best settings</b>
-                  <span className="hint block">Listens to a little of your file and picks the settings it needs. You can still change anything.</span>
-                </span>
-              </label>
-            )}
-            {auto && (
-              <Recommended
-                title="Recommended for this file" line={reco?.line} reasons={reco?.reasons} listening={listening}
-                listeningText="Listening to a little of your file to suggest the best settings…"
-                onApply={custom && reco ? () => applyReco(reco) : null}
-              />
-            )}
-            <fieldset className="field" disabled={busy}>
-              <legend className="label">Noise removal</legend>
-              <div className="choice-cards">
-                <Choice name="noise" value="off" current={noise} onPick={pickNoise} title="Off" hint="Leave the sound as it is" recommended={recNoise === 'off'} />
-                <Choice
-                  name="noise" value="browser" current={noise} onPick={pickNoise} disabled={!verdict.ok}
-                  title="Free, in your browser" hint="Done on your own device. Nothing is uploaded." reason={verdict.why} recommended={recNoise === 'browser'}
-                />
-                <Choice
-                  name="noise" value="denoise" current={noise} onPick={pickNoise} disabled={info.hasAudio === false}
-                  title="Denoising" hint={`Paid, done on our side: the noise removed${denoiseRate ? `. ${rate(denoiseRate.usdPerMinute)} a minute` : ''}`}
-                  reason="This file has no audio track." recommended={recNoise === 'denoise'}
-                />
-              </div>
-            </fieldset>
-            {noise === 'off' && info.hasAudio !== false && (
-              <div className="stack">
-                <label className="check">
-                  <input type="checkbox" name="leveling-alone" checked={levelingAlone} onChange={(e) => setLevelingAlone(e.target.checked)} disabled={busy} />
-                  <span>Leveling
-                    <span className="hint block" data-testid="leveling-alone-hint">
-                      Paid, done on our side: evens out the volume and sets the loudness, without removing any noise.
-                      {levelingRate ? ` ${rate(levelingRate.usdPerMinute)} a minute.` : ''}
-                    </span>
-                  </span>
+              <div className="auto-bar" data-testid="auto-box">
+                <label className="switch" data-testid="auto-settings">
+                  <input type="checkbox" role="switch" name="auto" checked={auto} onChange={(e) => setAutoSettings(e.target.checked)} disabled={busy} />
+                  <span><b>Automatic best settings</b></span>
                 </label>
-                {levelingOnly && (
-                  <>
-                    <div className="field">
-                      <label htmlFor="loud-alone">Loudness target</label>
-                      <select id="loud-alone" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy}>
-                        {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
-                      </select>
+                {auto ? (
+                  <p className="auto-line" aria-live="polite" data-testid="reco">
+                    {listening ? (
+                      <span data-testid="reco-listening"><span className="spinner" aria-hidden="true" /> {autoLine}</span>
+                    ) : applied && reco ? (
+                      <>
+                        <span className="auto-text"><b data-testid="reco-status">{autoLine}</b> <span className="muted" data-testid="reco-line">{reco.line}</span></span>
+                        {custom
+                          ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => applyReco(reco, info, true)} disabled={busy} data-testid="reco-apply">Use them again</button>
+                          : <button type="button" className="btn btn-ghost btn-sm" onClick={undoAuto} disabled={busy} data-testid="reco-undo">Undo</button>}
+                      </>
+                    ) : (
+                      <span className="muted">Listens to a little of your file and sets the best choices for it. You can still change anything.</span>
+                    )}
+                  </p>
+                ) : (
+                  <p className="auto-line muted">Off. Nothing is changed for you.</p>
+                )}
+                {auto && applied && reco?.reasons?.length > 0 && (
+                  <details className="auto-why">
+                    <summary>Why these choices</summary>
+                    <ul className="reco-why small muted" data-testid="reco-why">
+                      {reco.reasons.map((r) => <li key={r}>{r}</li>)}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            )}
+
+            <Step title="Noise and voice" lead="Take the noise out of the sound.">
+              <fieldset className="field" disabled={busy}>
+                <legend className="sr-only">Noise removal</legend>
+                <div className="choice-cards">
+                  <Choice name="noise" value="off" current={noise} onPick={pickNoise} title="Off" hint="Leave the sound as it is" />
+                  <Choice
+                    name="noise" value="browser" current={noise} onPick={pickNoise} disabled={!verdict.ok}
+                    title="Free, in your browser" hint="Done on your own device. Nothing is uploaded." reason={verdict.why}
+                  />
+                  <Choice
+                    name="noise" value="denoise" current={noise} onPick={pickNoise} disabled={info.hasAudio === false}
+                    title="Denoising" hint={`Paid, done on our side: the noise removed${denoiseRate ? `. ${rate(denoiseRate.usdPerMinute)} a minute` : ''}`}
+                    reason="This file has no audio track."
+                  />
+                </div>
+              </fieldset>
+
+              {wantsBrowser && (
+                <div className="step-sub">
+                  <StrengthPicker name="lstrength" value={localStrength} onChange={(v) => { touch('strength'); setLocalStrength(v); }} disabled={busy} />
+                  {info.channels > 2 && <p className="hint mb0">This file has {info.channels} channels; they will be mixed down to mono.</p>}
+                  {info.duration > LONG_SECONDS && (
+                    <div className="banner banner-warn">
+                      This is a long recording ({human(info.duration)}). Cleaning it here could take about {human(eta)} and needs a lot of memory.
+                      Keep this tab open, or choose Denoising for long files.
                     </div>
-                    <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
-                  </>
-                )}
-              </div>
-            )}
-            {wantsBrowser && <GoodToKnow k="browserDenoise" />}
-            {wantsDenoise && <GoodToKnow k={rebuild && rebuildRate ? 'rebuild' : 'denoise'} />}
-
-            {wantsBrowser && (
-              <div className="stack">
-                <StrengthPicker name="lstrength" value={localStrength} onChange={(v) => { touch(); setLocalStrength(v); }} disabled={busy} />
-                {info.channels > 2 && <p className="small muted mb0">This file has {info.channels} channels; they will be mixed down to mono.</p>}
-                {info.duration > LONG_SECONDS && (
-                  <div className="banner banner-warn">
-                    This is a long recording ({human(info.duration)}). Cleaning it here could take about {human(eta)} and needs a lot of memory.
-                    Keep this tab open, or choose Denoising for long files.
-                  </div>
-                )}
-                {info.duration && !wavFits(info.duration, info.channels >= 2 ? 2 : 1, 24) && <p className="muted small mb0" data-testid="wav24-warn">For a recording this long, only the 16-bit WAV can be saved (a WAV file can’t be bigger than 4 GB).</p>}
-                {eta && <p className="muted small mb0" data-testid="eta">Should take about {human(eta)} on this device{loadLeft ? ' (including getting the noise remover ready)' : ''}.</p>}
-              </div>
-            )}
-
-            {wantsDenoise && (
-              <div className="stack">
-              {rebuildOffered && !rebuildRate && (
-                <label className="check muted" data-testid="rebuild-paused">
-                  <input type="checkbox" name="rebuild" checked={false} disabled />
-                  <span>Rebuild the voice
-                    <span className="hint block">Paused right now. Try again later.</span>
-                  </span>
-                </label>
+                  )}
+                  {info.duration && !wavFits(info.duration, info.channels >= 2 ? 2 : 1, 24) && <p className="hint mb0" data-testid="wav24-warn">For a recording this long, only the 16-bit WAV can be saved (a WAV file can’t be bigger than 4 GB).</p>}
+                  {eta && <p className="hint mb0" data-testid="eta">Should take about {human(eta)} on this device{loadLeft ? ' (including getting the noise remover ready)' : ''}.</p>}
+                  <GoodToKnow k="browserDenoise" />
+                  {hasSecondTrack && <p className="hint mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Denoising; the free cleanup in your browser can&rsquo;t do it.</p>}
+                  {isVideo && info.viaLibav && <p className="hint mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Denoising gives you the whole video back.</p>}
+                </div>
               )}
-              {rebuildRate && (
-                <label className="check">
-                  <input type="checkbox" name="rebuild" checked={rebuild} onChange={(e) => { touch(); setRebuild(e.target.checked); }} disabled={busy} />
-                  <span>Rebuild the voice
-                    <span className="hint block" data-testid="rebuild-hint">
-                      For recordings made in echoey rooms: removes the room echo and brings back dull, muffled sound. Slower,
-                      {' '}{rate(rebuildRate.usdPerMinute)} a minute.
-                      On very echoey recordings it can change a word, so listen before you publish.
+
+              {wantsDenoise && (
+                <div className="step-sub">
+                  {rebuildOffered && !rebuildRate && (
+                    <span data-testid="rebuild-paused">
+                      <Toggle name="rebuild" checked={false} disabled muted title="Rebuild the voice" hint="Paused right now. Try again later." />
                     </span>
-                  </span>
-                </label>
-              )}
-              {!(rebuild && rebuildRate) && <StrengthPicker name="strength" value={strength} onChange={(v) => { touch(); setStrength(v); }} disabled={busy} />}
-              <div className="form-grid">
-                {!(rebuild && rebuildRate) && (
-                <div className="field">
-                  <label htmlFor="noisekind">Background noise</label>
-                  <select id="noisekind" className="select" value={noiseKind} onChange={(e) => setNoiseKind(e.target.value)} disabled={busy}>
-                    {NOISE.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
-                  </select>
-                  <span className="hint">{NOISE.find((n) => n.id === noiseKind).hint}</span>
+                  )}
+                  {rebuildRate && (
+                    <Toggle
+                      name="rebuild" checked={rebuild} onChange={(e) => { touch('rebuild'); setRebuild(e.target.checked); }} disabled={busy}
+                      title="Rebuild the voice" hintId="rebuild-hint"
+                      hint={`For recordings made in echoey rooms: removes the room echo and brings back dull, muffled sound. Slower, ${rate(rebuildRate.usdPerMinute)} a minute. On very echoey recordings it can change a word, so listen before you publish.`}
+                    />
+                  )}
+                  {!rebuilding && <StrengthPicker name="strength" value={strength} onChange={(v) => { touch('strength'); setStrength(v); }} disabled={busy} />}
+                  {!rebuilding && (
+                    <div className="field">
+                      <label htmlFor="noisekind">Background noise</label>
+                      <select id="noisekind" className="select" value={noiseKind} onChange={(e) => setNoiseKind(e.target.value)} disabled={busy}>
+                        {NOISE.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
+                      </select>
+                      <span className="hint">{NOISE.find((n) => n.id === noiseKind).hint}</span>
+                    </div>
+                  )}
+                  {!rebuilding && (
+                    <Toggle
+                      name="highs" checked={restoreHighs} onChange={(e) => { touch('highs'); setRestoreHighs(e.target.checked); }} disabled={busy}
+                      title="Restore missing highs" hintId="highs-hint" hint="For phone calls and other recordings that sound dull or muffled. Clear recordings are left as they are."
+                    />
+                  )}
+                  {hasSecondTrack && (
+                    <Toggle
+                      name="echo" checked={echo} onChange={(e) => setEcho(e.target.checked)} disabled={busy}
+                      title="Remove speaker echo using the second audio track (your desktop sound)"
+                      hint="OBS can record your mic and your desktop audio on separate tracks. Put the mic on track 1 and the desktop sound on track 2."
+                    />
+                  )}
+                  <GoodToKnow k={rebuilding ? 'rebuild' : 'denoise'} />
                 </div>
-                )}
-                <div className="field">
-                  <label htmlFor="loud">Loudness target</label>
-                  <select id="loud" className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy || !leveling}>
-                    {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
-                  </select>
+              )}
+            </Step>
+
+            {showLeveling && (
+              <Step title="Leveling and loudness" lead="Even out the volume and set how loud the result is.">
+                <Toggle
+                  name={noise === 'off' ? 'leveling-alone' : 'leveling'} checked={leveling} disabled={busy}
+                  onChange={(e) => { touch('leveling'); setLeveling(e.target.checked); }}
+                  title="Leveling" hintId={noise === 'off' ? 'leveling-alone-hint' : 'leveling-hint'}
+                  hint={`Paid, done on our side: evens out the volume and sets the loudness${noise === 'off' ? ', without removing any noise' : ''}${levelingRate ? `. ${rate(levelingRate.usdPerMinute)} a minute${noise === 'off' ? '' : ' more'}` : ''}.${noise === 'off' ? '' : ' Turn it off to keep the voice as it was recorded, just without the noise.'}`}
+                />
+                <div className="step-sub">
+                  <div className="field">
+                    <label htmlFor={noise === 'off' ? 'loud-alone' : 'loud'}>Loudness target</label>
+                    <select id={noise === 'off' ? 'loud-alone' : 'loud'} className="select" value={loudness} onChange={(e) => setLoudness(e.target.value)} disabled={busy || !leveling}>
+                      {LOUDNESS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+                    </select>
+                  </div>
                 </div>
-              </div>
-              <label className="check">
-                <input type="checkbox" name="leveling" checked={leveling} onChange={(e) => setLeveling(e.target.checked)} disabled={busy} />
-                <span>Leveling
-                  <span className="hint block" data-testid="leveling-hint">Evens out the volume and sets the loudness above{levelingRate ? `, ${rate(levelingRate.usdPerMinute)} a minute more` : ''}. Turn it off to keep the voice as it was recorded, just without the noise.</span>
-                </span>
-              </label>
-              {!(rebuild && rebuildRate) && (
-                <label className="check">
-                  <input type="checkbox" name="highs" checked={restoreHighs} onChange={(e) => { touch(); setRestoreHighs(e.target.checked); }} disabled={busy} />
-                  <span>Restore missing highs
-                    <span className="hint block" data-testid="highs-hint">For phone calls and other recordings that sound dull or muffled. Clear recordings are left as they are.</span>
-                  </span>
-                </label>
-              )}
-              <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
-              {hasSecondTrack && (
-                <label className="check">
-                  <input type="checkbox" name="echo" checked={echo} onChange={(e) => setEcho(e.target.checked)} disabled={busy} />
-                  <span>
-                    Remove speaker echo using the second audio track (your desktop sound)
-                    <span className="hint block">OBS can record your mic and your desktop audio on separate tracks. Put the mic on track 1 and the desktop sound on track 2.</span>
-                  </span>
-                </label>
-              )}
-              </div>
+              </Step>
             )}
 
-            {hasSecondTrack && wantsBrowser && <p className="small muted mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Denoising; the free cleanup in your browser can&rsquo;t do it.</p>}
+            <Step title="Subtitles and transcript" lead="Write down what is said, in the language you choose.">
+              <fieldset className="field" disabled={busy}>
+                <legend className="sr-only">Subtitles and transcript</legend>
+                <div className="choice-cards">
+                  <Choice name="subs" value="off" current={subs} onPick={pickSubs} title="Off" hint="No subtitles or transcript" />
+                  <Choice
+                    name="subs" value="browser" current={subs} onPick={pickSubs} disabled={!sVerdict.ok}
+                    title="Free, in your browser" reason={sVerdict.why}
+                    hint="Made on your own device, nothing is uploaded. Fine for clear speech. The first time, it downloads about 80 MB."
+                  />
+                  <Choice
+                    name="subs" value="standard" current={subs} onPick={pickSubs}
+                    title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${rate(standardRate.usdPerMinute)} a minute` : ''}`}
+                  />
+                  <Choice
+                    name="subs" value="accurate" current={subs} onPick={pickSubs}
+                    title="Extra accurate" hint="Paid. Best for accents, noisy rooms and specialist words. Works in any language."
+                  />
+                </div>
+              </fieldset>
 
-            {isVideo && wantsBrowser && info.viaLibav && <p className="small muted mb0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can&rsquo;t rebuild this video type, so you&rsquo;ll get the cleaned sound as a WAV file. Denoising gives you the whole video back.</p>}
-
-            <fieldset className="field" disabled={busy}>
-              <legend className="label">Subtitles &amp; transcript</legend>
-              <div className="choice-cards">
-                <Choice name="subs" value="off" current={subs} onPick={pickSubs} title="Off" hint="No subtitles or transcript" />
-                <Choice
-                  name="subs" value="browser" current={subs} onPick={pickSubs} disabled={!sVerdict.ok}
-                  title="Free, in your browser" reason={sVerdict.why}
-                  hint="Made on your own device, nothing is uploaded. Fine for clear speech. The first time, it downloads about 80 MB."
-                />
-                <Choice
-                  name="subs" value="standard" current={subs} onPick={pickSubs}
-                  title="Standard" hint={`Paid. Good for most recordings, in many languages${standardRate ? `. ${rate(standardRate.usdPerMinute)} a minute` : ''}`}
-                  recommended={reco?.subs === 'standard'}
-                />
-                <Choice
-                  name="subs" value="accurate" current={subs} onPick={pickSubs}
-                  title="Extra accurate" hint="Paid. Best for accents, noisy rooms and specialist words. Works in any language."
-                  recommended={reco?.subs === 'accurate'}
-                />
-              </div>
-              {subs === 'accurate' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
-              {serverClean && serverText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
-              {wantsBrowser && serverText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
-              {serverClean && localSubs && <span className="hint" data-testid="denoise-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
-            </fieldset>
-            {subs === 'browser' && <GoodToKnow k="browserSubs" />}
-            {subs === 'standard' && <GoodToKnow k="standardSubs" />}
-            {subs === 'accurate' && <GoodToKnow k="accurateSubs" />}
-            {translations.length > 0 && <GoodToKnow k="translations" />}
-
-            {wantsText && (
-              <div className="stack">
-                <div className="form-grid">
+              {wantsText && (
+                <div className="step-sub">
                   <div className="field">
                     <label htmlFor="lang">Language</label>
                     <select id="lang" className="select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={busy}>
@@ -723,7 +774,7 @@ export default function JobForm({ onSubmitted }) {
                   </div>
                   <fieldset className="field" disabled={busy || !serverText} data-testid="translate-to">
                     <legend className="label">Also translate into</legend>
-                    <div className="checks">
+                    <div className="sel-row">
                       {targets.map((t, i) => (
                         <select
                           key={i} className="select" aria-label={`Translation language ${i + 1}`} value={t}
@@ -751,43 +802,56 @@ export default function JobForm({ onSubmitted }) {
                       ))}
                     </div>
                   </fieldset>
-                </div>
-                {canEmbed && (
-                  <label className="check">
-                    <input
-                      type="checkbox" name="embed" checked={embed} disabled={busy}
+                  {canEmbed && (
+                    <Toggle
+                      name="embed" checked={embed} disabled={busy} title="Put the subtitles into the video" hintId="embed-hint"
                       onChange={(e) => {
                         setEmbed(e.target.checked);
                         // the cleaned video becomes an MKV, the kind of file players show these subtitles from
                         if (e.target.checked && serverClean && !embedOnServer && !canHoldSubtitles(choice.format) && choice.okIds?.includes('mkv')) choice.pickFormat('mkv');
                       }}
+                      hint={embedOnServer
+                        ? 'Your browser can’t open this video type, so it’s uploaded whole and we put them in on our side.'
+                        : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!serverClean && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
                     />
-                    <span>Put the subtitles into the video
-                      <span className="hint block" data-testid="embed-hint">
-                        {embedOnServer
-                          ? 'Your browser can’t open this video type, so it’s uploaded whole and we put them in on our side.'
-                          : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!serverClean && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
-                      </span>
-                    </span>
-                  </label>
-                )}
-                {wantsText && videoResult && tooBigHere && <p className="small muted mb0" data-testid="embed-too-big">This browser can’t rebuild a video this big (over {gigabytes(limit)}); Chrome, Edge or Firefox can. You’ll get the subtitle files to load in your player or video editor.</p>}
-              </div>
+                  )}
+                  {wantsText && videoResult && tooBigHere && <p className="hint mb0" data-testid="embed-too-big">This browser can’t rebuild a video this big (over {gigabytes(limit)}); Chrome, Edge or Firefox can. You’ll get the subtitle files to load in your player or video editor.</p>}
+                  {subs === 'accurate' && <span className="hint" data-testid="accurate-note">Extra accurate sends your audio to a speech partner we work with, only for this option. <Link to="/privacy">Privacy details</Link></span>}
+                  {serverClean && serverText && <span className="hint" data-testid="both-note">We write the transcript from your original recording (it comes out more accurate), and clean the sound separately.</span>}
+                  {wantsBrowser && serverText && <span className="hint" data-testid="browser-subs-note">The noise removal happens on your device. For the subtitles, the original sound is uploaded.</span>}
+                  {serverClean && localSubs && <span className="hint" data-testid="denoise-local-subs-note">The cleanup is done on our side; the subtitles are made here on your device, from your original recording.</span>}
+                  {subs === 'browser' && <GoodToKnow k="browserSubs" />}
+                  {subs === 'standard' && <GoodToKnow k="standardSubs" />}
+                  {subs === 'accurate' && <GoodToKnow k="accurateSubs" />}
+                  {translations.length > 0 && <GoodToKnow k="translations" />}
+                </div>
+              )}
+            </Step>
+
+            {serverClean && (
+              <Step title="The result file">
+                <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
+              </Step>
             )}
 
-            {kind && duration && est != null && (
-              <p className="mb0" data-testid="estimate">
-                <b>Estimated cost: {money(est)}</b>{' '}
-                <span className="muted">for {human(duration)} of audio{breakdown ? ` (cleaning ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? '; the subtitles made on your device are free' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
-              </p>
-            )}
-            {lengthUnknown && <p className="mb0 muted small" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}
-            {problems.map((p) => (
-              <div key={p} className="banner banner-warn" role="alert">
-                {p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}
-                {p.includes('load the prices') && <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPricing().catch(() => {})}>Try again</button>}
+            <div className="step step-end">
+              {kind && duration && est != null && (
+                <p className="mb0" data-testid="estimate">
+                  <b>Estimated cost: {money(est)}</b>{' '}
+                  <span className="hint">for {human(duration)} of audio{breakdown ? ` (cleaning ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? '; the subtitles made on your device are free' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
+                </p>
+              )}
+              {lengthUnknown && <p className="hint mb0" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}
+              {problems.map((p) => (
+                <div key={p} className="banner banner-warn" role="alert">
+                  {p} {p.includes('balance') && <Link to="/app/billing">Add credit</Link>}
+                  {p.includes('load the prices') && <button type="button" className="btn btn-ghost btn-sm" onClick={() => loadPricing().catch(() => {})}>Try again</button>}
+                </div>
+              ))}
+              <div className="row">
+                <button type="submit" className="btn btn-primary btn-lg" disabled={!canStart || busy} data-testid="start">{startLabel}</button>
               </div>
-            ))}
+            </div>
           </>
         )}
 
@@ -831,11 +895,6 @@ export default function JobForm({ onSubmitted }) {
           </div>
         )}
 
-        {file && info && !probing && (
-          <div className="row">
-            <button type="submit" className="btn btn-primary btn-lg" disabled={!canStart} data-testid="start">{startLabel}</button>
-          </div>
-        )}
       </form>
 
       {subsResult && (
