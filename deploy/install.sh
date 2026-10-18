@@ -83,9 +83,11 @@ else
   COMMIT="$(info commit)"; BRANCH="$(info branch)"; SUBJECT="$(info subject)"
   [ -n "$COMMIT" ] || { echo "$REPO has neither .git nor DEPLOY_INFO: run deploy/install.sh from the owner's checkout (it stages the commit for acw)" >&2; exit 1; }
 fi
-say "deploying $COMMIT ($BRANCH): $SUBJECT"
 DEPLOYED="$(as_acw cat "$H/app/VERSION" 2>/dev/null || true)"
-[ -n "$DEPLOYED" ] && say "deployed now: $DEPLOYED"
+if [ "${ACW_FROM_OWNER:-}" != 1 ]; then  # (the owner's run printed this already)
+  say "deploying $COMMIT ($BRANCH): $SUBJECT"
+  [ -n "$DEPLOYED" ] && say "deployed now: $DEPLOYED"
+fi
 
 # ---- 1. Is this a deploy we want?
 problems=()
@@ -171,6 +173,7 @@ if [ "$ROLE" = owner ]; then
   # sudo drops the environment: hand over the few settings that are meant to reach the server part.
   envs=()
   for v in ACW_WORKERS ACW_MEMORY_PERCENT ACW_ARCHIVE_DIR; do [ -n "${!v:-}" ] && envs+=("$v=${!v}"); done
+  envs+=(ACW_FROM_OWNER=1)  # the server part then leaves out what the owner's run says itself (header, "run as the owner")
   server() { as_acw env ${envs[@]+"${envs[@]}"} bash "$STAGE/deploy/install.sh" --server-only "$@"; }
 
   # What would the server part need that only the owner can do? (read-only)
@@ -225,7 +228,7 @@ fi
 
 # ---- 2. What would change?
 changed_files() {  # changed_files SRC DST: paths (relative) rsync would add, change or delete
-  rsync -ainc --delete --exclude '__pycache__' "$1" "$2" | grep -v '^\.d' | sed -E 's/^[^ ]+ +//' || true
+  rsync -ainc --delete --filter='-p __pycache__/' "$1" "$2" | grep -v '^\.d' | sed -E 's/^[^ ]+ +//' || true
 }
 CHANGED_APP="$(changed_files "$REPO/server/acw/" "$H/app/acw/")"
 CHANGED_COMMON="$(changed_files "$REPO/common/acw_common/" "$H/app/acw_common/")"
@@ -384,8 +387,8 @@ if [ "$APP_CHANGED" = 1 ] && [ -d "$H/app/acw" ]; then
   rm -rf "$H/app.prev"
   cp -a "$H/app" "$H/app.prev"
 fi
-rsync -ac --delete --exclude '__pycache__' "$REPO/server/acw/" "$H/app/acw/"
-rsync -ac --delete --exclude '__pycache__' "$REPO/common/acw_common/" "$H/app/acw_common/"
+rsync -ac --delete --filter='-p __pycache__/' "$REPO/server/acw/" "$H/app/acw/"
+rsync -ac --delete --filter='-p __pycache__/' "$REPO/common/acw_common/" "$H/app/acw_common/"
 echo "$COMMIT" > "$H/app/VERSION"
 # The release mirror reads the archive list of the model files from here (the code copy above has no deploy/ folder).
 install -m 600 "$REPO/deploy/models.lock" "$H/app/models.lock"
@@ -500,7 +503,7 @@ fi
 
 # ---- 13 and 14. Website and smoke test: the owner's (VPS login key). Not done by acw.
 if [ "$ROLE" = server ]; then
-  [ "$STATUS" = 0 ] && echo "server part done. The website and the smoke test need the owner's VPS login: run deploy/install.sh as the owner (or deploy/publish-web.sh, python3 deploy/smoke.py)"
+  [ "$STATUS" = 0 ] && [ "${ACW_FROM_OWNER:-}" != 1 ] && echo "server part done. The website and the smoke test need the owner's VPS login: run deploy/install.sh as the owner (or deploy/publish-web.sh, python3 deploy/smoke.py)"
   exit "$STATUS"
 fi
 vps_status=0
