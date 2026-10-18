@@ -56,8 +56,7 @@ defaults:
 jobs:
   # ---------------------------------------------------------------------------
   # The models the app and setup download (check_model_urls.py): the speech model's files at their pinned commit on
-  # Hugging Face and our own models and licence texts in our Hugging Face repository (skipped, with a message, while
-  # config.HF_MODELS_REVISION is still PENDING-UPLOAD), each found with its pinned size. Nothing needs this job, so a
+  # Hugging Face and our own models and licence texts in our Hugging Face repository, each found with its pinned size. Nothing needs this job, so a
   # red result here does not stop the builds; the app and setup check every file's SHA-256 themselves.
   model-urls:
     name: Model downloads exist
@@ -268,9 +267,7 @@ jobs:
 
       - name: Models for the frozen selftest (restoring highs, rebuilding the voice)
         # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime (0.9 GB from our Hugging Face
-        # repository). The speech model is left out (1.6 GB). Does not fail the build when the models are not there yet
-        # (config.HF_MODELS_REVISION is PENDING-UPLOAD): the "Model downloads exist" job reports that.
-        continue-on-error: true
+        # repository). The speech model is left out (1.6 GB).
         run: |
           ACW_DESKTOP_MODELS="$RUNNER_TEMP/acw-models" python - <<'PY'
           from audio_cleaner_desktop import models, resources

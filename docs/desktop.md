@@ -14,8 +14,7 @@ previous install left in place, and are generated from the app's catalog by `pac
   (503 MB ONNX, `resources.VOICE_MODEL`).
 
 The last two are our own conversions (nobody else publishes these files). They are downloaded from our Hugging Face
-model repository (`config.HF_MODELS_REPO`, pinned to the commit `config.HF_MODELS_REVISION`, which must be a full commit
-id; `PENDING-UPLOAD` until the repository is uploaded), file by file like Whisper, every file pinned by URL, size and
+model repository (`config.HF_MODELS_REPO`, pinned to the commit `config.HF_MODELS_REVISION`, a full commit id), file by file like Whisper, every file pinned by URL, size and
 SHA-256: someone who only wants one model downloads only its files. Each model also has its licence texts
 (`SpeechModel.licences`, `LICENSES/<name>` in the model's folder: AP-BWE + training-data notice, Sidon + w2v-BERT 2.0 +
 training-data notice), downloaded with it. They are not part of the model's `files`, so they are not in the `.complete`
@@ -46,7 +45,7 @@ so nobody who can change a file there can make the app run anything else; the up
 The repository of the releases is `__releases__` in `audio_cleaner_desktop/__init__.py`; CI writes the one it publishes to
 (`ACW_RELEASES_REPO`, the trial repository while `vars.PUBLIC_DESKTOP_REPO` is set) together with the version. The "Model
 downloads exist" job runs `packaging/check_model_urls.py` on every build (HEAD requests: every pinned file is there with
-its size; our files are skipped, with a message, while the revision is `PENDING-UPLOAD`).
+its size).
 
 ### Changing a model safely
 

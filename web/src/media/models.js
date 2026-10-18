@@ -7,7 +7,7 @@
 export const MODEL_HOST = __MODEL_HOST__;
 
 // Our own files: SilverJunk08/audio-cleaner-models (deploy/models.lock pins the same commit for the server).
-const OURS = { repo: 'SilverJunk08/audio-cleaner-models', revision: 'PENDING-UPLOAD' };
+const OURS = { repo: 'SilverJunk08/audio-cleaner-models', revision: '898d417c842c899b08e1dbd9510e1745f336af69' };
 
 /** The noise remover: the libDF WebAssembly build (it must be the build df.js on the site belongs to: scripts/sync-dfn.mjs
  *  checks that) and the DeepFilterNet3 model. */

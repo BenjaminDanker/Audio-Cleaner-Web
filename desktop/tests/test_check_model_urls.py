@@ -18,7 +18,7 @@ HF_BASE = f"https://huggingface.co/{config.HF_MODELS_REPO}/resolve/{config.HF_MO
 
 
 def test_every_downloaded_file_is_pinned_by_revision_size_and_sha256():
-    assert config.HF_MODELS_REVISION == "PENDING-UPLOAD" or re.fullmatch(r"[0-9a-f]{40}", config.HF_MODELS_REVISION)  # never a branch
+    assert re.fullmatch(r"[0-9a-f]{40}", config.HF_MODELS_REVISION)  # a commit, never a branch
     for m in OWN:
         for f in (*m.files, *m.licences):
             assert f.url.startswith(HF_BASE) and f.size > 0 and re.fullmatch(r"[0-9a-f]{64}", f.sha256), f
@@ -51,14 +51,6 @@ def test_check_reports_every_missing_or_resized_file(monkeypatch):
     answers[second.url] = (404, {})
     found = check_model_urls.check(head)
     assert len(found) == 2 and "5 bytes there" in found[0] and "HTTP 404" in found[1]
-
-
-def test_our_files_are_skipped_with_a_message_while_the_revision_is_pending(monkeypatch, capsys):
-    monkeypatch.setattr(config, "HF_MODELS_REVISION", "PENDING-UPLOAD")
-    assert check_model_urls.pinned_files() == list(resources.SPEECH_MODEL.files)
-    monkeypatch.setattr(check_model_urls, "check", lambda head=None: [])
-    assert check_model_urls.main([]) == 0
-    assert "PENDING-UPLOAD" in capsys.readouterr().out
 
 
 def test_remote_size_follows_redirects_and_prefers_hugging_faces_linked_size():

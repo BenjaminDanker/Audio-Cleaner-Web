@@ -39,8 +39,6 @@ def fetch(dest_dir: Path, url_: str | None = None) -> Path:
     target = dest_dir / DPDFNET_FILE
     if target.is_file() and sha256_of(target) == DPDFNET_SHA256:
         return target
-    if url_ is None and config.HF_MODELS_REVISION == "PENDING-UPLOAD":
-        raise SystemExit("config.HF_MODELS_REVISION is still PENDING-UPLOAD: set the commit id of the models repository")
     try:
         models.fetch_file(url_ or url(), target, DPDFNET_SIZE, DPDFNET_SHA256)
     except models.DownloadError as e:

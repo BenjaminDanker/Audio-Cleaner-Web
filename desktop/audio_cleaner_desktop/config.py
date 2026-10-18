@@ -22,10 +22,10 @@ def release_url(version: str) -> str:
 
 # Our own converted models (AP-BWE, Sidon) and their licence texts are in one public Hugging Face model repository,
 # every file pinned by this revision, its size and SHA-256 (resources.py). The revision MUST be a full 40-character
-# commit id, never a branch name: a branch can change under the pins. "PENDING-UPLOAD" until the repository exists
+# commit id, never a branch name: a branch can change under the pins. "898d417c842c899b08e1dbd9510e1745f336af69" until the repository exists
 # (packaging/check_model_urls.py skips its checks until then).
 HF_MODELS_REPO = "SilverJunk08/audio-cleaner-models"
-HF_MODELS_REVISION = "PENDING-UPLOAD"
+HF_MODELS_REVISION = "898d417c842c899b08e1dbd9510e1745f336af69"
 
 
 def hf_models_url(path: str) -> str:

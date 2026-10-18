@@ -48,6 +48,3 @@ def test_a_wrong_model_is_refused_and_leaves_nothing_behind(tmp_path, served, mo
 def test_the_default_address_is_the_pinned_one_and_a_pending_revision_says_so(tmp_path, monkeypatch):
     assert fetch_dpdfnet.url() == config.hf_models_url("dpdfnet/dpdfnet8_48khz_hr_batch.onnx")
     assert (fetch_dpdfnet.DPDFNET_SIZE, fetch_dpdfnet.DPDFNET_SHA256[:8]) == (14777093, "b50417b0")
-    monkeypatch.setattr(config, "HF_MODELS_REVISION", "PENDING-UPLOAD")
-    with pytest.raises(SystemExit, match="PENDING-UPLOAD"):
-        fetch_dpdfnet.fetch(tmp_path)
