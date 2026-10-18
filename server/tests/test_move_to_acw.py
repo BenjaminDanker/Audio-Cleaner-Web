@@ -275,6 +275,9 @@ def _owner_tree(tmp_path):
     return base, owner_home, acw_home
 
 
+ACW_EXISTS = subprocess.run(["getent", "passwd", "acw"], capture_output=True).returncode == 0
+
+
 def _move_env(base, owner_home, acw_home, **extra):
     return {"ACW_MOVE_OWNER_HOME": str(owner_home), "ACW_MOVE_SVC_HOME": str(acw_home), "ACW_BACKUP_DIR": str(base / "backups"),
             "ACW_MOVE_STATE_DIR": str(base / "state"), **extra}
@@ -294,7 +297,9 @@ def test_move_to_acw_dry_run_lists_every_step_and_changes_nothing(tmp_path):
     acw = str(acw_home)
     steps = [
         "== checks (nothing is changed)", "running now: file jobs: none; live sessions: 0",
-        "useradd --create-home --home-dir " + acw + " --shell /usr/sbin/nologin --user-group", "usermod -aG acw " + ME,
+        # (on a machine where the move has been made, the account exists: the step says so instead of creating it)
+        ("exists (home " + acw if ACW_EXISTS else "useradd --create-home --home-dir " + acw + " --shell /usr/sbin/nologin --user-group"),
+        "usermod -aG acw " + ME,
         "loginctl enable-linger acw", "visudo -cf", f"{ME} ALL=(acw) NOPASSWD: ALL",
         "/usr/local/bin/acw-run", "/usr/local/bin/acw-ctl", "/usr/local/bin/acw-logs", "/usr/local/bin/acw-admin", "/usr/local/bin/acw-sh",
         "== stop and disable the services of " + ME, "in-progress",
