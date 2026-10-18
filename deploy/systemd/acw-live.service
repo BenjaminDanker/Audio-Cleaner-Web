@@ -11,7 +11,7 @@ WorkingDirectory=%h/audio-cleaner/app
 Environment=PYTHONPATH=%h/audio-cleaner/app
 EnvironmentFile=%h/audio-cleaner/secrets/acw.env
 # Same hardening as acw-web. acw.live_app serves GET /api/stream/ws and /api/health only, on its own event loop, so
-# API traffic never makes live audio late (acw-web still serves the WebSocket when the VPS cannot reach this one).
+# API traffic never makes live audio late. It is the only process that runs live: when it is down, live is down.
 ExecStart=%h/audio-cleaner/venv/bin/uvicorn acw.live_app:app --host 127.0.0.1 --port 8795 \
     --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
     --timeout-keep-alive 30 --ws-max-size 1048576 --ws-per-message-deflate false --limit-concurrency 500 --no-access-log

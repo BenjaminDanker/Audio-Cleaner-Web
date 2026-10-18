@@ -2,8 +2,8 @@
 
 The installer stays small: it holds the program (with libDF and FFmpeg) and no model. Every model, the noise
 removal ones (23 MB, required) and the large ones (subtitles, restoring highs, rebuilding the voice), is fetched by
-the installer's own setup. The app only downloads them itself when the user asks for it (a Download button
-after a setup download failed). Every file is pinned by URL (a fixed revision), size and
+the installer's own setup. The app downloads the noise models itself when they are missing at start (they are
+required), and the others when the user asks for them (Settings, or the Download button after setup's download failed). Every file is pinned by URL (a fixed revision), size and
 SHA-256, and every model is downloaded on its own: someone who only wants one model downloads only its files.
 A download goes into `<id>.partial/`, can resume after an interruption, is checked file by file and only then becomes
 `<id>/`, so a half-finished or tampered model is never used. After that the app works offline.

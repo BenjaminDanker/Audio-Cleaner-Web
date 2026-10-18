@@ -19,8 +19,12 @@
                 total download cap; no background loops (keeps big transfers off the live path)
    acw-tunnel   ssh -R 18790 → 127.0.0.1:8790     (IPQoS lowdelay)
    acw-web      FastAPI/uvicorn on 127.0.0.1:8790 — auth, billing, jobs API (also serves the
-                two bulk routes), live WebSocket relay, Stripe/OpenAI calls (only service with internet),
-                housekeeping (holds, orphaned sessions, retention), premium file transcription
+                two bulk routes), Stripe/OpenAI calls, job callbacks, housekeeping (holds,
+                retention), premium file transcription
+   acw-tunnel-live ssh -R 18795 → 127.0.0.1:8795  (IPQoS lowdelay)
+   acw-live     FastAPI/uvicorn on 127.0.0.1:8795 — the live WebSocket only (relay to acw-stream,
+                extra-accurate live captions, billing per second, closing orphaned live sessions)
+   acw-admin    the owner dashboard on 127.0.0.1:8796 (read-only; over SSH only)
    acw-stream   live DSP workers (one process per pair of live cores): echo canceller → DeepFilterNet3 → captions; Unix sockets,
                 no network (seccomp AF_UNIX + Landlock)
    acw-worker@N file-job workers (no network); each job stage runs in a sandboxed runner
@@ -37,7 +41,7 @@
 | Free browser denoise | user's browser (DFN3 WASM, Web Worker) | none of ours for the model: the wasm and the model (about 22 MB) come from Hugging Face; df.js (15 kB) from the VPS |
 | Studio clean (paid) | acw-worker → runner, see "File jobs" below | CPU on primary-ram |
 | Studio clean, voice rebuilt (paid, own price) | same, with Sidon instead of noise removal + highs; files up to 90 minutes, one such job at a time | about 1x real time per channel, ~3 GB RAM |
-| Desktop app (free) | user's computer: same `acw_common` pipeline as Studio clean, bundled libDF + LGPL FFmpeg | GitHub Releases bandwidth (free); update check hits a static JSON on the VPS |
+| Desktop app (free) | user's computer: same `acw_common` pipeline as Studio clean, bundled libDF + LGPL FFmpeg | GitHub Releases bandwidth (free; the update check reads the newest release's update.json there); models from Hugging Face |
 | Live (paid) | OBS plugin / browser ⇄ acw-live ⇄ acw-stream (one worker process per pair of live cores); 20 ms frames, 30 ms model latency | CPU; ~0.2 core per stream at full load |
 | Transcription standard (paid + free quota) | runner: NVIDIA Parakeet TDT (v2 English, v3 for 24 European languages) via onnx-asr, on the GPU worker when it is idle; Whisper large-v3-turbo for other languages; Whisper small detects the language | CPU (Parakeet ~0.09x real time on 4 threads, ~0.04x on the GPU) |
 | Transcription premium (paid) | runner cuts speech into ≤15 s VAD segments → acw-web sends them to OpenAI `gpt-transcribe` (text only; segment boundaries give subtitle timing); finished segments are kept, so a restart or outage does not pay twice | OpenAI per-minute fee |

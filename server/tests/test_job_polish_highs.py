@@ -28,6 +28,12 @@ def test_both_default_on_and_only_booleans_are_taken():
                 _opts(**{key: value})
 
 
+def test_the_old_polish_name_is_leveling_and_leveling_wins_when_both_are_sent():
+    assert _opts(polish=False)["leveling"] is False  # clients from before 2026-10-17
+    assert _opts(polish=False, leveling=True)["leveling"] is True
+    assert _opts(polish=True, leveling=False)["leveling"] is False
+
+
 def create(client, h, **options):
     return client.post("/api/jobs", json={
         "kind": "denoise", "denoiseTier": "standard", "filename": "rec.wav", "sizeBytes": 1000, "durationSeconds": 14,

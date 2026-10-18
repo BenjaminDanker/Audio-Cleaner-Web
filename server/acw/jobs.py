@@ -298,7 +298,8 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     # Even out the voice and set the loudness (on by default); bring back the missing highs of band-limited recordings
     # (on by default; full-band recordings are never touched, and the voice rebuild does it by itself).
     for key in ("leveling", "restore_highs"):
-        flag = options.get(key, True)
+        # "polish" is what Leveling was called before 2026-10-17: API clients written then still send it.
+        flag = options.get(key, options.get("polish", True) if key == "leveling" else True)
         if not isinstance(flag, bool):
             raise JobError(f"{key} must be true or false")
         out[key] = flag

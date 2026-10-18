@@ -57,10 +57,7 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
 - ✅ Studio clean, transcription (standard/premium, free quota), subtitles (soft subs + SRT/VTT/TXT)
 - ✅ Recordings: noise remover chosen per file (Background noise: Automatic / Light / Heavy; DeepFilterNet3 or
   DPDFNet-8, docs/research/denoise-2026-10.md addendum); missing highs of phone-quality recordings restored (AP-BWE)
-- ⬜ Desktop and server: upload `~/audio-cleaner-models-release/AudioCleaner-models-v1.zip` (908538132 bytes, sha256
-  5592be637b0be833d92b1476ffebfb07c2ac6920d9b24b3378ae6d318ebd81ce) to the GitHub release `models-v1` and untick
-  "set as latest". The desktop setup and `deploy/fetch-models.sh` (deploy/models.lock) both download that one archive.
-- ⬜ Price of "Denoising, voice rebuilt" (placeholder $1.20/h = 2x Denoising; it uses ~30x the CPU)
+- ✅ Price of Voice rebuild: $1.80/h (its own price; it uses ~30x the CPU of Denoising)
 - ✅ Echo removal for recordings with a second audio track (desktop sound), included in Studio clean (option `echo_reference_track`, docs/api.md)
 - ✅ Live denoise + live captions, server side + protocol (PCM and Opus)
 - ✅ Live echo cancellation (speakers' sound removed from the mic; no extra price): OBS plugin sends the Desktop Audio as a

@@ -20,7 +20,7 @@ function dfnBase() {
 // it is a module, so each worker imports it by URL (a cache hit, about 15 kB).
 //
 // Repeat visits: the wasm and the model are kept in the browser (models.js). df.js carries ?v=<hash> (__DFN_VERSION__),
-// so a changed file is a new URL; the front door (deploy/vps/audio.caddy) lets the browser keep it for a week.
+// so a changed file is a new URL; the front door (deploy/vps/sites/00-audio-cleaner-snippets.caddy) lets the browser keep it for a week.
 const V = `?v=${__DFN_VERSION__}`;
 // Sizes of the three files; only the denominator of the progress readout.
 const TOTAL = __DFN_JS_SIZE__ + DENOISER.wasm.size + DENOISER.model.size;

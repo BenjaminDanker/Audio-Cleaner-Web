@@ -9,10 +9,11 @@ or secrets.
 | Surface | Reachable from | Notes |
 |---|---|---|
 | `audiocleaner.live` static (`/`, `/app`, `/assets/`) | internet (VPS Caddy) | no server logic |
-| `/api/*`, WebSocket | internet → VPS → SSH tunnel → 127.0.0.1:8790 | the only path into primary-ram |
+| `/api/*` | internet → VPS → SSH tunnel → 127.0.0.1:8790 (`acw-web`) | the API |
+| `/api/stream/ws` (live WebSocket) | internet → VPS → third SSH tunnel → 127.0.0.1:8795 (`acw-live`) | live only |
 | uploads, result downloads and release downloads (`/api/downloads/`: the OBS plugin) | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same routes the main process also serves; nothing else is routed there. The release files are mirrored to primary-ram by `acw-mirror` (signature and checksums checked first); nothing is stored on the VPS |
 | primary-ram LAN ports | unchanged | the app binds loopback only |
-| VPS → primary-ram | `127.0.0.1:18790` and `127.0.0.1:18794` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false"` (the second `permitlisten` is added when the bulk tunnel is switched on, docs/operations.md; verified before for one port: no shell, no other ports, no local forwards) |
+| VPS → primary-ram | `127.0.0.1:18790`, `18794` and `18795` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitlisten="127.0.0.1:18795",permitopen="127.0.0.1:1",command="/bin/false"` (docs/vps.md; no shell, no other ports, no local forwards) |
 
 ## Process isolation (no root needed)
 
@@ -108,8 +109,8 @@ A job may carry an https address that the web process calls when the job ends (`
 notifications"). This is the one place where the server connects to an address a user chose, from a machine on a home
 network, so it is built to reach nothing but the public internet:
 
-- Only the web process delivers (its lifespan runs the delivery loop). The workers, the live worker and the bulk process
-  have no network, and a test (`tests/test_webhooks.py::test_only_the_web_process_delivers`) fails if they start using it.
+- Only the web process delivers (its lifespan runs the delivery loop). The workers, the live engine, the live process and
+  the bulk process do not run it, and a test fails if one of them starts to (`tests/test_webhooks.py`).
   The job code (worker, cancel, sweep) knows nothing about callbacks: it only writes the job's final state, and the loop
   looks at the `job_callbacks` table. A failing or slow receiver can therefore not hold up, fail or bill a job.
 - Address at creation (syntax only, `webhooks.check_url`): `https` scheme, port 443 or none, a host **name** with a dot

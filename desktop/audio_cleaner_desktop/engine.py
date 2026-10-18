@@ -80,7 +80,6 @@ LANGUAGES: dict[str, tuple[str, str]] = {
 MAX_SECONDS = 6 * 3600
 # Audio is processed through memory-mapped scratch files (~0.7 GB of disk per
 # hour and channel, twice), so long files need free disk space rather than RAM.
-LONG_FILE_SECONDS = 3 * 3600
 GB_PER_HOUR_PER_CHANNEL = 1.4
 
 _SAME_AS_INPUT = {
@@ -229,10 +228,6 @@ def default_ending(source: Source, options: JobOptions) -> str:
     if source.has_video:
         return source.ext if source.ext in _VIDEO_CONTAINERS else ".mkv"
     return AUDIO_FORMATS[_audio_format(source, options)][0]
-
-
-def output_extension(probe_result: ProbeResult, options: JobOptions) -> str:
-    return default_ending(Source.of(probe_result), options)
 
 
 def available_endings(source: Source) -> list[str]:

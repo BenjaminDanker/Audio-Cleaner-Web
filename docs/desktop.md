@@ -41,8 +41,8 @@ first.
 shows a message after installing (and logs it, for silent installs) when the files are still missing; the Mac postinstall
 logs it and shows a dialog in the installing user's session (best effort); the app is installed anyway so there is
 something to retry from. App: when the models are missing at start (setup's download failed, a portable run, or a silent
-self-update from a version that had them inside the program) a banner says so with a Download button (just these 23 MB,
-not the 2.6 GB); Clean asks before starting, `--cli` says to run `--download-models`, and `engine.process` raises a clear
+self-update from a version that had them inside the program) it downloads them by itself (just these 23 MB, not the
+2.6 GB; a failure shows a banner with "Try again"); Clean asks before starting, `--cli` says to run `--download-models`, and `engine.process` raises a clear
 error instead of failing on a missing file. `resources.check()` lists only the shipped components (libDF, FFmpeg);
 `resources.noise_ready()` is the models' counterpart. From source, `model_path()` and `heavy_noise_model_path()` also find
 `vendor/models` (`prepare_vendor.py --download-noise-models`, for tests and CI) and `~/audio-cleaner/models`. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image) because a disk image has no setup

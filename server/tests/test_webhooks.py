@@ -3,14 +3,16 @@ network: DNS and the connection are replaced (`webhooks._getaddrinfo`, `webhooks
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import re
 import ssl
 import time
+from pathlib import Path
 
 import pytest
 
-from acw import db, jobs, webhooks
+from acw import app as web_app, db, jobs, webhooks
 from acw.billing import ledger
 
 URL = "https://hooks.example.com/acw?token=secret-token"
@@ -471,3 +473,11 @@ def test_the_secret_is_not_in_the_account_export_and_goes_with_the_account(clien
     assert db.one("SELECT webhook_secret s FROM users WHERE id = ?", (uid,))["s"] is None
     assert db.one("SELECT COUNT(*) n FROM job_callbacks")["n"] == 0
     assert db.one("SELECT COUNT(*) n FROM idempotency_keys")["n"] == 0
+
+
+def test_only_the_web_process_delivers_job_callbacks():
+    # Static: no other module of the package starts the delivery loop (the workers, live and bulk processes have no network).
+    acw_dir = Path(webhooks.__file__).parent
+    starters = {p.relative_to(acw_dir).as_posix() for p in acw_dir.rglob("*.py") if "run_loop" in p.read_text(encoding="utf-8")}
+    assert starters - {"webhooks.py"} == {"app.py"}
+    assert "webhooks.run_loop()" in inspect.getsource(web_app.lifespan)

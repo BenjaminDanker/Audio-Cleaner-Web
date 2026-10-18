@@ -11,7 +11,8 @@ back to the server layout in ~/audio-cleaner/{bin,models}.
 
 No model is in the app. The noise removal models (DeepFilterNet3 and DPDFNet-8, 23 MB, REQUIRED: noise removal is what the
 app is for) and the ones for subtitles, restoring highs and rebuilding the voice (2.6 GB) are downloaded by the installer during setup;
-the app offers the download again when that failed (or after a portable run). Runs from source (tests, CI) also find the noise models in
+the app downloads the noise models itself when they are missing, and offers the others again when setup's download
+failed (or after a portable run). Runs from source (tests, CI) also find the noise models in
 vendor/models (prepare_vendor.py --download-noise-models) or the server's models, and may use the small test speech model that
 prepare_vendor.py puts in vendor/test-models/.
 """
@@ -80,7 +81,7 @@ def _licences(*names: str) -> tuple[models.ModelFile, ...]:
 # Noise removal: DeepFilterNet3 (the main remover, run by the bundled libDF) and DPDFNet-8 (heavy noise). One model with
 # both files, because they are used together (the app picks per recording, so either may be needed) and neither is
 # optional: one download, one marker, one line in the app, and setup cannot end up with only half of noise removal.
-# They are REQUIRED (`required`): the installers insist on them, and the app says so and offers the download when they
+# They are REQUIRED (`required`): the installers insist on them, and the app downloads them by itself when they
 # are missing instead of failing on a missing file. The files keep their bare names in the model's folder.
 NOISE_MODEL = models.SpeechModel(
     id="noise-removal",
