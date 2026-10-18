@@ -2,22 +2,75 @@
 
 ## Layout
 
+The services run as the account `acw` (section "Accounts" below), so everything production lives in **acw's home**,
+`/home/acw`. `~` in this runbook means acw's home whenever a command runs as acw (`acw-sh`, the wrappers, the units).
+
 ```
-~/audio-cleaner/
-  app/        deployed code (copies of server/acw and common/acw_common, see app/VERSION)
-  app.prev/   the previous copy of the code: deploy/rollback.sh brings it back
+/home/acw/audio-cleaner/                                                                          (acw:acw, 750)
+  app/        deployed code (copies of server/acw and common/acw_common, see app/VERSION)               (0700)
+  app.prev/   the previous copy of the code: deploy/rollback.sh brings it back                          (0700)
   venv/       Python 3.12 virtualenv (server/requirements.lock, installed with --require-hashes); venv-gpu/ for the GPU worker
               (deploy/setup-gpu.sh, deploy/requirements-gpu.lock)
-  bin/        ffmpeg, ffprobe (BtbN static n8.1.3, pinned in deploy/models.lock), libdf.so (built here)
+  bin/        ffmpeg, ffprobe (BtbN static n8.1.3, pinned in deploy/models.lock), libdf.so and acw-live (built by the owner)
   models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, ap-bwe/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
               silero-vad/, whisper/{large-v3-turbo,small}   (every file, its source and sha256: deploy/models.lock)
   wasm/       df.js + df_bg.wasm for the browser build
   data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha, metrics.prom,
-              downloads/ (the mirrored release files, see "Release downloads")   (0700)
-  secrets/    acw.env (web, secrets), acw-worker.env   (0700, files 0600)
-  src/        build trees (DeepFilterNet, deepfilter-build) - safe to delete
-  dev/        local dev instance (dev.sh) - safe to delete
+              downloads/ (the mirrored release files, see "Release downloads")                          (0700)
+  secrets/    acw.env (web, secrets), acw-worker.env, vps.env, backup.env/backup.pass, github-releases-read.token  (0700, files 0600)
+/home/acw/.ssh/acw_tunnel(.pub), known_hosts   the tunnel key and the VPS host key (no login key of the owner's)
+/home/acw/.config/systemd/user/                the units (acw's user manager, linger on)
+/home/acw/deploy/<commit>/                     what deploy/install.sh staged for acw (the newest four are kept)
+
+/home/silver/audio-cleaner/                    the owner's side of the same name
+  bin models wasm venv venv-gpu   links to /home/acw/audio-cleaner/...  (tools, dev runs, tests and the web build read them)
+  src/        build trees (DeepFilterNet, deepfilter-build, libav-build) - the Rust toolchain is the owner's - safe to delete
+  dev/ research/ listen/          local dev instance (dev.sh), experiments - safe to delete
+  secrets/    the owner's own tokens and keys (update-signing-key.pem, github-actions-*.token): never moved to acw
 ```
+
+## Accounts: who runs what (acw and silver)
+
+Why: a hole in the web code must not expose the owner's SSH keys (the VPS login), other secrets, the Minecraft servers
+or any of the owner's files. So the services run as `acw`, a normal account with no login shell (`/usr/sbin/nologin`),
+home `/home/acw` (750), which cannot read `/home/silver`. `silver` (the owner) keeps full control: it is in group `acw`, and
+`/etc/sudoers.d/acw` says `silver ALL=(acw) NOPASSWD: ALL` (**privilege only goes down**: acw has no sudo rights and the
+owner's VPS login key is not on acw's side). The services stay systemd **user** units, now in acw's user manager (linger
+on), so `systemctl --user`, `Path.home()` and the cgroup path `user@<uid>.service/acw.slice` behave as before, as acw.
+
+| You want to | Command (as the owner) | What it is |
+|---|---|---|
+| deploy | `cd ~/repos/Audio-Cleaner-Web && deploy/install.sh --wait-live` | unchanged; stages the commit for acw, runs the server part as acw, then publishes the site and runs the smoke test as you |
+| status, restart, enable | `acw-ctl status 'acw-*'`, `acw-ctl restart acw-web` | `systemctl --user ...` in acw's manager |
+| logs | `acw-logs acw-web -f`, `acw-logs 'acw-worker@*' --since -1h`, `acw-logs` (all acw-* units) | `journalctl --user -u UNIT ...` as acw. (Members of group `adm` can also read acw's user journal file directly, through journald's ACL, but then units must be matched with `_UID=`; asking acw's own journalctl is exact.) |
+| admin commands | `acw-admin activity`, `acw-admin grant a@b.c 5 "credit"`, `acw-admin -m acw.alerts test` | `python -m acw.admin` as acw with the units' environment (`acw-worker.env`, `backup.env`, then `acw.env`; `--worker-env` leaves the web secrets out) |
+| edit a secret or setting | `acw-sh -c 'nano ~/audio-cleaner/secrets/acw.env'`, then `acw-ctl restart acw-web` | the env files are acw's (0600); you cannot open them as yourself |
+| a shell for maintenance | `acw-sh`, `acw-sh -c 'du -sh ~/audio-cleaner/data/jobs'` | bash as acw in `/home/acw` (cwd `/`: acw cannot enter your folders, give files by absolute path) |
+| the same without the wrappers | `sudo -u acw env XDG_RUNTIME_DIR=/run/user/$(id -u acw) systemctl --user status 'acw-*'` | what `deploy/host/acw-run` does |
+
+The wrappers (`acw-run`, `acw-ctl`, `acw-logs`, `acw-admin`, `acw-sh`) live in `deploy/host/` and are installed in
+`/usr/local/bin` by `deploy/host/move-to-acw.sh`; re-install them with `sudo install -m 755 deploy/host/acw-* /usr/local/bin/`
+after changing them.
+
+**What the owner can and cannot read.** acw reads nothing of `/home/silver` (home 750, no ACL). The owner reads
+`bin models wasm venv venv-gpu` of acw (group `acw` plus an ACL entry for the owner, which also covers login sessions that
+began before the group was added: a group change reaches a running session and the owner's own systemd user manager only
+at the next login), but **not** `app`, `data`, `secrets` (acw only, 0700): use `acw-sh` or `acw-admin` for those.
+`/mnt/mc-storage/audio-cleaner-backups` belongs to acw (750).
+
+**Where the deploy steps run.** `deploy/install.sh` run by the owner: (1) git checks (clean tree, descendant of the
+deployed `app/VERSION`) and the syntax gate; (2) `git archive HEAD` of `deploy server common native` into
+`/home/acw/deploy/<commit>` (owned by acw; it also holds `DEPLOY_INFO`: commit, branch, subject); (3) asks the server part
+what it needs (`--plan`, read-only) and **builds libDF and `acw-live` as the owner** (the Rust toolchain stays with the owner; the
+build trees stay in `~/audio-cleaner/src`), handing the binaries over; (4) runs the **server part as acw**
+(`install.sh --server-only`: env check `ACW_ENV=production`, pre-deploy database snapshot, packages, code copy, models, config,
+`init-db`, units, restart, health) with the same flags; (5) only if that went well, as the owner again: `deploy/publish-web.sh`
+(needs the VPS login key) and `deploy/smoke.py` (`ssh vps`). `deploy/rollback.sh` and `deploy/drain.sh` follow the same
+split. Run by acw itself, `install.sh` does only the server part (no VPS access: it says so). Without the account
+(`/etc/acw-service-user` absent) one account does everything, as before.
+
+**One-time move and the way back.** `sudo bash deploy/host/move-to-acw.sh` (`--dry-run` first), `sudo bash
+deploy/host/move-back-to-silver.sh`; see "Moving the services to acw" at the end of this file.
 
 ## Deploy / update
 
@@ -26,7 +79,7 @@ script refuses another history, so an old checkout can't overwrite newer code):
 
 ```bash
 cd ~/repos/Audio-Cleaner-Web && git checkout on-prem && git merge --ff-only desktop-merge   # or pull
-deploy/install.sh                      # check, back up, copy, restart what changed, verify, publish the site if web/ changed
+deploy/install.sh                      # as the owner: check, stage for acw, back up, copy, restart what changed, verify, publish the site if web/ changed
 python3 deploy/smoke.py               # the live site from outside: pages, headers, API, live, downloads, Stripe and Google
                                        # addresses, the old address, certificates, the models on Hugging Face, the tunnels
                                        # (install.sh runs it at the end; it changes nothing)
@@ -38,6 +91,8 @@ deploy/rollback.sh                     # put the previous code back (run again t
 deploy/drain.sh on|off|status|wait     # refuse new live sessions by hand (e.g. before a long maintenance)
 deploy/publish-web.sh                  # build the site and rsync it to the VPS (install.sh does it when web/ changed)
 ```
+
+(Who does which part is in "Accounts" above: the owner's run hands the server part to acw and keeps the VPS parts.)
 
 What `install.sh` does, in order: prints the commit and what is running now (file jobs, live sessions);
 **refuses** (unless `--force`) when the working tree has uncommitted changes, when the commit is not a
@@ -57,12 +112,12 @@ the older code: check the "running now" line and wait for jobs to finish.)
 
 Rollback keeps units, packages and the database as they are; schema changes are additive.
 
-## Services (user units, linger on)
+## Services (acw's user units, linger on)
 
 ```bash
-systemctl --user status 'acw-*'
-journalctl --user -u acw-web -f
-systemctl --user restart acw-web
+acw-ctl status 'acw-*'
+acw-logs acw-web -f
+acw-ctl restart acw-web
 ```
 
 Ports on primary-ram (all loopback) and how they reach the VPS:
@@ -86,7 +141,7 @@ the sweep that closes and bills sessions whose handler is gone, on a loop of its
 `acw-web` has no live code running. The VPS sends `/api/stream/ws` to `127.0.0.1:18795` (`acw-tunnel-live`) only.
 
 Set up once (done 2026-10-18): the `acw_tunnel` key on the VPS lists `permitlisten="127.0.0.1:18795"` (next to 18790 and
-18794), and `systemctl --user enable --now acw-tunnel-live`. When `acw-live` or its tunnel is down, live is down: the
+18794), and `acw-ctl enable --now acw-tunnel-live`. When `acw-live` or its tunnel is down, live is down: the
 monitor mails (`health_live`, and the units like any other).
 
 Check: `curl -s 127.0.0.1:8795/api/health` here and `curl -s 127.0.0.1:18795/api/health` on the VPS answer
@@ -101,7 +156,7 @@ same route functions, authentication, body limits, upload caps and headers as th
 runs no housekeeping, cloud transcription or live code) and their own SSH connection. The main process keeps serving
 the same two routes, so nothing breaks before the VPS is switched, and the VPS falls back to it when the bulk side is down.
 
-Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then `systemctl --user restart acw-bulk`):
+Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then `acw-ctl restart acw-bulk`):
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -120,7 +175,7 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
        restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 AAAA... acw-tunnel@primary-ram
 
    (one more `permitlisten`; sshd accepts several). Nothing else changes, and the main tunnel keeps working during the edit.
-3. **Bulk tunnel.** On primary-ram: `systemctl --user enable --now acw-tunnel-bulk`, then on the VPS
+3. **Bulk tunnel.** On primary-ram: `acw-ctl enable --now acw-tunnel-bulk`, then on the VPS
    `curl -s 127.0.0.1:18794/api/health`. From now on `deploy/install.sh`, `deploy/rollback.sh` and the monitor treat it
    like the other units (`deploy/install.sh` prints a reminder until it is enabled).
 4. **Caddy.** On primary-ram `deploy/vps/publish-edge.sh` (copies the sites to the VPS and reloads Caddy; a configuration
@@ -130,11 +185,11 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
    stopped `acw-bulk` or `acw-tunnel-bulk` costs a few seconds, not an outage. This snippet no longer uses
    `request_body { read_timeout }`, which Caddy's Caddyfile syntax does not have (the old snippet failed `caddy validate`):
    the 20 s stall limit for small bodies is enforced by the app (`acw/bodylimit.py`).
-5. **Check.** Upload and download a file on the site; `journalctl --user -u acw-bulk -f` shows the `PUT .../input` and
+5. **Check.** Upload and download a file on the site; `acw-logs acw-bulk -f` shows the `PUT .../input` and
    `GET .../outputs/...` lines (client address, status, milliseconds), the main `acw-web` log shows none for them.
 
 Back out: put the previous version of `deploy/vps/sites/00-audio-cleaner-snippets.caddy` back (`git checkout` of the old
-commit) and run `deploy/vps/publish-edge.sh`; on primary-ram `systemctl --user disable --now acw-tunnel-bulk`. The main path never changed.
+commit) and run `deploy/vps/publish-edge.sh`; on primary-ram `acw-ctl disable --now acw-tunnel-bulk`. The main path never changed.
 
 The router: `IPQoS` marks the two SSH connections so a router that prioritises by DSCP or runs smart queueing (SQM,
 cake/fq_codel) can favour the live one. It does nothing without such a router; the separate connection and process are
@@ -173,12 +228,11 @@ start of a file download per network (40 bursts, then one every 45 s; resuming a
 **Commands.**
 
 ```bash
-cd ~/audio-cleaner/app && set -a && . ../secrets/acw-worker.env && set +a
-../venv/bin/python -m acw.admin mirror --status          # what is served and when it was last mirrored
-../venv/bin/python -m acw.admin mirror --once            # run a pass now (what the timer does); --channel desktop|obs-plugin|models
-../venv/bin/python -m acw.admin mirror --once --force    # fetch and publish again even if the served version looks current or newer (a downgrade, a damaged copy)
-../venv/bin/python -m acw.admin mirror --verify          # hash every served file against its recorded checksum (no network)
-systemctl --user start acw-mirror.service                # the same as --once, with the unit's settings; journalctl --user -u acw-mirror
+acw-admin mirror --status          # what is served and when it was last mirrored
+acw-admin mirror --once            # run a pass now (what the timer does); --channel desktop|obs-plugin|models
+acw-admin mirror --once --force    # fetch and publish again even if the served version looks current or newer (a downgrade, a damaged copy)
+acw-admin mirror --verify          # hash every served file against its recorded checksum (no network)
+acw-ctl start acw-mirror.service   # the same as --once, with the unit's settings; acw-logs acw-mirror
 ```
 
 A release must not be older than the served one: to roll the plugin back on purpose, publish a newer
@@ -208,7 +262,7 @@ loopback address (no DNS rebinding), and it only reads (the database is opened r
 Open it over SSH from your PC:
 
 ```bash
-ssh -L 8796:127.0.0.1:8796 silver@primary-ram      # then open http://localhost:8796
+ssh -L 8796:127.0.0.1:8796 silver@primary-ram      # then open http://localhost:8796  (the dashboard runs as acw; you log in as yourself)
 ```
 
 The machine graphs come from `data/samples.sqlite3` (`acw/samples.py`): the monitor records one row every 2 minutes
@@ -218,20 +272,19 @@ dashboard has the exact ones.
 ## Admin CLI
 
 ```bash
-cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
-../venv/bin/python -m acw.admin login-link you@example.com   # one-time sign-in URL
-../venv/bin/python -m acw.admin grant someone@example.com 5 "support credit"
-../venv/bin/python -m acw.admin user someone@example.com
-../venv/bin/python -m acw.admin suspend someone@example.com "reason"
-../venv/bin/python -m acw.admin stats            # report for the last 30 days (see "Statistics and metrics")
-../venv/bin/python -m acw.admin stats --days 7
-../venv/bin/python -m acw.admin activity       # file jobs and live sessions running now
-../venv/bin/python -m acw.admin check-money    # balances and holds against the ledger (exit 1 on a mismatch)
-../venv/bin/python -m acw.admin verify-backup FILE.sqlite3.gz
-../venv/bin/python -m acw.admin retention      # apply the retention rules now and print what each removed (the web process does it hourly)
-../venv/bin/python -m acw.admin storage        # sizes of the database, job files, data directory and backups
-../venv/bin/python -m acw.admin mirror --status  # release downloads: what is served, when it was last mirrored (--once runs a pass now, --force refetches, --verify hashes every served file)
-../venv/bin/python -m acw.admin compact-money  # payment/ledger records older than 7 years: what it would remove (add --apply to do it)
+acw-admin login-link you@example.com   # one-time sign-in URL
+acw-admin grant someone@example.com 5 "support credit"
+acw-admin user someone@example.com
+acw-admin suspend someone@example.com "reason"
+acw-admin stats            # report for the last 30 days (see "Statistics and metrics")
+acw-admin stats --days 7
+acw-admin activity       # file jobs and live sessions running now
+acw-admin check-money    # balances and holds against the ledger (exit 1 on a mismatch)
+acw-admin verify-backup FILE.sqlite3.gz
+acw-admin retention      # apply the retention rules now and print what each removed (the web process does it hourly)
+acw-admin storage        # sizes of the database, job files, data directory and backups
+acw-admin mirror --status  # release downloads: what is served, when it was last mirrored (--once runs a pass now, --force refetches, --verify hashes every served file)
+acw-admin compact-money  # payment/ledger records older than 7 years: what it would remove (add --apply to do it)
 ```
 
 ## Statistics and metrics
@@ -247,8 +300,8 @@ in `jobs.wait_seconds`; older jobs fall back to `started_at - queued_at`), "run"
 jobs, `acw-live` for live sessions); no user ids, addresses or file names:
 
 ```bash
-journalctl --user --since -1d -o cat | grep '"event":"job_'           # job_done and job_failed
-journalctl --user --since -1d -o cat | grep '"event":"live_session_end"'
+acw-logs --since -1d -o cat | grep '"event":"job_'           # job_done and job_failed
+acw-logs --since -1d -o cat | grep '"event":"live_session_end"'
 ```
 
 | Event | Fields |
@@ -287,16 +340,15 @@ SMTP_PASSWORD=<API key>
 SMTP_FROM=Audio Cleaner <no-reply@audiocleaner.live>
 ```
 
-Then `systemctl --user restart acw-web` and check with:
+Then `acw-ctl restart acw-web` and check with:
 
 ```bash
-cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
-../venv/bin/python -m acw.alerts test      # sends a test mail
-../venv/bin/python -m acw.alerts status    # every alert kind, active or not, mails sent / suppressed
+acw-admin -m acw.alerts test      # sends a test mail
+acw-admin -m acw.alerts status    # every alert kind, active or not, mails sent / suppressed
 ```
 
 Until SMTP and `ACW_ALERT_EMAIL` are both set nothing is mailed: every alert is
-logged at ERROR (`journalctl --user -u acw-monitor -u acw-web | grep -i 'ALERT NOT SENT'`)
+logged at ERROR (`acw-logs 'acw-*' | grep -i 'ALERT NOT SENT'`)
 and goes out by itself, still pending, once mail works. The same SMTP account is used
 for magic-link sign-in mails and the contact form ("Mail").
 
@@ -381,7 +433,7 @@ SMTP_FROM=Audio Cleaner <no-reply@audiocleaner.live>
 
 Port 587 with STARTTLS is what both mail paths use (`acw/alerts.py` for alerts and the contact form, and the sign-in mail
 in `api/auth_routes.py`; the server certificate is verified). Port 465 (implicit TLS) works only for alerts and the
-contact form, not for sign-in links, so keep 587. Then `systemctl --user restart acw-web` and run
+contact form, not for sign-in links, so keep 587. Then `acw-ctl restart acw-web` and run
 `python -m acw.alerts test` (see "Alerts"). Replies to contact-form messages go to the sender (`Reply-To`); the address
 `no-reply@` need not exist, because it only sends.
 
@@ -431,31 +483,32 @@ snapshot into `data/backups` before every deploy.
 **Off the machine (switched off until you configure it).** Create `~/audio-cleaner/secrets/backup.env` (0600):
 
 ```
-ACW_BACKUP_OFFBOX=user@host:/path/to/backups/       # an rsync destination (ssh key login, no password)
-ACW_BACKUP_PASSPHRASE_FILE=/home/silver/audio-cleaner/secrets/backup.pass   # a file holding a long passphrase (gpg --symmetric, AES256)
+ACW_BACKUP_OFFBOX=user@host:/path/to/backups/       # an rsync destination (ssh key login, no password: a key of acw's, made with `acw-sh`, not yours)
+ACW_BACKUP_PASSPHRASE_FILE=/home/acw/audio-cleaner/secrets/backup.pass   # a file holding a long passphrase (gpg --symmetric, AES256)
 # or, with `age` installed:  ACW_BACKUP_AGE_RECIPIENT=age1...   (a public key; keep the private key elsewhere)
 ```
 
 Each nightly snapshot is then encrypted and copied; the unit fails if that does not work. The remote end keeps
 everything it is given (prune it there). Also worth copying once, by hand, because the database does not hold them:
 `secrets/` (the passphrase file belongs somewhere other than the backup target) and `models/` (9 GB, partly converted by hand).
-After setting it up, run `systemctl --user start acw-backup.service` and look at `journalctl --user -u acw-backup -n 20`.
+After setting it up, run `acw-ctl start acw-backup.service` and look at `acw-logs acw-backup -n 20`.
 
 **Restore** (the database only; everything else is code and models):
 
 ```bash
-cd ~/audio-cleaner/app && set -a && . ../secrets/acw-worker.env && set +a
+# As the owner. The folder paths below are acw's: run the file steps in `acw-sh`.
 # 1. pick a snapshot and check it first (an encrypted off-machine copy: gpg --decrypt -o x.sqlite3.gz x.sqlite3.gz.gpg)
 ls -1 /mnt/mc-storage/audio-cleaner-backups | tail
-../venv/bin/python -m acw.admin verify-backup /mnt/mc-storage/audio-cleaner-backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz
+acw-admin --worker-env verify-backup /mnt/mc-storage/audio-cleaner-backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz
 # 2. stop everything that writes (the tunnel can stay: the site shows its maintenance message)
-systemctl --user stop acw-web 'acw-worker@*' acw-worker-gpu acw-stream acw-monitor.timer acw-backup.timer
-# 3. keep what is there, put the snapshot in place
+acw-ctl stop acw-web 'acw-worker@*' acw-worker-gpu acw-stream acw-monitor.timer acw-backup.timer
+# 3. keep what is there, put the snapshot in place (in `acw-sh`: ~/audio-cleaner/data is acw's)
+acw-sh
 cd ~/audio-cleaner/data && mkdir -p ../data-before-restore && cp -a acw.sqlite3* ../data-before-restore/ && rm -f acw.sqlite3 acw.sqlite3-wal acw.sqlite3-shm
 gunzip -c /mnt/mc-storage/audio-cleaner-backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz > acw.sqlite3 && chmod 600 acw.sqlite3
 # 4. schema (additive), then the money check, then start
-cd ~/audio-cleaner/app && ../venv/bin/python -m acw.admin init-db && ../venv/bin/python -m acw.admin check-money
-systemctl --user start acw-stream acw-web 'acw-worker@1' 'acw-worker@2' acw-monitor.timer acw-backup.timer   # and the other workers
+cd ~/audio-cleaner/app && acw-admin init-db && acw-admin check-money
+acw-ctl start acw-stream acw-web 'acw-worker@1' 'acw-worker@2' acw-monitor.timer acw-backup.timer   # and the other workers
 ```
 
 Jobs that were in flight are re-queued or failed by the normal sweeps; stripe events that were missed are picked up
@@ -521,15 +574,15 @@ the monitor and `check-money` all test). When records get older than 7 years the
 of grace). Then, once a year:
 
 ```bash
-../venv/bin/python -m acw.admin compact-money          # shows what it would do
-../venv/bin/python -m acw.admin compact-money --apply  # ... does it, then runs the money check
+acw-admin compact-money          # shows what it would do
+acw-admin compact-money --apply  # ... does it, then runs the money check
 ```
 
 For each account the leading run of ledger rows older than 7 years becomes one "balance carried forward" row (`kind=adjustment`,
 `ref_type=carry_forward`, same id and closing balance as the last row it replaces), so every balance and every later
 `balance_after` still adds up; a run that adds up to nothing is simply removed. A user whose rows do not add up is rolled back
 and reported. It also deletes settled payments and audit rows older than 7 years, and deleted accounts nothing points at any more.
-Take a backup first (`systemctl --user start acw-backup.service`).
+Take a backup first (`acw-ctl start acw-backup.service`).
 
 **Files and disks.**
 
@@ -541,7 +594,7 @@ Take a backup first (`systemctl --user start acw-backup.service`).
 | `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`, `gpu-worker-alive`) | rewritten in place, fixed names | a few KB in all |
 | `/mnt/mc-storage/audio-cleaner-backups` | nightly snapshot, gzipped | the newest 30, plus at most 3 failed (`*.bad`) and `backup-status.json`; also pruned on a night when the backup fails. About a quarter of the database size each: ~250 MB x 30 = 7.5 GB at the worst example above. Not ours: a stray `Audio-Cleaner-desktop-repo.bundle` (16 MB) |
 | The off-machine copy (if set up) | one encrypted file a night | "the remote end keeps everything": prune it there (Backups) |
-| Journal (`journalctl --user`) | see below | size and age caps |
+| Journal (acw's user journal: `acw-logs`) | see below | size and age caps |
 | `/var/log/syslog` (rsyslog gets a copy of everything journald sees, `ForwardToSyslog=yes`) | the same lines, with client addresses | logrotate: weekly, 4 kept, so about five weeks (inside the 90 days); ~16 MB a week at the example load |
 | GitHub releases of the desktop app | installers | the newest 5 automatic ones (docs/desktop.md) |
 | `data/downloads/` | the mirrored release files | the current version of each channel plus the previous one for 7 days: ~0.1 GB of OBS plugin packages (the only channel: the desktop app and the models come from GitHub releases and Hugging Face); `mirror` refuses to download unless 5 GB stay free, `acw_downloads_bytes{channel}` in `metrics.prom` shows it |
@@ -555,7 +608,7 @@ snapshots of ~0.25 GB each, so up to ~3.5 GB at year 7); raise `ACW_DATA_ALERT_G
 purpose if real growth gets there. `python -m acw.admin storage` and the `acw_storage_bytes{what}` gauge in `metrics.prom`
 (database, data, jobs, backups) show the numbers.
 
-**Journal volume (`journalctl --user`, units `acw-*`).** Nothing is logged per audio frame or per WebSocket message. What is
+**Journal volume (acw's user journal, `acw-logs`, units `acw-*`).** Nothing is logged per audio frame or per WebSocket message. What is
 logged: one access-log line per HTTP request (client address, method, path without query, status, milliseconds; about 90
 bytes of text, median measured on this machine), one JSON line per finished job and per live session (300 to 500 bytes), a
 line when a worker claims a job, warnings and errors, and the monitor's one line every 2 minutes. The one chatty source used to
@@ -611,7 +664,7 @@ Still to do (needs you):
 4. **Mail**: a sending service with the domain verified, then `SMTP_*` in `acw.env` ("Mail").
 5. **Contact form**: nothing to do when `ACW_ALERT_EMAIL` and `SMTP_*` are set (messages go to the alert address). Set
    `ACW_CONTACT_EMAIL` only to send them somewhere else (see "Contact form").
-6. `systemctl --user restart acw-web` after editing `acw.env`.
+6. `acw-ctl restart acw-web` after editing `acw.env`.
 
 The VPS side (Caddy routes, firewall, frp) is in the repository and done: docs/vps.md. Turnstile's three CSP additions
 are written in `00-audio-cleaner-snippets.caddy`, commented out; the request-body and header-timeout settings are in
@@ -774,3 +827,84 @@ transcription and file translation have two places each (`PREMIUM_JOBS_AT_ONCE`,
 translation line is retried once after 0.5 s and then skipped; a stage that runs past its time limit but is still
 making progress is given the time its progress says it needs, up to 3x the limit. On a bigger CPU all of this scales by itself (cores from the
 topology, speed from the calibration).
+
+## Moving the services to acw (one time) and back
+
+`deploy/host/move-to-acw.sh` moves the production services from `silver` to the account `acw` (why and what it means:
+"Accounts" near the top and docs/security.md). Read this once, run it once.
+
+```bash
+cd ~/repos/Audio-Cleaner-Web
+sudo bash deploy/host/move-to-acw.sh --dry-run     # every step printed, the read-only checks run, nothing changed (works without sudo)
+sudo bash deploy/host/move-to-acw.sh               # asks "Type yes" (--yes skips it)
+# the way back, any time (also after a failed half-way run):
+sudo bash deploy/host/move-back-to-silver.sh
+```
+
+**Downtime**: from the moment the services stop until `/api/health` answers again, about 3 to 6 minutes (stop 10-60 s: a
+stopping worker puts its job back in the queue; the move itself is renames; rebuilding `acw-live` against the moved venv 30 s to
+2 minutes with the build cache warm; start and health check about 30 s). Live sessions are cut: the script refuses to start
+while one runs (and refuses jobs running, too) unless `--force`. Run it in a quiet hour; `deploy/drain.sh wait` first if you like.
+
+What it does, in this order (`--dry-run` prints each command):
+
+1. **Checks** (nothing changed): root, the owner's folder has `app`, `venv`, `secrets`; the destination parent is the same
+   filesystem (else `mv` would copy 9 GB: it stops); nothing exists in both places; no job or live session is running
+   (`acw.admin activity`, a read-only look at the database, like `install.sh`'s "running now" line); the tunnel key, the `vps`
+   host key and `secrets/vps.env` exist; the backup folder exists; `/home/silver` is not world-accessible.
+2. **Account**: `useradd --create-home --home-dir /home/acw --shell /usr/sbin/nologin --user-group acw`, `chmod 750 /home/acw`,
+   the owner joins group `acw`, `loginctl enable-linger acw`, acw's user manager is started and waited for.
+3. **sudoers** `/etc/sudoers.d/acw` (checked with `visudo -cf` before it is installed) and the wrappers in `/usr/local/bin`.
+4. **Downtime starts**: `new live sessions refused` (`data/drain`), the activity check again, the unit files and drop-ins are copied
+   to `/var/lib/acw-move/units-silver` (acw gets exactly what ran), the owner's `acw-*` units are disabled and stopped
+   (`disable --now`, then waits until none is active), their unit files are removed from the owner's manager so nothing
+   starts there by accident, and a database snapshot is taken with everything stopped.
+5. **Move** `app app.prev venv venv-gpu bin models wasm data` to `/home/acw/audio-cleaner` and the production secrets
+   (an allowlist: `acw.env acw-worker.env vps.env backup.env backup.pass github-releases-read.token`); `src/`, `dev/`,
+   `research/`, `listen/` and every other secret (`update-signing-key.pem`, `github-actions-*.token`) stay with the owner.
+   `/home/silver/audio-cleaner/{bin,models,wasm,venv,venv-gpu}` become links to acw's folders (the dev instance
+   `dev/dev.sh`, the web build's `npm run sync-dfn`, the tools and the tests read them there). Old home paths in the moved `*.env`
+   files are rewritten. Modes: `app app.prev data secrets` 0700 and the secret files 0600 (acw only: the owner cannot read
+   them, on purpose); `bin models wasm venv venv-gpu` group-readable (`g=rX`, `o=`) with an ACL for the owner.
+6. **Venvs**: `deploy/host/fix-venv-paths.sh` rewrites the old absolute path in `venv/bin/*` (shebangs, `activate*`) and
+   `pyvenv.cfg` (nothing else in the venvs names it): no reinstall, venv-gpu's 3.9 GB of CUDA wheels stay. Tested on a copy
+   (`pip --version`, `uvicorn --version` fail before the rewrite and work after) and by `server/tests/test_move_to_acw.py`.
+7. **The tunnel key**: `acw_tunnel(.pub)` is copied to `/home/acw/.ssh` (0600, acw) and the `vps` host key line(s)
+   (`ssh-keygen -F vps`, hashed or not) to `/home/acw/.ssh/known_hosts`. The owner's own login key and `~/.ssh/config`
+   are not copied. The backup folder `/mnt/mc-storage/audio-cleaner-backups` is chowned to acw (750).
+8. **`acw-live` is rebuilt** by the owner against the venv in its new place. This cannot be skipped: the binary records the
+   absolute path of the sherpa-onnx library twice (rpath and the folder its Landlock sandbox lets it read); copied as is it
+   would look in `/home/silver/...`, which acw cannot read, and live would not start. The source stamp `bin/acw-live.src`
+   stays valid (it hashes the sources), so the next deploy does not rebuild it. (`libdf.so` has no such path.)
+9. **Units**: the stashed unit files and drop-ins are installed in `/home/acw/.config/systemd/user`, `/etc/acw-service-user`
+   is written (from now on `deploy/*.sh` act through acw), `daemon-reload`, `enable --now` of exactly the units that were enabled
+   before (stream worker first, timers last), then the same health check as `install.sh` (every unit active; `/api/health?deep=1`
+   on 8790, and /api/health on 8794 and 8795; up to 120 s), the drain flag is removed.
+10. **Smoke test** (`deploy/smoke.py`, as the owner) and an **isolation check** (as acw: `/home/silver`, `~/.ssh/id_ed25519` and
+    `~/audio-cleaner/secrets` of the owner must not be readable).
+
+**What could break, and the guard.** Work running (refused). A different filesystem (refused). `mv` onto an existing folder (refused; the
+script never overwrites). The user manager of acw not up (waited for 30 s, then it stops before touching anything). The owner's
+manager not running while units are enabled (refused: they could not be stopped cleanly). A path to the old home hiding in an env file
+(rewritten for `ACW_GITHUB_TOKEN_FILE`-style settings; any other mention of `/home/silver` is reported by name, never by content).
+Rebuilding `acw-live` failing (the script stops with the old engine in place and the services stopped: fix it, run again, or go back).
+The health check failing: the script prints what failed and does **not** roll back by itself:
+
+```
+FAILED during: <the step> (exit N; the error is above)
+  go on:     fix the cause, then run this script again; it continues where it stopped
+  go back:   sudo bash deploy/host/move-back-to-silver.sh
+```
+
+Both scripts are idempotent: each step looks at what is already done (moved folders, existing account, installed sudoers file,
+unit list recorded in `/var/lib/acw-move/units.<user>`). They never print secret contents (only file names).
+
+**Afterwards.** Log out and in once (or restart the sessions that read `~/audio-cleaner/{models,bin}`): group `acw` only reaches
+running sessions at the next login; the ACL entry covers the folders meanwhile. Open the dashboard as before
+(`ssh -L 8796:127.0.0.1:8796 silver@primary-ram`). The journal of the old units stays in the owner's user journal; new lines
+are in acw's (`acw-logs`). If the journal retention (`MaxRetentionSec`) is set system-wide it applies to both.
+
+**Way back**: `move-back-to-silver.sh` does the same steps in reverse (units back from the stash, folders and secrets back, links
+removed, `acw-live` rebuilt against the owner's venv, tunnel key removed from `/home/acw/.ssh`, backup folder returned,
+`/etc/acw-service-user` removed). The account, `/etc/sudoers.d/acw` and the wrappers stay (harmless); the last lines of its
+output show how to remove them.

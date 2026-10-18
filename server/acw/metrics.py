@@ -10,7 +10,7 @@ Log lines are single-line JSON on stderr (journald), no user ids, e-mail address
   {"event":"live_session_end","session":"…","denoise":"light","captions":"local","audio_s":3601.2,"wall_s":3640,
    "cost_micros":…,"end_reason":"client_stop","frames":180060,"late_frames":12,"dropped_frames":0}
 
-Find them with:  journalctl --user --since -1d | grep '"event":"job_'
+Find them with:  acw-logs --since -1d | grep '"event":"job_'
 """
 from __future__ import annotations
 

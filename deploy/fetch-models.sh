@@ -17,6 +17,14 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 H="${ACW_HOME:-$HOME/audio-cleaner}"
+# With the service account (acw, /etc/acw-service-user) the production folder is acw's: the owner may only --check it
+# (bin and models are readable by the owner); fetching is done by acw, through deploy/install.sh.
+SVC_USER="$(cat /etc/acw-service-user 2>/dev/null || true)"
+OWNER_VIEW=0
+if [ -z "${ACW_HOME:-}" ] && [ -n "$SVC_USER" ] && [ "$(id -un)" != "$SVC_USER" ]; then
+  H="$(getent passwd "$SVC_USER" | cut -d: -f6)/audio-cleaner"
+  OWNER_VIEW=1
+fi
 LOCK="$HERE/models.lock"
 CHECK=0
 OPTIONAL=0
@@ -32,7 +40,7 @@ while [ $# -gt 0 ]; do
     --only) ONLY="${2:?--only needs a pattern}"; shift ;;
     --dest-dir) DEST_DIR="${2:?--dest-dir needs a directory}"; shift ;;
     --archive) ARCHIVES+=("${2:?--archive needs a file}"); shift ;;
-    --home) H="${2:?--home needs a directory}"; shift ;;
+    --home) H="${2:?--home needs a directory}"; OWNER_VIEW=0; shift ;;
     --lock) LOCK="${2:?--lock needs a file}"; shift ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "unknown option $1 (see --help)" >&2; exit 2 ;;
@@ -40,6 +48,10 @@ while [ $# -gt 0 ]; do
   shift
 done
 [ -f "$LOCK" ] || { echo "no lock file $LOCK" >&2; exit 2; }
+if [ "$OWNER_VIEW" = 1 ] && [ "$CHECK" = 0 ] && [ -z "$DEST_DIR" ]; then
+  echo "$H belongs to $SVC_USER: deploy/install.sh fetches what is missing (as $SVC_USER); here only --check works (or --dest-dir, or --home DIR)" >&2
+  exit 2
+fi
 
 sha_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi

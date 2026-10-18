@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# acw-ctl SYSTEMCTL-ARGS...   systemctl --user for the services (they run in acw's user manager, not yours).
+#   acw-ctl status 'acw-*'        acw-ctl restart acw-web        acw-ctl list-timers
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec "$HERE/acw-run" systemctl --user "$@"

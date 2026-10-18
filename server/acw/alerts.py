@@ -329,7 +329,7 @@ def web_started() -> bool:
             "web_unclean_stop", "acw-web is back up after an unclean stop",
             f"acw-web has just started and the previous run did not shut down cleanly (it crashed, was killed, "
             f"ran out of memory, or the machine lost power). The previous run started {when}.\n"
-            "Check: journalctl --user -u acw-web --since '-1h'  and  dmesg | grep -i oom\n",
+            "Check: acw-logs acw-web --since '-1h'  and  dmesg | grep -i oom\n",
             event=True,
         )
     return unclean
@@ -363,7 +363,7 @@ def unit_failed(unit: str) -> bool:
     return send_alert(
         f"service:{unit}", f"{unit} failed",
         f"systemd reports that {unit} entered the failed state (it crashed or kept failing to start).\n\n{props}\n\n"
-        f"Check: journalctl --user -u {unit} -n 80 --no-pager\n"
+        f"Check: acw-logs {unit} -n 80 --no-pager\n"
         "You will get a second mail when the service is healthy again.\n",
     )
 

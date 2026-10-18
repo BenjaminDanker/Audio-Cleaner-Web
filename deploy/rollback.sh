@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Put the previous copy of the code back (deploy/install.sh keeps it as ~/audio-cleaner/app.prev).
+# Put the previous copy of the code back (deploy/install.sh keeps it as app.prev in acw's ~/audio-cleaner).
 #   deploy/rollback.sh [--wait-live[=SECS]] [--force]
+# Run by the owner it stages these scripts for acw and runs this same script there as acw (the services are acw's).
 # Swaps app and app.prev (the release mirror's timer follows the code), restarts the web process, the bulk-transfer process, the file workers and the live worker, and checks them.
 # Only code goes back: units, packages and the database stay as they are (schema changes are additive, the
 # previous code ignores new tables and columns). Running it again swaps forward again.
@@ -9,6 +10,13 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=deploy/lib.sh
 . "$REPO/deploy/lib.sh"
 
+if [ "$ACW_DELEGATE" = 1 ]; then
+  STAGE="$(stage_for_acw "$(git -C "$REPO" rev-parse --short HEAD)-rollback" deploy)"
+  rc=0
+  as_acw bash "$STAGE/deploy/rollback.sh" "$@" || rc=$?
+  exit "$rc"
+fi
+
 FORCE=0
 WAIT_LIVE=""
 for arg in "$@"; do
@@ -16,7 +24,7 @@ for arg in "$@"; do
     --force) FORCE=1 ;;
     --wait-live) WAIT_LIVE=600 ;;
     --wait-live=*) WAIT_LIVE="${arg#*=}" ;;
-    -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
     *) echo "unknown option $arg" >&2; exit 2 ;;
   esac
 done
@@ -76,6 +84,6 @@ LIVE_TUNNEL=""
 if check_running $UNITS acw-tunnel.service $BULK_TUNNEL $LIVE_TUNNEL; then
   echo "rolled back to $(cat "$H/app/VERSION" 2>/dev/null || echo unknown); run again to undo"
 else
-  echo "the rolled-back code did not come up cleanly either; look at: journalctl --user -u acw-web -n 80" >&2
+  echo "the rolled-back code did not come up cleanly either; look at: journalctl --user -u acw-web -n 80 (as the owner: acw-logs acw-web -n 80)" >&2
   exit 1
 fi

@@ -1,7 +1,7 @@
 # The VPS (edge): what lives there and how to rebuild it
 
 One small VPS (IONOS VPS Linux XS: 1 vCPU, 1 GB, Ubuntu 24.04, Kansas City; its address is in `~/.ssh/config` as
-`vps` and in `~/audio-cleaner/secrets/vps.env`, never in the repo) is the public front door for two things:
+`vps` (the owner's) and in `/home/acw/audio-cleaner/secrets/vps.env` (the tunnels'), never in the repo) is the public front door for two things:
 
 | Name | What | How it reaches home |
 |---|---|---|
@@ -33,14 +33,15 @@ TCP round trip from home: about 27 ms.
 Sudo is needed only for `setup.sh` (packages, firewall, users, the main Caddyfile) and frp's config. Everything
 that changes routinely (sites, website files, packs) belongs to `silver`.
 
-### The tunnel keys (`~/.ssh/authorized_keys` of `silver`)
+### The tunnel keys (`~/.ssh/authorized_keys` of `silver` on the VPS)
 
 Each key may only open its own listening ports, nothing else (no shell, no outgoing forwards):
 
-    restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitlisten="127.0.0.1:18795",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 <~/.ssh/acw_tunnel.pub of primary-ram> acw-tunnel@primary-ram
+    restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitlisten="127.0.0.1:18795",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 </home/acw/.ssh/acw_tunnel.pub of primary-ram> acw-tunnel@primary-ram
     restrict,port-forwarding,permitlisten="127.0.0.1:18788",permitopen="127.0.0.1:8788",command="/bin/false" ssh-ed25519 <its key> pet-companion-vps-tunnel
 
-plus your own login key(s).
+plus your own login key(s). The tunnel key lives with the service account (`/home/acw/.ssh/acw_tunnel`, the VPS host key under the alias `vps`
+in `/home/acw/.ssh/known_hosts`); your own VPS login key never leaves `/home/silver/.ssh` (docs/security.md, "Accounts").
 
 ## Change something
 
@@ -56,15 +57,16 @@ plus your own login key(s).
 ## Rebuild on a new VPS
 
 1. Create the VPS (Ubuntu 24.04), your user `silver` with sudo and your SSH key. Note its address.
-2. On primary-ram: point `HostName` of `Host vps` in `~/.ssh/config` and `ACW_VPS` in
-   `~/audio-cleaner/secrets/vps.env` at it, then `ssh vps true` (check the host key out of band first).
+2. On primary-ram: point `HostName` of `Host vps` in `~/.ssh/config` (yours) and `ACW_VPS` in
+   `/home/acw/audio-cleaner/secrets/vps.env` (edit it with `acw-sh`) at it, then `ssh vps true` (check the host key out of band first),
+   and copy the new host key for the tunnels: `ssh-keygen -F vps | grep -v '^#' | acw-sh -c 'cat > ~/.ssh/known_hosts'` (replaces the old one).
 3. On the VPS, add the tunnel key lines above to `~/.ssh/authorized_keys`.
 4. frp: copy `frps` (from the frp release, https://github.com/fatedier/frp/releases, same version) to `/opt/frp/frps`
    and `frps.ini` (with its token) to `/etc/frp/frps.ini` on the new VPS (`sudo install -d /opt/frp /etc/frp` first).
 5. On primary-ram: `deploy/vps/publish-edge.sh --setup`, then `ssh -t vps 'sudo bash ~/edge-src/setup.sh'`.
 6. DNS (Namecheap, both domains): the `A` record of `@` to the new address (`www` of audiocleaner.live is a CNAME to
    `@`). Mail forwarding records stay as they are.
-7. On primary-ram: `systemctl --user restart acw-tunnel acw-tunnel-bulk acw-tunnel-live`, `deploy/publish-web.sh`,
+7. On primary-ram: `acw-ctl restart acw-tunnel acw-tunnel-bulk acw-tunnel-live`, `deploy/publish-web.sh`,
    copy the packs to `/var/www/pack`, then `curl -s https://audiocleaner.live/api/health` (`{"ok":true}`).
 8. At home, point the Velocity proxy machine's `frpc.ini` (`server_addr`) at the new address; restart frpc.
 

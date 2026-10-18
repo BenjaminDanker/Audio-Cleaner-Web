@@ -4,6 +4,39 @@ primary-ram sits on the home LAN, so the design goal is: a compromise of any
 internet-facing piece must not reach the LAN, other services on primary-ram,
 or secrets.
 
+## Accounts: the services are not the owner
+
+The services run as the account **`acw`**, not as the owner (`silver`). A hole in the web code, a bug in a parser that
+gets past the runner sandbox, or a stolen process would otherwise have the owner's identity: the SSH keys (including the
+login to the VPS, which can change what the whole internet sees), other secrets, the Minecraft servers and every file
+of the owner. As `acw` it has none of that.
+
+| | `silver` (owner) | `acw` (services) |
+|---|---|---|
+| login | normal | none (`/usr/sbin/nologin`, no password); it exists to own processes and files |
+| home | `/home/silver` (750) | `/home/acw` (750, group `acw`); cannot read `/home/silver` |
+| sudo | yes | none; `/etc/sudoers.d/acw`: `silver ALL=(acw) NOPASSWD: ALL` - privilege only goes **down** |
+| VPS login key | yes (`~/.ssh/id_ed25519`, `~/.ssh/config`) | **never**: acw has only the restricted tunnel key (below) and the VPS host key |
+| website publishing, smoke test | `deploy/publish-web.sh` (`ssh vps`, rsync), `deploy/smoke.py` | cannot (no key; the script refuses to run as acw) |
+| Rust toolchain, build trees, `dev/`, `research/` | yes | no (native programs are built by the owner and handed over) |
+| `update-signing-key.pem`, `github-actions-*.token`, the owner's other secrets | yes | no (the migration moves only an allowlist of acw's own files) |
+| `secrets/acw.env`, `acw-worker.env`, `vps.env`, `backup.*`, `github-releases-read.token` | cannot read (0600, 0700 folder; a root-or-acw job) | yes |
+| database, job files, `app/` | cannot read directly (`acw-admin`, `acw-sh`) | yes |
+| `bin/ models/ wasm/ venv/` (no secrets) | read (group `acw` + ACL) | owner |
+
+The **tunnel key** (`/home/acw/.ssh/acw_tunnel`) is the restricted one (`permitlisten` on three loopback ports on the VPS,
+no shell, `command="/bin/false"`): all it can do is hold the three reverse tunnels open, so a stolen copy changes nothing
+on the VPS. The units use `-F none`, `IdentitiesOnly=yes` and `HostKeyAlias=vps` with `/home/acw/.ssh/known_hosts`.
+
+What the owner's tools cost: the owner can act as acw (`acw-ctl`, `acw-logs`, `acw-admin`, `acw-sh`, `deploy/install.sh`);
+that is the point (silver keeps full control) and it means the owner account is the one to protect (SSH keys only, Tailscale
+SSH-only, `deploy/host/tailscale-ssh-only.sh`). The deploy runs from a `git archive` of the exact commit owned by acw
+(`/home/acw/deploy/<commit>`), so acw never reads the owner's checkout and what runs is what was checked.
+
+Limits to know: acw and silver share the kernel, the loopback network and `/tmp` is per-account; a local kernel exploit
+or a root hole still crosses accounts. The Landlock/seccomp runner (below) is unchanged and still the layer against
+hostile media; the account split is the layer behind it.
+
 ## Exposure
 
 | Surface | Reachable from | Notes |

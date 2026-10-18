@@ -362,7 +362,7 @@ def test_check_timer_services():
     assert by["service:acw-backup.service"].bad
     assert not by["service:acw-mirror.service"].bad and not by["service:acw-monitor.service"].bad  # still running = fine
     bad = by["service:acw-backup.service"]
-    assert bad.subject == "acw-backup.service failed" and "exit-code" in bad.body and "journalctl --user -u acw-backup.service" in bad.body
+    assert bad.subject == "acw-backup.service failed" and "exit-code" in bad.body and "acw-logs acw-backup.service" in bad.body
     assert (bad.confirm, bad.clear) == (1, 2)
 
 

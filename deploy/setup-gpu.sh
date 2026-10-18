@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Optional: the GPU transcription worker's Python environment (~/audio-cleaner/venv-gpu).
+# Optional: the GPU transcription worker's Python environment (acw's ~/audio-cleaner/venv-gpu; run by the owner it
+# stages these files for acw and runs this script there as acw).
 # Needs an NVIDIA driver (nvidia-smi works). Then run deploy/install.sh, which
 # enables acw-worker-gpu when this environment exists.
 #
@@ -9,7 +10,15 @@
 # and run `python3 deploy/hash_lock.py deploy/requirements-gpu.lock`.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-V="$HOME/audio-cleaner/venv-gpu"
+# shellcheck source=deploy/lib.sh
+. "$REPO/deploy/lib.sh"
+if [ "$ACW_DELEGATE" = 1 ]; then
+  STAGE="$(stage_for_acw "$(git -C "$REPO" rev-parse --short HEAD)-gpu" deploy)"
+  rc=0
+  as_acw bash "$STAGE/deploy/setup-gpu.sh" "$@" || rc=$?
+  exit "$rc"
+fi
+V="$H/venv-gpu"
 command -v nvidia-smi >/dev/null || { echo "no NVIDIA driver (nvidia-smi) - nothing to do" >&2; exit 1; }
 [ -x "$V/bin/python" ] || python3 -m venv "$V"
 "$V/bin/pip" install -q --upgrade pip

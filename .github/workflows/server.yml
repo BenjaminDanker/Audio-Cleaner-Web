@@ -1,6 +1,6 @@
 # Checks for the server, the shared audio code, the live engine, the website and the deploy scripts: the server and
 # common tests on Python 3.12 with the locked packages (the same set production runs), the live engine's unit tests
-# (native/live), the website build, and shellcheck on deploy/*.sh. Tests that need FFmpeg, libDF or the models skip themselves here; they run on the production host.
+# (native/live), the website build, and shellcheck on deploy/*.sh (the host scripts and the acw-* wrappers in deploy/host/ included). Tests that need FFmpeg, libDF or the models skip themselves here; they run on the production host.
 # Every third-party action is pinned to a full commit SHA.
 name: Server and website
 
@@ -105,4 +105,4 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
-          shellcheck -x -S warning deploy/*.sh deploy/vps/*.sh
+          shellcheck -x -S warning deploy/*.sh deploy/vps/*.sh deploy/host/move-*.sh deploy/host/fix-venv-paths.sh deploy/host/acw-*

@@ -207,7 +207,7 @@ def check_services(states: dict[str, dict[str, str]], prev: dict, now: int) -> t
         findings.append(Finding(
             f"service:{unit}", not active, f"{unit} is not running",
             f"{unit} is {st.get('ActiveState')} ({st.get('SubState')}), last result: {st.get('Result')}.\n"
-            f"Check: systemctl --user status {unit}; journalctl --user -u {unit} -n 80 --no-pager\n",
+            f"Check: acw-ctl status {unit}; acw-logs {unit} -n 80 --no-pager\n",
             confirm=2,
         ))
         n = int(st.get("NRestarts") or 0)
@@ -220,7 +220,7 @@ def check_services(states: dict[str, dict[str, str]], prev: dict, now: int) -> t
             f"restarts:{unit}", len(events) >= RESTART_ALERT_AT, f"{unit} keeps restarting",
             f"systemd restarted {unit} {len(events)} times in the last {RESTART_WINDOW_S // 60} minutes "
             "(it crashes or exits and is brought back automatically).\n"
-            f"Check: journalctl --user -u {unit} --since '-1h' --no-pager\n",
+            f"Check: acw-logs {unit} --since '-1h' --no-pager\n",
         ))
     return findings, hist
 
@@ -239,7 +239,7 @@ def check_timer_services(states: dict[str, dict[str, str]]) -> list[Finding]:
         findings.append(Finding(
             f"service:{unit}", failed, f"{unit} failed",
             f"The last run of {unit} failed (result: {st.get('Result')}).\n"
-            f"Check: journalctl --user -u {unit} -n 80 --no-pager\n",
+            f"Check: acw-logs {unit} -n 80 --no-pager\n",
         ))
     return findings
 
@@ -266,7 +266,7 @@ def check_health(ok_fn: Callable[[str], tuple[bool, str]] = http_ok) -> list[Fin
     findings = [Finding(
         "health_local", not ok, "Audio Cleaner API is not answering locally",
         f"{local_url} failed ({why}). acw-web is down or stuck; users cannot reach the service at all.\n"
-        "Check: systemctl --user status acw-web; journalctl --user -u acw-web -n 80 --no-pager\n",
+        "Check: acw-ctl status acw-web; acw-logs acw-web -n 80 --no-pager\n",
         confirm=2,
     )]
     if ok and s.public_origin.startswith("https://"):
@@ -276,7 +276,7 @@ def check_health(ok_fn: Callable[[str], tuple[bool, str]] = http_ok) -> list[Fin
             "health_public", not pub_ok, "Audio Cleaner is not reachable from the internet",
             f"The local API is healthy, but {url} failed from this machine ({pub_why}).\n"
             "The problem is on the public path: the acw-tunnel SSH tunnel, the VPS, or its Caddy route.\n"
-            "Check: systemctl --user status acw-tunnel; ssh vps 'curl -s 127.0.0.1:18790/api/health'\n",
+            "Check: acw-ctl status acw-tunnel; ssh vps 'curl -s 127.0.0.1:18790/api/health'\n",
             confirm=2,
         ))
     return findings
@@ -295,7 +295,7 @@ def check_bulk(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Pat
         "health_bulk", not ok, "Audio Cleaner upload/download process is not answering",
         f"{url} failed ({why}). acw-bulk is down or stuck: uploads and result downloads fall back to the main process "
         "once the VPS notices (a few seconds to a minute), or fail if the VPS is not set up for the fallback.\n"
-        "Check: systemctl --user status acw-bulk; journalctl --user -u acw-bulk -n 80 --no-pager\n",
+        "Check: acw-ctl status acw-bulk; acw-logs acw-bulk -n 80 --no-pager\n",
         confirm=2,
     )]
 
@@ -312,7 +312,7 @@ def check_live(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Pat
     return [Finding(
         "health_live", not ok, "Audio Cleaner live process is not answering",
         f"{url} failed ({why}). acw-live is down or stuck: live is unavailable (no new sessions; running ones have ended).\n"
-        "Check: systemctl --user status acw-live; journalctl --user -u acw-live -n 80 --no-pager\n",
+        "Check: acw-ctl status acw-live; acw-logs acw-live -n 80 --no-pager\n",
         confirm=2,
     )]
 
@@ -330,7 +330,7 @@ def check_mirror(unit_dir: Path | None = None, now: float | None = None) -> list
         "mirror_stale", bool(problems), "Release downloads are out of date",
         "\n".join(problems) + "\nWhat people can download now is the last good version (nothing wrong is ever served); "
         "new releases are not reaching the website and the apps.\n"
-        "Check: python -m acw.admin mirror --status; journalctl --user -u acw-mirror -n 60 --no-pager; "
+        "Check: acw-admin mirror --status; acw-logs acw-mirror -n 60 --no-pager; "
         "docs/operations.md, \"Release downloads\".\n",
         confirm=2,
     )]
@@ -387,7 +387,7 @@ def check_resources(data_dir: Path, mem: dict[str, int], swap_hist: list, now: i
         "disk_low", free < DISK_MIN, f"Disk space is low ({_fmt_gb(free)} free)",
         f"Only {_fmt_gb(free)} is free on the volume holding {data_dir} (alert below {_fmt_gb(DISK_MIN)}). "
         "New uploads are refused below the job reserve and running jobs can fail.\n"
-        "Check: du -sh ~/audio-cleaner/data/jobs; df -h\n",
+        "Check: acw-sh -c 'du -sh ~/audio-cleaner/data/jobs; df -h'\n",
     ))
     avail = mem.get("MemAvailable", 0)
     findings.append(Finding(
@@ -435,7 +435,7 @@ def check_backup(directory: Path = BACKUP_DIR, now: float | None = None) -> list
         why = f"The newest database snapshot in {directory} is {age / 3600:.0f} hours old (alert after {BACKUP_MAX_AGE_S // 3600} h)."
     return [Finding(
         "backup_stale", bad, "Database backup is overdue",
-        why + "\nCheck: systemctl --user status acw-backup.timer acw-backup.service; journalctl --user -u acw-backup\n",
+        why + "\nCheck: acw-ctl status acw-backup.timer acw-backup.service; acw-logs acw-backup\n",
     )]
 
 
@@ -458,7 +458,7 @@ def check_backup_result(directory: Path = BACKUP_DIR) -> list[Finding]:
     return [Finding(
         "backup_bad", bad, "Database backup failed its check",
         "The newest snapshot (" + str(status.get("file")) + ") is not good: " + "; ".join(problems) + ".\n"
-        "Check: journalctl --user -u acw-backup -n 40 --no-pager; python -m acw.admin check-money\n",
+        "Check: acw-logs acw-backup -n 40 --no-pager; acw-admin check-money\n",
     )]
 
 
@@ -469,11 +469,11 @@ def check_storage(data_dir: Path, backup_dir: Path = BACKUP_DIR) -> list[Finding
     return [
         Finding("data_large", s["data"] > d_lim, f"The data directory is larger than expected ({_fmt_gb(s['data'])})",
                 f"{data_dir} without jobs/ holds {_fmt_gb(s['data'])} (alert above {_fmt_gb(d_lim)}; the database file and its log are "
-                f"{_fmt_gb(s['database'])}).\nSomething that should be bounded is growing: python -m acw.admin storage; "
+                f"{_fmt_gb(s['database'])}).\nSomething that should be bounded is growing: acw-admin storage; "
                 "docs/operations.md, \"What grows and what bounds it\". ACW_DATA_ALERT_GB changes the limit.\n"),
         Finding("backups_large", s["backups"] > b_lim, f"The backup directory is larger than expected ({_fmt_gb(s['backups'])})",
                 f"{backup_dir} holds {_fmt_gb(s['backups'])} (alert above {_fmt_gb(b_lim)}). Thirty nightly snapshots should be far smaller "
-                "than that: check the database size and for stray files in the folder (python -m acw.admin storage). "
+                "than that: check the database size and for stray files in the folder (acw-admin storage). "
                 "ACW_BACKUPS_ALERT_GB changes the limit.\n"),
     ]
 
@@ -485,7 +485,7 @@ def check_old_money(now: int) -> list[Finding]:
     n = sum(old.values())
     return [Finding("old_money_records", n > 0, "Payment records older than 7 years can be cleaned up",
                     f"{old['ledger']} ledger rows, {old['payments']} payments and {old['audit_log']} audit rows are older than 7 years.\n"
-                    "Nothing is deleted automatically. When you are ready: python -m acw.admin compact-money (shows what it would do), "
+                    "Nothing is deleted automatically. When you are ready: acw-admin compact-money (shows what it would do), "
                     "then compact-money --apply. It keeps every balance correct. See docs/operations.md.\n", confirm=1)]
 
 
@@ -494,7 +494,7 @@ def check_stuck_states(now: int) -> list[Finding]:
     n = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'cloud_asr' AND COALESCE(heartbeat_at, queued_at, created_at) < ?", (now - 1800,))["n"]
     out.append(Finding("cloud_asr_stuck", n > 0, "Extra-accurate transcription is stuck",
                        f"{n} job(s) have been waiting on the OpenAI transcription for over 30 minutes (outage, quota or a bug).\n"
-                       "Check: journalctl --user -u acw-web | grep -i 'cloud ASR'\n"))
+                       "Check: acw-logs acw-web | grep -i 'cloud ASR'\n"))
     up = db.one("SELECT COUNT(*) AS n, COALESCE(SUM(input_bytes), 0) AS b FROM jobs WHERE status = 'uploading'")
     out.append(Finding("uploads_piling", up["n"] > 15 or up["b"] > 40 * GB, "Many uploads in progress",
                        f"{up['n']} uploads are in progress ({_fmt_gb(up['b'])} promised). Disk space and the home link are shared with live audio.\n"))
@@ -508,11 +508,11 @@ def check_stuck_states(now: int) -> list[Finding]:
     failed, ok = int(rows["failed"] or 0), int(rows["ok"] or 0)
     out.append(Finding("jobs_failing", failed + ok >= 10 and failed / (failed + ok) > 0.3, "Many file jobs are failing",
                        f"{failed} of the {failed + ok} file jobs that ended in the last 24 hours failed.\n"
-                       "Check: journalctl --user -u 'acw-worker@*' --since '-1d' | grep -i 'died\\|crashed'\n"))
+                       "Check: acw-logs 'acw-worker@*' --since '-1d' | grep -i 'died\\|crashed'\n"))
     ev = db.one("SELECT COUNT(*) AS n FROM stripe_events WHERE processed_at IS NULL AND received_at < ?", (now - 600,))["n"]
     out.append(Finding("stripe_events_unprocessed", ev > 0, "Stripe events were received but not processed",
                        f"{ev} Stripe event(s) older than 10 minutes were stored without being handled: a payment may not be credited.\n"
-                       "Check: journalctl --user -u acw-web | grep -i webhook\n"))
+                       "Check: acw-logs acw-web | grep -i webhook\n"))
     pend = db.one(
         "SELECT COUNT(*) AS n FROM payments WHERE status = 'pending' AND ((kind = 'auto_reload' AND created_at < ?) OR created_at < ?)",
         (now - 3600, now - 26 * 3600),
@@ -528,7 +528,7 @@ def check_money() -> list[Finding]:
     return [Finding("ledger_invariant", bad, "Balances do not match the ledger",
                     f"{p['balance_mismatch']} account(s) have a balance different from the sum of their ledger entries and "
                     f"{p['held_mismatch']} have a held amount different from their active holds.\n"
-                    "Check: python -m acw.admin check-money; do not restart anything until you have looked.\n", confirm=1)]
+                    "Check: acw-admin check-money; do not restart anything until you have looked.\n", confirm=1)]
 
 
 def check_installation(now: int) -> list[Finding]:
@@ -538,7 +538,7 @@ def check_installation(now: int) -> list[Finding]:
                        "Missing under ~/audio-cleaner: " + ", ".join(missing[:12]) + ".\nJobs that need them fail.\n"))
     out.append(Finding("stream_socket", not health.stream_worker_ok(), "The live audio worker does not answer",
                        "Connecting to the live worker's socket failed: live sessions cannot start.\n"
-                       "Check: systemctl --user status acw-stream; journalctl --user -u acw-stream -n 60 --no-pager\n", confirm=2))
+                       "Check: acw-ctl status acw-stream; acw-logs acw-stream -n 60 --no-pager\n", confirm=2))
     age = health.gpu_worker_age()
     running = db.one("SELECT COUNT(*) AS n FROM jobs WHERE status = 'running'")["n"]
     states = {}
@@ -550,7 +550,7 @@ def check_installation(now: int) -> list[Finding]:
     out.append(Finding("gpu_worker_silent", gpu_unit_active and age is not None and age > 45 * 60 and running == 0,
                        "The GPU transcription worker is not reporting in",
                        "The GPU worker is running but has not marked itself idle for over 45 minutes while nothing else is running; "
-                       "CPU workers are taking the transcription jobs it should.\nCheck: journalctl --user -u acw-worker-gpu -n 60 --no-pager\n"))
+                       "CPU workers are taking the transcription jobs it should.\nCheck: acw-logs acw-worker-gpu -n 60 --no-pager\n"))
     return out
 
 

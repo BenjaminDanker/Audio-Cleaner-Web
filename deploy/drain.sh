@@ -7,7 +7,7 @@ set -euo pipefail
 case "${1:-status}" in
   on) drain_on; echo "drain on: new live sessions are refused" ;;
   off) drain_off; echo "drain off" ;;
-  status) [ -e "$H/data/drain" ] && echo "drain on" || echo "drain off"; echo "live sessions: $(live_sessions)" ;;
+  status) as_acw test -e "$H/data/drain" && echo "drain on" || echo "drain off"; echo "live sessions: $(live_sessions)" ;;
   wait)
     drain_on
     if wait_for_live "${2:-600}"; then echo "no live sessions left"; else echo "still $(live_sessions) live session(s)"; exit 1; fi ;;

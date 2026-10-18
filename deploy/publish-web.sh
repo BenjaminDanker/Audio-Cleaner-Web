@@ -8,6 +8,13 @@
 # hashed files stay for one more release, so a tab that is still open on the old page keeps loading its scripts.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=deploy/lib.sh
+. "$REPO/deploy/lib.sh"
+# This needs the owner's VPS login key (ssh vps): the service account (acw) never has one.
+if [ -n "$ACW_SERVICE_USER" ] && [ "$(id -un)" = "$ACW_SERVICE_USER" ]; then
+  echo "publish-web.sh needs the owner's VPS login key; $ACW_SERVICE_USER has none by design: run it as the owner" >&2
+  exit 1
+fi
 cd "$REPO/web"
 npm ci --no-audit --no-fund
 npm run sync-dfn
@@ -39,4 +46,5 @@ printf '%s\n' "$NEW_LIST" | ssh vps 'set -eu
   rm -f /tmp/acw-assets-new /tmp/acw-assets-keep'
 ssh vps 'curl -s -o /dev/null -w "%{http_code} " https://audiocleaner.live/ && curl -s https://audiocleaner.live/api/health'
 echo
-git -C "$REPO" rev-parse HEAD:web > "$HOME/audio-cleaner/data/web-published" 2>/dev/null || true
+# Record which web/ tree is published (install.sh publishes only when it differs); the file is in acw's data folder.
+git -C "$REPO" rev-parse HEAD:web | put_as_acw /dev/stdin "$H/data/web-published" 600 2>/dev/null || true

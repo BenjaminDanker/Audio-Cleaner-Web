@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# acw-logs [UNIT] [JOURNALCTL-ARGS...]   the journal of a service (journalctl --user -u UNIT, as acw).
+#   acw-logs acw-web -f        acw-logs acw-live --since -1h        acw-logs 'acw-worker@*' -n 100
+#   acw-logs                   every acw-* unit
+# Why through acw and not a plain read: the logs are in acw's user journal. Members of group adm can read that file
+# too (journald's ACL), but matching units there needs _UID= tricks; asking acw's own journalctl is exact, and
+# works whatever the journald ACLs are.
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+unit='acw-*'
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then unit="$1"; shift; fi
+exec "$HERE/acw-run" journalctl --user -u "$unit" "$@"

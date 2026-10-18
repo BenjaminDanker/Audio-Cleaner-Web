@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# acw-sh [BASH-ARGS...]   a shell as acw, in /home/acw, for maintenance (acw has no login shell of its own).
+#   acw-sh                       interactive            acw-sh -c 'du -sh ~/audio-cleaner/data/jobs'
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+exec "$HERE/acw-run" bash -c 'cd "$HOME" && exec bash -l "$@"' acw-sh "$@"

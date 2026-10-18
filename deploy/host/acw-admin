@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# acw-admin [--worker-env] [-m MODULE] ARGS...   python -m acw.admin ARGS as acw, with the environment the units get:
+# secrets/acw-worker.env, secrets/backup.env (when present), then secrets/acw.env (the web secrets: Stripe, SMTP, ...).
+#   acw-admin activity        acw-admin stats --days 7        acw-admin grant someone@example.com 5 "support credit"
+#   acw-admin --worker-env backup /mnt/mc-storage/audio-cleaner-backups --keep 30    (no web secrets: what install.sh uses)
+#   acw-admin -m acw.alerts test                                                      (another module of the app)
+# Paths in ARGS are absolute and readable by acw (it cannot enter your home).
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+worker_only=0
+module=acw.admin
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --worker-env) worker_only=1; shift ;;
+    -m) module="${2:?-m needs a module name}"; shift 2 ;;
+    *) break ;;
+  esac
+done
+exec "$HERE/acw-run" bash -c '
+set -euo pipefail
+h="$HOME/audio-cleaner"
+worker_only="$1"; module="$2"; shift 2
+cd "$h/app"
+set -a
+. "$h/secrets/acw-worker.env"
+if [ -f "$h/secrets/backup.env" ]; then . "$h/secrets/backup.env"; fi
+if [ "$worker_only" != 1 ]; then . "$h/secrets/acw.env"; fi
+set +a
+PYTHONPATH="$h/app" exec "$h/venv/bin/python" -m "$module" "$@"
+' acw-admin "$worker_only" "$module" "$@"

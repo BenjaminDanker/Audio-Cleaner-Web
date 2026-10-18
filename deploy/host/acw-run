@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# acw-run COMMAND [ARGS...]   run a command as the service account (acw), inside its systemd user session.
+# The base of acw-ctl, acw-logs, acw-admin and acw-sh (installed next to them in /usr/local/bin by move-to-acw.sh).
+#
+# silver -> acw only: /etc/sudoers.d/acw lets the owner run commands AS acw without a password (privilege goes
+# down, never up). When this runs as acw already (or ACW_USER names the current user) no sudo is involved.
+# It sets HOME, XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS the way a login of acw would, so `systemctl --user`
+# and `journalctl --user` talk to acw's manager. The working directory becomes / (acw cannot enter the owner's
+# folders): give files by absolute path, readable by acw.
+#
+# Test hooks: ACW_USER (account, default acw), ACW_UID, ACW_HOME_DIR (skip the lookups), ACW_RUN_DRY=1 (print the
+# command that would run instead of running it).
+set -euo pipefail
+ACW_USER="${ACW_USER:-acw}"
+[ $# -gt 0 ] || { echo "usage: acw-run COMMAND [ARGS...]" >&2; exit 2; }
+
+uid="${ACW_UID:-}"
+[ -n "$uid" ] || uid="$(id -u "$ACW_USER" 2>/dev/null)" || { echo "acw-run: there is no account '$ACW_USER' (deploy/host/move-to-acw.sh creates it)" >&2; exit 1; }
+home="${ACW_HOME_DIR:-}"
+[ -n "$home" ] || home="$(getent passwd "$ACW_USER" | cut -d: -f6)"
+[ -n "$home" ] || { echo "acw-run: no home directory for '$ACW_USER'" >&2; exit 1; }
+rt="/run/user/$uid"
+
+env_args=(HOME="$home" USER="$ACW_USER" LOGNAME="$ACW_USER"
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus")
+[ -z "${TERM:-}" ] || env_args+=(TERM="$TERM")
+
+if [ "$(id -un)" = "$ACW_USER" ]; then
+  cmd=(env "${env_args[@]}" "$@")
+else
+  cmd=(sudo -n -u "$ACW_USER" env "${env_args[@]}" "$@")
+fi
+if [ -n "${ACW_RUN_DRY:-}" ]; then
+  printf '%q ' "${cmd[@]}"; echo
+  exit 0
+fi
+cd /
+exec "${cmd[@]}"
