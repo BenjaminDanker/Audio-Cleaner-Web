@@ -25,13 +25,13 @@ export default function Privacy() {
   const { contact } = useAuth();
   const form = contact ? <Link to="/contact">contact form</Link> : null;
   return (
-    <Legal title="Privacy Policy" sections={SECTIONS}>
+    <Legal title="Privacy Policy" sections={SECTIONS} version="2026-10-18">
       <h2 id="who">1. Who we are</h2>
       <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{(form || email) && <> Contact: {form && <>use the {form}</>}{form && email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
       <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
 
       <h2 id="browser">2. Free noise removal and subtitles in your browser</h2>
-      <p>The free noise removal and the free subtitles on the <Link to="/app">Cleanup page</Link> process your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover and the subtitle maker themselves, and the public price list, none of which contain your data.</p>
+      <p>The free noise removal and the free subtitles on the <Link to="/app">Cleanup page</Link> process your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover and the subtitle maker themselves, and the public price list, none of which contain your data. The noise remover’s and the subtitle maker’s model files come from Hugging Face (huggingface.co), which, like any site your browser connects to, sees your IP address and browser type.</p>
 
       <h2 id="collect">3. What we collect</h2>
       <ul>
@@ -72,7 +72,7 @@ export default function Privacy() {
       <p>We do not sell personal data and do not share it for advertising.</p>
 
       <h2 id="cookies">7. Cookies and tracking</h2>
-      <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie during Google sign-in). We use <b>no analytics, advertising trackers, third-party fonts, CDNs or social widgets</b>. The only third-party script is Cloudflare Turnstile, loaded only on the sign-in page when enabled.</p>
+      <p>We use one strictly necessary, HttpOnly session cookie while you are signed in (plus a short-lived cookie during Google sign-in). We use <b>no analytics, advertising trackers, third-party fonts or social widgets</b>. The free tools’ model files are downloaded from Hugging Face (section 2). The only third-party script is Cloudflare Turnstile, loaded only on the sign-in page when enabled.</p>
 
       <h2 id="retention">8. How long we keep things</h2>
       <ul>

@@ -4,8 +4,9 @@ import { SITE } from '../site.js';
 
 export const LEGAL_VERSION = '2026-10-16';
 
-/** Wrapper for legal text: version and table of contents. */
-export default function Legal({ title, sections, children }) {
+/** Wrapper for legal text: version and table of contents. `version`: this page's own version date, when it changed
+ *  after LEGAL_VERSION (the Terms' version, which signed-in users accept). */
+export default function Legal({ title, sections, version = LEGAL_VERSION, children }) {
   const email = SITE.supportEmail.trim();
   const { contact } = useAuth();
   return (
@@ -14,7 +15,7 @@ export default function Legal({ title, sections, children }) {
         <article className="prose">
           <h1>{title}</h1>
           <p className="muted">
-            Version {LEGAL_VERSION}.
+            Version {version}.
           </p>
           <nav className="toc" aria-label="Contents">
             <ol>
