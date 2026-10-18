@@ -40,10 +40,11 @@ mc-multi-world.space {
 		uri strip_prefix /audio
 		import acw_api
 	}
-	handle /audio* {
-		uri strip_prefix /audio
+	# (handle_path strips /audio before the redirect; a plain `uri strip_prefix` would run after `redir`.)
+	handle_path /audio/* {
 		redir https://audiocleaner.live{uri} 308
 	}
+	redir /audio https://audiocleaner.live/ 308
 	import acw_errors
 
 	handle {
