@@ -2,7 +2,9 @@
 // themselves once /api/health answers again (the page's own 30 s re-check, run on a fake clock so nothing waits).
 // Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist at the root and forwards
 // /api/* to a backend port it can switch at runtime: a dead port (what the proxy turns into HTTP 502), the front door's
-// maintenance answer, or the real test backend on 8792 for the recovery. Usage: node tests/offline.mjs
+// maintenance answer, or the real test backend on 8792 for the recovery.
+// Usage: tests/run.sh offline   (builds the site with an empty base path and starts the backend on 8792), or by hand with
+// DIST=<site built for the root, not web/dist's /audio/ base> and a running `tests/backend.sh start`: node tests/offline.mjs
 import { createServer, request as httpRequest } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
@@ -82,6 +84,8 @@ await check('maintenance (the front door answers 503): Cleanup and Billing show 
 });
 
 await check('recovery: the banner and the panel go away by themselves once /api/health answers again (the page re-checks every 30 s; the clock is run forward, not waited for)', async () => {
+  const alive = await fetch(`http://127.0.0.1:${REAL_BACKEND}/api/health`).then((r) => r.ok, () => false);
+  if (!alive) throw new Error(`precondition: the test backend is not answering on port ${REAL_BACKEND} (start it with tests/backend.sh start, or run this through tests/run.sh); without it the page can never recover`);
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   try {

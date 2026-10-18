@@ -17,7 +17,7 @@ export const MIRROR_ORIGIN = `http://127.0.0.1:${MIRROR_PORT}`;
 const AC = join(homedir(), 'audio-cleaner');
 const ROOTS = [
   ...(process.env.ACW_MODEL_SRC ? process.env.ACW_MODEL_SRC.split(':') : []),
-  process.env.DFN_WASM_DIR || join(AC, 'wasm'), join(AC, 'models'), join(AC, 'dev', 'testmodels'),
+  process.env.DFN_WASM_DIR || join(AC, 'wasm'), join(AC, 'models'), // (links to the production folders, read-only)
 ];
 
 /** Every pinned file of models.js: { path: '<repo>/resolve/<revision>/<path>', size, sha256 }. */

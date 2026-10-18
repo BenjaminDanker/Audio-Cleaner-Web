@@ -3,7 +3,8 @@
 // WebSocket on a second process behind tests/front.mjs (what Caddy does in production). BASE is the origin; the API is /api/...
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { startMirror } from './mirror.mjs';
 
@@ -11,7 +12,7 @@ export const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:8792';
 export const BASE = ORIGIN; // the site is served from the root of its own domain (audiocleaner.live)
 export const FILES = process.env.E2E_FILES || join(homedir(), 'audio-cleaner', 'dev', 'webtest-files');
 export const SHOTS = process.env.E2E_SHOTS || join(homedir(), 'audio-cleaner', 'dev', 'webtest-shots');
-const SERVER = process.env.ACW_SERVER_DIR || join(homedir(), 'repos', 'Audio-Cleaner-Web', 'server');
+const SERVER = process.env.ACW_SERVER_DIR || join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'server');
 const PY = process.env.ACW_PYTHON || join(homedir(), 'audio-cleaner', 'venv', 'bin', 'python');
 
 const adminEnv = () => ({

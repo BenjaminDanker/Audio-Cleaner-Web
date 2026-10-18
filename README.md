@@ -44,11 +44,27 @@ cd server && nice -n 10 ~/venvs/acw-dev/bin/python -m pytest -q
 cd ../common && nice -n 10 ~/venvs/acw-dev/bin/python -m pytest -q
 
 # run locally (needs ~/audio-cleaner/{bin,models}, see docs/operations.md)
-export ACW_DATA_DIR=~/audio-cleaner/dev/data
+export ACW_DATA_DIR=~/acw-dev-data
 native/live/build.sh ~/audio-cleaner/bin && ~/audio-cleaner/bin/acw-live & ~/venvs/acw-dev/bin/python -m acw.worker.main &
 ~/venvs/acw-dev/bin/uvicorn acw.app:app --host 127.0.0.1 --port 8791
 ~/venvs/acw-dev/bin/python -m acw.admin login-link you@example.com
 ```
+
+### Browser tests (web/tests)
+
+```bash
+cd web && npm run test:fixtures   # once: the media files the suites use (E2E_FILES, default ~/audio-cleaner/dev/webtest-files)
+npm run test:all                  # builds the site once, then every suite (not long.mjs) on its own fresh backend
+npm run test:all -- free ui       # only these suites
+```
+
+`tests/run.sh` builds into a temp dist with `ACW_MODEL_HOST=http://127.0.0.1:8798/` (each suite serves the models from
+`tests/mirror.mjs`, which reads the production `~/audio-cleaner/{wasm,models}` read-only), starts a throwaway backend with
+`tests/backend.sh` (main app 18792, live app 18793, native live engine, worker, `tests/front.mjs` on 8792; own data dir
+`/tmp/acw-webtest-<uid>`, empty base path, `ACW_LIVE_TRIAL_SECONDS=0`) and stops it after the suite. It exits non-zero if a
+suite exits non-zero or prints a `FAIL` line; logs are in the state dir. `tests/backend.sh start|stop|env` runs a backend by
+hand for a single `node tests/<suite>.mjs`. Overrides: `AC_HOME`, `ACW_BIN_DIR`, `ACW_MODELS_DIR`, `ACW_PYTHON`, `ACW_MODEL_SRC`,
+`ACW_TEST_STATE`, `E2E_FILES`.
 
 ## Licences
 

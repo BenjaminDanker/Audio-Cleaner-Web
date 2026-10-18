@@ -25,7 +25,7 @@ The services run as the account `acw` (section "Accounts" below), so everything 
 /home/silver/audio-cleaner/                    the owner's side of the same name
   bin models wasm venv venv-gpu   links to /home/acw/audio-cleaner/...  (tools, dev runs, tests and the web build read them)
   src/        build trees (DeepFilterNet, deepfilter-build, libav-build) - the Rust toolchain is the owner's - safe to delete
-  dev/ research/ listen/          local dev instance (dev.sh), experiments - safe to delete
+  dev/ research/ listen/          scratch data, test fixtures, experiments - safe to delete
   secrets/    the owner's own tokens and keys (update-signing-key.pem, github-actions-*.token): never moved to acw
 ```
 
@@ -600,7 +600,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 | `data/downloads/` | the mirrored release files | the current version of each channel plus the previous one for 7 days: ~0.1 GB of OBS plugin packages (the only channel: the desktop app and the models come from GitHub releases and Hugging Face); `mirror` refuses to download unless 5 GB stay free, `acw_downloads_bytes{channel}` in `metrics.prom` shows it |
 | `app.prev` | one previous copy of the code (1 MB) | replaced at every deploy |
 | `/var/www/audio` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
-| `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; the dev instance; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
+| `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; test fixtures and scratch; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
 
 The monitor watches two sizes every 2 minutes and mails when `data/` without `jobs/` is over 5 GB (`data_large`) or the backup
 folder is over 20 GB (`backups_large`). At the example load the first stays around 1 GB (database, log, ten pre-deploy
@@ -862,8 +862,7 @@ What it does, in this order (`--dry-run` prints each command):
 5. **Move** `app app.prev venv venv-gpu bin models wasm data` to `/home/acw/audio-cleaner` and the production secrets
    (an allowlist: `acw.env acw-worker.env vps.env backup.env backup.pass github-releases-read.token`); `src/`, `dev/`,
    `research/`, `listen/` and every other secret (`update-signing-key.pem`, `github-actions-*.token`) stay with the owner.
-   `/home/silver/audio-cleaner/{bin,models,wasm,venv,venv-gpu}` become links to acw's folders (the dev instance
-   `dev/dev.sh`, the web build's `npm run sync-dfn`, the tools and the tests read them there). Old home paths in the moved `*.env`
+   `/home/silver/audio-cleaner/{bin,models,wasm,venv,venv-gpu}` become links to acw's folders (the web build's `npm run sync-dfn`, the tools and the tests read them there). Old home paths in the moved `*.env`
    files are rewritten. Modes: `app app.prev data secrets` 0700 and the secret files 0600 (acw only: the owner cannot read
    them, on purpose); `bin models wasm venv venv-gpu` group-readable (`g=rX`, `o=`) with an ACL for the owner.
 6. **Venvs**: `deploy/host/fix-venv-paths.sh` rewrites the old absolute path in `venv/bin/*` (shebangs, `activate*`) and
