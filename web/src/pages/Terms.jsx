@@ -45,7 +45,7 @@ export default function Terms() {
       <h2 id="services">3. The services</h2>
       <ul>
         <li><b>Free noise removal and free subtitles.</b> Run locally in your browser from the Cleanup page (you sign in to use them). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
-        <li><b>Denoising, Voice rebuild and Leveling.</b> Paid processing of files you upload, done on our side: noise removal, rebuilding the voice of echoey or damaged recordings, voice levelling, loudness normalisation and related processing.</li>
+        <li><b>Paid file processing.</b> Processing of the files you upload, done on our side.</li>
         <li><b>Transcription and subtitles.</b> Free in your browser (above), Standard (paid, done by us), or Extra accurate (paid; the audio is sent to a third-party speech-recognition provider, see the Privacy Policy).</li>
         <li><b>Translations.</b> Paid subtitles and live captions can also be translated into other languages (paid per language; the text, not the audio, is translated by the same third-party provider). Translations are made by software and can be wrong: check them before you rely on them.</li>
         <li><b>Live.</b> Real-time noise removal and captions for streams, from the browser test page or the OBS plugin, billed by the second of audio processed.</li>

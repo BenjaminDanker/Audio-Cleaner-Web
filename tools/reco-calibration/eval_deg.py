@@ -23,7 +23,7 @@ for rt in (0.15, 0.3, 0.5, 0.7, 1.0, 1.4):
 for fc in (1200, 2000, 3000):
     a, n = rate(lambda r: r['cat']=='muffled' and r['cut']==fc, lambda x: x['rebuild']); print(f'muffled (one-pole low-pass {fc} Hz): rebuild recommended {a}/{n}')
 for fc in (3400, 4000, 5500, 7000, 9500):
-    a, n = rate(lambda r: r['cat']=='bandlimit' and r['cut']==fc, lambda x: x['restoreHighs']); b, _ = rate(lambda r: r['cat']=='bandlimit' and r['cut']==fc, lambda x: x['noise']=='polish')
+    a, n = rate(lambda r: r['cat']=='bandlimit' and r['cut']==fc, lambda x: x['restoreHighs']); b, _ = rate(lambda r: r['cat']=='bandlimit' and r['cut']==fc, lambda x: x['noise']=='denoise')
     py = collections.Counter(str(bwe.pick_model(r['bandwidthHz'])) for r in rows if r['cat']=='bandlimit' and r['cut']==fc)
     print(f'band-limited at {fc} Hz: phone-like (restore highs, Denoising) {a}/{n}; server generator {dict(py)}')
 for tag in ('amr', 'g722', 'mp3_32', 'opus_12'):

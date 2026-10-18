@@ -144,7 +144,7 @@ def test_file_names_leave_the_credit_history_after_a_year_amounts_stay_and_recen
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     h = ledger.create_hold(uid, 1_000_000, "job", "j1")
-    ledger.capture_hold(h, 400_000, "Clean & polish: my-secret-podcast.wav (12.5 min)")
+    ledger.capture_hold(h, 400_000, "Denoising + Leveling: my-secret-podcast.wav (12.5 min)")
     h2 = ledger.create_hold(uid, 1_000_000, "job", "j2")
     ledger.capture_hold(h2, 100_000, "denoise + transcribe: legacy: name (with) parens.flac (0.2 min)")
     h3 = ledger.create_hold(uid, 1_000_000, "stream", "s1")
@@ -158,8 +158,8 @@ def test_file_names_leave_the_credit_history_after_a_year_amounts_stay_and_recen
     before = ledger.balance(uid)
     assert retention.run(NOW)["usage_names"] == 3
     rows = [r["description"] for r in db.all_rows("SELECT description FROM ledger WHERE kind = 'usage' ORDER BY id")]
-    # Rows written before the rename keep their old label ("Clean & polish"); legacy kind names get today's label.
-    assert rows[:4] == ["Clean & polish (12.5 min)", "Denoising + Subtitles & transcript (0.2 min)", "Live session (3.0 min)", "Denoising (5.0 min)"]
+    # A row keeps the label it was written with; legacy kind names get today's label.
+    assert rows[:4] == ["Denoising + Leveling (12.5 min)", "Denoising + Subtitles & transcript (0.2 min)", "Live session (3.0 min)", "Denoising (5.0 min)"]
     assert rows[4] == "Denoising: recent.wav (1.0 min)"
     everything = str([dict(r) for r in db.all_rows("SELECT * FROM ledger")])
     assert "secret" not in everything and "legacy" not in everything and "private-interview" not in everything
