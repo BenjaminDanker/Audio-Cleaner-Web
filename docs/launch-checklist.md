@@ -26,10 +26,8 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
   otherwise add 200-500 ms to live-stream latency (measured during research downloads).
 
 ## Accounts and keys
-- ⬜ Google OAuth client: add the exact redirect URI
-  `https://audiocleaner.live/api/auth/oauth/google/callback` (QA hit `redirect_uri_mismatch`)
-- ⬜ Stripe: add a webhook endpoint `https://audiocleaner.live/api/stripe/webhook`, keep the old one until events stop
-  arriving there (docs/payments.md)
+- ✅ Google OAuth client: redirect URI `https://audiocleaner.live/api/auth/oauth/google/callback` (2026-10-18; the old one removed)
+- ✅ Stripe: webhook endpoint moved to `https://audiocleaner.live/api/stripe/webhook`; billing portal links point at the new domain (2026-10-18)
 - ⬜ Mail from the domain: Namecheap forwarding for `support@audiocleaner.live`, Resend with the domain verified and
   `SMTP_*` in `acw.env`, DMARC record (docs/operations.md, "Mail"); needed for sign-in links, alerts and the contact form
 - ✅ Stripe: restricted key, webhook endpoint + events
@@ -43,10 +41,9 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
   The Privacy Policy no longer has placeholders (retention periods and transfers are written out: 7 years payments,
   12 months file names, 90 days addresses, 30 days backups; processed in the United States); with an empty
   `supportEmail` it points people at the Account page, so set the address when you have one.
-- ⬜ Product name and domain (the code says "Audio Cleaner"; it's one constant/string set)
-- ⬜ Prices (server/acw/billing/pricing.py; launch placeholders: Studio $0.60/h,
-  transcription $0.24/h standard and $0.90/h premium, live denoise $0.24/h,
-  live captions $0.36/h standard and $1.50/h premium)
+- ✅ Product name and domain: Audio Cleaner, https://audiocleaner.live (2026-10-18)
+- ✅ Prices (server/acw/billing/pricing.py): Denoising $0.54/h, Leveling $0.06/h, Voice rebuild $1.80/h, and the subtitle,
+  live and translation prices on the site's price list
 - ⬜ Terms of Service + Privacy Policy reviewed by a lawyer (drafts in the site)
 - ✅ Not offered in EU/EEA/UK/CH (authorize-first card-country check; docs/payments.md).
   (no Radar rule needed: cards are authorized first and only charged after the country check)
