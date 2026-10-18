@@ -6,7 +6,6 @@ import { useAuth } from '../auth.jsx';
 import ApiKeys from '../components/ApiKeys.jsx';
 import { IconBroadcast } from '../components/Icons.jsx';
 import PluginInstall from '../components/PluginInstall.jsx';
-import PriceTable from '../components/PriceTable.jsx';
 import { balanceMoney, clock, dateTime, rate, moneyUsd, trialLeft } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
@@ -29,23 +28,12 @@ export default function Live() {
           <p className="muted mb0">Clean mic audio and live captions for OBS. Your first two hours of live are free; after that you only pay while you’re live.</p>
         </div>
       </header>
-      <LivePrices />
       <div className="callout-grid">
         <ApiKeys />
         <ObsSetup />
       </div>
       <LiveDemo pricing={pricing} />
     </div>
-  );
-}
-
-function LivePrices() {
-  return (
-    <section className="card stack" aria-labelledby="lp-h">
-      <h2 id="lp-h" className="mb0">What live costs</h2>
-      <PriceTable only={['live']} testId="live-prices" showNote={false} />
-      <p className="small muted mb0">Counted by the second of audio. When you start, we set aside about five minutes of credit and give back whatever you don&rsquo;t use. If you turn on both noise removal and captions, the two add up.</p>
-    </section>
   );
 }
 
