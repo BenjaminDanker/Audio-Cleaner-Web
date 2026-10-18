@@ -110,12 +110,12 @@ async function open(page, path) {
     return `${Date.now() - t0} ms: ${s.line}`;
   });
 
-  await check('steady noise sets Denoising with a strength below Maximum; a lot of noise sets Denoising at Maximum with Extra accurate subtitles and Leveling; a recording with no one speaking sets Denoising, Leveling and no subtitles', async () => {
+  await check('steady noise sets Denoising at the strength the model picks (Strong for these two files; the stronger remover only for a lot of noise); a lot of noise says so and sets Extra accurate subtitles and Leveling; a recording with no one speaking sets Denoising, Leveling and no subtitles', async () => {
     const mild = await open(page, FILES.mild);
-    if (mild.noise !== 'denoise' || !mild.strength || mild.strength === 'max' || !mild.leveling) throw new Error(`mild: ${JSON.stringify(mild)}`);
+    if (mild.noise !== 'denoise' || mild.strength !== 'strong' || !mild.leveling || /stronger noise remover/.test(mild.why.join(' '))) throw new Error(`mild: ${JSON.stringify(mild)}`);
     const loud = await open(page, FILES.loud);
     if (loud.noise !== 'denoise' || !/stronger noise remover/.test(loud.why.join(' '))) throw new Error(`loud: ${JSON.stringify(loud)}`);
-    if (loud.subs !== 'accurate' || !loud.leveling || loud.strength !== 'max') throw new Error(`loud: ${JSON.stringify(loud)}`);
+    if (loud.subs !== 'accurate' || !loud.leveling || loud.strength !== 'strong') throw new Error(`loud: ${JSON.stringify(loud)}`);
     const hum = await open(page, FILES.hum);
     if (hum.noise !== 'denoise' || hum.strength !== 'balanced' || !/no subtitles/.test(hum.line) || hum.subs !== 'off' || !hum.leveling) throw new Error(JSON.stringify(hum));
     return `mild -> ${mild.noise}/${mild.strength}; loud -> ${loud.noise}/${loud.strength}/${loud.subs}; hum -> ${hum.line}`;

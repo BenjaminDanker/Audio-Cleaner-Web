@@ -12,7 +12,7 @@ import { LANGUAGES } from '../jobs.js';
 import { startLocalLive } from '../live/local.js';
 import { applyCaption, startLive } from '../live/session.js';
 import { ROOM_TEST_SECONDS, testRoom } from '../live/roomtest.js';
-import { roomChanges } from '../recommend.js';
+import { roomChanges } from '../recommend-room.js';
 import StrengthPicker from '../components/StrengthPicker.jsx';
 import { strengthDb } from '../strengths.js';
 
@@ -127,7 +127,7 @@ function LiveDemo({ pricing }) {
   const [translations, setTranslations] = useState({}); // caption id -> {lang: text}
   const [warning, setWarning] = useState(null); // {text, credit}
   const [stopped, setStopped] = useState(null); // {text, credit}
-  const [room, setRoom] = useState(null); // "Test my room": {progress} while it listens, then {result} (recommend.js roomChanges)
+  const [room, setRoom] = useState(null); // "Test my room": {progress} while it listens, then {result} (recommend-room.js roomChanges)
   const roomStop = useRef(null);
   const session = useRef(null);
   const logRef = useRef(null);

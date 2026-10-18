@@ -1,5 +1,5 @@
 // "Test my room": listens to the microphone for ROOM_TEST_SECONDS while the person talks the way they do on stream (their game,
-// music and fans as usual), then hands back what it heard; recommend.js roomChanges turns that into the settings that fit.
+// music and fans as usual), then hands back what it heard; recommend-room.js roomChanges turns that into the settings that fit.
 // The noise is measured by the noise remover itself (the free in-browser one, at full strength: analysis.js NoiseFigure), so
 // wind, keyboards and chatter count, not just a steady hum. Nothing is sent anywhere and nothing is billed.
 import { Analyser } from '../media/analysis.js';

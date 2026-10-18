@@ -287,10 +287,10 @@ const jobOutputHash = (id) => page.evaluate(async (id) => {
   const h = await crypto.subtle.digest('SHA-256', buf);
   return { name: audio.name, bytes: buf.byteLength, sha: [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('') };
 }, id);
-/** Uploads the raw file through the API, bypassing the browser's FLAC step (the reference for "same result as before"); no audio_format, so it is the API default. */
-const rawJob = async (file) => {
+/** Uploads the raw file through the API, bypassing the browser's FLAC step (the reference for "same result as before"); no audio_format, so it is the API default. `options`: the settings of the job to compare with (the page's automatic settings now depend on the file). */
+const rawJob = async (file, options = { loudness_lufs: -14, atten_lim_db: 100, caption_formats: [] }) => {
   const bytes = readFileSync(file);
-  const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options: { loudness_lufs: -14, atten_lim_db: 100, caption_formats: [] } });
+  const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options });
   if (made.status !== 200) throw new Error('raw create: ' + JSON.stringify(made));
   const put = await page.evaluate(async ({ url, b64 }) => {
     const me = await (await fetch('/api/me')).json();
@@ -326,7 +326,9 @@ await check('a WAV is sent as FLAC (smaller, the declared name and size match) a
   const done = await waitDone(jobs.body.jobs[0].id);
   if (done.status !== 'done' || done.inputName !== 'noisy.wav') throw new Error('job ' + done.status + ' ' + (done.error || ''));
   const viaFlac = await jobOutputHash(done.id);
-  const rawDone = await waitDone(await rawJob(join(FILES, 'noisy.wav')));
+  // the same settings as the page chose by itself (Automatic best settings), so the only difference is the browser's FLAC step
+  const { audio_format: _sent, ...pageOptions } = reqs[0].options;
+  const rawDone = await waitDone(await rawJob(join(FILES, 'noisy.wav'), pageOptions));
   if (rawDone.status !== 'done') throw new Error('raw job ' + rawDone.status);
   const viaRaw = await jobOutputHash(rawDone.id);
   if (reqs[0].options.audio_format !== 'flac' || rawDone.options.audio_format !== 'flac' || !viaFlac.name.endsWith('.flac')) throw new Error(`FLAC is the default for server audio: page ${reqs[0].options.audio_format}, API ${rawDone.options.audio_format}, file ${viaFlac.name}`);

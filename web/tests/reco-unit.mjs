@@ -7,7 +7,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HEAVY_BELOW_DB, planWindows, RATE } from '../src/media/analysis.js';
+import { modelDecision } from '../src/reco-model.js';
 import { recommendForFile, roomChanges, strengthFor, T } from '../src/recommend.js';
+import { noiseVerdict } from '../src/recommend-room.js';
 import { gauss, noisy, rng, voice } from './reco-audio.mjs';
 import { analysePlanes, loadDfn } from './reco-cli.mjs';
 
@@ -91,18 +93,124 @@ check('a long file is judged from about a minute spread over it (six stretches),
 const REASONS = [];
 const rec = (x, ctx) => { const r = recommendForFile(analyse([x]), ctx); if (r) REASONS.push(...r.reasons, r.line); return r; };
 
-check('automatic settings always pick Denoising (never Off or the free cleanup) with Leveling: Gentle for a clean recording, the measured strength for noise, Max with a stronger remover for a lot', () => {
+check('automatic settings always pick Denoising (never Off or the free cleanup) with Leveling: the strength is the trained model\'s (Gentle for a clean recording, Max for a lot of noise), the stronger remover is still the server\'s rule', () => {
   const clean = rec(noisy(10, 55));
   assert.deepEqual([clean.noise, clean.strength, clean.leveling, clean.nothing], ['denoise', 'gentle', true, false]);
-  const mild = rec(noisy(10, 22));
-  assert.equal(mild.noise, 'denoise');
-  assert.equal(mild.heavy, false);
-  assert.ok(mild.leveling && mild.strength !== 'max' && mild.strength !== 'gentle', mild.strength);
+  assert.equal(clean.heavy, false);
+  const mild = analyse([noisy(10, 22)]);
+  const mildRec = rec(noisy(10, 22));
+  assert.equal(mildRec.noise, 'denoise');
+  assert.equal(mildRec.heavy, false);
+  assert.ok(mildRec.leveling);
+  assert.equal(mildRec.strength, modelDecision(mild).strength); // wiring: from the model, not from the noise-figure steps
   const heavy = rec(noisy(10, 3));
   assert.equal(heavy.noise, 'denoise');
   assert.equal(heavy.heavy, true);
   assert.equal(heavy.strength, 'max');
-  assert.equal(strengthFor(T.CLEAN_AT_LEAST - 0.1), 'gentle');
+  assert.equal(strengthFor(T.CLEAN_AT_LEAST - 0.1), 'gentle'); // the live room's rule is unchanged
+});
+
+// A grid of measurements (not audio): what the file advice makes of each must be the model's decisions, plus the rules it kept.
+const gridStats = () => {
+  const out = [];
+  for (const noiseDb of [-3, 8, 14, 18, 20, 23, 26, 32, 45]) {
+    for (const bandwidthHz of [3800, 6500, 8000, 12000, 24000]) {
+      for (const tiltDb of [-45, -30, -20, -12]) {
+        for (const dropDb of [null, 6, 14, 30]) {
+          for (const floorDb of [-35, -60, -80]) {
+            out.push({ seconds: 20, segments: 1, noiseDb, floorDb, levelDb: floorDb + 30, peakDb: floorDb + 34, silentFraction: 0.05, speechFraction: 0.5,
+              bandDynDb: 20, hasSpeech: true, bandwidthHz, tiltDb, dropDb, clipFraction: 0, peak: 0.7, layout: 'mono', loudnessLufs: -22 });
+          }
+        }
+      }
+    }
+  }
+  return out;
+};
+
+check('files: strength, rebuild and restore highs follow the model; rebuild is also chosen for an echo or a muffled voice; heavy stays the rule', () => {
+  const seen = { rebuildModel: 0, restore: 0, rebuildRule: 0, strengths: new Set() };
+  for (const s of gridStats()) {
+    const r = recommendForFile(s, {});
+    const m = modelDecision(s);
+    const v = noiseVerdict(s);
+    const echoey = s.dropDb != null && s.dropDb < T.ECHO_DROP_DB;
+    const dull = s.bandwidthHz > T.PHONE_HZ && s.tiltDb <= T.DULL_TILT_DB;
+    const where = JSON.stringify(s);
+    assert.equal(r.strength, m.strength, where);
+    assert.equal(r.restoreHighs, m.restoreHighs, where); // no longer "phone => restore"
+    assert.equal(r.rebuild, echoey || dull || m.rebuild, where);
+    assert.equal(r.heavy, v.heavy && !v.clean, where);
+    assert.deepEqual([r.noise, r.leveling, r.nothing, r.noSpeech], ['denoise', true, false, false]);
+    assert.equal(r.line.startsWith(r.rebuild ? 'Voice rebuild' : 'Denoising'), true, r.line);
+    if (m.rebuild) seen.rebuildModel++;
+    if (m.restoreHighs) seen.restore++;
+    if (!m.rebuild && (echoey || dull)) seen.rebuildRule++;
+    seen.strengths.add(r.strength);
+    REASONS.push(...r.reasons, r.line);
+  }
+  // the grid reaches every branch, or the checks above prove nothing
+  assert.ok(seen.rebuildModel > 0 && seen.restore > 0 && seen.rebuildRule > 0, JSON.stringify({ ...seen, strengths: [...seen.strengths] }));
+  assert.ok(seen.strengths.size >= 3, [...seen.strengths].join());
+});
+
+check('files: the reasons say what was chosen (echo, muffled, restore highs for a phone call or not, quiet and gentle)', () => {
+  const grid = gridStats();
+  const find = (f) => grid.find(f);
+  const text = (s) => recommendForFile(s, {}).reasons.join(' ');
+  const rb = (s) => modelDecision(s).rebuild;
+  const rs = (s) => modelDecision(s).restoreHighs;
+  const echo = find((s) => s.dropDb === 6 && s.bandwidthHz > T.PHONE_HZ);
+  assert.match(text(echo), /echoey/);
+  assert.equal(recommendForFile(echo, {}).rebuild, true);
+  const dull = find((s) => s.dropDb == null && s.bandwidthHz > T.PHONE_HZ && s.tiltDb <= T.DULL_TILT_DB);
+  assert.match(text(dull), /muffled|lost some of its clarity/);
+  assert.equal(recommendForFile(dull, {}).rebuild, true);
+  const phoneRestore = find((s) => s.bandwidthHz <= T.PHONE_HZ && rs(s));
+  const otherRestore = find((s) => s.bandwidthHz > T.PHONE_HZ && rs(s));
+  const phoneNo = find((s) => s.bandwidthHz <= T.PHONE_HZ && !rs(s));
+  assert.ok(phoneRestore && otherRestore && phoneNo, 'the grid has no phone-bandwidth / wide-band examples for the restore head');
+  assert.match(text(phoneRestore), /phone call or a very small file/);
+  assert.match(text(otherRestore), /Some of the high sounds are missing/);
+  assert.doesNotMatch(text(phoneNo), /high sounds are missing/); // a phone-bandwidth file the model leaves alone gets no restore
+  assert.equal(recommendForFile(phoneNo, {}).restoreHighs, false);
+  const modelOnly = find((s) => rb(s) && !(s.dropDb != null && s.dropDb < T.ECHO_DROP_DB) && !(s.bandwidthHz > T.PHONE_HZ && s.tiltDb <= T.DULL_TILT_DB));
+  assert.ok(modelOnly, 'the grid has no case where only the model asks for the voice rebuild');
+  assert.match(text(modelOnly), /lost some of its clarity/);
+  const gentleClean = find((s) => s.noiseDb >= T.CLEAN_AT_LEAST && modelDecision(s).strength === 'gentle');
+  assert.ok(gentleClean);
+  assert.match(text(gentleClean), /clean and quiet/);
+  const notGentle = find((s) => modelDecision(s).strength === 'max');
+  assert.match(text(notGentle), /Maximum is enough/);
+});
+
+check('files: the strength sentence says "With it, ..." where the stronger remover is used, and the usual sentence where it is not', () => {
+  const seen = new Set();
+  for (const s of gridStats()) {
+    const r = recommendForFile(s, {});
+    const name = { gentle: 'Gentle', balanced: 'Balanced', strong: 'Strong', max: 'Maximum' }[r.strength];
+    const soft = r.strength === 'gentle' || r.strength === 'balanced';
+    const sentence = r.reasons.find((t) => / is enough/.test(t));
+    if (r.heavy) {
+      assert.equal(sentence, `With it, ${name} is enough${soft ? ' and keeps the voice natural' : ''}.`, JSON.stringify(s));
+      assert.ok(r.reasons.some((t) => /stronger noise remover/.test(t)));
+      seen.add(`heavy/${r.strength}`);
+    } else if (sentence) { // (a clean file at Gentle has no such sentence: "clean and quiet" says it)
+      assert.equal(sentence, `${name} is enough to take it out${soft ? ' while keeping the voice natural' : ''}.`, JSON.stringify(s));
+      assert.ok(!r.reasons.some((t) => /stronger noise remover|With it,/.test(t)));
+      seen.add(`plain/${r.strength}`);
+    }
+  }
+  for (const k of ['heavy/gentle', 'heavy/strong', 'plain/gentle', 'plain/balanced', 'plain/strong']) assert.ok(seen.has(k), `the grid never reaches ${k}: ${[...seen]}`);
+});
+
+check('files: a file with no speech, or a short one, or without a noise figure, is not sent to the model', () => {
+  const s = gridStats()[0];
+  const none = recommendForFile({ ...s, hasSpeech: false }, {});
+  assert.deepEqual([none.noSpeech, none.strength, none.rebuild, none.restoreHighs, none.heavy, none.subs], [true, 'balanced', false, false, false, null]);
+  assert.equal(recommendForFile({ ...s, seconds: 1 }, {}), null);
+  assert.equal(recommendForFile({ ...s, noiseDb: null }, {}), null);
+  assert.equal(recommendForFile({ ...s, tiltDb: null, dropDb: null }, {}).noise, 'denoise'); // missing measurements still give advice
 });
 
 check('"heavy" only where the server would pick the stronger remover (and not within the margin of its cut)', () => {
