@@ -102,6 +102,13 @@ res = {
     "fifo": attempt(lambda: os.mkfifo(job / "fifo")),
     "socketpair": attempt(lambda: socket.socketpair()),
 }
+import ctypes, platform
+libc = ctypes.CDLL(None, use_errno=True)
+def errno_of(call):
+    ctypes.set_errno(0); call(); return ctypes.get_errno()
+perf = {"x86_64": 298, "aarch64": 241}[platform.machine()]
+res["unshare_errno"] = errno_of(lambda: libc.unshare(0x10000000))  # CLONE_NEWUSER
+res["perf_errno"] = errno_of(lambda: libc.syscall(perf, 0, 0, -1, -1, 0))
 # what a runner legitimately does keeps working: pipes, child processes, files in the job directory
 out = subprocess.run(["/usr/bin/true"], capture_output=True)
 (job / "ok").write_text("x")
@@ -132,6 +139,7 @@ def test_runner_sandbox_refuses_sockets_links_and_pipes(tmp_path, mode):
     # the CUDA driver serves an abstract socket of its own; the runner still can't connect anywhere
     assert res["unix_abstract_bind"] == ("allowed" if mode == "gpu" else "blocked")
     assert res["symlink"] == res["fifo"] == "blocked"
+    assert res["unshare_errno"] == res["perf_errno"] == 1  # EPERM: no new namespaces, no perf events
     assert res["socketpair"] == "allowed"  # an anonymous connected pair leads nowhere (the denoiser's runtime builds one)
     assert res["unix_socket"] == ("allowed" if mode == "gpu" else "blocked")
     assert not (job / "link").exists() and not (job / "fifo").exists()
@@ -170,6 +178,7 @@ def test_seccomp_filter_is_well_formed_and_names_the_network_calls(gpu):
         assert rows[0][3] == 4 and rows[-1][3] == sandbox.SECCOMP_RET_ALLOW  # arch check first, allow by default
         numbers = {r[3] for r in rows if r[0] == 0x15}
         assert nums["connect"] in numbers and nums["sendto"] in numbers and nums["io_uring_setup"] in numbers
+        assert {nums[n] for n in ("bpf", "unshare", "setns", "perf_event_open", "userfaultfd", "keyctl")} <= numbers
         assert nums["socket"] in numbers  # refused, or allowed for AF_UNIX only
         for i, (code, jt, jf, _k) in enumerate(rows):  # every jump stays inside the program
             if code == 0x15:

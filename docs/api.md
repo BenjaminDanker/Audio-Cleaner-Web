@@ -167,7 +167,7 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 | `transcribeTier` | required for `transcribe` kinds: `local` (Standard) or `premium` (extra accurate; audio goes to a speech partner, see the privacy policy) |
 | `filename` | its extension must be one we read: audio `wav rf64 w64 mp3 mp2 mpa m4a m4b m4r aac flac ogg oga opus spx wma aiff aif aifc caf au snd amr ac3 eac3 dts mka wv ape tta mpc`, video `mp4 m4v mov webm mkv avi wmv asf flv f4v 3gp 3g2 ts mts m2ts mpg mpeg vob mxf dv ogv rm rmvb`; anything else is `400 Unsupported file type.` Only the extension is used; the name never becomes a path |
 | `sizeBytes` | 1 byte up to `maxUploadBytes` (4 GiB; `413` above); at most 40 MB per second of `durationSeconds` unless under 200 MB |
-| `durationSeconds` | 0.5 s up to 14,400 s (4 h); up to 5,400 s (90 min) with `rebuild`. From the client; the server measures again after the upload and prices what it finds |
+| `durationSeconds` | 0.5 s up to 14,400 s (4 h); up to 5,400 s (90 min) with `rebuild`. From the client: the server measures the file after the upload and prices what it finds, within the API key's monthly limit. The measured length may be at most 10 % (+5 s) longer than this, else the job fails before any work and nothing is charged |
 | `displayName` | optional, shown as the job's name and used for result file names. Up to 300 characters sent, cut to 120 after control, bidirectional and zero-width characters are removed |
 | `callbackUrl` | optional, see "Finish notifications" |
 | `free` | `true` is refused (400): jobs here are always paid. The free tools run in the visitor's browser |

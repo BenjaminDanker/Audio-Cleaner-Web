@@ -36,6 +36,10 @@ mc-multi-world.space {
 	# Audio Cleaner lived at /audio until it moved to https://audiocleaner.live (2026-10-18). Its API still answers
 	# here, for OBS plugin builds and API clients that have this address (and Stripe's webhook until it points at the
 	# new one); every page redirects to the same page there.
+	# Stripe calls the new address (since 2026-10-18): its webhook is not reachable through this one any more.
+	handle /audio/api/stripe/webhook {
+		respond 404
+	}
 	handle /audio/api/* {
 		uri strip_prefix /audio
 		import acw_api

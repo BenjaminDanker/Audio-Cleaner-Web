@@ -55,6 +55,12 @@ if [ -n "$DEPLOYED" ]; then
     problems+=("$COMMIT is not a descendant of the deployed $DEPLOYED: deploying it would drop changes that are live now")
   fi
 fi
+# The app falls back to development behaviour without ACW_ENV=production (relaxed cookies, API docs on, ...).
+for f in acw.env acw-worker.env; do
+  if [ -f "$HOME/audio-cleaner/secrets/$f" ] && ! grep -qx 'ACW_ENV=production' "$HOME/audio-cleaner/secrets/$f"; then
+    problems+=("~/audio-cleaner/secrets/$f does not say ACW_ENV=production")
+  fi
+done
 if [ "${#problems[@]}" -gt 0 ]; then
   for p in "${problems[@]}"; do echo "problem: $p" >&2; done
   if [ "$FORCE" = 1 ]; then echo "continuing because of --force" >&2; else echo "refusing to deploy (--force overrides)" >&2; exit 1; fi

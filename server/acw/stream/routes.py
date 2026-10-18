@@ -633,7 +633,9 @@ async def _start(ws: WebSocket, principal: auth.Principal, ip: str) -> Session |
         try:
             worker_cfg = features.worker(sess.trial)
             worker_cfg["return_audio"] = sess.return_audio
-            worker_cfg["opus_bitrate"] = int(cfg.get("opusBitrate", 96_000)) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
+            # 24-160 kbit/s (docs/streaming-protocol.md); anything else is the default
+            rate = int(cfg["opusBitrate"]) if str(cfg.get("opusBitrate", "")).isdigit() else 96_000
+            worker_cfg["opus_bitrate"] = rate if 24_000 <= rate <= 160_000 else 96_000
             # What this session's class may take (resource broker): a free-trial session doesn't open a new core
             # while paid file jobs run, and the engine keeps it below 70% of live capacity.
             worker_cfg.update(await asyncio.to_thread(broker.live_options, "live_trial" if sess.trial else "live"))

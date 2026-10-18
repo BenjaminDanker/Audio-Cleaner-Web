@@ -173,19 +173,24 @@ SYSCALLS = {
         "socket": 41, "connect": 42, "accept": 43, "sendto": 44, "sendmsg": 46, "bind": 49, "listen": 50,
         "socketpair": 53, "ptrace": 101, "accept4": 288, "sendmmsg": 307, "process_vm_readv": 310,
         "process_vm_writev": 311, "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
-        "pidfd_getfd": 438,
+        "pidfd_getfd": 438, "bpf": 321, "unshare": 272, "setns": 308, "perf_event_open": 298, "userfaultfd": 323,
+        "add_key": 248, "request_key": 249, "keyctl": 250,
     },
     AUDIT_ARCH_AARCH64: {
         "socket": 198, "socketpair": 199, "bind": 200, "listen": 201, "accept": 202, "connect": 203,
         "sendto": 206, "sendmsg": 211, "ptrace": 117, "accept4": 242, "sendmmsg": 269, "process_vm_readv": 270,
         "process_vm_writev": 271, "io_uring_setup": 425, "io_uring_enter": 426, "io_uring_register": 427,
-        "pidfd_getfd": 438,
+        "pidfd_getfd": 438, "bpf": 280, "unshare": 97, "setns": 268, "perf_event_open": 241, "userfaultfd": 282,
+        "add_key": 217, "request_key": 218, "keyctl": 219,
     },
 }
 # Refused for every runner. io_uring can open and use sockets by itself, so it goes too; ptrace, process_vm_*
-# and pidfd_getfd would let a compromised runner reach into other processes of the same user.
+# and pidfd_getfd would let a compromised runner reach into other processes of the same user. bpf, perf_event_open
+# and userfaultfd are kernel attack surface no decoder needs; unshare and setns would give it new namespaces (a user
+# namespace brings mount and more); the keyring calls reach the user's kernel keys.
 ALWAYS_DENIED = ("ptrace", "process_vm_readv", "process_vm_writev", "pidfd_getfd", "io_uring_setup", "io_uring_enter",
-                 "io_uring_register")
+                 "io_uring_register", "bpf", "unshare", "setns", "perf_event_open", "userfaultfd", "add_key", "request_key",
+                 "keyctl")
 # CPU runner: no way to get a socket that could reach anything. socketpair() stays: the connected pair it makes
 # leads nowhere (DeepFilterNet's Rust runtime builds one for its signal handling and aborts without it).
 NO_SOCKETS = ("socket", "connect", "bind", "listen", "accept", "accept4", "sendto", "sendmmsg")

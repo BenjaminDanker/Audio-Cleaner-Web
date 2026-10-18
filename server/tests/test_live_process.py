@@ -68,5 +68,10 @@ def test_the_live_route_tunnel_units_and_install_all_point_at_the_live_process()
     page = old.split("handle_path /audio/* {")[1].split("\n\t}")[0]
     assert "redir https://audiocleaner.live{uri} 308" in page and "strip_prefix" not in page
     assert "redir /audio https://audiocleaner.live/ 308" in old
+    assert "includeSubDomains" in re.search(r'Strict-Transport-Security "([^"]*)"', caddy).group(1)
+    assert "@acw_hidden path /.*\n" in caddy and "respond @acw_hidden 404" in caddy  # dot-files of the site folder
+    assert old.index("handle /audio/api/stripe/webhook {\n\t\trespond 404") < old.index("handle /audio/api/* {")
+    install = (deploy / "install.sh").read_text()
+    assert "grep -qx 'ACW_ENV=production'" in install and "acw.env acw-worker.env" in install  # refuses a dev-mode deploy
     units = re.search(r'^UNITS="([^"]*)"', (deploy / "install.sh").read_text(), re.M).group(1)
     assert "acw-tunnel-live.service" in units.split()

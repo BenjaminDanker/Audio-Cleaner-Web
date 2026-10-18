@@ -130,6 +130,9 @@ LIMITS = {
     "email_link": (6, 6 / 3600),       # 6 per hour per IP (shared addresses: CGNAT, campus, office)
     "email_addr": (3, 3 / 3600),       # 3 per hour per mailbox
     "email_domain": (20, 20 / 3600),   # sign-in mails per hour to one (small) mail domain
+    "email_link_wide": (12, 12 / 3600),  # ... per IPv6 /48 (a prefix that size holds 65,536 /64s)
+    "email_all": (60, 60 / 3600),      # sign-in mails per hour in total, and per day: a flood of new addresses stops
+    "email_all_day": (400, 400 / 86400),  # here, below the mail account's own limits (it also carries the owner's alerts)
     "api": (120, 2.0),                 # general API calls
     "job_create": (20, 20 / 3600),
     "upload": (30, 30 / 3600),
@@ -252,13 +255,14 @@ uploads = UploadBandwidth(_budget)
 downloads = DownloadBandwidth(_budget)  # the same object: uploads and downloads together stay under one rate
 
 
-def client_net(ip: str) -> str:
-    """Rate-limit key for an address: IPv6 addresses count per /64 (one subscriber holds billions of them)."""
+def client_net(ip: str, prefix: int = 64) -> str:
+    """Rate-limit key for an address: IPv6 addresses count per /64 (one subscriber holds billions of them), or per
+    `prefix` (e.g. 48: what one customer or small provider usually holds)."""
     if ":" in ip:
         import ipaddress
 
         try:
-            return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+            return str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
         except ValueError:
             return ip
     return ip

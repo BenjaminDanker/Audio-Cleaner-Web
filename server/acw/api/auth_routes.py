@@ -241,6 +241,10 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
     enforce("email_addr", canon)
     if canon.partition("@")[2] not in BIG_MAIL_DOMAINS:
         enforce("email_domain", canon.partition("@")[2])
+    if ":" in ip:
+        enforce("email_link_wide", f"ip:{client_net(ip, 48)}")
+    enforce("email_all", "all")
+    enforce("email_all_day", "all")
     token = auth.create_login_token(email, "email_login", ip)
     link = s.url(f"/login/verify#token={token}")
     text = (
@@ -249,8 +253,8 @@ async def email_login(body: EmailLoginBody, request: Request) -> dict:
     )
     try:
         await run_outbound(_send_mail, email, "Your Audio Cleaner sign-in link", text)
-    except Exception:  # noqa: BLE001
-        log.exception("sending login email failed")
+    except Exception as e:  # noqa: BLE001
+        log.error("sending login email failed: %s", type(e).__name__)  # not the exception text: it can hold the address
         raise HTTPException(status_code=503, detail="Could not send the email right now.")
     # Same response whether or not the account exists.
     return {"ok": True}

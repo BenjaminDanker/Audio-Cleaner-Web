@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import broker, db, hostload, jobs, metrics
+from .. import broker, db, hostload, jobs, keycaps, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -390,19 +390,37 @@ def _job_cost(job: dict, params: dict, seconds: float) -> int:
                                    "leveling" in (params.get("rates") or {}))
 
 
+# A job made with an API key must say how long its file is (an API client knows): the measured length may be this
+# much longer, no more. (The website estimates the length of a file it can't read itself from its size, so its jobs
+# are held to the measured price only.)
+CLAIM_SLACK, CLAIM_SLACK_SECONDS = 1.1, 5.0
+
+
 def _reprice(job: dict, duration: float) -> None:
-    """Make the hold match the real duration before the expensive work starts."""
+    """Make the hold match the real duration before the expensive work starts: within the account's balance and, for a
+    job made with an API key, within the key's monthly spending limit and the length it said the file has."""
     params = json.loads(job["params_json"])
+    claimed = float(job.get("claimed_seconds") or 0)
+    key_id = job.get("api_key_id")
+    if key_id and duration > claimed * CLAIM_SLACK + CLAIM_SLACK_SECONDS:
+        raise StageFailed(
+            f"This file is {duration / 60:.1f} min long, but the job said {claimed / 60:.1f} min. "
+            "Send its real length in durationSeconds."
+        )
     db.execute("UPDATE jobs SET duration_seconds = ? WHERE id = ?", (duration, job["id"]))
     cost = _job_cost(job, params, duration)
     if cost > job["est_cost_micros"]:
         try:
-            ledger.extend_hold(job["hold_id"], cost - job["est_cost_micros"])
+            with db.tx() as c:
+                keycaps.check(c, key_id, cost - job["est_cost_micros"])  # the key's limit holds for the real price too
+                ledger.extend_hold(job["hold_id"], cost - job["est_cost_micros"], c=c)
+                c.execute("UPDATE jobs SET est_cost_micros = ? WHERE id = ?", (cost, job["id"]))
+        except keycaps.KeyCapReached as e:
+            raise StageFailed(str(e))
         except (ledger.InsufficientFunds, ledger.LedgerError):
             raise StageFailed(
                 f"This file is {duration / 60:.1f} min and costs ${cost / 1e6:.2f}, more than your available balance."
             )
-        db.execute("UPDATE jobs SET est_cost_micros = ? WHERE id = ?", (cost, job["id"]))
         job["est_cost_micros"] = cost
 
 
