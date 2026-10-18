@@ -5,8 +5,10 @@ for Audio Cleaner:
 
 1. Serves the **static website** from `/var/www/audio` (the app, and the free browser tools' code: the noise
    remover's df.js, the speech runtime, the decoder). Kept here on purpose: serving it from home would compete with
-   live audio and Minecraft on the home connection (1 Gbit/s both ways; the VPS link itself carries about 73 Mbit/s
-   inbound and 92 Mbit/s outbound, measured 2026-10-15). The free tools' **models** (about 22 MB for the noise remover,
+   live audio and Minecraft on the home connection. Measured 2026-10-18: the VPS's own link does about 1.3 Gbit/s down
+   and 0.5-0.9 Gbit/s up (to Cloudflare); primary-ram reaches only about 90 Mbit/s down and 85 up to anywhere (even 4
+   connections at once, with its network card at 1 Gbit/s and the line idle), so the ~60-90 Mbit/s between home and
+   the VPS is the home side, not the VPS. The free tools' **models** (about 22 MB for the noise remover,
    77 MB for the subtitles) are not here: visitors' browsers download them from Hugging Face (`web/src/media/models.js`).
 2. **Forwards** `/audio/api/*` (and the live WebSocket) to the home server
    through SSH reverse tunnels that primary-ram opens:
