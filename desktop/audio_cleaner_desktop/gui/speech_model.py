@@ -1,5 +1,5 @@
-"""The one-time download of a model (the speech model for subtitles, the one that restores highs, the one that
-rebuilds the voice): a background download with progress, and the line under the setting that offers it, shows
+"""The one-time download of a model (the noise removal models, the speech model for subtitles, the one that restores
+highs, the one that rebuilds the voice): a background download with progress, and the line under the setting that offers it, shows
 it running, or says what went wrong."""
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ class SpeechModelDownloader(QObject):
     def ready(self) -> bool:
         if self.model is resources.SPEECH_MODEL:
             return resources.speech_ready()  # also counts the test model when run from source
+        if self.model is resources.NOISE_MODEL:
+            return resources.noise_ready()  # also counts vendor/models and the server's models when run from source
         if self.model is resources.HIGHS_MODEL:
             return resources.highs_model_dir() is not None
         if self.model is resources.VOICE_MODEL:

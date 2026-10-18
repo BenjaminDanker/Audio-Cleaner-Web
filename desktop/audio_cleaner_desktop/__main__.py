@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gui", action="store_true", help="with --selftest: also build the window, the preview and the About box")
     p.add_argument(
         "--download-models", "--download-speech-model", action="store_true", dest="download_models",
-        help="download the models for subtitles, restoring highs and rebuilding the voice (about 2.6 GB, once) and exit",
+        help="download the models for noise removal, subtitles, restoring highs and rebuilding the voice (about 2.6 GB, once) and exit",
     )
     p.add_argument("-o", "--output-dir", metavar="OUTDIR", help="write results here (default: next to each original)")
     p.add_argument(

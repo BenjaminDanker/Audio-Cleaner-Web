@@ -604,6 +604,9 @@ def process(
     ff = ffmpeg(threads, cancel)
 
     info = probe(src, ff)
+    if not resources.noise_ready():  # setup's download failed, or a portable run: the app offers it (main_window, --download-models)
+        raise MediaError("Noise removal needs its models, which aren't downloaded yet. Download them (Audio Cleaner offers "
+                         "it when it starts, or run it with --download-models), then try again.")
     dest_dir = Path(out_dir) if out_dir is not None else src.absolute().parent
     out_stem, ext = split_name(output_name_for(src, Source.of(info), options, output_name, output_format))
     tmp_out = dest_dir / f".acw-{uuid.uuid4().hex}{ext}"

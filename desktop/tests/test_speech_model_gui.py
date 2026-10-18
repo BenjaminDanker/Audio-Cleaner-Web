@@ -11,7 +11,7 @@ import pytest
 from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QMessageBox
 
-from audio_cleaner_desktop import models
+from audio_cleaner_desktop import cli, engine, models, resources
 from audio_cleaner_desktop.gui import speech_model
 from audio_cleaner_desktop.gui.main_window import MainWindow
 from audio_cleaner_desktop.gui.preferences import Preferences
@@ -59,7 +59,7 @@ def test_panel_offers_the_download_runs_it_and_goes_away(qapp, tmp_path, small_m
 
 
 def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, tmp_path, monkeypatch):
-    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self._fake_ready))
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model is resources.NOISE_MODEL or self._fake_ready))
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "_fake_ready", False, raising=False)
     started = []
 
@@ -176,3 +176,38 @@ def test_automatic_rebuilding_offers_the_download_but_never_holds_up_cleaning(qa
         w.queue.shutdown()
         w.history.close()
         w._pool.waitForDone()
+
+
+def test_missing_noise_models_are_downloaded_by_the_window_and_a_failure_offers_try_again(qapp, tmp_path, monkeypatch, capsys):
+    """The noise removal models are required: a window without them downloads just them by itself (a silent update shows no
+    download page), a failed download offers "Try again" which downloads them again, Clean asks first, the command line
+    points at --download-models."""
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model is not resources.NOISE_MODEL))
+    started, shown = [], []
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", lambda self: started.append(self.model.id))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or QMessageBox.StandardButton.No)
+    w = MainWindow([], settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat), history_path=tmp_path / "h.db")
+    try:
+        w.show()
+        qapp.processEvents()
+        assert started == ["noise-removal"] and not shown  # by itself, only the noise models (23 MB), not 2.6 GB
+        assert w.banner_models.isVisible() and "Downloading the noise removal models" in w.banner_models._label.text()
+        w._model_download_finished(w.noise_download, False, "The download stopped (timed out).")
+        assert w.banner_models.isVisible() and "could not be downloaded" in w.banner_models._label.text()
+        assert w.banner_models._button.text() == "Try again"
+        started.clear()
+        w.banner_models.action.emit()  # "Try again": the noise models again
+        assert started == ["noise-removal"]
+        src = tmp_path / "a.wav"
+        src.write_bytes(b"RIFF")
+        w.add_paths([src])
+        w.start()
+        assert shown and "noise removal models are not installed" in shown[-1] and not w.queue.active
+    finally:
+        w.queue.shutdown()
+        w.history.close()
+        w._pool.waitForDone()
+    monkeypatch.setattr(resources, "check", lambda: [])
+    monkeypatch.setattr(resources, "noise_ready", lambda: False)
+    assert cli.run([str(tmp_path / "a.wav")], None, engine.JobOptions()) == 1
+    assert "--download-models" in capsys.readouterr().err

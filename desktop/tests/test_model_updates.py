@@ -176,7 +176,7 @@ def test_the_installers_folder_is_cleaned_only_where_it_can_be_written(server, m
 
 # ---- the window ---------------------------------------------------------------------------------------------------------------
 def _window(tmp_path, monkeypatch, started, outdated_ids):
-    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id in started))
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready", property(lambda self: self.model.id in started or self.model is resources.NOISE_MODEL))
     monkeypatch.setattr(speech_model.SpeechModelDownloader, "start", lambda self: started.append(self.model.id))
     monkeypatch.setattr(models, "needs_update", lambda m: m.id in outdated_ids)
     cleaned = []
@@ -268,7 +268,7 @@ def test_no_model_comes_from_the_releases_and_the_installers_download_exactly_th
     sys.path.insert(0, str(DESKTOP / "packaging"))
     import installer_models
 
-    catalog = (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
+    catalog = (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
     wanted = {f.url for m in catalog for f in (*m.files, *m.licences)}
     assert all(u.startswith("https://huggingface.co/") for u in wanted) and not any(u.startswith(config.RELEASES_URL) for u in wanted)
     windows = installer_models.render()

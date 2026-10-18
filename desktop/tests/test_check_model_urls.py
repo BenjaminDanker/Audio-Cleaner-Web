@@ -13,7 +13,7 @@ if str(PACKAGING) not in sys.path:
 
 import check_model_urls  # noqa: E402
 
-OWN = (resources.HIGHS_MODEL, resources.VOICE_MODEL)
+OWN = (resources.NOISE_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
 HF_BASE = f"https://huggingface.co/{config.HF_MODELS_REPO}/resolve/{config.HF_MODELS_REVISION}/"
 
 
@@ -25,6 +25,8 @@ def test_every_downloaded_file_is_pinned_by_revision_size_and_sha256():
         assert all(f.path.startswith("LICENSES/") for f in m.licences) and m.licences
     # the repository layout the owner uploads
     assert {f.url.removeprefix(HF_BASE) for f in resources.HIGHS_MODEL.files} == {f"ap-bwe/{k}to48k.onnx" for k in ("8k", "12k", "16k", "24k")}
+    assert {f.url.removeprefix(HF_BASE) for f in resources.NOISE_MODEL.files} == {
+        "deepfilternet3/DeepFilterNet3_onnx.tar.gz", "dpdfnet/dpdfnet8_48khz_hr_batch.onnx"}
     assert {f.url.removeprefix(HF_BASE) for f in resources.VOICE_MODEL.files} == {"sidon/sidon_fe.onnx", "sidon/sidon_dec.onnx"}
     assert config.hf_models_url("x/y") == HF_BASE + "x/y"
 

@@ -7,7 +7,7 @@ import threading
 
 import pytest
 
-from audio_cleaner_desktop import models
+from audio_cleaner_desktop import models, resources
 
 
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
@@ -207,3 +207,32 @@ def test_a_copy_from_the_old_models_archive_still_counts_and_is_not_downloaded_a
     assert models.is_installed(m) and models.missing_bytes(m) == 0 and not models.needs_update(m)
     assert models.download(m) == old and _RangeHandler.requests == []
     assert models.licence_dirs() == [models.models_dir() / "LICENSES"]  # About still finds them
+
+
+def test_the_noise_models_are_found_where_they_were_downloaded_and_check_no_longer_lists_them(monkeypatch, tmp_path):
+    """model_path()/heavy_noise_model_path() point into the downloaded noise-removal model (the app's or the installer's copy);
+    from source they also find vendor/models; with neither they name where the download will put them."""
+    import dataclasses
+
+    from acw_common import dfn, dpdfnet
+
+    names = (dfn.MODEL_FILE, dpdfnet.MODEL_FILE)
+    data = {n: n.encode() for n in names}
+    fake = dataclasses.replace(resources.NOISE_MODEL, files=tuple(
+        models.ModelFile(n, "", len(b), hashlib.sha256(b).hexdigest()) for n, b in data.items()))
+    monkeypatch.setattr(resources, "NOISE_MODEL", fake)
+    monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "models"))
+    monkeypatch.setenv("ACW_DESKTOP_VENDOR", str(tmp_path / "vendor"))
+    monkeypatch.setattr(resources, "_dev_fallback", lambda: None)
+    target = models.model_dir(fake)
+    assert not resources.noise_ready() and resources.model_path() == target / dfn.MODEL_FILE  # names the place to download to
+    assert not any(n in resources.check() for n in names)  # not a shipped component any more
+    (tmp_path / "vendor" / "models").mkdir(parents=True)
+    for n, b in data.items():
+        (tmp_path / "vendor" / "models" / n).write_bytes(b)
+    assert resources.noise_ready() and resources.model_path().parent == tmp_path / "vendor" / "models"  # run from source
+    target.mkdir(parents=True)
+    for n, b in data.items():
+        (target / n).write_bytes(b)
+    (target / ".complete").write_text("\n".join(f.sha256 for f in fake.files))
+    assert resources.model_path() == target / dfn.MODEL_FILE and resources.heavy_noise_model_path() == target / dpdfnet.MODEL_FILE

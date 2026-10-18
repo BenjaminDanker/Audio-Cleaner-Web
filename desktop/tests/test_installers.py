@@ -54,6 +54,19 @@ def test_windows_include_budgets_space_cleans_up_and_tries_every_download():
     assert "[UninstallDelete]" in text
 
 
+def test_the_noise_models_are_required_by_both_installers_and_setup_reports_them_missing():
+    noise = resources.NOISE_MODEL
+    assert noise.required and installer_models.CATALOG[0] is noise and not any(m.required for m in installer_models.CATALOG[1:])
+    windows = installer_models.render()
+    check = windows[windows.index("function RequiredInstalledMissing"):]
+    check = check[:check.index("\nend;")]
+    for f in noise.files:  # checked after the files are installed: both must be there with their size
+        assert f"models\\noise-removal\\{f.path}" in check and str(f.size) in check
+    assert "if RequiredInstalledMissing then" in windows and "mbError" in windows  # not a silent finish (also logged)
+    mac = installer_models.render_mac()
+    assert "required_missing=1" in mac and "display dialog" in mac and all(f.path in mac.split("required_missing=0")[1] for f in noise.files)
+
+
 def test_licence_texts_are_downloaded_into_their_model_but_are_not_part_of_its_marker():
     text = installer_models.render()
     for m in (resources.HIGHS_MODEL, resources.VOICE_MODEL):

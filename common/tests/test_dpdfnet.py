@@ -1,5 +1,5 @@
 """Tests for the DPDFNet-8 (48 kHz) file denoiser. Needs the ONNX model
-(deploy/fetch-dpdfnet.sh puts it in ~/audio-cleaner/models/dpdfnet/, or set
+(deploy/fetch-models.sh puts it in ~/audio-cleaner/models/dpdfnet/, or set
 ACW_DPDFNET_MODEL); otherwise skipped. Run with PYTHONPATH=common."""
 import sys
 import threading

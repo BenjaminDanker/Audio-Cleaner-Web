@@ -93,11 +93,9 @@ $icons = Join-Path $work 'icons'
 $env:PYTHONPATH = "$repo\desktop;$repo\common"
 $env:ACW_DESKTOP_VENDOR = $vendor
 $env:ACW_ICON_DIR = $icons
-Run $vpy @('desktop\packaging\fetch_dpdfnet.py', "$work\dpdfnet")
 $whisper = if ($WhisperModelDir) { @('--whisper-model', $WhisperModelDir) } else { @('--download-whisper') }
 Run $vpy (@('desktop\packaging\prepare_vendor.py', '--libdf', "$work\libdf\df.dll", '--ffmpeg-dir', $ffmpeg,
-    '--model', "$work\deepfilter\models\DeepFilterNet3_onnx.tar.gz", '--deepfilter-src', "$work\deepfilter",
-    '--dpdfnet', "$work\dpdfnet\dpdfnet8_48khz_hr_batch.onnx",
+    '--deepfilter-src', "$work\deepfilter", '--download-noise-models',
     '--rust-target', 'x86_64-pc-windows-msvc', '--out', $vendor) + $whisper)
 
 if (-not $SkipTests) {
@@ -111,6 +109,11 @@ Run $vpy @('desktop\packaging\make_icons.py', $icons)
 $dist = Join-Path $work 'dist'
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 Run "$venv\Scripts\pyinstaller.exe" @('desktop\packaging\audio_cleaner.spec', '--distpath', $dist, '--workpath', (Join-Path $work 'pyinstaller'), '--noconfirm')
+
+Step 'models for the frozen selftest'
+# The app downloads its models like any user (the noise removal models are required); only the frozen selftest needs them here.
+$env:ACW_DESKTOP_MODELS = Join-Path $work 'models'
+Run $vpy @('-c', 'from audio_cleaner_desktop import models, resources; models.download(resources.NOISE_MODEL)')
 
 Step 'frozen selftest'
 # The exe is windowed: without a console it writes audio-cleaner-cli.log in the temp folder.

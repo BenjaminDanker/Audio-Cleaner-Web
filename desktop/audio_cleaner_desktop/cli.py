@@ -49,6 +49,10 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
     if missing:
         print("Missing components: " + ", ".join(missing), file=sys.stderr)
         return 1
+    if not resources.noise_ready():
+        print("Noise removal needs its models (23 MB, not installed yet). Download them first: run with "
+              "--download-models (or open Audio Cleaner and use Download).", file=sys.stderr)
+        return 1
     if options.subtitles != "off" and not resources.speech_ready():
         print("Subtitles need the speech model. Download it first: open Audio Cleaner, Settings, Subtitles "
               "(or run with --download-models).", file=sys.stderr)
@@ -104,18 +108,19 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
 
 
 def download_models() -> int:
-    """Download (or finish downloading) the models for subtitles, restoring highs and rebuilding the voice,
-    with a progress line each."""
+    """Download (or finish downloading) the models for noise removal (required), subtitles, restoring highs and
+    rebuilding the voice, with a progress line each."""
     from . import models
 
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     worst = 0
-    for model in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
+    for model in (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
         if models.is_installed(model):
             print(f"{model.title}: already there ({models.location(model)})")
             continue
-        line = _ProgressLine(f"Downloading: {model.title} ({model.size / 1e9:.1f} GB)")
+        size = f"{model.size / 1e9:.1f} GB" if model.size >= 1e9 else f"{model.size / 1e6:.0f} MB"
+        line = _ProgressLine(f"Downloading: {model.title} ({size})")
         try:
             path = models.download(model, progress=lambda done, total: line(done / total), cancel=cancel)
         except models.Cancelled:
@@ -151,9 +156,8 @@ def _check_speech_runtime() -> None:
 
 
 def _check_models() -> list[str]:
-    """One second of audio through each model the app runs next to the always-installed ones. The noise
-    remover for heavy noise ships with the app; the downloaded ones are only checked where they are installed.
-    Returns what was skipped."""
+    """One second of audio through each model the app runs: the heavy-noise remover (the required noise removal
+    models must be installed); the optional ones are only checked where they are installed. Returns what was skipped."""
     from acw_common import aec, bwe, restore
 
     sr = pipeline.SAMPLE_RATE
@@ -280,6 +284,8 @@ def selftest(gui: bool = False) -> int:
         missing = resources.check()
         if missing:
             raise RuntimeError("missing components: " + ", ".join(missing))
+        if not resources.noise_ready():
+            raise RuntimeError("the noise removal models are not installed (run with --download-models)")
         sr = pipeline.SAMPLE_RATE
         t = np.arange(3 * sr) / sr
         rng = np.random.default_rng(0)

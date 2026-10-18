@@ -38,15 +38,12 @@ binaries = []
 for f in sorted(need(VENDOR / "native").iterdir()):
     binaries.append((str(f), "native"))  # libdf.*, ffmpeg[.exe], ffprobe[.exe] -> <app>/native/
 
-# Only the two small noise models ship (DeepFilterNet3 8 MB, DPDFNet-8 15 MB); the other models (subtitles,
-# restoring highs, rebuilding the voice: 2.6 GB) are downloaded by the installer's setup (installer_models.py)
-# or by the app (models.py), so the installer stays small. Refuse to bundle anything else.
-_shipped = sorted(p.name for p in need(VENDOR / "models").iterdir())
-if _shipped != ["DeepFilterNet3_onnx.tar.gz", "dpdfnet8_48khz_hr_batch.onnx"]:
-    raise SystemExit(f"audio_cleaner.spec: vendor/models must only hold the two noise models, found {_shipped}")
+# No model ships: the noise removal models (DeepFilterNet3, DPDFNet-8: 23 MB, required) and the others (subtitles,
+# restoring highs, rebuilding the voice: 2.6 GB) are all downloaded by the installer's setup (installer_models.py) or by the
+# app (models.py), so the installer stays small. vendor/models (the copy the tests read) is deliberately not bundled;
+# only libDF, FFmpeg and the licence notices are.
 
 datas = [
-    (str(need(VENDOR / "models")), "models"),
     (str(need(VENDOR / "licenses")), "licenses"),
     # loaded at run time through the package path (About dialog, window icon)
     (str(DESKTOP / "audio_cleaner_desktop" / "assets"), "audio_cleaner_desktop/assets"),

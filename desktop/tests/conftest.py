@@ -1,5 +1,5 @@
 """Shared fixtures. desktop/ and common/ go on sys.path; tests that need the bundled native
-pieces (libDF, models, FFmpeg) are skipped when `resources.check()` reports something missing."""
+pieces (libDF, FFmpeg, the noise models in vendor/models) are skipped when one is missing."""
 from __future__ import annotations
 
 import os
@@ -25,7 +25,7 @@ SPEECH_SECONDS = 4  # length of the stand-in used where the dev sample is missin
 SPEECH_SAMPLE = Path.home() / "audio-cleaner" / "dev" / "live_opus.wav"
 FULL_FFMPEG = Path(os.environ.get("ACW_FULL_FFMPEG", Path.home() / "audio-cleaner" / "bin" / "ffmpeg"))
 
-_MISSING = resources.check()
+_MISSING = resources.check() + ([] if resources.noise_ready() else ["noise removal models (vendor/models: prepare_vendor.py --download-noise-models)"])
 _SPEECH = resources.speech_ready()
 NATIVE_MARK = "native"
 SPEECH_MARK = "speech"
@@ -233,3 +233,14 @@ def qapp():
 def _models_in_a_scratch_folder(tmp_path, monkeypatch):
     """No test downloads to, or tidies up in, the real models folder of whoever runs the tests."""
     monkeypatch.setenv("ACW_DESKTOP_MODELS", str(tmp_path / "default-models"))
+
+
+@pytest.fixture(autouse=True)
+def _noise_models_count_as_there(monkeypatch):
+    """A window whose noise removal models are missing downloads them by itself, so every test counts them as there
+    (a test about them overrides this and fakes the download)."""
+    from audio_cleaner_desktop.gui import speech_model
+
+    real_ready = speech_model.SpeechModelDownloader.ready.fget
+    monkeypatch.setattr(speech_model.SpeechModelDownloader, "ready",
+                        property(lambda self: self.model is resources.NOISE_MODEL or real_ready(self)))

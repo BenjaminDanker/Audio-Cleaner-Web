@@ -27,7 +27,7 @@ ONLINE_NOTICE = (
 
 def downloaded_models():
     """The models that setup downloads (or Settings does), in the order the app lists them."""
-    return (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
+    return (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
 
 
 def notice_files() -> list[Path]:

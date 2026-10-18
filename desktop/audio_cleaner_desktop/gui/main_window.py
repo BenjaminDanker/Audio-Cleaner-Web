@@ -210,11 +210,12 @@ class MainWindow(QMainWindow):
         self.banner_missing = Banner()
         self.banner_disk = Banner()
         self.banner_models = Banner()
-        self.banner_models.action.connect(self.fetch_models)
+        self.banner_models.action.connect(self._models_action)
         self.banner_update = Banner()
         self.banner_update.action.connect(self._update_action)
         self._model_queue: list[SpeechModelDownloader] = []
         self._auto_models = False  # the queue is an update the app started by itself (quiet when it fails)
+        self._noise_only = False  # the queue is just the (required) noise removal models, see fetch_noise_models
         layout.addWidget(self.banner_missing)
         layout.addWidget(self.banner_disk)
         layout.addWidget(self.banner_models)
@@ -251,6 +252,7 @@ class MainWindow(QMainWindow):
         self._left = left
         body.addLayout(left, 1)
 
+        self.noise_download = SpeechModelDownloader(self, resources.NOISE_MODEL)
         self.speech_download = SpeechModelDownloader(self)
         self.highs_download = SpeechModelDownloader(self, resources.HIGHS_MODEL)
         self.voice_download = SpeechModelDownloader(self, resources.VOICE_MODEL)
@@ -258,6 +260,7 @@ class MainWindow(QMainWindow):
             dl.finished.connect(lambda ok, message, dl=dl: self._model_download_finished(dl, ok, message))
             dl.progress.connect(lambda done, total, dl=dl: self._model_queue and self._model_queue[0] is dl
                                 and self._show_model_progress(done, total))
+        self._fetch_missing_noise_models()
         self.settings_panel = SettingsPanel(
             self.prefs, self.speech_download, highs_downloader=self.highs_download, voice_downloader=self.voice_download,
             updater=self.updater,
@@ -414,6 +417,9 @@ class MainWindow(QMainWindow):
             return
         if item is None or item.state not in (ITEM_DONE, ITEM_FAILED, CANCELLED) or self._missing:
             return
+        if not self.noise_download.ready:
+            self._ask_for_model(self.noise_download)
+            return
         self._requeue(item)
         if not self.queue.active:
             self._batch_started = time.monotonic()
@@ -538,6 +544,8 @@ class MainWindow(QMainWindow):
     def start(self) -> None:
         if self._missing or self.queue.busy:
             return
+        if not self.noise_download.ready and not self._ask_for_model(self.noise_download):
+            return
         if self.prefs.subtitles != "off" and not self.speech_download.ready and not self._ask_for_model(self.speech_download):
             return
         if self.prefs.job_options().rebuild_voice and not self.voice_download.ready and not self._ask_for_model(self.voice_download):
@@ -553,40 +561,68 @@ class MainWindow(QMainWindow):
 
     def _ask_for_model(self, downloader: SpeechModelDownloader) -> bool:
         """A model that a setting needs is not here: setup downloads them, so this only happens when that
-        download failed (offline during setup). Offers to download it now; returns False (nothing is started
-        now)."""
+        download failed (offline during setup) or the app was not installed by setup. Offers to download it now;
+        returns False (nothing is started now)."""
+        noise = downloader is self.noise_download
         voice = downloader is self.voice_download
-        what = "The model that rebuilds the voice" if voice else "The speech model for subtitles"
-        off = "turn Rebuild the voice off" if voice else "turn subtitles off"
+        what = ("The noise removal models" if noise else
+                "The model that rebuilds the voice" if voice else "The speech model for subtitles")
+        way_out = "" if noise else (f", or {'turn Rebuild the voice off' if voice else 'turn subtitles off'} to clean the files right away")
         if downloader.running:
             QMessageBox.information(
                 self, config.APP_NAME,
-                f"{what} is still downloading (the progress is shown at the top). Start again when it is done, "
-                f"or {off} to clean the files now.",
+                f"{what} {'are' if noise else 'is'} still downloading (the progress is shown at the top). Start again when "
+                f"{'they are' if noise else 'it is'} done{way_out.replace(' right away', ' now')}.",
             )
             return False
+        if noise:
+            text = (f"{what} are not installed, probably because the download during setup did not work. Audio Cleaner "
+                    f"cannot remove noise without them. Download them now ({size_text(downloader.model.size)})?\n\n"
+                    "You can start cleaning when it is done.")
+        else:
+            text = (f"{what} was not installed, probably because the download during setup did not work. Download it now "
+                    f"({size_text(downloader.model.size)})?\n\nYou can start cleaning when it is done{way_out}.")
         box = QMessageBox(
-            QMessageBox.Icon.Question, config.APP_NAME,
-            f"{what} was not installed, probably because the download during setup did not work. Download it now "
-            f"({size_text(downloader.model.size)})?\n\n"
-            f"You can start cleaning when it is done, or {off} to clean the files right away.",
+            QMessageBox.Icon.Question, config.APP_NAME, text,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self,
         )
         box.button(QMessageBox.StandardButton.Yes).setText("Download")
         box.button(QMessageBox.StandardButton.No).setText("Not now")
         if box.exec() == QMessageBox.StandardButton.Yes:
-            self.fetch_models()
+            self.fetch_noise_models() if noise else self.fetch_models()
         return False
 
     def _downloaders(self) -> tuple[SpeechModelDownloader, ...]:
-        return self.speech_download, self.highs_download, self.voice_download
+        return self.noise_download, self.speech_download, self.highs_download, self.voice_download
 
-    def fetch_models(self) -> None:
-        """Download every model that is not here yet, one after the other (setup normally installed them; this
-        finishes a download that failed there). Noise removal works meanwhile."""
+    def _fetch_missing_noise_models(self) -> None:
+        """The noise removal models are required and setup normally installed them. When they are not here (its
+        download failed, a silent update that showed no download page, or this is not an installed copy), they are
+        downloaded right away (23 MB): noise removal is what the app is for. A failure shows the banner's "Try again"."""
+        if self._missing or self.noise_download.ready:
+            return
+        self.fetch_noise_models()
+
+    def _models_action(self) -> None:
+        """The banner's button: the noise models only while they are what is offered, else everything missing."""
+        self.fetch_noise_models() if self._noise_only else self.fetch_models()
+
+    def fetch_noise_models(self) -> None:
+        """Download just the required noise removal models (the rest can wait: Settings and the next start offer them)."""
         if self._missing:
             return
         self._auto_models = False
+        self._noise_only = True
+        self._model_queue = [self.noise_download]
+        self._next_model()
+
+    def fetch_models(self) -> None:
+        """Download every model that is not here yet, one after the other (setup normally installed them; this
+        finishes a download that failed there)."""
+        if self._missing:
+            return
+        self._auto_models = False
+        self._noise_only = False
         self._model_queue = [d for d in self._downloaders() if not d.ready]
         self._next_model()
 
@@ -607,6 +643,7 @@ class MainWindow(QMainWindow):
             self._clean_old_models()
             return
         self._auto_models = True
+        self._noise_only = False
         self._model_queue = queue
         self._next_model()
 
@@ -643,12 +680,19 @@ class MainWindow(QMainWindow):
     def _show_model_progress(self, done: int, total: int) -> None:
         left = models.download_bytes([d.model for d in getattr(self, "_model_queue", [])]) or total
         pct = int(100 * done / max(1, total))
-        if self._auto_models:
+        if self._noise_only:
+            text = f"Downloading the noise removal models ({size_text(left)}, once; {pct}%). You can start cleaning when it is done."
+        elif self._auto_models:
             text = (f"Updating the models for subtitles, phone-quality recordings and rebuilding voices "
                     f"({size_text(left)} in all; {pct}% of the current one). Cleaning works meanwhile.")
         else:
-            text = (f"Getting everything ready: downloading the models for subtitles, phone-quality recordings and "
-                    f"rebuilding voices ({size_text(left)} in all, once; {pct}% of the current one). Noise removal works already.")
+            names = "noise removal, subtitles, phone-quality recordings and rebuilding voices"
+            if self.noise_download.ready:
+                names, ready = names.split(", ", 1)[1], " Noise removal works already."
+            else:
+                ready = ""
+            text = (f"Getting everything ready: downloading the models for {names} ({size_text(left)} in all, once; "
+                    f"{pct}% of the current one).{ready}")
         self.banner_models.show_message(text, "info")
 
     def _model_download_finished(self, downloader: SpeechModelDownloader, ok: bool, message: str) -> None:
@@ -672,9 +716,12 @@ class MainWindow(QMainWindow):
             self._next_model()
         else:
             self.banner_models.hide()
-            if not self._auto_models:
-                self._notify(config.APP_NAME, "Everything is ready: subtitles, restoring highs and rebuilding voices work now.")
+            if self._noise_only:
+                self._notify(config.APP_NAME, "Noise removal is ready: you can start cleaning.")
+            elif not self._auto_models:
+                self._notify(config.APP_NAME, "Everything is ready: noise removal, subtitles, restoring highs and rebuilding voices work now.")
             self._auto_models = False
+            self._noise_only = False
             self._clean_old_models()
         self._refresh_state()
 

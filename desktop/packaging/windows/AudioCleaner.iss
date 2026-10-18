@@ -2,8 +2,10 @@
 ;
 ;   iscc /DAppVersion=2.0.0 /DSourceDir=C:\path\to\dist\AudioCleaner [/DOutputDir=C:\out] [/DIconFile=C:\path\icon.ico]
 ;        [/DModelsInclude=C:\path\models.iss] AudioCleaner.iss
-;   (models.iss from installer_models.py: setup then downloads the models, 2.6 GB, file by file from Hugging Face.
-;   Without it nothing is downloaded during setup; the app then offers the downloads in Settings.)
+;   (models.iss from installer_models.py: setup then downloads every model, 2.6 GB, file by file from Hugging Face. The
+;   noise removal models (23 MB) are required: setup says so when they are missing. No model is inside the program.
+;   Without it nothing is downloaded during setup; the app then offers the downloads: the noise models when it starts,
+;   the others in Settings.)
 ;
 ; SourceDir is the PyInstaller output folder (the one that contains AudioCleaner.exe and _internal\).
 ; Installs per user by default (no administrator prompt); the "Install for all users" choice on the first
@@ -78,14 +80,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [InstallDelete]
 ; Everything the build puts in the program folder besides the exe is in _internal (PyInstaller 6): delete it before the new
 ; files are copied, so files an older version had and this one does not cannot linger (and cannot be loaded by mistake).
-; NEVER add {app}\models here: that folder holds the downloaded models (it is not {app}\_internal\models, the two
-; small noise models that ship inside the program).
+; NEVER add {app}\models here: that folder holds the downloaded models (versions before the noise models moved there
+; had them in {app}\_internal\models; this deletion removes those, and the app offers the download).
 Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
-; The models (subtitles, highs restoration, rebuilding the voice): downloaded during setup, see installer_models.py.
+; The models (noise removal, subtitles, highs restoration, rebuilding the voice): downloaded during setup, see installer_models.py.
 #ifdef ModelsInclude
   #include ModelsInclude
 #endif

@@ -5,7 +5,7 @@
     python installer_models.py --mac SCRIPTS_DIR      macOS: the .pkg's preinstall and postinstall scripts (make_pkg.sh)
     python installer_models.py --total-gb             size of all the downloads in GB (for the texts)
 
-Generated from the app's own catalog (resources.SPEECH_MODEL, HIGHS_MODEL, VOICE_MODEL; read without importing
+Generated from the app's own catalog (resources.NOISE_MODEL, SPEECH_MODEL, HIGHS_MODEL, VOICE_MODEL; read without importing
 numpy, so a bare python3 is enough), so the installer and the app always agree on URLs, sizes and SHA-256.
 
 Every model comes as individual files from Hugging Face (config.hf_models_url, pinned by revision): the installer
@@ -16,7 +16,13 @@ Files that a previous install already put there with the right size are not fetc
 does not download 2.5 GB each time. A model whose files are all there gets a .complete marker with the hashes of its
 files, which the app compares with its catalog (models.location). On a Mac the .pkg's postinstall script does the
 same into /Library/Application Support/Audio Cleaner/models/<id>/ (models.installer_dir). If a download fails
-(offline), setup still finishes; the app then offers the missing download in Settings.
+(offline), setup still finishes; the app then offers the missing download (Settings; the noise models at start-up).
+
+The noise removal models are REQUIRED (SpeechModel.required; they are what the app is for, 23 MB, first in the list):
+setup does not finish silently without them. Windows: after the files are installed a message says they are missing
+and that the app offers the download (logged too, for silent installs); a Mac: the same message as a dialog in the
+installing user's session (best effort) and in /var/log/audio-cleaner-install.log. Installing still succeeds so the
+app is there to retry from. Models that are not required only get the short "finish it in Settings" message.
 
 Running setup again over an installed app (same or newer version) downloads nothing that is already complete: a model
 whose files are all there with the right sizes is left alone (and its marker rewritten); a marker that names other
@@ -32,7 +38,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).res
 
 from audio_cleaner_desktop import models, resources  # noqa: E402
 
-CATALOG = (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
+CATALOG = (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
 BS = chr(92)
 
 
@@ -57,7 +63,7 @@ def total_bytes(catalog=CATALOG) -> int:
 
 def model_names() -> str:
     """The models in words, for the texts the installers show."""
-    return "subtitles, phone-quality recordings and rebuilding voices"
+    return "noise removal, subtitles, phone-quality recordings and rebuilding voices"
 
 
 def render(catalog=CATALOG) -> str:
@@ -92,6 +98,18 @@ def render(catalog=CATALOG) -> str:
         hashes = "#10".join(_pascal(f.sha256) for f in m.files)
         marker = _pascal("{app}" + BS + "models" + BS + m.id + BS + ".complete")
         markers.append(f"  if {ready} then\n    SaveStringToFile(ExpandConstant({marker}), {hashes}, False);")
+    tmp_names = {(m.id, f.path): f"acw-model-{n}" for n, (m, f) in enumerate(plain)}
+    required = [(m, f) for m in catalog if m.required for f in m.files]
+    installed_missing = "\n".join(
+        f"  if not ModelFileReady(ExpandConstant({_pascal(_app_path(m, f))}), {f.size}) then Result := True;"
+        for m, f in required
+    ) or "  Result := False;"
+    download_missing = "\n".join(
+        f"  if not (ModelFileReady(ExpandConstant({_pascal(_app_path(m, f))}), {f.size}) or "
+        f"ModelFileReady(ExpandConstant({_pascal('{tmp}' + BS + tmp_names[(m.id, f.path)])}), {f.size})) then Result := True;"
+        for m, f in required
+    ) or "  Result := False;"
+    required_mb = sum(m.size for m in catalog if m.required) / 1e6
     needed = chr(10).join(
         f"  if not ModelFileReady(ExpandConstant({_pascal(_app_path(m, f))}), {f.size}) then Result := Result + {f.size};"
         for m, f in plain
@@ -175,6 +193,20 @@ begin
 {needed}
 end;
 
+{{ The required models (noise removal) are missing: not installed, and not downloaded to the temporary folder either. }}
+function RequiredDownloadMissing: Boolean;
+begin
+  Result := False;
+{download_missing}
+end;
+
+{{ The required models are not in the program folder (checked after the files were installed). }}
+function RequiredInstalledMissing: Boolean;
+begin
+  Result := False;
+{installed_missing}
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   Need, Free, Total: Int64;
@@ -191,7 +223,8 @@ begin
   begin
     SuppressibleMsgBox('There is not enough free space on the drive for temporary files to download the models ('
       + Format('%.1f', [Need / 1.0e9]) + ' GB needed, ' + Format('%.1f', [Free / 1.0e9]) + ' GB free). '
-      + 'Setup will finish without them. Free up some space, then open Audio Cleaner > Settings to download them.',
+      + 'Setup will finish without them. Free up some space, then open Audio Cleaner to download them '
+      + '(it offers the noise removal models on its main screen, the others are in Settings).',
       mbInformation, MB_OK, IDOK);
     Exit;
   end;
@@ -203,7 +236,9 @@ begin
   finally
     ModelDownloads.Hide;
   end;
-  if ModelsCancelled then
+  if RequiredDownloadMissing then
+    Log('The required noise removal models were not downloaded; the message after the installation says so.')
+  else if ModelsCancelled then
     SuppressibleMsgBox('The download of the models was cancelled. Setup will finish without them. '
       + 'Open Audio Cleaner > Settings to download them later.', mbInformation, MB_OK, IDOK)
   else if ModelsFailed > 0 then
@@ -211,12 +246,21 @@ begin
       + 'Open Audio Cleaner > Settings to finish the download.', mbInformation, MB_OK, IDOK);
 end;
 
-{{ A model counts as installed only when all its files are there; this marker says which version of it. }}
+{{ A model counts as installed only when all its files are there; this marker says which version of it. The noise
+  removal models are required: when they are still missing, say so (setup does not end silently without them). The
+  app is installed anyway and offers the download on its main screen, so there is something to retry from. }}
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep <> ssPostInstall then
     Exit;
 {chr(10).join(markers)}
+  if RequiredInstalledMissing then
+  begin
+    Log('The required noise removal models are not installed.');
+    SuppressibleMsgBox('The noise removal models ({required_mb:.0f} MB) could not be downloaded, so Audio Cleaner cannot clean '
+      + 'recordings yet. It is installed: when you open it, it offers the download (one click, needs the internet). '
+      + 'The other models can be downloaded in Settings.', mbError, MB_OK, IDOK);
+  end;
 end;
 """
 
@@ -234,12 +278,17 @@ def render_mac(catalog=CATALOG) -> str:
         finishes.append(f'finish "{MAC_MODELS}/{m.id}" {specs}')
         forgets.append(f'forget_stale "{MAC_MODELS}/{m.id}" {specs}')
     total = total_bytes(catalog)
+    required = [f'"{f.size}:{MAC_MODELS}/{m.id}/{f.path}"' for m in catalog if m.required for f in m.files]
+    required_mb = sum(m.size for m in catalog if m.required) / 1e6
     return f"""#!/bin/bash
 # postinstall of the Audio Cleaner .pkg: download the models ({total / 1e9:.1f} GB, once).
 # Generated by desktop/packaging/installer_models.py: do not edit by hand. Runs as root during setup.
 # Every download is checked against its SHA-256 before it is used; files already there with the right
 # size are kept (updates do not download again). A failed download does not fail the installation: the app
 # offers it again in Settings. A model that is complete gets a .complete marker (the hashes of its files).
+# The noise removal models are REQUIRED: when they are still missing at the end, a dialog in the installing user's session
+# says so (best effort: there is none for a command-line install) and the log has the same line; the app is installed anyway
+# and offers the download on its main screen.
 LOG=/var/log/audio-cleaner-install.log
 failed=0
 have() {{  # have FILE SIZE: the file is there with that size
@@ -282,6 +331,18 @@ finish() {{  # finish DIR SHA:SIZE:PATH...  writes DIR/.complete when every file
 {chr(10).join(finishes)}
 chmod -R a+rX "{MAC_MODELS}" 2>/dev/null
 [ "$failed" = 0 ] || echo "some models are missing; Audio Cleaner offers them in Settings" >>"$LOG"
+required_missing=0
+for spec in {" ".join(required) or '""'}; do
+  [ -n "$spec" ] || continue
+  have "${{spec#*:}}" "${{spec%%:*}}" || required_missing=1
+done
+if [ "$required_missing" = 1 ]; then
+  echo "the required noise removal models are not installed; Audio Cleaner offers the download on its main screen" >>"$LOG"
+  user="$(stat -f%Su /dev/console 2>/dev/null)"
+  if [ -n "$user" ] && [ "$user" != root ]; then
+    launchctl asuser "$(id -u "$user")" osascript -e 'display dialog "The noise removal models ({required_mb:.0f} MB) could not be downloaded, so Audio Cleaner cannot clean recordings yet. It is installed: when you open it, it offers the download (one click, needs the internet)." with title "Audio Cleaner" buttons {{"OK"}} default button "OK" with icon caution giving up after 300' >>"$LOG" 2>&1 || true
+  fi
+fi
 exit 0
 """
 

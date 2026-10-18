@@ -33,10 +33,6 @@ on:
       - "native/deepfilter/build.sh"
       - "native/deepfilter/Cargo.lock"
       - "native/deepfilter/tract-0.23.patch"
-      # The heavy-noise model comes from deploy/fetch-dpdfnet.sh, which reads the pins in models.lock.
-      - "deploy/fetch-dpdfnet.sh"
-      - "deploy/fetch-models.sh"
-      - "deploy/models.lock"
       # A test compares the settings wording with the website's.
       - "web/src/jobs.js"
       - ".github/workflows/desktop.yml"
@@ -119,9 +115,9 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # DeepFilterNet libDF C library (native/deepfilter/build.sh) + the DFN3 model from the same checkout
-  # + the licence notices that need the Rust toolchain (crate list).
-  # The FINISHED outputs (library, model, notices) are cached under a key made of everything that goes into them;
+  # DeepFilterNet libDF C library (native/deepfilter/build.sh)
+  # + the licence notices that need the Rust toolchain (crate list). The models are not built here: the app downloads them.
+  # The FINISHED outputs (library, notices) are cached under a key made of everything that goes into them;
   # on a hit nothing is checked out or compiled (the cargo cache is not even restored). Cold, Windows needs ~7 min.
   libdf:
     name: libDF ${{ matrix.platform }}
@@ -167,7 +163,6 @@ jobs:
           bash native/deepfilter/build.sh native
           mkdir -p libdf-out
           cp "$OUT/${{ matrix.lib }}" libdf-out/
-          cp "$BUILD_DIR/models/DeepFilterNet3_onnx.tar.gz" libdf-out/
 
       - name: Licence notices (Rust crates, DeepFilterNet)
         if: steps.out.outputs.cache-hit != 'true'
@@ -180,7 +175,7 @@ jobs:
       - name: Check the outputs are complete
         # A cache entry is only saved after a successful job, but a hit must never hand on a half-empty folder.
         run: |
-          for f in "${{ matrix.lib }}" DeepFilterNet3_onnx.tar.gz DeepFilterNet-LICENSE-MIT DeepFilterNet-LICENSE-APACHE rust-crates.txt; do
+          for f in "${{ matrix.lib }}" DeepFilterNet-LICENSE-MIT DeepFilterNet-LICENSE-APACHE rust-crates.txt; do
             test -s "libdf-out/$f" || { echo "::error::libdf-out/$f is missing"; exit 1; }
           done
           ls -l libdf-out
@@ -250,28 +245,24 @@ jobs:
           version="$(python desktop/packaging/version.py --write)"
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Heavy-noise model (DPDFNet-8, pinned and verified)
-        run: bash deploy/fetch-dpdfnet.sh build/dpdfnet
-
-      - name: Assemble the vendor directory (native pieces, models, licence notices)
-        # No test model for subtitles: it is never bundled, only the tests use it.
+      - name: Assemble the vendor directory (native pieces, licence notices)
+        # No model goes into the app (the noise models are downloaded like the others), and no test model for subtitles.
         run: |
           python desktop/packaging/prepare_vendor.py \
             --libdf "build/libdf/${{ matrix.lib }}" \
             --ffmpeg-dir build/ffmpeg \
-            --model build/libdf/DeepFilterNet3_onnx.tar.gz \
-            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr_batch.onnx \
             --deepfilter-notices build/libdf \
             --no-test-model \
             --out desktop/vendor
 
-      - name: Models for the frozen selftest (restoring highs, rebuilding the voice)
-        # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime (0.9 GB from our Hugging Face
-        # repository). The speech model is left out (1.6 GB).
+      - name: Models for the frozen selftest (noise removal, restoring highs, rebuilding the voice)
+        # The frozen app has no model inside: the selftest needs the (required) noise removal models, and also runs AP-BWE
+        # and Sidon through the bundled onnxruntime (0.9 GB; all from our Hugging Face repository, at the pinned commit,
+        # downloaded the way the app does it). The speech model is left out (1.6 GB).
         run: |
           ACW_DESKTOP_MODELS="$RUNNER_TEMP/acw-models" python - <<'PY'
           from audio_cleaner_desktop import models, resources
-          for m in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
+          for m in (resources.NOISE_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
               models.download(m)
           PY
           echo "ACW_DESKTOP_MODELS=$RUNNER_TEMP/acw-models" >> "$GITHUB_ENV"
@@ -351,7 +342,7 @@ jobs:
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
           $ws = $env:GITHUB_WORKSPACE
-          # Setup downloads the models (speech, highs, voice) itself: the list comes from the app's catalog.
+          # Setup downloads the models (noise removal, speech, highs, voice) itself: the list comes from the app's catalog.
           python desktop\packaging\installer_models.py "$ws\build\models.iss"
           if ($LASTEXITCODE -ne 0) { throw "installer_models.py failed ($LASTEXITCODE)" }
           & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$ws\dist\AudioCleaner" "/DOutputDir=$ws\build\installer" `
@@ -547,17 +538,15 @@ jobs:
           path: .hf-cache
           key: whisper-small-${{ steps.whisper.outputs.rev }}
 
-      - name: Heavy-noise model (DPDFNet-8, pinned and verified)
-        run: bash deploy/fetch-dpdfnet.sh build/dpdfnet
-
-      - name: Assemble the vendor directory (native pieces, models, licence notices)
+      - name: Assemble the vendor directory (native pieces, noise models for the tests, licence notices)
+        # --download-noise-models: the two noise models from our Hugging Face repository (pinned, 23 MB) into
+        # vendor/models, which runs from source read; they are not part of the app.
         run: |
           python desktop/packaging/prepare_vendor.py \
             --libdf "build/libdf/${{ matrix.lib }}" \
             --ffmpeg-dir build/ffmpeg \
-            --model build/libdf/DeepFilterNet3_onnx.tar.gz \
-            --dpdfnet build/dpdfnet/dpdfnet8_48khz_hr_batch.onnx \
             --deepfilter-notices build/libdf \
+            --download-noise-models \
             --download-whisper \
             --out desktop/vendor
 
@@ -637,9 +626,11 @@ jobs:
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
           Setup downloads the models (about 2.6 GB in all, once), so keep the internet on while it installs; on a Mac
-          it can take several minutes. They are Whisper large-v3-turbo for subtitles (1.6 GB), AP-BWE for restoring the
-          highs of phone-quality recordings (0.5 GB) and Sidon for rebuilding voices (0.5 GB). After that everything
-          works offline. If a download fails, the app still works and offers it in Settings.
+          it can take several minutes. They are the noise removal models (DeepFilterNet3 and DPDFNet-8, 23 MB), Whisper
+          large-v3-turbo for subtitles (1.6 GB), AP-BWE for restoring the highs of phone-quality recordings (0.5 GB) and
+          Sidon for rebuilding voices (0.5 GB). After that everything works offline. If a download fails, the app is
+          installed anyway and offers it: the noise removal models (it cannot clean without them) when it starts, the
+          others in Settings.
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           # Marks the automatic releases, so the clean-up below never removes one made from a hand-pushed tag.

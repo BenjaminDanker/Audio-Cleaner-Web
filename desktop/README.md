@@ -2,9 +2,10 @@
 
 A free, offline app that removes background noise from the voice in video and audio files, and can write
 subtitles. It runs the shared cleaning pipeline (`../common/acw_common`) in a PySide6 window.
-Nothing is uploaded: the noise models and FFmpeg ship inside the app, and the installer downloads the three larger
-models (subtitles, restoring highs, rebuilding voices: 2.6 GB in all: Whisper 1.6 GB, AP-BWE 0.5 GB and Sidon 0.5 GB,
-each from Hugging Face) once during setup. The installed app also looks for a newer version when it starts and
+Nothing is uploaded: FFmpeg and the noise library (libDF) ship inside the app, and the installer downloads every model
+once during setup, each from Hugging Face: the noise removal models (DeepFilterNet3 and DPDFNet-8, 23 MB, required) and
+the three larger ones (subtitles, restoring highs, rebuilding voices: Whisper 1.6 GB, AP-BWE 0.5 GB and Sidon 0.5 GB;
+2.6 GB in all). If a download fails, the app offers it again (the noise removal models as soon as it starts). The installed app also looks for a newer version when it starts and
 installs it (a signed update; Settings > "Check for updates when Audio Cleaner starts", on by default; it sends
 nothing but a normal web request with the app version).
 
@@ -12,8 +13,9 @@ nothing but a normal web request with the app version).
 - `audio_cleaner_desktop/gui/` the window: queue, settings, preview, history, About
 - `audio_cleaner_desktop/cli.py` the `--cli` and `--selftest` modes
 - `vendor/` native pieces for running from source (git-ignored, filled by the packaging scripts):
-  `native/{libdf, ffmpeg, ffprobe}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr_batch.onnx}`, `licenses/`, and a
-  small speech model for the tests in `test-models/whisper-small/`.
+  `native/{libdf, ffmpeg, ffprobe}`, `licenses/`, and for tests and runs from source (never bundled) the noise models in
+  `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr_batch.onnx}` (`prepare_vendor.py --download-noise-models`) and a
+  small speech model in `test-models/whisper-small/`.
   On Linux, missing pieces fall back to `~/audio-cleaner/{bin,models}`.
 
 Building the installers: each script in [`packaging/`](packaging/) starts with a comment that says how to run it
@@ -36,7 +38,7 @@ python -m audio_cleaner_desktop                       # the window; FILE... are 
 python -m audio_cleaner_desktop --cli in.mp4 -o out/  # no window (see --help for the options)
 python -m audio_cleaner_desktop --cli talk.mp4 --output-name talk.mp3   # just the sound (also --format mp3, --video-size 720)
 python -m audio_cleaner_desktop --selftest [--gui]    # checks the bundled native pieces (--gui: and the window)
-python -m audio_cleaner_desktop --download-models     # the three models, from a terminal
+python -m audio_cleaner_desktop --download-models     # all the models (noise removal first), from a terminal
 ```
 
 ## Tests

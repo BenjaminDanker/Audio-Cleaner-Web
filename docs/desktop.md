@@ -1,19 +1,25 @@
 # Audio Cleaner for desktop
 
 The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code).
-The installer carries the app, FFmpeg and the two noise models (DeepFilterNet3, and DPDFNet-8 for heavy noise), so
-noise removal works offline straight after installing. Three larger models (2.6 GB in all) are downloaded by setup
-itself, and only by setup (the app downloads a model only when asked to; its one automatic request is the update check,
-see "Automatic updates" below). The installer is small; the
+The installer carries the app, FFmpeg and libDF (DeepFilterNet's native library) but no model. Every model is downloaded
+by setup (2.6 GB in all, once), from one place (our Hugging Face repository; Whisper from its own): the noise removal
+models are REQUIRED, the three larger ones are not. The app downloads a model only when asked to (a Download
+button, or its own offer when the required ones are missing); its one automatic request is the update check, see
+"Automatic updates" below. The installer is small; the
 Windows installer's download page and the Mac .pkg's postinstall script check every file's SHA-256, keep files a
 previous install left in place, and are generated from the app's catalog by `packaging/installer_models.py`:
 
+- the noise removal models, DeepFilterNet3 (8 MB tarball for libDF) and DPDFNet-8 (15 MB ONNX, heavy noise) in one
+  model, `resources.NOISE_MODEL` (`required=True`, first in the list; licence texts DeepFilterNet MIT + Apache-2.0 and
+  DPDFNet Apache-2.0). One model, not two: they are used together (the app picks per recording) and neither is optional,
+  so one download, one marker and one line in the app, and setup cannot leave half of noise removal behind;
 - the speech model for subtitles, Whisper large-v3-turbo (1.6 GB, from Hugging Face, `resources.SPEECH_MODEL`);
 - the model that restores the highs of phone-quality recordings, AP-BWE (4 x 119 MB ONNX, `resources.HIGHS_MODEL`);
 - the model that rebuilds the voice (optional "Rebuild the voice" setting: removes room echo too), Sidon
   (503 MB ONNX, `resources.VOICE_MODEL`).
 
-The last two are our own conversions (nobody else publishes these files). They are downloaded from our Hugging Face
+The last two are our own conversions (nobody else publishes these files; the noise models are the unchanged upstream
+files, mirrored in the same repository). They are downloaded from our Hugging Face
 model repository (`config.HF_MODELS_REPO`, pinned to the commit `config.HF_MODELS_REVISION`, a full commit id), file by file like Whisper, every file pinned by URL, size and
 SHA-256: someone who only wants one model downloads only its files. Each model also has its licence texts
 (`SpeechModel.licences`, `LICENSES/<name>` in the model's folder: AP-BWE + training-data notice, Sidon + w2v-BERT 2.0 +
@@ -28,8 +34,18 @@ which the app compares with its catalog. The speech model's files are tried on t
 not stop the next. If a download fails or is cancelled during setup (offline, no space on the temporary drive), setup still
 finishes; Settings then shows a Download button for what is missing (and the banner at the top offers all of it;
 `models.py`: pinned, resumable, verified, into the app's data folder; files setup did install are reused),
-`AudioCleaner --download-models` does all three from a terminal, and starting a job that needs a missing model asks
-first. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image) because a disk image has no setup
+`AudioCleaner --download-models` does all of them from a terminal, and starting a job that needs a missing model asks
+first.
+
+**Required models.** Noise removal is the app's job, so a missing noise model is never a silent failure. Setup: Windows
+shows a message after installing (and logs it, for silent installs) when the files are still missing; the Mac postinstall
+logs it and shows a dialog in the installing user's session (best effort); the app is installed anyway so there is
+something to retry from. App: when the models are missing at start (setup's download failed, a portable run, or a silent
+self-update from a version that had them inside the program) a banner says so with a Download button (just these 23 MB,
+not the 2.6 GB); Clean asks before starting, `--cli` says to run `--download-models`, and `engine.process` raises a clear
+error instead of failing on a missing file. `resources.check()` lists only the shipped components (libDF, FFmpeg);
+`resources.noise_ready()` is the models' counterpart. From source, `model_path()` and `heavy_noise_model_path()` also find
+`vendor/models` (`prepare_vendor.py --download-noise-models`, for tests and CI) and `~/audio-cleaner/models`. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image) because a disk image has no setup
 step to download in. The .pkg is wrapped with `productbuild --distribution` (`packaging/macos/distribution.py`): it
 refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.6 GB and takes minutes.
 
@@ -92,8 +108,7 @@ native/deepfilter/        reproducible libDF build (shared infrastructure)
 ```
 
 Frozen layout (under `sys._MEIPASS`, i.e. `_internal/` next to `AudioCleaner.exe`, or inside the `.app`):
-`native/{df.dll|libdf.dylib, ffmpeg[.exe], ffprobe[.exe]}`, `models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr_batch.onnx}`,
-`licenses/` (shown in About, together with the licence line of each downloaded model). Qt, FFmpeg and libDF stay separate files on purpose (LGPL, see
+`native/{df.dll|libdf.dylib, ffmpeg[.exe], ffprobe[.exe]}`, `licenses/` (no models; shown in About, together with the licence line of each downloaded model). Qt, FFmpeg and libDF stay separate files on purpose (LGPL, see
 the checklist at the end).
 
 ## Release process (CI)
@@ -109,11 +124,11 @@ the checklist at the end).
    deleted by the cleanup.
 3. `.github/workflows/desktop.yml` builds, per platform: FFmpeg (LGPL, from pinned source tarballs; Windows is
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest --gui`
-   (also builds the window and runs the noise models, echo canceller, AP-BWE and Sidon when their files are there),
+   (also builds the window and runs the noise models, echo canceller, AP-BWE and Sidon: CI downloads them from Hugging Face first, like the app does),
    and the installer (Inno Setup 6.7.1 on Windows, a `productbuild` .pkg on macOS; both download the models during
    setup, file by file from Hugging Face). Windows also runs the frozen app under a non-ASCII profile folder and installs, starts and uninstalls the
    installer silently. A separate "Model downloads exist" job checks the catalog URLs. Website/server-only pushes skip it; "Run workflow"
-   builds by hand (artifacts only, no release; a push that only changes `deploy/fetch-dpdfnet.sh` also builds). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
+   builds by hand (artifacts only, no release). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
 4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
    and `AudioCleaner-<version>-Mac-Intel.pkg` (GitHub shows each file's SHA-256 itself, so there is no separate
    checksum file) plus `update.json` and `update.json.sig` (the signed update information, see "Automatic updates"), and
@@ -250,8 +265,7 @@ The steps CI runs, in order. `desktop/packaging/build_macos.sh` and `build_windo
 Windows PC (written as thin wrappers; they have not been run on real machines yet, so expect to fix a path or two).
 
 1. **libDF**: `native/deepfilter/build.sh native` (needs Rust; Git Bash on Windows). Output `libdf.so` / `libdf.dylib` /
-   `df.dll` in `$OUT` (default `~/audio-cleaner/src/deepfilter-build/out`); the checkout also holds
-   `models/DeepFilterNet3_onnx.tar.gz`.
+   `df.dll` in `$OUT` (default `~/audio-cleaner/src/deepfilter-build/out`).
 2. **FFmpeg**: `desktop/packaging/build_ffmpeg.sh <linux-x86_64|macos-arm64|macos-x86_64|windows-x86_64> <out_dir>`.
    LGPL only (no GPL, version3, nonfree, no x264): FFmpeg 8.0.3 + libopus + LAME + libvpx (BSD, only its VP9 encoder is
    used) from sha256-pinned tarballs, linked statically into `ffmpeg` and `ffprobe`. H.264 pictures are encoded by the
@@ -265,10 +279,11 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    programs.
 3. **Vendor directory**:
    ```sh
-   python desktop/packaging/prepare_vendor.py --libdf PATH/libdf.so --ffmpeg-dir FFMPEG_OUT --model PATH/DeepFilterNet3_onnx.tar.gz \
-       [--whisper-model DIR | --download-whisper] [--deepfilter-src DIR] --out desktop/vendor
+   python desktop/packaging/prepare_vendor.py --libdf PATH/libdf.so --ffmpeg-dir FFMPEG_OUT \
+       [--download-noise-models] [--whisper-model DIR | --download-whisper] [--deepfilter-src DIR] --out desktop/vendor
    ```
-   Copies the native files, checks the DFN3 and DPDFNet models (sha256 pinned), puts a small test-only speech model in
+   Copies the native files, puts (with `--download-noise-models`, for the tests) the two noise models from Hugging Face
+   in `vendor/models/` (pinned; not bundled: the spec leaves that folder out), puts a small test-only speech model in
    `vendor/test-models/whisper-small/` (`Systran/faster-whisper-small`, revision and file hashes pinned in the script;
    `--download-whisper` fetches it; it is not bundled) and
    writes `licenses/`: FFmpeg/LAME/opus/libvpx, DeepFilterNet, DPDFNet, the Rust crates of libDF (`cargo tree` of the capi
@@ -307,9 +322,10 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
 ## Size
 
 Measured on Linux (the Windows/macOS sizes will differ somewhat): the `AudioCleaner` folder is about 0.6 GB
-uncompressed. The two noise models are 23 MB (DeepFilterNet 8 MB, DPDFNet-8 15 MB); the rest is PySide6/Qt 140 MB,
+uncompressed (no model inside; the two noise models, 23 MB, are downloaded: DeepFilterNet 8 MB, DPDFNet-8 15 MB);
+it is PySide6/Qt 140 MB,
 CTranslate2 137 MB (library and extension), SciPy and its OpenBLAS 71 MB, ONNX Runtime 30 MB, NumPy and its OpenBLAS
-41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.6 GB of models: Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
+41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.6 GB of models: the noise removal models 23 MB, Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
 Sidon 503 MB (2.6 GB on disk too). Windows setup needs that much free space on the temporary drive until the files are
 installed (it checks first); the app's own download of one model needs about that model's size. Memory
 while cleaning, measured: 0.5 GB for a normal file, 1.7 GB with

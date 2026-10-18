@@ -2,12 +2,13 @@
 """Assemble the vendor directory the PyInstaller spec bundles (and the app reads when run from source).
 
     vendor/native/{libdf.so|libdf.dylib|df.dll, ffmpeg[.exe], ffprobe[.exe]}
-    vendor/models/DeepFilterNet3_onnx.tar.gz
     vendor/licenses/...   notices of everything that ends up in the bundle (shown in the About dialog)
+    vendor/models/{DeepFilterNet3_onnx.tar.gz, dpdfnet8_48khz_hr_batch.onnx}   only with --download-noise-models, for the
+                          tests and runs from source: NOT bundled (the noise models are downloaded like every other model)
     vendor/test-models/whisper-small/...   a small speech model for the tests only: NOT bundled (the app
                           downloads its speech model when subtitles are first wanted, see models.py)
 
-    python prepare_vendor.py --libdf PATH --ffmpeg-dir DIR --model PATH
+    python prepare_vendor.py --libdf PATH --ffmpeg-dir DIR [--download-noise-models]
         [--whisper-model DIR | --download-whisper | --no-test-model] [--deepfilter-src DIR | --deepfilter-notices DIR]
         [--rust-target TRIPLE] [--out DIR]
 
@@ -39,10 +40,6 @@ HERE = Path(__file__).resolve().parent
 DESKTOP = HERE.parent
 SUPPLEMENTAL = HERE / "licenses"
 
-DFN_MODEL_SHA256 = "c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616"
-# Heavy-noise model (DPDFNet-8 48 kHz, Apache-2.0): fetched by packaging/fetch_dpdfnet.py (same pin).
-DPDFNET_FILE = "dpdfnet8_48khz_hr_batch.onnx"
-DPDFNET_SHA256 = "b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa"
 LIB_NAMES = ("libdf.so", "libdf.dylib", "df.dll")
 FFMPEG_NOTICES = ("COPYING.LGPLv2.1", "FFmpeg-LICENSE.md", "ffmpeg-buildinfo.txt", "lame-COPYING", "opus-COPYING", "libvpx-COPYING")
 
@@ -123,18 +120,25 @@ def copy_native(libdf: Path, ffmpeg_dir: Path, out: Path) -> None:
             (native / n).chmod(0o755)
 
 
-def copy_models(model: Path, dpdfnet: Path, whisper_dir: Path | None, download: bool, out: Path, test_model: bool = True) -> None:
-    need_file(model, "DeepFilterNet3 model")
-    if sha256_of(model) != DFN_MODEL_SHA256:
-        fail(f"{model} is not the expected DeepFilterNet3_onnx.tar.gz (sha256 mismatch)")
-    need_file(dpdfnet, "DPDFNet-8 model (packaging/fetch_dpdfnet.py)")
-    if sha256_of(dpdfnet) != DPDFNET_SHA256:
-        fail(f"{dpdfnet} is not the expected {DPDFNET_FILE} (sha256 mismatch)")
-    models = out / "models"
-    models.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(model, models / "DeepFilterNet3_onnx.tar.gz")
-    shutil.copy2(dpdfnet, models / DPDFNET_FILE)
+def fetch_noise_models(out: Path) -> None:
+    """Put the noise removal models (the app's catalog entry: our Hugging Face repository at the pinned commit) in
+    vendor/models, where runs from source (tests, CI) look for them. The download checks size and SHA-256 and resumes;
+    a file that is already right is left alone. The frozen app never reads this folder: it downloads them like every model."""
+    from audio_cleaner_desktop import models, resources  # noqa: PLC0415 - needs desktop/ on sys.path
 
+    for f in resources.NOISE_MODEL.files:
+        target = out / "models" / f.path
+        if target.is_file() and target.stat().st_size == f.size and sha256_of(target) == f.sha256:
+            continue
+        try:
+            models.fetch_file(f.url, target, f.size, f.sha256)
+        except models.DownloadError as e:
+            fail(f"{f.url}: {e}")
+
+
+def copy_models(whisper_dir: Path | None, download: bool, out: Path, test_model: bool = True) -> None:
+    """The small speech model for the tests (never bundled)."""
+    models = out / "models"
     target = out / "test-models" / WHISPER_DIR_NAME
     stale = models / WHISPER_DIR_NAME  # older vendor layout: it must not end up in the bundle
     if stale.exists():
@@ -418,7 +422,8 @@ def pyinstaller_notice(n: Notices) -> None:
 
 def cleanup_model_notices(n: Notices) -> None:
     n.add_file("DPDFNet-Apache-2.0.txt", SUPPLEMENTAL / "Apache-2.0.txt",
-               "DPDFNet-8 by Ceva (Apache-2.0, https://github.com/ceva-ip/DPDFNet): the noise remover for heavy noise")
+               "DPDFNet-8 by Ceva (Apache-2.0, https://github.com/ceva-ip/DPDFNet): the noise remover for heavy noise, "
+               "downloaded once with the other noise removal model")
     n.add_file("AP-BWE-MIT.txt", SUPPLEMENTAL / "AP-BWE-MIT.txt",
                "AP-BWE by Ye-Xin Lu et al. (MIT code and weights): the model that restores missing highs, downloaded once")
     n.add_file("Sidon-MIT.txt", SUPPLEMENTAL / "Sidon-MIT.txt",
@@ -500,9 +505,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--libdf", type=Path, help="libdf.so / libdf.dylib / df.dll from native/deepfilter/build.sh")
     ap.add_argument("--ffmpeg-dir", type=Path, help="output directory of desktop/packaging/build_ffmpeg.sh")
-    ap.add_argument("--model", type=Path, help="DeepFilterNet3_onnx.tar.gz")
-    ap.add_argument("--dpdfnet", type=Path, default=Path.home() / "audio-cleaner" / "models" / "dpdfnet" / DPDFNET_FILE,
-                    help=f"{DPDFNET_FILE} (packaging/fetch_dpdfnet.py; default: %(default)s)")
+    ap.add_argument("--download-noise-models", action="store_true",
+                    help="download the noise removal models into vendor/models for the tests (they are never bundled)")
     ap.add_argument("--whisper-model", type=Path, default=Path.home() / "audio-cleaner" / "models" / "whisper" / "small",
                     help="directory of Systran/faster-whisper-small (default: %(default)s)")
     ap.add_argument("--download-whisper", action="store_true", help=f"download {WHISPER_REPO}@{WHISPER_REVISION[:8]} with huggingface_hub (CI)")
@@ -522,7 +526,7 @@ def main() -> int:
         make_deepfilter_notices(a.deepfilter_src, a.rust_target, a.write_deepfilter_notices)
         print(f"DeepFilterNet notices written to {a.write_deepfilter_notices}")
         return 0
-    for flag in ("libdf", "ffmpeg_dir", "model"):
+    for flag in ("libdf", "ffmpeg_dir"):
         if getattr(a, flag) is None:
             ap.error(f"--{flag.replace('_', '-')} is required")
 
@@ -531,7 +535,9 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
     print(f"vendor directory: {out}")
     copy_native(a.libdf, a.ffmpeg_dir, out)
-    copy_models(a.model, a.dpdfnet, a.whisper_model, a.download_whisper, out, test_model=not a.no_test_model)
+    if a.download_noise_models:
+        fetch_noise_models(out)
+    copy_models(a.whisper_model, a.download_whisper, out, test_model=not a.no_test_model)
     n = Notices(out)
     ffmpeg_notices(n, a.ffmpeg_dir)
     if a.deepfilter_notices:
