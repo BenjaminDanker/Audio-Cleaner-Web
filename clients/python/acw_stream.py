@@ -5,7 +5,7 @@ Streams a WAV file (or, with --mic, the default microphone via sounddevice)
 in real time, writes the cleaned audio to a WAV file and prints captions.
 The OBS plugin implements the same protocol; see docs/streaming-protocol.md.
 
-  ACW_API_KEY=acw_... python acw_stream.py --url wss://host/audio/api/stream/ws \
+  ACW_API_KEY=acw_... python acw_stream.py --url wss://audiocleaner.live/api/stream/ws \
       --in noisy.wav --out cleaned.wav --denoise light --captions local
 """
 from __future__ import annotations

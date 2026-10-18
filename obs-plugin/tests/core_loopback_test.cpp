@@ -1575,7 +1575,7 @@ static void test_update_check()
 	// The address the plugin ships with: one place, no GitHub.
 	{
 		const std::string base = kUpdateBaseUrl;
-		CHECK(base == "https://mc-multi-world.space/audio/api/downloads/obs-plugin/");
+		CHECK(base == "https://audiocleaner.live/api/downloads/obs-plugin/");
 		CHECK(base.find("github") == std::string::npos && base.find("Benjamin") == std::string::npos);
 	}
 }

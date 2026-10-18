@@ -1,7 +1,8 @@
 # HTTP API (v1)
 
-All paths are relative to the app base (`/audio` on mc-multi-world.space today,
-`""` once it moves to its own domain). JSON in and out, except the file upload (raw bytes) and the downloads. One base
+All paths are relative to the app base, `https://audiocleaner.live` (no path prefix). The old address
+`https://mc-multi-world.space/audio/api` still answers the API for older clients (OBS plugin builds, scripts) for a while;
+new code should use the new one. JSON in and out, except the file upload (raw bytes) and the downloads. One base
 URL serves everything: the upload and download routes are answered by the bulk-transfer process behind the same
 address, nothing to configure and no redirects.
 
@@ -119,7 +120,7 @@ Lifecycle: `POST /api/jobs` (reserves the estimated price) -> `PUT` the file -> 
 key with the `jobs` scope (or a browser session). Worked example with curl:
 
 ```bash
-BASE=https://mc-multi-world.space/audio ; KEY=acw_...
+BASE=https://audiocleaner.live ; KEY=acw_...
 # 0. optional: what will it cost?
 curl -s $BASE/api/jobs/estimate -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
   -d '{"kind":"denoise_transcribe","denoiseTier":"standard","transcribeTier":"local","durationSeconds":612.4,"options":{"translate":["es"]}}'

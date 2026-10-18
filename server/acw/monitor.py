@@ -276,7 +276,7 @@ def check_health(ok_fn: Callable[[str], tuple[bool, str]] = http_ok) -> list[Fin
             "health_public", not pub_ok, "Audio Cleaner is not reachable from the internet",
             f"The local API is healthy, but {url} failed from this machine ({pub_why}).\n"
             "The problem is on the public path: the acw-tunnel SSH tunnel, the VPS, or its Caddy route.\n"
-            "Check: systemctl --user status acw-tunnel; ssh vps 'curl -s 127.0.0.1:18790/audio/api/health'\n",
+            "Check: systemctl --user status acw-tunnel; ssh vps 'curl -s 127.0.0.1:18790/api/health'\n",
             confirm=2,
         ))
     return findings

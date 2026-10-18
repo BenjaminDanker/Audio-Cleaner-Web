@@ -3,7 +3,7 @@
 The website shows this page at `/developers/live` (`web/src/pages/DevelopersLive.jsx`), written by hand from this file in
 friendlier words: **change both** when the protocol changes (see the note at the top of [api.md](api.md)).
 
-One WebSocket per live source: `wss://<host><base>/api/stream/ws`.
+One WebSocket per live source: `wss://audiocleaner.live/api/stream/ws`.
 
 Authenticate with `Authorization: Bearer acw_...` (API key with the `stream`
 scope). Browsers on the site itself can use the session cookie instead.

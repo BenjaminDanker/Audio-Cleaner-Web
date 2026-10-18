@@ -4,13 +4,14 @@
  Browser / OBS plugin
         │ HTTPS / WSS
         ▼
- VPS (Caddy, mc-multi-world.space)
-   /audio/*        → static site from /var/www/audio (incl. free WASM denoiser)
-   /audio/api/*    → 127.0.0.1:18790 ──────────────┐   request bodies capped (64 KB; 4 GB only for the upload route)
+ VPS (Caddy, audiocleaner.live)
+   /*              → static site from /var/www/audio (incl. free WASM denoiser)
+   /api/*          → 127.0.0.1:18790 ──────────────┐   request bodies capped (64 KB; 4 GB only for the upload route)
    job uploads and result downloads                 │
                    → 127.0.0.1:18794 (falls back    │ two SSH reverse tunnels, separate TCP connections
                      to 18790 if down) ───────────┐ │ (key restricted to these two ports)
-   (other paths: Minecraft packs, pet-companion)  │ │
+   (mc-multi-world.space: packs, pet-companion,    │ │
+    /audio/api/* for old clients: same upstream)  │ │
  primary-ram (home LAN, nothing new listens on it)▼ ▼
    acw-tunnel-bulk ssh -R 18794 → 127.0.0.1:8794   (IPQoS throughput)
    acw-bulk     FastAPI/uvicorn on 127.0.0.1:8794 — only PUT /api/jobs/{id}/input and

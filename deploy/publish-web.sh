@@ -11,7 +11,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO/web"
 npm ci --no-audit --no-fund
 npm run sync-dfn
-VITE_BASE=/audio/ npm run build
+VITE_BASE=/ npm run build
 # Pre-compress for Caddy's `precompressed zstd gzip`: zstd for browsers that take it (about a third smaller than gzip on
 # the WebAssembly files; level 19 keeps the window at 8 MB, the most browsers accept), gzip for the rest. Media is already
 # compressed: left alone.
@@ -37,6 +37,6 @@ printf '%s\n' "$NEW_LIST" | ssh vps 'set -eu
   fi
   cp /tmp/acw-assets-new .assets-current
   rm -f /tmp/acw-assets-new /tmp/acw-assets-keep'
-ssh vps 'curl -s -o /dev/null -w "%{http_code} " https://mc-multi-world.space/audio/ && curl -s https://mc-multi-world.space/audio/api/health'
+ssh vps 'curl -s -o /dev/null -w "%{http_code} " https://audiocleaner.live/ && curl -s https://audiocleaner.live/api/health'
 echo
 git -C "$REPO" rev-parse HEAD:web > "$HOME/audio-cleaner/data/web-published" 2>/dev/null || true

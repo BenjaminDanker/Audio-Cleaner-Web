@@ -788,7 +788,7 @@ static void test_reference_buffer()
 static void test_session_texts()
 {
 	std::printf("session texts and address rules\n");
-	CHECK(server_url_allowed("wss://mc-multi-world.space/audio/api/stream/ws"));
+	CHECK(server_url_allowed("wss://audiocleaner.live/api/stream/ws"));
 	CHECK(server_url_allowed("ws://127.0.0.1:8791/api/stream/ws"));
 	CHECK(server_url_allowed("ws://localhost/x"));
 	CHECK(server_url_allowed("ws://192.168.1.20/x") && server_url_allowed("ws://10.1.2.3:80/x"));

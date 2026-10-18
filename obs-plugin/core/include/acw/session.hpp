@@ -23,7 +23,7 @@ enum class Codec {
 };
 
 struct SessionConfig {
-	std::string url = "wss://mc-multi-world.space/audio/api/stream/ws";
+	std::string url = "wss://audiocleaner.live/api/stream/ws";
 	std::string api_key;               // never logged
 	bool denoise = true;               // tier "light"
 	std::string captions;              // "", "local" (standard, English) or "premium" (extra accurate)

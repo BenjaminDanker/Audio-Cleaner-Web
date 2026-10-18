@@ -1,0 +1,13 @@
+# The VPS's Caddy configuration: /etc/caddy/Caddyfile (installed by setup.sh). It holds only the global options and
+# imports the sites from /srv/edge, a folder the normal user (silver) owns: publish-edge.sh copies sites/ there and
+# reloads Caddy through its local admin API (127.0.0.1:2019), so changing a site needs no sudo.
+{
+	servers {
+		timeouts {
+			# drop clients that open a connection and never finish their headers
+			read_header 10s
+		}
+	}
+}
+
+import /srv/edge/*.caddy

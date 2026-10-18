@@ -41,16 +41,16 @@ check_running() {
       systemctl --user is-active --quiet "$u" || bad="$bad $u"
     done
     if [ -z "$bad" ]; then
-      health="$(curl -fsS --max-time 5 "http://127.0.0.1:8790/audio/api/health?deep=1" 2>/dev/null || true)"
+      health="$(curl -fsS --max-time 5 "http://127.0.0.1:8790/api/health?deep=1" 2>/dev/null || true)"
       case "$health" in *'"ok":true'*|*'"ok": true'*) ok=1 ;; esac
       # The bulk-transfer process answers on its own port (it serves uploads and downloads only).
       case " $* " in *" acw-bulk.service "*)
-        bulk="$(curl -fsS --max-time 5 "http://127.0.0.1:8794/audio/api/health" 2>/dev/null || true)"
+        bulk="$(curl -fsS --max-time 5 "http://127.0.0.1:8794/api/health" 2>/dev/null || true)"
         case "$bulk" in *'"ok":true'*|*'"ok": true'*) ;; *) ok=0; health="bulk: ${bulk:-no answer}; $health" ;; esac ;;
       esac
       # So does the live process (the live WebSocket only).
       case " $* " in *" acw-live.service "*)
-        live="$(curl -fsS --max-time 5 "http://127.0.0.1:8795/audio/api/health" 2>/dev/null || true)"
+        live="$(curl -fsS --max-time 5 "http://127.0.0.1:8795/api/health" 2>/dev/null || true)"
         case "$live" in *'"ok":true'*|*'"ok": true'*) ;; *) ok=0; health="live: ${live:-no answer}; $health" ;; esac ;;
       esac
     fi

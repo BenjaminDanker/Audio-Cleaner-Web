@@ -1,4 +1,6 @@
 // Shared helpers for the Playwright checks of the website (see the suites in this folder and web/package.json).
+// The browser suites run against the production layout: the site at the root of its own domain (base "/", ACW_BASE_PATH empty), the live
+// WebSocket on a second process behind tests/front.mjs (what Caddy does in production). BASE is the origin; the API is /api/...
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +8,7 @@ import { chromium } from 'playwright';
 import { startMirror } from './mirror.mjs';
 
 export const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:8792';
-export const BASE = `${ORIGIN}/audio`;
+export const BASE = ORIGIN; // the site is served from the root of its own domain (audiocleaner.live)
 export const FILES = process.env.E2E_FILES || join(homedir(), 'audio-cleaner', 'dev', 'webtest-files');
 export const SHOTS = process.env.E2E_SHOTS || join(homedir(), 'audio-cleaner', 'dev', 'webtest-shots');
 const SERVER = process.env.ACW_SERVER_DIR || join(homedir(), 'repos', 'Audio-Cleaner-Web', 'server');
@@ -15,7 +17,7 @@ const PY = process.env.ACW_PYTHON || join(homedir(), 'audio-cleaner', 'venv', 'b
 const adminEnv = () => ({
   ...process.env,
   ACW_DATA_DIR: process.env.ACW_DATA_DIR || join(homedir(), 'audio-cleaner', 'dev', 'webtest'),
-  ACW_BASE_PATH: '/audio',
+  ACW_BASE_PATH: '',
   ACW_PUBLIC_ORIGIN: ORIGIN,
 });
 
@@ -45,7 +47,7 @@ export async function signIn(page, email) {
   const link = loginLink(email);
   await page.goto(link);
   // Lands on /app, or on the page the visitor was sent to sign in from.
-  await page.waitForURL((u) => u.pathname.startsWith('/audio/') && !u.pathname.startsWith('/audio/login'), { timeout: 15000 });
+  await page.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 15000 });
 }
 
 const results = [];

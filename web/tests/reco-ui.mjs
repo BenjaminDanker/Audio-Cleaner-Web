@@ -1,7 +1,7 @@
 // "Recommended for this file" on the Cleanup page and the paid "Test my room" on the Live page, in a real browser. The numbers
 // behind the advice are checked in tests/reco-unit.mjs; here the page must show the same choices for the same audio.
 // Needs no backend: the API is answered by this script (page.route), and the audio is generated here. Point it at any server that
-// serves the built site under /audio/ (the test backend on 8792 by default):
+// serves the built site at the root (the test backend on 8792 by default):
 //   E2E_ORIGIN=http://127.0.0.1:8792 node tests/reco-ui.mjs
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ import { startMirror } from './mirror.mjs';
 await startMirror(); // the built site downloads the noise remover from the tests' local model host
 
 const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:8792';
-const BASE = `${ORIGIN}/audio`;
+const BASE = ORIGIN;
 const dir = mkdtempSync(join(tmpdir(), 'reco-ui-'));
 
 const rate = (product, tier, h) => ({ product, tier, usdPerHour: h, usdPerMinute: h / 60, available: true });
@@ -61,8 +61,8 @@ async function newPage(extraArgs = {}) {
   const page = await ctx.newPage();
   const problems = [];
   page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
-  await page.route('**/audio/api/**', (route) => {
-    const p = new URL(route.request().url()).pathname.replace('/audio/api/', '');
+  await page.route('**/api/**', (route) => {
+    const p = new URL(route.request().url()).pathname.replace('/api/', '');
     if (p === 'me') return route.fulfill({ json: ME });
     if (p === 'billing/pricing') return route.fulfill({ json: PRICING });
     if (p === 'health') return route.fulfill({ json: { ok: true } });
@@ -137,8 +137,8 @@ async function roomTest(mic, setup) {
   const page = await c.newPage();
   const problems = [];
   page.on('pageerror', (e) => problems.push(e.message));
-  await page.route('**/audio/api/**', (route) => {
-    const p = new URL(route.request().url()).pathname.replace('/audio/api/', '');
+  await page.route('**/api/**', (route) => {
+    const p = new URL(route.request().url()).pathname.replace('/api/', '');
     if (p === 'me') return route.fulfill({ json: ME });
     if (p === 'billing/pricing') return route.fulfill({ json: PRICING });
     return route.fulfill({ status: 404, json: { detail: 'not mocked' } });

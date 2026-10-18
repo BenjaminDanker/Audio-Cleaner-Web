@@ -21,7 +21,7 @@ const models = await mirror(); // the local model host
 const { SPEECH } = await import('../src/media/models.js'); // the pinned files (mirror.mjs has set the build-time host)
 const SPEECH_FILES = Object.keys(SPEECH.files).map((f) => f.split('/').pop());
 const calls = [];
-context.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/') || u.pathname.includes('/dfn/models/')) calls.push(`${r.method()} ${u.pathname}`); });
+context.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/api/') || u.pathname.includes('/dfn/models/')) calls.push(`${r.method()} ${u.pathname}`); });
 await signIn(page, EMAIL);
 
 async function run(file, { noise = 'off', embed = false } = {}) {

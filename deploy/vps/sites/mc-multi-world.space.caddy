@@ -1,0 +1,52 @@
+# mc-multi-world.space: the Minecraft network's web address. Minecraft itself does not go through Caddy: frps
+# (frps.service, docs/vps.md) carries it on 25565 (Java) and 19132/udp (Bedrock).
+mc-multi-world.space {
+	tls force_automate
+
+	# Pet companion (another project): its Stripe checkout and webhook, through its own SSH reverse tunnel on 18788.
+	@webhook path /v1/stripe/webhook
+	handle @webhook {
+		reverse_proxy 127.0.0.1:18788
+	}
+	@checkout path_regexp checkout ^/checkout/[23456789A-HJKMNP-TV-Za-hjkmnp-tv-z]{8}$
+	handle @checkout {
+		reverse_proxy 127.0.0.1:18788
+	}
+	@return path /checkout/success /checkout/cancel /checkout/return
+	handle @return {
+		reverse_proxy 127.0.0.1:18788
+	}
+
+	# Resource packs of the Minecraft servers (/var/www/pack, owned by silver).
+	handle /pack/tech/* {
+		rewrite * /pack/tech.zip
+		root * /var/www
+		file_server
+	}
+	handle /pack/magitech/* {
+		rewrite * /pack/magitech.zip
+		root * /var/www
+		file_server
+	}
+	handle /pack/* {
+		root * /var/www
+		file_server
+	}
+
+	# Audio Cleaner lived at /audio until it moved to https://audiocleaner.live (2026-10-18). Its API still answers
+	# here, for OBS plugin builds and API clients that have this address (and Stripe's webhook until it points at the
+	# new one); every page redirects to the same page there.
+	handle /audio/api/* {
+		uri strip_prefix /audio
+		import acw_api
+	}
+	handle /audio* {
+		uri strip_prefix /audio
+		redir https://audiocleaner.live{uri} 308
+	}
+	import acw_errors
+
+	handle {
+		respond "not found" 404
+	}
+}

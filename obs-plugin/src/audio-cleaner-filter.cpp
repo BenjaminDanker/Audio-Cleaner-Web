@@ -114,7 +114,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define S_UPDATE_INFO "update_info"
 #define S_UPDATE_DOWNLOAD "update_download"
 
-#define DEFAULT_URL "wss://mc-multi-world.space/audio/api/stream/ws"
+#define DEFAULT_URL "wss://audiocleaner.live/api/stream/ws"
 #define ECHO_DESKTOP "@desktop"  // the Desktop Audio source (output channel 1); "" = no echo cancellation
 
 #define T_(s) obs_module_text(s)

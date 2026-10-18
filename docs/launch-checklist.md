@@ -5,36 +5,38 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
 ## Infrastructure
 - ✅ Services on primary-ram (systemd user units, sandboxed workers, tunnel)
 - ✅ VPS tunnel key restricted to one port, no shell
-- ✅ VPS Caddy `/audio` route, site published (https://mc-multi-world.space/audio/)
-- ⬜ Own domain or subdomain (DNS A record → the VPS address), then set
-  `ACW_PUBLIC_ORIGIN`/`ACW_BASE_PATH` and the Caddy site block. Separates
-  cookies/origin from the pet-companion checkout pages.
+- ✅ VPS Caddy sites from the repo (`deploy/vps/`, docs/vps.md), site published (https://audiocleaner.live/)
+- ✅ Own domain `audiocleaner.live` (2026-10-18): separates cookies and origin from the pet-companion checkout pages.
+  The old `mc-multi-world.space/audio` address redirects pages and still proxies `/audio/api/*`; remove it once OBS
+  plugin users have updated and Stripe no longer posts there (docs/operations.md, "Domain")
 - ⬜ Optional hardening with sudo: dedicated `audiocleaner` system user + system units (docs/security.md)
 - ⬜ Off-box encrypted DB backup: built in and verified in tests, switched off until you create
   `~/audio-cleaner/secrets/backup.env` (docs/operations.md, "Backups"). The nightly snapshot to the HDD is ✅ and is now
   checked after writing (integrity + ledger sums). ⬜ Drill the restore once (same section).
 - ⬜ Push the branch and keep `on-prem` fast-forwarded from `desktop-merge`; deploy only from `~/repos/Audio-Cleaner-Web`
   (install.sh refuses a checkout that is not a descendant of what runs)
-- ⬜ Contact form: after the next deploy send a test message from `/audio/contact` (signed out) and check it arrives with a working
+- ⬜ Contact form: after the next deploy send a test message from `/contact` (signed out) and check it arrives with a working
   Reply (needs `ACW_ALERT_EMAIL` and `SMTP_*` in `acw.env`; `ACW_CONTACT_EMAIL` only to send somewhere else; docs/operations.md, "Contact form")
 - ⬜ Journal retention (one sudo command, docs/operations.md "Log retention"): the Privacy Policy promises 90 days
-- ⬜ Uptime alert (e.g. the Pi curls `https://…/audio/api/health` every minute and pings you)
+- ⬜ Uptime alert (e.g. the Pi curls `https://audiocleaner.live/api/health` every minute and pings you)
 
-- ⬜ Re-run `sudo bash ~/acw/install-audio-route.sh` on the VPS after Caddy snippet changes
-  (2026-10-13: stricter CSP, no-cache on all app routes; 2026-10-15: request body limits and timeouts, plus the global
-  `servers { timeouts { read_header 10s } }` option, see docs/operations.md "One-time setup")
+- ✅ Caddy changes go out with `deploy/vps/publish-edge.sh` (no sudo); firewall, packages and the main Caddyfile with
+  `--setup` and `setup.sh` (docs/vps.md)
 - ⬜ Router: enable SQM / fq_codel (cake) on the home link. Big downloads in the house
   otherwise add 200-500 ms to live-stream latency (measured during research downloads).
 
 ## Accounts and keys
 - ⬜ Google OAuth client: add the exact redirect URI
-  `https://mc-multi-world.space/audio/api/auth/oauth/google/callback` (QA hit `redirect_uri_mismatch`)
-- ⬜ SMTP provider for email sign-in links (optional, but most users expect email)
+  `https://audiocleaner.live/api/auth/oauth/google/callback` (QA hit `redirect_uri_mismatch`)
+- ⬜ Stripe: add a webhook endpoint `https://audiocleaner.live/api/stripe/webhook`, keep the old one until events stop
+  arriving there (docs/payments.md)
+- ⬜ Mail from the domain: Namecheap forwarding for `support@audiocleaner.live`, Resend with the domain verified and
+  `SMTP_*` in `acw.env`, DMARC record (docs/operations.md, "Mail"); needed for sign-in links, alerts and the contact form
 - ✅ Stripe: restricted key, webhook endpoint + events
   (docs/payments.md), customer portal enabled, statement descriptor,
   ✅ done 2026-10-15 (live; no Radar rule needed: authorize-first country check). Radar: switch to Lite before 2027-01-21.
 - ✅ OpenAI key set (premium file + live captions verified in production)
-- ⬜ Cloudflare Turnstile keys (optional, for the email form). Without them email sign-in has no bot check (3 mails per address and 6 per network per hour). To enable: keys in acw.env, and the three CSP additions that are commented in deploy/vps/audio.caddy
+- ⬜ Cloudflare Turnstile keys (optional, for the email form). Without them email sign-in has no bot check (3 mails per address and 6 per network per hour). To enable: keys in acw.env, and the three CSP additions that are commented in deploy/vps/sites/00-audio-cleaner-snippets.caddy
 
 ## Business / legal
 - ⬜ Fill `web/src/site.js`: support email, legal name/address, jurisdiction (shown in footer/Terms/Privacy).

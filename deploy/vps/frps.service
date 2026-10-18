@@ -1,0 +1,30 @@
+# frps (frp server, https://github.com/fatedier/frp): carries the Minecraft network from the proxy at home to the
+# public ports here (25565 Java, 19132/udp Bedrock; clients connect to 7000; dashboard on 127.0.0.1:7500 only).
+# Runs as its own user: every port it uses is above 1024, so it needs no root. Installed by setup.sh.
+[Unit]
+Description=frp server (Minecraft tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frp
+Group=frp
+ExecStart=/opt/frp/frps -c /etc/frp/frps.ini
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryMax=256M
+LogsDirectory=frp
+
+[Install]
+WantedBy=multi-user.target

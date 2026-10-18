@@ -22,7 +22,7 @@ const apiCalls = [];
 const libavFetches = [];
 page.on('request', (r) => {
   const u = new URL(r.url());
-  if (u.pathname.includes('/audio/api/')) apiCalls.push(`${r.method()} ${u.pathname}`);
+  if (u.pathname.includes('/api/')) apiCalls.push(`${r.method()} ${u.pathname}`);
   if (u.pathname.includes('/dfn/libav/')) libavFetches.push(u.pathname.split('/').pop());
 });
 await signIn(page, EMAIL);

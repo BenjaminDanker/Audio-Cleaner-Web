@@ -470,7 +470,7 @@ No patches are applied to any of the source trees. On Windows the picture can al
 macOS with VideoToolbox: those are parts of the operating system that FFmpeg calls (nothing of them is shipped).
 
 Corresponding source: the tarballs above are the complete corresponding source. If a link is
-ever unavailable, ask us through https://mc-multi-world.space/audio/contact and
+ever unavailable, ask us through https://audiocleaner.live/contact and
 we will provide the exact source archives for any version of this software we have distributed,
 for at least three years after our last distribution of that version.
 

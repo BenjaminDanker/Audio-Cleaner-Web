@@ -1,87 +1,76 @@
-# The VPS (edge) — what lives there and how to rebuild it
+# The VPS (edge): what lives there and how to rebuild it
 
-The VPS (`mc-multi-world.space`, Caddy 2.11) does two things
-for Audio Cleaner:
+One small VPS (IONOS VPS Linux XS: 1 vCPU, 1 GB, Ubuntu 24.04, Kansas City; its address is in `~/.ssh/config` as
+`vps` and in `~/audio-cleaner/secrets/vps.env`, never in the repo) is the public front door for two things:
 
-1. Serves the **static website** from `/var/www/audio` (the app, and the free browser tools' code: the noise
-   remover's df.js, the speech runtime, the decoder). Kept here on purpose: serving it from home would compete with
-   live audio and Minecraft on the home connection. Measured 2026-10-18: the VPS's own link does about 1.3 Gbit/s down
-   and 0.5-0.9 Gbit/s up (to Cloudflare); primary-ram reaches only about 90 Mbit/s down and 85 up to anywhere (even 4
-   connections at once, with its network card at 1 Gbit/s and the line idle), so the ~60-90 Mbit/s between home and
-   the VPS is the home side, not the VPS. The free tools' **models** (about 22 MB for the noise remover,
-   77 MB for the subtitles) are not here: visitors' browsers download them from Hugging Face (`web/src/media/models.js`).
-2. **Forwards** `/audio/api/*` (and the live WebSocket) to the home server
-   through SSH reverse tunnels that primary-ram opens:
-   VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), for the live WebSocket
-   VPS `127.0.0.1:18795` → primary-ram `127.0.0.1:8795` (`acw-tunnel-live`, its own connection and process:
-   docs/operations.md, "Live process"), and for job uploads and result downloads
-   VPS `127.0.0.1:18794` → primary-ram `127.0.0.1:8794` (`acw-tunnel-bulk` unit, its own connection and process so
-   big transfers do not delay live audio; Caddy falls back to 18790 when it is down: docs/operations.md, "Bulk transfers").
-   Compression: Caddy compresses (zstd, gzip) only the small JSON answers of the API; the live WebSocket, uploads and
-   downloads are already compressed audio or need no delay and are passed through untouched. The static files are
-   pre-compressed by `deploy/publish-web.sh` (zstd and gzip).
+| Name | What | How it reaches home |
+|---|---|---|
+| `audiocleaner.live` (and `www.`, redirected) | Audio Cleaner: the website (served from this VPS, `/var/www/audio`) and its API | SSH reverse tunnels that primary-ram opens (below) |
+| `mc-multi-world.space` | the Minecraft network's web address: resource packs (`/var/www/pack`), the pet companion's Stripe checkout (another project, its own tunnel on 18788), and the old Audio Cleaner address `/audio` (redirects; its API still answers for old OBS plugin builds) | |
+| Minecraft (ports 25565, 19132/udp) | the Minecraft network itself | frp: `frps` here, `frpc` on the Velocity proxy machine at home (192.168.1.200) |
 
-Nothing else of ours is on the VPS: no data, no secrets. When the home server
-or tunnel is down, Caddy answers API calls with a 503 maintenance JSON
-(`handle_errors` in the snippet) and the site shows a maintenance notice. The free browser tools keep working in a
-page that already loaded them; a new visitor cannot start them (they need a sign-in, and their code a session check,
-both at home).
+Nothing else of ours is on the VPS: no data, no secrets beyond the frp token. The free tools' models come from
+Hugging Face, not from here.
 
-Files in the repo: `deploy/vps/audio.caddy` (the site-block snippet),
-`deploy/vps/install-audio-route.sh` (inserts/replaces it in
-`/etc/caddy/Caddyfile`, validates, reloads, keeps a backup, reverts on error),
-`deploy/publish-web.sh` (builds the site and rsyncs it to `/var/www/audio`).
+Measured 2026-10-18: the VPS's own link does about 1.3 Gbit/s down and 0.5-0.9 Gbit/s up (to Cloudflare);
+primary-ram reaches only about 90 Mbit/s down and 85 up to anywhere (even with 4 connections at once, its network
+card at 1 Gbit/s and the line idle), so the ~60-90 Mbit/s between home and the VPS is the home side, not the VPS.
+TCP round trip from home: about 27 ms.
 
-## Apply a changed snippet (current VPS)
+## What runs there
 
-On primary-ram:
+| Piece | Runs as | Config (in the repo) | Notes |
+|---|---|---|---|
+| Caddy 2 (apt, Caddy's repository) | `caddy` (system service) | `/etc/caddy/Caddyfile` = `deploy/vps/Caddyfile`: global options + `import /srv/edge/*.caddy`; the sites in `/srv/edge` = `deploy/vps/sites/` | HTTPS certificates by itself (ports 80/443). The sites folder belongs to `silver` and Caddy reloads through its admin API on 127.0.0.1:2019, so **changing a site needs no sudo**: `deploy/vps/publish-edge.sh` |
+| frps (frp 0.65.0) | `frp` (own system user) | `/opt/frp/frps`, `/etc/frp/frps.ini` (root:frp 0640, **holds the token: not in the repo**), unit `deploy/vps/frps.service` | clients connect on 7000; Minecraft on 25565 (Java) and 19132/udp (Bedrock); dashboard on 127.0.0.1:7500 only |
+| SSH tunnels from home | `silver` (the tunnel keys' listen ports) | `~/.ssh/authorized_keys` (below) | 127.0.0.1:18790 acw-web, 18794 acw-bulk, 18795 acw-live; 18788 pet companion |
+| ufw | | `deploy/vps/setup.sh` | open: 22, 80, 443 (+443/udp), 7000, 25565, 19132/udp; everything else closed |
+| sshd | | `/etc/ssh/sshd_config.d/00-keys-only.conf` (setup.sh) | keys only, no root login; fail2ban watches it |
+| unattended-upgrades | | Ubuntu default | security updates by themselves |
+| Website files | `silver` | `/var/www/audio` | `deploy/publish-web.sh` (from primary-ram, rsync) |
+| Resource packs | `silver` | `/var/www/pack` | copied there by hand |
 
-    scp ~/repos/Audio-Cleaner-Web/deploy/vps/audio.caddy ~/repos/Audio-Cleaner-Web/deploy/vps/install-audio-route.sh vps:~/acw/
+Sudo is needed only for `setup.sh` (packages, firewall, users, the main Caddyfile) and frp's config. Everything
+that changes routinely (sites, website files, packs) belongs to `silver`.
 
-On the VPS:
+### The tunnel keys (`~/.ssh/authorized_keys` of `silver`)
 
-    sudo bash ~/acw/install-audio-route.sh
+Each key may only open its own listening ports, nothing else (no shell, no outgoing forwards):
 
-## Move to a new VPS
+    restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitlisten="127.0.0.1:18795",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 <~/.ssh/acw_tunnel.pub of primary-ram> acw-tunnel@primary-ram
+    restrict,port-forwarding,permitlisten="127.0.0.1:18788",permitopen="127.0.0.1:8788",command="/bin/false" ssh-ed25519 <its key> pet-companion-vps-tunnel
 
-Assumes a Debian/Ubuntu VPS with your user `silver`, the domain's DNS A record
-pointing at it, and Caddy installed (`sudo apt install caddy` or Caddy's apt
-repo) with a site block for the domain that ends in the catch-all
-`handle { respond "not found" 404 }` the installer looks for.
+plus your own login key(s).
 
-1. On primary-ram, point the `vps` SSH alias (`~/.ssh/config`) and `ACW_VPS` in
-   `~/audio-cleaner/secrets/vps.env` (`<user>@<new address>`, see `deploy/vps.env.example`; the tunnel
-   units read it, the address is never in the repo) at the new host.
-2. On the new VPS, allow the tunnel key to open exactly two listening ports and
-   nothing else. Append this line to `~/.ssh/authorized_keys` (the public key is
-   `~/.ssh/acw_tunnel.pub` on primary-ram):
+## Change something
 
-       restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false" ssh-ed25519 <contents of acw_tunnel.pub> acw-tunnel@primary-ram
+- **A Caddy site** (routes, headers, a new domain): edit `deploy/vps/sites/*.caddy`, then on primary-ram
+  `deploy/vps/publish-edge.sh`. It copies them to `/srv/edge` and reloads Caddy; a configuration that does not load is
+  put back and Caddy keeps running the old one.
+- **The website**: `deploy/publish-web.sh` (`deploy/install.sh` runs it when `web/` changed).
+- **Firewall, packages, frp's unit, the main Caddyfile**: edit them in `deploy/vps/`, then
+  `deploy/vps/publish-edge.sh --setup` and `ssh -t vps 'sudo bash ~/edge-src/setup.sh'` (safe to run again).
+- **frp's settings or token**: `sudo nano /etc/frp/frps.ini` on the VPS, `sudo systemctl restart frps`; the client's
+  `frpc.ini` on the proxy machine must have the same token.
 
-3. From primary-ram, copy the route files and accept the new host key once:
+## Rebuild on a new VPS
 
-       ssh vps 'mkdir -p ~/acw'
-       scp ~/repos/Audio-Cleaner-Web/deploy/vps/audio.caddy ~/repos/Audio-Cleaner-Web/deploy/vps/install-audio-route.sh vps:~/acw/
-       ssh -F none -i ~/.ssh/acw_tunnel -o IdentitiesOnly=yes -o HostKeyAlias=vps <user>@<new address> true   # answer "yes"; it exits (command=/bin/false)
+1. Create the VPS (Ubuntu 24.04), your user `silver` with sudo and your SSH key. Note its address.
+2. On primary-ram: point `HostName` of `Host vps` in `~/.ssh/config` and `ACW_VPS` in
+   `~/audio-cleaner/secrets/vps.env` at it, then `ssh vps true` (check the host key out of band first).
+3. On the VPS, add the tunnel key lines above to `~/.ssh/authorized_keys`.
+4. frp: copy `frps` (from the frp release, https://github.com/fatedier/frp/releases, same version) to `/opt/frp/frps`
+   and `frps.ini` (with its token) to `/etc/frp/frps.ini` on the new VPS (`sudo install -d /opt/frp /etc/frp` first).
+5. On primary-ram: `deploy/vps/publish-edge.sh --setup`, then `ssh -t vps 'sudo bash ~/edge-src/setup.sh'`.
+6. DNS (Namecheap, both domains): the `A` record of `@` to the new address (`www` of audiocleaner.live is a CNAME to
+   `@`). Mail forwarding records stay as they are.
+7. On primary-ram: `systemctl --user restart acw-tunnel acw-tunnel-bulk acw-tunnel-live`, `deploy/publish-web.sh`,
+   copy the packs to `/var/www/pack`, then `curl -s https://audiocleaner.live/api/health` (`{"ok":true}`).
+8. At home, point the Velocity proxy machine's `frpc.ini` (`server_addr`) at the new address; restart frpc.
 
-4. On the new VPS: `sudo bash ~/acw/install-audio-route.sh`
-5. On primary-ram:
+## Email for the domains
 
-       cd ~/repos/Audio-Cleaner-Web && bash deploy/install.sh     # re-installs the tunnel unit
-       bash deploy/publish-web.sh                                 # uploads the site
-       curl -s https://mc-multi-world.space/audio/api/health      # {"ok":true}
-
-6. Update the Google OAuth redirect URI and the Stripe webhook endpoint only if
-   the domain changed (both use `https://<domain>/audio/...`).
-
-## SSH: keys only
-
-The VPS must not accept passwords. Cloud images ship `/etc/ssh/sshd_config.d/50-cloud-init.conf`
-with `PasswordAuthentication yes`, and sshd keeps the first value it reads, so a `no` further down
-(`sshd_config`, `60-cloudimg-settings.conf`) does nothing. A file that sorts first wins:
-
-    echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-keys-only.conf
-    sudo sshd -t && sudo systemctl reload ssh
-    sudo sshd -T | grep -Ei 'passwordauthentication|kbdinteractiveauthentication|permitrootlogin'   # all "no"
-
-Check from a second terminal that key login still works before closing the first one.
+Namecheap's email forwarding receives mail for audiocleaner.live (MX `eforward*.registrar-servers.com`, SPF
+`include:spf.efwd.registrar-servers.com`) and forwards it to the owner's inbox: the site never shows that inbox.
+Sending (sign-in links, alerts, the contact form) goes through the SMTP account in `acw.env` (`SMTP_*`); for mail
+to come from the domain, that account must be a sending service with the domain verified (docs/operations.md, "Mail").

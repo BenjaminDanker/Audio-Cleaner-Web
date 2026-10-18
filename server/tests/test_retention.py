@@ -400,7 +400,7 @@ def test_backups_stay_at_keep_also_when_tonight_fails_and_failed_snapshots_are_c
 def test_polling_the_job_list_is_not_logged_but_errors_and_everything_else_are(client, signed_in, caplog):
     from acw.bodylimit import _quiet
 
-    assert _quiet("GET", "/audio/api/jobs", 200) and _quiet("GET", "/api/health", 200)
+    assert _quiet("GET", "/api/jobs", 200) and _quiet("GET", "/api/health", 200)
     assert not _quiet("GET", "/api/jobs", 429) and not _quiet("GET", "/api/jobs", 401)
     assert not _quiet("POST", "/api/jobs", 200) and not _quiet("GET", "/api/jobs/" + "a" * 32, 200)
     assert not _quiet("GET", "/api/health", 503) and not _quiet("GET", "/api/me", 200)

@@ -11,7 +11,7 @@ Built against libobs 31.1.1; works with OBS 31 and newer (OBS refuses plugins bu
 ## Install
 
 Download the package for your platform from the Live page of the website (it comes from our own download server,
-`https://mc-multi-world.space/audio/api/downloads/obs-plugin/`), and unpack. For maintainers: CI publishes every build
+`https://audiocleaner.live/api/downloads/obs-plugin/`), and unpack. For maintainers: CI publishes every build
 as its own release per version (`obs-plugin-v<version>`), and the server mirrors it (docs/operations.md, "Release downloads").
 OBS must be **version 31 or newer**; restart OBS afterwards.
 
@@ -121,7 +121,7 @@ captions follow the switches, and translations translate whichever was spoken.
 
 Once each time OBS starts (a few seconds after the plugin loads, on a thread of its own, never on the audio path and never
 holding up OBS) the plugin reads the newest version's manifest from our download server,
-`https://mc-multi-world.space/audio/api/downloads/obs-plugin/manifest.json`, and its signature (`manifest.json.sig`).
+`https://audiocleaner.live/api/downloads/obs-plugin/manifest.json`, and its signature (`manifest.json.sig`).
 The manifest is signed when it is built (Ed25519); the plugin checks the signature with the public key built into it and
 ignores anything that is not signed by that key, or not newer than itself. https only, certificates and host names
 verified, small size limits, a few seconds of patience. If the release is newer:

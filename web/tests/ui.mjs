@@ -1,5 +1,5 @@
 // The sign-in form (Google and email, with the bot check's token sent), an accessibility scan of the main pages (labels, names,
-// one heading, landmarks, unique ids), and one session under the production Content-Security-Policy (read from deploy/vps/audio.caddy; only the tests' local model host is
+// one heading, landmarks, unique ids), and one session under the production Content-Security-Policy (read from deploy/vps/sites/00-audio-cleaner-snippets.caddy; only the tests' local model host is
 // added to connect-src) that does the free cleanup,
 // the free subtitles, an MP3 export and a live test: no policy violation may show up anywhere.
 // Usage: node tests/ui.mjs
@@ -18,7 +18,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await page.route('**/api/auth/email', (r) => { posted = r.request().postDataJSON(); return r.fulfill({ json: { ok: true } }); });
     await page.goto(`${BASE}/login`);
     const go = await page.getByRole('link', { name: /Google/ }).getAttribute('href');
-    if (go !== '/audio/api/auth/oauth/google/start') throw new Error(go);
+    if (go !== '/api/auth/oauth/google/start') throw new Error(go);
     await page.getByLabel('Email address').fill('someone@example.com');
     await page.waitForFunction(() => !document.querySelector('button[type=submit]').disabled, null, { timeout: 20000 });
     await page.getByRole('button', { name: /Email me/ }).click();
@@ -62,11 +62,11 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 }
 
 {
-  // The policy the front door sends (deploy/vps/audio.caddy): no inline script or style, same-origin everything, wasm needs
+  // The policy the front door sends (deploy/vps/sites/00-audio-cleaner-snippets.caddy): no inline script or style, same-origin everything, wasm needs
   // 'wasm-unsafe-eval', and the models may come from Hugging Face. The tests' local model host stands in for it.
-  const caddy = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'deploy', 'vps', 'audio.caddy'), 'utf8');
+  const caddy = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'deploy', 'vps', 'sites', '00-audio-cleaner-snippets.caddy'), 'utf8');
   const real = /Content-Security-Policy "([^"]+)"/.exec(caddy)?.[1];
-  if (!real || !/connect-src [^;]*https:\/\/huggingface\.co/.test(real)) throw new Error('no usable policy in deploy/vps/audio.caddy');
+  if (!real || !/connect-src [^;]*https:\/\/huggingface\.co/.test(real)) throw new Error('no usable policy in deploy/vps/sites/00-audio-cleaner-snippets.caddy');
   const csp = real.replace(/connect-src /, `connect-src ${(await mirror()).origin} `);
   // (A page whose responses are made by route.fulfill below counts as a public page to Chromium, which would then refuse to reach the
   // local model host on loopback: that check is switched off for this one session.)

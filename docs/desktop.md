@@ -544,7 +544,7 @@ gh secret set PUBLIC_RELEASE_TOKEN --repo BenjaminDanker/Audio-Cleaner-Web
 
 On the old repository (Settings): keep the default branch `main`, do not protect `main` in a way that blocks the deploy
 key (a deploy key cannot bypass branch protection), and set the description and website
-(https://mc-multi-world.space/audio/). Run "Public desktop copy" once with "Run workflow" on `on-prem` and look at the
+(https://audiocleaner.live/). Run "Public desktop copy" once with "Run workflow" on `on-prem` and look at the
 commit it pushed (it also removes the old build workflow) before announcing anything; the first release is copied by the
 next release of the app. To stop the copies, delete the secrets or the workflows.
 

@@ -51,10 +51,19 @@ def test_the_live_route_tunnel_units_and_install_all_point_at_the_live_process()
     unit = (deploy / "systemd/acw-live.service").read_text()
     assert "acw.live_app:app --host 127.0.0.1 --port 8795" in unit and "0.0.0.0" not in unit
     assert "-R 127.0.0.1:18795:127.0.0.1:8795" in (deploy / "systemd/acw-tunnel-live.service").read_text()
-    caddy = (deploy / "vps/audio.caddy").read_text()
+    sites = deploy / "vps/sites"
+    caddy = (sites / "00-audio-cleaner-snippets.caddy").read_text()
     live_route = caddy.split("handle @acw_ws {")[1].split("handle ")[0]
     assert re.findall(r"reverse_proxy (\S+)", live_route) == ["127.0.0.1:18795"]
     csp = re.search(r'Content-Security-Policy "([^"]*)"', caddy).group(1)
     assert re.search(r"connect-src 'self' https://huggingface.co https://\*\.huggingface.co https://\*\.hf.co;", csp)
+    # The new domain serves the API and the site from the root; the old address strips /audio before the same API routes
+    # and sends every other /audio page to the new domain.
+    assert re.findall(r"^\s+import (\w+)", (sites / "audiocleaner.live.caddy").read_text(), re.M) == ["acw_api", "acw_site", "acw_errors"]
+    old = (sites / "mc-multi-world.space.caddy").read_text()
+    api = old.split("handle /audio/api/* {")[1].split("\n\t}")[0]
+    assert api.index("uri strip_prefix /audio") < api.index("import acw_api")
+    page = old.split("handle /audio* {")[1].split("\n\t}")[0]
+    assert "uri strip_prefix /audio" in page and "redir https://audiocleaner.live{uri} 308" in page
     units = re.search(r'^UNITS="([^"]*)"', (deploy / "install.sh").read_text(), re.M).group(1)
     assert "acw-tunnel-live.service" in units.split()

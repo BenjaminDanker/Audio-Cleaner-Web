@@ -71,8 +71,8 @@ Ports on primary-ram (all loopback) and how they reach the VPS:
 | `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`), result downloads (`GET /api/jobs/{id}/outputs/{name}`) and the release downloads (`GET /api/downloads/...`) only |
 | `acw-mirror.timer` | none (a oneshot every 10 minutes) | nothing: it only fetches from the release service | copies the newest release files to `data/downloads/` ("Release downloads") |
 
-Check from the VPS with `curl -s 127.0.0.1:18790/audio/api/health`, `curl -s 127.0.0.1:18794/audio/api/health` and
-`curl -s 127.0.0.1:18795/audio/api/health`.
+Check from the VPS with `curl -s 127.0.0.1:18790/api/health`, `curl -s 127.0.0.1:18794/api/health` and
+`curl -s 127.0.0.1:18795/api/health`.
 
 ## Live process (the live WebSocket on its own process and tunnel)
 
@@ -80,13 +80,13 @@ Why: the live WebSocket relays every session's audio frames on one event loop (o
 ran every sign-in, page visit and job-list poll, so heavy API traffic made running sessions late (admission only
 refuses new ones). `acw-live` (`acw/live_app.py`) is the only process that runs live sessions: the live WebSocket and
 the sweep that closes and bills sessions whose handler is gone, on a loop of its own; its admission measures that loop.
-`acw-web` has no live code running. The VPS sends `/audio/api/stream/ws` to `127.0.0.1:18795` (`acw-tunnel-live`) only.
+`acw-web` has no live code running. The VPS sends `/api/stream/ws` to `127.0.0.1:18795` (`acw-tunnel-live`) only.
 
 Set up once (done 2026-10-18): the `acw_tunnel` key on the VPS lists `permitlisten="127.0.0.1:18795"` (next to 18790 and
 18794), and `systemctl --user enable --now acw-tunnel-live`. When `acw-live` or its tunnel is down, live is down: the
 monitor mails (`health_live`, and the units like any other).
 
-Check: `curl -s 127.0.0.1:8795/audio/api/health` here and `curl -s 127.0.0.1:18795/audio/api/health` on the VPS answer
+Check: `curl -s 127.0.0.1:8795/api/health` here and `curl -s 127.0.0.1:18795/api/health` on the VPS answer
 `{"ok":true,"process":"live"}`.
 
 ## Bulk transfers (uploads and downloads on their own process and tunnel)
@@ -109,7 +109,7 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
 
 1. **Home side.** `deploy/install.sh --wait-live` (the first deploy also restarts `acw-tunnel`, because its unit gained
    `-o IPQoS=lowdelay`, and that cuts live sessions; later deploys never restart it). It starts `acw-bulk` and installs
-   `acw-tunnel-bulk` **without enabling it**. Check: `curl -s 127.0.0.1:8794/audio/api/health` answers
+   `acw-tunnel-bulk` **without enabling it**. Check: `curl -s 127.0.0.1:8794/api/health` answers
    `{"ok":true,"process":"bulk"}`.
 2. **VPS key.** The tunnel key is restricted to the ports it may listen on. On the VPS, edit `~/.ssh/authorized_keys` and
    change the line of the `acw_tunnel` key (keep the key itself and its comment) so it starts with
@@ -118,10 +118,10 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
 
    (one more `permitlisten`; sshd accepts several). Nothing else changes, and the main tunnel keeps working during the edit.
 3. **Bulk tunnel.** On primary-ram: `systemctl --user enable --now acw-tunnel-bulk`, then on the VPS
-   `curl -s 127.0.0.1:18794/audio/api/health`. From now on `deploy/install.sh`, `deploy/rollback.sh` and the monitor treat it
+   `curl -s 127.0.0.1:18794/api/health`. From now on `deploy/install.sh`, `deploy/rollback.sh` and the monitor treat it
    like the other units (`deploy/install.sh` prints a reminder until it is enabled).
-4. **Caddy.** `scp ~/repos/Audio-Cleaner-Web/deploy/vps/audio.caddy ~/repos/Audio-Cleaner-Web/deploy/vps/install-audio-route.sh vps:~/acw/`
-   then on the VPS `sudo bash ~/acw/install-audio-route.sh` (validates, reloads, keeps a backup, reverts on error). The upload
+4. **Caddy.** On primary-ram `deploy/vps/publish-edge.sh` (copies the sites to the VPS and reloads Caddy; a configuration
+   that does not load is put back; no sudo). The upload
    route (`.../input`, still 4 GB, no stall timeouts) and `.../outputs/...` now go to `127.0.0.1:18794` first and fall back to
    `127.0.0.1:18790` (`lb_policy first`, a health check every 10 s, 30 s of avoidance after a failed connection), so a
    stopped `acw-bulk` or `acw-tunnel-bulk` costs a few seconds, not an outage. This snippet no longer uses
@@ -130,8 +130,8 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
 5. **Check.** Upload and download a file on the site; `journalctl --user -u acw-bulk -f` shows the `PUT .../input` and
    `GET .../outputs/...` lines (client address, status, milliseconds), the main `acw-web` log shows none for them.
 
-Back out: on the VPS copy the newest `/etc/caddy/Caddyfile.backup.*` (the installer made it) over `/etc/caddy/Caddyfile`
-and `sudo systemctl reload caddy`; on primary-ram `systemctl --user disable --now acw-tunnel-bulk`. The main path never changed.
+Back out: put the previous version of `deploy/vps/sites/00-audio-cleaner-snippets.caddy` back (`git checkout` of the old
+commit) and run `deploy/vps/publish-edge.sh`; on primary-ram `systemctl --user disable --now acw-tunnel-bulk`. The main path never changed.
 
 The router: `IPQoS` marks the two SSH connections so a router that prioritises by DSCP or runs smart queueing (SQM,
 cake/fq_codel) can favour the live one. It does nothing without such a router; the separate connection and process are
@@ -142,10 +142,10 @@ what helps in any case. Setting up SQM on the home router remains the best secon
 Users and the apps never see the GitHub repository (it may become private). GitHub Releases stays where CI puts the build
 output; primary-ram keeps a verified copy and serves it under our own domain, from the bulk process (`acw-bulk`, so a
 download never queues in front of live audio, under the same shared transfer budget `ACW_TRANSFER_MBPS_TOTAL` as result downloads and uploads).
-**Nothing is stored on the VPS**: Caddy only proxies `^/audio/api/(jobs/<id>/outputs/|downloads/)` to the bulk upstream
-(`deploy/vps/audio.caddy`, falling back to the main process like the other bulk routes).
+**Nothing is stored on the VPS**: Caddy only proxies `^/api/(jobs/<id>/outputs/|downloads/)` to the bulk upstream
+(`deploy/vps/sites/00-audio-cleaner-snippets.caddy`, falling back to the main process like the other bulk routes).
 
-**Addresses** (base `https://mc-multi-world.space/audio/api/downloads`; GET and HEAD, Range works, no sign-in, no redirects):
+**Addresses** (base `https://audiocleaner.live/api/downloads`; GET and HEAD, Range works, no sign-in, no redirects):
 
 | Address | What |
 |---|---|
@@ -193,7 +193,7 @@ place (`DEFAULT_REPO` in `acw/mirror.py`, or `ACW_GITHUB_REPO`).
 
 **One-time:** deploy (`deploy/install.sh` enables the timer), then update the VPS Caddy snippet as in "One-time setup"
 (the `downloads/` part of the bulk matcher; until then the downloads still work, through the main tunnel).
-Check: `curl -sI https://mc-multi-world.space/audio/api/downloads/obs-plugin/manifest.json` after the first pass finished
+Check: `curl -sI https://audiocleaner.live/api/downloads/obs-plugin/manifest.json` after the first pass finished
 (`mirror --status`).
 
 ## Owner dashboard
@@ -272,16 +272,16 @@ to `ACW_ALERT_EMAIL` with subject prefix `[Audio Cleaner]`; mails carry counts,
 job ids (first 8 characters) and status codes only, never user emails, file
 names or transcripts.
 
-**Set up (once).** Put this in `~/audio-cleaner/secrets/acw.env` (the monitor
-and the failure hook read that file; workers send no mail):
+**Set up (once).** Set `ACW_ALERT_EMAIL` and the `SMTP_*` variables in `~/audio-cleaner/secrets/acw.env` (the monitor
+and the failure hook read that file; workers send no mail; the mail account is described under "Mail"):
 
 ```
 ACW_ALERT_EMAIL=silverjunk08@gmail.com
-SMTP_HOST=smtp.gmail.com
+SMTP_HOST=smtp.resend.com
 SMTP_PORT=587
-SMTP_USER=<your gmail address>
-SMTP_PASSWORD=<16-char app password>   # https://myaccount.google.com/apppasswords (needs 2-step verification)
-SMTP_FROM=<your gmail address>
+SMTP_USER=resend
+SMTP_PASSWORD=<API key>
+SMTP_FROM=Audio Cleaner <no-reply@audiocleaner.live>
 ```
 
 Then `systemctl --user restart acw-web` and check with:
@@ -295,7 +295,7 @@ cd ~/audio-cleaner/app && set -a && . ../secrets/acw.env && set +a
 Until SMTP and `ACW_ALERT_EMAIL` are both set nothing is mailed: every alert is
 logged at ERROR (`journalctl --user -u acw-monitor -u acw-web | grep -i 'ALERT NOT SENT'`)
 and goes out by itself, still pending, once mail works. The same SMTP account is used
-for magic-link sign-in mails.
+for magic-link sign-in mails and the contact form ("Mail").
 
 **De-duplication.** Each alert has a kind. The first occurrence is mailed; while it
 stays active it is mailed again after 1 hour and then every 6 hours; when the
@@ -308,10 +308,10 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 | Service not running (`service:<unit>`) | an enabled `acw-*` unit (or `acw-backup.timer`, `acw-mirror.timer`) is not `active` for 2 checks in a row; also sent at once by the `OnFailure=` hook (`acw-alert@.service`) when a unit enters `failed` | the hook only fires when systemd gives up; with `Restart=always` that is rare, so the next row covers crash loops |
 | Restarting repeatedly (`restarts:<unit>`) | systemd auto-restarted the unit 2+ times in 30 minutes (`NRestarts`) | a manual `systemctl restart` does not count |
 | Back up after unclean stop (`web_unclean_stop`) | acw-web starts and the previous run did not record a clean shutdown (crash, kill, OOM, power loss) | at most 1 mail per hour |
-| API down locally (`health_local`) | `http://127.0.0.1:8790/audio/api/health` fails twice in a row | acw-web is down or stuck |
-| Upload/download process down (`health_bulk`) | only where `acw-bulk` is enabled: `http://127.0.0.1:8794/audio/api/health` fails twice in a row | uploads and downloads fall back to `acw-web` once the VPS notices (docs/operations.md, Bulk transfers); `acw-tunnel-bulk` is watched as a service like the other units |
+| API down locally (`health_local`) | `http://127.0.0.1:8790/api/health` fails twice in a row | acw-web is down or stuck |
+| Upload/download process down (`health_bulk`) | only where `acw-bulk` is enabled: `http://127.0.0.1:8794/api/health` fails twice in a row | uploads and downloads fall back to `acw-web` once the VPS notices (docs/operations.md, Bulk transfers); `acw-tunnel-bulk` is watched as a service like the other units |
 | Release downloads out of date (`mirror_stale`) | only where `acw-mirror.timer` is enabled: a channel has had no successful mirror run for 2 hours, or a newer release has been on the release service for over an hour without being served (for example its signature or a checksum is wrong), twice in a row | people keep getting the last good version, never a wrong one; the mail has the last error. See "Release downloads" |
-| Not reachable from the internet (`health_public`) | local health is fine but `https://mc-multi-world.space/audio/api/health` fails from this machine twice in a row | the problem is the tunnel, VPS or Caddy; skipped when the public origin is not https |
+| Not reachable from the internet (`health_public`) | local health is fine but `https://audiocleaner.live/api/health` fails from this machine twice in a row | the problem is the tunnel, VPS or Caddy; skipped when the public origin is not https |
 | File queue long (`queue_long`) | the head job has waited over 20 min, or the last job's estimated wait (`jobs.queue_wait_seconds`) is over 45 min | the mail shows busy cores for Audio Cleaner vs everything else (with the busiest other process names, e.g. `java`) and memory, so you can see when the Minecraft servers are the cause |
 | Jobs abnormally slow (`jobs_slow`) | a running job, 10+ minutes in, is projected to take over 3x its `jobs.job_seconds` estimate | same host load breakdown |
 | Disk low (`disk_low`) | under 15 GB free on the data volume | |
@@ -342,12 +342,61 @@ Thresholds are constants at the top of `server/acw/monitor.py`.
 
 Limits: the monitor runs on this machine, so a power cut, network loss or a dead
 `systemd --user` manager sends nothing. For that, point an outside monitor (for
-example UptimeRobot, free) at `https://mc-multi-world.space/audio/api/health`
+example UptimeRobot, free) at `https://audiocleaner.live/api/health`
 (that URL answers only `{"ok":true}`; the detailed check `?deep=1` works from this machine and for admins).
+
+## Mail
+
+The site's mail (sign-in links, alerts, the contact form) should come from the domain, not from a personal mailbox.
+Receiving and sending are separate things here.
+
+**Receiving: Namecheap email forwarding.** In Namecheap, Domain List, `audiocleaner.live`, Mail Settings: "Email
+Forwarding" (the records are MX `eforward*.registrar-servers.com` and an SPF TXT
+`v=spf1 include:spf.efwd.registrar-servers.com ~all` on the bare domain). Add an alias such as `support@audiocleaner.live`
+that forwards to the owner's inbox. Nobody sees the inbox address, and there is no mailbox to run.
+
+**Sending: a transactional service with the domain verified.** Recommended: Resend (https://resend.com, free: 3,000 mails a
+month, 100 a day). Add the domain `audiocleaner.live` there and put the DNS records it shows into Namecheap (Advanced DNS).
+Resend uses a subdomain for the bounce path, so nothing clashes with the forwarding MX on the bare domain:
+
+| Type | Host | Value |
+|---|---|---|
+| MX | `send` | Resend's feedback server (priority 10) |
+| TXT | `send` | `v=spf1 include:amazonses.com ~all` (as Resend shows it) |
+| TXT | `resend._domainkey` | the DKIM public key Resend shows |
+
+Copy the exact values from Resend's page; wait until it says "Verified". Then create an API key (sending access) and set in
+`~/audio-cleaner/secrets/acw.env`:
+
+```
+SMTP_HOST=smtp.resend.com
+SMTP_PORT=587
+SMTP_USER=resend
+SMTP_PASSWORD=<the API key>
+SMTP_FROM=Audio Cleaner <no-reply@audiocleaner.live>
+```
+
+Port 587 with STARTTLS is what both mail paths use (`acw/alerts.py` for alerts and the contact form, and the sign-in mail
+in `api/auth_routes.py`; the server certificate is verified). Port 465 (implicit TLS) works only for alerts and the
+contact form, not for sign-in links, so keep 587. Then `systemctl --user restart acw-web` and run
+`python -m acw.alerts test` (see "Alerts"). Replies to contact-form messages go to the sender (`Reply-To`); the address
+`no-reply@` need not exist, because it only sends.
+
+**DMARC** (recommended, once sending works): a TXT record `_dmarc` with
+`v=DMARC1; p=none; rua=mailto:support@audiocleaner.live` (use the forwarded address). `p=none` only reports; reports arrive
+as mail to that address. Tighten to `p=quarantine` after a few weeks of clean reports.
+
+**If 100 a day is too few** (one sign-in link is one mail): Brevo (https://www.brevo.com, free: 300 a day; SMTP host
+`smtp-relay.brevo.com`, port 587, its own SMTP login and key, the domain verified the same way with its own DKIM and
+SPF/DMARC records).
+
+**Not recommended: Gmail SMTP** (`smtp.gmail.com`, port 587, an app password from
+https://myaccount.google.com/apppasswords, `SMTP_FROM` = the Gmail address). It works, but every mail shows the personal
+address as the sender.
 
 ## Contact form
 
-The site has no public email address. `/contact` (a form) sends its messages to the owner by mail, through the same SMTP
+The site shows no email address. `/contact` (a form) sends its messages to the owner by mail, through the same SMTP
 account as the sign-in links and the alerts (`acw.alerts.send_contact_mail`). The recipient is `ACW_CONTACT_EMAIL` if set,
 otherwise the alert address `ACW_ALERT_EMAIL`; either can list several addresses separated by commas. Nothing to set
 when the alert address is the one you want. The address never reaches a browser: `/api/me` only says `contactForm: true`.
@@ -364,8 +413,8 @@ when the alert address is the one you want. The address never reaches a browser:
   Same-origin requests only, and the usual CSRF token when signed in.
 - The text of a message is **not stored** anywhere (not in the database, not in the journal). The audit log keeps that a
   message was sent (time, topic, account if signed in, network address for 90 days).
-- Check it: sign out, open `/audio/contact`, send a test, and look in the mailbox (spam folder first time: it comes from
-  your own SMTP account).
+- Check it: sign out, open `/contact`, send a test, and look in the mailbox (spam folder first time: it comes from
+  the sending service's account for the domain, see "Mail").
 
 ## Backups
 
@@ -517,43 +566,53 @@ and the owner's `MaxRetentionSec=90day` (`/etc/systemd/journald.conf.d/acw-reten
 times the example traffic (~40 MB a day) stays under 4 GB for the full 90 days; only beyond that the size cap, not the 90
 days, decides, which makes the logs shorter and never longer than the Privacy Policy says.
 
-## Moving to a domain of its own
+## Domain
 
-Only configuration changes (the shared host `mc-multi-world.space/audio` is the weak point, see security.md):
+Audio Cleaner has its own domain, `https://audiocleaner.live` (`www.` redirects to it); it moved from
+`https://mc-multi-world.space/audio` on 2026-10-18. What was changed:
 
-1. DNS: an A record for the new name to the VPS address; a Caddy site block for it with the contents of
-   `deploy/vps/audio.caddy` but **without** the `/audio` prefix (routes at `/`, root `/var/www/audio`, same CSP).
-2. `~/audio-cleaner/secrets/acw.env` and `acw-worker.env`: `ACW_PUBLIC_ORIGIN=https://new.name`, `ACW_BASE_PATH=` (empty).
-   The session cookie then becomes `__Host-acw_session` (Secure, `Path=/`, no Domain) by itself; everybody signs in again.
-3. Google OAuth client: add `https://new.name/api/auth/oauth/google/callback`; Stripe webhook endpoint
-   `https://new.name/api/stripe/webhook` (keep the old one until events stop arriving there); Stripe return URLs follow the origin.
-4. Website: build with `VITE_BASE=/` (publish-web.sh uses `/audio/` today; change it there), the health URLs in
-   `monitor.py`/`publish-web.sh`, `deploy/systemd/acw-tunnel.service` stays as it is.
-5. Keep a redirect from the old `/audio/*` for a while, and note that OBS plugin builds carry the server address
-   (`obs-plugin/src/audio-cleaner-filter.cpp`, `core/include/acw/session.hpp`): keep the old host answering until users have updated.
-6. `deploy/install.sh`, then check `/api/health` on the new name.
+- DNS (Namecheap): `A` record of `@` to the VPS, `www` a CNAME to `@`. The sites are in `deploy/vps/sites/`
+  (`audiocleaner.live.caddy`, the shared routes in `00-audio-cleaner-snippets.caddy`), published with
+  `deploy/vps/publish-edge.sh` (docs/vps.md).
+- `acw.env` and `acw-worker.env`: `ACW_PUBLIC_ORIGIN=https://audiocleaner.live`, `ACW_BASE_PATH=` (empty). The base path is
+  now `/`: pages and API are at `/app`, `/login`, `/contact`, `/api/...`, `/dfn/...`, `/assets/...`, with no `/audio`
+  prefix. The session cookie is `__Host-acw_session` (Secure, `Path=/`, no Domain; with a base path it would be
+  `__Secure-acw_session`, see `Settings.session_cookie_name`); everybody signed in again once.
+- The website is built with `VITE_BASE=/` (`deploy/publish-web.sh`); the monitor builds its health URLs from the settings.
+- The old address still answers for a while. On `mc-multi-world.space`, `/audio/api/*` is proxied to the same API with
+  the prefix stripped (old OBS plugin builds carry the address, `obs-plugin/src/audio-cleaner-filter.cpp` and
+  `core/include/acw/session.hpp`; API clients; Stripe's webhook until it is moved). Every other `/audio/*` page
+  redirects (308) to the same page on `audiocleaner.live`.
+
+Still to do (needs you):
+
+1. **Google OAuth client:** `https://audiocleaner.live/api/auth/oauth/google/callback` must be in its authorised redirect
+   URIs (the old `mc-multi-world.space/audio/...` one can go once sign-in works on the new address).
+2. **Stripe webhook:** add an endpoint `https://audiocleaner.live/api/stripe/webhook` (payments.md, same events) and put its
+   signing secret in `acw.env`; keep the old endpoint (`https://mc-multi-world.space/audio/api/stripe/webhook`) until events
+   stop arriving there, then delete it. Checkout return URLs follow `ACW_PUBLIC_ORIGIN`.
+3. **Retiring the old address:** remove the two `/audio` blocks from `deploy/vps/sites/mc-multi-world.space.caddy` and run
+   `deploy/vps/publish-edge.sh`. Keep them until OBS plugin users have updated to a build that uses
+   `audiocleaner.live`, and until no Stripe event or API call arrives through `/audio/api` (the Caddy access log on the
+   VPS shows it).
 
 ## One-time setup still needed (needs you)
 
-1. **VPS Caddy route** (sudo): `ssh vps` then `sudo bash ~/acw/install-audio-route.sh`.
-   Adds `/audio` before the 404 catch-all, creates `/var/www/audio` owned by
-   silver, validates (reverts on failure), and reloads.
-   Re-run it (after `scp deploy/vps/audio.caddy deploy/vps/install-audio-route.sh vps:~/acw/`) whenever the
-   snippet changes. The current one caps request bodies (64 KB; 4 GB only for the upload route; 1 MB for the
-   Stripe webhook), sends uploads, result downloads and the release downloads (`/audio/api/downloads/`) to the bulk tunnel first (see "Bulk transfers", which also
-   needs the tunnel key changed on the VPS first) and was validated with `caddy validate` on Caddy 2.11. Once, add to the **global options**
-   block at the top of `/etc/caddy/Caddyfile`: `servers { timeouts { read_header 10s } }`, then `sudo caddy validate` and reload.
-   Turnstile's three CSP additions are written in the snippet, commented out.
-2. **Sign-in providers**: create OAuth apps with these callbacks and put the
+1. **Sign-in providers**: create OAuth apps with these callbacks and put the
    ids/secrets in `~/audio-cleaner/secrets/acw.env`:
-   - Google: `https://mc-multi-world.space/audio/api/auth/oauth/google/callback`
-   (Email links need SMTP: any transactional provider.)
-3. **Stripe** (test mode first): restricted key + webhook (see payments.md) into `acw.env`.
-4. **OpenAI**: an `OPENAI_API_KEY` for premium transcription and captions.
+   - Google: `https://audiocleaner.live/api/auth/oauth/google/callback`
+   (Email links need SMTP: see "Mail".)
+2. **Stripe** (test mode first): restricted key + webhook (see payments.md) into `acw.env`.
+3. **OpenAI**: an `OPENAI_API_KEY` for premium transcription and captions.
    Preferably a dedicated project key with a monthly budget cap.
+4. **Mail**: a sending service with the domain verified, then `SMTP_*` in `acw.env` ("Mail").
 5. **Contact form**: nothing to do when `ACW_ALERT_EMAIL` and `SMTP_*` are set (messages go to the alert address). Set
    `ACW_CONTACT_EMAIL` only to send them somewhere else (see "Contact form").
 6. `systemctl --user restart acw-web` after editing `acw.env`.
+
+The VPS side (Caddy routes, firewall, frp) is in the repository and done: docs/vps.md. Turnstile's three CSP additions
+are written in `00-audio-cleaner-snippets.caddy`, commented out; the request-body and header-timeout settings are in
+the snippets and in `deploy/vps/Caddyfile`.
 
 ## Rebuilding native pieces and models
 

@@ -711,7 +711,7 @@ def test_the_release_is_published_to_the_public_repository_with_the_installers_a
     assert "Intel" in by_file["AudioCleaner-$version-Mac-Intel.pkg"]
     assert "Pick the file that matches your computer" in notes and "About This Mac" in notes
     assert "downloads the models once" in notes and "updates itself" in notes
-    assert "mc-multi-world.space" not in notes  # not offered on the website
+    assert "audiocleaner.live" not in notes  # not offered on the website
     # and nothing about where the build runs: no private repository, commit or link
     assert "GITHUB_REPOSITORY" not in step and "GITHUB_SHA" not in step and "github.com" not in step
     # The public copy's leak scan (tools/public-desktop/sync.py) names the private repository; that name is not written

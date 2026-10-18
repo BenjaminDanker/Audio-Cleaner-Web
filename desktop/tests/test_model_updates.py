@@ -259,7 +259,7 @@ def test_the_release_addresses_are_defined_in_one_place():
         if path.name != "__init__.py" or path.parent.name != "audio_cleaner_desktop":
             assert __releases__ not in text and "releases/latest" not in text, path
         if path.name != "config.py":
-            assert "mc-multi-world" not in text, path
+            assert "audiocleaner.live" not in text, path
 
 
 def test_no_model_comes_from_the_releases_and_the_installers_download_exactly_the_catalog():
@@ -275,8 +275,8 @@ def test_no_model_comes_from_the_releases_and_the_installers_download_exactly_th
     mac = installer_models.render_mac()
     for text in (windows, mac):
         assert {u.rstrip(":.,") for u in re.findall(r"https://[^\s'\"]+", text)} == wanted  # (a log line ends one with ":")
-        assert "mc-multi-world" not in text and "api/downloads" not in text and ".zip" not in text and "tar.exe" not in text
-    assert "mc-multi-world" not in installer_models.render_mac_preinstall()
+        assert "audiocleaner.live" not in text and "api/downloads" not in text and ".zip" not in text and "tar.exe" not in text
+    assert "audiocleaner.live" not in installer_models.render_mac_preinstall()
 
 
 def _private_repository_pattern() -> str | None:

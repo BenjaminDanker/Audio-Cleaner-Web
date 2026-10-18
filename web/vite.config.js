@@ -39,7 +39,7 @@ function ortDir() {
 // The public address of the site (no trailing slash), for the absolute links in index.html (canonical, social previews).
 // Set VITE_SITE_ORIGIN when building for another domain.
 function siteOrigin(env) {
-  return (process.env.VITE_SITE_ORIGIN || env.VITE_SITE_ORIGIN || 'https://mc-multi-world.space').replace(/\/+$/, '');
+  return (process.env.VITE_SITE_ORIGIN || env.VITE_SITE_ORIGIN || 'https://audiocleaner.live').replace(/\/+$/, '');
 }
 
 // Fills %SITE_ORIGIN% in index.html and writes robots.txt next to the app (under the base path). Crawlers only read
@@ -58,11 +58,11 @@ function sitePlugin(origin, base) {
   };
 }
 
-// The app is served under VITE_BASE (default "/audio/", use "/" on a dedicated domain).
+// The app is served under VITE_BASE (default "/": its own domain; e.g. "/audio/" when it shares a host).
 // API calls go to `${BASE_URL}api/` on the same origin, so no CORS and cookie auth just works.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
-  let base = process.env.VITE_BASE || env.VITE_BASE || '/audio/';
+  let base = process.env.VITE_BASE || env.VITE_BASE || '/';
   if (!base.startsWith('/')) base = `/${base}`;
   if (!base.endsWith('/')) base = `${base}/`;
   const backend = process.env.ACW_DEV_BACKEND || 'http://127.0.0.1:8791';

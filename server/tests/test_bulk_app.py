@@ -160,15 +160,16 @@ def test_download_cap_slows_the_transfer(client, bulk, monkeypatch, virtual_time
     assert virtual_time.slept == pytest.approx((600_000 - 500_000) / 500_000)  # 0.2 s of waiting, in virtual time
 
 
-def test_the_cap_applies_under_the_base_path_to_job_results_and_release_downloads():
+@pytest.mark.parametrize("base", ["", "/audio"])  # its own domain (production) and a shared host
+def test_the_cap_applies_to_job_results_and_release_downloads(base):
     from acw.bulk_app import DownloadThrottleMiddleware
 
-    mw = DownloadThrottleMiddleware(None, base_path="/audio")
-    scope = {"type": "http", "method": "GET", "path": f"/audio/api/jobs/{JOB}/outputs/x.wav"}
+    mw = DownloadThrottleMiddleware(None, base_path=base)
+    scope = {"type": "http", "method": "GET", "path": f"{base}/api/jobs/{JOB}/outputs/x.wav"}
     assert mw.applies(scope)
-    assert mw.applies({**scope, "path": "/audio/api/downloads/obs-plugin/x.zip"})
-    assert mw.applies({**scope, "method": "HEAD", "path": "/audio/api/downloads/obs-plugin/x.zip"})
-    assert not mw.applies({**scope, "path": f"/audio/api/jobs/{JOB}/input"})
-    assert not mw.applies({**scope, "path": "/audio/api/health"})
+    assert mw.applies({**scope, "path": f"{base}/api/downloads/obs-plugin/x.zip"})
+    assert mw.applies({**scope, "method": "HEAD", "path": f"{base}/api/downloads/obs-plugin/x.zip"})
+    assert not mw.applies({**scope, "path": f"{base}/api/jobs/{JOB}/input"})
+    assert not mw.applies({**scope, "path": f"{base}/api/health"})
     assert not mw.applies({**scope, "method": "PUT"})
     assert not mw.applies({"type": "websocket", "path": scope["path"], "method": "GET"})

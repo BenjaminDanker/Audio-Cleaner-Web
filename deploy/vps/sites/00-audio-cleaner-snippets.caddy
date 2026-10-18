@@ -1,0 +1,148 @@
+# Audio Cleaner: the pieces its sites import (audiocleaner.live.caddy, and the old address in mc-multi-world.space.caddy).
+#
+# Upstreams (SSH reverse tunnels that primary-ram opens, docs/vps.md):
+#   127.0.0.1:18790  acw-web   the API (acw-tunnel)
+#   127.0.0.1:18795  acw-live  the live WebSocket, the only process that runs live (acw-tunnel-live)
+#   127.0.0.1:18794  acw-bulk  uploads, result downloads, the OBS plugin's downloads (acw-tunnel-bulk), so a big transfer
+#                    never queues in front of live audio; when it is down they fall back to 18790 (acw-web serves them too)
+#
+# Request bodies: only a file upload may be big. Everything else is small JSON, so it gets 64 KB (the app enforces the
+# same limit again and drops a body that stalls for 20 s: acw/bodylimit.py; the Caddyfile has no per-body read
+# timeout). The Stripe webhook gets 1 MB.
+
+(acw_upstream) {
+	header_up -X-Real-IP
+	flush_interval -1
+	transport http {
+		dial_timeout 5s
+		response_header_timeout 2m
+	}
+}
+
+(acw_bulk) {
+	reverse_proxy 127.0.0.1:18794 127.0.0.1:18790 {
+		lb_policy first
+		lb_try_duration 3s
+		lb_try_interval 250ms
+		fail_duration 30s
+		health_uri /api/health
+		health_interval 10s
+		health_timeout 3s
+		import acw_upstream
+	}
+}
+
+# /api/*: the API, routed to the process that serves it.
+(acw_api) {
+	handle /api/* {
+		@acw_upload path_regexp ^/api/jobs/[0-9a-f]{32}/input$
+		@acw_download path_regexp ^/api/(jobs/[0-9a-f]{32}/outputs/|downloads/)
+		@acw_webhook path /api/stripe/webhook
+		# The live WebSocket (audio frames; compression would only add delay) is never compressed.
+		@acw_ws path /api/stream/ws
+		handle @acw_upload {
+			request_body {
+				max_size 4GB
+			}
+			import acw_bulk
+		}
+		handle @acw_download {
+			request_body {
+				max_size 64KB
+			}
+			import acw_bulk
+		}
+		handle @acw_ws {
+			request_body {
+				max_size 64KB
+			}
+			reverse_proxy 127.0.0.1:18795 {
+				import acw_upstream
+			}
+		}
+		handle @acw_webhook {
+			request_body {
+				max_size 1MB
+			}
+			reverse_proxy 127.0.0.1:18790 {
+				import acw_upstream
+			}
+		}
+		handle {
+			# The JSON answers (the job list is the big one: ~45 kB for 50 jobs, ~6-8x smaller compressed). Only JSON
+			# is compressed; uploads, result downloads and the WebSocket are handled above and left alone.
+			encode {
+				zstd
+				gzip
+				match {
+					header Content-Type application/json*
+				}
+			}
+			request_body {
+				max_size 64KB
+			}
+			reverse_proxy 127.0.0.1:18790 {
+				import acw_upstream
+			}
+		}
+	}
+}
+
+# Everything else: the website from /var/www/audio (deploy/publish-web.sh puts it there).
+(acw_site) {
+	handle {
+		root * /var/www/audio
+		# Turnstile (human check on email sign-in) is NOT enabled. To enable it, set TURNSTILE_SITE_KEY and
+		# TURNSTILE_SECRET in acw.env and change these three directives in the Content-Security-Policy below:
+		#     script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com;
+		#     frame-src https://challenges.cloudflare.com;
+		#     connect-src (add) https://challenges.cloudflare.com;
+		# (frame-src is not in the policy yet: add it; without it default-src 'self' blocks the widget's frame.)
+		# connect-src: the free tools download their models from Hugging Face (web/src/media/models.js), which hands
+		# the files out from its storage hosts under hf.co.
+		header {
+			Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+			Strict-Transport-Security "max-age=31536000"
+			X-Content-Type-Options "nosniff"
+			X-Frame-Options "DENY"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			Cross-Origin-Opener-Policy "same-origin"
+			Permissions-Policy "camera=(), geolocation=(), payment=(), usb=(), microphone=(self)"
+			-Server
+		}
+		@acw_immutable path /assets/*
+		header @acw_immutable Cache-Control "public, max-age=31536000, immutable"
+		# The free in-browser tools' code (the noise remover's glue code, the speech runtime, the decoder): only for
+		# signed-in browsers (the home server checks the session and a daily cap per account). Their models come from
+		# Hugging Face.
+		@acw_dfn path /dfn/*
+		forward_auth @acw_dfn 127.0.0.1:18790 {
+			uri /api/auth/asset-check
+		}
+		header @acw_dfn Cache-Control "private, max-age=604800"
+		# Every app route serves index.html: never cache it, only hashed assets.
+		@acw_html not path /assets/* /dfn/*
+		header @acw_html Cache-Control "no-cache"
+		# App routes (/app, /login, ...) get index.html; a missing hashed script or a missing file under assets/ or
+		# dfn/ is a real 404, so a tab on an old page can tell it must reload.
+		@acw_spa not path /assets/* /dfn/*
+		try_files @acw_spa {path} /index.html
+		file_server {
+			precompressed zstd gzip
+		}
+	}
+}
+
+# Home server or tunnel down: API calls get a clear maintenance answer instead of a bare 502. The site itself is
+# served from this VPS, so it keeps loading and shows a maintenance notice.
+(acw_errors) {
+	handle_errors 502 503 504 {
+		@acw_api path /api/* /audio/api/*
+		handle @acw_api {
+			header Content-Type application/json
+			header Cache-Control no-store
+			header Retry-After 60
+			respond `{"detail":"maintenance","message":"Audio Cleaner is taking a short break. Please try again in a little while."}` 503
+		}
+	}
+}

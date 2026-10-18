@@ -95,7 +95,10 @@ async function detect(audio) {
 
 async function transcribe(audio, language) {
   const seconds = audio.length / 16000;
-  const r = await asr(audio, { return_timestamps: true, language: language || 'en', task: 'transcribe' });
+  // no_repeat_ngram_size 10: stops the decoder repeating itself in a loop (one looping window cost 5x the time and filled
+  // the subtitles with the same line), without touching phrases people really repeat: measured on FLEURS in 10
+  // languages, sung lyrics and repeated sentences (smaller values damaged those).
+  const r = await asr(audio, { return_timestamps: true, language: language || 'en', task: 'transcribe', no_repeat_ngram_size: 10 });
   const chunks = r.chunks?.length ? r.chunks : [{ timestamp: [0, seconds], text: r.text }];
   return chunks
     .map((c) => ({

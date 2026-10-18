@@ -15,8 +15,8 @@ admin('login-link', EMAIL); // creates the user (no credit: the checks that need
 
 /** fetch() with the CSRF token, run inside the page (same origin). */
 const apiCall = (page, method, path, body) => page.evaluate(async ({ method, path, body }) => {
-  const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
-  const res = await fetch(`/audio/api/${path}`, {
+  const me = await (await fetch('/api/me', { credentials: 'same-origin' })).json();
+  const res = await fetch(`/api/${path}`, {
     method, credentials: 'same-origin',
     headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -261,9 +261,9 @@ const waitDone = async (id) => {
   throw new Error('job timeout');
 };
 const jobOutputHash = (id) => page.evaluate(async (id) => {
-  const j = await (await fetch(`/audio/api/jobs/${id}`)).json();
+  const j = await (await fetch(`/api/jobs/${id}`)).json();
   const audio = j.outputs.find((o) => o.kind === 'audio');
-  const buf = await (await fetch(`/audio/api/jobs/${id}/outputs/${encodeURIComponent(audio.name)}`)).arrayBuffer();
+  const buf = await (await fetch(`/api/jobs/${id}/outputs/${encodeURIComponent(audio.name)}`)).arrayBuffer();
   const h = await crypto.subtle.digest('SHA-256', buf);
   return { name: audio.name, bytes: buf.byteLength, sha: [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('') };
 }, id);
@@ -273,9 +273,9 @@ const rawJob = async (file) => {
   const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options: { loudness_lufs: -16, atten_lim_db: 100, caption_formats: [] } });
   if (made.status !== 200) throw new Error('raw create: ' + JSON.stringify(made));
   const put = await page.evaluate(async ({ url, b64 }) => {
-    const me = await (await fetch('/audio/api/me')).json();
+    const me = await (await fetch('/api/me')).json();
     const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    return (await fetch(`/audio/${url}`, { method: 'PUT', headers: { 'X-CSRF-Token': me.csrfToken, 'Content-Type': 'application/octet-stream' }, body: bin })).status;
+    return (await fetch(`/${url}`, { method: 'PUT', headers: { 'X-CSRF-Token': me.csrfToken, 'Content-Type': 'application/octet-stream' }, body: bin })).status;
   }, { url: made.body.uploadUrl, b64: bytes.toString('base64') });
   if (put !== 200) throw new Error('raw upload ' + put);
   return made.body.id;

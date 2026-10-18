@@ -39,10 +39,11 @@ def test_oversized_bodies_are_refused_before_they_are_read_and_the_limit_follows
     assert client.post("/api/auth/email", content=streamed(), headers=json_h).status_code == 413
     assert client.post("/api/stripe/webhook", content=b"x" * 1_200_000).status_code == 413
     assert client.post("/api/stripe/webhook", content=b"x" * 2000).status_code != 413
-    mw = BodyLimitMiddleware(None, base_path="/audio")
-    assert mw.limit_for("/audio/api/auth/email") == 64 * 1024
-    assert mw.limit_for("/audio/api/stripe/webhook") == 1024 * 1024
-    assert mw.limit_for("/audio/api/jobs/" + "a" * 32 + "/input") is None  # uploads have their own rules
+    for base in ("", "/audio"):  # its own domain (production) and a shared host
+        mw = BodyLimitMiddleware(None, base_path=base)
+        assert mw.limit_for(f"{base}/api/auth/email") == 64 * 1024
+        assert mw.limit_for(f"{base}/api/stripe/webhook") == 1024 * 1024
+        assert mw.limit_for(f"{base}/api/jobs/" + "a" * 32 + "/input") is None  # uploads have their own rules
 
 
 def test_the_access_log_never_has_a_query_string(client, caplog):

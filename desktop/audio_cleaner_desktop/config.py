@@ -6,7 +6,7 @@ BUNDLE_ID = "local.audio-cleaner.desktop"
 
 from . import __releases__
 
-SITE_URL = "https://mc-multi-world.space/audio/"
+SITE_URL = "https://audiocleaner.live/"
 CONTACT_URL = SITE_URL + "contact"  # where the source-code offers in the notices point
 
 # The installers and the signed update.json come from the app's GitHub releases (one release per version, tag

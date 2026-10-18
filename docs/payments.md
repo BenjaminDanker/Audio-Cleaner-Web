@@ -115,7 +115,8 @@ empty `ACW_BLOCKED_CARD_COUNTRIES` and remove the Radar rule.
 
 ## Webhooks to configure (Stripe dashboard → Developers → Webhooks)
 
-Endpoint `https://mc-multi-world.space/audio/api/stripe/webhook`, events:
+Endpoint `https://audiocleaner.live/api/stripe/webhook` (the address the site moved to on 2026-10-18; the older
+`https://mc-multi-world.space/audio/api/stripe/webhook` is still proxied to the same handler), events:
 `checkout.session.completed`, `checkout.session.async_payment_succeeded`,
 `payment_intent.amount_capturable_updated`, `payment_intent.succeeded`, `payment_intent.payment_failed`, `charge.refunded`,
 `charge.dispute.created`, `radar.early_fraud_warning.created`,
@@ -127,7 +128,9 @@ kept on refunds); everything else None (add Tax Calculations, Transactions:
 Write only if Stripe Tax is switched on).
 
 Live setup done 2026-10-15: webhook `we_1UQfwPRxGAWCymT90oQHeB12` (9 events),
-portal configuration `bpc_1UQfwbRxGAWCymT93anjWxhJ` (the account default).
+portal configuration `bpc_1UQfwbRxGAWCymT93anjWxhJ` (the account default). That live webhook was created with the old
+address: add an endpoint at the new one (same events), copy its signing secret into `acw.env`, and delete the old
+endpoint once no events arrive there (docs/operations.md, "Domain").
 
 ### With the Stripe CLI (test mode; add `--live` for live mode)
 
@@ -135,14 +138,14 @@ Webhook (the response shows `secret` once: that is `STRIPE_WEBHOOK_SECRET`;
 `api_version` matches the stripe-python version in requirements.lock):
 
 ```
-stripe post /v1/webhook_endpoints -d url=https://mc-multi-world.space/audio/api/stripe/webhook -d api_version=2026-09-30.endive -d "description=Audio Cleaner" -d "enabled_events[]=checkout.session.completed" -d "enabled_events[]=checkout.session.async_payment_succeeded" -d "enabled_events[]=payment_intent.amount_capturable_updated" -d "enabled_events[]=payment_intent.succeeded" -d "enabled_events[]=payment_intent.payment_failed" -d "enabled_events[]=charge.refunded" -d "enabled_events[]=charge.dispute.created" -d "enabled_events[]=radar.early_fraud_warning.created" -d "enabled_events[]=payment_method.detached"
+stripe post /v1/webhook_endpoints -d url=https://audiocleaner.live/api/stripe/webhook -d api_version=2026-09-30.endive -d "description=Audio Cleaner" -d "enabled_events[]=checkout.session.completed" -d "enabled_events[]=checkout.session.async_payment_succeeded" -d "enabled_events[]=payment_intent.amount_capturable_updated" -d "enabled_events[]=payment_intent.succeeded" -d "enabled_events[]=payment_intent.payment_failed" -d "enabled_events[]=charge.refunded" -d "enabled_events[]=charge.dispute.created" -d "enabled_events[]=radar.early_fraud_warning.created" -d "enabled_events[]=payment_method.detached"
 ```
 
 Customer portal (only "update the saved card"; its `id` is `STRIPE_PORTAL_CONFIGURATION`,
 otherwise the portal settings must be saved once in the dashboard):
 
 ```
-stripe post /v1/billing_portal/configurations -d "features[payment_method_update][enabled]=true" -d "business_profile[terms_of_service_url]=https://mc-multi-world.space/audio/terms" -d "business_profile[privacy_policy_url]=https://mc-multi-world.space/audio/privacy"
+stripe post /v1/billing_portal/configurations -d "features[payment_method_update][enabled]=true" -d "business_profile[terms_of_service_url]=https://audiocleaner.live/terms" -d "business_profile[privacy_policy_url]=https://audiocleaner.live/privacy"
 ```
 
 Not available through the API (dashboard only): restricted API keys, the

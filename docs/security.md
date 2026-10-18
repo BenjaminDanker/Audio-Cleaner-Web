@@ -8,9 +8,9 @@ or secrets.
 
 | Surface | Reachable from | Notes |
 |---|---|---|
-| `/audio/*` static | internet (VPS Caddy) | no server logic |
-| `/audio/api/*`, WebSocket | internet → VPS → SSH tunnel → 127.0.0.1:8790 | the only path into primary-ram |
-| uploads, result downloads and release downloads (`/audio/api/downloads/`: the OBS plugin) | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same routes the main process also serves; nothing else is routed there. The release files are mirrored to primary-ram by `acw-mirror` (signature and checksums checked first); nothing is stored on the VPS |
+| `audiocleaner.live` static (`/`, `/app`, `/assets/`) | internet (VPS Caddy) | no server logic |
+| `/api/*`, WebSocket | internet → VPS → SSH tunnel → 127.0.0.1:8790 | the only path into primary-ram |
+| uploads, result downloads and release downloads (`/api/downloads/`: the OBS plugin) | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same routes the main process also serves; nothing else is routed there. The release files are mirrored to primary-ram by `acw-mirror` (signature and checksums checked first); nothing is stored on the VPS |
 | primary-ram LAN ports | unchanged | the app binds loopback only |
 | VPS → primary-ram | `127.0.0.1:18790` and `127.0.0.1:18794` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false"` (the second `permitlisten` is added when the bulk tunnel is switched on, docs/operations.md; verified before for one port: no shell, no other ports, no local forwards) |
 
@@ -56,7 +56,8 @@ also removes the shared-UID risk with the Minecraft servers.
 ## Web application
 
 - Sessions: 256-bit random tokens, stored as SHA-256; cookie HttpOnly,
-  SameSite=Lax, `Secure` + `__Secure-` prefix in production, path `/audio/`.
+  SameSite=Lax, `Secure`, name `__Host-acw_session` (path `/`, no Domain; the browser enforces that) on the own domain,
+  `__Secure-acw_session` with path `<base>/` if the app is ever served under a base path again.
 - CSRF: per-session token header on every non-GET + Origin check; login and
   magic-link endpoints require same Origin (prevents login CSRF).
 - OAuth: PKCE + state stored server-side and bound to the browser by a
@@ -77,7 +78,7 @@ also removes the shared-UID risk with the Minecraft servers.
   Each limit name has its own table, so a flood of made-up keys of one kind cannot push out the others.
 - Request bodies: 64 KB for everything but the upload route (1 MB for the Stripe webhook), counted while the
   body arrives, with a 20 s stall limit (`acw/bodylimit.py`); Caddy caps the sizes in front
-  (`deploy/vps/audio.caddy`; its Caddyfile syntax has no per-body read timeout, so the stall limit is the app's). The access log omits query strings (sign-in codes, payment ids).
+  (`deploy/vps/sites/00-audio-cleaner-snippets.caddy`; its Caddyfile syntax has no per-body read timeout, so the stall limit is the app's). The access log omits query strings (sign-in codes, payment ids).
 - Upload: declared size enforced, streamed to disk, extension allowlist,
   filenames never used as paths (`input.<ext>`), outputs sanitized. An upload that sends nothing for 30 s is
   dropped; upload bandwidth is capped per account and overall; the declared bytes of uploads in progress are
@@ -194,13 +195,13 @@ network, so it is built to reach nothing but the public internet:
   `deploy/fetch-models.sh`). `libdf.so` is built locally and only recorded.
 
 - Same Unix user as the Minecraft servers (see recommended hardening above).
-- Shared origin `mc-multi-world.space` with the pet-companion checkout pages:
-  path-scoped cookies are not a security boundary against script on the same
-  origin. Move to a dedicated subdomain/domain before launch: only `ACW_PUBLIC_ORIGIN`,
-  `ACW_BASE_PATH` (empty) and the Caddy block change, and the session cookie then becomes `__Host-acw_session`
-  by itself (steps in docs/operations.md, "Moving to a domain of its own").
-- The pet-companion tunnel key on the VPS (`permitlisten="127.0.0.1:18788"`) lacks
-  `command="/bin/false"`, so it can open a shell on the VPS. Worth adding.
+- Resolved 2026-10-18: Audio Cleaner shared the origin `mc-multi-world.space` with the pet-companion checkout pages
+  (path-scoped cookies are not a security boundary against script on the same origin). It now has its own domain,
+  `audiocleaner.live`, and the `__Host-` cookie. While the old address lasts, `mc-multi-world.space/audio/api/*` is
+  proxied to the same API for old clients and the webhook, but no page is served there (pages redirect); the old
+  address goes away once the old clients have moved (docs/operations.md, "Domain").
+- The pet-companion tunnel key on the VPS is restricted like ours (`permitlisten="127.0.0.1:18788"`,
+  `command="/bin/false"`: no shell; docs/vps.md).
 - No malware/CSAM scanning of uploads (audio-only product, files deleted quickly);
   revisit if video volume grows.
 - Backups: a nightly snapshot goes to `/mnt/mc-storage/audio-cleaner-backups`
@@ -215,5 +216,5 @@ network, so it is built to reach nothing but the public internet:
   then the main process serves the same routes as before. Still open from SEC-08: SQM on the home router, a smaller
   per-file cap for free jobs.
 - Logs: the user journal keeps client addresses until it rotates; set `MaxRetentionSec` once (docs/operations.md, "Log retention").
-- The `/audio/dfn/*` forward-auth gate relies on Caddy's path normalisation; test `//`, `%2e`, upper-case once on the VPS
-  with the installed Caddy version (`curl -i https://mc-multi-world.space/audio//dfn/df.js` must not return the file without a session).
+- The `/dfn/*` forward-auth gate relies on Caddy's path normalisation; test `//`, `%2e`, upper-case once on the VPS
+  with the installed Caddy version (`curl -i https://audiocleaner.live//dfn/df.js` must not return the file without a session).

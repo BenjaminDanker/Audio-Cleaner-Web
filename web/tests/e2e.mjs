@@ -45,10 +45,10 @@ if (want('auth')) {
     const p1 = await ctx.newPage();
     try {
       await p1.goto(`${BASE}/app/billing`);
-      await p1.waitForURL(/\/audio\/login$/);
+      await p1.waitForURL(/\/login$/);
       const link = loginLink(mail);
       await p1.goto(link);
-      await p1.waitForURL((u) => u.pathname.startsWith('/audio/') && !u.pathname.startsWith('/audio/login'), { timeout: 15000 });
+      await p1.waitForURL((u) => !u.pathname.startsWith('/login'), { timeout: 15000 });
       if (p1.url().includes('token')) throw new Error('token still in URL');
       await p1.waitForSelector('[data-testid=available]');
       // a reused link is refused
@@ -328,8 +328,8 @@ if (want('account')) {
       if (!(await btn.isDisabled())) throw new Error('enabled with wrong email');
       // hold a paid job so the deletion is refused
       const made = await p2.evaluate(async () => {
-        const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
-        const res = await fetch('/audio/api/jobs', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken }, body: JSON.stringify({ kind: 'transcribe', transcribeTier: 'local', filename: 'hold.wav', sizeBytes: 1000, durationSeconds: 5, options: { audio_format: 'wav', caption_formats: ['txt'] } }) });
+        const me = await (await fetch('/api/me', { credentials: 'same-origin' })).json();
+        const res = await fetch('/api/jobs', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken }, body: JSON.stringify({ kind: 'transcribe', transcribeTier: 'local', filename: 'hold.wav', sizeBytes: 1000, durationSeconds: 5, options: { audio_format: 'wav', caption_formats: ['txt'] } }) });
         return { status: res.status, body: await res.json() };
       });
       if (made.status !== 200) throw new Error('could not create a held job: ' + JSON.stringify(made));
@@ -339,11 +339,11 @@ if (want('account')) {
       await alert.waitFor({ timeout: 10000 });
       if (!(await alert.innerText()).includes('Wait for your running jobs to finish first.')) throw new Error(await alert.innerText());
       await p2.evaluate(async (id) => {
-        const me = await (await fetch('/audio/api/me', { credentials: 'same-origin' })).json();
-        await fetch(`/audio/api/jobs/${id}/cancel`, { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': me.csrfToken } });
+        const me = await (await fetch('/api/me', { credentials: 'same-origin' })).json();
+        await fetch(`/api/jobs/${id}/cancel`, { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': me.csrfToken } });
       }, made.body.id);
       await btn.click();
-      await p2.waitForURL(/\/audio\/?$/, { timeout: 15000 });
+      await p2.waitForURL(/\/$/, { timeout: 15000 });
       await p2.getByTestId('account-deleted').waitFor({ timeout: 10000 });
       await p2.getByText('Your account has been deleted.').waitFor();
       await p2.goto(`${BASE}/app`);

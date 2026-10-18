@@ -18,7 +18,7 @@
 namespace acw {
 
 // The only address the plugin fetches updates from (a folder: it ends with a slash).
-constexpr const char *kUpdateBaseUrl = "https://mc-multi-world.space/audio/api/downloads/obs-plugin/";
+constexpr const char *kUpdateBaseUrl = "https://audiocleaner.live/api/downloads/obs-plugin/";
 
 // MAJOR.MINOR.PATCH (a build is MAJOR.MINOR.<CI run number>). Up to four numeric parts are understood; a
 // missing part counts as 0.

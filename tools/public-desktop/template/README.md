@@ -141,4 +141,4 @@ Audio Cleaner is open source under the [MIT License](LICENSE).
 ## Questions and problems
 
 Found a bug, or something doesn't build? [Open an issue](https://github.com/BenjaminDanker/Audio-Cleaner/issues).
-For anything else, there is a contact form at https://mc-multi-world.space/audio/contact.
+For anything else, there is a contact form at https://audiocleaner.live/contact.

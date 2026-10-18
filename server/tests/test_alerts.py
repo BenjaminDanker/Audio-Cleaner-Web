@@ -228,8 +228,8 @@ def test_service_and_restart_checks():
 
 
 def test_health_check_says_which_path_failed(monkeypatch):
-    monkeypatch.setenv("ACW_PUBLIC_ORIGIN", "https://example.org")
-    monkeypatch.setenv("ACW_BASE_PATH", "/audio")
+    monkeypatch.setenv("ACW_PUBLIC_ORIGIN", "https://audiocleaner.live")
+    monkeypatch.setenv("ACW_BASE_PATH", "")
     get_settings.cache_clear()
     calls = []
 
@@ -239,7 +239,7 @@ def test_health_check_says_which_path_failed(monkeypatch):
 
     f = {x.kind: x for x in monitor.check_health(fake)}
     assert not f["health_local"].bad and f["health_public"].bad
-    assert calls == ["http://127.0.0.1:8790/audio/api/health", "https://example.org/audio/api/health"]
+    assert calls == ["http://127.0.0.1:8790/api/health", "https://audiocleaner.live/api/health"]
     f = {x.kind: x for x in monitor.check_health(lambda u: (False, "refused"))}
     assert f["health_local"].bad and "health_public" not in f  # public is only judged when local works
 

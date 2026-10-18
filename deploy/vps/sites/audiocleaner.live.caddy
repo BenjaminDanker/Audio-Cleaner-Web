@@ -1,0 +1,10 @@
+# Audio Cleaner: https://audiocleaner.live (the pieces are in 00-audio-cleaner-snippets.caddy).
+audiocleaner.live {
+	import acw_api
+	import acw_site
+	import acw_errors
+}
+
+www.audiocleaner.live {
+	redir https://audiocleaner.live{uri} 308
+}

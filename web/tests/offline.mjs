@@ -1,7 +1,7 @@
 // The backend is down: the "taking a short break" banner, the calm panel instead of the paid tools, and both going away by
 // themselves once /api/health answers again (the page's own 30 s re-check, run on a fake clock so nothing waits).
-// Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist under /audio/ and forwards
-// /audio/api/* to a backend port it can switch at runtime: a dead port (what the proxy turns into HTTP 502), the front door's
+// Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist at the root and forwards
+// /api/* to a backend port it can switch at runtime: a dead port (what the proxy turns into HTTP 502), the front door's
 // maintenance answer, or the real test backend on 8792 for the recovery. Usage: node tests/offline.mjs
 import { createServer, request as httpRequest } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
@@ -9,11 +9,11 @@ import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SHOTS, check, launch, summary } from './helpers.mjs';
 
-const DIST = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
+const DIST = process.env.DIST || resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const PORT = Number(process.env.OFFLINE_PORT || 8797);
 const REAL_BACKEND = Number(process.env.E2E_BACKEND_PORT || 8792);
 const DEAD_PORT = 9; // nothing listens here
-const OFF = `http://127.0.0.1:${PORT}/audio`;
+const OFF = `http://127.0.0.1:${PORT}`;
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.webmanifest': 'application/manifest+json', '.txt': 'text/plain' };
 
 let mode = 'dead-502'; // dead-502 | maint | real
@@ -21,7 +21,7 @@ const apiHits = [];
 
 const server = createServer((req, res) => {
   const url = new URL(req.url, OFF);
-  if (url.pathname.startsWith('/audio/api/')) {
+  if (url.pathname.startsWith('/api/')) {
     apiHits.push(`${mode} ${req.method} ${url.pathname}`);
     if (mode === 'maint') { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify({ detail: 'maintenance', message: 'Audio Cleaner is taking a short break.' })); return; }
     const port = mode === 'real' ? REAL_BACKEND : DEAD_PORT;
@@ -30,7 +30,7 @@ const server = createServer((req, res) => {
     req.pipe(up);
     return;
   }
-  const rel = normalize(decodeURIComponent(url.pathname.replace(/^\/audio\/?/, ''))).replace(/^(\.\.[/\\])+/, '');
+  const rel = normalize(decodeURIComponent(url.pathname.replace(/^\//, ''))).replace(/^(\.\.[/\\])+/, '');
   let file = join(DIST, rel);
   if (!rel || !existsSync(file) || !statSync(file).isFile()) file = join(DIST, 'index.html');
   res.writeHead(200, { 'content-type': TYPES[extname(file)] || 'application/octet-stream' });
@@ -92,7 +92,7 @@ await check('recovery: the banner and the panel go away by themselves once /api/
     mode = 'real';
     await page.clock.runFor(31000); // the next /api/health check
     await page.getByTestId('api-offline').waitFor({ state: 'detached', timeout: 15000 });
-    if (!apiHits.some((h) => h.startsWith('real') && h.endsWith('/audio/api/health'))) throw new Error('recovery did not use /api/health: ' + apiHits.slice(-4).join(' ; '));
+    if (!apiHits.some((h) => h.startsWith('real') && h.endsWith('/api/health'))) throw new Error('recovery did not use /api/health: ' + apiHits.slice(-4).join(' ; '));
     return 'recovered through /api/health';
   } finally {
     await ctx.close();
