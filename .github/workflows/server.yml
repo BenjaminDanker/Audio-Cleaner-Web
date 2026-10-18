@@ -89,9 +89,10 @@ jobs:
         working-directory: web
         run: |
           npm ci --no-audit --no-fund
-          # The noise remover's WebAssembly build and model come from the production host; stand-ins let the build run.
+          # The noise remover's glue code comes from the production host's build (its WebAssembly and model from Hugging
+          # Face); stand-ins let the build run.
           mkdir -p public/dfn
-          for f in df.js df_bg.wasm LICENSE-MIT LICENSE-APACHE DeepFilterNet3_onnx.tar.gz; do echo stand-in > "public/dfn/$f"; done
+          for f in df.js LICENSE-MIT LICENSE-APACHE; do echo stand-in > "public/dfn/$f"; done
           npm run build
 
   shell:

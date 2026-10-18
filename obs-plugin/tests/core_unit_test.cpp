@@ -336,14 +336,16 @@ static void test_caption_lines()
 	// Pacer: rapid pushes with a tiny queue drop the backlog; the newest line survives.
 	std::mutex m;
 	std::vector<std::string> sent;
+	bool bad_durations = false;
 	CaptionPacer::Options o;
 	o.max_queue_lines = 2;
 	o.min_gap_seconds = 0.05;
 	o.chars_per_second = 1000;
 	CaptionPacer p(
 		[&](const std::string &line, double dur) {
-			CHECK(dur >= 1.5 && dur <= 4.0);
-			std::lock_guard<std::mutex> lk(m);
+			std::lock_guard<std::mutex> lk(m);  // runs on the pacer's thread: record, check on this one
+			if (!(dur >= 1.5 && dur <= 4.0))
+				bad_durations = true;
 			sent.push_back(line);
 		},
 		o);
@@ -358,6 +360,7 @@ static void test_caption_lines()
 	{
 		std::lock_guard<std::mutex> lk(m);
 		CHECK(sent.size() <= 4);
+		CHECK(!bad_durations);
 	}
 	CHECK(p.dropped_lines() >= 2);
 	p.set_enabled(false);

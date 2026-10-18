@@ -1764,6 +1764,7 @@ public:
 	}
 	std::atomic<bool> noise{true}, muted{false};
 	std::atomic<float> level{0.0f};  // fed when `noise` is off
+	std::atomic<size_t> fed{0};      // samples handed over so far (index into cap, once stopped), for windows by delivery
 	Capture cap;                     // read after stop()
 
 private:
@@ -1787,6 +1788,7 @@ private:
 				cap.in.insert(cap.in.end(), blk.begin(), blk.end());
 				cap.out.insert(cap.out.end(), proc.begin(), proc.end());
 			}
+			fed += blk.size();
 			t += period;
 			std::this_thread::sleep_until(t);
 		}
@@ -1957,13 +1959,18 @@ static void test_silence_frames()
 		Source src(s, 480, true);
 		CHECK(wait_until([&] { return s.snapshot().used > 60; }, 10000));
 		const SessionSnapshot a = s.snapshot();
-		std::this_thread::sleep_for(milliseconds(300));  // a little more, for the last half second looked at below
+		// Looked at: what was delivered from here on (minus a little, for the cross-fade and the block in flight).
+		// Which samples that is comes from what the host actually handed over, not from the clock: a runner that wakes
+		// its timers late delivers fewer blocks in the same time, and the replies missed are counted over the same blocks.
+		const size_t from = src.fed.load() + 4800;
+		std::this_thread::sleep_for(milliseconds(700));
 		src.stop();
 		const SessionSnapshot b = s.snapshot();
 		const Capture &c = src.cap;
+		CHECK(c.out.size() > from + 4800);  // enough was delivered to look at
 		double peak = 0;
 		size_t loud = 0;
-		for (size_t i = c.out.size() - 24000; i < c.out.size(); ++i) {  // the last half second
+		for (size_t i = std::min(from, c.out.size()); i < c.out.size(); ++i) {
 			peak = std::max<double>(peak, std::fabs(c.out[i]));
 			loud += c.out[i] != 0.0f;
 		}

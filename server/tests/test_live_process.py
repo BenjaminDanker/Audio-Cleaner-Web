@@ -63,7 +63,10 @@ def test_the_live_route_tunnel_units_and_install_all_point_at_the_live_process()
     old = (sites / "mc-multi-world.space.caddy").read_text()
     api = old.split("handle /audio/api/* {")[1].split("\n\t}")[0]
     assert api.index("uri strip_prefix /audio") < api.index("import acw_api")
-    page = old.split("handle /audio* {")[1].split("\n\t}")[0]
-    assert "uri strip_prefix /audio" in page and "redir https://audiocleaner.live{uri} 308" in page
+    # handle_path strips /audio before the redirect (a plain `uri strip_prefix` would run after `redir`, which Caddy
+    # orders first); bare /audio goes to the new domain's root.
+    page = old.split("handle_path /audio/* {")[1].split("\n\t}")[0]
+    assert "redir https://audiocleaner.live{uri} 308" in page and "strip_prefix" not in page
+    assert "redir /audio https://audiocleaner.live/ 308" in old
     units = re.search(r'^UNITS="([^"]*)"', (deploy / "install.sh").read_text(), re.M).group(1)
     assert "acw-tunnel-live.service" in units.split()

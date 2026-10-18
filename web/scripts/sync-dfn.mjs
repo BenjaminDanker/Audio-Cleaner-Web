@@ -81,7 +81,6 @@ function syncOrt() {
 
 const libavPresent = () => existsSync(libavOut) && readdirSync(libavOut).length === 1;
 const complete = () => files.every(([, name]) => existsSync(join(out, name))) && (libavPresent() || !existsSync(libavDist));
-checkWasmPin();
 if (process.argv.includes('--if-missing') && complete()) {
   removeOld();
   syncOrt();
@@ -89,6 +88,7 @@ if (process.argv.includes('--if-missing') && complete()) {
   process.exit(0);
 }
 
+checkWasmPin(); // df.js is copied below: it must belong to the pinned WebAssembly build
 mkdirSync(out, { recursive: true });
 let total = 0;
 for (const [src, name] of files) {

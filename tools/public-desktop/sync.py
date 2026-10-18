@@ -68,7 +68,7 @@ ABSENT = [".github/workflows/desktop.yml"]
 # The sync is refused when one of these is missing from the export.
 REQUIRED = [
     "desktop/pyproject.toml", "desktop/requirements.lock", "desktop/packaging/audio_cleaner.spec",
-    "desktop/packaging/EULA.txt", "desktop/packaging/licenses/LGPL-3.0.txt", "desktop/packaging/fetch_dpdfnet.py",
+    "desktop/packaging/EULA.txt", "desktop/packaging/licenses/LGPL-3.0.txt", "desktop/packaging/check_model_urls.py",
     "common/pyproject.toml", "common/acw_common/pipeline.py", "native/deepfilter/build.sh", "native/deepfilter/Cargo.lock",
     "native/deepfilter/tract-0.23.patch", *PLACEMENT.values(),
 ]

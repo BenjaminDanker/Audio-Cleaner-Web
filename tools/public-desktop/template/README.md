@@ -29,7 +29,7 @@ Get the installer from the [latest release](https://github.com/BenjaminDanker/Au
 Not sure which Mac you have? Apple menu > About This Mac: "Chip" means Apple silicon, "Processor" means Intel. macOS 14
 or newer is needed.
 
-Setup downloads the larger models once (about 2.5 GB). The app looks for a newer version when it starts and updates
+Setup downloads the models once (about 2.6 GB), from Hugging Face. The app looks for a newer version when it starts and updates
 itself; you can switch that off in Settings.
 
 ## Build it yourself
@@ -106,7 +106,7 @@ The same environment runs the tests and the command line:
 QT_QPA_PLATFORM=offscreen python -m pytest -q common/tests desktop/tests
 python -m audio_cleaner_desktop --cli talk.mp4 -o cleaned/              # no window; --help lists every option
 python -m audio_cleaner_desktop --cli talk.mp4 --output-name talk.mp3    # just the sound
-python -m audio_cleaner_desktop --download-models                       # the subtitle and restoration models
+python -m audio_cleaner_desktop --download-models                       # the noise, subtitle and restoration models
 python -m audio_cleaner_desktop --selftest                              # checks the native pieces
 ```
 
@@ -116,11 +116,11 @@ Each of these starts with a comment that says how to run it on its own:
 
 1. `native/deepfilter/build.sh native`: the DeepFilterNet library (libDF), from a pinned commit with one patch
 2. `desktop/packaging/build_ffmpeg.sh`: FFmpeg with only LGPL parts, linked statically, from pinned source tarballs
-3. `desktop/packaging/fetch_dpdfnet.py`: the stronger noise remover's model, checked against its SHA-256
-4. `desktop/packaging/prepare_vendor.py`: puts the native pieces and models in one folder, checks every file against
-   its pinned SHA-256 and writes the licence notices
-5. `desktop/packaging/audio_cleaner.spec`: packages the app with PyInstaller (then `--selftest --gui` on the result)
-6. `desktop/packaging/windows/AudioCleaner.iss` (Inno Setup) or `desktop/packaging/macos/make_pkg.sh`: the installer
+3. `desktop/packaging/prepare_vendor.py`: puts the native pieces in one folder, checks every file against its pinned
+   SHA-256 and writes the licence notices (the models are not in the app: setup and the app download them from
+   Hugging Face, every file pinned and checked; `desktop/packaging/check_model_urls.py` checks they are all there)
+4. `desktop/packaging/audio_cleaner.spec`: packages the app with PyInstaller (then `--selftest --gui` on the result)
+5. `desktop/packaging/windows/AudioCleaner.iss` (Inno Setup) or `desktop/packaging/macos/make_pkg.sh`: the installer
 
 ## What is in here
 
