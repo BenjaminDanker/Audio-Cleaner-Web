@@ -280,3 +280,9 @@ export function toText(segments) {
   if (cur.length) paras.push(cur.join(' '));
   return `${paras.join('\n\n')}\n`;
 }
+
+/** The subtitle files of a finished in-browser transcription: { srt, vtt, txt, cues, segments, language, empty }. */
+export function subtitleFiles(result) {
+  const cues = buildCues(result.segments);
+  return { srt: toSrt(cues), vtt: toVtt(cues), txt: toText(result.segments), cues, segments: result.segments, language: result.language, empty: cues.length === 0 };
+}

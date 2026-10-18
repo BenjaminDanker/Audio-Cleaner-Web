@@ -109,7 +109,7 @@ export default function AbPlayer({ original, cleanedUrl, isVideo }) {
         data-testid="ab-original"
       />
       <audio ref={slave} src={cleanedUrl} preload="auto" data-testid="ab-cleaned" />
-      {!origOk && <p className="banner banner-info small mb0">Your browser cannot play the original file, so only the cleaned audio is available here. Download it below.</p>}
+      {!origOk && <p className="banner banner-info small mb0">Your browser cannot play the original file, so only the cleaned audio is available here.</p>}
       <div className="ab-modes" role="radiogroup" aria-label="What you hear">
         <div className="seg">
           <label>

@@ -5,7 +5,7 @@
 // audio frame is read. The paid checks run against the local backend (port 8792); the full-service and captions checks use a mocked socket.
 // Usage: node tests/live.mjs
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, launch, signIn, summary } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 const wav = join(FILES, 'noisy.wav');
@@ -36,6 +36,7 @@ const paidTest = async (pg = page) => {
 };
 
 await signIn(page, EMAIL);
+admin('grant', EMAIL, '5', 'live test'); // the paid checks need credit; a fresh backend starts with none
 
 await check('live, free test: it runs in the browser with no credit and no connection to us; the speech is cleaned and captioned', async () => {
   const f = await launch(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${join(FILES, 'speech.wav')}`]);
@@ -96,7 +97,9 @@ await check('live, paid test: the price is the server\'s for the chosen captions
   const r1 = Number(await stats.getAttribute('data-recv'));
   await page.waitForTimeout(1500);
   if (Number(await stats.getAttribute('data-recv')) <= r1) throw new Error('the audio stopped after the change');
-  await page.getByRole('checkbox', { name: /Remove noise/ }).uncheck(); // no captions and no noise removal would leave nothing to do
+  // click, not uncheck(): the page unticks the box, the server refuses (no captions and no noise removal would leave nothing to do)
+  // and the page puts the tick back; locator.uncheck() fails when that happens before it re-reads the state.
+  await page.getByRole('checkbox', { name: /Remove noise/ }).click();
   await page.getByTestId('live-error').waitFor({ timeout: 10000 });
   if (!(await page.getByRole('checkbox', { name: /Remove noise/ }).isChecked())) throw new Error('noise removal was not put back');
   const why = await page.getByTestId('live-error').innerText();

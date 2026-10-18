@@ -322,8 +322,6 @@ dialog.modal h2 { margin-top: 0; }
 .ab .transport { display: flex; align-items: center; gap: 12px; }
 .ab input[type="range"] { flex: 1; accent-color: var(--brand); min-width: 0; }
 .time { font-variant-numeric: tabular-nums; font-size: 0.9rem; color: var(--muted); min-width: 5.5em; text-align: right; }
-.stat-row { display: flex; flex-wrap: wrap; gap: 8px 24px; font-size: 0.92rem; color: var(--muted); }
-.stat-row b { color: var(--text); font-variant-numeric: tabular-nums; }
 .big-number { font-size: 2.1rem; font-weight: 750; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1.1; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 0.94rem; margin: 0; }
 .kv dt { color: var(--muted); }
@@ -422,8 +420,15 @@ textarea.input { min-height: 140px; resize: vertical; line-height: 1.45; }
 .namefmt .input:focus, .namefmt .select:focus { position: relative; z-index: 1; }
 .namefmt:has(.input[aria-invalid="true"]) .select { border-color: var(--danger); }
 .hint.hint-bad { color: var(--danger); font-weight: 600; }
-.save-as { padding-top: 14px; border-top: 1px solid var(--border); }
-.save-as h3 { font-size: 1rem; }
+
+/* A finished result (Result.jsx), at the bottom of its card: the files, Download again, and what can still change */
+.result { padding-top: 14px; border-top: 1px solid var(--border); }
+.more { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.more > summary { cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px; padding: 10px 14px; font-weight: 650; }
+.more > summary::-webkit-details-marker { display: none; }
+.more > summary::before { content: "›"; font-size: 1.4rem; line-height: 1; color: var(--muted); transition: transform 0.15s ease; width: 1ch; }
+.more[open] > summary::before { transform: rotate(90deg); }
+.more > :not(summary) { margin: 0 16px 16px; }
 
 /* OBS plugin downloads (Live page): one row per kind of computer; its steps open under it */
 .install-list { display: flex; flex-direction: column; gap: 10px; }

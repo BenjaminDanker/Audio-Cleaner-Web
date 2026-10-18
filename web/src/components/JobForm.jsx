@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import { Link } from 'react-router';
 import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
-import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, rate, shownName } from '../format.js';
+import { addLocalCard, beginFinish, finishSeconds, getFinish } from '../finish.js';
+import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, rate, shownName, stem } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
 import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
 import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from '../media/convert.js';
@@ -10,10 +11,9 @@ import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../me
 import { analyseFile } from '../media/analyse.js';
 import { probeMedia } from '../media/mb.js';
 import { denoiseFile } from '../media/pipeline.js';
-import { preloadSpeech, speechLoadState, subscribeSpeechLoad, transcribeFile } from '../media/speech.js';
+import { preloadSpeech, speechLoadState, subscribeSpeechLoad, subtitleFiles, transcribeFile } from '../media/speech.js';
 import { buildWav, wavFits } from '../media/wav.js';
-import { BrowserResult, ProgressPanel } from './BrowserClean.jsx';
-import SubtitlesResult, { SubtitlesProgress, subtitleFiles } from './SubtitlesResult.jsx';
+import { FinishProgress, ProgressPanel, SubtitlesProgress } from './Progress.jsx';
 import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
@@ -121,7 +121,7 @@ function Toggle({ name, checked, onChange, disabled, title, hint, hintId, muted 
  *   Noise removal:  Off | Free, in your browser (nothing uploaded) | Denoising (paid, on our side)
  *   Subtitles:      Off | Free, in your browser (nothing uploaded) | Standard (paid) | Extra accurate (paid)
  * Any combination works: the browser part runs here, in parallel with the job (if any) for the rest.
- * onSubmitted({id, ...}, {file, info, extracted, keepVideo})
+ * onSubmitted({id, ...}) once a job on our side exists (its card finishes it: see finish.js)
  */
 export default function JobForm({ onSubmitted }) {
   const { balance, refresh } = useAuth();
@@ -134,7 +134,6 @@ export default function JobForm({ onSubmitted }) {
   const [probing, setProbing] = useState(false);
   const [noise, setNoise] = useState('denoise'); // 'off' | 'browser' | 'denoise'
   const [subs, setSubs] = useState('standard'); // 'off' | 'browser' | 'standard' | 'accurate'
-  const [keepVideo, setKeepVideo] = useState(true);
   const [embed, setEmbed] = useState(false);
   const [echo, setEcho] = useState(false); // Denoising: remove speaker echo using the second audio track
   const [loudness, setLoudness] = useState('-14'); // the YouTube target
@@ -152,10 +151,9 @@ export default function JobForm({ onSubmitted }) {
   const [localRunning, setLocalRunning] = useState(false);
   const [localProg, setLocalProg] = useState(null);
   const [localStage, setLocalStage] = useState('');
-  const [localResult, setLocalResult] = useState(null); // {file, info, isVideo, keepVideo, result}
+  const [finProg, setFinProg] = useState(null); // the last step (putting the files together), while it runs here: 0 to 1
   const [subsRunning, setSubsRunning] = useState(false);
   const [subsProg, setSubsProg] = useState(null);
-  const [subsResult, setSubsResult] = useState(null); // {file, info, files, embed, cleanPcm} from the free in-browser subtitles
   const [compressedInfo, setCompressedInfo] = useState(null); // {from, to} once the input was encoded to FLAC
   const [stats, setStats] = useState(null); // what the quick listen to the file found (media/analysis.js); null: not (yet) measured
   const [listening, setListening] = useState(false);
@@ -172,13 +170,11 @@ export default function JobForm({ onSubmitted }) {
   const listen = useRef(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const choice = useOutputChoice({ file, info, keepVideo, serverAudio: noise === 'denoise' || (noise === 'off' && leveling) });
+  const choice = useOutputChoice({ file, info, serverAudio: noise === 'denoise' || (noise === 'off' && leveling) });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
-  const jobLocal = useRef(null); // {out, entry} of the job just started, so the sound cleaned here can join its subtitles
 
   useEffect(() => () => { abort.current?.abort(); listen.current?.abort(); }, []);
-  useEffect(() => () => { if (localResult?.result?.url) URL.revokeObjectURL(localResult.result.url); }, [localResult]);
   useEffect(() => {
     if (!busy) return undefined;
     const warn = (e) => { e.preventDefault(); e.returnValue = ''; };
@@ -192,6 +188,7 @@ export default function JobForm({ onSubmitted }) {
   const wantsDenoise = noise === 'denoise'; // Denoising (or Voice rebuild) on our side
   const levelingOnly = noise === 'off' && leveling && info?.hasAudio !== false; // Leveling on its own, on our side
   const serverClean = wantsDenoise || levelingOnly; // a cleaned file comes from our side
+  const cleaning = serverClean || wantsBrowser; // the cleaned sound is part of the result (the file type and name are chosen)
   const wantsText = subs !== 'off'; // any subtitles: the language, formats and "into the video" choices apply
   const localSubs = subs === 'browser'; // made here, free
   const serverText = wantsText && !localSubs; // made on our side, paid
@@ -203,7 +200,7 @@ export default function JobForm({ onSubmitted }) {
   // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the
   // browser can't open goes up whole, and then our side puts them in. A recording with no picture can get them in the
   // plain black video made here when a video file type is picked.
-  const videoResult = isVideo ? !serverClean || choice.isVideoFile : serverClean && choice.isVideoFile;
+  const videoResult = isVideo ? !cleaning || choice.isVideoFile : cleaning && choice.isVideoFile;
   const embedOnServer = serverText && isVideo && !info?.viaMediabunny;
   const limit = buildLimit(); // null: this browser writes the result to disk, so any size works
   const tooBigHere = isVideo && !embedOnServer && file && limit != null && file.size > limit;
@@ -212,7 +209,7 @@ export default function JobForm({ onSubmitted }) {
   const embedNow = canEmbed && embed;
   const embedHere = embedNow && !embedOnServer;
   // A subtitles-only video keeps its own file type when that can carry them (WebM), else it becomes MKV.
-  const embedFormat = serverClean ? choice.format : isVideo ? defaultFormatId(file, info, true) : null;
+  const embedFormat = cleaning ? choice.format : isVideo ? defaultFormatId(file, info, true) : null;
 
   // Some formats (WMA, AMR, AVI, MPEG...) the browser can't read, but the server can. Then the length is a rough
   // guess from the file size (128 kbit/s) until the server measures it; the price is corrected to the real length.
@@ -240,12 +237,10 @@ export default function JobForm({ onSubmitted }) {
   }, [info]);
   // Whatever is still downloading counts too, so the estimate is honest if you start straight away.
   const loadLeft = load.done ? 0 : load.secondsLeft;
-  const eta = procEta == null ? null : procEta + (loadLeft || 0);
-
-  // For Denoising the file type in the list and "Keep the video" are the same decision: a video type keeps the picture.
-  useEffect(() => {
-    if (serverClean && isVideo && !info?.viaLibav && choice.outputs) setKeepVideo(choice.isVideoFile);
-  }, [serverClean, isVideo, info, choice.outputs, choice.isVideoFile]);
+  // ... and so does the last step, putting the files together (the cleaned sound back into the video, the chosen file type)
+  const finishEta = wantsBrowser ? finishSeconds(buildWants(), { info, file }) : 0;
+  const eta = procEta == null ? null : procEta + (loadLeft || 0) + finishEta;
+  const tail = wantsBrowser && procEta && finishEta ? Math.min(0.4, finishEta / (procEta + finishEta)) : 0; // its share of the progress bar
 
   const est = useMemo(() => {
     if (!kind) return 0;
@@ -271,7 +266,6 @@ export default function JobForm({ onSubmitted }) {
     setError('');
     setEmbed(false);
     setEcho(false);
-    setKeepVideo(true);
     // every file starts from the usual choices: Denoising, Standard subtitles, Leveling, no rebuild
     setSubs('standard');
     setNoise('denoise');
@@ -429,8 +423,31 @@ export default function JobForm({ onSubmitted }) {
   if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`);
   if (info && !wantsBrowser && !localSubs && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
   if (wantsText && !Object.values(caps).some(Boolean)) problems.push('Choose at least one caption or transcript format.');
-  if (embedHere && serverClean && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
-  const canStart = (wantsBrowser || localSubs || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || est != null) && (!serverClean || choice.valid);
+  if (embedHere && cleaning && !canHoldSubtitles(choice.format)) problems.push(`Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.`);
+  const canStart = (wantsBrowser || localSubs || kind) && file && info && !probing && !busy && problems.length === 0 && (!kind || est != null) && (!cleaning || choice.valid);
+
+  /** What the person asked for, as it stands now: the files that download by themselves when everything is done. */
+  function buildWants(f = file) {
+    const w = {
+      sound: cleaning, format: choice.format, name: choice.name.trim(), size: choice.size,
+      subs: wantsText, caps: { ...caps }, embed: embedNow, soundHere: wantsBrowser, subsHere: localSubs,
+    };
+    // subtitles into the video with no cleaning: the video keeps its own sound, as an MKV
+    if (!cleaning && embedNow) Object.assign(w, { format: 'mkv', size: 'same', name: `${stem(f?.name)}-subtitled.mkv` });
+    return w;
+  }
+
+  /** "When it's done, these download by themselves: ..." */
+  function willDownload() {
+    const parts = [];
+    if (cleaning) parts.push(`${choice.name.trim()}${embedNow ? ' (with the subtitles inside)' : ''}`);
+    else if (embedNow) parts.push(`${stem(file?.name)}-subtitled.mkv (the video with the subtitles inside)`);
+    if (wantsText) {
+      const f = [['srt', 'SRT'], ['vtt', 'VTT'], ['txt', 'TXT']].filter(([id]) => caps[id]).map(([, l]) => l);
+      if (f.length) parts.push(`the subtitles (${f.join(', ')})`);
+    }
+    return parts.length ? parts.join(' and ') : '';
+  }
 
   async function runLocal(f, i, signal) {
     setLocalRunning(true);
@@ -463,7 +480,7 @@ export default function JobForm({ onSubmitted }) {
     }
   }
 
-  async function runJob(f, i, signal) {
+  async function runJob(f, i, signal, entry) {
     setStep({ phase: 'create', frac: 0 });
     const body = {
       kind,
@@ -493,12 +510,8 @@ export default function JobForm({ onSubmitted }) {
         onCompressed: setCompressedInfo,
       });
       setResult(out);
-      const entry = {
-        file: f, info: i, extracted: out.extracted, keepVideo, embed: embedHere, browserClean: wantsBrowser, browserSubs: localSubs,
-        output: serverClean ? { name: choice.name.trim(), format: choice.format, size: choice.size } : null,
-      };
-      jobLocal.current = { out, entry };
-      onSubmitted?.(out, entry);
+      beginFinish({ ...out, displayName: f.name, outputs: [] }, entry); // from here on the job's card finishes it by itself
+      onSubmitted?.(out);
       return out;
     } finally {
       setStep(null);
@@ -519,53 +532,73 @@ export default function JobForm({ onSubmitted }) {
     setErrorKind('');
     setResult(null);
     setCompressedInfo(null);
-    if (wantsBrowser) setLocalResult(null);
-    if (localSubs) setSubsResult(null);
-    const subsCaps = { ...caps };
-    const subsEmbed = embedHere && !kind; // with a job, the job's card puts them into the video
+    const wants = buildWants(f);
+    let doneBrowser;
+    const entry = { file: f, info: i, wants, browser: new Promise((r) => { doneBrowser = r; }) };
 
     // The browser parts and the job (if there is one) run side by side; each reports on its own.
     const outcomes = await Promise.allSettled([
       wantsBrowser ? runLocal(f, i, ctl.signal) : Promise.resolve(null),
       localSubs ? runLocalSubs(f, i, ctl.signal) : Promise.resolve(null),
-      kind ? runJob(f, i, ctl.signal) : Promise.resolve(null),
+      kind ? runJob(f, i, ctl.signal, entry) : Promise.resolve(null),
     ]);
     const [local, subsOut, job] = outcomes;
-    const subsFiles = subsOut.status === 'fulfilled' && subsOut.value ? subtitleFiles(subsOut.value) : null;
-    const started = jobLocal.current;
-    jobLocal.current = null;
-    if (started?.entry.embed && (wantsBrowser || localSubs)) {
-      // The video the job's card makes uses the sound cleaned here and the subtitles made here, when they worked out.
-      if (wantsBrowser) {
-        if (local.status === 'fulfilled' && local.value) started.entry.cleanPcm = local.value.pcm;
-        else started.entry.browserClean = false;
-      }
-      if (localSubs) {
-        if (subsFiles) { started.entry.localVtt = subsFiles.vtt; started.entry.localLang = subsFiles.language; }
-        else started.entry.browserSubs = false;
-      }
-      onSubmitted?.(started.out, started.entry);
-    }
     const canceled = ctl.signal.aborted || outcomes.some((o) => o.status === 'rejected' && o.reason?.name === 'AbortError');
+    const subsFiles = subsOut.status === 'fulfilled' && subsOut.value ? subtitleFiles(subsOut.value) : null;
+    const cleaned = local.status === 'fulfilled' && local.value ? local.value : null;
+    const madeJob = job.status === 'fulfilled' && job.value ? job.value : null;
     let failed = false;
-    if (subsFiles) {
-      setSubsResult({ file: f, info: i, files: subsFiles, caps: subsCaps, embed: subsEmbed, cleanPcm: local.status === 'fulfilled' && local.value ? local.value.pcm : null });
-    } else if (subsOut.status === 'rejected' && subsOut.reason?.name !== 'AbortError') {
-      failed = true;
-      setError(subsOut.reason?.message || 'Something went wrong while making the subtitles. Please try again.');
+    const failedParts = {};
+    if (!subsFiles && localSubs) {
+      failedParts.subs = true;
+      if (subsOut.status === 'rejected' && subsOut.reason?.name !== 'AbortError') {
+        failed = true;
+        setError(subsOut.reason?.message || 'Something went wrong while making the subtitles. Please try again.');
+      }
     }
-    if (local.status === 'fulfilled' && local.value) {
-      setLocalResult({ file: f, info: i, isVideo: !!i?.hasVideo, keepVideo: keepVideo && !i?.viaLibav, result: local.value });
-    } else if (local.status === 'rejected' && local.reason?.name !== 'AbortError') {
-      failed = true;
-      setError(local.reason?.message || 'Something went wrong while cleaning this file. Please try again.');
+    if (!cleaned && wantsBrowser) {
+      failedParts.sound = true;
+      if (local.status === 'rejected' && local.reason?.name !== 'AbortError') {
+        failed = true;
+        setError(local.reason?.message || 'Something went wrong while cleaning this file. Please try again.');
+      }
     }
-    if (job.status === 'rejected' && job.reason?.name !== 'AbortError') {
-      failed = true;
-      const err = job.reason;
-      setError(inGigabytes(err.detail || err.message || 'Could not start the job.'));
-      setErrorKind(err?.status === 507 ? 'storage' : '');
+    if (kind && !madeJob) {
+      if (serverClean) failedParts.sound = true;
+      if (serverText) failedParts.subs = true;
+      if (job.status === 'rejected' && job.reason?.name !== 'AbortError') {
+        failed = true;
+        const err = job.reason;
+        setError(inGigabytes(err.detail || err.message || 'Could not start the job.'));
+        setErrorKind(err?.status === 507 ? 'storage' : '');
+      }
     }
+    // what this browser made now goes to the finishing step: the job's card (it waits for this), or a card of its own for a free run
+    const parts = { pcm: cleaned?.pcm || null, wav: cleaned?.wav || null, wavUrl: cleaned?.url || '', subs: subsFiles, failed: canceled ? { sound: true, subs: true } : failedParts };
+    let fin = madeJob ? getFinish(madeJob.id) : null;
+    if (!fin && !canceled) {
+      const made = { sound: !!cleaned, subs: !!subsFiles };
+      if (made.sound || made.subs) {
+        const label = made.sound && made.subs ? 'Free noise removal and subtitles' : made.sound ? 'Free noise removal' : 'Free subtitles';
+        fin = beginFinish({
+          id: `local-${Date.now().toString(36)}`, local: true, free: true, status: 'done', kind: 'denoise', label, displayName: f.name, inputName: f.name,
+          createdAt: Math.floor(Date.now() / 1000), durationSeconds: i?.duration || 0, outputs: [], costMicros: 0,
+        }, { file: f, info: i, wants: { ...wants, sound: made.sound, subs: made.subs }, browser: null });
+      }
+    }
+    if (fin) {
+      Object.assign(fin, parts);
+      if (fin.job.local) {
+        // a free run: the last step happens here, in the form, and then its card joins the list
+        const off = fin.subscribe(() => setFinProg(fin.state.progress));
+        setFinProg(0);
+        await fin.run({ save: true, signal: ctl.signal });
+        off();
+        setFinProg(null);
+        addLocalCard(fin.job);
+      }
+    }
+    doneBrowser();
     if (kind) await refresh(); // the balance changes as soon as a job exists
     setBusy(false);
     setLocalRunning(false);
@@ -672,7 +705,6 @@ export default function JobForm({ onSubmitted }) {
                       Keep this tab open, or choose Denoising for long files.
                     </div>
                   )}
-                  {info.duration && !wavFits(info.duration, info.channels >= 2 ? 2 : 1, 24) && <p className="hint mb0" data-testid="wav24-warn">For a recording this long, only the 16-bit WAV can be saved (a WAV file can’t be bigger than 4 GB).</p>}
                   {eta && <p className="hint mb0" data-testid="eta">Should take about {human(eta)} on this device{loadLeft ? ' (including getting the noise remover ready)' : ''}.</p>}
                   <GoodToKnow k="browserDenoise" />
                   {hasSecondTrack && <p className="hint mb0" data-testid="echo-browser-note">This file has a second audio track (your desktop sound). Removing speaker echo with it needs Denoising; the free cleanup in your browser can&rsquo;t do it.</p>}
@@ -806,11 +838,11 @@ export default function JobForm({ onSubmitted }) {
                       onChange={(e) => {
                         setEmbed(e.target.checked);
                         // the cleaned video becomes an MKV, the kind of file players show these subtitles from
-                        if (e.target.checked && serverClean && !embedOnServer && !canHoldSubtitles(choice.format) && choice.okIds?.includes('mkv')) choice.pickFormat('mkv');
+                        if (e.target.checked && cleaning && !embedOnServer && !canHoldSubtitles(choice.format) && choice.okIds?.includes('mkv')) choice.pickFormat('mkv');
                       }}
                       hint={embedOnServer
                         ? 'Your browser can’t open this video type, so it’s uploaded whole and we put them in on our side.'
-                        : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!serverClean && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
+                        : `Done on your device ${kind ? 'when the job is finished' : 'once the subtitles are made'}, so nothing extra is uploaded. Players can turn them on and off. They go into an MKV file, the kind players show subtitles from${!cleaning && embedFormat && !canHoldSubtitles(embedFormat) ? `, so you’ll get an MKV instead of ${embedFormat.toUpperCase()}` : ''}. Video editors usually take the .srt file instead.`}
                     />
                   )}
                   {wantsText && videoResult && tooBigHere && <p className="hint mb0" data-testid="embed-too-big">This browser can’t rebuild a video this big (over {gigabytes(limit)}); Chrome, Edge or Firefox can. You’ll get the subtitle files to load in your player or video editor.</p>}
@@ -826,13 +858,14 @@ export default function JobForm({ onSubmitted }) {
               )}
             </Step>
 
-            {serverClean && (
-              <Step title="The result file">
+            {cleaning && (
+              <Step title="The result file" lead="The cleaned sound as the file you choose. It downloads by itself when it’s done.">
                 <OutputFields choice={choice} info={info} idPrefix="job" disabled={busy} />
               </Step>
             )}
 
             <div className="step step-end">
+              {willDownload() && <p className="mb0" data-testid="will-download">When it’s done, these download by themselves: <b>{willDownload()}</b>.</p>}
               {kind && duration && est != null && (
                 <p className="mb0" data-testid="estimate">
                   <b>Estimated cost: {money(est)}</b>{' '}
@@ -855,8 +888,9 @@ export default function JobForm({ onSubmitted }) {
 
         {busy && (
           <div className="stack" data-testid="run-progress">
-            {localRunning && <ProgressPanel prog={localProg} stage={localStage} load={load} procEta={procEta} />}
+            {localRunning && <ProgressPanel prog={localProg} stage={localStage} load={load} procEta={procEta} tail={tail} finishEta={finishEta} />}
             {subsRunning && <SubtitlesProgress prog={subsProg} load={speechLoad} />}
+            {finProg != null && <FinishProgress progress={finProg} from={1 - tail} />}
             {step && (
               <div className="stack" data-testid="upload-progress">
                 <div className="row-between">
@@ -889,24 +923,12 @@ export default function JobForm({ onSubmitted }) {
         )}
         {result && !busy && (
           <div className="banner banner-success" role="status" data-testid="submitted">
-            Got it, we’re on it.{result.extracted ? ` Only the sound was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''}{result.compressed ? ` ${compressedNote(result.compressed)}.` : ''} You can follow along below.
+            Got it, we’re on it.{result.extracted ? ` Only the sound was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''}{result.compressed ? ` ${compressedNote(result.compressed)}.` : ''} Follow along below. Keep this page open and your files download by themselves when it’s done.
           </div>
         )}
 
       </form>
 
-      {subsResult && (
-        <SubtitlesResult
-          file={subsResult.file} info={subsResult.info} files={subsResult.files} caps={subsResult.caps} embed={subsResult.embed}
-          cleanPcm={subsResult.cleanPcm} onClose={() => setSubsResult(null)}
-        />
-      )}
-      {localResult && (
-        <BrowserResult
-          file={localResult.file} info={localResult.info} result={localResult.result} isVideo={localResult.isVideo}
-          keepVideo={localResult.keepVideo} onClose={() => setLocalResult(null)}
-        />
-      )}
     </>
   );
 }

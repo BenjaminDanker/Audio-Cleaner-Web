@@ -11,6 +11,8 @@ const want = (s) => only.length === 0 || only.includes(s);
 const EMAIL = process.env.E2E_EMAIL || `e2e-${Date.now()}@example.com`;
 
 const { browser, context, page, logs } = await launch();
+const got = []; // the files the page downloaded (they start by themselves when a job is done)
+page.on('download', (d) => got.push(d));
 const gotoApp = async (path) => { await page.goto(`${BASE}${path}`); await page.waitForSelector('main h1', { timeout: 15000 }); };
 
 async function waitJob(name, timeout = 240000) {
@@ -125,7 +127,7 @@ if (want('studio')) {
     }
   });
 
-  await check('a paid file job, Denoising + Leveling: the estimate on Start, the request that is sent, the finished file downloads, the balance drops', async () => {
+  await check('a paid file job, Denoising + Leveling: the estimate on Start, the request that is sent, the finished file downloads by itself (Download again brings it again), the balance drops', async () => {
     await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'denoise');
@@ -134,6 +136,7 @@ if (want('studio')) {
     if (!/\$0\.0[0-9]+/.test(est)) throw new Error('estimate: ' + est);
     if (!/^Start – about \$0\.0/.test(await page.getByTestId('start').innerText())) throw new Error('start label: ' + await page.getByTestId('start').innerText());
     if (!(await page.locator('input[type=checkbox][name=leveling]').isChecked())) throw new Error('Leveling is on by default with Denoising');
+    got.length = 0;
     const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'), page.getByTestId('start').click()]);
     const body = req.postDataJSON();
     if (body.kind !== 'denoise' || body.denoiseTier !== 'standard' || body.options.leveling !== true || body.options.audio_format !== 'flac') throw new Error('job sent: ' + JSON.stringify(body));
@@ -141,34 +144,66 @@ if (want('studio')) {
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
     if (status !== 'done') throw new Error('status ' + status + ' ' + (await card.innerText()));
+    await card.getByTestId('result').waitFor({ timeout: 60000 }); // its last step is over and the files are down
     await page.screenshot({ path: join(SHOTS, 'studio-done.png'), fullPage: true });
-    const [dl] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download').first().click()]);
-    if (!dl.suggestedFilename().endsWith('.flac')) throw new Error('the audio a server job makes should come as FLAC, got ' + dl.suggestedFilename());
+    if (got.length !== 1 || !got[0].suggestedFilename().endsWith('.flac')) throw new Error('the audio a server job makes should come down by itself as one FLAC, got ' + got.map((d) => d.suggestedFilename()));
+    const dl = got[0];
     const p = join(FILES, 'out-studio.flac');
     await dl.saveAs(p);
+    if ((await card.getByTestId('download-again').count()) !== 1) throw new Error('want exactly one Download again button');
+    const [again] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download-again').click()]);
+    if (again.suggestedFilename() !== dl.suggestedFilename()) throw new Error('again: ' + again.suggestedFilename());
     await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent !== '$5.00', null, { timeout: 15000 });
     return `${est.split('\n')[0]}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;
   });
 }
 
 if (want('transcribe')) {
-  await check('a paid subtitles job (Standard) on the Cleanup page: the estimate, the finished transcript downloads', async () => {
+  await check('a paid subtitles job (Standard) on the Cleanup page: the estimate; the finished SRT, VTT and TXT come down by themselves, once each, and no other button', async () => {
     await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'standard');
     await page.getByTestId('estimate').waitFor();
+    got.length = 0;
     await page.getByRole('button', { name: /^Start – about/ }).click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.', 300000);
     const st = await card.getAttribute('data-status');
     if (st !== 'done') throw new Error(st + ' ' + (await card.innerText()));
-    const names = await card.locator('.oname').allInnerTexts();
-    const [dl] = await Promise.all([page.waitForEvent('download'), card.locator('li', { hasText: '.txt' }).getByTestId('download').click()]);
-    await dl.saveAs(join(FILES, 'out-transcript.txt'));
+    await card.getByTestId('result').waitFor({ timeout: 60000 });
+    const names = await card.getByTestId('made-file').locator('.oname').allInnerTexts();
+    const dls = got.map((d) => d.suggestedFilename()).sort();
+    if (dls.length !== 3 || !/-transcript\.txt$/.test(dls[0]) || !/\.srt$/.test(dls[1]) || !/\.vtt$/.test(dls[2])) throw new Error('downloaded by itself: ' + dls);
+    const txt = got.find((d) => /\.txt$/.test(d.suggestedFilename()));
+    await txt.saveAs(join(FILES, 'out-transcript.txt'));
     const text = readFileSync(join(FILES, 'out-transcript.txt'), 'utf8').trim();
     if (!text) throw new Error('empty transcript');
+    if ((await card.getByRole('button', { name: /Download/ }).count()) !== 1) throw new Error('want one Download again button, no per-file buttons');
     return `${names.join(', ')} | "${text.slice(0, 80)}"`;
+  });
+
+  await check('a paid subtitles job on a video, subtitles put into the video + TXT only: exactly the MKV with the subtitles inside and the transcript come down by themselves, nothing else', async () => {
+    await gotoApp('/app');
+    await dropFile(page, join(FILES, 'speech.mp4'));
+    await pick(page, 'noise', 'off');
+    await pick(page, 'subs', 'standard');
+    await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
+    for (const label of ['SRT', 'VTT']) await page.locator('label.check').filter({ hasText: new RegExp(`^${label}$`) }).locator('input').uncheck();
+    await page.getByTestId('estimate').waitFor();
+    const hint = await page.getByTestId('will-download').innerText();
+    if (!/speech-subtitled\.mkv/.test(hint) || !/TXT/.test(hint) || /SRT|VTT/.test(hint)) throw new Error('the line before Start: ' + hint);
+    got.length = 0;
+    await page.getByRole('button', { name: /^Start – about/ }).click();
+    await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+    const card = await waitJob('speech.', 300000);
+    if ((await card.getAttribute('data-status')) !== 'done') throw new Error(await card.innerText());
+    await card.getByTestId('result').waitFor({ timeout: 90000 });
+    const dls = got.map((d) => d.suggestedFilename()).sort();
+    if (dls.join() !== 'speech-subtitled.mkv,speech-transcript.txt' && !(dls.length === 2 && /-subtitled\.mkv$/.test(dls[0]) && /-transcript\.txt$/.test(dls[1]))) throw new Error('downloaded by itself: ' + dls);
+    if ((await card.getByTestId('made-file').count()) !== 2) throw new Error('the card should list the two files: ' + await card.getByTestId('made').innerText());
+    await page.screenshot({ path: join(SHOTS, 'studio-video-subs.png'), fullPage: true });
+    return dls.join(', ');
   });
 }
 

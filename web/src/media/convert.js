@@ -330,6 +330,24 @@ export function srtToVtt(srt) {
   return `WEBVTT\n\n${body.trim()}\n`;
 }
 
+/** WebVTT text as SRT (numbered cues, the milliseconds after a comma; styles, notes and cue settings are left out). */
+export function vttToSrt(vtt) {
+  const stamp = (t) => {
+    const [h, m, rest] = t.split(':').length === 3 ? t.split(':') : ['0', ...t.split(':')];
+    return `${h.padStart(2, '0')}:${m.padStart(2, '0')}:${rest.replace('.', ',').padEnd(6, '0')}`;
+  };
+  const out = [];
+  for (const block of String(vtt).replace(/^﻿/, '').replace(/\r\n?/g, '\n').split(/\n{2,}/)) {
+    const lines = block.split('\n');
+    const at = lines.findIndex((l) => l.includes('-->'));
+    const times = at >= 0 && lines[at].match(/^\s*(\S+)\s+-->\s+(\S+)/);
+    if (!times) continue;
+    const text = lines.slice(at + 1).join('\n').trim();
+    if (text) out.push(`${out.length + 1}\n${stamp(times[1])} --> ${stamp(times[2])}\n${text}\n`);
+  }
+  return out.join('\n');
+}
+
 /* ------------------------------------------------------------------------------------------------ making the file */
 
 // Finished files written to the browser's private storage. The newest one stays until the next build (its download

@@ -6,8 +6,8 @@ import {
 
 // "What should the result be called, and what kind of file?" A name box with a file-type list attached to its right,
 // and (for a video) the picture size. Typing another ending changes the list; picking from the list changes the ending.
-// Only what this browser can really make for this file is in the list. Used on the Cleanup form (paid cleaning: the choice
-// is kept with the job in this tab) and on the free result (saved from there). Nothing here uploads anything.
+// Only what this browser can really make for this file is in the list. Used on the Cleanup form (the choice is made before
+// Start, and the result is downloaded by itself) and on a finished result ("Change and save again"). Nothing here uploads anything.
 
 const defaultName = (file, id) => `${stem(file?.name)}-cleaned.${FORMAT[id]?.ext || 'wav'}`;
 const AUDIO_DEFAULT_FOR = (file) => (/\.webm$/i.test(file?.name || '') ? 'ogg' : 'm4a');
@@ -16,26 +16,29 @@ const AUDIO_DEFAULT_FOR = (file) => (/\.webm$/i.test(file?.name || '') ? 'ogg' :
  * State for the choice: {name, format, size}. `serverAudio`: our server writes the sound (any audio type is possible,
  * only the video files depend on this browser). `keepVideo` only sets where the choice starts.
  */
-export function useOutputChoice({ file, info, keepVideo = true, serverAudio = false }) {
+export function useOutputChoice({ file, info, keepVideo = true, serverAudio = false, initial = null }) {
   const [outputs, setOutputs] = useState(null); // null: still asking the browser
-  const [format, setFormatState] = useState(serverAudio ? 'flac' : 'wav');
-  const [name, setNameState] = useState('');
-  const [size, setSize] = useState('same');
+  const [format, setFormatState] = useState(initial?.format || (serverAudio ? 'flac' : 'wav'));
+  const [name, setNameState] = useState(initial?.name || '');
+  const [size, setSize] = useState(initial?.size || 'same');
   const [sizes, setSizes] = useState(null);
-  const [touched, setTouched] = useState(false);
+  const [touched, setTouched] = useState(!!initial);
 
-  // another file: start over
+  // another file: start over (with `initial`: from the choices the result was made with)
   useEffect(() => {
     setOutputs(null);
     setSizes(null);
-    setSize('same');
-    setTouched(false);
-    if (file && info) {
+    setSize(initial?.size || 'same');
+    setTouched(!!initial);
+    if (initial) {
+      setFormatState(initial.format);
+      setNameState(initial.name);
+    } else if (file && info) {
       const id = defaultFormatId(file, info, keepVideo, serverAudio);
       setFormatState(id);
       setNameState(defaultName(file, id));
     }
-    // keepVideo and serverAudio only matter for the starting point, handled below
+    // keepVideo, serverAudio and initial only matter for the starting point
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file, info]);
 

@@ -81,6 +81,79 @@ if (want('jobs')) {
     await page.unroute(/\/api\/jobs(\/d1)?$/);
     return 'asked first, kept on "Keep them", deleted on "Yes, delete"';
   });
+  // A job the server lists after a reload (this browser has no file or sound of it): the card lists what it made, with one
+  // Download again, which brings exactly what was asked for; Change and save again can still change the subtitle formats.
+  const stubFiles = {
+    'noisy-cleaned.flac': 'fLaC-not-really-audio', 'noisy.srt': '1\n00:00:00,000 --> 00:00:01,000\nHello there.\n', 'noisy.vtt': 'WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello there.\n',
+    'noisy-transcript.txt': 'Hello there.\n',
+  };
+  const stubJob = (id, names) => job(id, {
+    kind: 'denoise_transcribe', inputName: 'noisy.flac', displayName: 'noisy.wav', expiresAt: now() + 3600, costMicros: 2600,
+    outputs: names.map((n) => ({ name: n, kind: n.endsWith('.flac') ? 'audio' : n.endsWith('.txt') ? 'transcript' : 'captions', bytes: stubFiles[n].length, lang: n.endsWith('.flac') ? undefined : 'en' })),
+  });
+  const downloads = [];
+  page.on('download', (d) => downloads.push(d));
+  const withJobs = async (list, id) => {
+    await page.route(/\/api\/jobs$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list } }) : r.continue()));
+    await page.route(`**/api/jobs/${id}/outputs/**`, (r) => {
+      const name = decodeURIComponent(new URL(r.request().url()).pathname.split('/').pop());
+      return r.fulfill({ body: stubFiles[name] ?? '', contentType: 'application/octet-stream' });
+    });
+  };
+  const without = async (id) => { await page.unroute(/\/api\/jobs$/); await page.unroute(`**/api/jobs/${id}/outputs/**`); };
+  const sorted = () => downloads.map((d) => d.suggestedFilename()).sort();
+  const waitFor = async (n) => { for (let i = 0; i < 60 && downloads.length < n; i++) await page.waitForTimeout(250); await page.waitForTimeout(500); };
+
+  await check('a finished job after a reload: its files are listed with their sizes, one Download again brings all of them, and no other download buttons', async () => {
+    const j = stubJob('d2', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']);
+    await withJobs([j], 'd2');
+    try {
+      await page.goto(`${BASE}/app`);
+      const card = page.getByTestId('job').first();
+      await card.getByTestId('download-again').waitFor();
+      const rows = (await card.getByTestId('made-file').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
+      if (rows.length !== 4 || !rows.every((t) => /\d+ B$/.test(t))) throw new Error('listed: ' + JSON.stringify(rows));
+      if ((await card.getByRole('button', { name: /download/i }).count()) !== 1 || (await card.getByRole('link', { name: /download/i }).count())) throw new Error('want exactly one download button');
+      downloads.length = 0;
+      await card.getByTestId('download-again').click();
+      await waitFor(4);
+      const want = ['noisy-cleaned.flac', 'noisy-transcript.txt', 'noisy.srt', 'noisy.vtt'];
+      if (sorted().join() !== want.join()) throw new Error('downloaded: ' + sorted());
+      return rows.join(' | ');
+    } finally {
+      await without('d2');
+    }
+  });
+
+  await check('what was asked for decides what is downloaded: only the TXT and the sound were ticked (the server also kept a VTT for the video), so only those two come down; Change and save again adds the SRT', async () => {
+    const j = stubJob('d3', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']);
+    await withJobs([j], 'd3');
+    await page.goto(`${BASE}/app`);
+    await page.evaluate(() => localStorage.setItem('acw.wants.d3', JSON.stringify({
+      sound: true, format: 'flac', name: 'noisy-cleaned.flac', size: 'same', subs: true, caps: { srt: false, vtt: false, txt: true }, embed: false, soundHere: false, subsHere: false,
+    })));
+    try {
+      await page.reload();
+      const card = page.getByTestId('job').first();
+      await card.getByTestId('download-again').waitFor();
+      const rows = await card.getByTestId('made-file').locator('.oname').allInnerTexts();
+      if (rows.sort().join() !== 'noisy-cleaned.flac,noisy-transcript.txt') throw new Error('listed: ' + rows);
+      downloads.length = 0;
+      await card.getByTestId('download-again').click();
+      await waitFor(2);
+      if (sorted().join() !== 'noisy-cleaned.flac,noisy-transcript.txt') throw new Error('downloaded: ' + sorted());
+      await card.getByTestId('again').locator('summary').click();
+      await card.getByTestId('again-cap-srt').check();
+      downloads.length = 0;
+      await card.getByTestId('again-save').click();
+      await waitFor(3);
+      if (sorted().join() !== 'noisy-cleaned.flac,noisy-transcript.txt,noisy.srt') throw new Error('after adding the SRT: ' + sorted());
+      return 'TXT + sound, then + SRT';
+    } finally {
+      await without('d3');
+    }
+  });
+
   await browser.close();
 }
 

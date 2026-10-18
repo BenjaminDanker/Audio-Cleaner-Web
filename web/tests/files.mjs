@@ -164,6 +164,27 @@ await check('leveling alone, subtitles alone, and both together each send exactl
   return 'denoise / denoise_transcribe / transcribe premium as chosen';
 });
 
+await check('the line before Start names exactly what will download by itself: the cleaned file under its chosen name, and the subtitle formats ticked (with "inside the video" when that is ticked)', async () => {
+  await freshApp();
+  await choose('noisy.wav');
+  await pick(page, 'noise', 'denoise');
+  await pick(page, 'subs', 'standard');
+  const line = () => page.getByTestId('will-download').innerText();
+  let t = await line();
+  if (!/noisy-cleaned\.flac/.test(t) || !/SRT, VTT, TXT/.test(t)) throw new Error('default: ' + t);
+  await page.locator('label.check').filter({ hasText: /^SRT$/ }).locator('input').uncheck();
+  await page.locator('label.check').filter({ hasText: /^VTT$/ }).locator('input').uncheck();
+  await page.getByTestId('out-name').fill('talk.mp3');
+  t = await line();
+  if (!/talk\.mp3/.test(t) || !/\(TXT\)/.test(t) || /SRT|VTT/.test(t)) throw new Error('after the changes: ' + t);
+  await page.locator('label.check').filter({ hasText: /^TXT$/ }).locator('input').uncheck();
+  await page.locator('label.check').filter({ hasText: /^SRT$/ }).locator('input').check();
+  await pick(page, 'subs', 'off');
+  t = await line();
+  if (!/talk\.mp3/.test(t) || /subtitles/.test(t)) throw new Error('with the subtitles off: ' + t);
+  return t.replace(/\s+/g, ' ');
+});
+
 await check('echo removal and translation: the echo box is offered only for Denoising, sends true/false as ticked, uploads one smaller .mka; Spanish is sent as translate', async () => {
   await freshApp();
   await choose('echo2.mp4');

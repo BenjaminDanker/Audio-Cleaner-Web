@@ -1,17 +1,15 @@
-import { useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
-import { api, outputUrl } from '../api.js';
+import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
-import { saveBlob } from '../download.js';
-import { bytes, clock, dateTime, human, money, shownName, stem } from '../format.js';
+import { finishOf, forgetFinish, removeLocalCard, useFinish } from '../finish.js';
+import { clock, dateTime, human, money } from '../format.js';
 import { useNow } from '../hooks.js';
-import { ACTIVE, jobTitle, kindLabel, LANGUAGES, queueText, stageText, statusLabel } from '../jobs.js';
-import { buildMedia, canHoldSubtitles, defaultFormatId, FORMAT, srtToVtt } from '../media/convert.js';
-import { IconDownload } from './Icons.jsx';
+import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel } from '../jobs.js';
+import ResultPanel from './Result.jsx';
 
-const OUT_LABEL = { audio: 'Cleaned audio', video: 'Video', captions: 'Captions', transcript: 'Transcript', segments: 'Segments' };
-
-function badgeClass(status) {
+function badgeClass(status, finishing) {
+  if (finishing) return 'badge badge-run';
   if (status === 'done') return 'badge badge-ok';
   if (status === 'failed' || status === 'canceled') return 'badge badge-bad';
   if (ACTIVE.has(status)) return 'badge badge-run';
@@ -26,153 +24,27 @@ function Countdown({ expiresAt }) {
   return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
 }
 
-/** The job's subtitles as WebVTT text (made in this browser, or from its .vtt file, or its .srt one), for putting into a video here. */
-async function jobSubtitles(job, local) {
-  if (local?.localVtt) return [{ text: local.localVtt, lang: local.localLang, name: langName(local.localLang) }];
-  // one track per language: the spoken one first, then the translations, each from its .vtt (or its .srt)
-  const caps = job.outputs.filter((o) => o.kind === 'captions');
-  const langs = [...new Set(caps.map((o) => o.lang || ''))];
-  const tracks = [];
-  for (const lang of langs) {
-    const mine = caps.filter((o) => (o.lang || '') === lang);
-    const pick = mine.find((o) => /\.vtt$/i.test(o.name)) || mine.find((o) => /\.srt$/i.test(o.name));
-    if (!pick) continue;
-    const res = await fetch(outputUrl(job.id, pick.name), { credentials: 'same-origin' });
-    if (!res.ok) throw new Error('Couldn’t download the subtitles. Please try again.');
-    const text = await res.text();
-    tracks.push({ text: /\.vtt$/i.test(pick.name) ? text : srtToVtt(text), lang: lang || undefined, name: langName(lang) });
-  }
-  if (!tracks.length) throw new Error('This job has no subtitles to put into the video.');
-  return tracks;
-}
-
-const LANGUAGE_NAME = Object.fromEntries(LANGUAGES.filter(([c]) => c));
-const langName = (code) => LANGUAGE_NAME[code] || 'Subtitles';
-
-/** The file type a video with subtitles is made as when nothing was chosen: a WebM stays WebM, anything else becomes MKV. */
-function subtitledFormat(file, info, inputName) {
-  const id = defaultFormatId(file || { name: inputName }, info || { hasVideo: true }, true);
-  return canHoldSubtitles(id) ? id : 'mkv';
-}
-
-/**
- * Add the cleaned audio back into the original video, locally, as chosen in the form (file type, picture size, name).
- * For a recording with no picture and a video type chosen, it makes the video (plain black picture) the same way.
- * With `local.embed` the job's subtitles go into the video too. A subtitles-only job (no cleaned audio from us) keeps the
- * video's own sound, or the sound cleaned in this browser when that was chosen as well.
- */
-function RemuxPanel({ job, local, noPicture = false }) {
-  const [file, setFile] = useState(local?.file || null);
-  const [busy, setBusy] = useState(false);
-  const [prog, setProg] = useState(0);
-  const [err, setErr] = useState('');
-  const [note, setNote] = useState('');
-  const picker = useRef(null);
-  const ctl = useRef(null);
-  const audioOut = job.outputs.find((o) => o.kind === 'audio');
-  const embed = !!local?.embed;
-  if (!audioOut && !embed) return null;
-  const choice = local?.output && FORMAT[local.output.format]?.kind === 'video' ? local.output : null;
-  // the free cleanup or the free subtitles in this tab aren't done yet
-  const waitingForBrowser = (!audioOut && local?.browserClean && !local?.cleanPcm) || (embed && local?.browserSubs && !local?.localVtt);
-
-  async function run(videoFile) {
-    const abort = new AbortController();
-    ctl.current = abort;
-    setBusy(true); setErr(''); setNote(''); setProg(0);
-    try {
-      const subtitles = embed ? await jobSubtitles(job, local) : null;
-      let audioFile = null;
-      if (audioOut) {
-        const res = await fetch(outputUrl(job.id, audioOut.name), { credentials: 'same-origin' });
-        if (!res.ok) throw new Error('Couldn’t download the cleaned audio. Please try again.');
-        audioFile = await res.blob();
-      }
-      const pcm = !audioOut && local?.cleanPcm ? local.cleanPcm : null;
-      if (!audioOut && !pcm) audioFile = videoFile; // subtitles only: the video keeps its own sound
-      const format = choice?.format || subtitledFormat(videoFile, local?.info, job.inputName);
-      const { remuxWithCleanAudio } = await import('../media/remux.js');
-      const out = noPicture
-        ? await buildMedia({ format, audioFile, audioName: audioOut?.name, subtitles, onProgress: setProg, signal: abort.signal })
-        : await remuxWithCleanAudio({
-          videoFile, pcm, audioFile, audioName: audioOut?.name || '', info: local?.info, format, size: choice?.size, subtitles, onProgress: setProg, signal: abort.signal,
-        });
-      const suffix = audioOut || pcm ? 'cleaned' : 'subtitled';
-      saveBlob(out.blob, choice?.name || `${stem(videoFile?.name || job.inputName)}-${suffix}${out.ext}`);
-      if (out.note) setNote(out.note);
-    } catch (e) {
-      if (e?.name !== 'AbortError') setErr(e.message || 'Couldn’t build the video. Please try again.');
-    } finally {
-      ctl.current = null;
-      setBusy(false);
-    }
-  }
-
-  const label = busy ? `Building video… ${Math.round(prog * 100)}%` : waitingForBrowser ? 'Waiting for your browser to finish…' : null;
-  const what = audioOut && embed ? 'cleaned audio and subtitles' : audioOut ? 'cleaned audio' : local?.cleanPcm ? 'cleaned audio and subtitles' : 'subtitles';
-  return (
-    <div className="stack" data-testid="remux">
-      <div className="row">
-        {noPicture ? (
-          <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => run(null)} data-testid="remux-btn">
-            {label || `Save as ${shownName(choice.name)}`}
-          </button>
-        ) : file ? (
-          <button type="button" className="btn btn-secondary btn-sm" disabled={busy || waitingForBrowser} onClick={() => run(file)} data-testid="remux-btn">
-            {label || (choice ? `Save ${shownName(choice.name)}` : `Put the ${what} into ${shownName(file.name)}`)}
-          </button>
-        ) : (
-          <>
-            <button type="button" className="btn btn-secondary btn-sm" disabled={waitingForBrowser} onClick={() => picker.current?.click()}>{label || `Put the ${what} into your video…`}</button>
-            <input
-              ref={picker} type="file" accept="video/*,.mkv,.mov,.mp4,.webm" className="sr-only" tabIndex={-1}
-              aria-label="Choose the original video"
-              onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) { setFile(f); run(f); } }}
-            />
-          </>
-        )}
-        {busy && <button type="button" className="btn btn-ghost btn-sm" onClick={() => ctl.current?.abort()}>Cancel</button>}
-        <span className="small muted">This happens on your device; the video isn’t uploaded.</span>
-      </div>
-      {note && <p className="small banner banner-info mb0">{note}</p>}
-      {err && <p className="small banner banner-error mb0" role="alert">{err}</p>}
-    </div>
-  );
-}
-
 /** Failed and canceled jobs cost nothing: say so once (the server's own messages often say it already). */
 const withNotCharged = (text) => (/not charged|weren.t charged/i.test(text) ? text : `${text} You weren’t charged.`);
 
-export default function JobCard({ job, local, onChanged }) {
+/**
+ * One job in the list: what it is doing while it runs, and, once it is done, its files (see Result.jsx). A free run made
+ * in this tab (job.local) has no job on our side; it shows the same way.
+ */
+export default function JobCard({ job, onChanged }) {
   const { contact } = useAuth();
+  const fin = finishOf(job);
+  const st = useFinish(fin);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const active = ACTIVE.has(job.status);
   const canCancel = job.status === 'uploading' || job.status === 'queued';
-  const hasVideoInput = local?.info?.hasVideo || /\.(mp4|mov|m4v|mkv|webm)$/i.test(job.inputName || '');
-  const hasVideoOut = job.outputs.some((o) => o.kind === 'video');
-  const hasAudioOut = job.outputs.some((o) => o.kind === 'audio');
-  // Subtitles put into the video here, in the browser (chosen in the form in this tab); the server never needs the video for it.
-  const embedHere = !!local?.embed && (job.outputs.some((o) => o.kind === 'captions') || !!local?.browserSubs);
-  const showRemux = job.status === 'done' && hasVideoInput && (local?.extracted !== false || embedHere) && local?.keepVideo !== false && !hasVideoOut && (hasAudioOut || embedHere);
-  const chosenKind = FORMAT[local?.output?.format]?.kind;
-  // A video type was chosen for a recording with no picture: the video (plain black picture) is made here from the cleaned sound.
-  const showBlack = job.status === 'done' && chosenKind === 'video' && !hasVideoInput && !hasVideoOut && !!job.outputs.find((o) => o.kind === 'audio');
-  // A sound type was chosen: the file keeps the name chosen in the form.
-  const audioName = chosenKind === 'audio' ? local.output.name : null;
+  const finishing = job.status === 'done' && (st.phase === 'waiting' || st.phase === 'building' || st.phase === 'saving');
 
-  // The server names its files its own way (and its header wins over the link's name): the name chosen in the form is applied here.
-  async function saveRenamed(o, name) {
-    setErr('');
-    try {
-      const res = await fetch(outputUrl(job.id, o.name), { credentials: 'same-origin' });
-      if (!res.ok) throw new Error('Couldn’t download that file. Please try again.');
-      saveBlob(await res.blob(), name);
-    } catch (e) {
-      setErr(e.message || 'Couldn’t download that file. Please try again.');
-    }
-  }
+  // The job finished while this tab was open: its last step and the downloads happen by themselves.
+  useEffect(() => {
+    if (job.status === 'done') fin.auto();
+  }, [job.status, fin]);
 
   async function act(fn) {
     setBusy(true); setErr('');
@@ -186,19 +58,21 @@ export default function JobCard({ job, local, onChanged }) {
     }
   }
 
-  const pct = typeof job.progress === 'number' ? job.progress : 0;
+  // The last step is part of the wait: the bar fills to nine tenths while we work, and the last tenth is putting the files together.
+  const tail = fin.thisTab && fin.willBuild() ? 0.1 : 0;
+  const pct = (typeof job.progress === 'number' ? job.progress : 0) * (1 - tail);
   const step = stageText(job); // '' when the server's step name is not one we know: then only the percentage is shown
   const stepLine = step ? `${step}${pct ? ` · ${Math.round(pct)}%` : ''}` : pct ? `${Math.round(pct)}% done` : 'Just a moment…';
   return (
     <article className="card job" data-testid="job" data-status={job.status} data-job-id={job.id}>
       <div className="job-head">
         <div>
-          <div className="job-title">{jobTitle(job, local)}</div>
+          <div className="job-title">{jobTitle(job, fin.file ? { file: fin.file } : null)}</div>
           <div className="small muted">{kindLabel(job)} · {dateTime(job.createdAt)} · {clock(job.durationSeconds)}</div>
         </div>
         <span className="row">
-          {job.free && <span className="badge badge-free" data-testid="free-badge">{job.kind === 'transcribe' ? 'Free' : 'Free subtitles'}</span>}
-          <span className={badgeClass(job.status)}>{statusLabel(job.status)}</span>
+          {job.free && <span className="badge badge-free" data-testid="free-badge">{job.kind === 'transcribe' || job.local ? 'Free' : 'Free subtitles'}</span>}
+          <span className={badgeClass(job.status, finishing)}>{finishing ? 'Putting it together' : statusLabel(job.status)}</span>
         </span>
       </div>
 
@@ -224,27 +98,19 @@ export default function JobCard({ job, local, onChanged }) {
 
       {job.status === 'done' && (
         <>
-          <ul className="outputs" aria-label="Downloads">
-            {job.outputs.map((o) => (
-              <li key={o.name}>
-                <span><span className="oname">{o.name}</span> <span className="muted small">· {OUT_LABEL[o.kind] || o.kind}{o.lang && LANGUAGE_NAME[o.lang] ? ` · ${LANGUAGE_NAME[o.lang]}` : ''} · {bytes(o.bytes)}</span></span>
-                <a className="btn btn-primary btn-sm" href={outputUrl(job.id, o.name)} download={o.name} data-testid="download"
-                  onClick={o.kind === 'audio' && audioName ? (e) => { e.preventDefault(); saveRenamed(o, audioName); } : undefined}>
-                  <IconDownload width={16} height={16} /> Download
-                </a>
-              </li>
-            ))}
-          </ul>
-          {job.notice && <p className="banner banner-info small mb0" role="status" data-testid="job-notice">{job.notice}</p>}
-          {showRemux && <RemuxPanel job={job} local={local} />}
-          {showBlack && <RemuxPanel job={job} local={local} noPicture />}
-          {hasVideoOut && <p className="small muted mb0">The video file above already has the clean sound in it.</p>}
+          <ResultPanel job={job} fin={fin} />
           <div className="row-between">
-            <span className="small muted">Cost <b>{money(job.costMicros || 0)}</b> · <Countdown expiresAt={job.expiresAt} /></span>
-            {confirmDelete ? (
+            {job.local ? (
+              <span className="small muted">Kept in this tab only, until you leave or reload the page.</span>
+            ) : (
+              <span className="small muted">Cost <b>{money(job.costMicros || 0)}</b> · <Countdown expiresAt={job.expiresAt} /></span>
+            )}
+            {job.local ? (
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeLocalCard(job.id)}>Remove</button>
+            ) : confirmDelete ? (
               <span className="row" data-testid="delete-confirm">
                 <span className="small">Delete these files now? They can’t be brought back.</span>
-                <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => act(() => api(`jobs/${job.id}`, { method: 'DELETE' }))}>Yes, delete</button>
+                <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => act(async () => { await api(`jobs/${job.id}`, { method: 'DELETE' }); forgetFinish(job.id); })}>Yes, delete</button>
                 <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirmDelete(false)}>Keep them</button>
               </span>
             ) : (
@@ -261,4 +127,3 @@ export default function JobCard({ job, local, onChanged }) {
     </article>
   );
 }
-

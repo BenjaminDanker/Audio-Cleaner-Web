@@ -1,8 +1,9 @@
-import { useCallback, useRef } from 'react';
+import { useEffect, useMemo } from 'react';
 import { Link } from 'react-router';
 import { useAuth } from '../auth.jsx';
 import JobCard from '../components/JobCard.jsx';
 import JobForm from '../components/JobForm.jsx';
+import { pruneWants, useLocalCards } from '../finish.js';
 import { balanceMoney } from '../format.js';
 import { usePageTitle } from '../hooks.js';
 import { useJobs } from '../useJobs.js';
@@ -10,13 +11,14 @@ import { useJobs } from '../useJobs.js';
 export default function Cleanup() {
   usePageTitle('Cleanup');
   const { balance, refresh } = useAuth();
-  const localJobs = useRef(new Map()); // jobId -> {file, info, extracted} (this tab only)
   const { jobs, error, reload } = useJobs({ onFinished: refresh });
+  const localCards = useLocalCards(); // free runs made in this tab: no job on our side, listed like the others
+  const all = useMemo(() => (jobs ? [...localCards, ...jobs] : jobs), [localCards, jobs]);
 
-  const submitted = useCallback((job, local) => {
-    localJobs.current.set(job.id, local);
-    reload();
-  }, [reload]);
+  // the choices kept for jobs the server no longer lists (they stay for 24 hours) go too
+  useEffect(() => {
+    if (jobs && !error) pruneWants(jobs.map((j) => j.id));
+  }, [jobs, error]);
 
   return (
     <div className="container page stack-lg">
@@ -27,7 +29,7 @@ export default function Cleanup() {
         </div>
       </header>
 
-      <JobForm onSubmitted={submitted} />
+      <JobForm onSubmitted={reload} />
 
       <section aria-labelledby="jobs-h" className="stack">
         <div className="row-between">
@@ -35,9 +37,9 @@ export default function Cleanup() {
           <button type="button" className="btn btn-ghost btn-sm" onClick={reload}>Refresh</button>
         </div>
         {error && <div className="banner banner-error" role="alert">{error}</div>}
-        {jobs === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading your jobs…</p>}
-        {jobs?.length === 0 && !error && <p className="card muted mb0">Nothing here yet. Drop a file above and it’ll show up.</p>}
-        {jobs?.map((j) => <JobCard key={j.id} job={j} local={localJobs.current.get(j.id)} onChanged={() => { reload(); refresh(); }} />)}
+        {all === null && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Loading your jobs…</p>}
+        {all?.length === 0 && !error && <p className="card muted mb0">Nothing here yet. Drop a file above and it’ll show up.</p>}
+        {all?.map((j) => <JobCard key={j.id} job={j} onChanged={() => { reload(); refresh(); }} />)}
       </section>
 
       <div className="grid grid-2">

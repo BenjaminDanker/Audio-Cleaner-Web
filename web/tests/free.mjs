@@ -6,7 +6,9 @@
 // Needs the local backend (port 8792, see helpers.mjs) with `ACW_MODEL_HOST=http://127.0.0.1:8798/ npm run build` output (the
 // model host is mirror.mjs) and the fixtures (make-fixtures.sh).
 // Usage: node tests/free.mjs
+import { execFileSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { BASE, FILES, SHOTS, check, dropFile, launch, mirror, pick, settleRecommendation, signIn, summary, waitResult } from './helpers.mjs';
 
@@ -14,8 +16,11 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free optio
 const SOURCE_FRAMES = 508591; // noisy.wav at 48 kHz; the other fixtures are made from it (tests/make-fixtures.sh)
 const close = (frames) => Math.abs(frames - SOURCE_FRAMES) < SOURCE_FRAMES * 0.02; // codec padding is a few ms
 
-const { browser, page, logs } = await launch();
+const FFPROBE = process.env.FFPROBE || join(homedir(), 'audio-cleaner', 'bin', 'ffprobe');
+const { browser, page, logs } = await launch([], { acceptDownloads: true });
 const models = await mirror(); // the local model host: what the browser downloaded from it
+const downloads = []; // every file the page downloaded, in order (they start by themselves when a run is done)
+page.on('download', (d) => downloads.push(d));
 const WASM = 'df_bg.wasm';
 const MODEL = 'DeepFilterNet3_onnx.tar.gz';
 const apiCalls = [];
@@ -32,6 +37,7 @@ async function runFree(file, strengthLabel = 'Strong') {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, file)); // "Free, in your browser" is the default whenever the browser can open the file
   await page.getByTestId('strength-lstrength').getByText(strengthLabel, { exact: true }).click();
+  downloads.length = 0;
   const t0 = Date.now();
   await page.getByRole('button', { name: 'Start – free' }).click();
   await page.waitForSelector('[data-testid=result]', { timeout: 180000 });
@@ -44,15 +50,24 @@ await check('free: a mono 48 kHz WAV is cleaned in the browser (length kept, not
   if (!close(r.frames)) throw new Error(`frames ${r.frames}`);
   if (r.rms < 0.001) throw new Error(`silent rms=${r.rms}`);
   if (libavFetches.length) throw new Error('a WAV fetched the extra decoder: ' + libavFetches.join(', '));
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: /Cleaned WAV/ }).click()]);
+  // the cleaned WAV came down by itself, and it is the only thing that did
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'noisy-cleaned.wav') throw new Error('downloaded by itself: ' + downloads.map((d) => d.suggestedFilename()).join(', '));
   const p = join(FILES, 'out-free.wav');
-  await dl.saveAs(p);
+  await downloads[0].saveAs(p);
   const b = readFileSync(p);
   if (b.toString('ascii', 0, 4) !== 'RIFF') throw new Error('not RIFF');
   const got = b.readUInt32LE(40) / 2 / b.readUInt16LE(22);
   if (!close(got)) throw new Error(`downloaded frames ${got}`);
+  // the card has one button to download it again, and none for other variants (no 16-bit / 24-bit / video buttons)
+  const card = page.getByTestId('job').first();
+  if ((await card.getByTestId('download-again').count()) !== 1) throw new Error('want exactly one Download again button');
+  if (await card.getByRole('link', { name: /Cleaned WAV|24-bit/ }).count() || await card.getByRole('button', { name: /24-bit|Video with/ }).count()) throw new Error('a redundant variant button is back');
+  const [again] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download-again').click()]);
+  const p2 = join(FILES, 'out-free-again.wav');
+  await again.saveAs(p2);
+  if (again.suggestedFilename() !== 'noisy-cleaned.wav' || statSync(p2).size !== b.length) throw new Error(`again: ${again.suggestedFilename()} ${statSync(p2).size} vs ${b.length}`);
   await page.screenshot({ path: join(SHOTS, 'free-done.png'), fullPage: true });
-  return `frames=${r.frames} rms=${r.rms} in ${r.ms} ms; download ${b.length} bytes`;
+  return `frames=${r.frames} rms=${r.rms} in ${r.ms} ms; download ${b.length} bytes, and again`;
 });
 
 await check('free: nothing about the file is sent to our server (only the account, prices and the job list are read)', async () => {
@@ -82,20 +97,19 @@ await check('free: WMA (read by libav.js) shows its real length and is cleaned; 
   if (await page.getByRole('checkbox', { name: /Keep the video/ }).count()) throw new Error('keep-video offered');
   const a = await runFree('noisy.avi');
   if (!close(a.frames) || a.rms < 0.001) throw new Error(`avi ${JSON.stringify(a)}`);
-  if (await page.getByTestId('dl-video').count()) throw new Error('video download offered for an AVI');
+  if (downloads.length !== 1 || !/\.wav$/.test(downloads[0].suggestedFilename())) throw new Error('an AVI should come back as one WAV: ' + downloads.map((d) => d.suggestedFilename()).join(', '));
   return `wma frames=${w.frames}; avi frames=${a.frames}; decoder files: ${[...new Set(libavFetches)].join(', ')}`;
 });
 
-await check('free: an MP4 is cleaned and the video comes back with the cleaned sound', async () => {
+await check('free: an MP4 is cleaned and the video (picture and cleaned sound) comes down by itself, as the one file', async () => {
   const r = await runFree('test.mp4');
   if (r.rms < 0.001) throw new Error('silent');
-  const btn = page.getByTestId('dl-video');
-  await btn.waitFor();
-  await page.waitForFunction(() => !document.querySelector('[data-testid=dl-video]').disabled, null, { timeout: 5000 });
-  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), btn.click()]);
-  const p = join(FILES, 'out-free-video' + (dl.suggestedFilename().match(/\.[a-z0-9]+$/)?.[0] || '.mp4'));
-  await dl.saveAs(p);
-  return `${dl.suggestedFilename()} ${statSync(p).size} bytes`;
+  if (downloads.length !== 1 || !/^test-cleaned\.(mp4|mkv|webm|mov)$/.test(downloads[0].suggestedFilename())) throw new Error('downloaded: ' + downloads.map((d) => d.suggestedFilename()).join(', '));
+  const p = join(FILES, 'out-free-video' + downloads[0].suggestedFilename().match(/\.[a-z0-9]+$/)[0]);
+  await downloads[0].saveAs(p);
+  const kinds = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-of', 'json', p], { encoding: 'utf8' })).streams.map((s) => s.codec_type).sort();
+  if (kinds.join() !== 'audio,video') throw new Error('streams: ' + kinds);
+  return `${downloads[0].suggestedFilename()} ${statSync(p).size} bytes (${kinds.join(' + ')})`;
 });
 
 /** A fresh browser profile (empty Cache Storage), signed in; `site` lists what it fetched from the site's /dfn/ folder. */
@@ -189,14 +203,22 @@ await check('free + free: browser noise removal AND free subtitles at the same t
   await pick(page, 'subs', 'browser');
   const label = (await page.getByTestId('start').innerText()).trim();
   if (label !== 'Start – free') throw new Error('label: ' + label);
+  downloads.length = 0;
   await page.getByTestId('start').click();
-  await page.waitForSelector('[data-testid=result]', { timeout: 180000 });
-  await waitResult(page, 'subs-result');
+  await waitResult(page, 'result', 180000);
   await page.unroute('**/api/jobs');
   if (posts.length) throw new Error('a job was sent: ' + JSON.stringify(posts.at(-1)));
-  const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: /Cleaned WAV/ }).click()]);
+  // exactly what was chosen came down by itself: the cleaned sound and the three subtitle files, and Download again brings them all again
+  const want = ['noisy-cleaned.wav', 'noisy-transcript.txt', 'noisy.srt', 'noisy.vtt'];
+  const names = () => downloads.map((d) => d.suggestedFilename()).sort();
+  if (names().join() !== want.join()) throw new Error('downloaded by itself: ' + names());
+  downloads.length = 0;
+  await page.getByTestId('job').first().getByTestId('download-again').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid=job] [data-testid=download-again]')?.textContent.includes('Download again'), null, { timeout: 15000 });
+  for (let i = 0; i < 40 && downloads.length < want.length; i++) await page.waitForTimeout(250);
+  if (names().join() !== want.join()) throw new Error('downloaded again: ' + names());
   await page.screenshot({ path: join(SHOTS, 'free-free-combo.png'), fullPage: true });
-  return `download ${dl.suggestedFilename()} + subtitles (${await page.getByTestId('subs-result').getAttribute('data-cues')} cues)`;
+  return `${want.join(', ')}, then all of them again (${await page.getByTestId('result').first().getAttribute('data-cues')} cues)`;
 });
 
 console.log('LOGS:\n' + logs.join('\n'));
