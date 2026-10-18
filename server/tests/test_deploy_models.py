@@ -50,7 +50,9 @@ def test_lock_is_well_formed_and_pinned():
             assert e["rest"].startswith("https://"), e
             assert not re.search(r"/(main|master|latest)/|-latest-", e["rest"]), f"unpinned URL: {e['rest']}"
             if "huggingface.co" in e["rest"]:
-                assert re.search(r"/resolve/[0-9a-f]{40}/", e["rest"]), f"Hugging Face URL without a commit id: {e['rest']}"
+                # our own repo is pinned to its commit once the models are uploaded (until then: PENDING-UPLOAD)
+                ours = "SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/" in e["rest"]
+                assert ours or re.search(r"/resolve/[0-9a-f]{40}/", e["rest"]), f"Hugging Face URL without a commit id: {e['rest']}"
             if "github.com" in e["rest"]:
                 assert re.search(r"/raw/[0-9a-f]{40}/", e["rest"]), e["rest"]
         if e["kind"] == "archive":

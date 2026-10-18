@@ -77,6 +77,7 @@ def test_the_launcher_installs_it_before_anything_else():
     from pathlib import Path
 
     src = (Path(__file__).resolve().parents[1] / "packaging" / "launcher.py").read_text(encoding="utf-8")
-    code = [ln for ln in src.splitlines() if ln.startswith(("import ", "from "))]
-    assert code[0] == "from audio_cleaner_desktop import quiet_popen"
+    code = [ln for ln in src.splitlines() if ln.startswith(("import ", "from ")) and ln != "import os"]
+    assert code[0].startswith("from audio_cleaner_desktop import quiet_popen")
+    assert src.index("OMP_NUM_THREADS") < src.index("from audio_cleaner_desktop")  # numpy's thread pool: before any import
     assert src.index("quiet_popen.install()") < src.index("import multiprocessing")

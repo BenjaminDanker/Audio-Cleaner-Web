@@ -246,7 +246,7 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if kind in ("transcribe", "denoise_transcribe"):
         pricing.rate("transcribe", transcribe_tier or "")
     out: dict = {}
-    fmt = options.get("audio_format", "wav")
+    fmt = options.get("audio_format", "flac")  # lossless like WAV, about half the size to download
     if not isinstance(fmt, str) or fmt not in AUDIO_FORMATS:
         raise JobError("unsupported output format")
     out["audio_format"] = fmt

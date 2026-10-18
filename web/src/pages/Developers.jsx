@@ -142,7 +142,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
         <Table
           head={['Option', 'Default', 'Values and meaning']}
           rows={[
-            ['audio_format', 'wav', 'The format of the cleaned audio: wav, flac, mp3, m4a or opus.'],
+            ['audio_format', 'flac', 'The format of the cleaned audio: wav, flac, mp3, m4a or opus.'],
             ['caption_formats', '["srt","vtt","txt"]', 'Any of srt, vtt, txt and json. json gives a "segments" file with every line and its times.'],
             ['language', 'null', 'The language spoken, as a 2 or 3 letter code ("en", "es", "haw"). null means we find it ourselves.'],
             ['translate', '[]', 'Up to 3 languages to translate the subtitles and transcript into (two letter codes: en, es, fr, de, it, pt, nl, pl, ru, uk, tr, ar, hi, ja, ko, zh, sv, da, fi, no, cs, el, he, id, vi), not the language spoken. Needs "transcribe" or "denoise_transcribe". Each language costs extra; a language that can’t be made is left out, said in "notice" and not charged.'],

@@ -2,9 +2,9 @@
 // the visitor's processor). One instance per page; it handles one request at a time, in order.
 //
 // Protocol (main -> worker):
-//   { type: 'init', modelHost, model, ortBase, fileSizes }   -> progress* then { type: 'ready' } | { type: 'error', message }
-//        modelHost: absolute URL the model folder hangs off (the site's dfn/models/), model: its id there;
-//        ortBase: absolute URL of the runtime's folder; fileSizes: { 'tokenizer.json': bytes, ... } of the model's files
+//   { type: 'init', modelHost, speech, ortBase }   -> progress* then { type: 'ready' } | { type: 'error', message }
+//        modelHost: https://huggingface.co/ (or the tests' copy), speech: models.js SPEECH (repo, revision, dtype, and
+//        every file's size and SHA-256); ortBase: absolute URL of the runtime's folder
 //   { type: 'detect', id, audio: Float32Array (16 kHz mono, up to 30 s) }   -> { type: 'language', id, language }
 //   { type: 'transcribe', id, audio, language }   -> { type: 'result', id, segments: [{start, end, text}] }  (seconds)
 //   any request can answer { type: 'error', id, message }
@@ -15,28 +15,58 @@ import { env, pipeline, Tensor } from '@huggingface/transformers';
 let asr = null;
 
 /**
- * The library asks for the first byte of every file (a Range request) just to learn its size for a progress total, which
- * speech.js does not use; each of those is a round trip that the sign-in check on the server has to answer too. They are
- * answered here from the sizes the page knows (a file it does not know goes to the network as usual), so every file is
- * requested exactly once.
+ * Every model file goes through here: it must be one of the pinned files, it is always taken from the pinned commit,
+ * its bytes must have the pinned size and SHA-256 (a file that does not is never used, nor kept in the browser's cache),
+ * and its download progress is reported. The library asks for some files at "main" before it applies the revision (its
+ * file list), and for the first byte of every file (a Range request) just to learn its size for a progress total: the
+ * first go to the pinned commit too, the second are answered from the pins, and a file asked for again is answered
+ * from the checked copy, so every file is downloaded exactly once.
  */
-function answerSizeProbes(fileSizes) {
+function checkedFetch(speech) {
   const realFetch = env.fetch;
-  env.fetch = (input, init) => {
-    const range = new Headers(init?.headers).get('range');
-    const size = range === 'bytes=0-0' ? fileSizes?.[String(input).split('/').pop().split('?')[0]] : null;
-    if (!size) return realFetch(input, init);
-    return Promise.resolve(new Response(new Uint8Array(1), { status: 206, headers: { 'content-range': `bytes 0-0/${size}`, 'content-type': 'application/octet-stream' } }));
+  const base = `${env.remoteHost}${speech.repo}/resolve/`;
+  const pinned = `${base}${speech.revision}/`;
+  const checked = new Map(); // file -> its checked bytes
+  const answer = (bytes) => new Response(bytes, { status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) } });
+  env.fetch = async (input, init) => {
+    const url = String(input?.url ?? input);
+    const rest = url.startsWith(base) ? url.slice(base.length).split('?')[0] : '';
+    const slash = rest.indexOf('/');
+    const rev = rest.slice(0, slash);
+    const name = slash > 0 && (rev === speech.revision || rev === 'main') ? rest.slice(slash + 1) : null;
+    const pin = name ? speech.files[name] : null;
+    if (!pin) throw new Error(`Not one of the subtitle maker's files: ${url}`);
+    if (new Headers(init?.headers).get('range') === 'bytes=0-0') {
+      return new Response(new Uint8Array(1), { status: 206, headers: { 'content-range': `bytes 0-0/${pin.size}`, 'content-type': 'application/octet-stream' } });
+    }
+    if (checked.has(name)) return answer(checked.get(name));
+    const res = await realFetch(pinned + name, { credentials: 'omit', mode: 'cors' });
+    if (!res.ok) return res;
+    const bytes = new Uint8Array(pin.size);
+    let have = 0;
+    const reader = res.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (have + value.length > pin.size) throw new Error(`${name} is not the expected file.`);
+      bytes.set(value, have);
+      have += value.length;
+      self.postMessage({ type: 'progress', file: name, loaded: have, total: pin.size });
+    }
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
+    if (have !== pin.size || digest !== pin.sha256) throw new Error(`${name} is not the expected file.`);
+    checked.set(name, bytes);
+    return answer(bytes);
   };
 }
 
-async function init({ modelHost, model, ortBase, fileSizes }) {
+async function init({ modelHost, speech, ortBase }) {
   env.allowLocalModels = false;
   env.allowRemoteModels = true;
   env.remoteHost = modelHost;
-  env.remotePathTemplate = '{model}/';
-  env.useBrowserCache = true; // the files stay in the browser's cache: the model is downloaded once
-  answerSizeProbes(fileSizes);
+  env.remotePathTemplate = '{model}/resolve/{revision}/';
+  env.useBrowserCache = true; // the checked files stay in the browser's cache: the model is downloaded once
+  checkedFetch(speech);
   // The model only ever runs on the processor (device 'wasm'), so the plain build is enough: the one with WebGPU/asyncify
   // support is twice the size to download and about a fifth slower.
   env.backends.onnx.wasm.wasmPaths = { mjs: `${ortBase}ort-wasm-simd-threaded.mjs`, wasm: `${ortBase}ort-wasm-simd-threaded.wasm` };
@@ -44,13 +74,7 @@ async function init({ modelHost, model, ortBase, fileSizes }) {
   // (The browser's HTTP cache keeps both files; the model files are what the library caches itself.)
   env.useWasmCache = false;
   env.backends.onnx.wasm.numThreads = 1; // threads need a cross-origin isolated page, which this site is not
-  asr = await pipeline('automatic-speech-recognition', model, {
-    device: 'wasm',
-    dtype: { encoder_model: 'q8', decoder_model_merged: 'q8' },
-    progress_callback: (p) => {
-      if (p.status === 'progress') self.postMessage({ type: 'progress', file: p.file, loaded: p.loaded, total: p.total });
-    },
-  });
+  asr = await pipeline('automatic-speech-recognition', speech.repo, { device: 'wasm', revision: speech.revision, dtype: speech.dtype });
 }
 
 /** The language spoken, from one step of the decoder after <|startoftranscript|> (Whisper's own way of telling). */

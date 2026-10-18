@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
+import { startMirror } from './mirror.mjs';
 
 export const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:8792';
 export const BASE = `${ORIGIN}/audio`;
@@ -26,7 +27,11 @@ export function loginLink(email) {
   return admin('login-link', email).split('\n')[0].trim();
 }
 
+/** The local copy of the free tools' models (mirror.mjs): the site under test is built to download them from here. */
+export const mirror = () => startMirror();
+
 export async function launch(extraArgs = [], opts = {}) {
+  await startMirror().catch((e) => console.log(`WARNING ${e.message}`)); // only the suites that run the free tools need it
   const browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=no-user-gesture-required', ...extraArgs] });
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, permissions: ['microphone'], ...opts });
   const page = await context.newPage();
@@ -61,6 +66,13 @@ export function skip(name, reason) {
   console.log(`SKIP ${name} -- KNOWN PRODUCT BUG: ${reason}`);
 }
 export const summary = () => results;
+
+/** Waits for a result (data-testid), or fails at once with the page's own error text instead of waiting out the timeout. */
+export async function waitResult(page, testid, timeout = 300000) {
+  const either = page.locator(`[data-testid=${testid}], [data-testid=job-error]`).first();
+  await either.waitFor({ timeout });
+  if (await page.getByTestId('job-error').count()) throw new Error(`the page says: ${await page.getByTestId('job-error').first().innerText()}`);
+}
 
 // ---- the Cleanup page's options (drop a file, then pick what to do) ----
 /** Click one of the option cards: group 'noise' (off | browser | denoise) or 'subs' (off | browser | standard | accurate). */

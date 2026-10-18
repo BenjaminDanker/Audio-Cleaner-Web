@@ -65,7 +65,7 @@ def _phone_call(tmp_path, seconds=14.0):
 def _run(client, h, data, tier="standard", **options):
     r = client.post("/api/jobs", json={
         "kind": "denoise", "denoiseTier": tier, "filename": "rec.wav", "sizeBytes": len(data), "durationSeconds": 14,
-        "options": {"output_video": False, "loudness_lufs": -16.0, "noise": "light", **options},
+        "options": {"output_video": False, "loudness_lufs": -16.0, "noise": "light", "audio_format": "wav", **options},
     }, headers=h)
     assert r.status_code == 200, r.text
     job_id = r.json()["id"]

@@ -39,7 +39,7 @@ export default function Licenses() {
             </tbody>
           </table>
         </div>
-        <p className="small muted">The DeepFilterNet model and WebAssembly module are served next to their licence files at <span className="mono">{BASE}dfn/</span>.</p>
+        <p className="small muted">The free tools’ models (DeepFilterNet with its WebAssembly module, and Whisper base) are downloaded by your browser from Hugging Face, where they are published with their licence files.</p>
         {(contact || email) && (
           <p className="small muted">Want the source code of one of these, as the licences allow? Ask {contact ? <>through the <Link to="/contact">contact form</Link></> : <>at <a href={`mailto:${email}`}>{email}</a></>} and we will send it.</p>
         )}

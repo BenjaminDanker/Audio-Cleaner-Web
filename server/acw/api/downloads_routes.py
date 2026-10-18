@@ -4,7 +4,7 @@
   obs-plugin/latest/<platform>             windows | mac | ubuntu-debian | linux-other: the current package, for the
                                            website's buttons (served directly, never redirected)
 
-(The OBS plugin only: the desktop app gets its updates and models from its own GitHub releases.)
+(The OBS plugin only: the desktop app gets its updates from its GitHub releases and its models from Hugging Face.)
 
 Public: no sign-in, a rate limit per network (httpstack: all /api/ calls; here: starting file downloads) and the
 download byte-rate cap of the bulk process (acw/bulk_app.py applies it to these paths). The files were verified by

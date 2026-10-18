@@ -2,7 +2,7 @@
 
 The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code).
 The installer carries the app, FFmpeg and the two noise models (DeepFilterNet3, and DPDFNet-8 for heavy noise), so
-noise removal works offline straight after installing. Three larger models (2.5 GB in all) are downloaded by setup
+noise removal works offline straight after installing. Three larger models (2.6 GB in all) are downloaded by setup
 itself, and only by setup (the app downloads a model only when asked to; its one automatic request is the update check,
 see "Automatic updates" below). The installer is small; the
 Windows installer's download page and the Mac .pkg's postinstall script check every file's SHA-256, keep files a
@@ -13,19 +13,15 @@ previous install left in place, and are generated from the app's catalog by `pac
 - the model that rebuilds the voice (optional "Rebuild the voice" setting: removes room echo too), Sidon
   (503 MB ONNX, `resources.VOICE_MODEL`).
 
-The last two come in ONE zip archive, `AudioCleaner-models-v1.zip` (0.9 GB, `resources.MODELS_ARCHIVE`), built from this
-repository's `models-v1` release and served by our own download server (see "Where the app downloads from"); it also holds a `README.txt` and the `LICENSES/` folder (AP-BWE, Sidon, w2v-BERT 2.0
-and training-data notices). Each of the two stays a model of its own in the catalog (own folder, own panel and checks,
-every file pinned by size and SHA-256), but downloading either installs both. Setup downloads the archive once (the
-download page checks its SHA-256), unpacks it, checks the size of every file, moves the files to their model folders,
-puts `LICENSES/` next to them (`{app}\models\LICENSES`, which About points to) and deletes the archive.
-On Windows the unpacking is `%SystemRoot%\System32\tar.exe -xf <zip> -C <folder>` (Windows 10 1803 and later, so on
-every supported Windows; if it were missing, setup skips the archive and shows the "open Audio Cleaner > Settings to
-finish the download" message). On a Mac the postinstall script uses `curl`, `shasum -a 256` and `ditto -x -k`. The
-app itself (`models.py`) streams the archive into `<models>/AudioCleaner-models-v1.partial/` (resumable, SHA-256
-checked), unpacks the members of both models member by member (never a whole file in memory, size and SHA-256 checked
-again), and deletes the archive; it needs about 1.9 GB free at the peak (archive plus unpacked), cancelling works
-during the download and the unpacking, and a copy that setup installed is reused instead (D-33).
+The last two are our own conversions (nobody else publishes these files). They are downloaded from our Hugging Face
+model repository (`config.HF_MODELS_REPO`, pinned to the commit `config.HF_MODELS_REVISION`, which must be a full commit
+id; `PENDING-UPLOAD` until the repository is uploaded), file by file like Whisper, every file pinned by URL, size and
+SHA-256: someone who only wants one model downloads only its files. Each model also has its licence texts
+(`SpeechModel.licences`, `LICENSES/<name>` in the model's folder: AP-BWE + training-data notice, Sidon + w2v-BERT 2.0 +
+training-data notice), downloaded with it. They are not part of the model's `files`, so they are not in the `.complete`
+marker: a copy installed by an older version (the old 0.9 GB archive unpacked into the model folders, with a shared
+`<models>/LICENSES`) still counts as installed and is not downloaded again. About lists every installed model's
+`LICENSES` folder and the old shared one (`models.licence_dirs`).
 
 They go to `{app}\models\<id>` on Windows and `/Library/Application Support/Audio Cleaner/models/<id>` on a Mac
 (`models.installer_dir`); a model whose files are all there also gets a `.complete` marker (the hashes of its files),
@@ -36,46 +32,34 @@ finishes; Settings then shows a Download button for what is missing (and the ban
 `AudioCleaner --download-models` does all three from a terminal, and starting a job that needs a missing model asks
 first. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image) because a disk image has no setup
 step to download in. The .pkg is wrapped with `productbuild --distribution` (`packaging/macos/distribution.py`): it
-refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.5 GB and takes minutes.
+refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.6 GB and takes minutes.
 
-**Where the app downloads from: its own GitHub releases.** People get the installers from the public repository's
-Releases, and the app and the installers download everything else from there too. Every desktop release (tag
-`v<version>` in the public repository, made by the release job of `desktop.yml`) carries the whole version:
+**Where the app downloads from.** People get the installers from the public repository's Releases. Every desktop release
+(tag `v<version>` in the public repository, made by the release job of `desktop.yml`) carries the three installers and
+`update.json` / `update.json.sig`: installed apps read the newest release's (`config.LATEST_URL`, GitHub's fixed
+`releases/latest/download/` address) and download the installer from the release of the version it names. That is the
+only thing the updater uses the releases for; no model is in a release. The models come from Hugging Face: Whisper from
+its own repository (`_TURBO` in `resources.py`, one pinned commit), ours from `config.HF_MODELS_REPO` (URLs built by
+`config.hf_models_url`). Every file is checked against the size and SHA-256 pinned in `resources.py` before it is used,
+so nobody who can change a file there can make the app run anything else; the update information is also signed (below).
 
-* the three installers;
-* `update.json` and `update.json.sig`: installed apps read the newest release's (`config.LATEST_URL`, GitHub's fixed
-  `releases/latest/download/` address) and download the installer from the release of the version it names;
-* our models: the archive `AudioCleaner-models-vN.zip` (AP-BWE and Sidon with their licence texts; we converted them,
-  nobody else publishes these files). The app and its installers download it from the app's own release
-  (`config.MODELS_URL` = `release_url(<the app's version>)`; a source checkout, which has no release of its own, uses the
-  newest release), so every version always gets exactly the models it was built with. Releases there are never
-  deleted.
-
-The speech model for subtitles (Whisper large-v3-turbo) is not in the releases: it is published on Hugging Face as it
-is, so the app downloads it from there, pinned to one commit (`_TURBO` in `resources.py`) and checked file by file.
-
-The repository is `__releases__` in `audio_cleaner_desktop/__init__.py`; CI writes the one it publishes to
-(`ACW_RELEASES_REPO`, the trial repository while `vars.PUBLIC_DESKTOP_REPO` is set) together with the version. Every file
-is checked against the size and SHA-256 pinned in `resources.py` before it is used, so nobody who can change a release
-file can make the app run anything else; the update information is also signed (below).
-
-**How the models get into a release.** `packaging/release_models.py` (in the release job) carries the models archive
-over from the newest release that already has it (the public repository's releases first, then this repository's),
-checking it against its pin. The "Model downloads exist" job runs `release_models.py --check` on every build (the
-archive in a release, and the speech model's pinned files on Hugging Face) and goes red when something can't be found.
+The repository of the releases is `__releases__` in `audio_cleaner_desktop/__init__.py`; CI writes the one it publishes to
+(`ACW_RELEASES_REPO`, the trial repository while `vars.PUBLIC_DESKTOP_REPO` is set) together with the version. The "Model
+downloads exist" job runs `packaging/check_model_urls.py` on every build (HEAD requests: every pinned file is there with
+its size; our files are skipped, with a message, while the revision is `PENDING-UPLOAD`).
 
 ### Changing a model safely
 
 Never change a published file: every app version has its models' sizes and SHA-256 pinned.
 
-1. New models archive: build it, name it `AudioCleaner-models-vN+1.zip` (a new name for new contents), and upload it
-   once to this repository's newest desktop release: `gh release upload desktop-v<newest> AudioCleaner-models-vN+1.zip`.
-   For a Whisper revision, change the commit id in `_TURBO` in `resources.py` (never `main`).
-2. Update the catalog in `resources.py`: the archive's `name`, `url`, `size`, `sha256`, the `shared` licence files and
-   each model file's `size`/`sha256`/`member`; for Whisper the files' sizes and hashes.
-3. Update `deploy/models.lock` (the server's copy of the models) the same way: the `archive` line and the `member` lines.
-4. Push. The next desktop release carries the new archive; apps that update to it find that a model they had changed
-   and download the new one by themselves (`models.outdated`), and older versions keep downloading theirs.
+1. Upload the new files to the Hugging Face model repository under a new path or as a new commit (`ap-bwe/`, `sidon/`,
+   `LICENSES/`); the commit id is the pin, so old commits keep serving older app versions. Whisper: change the commit id
+   in `_TURBO` in `resources.py` (never `main`).
+2. Set `HF_MODELS_REVISION` in `config.py` to the new full commit id, and update the catalog in `resources.py`: each
+   model file's `size`/`sha256` (and the licence texts'); for Whisper the files' sizes and hashes.
+3. Update `deploy/models.lock` (the server's copy of the models) to match.
+4. Push. Apps that update to the next release find that a model they had changed and download the new one by
+   themselves (`models.outdated`), and older versions keep downloading theirs.
 
 What users experience: the installed copy no longer matches the catalog (its `.complete` marker names the old hashes),
 so it does not count as installed. On the next start of the updated app, about 6 seconds after the window opens, the
@@ -88,11 +72,11 @@ update (`ForgetStaleModels` in the generated installer forgets files whose marke
 
 Clean-up: when the new copy is complete the old data goes. In the app's own models folder (`models.remove_stale`):
 a model folder whose marker names other hashes than the catalog, a model folder of an id that left the catalog, and
-`.partial` folders of other hashes or older archives (a partial is only resumed when its `.pin` names exactly the hashes
+`.partial` folders of other hashes, and the `.partial` folders of the old models archive (a partial is only resumed when its `.pin` names exactly the hashes
 of the current catalog entry). In the installer's folder (`{app}\models`, `/Library/Application Support/Audio Cleaner/models`)
 the same is deleted only where the user may write; otherwise it stays until the next interactive setup (which, for
 the files it replaces, does it itself). Folders without a `.complete` marker (including `LICENSES`) and loose files are
-never touched, so the licence texts of the current archive stay.
+never touched, so the shared `LICENSES` of older installs stays.
 
 Runs on Windows 10/11 (x64) and macOS 14 Sonoma or newer, on Apple silicon or Intel (PySide6 6.12 and the
 onnxruntime wheels set that floor; Intel Macs use onnxruntime 1.23.2, the last release with Intel Mac wheels).
@@ -128,7 +112,7 @@ the checklist at the end).
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest --gui`
    (also builds the window and runs the noise models, echo canceller, AP-BWE and Sidon when their files are there),
    and the installer (Inno Setup 6.7.1 on Windows, a `productbuild` .pkg on macOS; both download the models during
-   setup; the ONNX models arrive as one archive). Windows also runs the frozen app under a non-ASCII profile folder and installs, starts and uninstalls the
+   setup, file by file from Hugging Face). Windows also runs the frozen app under a non-ASCII profile folder and installs, starts and uninstalls the
    installer silently. A separate "Model downloads exist" job checks the catalog URLs. Website/server-only pushes skip it; "Run workflow"
    builds by hand (artifacts only, no release; a push that only changes `deploy/fetch-dpdfnet.sh` also builds). About 10 minutes with warm FFmpeg/libDF caches, 20-30 cold.
 4. The `release` job attaches `AudioCleaner-<version>-Windows.exe`, `AudioCleaner-<version>-Mac-Apple-silicon.pkg`
@@ -326,11 +310,9 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
 Measured on Linux (the Windows/macOS sizes will differ somewhat): the `AudioCleaner` folder is about 0.6 GB
 uncompressed. The two noise models are 23 MB (DeepFilterNet 8 MB, DPDFNet-8 15 MB); the rest is PySide6/Qt 140 MB,
 CTranslate2 137 MB (library and extension), SciPy and its OpenBLAS 71 MB, ONNX Runtime 30 MB, NumPy and its OpenBLAS
-41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.5 GB of models: Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
-Sidon 503 MB (the last two come in one 0.9 GB archive, so the download is 2.5 GB in all and 2.6 GB on disk). Windows
-setup needs the 2.5 GB of free space on the temporary drive until the files are installed (it checks first), and the
-unpacked models on the install drive (the archive is unpacked there, then the files are moved: about 1 GB extra for a
-moment). The app's own download of the two ONNX models needs about 1.9 GB at the peak (archive plus unpacked). Memory
+41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.6 GB of models: Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
+Sidon 503 MB (2.6 GB on disk too). Windows setup needs that much free space on the temporary drive until the files are
+installed (it checks first); the app's own download of one model needs about that model's size. Memory
 while cleaning, measured: 0.5 GB for a normal file, 1.7 GB with
 subtitles, 2.6 GB with "Rebuild the voice" (`sysinfo.py` plans with these numbers). GitHub Release assets may be up
 to 2 GiB each.
@@ -351,8 +333,9 @@ to 2 GiB each.
   files. It must not add restrictions that the MIT License or the LGPL components' licences don't allow.
 * The downloaded models carry notices too: `AP-BWE-MIT.txt` (code and weights), `Sidon-MIT.txt`,
   `w2v-BERT-2.0-MIT.txt` (Meta) and `Training-data-attribution.txt` (CC BY 4.0: VCTK, FLEURS-R, LibriTTS-R) ship in
-  `licenses/` and are shown in About, and the same files (plus `AP-BWE-weights-LICENSE.txt`) are in the `LICENSES/` folder of the models archive, which
-  setup and the app unpack next to the models.
+  `licenses/` and are shown in About, and the same files (plus `AP-BWE-weights-LICENSE.txt`) are in the model repository
+  on Hugging Face (`LICENSES/`); setup and the app download each model's texts into its folder (`<model>/LICENSES`),
+  and About lists those folders.
   The Dropbox CTranslate2 conversion of Whisper has no licence text of its own (its card says MIT); OpenAI's
   `Whisper-MIT.txt` is the text that applies.
 * Re-run the licence collection (it runs in every build) after changing dependencies; it fails when a package has no
@@ -371,13 +354,13 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
   `{app}\models` is never deleted by an update. The model step looks at what is installed: a model whose files are all
   there with the right sizes (and a `.complete` marker that matches the catalog) is not downloaded again; with every
   model complete setup does not even show the download page. A model from an earlier, partial install is finished:
-  single files one by one, the archive again if any of its files is missing or has the wrong size; a model whose marker
+  its missing or wrong-sized files are downloaded one by one; a model whose marker
   names other hashes than this catalog is removed and fetched again. A silent setup (`/VERYSILENT`) never downloads
   models, as before.
 * **macOS.** The .pkg replaces `/Applications/Audio Cleaner.app` completely: its preinstall script removes the old bundle
   (that one folder and nothing else) before the new one is laid down, so no file of an older version can stay inside it,
-  and the component is not skipped for being "the same or an older version". Its postinstall script skips the archive
-  and the Whisper files when they are complete, as on Windows. Quit the app before installing.
+  and the component is not skipped for being "the same or an older version". Its postinstall script skips the files
+  that are complete, as on Windows. Quit the app before installing.
 * **What an update keeps.** The settings (every option in the settings panel, the window size and position, the tab
   last used), the history and everything the app downloaded itself are outside the program folder: the settings are in
   the registry (`HKEY_CURRENT_USER\Software\Audio Cleaner`) or the macOS preferences, the history and the app's own
@@ -552,8 +535,9 @@ next release of the app. To stop the copies, delete the secrets or the workflows
 
 ## Owner to-do before the first release
 
-* Check that the "Model downloads exist" job is green (`release_models.py --check`: the pinned speech model files on
-  Hugging Face, and the models archive in a release).
+* Upload the models repository (`SilverJunk08/audio-cleaner-models`, layout in `resources.py`), set
+  `HF_MODELS_REVISION` in `config.py` to its full commit id, and check that the "Model downloads exist" job is green
+  (`check_model_urls.py`: the pinned files on Hugging Face).
 
 * Set the Apple and Azure secrets if you want signed installers (optional).
 * Add the secret `UPDATE_SIGNING_KEY` (the contents of `~/audio-cleaner/secrets/update-signing-key.pem`) so releases get

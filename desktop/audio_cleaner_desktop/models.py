@@ -3,21 +3,21 @@
 The installer stays small: noise removal (libDF + the DeepFilterNet3 models, a few MB) works straight
 after installing, and the large models (subtitles, restoring highs, rebuilding the voice) are fetched by the
 installer's own setup. The app only downloads them itself when the user asks for it (a Download button
-after a setup download failed). Every file is pinned by URL (a fixed revision or release), size and
-SHA-256. A download goes into
-`<id>.partial/`, can resume after an interruption, is checked file by file and only then becomes
+after a setup download failed). Every file is pinned by URL (a fixed revision), size and
+SHA-256, and every model is downloaded on its own: someone who only wants one model downloads only its files.
+A download goes into `<id>.partial/`, can resume after an interruption, is checked file by file and only then becomes
 `<id>/`, so a half-finished or tampered model is never used. After that the app works offline.
 
-Some models do not come as single files but together in one zip archive (the two ONNX models, with their licence
-texts): such a model has an `archive`. The archive is downloaded once into `<archive>.partial/` (resumable, its
-SHA-256 checked), every member the models need is unpacked from it as a stream into the models' own `.partial`
-folders and checked again by size and SHA-256, the models are put in place and the archive is deleted. Downloading
-one model of an archive installs all the models that share it (one download).
+A model can also have licence texts (`licences`, paths like `LICENSES/<name>` inside its folder). They are downloaded
+with it, checked the same way, and are not part of what makes the model complete: they are not in `files`, not in the
+`.complete` marker and not in the `.partial` pin, so a copy installed before the texts were fetched separately (the
+old models archive, setup of an older version) still counts as installed and is never downloaded again for them.
 
-Changing a model (a new revision, a new archive) is safe: the old copy no longer matches the catalog, so it does not
+Changing a model (a new revision) is safe: the old copy no longer matches the catalog, so it does not
 count as installed, and nothing half-finished from the old one is resumed (a `.partial` folder is pinned to the hashes
 it is for). The app downloads the new version by itself when the old one was there (outdated()), and removes what is
-left of the old one afterwards (remove_stale()).
+left of the old one afterwards (remove_stale(), which also clears the `.partial` folders of the models archive that
+older versions used).
 """
 from __future__ import annotations
 
@@ -30,7 +30,6 @@ import sys
 import threading
 import urllib.parse
 import urllib.request
-import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,25 +50,6 @@ class ModelFile:
     url: str
     size: int
     sha256: str
-    member: str = ""  # a file of an archive: its path inside the archive (then `url` is empty)
-
-
-@dataclass(frozen=True)
-class ModelArchive:
-    """One zip file that holds the files of several models and shared files (licence texts)."""
-    name: str  # file name of the archive
-    url: str
-    size: int
-    sha256: str
-    shared: tuple[ModelFile, ...] = ()  # unpacked into the models folder itself (path relative to it, e.g. LICENSES/x.txt)
-
-    @property
-    def file(self) -> ModelFile:
-        return ModelFile(self.name, self.url, self.size, self.sha256)
-
-    @property
-    def unpacked_size(self) -> int:
-        return sum(f.size for f in self.shared)
 
 
 @dataclass(frozen=True)
@@ -79,17 +59,12 @@ class SpeechModel:
     description: str
     licence: str  # one line for the About box
     files: tuple[ModelFile, ...]
-    archive: ModelArchive | None = None  # when set, `files` are members of this archive
+    licences: tuple[ModelFile, ...] = ()  # licence texts that come with it (see the module docstring)
 
     @property
     def size(self) -> int:
         """Size of the model's files once installed."""
         return sum(f.size for f in self.files)
-
-    @property
-    def download_size(self) -> int:
-        """What has to be downloaded for it: the archive as a whole, or its files."""
-        return self.archive.size if self.archive is not None else self.size
 
 
 class DownloadError(Exception):
@@ -132,14 +107,19 @@ def models_dir() -> Path:
     return app_data_dir() / "models"
 
 
-def licences_dir() -> Path | None:
-    """The folder with the licence texts that came with the downloaded models (LICENSES, next to the models),
-    from the app's own download or setup's; None when there is none."""
-    candidates = [models_dir() / "LICENSES"]
+def licence_dirs() -> list[Path]:
+    """The folders with licence texts that came with the downloaded models: each installed model's own `LICENSES`
+    folder, and the shared `LICENSES` folder next to the models that setup or the old models archive left."""
+    dirs = [d / "LICENSES" for m in CATALOG.values() if (d := location(m)) is not None]
+    dirs.append(models_dir() / "LICENSES")
     installed = installer_models_dir()
     if installed is not None:
-        candidates.append(installed / "LICENSES")
-    return next((d for d in candidates if d.is_dir()), None)
+        dirs.append(installed / "LICENSES")
+    seen: list[Path] = []
+    for d in dirs:
+        if d.is_dir() and d not in seen:
+            seen.append(d)
+    return seen
 
 
 def model_dir(model: SpeechModel) -> Path:
@@ -168,9 +148,7 @@ def _sizes_match(d: Path, model: SpeechModel) -> bool:
 
 
 def pin_token(model: SpeechModel) -> str:
-    """What a `.partial` folder of `model` is pinned to: the hashes of its files (an archive model: the archive's)."""
-    if model.archive is not None:
-        return model.archive.sha256
+    """What a `.partial` folder of `model` is pinned to: the hashes of its files."""
     return "\n".join(f.sha256 for f in model.files)
 
 
@@ -241,31 +219,11 @@ def _installer_file(model: SpeechModel, f: ModelFile) -> Path | None:
         return None
 
 
-def _archive_dir(archive: ModelArchive) -> Path:
-    """Where the archive is downloaded to: `<name without .zip>.partial` in the models folder."""
-    return models_dir() / f"{Path(archive.name).stem}.partial"
-
-
-def _archive_have(archive: ModelArchive) -> int:
-    """Bytes of the archive already on disk (a finished download, or what a resumed one starts from)."""
-    d = _archive_dir(archive)
-    if not _pinned(d, archive.sha256):
-        return 0  # started for another archive (or by an older app): not resumed
-    for p in (d / archive.name, d / (archive.name + ".part")):
-        if p.is_file():
-            return min(p.stat().st_size, archive.size)
-    return 0
-
-
 def missing_bytes(model: SpeechModel) -> int:
     """How much is still to download (a resumed download counts what is already there, and so do the
     files setup managed to install)."""
     if is_installed(model):
         return 0
-    if model.archive is not None:
-        if all(_installer_file(model, f) is not None for f in model.files):
-            return 0  # setup installed all of it; the sha256 check happens when it is reused
-        return model.archive.size - _archive_have(model.archive)
     part = models_dir() / f"{model.id}.partial"
     pinned = _pinned(part, pin_token(model))
     have = 0
@@ -284,16 +242,8 @@ def missing_bytes(model: SpeechModel) -> int:
 
 
 def download_bytes(models_: "list[SpeechModel] | tuple[SpeechModel, ...]") -> int:
-    """What downloading all of `models_` takes: models that share an archive count it once."""
-    seen: set[str] = set()
-    total = 0
-    for m in models_:
-        if m.archive is None:
-            total += m.size
-        elif m.archive.url not in seen:
-            seen.add(m.archive.url)
-            total += m.archive.size
-    return total
+    """What downloading all of `models_` takes."""
+    return sum(m.size for m in models_)
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -392,15 +342,6 @@ def fetch_file(url: str, dest: Path, size: int, sha256: str, progress: Progress 
     _fetch(f, dest, 0, size, progress, cancel, opener or https_opener(), user_agent)
 
 
-_ARCHIVE_LOCKS: dict[str, threading.Lock] = {}
-_ARCHIVE_LOCKS_GUARD = threading.Lock()
-
-
-def _archive_lock(archive: ModelArchive) -> threading.Lock:
-    with _ARCHIVE_LOCKS_GUARD:
-        return _ARCHIVE_LOCKS.setdefault(archive.url, threading.Lock())
-
-
 def _check_disk(root: Path, need: int) -> None:
     free = shutil.disk_usage(root).free
     if need + (64 << 20) > free:
@@ -410,19 +351,7 @@ def _check_disk(root: Path, need: int) -> None:
 
 
 def download(model: SpeechModel, progress: Progress | None = None, cancel: threading.Event | None = None) -> Path:
-    """Download (or finish downloading) `model`; returns its folder. Raises DownloadError or Cancelled.
-    A model that comes in an archive installs every model of that archive (one download)."""
-    if model.archive is not None:
-        lock = _archive_lock(model.archive)
-        while not lock.acquire(timeout=0.2):  # another model of the same archive is being fetched: wait for it
-            if cancel is not None and cancel.is_set():
-                raise Cancelled
-        try:
-            if is_installed(model):
-                return location(model)
-            return _download_from_archive(model, progress, cancel)
-        finally:
-            lock.release()
+    """Download (or finish downloading) `model`; returns its folder. Raises DownloadError or Cancelled."""
     final = model_dir(model)
     if is_installed(model):
         return location(model)
@@ -430,8 +359,8 @@ def download(model: SpeechModel, progress: Progress | None = None, cancel: threa
     root.mkdir(parents=True, exist_ok=True)
     part = root / f"{model.id}.partial"
     _claim(part, pin_token(model))
-    _check_disk(root, missing_bytes(model))
-    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _HttpsRedirects())
+    _check_disk(root, missing_bytes(model) + sum(f.size for f in model.licences))
+    opener = https_opener()
     done = 0
     for f in model.files:
         dest = part / f.path
@@ -441,6 +370,11 @@ def download(model: SpeechModel, progress: Progress | None = None, cancel: threa
         done += f.size
         if progress is not None:
             progress(done, model.size)
+    for f in model.licences:  # small texts: no progress; they are checked like the files but are not part of the marker
+        dest = part / f.path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if not (dest.is_file() and dest.stat().st_size == f.size):
+            _fetch(f, dest, done, model.size, None, cancel, opener)
     return _put_in_place(model, part, final)
 
 
@@ -453,108 +387,8 @@ def _put_in_place(model: SpeechModel, part: Path, final: Path) -> Path:
     return final
 
 
-def _group(model: SpeechModel) -> list[SpeechModel]:
-    """`model` and the other catalog models that come from the same archive."""
-    return [model] + [m for m in CATALOG.values() if m.id != model.id and m.archive == model.archive]
-
-
-def _verified_archive(archive: ModelArchive, dest: Path, cancel: threading.Event | None) -> bool:
-    """An archive downloaded earlier (kept when unpacking was interrupted) that still checks out."""
-    if not dest.is_file():
-        return False
-    if dest.stat().st_size == archive.size and _sha256(dest, cancel) == archive.sha256:
-        return True
-    dest.unlink(missing_ok=True)
-    return False
-
-
-def _unpack_member(zf: zipfile.ZipFile, f: ModelFile, dest: Path, cancel: threading.Event | None) -> None:
-    """Stream archive member `f.member` to `dest`, checking size and SHA-256 on the way; never reads a whole
-    file into memory, stops between chunks when cancelled, leaves nothing half-written."""
-    tmp = dest.with_name(dest.name + ".unpack")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        try:
-            info = zf.getinfo(f.member or f.path)
-        except KeyError:
-            raise DownloadError(f"{f.member or f.path} is missing in the downloaded archive. Please try again later.") from None
-        h = hashlib.sha256()
-        n = 0
-        with zf.open(info) as src, open(tmp, "wb") as out:
-            while chunk := src.read(_CHUNK):
-                if cancel is not None and cancel.is_set():
-                    raise Cancelled
-                out.write(chunk)
-                h.update(chunk)
-                n += len(chunk)
-        if n != f.size or h.hexdigest() != f.sha256:
-            raise DownloadError(f"{f.path} in the downloaded archive is not what it should be. Please try again.")
-        os.replace(tmp, dest)
-    except zipfile.BadZipFile as e:
-        raise DownloadError(f"The downloaded archive is damaged ({e}). Please try again.") from e
-    except OSError as e:
-        raise DownloadError(f"{f.path} could not be unpacked ({e}).") from e
-    finally:
-        tmp.unlink(missing_ok=True)
-
-
-def _download_from_archive(model: SpeechModel, progress: Progress | None, cancel: threading.Event | None) -> Path:
-    archive = model.archive
-    assert archive is not None
-    root = models_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    todo = [m for m in _group(model) if not is_installed(m)]
-    stages = {m.id: root / f"{m.id}.partial" for m in todo}
-    arch_dir = _archive_dir(archive)
-    arch_path = arch_dir / archive.name
-    total = archive.size
-    try:
-        for d in stages.values():  # anything in there is from an older attempt: start clean
-            shutil.rmtree(d, ignore_errors=True)
-        seeded: set[tuple[str, str]] = set()
-        for m in todo:  # files setup installed with a matching hash are not unpacked again
-            for f in m.files:
-                dest = stages[m.id] / f.path
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                if _seed(m, f, dest, cancel):
-                    seeded.add((m.id, f.path))
-        unpack = [(m, f) for m in todo for f in m.files if (m.id, f.path) not in seeded]
-        if unpack:
-            _claim(arch_dir, archive.sha256)
-            # the archive and everything unpacked from it exist side by side until the archive is deleted
-            _check_disk(root, archive.size - _archive_have(archive) + sum(f.size for _, f in unpack) + archive.unpacked_size)
-            if not _verified_archive(archive, arch_path, cancel):
-                opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _HttpsRedirects())
-                _fetch(archive.file, arch_path, 0, total, progress, cancel, opener)
-            try:
-                with zipfile.ZipFile(arch_path) as zf:
-                    for m, f in unpack:
-                        _unpack_member(zf, f, stages[m.id] / f.path, cancel)
-                    for f in archive.shared:
-                        _unpack_member(zf, f, root / f.path, cancel)
-            except DownloadError:
-                arch_path.unlink(missing_ok=True)  # does not match the catalog: fetch it again next time
-                raise
-            except zipfile.BadZipFile as e:
-                arch_path.unlink(missing_ok=True)
-                raise DownloadError(f"The downloaded archive is damaged ({e}). Please try again.") from e
-        if progress is not None:
-            progress(total, total)
-        for m in todo:
-            _put_in_place(m, stages[m.id], model_dir(m))
-    except BaseException:
-        for d in stages.values():
-            shutil.rmtree(d, ignore_errors=True)
-        raise
-    shutil.rmtree(arch_dir, ignore_errors=True)
-    return model_dir(model)
-
-
 def remove(model: SpeechModel) -> None:
-    dirs = [model_dir(model), models_dir() / f"{model.id}.partial"]
-    if model.archive is not None:
-        dirs.append(_archive_dir(model.archive))
-    for d in dirs:
+    for d in (model_dir(model), models_dir() / f"{model.id}.partial"):
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -608,15 +442,14 @@ def remove_stale(catalog: "list[SpeechModel] | tuple[SpeechModel, ...] | None" =
     * A model folder (it has a `.complete` marker) in the app's models folder whose marker names other hashes than the
       catalog's entry of that id goes when the current model is installed (in either place).
     * A model folder of an id that is not in the catalog any more, and a `.partial` folder that is not the current
-      download of a catalog model or archive (another revision, an older archive), go when no model still waits for
-      its update.
+      download of a catalog model (another revision; the folders of the old models archive), go when no model still
+      waits for its update.
     * The same for the installer's folder ({app}\\models, /Library/Application Support/...), but only where this user
       may delete: otherwise it stays (the next interactive setup forgets what is stale).
     * Nothing else is touched: the LICENSES folder, folders without a marker and files are left alone, so a models
       folder that also holds other things is safe.
     """
     cat = {m.id: m for m in (CATALOG.values() if catalog is None else catalog)}
-    archives = {Path(m.archive.name).stem: m.archive.sha256 for m in cat.values() if m.archive is not None}
     waiting = any(needs_update(m) for m in cat.values())
     removed: list[Path] = []
 
@@ -630,8 +463,6 @@ def remove_stale(catalog: "list[SpeechModel] | tuple[SpeechModel, ...] | None" =
                 stem = d.name[: -len(".partial")]
                 if stem in cat:
                     keep = _pinned(d, pin_token(cat[stem]))
-                elif stem in archives:
-                    keep = _pinned(d, archives[stem])
                 else:
                     keep = waiting  # an orphan: only after the updates are done
                 if not keep:

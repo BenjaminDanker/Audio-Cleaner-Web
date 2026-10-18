@@ -176,13 +176,3 @@ def test_automatic_rebuilding_offers_the_download_but_never_holds_up_cleaning(qa
         w.queue.shutdown()
         w.history.close()
         w._pool.waitForDone()
-
-
-def test_the_two_onnx_models_share_one_archive_so_it_is_counted_once():
-    """Restoring highs and rebuilding the voice come from one archive, so the downloads count it once."""
-    from audio_cleaner_desktop import resources
-
-    archive = resources.MODELS_ARCHIVE
-    assert resources.HIGHS_MODEL.archive == resources.VOICE_MODEL.archive == archive
-    assert models.download_bytes([resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL]) == (
-        resources.SPEECH_MODEL.size + archive.size)

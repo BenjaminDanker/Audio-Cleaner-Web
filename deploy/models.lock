@@ -14,31 +14,28 @@
 # local: files that cannot be traced to a download: --check verifies that they exist and match (a different hash
 #   is reported as "changed", not as an error: a rebuild legitimately differs); nothing fetches them.
 # To change a pin: download the new file, run sha256sum on it, and replace the URL, sha256 and size here.
-#   Keep Hugging Face URLs on a commit id, never "main".
-# Our models archive is released once per version, like the apps: models-vN holds the complete set and is never changed
-#   after it is published; new or changed models are a new release models-vN+1 (gh release create), which the server
-#   (here) and the desktop app (resources.MODELS_ARCHIVE) then pin. The download server serves every archive listed
-#   here, so keep an older archive line while an app version still in use pins it.
+#   Keep Hugging Face URLs on a commit id, never "main". (The free tools' models are not here: visitors' browsers
+#   download them from Hugging Face themselves, pinned in web/src/media/models.js.)
+# Our own models (the ones we convert or export) are in the Hugging Face repo SilverJunk08/audio-cleaner-models, pinned
+#   to one commit like every other Hugging Face file: the desktop app (resources.py) and the website (web/src/media)
+#   pin the same commit. New or changed models are a new commit there; then update the pins here and in those places.
 #
 # Sources (all verified byte for byte against the files in production on 2026-10-15):
 #   DeepFilterNet3        github.com/Rikorose/DeepFilterNet, the commit libDF is built from (native/deepfilter/build.sh)
 #   DPDFNet-8             Ceva-IP/DPDFNet, Apache-2.0: our export with a dynamic batch (tools/export_dpdfnet_batch.py) of the
-#                         published weights (Ceva-IP/DPDFNet commit dd6818d, code 9bd9844), published in the models-v2 release archive
+#                         published weights (Ceva-IP/DPDFNet commit dd6818d, code 9bd9844), in SilverJunk08/audio-cleaner-models
 #   Whisper large-v3-turbo, small, base   CTranslate2 conversions (faster-whisper): dropbox-dash/faster-whisper-large-v3-turbo
 #                         (renamed from mobiuslabsgmbh/...), Systran/faster-whisper-small, Systran/faster-whisper-base
 #                         (base only detects the spoken language: runner.py, docs/research/heavy-2026-10.md)
 #   Parakeet TDT v2, v3   istupakov/parakeet-tdt-0.6b-v{2,3}-onnx (onnx-asr layout), CC-BY-4.0
 #   Silero VAD            istupakov/silero-vad-onnx (what onnx-asr downloads), MIT
 #   Live captions         csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8
-#   Free subtitles        onnx-community/whisper-base (OpenAI Whisper base, MIT), 8-bit ONNX: runs in the visitor's
-#                         browser; web/scripts/sync-dfn.mjs copies it into the site (served from the VPS, signed-in only)
-#   AP-BWE, Sidon ONNX    our conversions (tools/export_apbwe_onnx.py, tools/convert_sidon_onnx.py), published as the
-#                         models-v2 release archive (the one complete set: every model we convert ourselves); the Sidon TorchScript files come from sarulab-speech/sidon-v0.1
+#   AP-BWE, Sidon ONNX    our conversions (tools/export_apbwe_onnx.py, tools/convert_sidon_onnx.py), in
+#                         SilverJunk08/audio-cleaner-models; the Sidon TorchScript files come from sarulab-speech/sidon-v0.1
 #   FFmpeg / FFprobe      BtbN/FFmpeg-Builds autobuild-2026-10-09-14-16 (n8.1.3-16-ge0a878dd70, GPL, static).
 #                         BtbN prunes old daily builds: if this URL ever 404s, take a build that is still there,
-#                         replace the btbn-ffmpeg archive line and the two bin/ lines, and mirror the tarball in our own release.
+#                         replace the btbn-ffmpeg archive line and the two bin/ lines, and keep a copy of the tarball somewhere we control.
 #
-archive  -         1c58ce59bdb9dfd41c4aabd0ae93e113604f3c75ac664d1b9130f555ab650d04   922088329 models-v2                                            https://github.com/BenjaminDanker/Audio-Cleaner-Web/releases/download/models-v2/AudioCleaner-models-v2.zip
 archive  -         968255015cc65dd999a7eddf8016be89a8a1bbef063ea7d3e9c3a229b0f6faaf  150350364 btbn-ffmpeg                                          https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-09-14-16/ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1.tar.xz
 
 
@@ -47,14 +44,7 @@ file     -         4f04431988472f8c7b815f942aa6901976929c9e22353029681fcdb262da0
 file     -         100c5616929a131b5b3c8c8ab0d83aaba2cdcae163acd8d190b4e5ffa5f7d051  131507603 models/captions-en/encoder.int8.onnx                 https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/encoder.int8.onnx
 file     -         d2d8e7290a6a8245a83ed211aa0dd8cdf8effb8a7c64fe392399561111b52f30    1408182 models/captions-en/joiner.int8.onnx                  https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/joiner.int8.onnx
 file     -         618dc110fc2213886b52e063ff42329bbdf37a266ca7705184090fa5f39f3131      11896 models/captions-en/tokens.txt                        https://huggingface.co/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-480ms-int8/resolve/df8ed95e44a70924450381e610770f9d656d1e15/tokens.txt
-file     -         f4d0608f7d918166da7edb3e188de5ef1bfe70d9802e785d271fd88111e9cf4b       2243 models/browser/whisper-base/config.json                              https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/config.json
-file     -         61070cf8de25b1e9256e8e102ded49d8d24a8369ed36ef84fdf21549e68125a0       3832 models/browser/whisper-base/generation_config.json                   https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/generation_config.json
-file     -         a6a76d28c93edb273669eb9e0b0636a2bddbb1272c3261e47b7ca6dfdbac1b8d        339 models/browser/whisper-base/preprocessor_config.json                 https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/preprocessor_config.json
-file     -         27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566    2480466 models/browser/whisper-base/tokenizer.json                           https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/tokenizer.json
-file     -         2e036e4dbacfdeb7242c7d4ec4149f4a16e86026048f94d1637e3a8ee9c6a573     282682 models/browser/whisper-base/tokenizer_config.json                    https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/tokenizer_config.json
-file     -         5862993336bf33acd23736071aae2b32261d3b1b2f37780194460d4ef974dd46   23201314 models/browser/whisper-base/onnx/encoder_model_quantized.onnx        https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/onnx/encoder_model_quantized.onnx
-file     -         fa3ef9902734ce5ae6f9ef2bdb2ba9a6c4b5785b09f4f420ce036573dc9d090b   53693315 models/browser/whisper-base/onnx/decoder_model_merged_quantized.onnx https://huggingface.co/onnx-community/whisper-base/resolve/1846881b6b3a3024392c1eea3ad983695bc23925/onnx/decoder_model_merged_quantized.onnx
-member   -         b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa   14777093 models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx          models-v2:dpdfnet/dpdfnet8_48khz_hr_batch.onnx
+file     -         b50417b070e63b22d32c3ab4e2ee056805cb8bc5ca8db053b1ce937bfc41bdaa   14777093 models/dpdfnet/dpdfnet8_48khz_hr_batch.onnx          https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/dpdfnet/dpdfnet8_48khz_hr_batch.onnx
 file     -         666903c76b9798caf2c210afd4f6cd60b08a8dbf9800ec8d7a3bc0d2148ac466         97 models/parakeet-v2/config.json                       https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/config.json
 file     -         cbb52a07bd70ab5b67f8439d4b3cd8704b18467b4430bcacb5adabe154b8d191   35792059 models/parakeet-v2/decoder_joint-model.onnx          https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/decoder_joint-model.onnx
 file     -         3987bcd28175d829d12888a996a84e8f62a0e374d9ffd640662c1515adc679d3   41770866 models/parakeet-v2/encoder-model.onnx                https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85/encoder-model.onnx
@@ -88,14 +78,14 @@ file     -         34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453
 
 member   -         329540e2635d1cceebf9ecb716b15e6bdfa434d43b8467138c946ecccc099890  172328840 bin/ffmpeg                                           btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffmpeg
 member   -         94ec62142287906e2c17711b06f1fbe4fd2a2632e241f2786b6cd6ef4ee5c7a2  172095304 bin/ffprobe                                          btbn-ffmpeg:ffmpeg-n8.1.3-16-ge0a878dd70-linux64-gpl-8.1/bin/ffprobe
-member   -         eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618  119093242 models/ap-bwe/12kto48k.onnx                          models-v2:ap-bwe/12kto48k.onnx
-member   -         ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44  119093242 models/ap-bwe/16kto48k.onnx                          models-v2:ap-bwe/16kto48k.onnx
-member   -         e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55  119093242 models/ap-bwe/24kto48k.onnx                          models-v2:ap-bwe/24kto48k.onnx
-member   -         788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3  119093242 models/ap-bwe/8kto48k.onnx                           models-v2:ap-bwe/8kto48k.onnx
-member   -         08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4  104975475 models/sidon/sidon_dec.onnx                          models-v2:sidon/sidon_dec.onnx
-member   -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75  397857704 models/sidon/sidon_fe.onnx                           models-v2:sidon/sidon_fe.onnx
+file     -         eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618  119093242 models/ap-bwe/12kto48k.onnx                          https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/ap-bwe/12kto48k.onnx
+file     -         ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44  119093242 models/ap-bwe/16kto48k.onnx                          https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/ap-bwe/16kto48k.onnx
+file     -         e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55  119093242 models/ap-bwe/24kto48k.onnx                          https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/ap-bwe/24kto48k.onnx
+file     -         788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3  119093242 models/ap-bwe/8kto48k.onnx                           https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/ap-bwe/8kto48k.onnx
+file     -         08c7547572f000d964f7dc3ef120fdf155c2d936721d9d320d20c6c4a1d652c4  104975475 models/sidon/sidon_dec.onnx                          https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/sidon/sidon_dec.onnx
+file     -         76222cc7f4dd95eb3d137d81783e73b69b00cab66b65a91790e0e72c96452a75  397857704 models/sidon/sidon_fe.onnx                           https://huggingface.co/SilverJunk08/audio-cleaner-models/resolve/PENDING-UPLOAD/sidon/sidon_fe.onnx
 
 local    optional  f4dd2f350f3d41dee721567b7d5c351cb7122c27be9b8fc110ad7cf721e62b1f   15361376 bin/libdf-tract021.so                                older libDF build (tract 0.21), only used by native/deepfilter/test_native.py to compare outputs
 local    -         20383b5926de53220c65c7d0cb1895f73bf0b16947c920a588c1af6907f2c890   25399704 bin/libdf.so                                         built by native/deepfilter/build.sh (pinned DeepFilterNet commit + tract-0.23.patch); a rebuild may differ byte for byte
 local    optional  d99358ebe4081f13c0ba12cb79e9d77bc9707dfda9ad4151d5ef5f2afaee4caa      15013 wasm/df.js                                           browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
-local    optional  8ed0596104271ff3503d79ae1571b4e5674d20f32982d0781b80c70f1c4ac4c1   14028025 wasm/df_bg.wasm                                      browser build of libDF (native/deepfilter/build.sh); published to the website by deploy/publish-web.sh
+local    optional  8ed0596104271ff3503d79ae1571b4e5674d20f32982d0781b80c70f1c4ac4c1   14028025 wasm/df_bg.wasm                                      browser build of libDF (native/deepfilter/build.sh); visitors download it from Hugging Face (web/src/media/models.js pins it)

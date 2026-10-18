@@ -1,7 +1,8 @@
 // Live captions (Live page): the free test in the browser (nothing sent to us), the paid test from start to stop with a change
 // made while it runs, its price against the server's list, a full service answered with one-click alternatives, premium captions
 // shown as they arrive, the OBS plugin downloads, and the session charged in the ledger.
-// The paid checks run against the local backend (port 8792); the full-service and captions checks use a mocked socket.
+// The browser sends and gets back Opus (WebCodecs) where it can, PCM where it cannot: both are run end to end and the codec byte of every
+// audio frame is read. The paid checks run against the local backend (port 8792); the full-service and captions checks use a mocked socket.
 // Usage: node tests/live.mjs
 import { join } from 'node:path';
 import { BASE, FILES, SHOTS, check, launch, signIn, summary } from './helpers.mjs';
@@ -16,10 +17,22 @@ page.on('websocket', (ws) => {
   ws.on('framesent', (f) => { if (typeof f.payload === 'string') { if (!wsFrames.start && f.payload.includes('"start"')) wsFrames.start = f.payload; wsFrames.textIn.push('>' + f.payload); } });
   ws.on('framereceived', (f) => { if (typeof f.payload === 'string') wsFrames.textIn.push('<' + f.payload.slice(0, 160)); });
 });
+/** The codec byte (header byte 1: 1 PCM, 3 Opus, 4 silence) of every binary frame this page sends and receives. */
+const codecsOf = (pg) => {
+  const c = { sent: new Set(), recv: new Set() };
+  pg.on('websocket', (ws) => {
+    ws.on('framesent', (f) => { if (typeof f.payload !== 'string') c.sent.add(f.payload[1]); });
+    ws.on('framereceived', (f) => { if (typeof f.payload !== 'string') c.recv.add(f.payload[1]); });
+  });
+  return c;
+};
+/** The "Cleaned level" meter moves only when frames that came back were decoded. */
+const heardBack = (pg) => pg.waitForFunction(() => document.querySelectorAll('meter.level')[1]?.value > 0.001, null, { timeout: 15000 });
+const mainCodecs = codecsOf(page);
 const rate = (usd) => `$${(usd || 0).toFixed(4).replace(/(\.\d\d\d*?)0+$/, '$1')}`; // the page's own price rounding
-const paidTest = async () => {
-  await page.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
-  await page.getByTestId('live-free-hint').waitFor();
+const paidTest = async (pg = page) => {
+  await pg.getByTestId('live-mode').locator('label', { hasText: 'Paid, done on our side' }).click();
+  await pg.getByTestId('live-free-hint').waitFor();
 };
 
 await signIn(page, EMAIL);
@@ -70,6 +83,8 @@ await check('live, paid test: the price is the server\'s for the chosen captions
   if (!start || start.sampleRate !== 48000 || start.denoise !== 'light' || start.captions !== 'local') throw new Error('start message: ' + wsFrames.start);
   const stats = page.getByTestId('live-stats');
   await page.waitForFunction(() => Number(document.querySelector('[data-testid=live-stats]')?.getAttribute('data-recv')) > 50, null, { timeout: 30000 });
+  await heardBack(page);
+  if ([...mainCodecs.sent].join() !== '3' || mainCodecs.recv.has(1)) throw new Error(`codecs: sent ${[...mainCodecs.sent]}, received ${[...mainCodecs.recv]} (3 is Opus)`);
   const before = Number(await priceEl.getAttribute('data-usd-per-minute'));
   const answers = () => wsFrames.textIn.filter((t) => t.startsWith('<{"type":"config"'));
   const n = answers().length;
@@ -88,6 +103,27 @@ await check('live, paid test: the price is the server\'s for the chosen captions
   await page.getByTestId('live-stop').click();
   await page.getByTestId('live-start').waitFor({ timeout: 15000 });
   return `price ${before} -> ${after} a minute; refused: ${why}`;
+});
+
+await check('live, paid, a browser without WebCodecs Opus (AudioEncoder removed): the audio goes out as PCM and the cleaned audio comes back and is heard', async () => {
+  const f = await launch(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${wav}`]);
+  const c = codecsOf(f.page);
+  try {
+    await f.page.addInitScript(() => { delete window.AudioEncoder; delete window.AudioDecoder; });
+    await signIn(f.page, EMAIL);
+    await f.page.goto(`${BASE}/app/live`);
+    await paidTest(f.page);
+    await f.page.getByTestId('live-start').click();
+    await f.page.getByTestId('live-stop').waitFor({ timeout: 30000 });
+    await f.page.waitForFunction(() => Number(document.querySelector('[data-testid=live-stats]')?.getAttribute('data-recv')) > 50, null, { timeout: 30000 });
+    await heardBack(f.page);
+    await f.page.getByTestId('live-stop').click();
+    await f.page.getByTestId('live-start').waitFor({ timeout: 15000 });
+    if ([...c.sent].join() !== '1' || c.recv.has(3)) throw new Error(`codecs: sent ${[...c.sent]}, received ${[...c.recv]} (1 is PCM)`);
+    return `sent codec ${[...c.sent]}, received ${[...c.recv]}`;
+  } finally {
+    await f.browser.close();
+  }
 });
 
 await check('live, paid: the session is charged in the ledger', async () => {

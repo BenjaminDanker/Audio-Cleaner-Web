@@ -7,6 +7,7 @@ import textwrap
 import threading
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from acw import db, jobs
@@ -52,7 +53,8 @@ def _stage_with(monkeypatch, d, returncode, oom):
 
     (d / "spec.json").write_text("{}")
     monkeypatch.setattr(W, "oom_kills", lambda it=iter(oom): next(it))
-    monkeypatch.setattr(W.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(
+    W.started_env = []
+    monkeypatch.setattr(W.subprocess, "Popen", lambda *a, **kw: W.started_env.append(kw["env"]) or SimpleNamespace(
         stdout=iter(()), stderr=iter(()), poll=lambda: 0, wait=lambda: 0, returncode=returncode, pid=1))
     return W
 
@@ -77,6 +79,7 @@ def test_a_runner_that_dies_is_an_oom_failure_an_interruption_or_a_plain_failure
             with pytest.raises(W.StageFailed) as e:
                 W.run_stage(job, d, "main", 10)
             assert (e.value.user_message == W.OOM_MESSAGE) == (outcome == "oom")
+            assert W.started_env[0]["OPENBLAS_NUM_THREADS"] == W.started_env[0]["MKL_NUM_THREADS"] == "1"  # numpy's own pool
             if outcome == "oom":
                 assert "not charged" in W.OOM_MESSAGE and "memory" in W.OOM_MESSAGE
     finally:
@@ -189,3 +192,29 @@ def test_the_ceiling_still_stops_a_stage_that_never_finishes(monkeypatch):
     with pytest.raises(W.StageFailed) as e:  # keeps reporting tiny steps forever: stopped at 3 x the limit
         _run_main(monkeypatch, {"steps": [[0.1 + i * 0.3, 5 + i] for i in range(40)], "finish": 60}, 1)
     assert "took too long" in e.value.user_message
+
+
+def test_a_job_that_transcribes_and_cleans_decodes_the_file_once(tmp_path, monkeypatch):
+    """The 48 kHz decode made for cleaning also gives the recogniser its 16 kHz audio (no second decode of the file)."""
+    from acw.worker import runner
+    from acw_common import pipeline
+
+    class Stop(Exception):
+        pass
+
+    def stop(*a, **k):
+        raise Stop
+
+    calls = []
+    x = np.zeros((4800, 1), np.float32)
+    ff = SimpleNamespace(probe=lambda src: SimpleNamespace(audio_tracks=1), decode=lambda *a, **k: calls.append("decode 16 kHz"))
+    monkeypatch.setattr(runner, "_ff", lambda spec: ff)
+    monkeypatch.setattr(pipeline, "decode_for_clean", lambda *a, **k: calls.append("decode 48 kHz") or x)
+    monkeypatch.setattr(pipeline, "to_speech_16k", lambda y: calls.append("to 16 kHz") or y[:, 0])
+    monkeypatch.setattr(runner, "_write_asr_chunks", lambda *a, **k: calls.append("transcribe"))
+    monkeypatch.setattr(pipeline, "choose_noise_profile", stop)  # the cleaning starts: enough
+    spec = {"kind": "denoise_transcribe", "transcribe_tier": "premium", "options": {}, "output_stem": "t", "input": "t.wav",
+            "max_seconds": 600, "lib_path": "lib", "dfn_model": "model"}
+    with pytest.raises(Stop):
+        runner.stage_main(tmp_path, spec)
+    assert calls == ["decode 48 kHz", "to 16 kHz", "transcribe"]

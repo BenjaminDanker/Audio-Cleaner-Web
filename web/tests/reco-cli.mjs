@@ -4,18 +4,23 @@
 // --sampled: only the stretches the browser would decode (planWindows), as it does for a long file.
 // --first=10: only the first 10 seconds, as the live test hears them.   --reco: also print the recommendation.
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { Analyser, planWindows, RATE } from '../src/media/analysis.js';
 import { DfnStream, Pairer } from '../src/media/dfnstream.js';
 
 const DFN = new URL('../public/dfn/', import.meta.url);
+// The browser downloads these two from Hugging Face (src/media/models.js); here they are the same files, read from disk.
+const WASM = process.env.DFN_WASM || join(process.env.DFN_WASM_DIR || join(homedir(), 'audio-cleaner', 'wasm'), 'df_bg.wasm');
+const MODEL = process.env.DFN_MODEL || join(homedir(), 'audio-cleaner', 'models', 'DeepFilterNet3_onnx.tar.gz');
 let dfn = null;
 
-/** The site's own noise remover (public/dfn: df.js, df_bg.wasm, the model), loaded once in Node. */
+/** The site's own noise remover (df.js from public/dfn, df_bg.wasm and the model from disk), loaded once in Node. */
 export async function loadDfn() {
   if (!dfn) {
     const mod = await import(new URL('df.js', DFN).href);
-    mod.initSync({ module: readFileSync(new URL('df_bg.wasm', DFN)) });
-    dfn = { mod, model: new Uint8Array(readFileSync(new URL('DeepFilterNet3_onnx.tar.gz', DFN))) };
+    mod.initSync({ module: readFileSync(WASM) });
+    dfn = { mod, model: new Uint8Array(readFileSync(MODEL)) };
   }
   return dfn;
 }

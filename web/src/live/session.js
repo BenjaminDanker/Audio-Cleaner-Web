@@ -1,6 +1,7 @@
 // Browser live-denoise demo client for GET /api/stream/ws (docs/streaming-protocol.md).
-// mic (48 kHz mono, the browser removes speaker echo; its noise suppression and auto gain are off) -> capture worklet (20 ms frames) -> WebSocket (pcm_s16le + 16-byte header)
-// <- processed frames -> playback worklet (jitter buffer) -> speakers
+// mic (48 kHz mono, the browser removes speaker echo; its noise suppression and auto gain are off) -> capture worklet (20 ms frames)
+// -> Opus (WebCodecs, 64 kbit/s; pcm_s16le where the browser has no Opus encoder) + 16-byte header -> WebSocket
+// <- processed frames (the same codec) -> playback worklet (jitter buffer) -> speakers
 
 import { streamUrl } from '../api.js';
 import captureUrl from './capture.worklet.js?url';
@@ -8,6 +9,35 @@ import playbackUrl from './playback.worklet.js?url';
 
 const FRAME = 960;
 const HEADER = 16;
+const PCM = 1;
+const OPUS = 3;
+const SILENCE = 4;
+// Opus both ways: about 70 kbit/s instead of 770 kbit/s of PCM in each direction (the OBS plugin sends the same).
+const OPUS_BITRATE = 64000;
+const OPUS_CONFIG = { codec: 'opus', sampleRate: 48000, numberOfChannels: 1 };
+
+/** An Opus encoder and decoder from the browser (WebCodecs), or null where it has none: then the audio goes as PCM. */
+async function opusCodecs() {
+  try {
+    if (typeof AudioEncoder === 'undefined' || typeof AudioDecoder === 'undefined') return null;
+    const enc = { ...OPUS_CONFIG, bitrate: OPUS_BITRATE, bitrateMode: 'variable', opus: { frameDuration: 20000, complexity: 9 } };
+    const [e, d] = await Promise.all([AudioEncoder.isConfigSupported(enc), AudioDecoder.isConfigSupported(OPUS_CONFIG)]);
+    return e.supported && d.supported ? { enc: e.config, dec: d.config } : null;
+  } catch {
+    return null;
+  }
+}
+
+function header(codec, seq, tsUs, size) {
+  const out = new ArrayBuffer(HEADER + size);
+  const dv = new DataView(out);
+  dv.setUint8(0, 1);
+  dv.setUint8(1, codec);
+  dv.setUint16(2, 0, true);
+  dv.setUint32(4, seq >>> 0, true);
+  dv.setBigUint64(8, BigInt(Math.max(0, Math.round(tsUs))), true);
+  return out;
+}
 
 function peak(f32) {
   let p = 0;
@@ -93,11 +123,14 @@ export async function startLive(opts) {
   let statTimer = null;
   const pendingChanges = new Map(); // config id -> resolve(answer)
   let changeId = 0;
+  let encoder = null; // Opus (WebCodecs) while it works; null: PCM
+  let decoder = null;
 
   const cleanup = () => {
     if (closed) return;
     closed = true;
     clearInterval(statTimer);
+    for (const c of [encoder, decoder]) try { c?.state !== 'closed' && c?.close(); } catch { /* ignore */ }
     try { capture?.port && (capture.port.onmessage = null); } catch { /* ignore */ }
     stream?.getTracks().forEach((t) => t.stop());
     try { capture?.disconnect(); } catch { /* ignore */ }
@@ -142,7 +175,8 @@ export async function startLive(opts) {
       ws.onopen = () => {
         ws.send(JSON.stringify({
           type: 'start', version: 1, denoise: opts.denoise || null, captions: opts.captions || null,
-          language: opts.language || null, sampleRate: 48000, attenLimDb: opts.attenDb, client: 'acw-web-demo/1.0',
+          language: opts.language || null, sampleRate: 48000, attenLimDb: opts.attenDb, client: 'acw-web-demo/1.1',
+          opusBitrate: OPUS_BITRATE,
           ...(opts.translate?.length ? { translate: opts.translate } : {}),
         }));
       };
@@ -198,19 +232,72 @@ export async function startLive(opts) {
       rtts.push(lastRtt);
       if (rtts.length > 50) rtts.shift();
       recv++;
+      if (codec === OPUS) {
+        if (decoder?.state === 'configured') {
+          decoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: ts, data: new Uint8Array(buf, HEADER) }));
+        }
+        return;
+      }
       let f32;
-      if (codec === 1) {
+      if (codec === PCM) {
         const i16 = new Int16Array(buf, HEADER, (buf.byteLength - HEADER) >> 1);
         f32 = new Float32Array(i16.length);
         for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+      } else if (codec === SILENCE) {
+        f32 = new Float32Array(dv.getUint16(HEADER, true));
       } else {
         f32 = new Float32Array(buf.slice(HEADER));
       }
+      heard(f32);
+    };
+
+    /** Processed audio back from live: level meter and, when chosen, the speakers. */
+    function heard(f32) {
       outLevel = Math.max(outLevel * 0.85, peak(f32));
       if (monitor === 'processed') {
         playback.port.postMessage({ type: 'frame', samples: f32 }, [f32.buffer]);
       }
-    };
+    }
+
+    /** One 20 ms frame to live: PCM, with seq and the time it was captured (echoed back, for the round trip). */
+    function sendPcm(f32, tsUs) {
+      const out = header(PCM, seq++, tsUs, FRAME * 2);
+      const i16 = new Int16Array(out, HEADER, FRAME);
+      for (let i = 0; i < FRAME; i++) {
+        const s = Math.max(-1, Math.min(1, f32[i]));
+        i16[i] = s < 0 ? s * 32768 : s * 32767;
+      }
+      ws.send(out);
+    }
+
+    const codecs = await opusCodecs();
+    if (codecs) {
+      try {
+        encoder = new AudioEncoder({
+          output: (chunk) => {
+            if (stopping || ws.readyState !== WebSocket.OPEN) return;
+            const out = header(OPUS, seq++, chunk.timestamp, chunk.byteLength);
+            chunk.copyTo(new Uint8Array(out, HEADER));
+            ws.send(out);
+          },
+          error: () => { encoder = null; }, // from here on PCM (the service answers each frame in its own codec)
+        });
+        encoder.configure(codecs.enc);
+        decoder = new AudioDecoder({
+          output: (data) => {
+            const f32 = new Float32Array(data.numberOfFrames);
+            data.copyTo(f32, { planeIndex: 0, format: 'f32-planar' });
+            data.close();
+            heard(f32);
+          },
+          error: () => { decoder = null; },
+        });
+        decoder.configure(codecs.dec);
+      } catch {
+        encoder = null;
+        decoder = null;
+      }
+    }
 
     playback.port.onmessage = (e) => {
       if (e.data.type === 'stats') {
@@ -227,19 +314,12 @@ export async function startLive(opts) {
         playback.port.postMessage({ type: 'frame', samples: f32.slice() });
       }
       if (!ready || stopping || ws.readyState !== WebSocket.OPEN) return;
-      const out = new ArrayBuffer(HEADER + FRAME * 2);
-      const dv = new DataView(out);
-      dv.setUint8(0, 1);
-      dv.setUint8(1, 1); // pcm_s16le
-      dv.setUint16(2, 0, true);
-      dv.setUint32(4, seq++ >>> 0, true);
-      dv.setBigUint64(8, BigInt(Math.round(performance.now() * 1000)), true);
-      const i16 = new Int16Array(out, HEADER, FRAME);
-      for (let i = 0; i < FRAME; i++) {
-        const s = Math.max(-1, Math.min(1, f32[i]));
-        i16[i] = s < 0 ? s * 32768 : s * 32767;
+      const tsUs = performance.now() * 1000;
+      if (encoder?.state === 'configured') {
+        encoder.encode(new AudioData({ format: 'f32-planar', sampleRate: 48000, numberOfFrames: FRAME, numberOfChannels: 1, timestamp: tsUs, data: f32 }));
+      } else {
+        sendPcm(f32, tsUs);
       }
-      ws.send(out);
       sent++;
       const now = performance.now();
       if (now - lastStats > 200) {

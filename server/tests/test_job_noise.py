@@ -12,6 +12,7 @@ def _opts(**extra):
 
 def test_noise_defaults_to_auto_and_only_three_choices_are_taken():
     assert _opts()["noise"] == "auto"
+    assert _opts()["audio_format"] == "flac"  # the default output: lossless like WAV, about half the size
     for value in ("auto", "light", "heavy"):
         assert _opts(noise=value)["noise"] == value
     for value in ("loud", "", None, 3):

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from acw import broker
+from acw import broker, db
 from acw.billing import ledger
 from acw.config import get_settings
 from acw.stream import routes
@@ -184,9 +184,10 @@ def test_the_cores_in_use_are_published_for_file_jobs(client, signed_in, echo_wo
     uid, _ = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     seen = []
-    monkeypatch.setattr(broker, "publish_live_cores", lambda cores, data_dir=None: seen.append(sorted(cores)))
+    monkeypatch.setattr(broker, "publish_live_cores", lambda cores, data_dir=None, role="web": seen.append(sorted(cores)))
     _session(client, {"denoise": "light"}, [_pcm(0)])
     assert seen == [[0, 1], []]  # the engine said cores 0 and 1 (echo_worker's ready); free again afterwards
+    assert db.one("SELECT owner FROM stream_sessions")["owner"] == "web"  # the session records which process ran it
 
 
 def test_file_jobs_keep_off_live_cores_and_one_spare(tmp_path, monkeypatch):

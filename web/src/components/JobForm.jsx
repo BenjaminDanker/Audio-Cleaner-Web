@@ -264,7 +264,8 @@ export default function JobForm({ onSubmitted }) {
     setInfo(i);
     setProbing(false);
     // The noise remover is only fetched once it is clear that this file wants it (the quick listen below says), or when it can't be told.
-    if (i.hasAudio !== false && autoRef.current) listenTo(f, i, canBrowser);
+    // The quick listen needs the noise remover too, so a browser that asks to save data skips it: nothing is downloaded before Start.
+    if (i.hasAudio !== false && autoRef.current && !navigator.connection?.saveData) listenTo(f, i, canBrowser);
     else if (canBrowser) warmUpDenoiser();
   }
 

@@ -31,10 +31,10 @@ wait_for_live() {
   done
 }
 
-# Poll until every unit in "$@" is active and the deep health check passes (and the bulk process answers, when
-# acw-bulk.service is among them), at most 30 s.
+# Poll until every unit in "$@" is active and the deep health check passes (and the bulk and live processes answer,
+# when acw-bulk.service / acw-live.service are among them), at most 30 s.
 check_running() {
-  local deadline=$(( $(date +%s) + 30 )) u bad health="" bulk="" ok=0
+  local deadline=$(( $(date +%s) + 30 )) u bad health="" bulk="" live="" ok=0
   while :; do
     bad=""
     for u in "$@"; do
@@ -47,6 +47,11 @@ check_running() {
       case " $* " in *" acw-bulk.service "*)
         bulk="$(curl -fsS --max-time 5 "http://127.0.0.1:8794/audio/api/health" 2>/dev/null || true)"
         case "$bulk" in *'"ok":true'*|*'"ok": true'*) ;; *) ok=0; health="bulk: ${bulk:-no answer}; $health" ;; esac ;;
+      esac
+      # So does the live process (the live WebSocket only).
+      case " $* " in *" acw-live.service "*)
+        live="$(curl -fsS --max-time 5 "http://127.0.0.1:8795/audio/api/health" 2>/dev/null || true)"
+        case "$live" in *'"ok":true'*|*'"ok": true'*) ;; *) ok=0; health="live: ${live:-no answer}; $health" ;; esac ;;
       esac
     fi
     [ "$ok" = 1 ] && break

@@ -310,6 +310,8 @@ MIGRATIONS = [
     # The free live trial: seconds of Standard live an account has left, and how many seconds of each session came from it.
     ("users", "trial_live_seconds", "ALTER TABLE users ADD COLUMN trial_live_seconds REAL NOT NULL DEFAULT 0"),
     ("stream_sessions", "trial_seconds", "ALTER TABLE stream_sessions ADD COLUMN trial_seconds REAL NOT NULL DEFAULT 0"),
+    # Which process runs the session ("live", or "web" standing in for it): each closes only its own orphans.
+    ("stream_sessions", "owner", "ALTER TABLE stream_sessions ADD COLUMN owner TEXT"),
     # Email alerts (acw.alerts): one row per alert kind, for de-duplication and "resolved" mails.
     (
         "alert_state",
@@ -377,6 +379,11 @@ POST_MIGRATION_SQL = [
     "CREATE INDEX IF NOT EXISTS jobs_api_key ON jobs(api_key_id, finished_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS stream_sessions_api_key ON stream_sessions(api_key_id, ended_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS job_callbacks_due ON job_callbacks(next_attempt_at) WHERE state = 'pending'",
+    # The sweeps every 30 seconds (stream.routes.close_orphans, auth.purge_expired) read only these rows.
+    "CREATE INDEX IF NOT EXISTS stream_sessions_active ON stream_sessions(started_at) WHERE status = 'active'",
+    "CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at)",
+    "CREATE INDEX IF NOT EXISTS login_tokens_expiry ON login_tokens(expires_at)",
+    "CREATE INDEX IF NOT EXISTS oauth_states_expiry ON oauth_states(expires_at)",
 ]
 
 

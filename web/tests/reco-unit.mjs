@@ -11,7 +11,7 @@ import { recommendForFile, roomChanges, strengthFor, T } from '../src/recommend.
 import { gauss, noisy, rng, voice } from './reco-audio.mjs';
 import { analysePlanes, loadDfn } from './reco-cli.mjs';
 
-await loadDfn(); // the site's own noise remover (public/dfn), which measures the noise
+await loadDfn(); // the noise remover (df.js from public/dfn; the wasm and model from ~/audio-cleaner, as the browser gets them from the model host), which measures the noise
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 let failed = 0;

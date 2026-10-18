@@ -642,9 +642,9 @@ def test_the_release_job_signs_the_manifest_and_fails_closed():
     assert "check-key" in release  # a secret that is not the app's key publishes no manifest either
     assert 'rm -f "$key"' in release and "echo \"$UPDATE_SIGNING_KEY\"" not in release
     sparse = release.split("sparse-checkout: |")[1].split("sparse-checkout-cone-mode")[0].split()
-    # the app's modules (updater.py's key; resources.py, models.py and config.py for release_models.py) and the scripts
+    # the app's modules (updater.py's key) and the scripts
     assert sparse == ["desktop/audio_cleaner_desktop/*.py", "desktop/packaging/version.py",
-                      "desktop/packaging/make_update_manifest.py", "desktop/packaging/release_models.py"]
+                      "desktop/packaging/make_update_manifest.py"]
     assert WORKFLOW.count("--require-hashes") >= 2 and "--require-hashes -r desktop/requirements.lock" in WORKFLOW
 
 
@@ -674,28 +674,22 @@ def _step(job: str, name: str) -> str:
 
 
 @pytest.mark.skipif("\n  release:\n" not in WORKFLOW, reason="this copy of the repository publishes no releases")
-def test_the_release_is_published_to_the_public_repository_with_everything_the_app_downloads():
+def test_the_release_is_published_to_the_public_repository_with_the_installers_and_the_update_information():
     release = WORKFLOW.split("\n  release:\n")[1]
     name = "Publish the release to the public repository"
     assert f"- name: {name}" in release and "Copy the release to the public repository" not in WORKFLOW
     step = _step(release, name)
-    assert "GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step and "PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step
-    assert "OWN_TOKEN: ${{ github.token }}" in step  # reads this repository's releases (the models archive's first upload)
+    assert "GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in step
     assert "continue-on-error: true" in step and "::warning::" in step  # never fails the official release
     assert 'if [ -z "$GH_TOKEN" ]' in step and "exit 0" in step  # no secret: skipped
     assert 'tag="v$version"' in step and '--target "$branch"' in step and "--clobber" in step
-    # the models archive (release_models.py: pinned, hash-checked) is gathered before anything is uploaded; the speech
-    # model is not in the release (the app downloads it from Hugging Face)
-    assert "python3 desktop/packaging/release_models.py release/models" in step
-    assert step.index("release_models.py release/models") < step.index("gh release create")
-    assert "whisper" not in step.lower()
-    # everything the app and setup download: the installers, the signed update information (when this build has it)
-    # and the models archive (models/ holds nothing else)
+    # no model is in the release (the app and setup download them from Hugging Face)
+    assert "release_models" not in step and "models/" not in step and "whisper" not in step.lower()
+    # everything the app downloads from here: the installers and the signed update information (when this build has it)
     files = re.search(r"files=\((.*?)\)", step).group(1).split()
     assert files == ['"AudioCleaner-$version-Windows.exe"', '"AudioCleaner-$version-Mac-Apple-silicon.pkg"',
                      '"AudioCleaner-$version-Mac-Intel.pkg"']
     assert "[ ! -f update.json ] || files+=(update.json update.json.sig)" in step
-    assert 'for f in models/*; do files+=("$f"); done' in step
     # made as a draft, filled, then published and marked latest: no app and no person ever sees half a release
     create = step.index("gh release create")
     upload = step.index('gh release upload "$tag"')
@@ -704,7 +698,7 @@ def test_the_release_is_published_to_the_public_repository_with_everything_the_a
     assert "--draft " in step[create:upload] and "--latest" not in step[create:upload]
     assert "--draft=false" in step[publish:] and "--latest" in step[publish:]
     assert 'if ! gh release view "$tag"' in step  # a rerun reuses the release (its files are replaced)
-    # releases there are never removed: every version keeps its models (installed apps of that version download them)
+    # releases there are never removed: every version keeps its installers (an app updating from an older one downloads it)
     assert "gh release delete" not in step and "automatic build" not in step
     # The notes are written for the community: which file is for which computer, that setup downloads the models once
     # and that the app keeps itself up to date.
@@ -742,10 +736,9 @@ def test_the_app_is_built_for_the_repository_the_release_is_published_to():
     assert f"'{__releases__}'" in built_for  # with the same default as the source
 
 
-def test_the_model_check_job_looks_for_the_models_archive_and_the_speech_model_s_source():
+def test_the_model_check_job_runs_the_url_guard_and_the_release_job_needs_no_model_script():
     if "\n  model-urls:\n" not in WORKFLOW:
         pytest.skip("this copy of the repository has no workflow")
     job = WORKFLOW.split("\n  model-urls:\n")[1].split("\n  ffmpeg:\n")[0]
-    assert "run: python desktop/packaging/release_models.py --check" in job
-    assert "OWN_TOKEN: ${{ github.token }}" in job and "PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}" in job
-    assert "PUBLIC_REPO:" in job
+    assert "run: python desktop/packaging/check_model_urls.py" in job and "secrets." not in job
+    assert "release_models" not in WORKFLOW

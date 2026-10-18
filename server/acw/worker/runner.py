@@ -155,6 +155,9 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         # Transcribe first, from the original audio: every recogniser we tested
         # scores worse on denoised speech (docs/research/asr.md).
         emit(stage="Decoding", progress=5 if x is not None else 2)
+        if x is None and denoise:
+            # Cleaned too: decode once, at the cleaning rate, and make the recogniser's 16 kHz mono from that.
+            x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
         if x is not None:
             speech_16k = pipeline.to_speech_16k(x)
         else:
@@ -202,10 +205,11 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         leveling_only = spec.get("denoise_tier") == "off"  # Leveling on its own: no noise removal
         # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
         # time estimate on it; clean_audio then uses the same choice.
+        kept: dict = {}  # a short recording's measurement doubles as its full-strength cleaning (pipeline.Measured)
         if rebuild or leveling_only:
             profile = opts.get("noise", "auto")
         else:
-            profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"))
+            profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"), keep=kept)
         emit(stage="Leveling" if leveling_only else "Cleaning", progress=start + 2,
              **({} if rebuild or leveling_only else {"noise": profile}))
         used: dict = {}
@@ -228,12 +232,13 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
             restore_model_dir=Path(spec["models_dir"]) / "sidon",
             report=used,
+            measured=kept.get("measured"),
         )
         noise_used = used.get("noise")
         if used.get("highs"):
             restored = "This sounded like a phone or low-quality recording, so its missing high frequencies were restored."
             notice = f"{notice} {restored}" if notice else restored
-        fmt = opts.get("audio_format", "wav")
+        fmt = opts.get("audio_format", "flac")
         cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
         del x, y

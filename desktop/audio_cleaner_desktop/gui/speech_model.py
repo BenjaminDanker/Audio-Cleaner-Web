@@ -110,12 +110,12 @@ class SpeechModelPanel(QWidget):
         self.refresh()
 
     def showEvent(self, event) -> None:  # noqa: N802
-        self.refresh()  # another model of the same archive may have been installed meanwhile
+        self.refresh()  # the model may have been installed meanwhile (by setup, or the download queue)
         super().showEvent(event)
 
     def refresh(self) -> None:
         dl = self._dl
-        total = dl.model.download_size
+        total = dl.model.size
         if dl.running:
             self._button.setText("Cancel")
             self._button.setToolTip("Stop the download. Starting it again continues where it left off.")

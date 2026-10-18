@@ -3,6 +3,8 @@ The detection tests need no model; the extension tests are skipped when the ONNX
 (ACW_BWE_MODELS or ~/audio-cleaner/models/ap-bwe). The model caches one session per thread count, so the model tests use
 one thread count."""
 import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -177,3 +179,12 @@ def test_two_channel_memory_map_is_read_block_by_block(tmp_path, monkeypatch):
     assert max(seen) <= mm.size  # wrapping the map is fine; no array bigger than the input is ever made
     assert bwe.pick_model(bw) is not None
     assert bwe.effective_bandwidth(mono[:, None]) == bwe.effective_bandwidth(mono)  # one channel, 2-D
+
+
+def test_scipy_signal_is_loaded_only_where_it_is_used():
+    """It takes most of a second to import: importing the pipeline must not pay for it, and the Hann window that is
+    computed without it is scipy's."""
+    code = "import sys; import acw_common.pipeline; sys.exit('scipy.signal' in sys.modules)"
+    r = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1])
+    assert r.returncode == 0
+    assert np.array_equal(bwe._HANN, ss.get_window("hann", 320, fftbins=True).astype(np.float32))

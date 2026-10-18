@@ -47,6 +47,12 @@ mv "$H/app.rollback-tmp" "$H/app.prev"
 UNITS="acw-stream.service acw-web.service"
 # A copy of the code from before the bulk-transfer process existed has no acw/bulk_app.py to start.
 [ -f "$H/app/acw/bulk_app.py" ] && UNITS="$UNITS acw-bulk.service"
+# ... and from before the live process existed, none of acw/live_app.py: stop that unit then (acw-web serves live).
+if [ -f "$H/app/acw/live_app.py" ]; then
+  UNITS="$UNITS acw-live.service"
+else
+  systemctl --user stop acw-live.service acw-tunnel-live.service 2>/dev/null || true
+fi
 for unit in $(systemctl --user list-units --plain --no-legend 'acw-worker@*.service' 'acw-worker-gpu.service' | awk '{print $1}'); do
   UNITS="$UNITS $unit"
 done
@@ -61,8 +67,10 @@ else
 fi
 BULK_TUNNEL=""
 systemctl --user is-enabled --quiet acw-tunnel-bulk.service 2>/dev/null && BULK_TUNNEL="acw-tunnel-bulk.service"
+LIVE_TUNNEL=""
+[ -f "$H/app/acw/live_app.py" ] && systemctl --user is-enabled --quiet acw-tunnel-live.service 2>/dev/null && LIVE_TUNNEL="acw-tunnel-live.service"
 # shellcheck disable=SC2086
-if check_running $UNITS acw-tunnel.service $BULK_TUNNEL; then
+if check_running $UNITS acw-tunnel.service $BULK_TUNNEL $LIVE_TUNNEL; then
   echo "rolled back to $(cat "$H/app/VERSION" 2>/dev/null || echo unknown); run again to undo"
 else
   echo "the rolled-back code did not come up cleanly either; look at: journalctl --user -u acw-web -n 80" >&2

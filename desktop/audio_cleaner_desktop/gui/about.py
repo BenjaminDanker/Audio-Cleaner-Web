@@ -86,9 +86,10 @@ class AboutDialog(QDialog):
         models_text.setWordWrap(True)
         models_text.setToolTip("These models are downloaded during setup, not part of the installer. Their licence texts are listed below.")
         layout.addWidget(models_text)
-        model_licences = resources.model_licenses_dir()
-        if model_licences is not None:  # the texts that came in the models' download
-            where = QLabel(f"The licence texts that came with the models are in {model_licences}")
+        model_licences = resources.model_licenses_dirs()
+        if model_licences:  # the texts that came with the models' downloads
+            where = QLabel("The licence texts that came with the models are in "
+                           + ("\n" if len(model_licences) > 1 else "") + "\n".join(map(str, model_licences)))
             where.setObjectName("Muted")
             where.setWordWrap(True)
             where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)

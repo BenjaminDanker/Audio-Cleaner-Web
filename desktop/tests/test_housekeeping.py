@@ -434,17 +434,26 @@ def test_the_second_start_brings_the_window_forward_with_its_files(qapp, tmp_pat
         w._pool.waitForDone()
 
 
-def test_about_names_the_downloaded_models_and_their_licences(qapp):
+def test_about_names_the_downloaded_models_and_where_their_licence_texts_are(qapp, monkeypatch, tmp_path):
     from PySide6.QtWidgets import QLabel
 
-    from audio_cleaner_desktop import resources
+    from audio_cleaner_desktop import models, resources
     from audio_cleaner_desktop.gui.about import AboutDialog
 
-    dialog = AboutDialog()
-    text = "\n".join(label.text() for label in dialog.findChildren(QLabel))
+    def texts():
+        dialog = AboutDialog()
+        return "\n".join(label.text() for label in dialog.findChildren(QLabel))
+
+    text = texts()
     for model in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
         assert model.title in text and model.licence in text
-    assert "Sidon" in text and "AP-BWE" in text
+    assert "licence texts that came with the models" not in text  # nothing downloaded yet
+    # an installed model has its own LICENSES folder (also the installer's copy), the old shared one still counts
+    (tmp_path / "voice" / "LICENSES").mkdir(parents=True)
+    monkeypatch.setattr(models, "location", lambda m: tmp_path / "voice" if m is resources.VOICE_MODEL else None)
+    (models.models_dir() / "LICENSES").mkdir(parents=True)
+    text = texts()
+    assert str(tmp_path / "voice" / "LICENSES") in text and str(models.models_dir() / "LICENSES") in text
 
 
 def test_releasing_memory_drops_the_cached_models(monkeypatch):

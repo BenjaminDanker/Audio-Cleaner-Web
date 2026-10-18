@@ -1,0 +1,35 @@
+[Unit]
+Description=Audio Cleaner live sessions: the live WebSocket only (127.0.0.1:8795)
+OnFailure=acw-alert@%n.service
+After=network-online.target acw-stream.service
+Wants=acw-stream.service
+
+[Service]
+Slice=acw.slice
+Type=simple
+WorkingDirectory=%h/audio-cleaner/app
+Environment=PYTHONPATH=%h/audio-cleaner/app
+EnvironmentFile=%h/audio-cleaner/secrets/acw.env
+# Same hardening as acw-web. acw.live_app serves GET /api/stream/ws and /api/health only, on its own event loop, so
+# API traffic never makes live audio late (acw-web still serves the WebSocket when the VPS cannot reach this one).
+ExecStart=%h/audio-cleaner/venv/bin/uvicorn acw.live_app:app --host 127.0.0.1 --port 8795 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header \
+    --timeout-keep-alive 30 --ws-max-size 1048576 --ws-per-message-deflate false --limit-concurrency 500 --no-access-log
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @sandbox
+SystemCallErrorNumber=EPERM
+SystemCallFilter=~@privileged
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=1G
+TasksMax=300
+# Live sockets, the live engine's sockets and the tunnel each hold descriptors; the default soft limit is 1024.
+LimitNOFILE=8192
+
+[Install]
+WantedBy=default.target

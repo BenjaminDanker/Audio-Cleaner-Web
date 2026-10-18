@@ -3,8 +3,8 @@
 A free, offline app that removes background noise from the voice in video and audio files, and can write
 subtitles. It runs the shared cleaning pipeline (`../common/acw_common`) in a PySide6 window.
 Nothing is uploaded: the noise models and FFmpeg ship inside the app, and the installer downloads the three larger
-models (subtitles, restoring highs, rebuilding voices: 2.5 GB in all: Whisper 1.6 GB plus one 0.9 GB archive that holds
-the other two) once during setup. The installed app also looks for a newer version when it starts and
+models (subtitles, restoring highs, rebuilding voices: 2.6 GB in all: Whisper 1.6 GB, AP-BWE 0.5 GB and Sidon 0.5 GB,
+each from Hugging Face) once during setup. The installed app also looks for a newer version when it starts and
 installs it (a signed update; Settings > "Check for updates when Audio Cleaner starts", on by default; it sends
 nothing but a normal web request with the app version).
 

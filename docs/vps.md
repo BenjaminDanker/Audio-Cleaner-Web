@@ -3,23 +3,27 @@
 The VPS (`mc-multi-world.space`, Caddy 2.11) does two things
 for Audio Cleaner:
 
-1. Serves the **static website** from `/var/www/audio` (~30 MB: the app, the
-   free browser denoiser and its model). Kept here on purpose: new visitors
-   download ~12 MB, and serving that from home would compete with live audio
-   and Minecraft on the home connection (1 Gbit/s both ways; the VPS link itself carries about 73 Mbit/s inbound and 92 Mbit/s outbound, measured 2026-10-15).
+1. Serves the **static website** from `/var/www/audio` (the app, and the free browser tools' code: the noise
+   remover's df.js, the speech runtime, the decoder). Kept here on purpose: serving it from home would compete with
+   live audio and Minecraft on the home connection (1 Gbit/s both ways; the VPS link itself carries about 73 Mbit/s
+   inbound and 92 Mbit/s outbound, measured 2026-10-15). The free tools' **models** (about 22 MB for the noise remover,
+   77 MB for the subtitles) are not here: visitors' browsers download them from Hugging Face (`web/src/media/models.js`).
 2. **Forwards** `/audio/api/*` (and the live WebSocket) to the home server
    through SSH reverse tunnels that primary-ram opens:
-   VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), and for job uploads and result downloads
+   VPS `127.0.0.1:18790` → primary-ram `127.0.0.1:8790` (`acw-tunnel` unit), for the live WebSocket
+   VPS `127.0.0.1:18795` → primary-ram `127.0.0.1:8795` (`acw-tunnel-live`, its own connection and process, falling
+   back to 18790: docs/operations.md, "Live process"), and for job uploads and result downloads
    VPS `127.0.0.1:18794` → primary-ram `127.0.0.1:8794` (`acw-tunnel-bulk` unit, its own connection and process so
    big transfers do not delay live audio; Caddy falls back to 18790 when it is down: docs/operations.md, "Bulk transfers").
    Compression: Caddy compresses (zstd, gzip) only the small JSON answers of the API; the live WebSocket, uploads and
    downloads are already compressed audio or need no delay and are passed through untouched. The static files are
-   pre-compressed by `deploy/publish-web.sh` (including the speech model's `.onnx` files, 77 MB -> ~51 MB on the wire).
+   pre-compressed by `deploy/publish-web.sh` (zstd and gzip).
 
 Nothing else of ours is on the VPS: no data, no secrets. When the home server
 or tunnel is down, Caddy answers API calls with a 503 maintenance JSON
-(`handle_errors` in the snippet) and the site shows a maintenance notice while
-the free browser tools keep working.
+(`handle_errors` in the snippet) and the site shows a maintenance notice. The free browser tools keep working in a
+page that already loaded them; a new visitor cannot start them (they need a sign-in, and their code a session check,
+both at home).
 
 Files in the repo: `deploy/vps/audio.caddy` (the site-block snippet),
 `deploy/vps/install-audio-route.sh` (inserts/replaces it in

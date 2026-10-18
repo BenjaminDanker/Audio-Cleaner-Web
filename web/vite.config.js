@@ -3,20 +3,23 @@ import react from '@vitejs/plugin-react';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 
-// Version string for the (unhashed) public/dfn files, appended as ?v= so they can be cached for a long time.
+// Version string for df.js (unhashed, in public/dfn), appended as ?v= so it can be cached for a long time.
 function dfnVersion() {
-  const h = createHash('sha1');
-  for (const f of ['df.js', 'df_bg.wasm', 'DeepFilterNet3_onnx.tar.gz']) {
-    const p = new URL(`./public/dfn/${f}`, import.meta.url);
-    if (existsSync(p)) h.update(readFileSync(p));
-  }
-  return h.digest('hex').slice(0, 10);
+  const p = new URL('./public/dfn/df.js', import.meta.url);
+  return existsSync(p) ? createHash('sha1').update(readFileSync(p)).digest('hex').slice(0, 10) : '';
 }
 
-// Decoded byte sizes of the three files, for the progress readout while they download (src/media/denoise.js).
-function dfnSizes() {
-  const size = (f) => { const p = new URL(`./public/dfn/${f}`, import.meta.url); return existsSync(p) ? statSync(p).size : 0; };
-  return { js: size('df.js'), wasm: size('df_bg.wasm'), model: size('DeepFilterNet3_onnx.tar.gz') };
+// Its size, for the progress readout while the noise remover downloads (src/media/denoise.js).
+function dfnJsSize() {
+  const p = new URL('./public/dfn/df.js', import.meta.url);
+  return existsSync(p) ? statSync(p).size : 0;
+}
+
+// Where the free tools' models are downloaded from (src/media/models.js): Hugging Face. The test suites set
+// ACW_MODEL_HOST to a local copy laid out the same way (<repo>/resolve/<revision>/<path>).
+function modelHost() {
+  const h = process.env.ACW_MODEL_HOST || 'https://huggingface.co/';
+  return h.endsWith('/') ? h : `${h}/`;
 }
 
 // The versioned folder of the libav.js decoder (scripts/sync-dfn.mjs), or '' when it is not built.
@@ -70,7 +73,7 @@ export default defineConfig(({ mode }) => {
     // The speech runtime's build that loads its WebAssembly from where we say (the gated public/dfn/ort/ folder,
     // src/media/transcribe.worker.js) instead of having a 26 MB copy of it put among the public assets.
     resolve: { conditions: ['onnxruntime-web-use-extern-wasm', ...defaultClientConditions] },
-    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_SIZES__: JSON.stringify(dfnSizes()), __LIBAV_DIR__: JSON.stringify(libavDir()), __ORT_DIR__: JSON.stringify(ortDir()) },
+    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_JS_SIZE__: JSON.stringify(dfnJsSize()), __MODEL_HOST__: JSON.stringify(modelHost()), __LIBAV_DIR__: JSON.stringify(libavDir()), __ORT_DIR__: JSON.stringify(ortDir()) },
     worker: { format: 'es' },
     build: {
       target: 'es2022',

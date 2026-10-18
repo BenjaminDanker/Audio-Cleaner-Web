@@ -234,17 +234,21 @@ def test_label_values_are_escaped():
 
 # ------------------------------------------------------------------ the bulk process check
 
-def test_bulk_health_is_checked_only_where_the_unit_is_enabled(tmp_path):
+@pytest.mark.parametrize(("check", "unit", "port", "kind"), [
+    (monitor.check_bulk, "acw-bulk.service", 8794, "health_bulk"),
+    (monitor.check_live, "acw-live.service", 8795, "health_live"),
+])
+def test_bulk_and_live_health_are_checked_only_where_the_unit_is_enabled(tmp_path, check, unit, port, kind):
     calls = []
 
     def ok(url):
         calls.append(url)
         return False, "URLError"
 
-    assert monitor.check_bulk(ok, tmp_path) == []  # not enabled: nothing to check
+    assert check(ok, tmp_path) == []  # not enabled: nothing to check
     wants = tmp_path / "default.target.wants"
     wants.mkdir()
-    (wants / "acw-bulk.service").write_text("")
-    [f] = monitor.check_bulk(ok, tmp_path)
-    assert f.kind == "health_bulk" and f.bad and calls == ["http://127.0.0.1:8794/api/health"]
-    assert not monitor.check_bulk(lambda u: (True, "ok"), tmp_path)[0].bad
+    (wants / unit).write_text("")
+    [f] = check(ok, tmp_path)
+    assert f.kind == kind and f.bad and calls == [f"http://127.0.0.1:{port}/api/health"]
+    assert not check(lambda u: (True, "ok"), tmp_path)[0].bad

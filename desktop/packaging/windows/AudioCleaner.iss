@@ -2,9 +2,8 @@
 ;
 ;   iscc /DAppVersion=2.0.0 /DSourceDir=C:\path\to\dist\AudioCleaner [/DOutputDir=C:\out] [/DIconFile=C:\path\icon.ico]
 ;        [/DModelsInclude=C:\path\models.iss] AudioCleaner.iss
-;   (models.iss from installer_models.py: setup then downloads the models, 2.5 GB: the speech model's files and one zip
-;   archive with the two ONNX models, which setup unpacks with Windows' own tar.exe. Without it nothing is downloaded
-;   during setup; the app then offers the downloads in Settings.)
+;   (models.iss from installer_models.py: setup then downloads the models, 2.6 GB, file by file from Hugging Face.
+;   Without it nothing is downloaded during setup; the app then offers the downloads in Settings.)
 ;
 ; SourceDir is the PyInstaller output folder (the one that contains AudioCleaner.exe and _internal\).
 ; Installs per user by default (no administrator prompt); the "Install for all users" choice on the first

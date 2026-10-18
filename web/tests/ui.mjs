@@ -1,9 +1,12 @@
 // The sign-in form (Google and email, with the bot check's token sent), an accessibility scan of the main pages (labels, names,
-// one heading, landmarks, unique ids), and one session under the production Content-Security-Policy that does the free cleanup,
+// one heading, landmarks, unique ids), and one session under the production Content-Security-Policy (read from deploy/vps/audio.caddy; only the tests' local model host is
+// added to connect-src) that does the free cleanup,
 // the free subtitles, an MP3 export and a live test: no policy violation may show up anywhere.
 // Usage: node tests/ui.mjs
-import { join } from 'node:path';
-import { BASE, FILES, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { BASE, FILES, check, dropFile, launch, mirror, pick, signIn, summary, waitResult } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
@@ -59,9 +62,15 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 }
 
 {
-  // Strict CSP as the server sends it: no inline script or style, same-origin everything. wasm needs 'wasm-unsafe-eval'.
-  const csp = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'";
-  const { browser, context, page } = await launch(['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${join(FILES, 'speech.wav')}`], { acceptDownloads: true });
+  // The policy the front door sends (deploy/vps/audio.caddy): no inline script or style, same-origin everything, wasm needs
+  // 'wasm-unsafe-eval', and the models may come from Hugging Face. The tests' local model host stands in for it.
+  const caddy = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'deploy', 'vps', 'audio.caddy'), 'utf8');
+  const real = /Content-Security-Policy "([^"]+)"/.exec(caddy)?.[1];
+  if (!real || !/connect-src [^;]*https:\/\/huggingface\.co/.test(real)) throw new Error('no usable policy in deploy/vps/audio.caddy');
+  const csp = real.replace(/connect-src /, `connect-src ${(await mirror()).origin} `);
+  // (A page whose responses are made by route.fulfill below counts as a public page to Chromium, which would then refuse to reach the
+  // local model host on loopback: that check is switched off for this one session.)
+  const { browser, context, page } = await launch(['--disable-features=LocalNetworkAccessChecks', '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream', `--use-file-for-fake-audio-capture=${join(FILES, 'speech.wav')}`], { acceptDownloads: true });
   const viol = [];
   await context.route('**/*', async (route) => {
     const req = route.request();
@@ -77,7 +86,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await dropFile(page, join(FILES, 'speech.wav'));
     await pick(page, 'noise', 'browser');
     await page.getByRole('button', { name: 'Start – free' }).click();
-    await page.waitForSelector('[data-testid=result]', { timeout: 120000 });
+    await waitResult(page, 'result', 120000);
     if (Number(await page.locator('[data-testid=result]').getAttribute('data-rms')) < 0.001) throw new Error('silent under CSP');
     await page.getByTestId('save-as').locator('[data-testid=out-name]').fill('csp.mp3');
     const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.getByTestId('save-as').locator('[data-testid=save-btn]').click()]);
@@ -87,7 +96,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'browser');
     await page.getByRole('button', { name: 'Start – free' }).click();
-    await page.getByTestId('subs-result').waitFor({ timeout: 300000 });
+    await waitResult(page, 'subs-result');
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-start').click();
     await page.getByTestId('live-stop').waitFor({ timeout: 120000 });

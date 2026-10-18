@@ -4,7 +4,13 @@ import argparse
 import os
 import sys
 
-from . import quiet_popen
+# numpy's own thread pool (OpenBLAS/OpenMP/MKL) would only waste CPU next to the app's explicitly threaded work
+# (onnxruntime, CTranslate2 and libDF get their thread counts passed in): one thread, set before numpy is imported
+# (the engine import below pulls it in). An explicit setting by the user still wins.
+for _name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_name, "1")
+
+from . import quiet_popen  # noqa: E402
 
 quiet_popen.install()  # first, before the heavier imports below (the frozen app does this in packaging/launcher.py)
 
@@ -29,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gui", action="store_true", help="with --selftest: also build the window, the preview and the About box")
     p.add_argument(
         "--download-models", "--download-speech-model", action="store_true", dest="download_models",
-        help="download the models for subtitles, restoring highs and rebuilding the voice (about 2.5 GB, once) and exit",
+        help="download the models for subtitles, restoring highs and rebuilding the voice (about 2.6 GB, once) and exit",
     )
     p.add_argument("-o", "--output-dir", metavar="OUTDIR", help="write results here (default: next to each original)")
     p.add_argument(

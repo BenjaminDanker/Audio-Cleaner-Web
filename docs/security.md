@@ -10,7 +10,7 @@ or secrets.
 |---|---|---|
 | `/audio/*` static | internet (VPS Caddy) | no server logic |
 | `/audio/api/*`, WebSocket | internet → VPS → SSH tunnel → 127.0.0.1:8790 | the only path into primary-ram |
-| uploads, result downloads and release downloads (`/audio/api/downloads/`: installers, OBS plugin, model archive) | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same routes the main process also serves; nothing else is routed there. The release files are mirrored to primary-ram by `acw-mirror` (signature and checksums checked first); nothing is stored on the VPS |
+| uploads, result downloads and release downloads (`/audio/api/downloads/`: the OBS plugin) | internet → VPS → second SSH tunnel → 127.0.0.1:8794 (`acw-bulk`) | the same routes the main process also serves; nothing else is routed there. The release files are mirrored to primary-ram by `acw-mirror` (signature and checksums checked first); nothing is stored on the VPS |
 | primary-ram LAN ports | unchanged | the app binds loopback only |
 | VPS → primary-ram | `127.0.0.1:18790` and `127.0.0.1:18794` on the VPS only | tunnel key: `restrict,port-forwarding,permitlisten="127.0.0.1:18790",permitlisten="127.0.0.1:18794",permitopen="127.0.0.1:1",command="/bin/false"` (the second `permitlisten` is added when the bulk tunnel is switched on, docs/operations.md; verified before for one port: no shell, no other ports, no local forwards) |
 

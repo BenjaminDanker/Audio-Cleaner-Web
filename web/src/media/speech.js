@@ -1,19 +1,15 @@
 // Main-thread side of the free in-browser subtitles: one shared model download and one worker per page, then
 // subtitles for a whole file (transcribeFile) or for short pieces of live speech (transcribeSpeech).
 //
-// The model (Whisper base, about 80 MB) and the runtime's WebAssembly sit next to the noise remover's files (the same
-// sign-in gate, scripts/sync-dfn.mjs) and stay in the browser's cache, so they are downloaded once. Everything runs
-// on the visitor's device; nothing is uploaded.
+// The model (Whisper base, about 80 MB) comes from Hugging Face, pinned and checked (models.js); the runtime's WebAssembly
+// sits next to the noise remover's glue code on this site (scripts/sync-dfn.mjs). Both stay in the browser, so they are
+// downloaded once. Everything runs on the visitor's device; nothing is uploaded.
 
 import { decodeToChunks, TARGET_RATE } from './decode.js';
+import { MODEL_HOST, SPEECH } from './models.js';
 import { Resampler } from './resample.js';
 
-const MODEL = 'whisper-base-1846881'; // the folder scripts/sync-dfn.mjs puts it in (SPEECH_ID)
-const MODEL_BYTES = 79664191; // the seven files together, for the progress readout
-const FILE_SIZES = { // their sizes (deploy/models.lock pins them), so the worker need not ask the server for each
-  'config.json': 2243, 'generation_config.json': 3832, 'preprocessor_config.json': 339, 'tokenizer.json': 2480466,
-  'tokenizer_config.json': 282682, 'encoder_model_quantized.onnx': 23201314, 'decoder_model_merged_quantized.onnx': 53693315,
-};
+const MODEL_BYTES = Object.values(SPEECH.files).reduce((n, f) => n + f.size, 0); // for the progress readout
 const RATE = 16000;
 const WINDOW = 30 * RATE; // the model hears at most 30 s at a time
 const CUT_FROM = 20 * RATE; // a window ends at the quietest moment between 20 and 29.5 s
@@ -71,8 +67,7 @@ export function preloadSpeech() {
   e.ready.catch(() => { if (engine === e) stopSpeech(); });
   const origin = location.origin;
   worker.postMessage({
-    type: 'init', model: MODEL, fileSizes: FILE_SIZES,
-    modelHost: `${origin}${import.meta.env.BASE_URL}dfn/models/`,
+    type: 'init', modelHost: MODEL_HOST, speech: SPEECH,
     ortBase: `${origin}${import.meta.env.BASE_URL}dfn/ort/${__ORT_DIR__}/`,
   });
   return e.ready;

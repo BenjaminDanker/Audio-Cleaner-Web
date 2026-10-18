@@ -1,0 +1,24 @@
+[Unit]
+Description=Audio Cleaner reverse tunnel for live sessions (VPS 127.0.0.1:18795 -> 127.0.0.1:8795)
+OnFailure=acw-alert@%n.service
+After=network-online.target
+
+[Service]
+Slice=acw.slice
+Type=simple
+# The VPS (user@address) is not in the repo: ACW_VPS in this file (deploy/vps.env.example).
+EnvironmentFile=%h/audio-cleaner/secrets/vps.env
+# A third SSH connection of its own, so live audio never queues behind API answers in the main tunnel's TCP stream.
+# IPQoS=lowdelay, like the main tunnel. Same key; the VPS must allow this port for that key first (docs/operations.md,
+# "Live process"): install.sh enables this unit only after you have.
+# -F none: ignore ~/.ssh/config (its "vps" host disables forwardings).
+ExecStart=/usr/bin/ssh -F none -N -T -i %h/.ssh/acw_tunnel -o IdentitiesOnly=yes \
+    -o HostKeyAlias=vps -o StrictHostKeyChecking=yes -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=3 \
+    -o IPQoS=lowdelay \
+    -R 127.0.0.1:18795:127.0.0.1:8795 ${ACW_VPS}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

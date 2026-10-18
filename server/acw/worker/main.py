@@ -223,6 +223,10 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         "HOME": str(d),
         "HF_HUB_OFFLINE": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
+        # numpy's own thread pool: one thread. The heavy work sets its threads itself (ONNX Runtime, CTranslate2, libDF);
+        # a pool sized to the machine only costs CPU, starting up in every stage.
+        "OPENBLAS_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
     }
     if GPU_MODE:
         env["LD_LIBRARY_PATH"] = _cuda_library_path()

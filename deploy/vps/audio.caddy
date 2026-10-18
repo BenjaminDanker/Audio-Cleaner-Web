@@ -1,8 +1,11 @@
     # ---- Audio Cleaner (/audio) --------------------------------------------
-    # API + live WebSocket: SSH reverse tunnel from primary-ram (127.0.0.1:18790).
+    # API: SSH reverse tunnel from primary-ram (127.0.0.1:18790).
+    # The live WebSocket: its own tunnel and process (127.0.0.1:18795 -> acw-live), so API traffic never makes live audio
+    # late; if that upstream is down it falls back to 18790 (the main process serves it too).
     # Uploads, result downloads and release downloads (/audio/api/downloads/): their own tunnel and process (127.0.0.1:18794 -> acw-bulk), so a big transfer
     # never queues in front of live audio; if that upstream is down they fall back to 18790 (the main process
-    # serves the same routes). Before using this file, the key must be allowed to listen on 18794 (docs/operations.md).
+    # serves the same routes). Before using this file, the key must be allowed to listen on 18794 and 18795
+    # (docs/operations.md).
     # Static site (incl. the free in-browser denoiser) is served from this VPS,
     # so the free tier never touches the home connection.
     redir /audio /audio/ 308
@@ -69,7 +72,14 @@
             request_body {
                 max_size 64KB
             }
-            reverse_proxy 127.0.0.1:18790 {
+            reverse_proxy 127.0.0.1:18795 127.0.0.1:18790 {
+                lb_policy first
+                lb_try_duration 3s
+                lb_try_interval 250ms
+                fail_duration 30s
+                health_uri /audio/api/health
+                health_interval 10s
+                health_timeout 3s
                 header_up -X-Real-IP
                 flush_interval -1
                 transport http {
@@ -121,10 +131,12 @@
         # TURNSTILE_SECRET in acw.env and change these three directives in the Content-Security-Policy below:
         #     script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com;
         #     frame-src https://challenges.cloudflare.com;
-        #     connect-src 'self' https://challenges.cloudflare.com;
+        #     connect-src (add) https://challenges.cloudflare.com;
         # (frame-src is not in the policy yet: add it; without it default-src 'self' blocks the widget's frame.)
+        # connect-src: the free tools download their models from Hugging Face (web/src/media/models.js), which hands
+        # the files out from its storage hosts under hf.co.
         header {
-            Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+            Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' https://huggingface.co https://*.huggingface.co https://*.hf.co; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
             Strict-Transport-Security "max-age=31536000"
             X-Content-Type-Options "nosniff"
             X-Frame-Options "DENY"
@@ -135,19 +147,15 @@
         }
         @acw_immutable path /audio/assets/*
         header @acw_immutable Cache-Control "public, max-age=31536000, immutable"
-        # The free in-browser tool's engine and model: only for signed-in
-        # browsers (the home server checks the session and a daily cap per
-        # account, so bots can't keep downloading the model). The files
-        # themselves are still served from here.
+        # The free in-browser tools' code (the noise remover's glue code, the
+        # speech runtime, the decoder): only for signed-in browsers (the home
+        # server checks the session and a daily cap per account). The files
+        # themselves are served from here; their models come from Hugging Face.
         @acw_dfn path /audio/dfn/*
         forward_auth @acw_dfn 127.0.0.1:18790 {
             uri /audio/api/auth/asset-check
         }
         header @acw_dfn Cache-Control "private, max-age=604800"
-        # The speech model's .onnx files are stored gzipped next to the originals (deploy/publish-web.sh) and served
-        # that way (file_server below); say what they are, since the extension is unknown to Caddy.
-        @acw_onnx path /audio/dfn/*.onnx
-        header @acw_onnx Content-Type application/octet-stream
         # Every app route serves index.html: never cache it, only hashed assets.
         @acw_html not path /audio/assets/* /audio/dfn/*
         header @acw_html Cache-Control "no-cache"

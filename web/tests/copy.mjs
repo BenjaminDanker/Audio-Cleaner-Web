@@ -133,6 +133,7 @@ await check('legal: every licence in the list links to a real licence text (not 
   if (!(await page.locator('[data-testid=licenses] a[href^="https://creativecommons.org/licenses/by/4.0/"]').count())) throw new Error('no link to the CC BY 4.0 licence');
   const main = await page.locator('main').innerText();
   for (const need of ['mediabunny', 'React', 'React Router', 'Vite', 'Rust crates', 'sherpa-onnx', 'CC BY 4.0']) if (!main.includes(need)) throw new Error('missing ' + need);
+  if (!/models .*are downloaded by your browser from Hugging Face/.test(main) || /dfn\//.test(main)) throw new Error('the page does not say the free tools\' models come from Hugging Face');
   return `${seen.length} licence files`;
 });
 

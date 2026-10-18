@@ -18,7 +18,7 @@ const AUDIO_DEFAULT_FOR = (file) => (/\.webm$/i.test(file?.name || '') ? 'ogg' :
  */
 export function useOutputChoice({ file, info, keepVideo = true, serverAudio = false }) {
   const [outputs, setOutputs] = useState(null); // null: still asking the browser
-  const [format, setFormatState] = useState('wav');
+  const [format, setFormatState] = useState(serverAudio ? 'flac' : 'wav');
   const [name, setNameState] = useState('');
   const [size, setSize] = useState('same');
   const [sizes, setSizes] = useState(null);
@@ -31,11 +31,11 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
     setSize('same');
     setTouched(false);
     if (file && info) {
-      const id = defaultFormatId(file, info, keepVideo);
+      const id = defaultFormatId(file, info, keepVideo, serverAudio);
       setFormatState(id);
       setNameState(defaultName(file, id));
     }
-    // keepVideo only matters for the starting point, handled below
+    // keepVideo and serverAudio only matter for the starting point, handled below
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file, info]);
 
@@ -51,11 +51,11 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
   // where it starts follows "keep the video" until the visitor chooses something themselves
   useEffect(() => {
     if (!file || !info || touched) return;
-    const id = defaultFormatId(file, info, keepVideo);
+    const id = defaultFormatId(file, info, keepVideo, serverAudio);
     if (outputs && !okIds.includes(id)) return;
     setFormatState(id);
     setNameState(defaultName(file, id));
-  }, [file, info, keepVideo, touched, outputs, okIds]);
+  }, [file, info, keepVideo, serverAudio, touched, outputs, okIds]);
 
   // a format this browser cannot make is never kept: fall back to the nearest one that works
   useEffect(() => {

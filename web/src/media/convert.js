@@ -255,12 +255,14 @@ export async function listSizes(info, container) {
 }
 
 /** The format a result starts out as: the video's own kind of file when it is kept, WAV otherwise. */
-export function defaultFormatId(file, info, keepVideo = true) {
+export function defaultFormatId(file, info, keepVideo = true, serverAudio = false) {
   if (info?.hasVideo && keepVideo && !info?.viaLibav) {
     const id = EXT_TO_ID.get(endingOf(file?.name));
     return id && FORMAT[id].kind === 'video' ? id : 'mp4';
   }
-  return 'wav';
+  // Sound our server makes comes as FLAC (lossless, about half the download of WAV); sound made in this browser as WAV
+  // (no download, and written at once).
+  return serverAudio ? 'flac' : 'wav';
 }
 
 /** The audio format our server is asked for. For a video it is the small one that suits the file (the picture is put back here). */

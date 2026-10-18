@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from scipy.signal import resample_poly
 
 from . import bwe, clarity, dfn, dpdfnet, restore
 from .aec import DELAY_SAMPLES as AEC_DELAY_SAMPLES, EchoCanceller
@@ -95,20 +94,33 @@ def measure_windows(n: int, total_seconds: float = 60.0, count: int = 6) -> list
     return out
 
 
+@dataclass
+class Measured:
+    """What noise_figure_db heard when it measured a whole recording at once: the mono samples and DeepFilterNet3's
+    full-strength output for them. Cleaning a channel with exactly those samples at full strength with the light noise
+    remover gives that output (one contiguous run), so clean_audio uses it instead of running the model again."""
+    mono: np.ndarray
+    light: np.ndarray
+
+
 def noise_figure_db(x: np.ndarray, lib_path: str | Path, model_path: str | Path,
-                    cancel: threading.Event | None = None) -> float:
+                    cancel: threading.Event | None = None, keep: dict | None = None) -> float:
     """dB between the voice and the noise in it, as the noise remover itself hears it: DeepFilterNet3 at full strength
     runs over the measured parts of the recording (measure_windows, mono mix), and what it keeps is compared with what
     it takes out, over all of it: wind, keyboards, chatter and steady hiss alike, under the words and between them.
     99 when there is nothing to hear. The website (web/src/media/analysis.js NoiseFigure, with the same model in the
-    browser) and the live engine (native/live NoiseMeter) measure the same way. Setting `cancel` raises `Cancelled`."""
+    browser) and the live engine (native/live NoiseMeter) measure the same way. Setting `cancel` raises `Cancelled`.
+    With `keep`, a measurement of the whole recording at once is kept there as keep["measured"] (Measured)."""
     voice = removed = 0.0
-    for a, b in measure_windows(len(x)):
+    windows = measure_windows(len(x))
+    for a, b in windows:
         seg = np.asarray(x[a:b], dtype=np.float32)
         seg = seg.mean(axis=1, dtype=np.float32) if seg.ndim == 2 else seg
         y = dfn.denoise_array(np.ascontiguousarray(seg), lib_path, model_path, atten_lim_db=100.0, threads=1, cancel=cancel)
         voice += float(np.sum(np.square(y, dtype=np.float64)))
         removed += float(np.sum(np.square(seg.astype(np.float64) - y)))
+        if keep is not None and windows == [(0, len(x))]:
+            keep["measured"] = Measured(seg, y)
     if voice + removed <= 0:
         return 99.0
     return float(min(99.0, 10 * np.log10((voice + 1e-12) / (removed + 1e-12))))
@@ -188,11 +200,11 @@ def sound_spans(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> list[tuple[int,
 
 
 def choose_noise_profile(x: np.ndarray, lib_path: str | Path, model_path: str | Path, wanted: str = "auto",
-                         cancel: threading.Event | None = None) -> str:
-    """"light" or "heavy" for this recording ("auto" measures it: noise_figure_db)."""
+                         cancel: threading.Event | None = None, keep: dict | None = None) -> str:
+    """"light" or "heavy" for this recording ("auto" measures it: noise_figure_db; `keep` as there)."""
     if wanted in ("light", "heavy"):
         return wanted
-    return "heavy" if noise_figure_db(x, lib_path, model_path, cancel) < HEAVY_BELOW_DB else "light"
+    return "heavy" if noise_figure_db(x, lib_path, model_path, cancel, keep) < HEAVY_BELOW_DB else "light"
 
 
 def done_end(spans: list[tuple[int, int]], a: int) -> slice:
@@ -219,6 +231,7 @@ def clean_audio(
     report: dict | None = None,
     bwe_model_dir: str | Path | None = None,
     restore_model_dir: str | Path | None = None,
+    measured: Measured | None = None,
 ) -> np.ndarray:
     """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
 
@@ -230,7 +243,8 @@ def clean_audio(
     restore_highs (the desktop app downloads them on request; None skips the step). `restore_model_dir` holds
     Sidon's ONNX files, required for restore_voice. `report`, when given,
     gets {"noise": "light"|"heavy"|"rebuilt", "highs": None|"8k".."24k"}, plus (unless
-    rebuilt) "atten_lim_db" (the strength used) and, when the noise was measured, "noise_db" (noise_figure_db)."""
+    rebuilt) "atten_lim_db" (the strength used) and, when the noise was measured, "noise_db" (noise_figure_db).
+    `measured`: what choose_noise_profile kept (its `keep`), when the caller measured the recording itself."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
@@ -264,7 +278,9 @@ def clean_audio(
     # One measurement serves both automatic choices: which remover, and how strong.
     figure = None
     if opts.noise == "auto" or opts.atten_lim_db is None:
-        figure = noise_figure_db(x, lib_path, model_path, cancel)
+        kept: dict = {}
+        figure = noise_figure_db(x, lib_path, model_path, cancel, kept)
+        measured = kept.get("measured", measured)
     profile = opts.noise if opts.noise != "auto" else ("heavy" if figure < HEAVY_BELOW_DB else "light")
     atten = opts.atten_lim_db if opts.atten_lim_db is not None else strength_for(figure)
     heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
@@ -287,6 +303,12 @@ def clean_audio(
         report["channels_cleaned"] = len(todo)
     for k, ch in enumerate(todo):
         spans = sound_spans(x[:, ch])
+        if (measured is not None and profile == "light" and atten == 100.0 and spans == [(0, len(x))]
+                and len(measured.mono) == len(x) and np.array_equal(measured.mono, x[:, ch])):
+            y[:, ch] = measured.light  # the measurement already cleaned exactly this at full strength
+            if progress:
+                progress(share * (k + 1) / len(todo))
+            continue
         total = sum(b - a for a, b in spans) or 1
         done = 0
         for a, b in spans:
@@ -405,6 +427,8 @@ def remove_echo(
 def to_speech_16k(x: np.ndarray) -> np.ndarray:
     """Float32 (samples, channels) at SAMPLE_RATE -> mono at 16 kHz for speech recognition, in blocks
     (with some context at each side, so the joins are clean)."""
+    from scipy.signal import resample_poly  # imported here: it takes most of a second to load
+
     n = len(x)
     out = np.empty(-(-n // 3), dtype=np.float32)
     block, context = SAMPLE_RATE * 30, SAMPLE_RATE  # both multiples of 3

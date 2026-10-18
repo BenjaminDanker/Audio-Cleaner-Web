@@ -300,6 +300,24 @@ def check_bulk(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Pat
     )]
 
 
+def check_live(ok_fn: Callable[[str], tuple[bool, str]] = http_ok, unit_dir: Path | None = None) -> list[Finding]:
+    """The live process (the live WebSocket, acw-live) answers on its own port. Only checked where that unit is
+    enabled. Its tunnel is a unit like the others (service:acw-tunnel-live.service)."""
+    unit_dir = UNIT_DIR if unit_dir is None else unit_dir
+    if not (unit_dir / "default.target.wants" / "acw-live.service").exists():
+        return []
+    s = get_settings()
+    url = f"http://127.0.0.1:{os.environ.get('ACW_LIVE_PORT', '8795')}{s.base_path}/api/health"
+    ok, why = ok_fn(url)
+    return [Finding(
+        "health_live", not ok, "Audio Cleaner live process is not answering",
+        f"{url} failed ({why}). acw-live is down or stuck: new live sessions go to the main process once the VPS "
+        "notices (a few seconds to a minute); sessions that were running on it have ended.\n"
+        "Check: systemctl --user status acw-live; journalctl --user -u acw-live -n 80 --no-pager\n",
+        confirm=2,
+    )]
+
+
 def check_mirror(unit_dir: Path | None = None, now: float | None = None) -> list[Finding]:
     """The release mirror (acw-mirror.timer, every 10 minutes) keeps the downloads current: no successful run for
     2 hours, or a newer release on the build service not served for an hour. Only checked where the timer is enabled."""
@@ -634,6 +652,7 @@ def run(*, ctx: Callable[[], str] | None = None, http: Callable[[str], tuple[boo
         [u for u in TIMER_SERVICES if (UNIT_DIR / u).exists()])))
     guarded("health", lambda: check_health(http))
     guarded("bulk", lambda: check_bulk(http))
+    guarded("live", lambda: check_live(http))
     guarded("mirror", check_mirror)
     guarded("queue", lambda: check_queue(host_ctx))
     guarded("slow_jobs", lambda: check_slow_jobs(host_ctx))

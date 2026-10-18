@@ -1,13 +1,15 @@
 // Free subtitles made in the browser (Cleanup page, "Free, in your browser"): the right words, the SRT/VTT/TXT downloads, a
 // recording longer than one 30 s piece, a video that gets them inside (MKV), nothing about the file is uploaded, and our side
-// never accepts a free subtitles job. The speech model comes from our server once (the browser keeps it).
-// Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output and the fixtures (make-fixtures.sh).
+// never accepts a free subtitles job. The speech model comes from the model host (Hugging Face; here the local copy of
+// mirror.mjs), each pinned file once, checked and kept by the browser; a changed file is refused.
+// Needs the local backend (port 8792, see helpers.mjs) with `ACW_MODEL_HOST=http://127.0.0.1:8798/ npm run build` output and
+// the fixtures (make-fixtures.sh).
 // Usage: node tests/subtitles.mjs
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, mirror, pick, signIn, summary, waitResult } from './helpers.mjs';
 
 const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
 const FFPROBE = process.env.FFPROBE || join(homedir(), 'audio-cleaner', 'bin', 'ffprobe');
@@ -15,8 +17,11 @@ const EMAIL = `e2e-subs-${Date.now()}@example.com`;
 const SAID = /responsible|hearing|damage|exposure/i; // what speech.wav says
 
 const { browser, context, page, logs } = await launch([], { acceptDownloads: true });
+const models = await mirror(); // the local model host
+const { SPEECH } = await import('../src/media/models.js'); // the pinned files (mirror.mjs has set the build-time host)
+const SPEECH_FILES = Object.keys(SPEECH.files).map((f) => f.split('/').pop());
 const calls = [];
-context.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/') || u.pathname.includes('/audio/dfn/models/')) calls.push(`${r.method()} ${u.pathname}`); });
+context.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/audio/api/') || u.pathname.includes('/dfn/models/')) calls.push(`${r.method()} ${u.pathname}`); });
 await signIn(page, EMAIL);
 
 async function run(file, { noise = 'off', embed = false } = {}) {
@@ -28,7 +33,7 @@ async function run(file, { noise = 'off', embed = false } = {}) {
   const t0 = Date.now();
   await page.getByRole('button', { name: 'Start – free' }).click();
   const res = page.getByTestId('subs-result');
-  await res.waitFor({ timeout: 300000 });
+  await waitResult(page, 'subs-result');
   return { res, ms: Date.now() - t0 };
 }
 
@@ -39,8 +44,9 @@ async function download(locator, name) {
   return { path: p, name: dl.suggestedFilename() };
 }
 
-await check('subtitles, free: a short recording gives the right words; SRT, VTT and TXT download; nothing is uploaded; the speech model comes from our server once', async () => {
+await check('subtitles, free: a short recording gives the right words; SRT, VTT and TXT download; nothing is uploaded; the speech model comes from the model host, each file once', async () => {
   calls.length = 0;
+  models.reset();
   const { res, ms } = await run('speech.wav');
   const preview = await res.getByTestId('subs-preview').innerText();
   if (!SAID.test(preview)) throw new Error(`preview: ${preview}`);
@@ -53,13 +59,17 @@ await check('subtitles, free: a short recording gives the right words; SRT, VTT 
   if (txt.name !== 'speech-transcript.txt' || !SAID.test(readFileSync(txt.path, 'utf8'))) throw new Error(txt.name);
   const posted = calls.filter((c) => c.startsWith('POST') || c.includes('/jobs/'));
   if (posted.length) throw new Error(`sent to the server: ${posted.join(', ')}`);
-  const model = calls.filter((c) => c.includes('/dfn/models/') || c.includes('/speech/'));
+  if (calls.some((c) => c.includes('/dfn/models/'))) throw new Error('the speech model was fetched from the site: ' + calls.join(', '));
+  const got = models.byName(); // every pinned file, one download each
+  if (SPEECH_FILES.some((f) => got[f] !== 1)) throw new Error('model host downloads: ' + JSON.stringify(got));
   await page.screenshot({ path: join(SHOTS, 'subs-free.png'), fullPage: true });
-  return `${ms} ms; "${preview.slice(0, 80)}"; no upload; model files from the site: ${model.length}`;
+  return `${ms} ms; "${preview.slice(0, 80)}"; no upload; ${SPEECH_FILES.length} model files from the model host, once each`;
 });
 
 await check('subtitles, free: a 48 s recording (longer than one 30 s piece) has every repeat, in order, timed across the whole file', async () => {
-  const { res, ms } = await run('speech-long.wav');
+  const before = JSON.stringify(models.byName());
+  const { res, ms } = await run('speech-long.wav'); // a new page load: the model comes from the browser's kept copy
+  if (JSON.stringify(models.byName()) !== before) throw new Error('second page load downloaded the model again: ' + JSON.stringify(models.byName()));
   const srt = readFileSync((await download(res.getByTestId('subs-dl-srt'), 'subs-long.srt')).path, 'utf8');
   const times = [...srt.matchAll(/(\d\d):(\d\d):(\d\d),(\d{3}) --> (\d\d):(\d\d):(\d\d),(\d{3})/g)].map((m) => [
     +m[1] * 3600 + +m[2] * 60 + +m[3] + +m[4] / 1000, +m[5] * 3600 + +m[6] * 60 + +m[7] + +m[8] / 1000]);
@@ -69,6 +79,30 @@ await check('subtitles, free: a 48 s recording (longer than one 30 s piece) has 
   const n = (srt.match(/responsible/gi) || []).length;
   if (n < 3) throw new Error(`"responsible" ${n} times: ${srt}`);
   return `${times.length} cues, last ends at ${last.toFixed(1)} s, "responsible" ${n}/4 times, ${ms} ms`;
+});
+
+await check('subtitles, free: a model file that is not the pinned one (changed bytes) is refused with an error and no subtitles are made', async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } }); // empty Cache Storage
+  const p = await ctx.newPage();
+  try {
+    await signIn(p, EMAIL);
+    models.reset();
+    models.tamper('preprocessor_config.json');
+    await p.goto(`${BASE}/app`);
+    await dropFile(p, join(FILES, 'speech.wav'));
+    await pick(p, 'noise', 'off');
+    await pick(p, 'subs', 'browser');
+    await p.getByRole('button', { name: 'Start – free' }).click();
+    await p.getByTestId('job-error').waitFor({ timeout: 120000 });
+    const err = await p.getByTestId('job-error').innerText();
+    if (!/subtitle maker couldn.t start/.test(err)) throw new Error('error text: ' + err); // the worker's own reason is not passed on
+    if (await p.getByTestId('subs-result').count()) throw new Error('subtitles were made with a changed file');
+    if (!models.byName()['preprocessor_config.json']) throw new Error('the changed file was never requested, so the refusal is not the one under test');
+    return err.split('\n')[0];
+  } finally {
+    models.tamper(null);
+    await ctx.close();
+  }
 });
 
 await check('subtitles, free, video: "Put the subtitles into the video" gives an MKV with the picture and sound copied and a subtitle track any player reads', async () => {

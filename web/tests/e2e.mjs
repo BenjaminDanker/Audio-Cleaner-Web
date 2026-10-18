@@ -136,14 +136,15 @@ if (want('studio')) {
     if (!(await page.locator('input[type=checkbox][name=leveling]').isChecked())) throw new Error('Leveling is on by default with Denoising');
     const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'), page.getByTestId('start').click()]);
     const body = req.postDataJSON();
-    if (body.kind !== 'denoise' || body.denoiseTier !== 'standard' || body.options.leveling !== true) throw new Error('job sent: ' + JSON.stringify(body));
+    if (body.kind !== 'denoise' || body.denoiseTier !== 'standard' || body.options.leveling !== true || body.options.audio_format !== 'flac') throw new Error('job sent: ' + JSON.stringify(body));
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
     if (status !== 'done') throw new Error('status ' + status + ' ' + (await card.innerText()));
     await page.screenshot({ path: join(SHOTS, 'studio-done.png'), fullPage: true });
     const [dl] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download').first().click()]);
-    const p = join(FILES, 'out-studio.wav');
+    if (!dl.suggestedFilename().endsWith('.flac')) throw new Error('the audio a server job makes should come as FLAC, got ' + dl.suggestedFilename());
+    const p = join(FILES, 'out-studio.flac');
     await dl.saveAs(p);
     await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent !== '$5.00', null, { timeout: 15000 });
     return `${est.split('\n')[0]}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;

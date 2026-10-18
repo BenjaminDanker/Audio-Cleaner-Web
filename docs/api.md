@@ -175,7 +175,7 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 
 | Option | Default | Range and meaning |
 |---|---|---|
-| `audio_format` | `wav` | `wav`, `flac`, `mp3`, `m4a`, `opus` |
+| `audio_format` | `flac` | `wav`, `flac`, `mp3`, `m4a`, `opus` |
 | `caption_formats` | `["srt","vtt","txt"]` | any of `srt`, `vtt`, `txt`, `json` (`json` gives `segments.json`: every line with its times, kind `segments`) |
 | `language` | `null` (detect) | the spoken language: a 2-3 letter code (`en`, `es`, `haw`) or null |
 | `translate` | `[]` | up to 3 target languages (two-letter codes from the translation list, not the spoken one); needs a transcription kind. The subtitles and transcript are also made in those languages (`<stem>.<lang>.srt\|vtt`, `<stem>.<lang>-transcript.txt`), priced per language. A language that can't be made is left out, said in `notice` and not charged |

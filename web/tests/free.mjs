@@ -1,17 +1,23 @@
 // Free noise removal in the browser (Cleanup page): what it makes and how it is downloaded, the file types it reads itself
-// (WAV, MP3, WMA and AVI through libav.js, stereo at 44.1 kHz, MP4 video), that nothing about the file goes to our server, that the
-// noise remover is fetched once, and the free + free combination (browser noise removal + free subtitles, no job at all).
-// Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output and the fixtures (make-fixtures.sh).
+// (WAV, MP3, WMA and AVI through libav.js, stereo at 44.1 kHz, MP4 video), that nothing about the file goes to our server, where
+// the noise remover comes from (df.js from the site; the WebAssembly and the model from the model host, once, kept in the browser,
+// a wrong file refused), that data saver mode downloads nothing before Start, and the free + free combination (browser noise
+// removal + free subtitles, no job at all).
+// Needs the local backend (port 8792, see helpers.mjs) with `ACW_MODEL_HOST=http://127.0.0.1:8798/ npm run build` output (the
+// model host is mirror.mjs) and the fixtures (make-fixtures.sh).
 // Usage: node tests/free.mjs
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, dropFile, launch, pick, settleRecommendation, signIn, skip, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, mirror, pick, settleRecommendation, signIn, summary, waitResult } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free option needs an account
 const SOURCE_FRAMES = 508591; // noisy.wav at 48 kHz; the other fixtures are made from it (tests/make-fixtures.sh)
 const close = (frames) => Math.abs(frames - SOURCE_FRAMES) < SOURCE_FRAMES * 0.02; // codec padding is a few ms
 
 const { browser, page, logs } = await launch();
+const models = await mirror(); // the local model host: what the browser downloaded from it
+const WASM = 'df_bg.wasm';
+const MODEL = 'DeepFilterNet3_onnx.tar.gz';
 const apiCalls = [];
 const libavFetches = [];
 page.on('request', (r) => {
@@ -92,35 +98,86 @@ await check('free: an MP4 is cleaned and the video comes back with the cleaned s
   return `${dl.suggestedFilename()} ${statSync(p).size} bytes`;
 });
 
-await check('free: the noise remover is fetched once, only after a file is chosen (not on opening the page), and a stereo file uses the same copy', async () => {
+/** A fresh browser profile (empty Cache Storage), signed in; `site` lists what it fetched from the site's /dfn/ folder. */
+async function freshProfile(init) {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
-  const dfn = [];
-  ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) dfn.push(u.pathname.split('/').pop()); });
+  if (init) await ctx.addInitScript(init);
+  const site = [];
+  ctx.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.includes('/dfn/')) site.push(u.pathname.split('/').pop()); });
   const p = await ctx.newPage();
+  await signIn(p, EMAIL);
+  models.reset();
+  return { ctx, p, site };
+}
+const startFree = async (p, file) => {
+  await p.goto(`${BASE}/app`);
+  await p.setInputFiles('input[type=file]', join(FILES, file));
+  await p.getByTestId('start').waitFor({ timeout: 20000 });
+  await settleRecommendation(p);
+  await pick(p, 'noise', 'browser');
+  await p.getByRole('button', { name: 'Start – free' }).click();
+};
+const keptFiles = (p) => p.evaluate(async () => (await (await caches.open('acw-models')).keys()).map((r) => r.url.split('/').pop()));
+
+await check('free: the noise remover is downloaded after a file is chosen (df.js from the site; the wasm and the model once each from the model host, never from /dfn/); a stereo file and a second page load use the kept copy', async () => {
+  const { ctx, p, site } = await freshProfile();
   try {
-    await signIn(p, EMAIL);
     await p.goto(`${BASE}/app`); await p.waitForSelector('main h1');
     await p.waitForTimeout(1500);
-    if (dfn.length) throw new Error('downloaded before a file was chosen: ' + dfn.join(', '));
-    await p.setInputFiles('input[type=file]', join(FILES, 'stereo44.wav'));
-    await p.getByTestId('start').waitFor({ timeout: 20000 });
-    await settleRecommendation(p);
-    await pick(p, 'noise', 'browser');
-    await p.getByRole('button', { name: 'Start – free' }).waitFor({ timeout: 20000 });
-    await p.getByRole('button', { name: 'Start – free' }).click();
+    if (site.length || Object.keys(models.hits).length) throw new Error('downloaded before a file was chosen: ' + site.join(', ') + Object.keys(models.hits));
+    await startFree(p, 'stereo44.wav');
     await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
-    const count = (n) => dfn.filter((f) => f === n).length;
-    if (count('df_bg.wasm') !== 1 || count('DeepFilterNet3_onnx.tar.gz') !== 1) throw new Error('downloads: ' + dfn.join(', '));
-    const channels = await p.locator('[data-testid=result]').getAttribute('data-channels');
-    if (channels !== '2') throw new Error('expected a stereo run, got ' + channels);
-    return 'wasm x1, model x1 (stereo)';
+    if (JSON.stringify(models.byName()) !== JSON.stringify({ [WASM]: 1, [MODEL]: 1 })) throw new Error('model host downloads: ' + JSON.stringify(models.byName()));
+    if (!site.includes('df.js') || site.includes(WASM) || site.includes(MODEL)) throw new Error('from the site: ' + site.join(', '));
+    if ((await p.locator('[data-testid=result]').getAttribute('data-channels')) !== '2') throw new Error('expected a stereo run');
+    await startFree(p, 'noisy.wav'); // a new page load: the browser's own copy, no second download
+    await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
+    if (JSON.stringify(models.byName()) !== JSON.stringify({ [WASM]: 1, [MODEL]: 1 })) throw new Error('second page load downloaded again: ' + JSON.stringify(models.byName()));
+    const kept = (await keptFiles(p)).sort();
+    if (kept.join() !== [WASM, MODEL].sort().join()) throw new Error('kept in the browser: ' + kept);
+    return 'wasm x1, model x1 from the model host; stereo and a second page load from Cache Storage';
   } finally {
     await ctx.close();
   }
 });
 
-skip('free: when the browser asks to save data, nothing is downloaded before Start',
-  'the recommendation quick listen loads the noise remover on file choice even with navigator.connection.saveData on (product promise: nothing before Start)');
+await check('free: a model file that is not the pinned one (changed bytes) is refused with an error and not kept; the real file then works', async () => {
+  const { ctx, p } = await freshProfile();
+  try {
+    models.tamper(MODEL);
+    await startFree(p, 'noisy.wav');
+    const err = await p.getByTestId('job-error').waitFor({ timeout: 120000 }).then(() => p.getByTestId('job-error').innerText());
+    if (!/not the expected file/.test(err)) throw new Error('error text: ' + err);
+    if (await p.getByTestId('result').count()) throw new Error('a result was made from the changed file');
+    if ((await keptFiles(p)).includes(MODEL)) throw new Error('the changed file was kept');
+    models.tamper(null);
+    await p.getByRole('button', { name: 'Start – free' }).click();
+    await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
+    if (!(await keptFiles(p)).includes(MODEL)) throw new Error('the real file was not kept');
+    return err.split('\n')[0];
+  } finally {
+    models.tamper(null);
+    await ctx.close();
+  }
+});
+
+await check('free: when the browser asks to save data, nothing is downloaded before Start', async () => {
+  const { ctx, p, site } = await freshProfile(() => Object.defineProperty(navigator, 'connection', { value: { saveData: true } }));
+  try {
+    await p.goto(`${BASE}/app`);
+    await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+    await p.getByTestId('start').waitFor({ timeout: 20000 });
+    await pick(p, 'noise', 'browser');
+    await p.waitForTimeout(2000);
+    if (site.length || Object.keys(models.hits).length) throw new Error(`downloaded before Start: ${site.join(', ')} ${Object.keys(models.hits)}`);
+    await p.getByRole('button', { name: 'Start – free' }).click();
+    await p.waitForSelector('[data-testid=result]', { timeout: 120000 });
+    if (models.byName()[WASM] !== 1) throw new Error('Start did not download the noise remover');
+    return 'nothing before Start, then the noise remover and a result';
+  } finally {
+    await ctx.close();
+  }
+});
 
 await check('free + free: browser noise removal AND free subtitles at the same time, no job is sent at all', async () => {
   const posts = [];
@@ -132,7 +189,7 @@ await check('free + free: browser noise removal AND free subtitles at the same t
   if (label !== 'Start – free') throw new Error('label: ' + label);
   await page.getByTestId('start').click();
   await page.waitForSelector('[data-testid=result]', { timeout: 180000 });
-  await page.getByTestId('subs-result').waitFor({ timeout: 300000 });
+  await waitResult(page, 'subs-result');
   await page.unroute('**/api/jobs');
   if (posts.length) throw new Error('a job was sent: ' + JSON.stringify(posts.at(-1)));
   const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('link', { name: /Cleaned WAV/ }).click()]);

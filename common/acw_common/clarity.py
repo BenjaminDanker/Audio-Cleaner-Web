@@ -17,8 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import minimum_filter1d, uniform_filter1d
-from scipy.signal import butter, lfilter, sosfilt, sosfilt_zi
+# scipy is imported inside the functions that use it: it takes most of a second to load, which a job that never levels
+# the sound need not pay.
 
 BLOCK_SECONDS = 10.0
 
@@ -63,6 +63,7 @@ def _mono_block(x2: np.ndarray, s: int, e: int) -> np.ndarray:
 
 def _frame_rms(x2: np.ndarray, sr: int, sos: np.ndarray, frame: int) -> np.ndarray:
     """RMS of the high-passed mono mix in consecutive frames of `frame` samples."""
+    from scipy.signal import sosfilt_zi, sosfilt
     zi = sosfilt_zi(sos) * 0.0
     out, carry = [], np.zeros(0)
     for s, e in _blocks(len(x2), sr):
@@ -77,6 +78,7 @@ def _frame_rms(x2: np.ndarray, sr: int, sos: np.ndarray, frame: int) -> np.ndarr
 def speech_level_gain_db(original: np.ndarray, denoised: np.ndarray, sr: int, max_boost_db: float) -> float:
     """DFN tends to lower speech level slightly. Gain (never negative) that makes
     the denoised signal's loud (speech) frames match the original's."""
+    from scipy.signal import butter
     o, d = _as2d(original), _as2d(denoised)
     if len(o) < sr:
         return 0.0
@@ -97,6 +99,7 @@ def match_speech_level(original: np.ndarray, denoised: np.ndarray, sr: int, max_
 
 
 def _highpass_inplace(x2: np.ndarray, sr: int, hz: float) -> None:
+    from scipy.signal import butter, sosfilt
     sos = butter(2, hz, btype="highpass", fs=sr, output="sos")
     zi = np.zeros((sos.shape[0], 2, x2.shape[1]))
     for s, e in _blocks(len(x2), sr):
@@ -117,6 +120,8 @@ def _compress_inplace(x2: np.ndarray, sr: int, threshold_db: float, ratio: float
 
     Gain reduction comes from a 10 ms RMS detector; a running minimum over the
     attack window gives a fast attack and a one-pole filter the release."""
+    from scipy.ndimage import minimum_filter1d, uniform_filter1d
+    from scipy.signal import lfilter
     n = len(x2)
     win = max(1, int(0.01 * sr))
     attack = max(1, int(attack_ms * 1e-3 * sr))
@@ -143,6 +148,7 @@ def integrated_loudness(x: np.ndarray, sr: int) -> float:
     """BS.1770-4 gated loudness (LUFS), equal to pyloudnorm's Meter, computed
     from 100 ms sub-block energies so the signal is never copied whole. Returns
     -inf for silence; raises ValueError for input shorter than one 400 ms block."""
+    from scipy.signal import lfilter
     import pyloudnorm as pyln
 
     x2 = _as2d(x)
@@ -206,6 +212,8 @@ def _limit_inplace(x2: np.ndarray, sr: int, ceiling_db: float, lookahead_ms: flo
     before the peak arrives) -> release smoothing that never rises above the
     requirement -> short min filter against overshoot. In blocks, the release
     filter state is carried and the min filters see `margin` real neighbours."""
+    from scipy.ndimage import minimum_filter1d
+    from scipy.signal import lfilter
     n = len(x2)
     ceiling = _lin(ceiling_db)
     la = max(1, int(lookahead_ms * 1e-3 * sr))

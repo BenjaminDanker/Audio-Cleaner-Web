@@ -568,7 +568,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(
             QMessageBox.Icon.Question, config.APP_NAME,
             f"{what} was not installed, probably because the download during setup did not work. Download it now "
-            f"({size_text(downloader.model.download_size)})?\n\n"
+            f"({size_text(downloader.model.size)})?\n\n"
             f"You can start cleaning when it is done, or {off} to clean the files right away.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self,
         )
@@ -638,7 +638,7 @@ class MainWindow(QMainWindow):
         dl = queue[0]
         if not dl.running:
             dl.start()
-        self._show_model_progress(0, dl.model.download_size)
+        self._show_model_progress(0, dl.model.size)
 
     def _show_model_progress(self, done: int, total: int) -> None:
         left = models.download_bytes([d.model for d in getattr(self, "_model_queue", [])]) or total

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import QSettings
@@ -24,6 +27,18 @@ def test_auto_parallelism_follows_cores_and_memory():
 def test_threads_are_split_between_jobs():
     assert sysinfo.threads_per_job(1) >= 2
     assert sysinfo.threads_per_job(64) == 2
+
+
+def test_numpys_own_thread_pool_is_one_thread_unless_set_before_numpy_loads():
+    desktop = Path(__file__).resolve().parents[1]
+    code = ("import os, sys; sys.path[:0] = sys.argv[1:3]; import audio_cleaner_desktop.__main__; "
+            "print(*(os.environ[n] for n in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS')))")
+    names = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+    run = lambda **extra: subprocess.run(  # noqa: E731
+        [sys.executable, "-I", "-c", code, str(desktop), str(desktop.parent / "common")], capture_output=True, text=True,
+        env={**{k: v for k, v in os.environ.items() if k not in names}, **extra}, check=True).stdout.split()
+    assert run() == ["1", "1", "1"]
+    assert run(OMP_NUM_THREADS="4") == ["1", "4", "1"]  # setdefault: an explicit choice stays
 
 
 def test_folders_are_searched_recursively(tmp_path):

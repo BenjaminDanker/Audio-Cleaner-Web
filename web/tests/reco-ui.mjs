@@ -8,6 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chromium } from 'playwright';
 import { noisy, voice, wavBytes } from './reco-audio.mjs';
+import { startMirror } from './mirror.mjs';
+
+await startMirror(); // the built site downloads the noise remover from the tests' local model host
 
 const ORIGIN = process.env.E2E_ORIGIN || 'http://127.0.0.1:8792';
 const BASE = `${ORIGIN}/audio`;

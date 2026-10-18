@@ -33,7 +33,7 @@
 
 | Product | Where it runs | Cost to us |
 |---|---|---|
-| Free browser denoise | user's browser (DFN3 WASM, Web Worker) | VPS egress for ~8 MB of assets per new visitor (wasm 3.9 MB gz + model 8 MB) |
+| Free browser denoise | user's browser (DFN3 WASM, Web Worker) | none of ours for the model: the wasm and the model (about 22 MB) come from Hugging Face; df.js (15 kB) from the VPS |
 | Studio clean (paid) | acw-worker → runner, see "File jobs" below | CPU on primary-ram |
 | Studio clean, voice rebuilt (paid, own price) | same, with Sidon instead of noise removal + highs; files up to 90 minutes, one such job at a time | about 1x real time per channel, ~3 GB RAM |
 | Desktop app (free) | user's computer: same `acw_common` pipeline as Studio clean, bundled libDF + LGPL FFmpeg | GitHub Releases bandwidth (free); update check hits a static JSON on the VPS |

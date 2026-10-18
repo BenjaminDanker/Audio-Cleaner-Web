@@ -1,5 +1,7 @@
 // Main-thread side of the in-browser noise remover: one shared download, then one module worker per channel.
 
+import { DENOISER, fetchPinned } from './models.js';
+
 const BASE = import.meta.env.BASE_URL;
 
 export { STRENGTHS } from '../strengths.js';
@@ -9,20 +11,19 @@ function dfnBase() {
 }
 
 // ---- one shared download ---------------------------------------------------------------------------------------
-// The noise remover is three files (df.js, df_bg.wasm, the model; about 22 MB together). They are fetched ONCE per page
-// load, in the background, as soon as a file has been chosen (the free in-browser cleanup, and the quick listen behind
-// "Automatic best settings": analyse.js), or when "Test my room" starts on the Live page. Nothing is downloaded before.
+// The noise remover is three files: df.js (the glue code, on this site) and the WebAssembly build and the model (about
+// 22 MB together, from Hugging Face, pinned and checked: models.js). They are fetched ONCE per page load, in the
+// background, as soon as a file has been chosen (the free in-browser cleanup, and the quick listen behind "Automatic best
+// settings": analyse.js), or when "Test my room" starts on the Live page. Nothing is downloaded before.
 // The wasm is compiled once, the compiled Module and the model bytes are handed to every worker, so a stereo file (two
 // workers) never downloads or compiles anything twice. df.js is only warmed into the HTTP cache here:
 // it is a module, so each worker imports it by URL (a cache hit, about 15 kB).
 //
-// Repeat visits: every URL carries ?v=<hash of the files> (__DFN_VERSION__), so a changed file is a new URL. The front
-// door (deploy/vps/audio.caddy) answers these files, for signed-in visitors only, with `Cache-Control: private,
-// max-age=604800`: a returning visitor gets them from the browser cache for a week, then the browser asks again.
+// Repeat visits: the wasm and the model are kept in the browser (models.js). df.js carries ?v=<hash> (__DFN_VERSION__),
+// so a changed file is a new URL; the front door (deploy/vps/audio.caddy) lets the browser keep it for a week.
 const V = `?v=${__DFN_VERSION__}`;
-// Decoded sizes of the three files; only the denominator of the progress readout (see vite.config.js).
-const SIZES = __DFN_SIZES__;
-const TOTAL = SIZES.js + SIZES.wasm + SIZES.model;
+// Sizes of the three files; only the denominator of the progress readout.
+const TOTAL = __DFN_JS_SIZE__ + DENOISER.wasm.size + DENOISER.model.size;
 
 let load = null; // the download in progress or finished: { promise, startedAt, loaded, done }
 const loadListeners = new Set();
@@ -52,52 +53,16 @@ export function subscribeDenoiserLoad(fn) {
   return () => loadListeners.delete(fn);
 }
 
-/** Counts every received byte of a response body into the shared progress. */
-function counted(body, state) {
-  return body.pipeThrough(new TransformStream({
-    transform(chunk, ctl) {
-      state.loaded += chunk.byteLength;
-      notify();
-      ctl.enqueue(chunk);
-    },
-  }));
-}
-
-function get(url) {
-  // `priority: 'low'` keeps this behind the page itself and whatever the visitor is doing (ignored where unsupported).
-  return fetch(url, { priority: 'low', credentials: 'same-origin' }).then((res) => {
-    if (!res.ok) throw new Error(`Could not get the noise remover (${res.status}).`);
-    return res;
-  });
-}
-
 async function download(state) {
-  const base = dfnBase();
-  const js = get(`${base}df.js${V}`).then((r) => r.arrayBuffer()).then((b) => { state.loaded += b.byteLength; });
-  const wasm = get(`${base}df_bg.wasm${V}`).then((res) => {
-    // Compile while the bytes arrive. The MIME type is set here, so a server that labels .wasm wrongly still works.
-    const headers = new Headers({ 'Content-Type': 'application/wasm' });
-    return WebAssembly.compileStreaming(new Response(counted(res.body, state), { status: 200, headers }));
-  });
-  const model = get(`${base}DeepFilterNet3_onnx.tar.gz${V}`).then(async (res) => {
-    const chunks = [];
-    const reader = counted(res.body, state).getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-    }
-    return new Uint8Array(await new Blob(chunks).arrayBuffer());
-  });
+  const count = (n) => { state.loaded += n; notify(); };
+  const js = fetch(`${dfnBase()}df.js${V}`, { priority: 'low', credentials: 'same-origin' }).then((res) => {
+    if (!res.ok) throw new Error(`Could not get the noise remover (${res.status}).`);
+    return res.arrayBuffer();
+  }).then((b) => count(b.byteLength));
+  const wasm = fetchPinned(DENOISER.wasm, { onBytes: count }).then((bytes) => WebAssembly.compile(bytes));
+  const model = fetchPinned(DENOISER.model, { onBytes: count });
   const [, module, bytes] = await Promise.all([js, wasm, model]);
-  let gz = bytes;
-  // Some static servers (and the Vite dev server) label *.tar.gz as Content-Encoding: gzip, so the browser hands us
-  // the already-decompressed tar. The model loader wants the gzip, so compress it again in that case.
-  if (!(gz[0] === 0x1f && gz[1] === 0x8b)) {
-    const stream = new Blob([gz]).stream().pipeThrough(new CompressionStream('gzip'));
-    gz = new Uint8Array(await new Response(stream).arrayBuffer());
-  }
-  return { module, model: gz };
+  return { module, model: bytes };
 }
 
 /**

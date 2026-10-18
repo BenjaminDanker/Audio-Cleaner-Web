@@ -73,7 +73,7 @@ def _recording(tmp_path, two_tracks):
 def _clean(client, h, data, **options):
     r = client.post("/api/jobs", json={
         "kind": "denoise", "denoiseTier": "standard", "filename": "rec.mkv", "sizeBytes": len(data), "durationSeconds": SECONDS,
-        "options": {"output_video": False, "loudness_lufs": None, **options},
+        "options": {"output_video": False, "loudness_lufs": None, "audio_format": "wav", **options},
     }, headers=h)
     assert r.status_code == 200, r.text
     job_id = r.json()["id"]

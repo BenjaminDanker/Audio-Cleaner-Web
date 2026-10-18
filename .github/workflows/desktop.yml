@@ -55,9 +55,10 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # The models every release carries (release_models.py --check): the speech model's files at their pinned commit on
-  # Hugging Face, and the models archive in a release it can be carried over from, with the pinned sizes. Nothing needs
-  # this job, so a red result here does not stop the builds; the release job itself refuses a file that doesn't match.
+  # The models the app and setup download (check_model_urls.py): the speech model's files at their pinned commit on
+  # Hugging Face and our own models and licence texts in our Hugging Face repository (skipped, with a message, while
+  # config.HF_MODELS_REVISION is still PENDING-UPLOAD), each found with its pinned size. Nothing needs this job, so a
+  # red result here does not stop the builds; the app and setup check every file's SHA-256 themselves.
   model-urls:
     name: Model downloads exist
     runs-on: ubuntu-24.04
@@ -68,12 +69,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: The models every release carries can be found (the speech model's pinned files, the models archive)
-        env:
-          OWN_TOKEN: ${{ github.token }}
-          PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          PUBLIC_REPO: ${{ vars.PUBLIC_DESKTOP_REPO || 'BenjaminDanker/Audio-Cleaner' }}
-        run: python desktop/packaging/release_models.py --check
+      - name: The pinned model files can be found (the speech model, and our models on Hugging Face)
+        run: python desktop/packaging/check_model_urls.py
 
   # ---------------------------------------------------------------------------
   # LGPL-only FFmpeg + libopus + LAME, static, from pinned source tarballs (desktop/packaging/build_ffmpeg.sh).
@@ -270,9 +267,9 @@ jobs:
             --out desktop/vendor
 
       - name: Models for the frozen selftest (restoring highs, rebuilding the voice)
-        # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime (one 0.9 GB archive, which
-        # the first download unpacks for both). The speech model is left out (1.6 GB). Does not fail the build when the download server does not have the models yet: the
-        # "Model downloads exist" job reports that.
+        # Lets the frozen selftest run AP-BWE and Sidon through the bundled onnxruntime (0.9 GB from our Hugging Face
+        # repository). The speech model is left out (1.6 GB). Does not fail the build when the models are not there yet
+        # (config.HF_MODELS_REVISION is PENDING-UPLOAD): the "Model downloads exist" job reports that.
         continue-on-error: true
         run: |
           ACW_DESKTOP_MODELS="$RUNNER_TEMP/acw-models" python - <<'PY'
@@ -593,7 +590,6 @@ jobs:
             desktop/audio_cleaner_desktop/*.py
             desktop/packaging/version.py
             desktop/packaging/make_update_manifest.py
-            desktop/packaging/release_models.py
           sparse-checkout-cone-mode: false
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -643,10 +639,10 @@ jobs:
           - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
-          Setup downloads the models (about 2.5 GB in all, once), so keep the internet on while it installs; on a Mac
-          it can take several minutes. They are Whisper large-v3-turbo for subtitles (1.6 GB) and one archive with
-          AP-BWE for restoring the highs of phone-quality recordings and Sidon for rebuilding voices (0.9 GB), which
-          setup unpacks for you. After that everything works offline. If a download fails, the app still works and offers it in Settings.
+          Setup downloads the models (about 2.6 GB in all, once), so keep the internet on while it installs; on a Mac
+          it can take several minutes. They are Whisper large-v3-turbo for subtitles (1.6 GB), AP-BWE for restoring the
+          highs of phone-quality recordings (0.5 GB) and Sidon for rebuilding voices (0.5 GB). After that everything
+          works offline. If a download fails, the app still works and offers it in Settings.
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           # Marks the automatic releases, so the clean-up below never removes one made from a hand-pushed tag.
@@ -661,18 +657,15 @@ jobs:
 
       # The release users get: the public repository's release v<version> (on its default branch) has everything of this
       # version, copied, not rebuilt: the installers, update.json and its signature (installed apps read the newest
-      # release's), and the models the app downloads from its own release (release_models.py: the speech model from its
-      # pinned commit, the models archive carried over from the newest release that has it; every file checked against
-      # its pinned SHA-256). It is made as a draft and published once every file is there, so neither an app nor a
-      # person ever sees half a release. Releases there are never removed: every version keeps its models. It never
+      # release's). The models are not in the release: the app and setup download them from Hugging Face. It is made as
+      # a draft and published once every file is there, so neither an app nor a person ever sees half a release.
+      # Releases there are never removed: every version keeps its installers. It never
       # fails the official release above: without the secret PUBLIC_RELEASE_TOKEN (a token that can write to that
       # repository, docs/desktop.md) it only prints a warning, and any error is a warning too. A rerun replaces the files.
       - name: Publish the release to the public repository
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          PUBLIC_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          OWN_TOKEN: ${{ github.token }}
           PUBLIC_REPO: ${{ vars.PUBLIC_DESKTOP_REPO || 'BenjaminDanker/Audio-Cleaner' }}  # a private trial repository when set
         run: |
           if [ -z "$GH_TOKEN" ]; then
@@ -683,11 +676,9 @@ jobs:
           version="$(python3 desktop/packaging/version.py)"
           tag="v$version"
           title="Audio Cleaner $version"
-          python3 desktop/packaging/release_models.py release/models
           cd release
           files=("AudioCleaner-$version-Windows.exe" "AudioCleaner-$version-Mac-Apple-silicon.pkg" "AudioCleaner-$version-Mac-Intel.pkg")
           [ ! -f update.json ] || files+=(update.json update.json.sig)
-          for f in models/*; do files+=("$f"); done
           branch="$(gh api "repos/$PUBLIC_REPO" --jq .default_branch)"
           notes="Audio Cleaner $version.
 
@@ -695,9 +686,9 @@ jobs:
           - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
-          Pick the file that matches your computer. Setup downloads the models once (about 2.5 GB in all), so keep the
+          Pick the file that matches your computer. Setup downloads the models once (about 2.6 GB in all), so keep the
           internet on while it installs; after that everything works offline. The app checks for a newer version when it
-          starts and updates itself. The other files here are what setup and the app download (update information and models).
+          starts and updates itself. The other files here are what the app downloads (update information).
 
           Not sure which Mac you have? Apple menu > About This Mac: \"Chip\" means Apple silicon, \"Processor\" means Intel."
           if ! gh release view "$tag" --repo "$PUBLIC_REPO" > /dev/null 2>&1; then

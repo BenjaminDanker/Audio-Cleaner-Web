@@ -267,10 +267,10 @@ const jobOutputHash = (id) => page.evaluate(async (id) => {
   const h = await crypto.subtle.digest('SHA-256', buf);
   return { name: audio.name, bytes: buf.byteLength, sha: [...new Uint8Array(h)].map((x) => x.toString(16).padStart(2, '0')).join('') };
 }, id);
-/** Uploads the raw file through the API, bypassing the browser's FLAC step (the reference for "same result as before"). */
+/** Uploads the raw file through the API, bypassing the browser's FLAC step (the reference for "same result as before"); no audio_format, so it is the API default. */
 const rawJob = async (file) => {
   const bytes = readFileSync(file);
-  const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options: { audio_format: 'wav', loudness_lufs: -16, atten_lim_db: 100, caption_formats: [] } });
+  const made = await apiCall(page, 'POST', 'jobs', { kind: 'denoise', denoiseTier: 'standard', filename: file.split('/').pop(), sizeBytes: bytes.length, durationSeconds: 10.6, options: { loudness_lufs: -16, atten_lim_db: 100, caption_formats: [] } });
   if (made.status !== 200) throw new Error('raw create: ' + JSON.stringify(made));
   const put = await page.evaluate(async ({ url, b64 }) => {
     const me = await (await fetch('/audio/api/me')).json();
@@ -309,6 +309,7 @@ await check('a WAV is sent as FLAC (smaller, the declared name and size match) a
   const rawDone = await waitDone(await rawJob(join(FILES, 'noisy.wav')));
   if (rawDone.status !== 'done') throw new Error('raw job ' + rawDone.status);
   const viaRaw = await jobOutputHash(rawDone.id);
+  if (reqs[0].options.audio_format !== 'flac' || rawDone.options.audio_format !== 'flac' || !viaFlac.name.endsWith('.flac')) throw new Error(`FLAC is the default for server audio: page ${reqs[0].options.audio_format}, API ${rawDone.options.audio_format}, file ${viaFlac.name}`);
   if (viaFlac.sha !== viaRaw.sha) throw new Error(`outputs differ: ${viaFlac.bytes} B vs ${viaRaw.bytes} B`);
   return `${orig} B -> ${put} B (${(100 * put / orig).toFixed(0)}%); output identical (${viaFlac.bytes} B, ${sha256(Buffer.from(viaFlac.sha)).slice(0, 8)})`;
 });

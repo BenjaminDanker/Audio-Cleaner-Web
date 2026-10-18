@@ -49,8 +49,8 @@ latency); standard live captions ~12 CPU-s.
 
 | Free thing | What it costs us |
 |---|---|
-| Browser denoise | Nothing per use (runs on the visitor's device). ~12 MB of VPS traffic per new visitor (cached for a year after). |
-| Free subtitles | Made in the visitor's browser: no compute here. Each new browser downloads the 80 MB model and the 26 MB runtime once from the VPS. |
+| Browser denoise | Nothing per use (runs on the visitor's device). The model and its WebAssembly (about 22 MB) come from Hugging Face; 15 kB of VPS traffic per new visitor. |
+| Free subtitles | Made in the visitor's browser: no compute here. Each new browser downloads the 77 MB model once from Hugging Face and the 14 MB speech runtime (about 2.5 MB compressed) from the VPS. |
 | Desktop app | Nothing (runs offline on the user's computer). |
 
 ## Fixed and risk items

@@ -72,11 +72,11 @@ export class DfnStream {
   }
 }
 
-/** df.js loaded in a worker or a page from the site's /dfn/ folder, initialised with an already compiled module. */
+/** df.js loaded in a worker or a page from the site's /dfn/ folder, initialised with the already compiled WebAssembly module
+ *  (denoise.js downloads and checks it once). */
 export async function loadDfnModule(dfnBase, version, module) {
-  const v = version ? `?v=${version}` : '';
-  const mod = await import(/* @vite-ignore */ `${dfnBase}df.js${v}`);
-  await mod.default({ module_or_path: module || `${dfnBase}df_bg.wasm${v}` });
+  const mod = await import(/* @vite-ignore */ `${dfnBase}df.js${version ? `?v=${version}` : ''}`);
+  await mod.default({ module_or_path: module });
   return mod;
 }
 

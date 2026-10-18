@@ -31,7 +31,6 @@ from pathlib import Path
 
 import numpy as np
 import scipy.fft
-import scipy.signal
 
 from .dfn import Cancelled
 
@@ -58,7 +57,9 @@ MODELS = {
 #: Anything wider than the last one is treated as full band.
 _LIMITS = (("8k", 4_400.0), ("12k", 6_600.0), ("16k", 8_800.0), ("24k", 12_600.0))
 
-_HANN = scipy.signal.get_window("hann", WIN, fftbins=True).astype(np.float32)  # == torch.hann_window
+# periodic Hann window, == torch.hann_window (and scipy.signal.get_window("hann", WIN), bit for bit; scipy.signal itself is
+# imported only where it is used: it takes most of a second to load)
+_HANN = (0.5 - 0.5 * np.cos(2 * np.pi * np.arange(WIN) / WIN)).astype(np.float32)
 
 
 # --------------------------------------------------------------------------------------------------------
@@ -155,6 +156,8 @@ def _smoothed_ltas(x: np.ndarray, sr: int):
         return None
     f, db = r
     # smooth in the dB domain with a ~200 Hz running median (kills single-bin tones and gaps)
+    import scipy.signal
+
     return f, scipy.signal.medfilt(db, max(3, int(round(200 / f[1])) | 1))
 
 
@@ -272,6 +275,8 @@ def _band_limit(x: np.ndarray, lr_rate: int) -> np.ndarray:
     """48 kHz -> lr_rate -> 48 kHz like the training data (everything above lr_rate/2 removed)."""
     ratio = SAMPLE_RATE // lr_rate
     h = _resample_filter(ratio)
+    import scipy.signal
+
     lo = scipy.signal.resample_poly(x, 1, ratio, window=h.copy())
     y = scipy.signal.resample_poly(lo, ratio, 1, window=h.copy())
     y = y[:len(x)]
