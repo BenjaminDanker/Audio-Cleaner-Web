@@ -10,7 +10,8 @@ installs it (a signed update; Settings > "Check for updates when Audio Cleaner s
 nothing but a normal web request with the app version).
 
 - `audio_cleaner_desktop/engine.py` cleans one file (no Qt; used by the window and the command line)
-- `audio_cleaner_desktop/gui/` the window: queue, settings, preview, history, About
+- `audio_cleaner_desktop/copies.py`, `blend.py`, `redo.py` the saved copies of a job, the strength blend, change-and-save-again (no Qt)
+- `audio_cleaner_desktop/gui/` the window: queue, settings, preview, the Jobs tab (list, job view, live strength), About
 - `audio_cleaner_desktop/cli.py` the `--cli` and `--selftest` modes
 - `vendor/` native pieces for running from source (git-ignored, filled by the packaging scripts):
   `native/{libdf, ffmpeg, ffprobe}`, `licenses/`, and for tests and runs from source (never bundled) the noise models in

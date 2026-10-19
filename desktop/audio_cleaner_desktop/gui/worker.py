@@ -30,6 +30,7 @@ class Job:
     options: engine.JobOptions
     out_dir: Path | None = None
     output_name: str | None = None  # the file name of the result (its ending says the type); None = the usual name
+    keep_dir: Path | None = None  # folder for the job's saved copies (copies.py); None = keep none
 
 
 def failure_message(error: BaseException) -> str:
@@ -60,6 +61,8 @@ class _JobThread(QThread):
         job = self.job
         try:
             extra = {"output_name": job.output_name} if job.output_name is not None else {}
+            if job.keep_dir is not None:
+                extra["keep_dir"] = job.keep_dir
             result = self._runner(
                 job.path, job.options, out_dir=job.out_dir, threads=self._threads, cancel=self.cancel,
                 progress=lambda f: self.progress.emit(job.id, f), **extra,

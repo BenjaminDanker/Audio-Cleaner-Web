@@ -419,6 +419,52 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     one (which goes to the Recycle Bin / Trash, as before); under another name or type it is a new file and the old one
     stays.
   * *Command line*: `--output-name NAME` (one file), `--format EXT` (the type of every result; the usual name), `--video-size`.
+* **Jobs, saved copies and "Change and save again"** (the Jobs tab, `gui/history_view.py` and `gui/job_view.py`; the same idea as the website's
+  kept copies, `docs/architecture.md`, but on the user's own disk with no time limit). The Jobs tab is the old History: one row per
+  cleaned or failed file, newest first (or oldest, by name, by disk used, by length), searchable by name, folder, results, message and
+  the settings in words ("Gentle", "leveled") and as stored, a page of 50 at a time with no cap (`HistoryStore.search(limit, offset,
+  sort)`). A row opens the job.
+  * *Where.* Every job gets a folder `jobs/<32 hex digits>/` next to `history.sqlite3` in the app's data folder
+    (`%LOCALAPPDATA%\Audio Cleaner\Audio Cleaner` etc.): `job.json` (the original's path with its fingerprint, the choices it
+    was made with, the copies with the sizes they were written with, the results saved from it), `noise.flac` (the noise removal at full
+    strength, before strength and Leveling), `rebuilt.flac` (the rebuilt voice, when Voice rebuild ran), `input.flac` (the recording with
+    the speaker echo taken out, only when that ran), `segments.json` (the transcript, when subtitles were made). 24-bit FLAC through
+    `acw_common/kept.py`, the website's format. The results and the original are not copied: they are the user's files and stay where they
+    are. **Disk: about 0.29 GB per hour of audio and per cleaned channel** for the noise copy (measured on speech: 0.294 GB for one hour of
+    mono; a stereo recording whose sides differ takes twice that, one whose sides are the same or one of them silent is kept once); the
+    rebuilt voice about the same; the transcript a few kB; `input.flac` (echo removal only) about 0.36 GB per hour. A job
+    that rebuilt the voice and was never changed holds only the rebuilt voice. The page shows each job's size and the total (the
+    `copies_bytes` column, counted again at start-up by `HistoryStore.reconcile`).
+  * *The original.* The job remembers its path and a fingerprint: size, modified time and a hash of 16 parts of the file (`copies.fingerprint`).
+    Before anything is done with a copy it is checked (`copies.check_original`): same size and modified time is accepted without reading;
+    a different modified time only if the parts hash the same (a copy put back); anything else is "changed", and a missing file is "moved".
+    The decoded original must also be as long as the copies (`JobCopies.samples`). When the original is moved or changed the strength
+    slider and every change but the subtitle files are unavailable with the reason in plain words; for a moved file "Find the original..."
+    accepts the file it was moved to when it is the same file.
+  * *Live strength.* The strength is the blend `out = (1 - a) * full + a * original`, `a = 10 ** (-dB / 20)` (`pipeline.blend_strength`). The job view
+    decodes the original with the pipeline's own function (`decode_for_clean`, so the samples line up exactly; the echo-free copy when echo was
+    removed) and the saved noise removal into scratch files (about 5 s per hour of audio) and `blend.BlendStream` mixes them block by
+    block (0.05 ms per 50 ms block). `gui/live_audio.py` gives the blocks to the sound card in pull mode (`QAudioSink`, 16-bit, 100 ms
+    buffer, an unbuffered `QIODevice` so Qt does not read ahead), reading the strength at every block, so moving the slider changes the
+    next 100 ms. The slider has the four names (Gentle 12, Balanced 24, Strong 40, Maximum 100 dB) at equal distances and the dB in between.
+    With Leveling on, the preview is the noise removal at a constant loudness (`blend.match_gain`, the website's); with it off it is exactly
+    the saved sound. "Original" plays the same stream at the same place, so A/B is instant. Where QtMultimedia or a sound output is
+    missing the slider still chooses the strength to save. The scratch files are deleted when the job is closed.
+  * *Change and save again* (`redo.py`): strength, Leveling on/off, loudness target, file type and name, subtitle files, Voice rebuild. Only
+    the later steps run, from the copies: strength/Leveling/loudness/type/name/subtitle kind need no model. Measured for one hour of mono
+    speech: 12 s (no Leveling, FLAC), 36 s (Leveling, FLAC), 54 s (Leveling, MP3); the same change on a clip of 10 s takes under a second. Voice rebuild
+    on runs the rebuild from the original (the slow step) unless a rebuilt voice is saved (then only Leveling); off uses the saved noise removal,
+    or runs the noise removal when the job never had one. Subtitles the job never made, or in another language, listen to the original
+    again; other kinds of subtitle file come from the saved transcript, and "Save only the subtitles" needs neither the original nor a model.
+    Steps that run a model keep their new copy in the job, so the next change is cheap. A new result is never written over a file: it goes next
+    to the last result under a free name; if the user types the name of an existing file the app asks, and only "Replace it" moves the old file
+    to the Recycle Bin / Trash and gives the new one its name.
+  * *Delete.* Deleting a job (or "Delete all") removes its folder and its row, nothing else: never the results, never the original
+    (`copies.delete_job_dir` only removes a folder with a name this app gives, directly in the jobs folder, and a link as a link). A job whose
+    copies cannot be removed (a file in use) stays in the list. Old entries (from before this) and failed or stopped jobs: an old entry has no
+    folder and just shows and deletes; a stopped job keeps nothing; a job that failed after its noise removal keeps that copy and can be
+    saved again from the job view; a copy that cannot be written (disk full) never fails the job, the notice says it can't be changed later.
+    Folders nothing points to are swept after a day.
 * **Only the Windows and macOS builds can show the system encoders work.** Linux has none, so the tests there (and in
   development) take the MPEG-4 path; the CI tests on Windows and macOS accept either codec.
 * **Preview of videos.** The sound plays in Qt's player; the picture is decoded by our own FFmpeg at the preview's size and shown against the sound's clock (`gui/video_preview.py`). Qt's player decodes every frame and holds the sound back when the picture is late, so an 8K video on a slower PC played in slow motion. Now late frames are dropped, the decoder jumps ahead to the key frame nearest the sound when it falls behind, and decodes key frames only if it keeps falling behind; the sound is never held back. Formats our FFmpeg does not decode (AV1) still use Qt's player. That is why the FFmpeg build includes video decoders and the scaler (`build_ffmpeg.sh` VIDEO_DECODERS).

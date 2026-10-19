@@ -7,28 +7,15 @@ from PySide6.QtWidgets import (
 )
 
 from .. import engine, resources, sysinfo
+from ..labels import (  # noqa: F401 - the wording lives in labels.py (no Qt there); these names stay importable from here
+    FORMAT_LABELS, LOUDNESS_LABELS, LOUDNESS_SHORT, NOISE_LABELS, STRENGTH_LABELS, SUBTITLE_LABELS, VIDEO_SIZE_LABELS,
+)
 from ..updater import UpdateController
 from . import tips
 from .preferences import Preferences
 from .speech_model import SpeechModelDownloader, SpeechModelPanel
 from .widgets import ElidedLabel, IconButton, Segmented, WrapCheck
 
-STRENGTH_LABELS = [("gentle", "Gentle"), ("balanced", "Balanced"), ("strong", "Strong"), ("max", "Maximum")]
-# The same wording as the website's Denoising form.
-LOUDNESS_LABELS = {
-    "podcast": "Podcast (\u221216 LUFS)", "youtube": "YouTube (\u221214 LUFS)", "broadcast": "Broadcast (\u221223 LUFS)",
-    "keep": "Keep original loudness",
-}
-LOUDNESS_SHORT = {"podcast": "podcast", "youtube": "YouTube", "broadcast": "broadcast", "keep": "original loudness"}
-NOISE_LABELS = {"auto": "Automatic", "light": "Light noise", "heavy": "Heavy noise"}
-SUBTITLE_LABELS = {
-    "off": "No subtitles", "srt": "SRT file", "vtt": "VTT file", "txt": "Text transcript", "embed": "Inside the video",
-}
-FORMAT_LABELS = {"same": "Same as the original", "wav": "WAV", "flac": "FLAC", "mp3": "MP3", "m4a": "M4A", "opus": "Opus"}
-VIDEO_SIZE_LABELS = {
-    "same": "Same as the original", "2160": "2160p (4K)", "1440": "1440p", "1080": "1080p (Full HD)", "720": "720p (HD)",
-    "480": "480p",
-}
 PARALLEL_LABELS = {0: "Automatic", 1: "1", 2: "2", 3: "3", 4: "4"}
 
 

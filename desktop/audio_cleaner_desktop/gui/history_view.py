@@ -1,19 +1,20 @@
-"""The History tab: totals, search and one row per cleaned (or failed) file."""
+"""The Jobs tab: totals, search, sorting and one row per cleaned (or failed) file, newest first, a page at a time. A row opens the job
+(job_view.py): listen, change the strength and save again from the copies the app kept, see what they take, delete the job."""
 from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
 
-from acw_common import reco_model
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 
-from .. import engine
+from ..labels import describe_settings, settings_dict  # noqa: F401 - they live in labels.py (no Qt); importable from here as before
 from . import shell
-from .history import DONE, Entry, HistoryStore, Totals
-from .settings_panel import FORMAT_LABELS, LOUDNESS_SHORT, STRENGTH_LABELS, SUBTITLE_LABELS, VIDEO_SIZE_LABELS
+from .history import DONE, SORTS, CopiesTotal, Entry, HistoryStore, Totals
+from .job_view import JobEnv, JobView
+from .queue_view import format_size
 from .theme import set_property
 from .widgets import ElidedLabel, IconButton, format_time
 
@@ -31,43 +32,6 @@ def format_spent(seconds: float) -> str:
     return f"{minutes // 60} h {minutes % 60:02d} min"
 
 
-def describe_settings(s: dict, has_video: bool) -> str:
-    if s.get("rebuild_voice"):
-        parts = ["voice rebuilt"]
-    elif s.get("picked_rebuild"):
-        parts = [f"voice rebuilt (it sounded {reco_model.REBUILD_WORDS.get(s['picked_rebuild'], s['picked_rebuild'])})"]
-    else:
-        picked = s.get("picked_strength") if s.get("strength") == engine.AUTO_STRENGTH else None
-        if s.get("strength") == engine.AUTO_STRENGTH:
-            parts = [f"{dict(STRENGTH_LABELS)[picked]} noise reduction (picked for this file)" if picked in engine.STRENGTHS
-                     else "noise reduction picked for the file"]
-        else:
-            parts = [dict(STRENGTH_LABELS).get(s.get("strength"), "Maximum") + " noise reduction"]
-    if s.get("noise", "auto") != "auto":
-        parts.append(f"for {s['noise']} noise")
-    if s.get("echo_track"):
-        parts.append("speaker echo removed")
-    if s.get("leveling", True):
-        parts.append("leveled (" + LOUDNESS_SHORT.get(s.get("loudness"), "podcast") + ")")
-    if not has_video and s.get("audio_format", "same") != "same":
-        parts.append(FORMAT_LABELS[s["audio_format"]])
-    if s.get("video_size", "same") != "same":
-        parts.append("video " + VIDEO_SIZE_LABELS.get(s["video_size"], s["video_size"] + "p"))
-    if s.get("subtitles", "off") != "off":
-        parts.append("subtitles: " + SUBTITLE_LABELS[s["subtitles"]].lower())
-    return ", ".join(parts)
-
-
-def settings_dict(options: engine.JobOptions) -> dict:
-    return {
-        "strength": options.strength, "leveling": options.leveling, "loudness": options.loudness,
-        "audio_format": options.audio_format, "subtitles": options.subtitles, "language": options.language,
-        "noise": options.noise, "echo_track": options.echo_track,
-        "rebuild_voice": options.rebuild_voice, "auto_rebuild": options.auto_rebuild,
-        "video_size": options.video_size,
-    }
-
-
 PAGE_SIZE = 50  # rows drawn at first, and added by each "Show more"
 
 
@@ -79,17 +43,26 @@ class _Stat(QFrame):
         layout.setSpacing(2)
         self.value = QLabel("0")
         self.value.setObjectName("Heading")
-        label = QLabel(caption)
-        label.setObjectName("Small")
+        self.caption = QLabel(caption)
+        self.caption.setObjectName("Small")
         layout.addWidget(self.value)
-        layout.addWidget(label)
+        layout.addWidget(self.caption)
+
+
+SORT_LABELS = {
+    "newest": "Newest first", "oldest": "Oldest first", "name": "Name (A to Z)", "disk": "Most disk used", "length": "Longest first",
+}
 
 
 class _HistoryRow(QFrame):
+    """One job. A click opens it; the buttons open the cleaned file, show it in its folder or delete the job."""
+
     def __init__(self, entry: Entry, page: "HistoryPage"):
         super().__init__()
         self.entry = entry
+        self._page = page
         self.setObjectName("Row")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         outputs = [Path(p) for p in entry.outputs]
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 10, 10, 10)
@@ -108,10 +81,10 @@ class _HistoryRow(QFrame):
         name.setToolTip("\n".join([entry.source, *entry.outputs]))
         when = datetime.fromtimestamp(entry.finished_at).strftime("%d %b %Y, %H:%M")
         if entry.status == DONE:
-            meta = f"{when}  ·  {format_time(entry.duration)}  ·  took {format_spent(entry.seconds_taken)}  ·  " \
+            meta = f"{when}  \u00b7  {format_time(entry.duration)}  \u00b7  took {format_spent(entry.seconds_taken)}  \u00b7  " \
                    + describe_settings(entry.settings, entry.has_video)
         else:
-            meta = f"{when}  ·  {entry.message}"
+            meta = f"{when}  \u00b7  {entry.message}"
         detail = ElidedLabel(meta)
         detail.setObjectName("Small")
         detail.setToolTip(meta)
@@ -119,22 +92,37 @@ class _HistoryRow(QFrame):
         middle.addWidget(detail)
         layout.addLayout(middle, 1)
 
+        self.disk = QLabel(format_size(entry.copies_bytes) if entry.job_dir else "")
+        self.disk.setObjectName("Small")
+        self.disk.setToolTip("Disk used by the saved copies of this job, which let it be changed and saved again" if entry.job_dir
+                             else "")
+        layout.addWidget(self.disk)
+
         status = QLabel("Done" if entry.status == DONE else "Failed")
         set_property(status, "state", "done" if entry.status == DONE else "failed")
         layout.addWidget(status)
 
+        open_job = IconButton("waveform", "Open this job: listen, change the strength and save again, see its saved copies")
+        open_job.clicked.connect(lambda: page.open_job(entry.id))
+        buttons = [open_job]
         if entry.status == DONE and outputs:
             open_btn = IconButton("play", "Open the cleaned file with your default player")
             open_btn.clicked.connect(lambda: self._open(outputs[0]))
             reveal = IconButton("folder", "Show the cleaned file in its folder")
             reveal.clicked.connect(lambda: shell.reveal_in_folder(outputs[0]))
-            for b in (open_btn, reveal):
-                b.setFixedSize(32, 32)
-                layout.addWidget(b)
-        remove = IconButton("trash", "Remove this entry from the history (the files stay)")
-        remove.setFixedSize(32, 32)
+            buttons += [open_btn, reveal]
+        remove = IconButton("trash", "Delete this job: its saved copies and its place in this list. Your original and the cleaned "
+                                     "files are not touched.")
         remove.clicked.connect(lambda: page.delete_entry(entry.id))
-        layout.addWidget(remove)
+        buttons.append(remove)
+        for b in buttons:
+            b.setFixedSize(32, 32)
+            layout.addWidget(b)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self._page.open_job(self.entry.id)
+        super().mouseReleaseEvent(event)
 
     def _open(self, path: Path) -> None:
         if not path.exists() or not shell.open_path(path):
@@ -142,10 +130,18 @@ class _HistoryRow(QFrame):
 
 
 class HistoryPage(QWidget):
-    def __init__(self, store: HistoryStore, parent: QWidget | None = None):
+    """The Jobs tab: the list, and (one click on a row) the job view in its place."""
+
+    def __init__(self, store: HistoryStore, parent: QWidget | None = None, *, env: JobEnv | None = None):
         super().__init__(parent)
         self._store = store
-        layout = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack)
+        page = QWidget()
+        self._stack.addWidget(page)
+        layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 16, 0, 0)
         layout.setSpacing(14)
 
@@ -155,20 +151,28 @@ class HistoryPage(QWidget):
         totals_row.setContentsMargins(24, 16, 24, 16)
         self._stats = {k: _Stat(c) for k, c in (
             ("files", "Files cleaned"), ("audio", "Audio cleaned"), ("video", "Video cleaned"), ("spent", "Time spent cleaning"),
+            ("disk", "Saved copies"),
         )}
         for stat in self._stats.values():
             totals_row.addWidget(stat, 1)
+        self._stats["disk"].setToolTip("The copies kept so a result can be changed and saved again without cleaning it again. They stay "
+                                       "until you delete the job.")
         layout.addWidget(totals)
 
         bar = QHBoxLayout()
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Search by file name")
+        self._search.setPlaceholderText("Search by name, folder or settings")
         self._search.setClearButtonEnabled(True)
-        self._search.setToolTip("Type part of a file name to find it in the history")
-        self._clear = QPushButton("Clear history")
-        self._clear.setToolTip("Forget every entry below. Your files are not touched.")
+        self._search.setToolTip("Type part of a file name, a folder, or what it was made with (for example Gentle or leveled)")
+        self._sort = QComboBox()
+        for key, label in SORT_LABELS.items():
+            self._sort.addItem(label, key)
+        self._sort.setToolTip("The order of the list")
+        self._clear = QPushButton("Delete all")
+        self._clear.setToolTip("Delete every job below with its saved copies. Your original and cleaned files are not touched.")
         self._clear.clicked.connect(self._clear_all)
         bar.addWidget(self._search, 1)
+        bar.addWidget(self._sort)
         bar.addWidget(self._clear)
         layout.addLayout(bar)
 
@@ -186,29 +190,63 @@ class HistoryPage(QWidget):
         card_layout.addWidget(self._empty, 1)
         card_layout.addWidget(self._scroll, 1)
         layout.addWidget(card, 1)
+        self._count = QLabel()
+        self._count.setObjectName("Small")
+        layout.addWidget(self._count)
+
+        self.view = JobView(store, env)
+        self.view.closed.connect(self.close_job)
+        self.view.deleteRequested.connect(self.delete_entry)
+        self.view.changed.connect(self.refresh)
+        self._stack.addWidget(self.view)
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(150)
         self._debounce.timeout.connect(self._search_changed)
         self._search.textChanged.connect(lambda _: self._debounce.start())
+        self._sort.currentIndexChanged.connect(lambda _: self._search_changed())
         self._shown = PAGE_SIZE
+        self._rows_layout: QVBoxLayout | None = None
+        self._more: QPushButton | None = None
+        self._loaded = 0
         self.refresh()
+
+    # -- the list -----------------------------------------------------------------------------------------------
+
+    @property
+    def sort(self) -> str:
+        return self._sort.currentData() or "newest"
 
     def _search_changed(self) -> None:
         self._shown = PAGE_SIZE
         self.refresh()
 
     def _show_more(self) -> None:
-        self._shown += PAGE_SIZE
-        self.refresh()
+        """The next page, added under the rows that are there (they are not drawn again)."""
+        if self._rows_layout is None:
+            return
+        text = self._search.text()
+        entries = self._store.search(text, limit=PAGE_SIZE, offset=self._loaded, sort=self.sort)
+        for entry in entries:
+            self._rows_layout.insertWidget(self._rows_layout.count() - 2, _HistoryRow(entry, self))
+        self._loaded += len(entries)
+        self._shown = self._loaded
+        self._update_more(self._store.count(text))
+
+    def _update_more(self, total: int) -> None:
+        if self._more is not None:
+            self._more.setVisible(total > self._loaded)
+        self._count.setText(f"Showing {self._loaded} of {total}" if total > self._loaded else
+                            (f"{total} job{'s' if total != 1 else ''}" if total else ""))
 
     def refresh(self) -> None:
-        """Rebuild the list: the newest PAGE_SIZE entries (more on request), not all of them at once."""
+        """Rebuild the list: the newest PAGE_SIZE jobs (more on request, a page at a time), not all of them at once."""
         totals = self._store.totals()
-        self._show_totals(totals)
-        found = self._store.search(self._search.text(), self._shown + 1)
-        entries, more = found[: self._shown], len(found) > self._shown
+        self._show_totals(totals, self._store.copies_total())
+        text = self._search.text()
+        total = self._store.count(text)
+        entries = self._store.search(text, limit=self._shown, offset=0, sort=self.sort)
         holder = QWidget()
         holder.setObjectName("RowHolder")
         rows = QVBoxLayout(holder)
@@ -216,38 +254,100 @@ class HistoryPage(QWidget):
         rows.setSpacing(2)
         for entry in entries:
             rows.addWidget(_HistoryRow(entry, self))
-        if more:
-            button = QPushButton("Show more")
-            button.setToolTip("Show older entries")
-            button.clicked.connect(self._show_more)
-            rows.addWidget(button, 0, Qt.AlignmentFlag.AlignCenter)
+        self._more = QPushButton("Show more")
+        self._more.setToolTip("Show older jobs")
+        self._more.clicked.connect(self._show_more)
+        rows.addWidget(self._more, 0, Qt.AlignmentFlag.AlignCenter)
         rows.addStretch(1)
+        self._rows_layout = rows
+        self._loaded = len(entries)
+        self._update_more(total)
         old = self._scroll.takeWidget()
         if old is not None:
             old.deleteLater()
         self._scroll.setWidget(holder)
-        searching = bool(self._search.text().strip())
+        searching = bool(text.strip())
         self._scroll.setVisible(bool(entries))
         self._empty.setVisible(not entries)
         self._empty.setText(
             "Nothing matches your search." if searching else "Files you clean will be listed here.\nNothing leaves your computer."
         )
-        self._clear.setEnabled(totals.files > 0 or bool(entries))
+        self._clear.setEnabled(totals.files > 0 or bool(entries) or self._store.count() > 0)
 
-    def _show_totals(self, t: Totals) -> None:
+    def _show_totals(self, t: Totals, c: CopiesTotal) -> None:
         self._stats["files"].value.setText(str(t.files))
         self._stats["audio"].value.setText(format_hours(t.audio_seconds))
         self._stats["video"].value.setText(format_hours(t.video_seconds))
         self._stats["spent"].value.setText(format_spent(t.seconds_spent))
+        self._stats["disk"].value.setText(format_size(c.bytes))
+        self._stats["disk"].caption.setText(f"Saved copies ({c.jobs} job{'s' if c.jobs != 1 else ''})")
 
-    def delete_entry(self, entry_id: int) -> None:
-        self._store.delete([entry_id])
+    # -- one job ------------------------------------------------------------------------------------------------
+
+    def open_job(self, entry_id: int) -> None:
+        if self.view.show_entry(entry_id):
+            self._stack.setCurrentWidget(self.view)
+
+    def close_job(self) -> None:
+        """Back to the list."""
+        self.view.unload()
+        self._stack.setCurrentIndex(0)
         self.refresh()
 
+    @property
+    def viewing(self) -> int | None:
+        """The id of the job that is open, if any."""
+        return self.view.entry.id if self._stack.currentWidget() is self.view and self.view.entry is not None else None
+
+    def shutdown(self, timeout_ms: int | None = None) -> bool:
+        """The window is closing: stop what the job view is doing and delete its scratch files. False if a save did not stop in time."""
+        return self.view.shutdown(timeout_ms)
+
+    # -- deleting -------------------------------------------------------------------------------------------------
+
+    def confirm(self, title: str, text: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
+    def _stayed(self, ids: list[int]) -> None:
+        if ids:
+            QMessageBox.warning(self, "Delete", "Some saved copies could not be removed (a file may be in use). The job stays in the "
+                                                "list; try again later.")
+
+    def delete_entry(self, entry_id: int) -> None:
+        """Delete one job after asking: its saved copies and its place in the list; never the original or the cleaned files."""
+        entry = self._store.get(entry_id)
+        if entry is None:
+            return
+        if self.view.busy and self.view.entry is not None and self.view.entry.id == entry_id:
+            return  # a change is being saved from its copies
+        if entry.job_dir:
+            text = (f"Delete \"{entry.name}\"?\n\nIts saved copies ({format_size(entry.copies_bytes)}) and its place in this list are "
+                    "deleted, so it can't be changed and saved again. Your original and the cleaned files are not touched.")
+        else:
+            text = f"Remove \"{entry.name}\" from the list?\n\nYour original and the cleaned files are not touched."
+        if not self.confirm("Delete job", text):
+            return
+        if self.viewing == entry_id:
+            self.view.unload()
+        stayed = self._store.delete([entry_id])
+        if self.viewing == entry_id:
+            self._stack.setCurrentIndex(0)
+        self.refresh()
+        self._stayed(stayed)
+
     def _clear_all(self) -> None:
-        answer = QMessageBox.question(
-            self, "Clear history", "Remove every entry from the history?\nYour cleaned files are not deleted.",
-        )
-        if answer == QMessageBox.StandardButton.Yes:
-            self._store.clear()
-            self.refresh()
+        c = self._store.copies_total()
+        n = self._store.count()
+        what = f" and the {format_size(c.bytes)} of saved copies" if c.jobs else ""
+        if not self.confirm("Delete all jobs", f"Delete all {n} job{'s' if n != 1 else ''}{what}?\n\nYour originals and cleaned files are "
+                                                "not touched, but the jobs can't be changed and saved again."):
+            return
+        if self.view.busy:
+            return
+        self.view.unload()
+        self._stack.setCurrentIndex(0)
+        stayed = self._store.clear()
+        self.refresh()
+        self._stayed(stayed)

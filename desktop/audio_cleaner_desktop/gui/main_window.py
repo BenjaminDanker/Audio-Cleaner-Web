@@ -1,4 +1,4 @@
-"""The main window: Clean tab (queue, settings, preview) and History tab."""
+"""The main window: Clean tab (queue, settings, preview) and Jobs tab (the list of jobs, each openable)."""
 from __future__ import annotations
 
 import logging
@@ -19,12 +19,13 @@ from PySide6.QtWidgets import (
 
 from acw_common.ffmpeg import MediaError
 
-from .. import __version__, config, engine, models, resources, sysinfo
+from .. import __version__, config, copies, engine, models, resources, sysinfo
 from ..updater import UpdateController
 from . import media, queue_view, shell, tips
 from .about import AboutDialog
 from .history import DONE, FAILED, Entry, HistoryStore
 from .history_view import HistoryPage, format_spent, settings_dict
+from .job_view import JobEnv
 from .player import PreviewPane
 from .preferences import Preferences
 from .queue_view import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING, WAITING, FileItem, FileRow, QueueView
@@ -190,8 +191,11 @@ class MainWindow(QMainWindow):
         outer.addWidget(self.tabs, 1)
 
         self.tabs.addTab(self._build_clean_tab(), "Clean")
-        self.history_page = HistoryPage(self.history)
-        self.tabs.addTab(self.history_page, "History")
+        self.history_page = HistoryPage(self.history, env=JobEnv(
+            voice_ready=lambda: resources.voice_model_dir() is not None, speech_ready=resources.speech_ready,
+            noise_ready=resources.noise_ready, scratch=lambda: self.history.jobs_root,
+        ))
+        self.tabs.addTab(self.history_page, "Jobs")
 
         footer = QHBoxLayout()
         version = QLabel(f"Version {__version__}")
@@ -470,7 +474,9 @@ class MainWindow(QMainWindow):
             return False
         item.options = self.prefs.job_options()
         self._queued.add(item.id)
-        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name), first=first)
+        item.keep_dir = copies.plan_job_dir(self.history.jobs_root)  # where this run keeps the copies that let its result be changed later
+        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name, keep_dir=item.keep_dir),
+                       first=first)
         return True
 
     # -- what the result is called ------------------------------------------------
@@ -824,7 +830,7 @@ class MainWindow(QMainWindow):
             notes.append(result.notice)
         item.message = "; ".join(notes)
         self._batch_done += 1
-        self._record(item, DONE, "", [str(p) for p in paths])
+        self._record(item, DONE, "", [str(p) for p in paths], kept_dir=result.kept_dir)
         self._refresh_row(item)
         if previewing:
             self.preview.show_files(item.id, item.path, paths[0], item.has_video, item.path.name, _subtitle_file(paths))
@@ -837,14 +843,29 @@ class MainWindow(QMainWindow):
             return
         item.state, item.message, item.stopping = ITEM_FAILED, message, False
         self._batch_failed += 1
-        self._record(item, FAILED, message, [])
+        self._record(item, FAILED, message, [], kept_dir=self._copies_left(item))
         self._refresh_row(item)
         self._refresh_state()
+
+    def _copies_left(self, item: FileItem) -> Path | None:
+        """A job that failed keeps the copies it had made before it failed (the result can still be saved from them); a folder with
+        none is removed. Returns the folder that stays."""
+        folder, item.keep_dir = item.keep_dir, None
+        if folder is None:
+            return None
+        job = copies.JobCopies.load(folder) if folder.is_dir() else None
+        if job is not None and job:
+            return folder
+        copies.delete_job_dir(folder.parent, folder.name)
+        return None
 
     def _on_cancelled(self, item_id: int) -> None:
         item = self._items.get(item_id)
         self._queued.discard(item_id)
         if item is not None:
+            if item.keep_dir is not None:  # stopped: nothing is kept
+                copies.delete_job_dir(item.keep_dir.parent, item.keep_dir.name)
+                item.keep_dir = None
             restart = item.restart
             item.state, item.progress, item.stopping, item.restart, item.outdated = CANCELLED, 0.0, False, False, False
             if restart and not self._missing:  # "Restart with the new settings": straight back in, first in line
@@ -875,15 +896,17 @@ class MainWindow(QMainWindow):
         self._tray.showMessage(title, text, self.windowIcon(), 8000)
         QTimer.singleShot(12000, self._tray.hide)
 
-    def _record(self, item: FileItem, status: str, message: str, outputs: list[str]) -> None:
+    def _record(self, item: FileItem, status: str, message: str, outputs: list[str], kept_dir: Path | None = None) -> None:
         options = item.options or self.prefs.job_options()
         elapsed = time.monotonic() - item.started_at if item.started_at else 0.0
+        item.keep_dir = None
         self.history.add(Entry(
             name=item.path.name, source=str(item.path), duration=item.duration, has_video=item.has_video,
             settings={**settings_dict(options), **({"picked_strength": item.picked_strength}
                                                     if status == DONE and item.picked_strength else {}),
                       **({"picked_rebuild": item.picked_rebuild} if status == DONE and item.picked_rebuild else {})},
             seconds_taken=elapsed, outputs=outputs, status=status, message=message,
+            job_dir=kept_dir.name if kept_dir is not None else "", copies_bytes=copies.scan_bytes(kept_dir) if kept_dir is not None else 0,
         ))
         if self.tabs.currentIndex() == 1:
             self.history_page.refresh()
@@ -1152,6 +1175,7 @@ class MainWindow(QMainWindow):
         self._awake.release()
         if self.preview is not None:
             self.preview.stop()
+        stopped = self.history_page.shutdown(QUIT_WAIT_MS) and stopped  # a save in the job view stops; its scratch files go
         self._qs.setValue("geometry", self.saveGeometry())
         self._qs.setValue("tab", self.tabs.currentIndex())
         self._qs.sync()
@@ -1167,7 +1191,12 @@ class MainWindow(QMainWindow):
     def _sweep_leftovers(self) -> None:
         if self._closing:
             return
-        folders = [*self.history.recent_folders()]
+        folders = [*self.history.recent_folders(), self.history.jobs_root]  # (the job view's scratch files are in the jobs folder)
+        protect = {i.keep_dir.name for i in self._items.values() if i.keep_dir is not None}
+        try:
+            self.history.reconcile(protect=protect)  # the sizes of the saved copies, and folders nothing in the list points to
+        except Exception:  # noqa: BLE001 - housekeeping must never bother the user
+            log.exception("checking the saved copies failed")
         out = self.prefs.output_dir()
         if out is not None:
             folders.append(out)

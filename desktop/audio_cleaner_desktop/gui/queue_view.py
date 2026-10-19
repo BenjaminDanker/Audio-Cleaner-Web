@@ -59,6 +59,7 @@ class FileItem:
     made_name: str = ""  # the name the files in `outputs` were asked for under
     job_name: str = ""  # the name asked for in the job that is running (or ran last)
     name_hint: bool = False  # show why the name can't be used (the box was left, or a start was refused)
+    keep_dir: Path | None = None  # the folder the saved copies of the run in line (or running) go to
 
 
 class DropZone(QFrame):
