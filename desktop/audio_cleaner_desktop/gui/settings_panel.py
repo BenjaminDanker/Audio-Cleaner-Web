@@ -78,14 +78,12 @@ class SettingsPanel(QFrame):
     changed = Signal()
 
     def __init__(self, prefs: Preferences, downloader: SpeechModelDownloader | None = None, parent: QWidget | None = None,
-                 highs_downloader: SpeechModelDownloader | None = None,
                  voice_downloader: SpeechModelDownloader | None = None, updater: UpdateController | None = None):
         super().__init__(parent)
         self.setObjectName("Card")
         self._prefs = prefs
         self.updater = updater or UpdateController(prefs, self)
         self.downloader = downloader or SpeechModelDownloader(self)
-        self.highs_downloader = highs_downloader or SpeechModelDownloader(self, resources.HIGHS_MODEL)
         self.voice_downloader = voice_downloader or SpeechModelDownloader(self, resources.VOICE_MODEL)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 20)
@@ -101,7 +99,6 @@ class SettingsPanel(QFrame):
             "Each file is listened to before it is cleaned and gets what fits it:\n"
             "\u2022 Noise reduction: Gentle for a quiet recording, up to Maximum for a noisy one\n"
             "\u2022 Background noise: the way of removing noise that suits it\n"
-            "\u2022 Missing highs: brought back when they are missing and the voice isn\u2019t rebuilt\n"
             "\u2022 Rebuild the voice: when it sounds echoey, muffled, damaged or like a phone call, or distorts from being "
             "recorded too loud (needs its model, downloaded once)\n\n"
             "The noise is measured by the noise remover itself, so wind, keyboards and chatter count as much as a "
@@ -132,8 +129,7 @@ class SettingsPanel(QFrame):
             self._noise,
         )
         self._auto_note = QLabel("Picked for each file while \u201cAutomatic best settings\u201d is on.")
-        self._auto_extra_note = QLabel("Restoring the highs and rebuilding the voice are picked for each file while "
-                                       "\u201cAutomatic best settings\u201d is on.")
+        self._auto_extra_note = QLabel("Rebuilding the voice is picked for each file while \u201cAutomatic best settings\u201d is on.")
         self._auto_extra_note.setObjectName("Small")
         self._auto_extra_note.setWordWrap(True)
         self._auto_extra_note.hide()
@@ -194,9 +190,6 @@ class SettingsPanel(QFrame):
         self.downloader.changed.connect(self._refresh_enabled)
         layout.addWidget(sub_row)
 
-        self._highs = QCheckBox("Restore missing highs (phone-quality recordings)")
-        self._highs.setToolTip("For a recording that is only missing its high sounds (phone calls, voice messages, small "
-                               "files) and otherwise sounds fine")
         self._echo = WrapCheck("Remove speaker echo using the second audio track (your desktop sound)")
         self._echo.setToolTip("For recordings with your desktop sound on a second audio track")
         self._rebuild = WrapCheck("Rebuild the voice")
@@ -205,10 +198,6 @@ class SettingsPanel(QFrame):
                                  "noise do not apply then.")
         extra_row = _Row(
             "Extra cleanup",
-            "Restore missing highs: phone calls, voice messages, old or low-quality recordings have lost their high "
-            "frequencies, which makes them sound dull and muffled. Audio Cleaner brings them back, only for "
-            "recordings that really are missing them; normal recordings are never changed. It needs an extra model, "
-            "downloaded once.\n\n"
             "Remove speaker echo: if your speakers' sound got into your microphone (a game, a call, music), Audio "
             "Cleaner can remove it, but only when the recording also has that speaker sound on its own audio track. "
             "OBS can record that: in Settings > Output (Output Mode: Advanced) > Recording, tick audio tracks 1 "
@@ -221,12 +210,6 @@ class SettingsPanel(QFrame):
             "noise settings do not apply to it.",
         )
         extra_row.layout_.addWidget(self._auto_extra_note)
-        extra_row.layout_.addWidget(self._highs)
-        self.highs_panel = SpeechModelPanel(
-            self.highs_downloader, need="Restoring the highs needs an extra model", what="the model that restores highs",
-        )
-        extra_row.layout_.addWidget(self.highs_panel)
-        self.highs_downloader.changed.connect(self._refresh_enabled)
         extra_row.layout_.addWidget(self._echo)
         extra_row.layout_.addWidget(self._rebuild)
         self.voice_panel = SpeechModelPanel(
@@ -334,7 +317,6 @@ class SettingsPanel(QFrame):
         self._loudness.currentIndexChanged.connect(lambda _: self._store("loudness", self._loudness.currentData()))
         self._noise.currentIndexChanged.connect(lambda _: self._store("noise", self._noise.currentData()))
         self._echo.toggled.connect(lambda v: self._store("echo_track", v))
-        self._highs.toggled.connect(lambda v: self._store("restore_highs", v))
         self._rebuild.toggled.connect(lambda v: self._store("rebuild_voice", v))
         self._subtitles.currentIndexChanged.connect(lambda _: self._store("subtitles", self._subtitles.currentData()))
         self._language.currentIndexChanged.connect(lambda _: self._store("language", self._language.currentData()))
@@ -360,7 +342,6 @@ class SettingsPanel(QFrame):
         _select(self._loudness, p.loudness)
         _select(self._noise, p.noise)
         self._echo.setChecked(p.echo_track)
-        self._highs.setChecked(p.restore_highs)
         self._rebuild.setChecked(p.rebuild_voice)
         _select(self._subtitles, p.subtitles)
         _select(self._language, p.language)
@@ -399,7 +380,7 @@ class SettingsPanel(QFrame):
         """Height with every optional line showing (subtitle language, output folder), so the window can be
         sized once to fit them all."""
         spacing = self.layout().spacing() // 2 + 6
-        optional = (self._language, self._folder_box, self.speech_panel, self.highs_panel, self.voice_panel,
+        optional = (self._language, self._folder_box, self.speech_panel, self.voice_panel,
                     self._rebuild_note, self._auto_note, self._auto_extra_note, self._update_status)
         extra = sum(w.sizeHint().height() + spacing for w in optional if w.isHidden())
         return self.sizeHint().height() + extra
@@ -410,7 +391,6 @@ class SettingsPanel(QFrame):
         rebuilt = self._rebuild.isChecked() and not auto  # always rebuilt (automatic rebuilds only some files)
         self._strength.setEnabled(not rebuilt and not auto)
         self._noise.setEnabled(not rebuilt and not auto)
-        self._highs.setEnabled(not auto)
         self._rebuild.setEnabled(not auto)
         self._rebuild_note.setVisible(rebuilt)
         self._auto_note.setVisible(auto)
@@ -419,8 +399,6 @@ class SettingsPanel(QFrame):
         self._language.setVisible(wants_subs)
         dl = self.downloader
         self.speech_panel.setVisible(dl.running or bool(dl.last_error) or (wants_subs and not dl.ready))
-        hd = self.highs_downloader
-        self.highs_panel.setVisible(hd.running or bool(hd.last_error) or ((auto or self._highs.isChecked()) and not hd.ready))
         vd = self.voice_downloader
         self.voice_panel.setVisible(vd.running or bool(vd.last_error) or ((auto or rebuilt) and not vd.ready))
         folder_mode = self._where.value() == "folder"

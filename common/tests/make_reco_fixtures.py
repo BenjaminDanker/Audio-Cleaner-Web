@@ -41,8 +41,8 @@ const out = rows.map((stats) => {
   const m = modelDecision(stats);
   const r = recommendForFile(stats, { hasAudio: true, duration: stats.seconds, channels: 1 });
   const why = r ? whyOf(r) : [];
-  return { model: { strength: m.strength, rebuild: m.rebuild, restoreHighs: m.restoreHighs, p: m.p },
-    reco: r && { strength: r.strength, rebuild: r.rebuild, restoreHighs: r.restoreHighs, heavy: r.heavy, noSpeech: r.noSpeech,
+  return { model: { strength: m.strength, rebuild: m.rebuild, p: m.p },
+    reco: r && { strength: r.strength, rebuild: r.rebuild, heavy: r.heavy, noSpeech: r.noSpeech,
       rebuildReason: why[0] ?? null, rebuildWhy: why } };
 });
 console.log(JSON.stringify(out));

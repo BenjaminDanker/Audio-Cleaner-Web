@@ -21,7 +21,7 @@ export const T = {
   BALANCED_BELOW: 24,
   /** below this noise figure the standard subtitles make clearly more mistakes */
   SUBS_NOISY_BELOW: 4,
-  /** the speech stops at this frequency or lower: a phone call or a very small file (bwe.pick_model would use its 8k or 12k generator) */
+  /** the speech stops at this frequency or lower: a phone call or a very small file */
   PHONE_HZ: 6600,
   /** the level can't fall faster than this within 60 ms (dB): the voice rings on, as in a large or bare room (analysis.js: dropOf) */
   ECHO_DROP_DB: 10.5,

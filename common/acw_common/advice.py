@@ -7,14 +7,14 @@ from __future__ import annotations
 import numpy as np
 from scipy.signal import butter, sosfilt
 
-from . import bwe
+from . import spectrum
 from .pipeline import SAMPLE_RATE, SILENCE_DB, measure_windows
 
 # The level can't fall faster than this within 60 ms (dB): the voice rings on, as in a large or bare room.
 ECHO_DROP_DB = 10.5
 # The top of the speech band sits this far below its middle (dB) or more: a muffled voice without a sharp cut-off.
 DULL_TILT_DB = -19.0
-# The speech stops at this frequency or lower: a phone call or a very small file (restoring the highs is the fix).
+# The speech stops at this frequency or lower: a phone call or a very small file (a reason of its own to rebuild the voice: reco_model.py).
 PHONE_HZ = 6600.0
 
 # The speech band's level moves at least this much (90th minus 10th percentile, dB) when someone speaks; steady noise,
@@ -71,14 +71,14 @@ def drop_db(x: np.ndarray) -> float | None:
 
 def rebuild_reason(x: np.ndarray) -> str | None:
     """"echoey" or "muffled" when rebuilding the voice is the fix, else None (also when nobody speaks: music is never
-    rebuilt). A phone-quality recording is not muffled in this sense: restoring its highs is the fix for that."""
+    rebuilt). A phone-quality recording is not muffled in this sense (reco_model.py calls it phone)."""
     if not has_speech(x):
         return None
     drop = drop_db(x)
     if drop is not None and drop < ECHO_DROP_DB:
         return "echoey"
     sample = np.concatenate([np.asarray(x[a:b]) for a, b in measure_windows(len(x))]) if len(x) else np.asarray(x)
-    if bwe.effective_bandwidth(sample) <= PHONE_HZ:
+    if spectrum.effective_bandwidth(sample) <= PHONE_HZ:
         return None
-    tilt = bwe.tilt_db(sample)
+    tilt = spectrum.tilt_db(sample)
     return "muffled" if tilt is not None and tilt <= DULL_TILT_DB else None

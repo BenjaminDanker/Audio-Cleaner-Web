@@ -254,7 +254,6 @@ class MainWindow(QMainWindow):
 
         self.noise_download = SpeechModelDownloader(self, resources.NOISE_MODEL)
         self.speech_download = SpeechModelDownloader(self)
-        self.highs_download = SpeechModelDownloader(self, resources.HIGHS_MODEL)
         self.voice_download = SpeechModelDownloader(self, resources.VOICE_MODEL)
         for dl in self._downloaders():
             dl.finished.connect(lambda ok, message, dl=dl: self._model_download_finished(dl, ok, message))
@@ -262,7 +261,7 @@ class MainWindow(QMainWindow):
                                 and self._show_model_progress(done, total))
         self._fetch_missing_noise_models()
         self.settings_panel = SettingsPanel(
-            self.prefs, self.speech_download, highs_downloader=self.highs_download, voice_downloader=self.voice_download,
+            self.prefs, self.speech_download, voice_downloader=self.voice_download,
             updater=self.updater,
         )
         self._settings_scroll = scroll = QScrollArea()
@@ -593,7 +592,7 @@ class MainWindow(QMainWindow):
         return False
 
     def _downloaders(self) -> tuple[SpeechModelDownloader, ...]:
-        return self.noise_download, self.speech_download, self.highs_download, self.voice_download
+        return self.noise_download, self.speech_download, self.voice_download
 
     def _fetch_missing_noise_models(self) -> None:
         """The noise removal models are required and setup normally installed them. When they are not here (its
@@ -719,7 +718,7 @@ class MainWindow(QMainWindow):
             if self._noise_only:
                 self._notify(config.APP_NAME, "Noise removal is ready: you can start cleaning.")
             elif not self._auto_models:
-                self._notify(config.APP_NAME, "Everything is ready: noise removal, subtitles, restoring highs and rebuilding voices work now.")
+                self._notify(config.APP_NAME, "Everything is ready: noise removal, subtitles and rebuilding voices work now.")
             self._auto_models = False
             self._noise_only = False
             self._clean_old_models()

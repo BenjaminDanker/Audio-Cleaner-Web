@@ -11,6 +11,7 @@ const TOC = [
   ['keys', 'Keys and scopes'],
   ['files', 'Cleaning a file'],
   ['options', 'All the options'],
+  ['auto', 'Automatic settings'],
   ['prices', 'Prices and estimates'],
   ['safe', 'Safe retries'],
   ['again', 'Changing a finished job'],
@@ -92,7 +93,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
           head={['Field', 'What it is']}
           rows={[
             ['kind', '"denoise" cleans the sound, "transcribe" writes subtitles and a transcript, "denoise_transcribe" does both.'],
-            ['denoiseTier', 'For cleaning: "standard" (Denoising), "rebuild" (Voice rebuild: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; own price; files up to 90 minutes), or "off" (no noise removal, only Leveling and/or Restore highs: at least one of them must be on). Leveling (options.leveling, on by default) and Restore highs (options.restore_highs, off by default) are each their own price.'],
+            ['denoiseTier', 'For cleaning: "standard" (Denoising), "rebuild" (Voice rebuild: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; own price; files up to 90 minutes), or "off" (no noise removal, only Leveling: options.leveling must then be on). Leveling (options.leveling, on by default) has its own price.'],
             ['transcribeTier', <>For subtitles: <code>"local"</code> (Standard) or <code>"premium"</code> (extra accurate; the audio goes to a speech partner, see the <Link to="/privacy">Privacy Policy</Link>).</>],
             ['filename', 'Its ending must be one we can read. Audio: wav, rf64, w64, mp3, mp2, mpa, m4a, m4b, m4r, aac, flac, ogg, oga, opus, spx, wma, aiff, aif, aifc, caf, au, snd, amr, ac3, eac3, dts, mka, wv, ape, tta, mpc. Video: mp4, m4v, mov, webm, mkv, avi, wmv, asf, flv, f4v, 3gp, 3g2, ts, mts, m2ts, mpg, mpeg, vob, mxf, dv, ogv, rm, rmvb. Anything else is refused with "Unsupported file type." Only the ending is used; the name never becomes a path.'],
             ['sizeBytes', 'The exact size of the upload: 1 byte up to 4 GiB. A file can weigh at most 40 MB per second of its length (small files, under 200 MB, are always fine).'],
@@ -125,6 +126,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
           <li><b>stage</b> and <b>progress</b> (0 to 100) say what it is doing. While <code>queued</code>, <code>queuePosition</code> and <code>queueWaitSeconds</code> (an estimate) tell you how long.</li>
           <li><b>estCostMicros</b> is what was set aside; <b>costMicros</b> is what you were charged (0 if it failed or was canceled).</li>
           <li><b>notice</b> is a friendly note about how your file was handled (for example &ldquo;the file had only one audio track&rdquo;). It is not an error. <b>error</b> says why a job failed or was canceled.</li>
+          <li><b>chosen</b> and <b>maximum</b> appear only on a job made with <a href="#auto">automatic settings</a>: what was decided and why, and whether <code>estCostMicros</code> is still the most it can cost.</li>
           <li><b>outputs</b> lists the result files. <code>kind</code> is <code>audio</code>, <code>video</code>, <code>captions</code>, <code>transcript</code> or <code>segments</code>; captions and transcripts in other languages have a <code>lang</code>.</li>
         </ul>
 
@@ -154,10 +156,42 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['noise', 'auto', '"auto" measures the recording and picks; "light" suits hiss, hum and a quiet room; "heavy" suits noise almost as loud as the voice. Does not apply when the voice is rebuilt.'],
             ['echo_reference_track', 'false', 'true or false (anything else is a 400). Removes speaker echo from the first audio track by using the second one (the sound from your speakers, as OBS can record it). Included in the price.'],
             ['leveling', 'true', 'true or false. Leveling, with its own price: evens out the voice and sets the loudness. false returns the cleaned voice as it is.'],
-            ['restore_highs', 'false', 'true or false. Restore highs, with its own price and its own line on the bill (per second, like Leveling). When it is true it always runs: it brings back the high sounds of a recording that lost them (phone calls, voice messages, small files), and a recording that already has them gets the widest restoration. Works with Denoising, or on its own with denoiseTier "off". Not with the voice rebuilt, which makes its own highs; it is not charged then.'],
+            ['automatic', 'false', 'true or false. true lets us listen to the file and decide the settings you did not give yourself, like the website’s Automatic best settings. Needs "denoise" or "denoise_transcribe" with denoiseTier "standard". See Automatic settings below.'],
           ]}
         />
-        <p>Restore highs used to be on by default, free, and only did something for recordings that had lost their highs. It is now off unless you set <code>restore_highs</code> to true, is charged like Leveling, and does its work whenever it is on; the job&rsquo;s <code>notice</code> says when it happened. Jobs made before this change keep the prices they were made with.</p>
+      </Section>
+
+      <Section id="auto" title="Automatic settings">
+        <p>Send <code>&quot;automatic&quot;: true</code> in <code>options</code> (with <code>denoiseTier</code> <code>&quot;standard&quot;</code>) and we decide the settings from the file itself, the way the website&rsquo;s <b>Automatic best settings</b> and the desktop app do. The job starts like any other; before it is cleaned the file is listened to for a few seconds, and then it gets:</p>
+        <Table
+          head={['Decided', 'How']}
+          rows={[
+            ['atten_lim_db', 'The gentlest of 12, 24, 40 and 100 dB that takes the noise out.'],
+            ['noise', '"heavy" when the noise is nearly as loud as the voice, otherwise "light".'],
+            ['denoiseTier', 'The voice is rebuilt ("rebuild") instead of cleaned ("standard") when it sounds echoey, muffled, like a phone call or distorted, or has lost its clarity. The strength and the noise type do not apply then.'],
+            ['leveling', 'On.'],
+          ]}
+        />
+        <p><b>What you send wins.</b> An option you give yourself (<code>atten_lim_db</code>, <code>noise</code> as &ldquo;light&rdquo; or &ldquo;heavy&rdquo;, <code>leveling</code>) is used as you sent it and is not decided; <code>&quot;noise&quot;: &quot;auto&quot;</code> is the automatic choice. Everything else works as usual. A strength or a noise type means you asked for Denoising, so the voice is not rebuilt then (nor when <code>echo_reference_track</code> is on).</p>
+        <p><b>The price is a ceiling.</b> The job sets aside the most the decision could cost: the Voice rebuild with Leveling where a rebuild is possible (it costs more than Denoising), otherwise Denoising with Leveling, less what you switched off yourself. The answer to creating the job has <code>&quot;maximum&quot;: true</code>, and so does the estimate, which also lists every way it can end in <code>outcomes</code> and your own choices in <code>fixed</code>. Once the file has been listened to, what is set aside shrinks to what will be charged, and you pay for the steps that ran. A key&rsquo;s spending limit is checked against the maximum.</p>
+        <Code label="Estimate with automatic settings">{`curl -s $BASE/api/jobs/estimate ${hdr} -H "Content-Type: application/json" -d '{
+  "kind": "denoise", "denoiseTier": "standard", "durationSeconds": 600, "options": {"automatic": true}
+}'
+# -> {"estCostMicros": 310000, "maximum": true, "fixed": [],
+#     "lines": [{"item": "denoise", "label": "Voice rebuild", ...}, {"item": "leveling", ...}],
+#     "outcomes": [{"label": "Denoising + Leveling", "denoiseTier": "standard", "estCostMicros": 100000},
+#                  {"label": "Voice rebuild + Leveling", "denoiseTier": "rebuild", "estCostMicros": 310000}], ...}`}</Code>
+        <p><b>What was chosen.</b> The job has <code>chosen</code>, which is <code>null</code> until the file has been listened to (<code>label</code> is &ldquo;Automatic settings&rdquo; and <code>maximum</code> is <code>true</code> until then). After that the job&rsquo;s <code>options</code>, <code>denoiseTier</code>, <code>label</code> and <code>costMicros</code> are the decided ones, as if you had asked for those settings.</p>
+        <Code label="A job with automatic settings">{`"chosen": {
+  "denoiseTier": "standard", "strength": "balanced", "attenLimDb": 24, "noise": "light", "heavy": false,
+  "leveling": true, "rebuild": false, "rebuildWanted": false, "fixed": [],
+  "reasons": ["There is some background noise: Denoising takes it out.",
+              "Balanced is enough to take it out while keeping the voice natural.",
+              "Leveling evens out the voice and sets the loudness."]
+}`}</Code>
+        <p><code>reasons</code> says in plain words what was heard and what was done, and which options were yours. When the voice is rebuilt, <code>strength</code>, <code>attenLimDb</code> and <code>noise</code> are <code>null</code>.</p>
+        <p><b>When the voice needs a rebuild but it can&rsquo;t be done</b> (the file is over 90 minutes long, voice rebuilding is paused, you gave Denoising settings, or <code>echo_reference_track</code> is on), the file is cleaned the usual way instead, with the strength we would have chosen. <code>rebuildWanted</code> is <code>true</code>, <code>rebuild</code> is <code>false</code>, the last reason says why, and <code>notice</code> repeats it. A rebuild waits in the same line as every Voice rebuild job, because it runs on its own machine.</p>
+        <p><b>Changing it afterwards.</b> The choices made are the job&rsquo;s settings now: <a href="#again">change them</a> like those of any job. <code>automatic</code> itself is refused there (<code>400</code>); send the settings you want, for example <code>denoiseTier</code> <code>&quot;rebuild&quot;</code>. The file is measured as it was uploaded (before any echo removal), and a job made with a key can only be changed with that key, as always.</p>
       </Section>
 
       <Section id="prices" title="Prices and estimates">
@@ -190,7 +224,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
   "options": {"...": "your options with the defaults filled in"},
   "availableMicros": 5000000, "affordable": true
 }`}</Code>
-        <p>The total is exactly what creating the same job would set aside. If your key has a spending limit, the answer also has <code>keyLimit</code> with what is left of it.</p>
+        <p>The total is exactly what creating the same job would set aside. If your key has a spending limit, the answer also has <code>keyLimit</code> with what is left of it. With <a href="#auto">automatic settings</a> it is the most the job could cost, and the answer says so (<code>maximum</code>).</p>
       </Section>
 
       <Section id="safe" title="Safe retries">
@@ -209,12 +243,12 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
       </Section>
 
       <Section id="again" title="Changing a finished job">
-        <p>For 2 hours after a job is done, the files it needs to be changed are kept next to its results: your upload, the noise removal before its strength is applied, the rebuilt voice when there was one, and the transcript. In that time you can ask for the same file again with other choices. Only the steps whose inputs changed run again, and you pay only for the steps that cost something and really run again. Setting the strength, restoring highs and writing the file cost nothing.</p>
+        <p>For 2 hours after a job is done, the files it needs to be changed are kept next to its results: your upload, the noise removal before its strength is applied, the rebuilt voice when there was one, and the transcript. In that time you can ask for the same file again with other choices. Only the steps whose inputs changed run again, and you pay only for the steps that cost something and really run again. Setting the strength and writing the file cost nothing.</p>
         <Table
           head={['You change', 'What runs again']}
           rows={[
             ['atten_lim_db', 'Nothing but a mix of the kept noise removal and your recording, which is free. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send leveling: false as well to change only the strength for free.'],
-            ['restore_highs, leveling, loudness_lufs', 'From the kept noise removal: Restore highs and Leveling are charged at their prices whenever they run (restore_highs: true always runs); with both off it is free.'],
+            ['leveling, loudness_lufs', 'From the kept noise removal: Leveling is charged at its price whenever it runs; with it off the change is free.'],
             ['denoiseTier: "rebuild"', 'The voice is rebuilt from your upload, at the full Voice rebuild price.'],
             ['denoiseTier: "standard" (from a rebuild)', 'The kept noise removal is used. If the job never had one, noise removal runs and is charged.'],
             ['noise, echo_reference_track', 'Noise removal runs again from your upload and is charged.'],

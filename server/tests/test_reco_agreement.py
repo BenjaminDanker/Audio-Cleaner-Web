@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 from scipy.signal import butter, fftconvolve, sosfilt
 
-from acw_common import advice, bwe, pipeline
+from acw_common import advice, pipeline, spectrum
 
 from .conftest import LIVE_LIBDF, LIVE_MODELS
 
@@ -139,14 +139,14 @@ def measured(tmp_path_factory):
     return [(Path(r["file"]), r, files[Path(r["file"])]) for r in rows]
 
 
-def test_noise_bandwidth_and_the_heavy_and_restore_choices_are_the_same_on_both_sides(measured):
+def test_noise_bandwidth_and_the_heavy_choice_are_the_same_on_both_sides(measured):
     """The same noise remover (WebAssembly in the browser, the native library on the server) on the same audio."""
     for path, js, x in measured:
         assert js["noiseDb"] == pytest.approx(_figure(x), abs=0.05), path.name
         assert (js["noiseDb"] < pipeline.HEAVY_BELOW_DB) == _server_heavy(x), path.name
-        py = bwe.effective_bandwidth(x)
+        py = spectrum.effective_bandwidth(x)
         assert js["bandwidthHz"] == pytest.approx(py, abs=1.0), path.name
-        assert bwe.pick_model(js["bandwidthHz"]) == bwe.pick_model(py), path.name
+        assert (js["bandwidthHz"] <= advice.PHONE_HZ) == (py <= advice.PHONE_HZ), path.name  # the same call on "a phone call"
 
 
 def test_channel_layout_matches_the_servers_plan(measured):
@@ -191,7 +191,7 @@ def test_speech_echo_and_muffling_are_judged_the_same(measured):
         assert (js["dropDb"] is None) == (py_drop is None), (path.name, js["dropDb"], py_drop)
         if py_drop is not None:
             assert js["dropDb"] == pytest.approx(py_drop, abs=1.0), path.name
-        py_tilt = bwe.tilt_db(x)
+        py_tilt = spectrum.tilt_db(x)
         assert (js["tiltDb"] is None) == (py_tilt is None), path.name
         if py_tilt is not None:
             assert js["tiltDb"] == pytest.approx(py_tilt, abs=0.5), path.name

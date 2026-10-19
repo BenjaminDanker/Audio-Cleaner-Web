@@ -77,15 +77,15 @@ def test_the_decisions_on_them_are_the_websites(name, recordings):
     if js["reco"] is None:
         assert rec is None
         return
-    assert (rec.strength, rec.rebuild, rec.restore_highs, rec.no_speech) == (
-        js["reco"]["strength"], js["reco"]["rebuild"], js["reco"]["restoreHighs"], js["reco"]["noSpeech"]), name
+    assert (rec.strength, rec.rebuild, rec.no_speech) == (
+        js["reco"]["strength"], js["reco"]["rebuild"], js["reco"]["noSpeech"]), name
     assert rec.rebuild_reason == js["reco"]["rebuildReason"], name  # why the voice is rebuilt: the same first reason
     assert js["reco"]["rebuildWhy"][:1] == ([rec.rebuild_reason] if rec.rebuild else []), name
 
 
 def test_the_recordings_cover_what_the_decisions_tell_apart():
     decided = [FIXTURE[n]["reco"] for n in FIXTURE if FIXTURE[n]["reco"]]
-    assert {d["rebuild"] for d in decided} == {True, False} and {d["restoreHighs"] for d in decided} == {True, False}
+    assert {d["rebuild"] for d in decided} == {True, False}
     assert any(d["noSpeech"] for d in decided) and len({d["strength"] for d in decided}) >= 2
     # ... and every reason for rebuilding the voice (the echoey, muffled, phone and too loud recordings of analysis_signals.py), or none
     assert {d["rebuildReason"] for d in decided} == {None, "echoey", "muffled", "phone", "distorted", "unclear"}

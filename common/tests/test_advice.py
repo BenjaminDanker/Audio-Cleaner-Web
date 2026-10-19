@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import scipy.signal as ss
 
-from acw_common import advice, bwe, pipeline
+from acw_common import advice, pipeline, spectrum
 
 SR = pipeline.SAMPLE_RATE
 
@@ -52,7 +52,7 @@ def test_a_close_voice_needs_nothing():
     x = talk()
     assert advice.has_speech(x)
     assert advice.drop_db(x) > 30  # words stop abruptly
-    assert -15 < bwe.tilt_db(x) < -5 and bwe.effective_bandwidth(x) > advice.PHONE_HZ
+    assert -15 < spectrum.tilt_db(x) < -5 and spectrum.effective_bandwidth(x) > advice.PHONE_HZ
     assert advice.rebuild_reason(x) is None
 
 
@@ -70,8 +70,8 @@ def test_a_short_ring_is_not_echoey():
 
 def test_a_muffled_voice():
     x = muffle(talk(), 2000)
-    assert bwe.effective_bandwidth(x) > advice.PHONE_HZ  # no cliff: not a phone call
-    assert bwe.tilt_db(x) <= advice.DULL_TILT_DB - 3
+    assert spectrum.effective_bandwidth(x) > advice.PHONE_HZ  # no cliff: not a phone call
+    assert spectrum.tilt_db(x) <= advice.DULL_TILT_DB - 3
     assert advice.rebuild_reason(x) == "muffled"
 
 
@@ -79,9 +79,9 @@ def test_echo_is_named_before_muffled():
     assert advice.rebuild_reason(room(muffle(talk()), 0.8)) == "echoey"
 
 
-def test_a_phone_call_is_left_to_restoring_the_highs():
+def test_a_phone_call_is_not_muffled_it_is_a_reason_of_its_own():
     phone = ss.sosfilt(ss.butter(10, 3400, fs=SR, output="sos"), muffle(talk())).astype(np.float32)
-    assert bwe.effective_bandwidth(phone) <= advice.PHONE_HZ and bwe.tilt_db(phone) < advice.DULL_TILT_DB
+    assert spectrum.effective_bandwidth(phone) <= advice.PHONE_HZ and spectrum.tilt_db(phone) < advice.DULL_TILT_DB
     assert advice.rebuild_reason(phone) is None
 
 
@@ -94,13 +94,13 @@ def test_no_speech_is_never_rebuilt():
     for x in (tone, hum_in_a_room, steady, muffle(steady), np.zeros(10 * SR, np.float32)):
         assert not advice.has_speech(x)
         assert advice.rebuild_reason(x) is None
-    assert bwe.tilt_db(tone) < advice.DULL_TILT_DB  # it would count as muffled if speech were not checked first
+    assert spectrum.tilt_db(tone) < advice.DULL_TILT_DB  # it would count as muffled if speech were not checked first
 
 
 def test_too_little_to_judge():
     assert not advice.has_speech(np.zeros(SR // 20, np.float32)) and advice.drop_db(np.zeros(SR // 20, np.float32)) is None
     assert advice.rebuild_reason(np.zeros(0, np.float32)) is None
-    assert bwe.tilt_db(np.zeros(SR, np.float32)) is None
+    assert spectrum.tilt_db(np.zeros(SR, np.float32)) is None
     # noise only 20 dB under the voice hides how fast the words stop: no figure rather than a wrong one
     x = talk() + (0.03 * np.random.default_rng(5).standard_normal(12 * SR)).astype(np.float32)
     assert advice.has_speech(x) and advice.drop_db(x) is None

@@ -50,12 +50,10 @@ def test_automatic_strength_is_a_choice_and_its_steps_are_the_pipelines():
 
 def test_only_what_is_left_to_the_model_makes_the_file_measured():
     assert not engine.JobOptions().decides  # fixed choices: nothing is measured before cleaning
-    assert not engine.JobOptions(strength="gentle", noise="light", restore_highs=True, auto_highs=False).decides
+    assert not engine.JobOptions(strength="gentle", noise="light").decides
     assert engine.JobOptions(strength="auto").decides and engine.JobOptions(auto_rebuild=True).decides
-    assert engine.JobOptions(auto_highs=True).decides
-    assert not engine.JobOptions(auto_highs=True, restore_highs=False).decides  # highs switched off by the user: nothing to decide
-    assert not engine.JobOptions(strength="auto", auto_rebuild=True, auto_highs=True, rebuild_voice=True).decides  # rebuilt anyway
-    assert engine.JobOptions().auto_highs is False  # the engine restores by the recording's own cut-off unless told to ask
+    assert not engine.JobOptions(strength="auto", auto_rebuild=True, rebuild_voice=True).decides  # rebuilt anyway
+    assert not hasattr(engine.JobOptions(), "restore_highs") and not hasattr(engine.JobOptions(), "auto_highs")  # (not a step any more)
 
 
 def test_automatic_rebuild_is_an_option_that_needs_the_voice_model(monkeypatch, tmp_path):
@@ -296,8 +294,7 @@ def fake_clean(monkeypatch):
         seen.kwargs.append(kw)
         if report is not None:
             atten = opts.atten_lim_db if opts.atten_lim_db is not None else 24.0
-            report.update(noise="rebuilt", highs=None) if opts.restore_voice else report.update(
-                noise="light", highs=None, atten_lim_db=atten, noise_db=21.0)
+            report.update(noise="rebuilt") if opts.restore_voice else report.update(noise="light", atten_lim_db=atten, noise_db=21.0)
         return np.array(x, dtype=np.float32)
 
     monkeypatch.setattr(pipeline, "clean_audio", clean)
@@ -312,14 +309,13 @@ WORDS = {"echoey": "echoey", "muffled": "muffled", "phone": "like a phone call",
 
 def measurement(**want) -> dict:
     """A real set of measurements (the website's code on a recording) whose decision has these values: any of strength,
-    rebuild, restoreHighs, reason (echoey / muffled / phone / distorted / unclear / None), heavy (noise figure below the heavy cut)."""
+    rebuild, reason (echoey / muffled / phone / distorted / unclear / None), heavy (noise figure below the heavy cut)."""
     for row in MODEL_ROWS:
         js, s = row["reco"], row["stats"]
         if not js or js["noSpeech"] or s["noiseDb"] is None:
             continue
         rec = reco_model.recommend(s, min_seconds=0.0)
-        got = {"strength": rec.strength, "rebuild": rec.rebuild, "restoreHighs": rec.restore_highs, "reason": rec.rebuild_reason,
-               "heavy": rec.heavy_remover}
+        got = {"strength": rec.strength, "rebuild": rec.rebuild, "reason": rec.rebuild_reason, "heavy": rec.heavy_remover}
         if all(got[k] == v for k, v in want.items()):
             return dict(s)
     raise LookupError(f"no stored measurements with {want}")
@@ -359,8 +355,8 @@ def test_rebuild_voice_without_its_model_is_said_and_cleaned_the_usual_way(clip_
 
 @pytest.mark.native
 def test_automatic_strength_says_what_it_picked(clip_wav, tmp_path, monkeypatch):
-    """The real measurement and the real model on the way: one measurement serves the noise remover, the strength, the
-    highs and the voice rebuild, and the strength is the model's."""
+    """The real measurement and the real model on the way: one measurement serves the noise remover, the strength and
+    the voice rebuild, and the strength is the model's."""
     figures, stats = [], []
     real_figure, real_measure = pipeline.noise_figure_db, analysis.measure
     monkeypatch.setattr(pipeline, "noise_figure_db", lambda *a, **k: figures.append(real_figure(*a, **k)) or figures[-1])
@@ -379,11 +375,11 @@ def test_the_models_strengths_are_the_apps_strengths():
 
 
 @pytest.mark.native
-def test_the_model_picks_the_strength_the_remover_and_the_highs(clip_wav, tmp_path, fake_clean, measured_as):
-    options = engine.JobOptions(strength="auto", auto_highs=True)
+def test_the_model_picks_the_strength_and_the_remover(clip_wav, tmp_path, fake_clean, measured_as):
+    options = engine.JobOptions(strength="auto")
     seen = set()
     for want in ({"strength": "gentle"}, {"strength": "balanced"}, {"strength": "strong"}, {"strength": "max"},
-                 {"restoreHighs": True}, {"restoreHighs": False}, {"heavy": True}, {"heavy": False}):
+                 {"heavy": True}, {"heavy": False}):
         stats = measurement(**want)
         asked = measured_as(stats)
         rec = reco_model.recommend(stats, min_seconds=0.0)
@@ -392,46 +388,41 @@ def test_the_model_picks_the_strength_the_remover_and_the_highs(clip_wav, tmp_pa
         assert len(asked) == 1  # measured once, before cleaning
         assert got.atten_lim_db == engine.STRENGTHS[rec.strength] and result.strength == rec.strength
         assert got.noise == ("heavy" if stats["noiseDb"] < pipeline.HEAVY_BELOW_DB else "light")  # the rule, given outright
-        assert got.restore_highs == rec.restore_highs and not got.restore_voice
+        assert not got.restore_voice
         assert "measured" in fake_clean.kwargs[-1]  # what the measurement kept goes to clean_audio (it need not clean twice)
-        seen.add((rec.strength, rec.restore_highs, rec.heavy_remover))
-    assert {k for k, _, _ in seen} == set(engine.STRENGTHS) and {h for _, h, _ in seen} == {True, False} and {v for *_, v in seen} == {True, False}
+        seen.add((rec.strength, rec.heavy_remover))
+    assert {k for k, _ in seen} == set(engine.STRENGTHS) and {v for _, v in seen} == {True, False}
 
 
 @pytest.mark.native
 def test_what_the_user_chose_is_not_overridden(clip_wav, tmp_path, fake_clean, measured_as):
-    wants_highs = measurement(restoreHighs=True)
-    measured_as(wants_highs)
+    stats = measurement(strength="strong")
+    measured_as(stats)
     out = tmp_path / "o"
-    # a strength chosen by hand stays; the highs are still the model's
-    engine.process(clip_wav, engine.JobOptions(strength="gentle", auto_highs=True), out_dir=out, output_name="a.wav")
-    assert (fake_clean[-1].atten_lim_db, fake_clean[-1].restore_highs, fake_clean[-1].noise) == (12.0, True, "heavy" if wants_highs["noiseDb"] < 19 else "light")
-    # highs switched off stay off, whatever the model says (and nothing needs measuring then)
-    asked = measured_as(wants_highs)
-    engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light", restore_highs=False, auto_highs=True),
-                   out_dir=out, output_name="b.wav")
-    assert not fake_clean[-1].restore_highs and not asked
-    # highs asked for by hand are restored by the recording's own cut-off, not by the model
-    asked = measured_as(measurement(restoreHighs=False))
-    engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light", restore_highs=True), out_dir=out, output_name="c.wav")
-    assert fake_clean[-1].restore_highs and not asked
+    # a strength chosen by hand stays; the noise remover is the rule's
+    engine.process(clip_wav, engine.JobOptions(strength="gentle", auto_rebuild=True), out_dir=out, output_name="a.wav")
+    assert (fake_clean[-1].atten_lim_db, fake_clean[-1].noise) == (12.0, "heavy" if stats["noiseDb"] < 19 else "light")
+    # everything chosen by hand: nothing needs measuring
+    asked = measured_as(stats)
+    engine.process(clip_wav, engine.JobOptions(strength="gentle", noise="light"), out_dir=out, output_name="b.wav")
+    assert (fake_clean[-1].atten_lim_db, fake_clean[-1].noise) == (12.0, "light") and not asked
     # a noise remover chosen by hand stays, the strength is the model's
     measured_as(measurement(strength="strong"))
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", noise="heavy"), out_dir=out, output_name="d.wav")
     assert fake_clean[-1].noise == "heavy" and fake_clean[-1].atten_lim_db == 40.0 and result.strength == "strong"
     # a fixed strength and an automatic remover: measured for the remover, the strength is the fixed one
-    engine.process(clip_wav, engine.JobOptions(strength="max", auto_highs=True), out_dir=out, output_name="e.wav")
+    engine.process(clip_wav, engine.JobOptions(strength="max", auto_rebuild=True), out_dir=out, output_name="e.wav")
     assert fake_clean[-1].atten_lim_db == 100.0
 
 
 @pytest.mark.native
 def test_a_recording_nobody_speaks_in_gets_the_middle_strength_and_nothing_else(clip_wav, tmp_path, fake_clean, measured_as, monkeypatch):
-    music = {**measurement(restoreHighs=True), "hasSpeech": False}
+    music = {**measurement(rebuild=True), "hasSpeech": False}
     measured_as(music)
     monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_highs=True, auto_rebuild=True), out_dir=tmp_path / "o")
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "o")
     got = fake_clean[-1]
-    assert (got.atten_lim_db, got.restore_highs, got.restore_voice) == (24.0, False, False)
+    assert (got.atten_lim_db, got.restore_voice) == (24.0, False)
     assert result.strength == "balanced" and result.rebuilt is None and result.notice is None
 
 
@@ -494,20 +485,18 @@ def test_a_recording_exactly_at_the_distortion_limit_is_left_alone(clip_wav, tmp
 
 
 @pytest.mark.native
-def test_a_rebuilt_phone_recording_is_not_also_told_to_download_the_model_that_restores_highs(
-        clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
-    """A phone call is rebuilt now, so the highs are not what is left to fix: only the rebuild is said."""
+def test_a_phone_recording_is_rebuilt_and_only_that_is_said(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
+    """A phone call (or a very small file) is a reason to rebuild the voice: nothing else is offered for missing high sounds."""
     monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
-    monkeypatch.setattr(resources, "highs_model_dir", lambda: None)
-    measured_as(measurement(reason="phone", restoreHighs=True))
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_highs=True, auto_rebuild=True), out_dir=tmp_path / "a")
+    measured_as(measurement(reason="phone"))
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert fake_clean[-1].restore_voice and result.rebuilt == "phone"
     assert result.notice == "the voice was rebuilt because it sounded like a phone call"
 
 
 @pytest.mark.native
 def test_automatic_rebuild_leaves_other_files_and_choices_alone(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
-    asked = measured_as(measurement(rebuild=False, strength="balanced", restoreHighs=False))
+    asked = measured_as(measurement(rebuild=False, strength="balanced"))
     monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert asked and not fake_clean[-1].restore_voice and result.rebuilt is None and result.notice is None
@@ -521,18 +510,6 @@ def test_automatic_rebuild_leaves_other_files_and_choices_alone(clip_wav, tmp_pa
     result = engine.process(clip_wav, engine.JobOptions(rebuild_voice=True, auto_rebuild=True), out_dir=tmp_path / "c")
     assert not asked  # rebuilt anyway: nothing to decide
     assert fake_clean[-1].restore_voice and result.rebuilt is None and result.notice is None
-
-
-@pytest.mark.native
-def test_a_phone_recording_without_the_highs_model_is_said_when_the_model_says_so(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
-    monkeypatch.setattr(resources, "highs_model_dir", lambda: None)
-    tip = "sounds like a phone recording. Download the model that restores highs in Settings to improve it"
-    measured_as(measurement(restoreHighs=True))
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_highs=True), out_dir=tmp_path / "a")
-    assert result.notice == tip
-    measured_as(measurement(restoreHighs=False))
-    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_highs=True), out_dir=tmp_path / "b")
-    assert result.notice is None
 
 
 @pytest.mark.native

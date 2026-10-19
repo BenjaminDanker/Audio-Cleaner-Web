@@ -31,7 +31,7 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import db, keycaps, metrics
+from . import automatic, db, keycaps, metrics
 from .billing import ledger, pricing
 from .config import get_settings
 
@@ -70,7 +70,7 @@ PLAUSIBLE_ANY_SIZE_BYTES = 200 * 1024**2
 # so RAM is flat per job and disk grows with length.
 GB = 1024**3
 # Re-measured 2026-10-17 (docs/research/heavy-2026-10.md): a heavy stereo clean peaks at 0.2 GB of private memory
-# and 0.8 GB including the mapped scratch files, band extension adds 0.45; rounded up.
+# and 0.8 GB including the mapped scratch files; rounded up.
 JOB_MEM = 1 * GB
 # Parakeet fp32: 0.3 GB of private memory per job plus the 2.4 GB of weights, which are the model file's own page
 # cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
@@ -82,14 +82,12 @@ KEPT_PER_HOUR_PER_CHANNEL = int(0.35 * GB)
 # Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
 # monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
 # remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
-# reports its choice the estimate sits in between), the voice rebuild instead of both, restoring highs
-# (it runs on every file it is switched on for), echo removal, and transcription.
+# reports its choice the estimate sits in between), the voice rebuild instead of both, echo removal, and transcription.
 SPEED = {
     "denoise_light": 0.05,
     "denoise_auto": 0.15,
     "denoise_heavy": 0.27,
     "denoise_rebuild": 0.14,  # on the card (the only place it runs): 8.2 s per minute (broker.GPU_WORK)
-    "highs": 0.23,  # measured 2026-10-19: AP-BWE takes 0.23 s per second of audio on four threads (0.78 CPU seconds)
     "leveling": 0.01,  # Leveling on its own (with noise removal it is part of the denoise figures)
     "echo": 0.03,
     "transcribe_local": 0.12,
@@ -97,7 +95,7 @@ SPEED = {
 }
 MODEL_LOAD_SECONDS = 20  # every stage starts a fresh sandboxed process that loads its models
 # Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
-# cleaning, highs restoration and local transcription) and wall-clock seconds per second of audio.
+# cleaning and local transcription) and wall-clock seconds per second of audio.
 CPU_PER_AUDIO_SECOND = 8
 WALL_PER_AUDIO_SECOND = 3
 STAGE_SLACK_SECONDS = 1800
@@ -174,13 +172,13 @@ def job_seconds(job: dict) -> float:
     channels = max(1, min(2, int(params.get("channels") or 2)))
     opts = params.get("options", {})
     t = 0.0
-    # A re-run does only part of the work: from a kept noise removal the blend, the highs and Leveling; from a kept rebuilt
+    # A re-run does only part of the work: from a kept noise removal the blend and Leveling; from a kept rebuilt
     # voice Leveling; the transcription only when it runs again.
     rerun = params.get("rerun")
     clean = rerun.get("clean", "full") if rerun else "full"
     if job["kind"] in ("denoise", "denoise_transcribe"):
         if clean == "denoised":
-            t += ((SPEED["highs"] if opts.get("restore_highs") else 0) + SPEED["leveling"]) * audio * channels
+            t += SPEED["leveling"] * audio * channels
         elif clean == "rebuilt":
             t += SPEED["leveling"] * audio * channels
         elif clean in ("reuse", "none"):
@@ -188,12 +186,10 @@ def job_seconds(job: dict) -> float:
         elif params.get("denoise_tier") == "rebuild":
             t += SPEED["denoise_rebuild"] * audio * channels
         elif params.get("denoise_tier") == pricing.NO_DENOISE:
-            t += ((SPEED["highs"] if opts.get("restore_highs") else 0) + SPEED["leveling"]) * audio * channels
+            t += SPEED["leveling"] * audio * channels
         else:
             profile = params.get("noise_profile") or opts.get("noise", "auto")
             t += (SPEED["denoise_" + profile] if profile in ("light", "heavy") else SPEED["denoise_auto"]) * audio * channels
-            if opts.get("restore_highs"):
-                t += SPEED["highs"] * audio * channels
     if opts.get("echo_reference_track") and (not rerun or clean in ("full", "denoised", "rebuilt") or rerun.get("transcribe")):
         t += SPEED["echo"] * audio * channels
     if params.get("transcribe_tier") and (not rerun or rerun.get("transcribe")):
@@ -287,16 +283,14 @@ def display_name(job: dict) -> str:
     return json.loads(job["params_json"]).get("display_name") or job["input_name"]
 
 
-def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, leveling: bool = False, highs: bool = False) -> str:
-    """Customer-facing name of what a job does (the same words as the price list). `leveling`, `highs`: Leveling / Restore highs
-    is part of it (for a stored job: "leveling" / "highs" in its pinned rates)."""
+def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, leveling: bool = False) -> str:
+    """Customer-facing name of what a job does (the same words as the price list). `leveling`: Leveling is part of it
+    (for a stored job: "leveling" in its pinned rates)."""
     parts = []
     if kind in ("denoise", "denoise_transcribe"):
         if denoise_tier != pricing.NO_DENOISE:
             parts.append("Voice rebuild" if denoise_tier == "rebuild" else "Denoising")
-        if highs:
-            parts.append("Restore highs")
-        if leveling or (denoise_tier == pricing.NO_DENOISE and not highs):
+        if leveling or denoise_tier == pricing.NO_DENOISE:
             parts.append("Leveling")
     if kind in ("transcribe", "denoise_transcribe"):
         parts.append("Subtitles & transcript" + (", extra accurate" if transcribe_tier == "premium" else ""))
@@ -367,17 +361,24 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if not isinstance(noise, str) or noise not in ("auto", "light", "heavy"):
         raise JobError("noise must be auto, light or heavy")
     out["noise"] = noise
-    # Even out the voice and set the loudness (on by default); restore the missing highs (off by default; it has its own price and,
-    # when it is on, it always runs; the voice rebuild makes its own highs, so it is never on with it).
-    for key, default in (("leveling", True), ("restore_highs", False)):
-        flag = options.get(key, default)
-        if not isinstance(flag, bool):
-            raise JobError(f"{key} must be true or false")
-        out[key] = flag
-    if denoise_tier == "rebuild":
-        out["restore_highs"] = False
-    if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not (out["leveling"] or out["restore_highs"]):
-        raise JobError("Choose Denoising, Voice rebuild, Restore highs or Leveling.")
+    # Even out the voice and set the loudness (on by default; its own price).
+    leveling = options.get("leveling", True)
+    if not isinstance(leveling, bool):
+        raise JobError("leveling must be true or false")
+    out["leveling"] = leveling
+    # Automatic settings (docs/api.md): the server measures the upload and decides what the request did not give itself. The values
+    # above stand in for what is decided until then (automatic.py).
+    auto = options.get("automatic", False)
+    if not isinstance(auto, bool):
+        raise JobError("automatic must be true or false")
+    out["automatic"] = auto
+    if auto and kind not in ("denoise", "denoise_transcribe"):
+        raise JobError("Automatic settings choose how the sound is cleaned: use them with noise removal (kind denoise or denoise_transcribe).")
+    if auto and denoise_tier != "standard":
+        raise JobError("Automatic settings need denoiseTier standard: the server picks Voice rebuild itself where the voice needs it. "
+                       "For Voice rebuild, or Leveling only, choose the settings yourself.")
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not out["leveling"]:
+        raise JobError("Choose Denoising, Voice rebuild or Leveling.")
     return out
 
 
@@ -398,47 +399,70 @@ def check_duration(kind: str, denoise_tier: str | None, seconds: float) -> None:
         )
 
 
+def price_lines(rates: dict[str, int], d_tier: str | None, t_tier: str | None, seconds: float, n_translate: int) -> list[dict]:
+    """The parts of a price, in price-list order: a line for each step in the pinned `rates`."""
+    lines = []
+    if "denoise" in rates:
+        r = pricing.rate("denoise", d_tier)
+        lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("denoise", d_tier, seconds, rates["denoise"])})
+    if "leveling" in rates:
+        r = pricing.rate("leveling", "standard")
+        lines.append({"item": "leveling", "label": r.label, "quantity": 1, "usdPerMinute": rates["leveling"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("leveling", "standard", seconds, rates["leveling"])})
+    if "transcribe" in rates:
+        r = pricing.rate("transcribe", t_tier)
+        lines.append({"item": "transcribe", "label": r.label, "quantity": 1, "usdPerMinute": rates["transcribe"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("transcribe", t_tier, seconds, rates["transcribe"])})
+    if "translate" in rates:
+        r = pricing.rate("transcribe_translate", "standard")
+        lines.append({"item": "translate", "label": r.label, "quantity": n_translate, "usdPerMinute": rates["translate"] / pricing.MICROS_PER_USD,
+                      "micros": n_translate * pricing.cost_micros("transcribe_translate", "standard", seconds, rates["translate"])})
+    return lines
+
+
+def automatic_plan(kind: str, t_tier: str | None, raw_options: dict, opts: dict) -> dict | None:
+    """What a job made with `automatic` stores to be decided later (params["automatic"]): the options the request gave itself and every
+    outcome the decision can end in, with the prices it would pin. None for any other job. `raw_options`: the request's options as
+    sent, `opts`: validated."""
+    if not opts["automatic"]:
+        return None
+    fixed = automatic.fixed_fields(raw_options)
+    return {"fixed": fixed, "candidates": automatic.candidates(kind, t_tier, opts, fixed, len(opts["translate"]))}
+
+
 def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, duration_seconds: float, options: dict) -> dict:
     """The price of a job before it exists (no hold, nothing stored): the same checks and the same price as creating
-    it, with the parts of the price listed. POST /api/jobs/estimate."""
+    it, with the parts of the price listed. POST /api/jobs/estimate. With `options.automatic` the price is the most the
+    decision could end in (`maximum`), and `outcomes` lists the ways it can end."""
     check_duration(kind, denoise_tier, duration_seconds)
     opts = validate_options(kind, denoise_tier, transcribe_tier, options)
     d_tier = denoise_tier if kind != "transcribe" else None
     t_tier = transcribe_tier if kind != "denoise" else None
     n = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
-    highs = kind != "transcribe" and opts["restore_highs"]
-    rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling, highs)
-    total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling, highs)
-    lines = []
-    if "denoise" in rates:
-        r = pricing.rate("denoise", d_tier)
-        lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("denoise", d_tier, duration_seconds, rates["denoise"])})
-    if "highs" in rates:
-        r = pricing.rate("highs", "standard")
-        lines.append({"item": "highs", "label": r.label, "quantity": 1, "usdPerMinute": rates["highs"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("highs", "standard", duration_seconds, rates["highs"])})
-    if "leveling" in rates:
-        r = pricing.rate("leveling", "standard")
-        lines.append({"item": "leveling", "label": r.label, "quantity": 1, "usdPerMinute": rates["leveling"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("leveling", "standard", duration_seconds, rates["leveling"])})
-    if "transcribe" in rates:
-        r = pricing.rate("transcribe", t_tier)
-        lines.append({"item": "transcribe", "label": r.label, "quantity": 1, "usdPerMinute": rates["transcribe"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("transcribe", t_tier, duration_seconds, rates["transcribe"])})
-    if "translate" in rates:
-        r = pricing.rate("transcribe_translate", "standard")
-        lines.append({"item": "translate", "label": r.label, "quantity": n, "usdPerMinute": rates["translate"] / pricing.MICROS_PER_USD,
-                      "micros": n * pricing.cost_micros("transcribe_translate", "standard", duration_seconds, rates["translate"])})
-    return {
+    plan = automatic_plan(kind, t_tier, options, opts)
+    if plan:
+        cands = automatic.within(plan["candidates"], duration_seconds)
+        top, total = automatic.dearest(kind, t_tier, cands, duration_seconds, n)
+        rates, d_tier = top["rates"], top["tier"]  # the lines are the dearest outcome's
+    else:
+        rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling)
+        total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling)
+    out = {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
         "durationSeconds": duration_seconds,
-        "maxSeconds": pricing.max_job_seconds(d_tier),
-        "lines": lines,
+        "maxSeconds": pricing.max_job_seconds(d_tier if not plan else "standard"),
+        "lines": price_lines(rates, d_tier, t_tier, duration_seconds, n),
         "options": opts,
     }
+    if plan:
+        out["maximum"] = True  # what is held; the charge is for the steps that actually run, and can be less
+        out["outcomes"] = [{"label": automatic.outcome_label(kind, c), "denoiseTier": c["tier"],
+                            "estCostMicros": automatic.cost(kind, t_tier, c, duration_seconds, n)} for c in cands]
+        out["fixed"] = plan["fixed"]
+    return out
 
 
 class Replay(Exception):
@@ -458,7 +482,7 @@ def replay_of(user_id: str, key: str, body_hash: str, c=None) -> dict | None:
     None for a new key. The same key with other job details is a conflict (409). `c`: inside a transaction."""
     q = c.execute if c is not None else db.conn().execute
     row = q(
-        "SELECT k.body_hash, k.job_id, k.created_at, j.est_cost_micros FROM idempotency_keys k LEFT JOIN jobs j ON j.id = k.job_id"
+        "SELECT k.body_hash, k.job_id, k.created_at, j.est_cost_micros, j.params_json FROM idempotency_keys k LEFT JOIN jobs j ON j.id = k.job_id"
         " WHERE k.user_id = ? AND k.key = ?",
         (user_id, key),
     ).fetchone()
@@ -466,7 +490,8 @@ def replay_of(user_id: str, key: str, body_hash: str, c=None) -> dict | None:
         return None
     if not hmac.compare_digest(row["body_hash"].encode(), body_hash.encode()):
         raise JobError("This Idempotency-Key was already used for a different job. Use a new key for a new job.", 409)
-    return {"id": row["job_id"], "estCostMicros": row["est_cost_micros"] or 0}
+    maximum = row["params_json"] is not None and automatic.pending(json.loads(row["params_json"]))
+    return {"id": row["job_id"], "estCostMicros": row["est_cost_micros"] or 0, **({"maximum": True} if maximum else {})}
 
 
 def create_job(
@@ -515,10 +540,17 @@ def create_job(
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     n_translate = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
-    highs = kind != "transcribe" and opts["restore_highs"]
-    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling, highs)
-    est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
-                                  leveling, highs)
+    plan = automatic_plan(kind, params["transcribe_tier"], options, opts)
+    if plan:
+        # held for the most it can cost; the decision (automatic.py) shrinks the hold to what will be charged
+        params["automatic"] = plan
+        top, est = automatic.dearest(kind, params["transcribe_tier"], automatic.within(plan["candidates"], claimed_seconds), claimed_seconds,
+                                     n_translate)
+        params["rates"] = top["rates"]
+    else:
+        params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling)
+        est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
+                                      leveling)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
@@ -571,7 +603,7 @@ def create_job(
     except Exception:
         shutil.rmtree(job_dir(job_id), ignore_errors=True)
         raise
-    return {"id": job_id, "estCostMicros": est}
+    return {"id": job_id, "estCostMicros": est, **({"maximum": True} if plan else {})}
 
 
 def input_path(job: dict) -> Path:
@@ -637,18 +669,21 @@ def finish_failed(
     return True
 
 
-def requeue(job: dict) -> None:
+def requeue(job: dict, next_stage: str | None = None, keep_place: bool = False) -> None:
     """Put a running job back in the queue untouched: the attempt it used is given back, its upload stays and
     its scratch files go (the stage starts again from the upload; after cloud transcription it keeps the
-    segments and chunks it needs)."""
+    segments and chunks it needs). `next_stage`: where the next worker goes on from (default: as it was); `keep_place`: it keeps
+    its place in the queue instead of joining at the end."""
+    sets, args = "status = 'queued', worker_id = NULL, attempts = MAX(0, attempts - 1), progress = 0, stage = NULL", []
+    if not keep_place:
+        sets, args = sets + ", queued_at = ?", [db.now()]
+    if next_stage:
+        sets, args = sets + ", next_stage = ?", [*args, next_stage]
     with db.tx() as c:
-        n = c.execute(
-            "UPDATE jobs SET status = 'queued', worker_id = NULL, attempts = MAX(0, attempts - 1), progress = 0, stage = NULL,"
-            " queued_at = ? WHERE id = ? AND status = 'running'",
-            (db.now(), job["id"]),
-        ).rowcount
+        n = c.execute(f"UPDATE jobs SET {sets} WHERE id = ? AND status = 'running'", (*args, job["id"])).rowcount
     if not n:
         return
+    invalidate_queue_cache()
     d = job_dir(job["id"])
     if job.get("next_stage") == "finalize":
         return  # finalize only reads what the earlier stages left
@@ -661,6 +696,13 @@ def requeue(job: dict) -> None:
             shutil.rmtree(p, ignore_errors=True)
         else:
             p.unlink(missing_ok=True)
+
+
+def hand_over(job: dict) -> None:
+    """A worker that has decided an automatic job needs the voice rebuilt, but is not the card's, gives it up: the job goes back in
+    the queue (where it was, to be taken by the card's worker alone, as it is a rebuild now) and goes on at its main stage, as its
+    file is probed and its settings decided."""
+    requeue(job, next_stage="main", keep_place=True)
 
 
 def _seconds_left(r: dict, now: int) -> float:
@@ -744,8 +786,10 @@ def label_of(kind: str, params: dict) -> str:
         from . import rerun
 
         return rerun.rerun_label(params.get("rates") or {}, params.get("denoise_tier"), params.get("transcribe_tier"))
+    if automatic.pending(params):  # not decided yet: what it will do is not known
+        return " + ".join(["Automatic settings", *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
     rates = params.get("rates") or {}
-    return job_label(kind, params.get("denoise_tier"), params.get("transcribe_tier"), "leveling" in rates, "highs" in rates)
+    return job_label(kind, params.get("denoise_tier"), params.get("transcribe_tier"), "leveling" in rates)
 
 
 def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None, callbacks: dict[str, dict] | None = None) -> dict:
@@ -784,6 +828,10 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "finishedAt": job["finished_at"],
         "expiresAt": job["expires_at"] if job["status"] == "done" else None,
     }
+    if params.get("automatic"):
+        out["chosen"] = params.get("chosen")  # null until the file has been listened to
+        if automatic.pending(params):
+            out["maximum"] = True  # estCostMicros is the most it can cost until then
     if job["status"] in ("queued", "running", "cloud_asr"):
         out["estimateSeconds"] = int(job_seconds(job))  # the whole job's rough length, for the wait before progress shows
     if job["status"] == "done":

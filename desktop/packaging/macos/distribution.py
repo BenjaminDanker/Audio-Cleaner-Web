@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Files for `productbuild --distribution` around the app's component package (make_pkg.sh):
 
-    python distribution.py OUT_DIR --version 2.0.0 --arch arm64 --eula ../EULA.txt --models-gb 2.6
+    python distribution.py OUT_DIR --version 2.0.0 --arch arm64 --eula ../EULA.txt --models-gb 2.1
 
 writes OUT_DIR/distribution.xml, OUT_DIR/welcome.txt and OUT_DIR/EULA.txt. The distribution makes the Mac
 installer refuse macOS older than 14 (the app does not start there) before anything is downloaded, shows the

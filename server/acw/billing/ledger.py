@@ -208,6 +208,28 @@ def extend_hold(hold_id: str, extra_micros: int, *, c: sqlite3.Connection | None
         return run(cc)
 
 
+def reduce_hold(hold_id: str, new_amount_micros: int, *, c: sqlite3.Connection | None = None) -> int:
+    """Shrink an active hold to `new_amount_micros` (a job held the most it could cost and turned out to need less); the rest is
+    available again at once. A hold that is not larger than that is left as it is. Returns the amount now held. With `c` it joins
+    the caller's transaction."""
+    if new_amount_micros <= 0:
+        raise LedgerError("hold amount must be positive")
+
+    def run(cc: sqlite3.Connection) -> int:
+        hold = _active_hold(cc, hold_id)
+        held = hold["amount_micros"]
+        if held <= new_amount_micros:
+            return held
+        cc.execute("UPDATE holds SET amount_micros = ? WHERE id = ?", (new_amount_micros, hold_id))
+        cc.execute("UPDATE users SET held_micros = held_micros - ? WHERE id = ?", (held - new_amount_micros, hold["user_id"]))
+        return new_amount_micros
+
+    if c is not None:
+        return run(c)
+    with db.tx() as cc:
+        return run(cc)
+
+
 def capture_hold(
     hold_id: str,
     amount_micros: int,

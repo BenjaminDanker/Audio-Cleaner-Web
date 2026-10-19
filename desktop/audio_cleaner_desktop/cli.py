@@ -108,14 +108,14 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
 
 
 def download_models() -> int:
-    """Download (or finish downloading) the models for noise removal (required), subtitles, restoring highs and
+    """Download (or finish downloading) the models for noise removal (required), subtitles and
     rebuilding the voice, with a progress line each."""
     from . import models
 
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     worst = 0
-    for model in (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
+    for model in (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.VOICE_MODEL):
         if models.is_installed(model):
             print(f"{model.title}: already there ({models.location(model)})")
             continue
@@ -158,7 +158,7 @@ def _check_speech_runtime() -> None:
 def _check_models() -> list[str]:
     """One second of audio through each model the app runs: the heavy-noise remover (the required noise removal
     models must be installed); the optional ones are only checked where they are installed. Returns what was skipped."""
-    from acw_common import aec, bwe, restore
+    from acw_common import aec, restore
 
     sr = pipeline.SAMPLE_RATE
     t = np.arange(sr) / sr
@@ -176,14 +176,6 @@ def _check_models() -> list[str]:
     echo = aec.cancel_echo(x, np.roll(x, 480))
     if echo.shape != x.shape or not np.isfinite(echo).all():
         raise RuntimeError("the echo canceller returned unexpected audio")
-
-    highs = resources.highs_model_dir()
-    if highs is not None and bwe.available(highs):
-        y = bwe.extend(x, highs, threads=1, model="8k")
-        if y.shape != x.shape or not np.isfinite(y).all():
-            raise RuntimeError("the model that restores highs returned unexpected audio")
-    else:
-        skipped.append("highs model")
 
     voice = resources.voice_model_dir()
     if voice is not None and restore.available(voice):

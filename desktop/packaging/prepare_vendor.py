@@ -424,8 +424,6 @@ def cleanup_model_notices(n: Notices) -> None:
     n.add_file("DPDFNet-Apache-2.0.txt", SUPPLEMENTAL / "Apache-2.0.txt",
                "DPDFNet-8 by Ceva (Apache-2.0, https://github.com/ceva-ip/DPDFNet): the noise remover for heavy noise, "
                "downloaded once with the other noise removal model")
-    n.add_file("AP-BWE-MIT.txt", SUPPLEMENTAL / "AP-BWE-MIT.txt",
-               "AP-BWE by Ye-Xin Lu et al. (MIT code and weights): the model that restores missing highs, downloaded once")
     n.add_file("Sidon-MIT.txt", SUPPLEMENTAL / "Sidon-MIT.txt",
                "Sidon by Nakata, Saito and the sarulab-speech group (MIT): the model that rebuilds the voice, downloaded once")
     n.add_file("w2v-BERT-2.0-MIT.txt", SUPPLEMENTAL / "w2v-BERT-2.0-MIT.txt",

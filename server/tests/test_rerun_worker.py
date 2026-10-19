@@ -45,7 +45,7 @@ def start_job(client, h, data, kind="denoise", transcribe_tier=None, tier="stand
     r = client.post("/api/jobs", json={
         "kind": kind, "denoiseTier": tier, "transcribeTier": transcribe_tier, "filename": "talk.wav", "sizeBytes": len(data),
         "durationSeconds": SECONDS,
-        "options": {"output_video": False, "noise": "light", "audio_format": "flac", "restore_highs": False, "loudness_lufs": -16.0, **options},
+        "options": {"output_video": False, "noise": "light", "audio_format": "flac", "loudness_lufs": -16.0, **options},
     }, headers=h)
     assert r.status_code == 200, r.text
     jid = r.json()["id"]
@@ -124,8 +124,8 @@ def test_change_and_save_again_end_to_end(client, signed_in, speech, tmp_path):
     assert params_of(r1)["rerun"]["clean"] == "reuse" and "talk-cleaned.wav" in files_of(r1)
     assert np.max(np.abs(decode(folder(r1) / "talk-cleaned.wav") - decode(folder(a) / "talk-cleaned.flac"))) < 1e-6  # lossless
 
-    # (3) strength only, without Leveling or highs: free, and exactly the blend of the kept copies
-    r2 = run_rerun(client, h, r1, expect_free=True, options={"atten_lim_db": 24, "leveling": False, "restore_highs": False})
+    # (3) strength only, without Leveling: free, and exactly the blend of the kept copies
+    r2 = run_rerun(client, h, r1, expect_free=True, options={"atten_lim_db": 24, "leveling": False})
     done2 = row(r2)
     assert done2["status"] == "done" and done2["cost_micros"] == 0 and done2["hold_id"] is None
     assert params_of(r2)["rerun"]["clean"] == "denoised" and params_of(r2)["rerun"]["paid"] == []
@@ -258,48 +258,3 @@ def test_subtitle_files_again_are_free_and_a_new_language_transcribes_again_and_
         line = usage_lines(uid)[-1]
         assert line["description"].startswith("Changed and saved again (Subtitles & transcript): talk.wav")
         assert -line["amount_micros"] == pricing.rerun_cost_micros({"transcribe": 4_000}, row(c)["duration_seconds"]) > 0
-
-
-@NATIVE
-def test_restore_highs_in_a_rerun_runs_from_the_kept_copy_is_charged_and_turning_it_off_is_free(client, signed_in, speech):
-    """Highs on in a re-run: the restore runs on the kept noise removal (no noise model), at the highs price, named in the
-    ledger; off again: free, and the sound is the first job's again."""
-    uid, h = signed_in
-    ledger.credit(uid, 8_000_000, "grant", "t", "g")
-    a = start_job(client, h, speech.read_bytes(), leveling=False, audio_format="wav")
-    assert _run_worker_once("done") == a
-    plain = decode(folder(a) / "talk-cleaned.wav")
-    lines = len(usage_lines(uid))
-
-    b = run_rerun(client, h, a, expect_free=False, options={"restore_highs": True})
-    done = row(b)
-    assert params_of(b)["rerun"]["clean"] == "denoised" and params_of(b)["rerun"]["paid"] == ["highs"] and params_of(b)["rates"] == {"highs": 70_000}
-    assert done["cost_micros"] == pricing.rerun_cost_micros({"highs": 70_000}, done["duration_seconds"]) > 0
-    new_lines = usage_lines(uid)
-    assert len(new_lines) == lines + 1 and new_lines[-1]["description"] == "Changed and saved again (Restore highs): talk.wav (0.1 min)"
-    assert -new_lines[-1]["amount_micros"] == done["cost_micros"]
-    assert client.get(f"/api/jobs/{b}").json()["notice"] == "Its high frequencies were restored, as you asked."
-    assert same_file(folder(a) / "kept-noise.flac", folder(b) / "kept-noise.flac")  # no noise model ran
-    restored = decode(folder(b) / "talk-cleaned.wav")
-    assert np.max(np.abs(restored[:len(plain)] - plain[:len(restored)])) > 1e-4  # the highs step changed the sound
-
-    c = run_rerun(client, h, b, expect_free=True, options={"restore_highs": False})
-    assert row(c)["cost_micros"] == 0 and row(c)["hold_id"] is None and len(usage_lines(uid)) == lines + 1
-    assert snr_db(plain, decode(folder(c) / "talk-cleaned.wav")) > 70  # back to the first job's sound (from its kept copy)
-
-
-@NATIVE
-def test_a_highs_only_job_changed_again_runs_from_the_upload_and_is_charged_for_the_steps_that_ran(client, signed_in, speech):
-    """No noise removal, so nothing is kept to start from: adding Leveling runs highs and Leveling again, both charged."""
-    uid, h = signed_in
-    ledger.credit(uid, 8_000_000, "grant", "t", "g")
-    a = start_job(client, h, speech.read_bytes(), tier="off", leveling=False, restore_highs=True, audio_format="wav")
-    assert _run_worker_once("done") == a
-    assert files_of(a) == {"input.wav", "talk-cleaned.wav"} and client.get(f"/api/jobs/{a}").json()["redo"]["noise"] is False
-    assert client.post(f"/api/jobs/{a}/rerun", json={}, headers=h).status_code == 400  # same choices: nothing to change
-    b = run_rerun(client, h, a, expect_free=False, options={"leveling": True})
-    assert params_of(b)["rerun"]["clean"] == "full" and params_of(b)["rerun"]["paid"] == ["highs", "leveling"]
-    done = row(b)
-    assert done["cost_micros"] == pricing.rerun_cost_micros({"highs": 70_000, "leveling": 1_000}, done["duration_seconds"])
-    assert usage_lines(uid)[-1]["description"] == "Changed and saved again (Restore highs + Leveling): talk.wav (0.1 min)"
-    assert client.get(f"/api/jobs/{b}").json()["notice"] == "Its high frequencies were restored, as you asked."

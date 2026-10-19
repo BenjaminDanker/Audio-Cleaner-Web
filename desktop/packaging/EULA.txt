@@ -6,7 +6,7 @@ for personal or commercial work, and copy, change and share it, as that licence 
 What it does online
 Audio Cleaner works offline: it does not upload your files and does not collect personal data. It goes online only
 for two things:
-- Models. Setup (or Settings, later) downloads the models for subtitles, restoring highs and rebuilding the voice,
+- Models. Setup (or Settings, later) downloads the models for subtitles and rebuilding the voice,
   once, from the app's releases on GitHub.
 - Updates. When it starts, it checks the app's releases on GitHub for a newer version and, if there is one, downloads it (on
   Windows it is installed when you close the app; on a Mac you are asked to open the installer). This is a normal web
@@ -16,7 +16,7 @@ for two things:
 Open source components
 Audio Cleaner contains third-party open source components, among them Qt (LGPL v3), FFmpeg (LGPL v2.1), DeepFilterNet
 (MIT / Apache 2.0), DPDFNet (Apache 2.0), WebRTC (BSD) and others, and the models it downloads are OpenAI Whisper (MIT),
-AP-BWE (MIT), Sidon (MIT) and Meta's w2v-BERT 2.0 (MIT). Each is licensed under its own terms, listed in the About
+Sidon (MIT) and Meta's w2v-BERT 2.0 (MIT). Each is licensed under its own terms, listed in the About
 window and in the "licenses" folder of the installation. Where those licences give you rights, for example to replace
 the Qt or FFmpeg files with your own builds, they apply.
 

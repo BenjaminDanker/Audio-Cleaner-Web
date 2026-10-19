@@ -39,7 +39,7 @@ for f in sorted(need(VENDOR / "native").iterdir()):
     binaries.append((str(f), "native"))  # libdf.*, ffmpeg[.exe], ffprobe[.exe] -> <app>/native/
 
 # No model ships: the noise removal models (DeepFilterNet3, DPDFNet-8: 23 MB, required) and the others (subtitles,
-# restoring highs, rebuilding the voice: 2.6 GB) are all downloaded by the installer's setup (installer_models.py) or by the
+# rebuilding the voice: 2.1 GB) are all downloaded by the installer's setup (installer_models.py) or by the
 # app (models.py), so the installer stays small. vendor/models (the copy the tests read) is deliberately not bundled;
 # only libDF, FFmpeg and the licence notices are.
 

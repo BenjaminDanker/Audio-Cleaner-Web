@@ -10,7 +10,7 @@ desktop/vendor, filled by the packaging scripts). On Linux, missing pieces fall
 back to the server layout in ~/audio-cleaner/{bin,models}.
 
 No model is in the app. The noise removal models (DeepFilterNet3 and DPDFNet-8, 23 MB, REQUIRED: noise removal is what the
-app is for) and the ones for subtitles, restoring highs and rebuilding the voice (2.6 GB) are downloaded by the installer during setup;
+app is for) and the ones for subtitles and rebuilding the voice (2.1 GB) are downloaded by the installer during setup;
 the app downloads the noise models itself when they are missing, and offers the others again when setup's download
 failed (or after a portable run). Runs from source (tests, CI) also find the noise models in
 vendor/models (prepare_vendor.py --download-noise-models) or the server's models, and may use the small test speech model that
@@ -51,20 +51,16 @@ SPEECH_MODEL = models.SpeechModel(
 )
 models.register(SPEECH_MODEL)
 
-# The two ONNX models are ours: AP-BWE (MIT code and weights, github.com/yxlu-0102/AP-BWE), converted to ONNX by
-# tools/export_apbwe_onnx.py, and Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX
-# (docs/research/restore-sidon.md). Each is a plain per-file model like the speech model, downloaded from our Hugging
-# Face repository (config.hf_models_url), pinned by revision, size and SHA-256, so a user who wants one model downloads
-# only its files. The licence texts come with each model (`licences`: LICENSES/<name> in the model's folder; not part
-# of `files`, so they are not in the .complete marker, see models.py).
+# The ONNX models are ours: Sidon v0.1 (MIT; sarulab-speech/sidon-v0.1), converted to ONNX (docs/research/restore-sidon.md), and the
+# noise removal ones. Each is a plain per-file model like the speech model, downloaded from our Hugging Face repository
+# (config.hf_models_url), pinned by revision, size and SHA-256, so a user who wants one model downloads only its files. The
+# licence texts come with each model (`licences`: LICENSES/<name> in the model's folder; not part of `files`, so they are not in the .complete marker, see models.py).
 def _hf(path: str, size: int, sha256: str, *, name: str = "") -> models.ModelFile:
     """A file of the models repository; `name` is its path inside the model's folder (default: the repository path)."""
     return models.ModelFile(name or path, config.hf_models_url(path), size, sha256)
 
 
 _LICENCE_TEXTS = {
-    "AP-BWE-MIT.txt": (1817, "f05afcdb387530db09c6eb21c429a9d3417197da54cbc8e69f08affc62fb9beb"),
-    "AP-BWE-weights-LICENSE.txt": (175, "506d3a47a2c84814c8d6a84f0450a18fb9d67c03bb30d8b7e9d357d9540be2d3"),
     "Sidon-MIT.txt": (1722, "ba0678e7b808bfdf63e376a58586864a93e28345c7c6304fef743de9e1dbf15d"),
     "Training-data-attribution.txt": (1605, "19bb96ffa127f60569675f31e263df72bd683f8d7ed1f2382f9f78843dfab16d"),
     "DeepFilterNet-MIT.txt": (1083, "24e6bb09c928af8d8e56268082f87413247ce36b39dd5d33add2f9893968065e"),
@@ -99,24 +95,6 @@ NOISE_MODEL = models.SpeechModel(
 )
 models.register(NOISE_MODEL)
 
-
-HIGHS_MODEL = models.SpeechModel(
-    id="restore-highs",
-    title="Model that restores missing highs",
-    description="AP-BWE: brings back the high frequencies of phone calls and other band-limited recordings.",
-    licence="AP-BWE by Ye-Xin Lu et al. (MIT code and weights), trained on VCTK (CC BY 4.0)",
-    files=tuple(
-        _hf(f"ap-bwe/{name}to48k.onnx", 119093242, sha, name=f"{name}to48k.onnx")
-        for name, sha in (
-            ("8k", "788d45ed37d399c0eeffca0462d7b9c2928871ae8523af67e96f9395720137a3"),
-            ("12k", "eaa2d5822e1094d2ec93fd233be8b1f2a20ae76a41b2702d404aa0b7ac00d618"),
-            ("16k", "ca91ce8a19b91555e6c49f1cce4e44547bb1073af7f32eae62edad9ba83ecd44"),
-            ("24k", "e662a7fe7243507fe766092a2b62869f55d75952fcce5ef8b1deb6d99076cf55"),
-        )
-    ),
-    licences=_licences("AP-BWE-MIT.txt", "AP-BWE-weights-LICENSE.txt", "Training-data-attribution.txt"),
-)
-models.register(HIGHS_MODEL)
 
 # The optional "rebuild the voice" step.
 VOICE_MODEL = models.SpeechModel(
@@ -228,19 +206,6 @@ def whisper_model_path() -> Path | None:
     for d in candidates:
         if all((d / n).is_file() for n in _WHISPER_FILES):
             return d
-    return None
-
-
-def highs_model_dir() -> Path | None:
-    """Folder of the AP-BWE models once downloaded (or the server's copy when run from source), else None."""
-    from acw_common import bwe
-
-    found = models.location(HIGHS_MODEL)
-    if found is not None:
-        return found
-    fallback = _dev_fallback()
-    if fallback is not None and bwe.available(fallback / "models" / "ap-bwe"):
-        return fallback / "models" / "ap-bwe"
     return None
 
 

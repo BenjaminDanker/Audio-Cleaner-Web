@@ -1,6 +1,6 @@
 """Intermediate results kept so a later change of the choices does not run the expensive step again.
 
-The server keeps, per paid job, the noise removal's full-strength output (before strength, highs and leveling) or the
+The server keeps, per paid job, the noise removal's full-strength output (before strength and leveling) or the
 rebuilt voice (before leveling): `pipeline.clean_audio(keep=...)` hands them over, `save` writes them as 24-bit FLAC and
 `load` brings them back as float32, to within 1.2e-7 of full scale (one 24-bit step; a sample is scaled down first when it would
 clip, and the scale is kept with the file). The 32-bit float they are made of would take twice the disk; FLAC takes

@@ -4,7 +4,7 @@
 // The noise figure is measured by the noise remover itself: it runs at full strength over the audio (in a worker, or Node), and
 // what it keeps (the voice) is compared with what it takes out (NoiseFigure), so wind, keyboards and chatter count as much as a
 // steady hiss. The server measures the same way to choose its noise remover (common/acw_common/pipeline.py: noise_figure_db,
-// measure_windows; bandwidth: bwe.effective_bandwidth). tests/test_reco_agreement.py runs this module and the Python functions on
+// measure_windows; bandwidth: spectrum.effective_bandwidth). tests/test_reco_agreement.py runs this module and the Python functions on
 // the same files and fails when they drift apart. Keep the two in step.
 //
 //   const a = new Analyser({ channels: 2 });
@@ -125,7 +125,7 @@ export function medfilt(x, k) {
   return out;
 }
 
-// ---- bandwidth (bwe.effective_bandwidth) ---------------------------------------------------------------------------
+// ---- bandwidth (spectrum.effective_bandwidth) ---------------------------------------------------------------------------
 const EDGE_DB = 20.0;
 const CLIFF_DB = 18.0;
 
@@ -164,7 +164,7 @@ function bandMean(db, lo, hi) {
   return c ? s / c : NaN;
 }
 
-/** Where the speech spectrum ends (Hz), or RATE / 2 when there is no sharp cut-off. A port of bwe.effective_bandwidth. */
+/** Where the speech spectrum ends (Hz), or RATE / 2 when there is no sharp cut-off. A port of spectrum.effective_bandwidth. */
 export function bandwidthOf(spectra, speechEnergy, extra = null) {
   const nyq = RATE / 2;
   const raw = ltasDb(spectra, speechEnergy);

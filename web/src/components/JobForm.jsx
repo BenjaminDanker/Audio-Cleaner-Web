@@ -5,7 +5,7 @@ import { useAuth } from '../auth.jsx';
 import { addLocalCard, beginFinish, finishSeconds, getFinish } from '../finish.js';
 import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, rate, shownName, stem } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
-import { highsHint, rebuildHint } from '../hints.js';
+import { rebuildHint } from '../hints.js';
 import { jobPath, LANGUAGES, LOUDNESS, NOISE, submitJob, tooManyText } from '../jobs.js';
 import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from '../media/convert.js';
 import { previewFits } from '../media/blend.js';
@@ -150,7 +150,6 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const [loudness, setLoudness] = useState('-14'); // the YouTube target
   const [noiseKind, setNoiseKind] = useState('auto');
   const [leveling, setLeveling] = useState(true); // Leveling (paid, on our side): even out the voice, set the loudness. With noise removal Off it runs on its own.
-  const [restoreHighs, setRestoreHighs] = useState(false); // Restore highs (paid, off unless asked for): bring back the high sounds a recording lost; with Denoising or on its own
   const [rebuild, setRebuild] = useState(false); // Voice rebuild (its own price)
   const [strength, setStrength] = useState('max'); // Denoising
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
@@ -180,7 +179,7 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const rebuildOk = useRef(false); // is the rebuild offered (the price list has it)?
   const listen = useRef(null);
   const [error, setError] = useState('');
-  const choice = useOutputChoice({ file, info, serverAudio: noise === 'denoise' || (noise === 'off' && (leveling || restoreHighs)) });
+  const choice = useOutputChoice({ file, info, serverAudio: noise === 'denoise' || (noise === 'off' && leveling) });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
 
@@ -196,7 +195,7 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const sVerdict = info ? subsVerdict(info) : null;
   const wantsBrowser = noise === 'browser';
   const wantsDenoise = noise === 'denoise'; // Denoising (or Voice rebuild) on our side
-  const soundOnly = noise === 'off' && (leveling || restoreHighs) && info?.hasAudio !== false; // no noise removal: Leveling and/or Restore highs on their own, on our side
+  const soundOnly = noise === 'off' && leveling && info?.hasAudio !== false; // no noise removal: Leveling on its own, on our side
   const serverClean = wantsDenoise || soundOnly; // a cleaned file comes from our side
   const cleaning = serverClean || wantsBrowser; // the cleaned sound is part of the result (the file type and name are chosen)
   const wantsText = subs !== 'off'; // any subtitles: the language, formats and "into the video" choices apply
@@ -231,15 +230,13 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const rebuildRate = pricing?.rebuildAvailable ? rebuildOffered : null; // paused while its machine is unavailable
   const denoiseTier = soundOnly ? 'off' : rebuild && rebuildRate ? 'rebuild' : 'standard';
   const levelingRate = findRate(pricing, 'leveling', 'standard');
-  const highsRate = findRate(pricing, 'highs', 'standard');
   const withLeveling = serverClean && leveling; // Leveling is charged on its own line
-  const withHighs = serverClean && restoreHighs && denoiseTier !== 'rebuild'; // so is Restore highs (the voice rebuild makes its own)
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
   const fileReco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
   const reco = auto ? fileReco : null; // used only with "Automatic best settings" on
   rebuildOk.current = !!rebuildRate;
-  now.current = { noise, strength, localStrength, rebuild, restoreHighs, leveling, subs, noiseKind };
+  now.current = { noise, strength, localStrength, rebuild, leveling, subs, noiseKind };
 
   const procEta = useMemo(() => {
     if (!info?.duration) return null;
@@ -256,12 +253,12 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
 
   const est = useMemo(() => {
     if (!kind) return 0;
-    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling, highs: withHighs });
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling, withHighs]);
+    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling });
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
   const breakdown = useMemo(() => {
     if (kind !== 'denoise_transcribe' || !duration) return null;
-    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling, highs: withHighs }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling, withHighs]);
+    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
 
   async function choose(f) {
     if (f.size < TINY_FILE_BYTES) {
@@ -282,7 +279,6 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
     setStrength('max');
     setLocalStrength('max');
     setRebuild(false);
-    setRestoreHighs(false);
     setLeveling(true);
     setNoiseKind('auto');
     setStats(null);
@@ -341,7 +337,6 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
       setLocalStrength(r.strength);
     }
     if (!skip.has('rebuild')) setRebuild(!!(r.rebuild && rebuildOk.current && next === 'denoise'));
-    if (!skip.has('highs')) setRestoreHighs(!!r.restoreHighs && !(r.rebuild && rebuildOk.current && next === 'denoise')); // on only where the automatic settings ask for it
     if (!skip.has('leveling')) setLeveling(!!r.leveling);
     if (!skip.has('subs') && i?.hasAudio !== false) setSubs(r.subs || 'off');
     setNoiseKind('auto');
@@ -387,7 +382,7 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
     const u = undoTo.current;
     if (u) {
       setNoise(u.noise); setStrength(u.strength); setLocalStrength(u.localStrength); setRebuild(u.rebuild);
-      setRestoreHighs(u.restoreHighs); setLeveling(u.leveling); setSubs(u.subs); setNoiseKind(u.noiseKind);
+      setLeveling(u.leveling); setSubs(u.subs); setNoiseKind(u.noiseKind);
     }
     undoTo.current = null;
     appliedRef.current = false;
@@ -510,7 +505,6 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
         leveling,
-        restore_highs: restoreHighs && denoiseTier !== 'rebuild',
         atten_lim_db: strengthDb(strength),
         echo_reference_track: !!(wantsDenoise && echo && hasSecondTrack),
       },
@@ -534,7 +528,7 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
     e.preventDefault();
     if (!canStart) return;
     listen.current?.abort(); // whatever the quick listen finds from here on must not change a run that has started
-    manual.current = new Set(['noise', 'strength', 'rebuild', 'highs', 'leveling', 'subs']);
+    manual.current = new Set(['noise', 'strength', 'rebuild', 'leveling', 'subs']);
     const f = file;
     const i = info;
     const ctl = new AbortController();
@@ -729,15 +723,6 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
                 </div>
               )}
 
-              {noise === 'off' && info.hasAudio !== false && (
-                <div className="step-sub">
-                  <Toggle
-                    name="highs-alone" checked={restoreHighs} onChange={(e) => { touch('highs'); setRestoreHighs(e.target.checked); }} disabled={busy}
-                    title="Restore highs" hintId="highs-alone-hint" hint={highsHint(highsRate)}
-                  />
-                </div>
-              )}
-
               {wantsDenoise && (
                 <div className="step-sub">
                   {!rebuilding && <StrengthPicker name="strength" value={strength} onChange={(v) => { touch('strength'); setStrength(v); }} disabled={busy} />}
@@ -749,12 +734,6 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
                       </select>
                       <span className="hint">{NOISE.find((n) => n.id === noiseKind).hint}</span>
                     </div>
-                  )}
-                  {!rebuilding && (
-                    <Toggle
-                      name="highs" checked={restoreHighs} onChange={(e) => { touch('highs'); setRestoreHighs(e.target.checked); }} disabled={busy}
-                      title="Restore highs" hintId="highs-hint" hint={highsHint(highsRate)}
-                    />
                   )}
                   {rebuildOffered && !rebuildRate && (
                     <span data-testid="rebuild-paused">

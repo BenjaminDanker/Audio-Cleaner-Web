@@ -104,7 +104,7 @@ def test_clean_audio_without_denoising_and_without_leveling_returns_the_input(tm
     opts = pipeline.CleanOptions(denoise=False, leveling=False)
     y = pipeline.clean_audio(noisy, missing, missing, opts, threads=1, progress=progress.append, report=report)
     assert y.shape == (len(noisy), 1) and y.dtype == np.float32 and np.array_equal(y[:, 0], noisy)
-    assert report["noise"] == "none" and report["highs"] is None and "noise_db" not in report
+    assert report["noise"] == "none" and "noise_db" not in report
     assert progress and progress[-1] == 1.0
     out = np.zeros(len(noisy), dtype=np.float32)  # written into the given array
     got = pipeline.clean_audio(noisy, missing, missing, opts, out=out)

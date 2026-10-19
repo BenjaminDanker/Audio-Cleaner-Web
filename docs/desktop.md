@@ -2,8 +2,8 @@
 
 The desktop app is a PySide6 (Qt) window around the shared cleaning pipeline in `common/` (the server uses the same code).
 The installer carries the app, FFmpeg and libDF (DeepFilterNet's native library) but no model. Every model is downloaded
-by setup (2.6 GB in all, once), from one place (our Hugging Face repository; Whisper from its own): the noise removal
-models are REQUIRED, the three larger ones are not. The app downloads a model only when asked to (a Download
+by setup (2.1 GB in all, once), from one place (our Hugging Face repository; Whisper from its own): the noise removal
+models are REQUIRED, the two larger ones are not. The app downloads a model only when asked to (a Download
 button, or its own offer when the required ones are missing); its one automatic request is the update check, see
 "Automatic updates" below. The installer is small; the
 Windows installer's download page and the Mac .pkg's postinstall script check every file's SHA-256, keep files a
@@ -14,15 +14,14 @@ previous install left in place, and are generated from the app's catalog by `pac
   DPDFNet Apache-2.0). One model, not two: they are used together (the app picks per recording) and neither is optional,
   so one download, one marker and one line in the app, and setup cannot leave half of noise removal behind;
 - the speech model for subtitles, Whisper large-v3-turbo (1.6 GB, from Hugging Face, `resources.SPEECH_MODEL`);
-- the model that restores the highs of phone-quality recordings, AP-BWE (4 x 119 MB ONNX, `resources.HIGHS_MODEL`);
 - the model that rebuilds the voice (optional "Rebuild the voice" setting: removes room echo too), Sidon
   (503 MB ONNX, `resources.VOICE_MODEL`).
 
-The last two are our own conversions (nobody else publishes these files; the noise models are the unchanged upstream
+The last one is our own conversion (nobody else publishes this file; the noise models are the unchanged upstream
 files, mirrored in the same repository). They are downloaded from our Hugging Face
 model repository (`config.HF_MODELS_REPO`, pinned to the commit `config.HF_MODELS_REVISION`, a full commit id), file by file like Whisper, every file pinned by URL, size and
 SHA-256: someone who only wants one model downloads only its files. Each model also has its licence texts
-(`SpeechModel.licences`, `LICENSES/<name>` in the model's folder: AP-BWE + training-data notice, Sidon + w2v-BERT 2.0 +
+(`SpeechModel.licences`, `LICENSES/<name>` in the model's folder: Sidon + w2v-BERT 2.0 +
 training-data notice), downloaded with it. They are not part of the model's `files`, so they are not in the `.complete`
 marker: a copy installed by an older version (the old 0.9 GB archive unpacked into the model folders, with a shared
 `<models>/LICENSES`) still counts as installed and is not downloaded again. About lists every installed model's
@@ -42,12 +41,12 @@ shows a message after installing (and logs it, for silent installs) when the fil
 logs it and shows a dialog in the installing user's session (best effort); the app is installed anyway so there is
 something to retry from. App: when the models are missing at start (setup's download failed, a portable run, or a silent
 self-update from a version that had them inside the program) it downloads them by itself (just these 23 MB, not the
-2.6 GB; a failure shows a banner with "Try again"); Clean asks before starting, `--cli` says to run `--download-models`, and `engine.process` raises a clear
+2.1 GB; a failure shows a banner with "Try again"); Clean asks before starting, `--cli` says to run `--download-models`, and `engine.process` raises a clear
 error instead of failing on a missing file. `resources.check()` lists only the shipped components (libDF, FFmpeg);
 `resources.noise_ready()` is the models' counterpart. From source, `model_path()` and `heavy_noise_model_path()` also find
 `vendor/models` (`prepare_vendor.py --download-noise-models`, for tests and CI) and `~/audio-cleaner/models`. Nothing is ever uploaded. The Mac download is a `.pkg` (not a disk image) because a disk image has no setup
 step to download in. The .pkg is wrapped with `productbuild --distribution` (`packaging/macos/distribution.py`): it
-refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.6 GB and takes minutes.
+refuses macOS older than 14, shows the EULA, and its welcome text says setup downloads about 2.1 GB and takes minutes.
 
 **Where the app downloads from.** People get the installers from the public repository's Releases. Every desktop release
 (tag `v<version>` in the public repository, made by the release job of `desktop.yml`) carries the three installers and
@@ -67,7 +66,7 @@ its size).
 
 Never change a published file: every app version has its models' sizes and SHA-256 pinned.
 
-1. Upload the new files to the Hugging Face model repository under a new path or as a new commit (`ap-bwe/`, `sidon/`,
+1. Upload the new files to the Hugging Face model repository under a new path or as a new commit (`sidon/`,
    `LICENSES/`); the commit id is the pin, so old commits keep serving older app versions. Whisper: change the commit id
    in `_TURBO` in `resources.py` (never `main`).
 2. Set `HF_MODELS_REVISION` in `config.py` to the new full commit id, and update the catalog in `resources.py`: each
@@ -124,7 +123,7 @@ the checklist at the end).
    deleted by the cleanup.
 3. `.github/workflows/desktop.yml` builds, per platform: FFmpeg (LGPL, from pinned source tarballs; Windows is
    cross-compiled with mingw-w64 on Ubuntu), libDF, then the app: tests, PyInstaller, the frozen `--selftest --gui`
-   (also builds the window and runs the noise models, echo canceller, AP-BWE and Sidon: CI downloads them from Hugging Face first, like the app does),
+   (also builds the window and runs the noise models, echo canceller and Sidon: CI downloads them from Hugging Face first, like the app does),
    and the installer (Inno Setup 6.7.1 on Windows, a `productbuild` .pkg on macOS; both download the models during
    setup, file by file from Hugging Face). Windows also runs the frozen app under a non-ASCII profile folder and installs, starts and uninstalls the
    installer silently. A separate "Model downloads exist" job checks the catalog URLs. Website/server-only pushes skip it; "Run workflow"
@@ -288,7 +287,7 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    `--download-whisper` fetches it; it is not bundled) and
    writes `licenses/`: FFmpeg/LAME/opus/libvpx, DeepFilterNet, DPDFNet, the Rust crates of libDF (`cargo tree` of the capi
    build), all Python packages of the interpreter running the script, Qt/PySide6 (LGPL + GPL text from
-   `desktop/packaging/licenses/`), Whisper, Silero VAD, the downloaded models (AP-BWE, Sidon, w2v-BERT 2.0 and the
+   `desktop/packaging/licenses/`), Whisper, Silero VAD, the downloaded models (Sidon, w2v-BERT 2.0 and the
    CC BY attribution of their training data), WebRTC (echo canceller) and LiveKit, Python, PyInstaller and an index
    `README.txt`. It fails on anything missing.
 4. **Icons**: `python desktop/packaging/make_icons.py OUT_DIR` (icon.ico, icon.icns from `assets/icon.png`).
@@ -301,7 +300,7 @@ Windows PC (written as thin wrappers; they have not been run on real machines ye
    ```
    Onedir, windowed, no UPX. The selftest denoises a tone through libDF, round-trips it through FFmpeg, loads the
    subtitle engine (CTranslate2, Silero VAD, the speech model if it is installed), runs a second through DPDFNet and
-   the echo canceller (and through AP-BWE and Sidon when their models are installed), and with `--gui` builds the
+   the echo canceller (and through Sidon when its model is installed), and with `--gui` builds the
    window, the preview and the About box, so a missing shared library, plugin or data file fails here.
 6. **Installer**: Windows `iscc /DAppVersion=2.0.0 /DSourceDir=dist\AudioCleaner desktop\packaging\windows\AudioCleaner.iss`
    (per-user install by default, asks for elevation only if the user picks all users; Start menu, optional desktop
@@ -325,8 +324,8 @@ Measured on Linux (the Windows/macOS sizes will differ somewhat): the `AudioClea
 uncompressed (no model inside; the two noise models, 23 MB, are downloaded: DeepFilterNet 8 MB, DPDFNet-8 15 MB);
 it is PySide6/Qt 140 MB,
 CTranslate2 137 MB (library and extension), SciPy and its OpenBLAS 71 MB, ONNX Runtime 30 MB, NumPy and its OpenBLAS
-41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.6 GB of models: the noise removal models 23 MB, Whisper large-v3-turbo 1.6 GB, AP-BWE 4 x 119 MB,
-Sidon 503 MB (2.6 GB on disk too). Windows setup needs that much free space on the temporary drive until the files are
+41 MB, libDF/FFmpeg 38 MB. Setup then downloads 2.1 GB of models: the noise removal models 23 MB, Whisper large-v3-turbo 1.6 GB,
+Sidon 503 MB (2.1 GB on disk too). Windows setup needs that much free space on the temporary drive until the files are
 installed (it checks first); the app's own download of one model needs about that model's size. Memory
 while cleaning, measured: 0.5 GB for a normal file, 1.7 GB with
 subtitles, 2.6 GB with "Rebuild the voice" (`sysinfo.py` plans with these numbers). GitHub Release assets may be up
@@ -344,11 +343,11 @@ to 2 GiB each.
   `--enable-gpl`, `--enable-nonfree` or libx264/libfdk to the build.
 * Qt's multimedia plugin brings its own FFmpeg libraries (LGPL); they are separate files and covered by the Qt notice.
 * `EULA.txt` (what the installers show) is the app's MIT License with what the app does online, the open source
-  components (FFmpeg and the downloaded models Whisper, AP-BWE, Sidon, w2v-BERT 2.0 named) and a note on the user's
+  components (FFmpeg and the downloaded models Whisper, Sidon, w2v-BERT 2.0 named) and a note on the user's
   files. It must not add restrictions that the MIT License or the LGPL components' licences don't allow.
-* The downloaded models carry notices too: `AP-BWE-MIT.txt` (code and weights), `Sidon-MIT.txt`,
-  `w2v-BERT-2.0-MIT.txt` (Meta) and `Training-data-attribution.txt` (CC BY 4.0: VCTK, FLEURS-R, LibriTTS-R) ship in
-  `licenses/` and are shown in About, and the same files (plus `AP-BWE-weights-LICENSE.txt`) are in the model repository
+* The downloaded models carry notices too: `Sidon-MIT.txt`,
+  `w2v-BERT-2.0-MIT.txt` (Meta) and `Training-data-attribution.txt` (CC BY 4.0) ship in
+  `licenses/` and are shown in About, and the same files are in the model repository
   on Hugging Face (`LICENSES/`); setup and the app download each model's texts into its folder (`<model>/LICENSES`),
   and About lists those folders.
   The Dropbox CTranslate2 conversion of Whisper has no licence text of its own (its card says MIT); OpenAI's
@@ -433,7 +432,7 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
 * **Uninstalling.** Windows: the uninstaller removes the program and the models setup installed, and asks whether to
   remove the models the app downloaded itself, the history and the settings (`%LOCALAPPDATA%\Audio Cleaner`); a
   silent uninstall keeps them. macOS: dragging the app to the Trash leaves the models in
-  `/Library/Application Support/Audio Cleaner/models` (2.6 GB, installed by the .pkg), the app's own data in
+  `/Library/Application Support/Audio Cleaner/models` (2.1 GB, installed by the .pkg), the app's own data in
   `~/Library/Application Support/Audio Cleaner` and its settings; delete those folders by hand to remove everything.
 * **Per-user and all-users installs on Windows are separate installs** (two uninstall entries, two copies of the
   models); installing one over the other does not replace it. Uninstall the old one first.
@@ -466,7 +465,7 @@ repository (`BenjaminDanker/Audio-Cleaner`, once a different app called VideoDen
 the app's code and each release are copied there automatically, one way, without mentioning this repository.
 
 * **What is copied** (`ALLOWLIST` in `tools/public-desktop/sync.py`): `desktop/` (app, packaging scripts, the licence
-  texts and EULA the installers ship, tests), all of `common/` (the app imports bwe, captions, clarity, dfn, dpdfnet,
+  texts and EULA the installers ship, tests), all of `common/` (the app imports captions, clarity, dfn, dpdfnet,
   ffmpeg, pipeline, restore and transcribe, which pull in aec and gpu; its tests are part of the desktop test run) and
   `native/deepfilter/` (the libDF build). Nothing else: no `deploy/`, `server/`, `web/`, `docs/`, `obs-plugin/`,
   `models.lock`. Files that exist only there live in `tools/public-desktop/template/`: `README.md`, `LICENSE` (this

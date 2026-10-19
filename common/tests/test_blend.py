@@ -1,7 +1,7 @@
 """Strength is a blend: a noise model run at an attenuation limit of X dB gives (to float precision) the blend
 (1 - a) * full + a * recording of its own full-strength output with the recording, a = 10 ** (-X / 20). The pipeline therefore runs
 the models at full strength only and blends afterwards (pipeline.blend_strength), which lets a job keep the full-strength output and
-change strength, restoring highs and leveling later without a model run (pipeline.redo_denoised). Every path of clean_audio is checked
+change strength and leveling later without a model run (pipeline.redo_denoised). Every path of clean_audio is checked
 against the model's own limit: light (DeepFilterNet3) and heavy (DPDFNet-8), a short recording and one cut into segments, spans around
 digital silence, stereo, dual-mono. The SNR of the difference is above 100 dB on all of them (measured 138 dB light, 147 dB heavy)."""
 from __future__ import annotations
@@ -58,6 +58,8 @@ def test_blend_strength_works_in_place_on_the_chosen_channels_and_does_nothing_a
 
 
 def test_automatic_choices_are_one_function():
+    """With only a noise figure at hand (no recording to measure) the rule decides the strength; with the full measurements the
+    model does (tests/test_reco_model.py)."""
     assert pipeline.automatic_choices(5.0) == ("heavy", 100.0)
     assert pipeline.automatic_choices(19.5) == ("light", 40.0)
     assert pipeline.automatic_choices(30.0) == ("light", 12.0)
@@ -105,7 +107,7 @@ def test_heavy_remover_cut_into_segments_follows_the_same_rule():
 # ---------------------------------------------------------------- every path of clean_audio
 
 def _clean(x, db, noise, **kw):
-    opts = pipeline.CleanOptions(atten_lim_db=db, leveling=False, restore_highs=False, noise=noise)
+    opts = pipeline.CleanOptions(atten_lim_db=db, leveling=False, noise=noise)
     return pipeline.clean_audio(x, LIB, MODEL, opts, threads=2, **kw)
 
 
@@ -153,10 +155,13 @@ def test_clean_audio_heavy_mono_and_stereo_equal_the_model_at_that_limit(tmp_pat
 @needs_dfn
 def test_a_weaker_strength_needs_no_extra_model_run_for_the_automatic_strength(monkeypatch):
     """atten_lim_db=None: measured once, the strength that fits the file is the blend of the one full-strength run."""
+    from acw_common import analysis, reco_model
+
     x = _speechlike(6, 10)[:, None]
     report: dict = {}
-    got = pipeline.clean_audio(x, LIB, MODEL, pipeline.CleanOptions(atten_lim_db=None, leveling=False, restore_highs=False, noise="light"), threads=1, report=report)
-    assert report["atten_lim_db"] == pipeline.strength_for(report["noise_db"])
+    got = pipeline.clean_audio(x, LIB, MODEL, pipeline.CleanOptions(atten_lim_db=None, leveling=False, noise="light"), threads=1, report=report)
+    stats = analysis.measure(x, LIB, MODEL)  # the same measurements, on their own: the strength is what the model says about them
+    assert report["atten_lim_db"] == reco_model.STRENGTH_DB[reco_model.recommend(stats, min_seconds=0.0).strength]
     assert snr_db(_per_channel_reference(x, report["atten_lim_db"], _light), got) > 100
 
 
@@ -178,7 +183,7 @@ def test_redoing_from_the_kept_full_strength_output_is_the_same_as_cleaning_agai
     for db in (12.0, 40.0):
         opts = pipeline.CleanOptions(atten_lim_db=db, leveling=leveling, noise="light")
         again = pipeline.clean_audio(x, LIB, MODEL, opts, threads=1)
-        redone = pipeline.redo_denoised(x, full.copy(), pipeline.channel_plan(x), opts, threads=1)
+        redone = pipeline.redo_denoised(x, full.copy(), pipeline.channel_plan(x), opts)
         assert np.array_equal(again, redone)
 
 
@@ -191,7 +196,7 @@ def test_redoing_with_the_two_sides_the_same_fills_the_copy_after_the_blend():
     full, todo = keep["denoised"]
     assert todo == [0] and pipeline.channel_plan(x) == [0, 0]
     opts = pipeline.CleanOptions(atten_lim_db=24.0, leveling=False, noise="light")
-    redone = pipeline.redo_denoised(x, full.copy(), pipeline.channel_plan(x), opts, threads=1)
+    redone = pipeline.redo_denoised(x, full.copy(), pipeline.channel_plan(x), opts)
     assert np.array_equal(redone[:, 0], redone[:, 1]) and np.array_equal(redone, pipeline.clean_audio(x, LIB, MODEL, opts, threads=1))
 
 

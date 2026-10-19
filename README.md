@@ -4,11 +4,10 @@ Speech denoising and transcription, self-hosted.
 
 - **Free in your browser**: DeepFilterNet3 compiled to WebAssembly. Files never leave the device.
 - **Studio clean** (pay as you go): echo removal for recordings with a second audio track, noise removal
-  (DeepFilterNet3, or DPDFNet-8 for heavy noise, chosen per file), restoring the highs of phone-quality
-  recordings, then a clarity chain (level match, high-pass, leveling, loudness, limiter). An optional "voice
+  (DeepFilterNet3, or DPDFNet-8 for heavy noise, chosen per file), then a clarity chain (level match, high-pass, leveling, loudness, limiter). An optional "voice
   rebuilt" tier regenerates the voice instead. Video keeps its picture and its other audio tracks; subtitles are
   embedded as a soft track. A finished job keeps its upload, the noise removal before its strength is applied and its
-  results for 2 hours, so strength, restoring highs, Leveling or the subtitles can be changed again by running only the
+  results for 2 hours, so strength, Leveling or the subtitles can be changed again by running only the
   steps that changed (the strength even live while listening, and free).
 - **Live for streamers** (pay as you go): OBS plugin streams the mic to the
   server and gets back cleaned audio (+30 ms model latency) and live captions
@@ -72,7 +71,7 @@ hand for a single `node tests/<suite>.mjs`. Overrides: `AC_HOME`, `ACW_BIN_DIR`,
 
 Everything except `obs-plugin/` is proprietary, all rights reserved (see `LICENSE`); the
 source is visible but not licensed for reuse. OBS plugin: GPL-2.0-or-later. Third-party:
-DeepFilterNet (MIT/Apache-2.0), DPDFNet (Apache-2.0), AP-BWE, Sidon and onnx-asr (MIT), WebRTC AEC3 via the
+DeepFilterNet (MIT/Apache-2.0), DPDFNet (Apache-2.0), Sidon and onnx-asr (MIT), WebRTC AEC3 via the
 LiveKit SDK (BSD / Apache-2.0), tract (MIT/Apache-2.0), NVIDIA Parakeet and NeMo models (CC BY 4.0), FFmpeg (server: GPL build run as
 a separate program, never distributed; desktop: LGPL build shipped as separate executables),
 Qt/PySide6 (LGPLv3, dynamically linked, desktop only), faster-whisper (MIT), Whisper

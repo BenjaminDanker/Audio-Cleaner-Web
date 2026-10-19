@@ -76,8 +76,6 @@ def _job_parts(kind: str, params: dict, cost: int, seconds: float) -> dict[str, 
     secs = max(0, math.ceil(seconds or 0))
     if "denoise" in rates and tier and tier != pricing.NO_DENOISE:
         out["Voice rebuild" if tier == "rebuild" else "Denoising"] = math.ceil(rates["denoise"] * secs / 60)
-    if "highs" in rates:
-        out["Restore highs"] = math.ceil(rates["highs"] * secs / 60)
     if "leveling" in rates:
         out["Leveling"] = math.ceil(rates["leveling"] * secs / 60)
     if "transcribe" in rates and t_tier:
@@ -149,7 +147,7 @@ def overview(start: int | None = Query(None), end: int | None = Query(None)) -> 
                 revenue[label] = revenue.get(label, 0) + micros
                 users_by_product.setdefault(label, set()).add(r["user_id"])
             name = job_names.job_label(r["kind"], params.get("denoise_tier"), params.get("transcribe_tier"),
-                                       "leveling" in (params.get("rates") or {}), "highs" in (params.get("rates") or {})) or r["kind"]
+                                       "leveling" in (params.get("rates") or {})) or r["kind"]
             jobs_by.setdefault(name, {}).setdefault(r["status"], 0)
             jobs_by[name][r["status"]] += 1
             if r["status"] == "done":

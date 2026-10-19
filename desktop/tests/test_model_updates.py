@@ -193,16 +193,16 @@ def _close(w):
 
 def test_the_window_updates_only_the_models_that_changed_quietly_and_tidies_up_after(qapp, tmp_path, monkeypatch):
     started: list[str] = []
-    w, cleaned = _window(tmp_path, monkeypatch, started, {"restore-highs", "rebuild-voice"})
+    w, cleaned = _window(tmp_path, monkeypatch, started, {"whisper-large-v3-turbo", "rebuild-voice"})
     try:
         w.show()
         qapp.processEvents()
         assert started == []  # nothing happens before the scheduled start-up step
         w.update_models()
-        assert started == ["restore-highs"] and w.banner_models.isVisible()
+        assert started == ["whisper-large-v3-turbo"] and w.banner_models.isVisible()
         assert "Updating the models" in w.banner_models._label.text() and w._auto_models
-        w._model_download_finished(w.highs_download, True, "")
-        assert started == ["restore-highs", "rebuild-voice"]  # the speech model, which the user did not have, is skipped
+        w._model_download_finished(w.speech_download, True, "")
+        assert started == ["whisper-large-v3-turbo", "rebuild-voice"]  # one after the other
         w._model_download_finished(w.voice_download, True, "")
         assert not w.banner_models.isVisible() and not w._auto_models
         assert wait_until(lambda: cleaned, timeout=5)  # outdated copies are removed after the last one is complete
@@ -212,15 +212,15 @@ def test_the_window_updates_only_the_models_that_changed_quietly_and_tidies_up_a
 
 def test_a_failed_automatic_update_is_not_retried_and_does_not_nag(qapp, tmp_path, monkeypatch):
     started: list[str] = []
-    w, cleaned = _window(tmp_path, monkeypatch, started, {"restore-highs", "rebuild-voice"})
+    w, cleaned = _window(tmp_path, monkeypatch, started, {"whisper-large-v3-turbo", "rebuild-voice"})
     try:
         w.show()
         w.update_models()
-        w.highs_download.last_error = "The download stopped (timed out)."
-        w._model_download_finished(w.highs_download, False, "The download stopped (timed out).")
-        assert started == ["restore-highs"]  # one try per start: the next model is not attempted either
+        w.speech_download.last_error = "The download stopped (timed out)."
+        w._model_download_finished(w.speech_download, False, "The download stopped (timed out).")
+        assert started == ["whisper-large-v3-turbo"]  # one try per start: the next model is not attempted either
         assert not w.banner_models.isVisible() and not w._auto_models and w._model_queue == []
-        panel = speech_model.SpeechModelPanel(w.highs_download)
+        panel = speech_model.SpeechModelPanel(w.speech_download)
         assert "timed out" in panel._text.text() and panel._button.text() == "Try again"  # it shows in Settings
         w.update_models()  # a manual "Try again" is a normal download; update_models itself runs once per start
         assert not cleaned  # nothing was tidied while an update is still missing
@@ -268,7 +268,7 @@ def test_no_model_comes_from_the_releases_and_the_installers_download_exactly_th
     sys.path.insert(0, str(DESKTOP / "packaging"))
     import installer_models
 
-    catalog = (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
+    catalog = (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.VOICE_MODEL)
     wanted = {f.url for m in catalog for f in (*m.files, *m.licences)}
     assert all(u.startswith("https://huggingface.co/") for u in wanted) and not any(u.startswith(config.RELEASES_URL) for u in wanted)
     windows = installer_models.render()

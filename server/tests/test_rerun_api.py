@@ -371,7 +371,7 @@ def test_a_paid_rerun_counts_against_the_keys_monthly_cap_and_a_free_one_does_no
 def _items(rates, seconds, languages=0):
     """What the price should be, worked out from the per-minute rates, a started second counting."""
     secs = math.ceil(seconds)
-    total = sum(math.ceil(rates[k] * secs / 60) for k in ("denoise", "highs", "leveling", "transcribe") if k in rates)
+    total = sum(math.ceil(rates[k] * secs / 60) for k in ("denoise", "leveling", "transcribe") if k in rates)
     return total + (languages * math.ceil(rates["translate"] * secs / 60) if "translate" in rates else 0)
 
 
@@ -385,18 +385,6 @@ CASES = [
     pytest.param(TEXT, {"transcribeTier": "premium"}, {"transcribe": 15_000}, "reuse", 0, id="better-subtitles"),
     pytest.param(TEXT, {"options": {"translate": ["fr", "es"]}}, {"translate": 4_000}, "reuse", 2, id="two-new-languages"),
     pytest.param(dict(options={"leveling": False}), {"options": {"atten_lim_db": 24}}, {}, "denoised", 0, id="free-strength"),
-    pytest.param(dict(), {"options": {"restore_highs": True}}, {"highs": 70_000, "leveling": 1_000}, "denoised", 0, id="highs-on-with-leveling"),
-    pytest.param(dict(options={"leveling": False}), {"options": {"restore_highs": True}}, {"highs": 70_000}, "denoised", 0, id="highs-on-alone"),
-    pytest.param(dict(options={"restore_highs": True}), {"options": {"restore_highs": False}}, {"leveling": 1_000}, "denoised", 0,
-                 id="highs-off-keeps-leveling-charged"),
-    pytest.param(dict(options={"restore_highs": True, "leveling": False}), {"options": {"restore_highs": False}}, {}, "denoised", 0,
-                 id="highs-off-is-free"),
-    pytest.param(dict(options={"restore_highs": True}), {"options": {"noise": "heavy"}}, {"denoise": 9_000, "highs": 70_000, "leveling": 1_000},
-                 "full", 0, id="other-noise-kind-with-highs"),
-    pytest.param(dict(denoise_tier="off"), {"options": {"restore_highs": True}}, {"highs": 70_000, "leveling": 1_000}, "full", 0,
-                 id="leveling-only-adds-highs"),
-    pytest.param(dict(denoise_tier="off", options={"restore_highs": True, "leveling": False}), {"options": {"leveling": True}},
-                 {"highs": 70_000, "leveling": 1_000}, "full", 0, id="highs-only-adds-leveling"),
     pytest.param(dict(), {"options": {"audio_format": "wav"}}, {}, "reuse", 0, id="free-file-type"),
     pytest.param(TEXT, {"options": {"caption_formats": ["srt"]}}, {}, "reuse", 0, id="free-caption-files"),
 ]
@@ -414,7 +402,7 @@ def test_the_estimate_is_the_price_the_hold_is_made_for(client, signed_in, gpu_u
     price = _items(rates, 90.5, languages)
     assert e["estCostMicros"] == price and e["estCostUsd"] == price / 1e6 and e["free"] is (price == 0)
     assert sum(line["micros"] for line in e["lines"]) == price
-    assert [line["item"] for line in e["lines"]] == [k for k in ("denoise", "highs", "leveling", "transcribe", "translate") if k in rates]
+    assert [line["item"] for line in e["lines"]] == [k for k in ("denoise", "leveling", "transcribe", "translate") if k in rates]
     assert e["steps"]["clean"] == clean and e["durationSeconds"] == 90.5 and e["expiresAt"] == row(src)["expires_at"]
     assert e["availableMicros"] == 5_000_000 and e["affordable"] is True
     # estimating makes and holds nothing
@@ -824,29 +812,32 @@ def test_the_price_guard_and_the_error_shape_for_a_key(client, signed_in):
     assert client.post(f"/api/jobs/{jid}/rerun", json=STRENGTH, headers={"Authorization": "Bearer nope"}).status_code == 401
 
 
-def test_a_rerun_to_the_voice_rebuild_never_carries_highs(client, signed_in, gpu_up):
-    """The rebuild makes its own highs: restore_highs is stored false and not charged, even from a job that had it on."""
-    uid, h = funded(client, signed_in)
-    src = make_done_job(uid, seconds=60, options={"restore_highs": True})
-    e = post(client, h, src, True, denoiseTier="rebuild", options={"restore_highs": True}).json()
-    assert [x["item"] for x in e["lines"]] == ["denoise", "leveling"] and e["estCostMicros"] == 31_000
-    assert e["options"]["restore_highs"] is False
-    new_id = post(client, h, src, denoiseTier="rebuild").json()["id"]
-    assert params_of(new_id)["options"]["restore_highs"] is False and params_of(new_id)["rates"] == {"denoise": 30_000, "leveling": 1_000}
-    assert client.get(f"/api/jobs/{new_id}").json()["label"] == "Changed and saved again (Voice rebuild + Leveling)"
-
-
-def test_a_rerun_with_highs_is_held_charged_and_named_with_restore_highs(client, signed_in):
-    """Turning Restore highs on in a re-run: the hold is the estimate, the ledger line names it, and the amount is its price."""
+def test_an_old_restore_highs_option_is_ignored_in_a_rerun_and_in_the_options_it_carries(client, signed_in, gpu_up):
+    """The step is gone: a job stored with the option (from before), or a request that still sends it, changes nothing: it is not
+    carried into the new job, not priced and not reported."""
     uid, h = funded(client, signed_in)
     src = make_done_job(uid, seconds=60)
-    quote = post(client, h, src, True, options={"restore_highs": True}).json()
-    assert quote["estCostMicros"] == 71_000 and [x["item"] for x in quote["lines"]] == ["highs", "leveling"]
-    assert quote["lines"][0] == {"item": "highs", "label": "Restore highs", "quantity": 1, "usdPerMinute": 0.07, "micros": 70_000}
-    new_id = post(client, h, src, maxCostMicros=71_000, options={"restore_highs": True}).json()["id"]
-    assert db.one("SELECT amount_micros FROM holds WHERE ref_id = ?", (new_id,))["amount_micros"] == 71_000
-    assert client.get(f"/api/jobs/{new_id}").json()["label"] == "Changed and saved again (Restore highs + Leveling)"
+    jobs.update_params(src, options={**params_of(src)["options"], "restore_highs": True})  # stored by an older version
+    e = post(client, h, src, True, denoiseTier="rebuild", options={"restore_highs": True}).json()
+    assert [x["item"] for x in e["lines"]] == ["denoise", "leveling"] and e["estCostMicros"] == 31_000
+    assert "restore_highs" not in e["options"]
+    new_id = post(client, h, src, denoiseTier="rebuild").json()["id"]
+    assert "restore_highs" not in params_of(new_id)["options"] and params_of(new_id)["rates"] == {"denoise": 30_000, "leveling": 1_000}
+    assert client.get(f"/api/jobs/{new_id}").json()["label"] == "Changed and saved again (Voice rebuild + Leveling)"
+    assert_error(post(client, h, src, True, options={"restore_highs": False}), 400, "nothing_to_change")  # (nothing that exists changed)
+
+
+def test_a_rerun_with_leveling_turned_on_is_held_charged_and_named_with_it(client, signed_in):
+    """The hold is the estimate, the ledger line names the step, and the amount is its price."""
+    uid, h = funded(client, signed_in)
+    src = make_done_job(uid, seconds=60, options={"leveling": False})
+    quote = post(client, h, src, True, options={"leveling": True}).json()
+    assert quote["estCostMicros"] == 1_000 and [x["item"] for x in quote["lines"]] == ["leveling"]
+    assert quote["lines"][0] == {"item": "leveling", "label": "Leveling", "quantity": 1, "usdPerMinute": 0.001, "micros": 1_000}
+    new_id = post(client, h, src, maxCostMicros=1_000, options={"leveling": True}).json()["id"]
+    assert db.one("SELECT amount_micros FROM holds WHERE ref_id = ?", (new_id,))["amount_micros"] == 1_000
+    assert client.get(f"/api/jobs/{new_id}").json()["label"] == "Changed and saved again (Leveling)"
     complete_like_the_worker(new_id, outputs=[OUT])
     line = db.one("SELECT * FROM ledger WHERE ref_id = ?", (new_id,))
-    assert (line["amount_micros"], line["description"]) == (-71_000, "Changed and saved again (Restore highs + Leveling): talk.wav (1.0 min)")
-    assert_error(post(client, h, src, maxCostMicros=70_999, options={"restore_highs": True}), 409, "price_changed")
+    assert (line["amount_micros"], line["description"]) == (-1_000, "Changed and saved again (Leveling): talk.wav (1.0 min)")
+    assert_error(post(client, h, src, maxCostMicros=999, options={"leveling": True}), 409, "price_changed")

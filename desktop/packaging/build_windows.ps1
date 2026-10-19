@@ -128,7 +128,7 @@ Step 'installer'
 $version = (& $vpy -c "from audio_cleaner_desktop import __version__ as v; print(v, end='')")
 $out = Join-Path $work 'out'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
-# Setup downloads the models (2.6 GB, file by file from Hugging Face): the list is generated from the app's catalog (needs no numpy).
+# Setup downloads the models (2.1 GB, file by file from Hugging Face): the list is generated from the app's catalog (needs no numpy).
 Run $vpy @('desktop\packaging\installer_models.py', "$work\models.iss")
 Run $iscc @("/DAppVersion=$version", "/DSourceDir=$dist\AudioCleaner", "/DOutputDir=$out", "/DIconFile=$icons\icon.ico", "/DModelsInclude=$work\models.iss", 'desktop\packaging\windows\AudioCleaner.iss')
 Copy-Item "$out\AudioCleaner-Setup-$version-x64.exe" "$out\AudioCleaner-Setup-x64.exe" -Force

@@ -19,10 +19,7 @@ variable costs are OpenAI (extra-accurate tiers only) and Stripe's fees.
 CPU per minute of audio comes from our measurements (docs/operations.md,
 docs/research/*): Studio clean 23.5 CPU-s (stereo), local transcription
 22 CPU-s with Parakeet (143 with Whisper), live denoise 20 CPU-s (under load),
-standard live captions ~12 CPU-s. Restore highs (added 2026-10-19, own price): 46.6 CPU-s per minute of audio, measured
-(60 s of speech, one thread, process CPU time; the four generators 0.77 to 0.78 CPU-s per second, 0.23 s of wall time on four
-threads), against 5.9 CPU-s for DeepFilterNet3 (0.099 per second): 7.9 times Denoising's CPU, so $0.54 an hour at Denoising's
-margin would be $4.25 an hour; $4.20 (`pricing.py`) is the clean number. It is 1.2 times the heavy remover's CPU (0.64 per second).
+standard live captions ~12 CPU-s.
 
 ## Profit margin per minute of audio
 
@@ -34,7 +31,6 @@ pay for.
 | Product | Price | Electricity | OpenAI | Stripe ($20 top-up) | Net | Margin |
 |---|---|---|---|---|---|---|
 | Studio clean | $0.0100 | $0.00001 | - | $0.00044 | $0.00955 | 95% |
-| Restore highs (with Denoising or on its own) | $0.0700 | $0.00002 | - | $0.0031 | $0.0669 | 96% |
 | Transcription (standard, Parakeet/Whisper) | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
 | Transcription, extra accurate | $0.0150 | <$0.00001 | $0.0045 | $0.00066 | $0.00984 | 66% |
 | Live noise removal | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |

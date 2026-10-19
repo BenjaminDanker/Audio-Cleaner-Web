@@ -180,7 +180,6 @@ GPU_WORK = {
     "transcribe": GpuWork("Parakeet transcription", 3300, 2.0, 0.9),
     "heavy": GpuWork("DPDFNet-8 heavy noise removal", 360, 9.7, 0.1),  # 5.5 s on 30 min files, 16 s on 2.5 min
     "rebuild": GpuWork("Sidon voice rebuild", 2600, 8.2, 0.13),
-    "highs": GpuWork("AP-BWE highs restoration", 360, 5.0, 0.7),  # inside a job that is on the card anyway
 }
 GPU_IDLE_FRESH_S = 6
 GPU_ALIVE_FRESH_S = 90
@@ -188,8 +187,7 @@ GPU_ALIVE_FRESH_S = 90
 
 def gpu_stages(job: dict) -> list[str]:
     """The GPU_WORK stages of `job` that make it a GPU job (empty: the CPU workers' job). A recording that turns out
-    lightly noisy under "auto" is cleaned by DeepFilterNet3 on the GPU worker's own CPU threads; band extension
-    follows a job to the card but is no reason to send it there."""
+    lightly noisy under "auto" is cleaned by DeepFilterNet3 on the GPU worker's own CPU threads."""
     params = json.loads(job["params_json"])
     opts = params.get("options", {})
     if job.get("next_stage") == "finalize" or opts.get("echo_reference_track"):

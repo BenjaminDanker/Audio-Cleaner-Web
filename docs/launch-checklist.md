@@ -53,7 +53,7 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
 - ✅ Free browser denoise (DFN3 WASM)
 - ✅ Studio clean, transcription (standard/premium, free quota), subtitles (soft subs + SRT/VTT/TXT)
 - ✅ Recordings: noise remover chosen per file (Background noise: Automatic / Light / Heavy; DeepFilterNet3 or
-  DPDFNet-8, docs/research/denoise-2026-10.md addendum); missing highs of phone-quality recordings restored (AP-BWE)
+  DPDFNet-8, docs/research/denoise-2026-10.md addendum)
 - ✅ Price of Voice rebuild: $1.80/h (its own price; it uses ~30x the CPU of Denoising)
 - ✅ Echo removal for recordings with a second audio track (desktop sound), included in Studio clean (option `echo_reference_track`, docs/api.md)
 - ✅ Live denoise + live captions, server side + protocol (PCM and Opus)

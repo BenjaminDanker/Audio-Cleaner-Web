@@ -69,7 +69,7 @@ def test_the_noise_models_are_required_by_both_installers_and_setup_reports_them
 
 def test_licence_texts_are_downloaded_into_their_model_but_are_not_part_of_its_marker():
     text = installer_models.render()
-    for m in (resources.HIGHS_MODEL, resources.VOICE_MODEL):
+    for m in (resources.VOICE_MODEL,):
         for f in m.licences:
             assert f"DestDir: \"{{app}}\\models\\{m.id}\\LICENSES\"; DestName: \"{f.path.split('/')[1]}\"" in text
         marker = text[text.index(f"MarkerAgrees(ExpandConstant('{{app}}\\models\\{m.id}\\.complete')"):]
@@ -256,7 +256,7 @@ def test_the_eula_is_the_mit_license_and_keeps_the_open_source_rights():
     assert "Permission is hereby granted, free of charge" in eula
     eula = " ".join(eula.split())  # the prose is wrapped at fixed width
     assert "FFmpeg (LGPL v2.1)" in eula and "Qt (LGPL v3)" in eula
-    for model in ("Whisper", "AP-BWE", "Sidon", "w2v-BERT 2.0"):  # the models setup downloads
+    for model in ("Whisper", "Sidon", "w2v-BERT 2.0"):  # the models setup downloads
         assert model in eula, model
     assert "replace the Qt or FFmpeg files with your own builds" in eula  # the LGPL right to swap the libraries
     assert "checks the app's releases on GitHub for a newer version" in eula and "your IP address" in eula  # says what goes online

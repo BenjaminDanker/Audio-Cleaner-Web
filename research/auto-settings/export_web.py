@@ -3,8 +3,9 @@
     web/src/reco-model-data.js          read by the website (web/src/reco-model.js)
     common/acw_common/reco_model.json   read by the desktop app (common/acw_common/reco_model.py)
 
-Both hold the same trees: the heavy-remover head is left out (the products keep that as a rule) and the numbers are rounded
-to 6 significant digits.
+Both hold the same trees: the heavy-remover head is left out (the products keep that as a rule), so is the restore-highs head
+(the products no longer have that step: a recording that is missing its highs gets the voice rebuilt; train.py still trains it),
+and the numbers are rounded to 6 significant digits. The format is version 3 (2 had the restore head).
 
 usage: export_web.py [<out/reco-model.json> [<web/src/reco-model-data.js> [<common/acw_common/reco_model.json>]]]
 Without arguments: ~/audio-cleaner-train/out/reco-model.json into this repository's two files. With --check (first
@@ -14,8 +15,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+FORMAT_VERSION = 3  # reco_model.VERSION and MODEL.version in web/src/reco-model.js
 JS_HEADER = ("// Generated: the trees of the automatic settings model (research/auto-settings, train.py -> out/reco-model.json), with the\n"
-             "// heavy-remover head left out (that stays a rule) and the numbers rounded to 6 significant digits. Read by src/reco-model.js.\n"
+             "// heavy-remover and restore heads left out (the first stays a rule, the second is no longer used) and the numbers rounded to 6\n"
+             "// significant digits. Read by src/reco-model.js.\n"
              "// To refresh it: research/auto-settings/export_web.py. Do not edit by hand.\n")
 
 
@@ -32,8 +35,9 @@ def r(x):
 def render(src: Path) -> tuple[str, str]:
     """(the website's file, the desktop app's file) for the model in `src`."""
     m = json.load(open(src))
-    for k in ("heavy", "rebuild_uncertain", "restore_uncertain"):
+    for k in ("heavy", "restore", "rebuild_uncertain", "restore_uncertain"):
         m.pop(k, None)
+    m["version"] = FORMAT_VERSION
     payload = json.dumps(r(m), separators=(",", ":"))
     return JS_HEADER + "export default " + payload + ";\n", payload + "\n"
 

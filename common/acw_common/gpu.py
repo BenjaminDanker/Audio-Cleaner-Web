@@ -1,4 +1,4 @@
-"""Settings every CUDA user in this process shares (the GPU worker's runner: DPDFNet, Sidon, AP-BWE, Parakeet).
+"""Settings every CUDA user in this process shares (the GPU worker's runner: DPDFNet, Sidon, Parakeet).
 
 onnxruntime-gpu (Maxwell build, docs/research/gpu-2026-10.md) is the only CUDA runtime here; its CUDA libraries come from
 the pip wheels in the worker's venv, on LD_LIBRARY_PATH.

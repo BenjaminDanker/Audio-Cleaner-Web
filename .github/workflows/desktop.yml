@@ -255,14 +255,14 @@ jobs:
             --no-test-model \
             --out desktop/vendor
 
-      - name: Models for the frozen selftest (noise removal, restoring highs, rebuilding the voice)
-        # The frozen app has no model inside: the selftest needs the (required) noise removal models, and also runs AP-BWE
-        # and Sidon through the bundled onnxruntime (0.9 GB; all from our Hugging Face repository, at the pinned commit,
+      - name: Models for the frozen selftest (noise removal, rebuilding the voice)
+        # The frozen app has no model inside: the selftest needs the (required) noise removal models, and also runs Sidon
+        # through the bundled onnxruntime (0.5 GB; all from our Hugging Face repository, at the pinned commit,
         # downloaded the way the app does it). The speech model is left out (1.6 GB).
         run: |
           ACW_DESKTOP_MODELS="$RUNNER_TEMP/acw-models" python - <<'PY'
           from audio_cleaner_desktop import models, resources
-          for m in (resources.NOISE_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
+          for m in (resources.NOISE_MODEL, resources.VOICE_MODEL):
               models.download(m)
           PY
           echo "ACW_DESKTOP_MODELS=$RUNNER_TEMP/acw-models" >> "$GITHUB_ENV"
@@ -342,7 +342,7 @@ jobs:
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
           $ws = $env:GITHUB_WORKSPACE
-          # Setup downloads the models (noise removal, speech, highs, voice) itself: the list comes from the app's catalog.
+          # Setup downloads the models (noise removal, speech, voice) itself: the list comes from the app's catalog.
           python desktop\packaging\installer_models.py "$ws\build\models.iss"
           if ($LASTEXITCODE -ne 0) { throw "installer_models.py failed ($LASTEXITCODE)" }
           & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$ws\dist\AudioCleaner" "/DOutputDir=$ws\build\installer" `
@@ -625,9 +625,9 @@ jobs:
           - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
-          Setup downloads the models (about 2.6 GB in all, once), so keep the internet on while it installs; on a Mac
+          Setup downloads the models (about 2.1 GB in all, once), so keep the internet on while it installs; on a Mac
           it can take several minutes. They are the noise removal models (DeepFilterNet3 and DPDFNet-8, 23 MB), Whisper
-          large-v3-turbo for subtitles (1.6 GB), AP-BWE for restoring the highs of phone-quality recordings (0.5 GB) and
+          large-v3-turbo for subtitles (1.6 GB) and
           Sidon for rebuilding voices (0.5 GB). After that everything works offline. If a download fails, the app is
           installed anyway and offers it: the noise removal models (it cannot clean without them) when it starts, the
           others in Settings.
@@ -674,7 +674,7 @@ jobs:
           - Mac with Apple silicon (M1 and newer), macOS 14 or newer: AudioCleaner-$version-Mac-Apple-silicon.pkg
           - Mac with an Intel processor, macOS 14 or newer: AudioCleaner-$version-Mac-Intel.pkg
 
-          Pick the file that matches your computer. Setup downloads the models once (about 2.6 GB in all), so keep the
+          Pick the file that matches your computer. Setup downloads the models once (about 2.1 GB in all), so keep the
           internet on while it installs; after that everything works offline. The app checks for a newer version when it
           starts and updates itself. The other files here are what the app downloads (update information).
 

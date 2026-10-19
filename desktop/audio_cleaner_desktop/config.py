@@ -20,7 +20,7 @@ def release_url(version: str) -> str:
     return RELEASES_URL + f"download/v{version}/"
 
 
-# Our models (the noise models, AP-BWE, Sidon) and their licence texts are in one public Hugging Face model repository,
+# Our models (the noise models, Sidon) and their licence texts are in one public Hugging Face model repository,
 # every file pinned by this revision, its size and SHA-256 (resources.py). The revision MUST be a full 40-character
 # commit id, never a branch name: a branch can change under the pins.
 HF_MODELS_REPO = "SilverJunk08/audio-cleaner-models"

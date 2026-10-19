@@ -2,7 +2,7 @@
 ;
 ;   iscc /DAppVersion=2.0.0 /DSourceDir=C:\path\to\dist\AudioCleaner [/DOutputDir=C:\out] [/DIconFile=C:\path\icon.ico]
 ;        [/DModelsInclude=C:\path\models.iss] AudioCleaner.iss
-;   (models.iss from installer_models.py: setup then downloads every model, 2.6 GB, file by file from Hugging Face. The
+;   (models.iss from installer_models.py: setup then downloads every model, 2.1 GB, file by file from Hugging Face. The
 ;   noise removal models (23 MB) are required: setup says so when they are missing. No model is inside the program.
 ;   Without it nothing is downloaded during setup; the app then offers the downloads: the noise models when it starts,
 ;   the others in Settings.)
@@ -87,7 +87,7 @@ Type: filesandordirs; Name: "{app}\_internal"
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
-; The models (noise removal, subtitles, highs restoration, rebuilding the voice): downloaded during setup, see installer_models.py.
+; The models (noise removal, subtitles, rebuilding the voice): downloaded during setup, see installer_models.py.
 #ifdef ModelsInclude
   #include ModelsInclude
 #endif
@@ -118,7 +118,7 @@ begin
   Data := ExpandConstant('{localappdata}\Audio Cleaner\Audio Cleaner');
   if UninstallSilent or not DirExists(Data) then
     Exit;
-  if MsgBox('Also remove the models Audio Cleaner downloaded (up to 2.6 GB), your history and your settings?',
+  if MsgBox('Also remove the models Audio Cleaner downloaded (up to 2.1 GB), your history and your settings?',
       mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
   begin
     DelTree(Data, True, True, True);

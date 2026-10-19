@@ -16,6 +16,7 @@ const BANNED = [
   /\bupgrade/i, /\benterprise\b/i, /\bsolutions?\b/i, /\btiers?\b/i, /\bplans?\b/i, /\bpro\b/i, /professional/i, /seamless/i, /leverage/i,
   /Create a free account/i, /Get started today/i,
   /\bStudio\b/i, /transcribe page/i, /free transcription/i, /no (account|sign-in)/i,
+  /Restore (missing )?highs/i, /missing highs/i, /AP-BWE/i, // (restoring highs is not offered any more: a recording that lost them is rebuilt)
 ];
 
 /** Everything a visitor can read or hear on the page: the text, option labels, and the labels screen readers announce. */
@@ -84,14 +85,13 @@ await check('copy: signed-in pages (Cleanup with a file and its options, Billing
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'subs', 'accurate');
   bad.push(...findings(await visibleText(page)).map((x) => `/app with a file: ${x}`));
-  // the paid options of each noise choice, with Restore highs ticked (its words and price), and the old title gone
+  // the paid options of each noise choice, and no Restore highs in any of them (the step is gone)
   for (const noise of ['denoise', 'off']) {
     await pick(page, 'noise', noise);
-    await page.locator(`input[name=${noise === 'off' ? 'highs-alone' : 'highs'}]`).check();
     const text = await visibleText(page);
-    bad.push(...findings(text).map((x) => `/app, noise ${noise}, Restore highs on: ${x}`));
-    if (/Restore missing highs/i.test(text)) bad.push(`/app, noise ${noise}: the old title "Restore missing highs" is still there`);
-    if (!/Restore highs/.test(text)) bad.push(`/app, noise ${noise}: no "Restore highs"`);
+    bad.push(...findings(text).map((x) => `/app, noise ${noise}: ${x}`));
+    if (/\bhighs\b/i.test(text)) bad.push(`/app, noise ${noise}: "highs" is still on the page`);
+    if (await page.locator('input[name=highs], input[name=highs-alone]').count()) bad.push(`/app, noise ${noise}: a Restore highs box is still there`);
   }
   if (bad.length) throw new Error(bad.join(' | '));
   return '4 pages + the options for a file clean';

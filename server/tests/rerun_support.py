@@ -119,7 +119,6 @@ def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, op
     t_tier = transcribe_tier if kind != "denoise" else None
     opts = jobs.validate_options(kind, d_tier, t_tier, options or {})
     leveling = kind != "transcribe" and opts["leveling"]
-    highs = kind != "transcribe" and opts["restore_highs"]
     return {
         "options": opts,
         "denoise_tier": d_tier,
@@ -127,7 +126,7 @@ def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, op
         "input_ext": ext,
         "display_name": None,
         "channels": channels,
-        "rates": pricing.job_rates(kind, d_tier, t_tier, len(opts["translate"]), leveling, highs),
+        "rates": pricing.job_rates(kind, d_tier, t_tier, len(opts["translate"]), leveling),
         "kept": kept if kept is not None else {},
         "noise_profile": "light",
     }

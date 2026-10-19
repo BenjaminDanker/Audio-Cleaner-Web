@@ -154,16 +154,17 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
  "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
              "language": "en" | null, "output_video": true, "embed_subtitles": true,
              "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
-             "noise": "auto|light|heavy", "leveling": true, "restore_highs": false, "translate": ["es", "de"]}}
+             "noise": "auto|light|heavy", "leveling": true, "translate": ["es", "de"],
+             "automatic": false}}
 ```
 
-Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, **without** a leading slash
+Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.automatic`, see "Automatic settings"). `uploadUrl` is relative to the base, **without** a leading slash
 (`api/jobs/<id>/input`). Fields:
 
 | Field | Rules |
 |---|---|
 | `kind` | `denoise` (clean the sound), `transcribe` (subtitles and transcript), or both |
-| `denoiseTier` | required for `denoise` kinds: `standard` (Denoising), `rebuild` (Voice rebuild, its own price: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; `atten_lim_db`, `noise` and `restore_highs` don't apply to it; files up to 90 minutes), or `off` (no noise removal: only Leveling and/or Restore highs, at least one of `options.leveling` and `options.restore_highs` must then be on). Leveling (`options.leveling`, on by default) and Restore highs (`options.restore_highs`, off by default) are each their own line on the bill. |
+| `denoiseTier` | required for `denoise` kinds: `standard` (Denoising), `rebuild` (Voice rebuild, its own price: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; `atten_lim_db` and `noise` don't apply to it; it also brings back the high sounds a phone call or a very small file has lost; files up to 90 minutes), or `off` (no noise removal: only Leveling, so `options.leveling` must then be on). Leveling (`options.leveling`, on by default) is its own line on the bill. |
 | `transcribeTier` | required for `transcribe` kinds: `local` (Standard) or `premium` (extra accurate; audio goes to a speech partner, see the privacy policy) |
 | `filename` | its extension must be one we read: audio `wav rf64 w64 mp3 mp2 mpa m4a m4b m4r aac flac ogg oga opus spx wma aiff aif aifc caf au snd amr ac3 eac3 dts mka wv ape tta mpc`, video `mp4 m4v mov webm mkv avi wmv asf flv f4v 3gp 3g2 ts mts m2ts mpg mpeg vob mxf dv ogv rm rmvb`; anything else is `400 Unsupported file type.` Only the extension is used; the name never becomes a path |
 | `sizeBytes` | 1 byte up to `maxUploadBytes` (4 GiB; `413` above); at most 40 MB per second of `durationSeconds` unless under 200 MB |
@@ -187,13 +188,58 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 | `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Included in the price. A single-track file is processed normally and `notice` says so |
 | `noise` | `auto` | `auto` (measured per file), `light`, `heavy` (better when the noise is nearly as loud as the voice). Doesn't apply to `rebuild` |
 | `leveling` | `true` | Leveling (its own price): the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. |
-| `restore_highs` | `false` | Restore highs (its own price, own line on the bill, `item: "highs"`): brings back the high sounds of a recording that lost them (phone calls, voice messages, small files). **It runs whenever it is `true`**, with `standard` or on its own with `denoiseTier: "off"`: the generator is chosen by the recording's measured bandwidth, and a recording that already has its highs gets the widest one. `false` never runs it. Must be a boolean. Doesn't apply to `rebuild` (the voice rebuild makes its own highs): it is stored as `false` there and not charged |
+| `automatic` | `false` | `true`: the server listens to the file and decides what you did not give yourself, like the website's "Automatic best settings" (next section). Must be a boolean; needs `kind` `denoise` or `denoise_transcribe` and `denoiseTier: "standard"` |
 
-**Changed 2026-10-19:** `restore_highs` used to default to `true` and only did something for recordings measured as band-limited, at no
-extra price. It now defaults to `false`, is charged per second like Leveling whenever it is on (see `GET /api/billing/pricing`, product
-`highs`), and always runs when on. Send `"restore_highs": true` for it. A job created before the change keeps its own prices (its stored
-rates have no `highs` line, so it is never charged for it). `denoiseTier: "off"` now needs `leveling` or `restore_highs` (or both) on;
-`notice` says when the highs were restored.
+There is no option for restoring the high sounds a recording has lost (phone calls, voice messages, very small files): the fix is
+`denoiseTier: "rebuild"`, which makes them again with the rest of the voice. An old client's `restore_highs` is an option like any
+other this page does not list: it is ignored (not stored, not priced, not reported). `denoiseTier: "off"` needs `leveling` on.
+
+#### Automatic settings: `options.automatic: true`
+
+Send `"automatic": true` (with `"denoiseTier": "standard"`) and the server decides the settings from the file itself, the way the
+website's "Automatic best settings" and the desktop app do (one and the same decision for all three):
+
+| Decided | How |
+|---|---|
+| noise strength (`atten_lim_db`) | the gentlest of 12, 24, 40 and 100 dB that takes the noise out |
+| noise type (`noise`) | the stronger remover (`heavy`) when the noise is nearly as loud as the voice, else `light` |
+| Voice rebuild (`denoiseTier`) | `rebuild` instead of `standard` when the voice sounds echoey, muffled, like a phone call or distorted, or is unclear; then the strength and the noise type do not apply |
+| Leveling (`leveling`) | on |
+
+**What you send wins.** An option you give yourself (`atten_lim_db`, `noise` as `light` or `heavy`, `leveling`) is
+kept as you sent it and is not decided; `noise: "auto"` is the automatic choice. Everything else (`audio_format`, `loudness_lufs`,
+captions, `translate`, ...) works as usual. A strength or a noise type means you asked for Denoising, so the
+voice is then never rebuilt (nor when `echo_reference_track` is on).
+
+**Price.** The job is held for the most the decision could cost: Voice rebuild + Leveling (the dearer way, wherever a rebuild is
+possible: not for a file over 90 minutes, nor when you gave a strength or a noise type), else Denoising + Leveling, less what you switched
+off yourself. `POST /api/jobs` answers
+`"maximum": true` and `estCostMicros` is that hold; the estimate (section 2) says `"maximum": true`, lists each way it can end in
+`outcomes` and the options you fixed in `fixed`. When the file has been listened to, the hold shrinks to what will be charged, and the
+charge is for the steps that ran. The key's monthly spending limit is checked against the maximum.
+
+**What was chosen.** The job (section 4) has `chosen`, `null` until the file has been listened to (it waits in the queue and starts like
+any job; `label` is "Automatic settings" and `maximum` is `true` until then):
+
+```json
+"chosen": {"denoiseTier": "standard", "strength": "balanced", "attenLimDb": 24, "noise": "light", "heavy": false,
+           "leveling": true, "rebuild": false, "rebuildWanted": false, "fixed": [],
+           "reasons": ["There is some background noise: Denoising takes it out.", "Balanced is enough to take it out while keeping the voice natural.",
+                       "Leveling evens out the voice and sets the loudness."]}
+```
+
+`reasons` says what was heard and what was done in plain words (and which options were yours). The job's `options`, `denoiseTier`,
+`label` and `costMicros` are the decided ones, so it reads like a job you made with those settings. For a rebuild `strength`,
+`attenLimDb` and `noise` are `null`.
+
+**When a rebuild is wanted but cannot be done** (the file is over 90 minutes, voice rebuilding is paused, you gave Denoising settings
+or `echo_reference_track`) the file is cleaned with Denoising instead, with the strength the decision gives:
+`rebuildWanted` is `true`, `rebuild` is `false`, the last reason says why, and `notice` repeats it. The decision is made before the job is
+sent to the machine that rebuilds voices, so a rebuild waits in that queue like any Voice rebuild job. The measurement uses the file as
+uploaded (before echo removal), about a minute of it spread over the file, in a separate step of a few seconds.
+
+**Changing it afterwards.** The choices made are the job's settings: change them like those of any job (section 7). `automatic` is not
+available there (`400`): send the settings you want instead, for example `denoiseTier: "rebuild"`.
 
 A video result keeps the input's container when it can hold the streams (`mp4 mov m4v mkv webm`); other containers
 come back as MKV. Other audio tracks are kept unchanged and subtitles go in where the container can hold them; only
@@ -233,9 +279,13 @@ job and holds nothing. Applies the same checks and limits, so it answers the sam
  "keyLimit": {"monthlyCapMicros": 500000, "usedMicros": 0, "remainingMicros": 500000, "resetsAt": 1793491200}}
 ```
 
-`lines` has `denoise`, `transcribe` and `translate` (`quantity` = number of languages) as they apply; the micros add
+`lines` has `denoise`, `leveling`, `transcribe` and `translate` (`quantity` = number of languages) as they apply; the micros add
 up to `estCostMicros`, which is exactly what `POST /api/jobs` would reserve for the same details. `keyLimit` only when
 the key has a monthly cap.
+
+With `options.automatic` the price is the most the decision could end in, not what it will: `"maximum": true`, `lines` are the dearest
+outcome's, `outcomes` is `[{label, denoiseTier, estCostMicros}]` for every way it can end (only Denoising for a file over 90 minutes, or
+when you gave Denoising settings), and `fixed` the options you gave yourself. The charge is for what ran and can be less.
 
 ### 3. Upload: `PUT /api/jobs/{id}/input`
 
@@ -247,7 +297,7 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
 
 ### 4. Poll: `GET /api/jobs/{id}` (and `GET /api/jobs`)
 
-`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,sourceJobId,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,redo?,callback?}`
+`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,sourceJobId,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,redo?,callback?,chosen?,maximum?}`
 
 - `status`: `uploading → queued → running → (cloud_asr) → done | failed | canceled | expired`. A restart of the
   service never fails a job: it goes back to `queued` and starts again.
@@ -268,6 +318,8 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
   (its upload exists) and which kept copies it can start from. `preview` is for the website's strength slider (the two
   signals `GET /api/jobs/{id}/kept/noise` and `.../kept/input`, 24-bit FLAC, sample for sample the same length).
 - `callback`: only when a `callbackUrl` was given, see below.
+- `chosen`, `maximum`: only for a job made with `options.automatic`: what was decided and why (`null` until the file has been listened to),
+  and `true` while `estCostMicros` is still the most it can cost. See "Automatic settings".
 
 `GET /api/jobs` returns `{jobs:[...], limits:{maxActiveJobs, retentionSeconds}}`: up to 50 of your jobs, newest first: the ones in
 progress and the ones whose files are still there (a finished job is listed for 2 hours; failed and canceled jobs, which keep no files, are listed for the
@@ -288,10 +340,10 @@ of the job now (the upload, the kept copies and the results) and the same for ev
 ### 7. Change a finished job: `POST /api/jobs/{id}/rerun/estimate` and `POST /api/jobs/{id}/rerun`
 
 For 2 hours after a job is `done`, its upload and the intermediate results of the expensive steps stay in its folder:
-the noise removal at full strength (before strength, Restore highs and Leveling), the rebuilt voice when the Voice rebuild
+the noise removal at full strength (before strength and Leveling), the rebuilt voice when the Voice rebuild
 ran, the transcript (and its translations). Asking for the same file again with other choices starts from the latest
 kept copy and runs only the steps whose inputs changed. Only paid steps that really run are charged, at today's
-per-second prices pinned to the new job; the blend that sets the strength and writing the file cost nothing (Restore highs and Leveling are charged whenever they run).
+per-second prices pinned to the new job; the blend that sets the strength and writing the file cost nothing (Leveling is charged whenever it runs).
 
 Body of both calls: only what changes (the rest stays as the job had it): `{denoiseTier?, transcribeTier?, options?}`.
 `transcribeTier: "off"` leaves the subtitles out of the new job's files (on its own that changes nothing: `nothing_to_change`). `/rerun` also takes `maxCostMicros?`: the price you were quoted; a higher one now is `409 price_changed`.
@@ -299,7 +351,7 @@ Body of both calls: only what changes (the rest stays as the job had it): `{deno
 | You change | What runs again | Price |
 |---|---|---|
 | `options.atten_lim_db` | the blend of the kept noise removal and the recording (no model runs); `(1 - a) * full + a * input`, `a = 10^(-dB/20)`, in the time domain: the same arithmetic the noise remover does itself. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send `"leveling": false` as well for a free strength change | free; Leveling's price when Leveling is on |
-| `options.restore_highs`, `options.leveling`, `options.loudness_lufs` | from the kept noise removal: the blend, Restore highs (when on), Leveling (when on) | Restore highs and Leveling at their prices whenever they run; free when both are off |
+| `options.leveling`, `options.loudness_lufs` | from the kept noise removal: the blend, Leveling (when on) | Leveling's price whenever it runs; free when it is off |
 | `denoiseTier: "rebuild"` | the voice is rebuilt from the upload | the full Voice rebuild price (plus Leveling when on) |
 | `denoiseTier: "standard"` (from a rebuild) | from the kept noise removal; if the job never had one, noise removal runs from the upload | free, or the Denoising price when it had to run |
 | `options.noise`, `options.echo_reference_track` | noise removal runs again from the upload | the Denoising price (plus Leveling when on) |

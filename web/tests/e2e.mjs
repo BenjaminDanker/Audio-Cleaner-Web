@@ -31,15 +31,13 @@ if (want('basic')) {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
-    for (const s of ['Denoising', 'Restore highs', 'Leveling', 'Voice rebuild', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
-    // Restore highs has a row of its own: 0.07 a minute, 4.20 an hour, in the files group between Denoising and Leveling (the server's order)
-    const highs = pricing.rates.find((r) => r.product === 'highs' && r.tier === 'standard');
-    if (!highs || highs.usdPerMinute !== 0.07 || highs.usdPerHour !== 4.2) throw new Error('the price list has no Restore highs at 0.07 a minute: ' + JSON.stringify(highs));
+    for (const s of ['Denoising', 'Leveling', 'Voice rebuild', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    // Restore highs is not sold any more: no rate in the price list, no row in the table (the files group is Denoising, Leveling, subtitles)
+    if (pricing.rates.some((r) => r.product === 'highs')) throw new Error('the price list still has Restore highs: ' + JSON.stringify(pricing.rates.filter((r) => r.product === 'highs')));
     const rows = (await page.locator('table tbody tr').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
-    const row = rows.find((t) => t.startsWith('Restore highs'));
-    if (!row || !row.includes('$0.07 / min') || !row.includes('$4.20 / hour') || !/adds them back and keeps the voice exactly as recorded/.test(row)) throw new Error('Restore highs row: ' + row);
+    if (rows.some((t) => /highs/i.test(t))) throw new Error('a Restore highs row: ' + rows.filter((t) => /highs/i.test(t)));
     const at = (name) => rows.findIndex((t) => t.startsWith(name));
-    if (!(at('Denoising') < at('Restore highs') && at('Restore highs') < at('Leveling'))) throw new Error('row order: ' + rows.map((r) => r.slice(0, 20)).join(' | '));
+    if (!(at('Denoising') < at('Leveling'))) throw new Error('row order: ' + rows.map((r) => r.slice(0, 20)).join(' | '));
     const missing = pricing.rates.filter((r) => r.available && r.product !== 'stream_denoise' && !txt.includes(`$${r.usdPerHour.toFixed(2)} / hour`) && !txt.includes(`$${(r.usdPerMinute).toFixed(3)} / min`));
     if (missing.length) throw new Error('prices not on the page: ' + missing.map((r) => `${r.product}/${r.tier}`).join(', '));
     if (/Available|Coming soon/.test(txt)) throw new Error('status column is back');

@@ -445,7 +445,7 @@ def test_about_names_the_downloaded_models_and_where_their_licence_texts_are(qap
         return "\n".join(label.text() for label in dialog.findChildren(QLabel))
 
     text = texts()
-    for model in (resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL):
+    for model in (resources.SPEECH_MODEL, resources.VOICE_MODEL):
         assert model.title in text and model.licence in text
     assert "licence texts that came with the models" not in text  # nothing downloaded yet
     # an installed model has its own LICENSES folder (also the installer's copy), the old shared one still counts
@@ -457,11 +457,10 @@ def test_about_names_the_downloaded_models_and_where_their_licence_texts_are(qap
 
 
 def test_releasing_memory_drops_the_cached_models(monkeypatch):
-    from acw_common import bwe, dpdfnet, restore, transcribe
+    from acw_common import dpdfnet, restore, transcribe
 
-    bwe._sessions[("x", 1)] = object()
     dpdfnet._models["x"] = ()
     restore._backends[("x",)] = object()
     transcribe._cached[("x", 1, "cpu")] = object()
     engine.release_memory()
-    assert not (bwe._sessions or dpdfnet._models or restore._backends or transcribe._cached)
+    assert not (dpdfnet._models or restore._backends or transcribe._cached)

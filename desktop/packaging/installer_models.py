@@ -5,7 +5,7 @@
     python installer_models.py --mac SCRIPTS_DIR      macOS: the .pkg's preinstall and postinstall scripts (make_pkg.sh)
     python installer_models.py --total-gb             size of all the downloads in GB (for the texts)
 
-Generated from the app's own catalog (resources.NOISE_MODEL, SPEECH_MODEL, HIGHS_MODEL, VOICE_MODEL; read without importing
+Generated from the app's own catalog (resources.NOISE_MODEL, SPEECH_MODEL, VOICE_MODEL; read without importing
 numpy, so a bare python3 is enough), so the installer and the app always agree on URLs, sizes and SHA-256.
 
 Every model comes as individual files from Hugging Face (config.hf_models_url, pinned by revision): the installer
@@ -38,7 +38,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1]), str(Path(__file__).res
 
 from audio_cleaner_desktop import models, resources  # noqa: E402
 
-CATALOG = (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL)
+CATALOG = (resources.NOISE_MODEL, resources.SPEECH_MODEL, resources.VOICE_MODEL)
 BS = chr(92)
 
 

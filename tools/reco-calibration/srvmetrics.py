@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np, soundfile as sf
 
 sys.path.insert(0, REPO + '/common')
-from acw_common import pipeline, bwe, dfn, dpdfnet
+from acw_common import pipeline, spectrum, dfn, dpdfnet
 
 S = Path(ROOT + '/reco')
 LIB = _os.path.expanduser('~/audio-cleaner/bin/libdf.so')
@@ -40,7 +40,7 @@ def one(m):
         c = c[:len(x)]
         r = dict(m)
         r['nd'] = pipeline.noise_figure_db(x, LIB, MODEL)
-        r['bw'] = bwe.effective_bandwidth(x)
+        r['bw'] = spectrum.effective_bandwidth(x)
         r['sisdr_in'] = sisdr(x, c)
         for db in (12, 24, 40, 100):
             y = dfn.denoise_array(x, LIB, MODEL, atten_lim_db=db, threads=1)

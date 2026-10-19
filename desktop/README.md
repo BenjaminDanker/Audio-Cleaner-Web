@@ -4,8 +4,8 @@ A free, offline app that removes background noise from the voice in video and au
 subtitles. It runs the shared cleaning pipeline (`../common/acw_common`) in a PySide6 window.
 Nothing is uploaded: FFmpeg and the noise library (libDF) ship inside the app, and the installer downloads every model
 once during setup, each from Hugging Face: the noise removal models (DeepFilterNet3 and DPDFNet-8, 23 MB, required) and
-the three larger ones (subtitles, restoring highs, rebuilding voices: Whisper 1.6 GB, AP-BWE 0.5 GB and Sidon 0.5 GB;
-2.6 GB in all). If a download fails, the app offers it again (the noise removal models as soon as it starts). The installed app also looks for a newer version when it starts and
+the two larger ones (subtitles, rebuilding voices: Whisper 1.6 GB and Sidon 0.5 GB;
+2.1 GB in all). If a download fails, the app offers it again (the noise removal models as soon as it starts). The installed app also looks for a newer version when it starts and
 installs it (a signed update; Settings > "Check for updates when Audio Cleaner starts", on by default; it sends
 nothing but a normal web request with the app version).
 

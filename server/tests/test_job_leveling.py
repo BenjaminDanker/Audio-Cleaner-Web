@@ -1,4 +1,5 @@
-"""The `leveling` and `restore_highs` job options (the desktop app's "Leveling" and "Restore missing highs")."""
+"""The `leveling` job option (the desktop app's "Leveling"), and Leveling on its own; a `restore_highs` option from an older client is no
+longer one: it is ignored like any option that is not known."""
 import json
 
 import numpy as np
@@ -12,21 +13,23 @@ from acw_common.ffmpeg import FFmpeg
 from .test_job_echo import NATIVE, SR
 from .test_job_pipeline import HOME, _run_worker_once
 
-KEYS = ("leveling", "restore_highs")
-
-
 def _opts(**extra):
     return jobs.validate_options("denoise", "standard", None, extra)
 
 
-def test_leveling_defaults_on_restore_highs_defaults_off_and_only_booleans_are_taken():
-    assert (_opts()["leveling"], _opts()["restore_highs"]) == (True, False)  # Restore highs is its own paid feature: off unless asked for
-    assert all(_opts(**{k: True})[k] is True for k in KEYS)
-    assert all(_opts(**{k: False})[k] is False for k in KEYS)
-    for key in KEYS:
-        for value in ("yes", 0, None):
-            with pytest.raises(jobs.JobError, match=f"{key} must be true or false"):
-                _opts(**{key: value})
+def test_leveling_defaults_on_and_only_booleans_are_taken():
+    assert _opts()["leveling"] is True
+    assert _opts(leveling=True)["leveling"] is True and _opts(leveling=False)["leveling"] is False
+    for value in ("yes", 0, None):
+        with pytest.raises(jobs.JobError, match="leveling must be true or false"):
+            _opts(leveling=value)
+
+
+def test_restore_highs_is_not_an_option_any_more_and_is_treated_like_any_unknown_option():
+    """The step is gone: a request that still sends it is accepted as it would be with any other key the API does not know (options
+    are free-form, unknown keys are ignored), and the job neither stores it, prices it nor reports it."""
+    assert _opts(restore_highs=True) == _opts() == _opts(restore_highs="yes") == _opts(some_future_option=1)
+    assert "restore_highs" not in _opts(restore_highs=True)
 
 
 def create(client, h, **options):
@@ -40,19 +43,17 @@ def test_stored_with_the_job_and_leveling_is_its_own_line_of_the_price(client, s
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     plain = create(client, h)
-    off = create(client, h, leveling=False, restore_highs=False)
-    highs = create(client, h, restore_highs=True)
-    assert plain.status_code == off.status_code == highs.status_code == 200, (plain.text, off.text, highs.text)
-    # Leveling and Restore highs are each their own line of the price: switching one off takes exactly that line away
+    off = create(client, h, leveling=False)
+    old_client = create(client, h, restore_highs=True)  # a client that still sends the removed option
+    assert plain.status_code == off.status_code == old_client.status_code == 200, (plain.text, off.text, old_client.text)
+    # Leveling is its own line of the price: switching it off takes exactly that line away
     assert off.json()["estCostMicros"] == pricing.cost_micros("denoise", "standard", 14) > 0
     assert plain.json()["estCostMicros"] == off.json()["estCostMicros"] + pricing.cost_micros("leveling", "standard", 14)
-    assert highs.json()["estCostMicros"] == plain.json()["estCostMicros"] + pricing.cost_micros("highs", "standard", 14)
-    stored = client.get(f"/api/jobs/{plain.json()['id']}").json()["options"]
-    assert (stored["leveling"], stored["restore_highs"]) == (True, False)  # not asked for: off, and not charged
-    stored = client.get(f"/api/jobs/{off.json()['id']}").json()["options"]
-    assert (stored["leveling"], stored["restore_highs"]) == (False, False)
-    stored = client.get(f"/api/jobs/{highs.json()['id']}").json()["options"]
-    assert (stored["leveling"], stored["restore_highs"]) == (True, True)
+    assert old_client.json()["estCostMicros"] == plain.json()["estCostMicros"]  # nothing is added for it
+    assert client.get(f"/api/jobs/{plain.json()['id']}").json()["options"]["leveling"] is True
+    assert client.get(f"/api/jobs/{off.json()['id']}").json()["options"]["leveling"] is False
+    stored = client.get(f"/api/jobs/{old_client.json()['id']}").json()["options"]
+    assert stored["leveling"] is True and "restore_highs" not in stored
     assert create(client, h, leveling="no").status_code == 400
 
 
@@ -89,18 +90,46 @@ def _level_db(wav, tmp_path):
 
 
 @NATIVE
-def test_the_worker_passes_both_options_on(client, signed_in, tmp_path):
+def test_the_worker_passes_the_option_on(client, signed_in, tmp_path):
     uid, h = signed_in
     ledger.credit(uid, 8_000_000, "grant", "t", "g")
     data = _phone_call(tmp_path)
-    job, leveled = _run(client, h, data, restore_highs=True)  # both on
-    assert "Its high frequencies were restored, as you asked." in (job["notice"] or "")
-    job, by_default = _run(client, h, data)  # Leveling on, Restore highs not asked for
+    job, leveled = _run(client, h, data)
+    assert job["notice"] is None  # (an old client's restore_highs is ignored: nothing is restored, nothing is said)
+    job, as_is = _run(client, h, data, leveling=False, restore_highs=True)
     assert job["notice"] is None
-    job, as_is = _run(client, h, data, leveling=False, restore_highs=False)  # both off
-    assert job["notice"] is None  # no highs restored
     # the leveling step pulls the voice to the loudness target; without it the level stays where the noise remover left it
     assert abs(_level_db(leveled, tmp_path) - _level_db(as_is, tmp_path)) > 1.0
+
+
+def test_a_job_stored_with_the_removed_option_runs_and_is_charged_without_it(client, signed_in):
+    """Parameters written by an older version (restore_highs in the options, a highs price pinned in the rates) are read past: the job
+    is described, specified for the runner and charged by what exists (Denoising and Leveling), and nothing fails."""
+    import json as _json
+
+    from acw.worker import main as worker
+    from acw.worker.runner import clean_options
+
+    from .rerun_support import complete_like_the_worker, params_of, row
+
+    uid, h = signed_in
+    ledger.credit(uid, 2_000_000, "grant", "t", "g")
+    jid = create(client, h).json()["id"]
+    jobs.update_params(jid, options={**params_of(jid)["options"], "restore_highs": True},
+                       rates={"denoise": 9_000, "highs": 70_000, "leveling": 1_000})
+    assert client.put(f"/api/jobs/{jid}/input", content=bytes(1000), headers=h).status_code == 200
+    shown = client.get(f"/api/jobs/{jid}").json()
+    assert shown["label"] == "Denoising + Leveling"
+    worker._write_spec(row(jid), worker._settings_extra(), 14.0)
+    spec = _json.loads((jobs.job_dir(jid) / "spec.json").read_text())
+    assert "highs_where_needed" not in spec
+    opts = clean_options(spec, "light")
+    assert not hasattr(opts, "restore_highs") and opts.noise == "light" and opts.leveling is True
+    assert worker._job_cost(row(jid), params_of(jid), 14.0) == pricing.cost_micros("denoise", "standard", 14) + pricing.cost_micros("leveling", "standard", 14)
+    done = complete_like_the_worker(jid, outputs=["rec-cleaned.flac"])
+    assert done["cost_micros"] == worker._job_cost(row(jid), params_of(jid), 14.0)
+    line = db.one("SELECT description FROM ledger WHERE ref_id = ?", (jid,))["description"]
+    assert line.startswith("Denoising + Leveling:")
 
 
 # ---------------------------------------------------------------- Leveling on its own (noise tier "off")
@@ -109,11 +138,11 @@ def test_leveling_alone_needs_leveling_and_is_priced_for_it(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     assert jobs.validate_options("denoise", pricing.NO_DENOISE, None, {})["leveling"] is True
-    with pytest.raises(jobs.JobError, match="Choose Denoising, Voice rebuild, Restore highs or Leveling."):
+    with pytest.raises(jobs.JobError, match="Choose Denoising, Voice rebuild or Leveling."):
         jobs.validate_options("denoise", pricing.NO_DENOISE, None, {"leveling": False})
     refused = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "off", "filename": "rec.wav", "sizeBytes": 1000,
                                              "durationSeconds": 14, "options": {"leveling": False}}, headers=h)
-    assert refused.status_code == 400 and "Choose Denoising, Voice rebuild, Restore highs or Leveling." in refused.json()["detail"]
+    assert refused.status_code == 400 and "Choose Denoising, Voice rebuild or Leveling." in refused.json()["detail"]
     made = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "off", "filename": "rec.wav", "sizeBytes": 1000,
                                           "durationSeconds": 14, "options": {}}, headers=h)
     assert made.status_code == 200, made.text
@@ -131,7 +160,7 @@ def test_a_leveling_only_job_levels_without_removing_noise(client, signed_in, tm
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     data = _phone_call(tmp_path)
-    job, out = _run(client, h, data, tier="off", restore_highs=False)
+    job, out = _run(client, h, data, tier="off")
     assert job["status"] == "done"
     assert abs(_level_db(out, tmp_path) - _level_db(data, tmp_path)) > 1.0  # the quiet recording is brought to the target
     row = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))

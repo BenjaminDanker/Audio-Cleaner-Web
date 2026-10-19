@@ -12,7 +12,7 @@ The services run as the account `acw` (section "Accounts" below), so everything 
   venv/       Python 3.12 virtualenv (server/requirements.lock, installed with --require-hashes); venv-gpu/ for the GPU worker
               (deploy/setup-gpu.sh, deploy/requirements-gpu.lock)
   bin/        ffmpeg, ffprobe (BtbN static n8.1.3, pinned in deploy/models.lock), libdf.so and acw-live (built by the owner)
-  models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, ap-bwe/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
+  models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
               silero-vad/, whisper/{large-v3-turbo,small}   (every file, its source and sha256: deploy/models.lock)
   wasm/       df.js + df_bg.wasm for the browser build
   data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha, metrics.prom,
@@ -698,7 +698,7 @@ deploy/fetch-models.sh --with-optional # also the TorchScript Sidon weights (res
   `bin/libdf-tract021.so` (older build used only by a native test), `models/sidon/sidon_fe_q8.onnx` (optional int8 variant:
   `tools/convert_sidon_onnx.py`), `wasm/df.js` and `wasm/df_bg.wasm` (browser build, same script). `--check` reports them
   missing if absent and "changed" (not an error) if a rebuild differs.
-- **Our own models** (AP-BWE and Sidon ONNX from `tools/export_apbwe_onnx.py` and `tools/convert_sidon_onnx.py`, the
+- **Our own models** (Sidon ONNX from `tools/convert_sidon_onnx.py`, the
   batched DPDFNet-8 export, and DeepFilterNet3 with its browser build for the free tools) are in the Hugging Face repo
   `SilverJunk08/audio-cleaner-models`. A new or changed model is a new commit there (`hf upload`); then update the commit
   in `deploy/models.lock`, `desktop/audio_cleaner_desktop/config.py` (HF_MODELS_REVISION) and `web/src/media/models.js`.
@@ -742,7 +742,7 @@ paid before free, then the user with the fewest jobs running, then first come
 first served. The API reports `queuePosition` and `queueWaitSeconds`.
 - Studio clean, per channel at 4 threads (stereo is cleaned channel by channel, so double these for stereo):
   DeepFilterNet3 ~0.05x real time, DPDFNet-8 (heavy noise) ~0.33x, voice rebuilt ~0.9x (3 GB, one such job at a
-  time, files up to 90 minutes), highs restoration ~0.23x (it runs on every file it is switched on for) and echo removal a few percent more. These are the numbers in
+  time, files up to 90 minutes) and echo removal a few percent more. These are the numbers in
   `jobs.SPEED`: they drive the queue estimate and the slow-job alert, and the runner tells the worker which
   noise remover a file got so the estimate follows it.
 - Local transcription: Parakeet TDT (English: v2; 24 European languages: v3)
@@ -754,8 +754,7 @@ first served. The API reports `queuePosition` and `queueWaitSeconds`.
 (ONNX Runtime with CUDA, pinned for the GTX 960's sm_52), then
 `deploy/install.sh` enables `acw-worker-gpu`. It takes the jobs whose heavy stages are much faster on the card
 (measurements and reasons: docs/research/gpu-2026-10.md; the rules are `broker.gpu_stages` and `broker.GPU_WORK`): local transcription (Parakeet), the heavy noise
-remover (DPDFNet-8: "heavy" or "auto" noise), the voice rebuild (Sidon), and the band extension
-of phone-quality recordings (AP-BWE) inside those jobs. Light cleaning (DeepFilterNet3), echo removal and
+remover (DPDFNet-8: "heavy" or "auto" noise) and the voice rebuild (Sidon). Light cleaning (DeepFilterNet3), echo removal and
 Whisper stay on the CPU (a job with echo removal is never given to the GPU worker; an "auto" job that turns out
 light is cleaned by DeepFilterNet3 on the GPU worker's CPU threads). It runs one job at a time and a job's models
 use the card one after the other (Parakeet needs 3.3 of the 4 GB alone, Sidon 2.6 GB, DPDFNet 0.3-0.4 GB), so nothing
@@ -763,7 +762,10 @@ shares it. While it is idle it refreshes `data/gpu-worker-idle`, and CPU workers
 busy they take everything but the voice rebuild. **The voice rebuild runs only on the card** (7.4x real time there,
 0.74x on four CPU cores): while no GPU worker is up (`data/gpu-worker-alive` older than 90 s; it is refreshed every
 2 s, and every 20 s during a job, and removed when the worker stops) the site shows it as paused, creating one is
-refused, and queued ones wait. Its queue estimate counts the card's own queue. A stage that cannot get the card (no card, CUDA library missing) fails the job with the usual "not charged"
+refused, and queued ones wait. Its queue estimate counts the card's own queue. A job made with `options.automatic` (docs/api.md) is queued as
+a Denoising job; the worker that takes it measures it first (the runner's `analyse` stage) and, when it decides on a rebuild and is not the
+card's worker, puts it back in the queue (same place, `next_stage = main`) for the card's worker; while the card is not up it decides on
+Denoising and says so in the job's `chosen`. A stage that cannot get the card (no card, CUDA library missing) fails the job with the usual "not charged"
 message instead of running slowly on the CPU. `python -m acw.admin capacity` shows the worker's state and the card's
 memory and load. Its sandboxed runner may also open `/dev/nvidia*` and has no address-space
 limit (CUDA reserves huge virtual ranges).

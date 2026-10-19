@@ -40,7 +40,7 @@
 |---|---|---|
 | Free browser denoise | user's browser (DFN3 WASM, Web Worker) | none of ours for the model: the wasm and the model (about 22 MB) come from Hugging Face; df.js (15 kB) from the VPS |
 | Studio clean (paid) | acw-worker → runner, see "File jobs" below | CPU on primary-ram |
-| Studio clean, voice rebuilt (paid, own price) | same, with Sidon instead of noise removal + highs; files up to 90 minutes, one such job at a time | about 1x real time per channel, ~3 GB RAM |
+| Studio clean, voice rebuilt (paid, own price) | same, with Sidon instead of noise removal; files up to 90 minutes, one such job at a time | about 1x real time per channel, ~3 GB RAM |
 | Desktop app (free) | user's computer: same `acw_common` pipeline as Studio clean, bundled libDF + LGPL FFmpeg | GitHub Releases bandwidth (free; the update check reads the newest release's update.json there); models from Hugging Face |
 | Live (paid) | OBS plugin / browser ⇄ acw-live ⇄ acw-stream (one worker process per pair of live cores); 20 ms frames, 30 ms model latency | CPU; ~0.2 core per stream at full load |
 | Transcription standard (paid + free quota) | runner: NVIDIA Parakeet TDT (v2 English, v3 for 24 European languages) via onnx-asr, on the GPU worker when it is idle; Whisper large-v3-turbo for other languages; Whisper small detects the language | CPU (Parakeet ~0.09x real time on 4 threads, ~0.04x on the GPU) |
@@ -59,13 +59,20 @@
    the runner, or speech segments for OpenAI (premium).
 4. **noise removal** on the echo-free audio, per channel: DeepFilterNet3 (light noise) or DPDFNet-8 (heavy noise),
    chosen per file from the measured speech-to-background gap, or forced by the `noise` option. With the
-   voice-rebuild tier, Sidon replaces steps 4 and 5.
-5. **restoring the highs** (only when the `restore_highs` option is on; its own price) with AP-BWE: the generator is chosen by the
-   measured bandwidth (phone calls, low bitrates) and a recording that already has its highs gets the widest one; when on it always
-   runs. It also runs on its own (noise tier "off"). Not with the voice rebuild, which makes its own highs.
-6. **clarity chain**: level match, high-pass, compressor, loudness, limiter.
-7. **write**: audio file, or video with the cleaned sound as the first track (the file's other audio tracks and its
+   voice-rebuild tier, Sidon replaces step 4.
+5. **clarity chain**: level match, high-pass, compressor, loudness, limiter.
+6. **write**: audio file, or video with the cleaned sound as the first track (the file's other audio tracks and its
    own subtitles are copied across where the container can hold them) and soft subtitles.
+
+**Automatic settings** (`options.automatic`, `server/acw/automatic.py`, docs/api.md): such a job is created as `standard`, held for the
+dearest way it can end (`automatic.candidates`: Denoising + Leveling, or Voice rebuild + Leveling: the rebuild where it is possible) and queued. After the probe
+the worker runs a sandboxed `analyse` stage (decode, then `acw_common.analysis.measure`: the browser's measurements and the noise
+figure over about a minute of the file) and decides outside the sandbox with the same function the desktop app uses
+(`acw_common.reco_model.automatic`): strength, noise remover, Voice rebuild, Leveling, with what the request gave itself
+kept. `automatic.apply` then makes the job the decided one in one transaction (tier, options, pinned rates, estimate, the hold shrunk to
+the estimate; `params.chosen` is what the API reports). A rebuild decided by a worker that is not the card's is handed over
+(`jobs.hand_over`: back in the queue where it was, `next_stage = main`, taken by the card's worker alone); where a rebuild is wanted but
+impossible the job continues as Denoising and says so. From then on it is an ordinary job.
 
 A worker that is stopped (restart, deploy) puts its job back in the queue with the upload kept; nothing fails.
 The estimates shown to people and the slow-job monitor follow the work a job does (`jobs.SPEED`).
@@ -79,7 +86,7 @@ the models' own attenuation limit (SNR of the difference above 100 dB on every p
 everything after it redone without a model:
 
 ```
-decode -> [echo removal] -> noise removal (full strength) --keep--> blend (strength) -> restore highs -> channel copies -> Leveling -> encode
+decode -> [echo removal] -> noise removal (full strength) --keep--> blend (strength) -> channel copies -> Leveling -> encode
                           \-> Voice rebuild ------------keep--------------------------------------------> Leveling -> encode
 ```
 
@@ -100,7 +107,7 @@ removal and before noise removal.
 ## Shared code
 
 `common/acw_common` holds everything both the server and the desktop app run:
-the libDF ctypes engine (`dfn`), DPDFNet (`dpdfnet`), AP-BWE (`bwe`), Sidon (`restore`), the echo canceller
+the libDF ctypes engine (`dfn`), DPDFNet (`dpdfnet`), Sidon (`restore`), the spectrum measurements (`spectrum`), the echo canceller
 (`aec`), the clarity chain (`clarity`), transcription and captions (`transcribe`, `captions`), the FFmpeg
 wrappers (`ffmpeg`) and the Studio-clean chain built from them (`pipeline`).
 The server's runner and live engine import it; `deploy/install.sh` copies it

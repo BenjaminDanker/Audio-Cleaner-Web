@@ -170,7 +170,7 @@ def test_a_redirect_to_plain_http_is_refused():
     assert ok is not None and ok.full_url == "https://cdn.example.org/model.bin"
 
 
-# --- licence texts that come with a model (our highs and voice models) -----------------------------------------------
+# --- licence texts that come with a model (our voice model) -----------------------------------------------
 
 def _model_with_licences(base, payloads, licences):
     m = _model(base, payloads)

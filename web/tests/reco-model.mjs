@@ -32,13 +32,12 @@ const stats = (o = {}) => ({
 function valid(d) {
   assert.ok(STRENGTHS.includes(d.strength), `strength ${d.strength}`);
   assert.equal(typeof d.rebuild, 'boolean');
-  assert.equal(typeof d.restoreHighs, 'boolean');
   assert.equal(d.p.strength.length, 4);
-  for (const v of [...d.p.strength, d.p.rebuild, d.p.restoreHighs]) assert.ok(Number.isFinite(v) && v >= 0 && v <= 1, `probability ${v}`);
+  for (const v of [...d.p.strength, d.p.rebuild]) assert.ok(Number.isFinite(v) && v >= 0 && v <= 1, `probability ${v}`);
   assert.ok(Math.abs(d.p.strength.reduce((a, b) => a + b, 0) - 1) < 1e-9, 'strength probabilities sum to 1');
   assert.equal(d.strength, STRENGTHS[d.p.strength.indexOf(Math.max(...d.p.strength))]);
   assert.equal(d.rebuild, d.p.rebuild > 0.5);
-  assert.equal(d.restoreHighs, d.p.restoreHighs > 0.5);
+  assert.ok(!('restoreHighs' in d) && !('restoreHighs' in d.p), 'the restore head is not used any more');
 }
 
 check('modelDecision: valid ids on synthetic stats', () => {
@@ -94,7 +93,7 @@ if (![ORIG_JS, ORIG_JSON, ROWS].every(existsSync)) {
   const model = orig.loadModel(readFileSync(ORIG_JSON, 'utf8'));
   const rows = readFileSync(ROWS, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   let n = 0;
-  const bad = { strength: 0, rebuild: 0, restoreHighs: 0 };
+  const bad = { strength: 0, rebuild: 0 };
   let maxDp = 0;
   let shifted = 0; // rows where a split flipped (a value within 6 significant digits of a threshold) and moved a probability
   const examples = [];
@@ -104,12 +103,12 @@ if (![ORIG_JS, ORIG_JSON, ROWS].every(existsSync)) {
     n++;
     for (const k of Object.keys(bad)) if (a[k] !== b[k]) { bad[k]++; if (examples.length < 5) examples.push(`${r.id}: ${k} ${a[k]} vs ${b[k]}`); }
     const p = orig.predict(model, r);
-    const dp = Math.max(Math.abs(p.rebuild - b.p.rebuild), Math.abs(p.restore - b.p.restoreHighs), ...p.strength.map((v, i) => Math.abs(v - b.p.strength[i])));
+    const dp = Math.max(Math.abs(p.rebuild - b.p.rebuild), ...p.strength.map((v, i) => Math.abs(v - b.p.strength[i])));
     maxDp = Math.max(maxDp, dp);
     if (dp > 1e-3) shifted++;
   }
   const agree = (k) => `${k} ${(100 * (1 - bad[k] / n)).toFixed(3)}% (${n - bad[k]}/${n})`;
-  console.log(`rounding check on ${n} rows: ${agree('strength')}, ${agree('rebuild')}, ${agree('restoreHighs')}; largest probability difference ${maxDp.toFixed(3)}, ${shifted} rows differ by more than 0.001`);
+  console.log(`rounding check on ${n} rows: ${agree('strength')}, ${agree('rebuild')}; largest probability difference ${maxDp.toFixed(3)}, ${shifted} rows differ by more than 0.001`);
   if (examples.length) console.log('  disagreements: ' + examples.join('; '));
   check('rounded web model agrees with the original on the test rows (>= 99.9% per decision, probabilities within 1e-3 on all but 1% of the rows)', () => {
     assert.ok(n > 0);

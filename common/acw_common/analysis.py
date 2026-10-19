@@ -10,7 +10,7 @@ in the same order as in the browser, not merely "about the same": 10 ms frame le
 (150 Hz to 3.5 kHz, two Butterworth biquads), kept as 32-bit floats like the browser's arrays; 2048-point Hann spectra every
 1024 samples with no frame across the join of two stretches; the long-term speech spectrum, its 200 Hz median smoothing,
 the bandwidth edge and the tilt; the 95th percentile of how fast the level falls in 60 ms; peak and clipping; BS.1770
-loudness with its 100 ms blocks and two gates. bwe.effective_bandwidth, bwe.tilt_db and advice.drop_db measure the same
+loudness with its 100 ms blocks and two gates. spectrum.effective_bandwidth, spectrum.tilt_db and advice.drop_db measure the same
 things but differ in small ways (they read the stretches as one piece, in 32-bit floats); this module follows the browser
 exactly, and tests/test_reco_agreement.py (server) and tests/test_analysis.py (here) keep it so.
 

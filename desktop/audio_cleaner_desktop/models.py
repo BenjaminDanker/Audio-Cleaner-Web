@@ -1,7 +1,7 @@
 """Models that are downloaded once instead of shipping in the installer.
 
 The installer stays small: it holds the program (with libDF and FFmpeg) and no model. Every model, the noise
-removal ones (23 MB, required) and the large ones (subtitles, restoring highs, rebuilding the voice), is fetched by
+removal ones (23 MB, required) and the large ones (subtitles, rebuilding the voice), is fetched by
 the installer's own setup. The app downloads the noise models itself when they are missing at start (they are
 required), and the others when the user asks for them (Settings, or the Download button after setup's download failed). Every file is pinned by URL (a fixed revision), size and
 SHA-256, and every model is downloaded on its own: someone who only wants one model downloads only its files.

@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--gui", action="store_true", help="with --selftest: also build the window, the preview and the About box")
     p.add_argument(
         "--download-models", "--download-speech-model", action="store_true", dest="download_models",
-        help="download the models for noise removal, subtitles, restoring highs and rebuilding the voice (about 2.6 GB, once) and exit",
+        help="download the models for noise removal, subtitles and rebuilding the voice (about 2.1 GB, once) and exit",
     )
     p.add_argument("-o", "--output-dir", metavar="OUTDIR", help="write results here (default: next to each original)")
     p.add_argument(
@@ -81,10 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--echo-track", action="store_true",
         help="remove speaker echo using the file's second audio track (files with one track are cleaned as usual)",
-    )
-    p.add_argument(
-        "--no-restore-highs", action="store_true",
-        help="do not restore the missing highs of phone-quality recordings (by default they are restored in the files that need it)",
     )
     p.add_argument(
         "--rebuild-voice", action="store_true",
@@ -136,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         options = JobOptions(
             strength=args.strength, leveling=not args.no_leveling, audio_format=args.audio_format,
             loudness=args.loudness, subtitles=args.subtitles, language=args.language, noise=args.noise,
-            echo_track=args.echo_track, restore_highs=not args.no_restore_highs, auto_highs=not args.no_restore_highs,
+            echo_track=args.echo_track,
             rebuild_voice=args.rebuild_voice, auto_rebuild=not args.no_auto_rebuild,
             video_size=args.video_size,
         )

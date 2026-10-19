@@ -79,16 +79,13 @@ def test_a_missing_model_is_fetched_one_after_the_other_never_at_start_up(qapp, 
         assert "Getting everything ready" in w.banner_models._label.text() and not shown  # nothing asked
         w.speech_download._fake_ready = True
         w._model_download_finished(w.speech_download, True, "")
-        assert started == ["whisper-large-v3-turbo", "restore-highs"]
-        w.highs_download._fake_ready = True
-        w._model_download_finished(w.highs_download, True, "")
-        assert started == ["whisper-large-v3-turbo", "restore-highs", "rebuild-voice"]
+        assert started == ["whisper-large-v3-turbo", "rebuild-voice"]
         w.voice_download._fake_ready = True
         w._model_download_finished(w.voice_download, True, "")
         assert not w.banner_models.isVisible()
         # a failed download says so and offers to try again
-        w._model_queue = [w.highs_download]
-        w._model_download_finished(w.highs_download, False, "The download stopped (timed out).")
+        w._model_queue = [w.voice_download]
+        w._model_download_finished(w.voice_download, False, "The download stopped (timed out).")
         assert w.banner_models.isVisible() and "could not be downloaded" in w.banner_models._label.text()
         # starting a subtitles job without the speech model does not start, and offers the download
         w.speech_download._fake_ready = False
@@ -190,7 +187,7 @@ def test_missing_noise_models_are_downloaded_by_the_window_and_a_failure_offers_
     try:
         w.show()
         qapp.processEvents()
-        assert started == ["noise-removal"] and not shown  # by itself, only the noise models (23 MB), not 2.6 GB
+        assert started == ["noise-removal"] and not shown  # by itself, only the noise models (23 MB), not 2.1 GB
         assert w.banner_models.isVisible() and "Downloading the noise removal models" in w.banner_models._label.text()
         w._model_download_finished(w.noise_download, False, "The download stopped (timed out).")
         assert w.banner_models.isVisible() and "could not be downloaded" in w.banner_models._label.text()

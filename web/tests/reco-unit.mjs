@@ -117,7 +117,7 @@ const gridStats = () => {
   const out = [];
   for (const noiseDb of [-3, 8, 14, 18, 20, 23, 26, 32, 45]) {
     for (const bandwidthHz of [3800, 6500, 6600, 6601, 8000, 12000, 24000]) {
-      for (const tiltDb of [-45, -30, -19, -17, -12, null]) { // (null: not measured; where the model asks to restore the highs without the rule rebuilding)
+      for (const tiltDb of [-45, -30, -19, -17, -12, null]) { // (null: not measured)
         for (const dropDb of [null, 6, 10.5, 14, 30]) {
           for (const floorDb of [-35, -60, -80]) {
             for (const clipFraction of [0, 0.002, 0.003, 0.05]) {
@@ -143,7 +143,7 @@ const CAUSES = ['echo', 'dull', 'phone', 'clipped'];
 const onlyCauses = (...names) => (s) => { const c = causesOf(s); return CAUSES.every((k) => c[k] === names.includes(k)); };
 const anyCause = (s) => Object.values(causesOf(s)).some(Boolean);
 
-// Every sentence of the rebuild / restore advice, word for word.
+// Every sentence of the rebuild advice, word for word. (Restoring the highs is not advised any more: that sentence is never said.)
 const SAY = {
   echo: 'The voice sounds echoey, as if it was recorded in a big or bare room.',
   dull: 'The voice sounds muffled.',
@@ -152,8 +152,8 @@ const SAY = {
   clarity: 'The voice has lost some of its clarity, from echo or from being saved as a very small file.',
   fix: 'Rebuilding the voice fixes this. Listen to the result before you publish.',
   next: 'Next time, turn the microphone level down.',
-  restore: 'Some of the high sounds are missing. Restoring them makes the voice clearer.',
 };
+const RESTORE = 'Some of the high sounds are missing. Restoring them makes the voice clearer.'; // gone: no step restores them any more
 const SAY_ALL = new Set(Object.values(SAY));
 /** the rebuild/restore sentences among the reasons, in the order given */
 const said = (r) => r.reasons.filter((t) => SAY_ALL.has(t));
@@ -167,7 +167,7 @@ function expectedSaid(s, m) {
     if (c.clipped) out.push(SAY.next);
     return out;
   }
-  return m.restoreHighs ? [SAY.restore] : [];
+  return [];
 }
 const GONE = /Cleaning can.t fix|microphone level down next time/i; // the old advice: now said as "Next time, turn the microphone level down."
 
@@ -175,8 +175,8 @@ check('the rebuild rules use these numbers: a phone call is 6600 Hz or lower, ec
   assert.deepEqual([T.PHONE_HZ, T.ECHO_DROP_DB, T.DULL_TILT_DB, T.CLIP_FRACTION], [6600, 10.5, -19, 0.002]);
 });
 
-check('files: rebuild = echoey || muffled || phone || clipped || the model, on the whole grid; strength and restore highs stay the model\'s; heavy stays the rule; every grid row says exactly the sentences its causes call for', () => {
-  const seen = { rebuildModel: 0, restore: 0, rebuildRule: 0, strengths: new Set(), rebuilt: 0, kept: 0, only: {}, edge: {}, restoreKept: 0, restoreRebuilt: 0, multi: 0 };
+check('files: rebuild = echoey || muffled || phone || clipped || the model, on the whole grid; the strength stays the model\'s; heavy stays the rule; every grid row says exactly the sentences its causes call for', () => {
+  const seen = { rebuildModel: 0, rebuildRule: 0, strengths: new Set(), rebuilt: 0, kept: 0, only: {}, edge: {}, multi: 0 };
   const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
   for (const s of gridStats()) {
     const r = recommendForFile(s, {});
@@ -185,7 +185,7 @@ check('files: rebuild = echoey || muffled || phone || clipped || the model, on t
     const c = causesOf(s);
     const where = JSON.stringify(s);
     assert.equal(r.strength, m.strength, where);
-    assert.equal(r.restoreHighs, m.restoreHighs, where); // what the model says, also where the voice is rebuilt (the sentence and the line are what change)
+    assert.ok(!('restoreHighs' in r) && !('restoreHighs' in m), where); // not a decision any more
     assert.equal(r.rebuild, c.echo || c.dull || c.phone || c.clipped || m.rebuild, where);
     assert.equal(r.heavy, v.heavy && !v.clean, where);
     assert.deepEqual([r.noise, r.leveling, r.nothing, r.noSpeech], ['denoise', true, false, false]);
@@ -193,20 +193,16 @@ check('files: rebuild = echoey || muffled || phone || clipped || the model, on t
     assert.deepEqual(said(r), expectedSaid(s, m), where);
     assert.equal(r.reasons.filter((t) => t === SAY.fix).length, r.rebuild ? 1 : 0, where);
     assert.equal(r.reasons.includes(SAY.next), c.clipped, where);
-    assert.equal(r.reasons.includes(SAY.restore), !r.rebuild && m.restoreHighs, where); // the restore sentence only when the voice is not rebuilt
-    assert.ok(!r.reasons.some((t) => GONE.test(t)), where);
-    assert.ok(!r.reasons.some((t) => /Restoring them/.test(t) && r.rebuild), where);
-    // the line: Voice rebuild replaces Denoising (and "restore the highs", which a rebuild does not need)
+    assert.ok(!r.reasons.some((t) => GONE.test(t) || t === RESTORE || /Restoring them|highs/i.test(t)), where);
+    // the line: Voice rebuild replaces Denoising
     if (r.rebuild) assert.match(r.line, /^Voice rebuild, leveling, (Standard|Extra accurate) subtitles$/, r.line);
     else assert.equal(r.line.startsWith('Denoising ('), true, r.line);
-    assert.equal(/restore the highs/.test(r.line), !r.rebuild && m.restoreHighs, r.line);
+    assert.ok(!/highs/i.test(r.line), r.line);
     // reachability counters
     if (m.rebuild) seen.rebuildModel++;
-    if (m.restoreHighs) seen.restore++;
     if (!m.rebuild && anyCause(s)) seen.rebuildRule++;
     seen.strengths.add(r.strength);
     if (r.rebuild) seen.rebuilt++; else seen.kept++;
-    if (m.restoreHighs) bump(seen, r.rebuild ? 'restoreRebuilt' : 'restoreKept');
     if (CAUSES.filter((k) => c[k]).length > 1) seen.multi++;
     for (const k of CAUSES) if (onlyCauses(k)(s) && !m.rebuild) bump(seen.only, k);
     if (!anyCause(s) && m.rebuild) bump(seen.only, 'model');
@@ -225,8 +221,7 @@ check('files: rebuild = echoey || muffled || phone || clipped || the model, on t
   }
   // the grid reaches every branch, or the checks above prove nothing
   const shown = JSON.stringify({ ...seen, strengths: [...seen.strengths] });
-  assert.ok(seen.rebuildModel > 0 && seen.restore > 0 && seen.rebuildRule > 0 && seen.rebuilt > 0 && seen.kept > 0, shown);
-  assert.ok(seen.restoreKept > 0 && seen.restoreRebuilt > 0 && seen.multi > 0, shown);
+  assert.ok(seen.rebuildModel > 0 && seen.rebuildRule > 0 && seen.rebuilt > 0 && seen.kept > 0 && seen.multi > 0, shown);
   for (const k of [...CAUSES, 'model']) assert.ok(seen.only[k] > 0, `nothing but "${k}" is on the grid: ${shown}`);
   for (const k of ['phone 6600 Hz is a phone call', 'phone 6601 Hz is not', 'exactly 0.002 clipped is not distortion', '0.003 clipped is',
     'a fall of exactly 10.5 dB is not an echo', 'a fall of 6 dB is an echo', 'exactly -19 dB is muffled', '-17 dB is not']) assert.ok(seen.edge[k] > 0, `${k}: ${shown}`);
@@ -267,18 +262,13 @@ check('files: each cause has its sentence, and they come in the order echoey, mu
   assert.match(text(modelOnly).join(' '), /lost some of its clarity/);
   // and a cause is named, the plain sentence is not added
   assert.ok(grid.every((s) => !(anyCause(s) && text(s).includes(SAY.clarity))));
-  // the voice is not rebuilt and the model wants the highs back: that sentence (a phone call never gets here: it is rebuilt)
-  const restore = find((s) => !anyCause(s) && !modelDecision(s).rebuild && modelDecision(s).restoreHighs, 'file that gets its highs restored without a rebuild');
-  assert.deepEqual(said(recommendForFile(restore, {})), [SAY.restore]);
-  assert.match(recommendForFile(restore, {}).line, /restore the highs/);
-  const noRestore = find((s) => !anyCause(s) && !modelDecision(s).rebuild && !modelDecision(s).restoreHighs, 'file that is left alone');
+  // a file the voice is not rebuilt for gets no advice about missing high sounds: nothing restores them any more
+  const noRestore = find((s) => !anyCause(s) && !modelDecision(s).rebuild, 'file that is left alone');
   assert.deepEqual(said(recommendForFile(noRestore, {})), []);
   assert.equal(recommendForFile(noRestore, {}).rebuild, false);
-  // the voice is rebuilt, so restoring the highs is not said even where the model wants it
-  const rebuiltAndRestore = find((s) => anyCause(s) && modelDecision(s).restoreHighs, 'file that is rebuilt and has its highs missing');
-  assert.ok(!text(rebuiltAndRestore).includes(SAY.restore) && recommendForFile(rebuiltAndRestore, {}).restoreHighs === true);
+  assert.ok(grid.every((s) => !text(s).includes(RESTORE) && !/highs/i.test(recommendForFile(s, {}).line)));
   const phoneAny = grid.filter((s) => s.bandwidthHz <= 6600 && s.clipFraction <= 0.002);
-  assert.ok(phoneAny.length > 100 && phoneAny.every((s) => recommendForFile(s, {}).rebuild && text(s).includes(SAY.phone) && !text(s).includes(SAY.restore)));
+  assert.ok(phoneAny.length > 100 && phoneAny.every((s) => recommendForFile(s, {}).rebuild && text(s).includes(SAY.phone) && !text(s).includes(RESTORE)));
   const gentleClean = find((s) => s.noiseDb >= T.CLEAN_AT_LEAST && modelDecision(s).strength === 'gentle', 'clean file at Gentle');
   assert.match(text(gentleClean).join(' '), /clean and quiet/);
   const notGentle = find((s) => modelDecision(s).strength === 'max', 'file at Maximum');
@@ -331,7 +321,7 @@ check('recordings: a phone-quality, an echoey and a too-loud recording get their
   assert.ok(phone.st.bandwidthHz <= 6600 && phone.st.clipFraction === 0, JSON.stringify(phone.st));
   assert.equal(phone.r.rebuild, true);
   assert.ok(said(phone.r).includes(SAY.phone) && !said(phone.r).includes(SAY.dull) && !said(phone.r).includes(SAY.next) && said(phone.r).at(-1) === SAY.fix, said(phone.r).join(' | '));
-  assert.ok(!phone.r.reasons.includes(SAY.restore) && !/restore the highs/.test(phone.r.line)); // rebuilt, not restored
+  assert.ok(!phone.r.reasons.includes(RESTORE) && !/highs/i.test(phone.r.line)); // rebuilt
 
   const room = heard(echoedBy(noisy(8, 40)));
   assert.ok(room.st.dropDb < 10.5 && room.st.clipFraction === 0, JSON.stringify(room.st));
@@ -364,7 +354,7 @@ check('files: the strength sentence says "With it, ..." where the stronger remov
 check('files: a file with no speech, or a short one, or without a noise figure, is not sent to the model', () => {
   const s = gridStats()[0];
   const none = recommendForFile({ ...s, hasSpeech: false }, {});
-  assert.deepEqual([none.noSpeech, none.strength, none.rebuild, none.restoreHighs, none.heavy, none.subs], [true, 'balanced', false, false, false, null]);
+  assert.deepEqual([none.noSpeech, none.strength, none.rebuild, none.heavy, none.subs], [true, 'balanced', false, false, null]);
   assert.equal(recommendForFile({ ...s, seconds: 1 }, {}), null);
   assert.equal(recommendForFile({ ...s, noiseDb: null }, {}), null);
   assert.equal(recommendForFile({ ...s, tiltDb: null, dropDb: null }, {}).noise, 'denoise'); // missing measurements still give advice

@@ -2,9 +2,9 @@
 """Time one model on the CPU or the GPU and compare the output with the CPU's (docs/research/gpu-2026-10.md).
 
     LD_LIBRARY_PATH=<venv-gpu CUDA libs> PYTHONPATH=common ~/audio-cleaner/venv-gpu/bin/python tools/bench_gpu.py \\
-        dpdfnet|sidon|bwe|parakeet --device cuda --wav noisy.wav --seconds 150 [--save out.npy] [--compare cpu_out.npy]
+        dpdfnet|sidon|parakeet --device cuda --wav noisy.wav --seconds 150 [--save out.npy] [--compare cpu_out.npy]
 
-dpdfnet, sidon and bwe take a 48 kHz wav, parakeet a 16 kHz one. It prints wall time, process CPU time, the card's peak
+dpdfnet and sidon take a 48 kHz wav, parakeet a 16 kHz one. It prints wall time, process CPU time, the card's peak
 memory over the whole run (nvidia-smi, whole card: nothing else may use it), and the SNR against `--compare`.
 Check `nvidia-smi` first: a Parakeet job in the GPU worker holds 3.3 GB."""
 from __future__ import annotations
@@ -56,13 +56,12 @@ class GpuMonitor:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("model", choices=["dpdfnet", "sidon", "bwe", "parakeet"])
+    ap.add_argument("model", choices=["dpdfnet", "sidon", "parakeet"])
     ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     ap.add_argument("--wav", required=True)
     ap.add_argument("--seconds", type=float, default=150)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--models", default=str(Path.home() / "audio-cleaner" / "models"))
-    ap.add_argument("--bwe-model", default="8k")
     ap.add_argument("--save")
     ap.add_argument("--compare")
     a = ap.parse_args()
@@ -80,10 +79,6 @@ def main() -> None:
         from acw_common import restore
 
         run = lambda y: restore.restore(y, models / "sidon", threads=a.threads, **kw)  # noqa: E731
-    elif a.model == "bwe":
-        from acw_common import bwe
-
-        run = lambda y: bwe.extend(y, models / "ap-bwe", threads=a.threads, model=a.bwe_model, **kw)  # noqa: E731
     else:
         from acw_common import transcribe
 

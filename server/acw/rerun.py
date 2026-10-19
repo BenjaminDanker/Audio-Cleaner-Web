@@ -5,8 +5,8 @@ removal at full strength (`kept-noise.flac`) or the rebuilt voice (`kept-rebuilt
 (`segments.json`, `segments.<lang>.json`) and its results. A re-run is a new job (`source_job_id`, `root_job_id`) that
 starts from the latest of those copies and runs only the steps whose inputs changed:
 
-  strength, restore highs, Leveling, loudness   from the kept noise removal: blend, highs, Leveling (no noise model); Restore
-                                                highs and Leveling are paid whenever they run
+  strength, Leveling, loudness                  from the kept noise removal: blend, Leveling (no noise model); Leveling is paid
+                                                whenever it runs
   Voice rebuild on                              the rebuild from the upload, at its full price (it is the expensive step)
   Voice rebuild off                             the kept noise removal, or noise removal from the upload (paid) when the job
                                                 never had one
@@ -198,12 +198,10 @@ def plan_rerun(src_params: dict, src_outputs_audio: dict | None, d_tier: str | N
         levels_same = _levels_same(new, old)
         same_audio_file = can_reuse and new["echo_reference_track"] == old["echo_reference_track"]
         if d_tier == pricing.NO_DENOISE:
-            if d_old == pricing.NO_DENOISE and same_audio_file and levels_same and new["restore_highs"] == old["restore_highs"]:
+            if d_old == pricing.NO_DENOISE and same_audio_file and levels_same:
                 clean = "reuse"
             else:
                 clean = "full"
-                if new["restore_highs"]:
-                    paid.append("highs")
                 if new["leveling"]:
                     paid.append("leveling")
         elif d_tier == "rebuild":
@@ -224,20 +222,16 @@ def plan_rerun(src_params: dict, src_outputs_audio: dict | None, d_tier: str | N
             entry = kept.get("noise")
             if entry and entry["echo"] == new["echo_reference_track"] and new["noise"] in (entry["noise_opt"], entry["profile"]):
                 same_result = (d_old == "standard" and same_audio_file and levels_same and new["atten_lim_db"] == old["atten_lim_db"]
-                               and new["restore_highs"] == old["restore_highs"] and new["noise"] == old["noise"])
+                               and new["noise"] == old["noise"])
                 if same_result:
                     clean = "reuse"
                 else:
                     clean = "denoised"
-                    if new["restore_highs"]:
-                        paid.append("highs")
                     if new["leveling"]:
                         paid.append("leveling")
             else:
                 clean = "full"
                 paid.append("denoise")
-                if new["restore_highs"]:
-                    paid.append("highs")
                 if new["leveling"]:
                     paid.append("leveling")
         if clean == "reuse":
@@ -273,9 +267,16 @@ def plan_rerun(src_params: dict, src_outputs_audio: dict | None, d_tier: str | N
             "work": work, "carry": carry, "reuse_segments": linked_seg}
 
 
+AUTOMATIC_RERUN = ("Automatic settings are for a first run. The choices they made are this job’s settings now: change them like any "
+                   "other (strength, Leveling, or the Voice rebuild tier).")
+
+
 def merged_options(src_params: dict, options: dict | None) -> dict:
-    """The source's choices with the changes asked for on top."""
-    return {**src_params["options"], **(options or {})}
+    """The source's choices with the changes asked for on top. A job made with automatic settings carries the choices they made
+    (its options are the decided ones); the automatic mode itself does not go on: asking for it again is refused."""
+    if (options or {}).get("automatic"):
+        raise jobs.JobError(AUTOMATIC_RERUN)
+    return {**src_params["options"], **(options or {}), "automatic": False}
 
 
 def _tiers(src_params: dict, denoise_tier, transcribe_tier) -> tuple[str, str | None, str | None]:
@@ -323,31 +324,6 @@ def _prepare(user_id: str, job_id: str, api_key_id: str | None, denoise_tier, tr
     return src, sp, kind, d_tier, t_tier, new, seconds, plan, files
 
 
-def _lines(rates: dict[str, int], d_tier: str | None, t_tier: str | None, seconds: float, n_translate: int) -> list[dict]:
-    lines = []
-    if "denoise" in rates:
-        r = pricing.rate("denoise", d_tier)
-        lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("denoise", d_tier, seconds, rates["denoise"])})
-    if "highs" in rates:
-        r = pricing.rate("highs", "standard")
-        lines.append({"item": "highs", "label": r.label, "quantity": 1, "usdPerMinute": rates["highs"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("highs", "standard", seconds, rates["highs"])})
-    if "leveling" in rates:
-        r = pricing.rate("leveling", "standard")
-        lines.append({"item": "leveling", "label": r.label, "quantity": 1, "usdPerMinute": rates["leveling"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("leveling", "standard", seconds, rates["leveling"])})
-    if "transcribe" in rates:
-        r = pricing.rate("transcribe", t_tier)
-        lines.append({"item": "transcribe", "label": r.label, "quantity": 1, "usdPerMinute": rates["transcribe"] / pricing.MICROS_PER_USD,
-                      "micros": pricing.cost_micros("transcribe", t_tier, seconds, rates["transcribe"])})
-    if "translate" in rates:
-        r = pricing.rate("transcribe_translate", "standard")
-        lines.append({"item": "translate", "label": r.label, "quantity": n_translate, "usdPerMinute": rates["translate"] / pricing.MICROS_PER_USD,
-                      "micros": n_translate * pricing.cost_micros("transcribe_translate", "standard", seconds, rates["translate"])})
-    return lines
-
-
 def estimate(user_id: str, job_id: str, api_key_id: str | None, denoise_tier: str | None, transcribe_tier: str | None, options: dict | None) -> dict:
     """What a re-run with these choices does and costs, before it exists (nothing is held or stored): the same checks and the
     same price as `create_rerun`. POST /api/jobs/{id}/rerun/estimate."""
@@ -361,7 +337,7 @@ def estimate(user_id: str, job_id: str, api_key_id: str | None, denoise_tier: st
         "estCostUsd": total / pricing.MICROS_PER_USD,
         "free": total == 0,
         "durationSeconds": seconds,
-        "lines": _lines(rates, d_tier, t_tier, seconds, n),
+        "lines": jobs.price_lines(rates, d_tier, t_tier, seconds, n),
         "steps": {"clean": plan["clean"], "transcribe": plan["transcribe"], "translate": plan["translate_new"]},
         "expiresAt": src["expires_at"],
         "options": new,
@@ -393,8 +369,6 @@ def rerun_label(rates: dict[str, int], d_tier: str | None, t_tier: str | None) -
     parts = []
     if "denoise" in rates:
         parts.append("Voice rebuild" if d_tier == "rebuild" else "Denoising")
-    if "highs" in rates:
-        parts.append("Restore highs")
     if "leveling" in rates:
         parts.append("Leveling")
     if "transcribe" in rates:

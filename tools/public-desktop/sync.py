@@ -40,7 +40,7 @@ from pathlib import Path
 SOURCE = Path(__file__).resolve().parents[2]
 TEMPLATE = "tools/public-desktop/template"
 
-# Copied as they are (paths relative to the repository root). common/ is all of it: the desktop app imports bwe, captions,
+# Copied as they are (paths relative to the repository root). common/ is all of it: the desktop app imports captions,
 # clarity, dfn, dpdfnet, ffmpeg, pipeline, restore and transcribe, and those import aec and gpu; its tests are part of the
 # desktop build's test run. native/deepfilter/ is the libDF build (build.sh, Cargo.lock, tract-0.23.patch) that
 # packaging/prepare_vendor.py and the build workflow use; its readme and tests come along. desktop/ holds the app, the

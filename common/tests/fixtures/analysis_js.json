@@ -21,7 +21,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.98425212153455,
@@ -29,14 +28,12 @@
      0.0027713819239418343,
      0.0064316883991987
     ],
-    "rebuild": 0.8890522857147494,
-    "restoreHighs": 0.14472483471514372
+    "rebuild": 0.8890522857147494
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "unclear",
@@ -67,7 +64,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9846543004028838,
@@ -75,14 +71,12 @@
      0.005031431899714933,
      0.0033477839367096777
     ],
-    "rebuild": 0.9738067721568734,
-    "restoreHighs": 0.06518769754075862
+    "rebuild": 0.9738067721568734
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "echoey",
@@ -113,7 +107,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9934370501954639,
@@ -121,14 +114,12 @@
      0.0011560530940785219,
      0.0013755693227469256
     ],
-    "rebuild": 0.7747118667119958,
-    "restoreHighs": 0.28370807414084803
+    "rebuild": 0.7747118667119958
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "muffled",
@@ -159,7 +150,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": true,
    "p": {
     "strength": [
      0.9966244204974407,
@@ -167,14 +157,12 @@
      0.000738559943795587,
      0.0005018223980454404
     ],
-    "rebuild": 0.6591291887533406,
-    "restoreHighs": 0.9799122332624437
+    "rebuild": 0.6591291887533406
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": true,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "phone",
@@ -205,7 +193,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.6286699550194732,
@@ -213,14 +200,12 @@
      0.14652387803701702,
      0.0983568710058572
     ],
-    "rebuild": 0.8519784043717356,
-    "restoreHighs": 0.2554323718173811
+    "rebuild": 0.8519784043717356
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "unclear",
@@ -251,7 +236,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9795405746346284,
@@ -259,14 +243,12 @@
      0.002575693093313044,
      0.01245845688706125
     ],
-    "rebuild": 0.7464909554742618,
-    "restoreHighs": 0.03266540127899027
+    "rebuild": 0.7464909554742618
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "distorted",
@@ -297,7 +279,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9209402579212773,
@@ -305,14 +286,12 @@
      0.0288795336954949,
      0.03009042959722758
     ],
-    "rebuild": 0.8080340211219591,
-    "restoreHighs": 0.14216066073726352
+    "rebuild": 0.8080340211219591
    }
   },
   "reco": {
    "strength": "balanced",
    "rebuild": false,
-   "restoreHighs": false,
    "heavy": false,
    "noSpeech": true,
    "rebuildReason": null,
@@ -341,7 +320,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.952162264705004,
@@ -349,14 +327,12 @@
      0.010341650367832442,
      0.021206833536918646
     ],
-    "rebuild": 0.9585950784172405,
-    "restoreHighs": 0.23730861620713814
+    "rebuild": 0.9585950784172405
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "unclear",
@@ -387,7 +363,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.984844644397031,
@@ -395,14 +370,12 @@
      0.0024947584410661165,
      0.006275115600938175
     ],
-    "rebuild": 0.8835186266995823,
-    "restoreHighs": 0.1366719756629509
+    "rebuild": 0.8835186266995823
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "unclear",
@@ -433,7 +406,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.45531536161290515,
@@ -441,14 +413,12 @@
      0.08878362956984483,
      0.35233353913488624
     ],
-    "rebuild": 0.856111385367168,
-    "restoreHighs": 0.14335850311382722
+    "rebuild": 0.856111385367168
    }
   },
   "reco": {
    "strength": "balanced",
    "rebuild": false,
-   "restoreHighs": false,
    "heavy": false,
    "noSpeech": true,
    "rebuildReason": null,
@@ -477,7 +447,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": false,
-   "restoreHighs": true,
    "p": {
     "strength": [
      0.4177174210657741,
@@ -485,14 +454,12 @@
      0.3774160567578211,
      0.04904999959515254
     ],
-    "rebuild": 0.3958584086079795,
-    "restoreHighs": 0.9317763792960521
+    "rebuild": 0.3958584086079795
    }
   },
   "reco": {
    "strength": "balanced",
    "rebuild": false,
-   "restoreHighs": false,
    "heavy": false,
    "noSpeech": true,
    "rebuildReason": null,
@@ -521,7 +488,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9783060793299525,
@@ -529,8 +495,7 @@
      0.002644123381522342,
      0.011580024474087583
     ],
-    "rebuild": 0.8778665189558758,
-    "restoreHighs": 0.12301614240341535
+    "rebuild": 0.8778665189558758
    }
   },
   "reco": null
@@ -557,7 +522,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9796086122266201,
@@ -565,14 +529,12 @@
      0.004371770678437252,
      0.007489260916413852
     ],
-    "rebuild": 0.8521043451688022,
-    "restoreHighs": 0.18332794718450002
+    "rebuild": 0.8521043451688022
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "unclear",
@@ -603,7 +565,6 @@
   "model": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "p": {
     "strength": [
      0.9710079044070026,
@@ -611,14 +572,12 @@
      0.005544589618296406,
      0.008237011604129282
     ],
-    "rebuild": 0.9694569824072349,
-    "restoreHighs": 0.15385736145378767
+    "rebuild": 0.9694569824072349
    }
   },
   "reco": {
    "strength": "gentle",
    "rebuild": true,
-   "restoreHighs": false,
    "heavy": true,
    "noSpeech": false,
    "rebuildReason": "unclear",

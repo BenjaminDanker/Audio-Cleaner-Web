@@ -1,7 +1,7 @@
 // "Recommended for this file": turns the measurements of src/media/analysis.js into choices and the reasons for them, in plain
 // words (the copy rules of tests/copy.mjs apply: no model names, no jargon).
 //
-// The noise strength, voice rebuild and restore highs come from the trained model (src/reco-model.js), which learned them from
+// The noise strength and the voice rebuild come from the trained model (src/reco-model.js), which learned them from
 // what actually came out of the noise remover and the voice rebuild. Voice rebuild is also chosen by the measurements alone
 // where the voice sounds echoey or muffled, like a phone call, or distorts from being recorded too loud (more often than the
 // model would): it re-creates the whole voice, which fixes all of these and sounds fuller and clearer nearly every time.
@@ -15,14 +15,14 @@ export { liveSettingsFor, roomChanges, strengthFor, T } from './recommend-room.j
  * @param {object} stats Analyser.result()
  * @param {{language?: string}} ctx language: what is picked for the subtitles ('' = detect automatically)
  * @returns {null | {
- *   noise: 'off'|'browser'|'denoise', strength: string, heavy: boolean, restoreHighs: boolean, rebuild: boolean, leveling: boolean,
+ *   noise: 'off'|'browser'|'denoise', strength: string, heavy: boolean, rebuild: boolean, leveling: boolean,
  *   subs: 'standard'|'accurate'|null, nothing: boolean, noSpeech: boolean, reasons: string[], line: string }}
  */
 export function recommendForFile(stats, ctx = {}) {
   if (!stats || !(stats.seconds >= 2) || stats.noiseDb == null) return null;
   if (!stats.hasSpeech) {
     return {
-      noise: 'denoise', strength: 'balanced', heavy: false, restoreHighs: false, rebuild: false, leveling: true, subs: null, nothing: false, noSpeech: true,
+      noise: 'denoise', strength: 'balanced', heavy: false, rebuild: false, leveling: true, subs: null, nothing: false, noSpeech: true,
       reasons: ['We could hardly hear anyone speaking in this file, so there is nothing to write down: no subtitles.'],
       line: 'Denoising (Balanced), leveling, no subtitles (we could hardly hear anyone speaking)',
     };
@@ -35,7 +35,6 @@ export function recommendForFile(stats, ctx = {}) {
   const dull = !phone && stats.tiltDb != null && stats.tiltDb <= T.DULL_TILT_DB;
   const clipped = stats.clipFraction > T.CLIP_FRACTION;
   const rebuild = echoey || dull || phone || clipped || m.rebuild;
-  const restoreHighs = m.restoreHighs;
   const quiet = stats.loudnessLufs != null && stats.loudnessLufs < T.QUIET_LUFS;
   const loud = stats.loudnessLufs != null && stats.loudnessLufs > T.LOUD_LUFS;
   // Automatic best settings choose among the paid options, the best one for every feature: Denoising (or Voice rebuild
@@ -60,8 +59,6 @@ export function recommendForFile(stats, ctx = {}) {
     if (!echoey && !dull && !phone && !clipped) reasons.push('The voice has lost some of its clarity, from echo or from being saved as a very small file.');
     reasons.push('Rebuilding the voice fixes this. Listen to the result before you publish.');
     if (clipped) reasons.push('Next time, turn the microphone level down.');
-  } else if (restoreHighs) {
-    reasons.push('Some of the high sounds are missing. Restoring them makes the voice clearer.');
   }
   if (quiet) reasons.push('It is very quiet: Leveling brings it up to a normal level.');
   if (loud) reasons.push('It is very loud: Leveling brings it down to a normal level.');
@@ -79,8 +76,7 @@ export function recommendForFile(stats, ctx = {}) {
   const leveling = true;
   const nothing = false;
   const bits = [rebuild ? 'Voice rebuild' : `Denoising (${strengthName(strength)})`];
-  if (!rebuild && restoreHighs) bits.push('restore the highs');
   bits.push('leveling', `${subs === 'accurate' ? 'Extra accurate' : 'Standard'} subtitles`);
-  return { noise, strength, heavy: v.heavy && !v.clean, restoreHighs, rebuild, leveling, subs, nothing, noSpeech: false, reasons, line: bits.join(', ') };
+  return { noise, strength, heavy: v.heavy && !v.clean, rebuild, leveling, subs, nothing, noSpeech: false, reasons, line: bits.join(', ') };
 }
 

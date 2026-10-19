@@ -1,14 +1,14 @@
 // The automatic settings model: gradient-boosted trees (research/auto-settings) evaluated on the measurements that
 // src/media/analysis.js (Analyser.result()) already takes, so nothing is downloaded and it takes well under a millisecond.
 // It was trained on what actually came out: the noise strength is the gentlest one whose result scores as well as the
-// strongest, voice rebuild and restore highs are what the damaged recordings needed. src/recommend.js decides with it.
+// strongest, and voice rebuild is what the damaged recordings needed. src/recommend.js decides with it.
 import MODEL from './reco-model-data.js';
 
 /** The measurements, in the order the trees use them (hasSpeech as 0/1; a missing one is NaN). */
 export const FEATURES = ['floorDb', 'levelDb', 'peakDb', 'silentFraction', 'speechFraction', 'bandDynDb', 'hasSpeech',
   'bandwidthHz', 'tiltDb', 'dropDb', 'clipFraction', 'peak', 'loudnessLufs', 'noiseDb'];
 
-if (MODEL.version !== 2 || MODEL.features.join() !== FEATURES.join()) throw new Error('reco-model-data.js does not match reco-model.js');
+if (MODEL.version !== 3 || MODEL.features.join() !== FEATURES.join()) throw new Error('reco-model-data.js does not match reco-model.js');
 
 function featureVector(stats) {
   return FEATURES.map((f) => {
@@ -38,8 +38,7 @@ const sigmoid = (v) => 1 / (1 + Math.exp(-v));
 
 /**
  * @param {object} stats Analyser.result()
- * @returns {{strength: 'gentle'|'balanced'|'strong'|'max', rebuild: boolean, restoreHighs: boolean,
- *   p: {strength: number[], rebuild: number, restoreHighs: number}}}
+ * @returns {{strength: 'gentle'|'balanced'|'strong'|'max', rebuild: boolean, p: {strength: number[], rebuild: number}}}
  */
 export function modelDecision(stats) {
   const x = featureVector(stats);
@@ -50,11 +49,9 @@ export function modelDecision(stats) {
   const strength = e.map((v) => v / sum);
   const best = strength.indexOf(Math.max(...strength));
   const rebuild = sigmoid(scores(MODEL.rebuild, x)[0]);
-  const restoreHighs = sigmoid(scores(MODEL.restore, x)[0]);
   return {
     strength: MODEL.strength_classes[best],
     rebuild: rebuild > 0.5,
-    restoreHighs: restoreHighs > 0.5,
-    p: { strength, rebuild, restoreHighs },
+    p: { strength, rebuild },
   };
 }

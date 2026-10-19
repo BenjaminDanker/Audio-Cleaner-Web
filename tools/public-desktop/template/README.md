@@ -8,8 +8,7 @@ uploaded: after setup it works offline.
   for recordings where the noise is nearly as loud as the voice
 - **Automatic best settings**: each file is listened to first and gets the cleanup that fits it
 - **Leveling**: evens out the voice and sets the loudness for podcasts, YouTube or broadcast
-- **Restores missing highs** of phone calls and other dull, low-quality recordings
-- **Rebuilds the voice** of recordings made in echoey rooms
+- **Rebuilds the voice** of recordings made in echoey rooms, and of phone calls and other dull, low-quality recordings
 - **Removes speaker echo** when your recording has the desktop sound on its own audio track (OBS can record that)
 - **Subtitles and transcripts**: SRT, VTT or plain text, or put right into the video, in 28 languages
 - Video stays as it is: only the sound is replaced, and you can save just the sound, another file type or a smaller
@@ -29,7 +28,7 @@ Get the installer from the [latest release](https://github.com/BenjaminDanker/Au
 Not sure which Mac you have? Apple menu > About This Mac: "Chip" means Apple silicon, "Processor" means Intel. macOS 14
 or newer is needed.
 
-Setup downloads the models once (about 2.6 GB), from Hugging Face. The app looks for a newer version when it starts and updates
+Setup downloads the models once (about 2.1 GB), from Hugging Face. The app looks for a newer version when it starts and updates
 itself; you can switch that off in Settings.
 
 ## Build it yourself
@@ -126,7 +125,7 @@ Each of these starts with a comment that says how to run it on its own:
 
 - `desktop/`: the app. `audio_cleaner_desktop/engine.py` cleans one file, `gui/` is the window (PySide6), `cli.py` the
   command line; `packaging/` builds the installers; `tests/`
-- `common/`: the cleaning itself (`acw_common`): noise removal, leveling, restoring highs, rebuilding the voice,
+- `common/`: the cleaning itself (`acw_common`): noise removal, leveling, rebuilding the voice,
   echo removal, subtitles, FFmpeg handling
 - `native/deepfilter/`: how the DeepFilterNet library is built
 

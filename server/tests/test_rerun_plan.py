@@ -42,18 +42,6 @@ TRANS = dict(kind="denoise_transcribe", t="local", segments={"language": "en"}, 
     pytest.param(PLAIN, {}, "reuse", [], False, id="same-choices-nothing-to-do"),
     pytest.param(PLAIN, {"atten_lim_db": 24}, "denoised", ["leveling"], True, id="strength-with-leveling-on-pays-leveling"),
     pytest.param(FREE, {"atten_lim_db": 24}, "denoised", [], True, id="strength-only-is-free"),
-    pytest.param(FREE, {"restore_highs": False}, "reuse", [], False, id="highs-off-stays-off"),
-    pytest.param(FREE, {"restore_highs": True}, "denoised", ["highs"], True, id="restore-highs-on-is-charged-at-the-highs-rate"),
-    pytest.param(PLAIN, {"restore_highs": True}, "denoised", ["highs", "leveling"], True, id="highs-on-with-leveling-pays-both"),
-    pytest.param(PLAIN, {"restore_highs": True, "leveling": False}, "denoised", ["highs"], True, id="highs-on-leveling-off-pays-highs-only"),
-    pytest.param(dict(restore_highs=True), {"restore_highs": False}, "denoised", ["leveling"], True, id="highs-turned-off-is-free"),
-    pytest.param(dict(restore_highs=True, leveling=False), {"restore_highs": False}, "denoised", [], True, id="highs-turned-off-nothing-left-to-pay"),
-    pytest.param(dict(restore_highs=True), {}, "reuse", [], False, id="same-highs-choice-nothing-to-do"),
-    pytest.param(dict(restore_highs=True), {"atten_lim_db": 24}, "denoised", ["highs", "leveling"], True, id="strength-with-highs-on-pays-highs-again"),
-    pytest.param(dict(restore_highs=True, leveling=False), {"atten_lim_db": 24}, "denoised", ["highs"], True, id="strength-with-only-highs-on"),
-    pytest.param(dict(restore_highs=True), {"noise": "heavy"}, "full", ["denoise", "highs", "leveling"], True, id="other-noise-kind-with-highs"),
-    pytest.param(dict(restore_highs=True), {"echo_reference_track": True}, "full", ["denoise", "highs", "leveling"], True, id="echo-on-with-highs"),
-    pytest.param(dict(restore_highs=True), {"audio_format": "wav"}, "reuse", [], True, id="file-type-with-highs-on-is-free"),
     pytest.param(FREE, {"leveling": True}, "denoised", ["leveling"], True, id="leveling-on-pays-leveling"),
     pytest.param(PLAIN, {"leveling": False}, "denoised", [], True, id="leveling-off-is-free"),
     pytest.param(PLAIN, {"loudness_lufs": -20.0}, "denoised", ["leveling"], True, id="loudness-with-leveling-pays-leveling"),
@@ -125,40 +113,16 @@ def test_leveling_on_its_own_is_always_paid_when_it_changes():
     assert plan["carry"] == ["noise", "input"]  # the kept noise removal stays for a later change back
 
 
-def test_restore_highs_on_its_own_is_part_of_the_reuse_check_and_paid_when_it_runs():
-    """Noise tier off: reuse needs the same Restore highs choice; highs and Leveling are each paid when they run again."""
-    highs_only = source(d="off", restore_highs=True, leveling=False)
-    plan = replan(highs_only)
-    assert (plan["clean"], plan["paid"], plan["work"]) == ("reuse", [], False)
-    assert replan(highs_only, audio_format="wav")["work"] is True and replan(highs_only, audio_format="wav")["paid"] == []
-    plan = replan(highs_only, leveling=True)
-    assert (plan["clean"], plan["paid"], plan["work"]) == ("full", ["highs", "leveling"], True)  # runs from the upload: both again
-    plan = replan(highs_only, restore_highs=False, leveling=True)
-    assert (plan["clean"], plan["paid"]) == ("full", ["leveling"])
+def test_the_noise_tier_off_reuses_a_result_with_the_same_leveling_and_pays_for_leveling_when_it_runs():
+    """Leveling on its own: reuse needs the same Leveling choice; Leveling is paid when it runs again; an old option that is no longer
+    one (restore_highs in the options of a job from before) changes nothing."""
     leveling_only = source(d="off")
-    plan = replan(leveling_only, restore_highs=True)
-    assert (plan["clean"], plan["paid"]) == ("full", ["highs", "leveling"])
-    assert replan(leveling_only, restore_highs=True, leveling=False)["paid"] == ["highs"]
-    # from Denoising to no noise removal, highs on: nothing kept is used
-    plan = replan(source(restore_highs=True), "off")
-    assert (plan["clean"], plan["paid"]) == ("full", ["highs", "leveling"])
-    assert replan(source(restore_highs=True), "off", leveling=False)["paid"] == ["highs"]
-
-
-def test_restore_highs_never_applies_to_the_voice_rebuild():
-    """The option is stored false under a rebuild, so a re-run asking for it changes nothing and a switch to rebuild drops it."""
-    rebuilt = source(d="rebuild", rebuilt=True)
-    assert rebuilt["options"]["restore_highs"] is False
-    plan = replan(rebuilt, restore_highs=True)
-    assert (plan["clean"], plan["paid"], plan["work"]) == ("reuse", [], False)
-    plan = replan(source(restore_highs=True), "rebuild")
-    assert (plan["clean"], plan["paid"]) == ("full", ["denoise", "leveling"])
-    carried = source(restore_highs=True, kept=kept_record(60.0, noise=True, rebuilt=True))
-    assert replan(carried, "rebuild")["paid"] == ["leveling"] and replan(carried, "rebuild")["clean"] == "rebuilt"
-    # and back from a rebuild to Denoising with highs on: from the kept noise removal when there is one
-    both = source(d="rebuild", kept=kept_record(60.0, noise=True, rebuilt=True), leveling=False)
-    plan = replan(both, "standard", restore_highs=True)
-    assert (plan["clean"], plan["paid"]) == ("denoised", ["highs"])
+    assert replan(leveling_only)["clean"] == "reuse"
+    assert replan(leveling_only, restore_highs=True)["clean"] == "reuse"  # not an option any more: ignored
+    old_job = source(d="off", restore_highs=True)
+    assert "restore_highs" not in old_job["options"] and replan(old_job)["clean"] == "reuse"
+    stored_before = {**leveling_only, "options": {**leveling_only["options"], "restore_highs": True}}  # a job stored by an older version
+    assert replan(stored_before)["clean"] == "reuse"  # (its extra key is just not read)
 
 
 def test_a_missing_file_changes_what_can_be_reused():
@@ -286,16 +250,14 @@ def test_rerun_rates_only_include_the_steps_that_run_at_todays_prices():
     assert r("standard", None, []) == {}
     assert r("standard", None, ["leveling"]) == {"leveling": 1_000}
     assert r("standard", None, ["denoise", "leveling"]) == {"denoise": 9_000, "leveling": 1_000}
-    assert r("standard", None, ["denoise", "highs", "leveling"]) == {"denoise": 9_000, "highs": 70_000, "leveling": 1_000}
-    assert r("standard", None, ["highs"]) == {"highs": 70_000}
-    assert r("off", None, ["highs", "leveling"]) == {"highs": 70_000, "leveling": 1_000}
+    assert r("standard", None, ["highs"]) == {}  # (a step that does not exist any more prices nothing)
     assert r("rebuild", None, ["denoise"]) == {"denoise": 30_000}
     assert r("off", None, ["denoise", "leveling"]) == {"leveling": 1_000}  # no noise removal to price
     assert r("standard", "local", ["transcribe"]) == {"transcribe": 4_000}
     assert r("standard", "premium", ["transcribe", "translate"]) == {"transcribe": 15_000, "translate": 4_000}
     assert r(None, "local", ["translate"]) == {"translate": 4_000}
     assert r("standard", None, ["transcribe"]) == {}  # no subtitle tier: nothing to price
-    assert pricing.RERUN_ITEMS == ("denoise", "highs", "leveling", "transcribe", "translate")
+    assert pricing.RERUN_ITEMS == ("denoise", "leveling", "transcribe", "translate")
 
 
 def test_rerun_cost_is_per_second_rounded_up_per_step_and_per_language():
@@ -309,8 +271,8 @@ def test_rerun_cost_is_per_second_rounded_up_per_step_and_per_language():
     assert cost({"denoise": 9_000, "leveling": 1_000}, 600) == 90_000 + 10_000
     # each step is rounded up separately, then added
     assert cost({"denoise": 9_000, "leveling": 1_000}, 1) == 150 + 17
-    assert cost({"highs": 70_000}, 60) == 70_000 and cost({"highs": 70_000}, 14) == 16_334  # 70000 * 14 / 60 = 16333.3, rounded up
-    assert cost({"denoise": 9_000, "highs": 70_000, "leveling": 1_000}, 15) == 2_250 + 17_500 + 250
+    assert cost({"denoise": 9_000, "leveling": 1_000}, 15) == 2_250 + 250
+    assert cost({"highs": 70_000}, 60) == 0  # (an old pinned line for a step that does not exist any more is not charged)
     assert cost({"translate": 4_000}, 60, 2) == 8_000 and cost({"translate": 4_000}, 60, 0) == 0
     assert cost({"translate": 4_000}, 30, 3) == 3 * 2_000
     assert cost({"transcribe": 15_000, "translate": 4_000}, 90, 2) == 22_500 + 2 * 6_000
@@ -320,9 +282,9 @@ def test_rerun_cost_is_per_second_rounded_up_per_step_and_per_language():
 def test_a_rerun_that_runs_everything_costs_what_the_same_first_job_costs():
     """Paying for every step again is the price of a new job with the same choices."""
     rates = pricing.rerun_rates("standard", "local", list(pricing.RERUN_ITEMS))
-    first = pricing.job_rates("denoise_transcribe", "standard", "local", 2, True, True)
+    first = pricing.job_rates("denoise_transcribe", "standard", "local", 2, True)
     assert rates == first and set(rates) == set(pricing.RERUN_ITEMS)
-    assert pricing.rerun_cost_micros(rates, 123.4, 2) == pricing.job_cost_micros("denoise_transcribe", "standard", "local", 123.4, first, 2, True, True)
+    assert pricing.rerun_cost_micros(rates, 123.4, 2) == pricing.job_cost_micros("denoise_transcribe", "standard", "local", 123.4, first, 2, True)
 
 
 # ---------------------------------------------------------------------------------------- labels
@@ -334,10 +296,7 @@ def test_the_label_names_the_steps_that_ran_again():
     assert lab({"leveling": 1_000}, "standard", None) == "Changed and saved again (Leveling)"
     assert lab({"denoise": 9_000, "leveling": 1_000}, "standard", None) == "Changed and saved again (Denoising + Leveling)"
     assert lab({"denoise": 30_000}, "rebuild", None) == "Changed and saved again (Voice rebuild)"
-    assert lab({"highs": 70_000}, "standard", None) == "Changed and saved again (Restore highs)"
-    assert lab({"highs": 70_000, "leveling": 1_000}, "off", None) == "Changed and saved again (Restore highs + Leveling)"
-    assert lab({"denoise": 9_000, "highs": 70_000, "leveling": 1_000}, "standard", None) == \
-        "Changed and saved again (Denoising + Restore highs + Leveling)"
+    assert lab({"leveling": 1_000}, "off", None) == "Changed and saved again (Leveling)"
     assert lab({"transcribe": 4_000}, "standard", "local") == "Changed and saved again (Subtitles & transcript)"
     assert lab({"transcribe": 15_000}, None, "premium") == "Changed and saved again (Subtitles & transcript, extra accurate)"
     assert lab({"translate": 4_000}, None, "local") == "Changed and saved again (Translated subtitles)"
@@ -612,17 +571,13 @@ def test_a_rerun_is_timed_and_sized_for_the_work_it_does():
     full = jobs.job_seconds(_job_row(job_params("denoise", "standard", None, {"noise": "light"})))
     same_as_full = jobs.job_seconds(_job_row(_rerun_params("full", noise="light")))
     blend = jobs.job_seconds(_job_row(_rerun_params("denoised", noise="light")))
-    blend_highs = jobs.job_seconds(_job_row(_rerun_params("denoised", noise="light", restore_highs=True)))
     rebuilt = jobs.job_seconds(_job_row(_rerun_params("rebuilt", d="rebuild")))
     reuse = jobs.job_seconds(_job_row(_rerun_params("reuse")))
     assert same_as_full == full
-    assert reuse == jobs.MODEL_LOAD_SECONDS < rebuilt <= blend < blend_highs < jobs.job_seconds(
-        _job_row(job_params("denoise", "standard", None, {"noise": "light", "restore_highs": True})))
-    assert blend < full
-    assert blend == jobs.MODEL_LOAD_SECONDS + jobs.SPEED["leveling"] * 60 * 2  # restoring highs is off by default: Leveling only
-    assert blend_highs == jobs.MODEL_LOAD_SECONDS + (jobs.SPEED["highs"] + jobs.SPEED["leveling"]) * 60 * 2
-    off_highs = jobs.job_seconds(_job_row(job_params("denoise", "off", None, {"restore_highs": True, "leveling": False})))
-    assert off_highs == jobs.MODEL_LOAD_SECONDS + (jobs.SPEED["highs"] + jobs.SPEED["leveling"]) * 60 * 2  # (Leveling's small share is counted)
+    assert reuse == jobs.MODEL_LOAD_SECONDS < rebuilt <= blend < full
+    assert blend == jobs.MODEL_LOAD_SECONDS + jobs.SPEED["leveling"] * 60 * 2  # Leveling only
+    leveling_alone = jobs.job_seconds(_job_row(job_params("denoise", "off", None, {})))
+    assert leveling_alone == jobs.MODEL_LOAD_SECONDS + jobs.SPEED["leveling"] * 60 * 2
     assert jobs.job_seconds(_job_row(_rerun_params("reuse", transcribe=True, t="local"), "denoise_transcribe")) == \
         jobs.MODEL_LOAD_SECONDS + jobs.SPEED["transcribe_local"] * 60
     assert jobs.job_seconds(_job_row(_rerun_params("reuse", transcribe=False, t="local"), "denoise_transcribe")) == jobs.MODEL_LOAD_SECONDS

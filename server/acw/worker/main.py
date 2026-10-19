@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import broker, db, hostload, jobs, keycaps, metrics, rerun
+from .. import automatic, broker, db, hostload, jobs, keycaps, metrics, rerun
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -77,6 +77,9 @@ def _settings_extra() -> dict:
 # The probe reads the whole file once (a fast decode that measures its real length).
 PROBE_CPU_SECONDS = 3600
 PROBE_TIMEOUT = 900
+# The measurement of an automatic job (automatic.py): a decode, about a minute of the file spread over it measured by the noise remover
+# and the browser's measurements; minutes of CPU even for a file of hours, mostly the decode.
+ANALYSE_TIMEOUT = 1800
 
 MAX_JOB_THREADS = int(os.environ.get("ACW_JOB_THREADS_MAX", "6"))
 
@@ -395,12 +398,15 @@ def _job_cost(job: dict, params: dict, seconds: float) -> int:
     # Translations: what was asked for until the job is done, then only the languages that were made.
     asked = params.get("options", {}).get("translate") or []
     made = params.get("translated", asked)
+    if automatic.pending(params):
+        # (not decided: it ends up charged for the most it can cost, which is what was held)
+        return automatic.pending_cost(job["kind"], params, seconds)
     if params.get("rerun"):
         # A re-run pays only for the steps it did again (its pinned rates are just those), and for the new languages it made.
         new = params["rerun"].get("translate_new") or []
         return pricing.rerun_cost_micros(params.get("rates") or {}, seconds, len([lang for lang in made if lang in new]))
     return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"), len(made),
-                                   "leveling" in (params.get("rates") or {}), "highs" in (params.get("rates") or {}))
+                                   "leveling" in (params.get("rates") or {}))
 
 
 # A job made with an API key must say how long its file is (an API client knows): the measured length may be this
@@ -498,6 +504,30 @@ def _complete(job: dict, d: Path, res: dict) -> None:
     metrics.job_ended(job["id"])
 
 
+def _decide(job: dict, extra: dict, duration: float) -> bool:
+    """The settings of an automatic job (automatic.py): its file is measured in a sandboxed stage, the decision is made here, and
+    the job becomes the job that was decided (tier, options, prices, estimate, hold). True when the decision is a voice rebuild and
+    this worker is not the card's: the job goes back in the queue for it and this worker is done with it."""
+    d = _write_spec(job, extra, duration)
+    res = run_stage(job, d, "analyse", ANALYSE_TIMEOUT)
+    stats = automatic.clean_stats(res.get("stats"))
+    if stats is None:
+        raise StageFailed("Processing failed; you were not charged.", "malformed measurements")
+    params = json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])
+    # The card is up when this is its worker, or when its marker says so (the same fact that lets a rebuild be ordered).
+    decision = automatic.decide(params, stats, duration, card_up=GPU_MODE or broker.gpu_worker_up())
+    if automatic.apply(job["id"], decision, duration) is None:
+        raise StageFailed("Processing failed; you were not charged.", "the job was no longer waiting for its settings")
+    chosen = decision["chosen"]
+    log.info("job %s decided: %s", job["id"], {k: chosen[k] for k in ("denoiseTier", "strength", "noise", "leveling")})
+    if decision["notice"]:
+        jobs.set_notice(job["id"], decision["notice"])
+    if decision["tier"] == "rebuild" and not GPU_MODE:
+        jobs.hand_over(job)
+        return True
+    return False
+
+
 def process(job: dict, extra: dict) -> None:
     try:
         d = _write_spec(job, extra, job.get("duration_seconds"))
@@ -507,8 +537,9 @@ def process(job: dict, extra: dict) -> None:
             _complete(job, d, res)
             return
         params = json.loads(job["params_json"])
-        if params.get("rerun"):
-            # A re-run knows its file: the source job measured it, and priced it (the hold is the price).
+        if params.get("rerun") or job["next_stage"] == "main":
+            # A re-run knows its file: the source job measured it, and priced it (the hold is the price). So does an automatic job
+            # a worker handed over to the card once it had decided on a rebuild: probed, measured, decided and priced already.
             duration = float(job["duration_seconds"])
         else:
             probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
@@ -523,6 +554,12 @@ def process(job: dict, extra: dict) -> None:
             job["duration_seconds"] = duration
             params = json.loads(job["params_json"])
             jobs.update_params(job["id"], channels=channels)
+        if automatic.pending(params):
+            if _decide(job, extra, duration):
+                return  # handed over to the card's worker
+            fresh = db.one("SELECT params_json, est_cost_micros FROM jobs WHERE id = ?", (job["id"],))  # the job it has become
+            job["params_json"], job["est_cost_micros"] = fresh["params_json"], fresh["est_cost_micros"]
+            params = json.loads(fresh["params_json"])
         d = _write_spec(job, extra, duration)
         wall = jobs.stage_limits(duration, _max_seconds(job, params))[1]
         res = run_stage(job, d, "main", wall)

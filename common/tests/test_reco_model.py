@@ -35,9 +35,9 @@ def test_the_trees_are_the_websites():
 
 def test_the_model_file_is_the_one_this_code_reads():
     m = reco_model.load()
-    assert m["version"] == reco_model.VERSION == 2 and tuple(m["features"]) == analysis.FEATURES
+    assert m["version"] == reco_model.VERSION == 3 and tuple(m["features"]) == analysis.FEATURES
     assert m["strength_classes"] == list(reco_model.STRENGTH_CLASSES)
-    assert m["noise"]["num_class"] == 4 and len(m["noise"]["trees"]) % 4 == 0 and m["rebuild"]["num_class"] == m["restore"]["num_class"] == 1
+    assert m["noise"]["num_class"] == 4 and len(m["noise"]["trees"]) % 4 == 0 and m["rebuild"]["num_class"] == 1 and "restore" not in m
     assert reco_model.MODEL_FILE.is_file() and reco_model.MODEL_FILE.parent == Path(analysis.__file__).parent
 
 
@@ -54,18 +54,17 @@ def test_a_model_that_does_not_fit_is_refused(tmp_path):
 
 def test_the_evaluator_agrees_with_the_websites_on_every_stored_set_of_measurements():
     assert len(FIXTURE) >= 400
-    outcomes = {"strength": set(), "rebuild": set(), "restore": set()}
+    outcomes = {"strength": set(), "rebuild": set()}
     for i, row in enumerate(FIXTURE):
         m = reco_model.model_decision(row["stats"])
         js = row["model"]
-        assert (m.strength, m.rebuild, m.restore_highs) == (js["strength"], js["rebuild"], js["restoreHighs"]), i
+        assert (m.strength, m.rebuild) == (js["strength"], js["rebuild"]), i
         assert list(m.p_strength) == pytest.approx(js["p"]["strength"], abs=1e-9), i
-        assert m.p_rebuild == pytest.approx(js["p"]["rebuild"], abs=1e-9) and m.p_restore_highs == pytest.approx(js["p"]["restoreHighs"], abs=1e-9), i
+        assert m.p_rebuild == pytest.approx(js["p"]["rebuild"], abs=1e-9), i
         outcomes["strength"].add(m.strength)
         outcomes["rebuild"].add(m.rebuild)
-        outcomes["restore"].add(m.restore_highs)
     # the stored sets reach every answer, so a wrong threshold or a mixed up class cannot hide
-    assert outcomes == {"strength": set(reco_model.STRENGTH_CLASSES), "rebuild": {True, False}, "restore": {True, False}}
+    assert outcomes == {"strength": set(reco_model.STRENGTH_CLASSES), "rebuild": {True, False}}
 
 
 def test_the_decision_agrees_with_the_websites_on_every_stored_set_of_measurements():
@@ -75,10 +74,11 @@ def test_the_decision_agrees_with_the_websites_on_every_stored_set_of_measuremen
         if js is None:
             assert rec is None and (s["seconds"] < 2 or s["noiseDb"] is None), i
             continue
-        assert (rec.strength, rec.rebuild, rec.restore_highs, rec.no_speech) == (js["strength"], js["rebuild"], js["restoreHighs"], js["noSpeech"]), i
+        assert (rec.strength, rec.rebuild, rec.no_speech) == (js["strength"], js["rebuild"], js["noSpeech"]), i
         assert rec.heavy_remover == (s["noiseDb"] < pipeline.HEAVY_BELOW_DB), i
         assert (rec.rebuild_reason is not None) == rec.rebuild, i
         assert rec.rebuild_reason == js["rebuildReason"], (i, s)  # the same first reason as the website says
+        assert rec.rebuild_reasons == (tuple(js["rebuildWhy"]) if not rec.no_speech else ()), (i, s)  # and every other one it hears
         assert js["rebuildWhy"][:1] == ([rec.rebuild_reason] if rec.rebuild else []), i
 
 
@@ -140,8 +140,8 @@ def rule_reasons(s: dict) -> list[str]:
 
 
 def stats(**kw) -> dict:
-    """A clean, close voice that the trees leave alone: nothing to rebuild, nothing to restore."""
-    base = next(r["stats"] for r in FIXTURE if r["reco"] and not r["reco"]["rebuild"] and not r["reco"]["restoreHighs"]
+    """A clean, close voice that the trees leave alone: nothing to rebuild."""
+    base = next(r["stats"] for r in FIXTURE if r["reco"] and not r["reco"]["rebuild"]
                 and r["stats"]["hasSpeech"] and r["stats"]["seconds"] >= 2 and r["stats"]["dropDb"] is not None
                 and r["stats"]["tiltDb"] is not None and r["stats"]["tiltDb"] > -15 and r["stats"]["dropDb"] > 15
                 and r["stats"]["bandwidthHz"] > 7000 and not r["stats"]["clipFraction"])
@@ -154,7 +154,7 @@ def reason_of(s: dict) -> str | None:
 
 def test_the_base_voice_of_these_tests_is_left_alone():
     clean = reco_model.recommend(stats())
-    assert (clean.rebuild, clean.rebuild_reason, clean.restore_highs) == (False, None, False)
+    assert (clean.rebuild, clean.rebuild_reason) == (False, None)
 
 
 def test_each_cause_is_its_own_reason():
@@ -183,7 +183,7 @@ def test_echo_is_named_before_muffled_before_phone_before_distortion():
 
 
 def test_a_phone_call_is_rebuilt_not_left_to_the_trees():
-    """Used to be: only the trees could rebuild a phone call (restoring its highs was the fix). Now it is rebuilt every time."""
+    """A phone call is rebuilt every time (it is the only fix for missing high sounds)."""
     for bandwidth in (2800.0, 3800.0, 5600.0, reco_model.PHONE_HZ):
         rec = reco_model.recommend({**stats(), "bandwidthHz": bandwidth})
         assert rec.rebuild and rec.rebuild_reason == "phone", bandwidth
@@ -243,7 +243,7 @@ def test_the_words_of_every_reason_follow_it_sounded():
 
 def test_nobody_speaking_gets_the_middle_strength_and_nothing_else():
     rec = reco_model.recommend(stats(hasSpeech=False, noiseDb=5.0))
-    assert (rec.strength, rec.rebuild, rec.restore_highs, rec.no_speech, rec.rebuild_reason) == ("balanced", False, False, True, None)
+    assert (rec.strength, rec.rebuild, rec.no_speech, rec.rebuild_reason) == ("balanced", False, True, None)
     assert rec.heavy_remover  # the stronger noise remover is still the rule on the noise figure
 
 
@@ -270,12 +270,115 @@ def test_the_evaluator_agrees_with_the_websites_run_live():
     js = fx.js_decide(rows)
     for i, (s, j) in enumerate(zip(rows, js)):
         m = reco_model.model_decision(s)
-        assert (m.strength, m.rebuild, m.restore_highs) == (j["model"]["strength"], j["model"]["rebuild"], j["model"]["restoreHighs"]), (i, s)
+        assert (m.strength, m.rebuild) == (j["model"]["strength"], j["model"]["rebuild"]), (i, s)
         r = reco_model.recommend(s)
         if j["reco"] is None:
             assert r is None, i
         else:
-            assert (r.strength, r.rebuild, r.restore_highs) == (j["reco"]["strength"], j["reco"]["rebuild"], j["reco"]["restoreHighs"]), (i, s)
+            assert (r.strength, r.rebuild) == (j["reco"]["strength"], j["reco"]["rebuild"]), (i, s)
             assert r.rebuild_reason == j["reco"]["rebuildReason"] and j["reco"]["rebuildWhy"][:1] == ([r.rebuild_reason] if r.rebuild else []), (i, s)
             if not r.no_speech:
                 assert j["reco"]["rebuildWhy"] == rule_reasons(s), (i, s)
+
+
+# ---- what the recommendation means for the settings of a job (shared by the desktop app and the API) -----------------
+
+def rows():
+    """Every stored set of measurements the website decides on."""
+    return [r["stats"] for r in FIXTURE if r["reco"] is not None]
+
+
+def test_the_four_strengths_are_the_same_everywhere():
+    assert tuple(reco_model.STRENGTH_DB) == reco_model.STRENGTH_CLASSES == tuple(reco_model.STRENGTH_NAMES)
+    # the steps of the rule are these strengths, so the rule and the model give values from one list
+    assert set(reco_model.STRENGTH_DB.values()) == {db for _, db in pipeline.STRENGTH_STEPS} | {pipeline.GENTLE_DB}
+    web = ROOT / "web" / "src" / "strengths.js"
+    if web.is_file():
+        found = re.findall(r"id: '(\w+)', label: '(\w+)', db: (\d+)", web.read_text())
+        assert [(i, float(db)) for i, _, db in found] == list(reco_model.STRENGTH_DB.items())
+        assert {i: label for i, label, _ in found} == reco_model.STRENGTH_NAMES
+
+
+def test_choose_turns_every_recommendation_into_the_settings_the_website_shows():
+    seen = set()
+    for i, s in enumerate(rows()):
+        rec = reco_model.recommend(s)
+        c = reco_model.choose(rec)
+        assert (c.strength, c.atten_lim_db) == (rec.strength, reco_model.STRENGTH_DB[rec.strength]), i
+        assert (c.noise, c.heavy) == (("heavy", True) if rec.heavy_remover else ("light", False)), i
+        assert (c.rebuild, c.rebuild_wanted, c.rebuild_reason) == (rec.rebuild, rec.rebuild, rec.rebuild_reason), i
+        assert c.leveling is True and c.no_speech == rec.no_speech, i
+        assert c.noise_db == rec.noise_db
+        seen.add((c.rebuild, c.heavy, c.no_speech))
+    assert seen >= {(True, False, False), (True, True, False), (False, True, False), (False, False, False), (False, False, True)}
+
+
+def test_where_the_voice_cannot_be_rebuilt_the_noise_is_removed_instead_and_it_is_said():
+    wanted = [reco_model.recommend(s) for s in rows() if reco_model.recommend(s).rebuild]
+    assert len(wanted) > 20
+    for rec in wanted:
+        c = reco_model.choose(rec, rebuild_available=False, rebuild_unavailable="this file is longer than 90 minutes")
+        assert (c.rebuild, c.rebuild_wanted, c.rebuild_reason) == (False, True, rec.rebuild_reason)
+        assert (c.strength, c.noise) == (rec.strength, "heavy" if rec.heavy_remover else "light")
+        assert any("would fix this, but this file is longer than 90 minutes, so Denoising is used instead" in r for r in c.reasons)
+        assert not any("is rebuilt instead" in r for r in c.reasons)
+    # nothing is said about a rebuild that was not wanted, available or not
+    plain = next(r for r in (reco_model.recommend(s) for s in rows()) if not r.rebuild)
+    for avail in (True, False):
+        c = reco_model.choose(plain, rebuild_available=avail)
+        assert not c.rebuild and not c.rebuild_wanted and c.rebuild_reason is None
+        assert not any("Rebuilding" in r for r in c.reasons)
+
+
+def test_the_reasons_say_what_was_heard_and_what_is_done_in_plain_words():
+    forbidden = re.compile(r"(?i)deepfilter|dpdfnet|sidon|ap-bwe|polish|\bmodel\b|\btrees?\b|neural|\bai\b|libdf|onnx")
+    kinds = set()
+    for i, s in enumerate(rows()):
+        rec = reco_model.recommend(s)
+        for avail in (True, False):
+            c = reco_model.choose(rec, rebuild_available=avail)
+            assert c.reasons and all(isinstance(r, str) and r.endswith(".") and r == r.strip() for r in c.reasons), i
+            assert not [r for r in c.reasons if forbidden.search(r)], (i, c.reasons)
+            assert c.reasons[-1] == "Leveling evens out the voice and sets the loudness."
+            text = " ".join(c.reasons)
+            if c.no_speech:
+                assert "hardly hear anyone speaking" in text and "Balanced" in text
+                kinds.add("no speech")
+            elif c.rebuild:
+                assert "Rebuilding the voice fixes this" in text
+                for reason in rec.rebuild_reasons:  # every cause that was heard is said, none that was not
+                    assert reco_model._PROBLEMS[reason] in text
+                for reason in set(reco_model._PROBLEMS) - set(rec.rebuild_reasons):
+                    assert reco_model._PROBLEMS[reason] not in text
+                kinds.add("rebuilt")
+            else:
+                assert reco_model.STRENGTH_NAMES[rec.strength] in text or ("clean and quiet" in text and rec.strength == "gentle")
+                assert ("stronger noise remover" in text) == rec.heavy_remover
+                kinds.add("denoised")
+    assert kinds == {"no speech", "rebuilt", "denoised"}
+
+
+def test_automatic_is_recommend_then_choose_and_says_nothing_where_the_website_does():
+    for s in rows()[:60]:
+        assert reco_model.automatic(s) == reco_model.choose(reco_model.recommend(s))
+        assert reco_model.automatic(s, rebuild_available=False) == reco_model.choose(reco_model.recommend(s), rebuild_available=False)
+    assert reco_model.automatic(stats(seconds=1.9)) is None and reco_model.automatic(stats(noiseDb=None)) is None
+    assert reco_model.automatic(stats(seconds=1.9), min_seconds=0.0) is not None
+
+
+def test_the_automatic_strength_of_the_pipeline_is_the_models_where_the_measurements_are_at_hand():
+    """pipeline.automatic_choices(noise_db, stats): the model's strength; without stats only the noise figure is known and the
+    rule (strength_for) stays. The remover is the rule either way."""
+    differs = 0
+    for s in rows():
+        if s["noiseDb"] is None:
+            continue
+        rec = reco_model.recommend(s, min_seconds=0.0)
+        remover, db = pipeline.automatic_choices(s["noiseDb"], s)
+        assert (remover, db) == ("heavy" if s["noiseDb"] < pipeline.HEAVY_BELOW_DB else "light", reco_model.STRENGTH_DB[rec.strength])
+        assert pipeline.automatic_choices(s["noiseDb"]) == (remover, pipeline.strength_for(s["noiseDb"]))
+        differs += db != pipeline.strength_for(s["noiseDb"])
+    assert differs > 20  # the model really decides differently from the rule on many recordings
+    # the figure given is the one used (clean_audio measures the recording's own, then measures the rest with it)
+    base = stats()
+    assert pipeline.automatic_choices(5.0, {**base, "noiseDb": 99.0})[0] == "heavy"

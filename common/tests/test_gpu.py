@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from acw_common import bwe, dpdfnet, restore  # noqa: E402
+from acw_common import dpdfnet, restore  # noqa: E402
 
 MODELS = Path(os.environ.get("ACW_MODELS_DIR", Path.home() / "audio-cleaner" / "models"))
 SR = 48_000
@@ -50,9 +50,6 @@ def test_no_cuda_means_an_error_not_a_slow_cpu_run():
     if have_card():
         pytest.skip("this machine has a usable card")
     x = speech(3)
-    if (MODELS / "ap-bwe" / "8kto48k.onnx").is_file():
-        with pytest.raises(RuntimeError, match="CUDA"):
-            bwe.extend(x, MODELS / "ap-bwe", model="8k", device="cuda")
     if restore.available(MODELS / "sidon"):
         with pytest.raises(RuntimeError, match="CUDA"):
             restore.restore(x, MODELS / "sidon", device="cuda")
@@ -63,8 +60,6 @@ def test_no_cuda_means_an_error_not_a_slow_cpu_run():
 
 def test_unknown_devices_are_refused():
     x = speech(1)
-    with pytest.raises(ValueError):
-        bwe.extend(x, MODELS / "ap-bwe", model="8k", device="tpu")
     with pytest.raises(ValueError):
         restore.restore(x, MODELS / "sidon", device="tpu")
 
@@ -81,14 +76,6 @@ def test_each_model_on_the_card_equals_its_cpu_output():
         assert snr_db(cpu, gpu) > 80, snr_db(cpu, gpu)
         assert np.array_equal(dpdfnet.denoise_array(x, device="cuda", **kw), gpu)
         dpdfnet.unload()
-    if (MODELS / "ap-bwe" / "8kto48k.onnx").is_file():
-        import scipy.signal as ss
-
-        low = ss.sosfilt(ss.butter(10, 3800, "low", fs=SR, output="sos"), x).astype(np.float32)
-        cpu = bwe.extend(low, MODELS / "ap-bwe", model="8k")
-        gpu = bwe.extend(low, MODELS / "ap-bwe", model="8k", device="cuda")
-        assert snr_db(cpu, gpu) > 80, snr_db(cpu, gpu)
-        bwe.unload()
     if restore.available(MODELS / "sidon"):
         cpu = restore.restore(x, MODELS / "sidon", threads=2)
         gpu = restore.restore(x, MODELS / "sidon", device="cuda")

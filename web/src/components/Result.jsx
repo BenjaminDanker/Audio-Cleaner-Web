@@ -5,7 +5,7 @@ import { useAuth } from '../auth.jsx';
 import { balanceMoney, bytes, clock, money, shownName } from '../format.js';
 import { beginFinish, useFinish } from '../finish.js';
 import { findRate, usePricing } from '../hooks.js';
-import { highsHint, rebuildHint } from '../hints.js';
+import { rebuildHint } from '../hints.js';
 import { jobPath, LOUDNESS } from '../jobs.js';
 import { BlendPlayer, dbAt, energySums, gainsFor, matchGain, mixOf, posOf, strengthName } from '../media/blend.js';
 import { canHoldSubtitles, FORMAT } from '../media/convert.js';
@@ -26,7 +26,7 @@ const SAME_DB = 0.05; // two strengths this close are the same
 const loudnessId = (v) => (v == null ? 'keep' : LOUDNESS.find((l) => l.value === v)?.id || String(v));
 
 /**
- * The choices of "Change and save again" that can be redone without starting over (strength, Voice rebuild, restoring highs,
+ * The choices of "Change and save again" that can be redone without starting over (strength, Voice rebuild,
  * Leveling and its loudness, the kind of subtitles), and what saving them does. The slider of the listen section and the
  * panel are two views of the same state:
  *   nothing  no paid choice changed: only the free ones (file type, name, subtitle files) are made again, in the browser
@@ -46,23 +46,21 @@ function useRedo(fin, job) {
   const made = useMemo(() => ({
     atten: Number.isFinite(opts.atten_lim_db) ? opts.atten_lim_db : 100,
     // the free cleanup in this browser does the noise removal and nothing after it
-    highs: job.local ? false : opts.restore_highs === true,
     leveling: job.local ? false : opts.leveling !== false,
     loudness: opts.loudness_lufs === undefined ? -16 : opts.loudness_lufs,
     rebuild: tier === 'rebuild',
     subs: baseSubs,
-  }), [job.local, opts.atten_lim_db, opts.restore_highs, opts.leveling, opts.loudness_lufs, tier, baseSubs]);
+  }), [job.local, opts.atten_lim_db, opts.leveling, opts.loudness_lufs, tier, baseSubs]);
   const start = useCallback(() => ({ ...made, atten: fin.currentStrength() }), [made, fin]);
   const [c, setC] = useState(start);
   const set = useCallback((patch) => setC((p) => ({ ...p, ...patch })), []);
   useEffect(() => { setC(start()); }, [job.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const canDenoise = server && (tier === 'standard' || tier === 'rebuild');
-  const canHighs = server && (tier === 'standard' || tier === 'rebuild' || tier === 'off'); // Restore highs: not with Voice rebuild on
   const canSlide = !!fin.sliderSource && tier !== 'rebuild' && (job.local || tier === 'standard');
   const here = fin.sliderSource === 'here'; // a free run made in this browser
   const rebuilding = c.rebuild && canDenoise;
-  const noiseLast = !c.highs && !c.leveling && !rebuilding; // noise removal is the last step of these choices
+  const noiseLast = !c.leveling && !rebuilding; // noise removal is the last step of these choices
 
   // what differs from what the job was made with, as the server wants it (rerun.py: only the differences)
   const body = useMemo(() => {
@@ -71,7 +69,6 @@ function useRedo(fin, job) {
     const out = { options };
     if (canDenoise && c.rebuild !== made.rebuild) out.denoiseTier = c.rebuild ? 'rebuild' : 'standard';
     if (canDenoise && !c.rebuild && Math.abs(c.atten - made.atten) > SAME_DB) options.atten_lim_db = Math.round(c.atten * 100) / 100;
-    if (canHighs && !c.rebuild && c.highs !== made.highs) options.restore_highs = c.highs;
     if (server && (tier === 'standard' || tier === 'rebuild' || tier === 'off')) {
       if (c.leveling !== made.leveling) options.leveling = c.leveling;
       if (c.leveling && c.loudness !== made.loudness) options.loudness_lufs = c.loudness;
@@ -79,7 +76,7 @@ function useRedo(fin, job) {
     if (c.subs !== made.subs) out.transcribeTier = c.subs;
     const empty = !out.denoiseTier && !out.transcribeTier && Object.keys(options).length === 0;
     return empty ? null : out;
-  }, [server, canDenoise, canHighs, tier, c, made]);
+  }, [server, canDenoise, tier, c, made]);
 
   const strengthChanged = Math.abs(c.atten - fin.currentStrength()) > SAME_DB;
   // The result is the blend of the two copies, made here, when noise removal is the last step and nothing else is paid for.
@@ -110,7 +107,7 @@ function useRedo(fin, job) {
   const affordable = mode !== 'server' || quote.state !== 'ok' || quote.data.affordable !== false;
   const canSave = !busy && (mode !== 'server' || (quote.state === 'ok' && affordable));
   const rebuildOffered = !!pricing?.rebuildAvailable && canDenoise;
-  const rates = { highs: findRate(pricing, 'highs', 'standard'), rebuild: findRate(pricing, 'denoise', 'rebuild') };
+  const rates = { rebuild: findRate(pricing, 'denoise', 'rebuild') };
 
   /** Save with these choices. `wants`: the free choices (file type, name, subtitle files) to make the files with. */
   async function save(wants) {
@@ -130,7 +127,7 @@ function useRedo(fin, job) {
       if (mode === 'local') {
         const db = Math.round(c.atten * 100) / 100;
         await fin.blendTo(db);
-        const keepBlend = !here && !(Math.abs(db - made.atten) <= SAME_DB && made.highs === c.highs && made.leveling === c.leveling);
+        const keepBlend = !here && !(Math.abs(db - made.atten) <= SAME_DB && made.leveling === c.leveling);
         await fin.run({ save: true, wants: { ...wants, blend: keepBlend ? { db } : undefined } });
         return;
       }
@@ -144,7 +141,7 @@ function useRedo(fin, job) {
 
   return {
     c, set, mode, price, quote, busy, error, canSave, affordable, save, server, canDenoise, canSlide, here, noiseLast, rebuildOffered,
-    made, tier, exact: noiseLast, baseSubs, available: server || here, canHighs, rates,
+    made, tier, exact: noiseLast, baseSubs, available: server || here, rates,
   };
 }
 
@@ -263,7 +260,7 @@ function BlendListen({ fin, job, redo }) {
       <p className="hint mb0" data-testid="blend-note">
         {exact
           ? 'What you hear is what you save.'
-          : 'This is the noise removal only, at an even loudness. Leveling and restoring highs are added when you save.'}
+          : 'This is the noise removal only, at an even loudness. Leveling is added when you save.'}
       </p>
       {redo.available && redo.mode !== 'nothing' && (
         <div className="row">
@@ -327,12 +324,6 @@ function SaveAgain({ fin, job, redo }) {
               onChange={(id) => redo.set({ atten: STRENGTHS.find((s) => s.id === id).db })}
               customText={`${strengthName(c.atten)} (${Math.round(c.atten)} dB). Try it in the listen section above.`}
             />
-          )}
-          {redo.canHighs && !c.rebuild && (
-            <label className="check">
-              <input type="checkbox" checked={c.highs} disabled={busy} onChange={(e) => redo.set({ highs: e.target.checked })} data-testid="again-highs" />
-              <span><b>Restore highs</b><span className="hint block">{highsHint(redo.rates.highs)}</span></span>
-            </label>
           )}
           {redo.canDenoise && redo.rebuildOffered && (
             <label className="check">

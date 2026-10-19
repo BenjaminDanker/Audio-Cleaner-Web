@@ -57,7 +57,7 @@ def remote_size(url: str, head=http_head) -> tuple[int | None, str]:
 def pinned_files():
     """The files the app downloads, each address once."""
     files = [*resources.SPEECH_MODEL.files,
-             *(f for m in (resources.NOISE_MODEL, resources.HIGHS_MODEL, resources.VOICE_MODEL) for f in (*m.files, *m.licences))]
+             *(f for m in (resources.NOISE_MODEL, resources.VOICE_MODEL) for f in (*m.files, *m.licences))]
     return list({f.url: f for f in files}.values())
 
 

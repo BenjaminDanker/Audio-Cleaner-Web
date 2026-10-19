@@ -1,6 +1,6 @@
 // "Change and save again" and the strength slider (Result panel of a job's page):
 //  1. a re-run on our side: the paid choices of the panel, the price on the line and on Save, the new job's own page, its files by
-//     themselves, one line in the billing history; with Leveling and highs off the same save is free, made on this device, no job;
+//     themselves, one line in the billing history; with Leveling off the same save is free, made on this device, no job;
 //     a change that runs on our side but costs nothing is free too;
 //  2. the file saved on this device equals what our side makes for the same choice (decoded to float, the difference is under -60 dB);
 //  3. the slider while listening: the gains of the two copies against 10^(-dB/20), the names, in-between values, Original, Play / Pause,
@@ -55,12 +55,11 @@ function snr(a, b) {
 const probe = (p) => JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', p], { encoding: 'utf8' }));
 
 /** Starts a paid Denoising job from the form (every choice that matters is set), waits for its result and its automatic download. Answers the job's id. */
-async function startJob({ file = 'noisy.wav', strength = 'max', leveling = true, highs = false } = {}) {
+async function startJob({ file = 'noisy.wav', strength = 'max', leveling = true } = {}) {
   await gotoApp('/app');
   await dropFile(page, join(FILES, file));
   await pick(page, 'noise', 'denoise');
   await page.locator(`label:has(input[name=strength][value=${strength}])`).click();
-  await page.locator('input[name=highs]').setChecked(highs);
   await page.locator('input[name=leveling]').setChecked(leveling);
   await page.getByTestId('estimate').waitFor();
   got.length = 0;
@@ -71,7 +70,7 @@ async function startJob({ file = 'noisy.wav', strength = 'max', leveling = true,
   await card().getByTestId('result').waitFor({ timeout: 90000 });
   await waitDownloads(1);
   const j = (await apiCall(page, 'GET', `jobs/${id}`)).body;
-  const want = { atten_lim_db: { max: 100, strong: 40, balanced: 24, gentle: 12 }[strength], leveling, restore_highs: highs };
+  const want = { atten_lim_db: { max: 100, strong: 40, balanced: 24, gentle: 12 }[strength], leveling };
   for (const [k, v] of Object.entries(want)) if (j.options[k] !== v) throw new Error(`the job was made with ${k}=${j.options[k]}, wanted ${v}`);
   return id;
 }
@@ -89,15 +88,15 @@ const setBox = (testid, on) => panel().getByTestId(testid).setChecked(on);
 /** The price line has settled (the estimate for a run on our side takes a moment). */
 const settled = async () => { await page.waitForFunction(() => { const p = document.querySelector('[data-testid=again-fields] [data-testid=again-price]'); return p && !['loading', 'idle'].includes(p.getAttribute('data-state')); }, null, { timeout: 15000 }); await sleep(150); };
 
-let J1; // made with Leveling, without Restore highs (which is a paid option of its own, off at first), Maximum
-let J2; // made without Leveling and without Restore highs, Maximum
+let J1; // made with Leveling, Maximum
+let J2; // made without Leveling, Maximum
 
 // ---------------------------------------------------------------------------------------------------- 1. changing a job again
 
-await check('setup: two paid Denoising jobs (J1 with Leveling, J2 with neither Leveling nor Restore highs), both at Maximum, each on its own page with its file downloaded by itself', async () => {
-  J1 = await startJob({ leveling: true, highs: false });
+await check('setup: two paid Denoising jobs (J1 with Leveling, J2 without), both at Maximum, each on its own page with its file downloaded by itself', async () => {
+  J1 = await startJob({ leveling: true });
   const first = got.map((g) => g.name);
-  J2 = await startJob({ leveling: false, highs: false });
+  J2 = await startJob({ leveling: false });
   if (J1 === J2) throw new Error('same job twice');
   const redo = (await apiCall(page, 'GET', `jobs/${J2}`)).body.redo;
   if (!redo?.available || !redo.preview) throw new Error('J2 has no redo preview: ' + JSON.stringify(redo));
@@ -113,18 +112,16 @@ await check('re-run on our side: a new strength with Leveling still on is paid (
   await gotoApp(`/app/job/${J1}`);
   await card().getByTestId('download-again').waitFor({ timeout: 20000 });
   await openAgain();
-  for (const id of ['again-leveling', 'again-highs', 'again-loudness', 'again-subs']) if (!(await panel().getByTestId(id).count())) throw new Error(`${id} is not in the panel`);
+  for (const id of ['again-leveling', 'again-loudness', 'again-subs']) if (!(await panel().getByTestId(id).count())) throw new Error(`${id} is not in the panel`);
   if ((await panel().getByTestId('again-rebuild').count()) !== (pricing.rebuildAvailable ? 1 : 0)) throw new Error(`the Voice rebuild box ${pricing.rebuildAvailable ? 'is missing' : 'is offered although the server does not offer it'}`);
-  if (!(await panel().getByTestId('again-leveling').isChecked()) || (await panel().getByTestId('again-highs').isChecked())) throw new Error('the panel does not start with what the job was made with (Leveling on, Restore highs off)');
-  // Restore highs comes first, with its words and its price; Voice rebuild (when the price list offers it) comes after it
-  const highsBox = await panel().getByTestId('again-highs').locator('xpath=ancestor::label').innerText();
-  if (!/^Restore highs\n?For a recording that is only missing its high sounds .*keeps the voice exactly as recorded\. \$0\.07 a minute\.$/s.test(highsBox.trim())) throw new Error('Restore highs in the panel: ' + highsBox);
+  if (!(await panel().getByTestId('again-leveling').isChecked())) throw new Error('the panel does not start with what the job was made with (Leveling on)');
+  if (await panel().getByTestId('again-highs').count() || /highs/i.test(await panel().innerText())) throw new Error('Restore highs is in the panel (it is not offered any more)');
   if (!/Nothing paid is changed/.test(await price().innerText()) || (await price().getAttribute('data-state')) === 'paid') throw new Error('unchanged panel: ' + await price().innerText());
   await strengthInPanel(J1, 'Strong');
   await settled();
   if ((await price().getAttribute('data-state')) !== 'paid') throw new Error('price state ' + await price().getAttribute('data-state'));
   const line = (await price().innerText()).replace(/\s+/g, ' ');
-  if (!/^Costs about \$0\.000\d/.test(line) || !/Leveling/.test(line) || /Restore highs/.test(line)) throw new Error('price line (only Leveling runs again): ' + line);
+  if (!/^Costs about \$0\.000\d/.test(line) || !/Leveling/.test(line) || /Denoising/.test(line)) throw new Error('price line (only Leveling runs again): ' + line);
   const label = (await panel().getByTestId('again-save').innerText()).replace(/\s+/g, ' ').trim();
   if (!/^Save · about \$0\.000\d$/.test(label)) throw new Error('Save label: ' + label);
   got.length = 0;
@@ -165,13 +162,12 @@ await check('the new job runs and ends on its own page; its file comes down by i
   return mine[0];
 });
 
-await check('Leveling and Restore highs switched off: the price line says Free and "Made on this device"; Save downloads the new strength at once with no job and no re-run request', async () => {
+await check('Leveling switched off: the price line says Free and "Made on this device"; Save downloads the new strength at once with no job and no re-run request', async () => {
   await gotoApp(`/app/job/${J1}`);
   await card().getByTestId('download-again').waitFor({ timeout: 20000 });
   await openAgain();
   await strengthInPanel(J1, 'Balanced');
   await setBox('again-leveling', false);
-  await setBox('again-highs', false);
   await settled();
   if ((await price().getAttribute('data-state')) !== 'free') throw new Error('price state ' + await price().getAttribute('data-state'));
   const line = (await price().innerText()).replace(/\s+/g, ' ');
@@ -254,48 +250,48 @@ await check('the free re-run\'s page says so once: "Got it. This one is free; yo
   return freeNote;
 });
 
-let highsNote = null;
-let highsJob = null;
-await check('Restore highs turned on in a re-run is a paid step: the line shows "Restore highs $0.0128" (the 4.20 an hour price, per second rounded up), Save shows the price, the new job costs it, and the billing history has a line for it', async () => {
+let levelingNote = null;
+let levelingJob = null;
+await check('Leveling turned on in a re-run of a job made without it is a paid step by itself: the line shows "Leveling" (the 3.60 an hour price, per second rounded up), Save shows the price, the new job costs it, and the billing history has a line for it', async () => {
   await gotoApp(`/app/job/${J2}`);
   await card().getByTestId('download-again').waitFor({ timeout: 20000 });
   await openAgain();
-  if ((await panel().getByTestId('again-highs').isChecked()) || (await panel().getByTestId('again-leveling').isChecked())) throw new Error('J2 should start with Leveling and highs off');
+  if (await panel().getByTestId('again-leveling').isChecked()) throw new Error('J2 should start with Leveling off');
   const dur = (await apiCall(page, 'GET', `jobs/${J2}`)).body.durationSeconds;
-  const micros = Math.ceil((70000 * Math.ceil(dur)) / 60); // Restore highs: 0.07 USD a minute, per second rounded up
+  const micros = Math.ceil((1000 * Math.ceil(dur)) / 60); // Leveling: 0.001 USD a minute, per second rounded up
   const usd = `$${(micros / 1e6).toFixed(4)}`;
-  await setBox('again-highs', true);
+  await setBox('again-leveling', true);
   await settled();
   if ((await price().getAttribute('data-state')) !== 'paid') throw new Error('price state ' + await price().getAttribute('data-state'));
   const line = (await price().innerText()).replace(/\s+/g, ' ');
-  if (!line.startsWith(`Costs about ${usd}`) || !line.includes(`Restore highs ${usd}`) || /Leveling|Denoising/.test(line)) throw new Error(`price line "${line}", wanted Restore highs ${usd} alone`);
+  if (!line.startsWith(`Costs about ${usd}`) || !line.includes(`Leveling ${usd}`) || /Denoising/.test(line)) throw new Error(`price line "${line}", wanted Leveling ${usd} alone`);
   const label = (await panel().getByTestId('again-save').innerText()).replace(/\s+/g, ' ').trim();
   if (label !== `Save · about ${usd}`) throw new Error('Save label: ' + label);
   got.length = 0;
   const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith(`/api/jobs/${J2}/rerun`) && r.method() === 'POST'), panel().getByTestId('again-save').click()]);
   await page.waitForURL((u) => JOB_PATH.test(u.pathname) && !u.pathname.endsWith(J2), { timeout: 30000 });
-  highsJob = jobIdOf(page);
+  levelingJob = jobIdOf(page);
   const sent = req.postDataJSON();
-  if (JSON.stringify(sent.options) !== '{"restore_highs":true}' || sent.maxCostMicros !== micros) throw new Error('sent: ' + JSON.stringify(sent));
-  highsNote = await page.getByTestId('submitted').innerText({ timeout: 4000 }).then((t) => t.trim(), () => null);
+  if (JSON.stringify(sent.options) !== '{"leveling":true}' || sent.maxCostMicros !== micros) throw new Error('sent: ' + JSON.stringify(sent));
+  levelingNote = await page.getByTestId('submitted').innerText({ timeout: 4000 }).then((t) => t.trim(), () => null);
   await waitCardDone(page);
   await card().getByTestId('result').waitFor({ timeout: 90000 });
   await waitDownloads(1);
   if (got.length !== 1) throw new Error('downloaded by itself: ' + got.map((g) => g.name));
-  const j = (await apiCall(page, 'GET', `jobs/${highsJob}`)).body;
-  if (j.costMicros !== micros || j.options.restore_highs !== true || j.sourceJobId !== J2) throw new Error(`cost ${j.costMicros} (wanted ${micros}), highs ${j.options.restore_highs}, source ${j.sourceJobId}`);
+  const j = (await apiCall(page, 'GET', `jobs/${levelingJob}`)).body;
+  if (j.costMicros !== micros || j.options.leveling !== true || j.sourceJobId !== J2 || 'restore_highs' in j.options) throw new Error(`cost ${j.costMicros} (wanted ${micros}), leveling ${j.options.leveling}, source ${j.sourceJobId}`);
   await gotoApp('/app/billing');
   await page.getByTestId('ledger').waitFor();
   const rows = (await page.locator('[data-testid=ledger] tbody tr').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ')).filter((t) => /Changed and saved again/.test(t));
-  const mine = rows.filter((t) => /Changed and saved again \(Restore highs\)/.test(t));
-  if (rows.length !== 2 || mine.length !== 1 || !mine[0].includes(`−${usd}`)) throw new Error(`re-run lines:\n${rows.join('\n')}`);
+  const mine = rows.filter((t) => t.includes(`−${usd}`) && /Changed and saved again \(Leveling\)/.test(t));
+  if (rows.length !== 2 || mine.length !== 2) throw new Error(`re-run lines (the first re-run, J1's, and this one):\n${rows.join('\n')}`);
   return `${line}; "${label}"; ${mine[0]}`;
 });
 
-await check('the note on that new page: "Got it. This costs about $0.0128; your files download by themselves when it’s done."', async () => {
-  if (highsNote === null) throw new Error('no note on the new job\'s page after Save');
-  if (!/^Got it\. This costs about \$0\.0128; your files download by themselves when it’s done\.$/.test(highsNote)) throw new Error('note: ' + highsNote);
-  return highsNote;
+await check('the note on that new page: "Got it. This costs about $0.0001; your files download by themselves when it’s done."', async () => {
+  if (levelingNote === null) throw new Error('no note on the new job\'s page after Save');
+  if (!/^Got it\. This costs about \$0\.000\d; your files download by themselves when it’s done\.$/.test(levelingNote)) throw new Error('note: ' + levelingNote);
+  return levelingNote;
 });
 
 // ---------------------------------------------------------------------------------------------------- 2. the same file from both
@@ -313,7 +309,7 @@ await check('what is saved on this device equals what our side makes for the sam
   if (got.length !== 1) throw new Error('downloads: ' + got.map((g) => g.name));
   const here = join(FILES, `redo-${TAG}-here.flac`);
   await got[0].download.saveAs(here);
-  // our side: the same change as a re-run (free: Leveling and highs are off)
+  // our side: the same change as a re-run (free: Leveling is off)
   const r = await apiCall(page, 'POST', `jobs/${J2}/rerun`, { options: { atten_lim_db: 40 } });
   if (r.status !== 200) throw new Error(`re-run ${r.status} ${JSON.stringify(r.body)}`);
   if (!r.body.free) throw new Error('the server wants money for it: ' + JSON.stringify(r.body));
@@ -368,7 +364,7 @@ await check('slider, a job on our side: Listen offers "Try other strengths" (wit
 await check('slider, Leveling still on in the panel: data-exact is "no", the note says they are added when you save, the gains keep the ratio a / (1 - a) of the strength and a loudness match g between 0.1 and 3', async () => {
   if ((await attr('data-exact')) !== 'no') throw new Error('exact: ' + await attr('data-exact'));
   const note = (await card().getByTestId('blend-note').innerText()).trim();
-  if (note !== 'This is the noise removal only, at an even loudness. Leveling and restoring highs are added when you save.') throw new Error('note: ' + note);
+  if (note !== 'This is the noise removal only, at an even loudness. Leveling is added when you save.') throw new Error('note: ' + note);
   const seen = [];
   for (const [id, db] of [['balanced', 24], ['gentle', 12], ['strong', 40], ['max', 100]]) {
     await card().getByTestId(`strength-set-${id}`).click();
@@ -386,10 +382,9 @@ await check('slider, Leveling still on in the panel: data-exact is "no", the not
   return seen.join(', ');
 });
 
-await check('slider, Leveling and highs off in the panel: data-exact is "yes", the note says what you hear is what you save, and the four names give exactly (1 - a) and a (24 dB: 0.93690 and 0.06310)', async () => {
+await check('slider, Leveling off in the panel: data-exact is "yes", the note says what you hear is what you save, and the four names give exactly (1 - a) and a (24 dB: 0.93690 and 0.06310)', async () => {
   await openAgain();
   await setBox('again-leveling', false);
-  await setBox('again-highs', false);
   await page.waitForFunction(() => document.querySelector('[data-testid=blend-player]')?.getAttribute('data-exact') === 'yes', null, { timeout: 5000 });
   const note = (await card().getByTestId('blend-note').innerText()).trim();
   if (note !== 'What you hear is what you save.') throw new Error('note: ' + note);
@@ -490,7 +485,7 @@ await check('slider: Play starts the sound (the button says Pause and the time m
   return `1 s played, paused at ${stopped}, played on`;
 });
 
-await check('slider on our side, Save this strength (Leveling and highs off): a file at that strength comes down at once, no job, no re-run request', async () => {
+await check('slider on our side, Save this strength (Leveling off): a file at that strength comes down at once, no job, no re-run request', async () => {
   await card().getByTestId('strength-set-gentle').click();
   await settled();
   const jobsBefore = (await listJobs(page)).jobs.length;
@@ -596,8 +591,7 @@ await check('a Voice rebuild job gets no slider (and no strength choice in the p
     }
     await openAgain();
     if (await card().locator(`[data-testid=strength-again-${J1}]`).count()) throw new Error('a strength choice for a Voice rebuild job');
-    if ((await card().getByTestId('again-highs').count()) !== 0) throw new Error('Restore highs is offered for a rebuild');
-    return 'no slider, no strength choice, no highs';
+    return 'no slider, no strength choice';
   } finally {
     await page.unroute('**/api/jobs').catch(() => {});
   }
@@ -609,7 +603,7 @@ if (pricing.rebuildAvailable) {
   console.log('SKIP a real Voice rebuild job -- the price list does not offer Voice rebuild here (no GPU worker in the test backend); the rebuild page was checked with the server\'s description above');
 }
 
-await check('Change and save again with Voice rebuild on offer (the price list is made to offer it): Restore highs comes first, Rebuild the voice right below it, each with its words and price; ticking the rebuild hides Restore highs and the strength, unticking brings them back', async () => {
+await check('Change and save again with Voice rebuild on offer (the price list is made to offer it): Rebuild the voice comes right below the strength, with its words and price, and there is no Restore highs; ticking the rebuild disables the strength, unticking brings it back', async () => {
   await page.route('**/api/billing/pricing', async (route) => {
     const res = await route.fetch();
     await route.fulfill({ response: res, json: { ...(await res.json()), rebuildAvailable: true } });
@@ -620,36 +614,34 @@ await check('Change and save again with Voice rebuild on offer (the price list i
     await openAgain();
     await panel().getByTestId('again-rebuild').waitFor();
     const order = await panel().evaluate((el) => {
-      const pos = (id) => el.querySelector(`[data-testid=${id}]`);
-      const before = (a, b) => !!(pos(a) && pos(b) && (pos(a).compareDocumentPosition(pos(b)) & Node.DOCUMENT_POSITION_FOLLOWING));
-      return { highsThenRebuild: before('again-highs', 'again-rebuild'), strengthThenHighs: !!el.querySelector('[data-testid^=strength-again-]') && (el.querySelector('[data-testid^=strength-again-]').compareDocumentPosition(pos('again-highs')) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 };
+      const strength = el.querySelector('[data-testid^=strength-again-]');
+      const rebuild = el.querySelector('[data-testid=again-rebuild]');
+      return { strengthThenRebuild: !!strength && !!rebuild && (strength.compareDocumentPosition(rebuild) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0 };
     });
-    if (!order.highsThenRebuild || !order.strengthThenHighs) throw new Error('order in the panel: ' + JSON.stringify(order));
+    if (!order.strengthThenRebuild) throw new Error('order in the panel: ' + JSON.stringify(order));
+    if (await panel().getByTestId('again-highs').count() || /highs/i.test(await panel().innerText())) throw new Error('Restore highs is in the panel');
     const rate = (p, t) => pricing.rates.find((r) => r.product === p && r.tier === t)?.usdPerMinute;
     const fmt = (usd) => `$${usd.toFixed(4).replace(/(\.\d\d\d*?)0+$/, '$1')}`;
     const rebuildText = (await panel().getByTestId('again-rebuild').locator('xpath=ancestor::label').innerText()).replace(/\s+/g, ' ').trim();
-    const wantRebuild = `Rebuild the voice For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt, which also brings back the highs. Slower, ${fmt(rate('denoise', 'rebuild'))} a minute, and on very echoey recordings it can change a word, so listen before you publish.`;
+    const wantRebuild = `Rebuild the voice For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt, which also brings back the high sounds that are missing. Slower, ${fmt(rate('denoise', 'rebuild'))} a minute, and on very echoey recordings it can change a word, so listen before you publish.`;
     if (rebuildText !== wantRebuild) throw new Error(`Rebuild the voice in the panel: "${rebuildText}"`);
-    const highsText = (await panel().getByTestId('again-highs').locator('xpath=ancestor::label').innerText()).replace(/\s+/g, ' ').trim();
-    if (highsText !== `Restore highs For a recording that is only missing its high sounds (phone calls, voice messages, small files) and otherwise sounds fine: adds them back and keeps the voice exactly as recorded. ${fmt(rate('highs', 'standard'))} a minute.`) throw new Error(`Restore highs in the panel: "${highsText}"`);
     await setBox('again-rebuild', true);
-    await page.waitForFunction(() => !document.querySelector('[data-testid=again-fields] [data-testid=again-highs]'), null, { timeout: 5000 });
     if (!(await card().locator(`input[name=again-${J2}]`).first().isDisabled())) throw new Error('the strength can still be changed with the voice rebuilt');
     await setBox('again-rebuild', false);
-    await panel().getByTestId('again-highs').waitFor({ timeout: 5000 });
-    return 'strength, Restore highs, Rebuild the voice; the rebuild hides Restore highs';
+    await page.waitForFunction((id) => !document.querySelector(`input[name=again-${id}]`)?.disabled, J2, { timeout: 5000 });
+    return 'strength, Rebuild the voice; no Restore highs';
   } finally {
     await page.unroute('**/api/billing/pricing').catch(() => {});
   }
 });
 
-await check('noise Off + Restore highs only: a paid job whose price is the Restore highs price alone (0.07 a minute); its page offers Restore highs and Leveling in the panel and no strength', async () => {
+await check('noise Off, Leveling on its own: a paid job whose price is the Leveling price alone; its page offers Leveling in the panel and no strength and no Restore highs', async () => {
   await gotoApp('/app');
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'noise', 'off');
   await page.getByTestId('start').waitFor();
   if (await page.getByTestId('start').isEnabled()) throw new Error('Start is on with nothing chosen');
-  await page.locator('input[name=highs-alone]').check();
+  await page.locator('input[name=leveling-alone]').check();
   await page.getByTestId('estimate').waitFor();
   const bodyReq = page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST');
   got.length = 0;
@@ -657,23 +649,24 @@ await check('noise Off + Restore highs only: a paid job whose price is the Resto
   const body = (await bodyReq).postDataJSON();
   await page.waitForURL(JOB_PATH, { timeout: 90000 });
   const id = jobIdOf(page);
-  if (body.kind !== 'denoise' || body.denoiseTier !== 'off' || body.options.restore_highs !== true || body.options.leveling !== false || body.transcribeTier) throw new Error('sent: ' + JSON.stringify(body));
-  const micros = Math.ceil((70000 * Math.ceil(body.durationSeconds)) / 60);
+  if (body.kind !== 'denoise' || body.denoiseTier !== 'off' || body.options.leveling !== true || 'restore_highs' in body.options || body.transcribeTier) throw new Error('sent: ' + JSON.stringify(body));
+  const micros = Math.ceil((1000 * Math.ceil(body.durationSeconds)) / 60);
   await waitCardDone(page);
   await card().getByTestId('result').waitFor({ timeout: 90000 });
   await waitDownloads(1);
   const j = (await apiCall(page, 'GET', `jobs/${id}`)).body;
-  if (j.denoiseTier !== 'off' || j.options.restore_highs !== true || j.estCostMicros !== micros || j.costMicros !== micros) throw new Error(`tier ${j.denoiseTier}, highs ${j.options.restore_highs}, est ${j.estCostMicros}, cost ${j.costMicros}, wanted ${micros}`);
+  if (j.denoiseTier !== 'off' || j.options.leveling !== true || j.estCostMicros !== micros || j.costMicros !== micros) throw new Error(`tier ${j.denoiseTier}, leveling ${j.options.leveling}, est ${j.estCostMicros}, cost ${j.costMicros}, wanted ${micros}`);
   if (got.length !== 1) throw new Error('downloaded by itself: ' + got.map((g) => g.name));
   await openAgain();
-  if (!(await panel().getByTestId('again-highs').isChecked()) || (await panel().getByTestId('again-leveling').isChecked())) throw new Error('the panel does not show what the job was made with');
+  if (!(await panel().getByTestId('again-leveling').isChecked())) throw new Error('the panel does not show what the job was made with');
   if (await card().locator('[data-testid^=strength-again-]').count()) throw new Error('a strength choice for a job with no noise removal');
+  if (await panel().getByTestId('again-highs').count()) throw new Error('Restore highs in the panel');
   await gotoApp('/app/billing');
   await page.getByTestId('ledger').waitFor();
   const rows = (await page.locator('[data-testid=ledger] tbody tr').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
-  const mine = rows.find((t) => /Restore highs/.test(t) && !/Changed and saved again/.test(t));
-  if (!mine || !mine.includes(`−$${(micros / 1e6).toFixed(4)}`)) throw new Error(`no billing line for ${micros} micros:\n${rows.join('\n')}`);
-  return `${j.estCostMicros} micros = Restore highs alone; ${mine}`;
+  const mine = rows.find((t) => /Leveling/.test(t) && !/Changed and saved again/.test(t) && t.includes(`−$${(micros / 1e6).toFixed(4)}`));
+  if (!mine) throw new Error(`no billing line for ${micros} micros:\n${rows.join('\n')}`);
+  return `${j.estCostMicros} micros = Leveling alone; ${mine}`;
 });
 
 // ---------------------------------------------------------------------------------------------------- 6. the kept copies

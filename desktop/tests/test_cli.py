@@ -22,7 +22,7 @@ def run(*args: str, timeout: float = 300) -> subprocess.CompletedProcess:
 def test_help_lists_the_options_and_the_automatic_choices():
     r = run("--help")
     assert r.returncode == 0
-    for flag in ("--subtitles", "--language", "--loudness", "--audio-format", "--noise", "--echo-track", "--no-restore-highs",
+    for flag in ("--subtitles", "--language", "--loudness", "--audio-format", "--noise", "--echo-track",
                  "--rebuild-voice", "--parallel", "--download-models", "--download-speech-model", "--gui",
                  "--output-name", "--format", "--video-size", "--no-auto-rebuild"):
         assert flag in r.stdout
@@ -77,8 +77,8 @@ def test_the_parser_takes_the_options_and_keeps_the_automatic_defaults():
     from audio_cleaner_desktop import __main__ as entry
 
     args = entry.build_parser().parse_args(
-        ["--cli", "--noise", "heavy", "--echo-track", "--no-restore-highs", "--rebuild-voice", "--parallel", "2", "a.wav"])
-    assert (args.noise, args.echo_track, args.no_restore_highs, args.rebuild_voice, args.parallel) == ("heavy", True, True, True, 2)
+        ["--cli", "--noise", "heavy", "--echo-track", "--rebuild-voice", "--parallel", "2", "a.wav"])
+    assert (args.noise, args.echo_track, args.rebuild_voice, args.parallel) == ("heavy", True, True, 2)
     assert entry.build_parser().parse_args(["--download-speech-model"]).download_models  # the old name still works
     parser = entry.build_parser()
     defaults = parser.parse_args(["--cli", "a.wav"])
@@ -98,15 +98,15 @@ def test_automatic_rebuild_is_on_unless_turned_off(monkeypatch):
     assert [(o.auto_rebuild, o.rebuild_voice, o.strength) for o in seen] == [(True, False, "auto"), (False, False, "auto")]
 
 
-def test_the_highs_are_left_to_the_model_unless_turned_off(monkeypatch):
+def test_restore_highs_is_gone_from_the_command_line_and_the_help(capsys):
+    """Restoring highs is not a step any more (a recording that is missing them is a reason to rebuild the voice)."""
     from audio_cleaner_desktop import __main__ as entry
-    from audio_cleaner_desktop import cli
 
-    seen = []
-    monkeypatch.setattr(cli, "run", lambda inputs, out_dir, options, *a, **k: seen.append(options) or 0)
-    assert entry.main(["--cli", "a.wav"]) == 0 and entry.main(["--cli", "--no-restore-highs", "a.wav"]) == 0
-    assert [(o.restore_highs, o.auto_highs) for o in seen] == [(True, True), (False, False)]
-    assert all(o.decides for o in seen[:1]) and seen[0].strength == "auto"
+    text = " ".join(run("--help").stdout.split())
+    assert "highs" not in text.lower() and "restore" not in text.lower()
+    with pytest.raises(SystemExit):
+        entry.build_parser().parse_intermixed_args(["--cli", "--no-restore-highs", "a.wav"])
+    assert "--no-restore-highs" in capsys.readouterr().err  # an unknown option, like any other
 
 
 def test_the_memory_plan_allows_for_automatic_rebuilding(tmp_path, monkeypatch):
@@ -129,14 +129,14 @@ def test_the_picked_strength_is_printed(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(resources, "check", lambda: [])
     results = iter([
         engine.JobResult(tmp_path / "a-cleaned.wav", 1.0, False, strength="balanced"),
-        engine.JobResult(tmp_path / "b-cleaned.wav", 1.0, False, strength="strong", notice="missing highs restored"),
+        engine.JobResult(tmp_path / "b-cleaned.wav", 1.0, False, strength="strong", notice="the voice was rebuilt because it sounded echoey"),
         engine.JobResult(tmp_path / "c-cleaned.wav", 1.0, False),
     ])
     monkeypatch.setattr(engine, "process", lambda *a, **k: next(results))
     assert cli.run([str(tmp_path / n) for n in ("a.wav", "b.wav", "c.wav")], None, engine.JobOptions(strength="auto"), parallel=1) == 0
     lines = [line for line in capsys.readouterr().out.splitlines() if "->" in line]
     assert lines[0].endswith("a-cleaned.wav  (balanced noise reduction picked for this file)")
-    assert lines[1].endswith("b-cleaned.wav  (strong noise reduction picked for this file; missing highs restored)")
+    assert lines[1].endswith("b-cleaned.wav  (strong noise reduction picked for this file; the voice was rebuilt because it sounded echoey)")
     assert lines[2].endswith("c-cleaned.wav")
 
 

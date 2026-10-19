@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     tier TEXT NOT NULL,
     status TEXT NOT NULL,                           -- uploading | queued | running | cloud_asr | done | failed | canceled | expired
     params_json TEXT NOT NULL,
-    next_stage TEXT NOT NULL DEFAULT 'probe',       -- probe | finalize
+    next_stage TEXT NOT NULL DEFAULT 'probe',       -- probe | main (after an automatic job was handed to the card) | finalize
     input_name TEXT NOT NULL,
     input_bytes INTEGER NOT NULL,
     received_bytes INTEGER NOT NULL DEFAULT 0,

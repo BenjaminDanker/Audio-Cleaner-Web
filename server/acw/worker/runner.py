@@ -22,7 +22,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-STAGES = ("probe", "main", "finalize")
+STAGES = ("probe", "analyse", "main", "finalize")
 
 
 def emit(**kw) -> None:
@@ -62,6 +62,8 @@ def main() -> int:
     try:
         if stage == "probe":
             result = stage_probe(job_dir, spec)
+        elif stage == "analyse":
+            result = stage_analyse(job_dir, spec)
         elif stage == "main":
             result = stage_main(job_dir, spec)
         else:
@@ -112,6 +114,28 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
     }
 
 
+def stage_analyse(job_dir: Path, spec: dict) -> dict:
+    """Measure the upload the way the website does (acw_common/analysis.py: the noise remover over about a minute of it spread over
+    the file, and the browser's measurements of the same stretches), for the settings of an automatic job (automatic.py). Only the
+    numbers go back; the decision is made outside the sandbox."""
+    import math
+
+    from acw_common import analysis, pipeline
+
+    ff = _ff(spec)
+    src = job_dir / spec["input"]
+    probe = ff.probe(src)
+    emit(stage="Listening to the file", progress=2)
+    # (before any echo removal: the second track is not part of what is measured)
+    x = pipeline.decode_for_clean(ff, src, probe, decode_limit(spec), work_dir=job_dir)
+    stats = analysis.measure(x, spec["lib_path"], spec["dfn_model"])
+    del x
+    (job_dir / "decoded.f32").unlink(missing_ok=True)
+    clean = {k: (v if isinstance(v, bool) or v is None or (isinstance(v, (int, float)) and math.isfinite(v)) else None)
+             for k, v in stats.items() if isinstance(v, (bool, int, float)) or v is None}
+    return {"stats": {k: (float(v) if isinstance(v, float) else v) for k, v in clean.items()}}
+
+
 def decode_limit(spec: dict) -> float:
     """Seconds of audio any decode may read: the length that was billed (the worker's measurement), with
     a little slack for resampling, never more than the tier's limit."""
@@ -123,6 +147,22 @@ def decode_limit(spec: dict) -> float:
 KEPT_NOISE = "kept-noise"
 KEPT_REBUILT = "kept-rebuilt"
 KEPT_INPUT = "kept-input"
+
+
+def clean_options(spec: dict, profile: str):
+    """The cleaning choices of a job (pipeline.CleanOptions) from its spec: its options and tier, with the noise remover `profile`."""
+    from acw_common import pipeline
+
+    opts = spec["options"]
+    return pipeline.CleanOptions(
+        atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
+        loudness_lufs=opts.get("loudness_lufs", -16.0),
+        leveling=bool(opts.get("leveling", True)),
+        noise=profile,
+        restore_voice=spec.get("denoise_tier") == "rebuild",
+        denoise=spec.get("denoise_tier") != "off",  # "off": Leveling on its own, no noise removal
+        device=spec.get("clean_device", "cpu"),
+    )
 
 
 def stage_main(job_dir: Path, spec: dict) -> dict:
@@ -219,22 +259,12 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         span = 85 - start
         rebuild = spec.get("denoise_tier") == "rebuild"
         leveling_only = spec.get("denoise_tier") == "off"  # Leveling on its own: no noise removal
-        copts = lambda profile: pipeline.CleanOptions(  # noqa: E731
-            atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
-            loudness_lufs=opts.get("loudness_lufs", -16.0),
-            leveling=bool(opts.get("leveling", True)),
-            restore_highs=bool(opts.get("restore_highs", False)) and not rebuild,
-            noise=profile,
-            restore_voice=rebuild,
-            denoise=not leveling_only,
-            device=spec.get("clean_device", "cpu"),
-        )
+        copts = lambda profile: clean_options(spec, profile)  # noqa: E731
         progress = lambda f: emit(stage="Cleaning" if f < 0.95 else "Leveling", progress=int(start + 2 + span * f))  # noqa: E731
         used: dict = {}
         echo_flag = bool(opts.get("echo_reference_track"))
         if clean_mode in ("denoised", "rebuilt"):
-            # From the copy the source job kept: no noise model runs (the blend for the strength, restoring the highs,
-            # Leveling). The copy was made from the same recording (pipeline.redo_denoised / redo_rebuilt).
+            # From the copy the source job kept: no noise model runs (the blend for the strength, Leveling). The copy was made from the same recording (pipeline.redo_denoised / redo_rebuilt).
             entry = rerun["kept"]["noise" if clean_mode == "denoised" else "rebuilt"]
             emit(stage="Cleaning", progress=start + 2)
             y = pipeline.output_buffer(x, job_dir)
@@ -244,10 +274,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 plan = entry["plan"]
                 if len(plan) != x.shape[1]:
                     raise ValueError("the kept copy does not fit this recording")
-                y = pipeline.redo_denoised(
-                    x, y, plan, copts(entry["profile"]), threads=threads, progress=progress,
-                    bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe", report=used,
-                )
+                y = pipeline.redo_denoised(x, y, plan, copts(entry["profile"]), progress=progress, report=used)
                 used["noise"] = entry["profile"]
             else:
                 y = pipeline.redo_rebuilt(x, y, copts("auto"), progress=progress, report=used)
@@ -259,7 +286,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 profile = opts.get("noise", "auto")
             else:
                 profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"), keep=kept)
-            emit(stage="Leveling" if leveling_only and not opts.get("restore_highs") else "Cleaning", progress=start + 2,
+            emit(stage="Leveling" if leveling_only else "Cleaning", progress=start + 2,
                  **({} if rebuild or leveling_only else {"noise": profile}))
 
             def keep_copy(name: str, y: Any, cols: list[int] | None) -> None:
@@ -279,16 +306,12 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 x, spec["lib_path"], spec["dfn_model"], copts(profile), threads=threads, progress=progress,
                 out=pipeline.output_buffer(x, job_dir),
                 heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
-                bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
                 restore_model_dir=Path(spec["models_dir"]) / "sidon",
                 report=used,
                 measured=kept.get("measured"),
                 keep=keep_copy,
             )
         noise_used = used.get("noise")
-        if used.get("highs"):
-            restored = "Its high frequencies were restored, as you asked."
-            notice = f"{notice} {restored}" if notice else restored
         fmt = opts.get("audio_format", "flac")
         cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
