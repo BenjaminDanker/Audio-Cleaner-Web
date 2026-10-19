@@ -247,7 +247,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
         <Table
           head={['You change', 'What runs again']}
           rows={[
-            ['atten_lim_db', 'Nothing but a mix of the kept noise removal and your recording, which is free. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send leveling: false as well to change only the strength for free.'],
+            ['atten_lim_db', 'Nothing but a mix of the kept noise removal and your recording, for a recording of any length, which is free. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send leveling: false as well to change only the strength for free.'],
             ['leveling, loudness_lufs', 'From the kept noise removal: Leveling is charged at its price whenever it runs; with it off the change is free.'],
             ['denoiseTier: "rebuild"', 'The voice is rebuilt from your upload, at the full Voice rebuild price.'],
             ['denoiseTier: "standard" (from a rebuild)', 'The kept noise removal is used. If the job never had one, noise removal runs and is charged.'],
@@ -256,6 +256,11 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['audio_format, caption_formats', 'The files are written again from what is already there. Free.'],
           ]}
         />
+        <h3>Hear and mix the strengths yourself</h3>
+        <p>A finished Denoising job keeps two signals on the same sample grid, whatever its length: <code>noise</code> (the noise removal at full strength) and <code>input</code> (your recording as the remover heard it). Every strength is <code>(1 - a) * noise + a * input</code> with <code>a = 10^(-dB/20)</code>. <code>GET /api/jobs/&#123;id&#125;/kept/&#123;noise|input&#125;?start=&lt;seconds&gt;&amp;seconds=&lt;n&gt;</code> hands out just a stretch of one of them as a small 24-bit FLAC: <code>start</code> in seconds (to the nearest sample at 48&nbsp;kHz), <code>seconds</code> at most 30 (the default). The same <code>start</code> and <code>seconds</code> for <code>noise</code> and <code>input</code> give two stretches that line up sample for sample, exactly the values the whole copies have there, so a player holds a few seconds at a time and fetches the next stretch ahead. How to read them (<code>channels</code>, <code>plan</code>, <code>scale</code>, <code>energy</code>) is in the job&rsquo;s <code>redo.preview</code>. Without <code>start</code> and <code>seconds</code> you get the whole copy. Only your own jobs, only while their files are kept (2 hours), with a limit of its own for stretches (<code>429</code> with <code>Retry-After</code>). To save a strength, ask for a change as above: with <code>leveling: false</code> it is free for any length.</p>
+        <Code label="One stretch of each copy">{`curl -s "$BASE/api/jobs/3f2c.../kept/noise?start=125.5&seconds=10" ${hdr} -o noise.flac
+curl -s "$BASE/api/jobs/3f2c.../kept/input?start=125.5&seconds=10" ${hdr} -o input.flac
+# both: 480000 samples at 48 kHz, X-Stretch-Start: 6024000, X-Stretch-Samples: 480000`}</Code>
         <h3>Ask for the price, then do it</h3>
         <p><code>POST /api/jobs/&#123;id&#125;/rerun/estimate</code> takes the choices you want to change (the rest stay as they were): <code>denoiseTier</code>, <code>transcribeTier</code> (<code>"off"</code> leaves the subtitles out; on its own that changes nothing) and <code>options</code>. It runs nothing and sets nothing aside, and answers with what would run, its price as lines, and whether your balance can cover it. <code>POST /api/jobs/&#123;id&#125;/rerun</code> with the same body does it: it sets the price aside, makes a new job with its own <code>id</code> (watch it, download from it and delete it like any other), and answers <code>{'{"id", "estCostMicros", "free", "expiresAt"}'}</code>. Add <code>maxCostMicros</code> with the price you were quoted and the call is refused with <code>409</code> and the code <code>price_changed</code> if it is higher now.</p>
         <Code label="Change a finished job">{`# what would it cost to keep Leveling on at a gentler strength?

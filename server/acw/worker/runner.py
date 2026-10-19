@@ -294,11 +294,11 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 if name == "denoised":
                     entry = kept_copies.save(ff, y, cols, job_dir / KEPT_NOISE)
                     kept_out["noise"] = {**entry, "echo": echo_flag, "profile": profile, "noise_opt": opts.get("noise", "auto"),
-                                         "plan": pipeline.channel_plan(x)}
-                    if spec.get("keep_input"):
-                        # the recording as the noise remover heard it (echo removed), on the same sample grid: with the copy above it
-                        # is what the page blends for its strength slider, exactly (web/src/media/blend.js)
-                        kept_out["input"] = {**kept_copies.save(ff, x, cols, job_dir / KEPT_INPUT), "echo": echo_flag}
+                                         "plan": pipeline.channel_plan(x), "energy": kept_copies.energy(y, x, cols)}
+                    # the recording as the noise remover heard it (echo removed), on the same sample grid, for any length: with the
+                    # copy above it is what the page blends for its strength slider, exactly (web/src/media/blend.js), in short
+                    # stretches (acw/stretch.py); "energy" above is what keeps the loudness of a preview even
+                    kept_out["input"] = {**kept_copies.save(ff, x, cols, job_dir / KEPT_INPUT), "echo": echo_flag}
                 else:
                     kept_out["rebuilt"] = {**kept_copies.save(ff, y, cols, job_dir / KEPT_REBUILT), "echo": echo_flag}
 

@@ -178,10 +178,8 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         "address_space_bytes": 32 * 1024**3,  # memory-mapped scratch files count here, not in RAM
         "max_file_bytes": 16 * 1024**3,
         **({"billed_seconds": billed} if billed is not None else {}),
-        # a re-run starts from the copies its source job kept (jobs.py, rerun.py); a first run keeps its own
-        # the recording itself is kept next to the noise removal when the page can use the pair (jobs.PREVIEW_MAX_CHANNEL_SECONDS)
-        "keep_input": jobs.preview_fits(billed if billed is not None else float(job.get("duration_seconds") or job["claimed_seconds"]),
-                                        (jobs.params_of(job["id"]) or params).get("channels")),
+        # a re-run starts from the copies its source job kept (jobs.py, rerun.py); a first run keeps its own (the noise removal
+        # and, next to it, the recording as the remover heard it, for the strength slider: any length, stretch.py)
         **({"rerun": {"clean": params["rerun"]["clean"], "transcribe": params["rerun"]["transcribe"],
                       "reuse_audio": params["rerun"].get("reuse_audio"), "kept": params.get("kept") or {}}}
            if params.get("rerun") else {}),

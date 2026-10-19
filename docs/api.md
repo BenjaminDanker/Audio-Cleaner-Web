@@ -316,7 +316,8 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
   (`ACW_JOB_RETENTION_MINUTES`; the housekeeping sweep runs every 30 to 60 seconds, so it is accurate to about a minute).
 - `redo` (when `done`): `{available, noise, rebuilt, transcript, translations, preview?}`: whether the job can still be changed
   (its upload exists) and which kept copies it can start from. `preview` is for the website's strength slider (the two
-  signals `GET /api/jobs/{id}/kept/noise` and `.../kept/input`, 24-bit FLAC, sample for sample the same length).
+  signals `GET /api/jobs/{id}/kept/noise` and `.../kept/input`, 24-bit FLAC, sample for sample the same length, for a recording of any
+  length; section 5a): `{samples, channels, plan, scale: {noise, input}, bytes: {noise, input}, stretchMaxSeconds, energy?}`.
 - `callback`: only when a `callbackUrl` was given, see below.
 - `chosen`, `maximum`: only for a job made with `options.automatic`: what was decided and why (`null` until the file has been listened to),
   and `true` while `estCostMicros` is still the most it can cost. See "Automatic settings".
@@ -329,6 +330,36 @@ same time), in the same shape: one request polls them all.
 
 Streams the file as an attachment (`name` from `outputs`). `404` until the job is `done`, and after the results expire. Download
 promptly: they are deleted, together with the upload and the copies kept for changing the job, 2 hours after `done`, or at once with `DELETE`.
+
+### 5a. The two kept copies, in stretches: `GET /api/jobs/{id}/kept/{noise|input}`
+
+A finished Denoising job (the standard remover, not the Voice rebuild) keeps for its 2 hours two signals on the same sample grid, of any
+length: `noise` (the noise removal at full strength) and `input` (the recording as the remover heard it). Any strength is exactly
+`(1 - a) * noise + a * input` with `a = 10^(-dB/20)` (`a = 0` from 100 dB), which is what the website's live strength slider plays and what a free
+re-run saves (section 7). `redo.preview` of the job tells how to read them: `samples` (the length, 48 kHz), `channels` (which channels of the
+recording are kept, e.g. `[0]`, or `[1]` alone), `plan` (for each channel of the result, the kept channel it is; `null`: silent), `scale`
+(a copy with a sample louder than 0.98 was scaled down by this factor before it was kept: divide by it), `bytes` (the sizes of the whole
+files), `stretchMaxSeconds` (30) and, when known, `energy` (`{full, input, cross}`: the sums of squares and of products over all
+samples and kept channels, the loudness of any blend is `(1-a)^2 full + a^2 input + 2a(1-a) cross`).
+
+Without parameters the answer is the whole copy (24-bit FLAC). With `start` and/or `seconds` it is only a stretch, small whatever the
+length of the recording:
+
+| Query | Meaning |
+|---|---|
+| `start` | seconds from the beginning, default `0`; rounded to the nearest sample (48 kHz). Six decimals name every sample exactly. At or past the end of the recording: `400` |
+| `seconds` | length, default and at most `30` (more is cut to 30); cut short by the end of the recording. Zero, negative or not a number: `422` |
+
+The answer is `200` `audio/flac`: 24-bit, 48 kHz, the kept channels, exactly those samples (a few seconds of speech are a few hundred kB). It decodes to the very
+values the whole copy has at those positions (nothing is lost), and the same `start` and `seconds` for `noise` and `input` give two stretches that
+line up sample for sample. Headers: `X-Stretch-Start` (the first sample), `X-Stretch-Samples` (how many) and `X-Total-Samples`;
+`Cache-Control: private, no-store`. A page or program that plays or mixes a long recording asks for the stretch around its position, the next
+one ahead of time and nothing else, and holds a few at a time.
+
+Same sign-in and key scope (`jobs`) as the other calls on a job; only the account's own jobs, `404` for any other, for a job that is not
+`done`, one without both copies (a Voice rebuild, Leveling on its own, a job made before the recording was kept) and after the 2 hours or
+`DELETE`. Stretches have a limit of their own per account (a burst of 120, then 2 a second: playing needs about one every 5 seconds, a seek one more
+pair) and `429` with `Retry-After` when it is passed; `503` with `Retry-After` when the server is busy cutting for others.
 
 ### 6. Cancel and delete
 
@@ -350,7 +381,7 @@ Body of both calls: only what changes (the rest stays as the job had it): `{deno
 
 | You change | What runs again | Price |
 |---|---|---|
-| `options.atten_lim_db` | the blend of the kept noise removal and the recording (no model runs); `(1 - a) * full + a * input`, `a = 10^(-dB/20)`, in the time domain: the same arithmetic the noise remover does itself. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send `"leveling": false` as well for a free strength change | free; Leveling's price when Leveling is on |
+| `options.atten_lim_db` | the blend of the kept noise removal and the recording (no model runs), for a recording of any length; `(1 - a) * full + a * input`, `a = 10^(-dB/20)`, in the time domain: the same arithmetic the noise remover does itself. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send `"leveling": false` as well for a free strength change | free; Leveling's price when Leveling is on |
 | `options.leveling`, `options.loudness_lufs` | from the kept noise removal: the blend, Leveling (when on) | Leveling's price whenever it runs; free when it is off |
 | `denoiseTier: "rebuild"` | the voice is rebuilt from the upload | the full Voice rebuild price (plus Leveling when on) |
 | `denoiseTier: "standard"` (from a rebuild) | from the kept noise removal; if the job never had one, noise removal runs from the upload | free, or the Denoising price when it had to run |

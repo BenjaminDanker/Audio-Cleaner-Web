@@ -136,6 +136,7 @@ LIMITS = {
     "api": (120, 2.0),                 # general API calls
     "job_create": (20, 20 / 3600),
     "upload": (30, 30 / 3600),
+    "kept_cut": (120, 2.0),            # stretches of a job's kept copies per account (the strength slider asks for two every ~10 s of playing, more when seeking)
     "checkout": (10, 10 / 3600),
     "asset_fetch": (300, 300 / 86400),  # free-tool files per account per day (api/auth_routes.asset_check)
     "stream_start": (60, 60 / 3600),    # live starts per account per hour (failed starts count too)

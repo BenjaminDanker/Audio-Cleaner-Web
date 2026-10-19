@@ -8,7 +8,7 @@ import { outputUrl } from './api.js';
 import { saveBlob } from './download.js';
 import { stem } from './format.js';
 import { LANGUAGES } from './jobs.js';
-import { blendToPcm, loadKeptPair, splitParts } from './media/blend.js';
+import { blendToPcm, keptSource, loadKeptPair, memorySource, previewFits, splitParts } from './media/blend.js';
 import { buildMedia, cleanName, endingOf, FORMAT, formatOfName, srtToVtt, vttToSrt } from './media/convert.js';
 import { probeMedia } from './media/mb.js';
 import { buildWav } from './media/wav.js';
@@ -85,7 +85,7 @@ export function finishSeconds(w, { info, file, serverAudio = false } = {}) {
 
 /* ------------------------------------------------------------------------------------------------ one job's finishing */
 
-const EMPTY = { phase: 'idle', progress: 0, files: [], note: '', error: '', pending: null, pairPhase: 'idle', pairProgress: 0, pairError: '', strengthDb: null };
+const EMPTY = { phase: 'idle', progress: 0, files: [], note: '', error: '', pending: null, strengthDb: null };
 
 export class Finish {
   constructor(id) {
@@ -111,8 +111,10 @@ export class Finish {
     // The two signals the strength is blended from (media/blend.js): the noise removal at full strength and the recording.
     this.pairParts = null; // made in this browser: interleaved float32 parts {full, input}
     this.pairChannels = 0;
-    this.pair = null; // decoded for the slider: {full, input, plan}
+    this.pair = null; // the parts above as arrays (a free run here only: everything is in memory already)
     this.pairLoad = null;
+    this.source = null; // what the slider plays from (media/blend.js memorySource / keptSource)
+    this.sourceKey = '';
     this.blendedDb = null; // the strength this.pcm was blended at, for a job on our side
     this.strengthDb = null; // the strength of the sound made in this tab (set by the free cleanup, and whenever it is blended again)
     this.subscribe = (fn) => { this.listeners.add(fn); return () => this.listeners.delete(fn); };
@@ -151,23 +153,50 @@ export class Finish {
     return Number.isFinite(this.job?.options?.atten_lim_db) ? this.job.options.atten_lim_db : 100;
   }
 
-  /** The two signals decoded, ready for the slider and for blending (a download for a job on our side). */
+  /**
+   * The two signals as whole arrays. A free run made here has them already (kept for the slider and for saving other strengths). For a
+   * job on our side this fetches both kept copies whole; that is only for blending a new strength on this device (recordings that fit in
+   * memory, previewFits), and nothing is kept afterwards: the slider plays from short stretches (stretchSource).
+   */
   ensurePair({ signal } = {}) {
     if (this.pair) return Promise.resolve(this.pair);
+    if (!this.pairParts) {
+      const preview = this.job?.redo?.preview;
+      if (!preview || !previewFits(this.job.durationSeconds || preview.samples / 48000, preview.channels.length)) {
+        return Promise.reject(new Error('This recording is too long to put together on this device.'));
+      }
+      return loadKeptPair(this.id, preview, { signal });
+    }
     if (!this.pairLoad) {
-      this.set({ pairPhase: 'loading', pairProgress: 0, pairError: '' });
-      const run = this.pairParts
-        ? (async () => {
-          const ch = this.pairChannels;
-          return { full: await splitParts(this.pairParts.full, ch), input: await splitParts(this.pairParts.input, ch), plan: Array.from({ length: ch }, (_, i) => i) };
-        })()
-        : loadKeptPair(this.id, this.job.redo.preview, { signal, onProgress: (p) => this.set({ pairProgress: p }) });
-      this.pairLoad = run.then(
-        (pair) => { this.pair = pair; this.set({ pairPhase: 'ready', pairProgress: 1 }); return pair; },
-        (e) => { this.pairLoad = null; this.set({ pairPhase: 'error', pairError: e?.message || 'Couldn’t get the sound to try other strengths with.' }); throw e; },
+      const ch = this.pairChannels;
+      this.pairLoad = (async () => ({ full: await splitParts(this.pairParts.full, ch), input: await splitParts(this.pairParts.input, ch), plan: Array.from({ length: ch }, (_, i) => i) }))().then(
+        (pair) => { this.pair = pair; return pair; },
+        (e) => { this.pairLoad = null; throw e; },
       );
     }
     return this.pairLoad;
+  }
+
+  /**
+   * What the slider plays from, whatever the length of the recording: the arrays of a free run made here, or the job's two kept
+   * copies on our side in short stretches (a few seconds are in memory at a time, never the whole recording).
+   */
+  async stretchSource() {
+    if (this.pairParts) {
+      if (this.sourceKey !== 'here') {
+        this.source = memorySource(await this.ensurePair());
+        this.sourceKey = 'here';
+      }
+      return this.source;
+    }
+    const preview = this.job?.redo?.preview;
+    if (!preview) throw new Error('The sound to try other strengths with is not here any more.');
+    const key = `${this.id}:${preview.samples}:${preview.channels.join(',')}:${preview.scale.noise}:${preview.scale.input}:${preview.energy?.full ?? ''}`;
+    if (this.sourceKey !== key) {
+      this.source = keptSource(this.id, preview);
+      this.sourceKey = key;
+    }
+    return this.source;
   }
 
   /** Make the cleaned sound from the two signals at strength `db` (dB): free, on this device. It becomes the sound of this job here. */

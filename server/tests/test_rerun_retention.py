@@ -249,7 +249,8 @@ def test_redo_of_a_job_with_the_noise_removal_and_the_recording_kept(client, sig
     redo = redo_of(client, jid)
     sizes = {k: (folder(jid) / f"kept-{k}.flac").stat().st_size for k in ("noise", "input")}
     assert redo == {"available": True, "noise": True, "rebuilt": False, "transcript": False, "translations": [],
-                    "preview": {"samples": 60 * 48_000, "channels": [0, 1], "plan": [0, 1], "scale": {"noise": 1.0, "input": 1.0}, "bytes": sizes}}
+                    "preview": {"samples": 60 * 48_000, "channels": [0, 1], "plan": [0, 1], "scale": {"noise": 1.0, "input": 1.0}, "bytes": sizes,
+                                "stretchMaxSeconds": 30}}
 
 
 def test_redo_lists_the_transcript_and_its_translations(client, signed_in):
@@ -354,16 +355,16 @@ def test_the_kept_copies_are_404_for_bad_names_unfinished_jobs_and_after_expiry(
 
 
 def test_the_kept_copies_are_404_without_a_preview_or_when_the_file_is_a_link(client, signed_in):
-    """A job without both copies (a rebuild, a long recording) has none to give; a link in their place is never followed."""
+    """A job without both copies (a rebuild, one made before the recording was kept) has none to give; a link in their place is never followed."""
     uid, _ = signed_in
     rebuild = make_done_job(uid, denoise_tier="rebuild", rebuilt=True)
-    long_recording = make_done_job(uid, input_copy=False)
-    for jid in (rebuild, long_recording):
+    no_recording = make_done_job(uid, input_copy=False)
+    for jid in (rebuild, no_recording):
         assert client.get(f"/api/jobs/{jid}/kept/noise").status_code == 404
         assert client.get(f"/api/jobs/{jid}/kept/input").status_code == 404
     planted = make_done_job(uid)
     (folder(planted) / "kept-input.flac").unlink()
-    os.symlink(folder(long_recording) / "kept-noise.flac", folder(planted) / "kept-input.flac")
+    os.symlink(folder(no_recording) / "kept-noise.flac", folder(planted) / "kept-input.flac")
     assert client.get(f"/api/jobs/{planted}/kept/input").status_code == 404
     assert client.get(f"/api/jobs/{planted}/kept/noise").status_code == 404  # no preview without both copies
 
@@ -421,7 +422,7 @@ def test_get_job_has_a_redo_preview_only_with_both_copies_and_standard_denoising
     listed = next(j for j in client.get("/api/jobs").json()["jobs"] if j["id"] == jid)
     assert listed["redo"] == redo
     if preview:
-        assert redo["preview"]["samples"] == 30 * 48_000 and set(redo["preview"]) == {"samples", "channels", "plan", "scale", "bytes"}
+        assert redo["preview"]["samples"] == 30 * 48_000 and set(redo["preview"]) == {"samples", "channels", "plan", "scale", "bytes", "stretchMaxSeconds"}
         assert client.get(f"/api/jobs/{jid}/kept/noise").status_code == client.get(f"/api/jobs/{jid}/kept/input").status_code == 200
     else:
         assert client.get(f"/api/jobs/{jid}/kept/noise").status_code == 404 and client.get(f"/api/jobs/{jid}/kept/input").status_code == 404
@@ -433,3 +434,24 @@ def test_a_transcript_only_job_has_no_noise_copy_and_no_preview(client, signed_i
     jid = make_done_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", segments={})
     redo = client.get(f"/api/jobs/{jid}").json()["redo"]
     assert redo["noise"] is False and "preview" not in redo and redo["transcript"] is True
+
+
+def test_the_preview_carries_the_energy_sums_when_the_runner_reported_them_and_only_sane_ones(client, signed_in):
+    """The sums that keep a preview's loudness level while the strength moves (kept.energy): passed on as reported, dropped when not numbers."""
+    uid, _ = signed_in
+    jid = make_done_job(uid, seconds=30.0)
+    assert "energy" not in redo_of(client, jid)["preview"]
+    good = {"full": 12.5, "input": 20.0, "cross": -3.25}
+    for energy, want in ((good, good), ({**good, "cross": 7}, {**good, "cross": 7.0}), ({"full": -1, "input": 2, "cross": 0}, None), ({"full": 1, "input": 2}, None),
+                         ({"full": float("inf"), "input": 2, "cross": 0}, None), ("x", None), (None, None)):
+        params = params_of(jid)
+        params["kept"]["noise"]["energy"] = energy
+        db.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(params), jid))
+        shown = redo_of(client, jid)["preview"]
+        assert shown.get("energy") == want, energy
+    from acw import rerun
+
+    entry = {**kept_record(30.0)["noise"], "energy": good, "plan": [0, 1]}
+    clean = rerun.sanitize_kept({"noise": entry}, folder(jid))
+    assert clean["noise"]["energy"] == good
+    assert "energy" not in rerun.sanitize_kept({"noise": {**entry, "energy": {"full": "x", "input": 1, "cross": 1}}}, folder(jid))["noise"]

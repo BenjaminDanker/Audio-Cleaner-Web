@@ -9,11 +9,11 @@ import stat
 import time
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, jobs, keycaps, rerun, webhooks
+from .. import auth, db, jobs, keycaps, rerun, stretch, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -396,10 +396,20 @@ def download(job_id: str, name: str, principal: auth.Principal = Depends(auth.re
 
 
 @router.get("/{job_id}/kept/{which}")
-def kept_copy(job_id: str, which: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> FileResponse:
+def kept_copy(
+    job_id: str,
+    which: str,
+    start: float | None = Query(default=None, ge=0, le=10**6),
+    seconds: float | None = Query(default=None, gt=0, le=10**6),
+    principal: auth.Principal = Depends(auth.require_scope("jobs")),
+) -> Response:
     """The two copies the strength slider blends (24-bit FLAC, 48 kHz, sample for sample the same length): the noise removal
     at full strength (`which` = noise) and the recording as the remover heard it (`input`). How to read them (channels, the
-    scale a loud sample was brought down by) is `redo.preview` of the job. Only the owner, only while the job's files exist."""
+    scale a loud sample was brought down by) is `redo.preview` of the job. Only the owner, only while the job's files exist.
+
+    With `start` and/or `seconds` the answer is only a stretch of the copy, whatever its length: `seconds` from the second `start`
+    (default 0), at most 30 seconds (more is cut to that), cut short by the end of the recording; the same numbers cut from the two
+    copies line up sample for sample. The headers say what is in it (`X-Stretch-Start`, `X-Stretch-Samples`, `X-Total-Samples`)."""
     job = _get_owned(job_id, principal)
     redo = rerun.redo_info(job) if job["status"] == "done" else {}
     name = {"noise": f"{jobs.KEPT_NOISE}.flac", "input": f"{jobs.KEPT_INPUT}.flac"}.get(which)
@@ -408,4 +418,22 @@ def kept_copy(job_id: str, which: str, principal: auth.Principal = Depends(auth.
     path = jobs.job_dir(job_id) / name
     if not _is_plain_file(path):
         raise HTTPException(status_code=404, detail="Not found.")
-    return FileResponse(path, media_type="audio/flac", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
+    if start is None and seconds is None:
+        return FileResponse(path, media_type="audio/flac", headers=headers)
+    enforce("kept_cut", principal.user_id)
+    total = int(redo["preview"]["samples"])
+    try:
+        first, count = stretch.span(start, seconds, total)
+    except stretch.OutOfRange as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        data = stretch.cut(path, first, count)
+    except stretch.Busy:
+        raise HTTPException(status_code=503, detail="Busy right now, please try again in a moment.", headers={"Retry-After": "2"})
+    except stretch.Failed:
+        raise HTTPException(status_code=500, detail="Couldn’t cut that part of the sound. Please try again.")
+    return Response(
+        content=data, media_type="audio/flac",
+        headers={**headers, "X-Stretch-Start": str(first), "X-Stretch-Samples": str(count), "X-Total-Samples": str(total)},
+    )

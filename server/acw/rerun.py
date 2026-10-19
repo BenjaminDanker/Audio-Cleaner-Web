@@ -25,6 +25,7 @@ as the job it came from and never extends it (`deadline`).
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -93,10 +94,23 @@ def sanitize_kept(raw: object, d: Path) -> dict:
                     continue
                 if not all(c is None or c in (0, 1) for c in entry["plan"]):
                     continue
+                energy = _energy(e.get("energy"))
+                if energy:
+                    entry["energy"] = energy
         except (KeyError, TypeError, ValueError):
             continue
         out[key] = entry
     return out
+
+
+def _energy(raw: object) -> dict | None:
+    """The sums of squares and of the products of the two copies (acw_common.kept.energy), when they are sane numbers."""
+    try:
+        out = {k: float(raw[k]) for k in ("full", "input", "cross")}  # type: ignore[index]
+    except (KeyError, TypeError, ValueError):
+        return None
+    ok = all(math.isfinite(v) for v in out.values()) and out["full"] >= 0 and out["input"] >= 0
+    return out if ok else None
 
 
 def translations_in(d: Path) -> list[str]:
@@ -165,11 +179,15 @@ def redo_info(job: dict) -> dict:
     }
     if out["noise"] and has("input") and params.get("denoise_tier") == "standard":
         # what the page needs to blend the strength itself (the strength slider, and saving a new strength without a job):
-        # the two copies (GET /api/jobs/{id}/kept/{noise|input}), sample for sample, and how to read them
+        # the two copies sample for sample, any length (GET /api/jobs/{id}/kept/{noise|input}?start=&seconds= hands out short
+        # stretches of them, stretch.py), and how to read them
         n = kept["noise"]
         out["preview"] = {"samples": n["samples"], "channels": n["channels"], "plan": n["plan"],
                           "scale": {"noise": n["scale"], "input": kept["input"]["scale"]},
-                          "bytes": {k: (d / kept[k]["file"]).stat().st_size for k in ("noise", "input")}}
+                          "bytes": {k: (d / kept[k]["file"]).stat().st_size for k in ("noise", "input")},
+                          "stretchMaxSeconds": jobs.STRETCH_MAX_SECONDS}
+        if energy := _energy(n.get("energy")):
+            out["preview"]["energy"] = energy  # keeps the loudness of a preview level while the strength moves
     return out
 
 

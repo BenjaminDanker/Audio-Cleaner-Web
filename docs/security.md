@@ -113,6 +113,13 @@ also removes the shared-UID risk with the Minecraft servers.
   the numbers the runner reported validated (`rerun.sanitize_kept`), and hard-links them into the new job's folder (the sandbox itself
   can't create links). A re-run never extends the files' lifetime: it ends with the job it came from (the upload is one of the linked files, so
   it goes then too, and "Delete now" deletes the whole chain).
+- Stretches of the kept copies (`GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=`, `acw/stretch.py`): the same authentication, scope and
+  ownership as the other reads of a job (the job is looked up by id **and** account; a link or a non-regular file in the place of a copy is a
+  404), numbers validated and the length capped at 30 s, a rate limit of its own (`kept_cut`, per account, 429 with `Retry-After`) and at most 4
+  cuts at once. The copies were written by the sandboxed runner, which handles untrusted uploads, so the web process never opens one with a decoder:
+  it starts `python -m acw.worker.cutter`, a program that confines itself first with the runner's own sandbox (`worker/sandbox.py`: Landlock with
+  the file's folder read-only and nothing writable, no sockets, CPU / memory / file-size limits, no new privileges) and then becomes FFmpeg
+  (forced `flac` demuxer, `file` protocol only) writing the stretch to its standard output; a 20 s timeout kills it. Nothing is written or stored.
 - WebSocket: API key, or session cookie + exact Origin match (no cross-site
   WebSocket hijacking).
 - Rate limits: per IP (IPv6 per /64) and per user for auth, email, uploads, job creation,

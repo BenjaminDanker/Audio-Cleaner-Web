@@ -3,8 +3,9 @@
 //     themselves, one line in the billing history; with Leveling off the same save is free, made on this device, no job;
 //     a change that runs on our side but costs nothing is free too;
 //  2. the file saved on this device equals what our side makes for the same choice (decoded to float, the difference is under -60 dB);
-//  3. the slider while listening: the gains of the two copies against 10^(-dB/20), the names, in-between values, Original, Play / Pause,
-//     and the note that says whether what you hear is what you save; the panel and the slider share one strength;
+//  3. the slider while listening: the player is there at once and plays from short stretches of the two copies (never a whole copy), the gains
+//     of the two copies against 10^(-dB/20), the names, in-between values, Original, Play / Pause, and the note that says whether what you
+//     hear is what you save; the panel and the slider share one strength;
 //  4. the free noise removal in the browser has the slider at once and saves other strengths with no job (mono and stereo);
 //  5. a Voice rebuild job has no slider;
 //  6. the kept copies: audio/flac for the owner only, and the redo block of the job says how to read them.
@@ -22,7 +23,12 @@ const { browser, context, page, logs } = await launch();
 const got = []; // [{name, download}] in order: what the page downloaded
 page.on('download', (d) => got.push({ name: d.suggestedFilename(), download: d }));
 const requests = [];
-page.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) requests.push(`${r.method()} ${u.pathname}`); });
+const keptAsked = []; // the kept copies asked for, with their query: [path?start=&seconds=]
+page.on('request', (r) => {
+  const u = new URL(r.url());
+  if (u.pathname.startsWith('/api/')) requests.push(`${r.method()} ${u.pathname}`);
+  if (/\/kept\/(noise|input)$/.test(u.pathname)) keptAsked.push(u.pathname + u.search);
+});
 await signIn(page, EMAIL);
 admin('grant', EMAIL, '5', 'redo test');
 
@@ -342,23 +348,23 @@ const A = (db) => (db >= 100 ? 0 : 10 ** (-db / 20));
 const blend = () => card().getByTestId('blend-player');
 const attr = (n) => blend().getAttribute(n);
 
-await check('slider, a job on our side: Listen offers "Try other strengths" (with the size), the two copies load and the player appears at the strength last saved here (else the one the job was made with)', async () => {
+await check('slider, a job on our side: opening Listen shows the player at once; it asks for short stretches of the two copies (the first ten seconds of each, and the part after), never a whole copy, and starts at the strength last saved here (else the one the job was made with)', async () => {
   await gotoApp(`/app/job/${J1}`);
   await card().getByTestId('download-again').waitFor({ timeout: 20000 });
+  const asked = keptAsked.length;
   await openListen();
-  if (await card().getByTestId('blend-player').count()) throw new Error('the player is there before anything was loaded');
-  const load = card().getByTestId('blend-load');
-  await load.waitFor();
+  if (await card().getByTestId('blend-load').count()) throw new Error('the page still asks to load the sound');
   const t0 = Date.now();
-  const fetched = requests.length;
-  await load.click();
   await blend().waitFor({ timeout: 120000 });
-  const gets = requests.slice(fetched).filter((r) => /\/kept\/(noise|input)$/.test(r)).sort();
-  if (gets.length !== 2 || !gets[0].includes('/kept/input') || !gets[1].includes('/kept/noise')) throw new Error('requests: ' + gets);
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid=blend-player]')?.getAttribute('data-held')) >= 2, null, { timeout: 30000 });
+  const gets = keptAsked.slice(asked);
+  if (!gets.length || gets.some((u) => !/\?start=\d+\.\d{6}&seconds=\d+\.\d{6}$/.test(u))) throw new Error('requests: ' + gets);
+  for (const which of ['noise', 'input']) if (!gets.includes(`/api/jobs/${J1}/kept/${which}?start=0.000000&seconds=10.000000`)) throw new Error(`no first stretch of ${which}: ${gets}`);
+  if ((await attr('data-source')) !== 'server') throw new Error('source ' + await attr('data-source'));
   // the strength of what this browser saved last (Balanced, a few checks above), else the one the job was made with
   if ((await attr('data-db')) !== '24.00' || (await card().getByTestId('strength-name').innerText()) !== 'Balanced') throw new Error(`starts at ${await attr('data-db')} dB`);
   if ((await attr('data-mode')) !== 'cleaned') throw new Error('mode ' + await attr('data-mode'));
-  return `loaded in ${Date.now() - t0} ms, at Balanced (the last strength saved here)`;
+  return `ready in ${Date.now() - t0} ms with ${gets.length} stretch requests, at Balanced (the last strength saved here)`;
 });
 
 await check('slider, Leveling still on in the panel: data-exact is "no", the note says they are added when you save, the gains keep the ratio a / (1 - a) of the strength and a loudness match g between 0.1 and 3', async () => {
@@ -510,7 +516,6 @@ await check('slider on a re-run job: the new job carried the two copies over, so
   const redo = (await apiCall(page, 'GET', `jobs/${rerunJob}`)).body.redo;
   if (!redo?.preview) throw new Error('the re-run has no kept copies: ' + JSON.stringify(redo));
   await openListen();
-  await card().getByTestId('blend-load').click();
   await blend().waitFor({ timeout: 120000 });
   if ((await attr('data-db')) !== '40.00' || (await card().getByTestId('strength-name').innerText()) !== 'Strong') throw new Error(`starts at ${await attr('data-db')} dB`);
   return 'Strong, from the carried copies';
@@ -587,7 +592,7 @@ await check('a Voice rebuild job gets no slider (and no strength choice in the p
     if (await card().getByTestId('listen').count()) {
       await openListen();
       await sleep(300);
-      if ((await card().getByTestId('blend-load').count()) || (await card().getByTestId('blend-player').count())) throw new Error('a slider for a Voice rebuild job');
+      if (await card().getByTestId('blend-player').count()) throw new Error('a slider for a Voice rebuild job');
     }
     await openAgain();
     if (await card().locator(`[data-testid=strength-again-${J1}]`).count()) throw new Error('a strength choice for a Voice rebuild job');

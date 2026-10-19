@@ -215,6 +215,29 @@ def test_a_kept_copy_comes_back_to_one_24_bit_step(tmp_path):
     assert not (tmp_path / "scratch.f32").exists()
 
 
+def test_the_energy_sums_give_the_loudness_of_every_blend_over_the_kept_channels():
+    """E(a) = (1 - a)^2 ef + a^2 ei + 2 a (1 - a) cfi is the energy of (1 - a) * full + a * input, for all kept channels, in blocks."""
+    rng = np.random.default_rng(3)
+    n = kept.BLOCK * 2 + 12_345  # more than two blocks, so the loop goes round
+    full = (0.2 * rng.standard_normal((n, 2))).astype(np.float32)
+    heard = (full + 0.1 * rng.standard_normal((n, 2))).astype(np.float32)
+    for cols in (None, [0], [1], [0, 1]):
+        e = kept.energy(full, heard, cols)
+        use = slice(None) if cols is None else cols
+        f, x = full[:, use].astype(np.float64), heard[:, use].astype(np.float64)
+        assert abs(e["full"] - np.sum(f * f)) <= 1e-9 * np.sum(f * f)
+        assert abs(e["input"] - np.sum(x * x)) <= 1e-9 * np.sum(x * x)
+        assert abs(e["cross"] - np.sum(f * x)) <= 1e-9 * np.sum(f * x)
+        for a in (0.0, 0.063, 0.25, 1.0):
+            mixed = (1 - a) * f + a * x
+            closed = (1 - a) ** 2 * e["full"] + a * a * e["input"] + 2 * a * (1 - a) * e["cross"]
+            assert abs(closed - np.sum(mixed * mixed)) <= 1e-8 * np.sum(mixed * mixed) + 1e-9
+    mono = kept.energy(full[:, 0], heard[:, 0])  # one-dimensional arrays are one channel
+    assert abs(mono["full"] - kept.energy(full, heard, [0])["full"]) < 1e-9
+    short = kept.energy(full, heard[:1000], [0])  # the shorter of the two decides
+    assert abs(short["input"] - np.sum(heard[:1000, 0].astype(np.float64) ** 2)) < 1e-9
+
+
 @needs_ff
 def test_a_loud_copy_is_scaled_down_with_the_file_and_restored_and_one_channel_can_be_kept(tmp_path):
     ff = FFmpeg(FF_DIR)

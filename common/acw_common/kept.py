@@ -5,6 +5,10 @@ rebuilt voice (before leveling): `pipeline.clean_audio(keep=...)` hands them ove
 `load` brings them back as float32, to within 1.2e-7 of full scale (one 24-bit step; a sample is scaled down first when it would
 clip, and the scale is kept with the file). The 32-bit float they are made of would take twice the disk; FLAC takes
 a third to a half of that (docs/operations.md, "What a job keeps").
+
+For the website's strength slider a job also keeps the recording as the remover heard it (`kept-input.flac`), on the same sample
+grid and for any length: the server hands out short, sample-exact stretches of both copies (server/acw/stretch.py), and
+`energy` gives the three sums the page needs to keep the loudness of a preview even while the strength moves.
 """
 from __future__ import annotations
 
@@ -26,6 +30,24 @@ def _peak(y: np.ndarray) -> float:
     for s in range(0, len(y), BLOCK):
         peak = max(peak, float(np.max(np.abs(y[s:s + BLOCK])))) if len(y[s:s + BLOCK]) else peak
     return peak
+
+
+def energy(full: np.ndarray, heard: np.ndarray, channels: list[int] | None = None) -> dict:
+    """The sums over the kept channels (all of them, every sample) the loudness of any blend is made of:
+    E(a) = (1 - a)^2 * full + a^2 * input + 2 a (1 - a) * cross, for the blend (1 - a) * full + a * heard. float64 sums."""
+    a2 = full[:, None] if full.ndim == 1 else full
+    b2 = heard[:, None] if heard.ndim == 1 else heard
+    cols = list(range(a2.shape[1])) if channels is None else sorted(channels)
+    ff_, xx, fx = 0.0, 0.0, 0.0
+    n = min(len(a2), len(b2))
+    for s in range(0, n, BLOCK):
+        for c in cols:
+            f = np.asarray(a2[s:min(n, s + BLOCK), c], dtype=np.float64)
+            x = np.asarray(b2[s:min(n, s + BLOCK), c], dtype=np.float64)
+            ff_ += float(np.dot(f, f))
+            xx += float(np.dot(x, x))
+            fx += float(np.dot(f, x))
+    return {"full": ff_, "input": xx, "cross": fx}
 
 
 def save(ff: FFmpeg, y: np.ndarray, channels: list[int] | None, dest: Path) -> dict:

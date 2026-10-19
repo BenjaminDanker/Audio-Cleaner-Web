@@ -54,10 +54,9 @@ ACTIVE = ("uploading", "queued", "running", "cloud_asr")
 KEPT_NOISE = "kept-noise"
 KEPT_REBUILT = "kept-rebuilt"
 KEPT_INPUT = "kept-input"  # the recording as the noise remover heard it, on the same sample grid (for the strength slider)
-# The strength slider blends the noise removal with the recording in the browser (two buffers of 32-bit floats in memory):
-# offered up to this many channel-seconds (20 minutes of mono, 10 of stereo: about 460 MB for both). A longer recording
-# can still be changed and saved again on our side, which is the same blend.
-PREVIEW_MAX_CHANNEL_SECONDS = 1200
+# The strength slider plays short stretches of the two copies (GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=, see
+# stretch.py), so both are kept for a recording of any length. A stretch is at most this many seconds.
+STRETCH_MAX_SECONDS = 30
 # Disk promised to uploads that are still arriving, per account, and the most a file may weigh per second of its
 # claimed length (320 Mbit/s: high-end video) unless it is small anyway. Without these a claim of a 4 GiB file
 # that is half a second long reserves 4 GiB of disk for an hour at no cost.
@@ -76,9 +75,10 @@ JOB_MEM = 1 * GB
 # cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
 LOCAL_ASR_MEM = int(3.2 * GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
-# What the kept copies of a job take, per hour of audio and kept channel (24-bit FLAC of the cleaned voice, measured
-# 0.29 to 0.31 GB; a recording whose channels are the same is kept once).
-KEPT_PER_HOUR_PER_CHANNEL = int(0.35 * GB)
+# What one kept copy of a job takes, per hour of audio and kept channel (24-bit FLAC: the cleaned voice measured 0.29 to
+# 0.31 GB, the recording next to it 0.32 to 0.36 GB and up to 0.40 GB for a very noisy one; a recording whose channels are
+# the same is kept once). A Denoising job keeps two copies for any length, a Voice rebuild one.
+KEPT_PER_HOUR_PER_CHANNEL = int(0.4 * GB)
 # Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
 # monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
 # remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
@@ -118,11 +118,6 @@ QUEUE_ORDER = (
 )
 
 
-def preview_fits(seconds: float, channels: int | None = None) -> bool:
-    """Is a recording of this length small enough for the strength slider (the page holds it in memory)?"""
-    return seconds * max(1, min(2, int(channels or 2))) <= PREVIEW_MAX_CHANNEL_SECONDS
-
-
 def params_of(job_id: str) -> dict | None:
     """A job's stored parameters as they are now (the copy in a claimed job dict can be older)."""
     row = db.one("SELECT params_json FROM jobs WHERE id = ?", (job_id,))
@@ -131,10 +126,10 @@ def params_of(job_id: str) -> dict | None:
 
 def kept_bytes(kind: str, seconds: float, channels: int = 2, denoise_tier: str | None = None) -> int:
     """Disk the kept copies of a job take (none for Leveling on its own or without cleaning): the noise removal, and next to
-    it the recording itself when it is short enough for the slider."""
+    it the recording itself (for the strength slider; a Voice rebuild has no slider and keeps the rebuilt voice only)."""
     if kind not in ("denoise", "denoise_transcribe") or denoise_tier == pricing.NO_DENOISE:
         return 0
-    per_hour = KEPT_PER_HOUR_PER_CHANNEL * (2 if denoise_tier != "rebuild" and preview_fits(seconds, channels) else 1)
+    per_hour = KEPT_PER_HOUR_PER_CHANNEL * (1 if denoise_tier == "rebuild" else 2)
     return int(seconds / 3600 * channels * per_hour)
 
 

@@ -605,13 +605,17 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 **What a job keeps** (`data/jobs/<id>/`, until its 2 hours are over; `acw_common/kept.py`, `server/acw/rerun.py`). Measured on a 130 s
 recording (`kept.save`, 24-bit FLAC): per hour of audio and per cleaned channel the noise removal at full strength takes about **0.29 GB**
 (0.14 GB for a stereo recording whose sides are nearly the same), the recording itself, kept next to it for the website's strength slider
-(only for recordings up to 10 minutes of stereo or 20 of mono, `jobs.PREVIEW_MAX_CHANNEL_SECONDS`), **0.36 GB**; the Voice rebuild keeps its
-output (about the same as the noise removal) and nothing else; the transcript is a few kB. A channel that repeats the other, or is silent,
-is kept once, or not at all. On top of that come the upload as it was sent (a FLAC of 1 h of mono speech: about 0.3 GB) and the results
-(a FLAC of the same: 0.3 GB). So a 1 hour mono file holds about 0.9 GB (1.2 GB with the slider copy, which a file that long doesn't have)
-for 2 hours, where it held its results (0.3 GB) for 24 hours before: at the example load of 1000 file jobs a day, 2 hours means about 83 jobs
-are on disk at any time instead of 1000. The re-run of a job hard-links what it needs (no copy), so it adds only what it writes. Setting
-`ACW_JOB_RETENTION_MINUTES` higher keeps all of this longer, lower shortens it (the Privacy Policy says 2 hours).
+(**for any length**: the page plays short stretches of both, `acw/stretch.py`), **0.36 GB** (0.32 to 0.36 on speech mixed with street noise at
+0 to 20 dB, 0.40 on white noise at -34 dBFS, which is the worst case); the Voice rebuild keeps its output (about the same as the noise
+removal) and nothing else; the transcript is a few kB. A channel that repeats the other, or is silent, is kept once, or not at all. On top of
+that come the upload as it was sent (a FLAC of 1 h of mono speech: about 0.3 GB) and the results (a FLAC of the same: 0.3 GB). So a 1 hour mono
+Denoising file holds about **1.25 GB** for 2 hours (copies 0.65, upload 0.3, result 0.3; before, a file over 20 minutes had no slider copy and held
+0.9 GB), a 1 hour stereo one with two different channels about **2.5 GB**, a 4 hour mono file about 5 GB; `jobs.kept_bytes`
+(admission, `KEPT_PER_HOUR_PER_CHANNEL` = 0.4 GB per copy, a worst-case figure) reserves 0.8 GB per hour and channel for the two copies. At the
+example load of 1000 file jobs a day, 2 hours means about 83 jobs are on disk at any time instead of 1000. The re-run of a job hard-links what
+it needs (no copy), so it adds only what it writes (a strength change without Leveling writes the new result only). A stretch is cut on request
+(about 90 ms of one core: a process of a few ms and FFmpeg seeking by itself, at most 4 at once, 120 a burst then 2 a second per account, nothing
+stored). Setting `ACW_JOB_RETENTION_MINUTES` higher keeps all of this longer, lower shortens it (the Privacy Policy says 2 hours).
 
 The monitor watches two sizes every 2 minutes and mails when `data/` without `jobs/` is over 5 GB (`data_large`) or the backup
 folder is over 20 GB (`backups_large`). At the example load the first stays around 1 GB (database, log, ten pre-deploy

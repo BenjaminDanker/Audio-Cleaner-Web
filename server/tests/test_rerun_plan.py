@@ -529,25 +529,16 @@ def test_the_active_limit_message_is_singular_for_one_file(monkeypatch):
 
 # ------------------------------------------------------------------------------- sizes of the copies
 
-def test_preview_fits_counts_channel_seconds_up_to_twenty_minutes():
-    """The strength slider holds two buffers in memory: up to 1200 channel-seconds."""
-    assert jobs.PREVIEW_MAX_CHANNEL_SECONDS == 1200
-    assert jobs.preview_fits(1200, 1) and not jobs.preview_fits(1200.5, 1)
-    assert jobs.preview_fits(600, 2) and not jobs.preview_fits(601, 2)
-    assert jobs.preview_fits(600) and not jobs.preview_fits(601)  # no channel count given: counted as two
-    assert jobs.preview_fits(600, 5) and not jobs.preview_fits(601, 5)  # more than two channels count as two
-    assert jobs.preview_fits(600, 0) and not jobs.preview_fits(601, 0)  # 0 channels is unknown: counted as two
-    assert jobs.preview_fits(0.5, 1)
-
-
 def test_kept_bytes_is_the_disk_the_copies_take_by_kind_tier_and_length():
-    """None for jobs without noise removal; Denoising keeps two copies while the slider can take it, a rebuild one."""
+    """None for jobs without noise removal; Denoising keeps two copies for any length (the slider plays stretches of them), a rebuild one."""
     per = jobs.KEPT_PER_HOUR_PER_CHANNEL
     assert jobs.kept_bytes("transcribe", 3600) == 0
     assert jobs.kept_bytes("denoise", 3600, 2, "off") == 0
     assert jobs.kept_bytes("denoise_transcribe", 3600, 2, "off") == 0
     assert jobs.kept_bytes("denoise", 600, 2, "standard") == int(600 / 3600 * 2 * per * 2)  # short: noise removal + recording
-    assert jobs.kept_bytes("denoise", 3600, 2, "standard") == int(3600 / 3600 * 2 * per)  # long: noise removal only
+    assert jobs.kept_bytes("denoise", 3600, 2, "standard") == int(3600 / 3600 * 2 * per * 2)  # an hour long: still both copies
+    assert jobs.kept_bytes("denoise", 4 * 3600, 1, "standard") == int(4 * per * 2) and jobs.kept_bytes("denoise", 4 * 3600, 1, "standard") > 3 * jobs.GB
+    assert not hasattr(jobs, "preview_fits") and not hasattr(jobs, "PREVIEW_MAX_CHANNEL_SECONDS")  # no length gate any more
     assert jobs.kept_bytes("denoise", 600, 1, "standard") == int(600 / 3600 * 1 * per * 2)
     assert jobs.kept_bytes("denoise", 600, 2, "rebuild") == int(600 / 3600 * 2 * per)  # the rebuilt voice only
     assert jobs.kept_bytes("denoise_transcribe", 600, 2, "standard") == jobs.kept_bytes("denoise", 600, 2, "standard")

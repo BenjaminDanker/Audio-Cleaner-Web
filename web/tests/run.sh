@@ -1,6 +1,6 @@
 #!/bin/bash
 # Runs the browser suites, each on a fresh throwaway backend (tests/backend.sh), against one build of the site.
-#   tests/run.sh                 every suite except long.mjs
+#   tests/run.sh                 every suite except long.mjs (stretch.mjs cleans 40 minutes of audio: a few minutes)
 #   tests/run.sh free ui         only these (names of tests/<name>.mjs)
 # The site is built once, with the model downloads pointed at tests/mirror.mjs (http://127.0.0.1:8798/), into a temp dist.
 # Exit status: 0 only when every suite exited 0 and printed no "FAIL" line. Logs: $ACW_TEST_STATE/<suite>.log
@@ -11,7 +11,7 @@ WEB=$(dirname "$HERE")
 STATE=${ACW_TEST_STATE:-/tmp/acw-webtest-$(id -u)}
 export ACW_TEST_STATE=$STATE
 SUITES=("$@")
-[ ${#SUITES[@]} -gt 0 ] || SUITES=(blend-unit contact convert copy e2e files fixes flac free jobs live offline redo reco-model reco-unit reco-ui subtitles ui)
+[ ${#SUITES[@]} -gt 0 ] || SUITES=(blend-unit contact convert copy e2e files fixes flac free jobs live offline redo stretch reco-model reco-unit reco-ui subtitles ui)
 
 mkdir -p "$STATE"
 exec 9>"$STATE.lock"
@@ -32,7 +32,7 @@ for t in "${SUITES[@]}"; do
   [ -f "tests/$t.mjs" ] || { echo "== $t: no such suite"; failed+=("$t"); continue; }
   "$HERE/backend.sh" start || { echo "== $t: backend did not start"; failed+=("$t"); continue; }
   s=$(date +%s)
-  timeout 1500 node "tests/$t.mjs" > "$STATE/$t.log" 2>&1; rc=$?
+  timeout 2400 node "tests/$t.mjs" > "$STATE/$t.log" 2>&1; rc=$?
   "$HERE/backend.sh" stop
   fails=$(grep -c -E "^FAIL" "$STATE/$t.log")
   echo "=== $t exit $rc, $(grep -c -E '^PASS' "$STATE/$t.log") PASS, $fails FAIL, $(( $(date +%s) - s )) s"

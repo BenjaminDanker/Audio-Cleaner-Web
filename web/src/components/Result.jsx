@@ -7,7 +7,7 @@ import { beginFinish, useFinish } from '../finish.js';
 import { findRate, usePricing } from '../hooks.js';
 import { rebuildHint } from '../hints.js';
 import { jobPath, LOUDNESS } from '../jobs.js';
-import { BlendPlayer, dbAt, energySums, gainsFor, matchGain, mixOf, posOf, strengthName } from '../media/blend.js';
+import { BlendPlayer, dbAt, gainsFor, matchGain, mixOf, posOf, previewFits, strengthName } from '../media/blend.js';
 import { canHoldSubtitles, FORMAT } from '../media/convert.js';
 import { STRENGTHS } from '../strengths.js';
 import AbPlayer from './AbPlayer.jsx';
@@ -31,8 +31,9 @@ const loudnessId = (v) => (v == null ? 'keep' : LOUDNESS.find((l) => l.value ===
  * panel are two views of the same state:
  *   nothing  no paid choice changed: only the free ones (file type, name, subtitle files) are made again, in the browser
  *   local    the new sound is the noise removal at the chosen strength and nothing after it: blended here from the two copies
- *            the job kept (or the two this browser made), free, no job
- *   server   a re-run on our side of the steps that changed (rerun.py): the price comes from the server before it is confirmed
+ *            the job kept (or the two this browser made), free, no job; only for a recording that fits in memory (previewFits)
+ *   server   a re-run on our side of the steps that changed (rerun.py): the price comes from the server before it is confirmed. With
+ *            nothing after the noise removal it only blends, and is free, for a recording of any length
  */
 function useRedo(fin, job) {
   const nav = useNavigate();
@@ -79,8 +80,12 @@ function useRedo(fin, job) {
   }, [server, canDenoise, tier, c, made]);
 
   const strengthChanged = Math.abs(c.atten - fin.currentStrength()) > SAME_DB;
-  // The result is the blend of the two copies, made here, when noise removal is the last step and nothing else is paid for.
-  const localBlend = canSlide && noiseLast && !c.rebuild && c.subs === made.subs && (strengthChanged || (!here && !!body));
+  // The result is the blend of the two copies, made here, when noise removal is the last step and nothing else is paid for, and the
+  // recording fits in this device's memory (the free run made here has it already). A longer one is saved the same way on our side:
+  // a re-run that only blends, which costs nothing (mode 'server' below, with the price asked of the server like any other).
+  const preview = job.redo?.preview;
+  const fitsHere = here || (!!preview && previewFits(job.durationSeconds || preview.samples / 48000, preview.channels.length));
+  const localBlend = canSlide && fitsHere && noiseLast && !c.rebuild && c.subs === made.subs && (strengthChanged || (!here && !!body));
   const mode = here ? (strengthChanged ? 'local' : 'nothing') : localBlend ? 'local' : body ? 'server' : 'nothing';
 
   // the price of a run on our side, asked of the server (debounced): nothing is held or stored by asking
@@ -151,28 +156,39 @@ const PRESETS = STRENGTHS.map((s) => ({ ...s, pos: posOf(s.db) }));
 
 /**
  * Listen with the strength changing live: the original and the cleaned sound are two signals played together, and the strength
- * is how much of each you hear (media/blend.js). "Original" plays only the recording.
+ * is how much of each you hear (media/blend.js). "Original" plays only the recording. The signals are played from short stretches
+ * (a few seconds held at a time, the next ones fetched ahead), so a recording of any length plays and the page's memory stays small.
  */
 function BlendListen({ fin, job, redo }) {
-  const st = useFinish(fin);
+  const [source, setSource] = useState(null);
+  const [sourceError, setSourceError] = useState('');
+  const [attempt, setAttempt] = useState(0);
   const [player, setPlayer] = useState(null);
+  const [info, setInfo] = useState({ buffering: false, error: '', held: 0, requests: 0, heldSeconds: 0 });
   const [mode, setMode] = useState('cleaned');
   const [playing, setPlaying] = useState(false);
   const [time, setTime] = useState(0);
-  const pair = fin.pair;
   const exact = redo.exact;
-  const sums = useMemo(() => (pair && !exact ? energySums(pair.full, pair.input) : null), [pair, exact]);
+  const sums = useMemo(() => (source && !exact ? source.sums() : null), [source, exact]);
   const db = redo.c.atten;
   const gains = useMemo(() => (mode === 'original'
     ? { a: 1, g: sums ? matchGain(sums, 1) : 1, full: 0, input: sums ? matchGain(sums, 1) : 1 }
     : gainsFor(db, { sums })), [mode, db, sums]);
 
   useEffect(() => {
-    if (!pair) return undefined;
-    const p = new BlendPlayer(pair, { onEnd: () => setPlaying(false) });
+    let live = true;
+    setSource(null);
+    setSourceError('');
+    fin.stretchSource().then((s) => { if (live) setSource(s); }, (e) => { if (live) setSourceError(e?.message || 'Couldn’t get the sound to try other strengths with.'); });
+    return () => { live = false; };
+  }, [fin, job.id, attempt]);
+  useEffect(() => {
+    if (!source) return undefined;
+    const p = new BlendPlayer(source, { onEnd: () => setPlaying(false), onState: setInfo });
     setPlayer(p);
+    p.prepare(); // the first seconds are on their way before Play is pressed
     return () => { p.close(); setPlayer(null); setPlaying(false); setTime(0); };
-  }, [pair]);
+  }, [source]);
   useEffect(() => { player?.setGains(gains.full, gains.input); }, [player, gains]);
   useEffect(() => {
     if (!player || !playing) return undefined;
@@ -180,48 +196,35 @@ function BlendListen({ fin, job, redo }) {
     return () => clearInterval(t);
   }, [player, playing]);
 
-  if (st.pairPhase === 'error') {
-    return (
-      <div className="stack" data-testid="blend-error">
-        <p className="banner banner-error small mb0" role="alert">{st.pairError}</p>
-        <div><button type="button" className="btn btn-secondary btn-sm" onClick={() => fin.ensurePair().catch(() => {})}>Try again</button></div>
-      </div>
-    );
-  }
-  if (!pair) {
-    const size = job.redo?.preview?.bytes ? job.redo.preview.bytes.noise + job.redo.preview.bytes.input : 0;
+  if (!player) {
+    if (sourceError) {
+      return (
+        <div className="stack" data-testid="blend-error">
+          <p className="banner banner-error small mb0" role="alert">{sourceError}</p>
+          <div><button type="button" className="btn btn-secondary btn-sm" onClick={() => setAttempt((n) => n + 1)}>Try again</button></div>
+        </div>
+      );
+    }
     return (
       <div className="stack" data-testid="blend-prepare">
-        {st.pairPhase === 'loading' ? (
-          <>
-            <p className="mb0" role="status"><span className="spinner" aria-hidden="true" /> Getting the sound ready to try other strengths{fin.sliderSource === 'server' ? ` (${Math.round(st.pairProgress * 100)}%)` : ''}…</p>
-            <progress className="bar" max={100} value={Math.round(st.pairProgress * 100)} aria-label="Getting the sound ready" />
-          </>
-        ) : (
-          <>
-            <p className="mb0">Hear other strengths while it plays: move the slider and the sound changes at once.</p>
-            <div className="row">
-              <button type="button" className="btn btn-secondary" onClick={() => fin.ensurePair().catch(() => {})} data-testid="blend-load">Try other strengths</button>
-              {size > 0 && <span className="small muted">Gets {bytes(size)} once, to this device.</span>}
-            </div>
-          </>
-        )}
+        <p className="mb0" role="status"><span className="spinner" aria-hidden="true" /> Getting the sound ready to try other strengths…</p>
       </div>
     );
   }
 
-  const dur = player?.duration || 0;
+  const dur = player.duration || 0;
   const toggle = () => {
-    if (!player) return;
-    if (playing) { player.pause(); setPlaying(false); } else { player.play().then(() => setPlaying(true)).catch(() => {}); }
+    if (playing) { player.pause(); setPlaying(false); } else { setPlaying(true); player.play().catch(() => setPlaying(false)); }
   };
-  const seek = (v) => { setTime(v); player?.seek(v); };
+  const seek = (v) => { setTime(v); player.seek(v); };
   const name = strengthName(db);
   const sayPrice = redo.price ? redo.price.text : redo.mode === 'server' && redo.quote.state === 'loading' ? 'working out the price…' : '';
   return (
     <div
       className="ab blend" data-testid="blend-player" data-db={db.toFixed(2)} data-mode={mode} data-exact={exact ? 'yes' : 'no'}
       data-gain-full={gains.full.toFixed(5)} data-gain-input={gains.input.toFixed(5)} data-share={mixOf(db).toFixed(5)}
+      data-source={source.kind} data-buffering={info.buffering && playing ? 'yes' : 'no'} data-held={info.held} data-held-seconds={info.heldSeconds}
+      data-requests={info.requests}
     >
       <div className="ab-modes" role="radiogroup" aria-label="What you hear">
         <div className="seg">
@@ -234,11 +237,11 @@ function BlendListen({ fin, job, redo }) {
             <span>Cleaned</span>
           </label>
         </div>
-        <span className="muted small" aria-live="polite">Listening to the {mode} sound</span>
+        <span className="muted small" aria-live="polite">{info.buffering && playing ? 'Getting the next part…' : `Listening to the ${mode} sound`}</span>
       </div>
       <div className="transport">
         <button type="button" className="btn btn-primary" onClick={toggle} aria-label={playing ? 'Pause' : 'Play'} data-testid="blend-play">{playing ? 'Pause' : 'Play'}</button>
-        <input type="range" min={0} max={dur || 0} step="0.01" value={Math.min(time, dur || 0)} onChange={(e) => seek(Number(e.target.value))} aria-label="Seek" aria-valuetext={`${clock(time)} of ${clock(dur)}`} />
+        <input type="range" min={0} max={dur || 0} step="0.01" value={Math.min(time, dur || 0)} onChange={(e) => seek(Number(e.target.value))} aria-label="Seek" aria-valuetext={`${clock(time)} of ${clock(dur)}`} data-testid="blend-seek" />
         <span className="time">{clock(time)} / {clock(dur)}</span>
       </div>
       <div className="field strength-slider">
@@ -268,6 +271,13 @@ function BlendListen({ fin, job, redo }) {
             <IconDownload width={18} height={18} /> {redo.busy ? 'Saving…' : 'Save this strength'}{sayPrice ? ` · ${sayPrice}` : ''}
           </button>
           {redo.mode === 'local' && <span className="small muted">Made on this device. Nothing is uploaded.</span>}
+          {redo.mode === 'server' && redo.price?.free && <span className="small muted">Put together on our side, free. Your file downloads by itself when it’s done.</span>}
+        </div>
+      )}
+      {info.error && (
+        <div className="stack" data-testid="blend-error">
+          <p className="banner banner-error small mb0" role="alert">{info.error}</p>
+          <div><button type="button" className="btn btn-secondary btn-sm" onClick={() => player.retry()}>Try again</button></div>
         </div>
       )}
       {redo.error && <p className="banner banner-error small mb0" role="alert">{redo.error}</p>}
@@ -446,11 +456,6 @@ export default function ResultPanel({ job, fin }) {
   const silent = fin.pcm && fin.pcm.rms < 1e-5;
   const preview = fin.subs && !fin.subs.empty ? fin.subs.txt.split(/\n+/).filter(Boolean).slice(0, 3).join(' ') : '';
   const pcm = fin.pcm;
-
-  // a free run made in this browser has its two signals ready: the slider is there at once
-  useEffect(() => {
-    if (listen && slide && fin.sliderSource === 'here') fin.ensurePair().catch(() => {});
-  }, [listen, slide, fin]);
 
   const onDownload = () => {
     if (needVideo) picker.current?.click();

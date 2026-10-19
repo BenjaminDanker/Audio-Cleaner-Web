@@ -95,8 +95,20 @@ of full scale) next to its upload, in its folder. `rerun.plan_rerun` decides, pe
 noise removal), `rebuilt` (Leveling on the kept voice), `full` (a model from the upload), `reuse` (the result is already right) or `none`;
 transcription runs only when its tier or language changed. The re-run is an ordinary queued job (`params.rerun`) with its own hold, priced
 only for the paid steps that run (`pricing.rerun_rates`), its files hard-linked from the source (no disk copy) and `source_job_id` /
-`root_job_id` columns linking the chain. The web page can also blend in the browser (`web/src/media/blend.js`): the strength slider uses the
-kept noise removal and the kept input, and saving a strength with nothing after the noise removal is done on the device, free.
+`root_job_id` columns linking the chain.
+
+The strength slider of the result page (`web/src/media/blend.js`) blends the kept noise removal and the kept input in the browser, for a
+recording of **any length**: the input copy is kept for every Denoising job, and `GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=`
+(`acw/stretch.py`) hands out a stretch (at most 30 s) of either as a small 24-bit FLAC, cut sample-exact by `acw/worker/cutter.py` (FFmpeg
+seeks to the second before and trims by sample; the program confines itself like the job runner and writes nothing, so the web process never
+opens a runner-made file with a decoder). The same stretch of both copies lines up sample for sample. `BlendPlayer` plays 10 s stretches
+of both with a gain each, holds the one playing, one behind and two fetched ahead (4 at most, about 30 MB), fetches again after a seek,
+waits when a stretch is late, and a strength change is a change of two gains (nothing is fetched); the loudness match of a preview that is not
+the last step uses `energy` sums the runner measured when it kept the copies (`kept.energy`, in `redo.preview`). Saving a strength with
+nothing after the noise removal is free: made on the device for a recording that fits in memory (`previewFits`, 20 min of mono or 10 of
+stereo, where the two whole copies are fetched once to blend them), otherwise the same blend as a free re-run on our side (no model runs, the
+new job's file downloads by itself). The free noise removal in the browser keeps its two signals in memory and plays them through the same
+player (`memorySource`).
 
 ## Live: the order
 

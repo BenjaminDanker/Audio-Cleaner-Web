@@ -40,11 +40,11 @@ def ff() -> FFmpeg:
     return FFmpeg(HOME / "bin")
 
 
-def start_job(client, h, data, kind="denoise", transcribe_tier=None, tier="standard", **options) -> str:
+def start_job(client, h, data, kind="denoise", transcribe_tier=None, tier="standard", seconds=SECONDS, **options) -> str:
     """Create a job and send its upload; returns its id (the job is queued)."""
     r = client.post("/api/jobs", json={
         "kind": kind, "denoiseTier": tier, "transcribeTier": transcribe_tier, "filename": "talk.wav", "sizeBytes": len(data),
-        "durationSeconds": SECONDS,
+        "durationSeconds": seconds,
         "options": {"output_video": False, "noise": "light", "audio_format": "flac", "loudness_lufs": -16.0, **options},
     }, headers=h)
     assert r.status_code == 200, r.text
@@ -102,7 +102,7 @@ def test_change_and_save_again_end_to_end(client, signed_in, speech, tmp_path):
     preview = shown["redo"]["preview"]
     seconds = first["duration_seconds"]
     assert preview["channels"] == [0] and preview["plan"] == [0] and abs(preview["samples"] - seconds * SR) < SR // 10
-    assert preview["bytes"] == {k: (folder(a) / f"kept-{k}.flac").stat().st_size for k in ("noise", "input")}
+    assert preview["bytes"] == {k: (folder(a) / f"kept-{k}.flac").stat().st_size for k in ("noise", "input")} and preview["stretchMaxSeconds"] == 30
     paid_first = usage_lines(uid)
     assert len(paid_first) == 1 and paid_first[0]["description"].startswith("Denoising + Leveling: talk.wav")
     price = pricing.job_cost_micros("denoise", "standard", None, seconds, {"denoise": 9_000, "leveling": 1_000}, 0, True)
@@ -117,6 +117,10 @@ def test_change_and_save_again_end_to_end(client, signed_in, speech, tmp_path):
     assert np.max(np.abs(heard - x)) < 1e-6
     full = kept_copies.load(f, entry_noise, folder(a), np.zeros(x.shape, np.float32), tmp_path / "s2.f32")
     assert snr_db(x, full) < 30  # the noise removal really changed the sound
+    # the sums that keep the preview's loudness level (the page uses them while the strength moves) are those of the two copies
+    want = kept_copies.energy(full, x)
+    for k in ("full", "input", "cross"):
+        assert abs(preview["energy"][k] - want[k]) <= 1e-4 * abs(want["full"]) + 1e-3, (k, preview["energy"], want)
 
     # (2) another file type only: free, nothing but a new encoding of the result that is there
     r1 = run_rerun(client, h, a, expect_free=True, options={"audio_format": "wav"})
@@ -258,3 +262,62 @@ def test_subtitle_files_again_are_free_and_a_new_language_transcribes_again_and_
         line = usage_lines(uid)[-1]
         assert line["description"].startswith("Changed and saved again (Subtitles & transcript): talk.wav")
         assert -line["amount_micros"] == pricing.rerun_cost_micros({"transcribe": 4_000}, row(c)["duration_seconds"]) > 0
+
+
+LONG_MINUTES = 21  # more than the strength slider used to take whole (20 minutes of mono)
+
+
+@pytest.fixture(scope="module")
+def long_recording(tmp_path_factory):
+    """21 minutes of mono 48 kHz: a slowly moving tone in pink noise (a speech sample would have to be repeated 100 times)."""
+    out = tmp_path_factory.mktemp("rerun-long") / "talk.wav"
+    n = LONG_MINUTES * 60
+    subprocess.run([
+        str(HOME / "bin/ffmpeg"), "-v", "error", "-f", "lavfi", "-i", f"sine=f=220:r=48000:d={n}", "-f", "lavfi", "-i", f"anoisesrc=c=pink:a=0.08:r=48000:d={n}",
+        "-filter_complex", "[0][1]amix=inputs=2:normalize=0,volume=0.8", "-ac", "1", "-y", str(out)], check=True)
+    return out
+
+
+@NATIVE
+def test_a_long_recording_keeps_the_recording_next_to_the_noise_removal_and_plays_in_stretches(client, signed_in, long_recording):
+    """21 minutes of mono (the old limit for keeping the recording was 20): both copies are kept, the job says how to read them, a stretch
+    of each from near the end is exactly the samples of the whole copy there, and saving a new strength without Leveling is a free
+    re-run whose sound is the blend of those two stretches."""
+    uid, h = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    n = LONG_MINUTES * 60
+    a = start_job(client, h, long_recording.read_bytes(), seconds=n, leveling=False)
+    assert _run_worker_once("done") == a
+    assert {"kept-noise.flac", "kept-input.flac"} <= files_of(a)
+    shown = client.get(f"/api/jobs/{a}").json()
+    preview = shown["redo"]["preview"]
+    assert abs(preview["samples"] - n * SR) < SR // 5 and preview["channels"] == [0] and preview["energy"]["full"] > 0
+    sizes = {k: (folder(a) / f"kept-{k}.flac").stat().st_size for k in ("noise", "input")}
+    assert preview["bytes"] == sizes
+    # a stretch of each copy near the end; the two line up with the files themselves
+    start = (preview["samples"] - 12 * SR) / SR
+    pieces = {}
+    for which in ("noise", "input"):
+        r = client.get(f"/api/jobs/{a}/kept/{which}?start={start:.6f}&seconds=10", headers=h)
+        assert r.status_code == 200 and int(r.headers["x-stretch-samples"]) == 10 * SR
+        first = int(r.headers["x-stretch-start"])
+        f = ff()
+        path = tmp = folder(a) / f"kept-{which}.flac"
+        whole_tail = f.decode(path, f.probe(path), SR, 1, n + 5)[first:first + 10 * SR, 0]
+        got = np.frombuffer(subprocess.run([str(HOME / "bin/ffmpeg"), "-v", "error", "-f", "flac", "-i", "pipe:0", "-f", "f32le", "-"], input=r.content, capture_output=True, check=True).stdout, dtype=np.float32)
+        assert np.array_equal(got, whole_tail), which
+        pieces[which] = (first, got)
+    assert pieces["noise"][0] == pieces["input"][0]
+    # saving another strength (no Leveling): a free re-run, the blend of the two copies
+    r1 = run_rerun(client, h, a, expect_free=True, options={"atten_lim_db": 24, "leveling": False})
+    assert params_of(r1)["rerun"]["clean"] == "denoised" and row(r1)["cost_micros"] == 0
+    for name in ("kept-noise.flac", "kept-input.flac"):
+        assert same_file(folder(a) / name, folder(r1) / name)  # carried, so the new job's page can play it too
+    mix = 10 ** (-24 / 20)
+    first = pieces["noise"][0]
+    expected = (1 - mix) * pieces["noise"][1] + mix * pieces["input"][1]
+    out = folder(r1) / "talk-cleaned.flac"
+    f = ff()
+    result = f.decode(out, f.probe(out), SR, 1, n + 5)[first:first + 10 * SR, 0]
+    assert np.max(np.abs(result - expected)) < 3e-4  # (the result is a 16-bit FLAC)
+    assert client.get(f"/api/jobs/{r1}/kept/input?start={start:.6f}&seconds=1", headers=h).status_code == 200
