@@ -39,7 +39,8 @@ def test_selftest_passes_and_builds_the_window():
 @pytest.mark.native
 def test_a_file_is_cleaned_from_the_command_line_with_a_chosen_name_and_the_picked_strength(clip_wav, tmp_path):
     out_dir = tmp_path / "out"
-    r = run("--cli", "-o", str(out_dir), "--output-name", "Voice Memo.mp3", str(clip_wav))
+    # (--no-auto-rebuild: the made-up tone is one the model would rebuild, which leaves no strength to pick)
+    r = run("--cli", "--no-auto-rebuild", "-o", str(out_dir), "--output-name", "Voice Memo.mp3", str(clip_wav))
     assert r.returncode == 0, r.stderr
     assert (out_dir / "Voice Memo.mp3").is_file()
     assert re.search(r"Voice Memo\.mp3  \((gentle|balanced|strong|max) noise reduction picked for this file", r.stdout), r.stdout
@@ -83,6 +84,17 @@ def test_automatic_rebuild_is_on_unless_turned_off(monkeypatch):
     monkeypatch.setattr(cli, "run", lambda inputs, out_dir, options, *a, **k: seen.append(options) or 0)
     assert entry.main(["--cli", "a.wav"]) == 0 and entry.main(["--cli", "--no-auto-rebuild", "a.wav"]) == 0
     assert [(o.auto_rebuild, o.rebuild_voice, o.strength) for o in seen] == [(True, False, "auto"), (False, False, "auto")]
+
+
+def test_the_highs_are_left_to_the_model_unless_turned_off(monkeypatch):
+    from audio_cleaner_desktop import __main__ as entry
+    from audio_cleaner_desktop import cli
+
+    seen = []
+    monkeypatch.setattr(cli, "run", lambda inputs, out_dir, options, *a, **k: seen.append(options) or 0)
+    assert entry.main(["--cli", "a.wav"]) == 0 and entry.main(["--cli", "--no-restore-highs", "a.wav"]) == 0
+    assert [(o.restore_highs, o.auto_highs) for o in seen] == [(True, True), (False, False)]
+    assert all(o.decides for o in seen[:1]) and seen[0].strength == "auto"
 
 
 def test_the_memory_plan_allows_for_automatic_rebuilding(tmp_path, monkeypatch):

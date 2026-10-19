@@ -1,6 +1,7 @@
 """Clean one media file end to end. No Qt in here: the GUI worker and the CLI both call process().
 
-    probe -> [transcribe the original] -> decode -> DeepFilterNet3 (+ leveling) -> write audio / mux into the video
+    probe -> [transcribe the original] -> decode -> [measure, when something is left automatic] -> DeepFilterNet3
+        (+ leveling) -> write audio / mux into the video
 
 The result is written next to the source (or into `out_dir`) as "<name>-cleaned.<ext>" (or under the name and in the
 format asked for: its ending says which, see available_endings()) and never replaces an existing file. A video can
@@ -26,7 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from acw_common import advice, captions, pipeline, transcribe
+from acw_common import analysis, captions, pipeline, reco_model, transcribe
 from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult, VideoOut
 
 from . import models, resources
@@ -39,7 +40,8 @@ Cancelled = pipeline.Cancelled
 # and matches Studio clean's default on the server (same pipeline).
 STRENGTHS: dict[str, float] = {"gentle": 12.0, "balanced": 24.0, "strong": 40.0, "max": 100.0}
 DEFAULT_STRENGTH = "max"
-# "auto": each file gets the strength that fits how noisy it is (pipeline.strength_for, measured by the noise remover).
+# "auto": each file gets the strength the trained model picks from how it sounds (reco_model.py, the same as the website's
+# "Automatic best settings"; measured once per file, analysis.py).
 AUTO_STRENGTH = "auto"
 STRENGTH_CHOICES = (AUTO_STRENGTH, *STRENGTHS)
 OUTPUT_AUDIO_FORMATS = ("wav", "flac", "mp3", "m4a", "opus")
@@ -116,8 +118,12 @@ class JobOptions:
     noise: str = "auto"  # pipeline.NOISE_PROFILES: measured per file, or forced light / heavy
     echo_track: bool = False  # remove speaker echo using the file's second audio track (when it has one)
     restore_highs: bool = True  # bring back the highs of phone-quality recordings (needs HIGHS_MODEL)
+    # With restore_highs: only where the trained model says the highs are missing (reco_model.py), not wherever the
+    # recording has a sharp cut-off.
+    auto_highs: bool = False
     rebuild_voice: bool = False  # Sidon instead of noise removal: also removes room echo; slow (VOICE_MODEL)
-    # Rebuild the voice of a file that sounds echoey or muffled (advice.rebuild_reason), when VOICE_MODEL is installed.
+    # Rebuild the voice of a file that sounds echoey or muffled, or that the trained model says needs it (reco_model.py), when
+    # VOICE_MODEL is installed.
     auto_rebuild: bool = False
     video_size: str = "same"  # of a video result: "same", or the pixels of the shorter side (VIDEO_SIZES)
 
@@ -141,6 +147,13 @@ class JobOptions:
     def atten_lim_db(self) -> float | None:
         """None: the one that fits each file (measured when it is cleaned)."""
         return None if self.strength == AUTO_STRENGTH else STRENGTHS[self.strength]
+
+    @property
+    def decides(self) -> bool:
+        """Something is left to the trained model (reco_model.py): the file is measured before it is cleaned."""
+        if self.rebuild_voice:  # the voice is rebuilt anyway: no strength, no highs step, nothing to decide
+            return False
+        return self.strength == AUTO_STRENGTH or self.auto_rebuild or (self.restore_highs and self.auto_highs)
 
     @property
     def loudness_lufs(self) -> float | None:
@@ -167,7 +180,7 @@ class JobResult:
     language: str | None = None  # language the speech was transcribed in
     notice: str | None = None  # something the user should know about how the file was cleaned
     strength: str | None = None  # the strength picked for this file (STRENGTHS key) when it was set to automatic
-    rebuilt: str | None = None  # why the voice was rebuilt automatically ("echoey", "muffled"); None when it wasn't
+    rebuilt: str | None = None  # why the voice was rebuilt automatically ("echoey", "muffled", "unclear"); None when it wasn't
 
     @property
     def paths(self) -> list[Path]:
@@ -657,17 +670,15 @@ def process(
             report(decode_end)
             used: dict = {}
             voice_dir = resources.voice_model_dir()
-            reason = advice.rebuild_reason(x) if options.auto_rebuild and not options.rebuild_voice else None
+            rec, measured = _decide(x, options, cancel)
+            reason = rec.rebuild_reason if rec is not None and options.auto_rebuild and not options.rebuild_voice else None
             _check_cancel(cancel)
             rebuild = (options.rebuild_voice or reason is not None) and voice_dir is not None
             y = pipeline.clean_audio(
                 x,
                 resources.libdf_path(),
                 resources.model_path(),
-                pipeline.CleanOptions(
-                    atten_lim_db=options.atten_lim_db, leveling=options.leveling, loudness_lufs=options.loudness_lufs,
-                    noise=options.noise, restore_highs=options.restore_highs, restore_voice=rebuild,
-                ),
+                _clean_options(options, rec, rebuild),
                 threads=threads,
                 progress=report.span(decode_end, clean_end),
                 cancel=cancel,
@@ -676,6 +687,7 @@ def process(
                 bwe_model_dir=resources.highs_model_dir(),
                 restore_model_dir=voice_dir,
                 report=used,
+                measured=measured,
             )
             picked = None
             if options.strength == AUTO_STRENGTH and "atten_lim_db" in used:
@@ -690,7 +702,7 @@ def process(
                                                  "cleaned the usual way. Download it in Settings to rebuild voices"]))
             if used.get("highs"):
                 notice = "; ".join(filter(None, [notice, "missing highs restored"]))
-            elif options.restore_highs and resources.highs_model_dir() is None and _sounds_band_limited(x):
+            elif options.restore_highs and resources.highs_model_dir() is None and _highs_missing(x, options, rec):
                 notice = "; ".join(filter(None, [notice, "sounds like a phone recording. Download the model that "
                                                  "restores highs in Settings to improve it"]))
             _check_cancel(cancel)
@@ -744,7 +756,43 @@ def process(
     )
 
 
-def _sounds_band_limited(x: np.ndarray) -> bool:
+def _decide(
+    x: np.ndarray, options: JobOptions, cancel: threading.Event,
+) -> tuple[reco_model.Recommendation | None, pipeline.Measured | None]:
+    """What the trained model says about this recording, when anything is left to it (JobOptions.decides): the recording
+    is measured once (analysis.measure: about a minute of it, spread over the file, and the noise remover over the same
+    parts). Also returns what that measurement kept of the noise remover's work, for clean_audio to use again."""
+    if not options.decides:
+        return None, None
+    kept: dict = {}
+    stats = analysis.measure(x, resources.libdf_path(), resources.model_path(), cancel, kept)
+    # An unusually short recording is decided like any other (the website only recommends nothing for under two seconds).
+    return reco_model.recommend(stats, min_seconds=0.0), kept.get("measured")
+
+
+def _clean_options(options: JobOptions, rec: reco_model.Recommendation | None, rebuild: bool) -> pipeline.CleanOptions:
+    """The settings clean_audio gets: the user's choices, and the model's wherever they are left automatic. Nothing the
+    user chose is overridden. The strength and the noise remover are given outright when the file was measured, so the
+    measurement is not repeated."""
+    atten, noise, highs = options.atten_lim_db, options.noise, options.restore_highs
+    if rec is not None:
+        if options.strength == AUTO_STRENGTH:
+            atten = STRENGTHS[rec.strength]
+        if options.noise == "auto":
+            noise = "heavy" if rec.heavy_remover else "light"  # the rule: a noise figure below pipeline.HEAVY_BELOW_DB
+        if options.auto_highs:
+            highs = highs and rec.restore_highs
+    return pipeline.CleanOptions(
+        atten_lim_db=atten, leveling=options.leveling, loudness_lufs=options.loudness_lufs, noise=noise,
+        restore_highs=highs, restore_voice=rebuild,
+    )
+
+
+def _highs_missing(x: np.ndarray, options: JobOptions, rec: reco_model.Recommendation | None) -> bool:
+    """Does the recording sound band-limited (a phone call, a very small file)? The model's answer when it was asked, else
+    the recording's own cut-off."""
+    if rec is not None and options.auto_highs:
+        return rec.restore_highs
     from acw_common import bwe
 
     return bwe.pick_model(bwe.effective_bandwidth(x)) is not None  # read block by block, however long x is

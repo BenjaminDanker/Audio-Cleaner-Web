@@ -47,6 +47,9 @@ datas = [
     (str(need(VENDOR / "licenses")), "licenses"),
     # loaded at run time through the package path (About dialog, window icon)
     (str(DESKTOP / "audio_cleaner_desktop" / "assets"), "audio_cleaner_desktop/assets"),
+    # the trees of "Automatic best settings", read next to acw_common/reco_model.py (PyInstaller does not collect data files
+    # of a package on its own; PyInstaller stops the build when the file is missing)
+    (str(ROOT / "common" / "acw_common" / "reco_model.json"), "acw_common"),
 ]
 hiddenimports = [
     # the updater checks the signature of update.json with cryptography's Ed25519 (a compiled Rust module + cffi)

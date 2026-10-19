@@ -64,7 +64,8 @@ def settings_dict(options: engine.JobOptions) -> dict:
         "strength": options.strength, "leveling": options.leveling, "loudness": options.loudness,
         "audio_format": options.audio_format, "subtitles": options.subtitles, "language": options.language,
         "noise": options.noise, "echo_track": options.echo_track, "restore_highs": options.restore_highs,
-        "rebuild_voice": options.rebuild_voice, "auto_rebuild": options.auto_rebuild, "video_size": options.video_size,
+        "auto_highs": options.auto_highs, "rebuild_voice": options.rebuild_voice, "auto_rebuild": options.auto_rebuild,
+        "video_size": options.video_size,
     }
 
 

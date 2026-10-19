@@ -147,12 +147,14 @@ def test_automatic_best_settings_choose_for_each_file_while_on_and_keep_the_hand
         o = prefs.job_options()
         assert (o.strength, o.noise, o.atten_lim_db, o.restore_highs, o.rebuild_voice, o.auto_rebuild) == (
             "auto", "auto", None, True, False, True)
+        assert o.auto_highs  # the highs are the model's call while everything is automatic
         _click(panel._auto, False)  # by hand
         panel._strength._buttons["strong"].click()
         _pick(panel._noise, "light")
         _click(panel._highs, False)
         o = prefs.job_options()
         assert (o.strength, o.noise, o.restore_highs, o.rebuild_voice, o.auto_rebuild) == ("strong", "light", False, False, False)
+        assert not o.auto_highs and not o.decides  # by hand: nothing is measured, nothing is picked for the file
         _click(panel._rebuild, True)  # rebuilt always, the noise settings don't apply
         assert prefs.job_options().rebuild_voice and not prefs.job_options().auto_rebuild
         _click(panel._auto, True)  # ticked rebuild doesn't count while automatic: only some files are rebuilt

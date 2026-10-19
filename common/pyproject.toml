@@ -12,5 +12,8 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["acw_common*"]
 
+[tool.setuptools.package-data]
+acw_common = ["reco_model.json"]  # the trees of "Automatic best settings" (reco_model.py reads it next to itself)
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-o", "--output-dir", metavar="OUTDIR", help="write results here (default: next to each original)")
     p.add_argument(
         "--strength", choices=list(STRENGTH_CHOICES), default=AUTO_STRENGTH,
-        help="noise reduction strength; auto (default) picks the one that fits each file from how noisy it is",
+        help="noise reduction strength; auto (default) picks the one that fits each file from how it sounds",
     )
     p.add_argument("--no-leveling", action="store_true", help="skip level matching, compression and loudness normalisation")
     p.add_argument(
@@ -82,14 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--echo-track", action="store_true",
         help="remove speaker echo using the file's second audio track (files with one track are cleaned as usual)",
     )
-    p.add_argument("--no-restore-highs", action="store_true", help="do not restore the missing highs of phone-quality recordings")
+    p.add_argument(
+        "--no-restore-highs", action="store_true",
+        help="do not restore the missing highs of phone-quality recordings (by default they are restored in the files that need it)",
+    )
     p.add_argument(
         "--rebuild-voice", action="store_true",
         help="rebuild the voice instead of filtering noise: also removes room echo; slow, needs its model",
     )
     p.add_argument(
         "--no-auto-rebuild", action="store_true",
-        help="do not rebuild the voice of files that sound echoey or muffled (by default they are, when its model is installed)",
+        help="do not rebuild the voice of files that need it (echo, a muffled or unclear voice; by default they are, when its model is installed)",
     )
     p.add_argument(
         "--parallel", type=int, choices=range(0, 5), default=1, metavar="N",
@@ -131,8 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         options = JobOptions(
             strength=args.strength, leveling=not args.no_leveling, audio_format=args.audio_format,
             loudness=args.loudness, subtitles=args.subtitles, language=args.language, noise=args.noise,
-            echo_track=args.echo_track, restore_highs=not args.no_restore_highs, rebuild_voice=args.rebuild_voice,
-            auto_rebuild=not args.no_auto_rebuild,
+            echo_track=args.echo_track, restore_highs=not args.no_restore_highs, auto_highs=not args.no_restore_highs,
+            rebuild_voice=args.rebuild_voice, auto_rebuild=not args.no_auto_rebuild,
             video_size=args.video_size,
         )
         if args.output_name is not None and len(args.files) != 1:

@@ -1,8 +1,10 @@
 # Automatic settings model
 
-The trees behind "Automatic best settings" for files (`web/src/reco-model.js`, data in `web/src/reco-model-data.js`).
-Gradient-boosted trees (LightGBM) on the 14 measurements `web/src/media/analysis.js` already takes, so the browser
-downloads nothing extra and decides in well under a millisecond.
+The trees behind "Automatic best settings" for files: the website (`web/src/reco-model.js`, data in
+`web/src/reco-model-data.js`) and the desktop app (`common/acw_common/reco_model.py`, data in
+`common/acw_common/reco_model.json`, the same trees). Gradient-boosted trees (LightGBM) on the 14 measurements
+`web/src/media/analysis.js` already takes (the desktop takes them with `common/acw_common/analysis.py`, a port that follows
+the browser code step by step), so nothing extra is downloaded and a decision takes well under a millisecond.
 
 ## What it decides, and from what
 
@@ -11,9 +13,13 @@ downloads nothing extra and decides in well under a millisecond.
 | Noise strength (gentle, balanced, strong, max) | the site's own noise remover run at all four strengths; label = the gentlest one whose PESQ-WB against the clean original is within 0.05 of the best | the model |
 | Voice rebuild | recordings damaged on purpose: echo (RT60 0.5 s or more), very small files (Opus 8 kbit/s or less, MP3 16 kbit/s or less), clipping | the model **or** the echoey/muffled rules: rebuild sounded better on nearly every recording in the listening test, so it is chosen more often than the labels say |
 | Restore highs | the high sounds cut off at 7 kHz or lower | the model |
-| Heavy noise remover | (only the server's 19 dB rule, so the model could only copy it) | the rule (`web/src/recommend-room.js`) |
+| Heavy noise remover | (only the server's 19 dB rule, so the model could only copy it) | the rule (`web/src/recommend-room.js`, `pipeline.HEAVY_BELOW_DB`) |
 
 Live ("Test my room") stays on the rules in `web/src/recommend-room.js`, which the OBS plugin shares.
+
+The desktop app decides the same way (`reco_model.recommend`, the Python version of `web/src/recommend.js`): the strength, the
+voice rebuild (or echoey, or muffled) and restore highs from the trees when the settings are left on automatic, the heavy
+noise remover by the rule. Settings the user chose themselves are never changed.
 
 ## Results (test split, 1002 clips, speakers not seen in training)
 
@@ -45,7 +51,8 @@ repository at `~/repos/acw-desktop-merge` (they import the web measurement code 
     bash run_split.sh <split> <count>          # generate, measure, current rules, labels (train / val / test)
     venv/bin/python train.py                   # out/reco-model.json, out/test_report.json
     venv/bin/python check_js.py                # the JS evaluator agrees with LightGBM
-    python3 export_web.py out/reco-model.json <repo>/web/src/reco-model-data.js
+    python3 export_web.py out/reco-model.json      # writes web/src/reco-model-data.js and common/acw_common/reco_model.json
+    python3 export_web.py --check                  # exit status 1 when either file is not what the export would write
     venv/bin/python listen_build.py choose; ...; venv/bin/python listen_build.py render   # the listening page
 
 `rules.mjs` runs the repository's `recommendForFile`, which now uses this model: to compare against the old rules, run it on a

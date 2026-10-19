@@ -102,7 +102,7 @@ class SettingsPanel(QFrame):
             "\u2022 Noise reduction: Gentle for a quiet recording, up to Maximum for a noisy one\n"
             "\u2022 Background noise: the way of removing noise that suits it\n"
             "\u2022 Missing highs: brought back when they are missing (phone calls, small files)\n"
-            "\u2022 Rebuild the voice: when it sounds echoey or muffled (needs its model, downloaded once)\n\n"
+            "\u2022 Rebuild the voice: when it sounds echoey, muffled or unclear (needs its model, downloaded once)\n\n"
             "The noise is measured by the noise remover itself, so wind, keyboards and chatter count as much as a "
             "steady hiss. The list shows what each file got. Untick it to choose these yourself.",
             self._auto,

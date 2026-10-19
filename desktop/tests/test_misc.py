@@ -122,6 +122,7 @@ def test_history_says_which_strength_was_picked():
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "echoey"}, False) == "voice rebuilt (it sounded echoey)"
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "muffled", "leveling": True, "loudness": "youtube"},
                              False) == "voice rebuilt (it sounded muffled), leveled (YouTube)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "unclear"}, False) == "voice rebuilt (it sounded unclear)"
 
 
 def test_history_keeps_the_automatic_choices():
@@ -131,3 +132,4 @@ def test_history_keeps_the_automatic_choices():
     s = settings_dict(engine.JobOptions(strength="auto", auto_rebuild=True))
     assert (s["strength"], s["noise"], s["auto_rebuild"], s["rebuild_voice"]) == ("auto", "auto", True, False)
     assert settings_dict(engine.JobOptions())["auto_rebuild"] is False
+    assert settings_dict(engine.JobOptions(auto_highs=True))["auto_highs"] is True and settings_dict(engine.JobOptions())["auto_highs"] is False

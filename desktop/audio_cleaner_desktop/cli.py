@@ -196,6 +196,23 @@ def _check_models() -> list[str]:
     return skipped
 
 
+def _check_recommender() -> None:
+    """The trained model of "Automatic best settings" is in the build and decides (the measurements run on a second of
+    noisy tone, and a made-up voice with a made-up noise figure goes through the trees)."""
+    from acw_common import analysis, reco_model
+
+    sr = pipeline.SAMPLE_RATE
+    t = np.arange(sr) / sr
+    rng = np.random.default_rng(2)
+    x = (0.2 * np.sin(2 * np.pi * 220 * t) + 0.03 * rng.standard_normal(t.size)).astype(np.float32)
+    stats = analysis.measure_features(x, noise_db=20.0)
+    if not np.isfinite(stats["levelDb"]) or not 0 < stats["bandwidthHz"] <= sr / 2:
+        raise RuntimeError("the measurements of the automatic settings returned unexpected numbers")
+    rec = reco_model.recommend({**stats, "hasSpeech": True}, min_seconds=0.0)
+    if rec is None or rec.strength not in reco_model.STRENGTH_CLASSES:
+        raise RuntimeError("the automatic settings model returned no decision")
+
+
 def _check_gui() -> None:
     """The window, the preview and the About box can be built (a missing Qt plugin or data file shows here)."""
     from PySide6.QtCore import QSettings
@@ -303,6 +320,7 @@ def selftest(gui: bool = False) -> int:
         if abs(info.duration - 3.0) > 0.2 or info.audio_channels != 1 or decoded.size < 2.8 * sr:
             raise RuntimeError(f"FFmpeg round-trip mismatch (duration {info.duration:.2f} s)")
         _check_windows_quiet()
+        _check_recommender()
         _check_update_verification()
         _check_speech_runtime()
         skipped = _check_models()

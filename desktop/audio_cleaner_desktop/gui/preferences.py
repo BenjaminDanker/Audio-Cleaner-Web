@@ -40,8 +40,8 @@ class _Setting:
 
 class Preferences:
     # On: each file gets the noise reduction strength and the kind of noise removal that fit it, its highs restored when
-    # they are missing and its voice rebuilt when it sounds echoey or muffled (measured when it is cleaned); the
-    # choices below are kept for when it is off.
+    # they are missing and its voice rebuilt when it needs it (measured once, when it is cleaned: the trained model of
+    # acw_common.reco_model, the website's "Automatic best settings"); the choices below are kept for when it is off.
     auto_settings = _Setting(True)
     strength = _Setting(engine.DEFAULT_STRENGTH, engine.STRENGTHS)
     leveling = _Setting(True)
@@ -70,7 +70,7 @@ class Preferences:
         return engine.JobOptions(
             strength=engine.AUTO_STRENGTH if auto else self.strength, leveling=self.leveling, audio_format=self.audio_format,
             loudness=self.loudness, subtitles=self.subtitles, language=self.language, noise="auto" if auto else self.noise,
-            echo_track=self.echo_track, restore_highs=True if auto else self.restore_highs,
+            echo_track=self.echo_track, restore_highs=True if auto else self.restore_highs, auto_highs=auto,
             rebuild_voice=False if auto else self.rebuild_voice, auto_rebuild=auto, video_size=self.video_size,
         )
 

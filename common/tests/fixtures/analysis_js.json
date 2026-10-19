@@ -1,0 +1,584 @@
+{
+ "close": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -33.70085223623817,
+   "floorDb": -70.73550720214844,
+   "levelDb": -26.741346168518067,
+   "peakDb": -24.5254545211792,
+   "silentFraction": 0,
+   "speechFraction": 0.365,
+   "bandDynDb": 51.11434669494629,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.332276123939018,
+   "dropDb": 43.78123378753662,
+   "clipFraction": 0,
+   "peak": 0.300537109375,
+   "loudnessLufs": -28.731122395734594,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.98425212153455,
+     0.006544808142309488,
+     0.0027713819239418343,
+     0.0064316883991987
+    ],
+    "rebuild": 0.8890522857147494,
+    "restoreHighs": 0.14472483471514372
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "echoey": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -26.339624281365204,
+   "floorDb": -64.85168075561523,
+   "levelDb": -22.738193702697753,
+   "peakDb": -22.30060157775879,
+   "silentFraction": 0,
+   "speechFraction": 0.6675,
+   "bandDynDb": 47.57196006774902,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.670311516466338,
+   "dropDb": 5.71778678894043,
+   "clipFraction": 0,
+   "peak": 0.300048828125,
+   "loudnessLufs": -25.610470705051906,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9846543004028838,
+     0.006966483760691472,
+     0.005031431899714933,
+     0.0033477839367096777
+    ],
+    "rebuild": 0.9738067721568734,
+    "restoreHighs": 0.06518769754075862
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "muffled": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -28.883705908051425,
+   "floorDb": -81.67166442871094,
+   "levelDb": -28.345615005493165,
+   "peakDb": -25.408043098449706,
+   "silentFraction": 0,
+   "speechFraction": 0.35875,
+   "bandDynDb": 54.233066177368165,
+   "hasSpeech": true,
+   "bandwidthHz": 17718.75,
+   "tiltDb": -27.434533008723452,
+   "dropDb": 53.093323135375975,
+   "clipFraction": 0,
+   "peak": 0.221282958984375,
+   "loudnessLufs": -31.41871630052401,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9934370501954639,
+     0.004031327387710549,
+     0.0011560530940785219,
+     0.0013755693227469256
+    ],
+    "rebuild": 0.7747118667119958,
+    "restoreHighs": 0.28370807414084803
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "phone": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -17.101905191727027,
+   "floorDb": -74.00029296875,
+   "levelDb": -23.32351131439209,
+   "peakDb": -20.6889630317688,
+   "silentFraction": 0,
+   "speechFraction": 0.41125,
+   "bandDynDb": 51.32634372711182,
+   "hasSpeech": true,
+   "bandwidthHz": 3750,
+   "tiltDb": -70.18477079576571,
+   "dropDb": 50.39394969940185,
+   "clipFraction": 0,
+   "peak": 0.43951416015625,
+   "loudnessLufs": -26.34273488054416,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": true,
+   "p": {
+    "strength": [
+     0.9966244204974407,
+     0.00213519716071821,
+     0.000738559943795587,
+     0.0005018223980454404
+    ],
+    "rebuild": 0.6591291887533406,
+    "restoreHighs": 0.9799122332624437
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": true,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "noisy": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -22.316870621685744,
+   "floorDb": -30.8533145904541,
+   "levelDb": -21.281811904907226,
+   "peakDb": -20.47955322265625,
+   "silentFraction": 0,
+   "speechFraction": 0,
+   "bandDynDb": 10.954576492309574,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -8.78191048862023,
+   "dropDb": null,
+   "clipFraction": 0,
+   "peak": 0.5,
+   "loudnessLufs": -24.009727703766107,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.6286699550194732,
+     0.1264492959376526,
+     0.14652387803701702,
+     0.0983568710058572
+    ],
+    "rebuild": 0.8519784043717356,
+    "restoreHighs": 0.2554323718173811
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "clipped": {
+  "stats": {
+   "seconds": 6,
+   "noiseDb": -15.164826469272457,
+   "floorDb": -55.10149726867676,
+   "levelDb": -12.007078647613525,
+   "peakDb": -10.063180685043335,
+   "silentFraction": 0,
+   "speechFraction": 0.43,
+   "bandDynDb": 50.03918409347534,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -6.477612286376338,
+   "dropDb": 42.91904697418213,
+   "clipFraction": 0.012444444444444444,
+   "peak": 0.999969482421875,
+   "loudnessLufs": -13.798272671285472,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9795405746346284,
+     0.005425275384997306,
+     0.002575693093313044,
+     0.01245845688706125
+    ],
+    "rebuild": 0.7464909554742618,
+    "restoreHighs": 0.03266540127899027
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "gated": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -34.31562648238884,
+   "floorDb": -22.707565307617188,
+   "levelDb": -20.19448947906494,
+   "peakDb": -20.1492338180542,
+   "silentFraction": 0.6175,
+   "speechFraction": 0,
+   "bandDynDb": 2.7756967544555664,
+   "hasSpeech": false,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.244106864197418,
+   "dropDb": null,
+   "clipFraction": 0,
+   "peak": 0.499969482421875,
+   "loudnessLufs": -24.259472772574647,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9209402579212773,
+     0.020089778786000025,
+     0.0288795336954949,
+     0.03009042959722758
+    ],
+    "rebuild": 0.8080340211219591,
+    "restoreHighs": 0.14216066073726352
+   }
+  },
+  "reco": {
+   "strength": "balanced",
+   "rebuild": false,
+   "restoreHighs": false,
+   "heavy": false,
+   "noSpeech": true
+  }
+ },
+ "stereo": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -23.71751367180967,
+   "floorDb": -51.42220001220703,
+   "levelDb": -25.20900821685791,
+   "peakDb": -24.07145071029663,
+   "silentFraction": 0,
+   "speechFraction": 0.54125,
+   "bandDynDb": 28.75564479827881,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.524357865214514,
+   "dropDb": null,
+   "clipFraction": 0,
+   "peak": 0.5,
+   "loudnessLufs": -21.850490960852802,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.952162264705004,
+     0.0162892513902448,
+     0.010341650367832442,
+     0.021206833536918646
+    ],
+    "rebuild": 0.9585950784172405,
+    "restoreHighs": 0.23730861620713814
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "dual_mono": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -33.70085223623817,
+   "floorDb": -70.73550720214844,
+   "levelDb": -26.741346168518067,
+   "peakDb": -24.5254545211792,
+   "silentFraction": 0,
+   "speechFraction": 0.365,
+   "bandDynDb": 51.11434669494629,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.332276123939018,
+   "dropDb": 43.78123378753662,
+   "clipFraction": 0,
+   "peak": 0.300537109375,
+   "loudnessLufs": -25.720822439094782,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.984844644397031,
+     0.006385481560964631,
+     0.0024947584410661165,
+     0.006275115600938175
+    ],
+    "rebuild": 0.8835186266995823,
+    "restoreHighs": 0.1366719756629509
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "hum": {
+  "stats": {
+   "seconds": 8,
+   "noiseDb": -33.83996480475705,
+   "floorDb": -16.73230438232422,
+   "levelDb": -16.718700981140138,
+   "peakDb": -16.716350650787355,
+   "silentFraction": 0,
+   "speechFraction": 0,
+   "bandDynDb": 0.047034645080564985,
+   "hasSpeech": false,
+   "bandwidthHz": 24000,
+   "tiltDb": -0.005393964913029237,
+   "dropDb": null,
+   "clipFraction": 0,
+   "peak": 0.1844482421875,
+   "loudnessLufs": -21.05043745738534,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.45531536161290515,
+     0.10356746968236374,
+     0.08878362956984483,
+     0.35233353913488624
+    ],
+    "rebuild": 0.856111385367168,
+    "restoreHighs": 0.14335850311382722
+   }
+  },
+  "reco": {
+   "strength": "balanced",
+   "rebuild": false,
+   "restoreHighs": false,
+   "heavy": false,
+   "noSpeech": true
+  }
+ },
+ "silence": {
+  "stats": {
+   "seconds": 5,
+   "noiseDb": 99,
+   "floorDb": null,
+   "levelDb": null,
+   "peakDb": null,
+   "silentFraction": 1,
+   "speechFraction": 0,
+   "bandDynDb": 0,
+   "hasSpeech": false,
+   "bandwidthHz": 24000,
+   "tiltDb": null,
+   "dropDb": null,
+   "clipFraction": 0,
+   "peak": 0,
+   "loudnessLufs": null,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": false,
+   "restoreHighs": true,
+   "p": {
+    "strength": [
+     0.4177174210657741,
+     0.15581652258125217,
+     0.3774160567578211,
+     0.04904999959515254
+    ],
+    "rebuild": 0.3958584086079795,
+    "restoreHighs": 0.9317763792960521
+   }
+  },
+  "reco": {
+   "strength": "balanced",
+   "rebuild": false,
+   "restoreHighs": false,
+   "heavy": false,
+   "noSpeech": true
+  }
+ },
+ "short": {
+  "stats": {
+   "seconds": 1.2,
+   "noiseDb": -30.565980900939724,
+   "floorDb": -70.66149368286133,
+   "levelDb": -24.200973320007325,
+   "peakDb": -24.080711460113527,
+   "silentFraction": 0,
+   "speechFraction": 0.35,
+   "bandDynDb": 52.792944335937506,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -6.698304124205388,
+   "dropDb": 44.111053466796875,
+   "clipFraction": 0,
+   "peak": 0.299713134765625,
+   "loudnessLufs": -26.868933977234228,
+   "segments": 1
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9783060793299525,
+     0.007469772814437618,
+     0.002644123381522342,
+     0.011580024474087583
+    ],
+    "rebuild": 0.8778665189558758,
+    "restoreHighs": 0.12301614240341535
+   }
+  },
+  "reco": null
+ },
+ "long": {
+  "stats": {
+   "seconds": 60,
+   "noiseDb": -22.843000734236615,
+   "floorDb": -55.774727249145506,
+   "levelDb": -22.349831962585448,
+   "peakDb": -20.63010511398315,
+   "silentFraction": 0,
+   "speechFraction": 0.5455,
+   "bandDynDb": 39.87214660644531,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.401045198130708,
+   "dropDb": 28.88154439926146,
+   "clipFraction": 0,
+   "peak": 0.5,
+   "loudnessLufs": -24.656126389621647,
+   "segments": 6
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9796086122266201,
+     0.008530356178528853,
+     0.004371770678437252,
+     0.007489260916413852
+    ],
+    "rebuild": 0.8521043451688022,
+    "restoreHighs": 0.18332794718450002
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ },
+ "long_stereo": {
+  "stats": {
+   "seconds": 60,
+   "noiseDb": -20.324706290533975,
+   "floorDb": -44.38263854980469,
+   "levelDb": -25.69177131652832,
+   "peakDb": -24.623955535888673,
+   "silentFraction": 0,
+   "speechFraction": 0.6031666666666666,
+   "bandDynDb": 24.82257671356201,
+   "hasSpeech": true,
+   "bandwidthHz": 24000,
+   "tiltDb": -9.318272587603463,
+   "dropDb": null,
+   "clipFraction": 0,
+   "peak": 0.5,
+   "loudnessLufs": -22.33589221606772,
+   "segments": 6
+  },
+  "model": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "p": {
+    "strength": [
+     0.9710079044070026,
+     0.0152104943705715,
+     0.005544589618296406,
+     0.008237011604129282
+    ],
+    "rebuild": 0.9694569824072349,
+    "restoreHighs": 0.15385736145378767
+   }
+  },
+  "reco": {
+   "strength": "gentle",
+   "rebuild": true,
+   "restoreHighs": false,
+   "heavy": true,
+   "noSpeech": false
+  }
+ }
+}
