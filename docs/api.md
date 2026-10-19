@@ -47,7 +47,7 @@ live worker, stuck jobs, missing model files and the ledger check.
     (see [streaming-protocol.md](streaming-protocol.md)). Give the plugin a key
     with only this scope.
   - `jobs`: the REST file API for scripts and automation: `/api/jobs` (create, estimate, upload, poll, download,
-    cancel, delete), see "File jobs" below.
+    cancel, delete, change a finished job), see "File jobs" below.
   Both bill the signed-in account's balance exactly like the website does. A key can also carry a **monthly spending
   cap** (see "API keys"). A key may read `GET /api/me` (balance, free trial left, its own cap) and the public
   `GET /api/billing/pricing`.
@@ -61,13 +61,13 @@ live worker, stuck jobs, missing model files and the ledger check.
 | 401 | no credentials, or the key is wrong or revoked |
 | 402 | the available balance can't cover the estimated price (the message says both amounts) |
 | 403 | the key lacks the scope, the account is suspended, or **the key's monthly spending cap is reached** (then the header `X-Error-Code: key_spending_cap` is set and the message says how much is left and when it starts over) |
-| 404 | the job doesn't exist, isn't yours, or the output isn't available |
+| 404 | the job doesn't exist, isn't yours (for changing a job: not one this key made), or the output isn't available |
 | 408 | an upload stalled for 30 s |
-| 409 | the job is in the wrong state for this (upload when not waiting for one, cancel after it started, delete while it runs), or an `Idempotency-Key` was used for different details |
+| 409 | the job is in the wrong state for this (upload when not waiting for one, cancel after it started, delete while it runs), an `Idempotency-Key` was used for different details, or a finished job can't be changed again (its files are gone, `job_files_gone`; see section 7) |
 | 411 | the upload has no `Content-Length`, or it differs from the `sizeBytes` given at creation |
 | 413 | the file is bigger than allowed (`maxUploadBytes` of `/api/billing/pricing`), or the upload is longer than declared |
 | 422 | the JSON doesn't match the shape (`fields` lists which) |
-| 429 | a rate limit above; `Retry-After` says when |
+| 429 | a rate limit above (`Retry-After` says when), or the account already has the most file jobs in progress (`code: too_many_active_jobs`, default 3; changing a finished job counts) |
 | 507 | the host is short on disk right now; try again later |
 | 503 | the service is on a short break (`{"detail":"maintenance"}`) or payments aren't switched on |
 
@@ -154,7 +154,7 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
  "options": {"audio_format": "wav|flac|mp3|m4a|opus", "caption_formats": ["srt","vtt","txt","json"],
              "language": "en" | null, "output_video": true, "embed_subtitles": true,
              "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
-             "noise": "auto|light|heavy", "leveling": true, "restore_highs": true, "translate": ["es", "de"]}}
+             "noise": "auto|light|heavy", "leveling": true, "restore_highs": false, "translate": ["es", "de"]}}
 ```
 
 Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, **without** a leading slash
@@ -163,7 +163,7 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 | Field | Rules |
 |---|---|
 | `kind` | `denoise` (clean the sound), `transcribe` (subtitles and transcript), or both |
-| `denoiseTier` | required for `denoise` kinds: `standard` (Denoising), `rebuild` (Voice rebuild, its own price: the voice is rebuilt, which also removes room echo and restores dull sound; `atten_lim_db` and `noise` don't apply to it; files up to 90 minutes), or `off` (no noise removal: only Leveling, which `options.leveling` must then be). Leveling (`options.leveling`, on by default) is its own line on the bill. |
+| `denoiseTier` | required for `denoise` kinds: `standard` (Denoising), `rebuild` (Voice rebuild, its own price: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; `atten_lim_db`, `noise` and `restore_highs` don't apply to it; files up to 90 minutes), or `off` (no noise removal: only Leveling and/or Restore highs, at least one of `options.leveling` and `options.restore_highs` must then be on). Leveling (`options.leveling`, on by default) and Restore highs (`options.restore_highs`, off by default) are each their own line on the bill. |
 | `transcribeTier` | required for `transcribe` kinds: `local` (Standard) or `premium` (extra accurate; audio goes to a speech partner, see the privacy policy) |
 | `filename` | its extension must be one we read: audio `wav rf64 w64 mp3 mp2 mpa m4a m4b m4r aac flac ogg oga opus spx wma aiff aif aifc caf au snd amr ac3 eac3 dts mka wv ape tta mpc`, video `mp4 m4v mov webm mkv avi wmv asf flv f4v 3gp 3g2 ts mts m2ts mpg mpeg vob mxf dv ogv rm rmvb`; anything else is `400 Unsupported file type.` Only the extension is used; the name never becomes a path |
 | `sizeBytes` | 1 byte up to `maxUploadBytes` (4 GiB; `413` above); at most 40 MB per second of `durationSeconds` unless under 200 MB |
@@ -187,10 +187,13 @@ Answer: `{id, estCostMicros, uploadUrl}`. `uploadUrl` is relative to the base, *
 | `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Included in the price. A single-track file is processed normally and `notice` says so |
 | `noise` | `auto` | `auto` (measured per file), `light`, `heavy` (better when the noise is nearly as loud as the voice). Doesn't apply to `rebuild` |
 | `leveling` | `true` | Leveling (its own price): the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. |
-| `restore_highs` | `true` | band-limited recordings (phone calls, low-bitrate files) get their missing highs restored; full-band ones are never changed. `false` switches it off. Must be a boolean. Doesn't apply to `rebuild`. Same price |
+| `restore_highs` | `false` | Restore highs (its own price, own line on the bill, `item: "highs"`): brings back the high sounds of a recording that lost them (phone calls, voice messages, small files). **It runs whenever it is `true`**, with `standard` or on its own with `denoiseTier: "off"`: the generator is chosen by the recording's measured bandwidth, and a recording that already has its highs gets the widest one. `false` never runs it. Must be a boolean. Doesn't apply to `rebuild` (the voice rebuild makes its own highs): it is stored as `false` there and not charged |
 
-Highs of band-limited recordings (phone calls, low-bitrate files) are restored automatically; full-band recordings
-are never changed, and `notice` says when it happened.
+**Changed 2026-10-19:** `restore_highs` used to default to `true` and only did something for recordings measured as band-limited, at no
+extra price. It now defaults to `false`, is charged per second like Leveling whenever it is on (see `GET /api/billing/pricing`, product
+`highs`), and always runs when on. Send `"restore_highs": true` for it. A job created before the change keeps its own prices (its stored
+rates have no `highs` line, so it is never charged for it). `denoiseTier: "off"` now needs `leveling` or `restore_highs` (or both) on;
+`notice` says when the highs were restored.
 
 A video result keeps the input's container when it can hold the streams (`mp4 mov m4v mkv webm`); other containers
 come back as MKV. Other audio tracks are kept unchanged and subtitles go in where the container can hold them; only
@@ -201,8 +204,15 @@ website only asks for it for a video the browser can't open (it goes up whole an
 sound only and puts the subtitles into an MKV in the browser afterwards.
 
 Errors specific to creating: `400` (see the table above), `402` (balance below the estimate), `403` (key cap),
-`409` (Idempotency-Key reused with different details), `429` (3 active jobs, 8 GiB of uploads waiting, job creation
+`409` (Idempotency-Key reused with different details), `429` (the active-job limit, 8 GiB of uploads waiting, job creation
 allowance), `507`.
+
+**Jobs in progress.** An account can have at most `ACW_MAX_ACTIVE_JOBS` file jobs at once (default 3): jobs that are
+uploading, waiting or running, which includes changing a finished job (section 7) and counts across every key and
+the website. One more is refused with `429`, the header `X-Error-Code: too_many_active_jobs`, `Retry-After`, and
+`{"detail": "You have 3 files being processed. Start this one when one of them is done.", "code": "too_many_active_jobs"}`.
+`GET /api/jobs` answers `limits: {maxActiveJobs, retentionSeconds}` next to the jobs. The per-key monthly spending cap
+(`403`, `key_spending_cap`) and the 8 GiB of uploads waiting are separate limits and unchanged.
 
 **Idempotency.** Send `Idempotency-Key: <1 to 128 visible ASCII characters>` and the same key from the same account within
 24 hours returns the same job instead of making (and holding money for) another: the answer is the original
@@ -237,7 +247,7 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
 
 ### 4. Poll: `GET /api/jobs/{id}` (and `GET /api/jobs`)
 
-`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,notice,queuePosition,queueWaitSeconds,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,callback?}`
+`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,sourceJobId,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,redo?,callback?}`
 
 - `status`: `uploading → queued → running → (cloud_asr) → done | failed | canceled | expired`. A restart of the
   service never fails a job: it goes back to `queued` and starts again.
@@ -250,21 +260,69 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
   error), or `null`.
 - `outputs[].kind`: `audio`, `video`, `captions`, `transcript`, `segments`; captions and transcripts carry `lang`.
   `name` is what the download URL takes.
-- `expiresAt`: when the results are deleted (24 hours after `done`).
+- `estimateSeconds`: while `queued` or `running`, a rough length of the whole job (for a "time left" before `progress` has moved).
+- `sourceJobId`: for a job made by changing another (section 7), that job's id.
+- `expiresAt`: when the upload, the copies kept for changing the job and the results are all deleted: 2 hours after `done`
+  (`ACW_JOB_RETENTION_MINUTES`; the housekeeping sweep runs every 30 to 60 seconds, so it is accurate to about a minute).
+- `redo` (when `done`): `{available, noise, rebuilt, transcript, translations, preview?}`: whether the job can still be changed
+  (its upload exists) and which kept copies it can start from. `preview` is for the website's strength slider (the two
+  signals `GET /api/jobs/{id}/kept/noise` and `.../kept/input`, 24-bit FLAC, sample for sample the same length).
 - `callback`: only when a `callbackUrl` was given, see below.
 
-`GET /api/jobs` returns `{jobs:[...]}`, your latest 50 (not the expired ones), in the same shape: one request polls them all.
+`GET /api/jobs` returns `{jobs:[...], limits:{maxActiveJobs, retentionSeconds}}`: up to 50 of your jobs, newest first: the ones in
+progress and the ones whose files are still there (a finished job is listed for 2 hours; failed and canceled jobs, which keep no files, are listed for the
+same time), in the same shape: one request polls them all.
 
 ### 5. Download: `GET /api/jobs/{id}/outputs/{name}`
 
 Streams the file as an attachment (`name` from `outputs`). `404` until the job is `done`, and after the results expire. Download
-promptly: they are deleted 24 hours after `done`, or at once with `DELETE`.
+promptly: they are deleted, together with the upload and the copies kept for changing the job, 2 hours after `done`, or at once with `DELETE`.
 
 ### 6. Cancel and delete
 
 `POST /api/jobs/{id}/cancel`: while `uploading` or `queued`; releases the reservation. `409` once it has started, and
-once its extra-accurate transcription is done (only packaging is left: "almost done"). `DELETE /api/jobs/{id}`: deletes the
-outputs now; `409` while the job is active. Both answer `{ok:true}`.
+once its extra-accurate transcription is done (only packaging is left: "almost done"). `DELETE /api/jobs/{id}`: deletes everything
+of the job now (the upload, the kept copies and the results) and the same for every job made from it by changing it (section 7);
+`409` while the job or one of those is active. Both answer `{ok:true}`.
+
+### 7. Change a finished job: `POST /api/jobs/{id}/rerun/estimate` and `POST /api/jobs/{id}/rerun`
+
+For 2 hours after a job is `done`, its upload and the intermediate results of the expensive steps stay in its folder:
+the noise removal at full strength (before strength, Restore highs and Leveling), the rebuilt voice when the Voice rebuild
+ran, the transcript (and its translations). Asking for the same file again with other choices starts from the latest
+kept copy and runs only the steps whose inputs changed. Only paid steps that really run are charged, at today's
+per-second prices pinned to the new job; the blend that sets the strength and writing the file cost nothing (Restore highs and Leveling are charged whenever they run).
+
+Body of both calls: only what changes (the rest stays as the job had it): `{denoiseTier?, transcribeTier?, options?}`.
+`transcribeTier: "off"` leaves the subtitles out of the new job's files (on its own that changes nothing: `nothing_to_change`). `/rerun` also takes `maxCostMicros?`: the price you were quoted; a higher one now is `409 price_changed`.
+
+| You change | What runs again | Price |
+|---|---|---|
+| `options.atten_lim_db` | the blend of the kept noise removal and the recording (no model runs); `(1 - a) * full + a * input`, `a = 10^(-dB/20)`, in the time domain: the same arithmetic the noise remover does itself. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send `"leveling": false` as well for a free strength change | free; Leveling's price when Leveling is on |
+| `options.restore_highs`, `options.leveling`, `options.loudness_lufs` | from the kept noise removal: the blend, Restore highs (when on), Leveling (when on) | Restore highs and Leveling at their prices whenever they run; free when both are off |
+| `denoiseTier: "rebuild"` | the voice is rebuilt from the upload | the full Voice rebuild price (plus Leveling when on) |
+| `denoiseTier: "standard"` (from a rebuild) | from the kept noise removal; if the job never had one, noise removal runs from the upload | free, or the Denoising price when it had to run |
+| `options.noise`, `options.echo_reference_track` | noise removal runs again from the upload | the Denoising price (plus Leveling when on) |
+| `transcribeTier`, `options.language` | the transcript is written again from the upload (always from the original sound) | the subtitle price |
+| `options.translate` | only the languages not already made (from the kept transcript) | per new language |
+| `options.audio_format`, `options.caption_formats` | the files are written again from what is there | free |
+
+`POST /api/jobs/{id}/rerun/estimate` runs and holds nothing and answers `{estCostMicros, estCostUsd, free, durationSeconds, lines,
+steps: {clean: "none"|"full"|"denoised"|"rebuilt"|"reuse", transcribe, translate}, expiresAt, options, denoiseTier, transcribeTier,
+availableMicros, affordable, keyLimit?}` (`lines` as in section 2, only the steps that run). `POST /api/jobs/{id}/rerun` holds the price
+and answers `{id, estCostMicros, free, expiresAt}`: a new job (poll, download and delete it like any other; it has `sourceJobId`; the
+credit history gets one line for it, "Changed and saved again" and the steps, none when it was free).
+
+- It uses the same queue, sandbox and worker as any job, counts toward the active-job limit and the key's spending cap, and is
+  priced for the length the first job measured.
+- It never extends the deletion time: the new job's results, the upload and the kept copies are all deleted when the job it came from is
+  (`expiresAt`); a change started too late to finish before then is refused (`409 job_expiring`), and one that is still only finishing in the
+  last minute of that time is stopped (`failed`, not charged) because its results could not be downloaded in time.
+- Who: the key that made a job can change it; the website session of the same account can change any job of the account;
+  a key can never change a job another key (or the website) made: that is `404 job_not_found`, like a job that doesn't exist.
+- Errors (with `code`, also in `X-Error-Code`): `404 job_not_found`, `409 job_files_gone` (deleted or past its 2 hours: start again from your file),
+  `409 job_not_finished`, `409 job_expiring`, `409 price_changed`, `400 nothing_to_change` (the choices give the files the job already has),
+  `429 too_many_active_jobs`, `402` (balance), `403` (`key_spending_cap`).
 
 ### Billing per call
 
@@ -300,7 +358,7 @@ service POSTs JSON to it:
 
 `type` is `job.done`, `job.failed`, `job.canceled` (or `job.expired` for a job whose results were deleted before the first
 delivery); the body is small on purpose: call `GET /api/jobs/{id}` and download for the rest. Download the files
-within their 24 hours. A callback can arrive more than once (a retry after a timeout): treat `jobId` as the dedupe key.
+within their 2 hours. A callback can arrive more than once (a retry after a timeout): treat `jobId` as the dedupe key.
 
 **Signature.** Each request carries `X-Audio-Cleaner-Signature: t=<unix seconds>,v1=<hex>` where `v1` is
 `HMAC-SHA256(secret, "<t>.<raw body>")` (the body exactly as received). The secret (`whsec_...`, one per account) is shown

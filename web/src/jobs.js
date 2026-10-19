@@ -7,6 +7,17 @@ import { compressForUpload } from './media/flac.js';
 
 export const ACTIVE = new Set(['uploading', 'queued', 'running', 'cloud_asr', 'canceling']);
 
+// The jobs that count against the most an account may have at once (the server counts the same states).
+const COUNTED = new Set(['uploading', 'queued', 'running', 'cloud_asr']);
+export const activeCount = (jobs) => (jobs || []).filter((j) => COUNTED.has(j.status)).length;
+/** The reason a file can't be started while the account already has the most it may have at once (the server says the same). */
+export const tooManyText = (n) => `You have ${n} ${n === 1 ? 'file' : 'files'} being processed. Start this one when one of them is done.`;
+/** Failed and canceled jobs cost nothing: say so once (the server's own messages often say it already). */
+export const withNotCharged = (text) => (/not charged|weren.t charged/i.test(text) ? text : `${text} You weren’t charged.`);
+
+/** The address of a job's own page (reload, back and forward land on it). */
+export const jobPath = (id) => `/app/job/${id}`;
+
 export const LANGUAGES = [
   ['', 'Detect automatically'],
   ['en', 'English'], ['es', 'Spanish'], ['fr', 'French'], ['de', 'German'], ['it', 'Italian'], ['pt', 'Portuguese'],

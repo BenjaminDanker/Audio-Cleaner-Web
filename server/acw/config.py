@@ -83,7 +83,11 @@ class Settings:
 
     max_upload_bytes: int = 4 * 1024**3
     workers: int = 3  # file-job worker units (ACW_WORKERS), used for queue estimates
-    job_output_ttl_hours: int = 24
+    # How long a file job's upload, its intermediate copies and its results are kept together, counted from when the
+    # job finishes (ACW_JOB_RETENTION_MINUTES; the sweeps run every 30 to 60 seconds, so it is accurate to about a minute).
+    job_retention_seconds: int = 2 * 3600
+    # File jobs an account may have at once (uploading, waiting, running; re-runs count). ACW_MAX_ACTIVE_JOBS.
+    max_active_jobs: int = 3
     stream_worker_socket: Path | None = None
 
     @property
@@ -163,6 +167,7 @@ def get_settings() -> Settings:
         admin_emails=[e.lower() for e in _env_list("ACW_ADMIN_EMAILS")],
         max_upload_bytes=_env_int("ACW_MAX_UPLOAD_BYTES", 4 * 1024**3),
         workers=_env_int("ACW_WORKERS", 3),
-        job_output_ttl_hours=_env_int("ACW_JOB_OUTPUT_TTL_HOURS", 24),
+        job_retention_seconds=60 * max(1, _env_int("ACW_JOB_RETENTION_MINUTES", 120)),
+        max_active_jobs=max(1, _env_int("ACW_MAX_ACTIVE_JOBS", 3)),
         stream_worker_socket=Path(_env("ACW_STREAM_SOCKET", str(data_dir / "stream.sock"))),
     )

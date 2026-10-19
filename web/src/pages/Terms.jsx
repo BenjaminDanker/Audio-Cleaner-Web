@@ -92,7 +92,7 @@ export default function Terms() {
       <p>The <Link to="/privacy">Privacy Policy</Link> applies. In short:</p>
       <ul>
         <li>The free noise removal processes files locally in your browser; nothing is uploaded.</li>
-        <li>Files you upload are deleted when processing finishes. Results are deleted 24 hours after they are ready (or when you delete them).</li>
+        <li>Files you upload, the copies we keep of them so a result can be changed again, and your results are kept together for 2 hours after a job finishes and are then deleted together (or when you delete them).</li>
         <li>Live audio is processed in memory and is not stored.</li>
         <li>Extra accurate transcription and extra accurate live captions send the audio to a third-party speech-recognition provider, our sub-processor, only when you choose them. Standard transcription and standard live captions are done by us and the audio goes no further.</li>
         <li>Payments are processed by Stripe.</li>

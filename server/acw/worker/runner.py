@@ -20,6 +20,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import Any
 
 STAGES = ("probe", "main", "finalize")
 
@@ -118,8 +119,15 @@ def decode_limit(spec: dict) -> float:
     return spec["max_seconds"] if billed is None else min(spec["max_seconds"], billed * 1.02 + 2)
 
 
+# The names of the copies a job keeps (jobs.KEPT_NOISE, jobs.KEPT_REBUILT: this module must not import the database code).
+KEPT_NOISE = "kept-noise"
+KEPT_REBUILT = "kept-rebuilt"
+KEPT_INPUT = "kept-input"
+
+
 def stage_main(job_dir: Path, spec: dict) -> dict:
     from acw_common import dpdfnet, pipeline
+    from acw_common import kept as kept_copies
 
     ff = _ff(spec)
     limit = decode_limit(spec)
@@ -131,15 +139,23 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     outputs: list[dict] = []
     denoise = spec["kind"] in ("denoise", "denoise_transcribe")
     transcribe = spec["kind"] in ("transcribe", "denoise_transcribe")
+    # A re-run starts from the copies the job it came from kept (rerun.py): "clean" says what to do about the sound
+    # ("full": from the upload, as a first run; "denoised" / "rebuilt": from the kept noise removal / rebuilt voice;
+    # "reuse": the cleaned sound of the source job is as wanted), "transcribe" whether the transcript is made again.
+    rerun = spec.get("rerun")
+    clean_mode = rerun["clean"] if rerun else "full"
+    transcribe_run = transcribe and (rerun is None or bool(rerun["transcribe"]))
+    denoise_run = denoise and clean_mode != "reuse"
     t0 = time.time()
 
     needs_cloud = False
     cleaned_path = None
     notice = None
     noise_used = None  # which noise remover ran ("light" | "heavy"), for the record
-    asr_end = 45 if denoise else 90  # progress when transcription is done
+    kept_out: dict = {}  # the copies kept for a later "change and save again" (reported to the worker, which checks them)
+    asr_end = 45 if denoise_run else 90  # progress when transcription is done
     x = None  # the decoded audio, echo-free when the second track was used
-    if opts.get("echo_reference_track"):
+    if opts.get("echo_reference_track") and (denoise_run or transcribe_run):
         if probe.audio_tracks < 2:
             notice = "This file has only one audio track, so there was no desktop sound to remove echo with. It was processed without echo removal."
         else:
@@ -151,11 +167,11 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 progress=lambda f: emit(stage="Removing echo", progress=int(2 + 3 * f)),
             )
             del mic
-    if transcribe:
+    if transcribe_run:
         # Transcribe first, from the original audio: every recogniser we tested
         # scores worse on denoised speech (docs/research/asr.md).
         emit(stage="Decoding", progress=5 if x is not None else 2)
-        if x is None and denoise:
+        if x is None and denoise_run:
             # Cleaned too: decode once, at the cleaning rate, and make the recogniser's 16 kHz mono from that.
             x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
         if x is not None:
@@ -193,8 +209,8 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             (job_dir / "segments.json").write_text(
                 json.dumps({"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
             )
-    if denoise:
-        start = asr_end if transcribe else (5 if x is not None else 2)
+    if denoise_run:
+        start = asr_end if transcribe_run else (5 if x is not None else 2)
         emit(stage="Decoding", progress=start)
         # Decoded and cleaned audio live in memory-mapped files in the job
         # directory, so RAM use doesn't grow with the length of the upload.
@@ -203,55 +219,107 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         span = 85 - start
         rebuild = spec.get("denoise_tier") == "rebuild"
         leveling_only = spec.get("denoise_tier") == "off"  # Leveling on its own: no noise removal
-        # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
-        # time estimate on it; clean_audio then uses the same choice.
-        kept: dict = {}  # a short recording's measurement doubles as its full-strength cleaning (pipeline.Measured)
-        if rebuild or leveling_only:
-            profile = opts.get("noise", "auto")
-        else:
-            profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"), keep=kept)
-        emit(stage="Leveling" if leveling_only else "Cleaning", progress=start + 2,
-             **({} if rebuild or leveling_only else {"noise": profile}))
-        used: dict = {}
-        y = pipeline.clean_audio(
-            x, spec["lib_path"], spec["dfn_model"],
-            pipeline.CleanOptions(
-                atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
-                loudness_lufs=opts.get("loudness_lufs", -16.0),
-                leveling=bool(opts.get("leveling", True)),
-                restore_highs=bool(opts.get("restore_highs", True)),
-                noise=profile,
-                restore_voice=rebuild,
-                denoise=not leveling_only,
-                device=spec.get("clean_device", "cpu"),
-            ),
-            threads=threads,
-            progress=lambda f: emit(stage="Cleaning" if f < 0.95 else "Leveling", progress=int(start + 2 + span * f)),
-            out=pipeline.output_buffer(x, job_dir),
-            heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
-            bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
-            restore_model_dir=Path(spec["models_dir"]) / "sidon",
-            report=used,
-            measured=kept.get("measured"),
+        copts = lambda profile: pipeline.CleanOptions(  # noqa: E731
+            atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
+            loudness_lufs=opts.get("loudness_lufs", -16.0),
+            leveling=bool(opts.get("leveling", True)),
+            restore_highs=bool(opts.get("restore_highs", False)) and not rebuild,
+            noise=profile,
+            restore_voice=rebuild,
+            denoise=not leveling_only,
+            device=spec.get("clean_device", "cpu"),
         )
+        progress = lambda f: emit(stage="Cleaning" if f < 0.95 else "Leveling", progress=int(start + 2 + span * f))  # noqa: E731
+        used: dict = {}
+        echo_flag = bool(opts.get("echo_reference_track"))
+        if clean_mode in ("denoised", "rebuilt"):
+            # From the copy the source job kept: no noise model runs (the blend for the strength, restoring the highs,
+            # Leveling). The copy was made from the same recording (pipeline.redo_denoised / redo_rebuilt).
+            entry = rerun["kept"]["noise" if clean_mode == "denoised" else "rebuilt"]
+            emit(stage="Cleaning", progress=start + 2)
+            y = pipeline.output_buffer(x, job_dir)
+            y[:] = 0.0
+            kept_copies.load(ff, entry, job_dir, y, job_dir / "kept-decoded.f32")
+            if clean_mode == "denoised":
+                plan = entry["plan"]
+                if len(plan) != x.shape[1]:
+                    raise ValueError("the kept copy does not fit this recording")
+                y = pipeline.redo_denoised(
+                    x, y, plan, copts(entry["profile"]), threads=threads, progress=progress,
+                    bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe", report=used,
+                )
+                used["noise"] = entry["profile"]
+            else:
+                y = pipeline.redo_rebuilt(x, y, copts("auto"), progress=progress, report=used)
+        else:
+            # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
+            # time estimate on it; clean_audio then uses the same choice.
+            kept: dict = {}  # a short recording's measurement doubles as its full-strength cleaning (pipeline.Measured)
+            if rebuild or leveling_only:
+                profile = opts.get("noise", "auto")
+            else:
+                profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"), keep=kept)
+            emit(stage="Leveling" if leveling_only and not opts.get("restore_highs") else "Cleaning", progress=start + 2,
+                 **({} if rebuild or leveling_only else {"noise": profile}))
+
+            def keep_copy(name: str, y: Any, cols: list[int] | None) -> None:
+                """What a later "change and save again" starts from: the noise removal at full strength, or the rebuilt voice."""
+                if name == "denoised":
+                    entry = kept_copies.save(ff, y, cols, job_dir / KEPT_NOISE)
+                    kept_out["noise"] = {**entry, "echo": echo_flag, "profile": profile, "noise_opt": opts.get("noise", "auto"),
+                                         "plan": pipeline.channel_plan(x)}
+                    if spec.get("keep_input"):
+                        # the recording as the noise remover heard it (echo removed), on the same sample grid: with the copy above it
+                        # is what the page blends for its strength slider, exactly (web/src/media/blend.js)
+                        kept_out["input"] = {**kept_copies.save(ff, x, cols, job_dir / KEPT_INPUT), "echo": echo_flag}
+                else:
+                    kept_out["rebuilt"] = {**kept_copies.save(ff, y, cols, job_dir / KEPT_REBUILT), "echo": echo_flag}
+
+            y = pipeline.clean_audio(
+                x, spec["lib_path"], spec["dfn_model"], copts(profile), threads=threads, progress=progress,
+                out=pipeline.output_buffer(x, job_dir),
+                heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
+                bwe_model_dir=Path(spec["models_dir"]) / "ap-bwe",
+                restore_model_dir=Path(spec["models_dir"]) / "sidon",
+                report=used,
+                measured=kept.get("measured"),
+                keep=keep_copy,
+            )
         noise_used = used.get("noise")
         if used.get("highs"):
-            restored = "This sounded like a phone or low-quality recording, so its missing high frequencies were restored."
+            restored = "Its high frequencies were restored, as you asked."
             notice = f"{notice} {restored}" if notice else restored
         fmt = opts.get("audio_format", "flac")
         cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
         del x, y
-        for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy"):
+        for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy", "kept-decoded.f32"):
             (job_dir / scratch).unlink(missing_ok=True)
+    elif denoise:
+        # The cleaned sound of the job this one came from is what is wanted (only the subtitles change): reused as it is,
+        # or in the other file type that was asked for.
+        from acw_common.ffmpeg import AUDIO_FORMATS
+
+        fmt = opts.get("audio_format", "flac")
+        old = job_dir / rerun["reuse_audio"]
+        if old.suffix == AUDIO_FORMATS[fmt][0]:
+            cleaned_path = old
+        else:
+            emit(stage="Cleaning", progress=60)
+            p = ff.probe(old)
+            audio = ff.decode(old, p, pipeline.SAMPLE_RATE, min(max(p.audio_channels, 1), 2), limit)
+            cleaned_path = ff.write_audio(pipeline.as_output(audio), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
+        outputs.append({"file": cleaned_path.name, "kind": "audio"})
 
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
     )
     # Translations need the internet, which this sandbox doesn't have: they run outside it, then `finalize` writes the files.
-    needs_cloud = needs_cloud or bool(opts.get("translate"))
+    # (A re-run that kept some languages only asks for the others.)
+    missing = [lang for lang in (opts.get("translate") or []) if not (job_dir / f"segments.{lang}.json").is_file()]
+    needs_cloud = needs_cloud or bool(missing)
     result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
-              "noise": noise_used}
+              "noise": noise_used, "kept": kept_out}
     if not needs_cloud:
         result.update(stage_finalize(job_dir, spec))
     return result

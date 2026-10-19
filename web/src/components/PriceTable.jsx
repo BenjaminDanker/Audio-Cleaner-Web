@@ -5,6 +5,7 @@ import { usePricing } from '../hooks.js';
 // prices themselves come from the server (GET /api/billing/pricing), so they can never disagree with the bill.
 const DESCRIPTIONS = {
   'denoise/standard': 'Background noise removed, the voice kept natural',
+  'highs/standard': 'For a recording that is only missing its high sounds (phone calls, voice messages, small files) and otherwise sounds fine: adds them back and keeps the voice exactly as recorded; with Denoising or on its own',
   'leveling/standard': 'The voice evened out and the loudness set for podcast, YouTube or broadcast; with Denoising or Voice rebuild, or on its own',
   'denoise/rebuild': 'For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt',
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
@@ -25,7 +26,7 @@ const LABELS = {
 
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
-  { id: 'files', title: 'Files', products: ['denoise', 'leveling', 'transcribe', 'transcribe_translate'] },
+  { id: 'files', title: 'Files', products: ['denoise', 'highs', 'leveling', 'transcribe', 'transcribe_translate'] },
   { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions', 'stream_translate'] },
 ];
 

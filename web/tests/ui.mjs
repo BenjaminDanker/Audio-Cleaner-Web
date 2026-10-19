@@ -32,6 +32,22 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 {
   const { browser, page } = await launch();
   await signIn(page, EMAIL);
+  // what a screen reader meets: unlabeled controls, buttons and images, heading count, landmarks, language and duplicate ids
+  const audit = () => {
+    const out = [];
+    const name = (el) => (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby'))?.textContent || el.labels && [...el.labels].map((l) => l.textContent).join(' ') || el.textContent || el.getAttribute('title') || '').trim();
+    for (const el of document.querySelectorAll('input:not([type=hidden]), select, textarea')) if (!name(el) && !el.closest('label')) out.push('control ' + el.outerHTML.slice(0, 80));
+    for (const el of document.querySelectorAll('button, a[href]')) if (!name(el)) out.push('empty ' + el.outerHTML.slice(0, 80));
+    for (const el of document.querySelectorAll('progress')) if (!el.getAttribute('aria-label') && !el.labels?.length) out.push('progress without a name ' + el.outerHTML.slice(0, 80));
+    for (const el of document.querySelectorAll('img')) if (!el.hasAttribute('alt')) out.push('img no alt');
+    const h1s = document.querySelectorAll('h1').length;
+    if (h1s !== 1) out.push('h1 count ' + h1s);
+    if (!document.querySelector('main')) out.push('no main');
+    if (!document.documentElement.lang) out.push('no lang');
+    const ids = [...document.querySelectorAll('[id]')].map((e) => e.id); const dup = ids.filter((x, i) => ids.indexOf(x) !== i);
+    if (dup.length) out.push('dup ids ' + dup.join(','));
+    return out;
+  };
   await check('a11y scan: unlabeled controls, buttons and images, heading count, landmarks, language and duplicate ids on the main pages (and the Cleanup page with a file)', async () => {
     const probs = [];
     for (const p of ['/', '/login', '/app', '/app+file', '/app/billing', '/app/live', '/app/account', '/terms']) {
@@ -39,24 +55,44 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
       await page.waitForSelector('main h1');
       if (p.endsWith('+file')) await dropFile(page, join(FILES, 'noisy.wav'));
       await page.waitForTimeout(300);
-      const r = await page.evaluate(() => {
-        const out = [];
-        const name = (el) => (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') && document.getElementById(el.getAttribute('aria-labelledby'))?.textContent || el.labels && [...el.labels].map((l) => l.textContent).join(' ') || el.textContent || el.getAttribute('title') || '').trim();
-        for (const el of document.querySelectorAll('input:not([type=hidden]), select, textarea')) if (!name(el) && !el.closest('label')) out.push('control ' + el.outerHTML.slice(0, 80));
-        for (const el of document.querySelectorAll('button, a[href]')) if (!name(el)) out.push('empty ' + el.outerHTML.slice(0, 80));
-        for (const el of document.querySelectorAll('img')) if (!el.hasAttribute('alt')) out.push('img no alt');
-        const h1s = document.querySelectorAll('h1').length;
-        if (h1s !== 1) out.push('h1 count ' + h1s);
-        if (!document.querySelector('main')) out.push('no main');
-        if (!document.documentElement.lang) out.push('no lang');
-        const ids = [...document.querySelectorAll('[id]')].map((e) => e.id); const dup = ids.filter((x, i) => ids.indexOf(x) !== i);
-        if (dup.length) out.push('dup ids ' + dup.join(','));
-        return out;
-      });
-      for (const x of r) probs.push(`${p}: ${x}`);
+      for (const x of await page.evaluate(audit)) probs.push(`${p}: ${x}`);
     }
     if (probs.length) throw new Error(probs.join(' | '));
     return '8 pages clean';
+  });
+
+  await check('a11y scan: the Cleanup page with its job rows (running, in line, uploading, done, failed) and a job\'s own page (running, and done with its result panel open) are clean too', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const job = (id, extra) => ({ id, kind: 'denoise', tier: 'standard', free: false, status: 'done', inputName: `${id}.wav`, displayName: `${id}.wav`, label: 'Denoising', createdAt: now - 60, finishedAt: now - 30, durationSeconds: 60, progress: 100, stage: '', outputs: [], costMicros: 2600, expiresAt: now + 7000, queuePosition: null, queueWaitSeconds: null, options: {}, ...extra });
+    const list = [
+      job('run1', { status: 'running', progress: 40, stage: 'Cleaning', estimateSeconds: 120, expiresAt: null, finishedAt: null }),
+      job('que1', { status: 'queued', progress: 0, queuePosition: 2, queueWaitSeconds: 60, estimateSeconds: 120, expiresAt: null, finishedAt: null }),
+      job('upl1', { status: 'uploading', progress: 0, expiresAt: null, finishedAt: null }),
+      job('done1', { outputs: [{ name: 'done1-cleaned.flac', kind: 'audio', bytes: 1000 }], redo: { available: false } }),
+      job('bad1', { status: 'failed', error: 'We couldn’t read that file. You were not charged.', expiresAt: null }),
+    ];
+    await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list, limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
+    try {
+      const probs = [];
+      await page.goto(`${BASE}/app`);
+      await page.getByTestId('job-row').first().waitFor();
+      if ((await page.getByTestId('job-row').count()) !== 5) throw new Error(`${await page.getByTestId('job-row').count()} rows, wanted 5`);
+      for (const x of await page.evaluate(audit)) probs.push(`/app (rows): ${x}`);
+      for (const id of ['run1', 'que1', 'done1', 'bad1']) {
+        await page.goto(`${BASE}/app/job/${id}`);
+        await page.getByTestId('job').waitFor();
+        if (id === 'done1') {
+          await page.getByTestId('again').locator('summary').click();
+          await page.getByTestId('again-fields').waitFor();
+        }
+        await page.waitForTimeout(200);
+        for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id}: ${x}`);
+      }
+      if (probs.length) throw new Error(probs.join(' | '));
+      return 'rows and 4 job pages clean';
+    } finally {
+      await page.unroute('**/api/jobs');
+    }
   });
   await browser.close();
 }

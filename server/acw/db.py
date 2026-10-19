@@ -334,6 +334,11 @@ MIGRATIONS = [
         " user_id TEXT NOT NULL, key TEXT NOT NULL, body_hash TEXT NOT NULL, job_id TEXT NOT NULL,"
         " created_at INTEGER NOT NULL, PRIMARY KEY (user_id, key))",
     ),
+    # "Change and save again" (acw.jobs.create_rerun): a re-run is a job of its own that starts from the files its source job
+    # kept; `source_job_id` is the job it was made from, `root_job_id` the first job of the chain (the upload they all came
+    # from: they are deleted together).
+    ("jobs", "source_job_id", "ALTER TABLE jobs ADD COLUMN source_job_id TEXT"),
+    ("jobs", "root_job_id", "ALTER TABLE jobs ADD COLUMN root_job_id TEXT"),
     # callbackUrl of a job: delivered by the web process (acw.webhooks) when the job ends. state: pending | delivered | failed.
     (
         "job_callbacks",
@@ -374,6 +379,7 @@ POST_MIGRATION_SQL = [
     # The free server-side subtitle minutes are gone (free subtitles are made in the browser).
     "DROP TABLE IF EXISTS free_usage",
     "DROP TABLE IF EXISTS deleted_emails",
+    "CREATE INDEX IF NOT EXISTS jobs_root ON jobs(root_job_id) WHERE root_job_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS jobs_api_key ON jobs(api_key_id, finished_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS stream_sessions_api_key ON stream_sessions(api_key_id, ended_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS job_callbacks_due ON job_callbacks(next_attempt_at) WHERE state = 'pending'",

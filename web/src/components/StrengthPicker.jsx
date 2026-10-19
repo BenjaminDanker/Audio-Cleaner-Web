@@ -1,8 +1,10 @@
 import { STRENGTHS } from '../strengths.js';
 
 /** Gentle / Balanced / Strong / Maximum as a row of buttons, with a line about the chosen one. */
-export default function StrengthPicker({ name, value, onChange, disabled, label = 'How much noise to remove' }) {
-  const current = STRENGTHS.find((s) => s.id === value) || STRENGTHS[STRENGTHS.length - 1];
+export default function StrengthPicker({ name, value, onChange, disabled, label = 'How much noise to remove', customText = '' }) {
+  // `value` that is none of the four (a strength in between, from the slider): none is ticked and `customText` says which it is
+  const named = STRENGTHS.find((s) => s.id === value);
+  const current = named || (customText ? null : STRENGTHS[STRENGTHS.length - 1]);
   return (
     <fieldset className="field" disabled={disabled} data-testid={`strength-${name}`}>
       <legend className="label">{label}</legend>
@@ -14,7 +16,7 @@ export default function StrengthPicker({ name, value, onChange, disabled, label 
           </label>
         ))}
       </div>
-      <span className="hint">{current.hint}</span>
+      <span className="hint" data-testid={`${name}-hint`}>{current ? current.hint : customText}</span>
     </fieldset>
   );
 }

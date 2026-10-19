@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { Link } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
 import { addLocalCard, beginFinish, finishSeconds, getFinish } from '../finish.js';
 import { balanceMoney, BILLING_NOTE, bytes, clock, human, money, rate, shownName, stem } from '../format.js';
 import { estimateMicros, findRate, loadPricing, usePricing } from '../hooks.js';
-import { LANGUAGES, LOUDNESS, NOISE, submitJob } from '../jobs.js';
+import { highsHint, rebuildHint } from '../hints.js';
+import { jobPath, LANGUAGES, LOUDNESS, NOISE, submitJob, tooManyText } from '../jobs.js';
 import { buildLimit, canHoldSubtitles, defaultFormatId, serverAudioFormat } from '../media/convert.js';
+import { previewFits } from '../media/blend.js';
 import { denoiserLoadState, preloadDenoiser, subscribeDenoiserLoad } from '../media/denoise.js';
 import { analyseFile } from '../media/analyse.js';
 import { probeMedia } from '../media/mb.js';
@@ -53,6 +55,12 @@ function warmUpDenoiser() {
 const inGigabytes = (text) => text.replace(/\b(\d{4,})\s*MB\b/g, (_, n) => gigabytes(Number(n) * 1024 ** 2));
 
 const compressedNote = (c) => `Compressed for upload: ${bytes(c.from)} → ${bytes(c.to)}`;
+
+/** "Got it, we're on it." plus what was done to the file before it went up (shown once, at the top of the job's page). */
+function startedNote(out) {
+  if (!out) return 'Got it.';
+  return `Got it, we’re on it.${out.extracted ? ` Only the sound was uploaded (${bytes(out.uploadBytes)} instead of ${bytes(out.originalBytes)}).` : ''}${out.compressed ? ` ${compressedNote(out.compressed)}.` : ''}`;
+}
 
 
 /** Start fetching the subtitle maker (about 80 MB, once; the browser keeps it) as soon as free subtitles are chosen. */
@@ -121,9 +129,12 @@ function Toggle({ name, checked, onChange, disabled, title, hint, hintId, muted 
  *   Noise removal:  Off | Free, in your browser (nothing uploaded) | Denoising (paid, on our side)
  *   Subtitles:      Off | Free, in your browser (nothing uploaded) | Standard (paid) | Extra accurate (paid)
  * Any combination works: the browser part runs here, in parallel with the job (if any) for the rest.
- * onSubmitted({id, ...}) once a job on our side exists (its card finishes it: see finish.js)
+ * onSubmitted({id, ...}) once a job on our side exists (its page finishes it: see finish.js). When everything is started (and the
+ * parts made here are done) the page of the job opens: /app/job/<id>. `active`: how many files are being processed on our side
+ * and `maxActive` the most there may be at once (the server says the same, with the code too_many_active_jobs).
  */
-export default function JobForm({ onSubmitted }) {
+export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
+  const nav = useNavigate();
   const { balance, refresh } = useAuth();
   const { data: pricing, error: pricingError } = usePricing();
   const load = useSyncExternalStore(subscribeDenoiserLoad, denoiserLoadState);
@@ -139,7 +150,7 @@ export default function JobForm({ onSubmitted }) {
   const [loudness, setLoudness] = useState('-14'); // the YouTube target
   const [noiseKind, setNoiseKind] = useState('auto');
   const [leveling, setLeveling] = useState(true); // Leveling (paid, on our side): even out the voice, set the loudness. With noise removal Off it runs on its own.
-  const [restoreHighs, setRestoreHighs] = useState(true); // Denoising: bring back the highs of dull phone-quality recordings
+  const [restoreHighs, setRestoreHighs] = useState(false); // Restore highs (paid, off unless asked for): bring back the high sounds a recording lost; with Denoising or on its own
   const [rebuild, setRebuild] = useState(false); // Voice rebuild (its own price)
   const [strength, setStrength] = useState('max'); // Denoising
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
@@ -168,9 +179,8 @@ export default function JobForm({ onSubmitted }) {
   const now = useRef({}); // the current choices, for the listen that finishes later
   const rebuildOk = useRef(false); // is the rebuild offered (the price list has it)?
   const listen = useRef(null);
-  const [result, setResult] = useState(null);
   const [error, setError] = useState('');
-  const choice = useOutputChoice({ file, info, serverAudio: noise === 'denoise' || (noise === 'off' && leveling) });
+  const choice = useOutputChoice({ file, info, serverAudio: noise === 'denoise' || (noise === 'off' && (leveling || restoreHighs)) });
   const [errorKind, setErrorKind] = useState(''); // 'storage' while the server is short on space
   const abort = useRef(null);
 
@@ -186,8 +196,8 @@ export default function JobForm({ onSubmitted }) {
   const sVerdict = info ? subsVerdict(info) : null;
   const wantsBrowser = noise === 'browser';
   const wantsDenoise = noise === 'denoise'; // Denoising (or Voice rebuild) on our side
-  const levelingOnly = noise === 'off' && leveling && info?.hasAudio !== false; // Leveling on its own, on our side
-  const serverClean = wantsDenoise || levelingOnly; // a cleaned file comes from our side
+  const soundOnly = noise === 'off' && (leveling || restoreHighs) && info?.hasAudio !== false; // no noise removal: Leveling and/or Restore highs on their own, on our side
+  const serverClean = wantsDenoise || soundOnly; // a cleaned file comes from our side
   const cleaning = serverClean || wantsBrowser; // the cleaned sound is part of the result (the file type and name are chosen)
   const wantsText = subs !== 'off'; // any subtitles: the language, formats and "into the video" choices apply
   const localSubs = subs === 'browser'; // made here, free
@@ -219,9 +229,11 @@ export default function JobForm({ onSubmitted }) {
   const denoiseRate = findRate(pricing, 'denoise', 'standard');
   const rebuildOffered = findRate(pricing, 'denoise', 'rebuild');
   const rebuildRate = pricing?.rebuildAvailable ? rebuildOffered : null; // paused while its machine is unavailable
-  const denoiseTier = levelingOnly ? 'off' : rebuild && rebuildRate ? 'rebuild' : 'standard';
+  const denoiseTier = soundOnly ? 'off' : rebuild && rebuildRate ? 'rebuild' : 'standard';
   const levelingRate = findRate(pricing, 'leveling', 'standard');
+  const highsRate = findRate(pricing, 'highs', 'standard');
   const withLeveling = serverClean && leveling; // Leveling is charged on its own line
+  const withHighs = serverClean && restoreHighs && denoiseTier !== 'rebuild'; // so is Restore highs (the voice rebuild makes its own)
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
   const fileReco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
@@ -244,25 +256,23 @@ export default function JobForm({ onSubmitted }) {
 
   const est = useMemo(() => {
     if (!kind) return 0;
-    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling });
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
+    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling, highs: withHighs });
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling, withHighs]);
   const breakdown = useMemo(() => {
     if (kind !== 'denoise_transcribe' || !duration) return null;
-    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
+    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling, highs: withHighs }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling, withHighs]);
 
   async function choose(f) {
     if (f.size < TINY_FILE_BYTES) {
       // Nothing to read in there: say so instead of offering options with made-up numbers.
       setFile(null);
       setInfo(null);
-      setResult(null);
       setError(f.size === 0 ? 'That file is empty (0 bytes). Please pick another one.' : 'That file is too small to hold any sound. Please pick another one.');
       return;
     }
     setFile(f);
     setInfo(null);
-    setResult(null);
     setError('');
     setEmbed(false);
     setEcho(false);
@@ -272,7 +282,7 @@ export default function JobForm({ onSubmitted }) {
     setStrength('max');
     setLocalStrength('max');
     setRebuild(false);
-    setRestoreHighs(true);
+    setRestoreHighs(false);
     setLeveling(true);
     setNoiseKind('auto');
     setStats(null);
@@ -331,7 +341,7 @@ export default function JobForm({ onSubmitted }) {
       setLocalStrength(r.strength);
     }
     if (!skip.has('rebuild')) setRebuild(!!(r.rebuild && rebuildOk.current && next === 'denoise'));
-    if (r.restoreHighs && !skip.has('highs')) setRestoreHighs(true);
+    if (!skip.has('highs')) setRestoreHighs(!!r.restoreHighs && !(r.rebuild && rebuildOk.current && next === 'denoise')); // on only where the automatic settings ask for it
     if (!skip.has('leveling')) setLeveling(!!r.leveling);
     if (!skip.has('subs') && i?.hasAudio !== false) setSubs(r.subs || 'off');
     setNoiseKind('auto');
@@ -419,6 +429,7 @@ export default function JobForm({ onSubmitted }) {
   // A video's picture is not uploaded and uncompressed WAV/AIFF is packed smaller first; anything else goes up as it is.
   const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
   if (kind && file && file.size > maxUpload && !canShrink) problems.push(`This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.`);
+  if (kind && maxActive && active >= maxActive) problems.push(tooManyText(active));
   if (kind && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
   if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`);
   if (info && !wantsBrowser && !localSubs && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
@@ -454,13 +465,15 @@ export default function JobForm({ onSubmitted }) {
     setLocalProg({ done: 0, total: i?.duration || null, rate: 0, eta: null, elapsed: 0 });
     try {
       const attenDb = strengthDb(localStrength);
+      // the full-strength sound and the recording are kept (in memory) while they fit: the strength can be changed afterwards
       const pcm = await denoiseFile(f, {
         attenDb, durationHint: i?.duration || null, signal, onProgress: setLocalProg, onStage: setLocalStage,
+        keepPair: !!i?.duration && previewFits(i.duration, i.channels >= 2 ? 2 : 1),
       });
       setLocalStage('Preparing the preview…');
       const wav = await buildWav(pcm, 16);
       if (signal.aborted) throw new DOMException('Canceled', 'AbortError');
-      return { pcm, wav, url: URL.createObjectURL(wav), strength: localStrength };
+      return { pcm, wav, url: URL.createObjectURL(wav), strength: localStrength, attenDb };
     } finally {
       setLocalRunning(false);
     }
@@ -497,7 +510,7 @@ export default function JobForm({ onSubmitted }) {
         loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null,
         noise: noiseKind,
         leveling,
-        restore_highs: restoreHighs,
+        restore_highs: restoreHighs && denoiseTier !== 'rebuild',
         atten_lim_db: strengthDb(strength),
         echo_reference_track: !!(wantsDenoise && echo && hasSecondTrack),
       },
@@ -509,7 +522,6 @@ export default function JobForm({ onSubmitted }) {
         onProgress: (p) => setStep(p),
         onCompressed: setCompressedInfo,
       });
-      setResult(out);
       beginFinish({ ...out, displayName: f.name, outputs: [] }, entry); // from here on the job's card finishes it by itself
       onSubmitted?.(out);
       return out;
@@ -530,7 +542,6 @@ export default function JobForm({ onSubmitted }) {
     setBusy(true);
     setError('');
     setErrorKind('');
-    setResult(null);
     setCompressedInfo(null);
     const wants = buildWants(f);
     let doneBrowser;
@@ -574,7 +585,10 @@ export default function JobForm({ onSubmitted }) {
       }
     }
     // what this browser made now goes to the finishing step: the job's card (it waits for this), or a card of its own for a free run
-    const parts = { pcm: cleaned?.pcm || null, wav: cleaned?.wav || null, wavUrl: cleaned?.url || '', subs: subsFiles, failed: canceled ? { sound: true, subs: true } : failedParts };
+    const parts = {
+      pcm: cleaned?.pcm || null, wav: cleaned?.wav || null, wavUrl: cleaned?.url || '', subs: subsFiles, failed: canceled ? { sound: true, subs: true } : failedParts,
+      ...(cleaned ? { pairParts: cleaned.pcm.pair, pairChannels: cleaned.pcm.channels, strengthDb: cleaned.attenDb } : {}),
+    };
     let fin = madeJob ? getFinish(madeJob.id) : null;
     if (!fin && !canceled) {
       const made = { sound: !!cleaned, subs: !!subsFiles };
@@ -606,6 +620,9 @@ export default function JobForm({ onSubmitted }) {
     if (!failed && !canceled) {
       setFile(null);
       setInfo(null);
+      // the job's own page: its progress, then its result
+      const id = madeJob?.id || fin?.job?.id;
+      if (id) nav(jobPath(id), { state: madeJob ? { submitted: startedNote(madeJob) } : null });
     }
   }
 
@@ -712,20 +729,17 @@ export default function JobForm({ onSubmitted }) {
                 </div>
               )}
 
+              {noise === 'off' && info.hasAudio !== false && (
+                <div className="step-sub">
+                  <Toggle
+                    name="highs-alone" checked={restoreHighs} onChange={(e) => { touch('highs'); setRestoreHighs(e.target.checked); }} disabled={busy}
+                    title="Restore highs" hintId="highs-alone-hint" hint={highsHint(highsRate)}
+                  />
+                </div>
+              )}
+
               {wantsDenoise && (
                 <div className="step-sub">
-                  {rebuildOffered && !rebuildRate && (
-                    <span data-testid="rebuild-paused">
-                      <Toggle name="rebuild" checked={false} disabled muted title="Rebuild the voice" hint="Paused right now. Try again later." />
-                    </span>
-                  )}
-                  {rebuildRate && (
-                    <Toggle
-                      name="rebuild" checked={rebuild} onChange={(e) => { touch('rebuild'); setRebuild(e.target.checked); }} disabled={busy}
-                      title="Rebuild the voice" hintId="rebuild-hint"
-                      hint={`For recordings made in echoey rooms: removes the room echo and brings back dull, muffled sound. Slower, ${rate(rebuildRate.usdPerMinute)} a minute. On very echoey recordings it can change a word, so listen before you publish.`}
-                    />
-                  )}
                   {!rebuilding && <StrengthPicker name="strength" value={strength} onChange={(v) => { touch('strength'); setStrength(v); }} disabled={busy} />}
                   {!rebuilding && (
                     <div className="field">
@@ -739,7 +753,18 @@ export default function JobForm({ onSubmitted }) {
                   {!rebuilding && (
                     <Toggle
                       name="highs" checked={restoreHighs} onChange={(e) => { touch('highs'); setRestoreHighs(e.target.checked); }} disabled={busy}
-                      title="Restore missing highs" hintId="highs-hint" hint="For phone calls and other recordings that sound dull or muffled. Clear recordings are left as they are."
+                      title="Restore highs" hintId="highs-hint" hint={highsHint(highsRate)}
+                    />
+                  )}
+                  {rebuildOffered && !rebuildRate && (
+                    <span data-testid="rebuild-paused">
+                      <Toggle name="rebuild" checked={false} disabled muted title="Rebuild the voice" hint="Paused right now. Try again later." />
+                    </span>
+                  )}
+                  {rebuildRate && (
+                    <Toggle
+                      name="rebuild" checked={rebuild} onChange={(e) => { touch('rebuild'); setRebuild(e.target.checked); }} disabled={busy}
+                      title="Rebuild the voice" hintId="rebuild-hint" hint={rebuildHint(rebuildRate)}
                     />
                   )}
                   {hasSecondTrack && (
@@ -919,11 +944,6 @@ export default function JobForm({ onSubmitted }) {
         {error && (
           <div className={errorKind === 'storage' ? 'banner banner-warn' : 'banner banner-error'} role="alert" data-testid="job-error">
             {error}
-          </div>
-        )}
-        {result && !busy && (
-          <div className="banner banner-success" role="status" data-testid="submitted">
-            Got it, we’re on it.{result.extracted ? ` Only the sound was uploaded (${bytes(result.uploadBytes)} instead of ${bytes(result.originalBytes)}).` : ''}{result.compressed ? ` ${compressedNote(result.compressed)}.` : ''} Follow along below. Keep this page open and your files download by themselves when it’s done.
           </div>
         )}
 

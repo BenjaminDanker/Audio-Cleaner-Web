@@ -235,6 +235,147 @@ await check('rebuild the voice: its own price (the server\'s) and no strength/no
   }
 });
 
+// ---- Restore highs: its own paid option (0.07 a minute), off at first, never together with the rebuilt voice ----
+const HIGHS_HINT = (price) => `For a recording that is only missing its high sounds (phone calls, voice messages, small files) and otherwise sounds fine: adds them back and keeps the voice exactly as recorded. ${price} a minute.`;
+const REBUILD_HINT = (price) => `For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt, which also brings back the highs. Slower, ${price} a minute, and on very echoey recordings it can change a word, so listen before you publish.`;
+const priceList = await (await fetch(`${BASE}/api/billing/pricing`)).json();
+const perMinute = (product, tier) => priceList.rates.find((r) => r.product === product && r.tier === tier);
+const shownRate = (usd) => `$${usd.toFixed(4).replace(/(\.\d\d\d*?)0+$/, '$1')}`;
+const { money: fmtMoney } = await import('../src/format.js');
+
+await check('Restore highs on the form: a toggle titled "Restore highs" (never "Restore missing highs"), off to begin with, with its words and the 0.07 a minute price, in this order: Strength, Background noise, Restore highs, Rebuild the voice', async () => {
+  const highs = perMinute('highs', 'standard');
+  if (!highs || highs.usdPerMinute !== 0.07 || highs.usdPerHour !== 4.2) throw new Error('the price list: ' + JSON.stringify(highs));
+  await withPricing((j) => ({ ...j, rebuildAvailable: true }));
+  try {
+    // without "Automatic best settings" a file starts from the usual choices; this browser remembers the switch
+    await freshApp();
+    await page.evaluate(() => localStorage.setItem('acw.autoSettings', 'off'));
+    await freshApp(); // loaded again with the switch off
+    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+    await start().waitFor({ timeout: 20000 });
+    if (!(await radio('noise', 'denoise').isChecked())) throw new Error('Denoising is not the starting choice');
+    const box = page.locator('input[name=highs]');
+    await box.waitFor();
+    if (await box.isChecked()) throw new Error('Restore highs is ticked to begin with (it is a paid option)');
+    const label = page.locator('label.check:has(input[name=highs])');
+    if ((await label.locator('b').innerText()) !== 'Restore highs') throw new Error('title: ' + await label.locator('b').innerText());
+    const hint = (await page.getByTestId('highs-hint').innerText()).trim();
+    if (hint !== HIGHS_HINT(shownRate(highs.usdPerMinute))) throw new Error('hint: ' + hint);
+    if (/Restore missing highs/.test(await page.locator('form').innerText())) throw new Error('the old title is still on the form');
+    const rebuildHint = (await page.getByTestId('rebuild-hint').innerText()).trim();
+    if (rebuildHint !== REBUILD_HINT(shownRate(perMinute('denoise', 'rebuild').usdPerMinute))) throw new Error('rebuild hint: ' + rebuildHint);
+    const order = await page.evaluate(() => {
+      const form = document.querySelector('form.job-form');
+      const find = (sel) => form.querySelector(sel);
+      const things = [['strength', '[data-testid=strength-strength]'], ['noise', '#noisekind'], ['highs', 'input[name=highs]'], ['rebuild', 'input[name=rebuild]']].map(([n, sel]) => [n, find(sel)]);
+      if (things.some(([, el]) => !el)) return { missing: things.filter(([, el]) => !el).map(([n]) => n) };
+      const out = [];
+      for (let i = 1; i < things.length; i++) out.push(`${things[i - 1][0]} before ${things[i][0]}: ${!!(things[i - 1][1].compareDocumentPosition(things[i][1]) & Node.DOCUMENT_POSITION_FOLLOWING)}`);
+      return { out };
+    });
+    if (order.missing || order.out.some((x) => x.endsWith('false'))) throw new Error('order: ' + JSON.stringify(order));
+    return `off to begin with; "${hint.slice(-40)}"; ${order.out.map((x) => x.split(':')[0]).join(', ')}`;
+  } finally {
+    await page.unroute('**/api/billing/pricing');
+    await page.evaluate(() => localStorage.removeItem('acw.autoSettings'));
+  }
+});
+
+await check('the estimate on the form adds Restore highs when it is ticked: exactly the server\'s own estimate for the same choices, and the difference is 0.07 a minute for the seconds of the file rounded up', async () => {
+  await freshApp();
+  await choose('noisy.wav');
+  await pick(page, 'noise', 'denoise');
+  await page.locator('input[name=leveling]').check();
+  const startText = async () => (await start().innerText()).trim();
+  posts.length = 0;
+  await start().click();
+  await refused();
+  const base = lastPost();
+  const dur = base.durationSeconds;
+  const quote = async (highs) => {
+    const r = await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', denoiseTier: 'standard', durationSeconds: dur, options: { leveling: true, restore_highs: highs } });
+    if (r.status !== 200) throw new Error('estimate ' + JSON.stringify(r));
+    return r.body;
+  };
+  const without = await quote(false);
+  const withHighs = await quote(true);
+  if (base.options.restore_highs !== false) throw new Error('sent restore_highs ' + base.options.restore_highs);
+  if ((await startText()) !== `Start – about ${fmtMoney(without.estCostMicros)}`) throw new Error(`Start without highs: "${await startText()}", the server says ${without.estCostMicros}`);
+  const highsMicros = Math.ceil((70000 * Math.ceil(dur)) / 60);
+  if (withHighs.estCostMicros - without.estCostMicros !== highsMicros) throw new Error(`the server adds ${withHighs.estCostMicros - without.estCostMicros}, wanted ${highsMicros}`);
+  if (!withHighs.lines.some((l) => l.item === 'highs' && l.micros === highsMicros)) throw new Error('no highs line: ' + JSON.stringify(withHighs.lines));
+  await page.locator('input[name=highs]').check();
+  await page.waitForFunction((t) => document.querySelector('[data-testid=start]')?.textContent.trim() === t, `Start – about ${fmtMoney(withHighs.estCostMicros)}`, { timeout: 5000 }).catch(async () => { throw new Error(`Start with highs: "${await startText()}", the server says ${withHighs.estCostMicros}`); });
+  const est = (await page.getByTestId('estimate').innerText()).replace(/\s+/g, ' ');
+  if (!est.includes(`Estimated cost: ${fmtMoney(withHighs.estCostMicros)}`)) throw new Error('estimate line: ' + est);
+  posts.length = 0;
+  await start().click();
+  await refused();
+  if (lastPost().options.restore_highs !== true || lastPost().denoiseTier !== 'standard') throw new Error('sent: ' + JSON.stringify(lastPost()));
+  return `${fmtMoney(without.estCostMicros)} -> ${fmtMoney(withHighs.estCostMicros)} (+${highsMicros} micros for ${dur.toFixed(1)} s)`;
+});
+
+await check('with Voice rebuild ticked Restore highs goes away and is neither sent nor charged (the rebuilt voice makes its own highs); unticking the rebuild brings the toggle back', async () => {
+  await withPricing((j) => ({ ...j, rebuildAvailable: true }));
+  try {
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'denoise');
+    await page.locator('input[name=highs]').check();
+    const rebuildRate = perMinute('denoise', 'rebuild').usdPerMinute;
+    const startText = async () => (await start().innerText()).trim();
+    const withHighs = await startText();
+    await page.getByRole('checkbox', { name: /Rebuild the voice/ }).check();
+    if (await page.locator('input[name=highs]').count() || await page.getByTestId('highs-hint').count()) throw new Error('Restore highs is still offered with the voice rebuilt');
+    posts.length = 0;
+    await start().click();
+    await refused();
+    const sent = lastPost();
+    if (sent.denoiseTier !== 'rebuild' || sent.options.restore_highs !== false) throw new Error('sent: ' + JSON.stringify(sent));
+    // only the rebuild (and Leveling) is charged
+    const quote = await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', denoiseTier: 'rebuild', durationSeconds: sent.durationSeconds, options: { leveling: true } });
+    const startWith = await startText();
+    if (quote.status === 200 && startWith !== `Start – about ${fmtMoney(quote.body.estCostMicros)}`) throw new Error(`Start with the rebuild: "${startWith}", the server says ${quote.body.estCostMicros}`);
+    if (quote.status === 200 && quote.body.lines.some((l) => l.item === 'highs')) throw new Error('the server charges Restore highs with the rebuild');
+    await page.getByRole('checkbox', { name: /Rebuild the voice/ }).uncheck();
+    await page.locator('input[name=highs]').waitFor();
+    return `${withHighs} with highs, ${startWith} rebuilt (${shownRate(rebuildRate)} a minute); highs not sent`;
+  } finally {
+    await page.unroute('**/api/billing/pricing');
+  }
+});
+
+await check('noise Off + Restore highs only: the toggle shows (name highs-alone, with the same words and price), Start offers a paid job at the Restore highs price alone, and it is sent as denoiseTier off with restore_highs true and no Leveling', async () => {
+  await freshApp();
+  await choose('noisy.wav');
+  await pick(page, 'noise', 'off');
+  const box = page.locator('input[name=highs-alone]');
+  await box.waitFor();
+  if (await box.isChecked()) throw new Error('Restore highs is ticked with nothing else chosen');
+  await page.getByText(/Choose at least one thing/).waitFor();
+  if (await start().isEnabled()) throw new Error('Start is on with nothing chosen');
+  const hint = (await page.getByTestId('highs-alone-hint').innerText()).trim();
+  if (hint !== HIGHS_HINT(shownRate(perMinute('highs', 'standard').usdPerMinute))) throw new Error('hint: ' + hint);
+  if ((await page.locator('label.check:has(input[name=highs-alone]) b').innerText()) !== 'Restore highs') throw new Error('title');
+  await box.check();
+  await page.getByTestId('estimate').waitFor();
+  posts.length = 0;
+  await start().click();
+  await refused();
+  const b = lastPost();
+  if (b.kind !== 'denoise' || b.denoiseTier !== 'off' || b.options.restore_highs !== true || b.options.leveling !== false || b.transcribeTier) throw new Error('sent: ' + JSON.stringify(b));
+  const quote = await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', denoiseTier: 'off', durationSeconds: b.durationSeconds, options: { leveling: false, restore_highs: true } });
+  const highsMicros = Math.ceil((70000 * Math.ceil(b.durationSeconds)) / 60);
+  if (quote.status !== 200 || quote.body.estCostMicros !== highsMicros || quote.body.lines.length !== 1 || quote.body.lines[0].item !== 'highs') throw new Error('the server\'s estimate: ' + JSON.stringify(quote));
+  if ((await start().innerText()).trim() !== `Start – about ${fmtMoney(highsMicros)}`) throw new Error(`Start: "${await start().innerText()}", wanted ${fmtMoney(highsMicros)}`);
+  // with Leveling as well, both are charged
+  await page.locator('input[name=leveling-alone]').check();
+  const both = await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', denoiseTier: 'off', durationSeconds: b.durationSeconds, options: { leveling: true, restore_highs: true } });
+  await page.waitForFunction((t) => document.querySelector('[data-testid=start]')?.textContent.trim() === t, `Start – about ${fmtMoney(both.body.estCostMicros)}`, { timeout: 5000 }).catch(async () => { throw new Error(`Start with both: "${await start().innerText()}", the server says ${both.body.estCostMicros}`); });
+  return `${fmtMoney(highsMicros)} for ${b.durationSeconds.toFixed(1)} s, then ${fmtMoney(both.body.estCostMicros)} with Leveling`;
+});
+
 await check('nothing chosen: Start is off with the reason; a file name with direction-changing characters is shown with them marked, never reversed', async () => {
   await freshApp();
   await choose('noisy.wav');

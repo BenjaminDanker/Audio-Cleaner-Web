@@ -3,7 +3,7 @@
 `python -m acw.admin storage` prints it; the monitor alerts when the data directory (without the job files) or the
 backup directory is larger than it should ever be, so a leak is noticed in days, not when the disk is full.
 Job files are not part of the 5 GB check: they are uploads and results that legitimately take many GB while work
-is going on, and they are bounded by their 24 hours and the free-space alert instead.
+is going on, and they are bounded by their 2 hours and the free-space alert instead.
 """
 from __future__ import annotations
 

@@ -205,7 +205,7 @@ def test_the_thresholds_and_strength_steps_are_the_same_numbers_in_every_impleme
     """The heavy cut, the advice thresholds and the strength steps are written down in three places (Python, the website,
     the OBS plugin): the same numbers, and the same strength for each step."""
     analysis = (ROOT / "web" / "src" / "media" / "analysis.js").read_text()
-    js = (ROOT / "web" / "src" / "recommend.js").read_text()
+    js = (ROOT / "web" / "src" / "recommend-room.js").read_text()  # the rules (the website's recommend.js decides with the trained model and falls back to these)
     cpp = (ROOT / "obs-plugin" / "core" / "src" / "input_advice.cpp").read_text()
     # heavy cut and silence level
     assert float(re.search(r"HEAVY_BELOW_DB\s*=\s*([\d.]+)", analysis).group(1)) == pipeline.HEAVY_BELOW_DB

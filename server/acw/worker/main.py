@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import broker, db, hostload, jobs, keycaps, metrics
+from .. import broker, db, hostload, jobs, keycaps, metrics, rerun
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -175,6 +175,13 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         "address_space_bytes": 32 * 1024**3,  # memory-mapped scratch files count here, not in RAM
         "max_file_bytes": 16 * 1024**3,
         **({"billed_seconds": billed} if billed is not None else {}),
+        # a re-run starts from the copies its source job kept (jobs.py, rerun.py); a first run keeps its own
+        # the recording itself is kept next to the noise removal when the page can use the pair (jobs.PREVIEW_MAX_CHANNEL_SECONDS)
+        "keep_input": jobs.preview_fits(billed if billed is not None else float(job.get("duration_seconds") or job["claimed_seconds"]),
+                                        (jobs.params_of(job["id"]) or params).get("channels")),
+        **({"rerun": {"clean": params["rerun"]["clean"], "transcribe": params["rerun"]["transcribe"],
+                      "reuse_audio": params["rerun"].get("reuse_audio"), "kept": params.get("kept") or {}}}
+           if params.get("rerun") else {}),
     }
     (d / "spec.json").write_text(json.dumps(spec))
     return d
@@ -373,6 +380,8 @@ def _read_result(path: Path) -> dict:
             isinstance(o, dict) and isinstance(o.get("file"), str) and isinstance(o.get("kind"), str) for o in outs
         ):
             raise StageFailed("Processing failed; you were not charged.", "malformed outputs")
+        if res.get("kept") is not None and not isinstance(res["kept"], dict):
+            raise StageFailed("Processing failed; you were not charged.", "malformed kept")
         for key in ("notice", "noise", "language"):
             if res.get(key) is not None and not isinstance(res[key], str):
                 raise StageFailed("Processing failed; you were not charged.", f"malformed {key}")
@@ -386,8 +395,12 @@ def _job_cost(job: dict, params: dict, seconds: float) -> int:
     # Translations: what was asked for until the job is done, then only the languages that were made.
     asked = params.get("options", {}).get("translate") or []
     made = params.get("translated", asked)
+    if params.get("rerun"):
+        # A re-run pays only for the steps it did again (its pinned rates are just those), and for the new languages it made.
+        new = params["rerun"].get("translate_new") or []
+        return pricing.rerun_cost_micros(params.get("rates") or {}, seconds, len([lang for lang in made if lang in new]))
     return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"), len(made),
-                                   "leveling" in (params.get("rates") or {}))
+                                   "leveling" in (params.get("rates") or {}), "highs" in (params.get("rates") or {}))
 
 
 # A job made with an API key must say how long its file is (an API client knows): the measured length may be this
@@ -439,9 +452,17 @@ def _complete(job: dict, d: Path, res: dict) -> None:
             lang = o.get("lang")
             outputs.append({"file": name, "kind": o["kind"], "bytes": st.st_size,
                             **({"lang": lang} if isinstance(lang, str) and re.fullmatch(r"[a-z]{2,3}", lang) else {})})
-    params = json.loads(job["params_json"])
+    fresh = db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))
+    params = json.loads(fresh["params_json"] if fresh is not None else job["params_json"])
     duration = float(job.get("duration_seconds") or job["claimed_seconds"])
-    keep = {o["file"] for o in outputs}
+    # What stays in the folder besides the results, until the job is deleted (2 hours): the upload, and the copies a later
+    # "change and save again" starts from (rerun.py).
+    now = db.now()
+    if rerun.too_late(params, now):  # nobody could download these before the job it came from is cleared away
+        jobs.finish_failed(job, rerun.TOO_LATE)
+        return
+    kept = rerun.collect_kept(params, d, res.get("kept") or params.get("kept_reported"))
+    keep = {o["file"] for o in outputs} | {f"input{params['input_ext']}"} | rerun.kept_files(kept)
     for p in d.iterdir():
         if p.name not in keep:
             if p.is_dir():
@@ -450,22 +471,28 @@ def _complete(job: dict, d: Path, res: dict) -> None:
                 shutil.rmtree(p, ignore_errors=True)
             else:
                 p.unlink(missing_ok=True)
-    now = db.now()
+    params.pop("kept_reported", None)
+    params["kept"] = kept
     # Charging and finishing are one step: a job is never "done" without its charge, and a failure
     # after the charge can't be reported as "not charged". Only a job that is still running completes.
     with db.tx() as c:
         n = c.execute(
             "UPDATE jobs SET status = 'done', progress = 100, stage = 'Done', outputs_json = ?, cost_micros = 0,"
             " finished_at = ?, expires_at = ? WHERE id = ? AND status = 'running'",
-            (json.dumps(outputs), now, now + get_settings().job_output_ttl_hours * 3600, job["id"]),
+            (json.dumps(outputs), now, rerun.completion_expiry(job, params, now), job["id"]),
         ).rowcount
         if not n:
             log.warning("job %s is no longer running; not completing it", job["id"])
             return
+        # (read again inside the transaction: the notice and the translated languages are written by other processes)
+        cur = json.loads(c.execute("SELECT params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()["params_json"])
+        cur.pop("kept_reported", None)
+        cur["kept"] = kept
+        c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(cur), job["id"]))
         if job["hold_id"]:
             cost = ledger.capture_hold(
-                job["hold_id"], _job_cost(job, params, duration),
-                f"{jobs.job_label(job['kind'], params['denoise_tier'], params['transcribe_tier'], 'leveling' in (params.get('rates') or {}))}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
+                job["hold_id"], _job_cost(job, cur, duration),
+                f"{jobs.label_of(job['kind'], cur)}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
     metrics.job_ended(job["id"])
@@ -479,23 +506,30 @@ def process(job: dict, extra: dict) -> None:
             job["duration_seconds"] = db.one("SELECT duration_seconds FROM jobs WHERE id = ?", (job["id"],))["duration_seconds"]
             _complete(job, d, res)
             return
-        probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
-        try:
-            duration = float(probe["duration"])  # the longer of the header's and the measured length
-            channels = min(max(int(probe.get("channels") or 1), 1), 2)
-        except (KeyError, TypeError, ValueError):
-            raise StageFailed("Processing failed; you were not charged.", "malformed probe result")
-        if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, json.loads(job["params_json"])) + 61):
-            raise StageFailed("Processing failed; you were not charged.", "implausible duration")
-        _reprice(job, duration)
-        job["duration_seconds"] = duration
         params = json.loads(job["params_json"])
-        jobs.update_params(job["id"], channels=channels)
+        if params.get("rerun"):
+            # A re-run knows its file: the source job measured it, and priced it (the hold is the price).
+            duration = float(job["duration_seconds"])
+        else:
+            probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
+            try:
+                duration = float(probe["duration"])  # the longer of the header's and the measured length
+                channels = min(max(int(probe.get("channels") or 1), 1), 2)
+            except (KeyError, TypeError, ValueError):
+                raise StageFailed("Processing failed; you were not charged.", "malformed probe result")
+            if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, params) + 61):
+                raise StageFailed("Processing failed; you were not charged.", "implausible duration")
+            _reprice(job, duration)
+            job["duration_seconds"] = duration
+            params = json.loads(job["params_json"])
+            jobs.update_params(job["id"], channels=channels)
         d = _write_spec(job, extra, duration)
         wall = jobs.stage_limits(duration, _max_seconds(job, params))[1]
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
+        if res.get("kept"):
+            jobs.update_params(job["id"], kept_reported=res["kept"])  # the finishing step may run after the cloud stage
         if res.get("needs_cloud_asr"):
             db.execute(
                 "UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', progress = 85,"

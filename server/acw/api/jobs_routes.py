@@ -10,10 +10,10 @@ import time
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, jobs, keycaps, webhooks
+from .. import auth, db, jobs, keycaps, rerun, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -52,6 +52,17 @@ class EstimateJob(BaseModel):
     options: dict = Field(default_factory=dict)
 
 
+class RerunJob(BaseModel):
+    """"Change and save again": the choices that differ from the source job's (the others stay as they were)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    denoiseTier: str | None = Field(default=None, max_length=32)  # standard | rebuild | off; omitted: as before
+    transcribeTier: str | None = Field(default=None, max_length=32)  # local | premium | off (no subtitles); omitted: as before
+    options: dict = Field(default_factory=dict)
+    maxCostMicros: int | None = Field(default=None, ge=0, le=10**12)  # the quoted price: a higher one now is refused (409 price_changed)
+
+
 IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")  # visible ASCII, no spaces
 KEY_CAP_HEADERS = {"X-Error-Code": "key_spending_cap"}
 
@@ -66,6 +77,16 @@ def _get_owned(job_id: str, principal: auth.Principal) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     return dict(row)
+
+
+def _error(e: jobs.JobError) -> JSONResponse:
+    """A job error as the answer: its status, `detail` (the message) and, when it has one, `code` (also in X-Error-Code)."""
+    headers = {}
+    if e.status == 429:
+        headers["Retry-After"] = str(e.retry_after or 60)
+    if e.code:
+        headers["X-Error-Code"] = e.code
+    return JSONResponse(status_code=e.status, content={"detail": str(e), **({"code": e.code} if e.code else {})}, headers=headers)
 
 
 def _upload_url(job_id: str) -> str:
@@ -121,7 +142,7 @@ def create(body: CreateJob, request: Request, response: Response, principal: aut
     except keycaps.KeyCapReached as e:
         raise HTTPException(status_code=403, detail=str(e), headers=KEY_CAP_HEADERS)
     except jobs.JobError as e:
-        raise HTTPException(status_code=e.status, detail=str(e), headers={"Retry-After": str(e.retry_after or 60)} if e.status == 429 else None)
+        return _error(e)
     except ValueError as e:  # pricing errors
         raise HTTPException(status_code=400, detail=str(e))
     if callback:
@@ -268,13 +289,19 @@ def _disk_free(path) -> int:
 
 @router.get("")
 def list_jobs(principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
+    # What is still there: the jobs in progress, and the finished ones until their files are cleared away (2 hours after they
+    # finished; a failed or canceled job's files are gone at once, so it is listed for as long as the others).
     rows = db.all_rows(
-        "SELECT * FROM jobs WHERE user_id = ? AND status != 'expired' ORDER BY created_at DESC LIMIT 50",
-        (principal.user_id,),
+        "SELECT * FROM jobs WHERE user_id = ? AND status != 'expired'"
+        " AND (status IN ('uploading', 'queued', 'running', 'cloud_asr', 'canceling') OR COALESCE(finished_at, created_at) > ?)"
+        " ORDER BY created_at DESC LIMIT 50",
+        (principal.user_id, db.now() - get_settings().job_retention_seconds),
     )
     queue = jobs.queue_snapshot() if any(r["status"] == "queued" for r in rows) else ([], {})  # shared for a second across requests
     callbacks = jobs.callbacks_for([r["id"] for r in rows])
-    return {"jobs": [jobs.public_job(dict(r), queue, callbacks) for r in rows]}
+    settings = get_settings()
+    return {"jobs": [jobs.public_job(dict(r), queue, callbacks) for r in rows],
+            "limits": {"maxActiveJobs": settings.max_active_jobs, "retentionSeconds": settings.job_retention_seconds}}
 
 
 @router.get("/{job_id}")
@@ -299,15 +326,54 @@ def cancel(job_id: str, principal: auth.Principal = Depends(auth.require_scope("
 
 @router.delete("/{job_id}")
 def delete(job_id: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
-    """Delete outputs now instead of waiting for expiry."""
+    """Delete everything of the job now instead of waiting for expiry: its upload, the copies kept for changing it again, its
+    results, and the same for every re-run made from it."""
     job = _get_owned(job_id, principal)
-    if job["status"] in ("running", "cloud_asr", "queued", "uploading"):
+    if job["status"] in ("running", "cloud_asr", "queued", "uploading") or rerun.chain_active(job):
         raise HTTPException(status_code=409, detail="Cancel or wait for the job first.")
-    import shutil
-
-    shutil.rmtree(jobs.job_dir(job_id), ignore_errors=True)
+    rerun.delete_chain(job)
     db.execute("UPDATE jobs SET status = 'expired', outputs_json = NULL WHERE id = ?", (job_id,))
     return {"ok": True}
+
+
+@router.post("/{job_id}/rerun/estimate")
+def rerun_estimate(job_id: str, body: RerunJob, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """What "change and save again" with these choices would do and cost, before it is made: nothing is held or stored."""
+    if len(json.dumps(body.options)) > 2000:
+        raise HTTPException(status_code=400, detail="options too large")
+    try:
+        out = rerun.estimate(principal.user_id, job_id, principal.api_key_id, body.denoiseTier, body.transcribeTier, body.options)
+    except jobs.JobError as e:
+        return _error(e)
+    except ValueError as e:  # pricing errors
+        raise HTTPException(status_code=400, detail=str(e))
+    available = ledger.balance(principal.user_id)["available_micros"]
+    out["availableMicros"] = available
+    out["affordable"] = available >= out["estCostMicros"]
+    if principal.api_key_id:
+        limit = keycaps.key_limit(principal.api_key_id)
+        if limit is not None:
+            out["keyLimit"] = limit
+    return out
+
+
+@router.post("/{job_id}/rerun")
+def rerun_job(job_id: str, body: RerunJob, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """"Change and save again": a new job from the files the finished job kept. It runs only the steps whose inputs changed
+    and is paid only for those (the price is `estimate`'s); it goes through the same queue and limits as any job."""
+    enforce("job_create", principal.user_id)
+    enforce("job_create", f"ip:{client_net(client_ip(request))}")
+    if len(json.dumps(body.options)) > 2000:
+        raise HTTPException(status_code=400, detail="options too large")
+    try:
+        return rerun.create_rerun(principal.user_id, job_id, denoise_tier=body.denoiseTier, transcribe_tier=body.transcribeTier,
+                                  options=body.options, api_key_id=principal.api_key_id, max_cost_micros=body.maxCostMicros)
+    except keycaps.KeyCapReached as e:
+        raise HTTPException(status_code=403, detail=str(e), headers=KEY_CAP_HEADERS)
+    except jobs.JobError as e:
+        return _error(e)
+    except ValueError as e:  # pricing errors
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/{job_id}/outputs/{name}")
@@ -327,3 +393,19 @@ def download(job_id: str, name: str, principal: auth.Principal = Depends(auth.re
         filename=name,
         headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
     )
+
+
+@router.get("/{job_id}/kept/{which}")
+def kept_copy(job_id: str, which: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> FileResponse:
+    """The two copies the strength slider blends (24-bit FLAC, 48 kHz, sample for sample the same length): the noise removal
+    at full strength (`which` = noise) and the recording as the remover heard it (`input`). How to read them (channels, the
+    scale a loud sample was brought down by) is `redo.preview` of the job. Only the owner, only while the job's files exist."""
+    job = _get_owned(job_id, principal)
+    redo = rerun.redo_info(job) if job["status"] == "done" else {}
+    name = {"noise": f"{jobs.KEPT_NOISE}.flac", "input": f"{jobs.KEPT_INPUT}.flac"}.get(which)
+    if name is None or not redo.get("preview"):
+        raise HTTPException(status_code=404, detail="Not available.")
+    path = jobs.job_dir(job_id) / name
+    if not _is_plain_file(path):
+        raise HTTPException(status_code=404, detail="Not found.")
+    return FileResponse(path, media_type="audio/flac", headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

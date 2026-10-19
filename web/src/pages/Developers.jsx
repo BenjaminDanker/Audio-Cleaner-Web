@@ -13,6 +13,7 @@ const TOC = [
   ['options', 'All the options'],
   ['prices', 'Prices and estimates'],
   ['safe', 'Safe retries'],
+  ['again', 'Changing a finished job'],
   ['callbacks', 'Finish notifications'],
   ['limits', 'Spending limits'],
   ['billing', 'What a call costs'],
@@ -91,7 +92,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
           head={['Field', 'What it is']}
           rows={[
             ['kind', '"denoise" cleans the sound, "transcribe" writes subtitles and a transcript, "denoise_transcribe" does both.'],
-            ['denoiseTier', 'For cleaning: "standard" (Denoising), "rebuild" (Voice rebuild: the voice is rebuilt, which also takes out room echo; own price; files up to 90 minutes), or "off" (no noise removal, only Leveling). Leveling (options.leveling, on by default) is its own price.'],
+            ['denoiseTier', 'For cleaning: "standard" (Denoising), "rebuild" (Voice rebuild: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; own price; files up to 90 minutes), or "off" (no noise removal, only Leveling and/or Restore highs: at least one of them must be on). Leveling (options.leveling, on by default) and Restore highs (options.restore_highs, off by default) are each their own price.'],
             ['transcribeTier', <>For subtitles: <code>"local"</code> (Standard) or <code>"premium"</code> (extra accurate; the audio goes to a speech partner, see the <Link to="/privacy">Privacy Policy</Link>).</>],
             ['filename', 'Its ending must be one we can read. Audio: wav, rf64, w64, mp3, mp2, mpa, m4a, m4b, m4r, aac, flac, ogg, oga, opus, spx, wma, aiff, aif, aifc, caf, au, snd, amr, ac3, eac3, dts, mka, wv, ape, tta, mpc. Video: mp4, m4v, mov, webm, mkv, avi, wmv, asf, flv, f4v, 3gp, 3g2, ts, mts, m2ts, mpg, mpeg, vob, mxf, dv, ogv, rm, rmvb. Anything else is refused with "Unsupported file type." Only the ending is used; the name never becomes a path.'],
             ['sizeBytes', 'The exact size of the upload: 1 byte up to 4 GiB. A file can weigh at most 40 MB per second of its length (small files, under 200 MB, are always fine).'],
@@ -101,14 +102,14 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
             ['options', 'The choices below. Keep the whole object under 2,000 characters.'],
           ]}
         />
-        <p>You can have 3 jobs in progress at once and up to 8 GiB of uploads waiting. If your balance can&rsquo;t cover the estimate you get <code>402</code> and nothing is created.</p>
+        <p>An account can have 3 file jobs in progress at once (waiting or running, and changing a finished job counts too) and up to 8 GiB of uploads waiting. The next one is refused with <code>429</code> and the code <code>too_many_active_jobs</code>: &ldquo;You have 3 files being processed. Start this one when one of them is done.&rdquo; Try again when one has finished. If your balance can&rsquo;t cover the estimate you get <code>402</code> and nothing is created.</p>
 
         <h3>2. Upload the file</h3>
         <p><code>PUT</code> the raw bytes to the <code>uploadUrl</code>: no JSON, no form. The <code>Content-Length</code> header is required and must equal <code>sizeBytes</code> (<code>411</code> if not). Start within 10 minutes of creating the job. The answer is <code>{'{"ok":true}'}</code>.</p>
         <p>If the upload fails, make a new job. Errors here: <code>409</code> when the job isn&rsquo;t waiting for a file (already uploaded or canceled), <code>408</code> after 30 seconds without data, <code>413</code> when more arrives than you said, <code>400</code> when less does, <code>507</code> when we are short on storage for a moment.</p>
 
         <h3>3. Wait for it</h3>
-        <p><code>GET /api/jobs/&#123;id&#125;</code> every few seconds (every 2 seconds is fine), or let us tell you with a <a href="#callbacks">finish notification</a>. To watch several jobs, <code>GET /api/jobs</code> lists your latest 50 in one request.</p>
+        <p><code>GET /api/jobs/&#123;id&#125;</code> every few seconds (every 2 seconds is fine), or let us tell you with a <a href="#callbacks">finish notification</a>. To watch several jobs, <code>GET /api/jobs</code> lists up to 50 of your jobs in one request: the ones in progress and the ones whose files are still there (2 hours after they finished).</p>
         <Code label="A finished job">{`{
   "id": "3f2c...", "kind": "denoise", "label": "Denoising + Leveling",
   "status": "done", "stage": "Done", "progress": 100, "error": null,
@@ -128,13 +129,13 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
         </ul>
 
         <h3>4. Download the results</h3>
-        <p><code>GET /api/jobs/&#123;id&#125;/outputs/&#123;name&#125;</code> with a <code>name</code> from <code>outputs</code>. The file comes as an attachment. Results are kept for <b>24 hours</b> after the job is done, then deleted for good.</p>
+        <p><code>GET /api/jobs/&#123;id&#125;/outputs/&#123;name&#125;</code> with a <code>name</code> from <code>outputs</code>. The file comes as an attachment. Your upload, the copies kept for <a href="#again">changing the job</a> and the results are kept together for <b>2 hours</b> after the job is done, then deleted together for good.</p>
         <p>A video comes back in its own container when it can hold the result (mp4, mov, m4v, mkv, webm), otherwise as MKV. Other audio tracks are kept as they were; only the first audio track is cleaned. Subtitles go into the video where the container can carry them.</p>
 
         <h3>5. Cancel or delete</h3>
         <Code label="Cancel and delete">{`curl -s -X POST   ${hdr} $BASE/api/jobs/3f2c.../cancel
 curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
-        <p><code>cancel</code> works while the job is still <code>uploading</code> or <code>queued</code>, and gives everything set aside back. Once it has started, or once the extra accurate transcription is done and only the packaging is left, you get <code>409</code>. <code>DELETE</code> removes the results right now (<code>409</code> while the job is still in progress).</p>
+        <p><code>cancel</code> works while the job is still <code>uploading</code> or <code>queued</code>, and gives everything set aside back. Once it has started, or once the extra accurate transcription is done and only the packaging is left, you get <code>409</code>. <code>DELETE</code> removes everything of the job right now: the upload, the kept copies and the results, and the same for every job made from it by changing it (<code>409</code> while the job, or one made from it, is still in progress).</p>
       </Section>
 
       <Section id="options" title="All the options">
@@ -152,9 +153,11 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['atten_lim_db', '100', 'How much noise may be taken out, in dB, kept between 6 (gentle) and 100 (as much as possible). The website offers 12, 24, 40 and 100. Does not apply when the voice is rebuilt.'],
             ['noise', 'auto', '"auto" measures the recording and picks; "light" suits hiss, hum and a quiet room; "heavy" suits noise almost as loud as the voice. Does not apply when the voice is rebuilt.'],
             ['echo_reference_track', 'false', 'true or false (anything else is a 400). Removes speaker echo from the first audio track by using the second one (the sound from your speakers, as OBS can record it). Included in the price.'],
+            ['leveling', 'true', 'true or false. Leveling, with its own price: evens out the voice and sets the loudness. false returns the cleaned voice as it is.'],
+            ['restore_highs', 'false', 'true or false. Restore highs, with its own price and its own line on the bill (per second, like Leveling). When it is true it always runs: it brings back the high sounds of a recording that lost them (phone calls, voice messages, small files), and a recording that already has them gets the widest restoration. Works with Denoising, or on its own with denoiseTier "off". Not with the voice rebuilt, which makes its own highs; it is not charged then.'],
           ]}
         />
-        <p>Recordings that lost their high sounds (phone calls, small files) get them back automatically; full quality recordings are left alone, and the job&rsquo;s <code>notice</code> says when it happened.</p>
+        <p>Restore highs used to be on by default, free, and only did something for recordings that had lost their highs. It is now off unless you set <code>restore_highs</code> to true, is charged like Leveling, and does its work whenever it is on; the job&rsquo;s <code>notice</code> says when it happened. Jobs made before this change keep the prices they were made with.</p>
       </Section>
 
       <Section id="prices" title="Prices and estimates">
@@ -203,6 +206,54 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
           <li>A request that failed (for example <code>402</code> because the balance was too low) doesn&rsquo;t use the key up; try again with it once you have fixed the cause.</li>
           <li>A repeat doesn&rsquo;t count against the hourly limit for creating jobs.</li>
         </ul>
+      </Section>
+
+      <Section id="again" title="Changing a finished job">
+        <p>For 2 hours after a job is done, the files it needs to be changed are kept next to its results: your upload, the noise removal before its strength is applied, the rebuilt voice when there was one, and the transcript. In that time you can ask for the same file again with other choices. Only the steps whose inputs changed run again, and you pay only for the steps that cost something and really run again. Setting the strength, restoring highs and writing the file cost nothing.</p>
+        <Table
+          head={['You change', 'What runs again']}
+          rows={[
+            ['atten_lim_db', 'Nothing but a mix of the kept noise removal and your recording, which is free. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send leveling: false as well to change only the strength for free.'],
+            ['restore_highs, leveling, loudness_lufs', 'From the kept noise removal: Restore highs and Leveling are charged at their prices whenever they run (restore_highs: true always runs); with both off it is free.'],
+            ['denoiseTier: "rebuild"', 'The voice is rebuilt from your upload, at the full Voice rebuild price.'],
+            ['denoiseTier: "standard" (from a rebuild)', 'The kept noise removal is used. If the job never had one, noise removal runs and is charged.'],
+            ['noise, echo_reference_track', 'Noise removal runs again from your upload and is charged.'],
+            ['transcribeTier, language', 'The transcript is written again from your original sound and is charged. Other languages in translate cost only for the new ones.'],
+            ['audio_format, caption_formats', 'The files are written again from what is already there. Free.'],
+          ]}
+        />
+        <h3>Ask for the price, then do it</h3>
+        <p><code>POST /api/jobs/&#123;id&#125;/rerun/estimate</code> takes the choices you want to change (the rest stay as they were): <code>denoiseTier</code>, <code>transcribeTier</code> (<code>"off"</code> leaves the subtitles out; on its own that changes nothing) and <code>options</code>. It runs nothing and sets nothing aside, and answers with what would run, its price as lines, and whether your balance can cover it. <code>POST /api/jobs/&#123;id&#125;/rerun</code> with the same body does it: it sets the price aside, makes a new job with its own <code>id</code> (watch it, download from it and delete it like any other), and answers <code>{'{"id", "estCostMicros", "free", "expiresAt"}'}</code>. Add <code>maxCostMicros</code> with the price you were quoted and the call is refused with <code>409</code> and the code <code>price_changed</code> if it is higher now.</p>
+        <Code label="Change a finished job">{`# what would it cost to keep Leveling on at a gentler strength?
+curl -s $BASE/api/jobs/3f2c.../rerun/estimate ${hdr} -H "Content-Type: application/json" \
+  -d '{"options": {"atten_lim_db": 24}}'
+# -> {"estCostMicros": 30184, "free": false, "lines": [{"item": "leveling", "label": "Leveling", "micros": 30184, ...}],
+#     "steps": {"clean": "denoised", "transcribe": false, "translate": []}, "expiresAt": 1760686820, "affordable": true, ...}
+
+# do it
+curl -s $BASE/api/jobs/3f2c.../rerun ${hdr} -H "Content-Type: application/json" \
+  -d '{"options": {"atten_lim_db": 24}, "maxCostMicros": 30184}'
+# -> {"id": "9a77...", "estCostMicros": 30184, "free": false, "expiresAt": 1760686820}`}</Code>
+        <ul>
+          <li>The new job goes through the same line and the same limits as any job: it counts toward the jobs in progress, and a key&rsquo;s spending limit holds for it.</li>
+          <li>It never extends the time the files are kept: the new job&rsquo;s results go at the same moment as the job it came from, and so does your upload. The answer&rsquo;s <code>expiresAt</code> says when. A change that is still only finishing in the last minute of that time is stopped and not charged.</li>
+          <li>A key can only change jobs that key made. Your signed-in website session can change any job of the account, including ones a key made. Anything else is <code>404</code> with the code <code>job_not_found</code>, the same answer as for a job that doesn&rsquo;t exist.</li>
+          <li>In your credit history a paid change is one line, &ldquo;Changed and saved again&rdquo; and the steps it did. A free one has no line.</li>
+          <li>A voice rebuild needs the same things as creating one (files up to 90 minutes, and it can be paused for a moment).</li>
+        </ul>
+        <Table
+          head={['Status and code', 'What it means']}
+          rows={[
+            ['404 job_not_found', 'No such job, or not one this key made.'],
+            ['409 job_files_gone', 'The job’s files are already deleted (2 hours passed, or it was deleted): start again from your file.'],
+            ['409 job_not_finished', 'Only a finished job can be changed.'],
+            ['409 job_expiring', 'Too little of the 2 hours is left for the work to finish. Start again from your file.'],
+            ['409 price_changed', 'The price is above your maxCostMicros.'],
+            ['400 nothing_to_change', 'These choices give the files the job already has.'],
+            ['429 too_many_active_jobs', 'You already have the most file jobs in progress that an account may have. Try again when one is done.'],
+            ['402, 403', 'As for creating a job: not enough balance, or the key’s monthly spending limit (X-Error-Code: key_spending_cap).'],
+          ]}
+        />
       </Section>
 
       <Section id="callbacks" title="Finish notifications">
@@ -265,7 +316,7 @@ export function isFromAudioCleaner(secret, header, rawBody) {
       </Section>
 
       <Section id="errors" title="Errors">
-        <p>An error is always JSON, <code>{'{"detail": "what went wrong, in words"}'}</code>, with one of these statuses. A malformed request body is <code>422</code> with <code>{'{"detail":"Invalid request.","fields":[...]}'}</code> naming the fields.</p>
+        <p>An error is always JSON, <code>{'{"detail": "what went wrong, in words"}'}</code>, with one of these statuses. Where a script may want to tell one error from another, the answer also has <code>"code"</code> (and the same in the header <code>X-Error-Code</code>): <code>too_many_active_jobs</code>, <code>key_spending_cap</code> and the codes of <a href="#again">changing a job</a>. A malformed request body is <code>422</code> with <code>{'{"detail":"Invalid request.","fields":[...]}'}</code> naming the fields.</p>
         <Table
           head={['Status', 'What it means']}
           rows={[
@@ -279,7 +330,7 @@ export function isFromAudioCleaner(secret, header, rawBody) {
             ['411', 'The upload has no Content-Length, or it is not the sizeBytes you gave.'],
             ['413', 'The file is bigger than the 4 GiB limit, or the upload is longer than you said.'],
             ['422', 'The request body isn’t shaped right (see "fields").'],
-            ['429', 'Too many requests. Wait for the number of seconds in the Retry-After header.'],
+            ['429', 'Too many requests. Wait for the number of seconds in the Retry-After header. With the code too_many_active_jobs: the account already has 3 file jobs in progress; try again when one is done.'],
             ['503', 'The service is taking a short break. Try again in a minute.'],
             ['507', 'We are short on storage for a moment. Try again a bit later.'],
           ]}
@@ -295,7 +346,7 @@ export function isFromAudioCleaner(secret, header, rawBody) {
             ['Any API call', 'A burst of 120, then 2 a second, for each network. Polling one job every 2 seconds is fine; to watch many, list them with GET /api/jobs.'],
             ['Creating jobs', '20 an hour for each account and each network. A repeat of an Idempotency-Key doesn’t count.'],
             ['Uploads', '30 an hour for each account. Upload speed is shared out fairly.'],
-            ['Jobs at once', '3 in progress, and no more than 8 GiB of uploads waiting.'],
+            ['Jobs at once', '3 file jobs in progress for each account (changing a finished job counts), and no more than 8 GiB of uploads waiting.'],
             ['Live sessions', '60 starts an hour for each account and 4 running at once; see the live page.'],
           ]}
         />

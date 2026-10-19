@@ -7,7 +7,9 @@ Speech denoising and transcription, self-hosted.
   (DeepFilterNet3, or DPDFNet-8 for heavy noise, chosen per file), restoring the highs of phone-quality
   recordings, then a clarity chain (level match, high-pass, leveling, loudness, limiter). An optional "voice
   rebuilt" tier regenerates the voice instead. Video keeps its picture and its other audio tracks; subtitles are
-  embedded as a soft track.
+  embedded as a soft track. A finished job keeps its upload, the noise removal before its strength is applied and its
+  results for 2 hours, so strength, restoring highs, Leveling or the subtitles can be changed again by running only the
+  steps that changed (the strength even live while listening, and free).
 - **Live for streamers** (pay as you go): OBS plugin streams the mic to the
   server and gets back cleaned audio (+30 ms model latency) and live captions
   (CEA-608 into Twitch/YouTube).

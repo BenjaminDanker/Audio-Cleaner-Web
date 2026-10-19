@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
+import { etaSeconds, etaText } from '../eta.js';
 import { finishOf, forgetFinish, removeLocalCard, useFinish } from '../finish.js';
 import { clock, dateTime, human, money } from '../format.js';
 import { useNow } from '../hooks.js';
-import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel } from '../jobs.js';
+import { ACTIVE, jobTitle, kindLabel, queueText, stageText, statusLabel, withNotCharged } from '../jobs.js';
 import ResultPanel from './Result.jsx';
 
 function badgeClass(status, finishing) {
@@ -24,14 +25,12 @@ function Countdown({ expiresAt }) {
   return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
 }
 
-/** Failed and canceled jobs cost nothing: say so once (the server's own messages often say it already). */
-const withNotCharged = (text) => (/not charged|weren.t charged/i.test(text) ? text : `${text} You weren’t charged.`);
-
 /**
- * One job in the list: what it is doing while it runs, and, once it is done, its files (see Result.jsx). A free run made
- * in this tab (job.local) has no job on our side; it shows the same way.
+ * One job on its page: what it is doing while it runs (a bar and the time left), and, once it is done, its files (see
+ * Result.jsx). A free run made in this tab (job.local) has no job on our side; it shows the same way.
+ * onChanged: something about the job changed (reload the list); onDeleted: its files were deleted just now.
  */
-export default function JobCard({ job, onChanged }) {
+export default function JobCard({ job, onChanged, onDeleted }) {
   const { contact } = useAuth();
   const fin = finishOf(job);
   const st = useFinish(fin);
@@ -62,7 +61,8 @@ export default function JobCard({ job, onChanged }) {
   const tail = fin.thisTab && fin.willBuild() ? 0.1 : 0;
   const pct = (typeof job.progress === 'number' ? job.progress : 0) * (1 - tail);
   const step = stageText(job); // '' when the server's step name is not one we know: then only the percentage is shown
-  const stepLine = step ? `${step}${pct ? ` · ${Math.round(pct)}%` : ''}` : pct ? `${Math.round(pct)}% done` : 'Just a moment…';
+  const eta = etaText(etaSeconds(job, Date.now()));
+  const stepLine = [step ? `${step}${pct ? ` · ${Math.round(pct)}%` : ''}` : pct ? `${Math.round(pct)}% done` : 'Just a moment…', eta].filter(Boolean).join(' · ');
   return (
     <article className="card job" data-testid="job" data-status={job.status} data-job-id={job.id}>
       <div className="job-head">
@@ -78,13 +78,13 @@ export default function JobCard({ job, onChanged }) {
 
       {job.status === 'queued' && (
         <p className="queue-note mb0" role="status" data-testid="queue-note">
-          <span className="spinner" aria-hidden="true" /> {queueText(job) || 'In line, you’re up soon'}
+          <span className="spinner" aria-hidden="true" /> {[queueText(job) || 'In line, you’re up soon', etaText(etaSeconds(job, Date.now()))].filter(Boolean).join(' · ')}
         </p>
       )}
       {(job.status === 'running' || job.status === 'cloud_asr') && (
         <div>
-          <progress className="bar" max={100} value={pct} aria-label={`Job progress, ${step || statusLabel(job.status)}`} />
-          <p className="small muted mb0" role="status">{stepLine}</p>
+          <progress className="bar" max={100} value={pct} aria-label={`Job progress, ${step || statusLabel(job.status)}`} data-testid="job-progress" />
+          <p className="small muted mb0" role="status" data-testid="job-line">{stepLine}</p>
         </div>
       )}
 
@@ -106,11 +106,11 @@ export default function JobCard({ job, onChanged }) {
               <span className="small muted">Cost <b>{money(job.costMicros || 0)}</b> · <Countdown expiresAt={job.expiresAt} /></span>
             )}
             {job.local ? (
-              <button type="button" className="btn btn-ghost btn-sm" onClick={() => removeLocalCard(job.id)}>Remove</button>
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => { removeLocalCard(job.id); onDeleted?.(); }}>Remove</button>
             ) : confirmDelete ? (
               <span className="row" data-testid="delete-confirm">
-                <span className="small">Delete these files now? They can’t be brought back.</span>
-                <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => act(async () => { await api(`jobs/${job.id}`, { method: 'DELETE' }); forgetFinish(job.id); })}>Yes, delete</button>
+                <span className="small">Delete everything of this file now: your upload, the results and any other versions made from it? They can’t be brought back.</span>
+                <button type="button" className="btn btn-danger btn-sm" disabled={busy} onClick={() => act(async () => { await api(`jobs/${job.id}`, { method: 'DELETE' }); forgetFinish(job.id); onDeleted?.(); })}>Yes, delete</button>
                 <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirmDelete(false)}>Keep them</button>
               </span>
             ) : (

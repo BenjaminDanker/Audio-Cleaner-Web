@@ -7,6 +7,16 @@ Money: paid jobs hold the estimated cost (from the client's claimed
 duration) at creation; the worker re-prices from the probed duration before
 doing the heavy work and captures the real cost on success. Free jobs reserve
 seconds of the daily allowance the same way.
+
+What a job keeps: its upload, the intermediate copies a later "change and save again" starts from (KEPT_NOISE: the noise
+removal at full strength, KEPT_REBUILT: the rebuilt voice, the transcript) and its results stay in the job's folder for
+`job_retention_seconds` (2 hours) after it finishes and are deleted together (`sweep`, or at once with "Delete now", which
+also takes the re-runs made from it). A failed or canceled job's files go at once.
+
+A re-run (`create_rerun`) is a job of its own, linked to its source (`source_job_id`; `root_job_id` is the first job of the
+chain): `plan_rerun` decides which steps run again, from which kept copy; the files it needs are hard-linked into its folder
+(no disk copy), it is queued, run and paid like any job (only for the paid steps that run again), and it ends at the same time
+as the job it came from.
 """
 from __future__ import annotations
 
@@ -40,7 +50,14 @@ ALLOWED_EXTS = {
 }
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")
-MAX_ACTIVE_JOBS_PER_USER = 3
+# Names of the copies a job keeps (acw_common.kept): the noise removal's full-strength output and the rebuilt voice.
+KEPT_NOISE = "kept-noise"
+KEPT_REBUILT = "kept-rebuilt"
+KEPT_INPUT = "kept-input"  # the recording as the noise remover heard it, on the same sample grid (for the strength slider)
+# The strength slider blends the noise removal with the recording in the browser (two buffers of 32-bit floats in memory):
+# offered up to this many channel-seconds (20 minutes of mono, 10 of stereo: about 460 MB for both). A longer recording
+# can still be changed and saved again on our side, which is the same blend.
+PREVIEW_MAX_CHANNEL_SECONDS = 1200
 # Disk promised to uploads that are still arriving, per account, and the most a file may weigh per second of its
 # claimed length (320 Mbit/s: high-end video) unless it is small anyway. Without these a claim of a 4 GiB file
 # that is half a second long reserves 4 GiB of disk for an hour at no cost.
@@ -59,17 +76,20 @@ JOB_MEM = 1 * GB
 # cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
 LOCAL_ASR_MEM = int(3.2 * GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
+# What the kept copies of a job take, per hour of audio and kept channel (24-bit FLAC of the cleaned voice, measured
+# 0.29 to 0.31 GB; a recording whose channels are the same is kept once).
+KEPT_PER_HOUR_PER_CHANNEL = int(0.35 * GB)
 # Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
 # monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
 # remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
 # reports its choice the estimate sits in between), the voice rebuild instead of both, restoring highs
-# (phone-quality recordings only, so only a small allowance), echo removal, and transcription.
+# (it runs on every file it is switched on for), echo removal, and transcription.
 SPEED = {
     "denoise_light": 0.05,
     "denoise_auto": 0.15,
     "denoise_heavy": 0.27,
     "denoise_rebuild": 0.14,  # on the card (the only place it runs): 8.2 s per minute (broker.GPU_WORK)
-    "highs": 0.02,
+    "highs": 0.23,  # measured 2026-10-19: AP-BWE takes 0.23 s per second of audio on four threads (0.78 CPU seconds)
     "leveling": 0.01,  # Leveling on its own (with noise removal it is part of the denoise figures)
     "echo": 0.03,
     "transcribe_local": 0.12,
@@ -100,6 +120,26 @@ QUEUE_ORDER = (
 )
 
 
+def preview_fits(seconds: float, channels: int | None = None) -> bool:
+    """Is a recording of this length small enough for the strength slider (the page holds it in memory)?"""
+    return seconds * max(1, min(2, int(channels or 2))) <= PREVIEW_MAX_CHANNEL_SECONDS
+
+
+def params_of(job_id: str) -> dict | None:
+    """A job's stored parameters as they are now (the copy in a claimed job dict can be older)."""
+    row = db.one("SELECT params_json FROM jobs WHERE id = ?", (job_id,))
+    return json.loads(row["params_json"]) if row else None
+
+
+def kept_bytes(kind: str, seconds: float, channels: int = 2, denoise_tier: str | None = None) -> int:
+    """Disk the kept copies of a job take (none for Leveling on its own or without cleaning): the noise removal, and next to
+    it the recording itself when it is short enough for the slider."""
+    if kind not in ("denoise", "denoise_transcribe") or denoise_tier == pricing.NO_DENOISE:
+        return 0
+    per_hour = KEPT_PER_HOUR_PER_CHANNEL * (2 if denoise_tier != "rebuild" and preview_fits(seconds, channels) else 1)
+    return int(seconds / 3600 * channels * per_hour)
+
+
 def scratch_bytes(kind: str, seconds: float, channels: int = 2, echo: bool = False) -> int:
     denoise = kind in ("denoise", "denoise_transcribe")
     if not (denoise or echo):
@@ -118,9 +158,12 @@ def job_needs(job: dict) -> tuple[int, int]:
         return int(0.3 * GB), 0
     params = json.loads(job["params_json"])
     seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
+    rerun = params.get("rerun")  # a re-run only does part of the work (rerun.py)
     mem = JOB_MEM + (
-        LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" else 0
+        LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" and (not rerun or rerun.get("transcribe")) else 0
     )
+    if rerun and rerun.get("clean") in ("reuse", "none") and not rerun.get("transcribe"):
+        return mem, 0
     return mem, scratch_bytes(job["kind"], seconds, echo=params.get("options", {}).get("echo_reference_track", False))
 
 
@@ -131,19 +174,29 @@ def job_seconds(job: dict) -> float:
     channels = max(1, min(2, int(params.get("channels") or 2)))
     opts = params.get("options", {})
     t = 0.0
+    # A re-run does only part of the work: from a kept noise removal the blend, the highs and Leveling; from a kept rebuilt
+    # voice Leveling; the transcription only when it runs again.
+    rerun = params.get("rerun")
+    clean = rerun.get("clean", "full") if rerun else "full"
     if job["kind"] in ("denoise", "denoise_transcribe"):
-        if params.get("denoise_tier") == "rebuild":
+        if clean == "denoised":
+            t += ((SPEED["highs"] if opts.get("restore_highs") else 0) + SPEED["leveling"]) * audio * channels
+        elif clean == "rebuilt":
+            t += SPEED["leveling"] * audio * channels
+        elif clean in ("reuse", "none"):
+            pass
+        elif params.get("denoise_tier") == "rebuild":
             t += SPEED["denoise_rebuild"] * audio * channels
         elif params.get("denoise_tier") == pricing.NO_DENOISE:
-            t += SPEED["leveling"] * audio * channels
+            t += ((SPEED["highs"] if opts.get("restore_highs") else 0) + SPEED["leveling"]) * audio * channels
         else:
             profile = params.get("noise_profile") or opts.get("noise", "auto")
             t += (SPEED["denoise_" + profile] if profile in ("light", "heavy") else SPEED["denoise_auto"]) * audio * channels
-            if opts.get("restore_highs", True):
+            if opts.get("restore_highs"):
                 t += SPEED["highs"] * audio * channels
-    if opts.get("echo_reference_track"):
+    if opts.get("echo_reference_track") and (not rerun or clean in ("full", "denoised", "rebuilt") or rerun.get("transcribe")):
         t += SPEED["echo"] * audio * channels
-    if params.get("transcribe_tier"):
+    if params.get("transcribe_tier") and (not rerun or rerun.get("transcribe")):
         t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
     return t + MODEL_LOAD_SECONDS
 
@@ -180,10 +233,27 @@ def queued_ids() -> list[str]:
 
 
 class JobError(Exception):
-    def __init__(self, message: str, status: int = 400, retry_after: int | None = None):
+    def __init__(self, message: str, status: int = 400, retry_after: int | None = None, code: str | None = None):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after  # seconds, sent as Retry-After with a 429
+        self.code = code  # sent as X-Error-Code and "code" in the answer, for clients that want to tell this error from others
+
+
+TOO_MANY_JOBS = "too_many_active_jobs"
+
+
+def too_many_jobs_message(n: int) -> str:
+    return f"You have {n} {'file' if n == 1 else 'files'} being processed. Start this one when one of them is done."
+
+
+def check_active_limit(c, user_id: str) -> None:
+    """An account may have `max_active_jobs` file jobs at once (uploading, waiting, running; re-runs count): one more is
+    refused with 429 and the code `too_many_active_jobs`. Called inside the transaction that stores the new job."""
+    limit = get_settings().max_active_jobs
+    n = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE)).fetchone()["n"]
+    if n >= limit:
+        raise JobError(too_many_jobs_message(n), 429, retry_after=60, code=TOO_MANY_JOBS)
 
 
 def seconds_until_utc_midnight() -> int:
@@ -217,14 +287,16 @@ def display_name(job: dict) -> str:
     return json.loads(job["params_json"]).get("display_name") or job["input_name"]
 
 
-def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, leveling: bool = False) -> str:
-    """Customer-facing name of what a job does (the same words as the price list). `leveling`: Leveling is part of it
-    (for a stored job: "leveling" in its pinned rates)."""
+def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, leveling: bool = False, highs: bool = False) -> str:
+    """Customer-facing name of what a job does (the same words as the price list). `leveling`, `highs`: Leveling / Restore highs
+    is part of it (for a stored job: "leveling" / "highs" in its pinned rates)."""
     parts = []
     if kind in ("denoise", "denoise_transcribe"):
         if denoise_tier != pricing.NO_DENOISE:
             parts.append("Voice rebuild" if denoise_tier == "rebuild" else "Denoising")
-        if leveling or denoise_tier == pricing.NO_DENOISE:
+        if highs:
+            parts.append("Restore highs")
+        if leveling or (denoise_tier == pricing.NO_DENOISE and not highs):
             parts.append("Leveling")
     if kind in ("transcribe", "denoise_transcribe"):
         parts.append("Subtitles & transcript" + (", extra accurate" if transcribe_tier == "premium" else ""))
@@ -295,15 +367,17 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if not isinstance(noise, str) or noise not in ("auto", "light", "heavy"):
         raise JobError("noise must be auto, light or heavy")
     out["noise"] = noise
-    # Even out the voice and set the loudness (on by default); bring back the missing highs of band-limited recordings
-    # (on by default; full-band recordings are never touched, and the voice rebuild does it by itself).
-    for key in ("leveling", "restore_highs"):
-        flag = options.get(key, True)
+    # Even out the voice and set the loudness (on by default); restore the missing highs (off by default; it has its own price and,
+    # when it is on, it always runs; the voice rebuild makes its own highs, so it is never on with it).
+    for key, default in (("leveling", True), ("restore_highs", False)):
+        flag = options.get(key, default)
         if not isinstance(flag, bool):
             raise JobError(f"{key} must be true or false")
         out[key] = flag
-    if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not out["leveling"]:
-        raise JobError("Choose Denoising, Voice rebuild or Leveling.")
+    if denoise_tier == "rebuild":
+        out["restore_highs"] = False
+    if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not (out["leveling"] or out["restore_highs"]):
+        raise JobError("Choose Denoising, Voice rebuild, Restore highs or Leveling.")
     return out
 
 
@@ -333,13 +407,18 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
     t_tier = transcribe_tier if kind != "denoise" else None
     n = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
-    rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling)
-    total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling)
+    highs = kind != "transcribe" and opts["restore_highs"]
+    rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling, highs)
+    total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling, highs)
     lines = []
     if "denoise" in rates:
         r = pricing.rate("denoise", d_tier)
         lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
                       "micros": pricing.cost_micros("denoise", d_tier, duration_seconds, rates["denoise"])})
+    if "highs" in rates:
+        r = pricing.rate("highs", "standard")
+        lines.append({"item": "highs", "label": r.label, "quantity": 1, "usdPerMinute": rates["highs"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("highs", "standard", duration_seconds, rates["highs"])})
     if "leveling" in rates:
         r = pricing.rate("leveling", "standard")
         lines.append({"item": "leveling", "label": r.label, "quantity": 1, "usdPerMinute": rates["leveling"] / pricing.MICROS_PER_USD,
@@ -419,7 +498,8 @@ def create_job(
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
 
-    disk_need = size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"]) + DISK_RESERVE
+    disk_need = (size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"])
+                 + kept_bytes(kind, claimed_seconds, denoise_tier=denoise_tier) + DISK_RESERVE)
     disk_free = hostload.get(settings.data_dir).snapshot().disk_free
     if disk_free < disk_need:
         raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
@@ -435,9 +515,10 @@ def create_job(
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     n_translate = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
-    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling)
+    highs = kind != "transcribe" and opts["restore_highs"]
+    params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling, highs)
     est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
-                                  leveling)
+                                  leveling, highs)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
@@ -450,9 +531,7 @@ def create_job(
                 again = replay_of(user_id, *idempotency, c=c)
                 if again is not None:
                     raise Replay(again["id"], again["estCostMicros"])
-            active = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE)).fetchone()
-            if active["n"] >= MAX_ACTIVE_JOBS_PER_USER:
-                raise JobError("You already have several jobs in progress; wait for one to finish.", 429, retry_after=60)
+            check_active_limit(c, user_id)
             # Bytes promised to uploads that are still arriving are not free space any more.
             promised = c.execute("SELECT COALESCE(SUM(input_bytes), 0) AS n FROM jobs WHERE status = 'uploading'").fetchone()["n"]
             mine = c.execute(
@@ -548,7 +627,7 @@ def finish_failed(
             return False
         c.execute(
             "UPDATE jobs SET status = ?, error = ?, finished_at = ?, expires_at = ? WHERE id = ?",
-            (status, message[:500], db.now(), db.now() + 86400, job["id"]),
+            (status, message[:500], db.now(), db.now() + get_settings().job_retention_seconds, job["id"]),
         )
         if job.get("hold_id"):
             ledger.release_hold(job["hold_id"], c=c)
@@ -573,9 +652,10 @@ def requeue(job: dict) -> None:
     d = job_dir(job["id"])
     if job.get("next_stage") == "finalize":
         return  # finalize only reads what the earlier stages left
-    keep = f"input{json.loads(job['params_json'])['input_ext']}"
+    params = json.loads(job["params_json"])
+    keep = {f"input{params['input_ext']}", *(params.get("rerun") or {}).get("linked", [])}  # a re-run's files from its source
     for p in d.iterdir():
-        if p.name == keep:
+        if p.name in keep:
             continue
         if p.is_dir() and not p.is_symlink():
             shutil.rmtree(p, ignore_errors=True)
@@ -658,6 +738,16 @@ def callbacks_for(job_ids: list[str]) -> dict[str, dict]:
     }
 
 
+def label_of(kind: str, params: dict) -> str:
+    """The customer-facing name of what a job does: the price list's words; for a re-run, the steps it did again."""
+    if params.get("rerun"):
+        from . import rerun
+
+        return rerun.rerun_label(params.get("rates") or {}, params.get("denoise_tier"), params.get("transcribe_tier"))
+    rates = params.get("rates") or {}
+    return job_label(kind, params.get("denoise_tier"), params.get("transcribe_tier"), "leveling" in rates, "highs" in rates)
+
+
 def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None, callbacks: dict[str, dict] | None = None) -> dict:
     """`queue` is queue_snapshot() and `callbacks` callbacks_for() (pass them once when listing many jobs)."""
     outputs = json.loads(job["outputs_json"]) if job.get("outputs_json") else []
@@ -680,7 +770,10 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "progress": job["progress"],
         "error": job["error"],
         "inputName": params.get("display_name") or job["input_name"],
-        "label": job_label(job["kind"], params.get("denoise_tier"), params.get("transcribe_tier"), "leveling" in (params.get("rates") or {})),
+        "label": label_of(job["kind"], params),
+        "denoiseTier": params.get("denoise_tier"),
+        "transcribeTier": params.get("transcribe_tier"),
+        "sourceJobId": job.get("source_job_id"),
         "durationSeconds": job["duration_seconds"] or job["claimed_seconds"],
         "estCostMicros": job["est_cost_micros"],
         "costMicros": job["cost_micros"],
@@ -691,6 +784,12 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "finishedAt": job["finished_at"],
         "expiresAt": job["expires_at"] if job["status"] == "done" else None,
     }
+    if job["status"] in ("queued", "running", "cloud_asr"):
+        out["estimateSeconds"] = int(job_seconds(job))  # the whole job's rough length, for the wait before progress shows
+    if job["status"] == "done":
+        from . import rerun
+
+        out["redo"] = rerun.redo_info(job)
     if callback is not None:
         out["callback"] = callback
     return out
@@ -705,6 +804,9 @@ def sweep() -> None:
     # 'canceling' was a transient state of older versions of the cancel request.
     for job in db.all_rows("SELECT * FROM jobs WHERE status = 'canceling'"):
         finish_failed(dict(job), "Canceled.", status="canceled")
+    # The retention is a ceiling: results that were made when it was longer end with it too.
+    db.execute("UPDATE jobs SET expires_at = finished_at + ? WHERE status = 'done' AND finished_at IS NOT NULL AND expires_at > finished_at + ?",
+               (get_settings().job_retention_seconds,) * 2)
     for job in db.all_rows("SELECT id FROM jobs WHERE status = 'done' AND expires_at <= ?", (now,)):
         shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
         db.execute("UPDATE jobs SET status = 'expired', outputs_json = NULL WHERE id = ? AND status = 'done'", (job["id"],))

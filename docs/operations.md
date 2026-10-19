@@ -588,7 +588,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 
 | Where | What grows | Bound |
 |---|---|---|
-| `data/jobs/` | uploads, intermediate files, results | the upload is deleted when processing ends, results after 24 h (`jobs.sweep`), leftovers of failed or canceled jobs after an hour; a deleted account's files at once. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve watch it |
+| `data/jobs/` | uploads, the copies kept for changing a job again, results | all of a job's files go together, 2 hours (`ACW_JOB_RETENTION_MINUTES`) after it finishes (`jobs.sweep`, from the web process every 30 s and from each worker every 60 s, so the deletion is accurate to about a minute), or at once with "Delete now" (which also takes the jobs made from it); the files of a failed or canceled job go at once and leftover folders after an hour; a deleted account's files at once. Sizes: "What a job keeps" below. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve (which counts the kept copies, `jobs.kept_bytes`) watch it |
 | `data/acw.sqlite3` and `-wal` | the database, see above | the table above; the log file stays ~4 MB (SQLite checkpoints it by itself) |
 | `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
 | `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`, `gpu-worker-alive`) | rewritten in place, fixed names | a few KB in all |
@@ -601,6 +601,17 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 | `app.prev` | one previous copy of the code (1 MB) | replaced at every deploy |
 | `/var/www/audio` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
 | `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; test fixtures and scratch; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
+
+**What a job keeps** (`data/jobs/<id>/`, until its 2 hours are over; `acw_common/kept.py`, `server/acw/rerun.py`). Measured on a 130 s
+recording (`kept.save`, 24-bit FLAC): per hour of audio and per cleaned channel the noise removal at full strength takes about **0.29 GB**
+(0.14 GB for a stereo recording whose sides are nearly the same), the recording itself, kept next to it for the website's strength slider
+(only for recordings up to 10 minutes of stereo or 20 of mono, `jobs.PREVIEW_MAX_CHANNEL_SECONDS`), **0.36 GB**; the Voice rebuild keeps its
+output (about the same as the noise removal) and nothing else; the transcript is a few kB. A channel that repeats the other, or is silent,
+is kept once, or not at all. On top of that come the upload as it was sent (a FLAC of 1 h of mono speech: about 0.3 GB) and the results
+(a FLAC of the same: 0.3 GB). So a 1 hour mono file holds about 0.9 GB (1.2 GB with the slider copy, which a file that long doesn't have)
+for 2 hours, where it held its results (0.3 GB) for 24 hours before: at the example load of 1000 file jobs a day, 2 hours means about 83 jobs
+are on disk at any time instead of 1000. The re-run of a job hard-links what it needs (no copy), so it adds only what it writes. Setting
+`ACW_JOB_RETENTION_MINUTES` higher keeps all of this longer, lower shortens it (the Privacy Policy says 2 hours).
 
 The monitor watches two sizes every 2 minutes and mails when `data/` without `jobs/` is over 5 GB (`data_large`) or the backup
 folder is over 20 GB (`backups_large`). At the example load the first stays around 1 GB (database, log, ten pre-deploy
@@ -731,7 +742,7 @@ paid before free, then the user with the fewest jobs running, then first come
 first served. The API reports `queuePosition` and `queueWaitSeconds`.
 - Studio clean, per channel at 4 threads (stereo is cleaned channel by channel, so double these for stereo):
   DeepFilterNet3 ~0.05x real time, DPDFNet-8 (heavy noise) ~0.33x, voice rebuilt ~0.9x (3 GB, one such job at a
-  time, files up to 90 minutes), highs restoration and echo removal a few percent more. These are the numbers in
+  time, files up to 90 minutes), highs restoration ~0.23x (it runs on every file it is switched on for) and echo removal a few percent more. These are the numbers in
   `jobs.SPEED`: they drive the queue estimate and the slow-job alert, and the runner tells the worker which
   noise remover a file got so the estimate follows it.
 - Local transcription: Parakeet TDT (English: v2; 24 European languages: v3)
@@ -817,6 +828,8 @@ When full, a new session is refused with the options that still fit; sessions th
 | `ACW_STREAM_MAX_CAPTION_STREAMS` | 5 per core of the worker | Standard caption streams per worker (in `acw-worker.env`). Each worker's caption decoder does about 13x real time in total; silence isn't decoded, but a stream can talk all the time. At the cap a new one goes to the next worker, or is offered extra-accurate captions. A stream that still falls more than 2 s behind drops its oldest audio and the client gets one `captions_behind` warning per incident |
 | `ACW_LOOP_LAG_LIMIT_MS` | `25` | the live process (`acw-live`) relays all live audio on one event loop: new live sessions are refused while it runs a 100 ms timer this late (p90 over 10 s). Running sessions are never cut. About 1.5% of a core per Opus session (2% per PCM session) was measured on 2026-10-18, so this rarely triggers |
 | `ACW_MAX_LIVE_SESSIONS` | `300` | sanity bound on live sessions in the web process (below uvicorn's `--limit-concurrency 500`) |
+| `ACW_MAX_ACTIVE_JOBS` | `3` | file jobs one account may have at once (uploading, waiting or running; changing a finished job counts): one more is refused with 429 and the code `too_many_active_jobs`, "You have 3 files being processed. Start this one when one of them is done." (per-key monthly caps are separate, `keycaps.py`) |
+| `ACW_JOB_RETENTION_MINUTES` | `120` | how long a finished job's upload, kept copies and results stay, counted from when it finishes; a re-run never outlives the job it came from |
 | `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
 
 Other queue limits: the job list shares one queue computation per second between all requests (`jobs.queue_snapshot`),

@@ -84,6 +84,15 @@ await check('copy: signed-in pages (Cleanup with a file and its options, Billing
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'subs', 'accurate');
   bad.push(...findings(await visibleText(page)).map((x) => `/app with a file: ${x}`));
+  // the paid options of each noise choice, with Restore highs ticked (its words and price), and the old title gone
+  for (const noise of ['denoise', 'off']) {
+    await pick(page, 'noise', noise);
+    await page.locator(`input[name=${noise === 'off' ? 'highs-alone' : 'highs'}]`).check();
+    const text = await visibleText(page);
+    bad.push(...findings(text).map((x) => `/app, noise ${noise}, Restore highs on: ${x}`));
+    if (/Restore missing highs/i.test(text)) bad.push(`/app, noise ${noise}: the old title "Restore missing highs" is still there`);
+    if (!/Restore highs/.test(text)) bad.push(`/app, noise ${noise}: no "Restore highs"`);
+  }
   if (bad.length) throw new Error(bad.join(' | '));
   return '4 pages + the options for a file clean';
 });
@@ -137,19 +146,64 @@ await check('legal: every licence in the list links to a real licence text (not 
   return `${seen.length} licence files`;
 });
 
-await check('retention: the privacy page states the server\'s retention periods, the landing FAQ says results stay 24 hours, and there is no privacy promise section on the landing page', async () => {
+/** Anything that says uploads, copies or results go with 24 hours, or that the upload goes as soon as it is processed (the old rules). */
+const OLD_RETENTION = [
+  /(upload|result|file|cop(y|ies))[^.]{0,100}24 hours?/i, /24 hours?[^.]{0,100}(upload|result|file|cop(y|ies))/i,
+  /deleted as soon as/i, /as soon as (it is|it.s|they are|they.re) processed/i, /Results stay for/i,
+];
+const oldRetention = (t) => OLD_RETENTION.filter((re) => re.test(t)).map((re) => `${re}: …${t.slice(Math.max(0, t.search(re) - 40), t.search(re) + 120).replace(/\s+/g, ' ')}…`);
+
+await check('retention: the landing FAQ, the Privacy page (section 4) and the Terms (section 8) say uploads, kept copies and results are kept together for 2 hours and then deleted together, with no trace of "24 hours" or "deleted as soon as"; no privacy promise section on the landing page', async () => {
   await page.goto(`${BASE}/`);
   await page.waitForSelector('table tbody tr');
-  const t = await page.locator('main').textContent();
+  const t = (await page.locator('main').textContent()).replace(/\s+/g, ' ');
   if (/privacy promise/i.test(t) || (await page.locator('#privacy').count())) throw new Error('the privacy promise section is still on the landing page');
-  if (!/Results stay for 24 hours/i.test(t) || !/train/i.test(t)) throw new Error('retention answer missing from the FAQ');
+  if (!/(upload|file)s? [^.]*(and|,) [^.]*results? are kept together for 2 hours/i.test(t) || !/deleted together/i.test(t)) throw new Error('the FAQ does not say files and results are kept together for 2 hours and then deleted together: ' + (/What happens to my files[^?]*\?.{0,400}/i.exec(t)?.[0] || t.slice(0, 400)));
+  if (!/train/i.test(t)) throw new Error('the FAQ no longer says nothing is trained on the audio');
+  const bad = oldRetention(t).map((x) => `landing: ${x}`);
+
   await page.goto(`${BASE}/privacy`);
+  await page.waitForSelector('main h1');
+  const section4 = (await page.locator('#files ~ ul').first().innerText()).replace(/\s+/g, ' ');
+  if (!/kept for 2 hours/.test(section4) || !/Results[^.]*available for download for 2 hours/.test(section4) || !/deleted together with the upload/.test(section4)) throw new Error('Privacy section 4: ' + section4.slice(0, 500));
+  bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `privacy: ${x}`));
   const pr = await page.locator('#retention ~ ul').first().innerText();
   for (const need of [/7 years/, /12 months/, /90 days/, /30 days/, /contact form/, /free live trial/]) if (!need.test(pr)) throw new Error(`Privacy retention lacks ${need}`);
+
+  await page.goto(`${BASE}/terms`);
+  await page.waitForSelector('main h1');
+  const section8 = (await page.locator('#data ~ ul').first().innerText()).replace(/\s+/g, ' ');
+  if (!/kept together for 2 hours/.test(section8) || !/deleted together/.test(section8)) throw new Error('Terms section 8: ' + section8.slice(0, 500));
+  bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `terms: ${x}`));
+  if (bad.length) throw new Error(bad.join(' | '));
+  return '2 hours, together, on the landing page, Privacy and Terms';
+});
+
+await check('retention: the signed-in Cleanup page (the list note and "Good to know"), the Account page and the Developers page say 2 hours too, and none of them keeps the old 24 hours', async () => {
+  const bad = [];
+  await page.goto(`${BASE}/app`);
+  await page.getByTestId('jobs-note').waitFor();
+  const note = (await page.getByTestId('jobs-note').innerText()).replace(/\s+/g, ' ');
+  if (!/for 2 hours after it.s done/.test(note)) throw new Error('the list note: ' + note);
+  const good = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  if (!/upload and your results are kept together for 2 hours after a file is done[^.]*deleted together/.test(good)) throw new Error('Cleanup "Good to know": ' + good.slice(-700));
+  bad.push(...oldRetention(good).map((x) => `cleanup: ${x}`));
+  await page.goto(`${BASE}/app/account`);
+  await page.waitForSelector('main h1');
+  const acct = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  if (!/uploads and results are deleted 2 hours after a file is done/.test(acct)) throw new Error('Account page: ' + acct.slice(0, 600));
+  bad.push(...oldRetention(acct).map((x) => `account: ${x}`));
+  await page.goto(`${BASE}/developers`);
+  await page.waitForSelector('pre.code');
+  const dev = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  if (!/kept together for 2 hours after the job is done, then deleted together/.test(dev)) throw new Error('Developers page: no 2 hours answer for the files');
+  // the API's idempotency keys are remembered for 24 hours: that is not about files
+  bad.push(...oldRetention(dev.replace(/within 24 hours/g, '').replace(/Keys are remembered for 24 hours, per account\./g, '')).map((x) => `developers: ${x}`));
+  if (bad.length) throw new Error(bad.join(' | '));
   return 'ok';
 });
 
-await check('running jobs: the server\'s step names are shown in plain words ("premium" and "cloud asr" never appear), an unknown step shows only the percentage', async () => {
+await check('running jobs: the server\'s step names are shown in plain words on the list rows and on the job\'s page ("premium" and "cloud asr" never appear), an unknown step shows only a plain "Working on it" with the percentage on the row', async () => {
   const now = Math.floor(Date.now() / 1000);
   const job = (id, extra) => ({ id, kind: 'denoise', free: false, status: 'running', inputName: `${id}.wav`, createdAt: now, durationSeconds: 60, progress: 0, stage: '', outputs: [], costMicros: 0, expiresAt: null, queuePosition: null, queueWaitSeconds: null, ...extra });
   const list = [
@@ -161,12 +215,52 @@ await check('running jobs: the server\'s step names are shown in plain words ("p
   await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list } }) : r.continue()));
   try {
     await page.goto(`${BASE}/app`);
-    await page.getByTestId('job').first().waitFor();
-    const lines = (await page.locator('[data-testid=job] p[role=status]').allInnerTexts()).map((l) => l.trim());
+    await page.getByTestId('job-row').first().waitFor();
+    if (await page.getByTestId('job').count()) throw new Error('full job cards on the list');
+    const lines = (await page.locator('[data-testid=job-row] [data-testid=row-line]').allInnerTexts()).map((l) => l.trim());
     const all = lines.join('\n');
     if (/premium|cloud asr|some brand new/i.test(all)) throw new Error('raw step shown: ' + all.slice(0, 400));
-    for (const w of ['Writing the transcript · 85%', 'Writing the transcript · 40%', 'Cleaning the sound · 41%', '7% done']) if (!lines.includes(w)) throw new Error(`missing "${w}" in ${JSON.stringify(lines)}`);
-    return lines.join(' | ');
+    for (const w of ['Writing the transcript · 85%', 'Writing the transcript · 40%', 'Cleaning the sound · 41%', 'Working on it · 7%']) if (!lines.includes(w)) throw new Error(`missing "${w}" in ${JSON.stringify(lines)}`);
+    // the job's own page, same words
+    const onPages = [];
+    for (const [id, want] of [['j1', 'Writing the transcript · 85%'], ['j2', 'Writing the transcript · 40%'], ['j3', 'Cleaning the sound · 41%'], ['j4', '7% done']]) {
+      await page.goto(`${BASE}/app/job/${id}`);
+      const line = (await page.getByTestId('job-line').innerText()).trim();
+      if (line !== want) throw new Error(`job page ${id}: "${line}", wanted "${want}"`);
+      const text = await page.getByTestId('job-page').innerText();
+      if (/premium|cloud asr|some brand new/i.test(text)) throw new Error(`job page ${id} shows a raw step: ` + text.slice(0, 300));
+      onPages.push(line);
+    }
+    return `rows: ${lines.join(' | ')}; pages: ${onPages.join(' | ')}`;
+  } finally {
+    await page.unroute('**/api/jobs');
+  }
+});
+
+await check('time left: a running row and a queued row say how long it takes in plain words ("about 2 min left", "In line · about 3 min left"), never raw seconds', async () => {
+  const now = Math.floor(Date.now() / 1000);
+  const job = (id, extra) => ({ id, kind: 'denoise', free: false, status: 'running', inputName: `${id}.wav`, createdAt: now, durationSeconds: 60, progress: 50, stage: 'Cleaning', outputs: [], costMicros: 0, expiresAt: null, queuePosition: null, queueWaitSeconds: null, ...extra });
+  const list = [
+    job('t1', { estimateSeconds: 240 }), // half of 4 minutes is left
+    job('t2', { status: 'queued', progress: 0, stage: '', queuePosition: 2, queueWaitSeconds: 60, estimateSeconds: 120 }),
+    job('t3', { estimateSeconds: 20 }),
+  ];
+  await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list } }) : r.continue()));
+  try {
+    await page.goto(`${BASE}/app`);
+    await page.getByTestId('job-row').first().waitFor();
+    const line = (id) => page.locator(`[data-testid=job-row][data-job-id=${id}] [data-testid=row-line]`).innerText().then((t) => t.trim());
+    const got = { t1: await line('t1'), t2: await line('t2'), t3: await line('t3') };
+    if (got.t1 !== 'Cleaning the sound · 50% · about 2 min left') throw new Error('running row: ' + got.t1);
+    if (got.t2 !== 'In line · about 3 min left') throw new Error('queued row: ' + got.t2);
+    if (got.t3 !== 'Cleaning the sound · 50% · less than a minute left') throw new Error('short row: ' + got.t3);
+    await page.goto(`${BASE}/app/job/t1`);
+    const card = (await page.getByTestId('job-line').innerText()).trim();
+    if (card !== 'Cleaning the sound · 50% · about 2 min left') throw new Error('job page: ' + card);
+    await page.goto(`${BASE}/app/job/t2`);
+    const queued = (await page.getByTestId('queue-note').innerText()).trim();
+    if (!/^In line: 1 ahead of you, about 1 min · about 3 min left$/.test(queued)) throw new Error('queued job page: ' + queued);
+    return Object.values(got).join(' | ');
   } finally {
     await page.unroute('**/api/jobs');
   }

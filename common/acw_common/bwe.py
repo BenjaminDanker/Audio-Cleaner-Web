@@ -185,6 +185,16 @@ def pick_model(bandwidth_hz: float) -> str | None:
     return None
 
 
+#: the generator with the widest input band (12 kHz): what a recording that already has its highs gets
+WIDEST = _LIMITS[-1][0]
+
+
+def choose_model(bandwidth_hz: float) -> str:
+    """The generator to use when restoring highs is asked for: `pick_model`'s choice by the measured bandwidth, and for a
+    recording that is (nearly) full band the widest one, so that asking for it always does something (it is paid for)."""
+    return pick_model(bandwidth_hz) or WIDEST
+
+
 # --------------------------------------------------------------------------------------------------------
 # Model runtime
 # --------------------------------------------------------------------------------------------------------

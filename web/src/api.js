@@ -60,13 +60,17 @@ export async function checkHealth() {
   }
 }
 
+/** The code of the answer to starting a file job while the account already has the most it may have at once. */
+export const TOO_MANY_JOBS = 'too_many_active_jobs';
+
 export class ApiError extends Error {
-  constructor(message, status, fields, retryAfter) {
+  constructor(message, status, fields, retryAfter, code) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.detail = message;
     this.fields = fields;
+    this.code = code || null; // the server's error code (X-Error-Code / "code"), for the few errors the page treats specially
     this.retryAfter = retryAfter; // seconds the server asked us to wait (HTTP 429 with Retry-After), if it did
   }
 }
@@ -113,11 +117,13 @@ function errorFrom(res, data) {
     else detail = res.status >= 500 ? 'Something went wrong on our side. Please try again in a moment.' : `Request failed (${res.status}).`;
   }
   let wait = null;
-  if (res.status === 429) {
+  const code = (typeof data?.code === 'string' && data.code) || res.headers?.get?.('X-Error-Code') || null;
+  // "too many files at once" says what to do by itself; a time to wait would only confuse it
+  if (res.status === 429 && code !== TOO_MANY_JOBS) {
     wait = retryAfterSeconds(res.headers?.get?.('Retry-After'));
     if (wait) detail = withWait(detail, wait);
   }
-  return new ApiError(detail, res.status, data?.fields, wait);
+  return new ApiError(detail, res.status, data?.fields, wait, code);
 }
 
 export async function fetchMe() {
@@ -213,6 +219,11 @@ export function uploadBlob(url, blob, { onProgress, signal } = {}) {
 /** URL for a job output (browser navigation / <a download>). */
 export function outputUrl(jobId, name) {
   return `${API}jobs/${encodeURIComponent(jobId)}/outputs/${encodeURIComponent(name)}`;
+}
+
+/** URL of one of the two copies the strength slider blends: `which` is 'noise' (full strength) or 'input' (the recording). */
+export function keptUrl(jobId, which) {
+  return `${API}jobs/${encodeURIComponent(jobId)}/kept/${which}`;
 }
 
 /** wss:// or ws:// URL for the live stream endpoint, same origin as the page. */

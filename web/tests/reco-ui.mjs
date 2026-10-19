@@ -20,7 +20,7 @@ const rate = (product, tier, h) => ({ product, tier, usdPerHour: h, usdPerMinute
 const PRICING = {
   maxJobSeconds: 36000, maxUploadBytes: 4 * 1024 ** 3, rebuildAvailable: true,
   rates: [
-    rate('denoise', 'standard', 1.2), rate('denoise', 'rebuild', 3.0), rate('transcribe', 'local', 0.6), rate('transcribe', 'premium', 2.4),
+    rate('denoise', 'standard', 1.2), rate('denoise', 'rebuild', 3.0), rate('highs', 'standard', 4.2), rate('transcribe', 'local', 0.6), rate('transcribe', 'premium', 2.4),
     rate('transcribe_translate', 'standard', 0.6), rate('stream_denoise', 'light', 1.2), rate('stream_captions', 'local', 0.6),
     rate('stream_captions', 'premium', 2.4), rate('stream_translate', 'standard', 0.6),
   ],
@@ -140,7 +140,8 @@ async function open(page, path) {
     const s = await open(page, FILES.clean);
     if (s.rebuild || /^Voice rebuild/.test(s.line)) throw new Error(`rebuilt: ${s.line}`);
     for (const t of [SAY.fix, SAY.next, SAY.echo, SAY.phone, SAY.clipped, SAY.restore]) if (s.why.includes(t)) throw new Error(`says "${t}": ${s.why.join(' | ')}`);
-    if (!/^For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt\./.test(s.rebuildHint)) throw new Error(`hint: ${s.rebuildHint}`);
+    // the words of src/hints.js, with the price of this page's price list (Voice rebuild 3.00 an hour = $0.05 a minute)
+    if (s.rebuildHint !== 'For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt, which also brings back the highs. Slower, $0.05 a minute, and on very echoey recordings it can change a word, so listen before you publish.') throw new Error(`hint: ${s.rebuildHint}`);
     if (/Cleaning can.t fix/.test(s.pageText)) throw new Error('the old advice is on the page');
   });
 

@@ -39,6 +39,9 @@ AUDIO_FORMATS = {
     "mp3": (".mp3", ["-c:a", "libmp3lame", "-b:a", "256k"]),
     "m4a": (".m4a", ["-c:a", "aac", "-b:a", "256k"]),
     "opus": (".opus", ["-c:a", "libopus", "-b:a", "128k"]),
+    # Not for people: the server keeps its intermediate results as 24-bit FLAC (exact to one 24-bit step, 1.2e-7 of full scale, a third to
+    # a half of the size of the 32-bit floats they are made of); the level is set by write_audio's `gain`.
+    "flac24": (".flac", ["-c:a", "flac", "-compression_level", "3", "-sample_fmt", "s32", "-bits_per_raw_sample", "24"]),
     "ogg": (".ogg", ["-c:a", "libopus", "-b:a", "128k"]),  # Opus in an Ogg file with the usual .ogg ending
 }
 
@@ -389,9 +392,9 @@ class FFmpeg:
             raise MediaError("The audio track is empty.")
         return np.memmap(raw, dtype=np.float32, mode="r", shape=(size, channels))
 
-    def write_audio(self, x: np.ndarray, sr: int, out: Path, fmt: str) -> Path:
+    def write_audio(self, x: np.ndarray, sr: int, out: Path, fmt: str, gain: float = 1.0) -> Path:
         """Encode float32 audio to `out` (suffix set by `fmt`), streaming it to
-        FFmpeg in blocks so a long (or memory-mapped) input is never copied whole."""
+        FFmpeg in blocks so a long (or memory-mapped) input is never copied whole. `gain` scales the samples on the way."""
         ext, codec_args = AUDIO_FORMATS[fmt]
         out = out.with_suffix(ext)
         channels = 1 if x.ndim == 1 else x.shape[1]
@@ -407,7 +410,8 @@ class FFmpeg:
                     for s in range(0, len(x), block):
                         if self._cancelled():
                             raise Cancelled()
-                        proc.stdin.write(np.ascontiguousarray(x[s:s + block], dtype=np.float32).tobytes())
+                        part = np.ascontiguousarray(x[s:s + block], dtype=np.float32)
+                        proc.stdin.write((part * np.float32(gain) if gain != 1.0 else part).tobytes())
                     proc.stdin.close()
                     proc.wait(timeout=3600)
                 except (BrokenPipeError, OSError):

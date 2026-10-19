@@ -85,6 +85,15 @@ export async function waitResult(page, testid, timeout = 300000) {
 export async function pick(page, group, value) {
   await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
   if (group === 'noise' && value === 'off') await page.locator('input[name=leveling-alone]').uncheck();
+  // Restore highs is a paid option of its own that starts off; the automatic settings may have ticked it for this file, and a test
+  // that is about something else must not pay for it (tests about Restore highs tick it themselves, after this)
+  if (group === 'noise' && value === 'denoise') await untick(page, 'input[name=highs]');
+  if (group === 'noise' && value === 'off') await untick(page, 'input[name=highs-alone]');
+}
+/** Unticks a checkbox that is on the page and ticked (nothing happens when it is not there). */
+async function untick(page, selector) {
+  const box = page.locator(selector);
+  if ((await box.count()) && (await box.isChecked())) await box.uncheck();
 }
 /** The quick listen that sets the best choices ("Automatic best settings") is over. */
 export async function settleRecommendation(page) {
@@ -92,7 +101,7 @@ export async function settleRecommendation(page) {
 }
 /**
  * Puts the options back to what they were before the paid defaults: the free in-browser cleanup when the browser can do it (else
- * Denoising), Maximum strength, no rebuild, subtitles Off. The checks that are about something else than the automatic settings start from there.
+ * Denoising), Maximum strength, no rebuild, no Restore highs, subtitles Off. The checks that are about something else than the automatic settings start from there.
  */
 export async function restoreOldDefaults(page) {
   const card = (v) => page.locator(`label.choice:has(input[name=noise][value=${v}]):not(.is-disabled)`);
@@ -102,6 +111,7 @@ export async function restoreOldDefaults(page) {
   if ((await max.count()) && !(await max.isChecked())) await page.locator(`label:has(input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max])`).click();
   const rebuild = page.locator('input[name=rebuild]');
   if ((await rebuild.count()) && (await rebuild.isChecked())) await rebuild.uncheck();
+  await untick(page, 'input[name=highs]'); // Restore highs (paid) starts off for the tests that are about something else
   // the subtitles start out Off, as before the paid defaults
   if (!(await page.locator('input[name=subs][value=off]').isChecked())) await page.locator('label.choice:has(input[name=subs][value=off])').click();
 }
@@ -115,4 +125,61 @@ export async function dropFile(page, path, { recommended = false } = {}) {
   await settleRecommendation(page);
   if (!recommended) await restoreOldDefaults(page);
   await page.waitForTimeout(300);
+}
+
+// ---- helpers for the suites about job pages and changing a job again (jobs.mjs, redo.mjs) ----
+export const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
+export const JOB_PATH = /\/app\/job\/[0-9a-f]{32}$/;
+
+/** Runs a few lines of Python against the test backend's data folder, with the server's modules importable (what admin() does). */
+export function pyRun(code) {
+  return execFileSync(PY, ['-c', code], { cwd: SERVER, env: adminEnv(), encoding: 'utf8' });
+}
+
+/** fetch() with the CSRF token, run inside the page (same origin, the page's own sign-in). Answers {status, body, headers}. */
+export const apiCall = (page, method, path, body) => page.evaluate(async ({ method, path, body }) => {
+  const me = await (await fetch('/api/me', { credentials: 'same-origin' })).json();
+  const res = await fetch(`/api/${path}`, {
+    method, credentials: 'same-origin',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json', 'X-CSRF-Token': me.csrfToken },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { parsed = text; }
+  return { status: res.status, body: parsed, headers: Object.fromEntries(res.headers.entries()) };
+}, { method, path, body });
+
+/** The job ids the page's account has now (the same list the Cleanup page shows), newest first. */
+export async function listJobs(page) {
+  const r = await apiCall(page, 'GET', 'jobs');
+  if (r.status !== 200) throw new Error(`GET /api/jobs answered ${r.status}`);
+  return r.body;
+}
+
+/** Waits until the job (by its API id) has ended; answers its final form. */
+export async function waitJobDone(page, id, { timeout = 300000 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    const j = await apiCall(page, 'GET', `jobs/${id}`);
+    if (j.status === 200 && ['done', 'failed', 'canceled', 'expired'].includes(j.body.status)) return j.body;
+    if (Date.now() - t0 > timeout) throw new Error(`job ${id} did not finish in ${timeout / 1000} s (${j.body?.status} ${j.body?.stage || ''} ${j.body?.progress ?? ''})`);
+    await page.waitForTimeout(1500);
+  }
+}
+
+/** The id of the job whose page the page is on. */
+export const jobIdOf = (page) => /\/app\/job\/([0-9a-f]{32}|local-[0-9a-z]+)/.exec(new URL(page.url()).pathname)?.[1] || null;
+
+/** On a job's page: waits until the job card says done (throws with the card's text when the job failed or was canceled). */
+export async function waitCardDone(page, timeout = 240000) {
+  const card = page.getByTestId('job').first();
+  const t0 = Date.now();
+  for (;;) {
+    const st = await card.getAttribute('data-status', { timeout: 3000 }).catch(() => null);
+    if (st === 'done') return card;
+    if (st === 'failed' || st === 'canceled') throw new Error(`the job ${st}: ${(await card.innerText()).slice(0, 300)}`);
+    if (Date.now() - t0 > timeout) throw new Error(`the job is still ${st} after ${timeout / 1000} s`);
+    await page.waitForTimeout(500);
+  }
 }

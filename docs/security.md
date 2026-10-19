@@ -104,6 +104,15 @@ also removes the shared-UID risk with the Minecraft servers.
 - `Idempotency-Key` on job creation: kept per account for 24 hours in `idempotency_keys` (the key text and a hash of
   the request body, no file data), swept by `jobs.sweep` and removed with the account. A repeat is answered before
   rate limits and money are touched; checked again inside the creation transaction against parallel requests.
+- Changing a finished job (`POST /api/jobs/{id}/rerun`, `acw/rerun.py`): the same authentication, scope, CSRF and job-creation rate limits as
+  creating one. The job is looked up by id **and** account; an API key can only change jobs that key made (`jobs.api_key_id`), a browser
+  session any job of its account, anything else is the same 404 as an unknown id. The new job is held and priced like any job (the
+  key's cap, the account's balance, the active-job limit are all checked in the transaction that stores it) and is run by the same queue,
+  worker and sandbox. It starts from files the sandboxed runner itself made earlier (the kept copies): the worker takes only
+  the fixed names `kept-noise.flac`, `kept-rebuilt.flac`, `kept-input.flac`, only as regular files in the job's folder (`lstat`), with
+  the numbers the runner reported validated (`rerun.sanitize_kept`), and hard-links them into the new job's folder (the sandbox itself
+  can't create links). A re-run never extends the files' lifetime: it ends with the job it came from (the upload is one of the linked files, so
+  it goes then too, and "Delete now" deletes the whole chain).
 - WebSocket: API key, or session cookie + exact Origin match (no cross-site
   WebSocket hijacking).
 - Rate limits: per IP (IPv6 per /64) and per user for auth, email, uploads, job creation,
@@ -191,7 +200,8 @@ network, so it is built to reach nothing but the public internet:
   (`asset_fetch`); browsers keep them in their cache. Jobs on our side are never free.
 - Job reservations: the per-account active-job count, the disk promised to uploads that are still arriving and the
   job row are checked and written in one transaction (parallel requests can't all pass). An account may have at most
-  8 GiB of uploads waiting; a file must be plausible for its claimed length (at most 40 MB per second, or 200 MB
+  `ACW_MAX_ACTIVE_JOBS` (default 3) file jobs uploading, waiting or running at once (changing a finished job counts; the refusal is
+  `429` with the code `too_many_active_jobs`), and at most 8 GiB of uploads waiting; a file must be plausible for its claimed length (at most 40 MB per second, or 200 MB
   whatever the length); an upload that has sent no byte 10 minutes after creation is canceled (the hour-long window
   starts with the first bytes).
 - Cancel is refused (409) once the extra-accurate transcription is done (`next_stage = finalize`: the paid-for work
@@ -236,7 +246,7 @@ network, so it is built to reach nothing but the public internet:
   address goes away once the old clients have moved (docs/operations.md, "Domain").
 - The pet-companion tunnel key on the VPS is restricted like ours (`permitlisten="127.0.0.1:18788"`,
   `command="/bin/false"`: no shell; docs/vps.md).
-- No malware/CSAM scanning of uploads (audio-only product, files deleted quickly);
+- No malware/CSAM scanning of uploads (audio-only product, files deleted 2 hours after a job finishes);
   revisit if video volume grows.
 - Backups: a nightly snapshot goes to `/mnt/mc-storage/audio-cleaner-backups`
   (another disk, 30 kept; `acw-backup.timer`) and is checked right after writing (SQLite integrity and ledger

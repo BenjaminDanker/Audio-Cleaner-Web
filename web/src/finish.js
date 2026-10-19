@@ -8,8 +8,10 @@ import { outputUrl } from './api.js';
 import { saveBlob } from './download.js';
 import { stem } from './format.js';
 import { LANGUAGES } from './jobs.js';
+import { blendToPcm, loadKeptPair, splitParts } from './media/blend.js';
 import { buildMedia, cleanName, endingOf, FORMAT, formatOfName, srtToVtt, vttToSrt } from './media/convert.js';
 import { probeMedia } from './media/mb.js';
+import { buildWav } from './media/wav.js';
 
 const LANGUAGE_NAME = Object.fromEntries(LANGUAGES.filter(([c]) => c));
 export const langName = (code) => LANGUAGE_NAME[code] || 'Subtitles';
@@ -26,10 +28,11 @@ const abortError = () => new DOMException('Canceled', 'AbortError');
 /**
  * What the person asked for, saved with the job in this browser so that "Download again" and "Change and save again" know it
  * after a reload (the server only keeps its own files):
- *   {sound, format, name, size, subs, caps:{srt,vtt,txt}, embed, soundHere, subsHere}
+ *   {sound, format, name, size, subs, caps:{srt,vtt,txt}, embed, soundHere, subsHere, blend?:{db}}
  * sound: the cleaned sound is part of the result, as `name` (a file type `format`, picture `size` for a video).
  * subs/caps: subtitle files by format. embed: the subtitles go inside the video. soundHere/subsHere: made in this
- * browser, so they exist only in this tab.
+ * browser, so they exist only in this tab. blend: the strength (dB) the sound was saved with from the two copies the job kept
+ * (a job on our side): made here, free, again whenever it is needed (after a reload too) while those copies exist.
  */
 const KEY = 'acw.wants.';
 export function saveWants(id, wants) {
@@ -43,7 +46,7 @@ export function loadWants(id) {
     return null;
   }
 }
-/** Forget the choices of jobs the server no longer lists (they are kept for 24 hours). */
+/** Forget the choices of jobs the server no longer lists (their files are cleared away 2 hours after they finish). */
 export function pruneWants(ids) {
   try {
     const keep = new Set([...ids, ...finishes.keys()]); // a job this tab just made may not be in the list yet
@@ -82,7 +85,7 @@ export function finishSeconds(w, { info, file, serverAudio = false } = {}) {
 
 /* ------------------------------------------------------------------------------------------------ one job's finishing */
 
-const EMPTY = { phase: 'idle', progress: 0, files: [], note: '', error: '', pending: null };
+const EMPTY = { phase: 'idle', progress: 0, files: [], note: '', error: '', pending: null, pairPhase: 'idle', pairProgress: 0, pairError: '', strengthDb: null };
 
 export class Finish {
   constructor(id) {
@@ -105,6 +108,13 @@ export class Finish {
     this.state = EMPTY;
     this.listeners = new Set();
     this.autoStarted = false;
+    // The two signals the strength is blended from (media/blend.js): the noise removal at full strength and the recording.
+    this.pairParts = null; // made in this browser: interleaved float32 parts {full, input}
+    this.pairChannels = 0;
+    this.pair = null; // decoded for the slider: {full, input, plan}
+    this.pairLoad = null;
+    this.blendedDb = null; // the strength this.pcm was blended at, for a job on our side
+    this.strengthDb = null; // the strength of the sound made in this tab (set by the free cleanup, and whenever it is blended again)
     this.subscribe = (fn) => { this.listeners.add(fn); return () => this.listeners.delete(fn); };
     this.getSnapshot = () => this.state;
   }
@@ -121,6 +131,59 @@ export class Finish {
   }
 
   get outputs() { return this.job?.outputs || []; }
+
+  /** Where the slider's two signals come from: 'here' (this browser made them), 'server' (the job kept them), or null. */
+  get sliderSource() {
+    if (this.pairParts) return 'here';
+    if (!this.job?.local && this.job?.redo?.preview && !this.useServerVideo) return 'server';
+    return null;
+  }
+
+  /** The cleaned sound in this tab is the one to use: made by the free cleanup here, or blended here from the job's kept copies. */
+  usesPcm(w) {
+    return !!this.pcm && (!!w.soundHere || (!!w.blend && this.blendedDb === w.blend.db));
+  }
+
+  /** The strength of the sound this job holds now (dB): what was saved here, else what the job was made with. */
+  currentStrength() {
+    if (this.strengthDb != null) return this.strengthDb;
+    if (this.wants?.blend) return this.wants.blend.db;
+    return Number.isFinite(this.job?.options?.atten_lim_db) ? this.job.options.atten_lim_db : 100;
+  }
+
+  /** The two signals decoded, ready for the slider and for blending (a download for a job on our side). */
+  ensurePair({ signal } = {}) {
+    if (this.pair) return Promise.resolve(this.pair);
+    if (!this.pairLoad) {
+      this.set({ pairPhase: 'loading', pairProgress: 0, pairError: '' });
+      const run = this.pairParts
+        ? (async () => {
+          const ch = this.pairChannels;
+          return { full: await splitParts(this.pairParts.full, ch), input: await splitParts(this.pairParts.input, ch), plan: Array.from({ length: ch }, (_, i) => i) };
+        })()
+        : loadKeptPair(this.id, this.job.redo.preview, { signal, onProgress: (p) => this.set({ pairProgress: p }) });
+      this.pairLoad = run.then(
+        (pair) => { this.pair = pair; this.set({ pairPhase: 'ready', pairProgress: 1 }); return pair; },
+        (e) => { this.pairLoad = null; this.set({ pairPhase: 'error', pairError: e?.message || 'Couldn’t get the sound to try other strengths with.' }); throw e; },
+      );
+    }
+    return this.pairLoad;
+  }
+
+  /** Make the cleaned sound from the two signals at strength `db` (dB): free, on this device. It becomes the sound of this job here. */
+  async blendTo(db) {
+    const pair = await this.ensurePair();
+    const pcm = blendToPcm(pair.full, pair.input, db, pair.plan);
+    const wav = await buildWav(pcm, 16);
+    if (this.wavUrl) URL.revokeObjectURL(this.wavUrl);
+    this.pcm = pcm;
+    this.wav = wav;
+    this.wavUrl = URL.createObjectURL(wav);
+    this.blendedDb = db;
+    this.strengthDb = db;
+    this.set({ strengthDb: db });
+    return pcm;
+  }
 
   get inputName() { return this.file?.name || this.job?.displayName || this.job?.inputName || ''; }
 
@@ -140,6 +203,7 @@ export class Finish {
     if (w.subsHere && (this.failed.subs || !this.subs)) { w.subs = false; w.embed = false; }
     if (this.failed.sound && !w.soundHere) w.sound = false;
     if (this.failed.subs && !w.subsHere) { w.subs = false; w.embed = false; }
+    if (w.blend && !(this.sliderSource === 'server' || this.pcm)) delete w.blend; // the copies it came from are gone: the sound as the job made it
     if (!w.sound && w.embed) {
       w.format = 'mkv'; w.size = 'same';
       if (!w.name || FORMAT[formatOfName(w.name)]?.kind !== 'video') w.name = `${stem(this.inputName)}-subtitled.mkv`;
@@ -157,7 +221,7 @@ export class Finish {
 
   /** The finished video made here: is it part of what will be built? (it takes longer than a sound file) */
   willBuild(w = this.effective()) {
-    return (w.sound || w.embed) && !(FORMAT[w.format]?.kind === 'audio' && !w.soundHere && this.serverAudio && FORMAT[w.format].exts.includes(endingOf(this.serverAudio.name)));
+    return (w.sound || w.embed) && !(FORMAT[w.format]?.kind === 'audio' && !w.soundHere && !w.blend && this.serverAudio && FORMAT[w.format].exts.includes(endingOf(this.serverAudio.name)));
   }
 
   /* ---- subtitles ---- */
@@ -234,7 +298,7 @@ export class Finish {
     }
     const def = FORMAT[w.format];
     const video = def?.kind === 'video';
-    const direct = !video && !w.soundHere && this.serverAudio && def.exts.includes(endingOf(this.serverAudio.name));
+    const direct = !video && !w.soundHere && !w.blend && this.serverAudio && def.exts.includes(endingOf(this.serverAudio.name));
     return {
       name: cleanName(w.name) || this.serverAudio?.name || 'result', bytes: direct ? this.serverAudio.bytes : null, kind: 'media',
       label: video ? (w.embed ? 'Video with subtitles' : 'Video') : 'Cleaned audio',
@@ -258,7 +322,11 @@ export class Finish {
       const picture = video && info.hasVideo;
       const sound = {};
       if (w.sound) {
-        if (this.pcm && w.soundHere) {
+        if (w.blend && !w.soundHere && !this.usesPcm(w)) {
+          report(0.02);
+          await this.blendTo(w.blend.db); // after a reload: from the copies the job kept
+        }
+        if (this.usesPcm(w)) {
           sound.pcm = this.pcm; sound.wav = this.wav;
         } else {
           const o = this.serverAudio;

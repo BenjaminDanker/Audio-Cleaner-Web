@@ -12,6 +12,13 @@ clearly better (DeepFilterNet3 is better on lighter noise). "auto" measures the 
 
 Keeping it in one place means a file cleaned on the desktop sounds exactly
 like the same file cleaned on the website.
+
+Strength (the attenuation limit) is a blend, in the time domain, of the noise remover's full-strength output with the
+recording itself (`blend_strength`): the models always run at full strength, so that output can be kept and the
+strength, restoring the highs and leveling changed afterwards without running a model again (`redo_denoised`,
+`redo_rebuilt`, used by the server's "change and save again"). This is the same arithmetic libDF does in its STFT domain
+and DPDFNet does in the time domain (a * noisy + (1 - a) * enhanced, a = 10 ** (-dB / 20)); tests/test_blend.py checks it
+against the models' own limit.
 """
 from __future__ import annotations
 
@@ -52,6 +59,13 @@ def strength_for(noise_db: float) -> float:
     return next((db for below, db in STRENGTH_STEPS if noise_db < below), GENTLE_DB)
 
 
+def automatic_choices(noise_db: float) -> tuple[str, float]:
+    """What "automatic" means for the noise step, in one place: (the noise remover, "light" or "heavy"; the strength in dB) for a
+    recording with this noise figure. `clean_audio` (noise "auto", and atten_lim_db None) and `choose_noise_profile` both ask here, for
+    the file jobs of the server and for the desktop app, so the rules for automatic choices change by changing this function."""
+    return ("heavy" if noise_db < HEAVY_BELOW_DB else "light"), strength_for(noise_db)
+
+
 @dataclass
 class CleanOptions:
     # Maximum noise attenuation in dB; 100 = no limit. Lower keeps more ambience. None: the one that fits the recording
@@ -65,8 +79,9 @@ class CleanOptions:
     loudness_lufs: float | None = -16.0
     # Which noise remover: "light" (DeepFilterNet3), "heavy" (DPDFNet-8) or "auto" (measured per recording).
     noise: str = "auto"
-    # Regenerate the highs of band-limited recordings (phone calls, low-bitrate files) with AP-BWE; full-band
-    # recordings are never touched. Needs the models (bwe_model_dir).
+    # Regenerate the highs with AP-BWE (phone calls, low-bitrate files): whenever it is on, it runs; the generator is the one
+    # that fits the measured bandwidth (the widest one for a recording that already has its highs). Off: it never runs.
+    # Needs the models (bwe_model_dir).
     restore_highs: bool = True
     # Rebuild the voice with Sidon (noise, room echo and missing highs in one; slow; the strength setting
     # does not apply). Needs the models (restore_model_dir).
@@ -204,7 +219,7 @@ def choose_noise_profile(x: np.ndarray, lib_path: str | Path, model_path: str | 
     """"light" or "heavy" for this recording ("auto" measures it: noise_figure_db; `keep` as there)."""
     if wanted in ("light", "heavy"):
         return wanted
-    return "heavy" if noise_figure_db(x, lib_path, model_path, cancel, keep) < HEAVY_BELOW_DB else "light"
+    return automatic_choices(noise_figure_db(x, lib_path, model_path, cancel, keep))[0]
 
 
 def done_end(spans: list[tuple[int, int]], a: int) -> slice:
@@ -215,6 +230,104 @@ def done_end(spans: list[tuple[int, int]], a: int) -> slice:
             return slice(prev, a)
         prev = s1
     return slice(a, a)
+
+
+# Called by clean_audio with what a later change of the choices can start from: ("denoised", y, todo) after the noise
+# removal at full strength (before strength, highs and leveling; y holds the channels in `todo`, the others are filled in
+# from them afterwards), ("rebuilt", y, None) after the voice rebuild (before leveling).
+Keep = Callable[[str, np.ndarray, "list[int] | None"], None]
+BLEND_BLOCK = SAMPLE_RATE * 30
+
+
+def strength_mix(atten_lim_db: float) -> float:
+    """The share `a` of the recording that stays in the result for an attenuation limit in dB (0 = nothing is blended:
+    100 dB or more, the full-strength output). The same arithmetic as libDF (tract.rs) and DPDFNet."""
+    lim = abs(float(atten_lim_db))
+    return 0.0 if lim >= 100.0 else min(float(10.0 ** (-lim / 20.0)), 1.0)
+
+
+def blend_strength(y: np.ndarray, x: np.ndarray, atten_lim_db: float, channels: list[int] | None = None) -> np.ndarray:
+    """Limit the noise removal to `atten_lim_db`, in place: y = (1 - a) * y + a * x in the given channels (default all),
+    where y is the full-strength output and x the recording it was made from (same length and alignment), a from
+    strength_mix. Read block by block, so memory-mapped arrays are never loaded whole."""
+    a = strength_mix(atten_lim_db)
+    if a <= 0.0:
+        return y
+    for ch in (range(y.shape[1]) if channels is None else channels):
+        for s in range(0, len(y), BLEND_BLOCK):
+            e = min(len(y), s + BLEND_BLOCK)
+            y[s:e, ch] = ((1.0 - a) * y[s:e, ch].astype(np.float64) + a * x[s:e, ch].astype(np.float64)).astype(np.float32)
+    return y
+
+
+def _after_noise(
+    x: np.ndarray, y: np.ndarray, plan: list[int | None], todo: list[int], *, atten: float, highs: str | None,
+    opts: CleanOptions, bwe_model_dir, threads: int, cancel, progress: Progress | None, share: float,
+) -> np.ndarray:
+    """Everything after the noise removal, from y (its full-strength output in the channels `todo`): the strength, the
+    highs, the channels that copy another, Leveling. clean_audio and redo_denoised both end here."""
+    blend_strength(y, x, atten, todo)
+    if highs:
+        for ch in todo:
+            bwe.extend(
+                y[:, ch:ch + 1], bwe_model_dir, threads=threads, cancel=cancel, out=y[:, ch:ch + 1], model=highs,
+                device=opts.device, progress=(lambda f: progress(share + (0.95 - share) * f)) if progress else None,
+            )
+    for c, src in enumerate(plan):
+        if src is None:
+            y[:, c] = 0.0
+        elif src != c:
+            y[:, c] = y[:, src]  # before the leveling: its loudness is measured on both channels, as before
+    if opts.leveling:
+        y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
+    if progress:
+        progress(1.0)
+    return y
+
+
+def highs_model(x: np.ndarray, opts: CleanOptions, bwe_model_dir) -> str | None:
+    """The generator that restores the highs, chosen by the bandwidth measured on the original (bwe.choose_model: a recording
+    that already has its highs gets the widest one), None when the option is off or the models are not there. When it is
+    on, it always runs."""
+    if opts.restore_highs and bwe_model_dir is not None and bwe.available(bwe_model_dir):
+        return bwe.choose_model(bwe.effective_bandwidth(x))
+    return None
+
+
+def redo_denoised(
+    x: np.ndarray, full: np.ndarray, plan: list[int | None], opts: CleanOptions, *, threads: int = 2,
+    progress: Progress | None = None, cancel: threading.Event | None = None, bwe_model_dir=None, report: dict | None = None,
+) -> np.ndarray:
+    """The Studio-clean result for new choices (strength, highs, leveling, loudness) from a kept full-strength noise
+    removal: no model but AP-BWE runs. `full` is shaped like x with the channels `plan` (channel_plan(x), as kept) names
+    filled in, and is changed in place into the result."""
+    x = np.asarray(x, dtype=np.float32)
+    if x.ndim == 1:
+        x = x[:, None]
+    atten = opts.atten_lim_db if opts.atten_lim_db is not None else 100.0
+    highs = highs_model(x, opts, bwe_model_dir)
+    if report is not None:
+        report.update(noise="kept", highs=highs, atten_lim_db=atten)
+    todo = sorted({c for c in plan if c is not None})
+    return _after_noise(x, full, plan, todo, atten=atten, highs=highs, opts=opts, bwe_model_dir=bwe_model_dir,
+                        threads=threads, cancel=cancel, progress=progress, share=0.5 if highs else 0.95)
+
+
+def redo_rebuilt(
+    x: np.ndarray, rebuilt: np.ndarray, opts: CleanOptions, *, progress: Progress | None = None, report: dict | None = None,
+) -> np.ndarray:
+    """The Voice-rebuild result for new leveling choices from the kept rebuilt voice (changed in place)."""
+    x = np.asarray(x, dtype=np.float32)
+    if x.ndim == 1:
+        x = x[:, None]
+    if report is not None:
+        report.update(noise="rebuilt", highs=None)
+    y = rebuilt[:, None] if rebuilt.ndim == 1 else rebuilt
+    if opts.leveling:
+        y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
+    if progress:
+        progress(1.0)
+    return y
 
 
 def clean_audio(
@@ -232,6 +345,7 @@ def clean_audio(
     bwe_model_dir: str | Path | None = None,
     restore_model_dir: str | Path | None = None,
     measured: Measured | None = None,
+    keep: Keep | None = None,
 ) -> np.ndarray:
     """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
 
@@ -244,7 +358,7 @@ def clean_audio(
     Sidon's ONNX files, required for restore_voice. `report`, when given,
     gets {"noise": "light"|"heavy"|"rebuilt", "highs": None|"8k".."24k"}, plus (unless
     rebuilt) "atten_lim_db" (the strength used) and, when the noise was measured, "noise_db" (noise_figure_db).
-    `measured`: what choose_noise_profile kept (its `keep`), when the caller measured the recording itself."""
+    `measured`: what choose_noise_profile kept (its `keep`), when the caller measured the recording itself. `keep`: see Keep."""
     opts = opts or CleanOptions()
     x = np.asarray(x, dtype=np.float32)
     if x.ndim == 1:
@@ -260,16 +374,24 @@ def clean_audio(
             progress=(lambda f: progress(0.95 * f)) if progress else None,
         )
         y = y[:, None] if y.ndim == 1 else y
+        if keep is not None:
+            keep("rebuilt", y, None)
         if opts.leveling:
             y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
         if progress:
             progress(1.0)
         return y
-    if not opts.denoise:  # Leveling on its own: the recording as it is, evened out and set to the loudness
+    if not opts.denoise:  # no noise removal: the recording as it is, with its highs restored and/or evened out and set to the loudness
+        highs = highs_model(x, opts, bwe_model_dir)
         if report is not None:
-            report.update(noise="none", highs=None)
+            report.update(noise="none", highs=highs)
         y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
         y[:] = x
+        if highs:  # the same last steps as after a noise removal, from the recording itself (nothing to blend)
+            plan = channel_plan(x)
+            todo = sorted({c for c in plan if c is not None})
+            return _after_noise(x, y, plan, todo, atten=100.0, highs=highs, opts=opts, bwe_model_dir=bwe_model_dir, threads=threads,
+                                cancel=cancel, progress=progress, share=0.0)
         if opts.leveling:
             y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
         if progress:
@@ -281,12 +403,11 @@ def clean_audio(
         kept: dict = {}
         figure = noise_figure_db(x, lib_path, model_path, cancel, kept)
         measured = kept.get("measured", measured)
-    profile = opts.noise if opts.noise != "auto" else ("heavy" if figure < HEAVY_BELOW_DB else "light")
-    atten = opts.atten_lim_db if opts.atten_lim_db is not None else strength_for(figure)
+    auto_profile, auto_strength = automatic_choices(figure) if figure is not None else (None, None)
+    profile = opts.noise if opts.noise != "auto" else auto_profile
+    atten = opts.atten_lim_db if opts.atten_lim_db is not None else auto_strength
     heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
-    highs = None  # the AP-BWE generator for a band-limited recording, measured on the original
-    if opts.restore_highs and bwe_model_dir is not None and bwe.available(bwe_model_dir):
-        highs = bwe.pick_model(bwe.effective_bandwidth(x))
+    highs = highs_model(x, opts, bwe_model_dir)
     if report is not None:
         report["noise"] = profile
         report["highs"] = highs
@@ -303,9 +424,9 @@ def clean_audio(
         report["channels_cleaned"] = len(todo)
     for k, ch in enumerate(todo):
         spans = sound_spans(x[:, ch])
-        if (measured is not None and profile == "light" and atten == 100.0 and spans == [(0, len(x))]
+        if (measured is not None and profile == "light" and spans == [(0, len(x))]
                 and len(measured.mono) == len(x) and np.array_equal(measured.mono, x[:, ch])):
-            y[:, ch] = measured.light  # the measurement already cleaned exactly this at full strength
+            y[:, ch] = measured.light  # the measurement already cleaned exactly this at full strength (any strength is a blend of it)
             if progress:
                 progress(share * (k + 1) / len(todo))
             continue
@@ -320,12 +441,12 @@ def clean_audio(
                 y[done_end(spans, a), ch] = 0.0  # the silence before this span
             if profile == "heavy":
                 dpdfnet.denoise_array(
-                    x[a:b, ch], atten_lim_db=atten, threads=threads, progress=prog, cancel=cancel,
+                    x[a:b, ch], atten_lim_db=100.0, threads=threads, progress=prog, cancel=cancel,
                     out=y[a:b, ch], model_path=heavy, device=opts.device,
                 )
             else:
                 dfn.denoise_array(
-                    x[a:b, ch], lib_path, model_path, atten_lim_db=atten, threads=threads, progress=prog,
+                    x[a:b, ch], lib_path, model_path, atten_lim_db=100.0, threads=threads, progress=prog,
                     cancel=cancel, out=y[a:b, ch],
                 )
             done += b - a
@@ -333,22 +454,10 @@ def clean_audio(
             y[spans[-1][1]:, ch] = 0.0
     if cancel is not None and cancel.is_set():
         raise Cancelled()
-    if highs:
-        for ch in todo:
-            bwe.extend(
-                y[:, ch:ch + 1], bwe_model_dir, threads=threads, cancel=cancel, out=y[:, ch:ch + 1], model=highs,
-                device=opts.device, progress=(lambda f: progress(share + (0.95 - share) * f)) if progress else None,
-            )
-    for c, src in enumerate(plan):
-        if src is None:
-            y[:, c] = 0.0
-        elif src != c:
-            y[:, c] = y[:, src]  # before the leveling: its loudness is measured on both channels, as before
-    if opts.leveling:
-        y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
-    if progress:
-        progress(1.0)
-    return y
+    if keep is not None:
+        keep("denoised", y, todo)
+    return _after_noise(x, y, plan, todo, atten=atten, highs=highs, opts=opts, bwe_model_dir=bwe_model_dir, threads=threads,
+                        cancel=cancel, progress=progress, share=share)
 
 
 def decode_for_clean(
@@ -442,7 +551,8 @@ def to_speech_16k(x: np.ndarray) -> np.ndarray:
 
 
 __all__ = [
-    "SAMPLE_RATE", "CleanOptions", "Cancelled", "clean_audio", "decode_for_clean", "output_buffer", "as_output",
+    "SAMPLE_RATE", "CleanOptions", "Cancelled", "clean_audio", "automatic_choices", "blend_strength", "strength_mix", "redo_denoised", "redo_rebuilt",
+    "channel_plan", "highs_model", "decode_for_clean", "output_buffer", "as_output",
     "remove_echo", "to_speech_16k",
 ]
 

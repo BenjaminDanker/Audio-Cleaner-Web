@@ -95,7 +95,7 @@ await check('contact, signed in and from a failed job: the account address is fi
   await page.route('**/api/jobs', (r) => (r.request().method() === 'GET'
     ? r.fulfill({ status: 200, json: { jobs: [{ id: jid, kind: 'denoise', tier: 'standard', free: false, status: 'failed', stage: null, progress: 0, error: 'We couldn’t read that file. You were not charged.', inputName: 'talk.wav', label: 'Denoising', durationSeconds: 60, estCostMicros: 0, costMicros: 0, options: {}, notice: null, outputs: [], createdAt: Math.floor(Date.now() / 1000), finishedAt: Math.floor(Date.now() / 1000), expiresAt: null }] } })
     : r.continue()));
-  await page.goto(`${BASE}/app`);
+  await page.goto(`${BASE}/app/job/${jid}`); // the failed job's own page has the link (the list on /app has only a short row)
   const link = page.getByTestId('job-contact');
   await link.waitFor({ timeout: 15000 });
   if (!(await link.getAttribute('href')).endsWith(`/contact?topic=job&job=${jid}`)) throw new Error(await link.getAttribute('href'));

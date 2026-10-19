@@ -106,7 +106,7 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     assert job["notice"] is None
     assert _speaker_vs_voice_db(with_echo_removal, tmp_path) < _speaker_vs_voice_db(without, tmp_path) - 10
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job["id"]).iterdir()}
-    assert left == {"rec-cleaned.wav"}  # scratch files are gone
+    assert left == {"rec-cleaned.wav", "input.mkv", "kept-noise.flac", "kept-input.flac"}  # scratch files are gone; the upload and the kept copies stay
 
 
 @NATIVE

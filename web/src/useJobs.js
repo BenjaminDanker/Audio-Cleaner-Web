@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
+import { noteJobs } from './eta.js';
 import { ACTIVE } from './jobs.js';
 
 const POLL_MS = 1500; // while a job is uploading or running (its progress moves)
@@ -23,10 +24,12 @@ const tabHidden = () => typeof document !== 'undefined' && document.hidden;
  * uploading or running, every 5 s while they only wait (queued, or in the cloud stage), every 15 s while the tab is in the
  * background, and once at once when the tab is shown again. If the server asks us to wait
  * (HTTP 429, Retry-After) or cannot be reached, polling slows down instead of hammering it, and a short note says so. A
- * sign-in that ran out (401) takes the visitor to the sign-in page like every other call.
+ * sign-in that ran out (401) takes the visitor to the sign-in page like every other call. `limits`: what the server says about
+ * jobs ({maxActiveJobs, retentionSeconds}); every fetch is also a reading for the time-left estimate (eta.js).
  */
 export function useJobs({ onFinished } = {}) {
   const [jobs, setJobs] = useState(null);
+  const [limits, setLimits] = useState(null);
   const [error, setError] = useState('');
   const jobsRef = useRef(null);
   jobsRef.current = jobs;
@@ -36,7 +39,9 @@ export function useJobs({ onFinished } = {}) {
   const load = useCallback(async () => {
     try {
       const r = await api('jobs');
+      noteJobs(r.jobs);
       setJobs(r.jobs);
+      if (r.limits) setLimits(r.limits);
       setError('');
     } catch (e) {
       setError(e.detail || 'Could not load your jobs.');
@@ -66,7 +71,9 @@ export function useJobs({ onFinished } = {}) {
         const ended = before.some((j) => ACTIVE.has(j.status) && now.has(j.id) && !ACTIVE.has(now.get(j.id).status));
         failures = 0;
         wait = pollDelay(r.jobs, tabHidden());
+        noteJobs(r.jobs);
         setJobs(r.jobs);
+        if (r.limits) setLimits(r.limits);
         setError('');
         if (ended) finished.current?.();
       } catch (e) {
@@ -96,5 +103,5 @@ export function useJobs({ onFinished } = {}) {
     return () => { stop = true; clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [hasActive]);
 
-  return { jobs, error, reload: load };
+  return { jobs, limits, error, reload: load };
 }

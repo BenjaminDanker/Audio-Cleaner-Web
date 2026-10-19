@@ -54,8 +54,8 @@ def test_parallel_creates_cannot_pass_the_active_job_cap():
 
     with ThreadPoolExecutor(16) as pool:
         results = list(pool.map(one, range(16)))
-    assert sum(isinstance(r, str) for r in results) == jobs.MAX_ACTIVE_JOBS_PER_USER
-    assert db.one("SELECT COUNT(*) n FROM holds WHERE status = 'active'")["n"] == jobs.MAX_ACTIVE_JOBS_PER_USER
+    assert sum(isinstance(r, str) for r in results) == get_settings().max_active_jobs
+    assert db.one("SELECT COUNT(*) n FROM holds WHERE status = 'active'")["n"] == get_settings().max_active_jobs
 
 
 def test_one_account_cannot_reserve_more_than_8_gb_of_uploads_and_a_size_must_fit_its_length(roomy_disk):

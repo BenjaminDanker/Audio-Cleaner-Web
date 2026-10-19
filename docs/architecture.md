@@ -60,14 +60,36 @@
 4. **noise removal** on the echo-free audio, per channel: DeepFilterNet3 (light noise) or DPDFNet-8 (heavy noise),
    chosen per file from the measured speech-to-background gap, or forced by the `noise` option. With the
    voice-rebuild tier, Sidon replaces steps 4 and 5.
-5. **restoring the highs** of band-limited recordings (phone calls, low bitrates) with AP-BWE; full-band files are
-   never touched.
+5. **restoring the highs** (only when the `restore_highs` option is on; its own price) with AP-BWE: the generator is chosen by the
+   measured bandwidth (phone calls, low bitrates) and a recording that already has its highs gets the widest one; when on it always
+   runs. It also runs on its own (noise tier "off"). Not with the voice rebuild, which makes its own highs.
 6. **clarity chain**: level match, high-pass, compressor, loudness, limiter.
 7. **write**: audio file, or video with the cleaned sound as the first track (the file's other audio tracks and its
    own subtitles are copied across where the container can hold them) and soft subtitles.
 
 A worker that is stopped (restart, deploy) puts its job back in the queue with the upload kept; nothing fails.
 The estimates shown to people and the slow-job monitor follow the work a job does (`jobs.SPEED`).
+
+## Changing a finished job
+
+Strength is a blend: the noise models always run at full strength, and the result is `(1 - a) * full + a * input` with
+`a = 10^(-dB/20)` (`pipeline.blend_strength`; 100 dB or more: no blend). That is what libDF does itself in the STFT domain after its
+post filter and what DPDFNet does in the time domain; `common/tests/test_blend.py` (and `server/tests/test_rerun_worker.py`, end to end) check it against
+the models' own attenuation limit (SNR of the difference above 100 dB on every path). So the output of the noise step can be kept and
+everything after it redone without a model:
+
+```
+decode -> [echo removal] -> noise removal (full strength) --keep--> blend (strength) -> restore highs -> channel copies -> Leveling -> encode
+                          \-> Voice rebuild ------------keep--------------------------------------------> Leveling -> encode
+```
+
+A job keeps (`jobs.KEPT_NOISE`, `KEPT_REBUILT`, `KEPT_INPUT`, `segments*.json`; `acw_common.kept` writes them as 24-bit FLAC, exact to one 24-bit step, 1.2e-7
+of full scale) next to its upload, in its folder. `rerun.plan_rerun` decides, per set of new choices, what runs: `denoised` (from the kept
+noise removal), `rebuilt` (Leveling on the kept voice), `full` (a model from the upload), `reuse` (the result is already right) or `none`;
+transcription runs only when its tier or language changed. The re-run is an ordinary queued job (`params.rerun`) with its own hold, priced
+only for the paid steps that run (`pricing.rerun_rates`), its files hard-linked from the source (no disk copy) and `source_job_id` /
+`root_job_id` columns linking the chain. The web page can also blend in the browser (`web/src/media/blend.js`): the strength slider uses the
+kept noise removal and the kept input, and saving a strength with nothing after the noise removal is done on the device, free.
 
 ## Live: the order
 
@@ -90,8 +112,12 @@ shared too: `native/deepfilter/build.sh` produces the server `.so`, the desktop
 
 ## Data flow and retention
 
-- Uploads land in `data/jobs/<id>/input.*` (0600), are deleted as soon as the job
-  finishes or fails; outputs are deleted after `ACW_JOB_OUTPUT_TTL_HOURS` (24 h).
+- Uploads land in `data/jobs/<id>/input.*` (0600) and stay there with the job's other files: the copies kept for changing it
+  again (the noise removal at full strength, the rebuilt voice, the recording as the remover heard it, the transcript) and its
+  results. They are deleted together 2 hours after the job finishes (`ACW_JOB_RETENTION_MINUTES`, `jobs.sweep` every 30 to 60
+  seconds), or at once with "Delete now" (which also takes every job made from the same upload); the files of a failed or
+  canceled job go at once. Changing a finished job (`acw/rerun.py`) is a new job that hard-links what it needs from the old
+  folder, runs only the steps whose inputs changed and never outlives the job it came from (section "Changing a finished job" below).
 - Live audio is never written to disk. Captions are not stored.
 - The browser tier sends nothing to the server.
 - The database keeps accounts, ledger, payments, job metadata and an audit log. File names are removed

@@ -25,6 +25,12 @@ class Rate:
 _RATE_LIST = [
     # File processing
     Rate("denoise", "standard", "Denoising", 9_000),
+    # Restore highs: brings back the high sounds of a recording that lost them (phone calls, voice messages, small files), with
+    # Denoising or on its own ("off" noise tier); never with Voice rebuild, which makes its own highs. It runs whenever it is on.
+    # Measured on this machine (2026-10-19, 60 s of speech, one thread, process CPU time): the four generators take 0.77 to 0.78
+    # CPU seconds per second of audio (0.23 s of wall time on four threads), DeepFilterNet3 0.099 (0.10 on four): 7.9 times
+    # Denoising's CPU. At Denoising's margin (0.54 USD an hour) that is 4.25 USD an hour; 4.20 is the clean number (0.07 a minute).
+    Rate("highs", "standard", "Restore highs", 70_000),
     # The voice is rebuilt (also removes room echo), on the GPU only, one job at a time.
     Rate("denoise", "rebuild", "Voice rebuild", 30_000),
     # Leveling: evens out the voice and sets the loudness; with Denoising or Voice rebuild, or on its own ("off" noise tier).
@@ -100,12 +106,15 @@ NO_DENOISE = "off"
 
 
 def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, translate_languages: int = 0,
-              leveling: bool = False) -> dict[str, int]:
+              leveling: bool = False, highs: bool = False) -> dict[str, int]:
     """Micros per minute of each part of a job at today's prices. Stored with the job, so a price
-    change never applies to a job that was already created. `translate` is per language."""
+    change never applies to a job that was already created. `translate` is per language. `highs`: Restore highs is on
+    (never with Voice rebuild, which makes its own)."""
     out: dict[str, int] = {}
     if kind in ("denoise", "denoise_transcribe") and denoise_tier and denoise_tier != NO_DENOISE:
         out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
+    if kind in ("denoise", "denoise_transcribe") and highs and denoise_tier != "rebuild":
+        out["highs"] = rate("highs", "standard").micros_per_minute
     if kind in ("denoise", "denoise_transcribe") and leveling:
         out["leveling"] = rate("leveling", "standard").micros_per_minute
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
@@ -117,15 +126,18 @@ def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, 
 
 def job_cost_micros(
     kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float, rates: dict[str, int] | None = None,
-    translate_languages: int = 0, leveling: bool = False,
+    translate_languages: int = 0, leveling: bool = False, highs: bool = False,
 ) -> int:
     """`rates` (from job_rates) pins the prices; without it the current price list applies. `translate_languages`:
-    how many translations are charged (asked for when estimating, made when the job is done); `leveling`: whether Leveling
-    is (a job's charge: "leveling" in its pinned rates, so a job made before Leveling had a price never pays for it)."""
+    how many translations are charged (asked for when estimating, made when the job is done); `leveling`, `highs`: whether
+    Leveling / Restore highs is part of it (a job's charge: "leveling" / "highs" in its pinned rates, so a job made before
+    they had a price never pays for them)."""
     rates = rates or {}
     total = 0
     if kind in ("denoise", "denoise_transcribe") and denoise_tier and denoise_tier != NO_DENOISE:
         total += cost_micros("denoise", denoise_tier, seconds, rates.get("denoise"))
+    if kind in ("denoise", "denoise_transcribe") and highs and denoise_tier != "rebuild":
+        total += cost_micros("highs", "standard", seconds, rates.get("highs"))
     if kind in ("denoise", "denoise_transcribe") and leveling:
         total += cost_micros("leveling", "standard", seconds, rates.get("leveling"))
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
@@ -133,6 +145,36 @@ def job_cost_micros(
         if translate_languages:
             total += translate_languages * cost_micros("transcribe_translate", "standard", seconds, rates.get("translate"))
     return max(total, MIN_JOB_CHARGE_MICROS) if total else 0
+
+
+RERUN_ITEMS = ("denoise", "highs", "leveling", "transcribe", "translate")
+
+
+def rerun_rates(denoise_tier: str | None, transcribe_tier: str | None, paid: list[str]) -> dict[str, int]:
+    """Micros per minute of each step a re-run does again (and so pays for), at today's prices; stored with the job. `paid`:
+    the steps from RERUN_ITEMS that run. Steps that don't run (the strength blend and encoding never have a price) are not here."""
+    out: dict[str, int] = {}
+    if "denoise" in paid and denoise_tier and denoise_tier != NO_DENOISE:
+        out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
+    if "highs" in paid:
+        out["highs"] = rate("highs", "standard").micros_per_minute
+    if "leveling" in paid:
+        out["leveling"] = rate("leveling", "standard").micros_per_minute
+    if "transcribe" in paid and transcribe_tier:
+        out["transcribe"] = rate("transcribe", transcribe_tier).micros_per_minute
+    if "translate" in paid:
+        out["translate"] = rate("transcribe_translate", "standard").micros_per_minute
+    return out
+
+
+def rerun_cost_micros(rates: dict[str, int], seconds: float, translate_languages: int = 0) -> int:
+    """What a re-run costs: each step it does again, per second of audio rounded up, at the prices pinned with the job."""
+    secs = max(0, math.ceil(seconds))
+    per = lambda micros: math.ceil(micros * secs / 60)  # noqa: E731
+    total = sum(per(rates[k]) for k in ("denoise", "highs", "leveling", "transcribe") if k in rates)
+    if "translate" in rates:
+        total += translate_languages * per(rates["translate"])
+    return total
 
 
 def public_price_list() -> list[dict]:

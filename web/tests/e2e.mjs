@@ -31,7 +31,15 @@ if (want('basic')) {
     await page.goto(`${BASE}/`);
     await page.waitForSelector('table tbody tr');
     const txt = await page.locator('table').innerText();
-    for (const s of ['Denoising', 'Leveling', 'Voice rebuild', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    for (const s of ['Denoising', 'Restore highs', 'Leveling', 'Voice rebuild', 'Files', 'Live streaming']) if (!txt.includes(s)) throw new Error('missing ' + s);
+    // Restore highs has a row of its own: 0.07 a minute, 4.20 an hour, in the files group between Denoising and Leveling (the server's order)
+    const highs = pricing.rates.find((r) => r.product === 'highs' && r.tier === 'standard');
+    if (!highs || highs.usdPerMinute !== 0.07 || highs.usdPerHour !== 4.2) throw new Error('the price list has no Restore highs at 0.07 a minute: ' + JSON.stringify(highs));
+    const rows = (await page.locator('table tbody tr').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+    const row = rows.find((t) => t.startsWith('Restore highs'));
+    if (!row || !row.includes('$0.07 / min') || !row.includes('$4.20 / hour') || !/adds them back and keeps the voice exactly as recorded/.test(row)) throw new Error('Restore highs row: ' + row);
+    const at = (name) => rows.findIndex((t) => t.startsWith(name));
+    if (!(at('Denoising') < at('Restore highs') && at('Restore highs') < at('Leveling'))) throw new Error('row order: ' + rows.map((r) => r.slice(0, 20)).join(' | '));
     const missing = pricing.rates.filter((r) => r.available && r.product !== 'stream_denoise' && !txt.includes(`$${r.usdPerHour.toFixed(2)} / hour`) && !txt.includes(`$${(r.usdPerMinute).toFixed(3)} / min`));
     if (missing.length) throw new Error('prices not on the page: ' + missing.map((r) => `${r.product}/${r.tier}`).join(', '));
     if (/Available|Coming soon/.test(txt)) throw new Error('status column is back');
@@ -140,6 +148,7 @@ if (want('studio')) {
     const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'), page.getByTestId('start').click()]);
     const body = req.postDataJSON();
     if (body.kind !== 'denoise' || body.denoiseTier !== 'standard' || body.options.leveling !== true || body.options.audio_format !== 'flac') throw new Error('job sent: ' + JSON.stringify(body));
+    await page.waitForURL(/\/app\/job\/[0-9a-f]{32}$/, { timeout: 90000 }); // Start opens the job's own page
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
     const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
     const status = await card.getAttribute('data-status');
@@ -153,7 +162,11 @@ if (want('studio')) {
     if ((await card.getByTestId('download-again').count()) !== 1) throw new Error('want exactly one Download again button');
     const [again] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download-again').click()]);
     if (again.suggestedFilename() !== dl.suggestedFilename()) throw new Error('again: ' + again.suggestedFilename());
+    // the balance is on the Cleanup page, not on the job's page: "Your jobs" goes there, and the finished job is one of its rows
+    await page.getByTestId('all-jobs').click();
+    await page.waitForURL(/\/app$/);
     await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent !== '$5.00', null, { timeout: 15000 });
+    await page.locator('[data-testid=job-row][data-status=done]', { hasText: 'noisy.' }).first().waitFor({ timeout: 15000 }).catch(() => { throw new Error('the finished job is not a row on the Cleanup page'); });
     return `${est.split('\n')[0]}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;
   });
 }

@@ -69,6 +69,11 @@ if (want('jobs')) {
     });
     await page.goto(`${BASE}/app`);
     await page.getByTestId('available').waitFor();
+    // the list on /app holds a short row with no Delete button: the job's own page has it
+    await page.getByTestId('job-row').waitFor();
+    if (await page.getByRole('button', { name: 'Delete now' }).count()) throw new Error('a Delete button on the list');
+    await page.getByTestId('job-open').click();
+    await page.waitForURL(/\/app\/job\/d1$/);
     await page.getByRole('button', { name: 'Delete now' }).click();
     await page.getByTestId('delete-confirm').waitFor();
     if (deletes) throw new Error('deleted without asking');
@@ -78,8 +83,9 @@ if (want('jobs')) {
     await page.getByRole('button', { name: 'Yes, delete' }).click();
     for (let i = 0; i < 20 && deletes === 0; i++) await page.waitForTimeout(100);
     if (deletes !== 1) throw new Error('deletes: ' + deletes);
+    await page.waitForURL(/\/app$/, { timeout: 10000 }); // after the delete the visitor is back on the Cleanup page
     await page.unroute(/\/api\/jobs(\/d1)?$/);
-    return 'asked first, kept on "Keep them", deleted on "Yes, delete"';
+    return 'asked first, kept on "Keep them", deleted on "Yes, delete", back on /app';
   });
   // A job the server lists after a reload (this browser has no file or sound of it): the card lists what it made, with one
   // Download again, which brings exactly what was asked for; Change and save again can still change the subtitle formats.
@@ -108,7 +114,7 @@ if (want('jobs')) {
     const j = stubJob('d2', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']);
     await withJobs([j], 'd2');
     try {
-      await page.goto(`${BASE}/app`);
+      await page.goto(`${BASE}/app/job/d2`);
       const card = page.getByTestId('job').first();
       await card.getByTestId('download-again').waitFor();
       const rows = (await card.getByTestId('made-file').allInnerTexts()).map((t) => t.replace(/\s+/g, ' '));
@@ -128,7 +134,7 @@ if (want('jobs')) {
   await check('what was asked for decides what is downloaded: only the TXT and the sound were ticked (the server also kept a VTT for the video), so only those two come down; Change and save again adds the SRT', async () => {
     const j = stubJob('d3', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']);
     await withJobs([j], 'd3');
-    await page.goto(`${BASE}/app`);
+    await page.goto(`${BASE}/app/job/d3`);
     await page.evaluate(() => localStorage.setItem('acw.wants.d3', JSON.stringify({
       sound: true, format: 'flac', name: 'noisy-cleaned.flac', size: 'same', subs: true, caps: { srt: false, vtt: false, txt: true }, embed: false, soundHere: false, subsHere: false,
     })));
