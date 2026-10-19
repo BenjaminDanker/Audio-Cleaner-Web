@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QFileDialog
 from audio_cleaner_desktop import resources
 from audio_cleaner_desktop.gui.main_window import MainWindow
 from audio_cleaner_desktop.gui.preferences import Preferences
-from audio_cleaner_desktop.gui.settings_panel import SettingsPanel
+from audio_cleaner_desktop.gui.settings_panel import InfoButton, SettingsPanel
 from audio_cleaner_desktop.gui.theme import ThemeWatcher
 
 
@@ -172,5 +172,28 @@ def test_automatic_best_settings_choose_for_each_file_while_on_and_keep_the_hand
     try:
         assert not panel._auto.isChecked() and prefs.auto_settings is False
         assert panel._strength.value() == "strong"
+    finally:
+        panel.deleteLater()
+
+
+def test_the_settings_say_what_the_voice_is_rebuilt_for(qapp, tmp_path):
+    """The Rebuild the voice tick, the Extra cleanup help and the Automatic best settings help name the same causes the
+    automatic choice rebuilds for (echo, a muffled voice, phone-quality or damaged sound, distortion from recording too loud)."""
+    panel = SettingsPanel(Preferences(QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat)))
+    try:
+        tip = " ".join(panel._rebuild.toolTip().split())
+        assert tip.startswith("For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud.")
+        assert "It takes several times longer" in tip and "dull sound" not in tip
+        helps = [" ".join(b._text.split()) for b in panel.findChildren(InfoButton)]
+        auto = next(t for t in helps if t.startswith("Each file is listened to"))
+        assert ("Rebuild the voice: when it sounds echoey, muffled, damaged or like a phone call, or distorts from being recorded too loud "
+                "(needs its model, downloaded once)") in auto
+        assert "Missing highs: brought back when they are missing and the voice isn\u2019t rebuilt" in auto  # a phone call is rebuilt instead
+        assert "(phone calls, small files)" not in auto
+        extra = next(t for t in helps if t.startswith("Restore missing highs"))
+        assert ("Rebuild the voice: instead of filtering the noise out, Audio Cleaner rebuilds the whole voice. Use it for a recording made "
+                "in an echoey room, a muffled voice, phone-quality or damaged sound (voice messages, very small files) or distortion from "
+                "recording too loud.") in extra
+        assert "also removes room echo and brings back dull sound" not in extra
     finally:
         panel.deleteLater()

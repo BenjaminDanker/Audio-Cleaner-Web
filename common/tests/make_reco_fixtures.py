@@ -7,7 +7,9 @@ or the trees change:
 
     python common/tests/make_reco_fixtures.py [measurements.jsonl ...]
 
-The jsonl files are lines of Analyser.result() (web/tests/reco-cli.mjs prints them), the real part of the second fixture."""
+The jsonl files are lines of Analyser.result() (web/tests/reco-cli.mjs prints them), the real part of the second fixture; given
+none, the real rows of the fixture already there are kept (and decided again by the website's code as it is now). The other rows
+are made up: random ones across the ranges, and "edge" ones on both sides of every threshold of the decision."""
 from __future__ import annotations
 
 import json
@@ -31,11 +33,17 @@ import { readFileSync } from 'node:fs';
 import { modelDecision } from '%(web)s/src/reco-model.js';
 import { recommendForFile } from '%(web)s/src/recommend.js';
 const rows = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+// Why the voice is rebuilt: recommendForFile says every cause it heard, in this order, in its own sentence (src/recommend.js).
+const WHY = [['echoey', /^The voice sounds echoey/], ['muffled', /^The voice sounds muffled/], ['phone', /^It sounds like a phone call/],
+  ['distorted', /^The sound distorts/], ['unclear', /^The voice has lost some of its clarity/]];
+const whyOf = (r) => (r.rebuild ? WHY.filter(([, re]) => r.reasons.some((t) => re.test(t))).map(([k]) => k) : []);
 const out = rows.map((stats) => {
   const m = modelDecision(stats);
   const r = recommendForFile(stats, { hasAudio: true, duration: stats.seconds, channels: 1 });
+  const why = r ? whyOf(r) : [];
   return { model: { strength: m.strength, rebuild: m.rebuild, restoreHighs: m.restoreHighs, p: m.p },
-    reco: r && { strength: r.strength, rebuild: r.rebuild, restoreHighs: r.restoreHighs, heavy: r.heavy, noSpeech: r.noSpeech } };
+    reco: r && { strength: r.strength, rebuild: r.rebuild, restoreHighs: r.restoreHighs, heavy: r.heavy, noSpeech: r.noSpeech,
+      rebuildReason: why[0] ?? null, rebuildWhy: why } };
 });
 console.log(JSON.stringify(out));
 """
@@ -91,7 +99,22 @@ def random_stats(n: int, seed: int = 5) -> list[dict]:
     return rows
 
 
+def edge_stats() -> list[dict]:
+    """Measurements on both sides of every threshold the decision has of its own (src/recommend-room.js T): a phone call is a
+    bandwidth of 6600 Hz or lower, an echo a fall under 10.5 dB, a muffled voice a tilt of -19 dB or lower (not for a phone call),
+    distortion more than 0.002 clipped; and the tilt and the fall missing."""
+    base = {"seconds": 20.0, "noiseDb": 30.0, "floorDb": -60.0, "levelDb": -30.0, "peakDb": -26.0, "silentFraction": 0.05,
+            "speechFraction": 0.5, "bandDynDb": 20.0, "hasSpeech": True, "bandwidthHz": 24000.0, "tiltDb": -12.0, "dropDb": 30.0,
+            "clipFraction": 0.0, "peak": 0.7, "loudnessLufs": -22.0}
+    return [{**base, "bandwidthHz": bw, "clipFraction": clip, "dropDb": drop, "tiltDb": tilt}
+            for bw in (6599.9, 6600.0, 6600.1, 24000.0)
+            for clip in (0.0, 0.002, 0.0020001)
+            for drop in (None, 10.4999, 10.5, 30.0)
+            for tilt in (None, -19.0001, -19.0, -18.9999, -12.0)]
+
+
 def model_fixture(real_files: list[str]) -> list[dict]:
+    """Rows are {"kind": real | made-up | edge, "stats", "model", "reco"}."""
     real = []
     for f in real_files:
         for line in Path(f).read_text().splitlines():
@@ -101,9 +124,19 @@ def model_fixture(real_files: list[str]) -> list[dict]:
     rng = np.random.default_rng(3)
     if len(real) > 200:
         real = [real[i] for i in sorted(rng.choice(len(real), 200, replace=False))]
+    if not real_files:  # keep the real rows of the fixture there (before it had "kind", its last 300 rows were the made-up ones)
+        old_path = HERE / "fixtures" / "reco_model_js.json"
+        old = json.loads(old_path.read_text()) if old_path.is_file() else []
+        real = [{k: r["stats"].get(k) for k in FIELDS} for r in (old[:-300] if old and "kind" not in old[0] else
+                                                                 [r for r in old if r["kind"] == "real"])]
+    kinds = ["real"] * len(real)
     rows = real + random_stats(300)
+    kinds += ["made-up"] * 300
+    edges = edge_stats()
+    rows += edges
+    kinds += ["edge"] * len(edges)
     decided = js_decide(rows)
-    return [{"stats": s, **d} for s, d in zip(rows, decided)]
+    return [{"kind": k, "stats": s, **d} for k, s, d in zip(kinds, rows, decided)]
 
 
 if __name__ == "__main__":

@@ -123,6 +123,12 @@ def test_history_says_which_strength_was_picked():
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "muffled", "leveling": True, "loudness": "youtube"},
                              False) == "voice rebuilt (it sounded muffled), leveled (YouTube)"
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "unclear"}, False) == "voice rebuilt (it sounded unclear)"
+    # every reason is said in its own words ("it sounded phone" is not English), whatever was stored
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "phone"}, False) == "voice rebuilt (it sounded like a phone call)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "distorted"}, False) == "voice rebuilt (it sounded distorted)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "phone", "leveling": True, "loudness": "youtube"},
+                             False) == "voice rebuilt (it sounded like a phone call), leveled (YouTube)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "something new"}, False) == "voice rebuilt (it sounded something new)"
 
 
 def test_history_keeps_the_automatic_choices():

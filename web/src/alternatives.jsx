@@ -6,7 +6,7 @@ export const ALTERNATIVES = {
   browserDenoise: 'Just a little hum? Your editor’s or OBS’s own noise filter may be enough.',
   deviceCaptions: 'Only reading along yourself? Windows, Mac, Chrome, Android and iPhone have free Live Captions on your screen.',
   denoise: 'Light, steady noise from a phone recording? YouTube Create’s free Audio cleanup may be enough.',
-  rebuild: 'Only a bit noisy? Plain Denoising is enough; rebuilding is for muffled, thin or echoey voices.',
+  rebuild: 'Only a bit noisy? Plain Denoising is enough; rebuilding is for echoey, muffled, phone-quality or distorted voices.',
   browserSubs: 'English video for YouTube? Its free automatic captions are fine for a first pass.',
   standardSubs: 'Rough English transcript of a YouTube video? YouTube’s free automatic captions may be enough.',
   accurateSubs: 'Clear speech? Standard is plenty; Extra accurate is for accents, noise and names that must be right.',

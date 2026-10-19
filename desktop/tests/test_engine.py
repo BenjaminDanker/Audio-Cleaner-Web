@@ -305,11 +305,14 @@ def fake_clean(monkeypatch):
 
 
 MODEL_ROWS = json.loads((Path(__file__).resolve().parents[2] / "common" / "tests" / "fixtures" / "reco_model_js.json").read_text())
+# Why the voice is rebuilt, and how the notice says it after "it sounded ..." (reco_model.REBUILD_WORDS, written out here)
+REBUILD_REASONS = ["echoey", "muffled", "phone", "distorted", "unclear"]
+WORDS = {"echoey": "echoey", "muffled": "muffled", "phone": "like a phone call", "distorted": "distorted", "unclear": "unclear"}
 
 
 def measurement(**want) -> dict:
     """A real set of measurements (the website's code on a recording) whose decision has these values: any of strength,
-    rebuild, restoreHighs, reason (echoey / muffled / unclear / None), heavy (noise figure below the heavy cut)."""
+    rebuild, restoreHighs, reason (echoey / muffled / phone / distorted / unclear / None), heavy (noise figure below the heavy cut)."""
     for row in MODEL_ROWS:
         js, s = row["reco"], row["stats"]
         if not js or js["noSpeech"] or s["noiseDb"] is None:
@@ -432,21 +435,74 @@ def test_a_recording_nobody_speaks_in_gets_the_middle_strength_and_nothing_else(
     assert result.strength == "balanced" and result.rebuilt is None and result.notice is None
 
 
+def test_the_notice_words_are_the_ones_the_engine_uses():
+    assert reco_model.REBUILD_WORDS == WORDS and list(reco_model.REBUILD_WORDS) == REBUILD_REASONS
+
+
 @pytest.mark.native
-@pytest.mark.parametrize("reason", ["echoey", "muffled", "unclear"])
+@pytest.mark.parametrize("reason", REBUILD_REASONS)
 def test_a_file_that_needs_it_gets_its_voice_rebuilt(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as, reason):
     asked = measured_as(measurement(rebuild=True, reason=reason))
     monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert len(asked) == 1 and fake_clean[-1].restore_voice
     assert result.rebuilt == reason and result.strength is None  # rebuilt: no noise reduction strength was used
-    assert result.notice == f"the voice was rebuilt because it sounded {reason}"
+    assert result.notice == f"the voice was rebuilt because it sounded {WORDS[reason]}"
     # without the model: cleaned the usual way (with the strength the model picked), and told how to fix it
     monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "b")
     assert not fake_clean[-1].restore_voice and fake_clean[-1].atten_lim_db == engine.STRENGTHS[result.strength]
     assert result.rebuilt is None and result.strength in engine.STRENGTHS
-    assert result.notice == f"it sounds {reason}: download the model that rebuilds the voice in Settings and clean it again to fix that"
+    assert result.notice == f"it sounds {WORDS[reason]}: download the model that rebuilds the voice in Settings and clean it again to fix that"
+
+
+def stored(**want) -> dict:
+    """Measurements from the stored sets (like measurement()) with `want` true of the stored website decision: kind (real /
+    made-up / edge), rule_only (the trees leave the file alone, the rules rebuild it), reason, rebuild, clip (clipFraction)."""
+    for row in MODEL_ROWS:
+        js, s = row["reco"], row["stats"]
+        if not js or js["noSpeech"] or s["noiseDb"] is None:
+            continue
+        got = {"kind": row["kind"], "rule_only": js["rebuild"] and not row["model"]["rebuild"], "reason": js["rebuildReason"],
+               "rebuild": js["rebuild"], "clip": s["clipFraction"]}
+        if all(got[k] == v for k, v in want.items()):
+            return dict(s)
+    raise LookupError(f"no stored measurements with {want}")
+
+
+@pytest.mark.native
+@pytest.mark.parametrize("reason", ["phone", "distorted"])
+def test_a_phone_recording_and_a_too_loud_one_are_rebuilt_now_whatever_the_trees_say(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as, reason):
+    """The trees leave these alone, the rules rebuild them: a voice that stops at 6600 Hz or lower, more than 0.2 % of the
+    samples clipped."""
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    stats = stored(rule_only=True, reason=reason)
+    assert not reco_model.model_decision(stats).rebuild  # the trees alone would not
+    measured_as(stats)
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
+    assert fake_clean[-1].restore_voice and result.rebuilt == reason and result.strength is None
+    assert result.notice == f"the voice was rebuilt because it sounded {WORDS[reason]}"
+
+
+@pytest.mark.native
+def test_a_recording_exactly_at_the_distortion_limit_is_left_alone(clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    stats = stored(kind="edge", clip=0.002, rebuild=False)  # exactly 0.2 % clipped is not more than that
+    measured_as(stats)
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
+    assert not fake_clean[-1].restore_voice and result.rebuilt is None and result.notice is None and result.strength in engine.STRENGTHS
+
+
+@pytest.mark.native
+def test_a_rebuilt_phone_recording_is_not_also_told_to_download_the_model_that_restores_highs(
+        clip_wav, tmp_path, monkeypatch, fake_clean, measured_as):
+    """A phone call is rebuilt now, so the highs are not what is left to fix: only the rebuild is said."""
+    monkeypatch.setattr(resources, "voice_model_dir", lambda: tmp_path)
+    monkeypatch.setattr(resources, "highs_model_dir", lambda: None)
+    measured_as(measurement(reason="phone", restoreHighs=True))
+    result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_highs=True, auto_rebuild=True), out_dir=tmp_path / "a")
+    assert fake_clean[-1].restore_voice and result.rebuilt == "phone"
+    assert result.notice == "the voice was rebuilt because it sounded like a phone call"
 
 
 @pytest.mark.native
@@ -490,4 +546,4 @@ def test_automatic_rebuild_on_a_real_file(clip_wav, tmp_path, monkeypatch):
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path)
     reason = reco_model.recommend(stats[0], min_seconds=0.0).rebuild_reason
     assert result.output.is_file() and result.rebuilt is None and result.strength in engine.STRENGTHS and len(stats) == 1
-    assert (result.notice is not None and result.notice.startswith(f"it sounds {reason}: download the model")) == (reason is not None)
+    assert (result.notice is not None and result.notice.startswith(f"it sounds {WORDS.get(reason)}: download the model")) == (reason is not None)

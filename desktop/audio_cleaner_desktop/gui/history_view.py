@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from acw_common import reco_model
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea, QVBoxLayout, QWidget,
@@ -34,7 +35,7 @@ def describe_settings(s: dict, has_video: bool) -> str:
     if s.get("rebuild_voice"):
         parts = ["voice rebuilt"]
     elif s.get("picked_rebuild"):
-        parts = [f"voice rebuilt (it sounded {s['picked_rebuild']})"]
+        parts = [f"voice rebuilt (it sounded {reco_model.REBUILD_WORDS.get(s['picked_rebuild'], s['picked_rebuild'])})"]
     else:
         picked = s.get("picked_strength") if s.get("strength") == engine.AUTO_STRENGTH else None
         if s.get("strength") == engine.AUTO_STRENGTH:

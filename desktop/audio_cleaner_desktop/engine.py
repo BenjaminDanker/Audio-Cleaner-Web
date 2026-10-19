@@ -122,8 +122,8 @@ class JobOptions:
     # recording has a sharp cut-off.
     auto_highs: bool = False
     rebuild_voice: bool = False  # Sidon instead of noise removal: also removes room echo; slow (VOICE_MODEL)
-    # Rebuild the voice of a file that sounds echoey or muffled, or that the trained model says needs it (reco_model.py), when
-    # VOICE_MODEL is installed.
+    # Rebuild the voice of a file that sounds echoey, muffled, like a phone call or distorted, or that the trained model says
+    # needs it (reco_model.py), when VOICE_MODEL is installed.
     auto_rebuild: bool = False
     video_size: str = "same"  # of a video result: "same", or the pixels of the shorter side (VIDEO_SIZES)
 
@@ -693,16 +693,17 @@ def process(
             if options.strength == AUTO_STRENGTH and "atten_lim_db" in used:
                 picked = next((k for k, db in STRENGTHS.items() if db == used["atten_lim_db"]), None)
             if reason and rebuild:
-                notice = "; ".join(filter(None, [notice, f"the voice was rebuilt because it sounded {reason}"]))
+                notice = "; ".join(filter(None, [notice, f"the voice was rebuilt because it sounded {reco_model.REBUILD_WORDS.get(reason, reason)}"]))
             elif reason:
-                notice = "; ".join(filter(None, [notice, f"it sounds {reason}: download the model that rebuilds the voice "
+                notice = "; ".join(filter(None, [notice, f"it sounds {reco_model.REBUILD_WORDS.get(reason, reason)}: download "
+                                                 "the model that rebuilds the voice "
                                                  "in Settings and clean it again to fix that"]))
             if options.rebuild_voice and not rebuild:
                 notice = "; ".join(filter(None, [notice, "the model that rebuilds the voice is not installed, so it was "
                                                  "cleaned the usual way. Download it in Settings to rebuild voices"]))
             if used.get("highs"):
                 notice = "; ".join(filter(None, [notice, "missing highs restored"]))
-            elif options.restore_highs and resources.highs_model_dir() is None and _highs_missing(x, options, rec):
+            elif not rebuild and options.restore_highs and resources.highs_model_dir() is None and _highs_missing(x, options, rec):
                 notice = "; ".join(filter(None, [notice, "sounds like a phone recording. Download the model that "
                                                  "restores highs in Settings to improve it"]))
             _check_cancel(cancel)

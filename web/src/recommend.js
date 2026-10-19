@@ -2,8 +2,9 @@
 // words (the copy rules of tests/copy.mjs apply: no model names, no jargon).
 //
 // The noise strength, voice rebuild and restore highs come from the trained model (src/reco-model.js), which learned them from
-// what actually came out of the noise remover and the voice rebuild. Voice rebuild is also chosen where the voice sounds echoey
-// or muffled by the measurements alone (more often than the model would): it makes a voice fuller and clearer nearly every time.
+// what actually came out of the noise remover and the voice rebuild. Voice rebuild is also chosen by the measurements alone
+// where the voice sounds echoey or muffled, like a phone call, or distorts from being recorded too loud (more often than the
+// model would): it re-creates the whole voice, which fixes all of these and sounds fuller and clearer nearly every time.
 // The heavy noise remover stays the server's own rule. The live recommendations ("Test my room") are in src/recommend-room.js.
 import { modelDecision } from './reco-model.js';
 import { noiseVerdict, STANDARD_LANGUAGES, strengthName, T } from './recommend-room.js';
@@ -32,7 +33,8 @@ export function recommendForFile(stats, ctx = {}) {
   const phone = stats.bandwidthHz <= T.PHONE_HZ;
   const echoey = stats.dropDb != null && stats.dropDb < T.ECHO_DROP_DB;
   const dull = !phone && stats.tiltDb != null && stats.tiltDb <= T.DULL_TILT_DB;
-  const rebuild = echoey || dull || m.rebuild;
+  const clipped = stats.clipFraction > T.CLIP_FRACTION;
+  const rebuild = echoey || dull || phone || clipped || m.rebuild;
   const restoreHighs = m.restoreHighs;
   const quiet = stats.loudnessLufs != null && stats.loudnessLufs < T.QUIET_LUFS;
   const loud = stats.loudnessLufs != null && stats.loudnessLufs > T.LOUD_LUFS;
@@ -49,15 +51,18 @@ export function recommendForFile(stats, ctx = {}) {
   const soft = strength === 'gentle' || strength === 'balanced';
   if (quietAndGentle) { /* said above */ } else if (v.heavy) reasons.push(`With it, ${strengthName(strength)} is enough${soft ? ' and keeps the voice natural' : ''}.`);
   else reasons.push(`${strengthName(strength)} is enough to take it out${soft ? ' while keeping the voice natural' : ''}.`);
-  if (restoreHighs) {
-    reasons.push(phone
-      ? 'It sounds like a phone call or a very small file: the high sounds are missing. Restoring them makes the voice clearer.'
-      : 'Some of the high sounds are missing. Restoring them makes the voice clearer.');
+  if (rebuild) {
+    // every problem heard, then the one fix: Voice rebuild re-creates the whole voice
+    if (echoey) reasons.push('The voice sounds echoey, as if it was recorded in a big or bare room.');
+    if (dull) reasons.push('The voice sounds muffled.');
+    if (phone) reasons.push('It sounds like a phone call or a very small file: the high sounds are missing.');
+    if (clipped) reasons.push('The sound distorts in places because it was recorded too loud.');
+    if (!echoey && !dull && !phone && !clipped) reasons.push('The voice has lost some of its clarity, from echo or from being saved as a very small file.');
+    reasons.push('Rebuilding the voice fixes this. Listen to the result before you publish.');
+    if (clipped) reasons.push('Next time, turn the microphone level down.');
+  } else if (restoreHighs) {
+    reasons.push('Some of the high sounds are missing. Restoring them makes the voice clearer.');
   }
-  if (echoey) reasons.push('The voice sounds echoey, as if it was recorded in a big or bare room. Rebuilding the voice takes that out. Listen to the result before you publish.');
-  else if (dull) reasons.push('The voice sounds muffled. Rebuilding the voice brings the clarity back. Listen to the result before you publish.');
-  else if (rebuild) reasons.push('The voice has lost some of its clarity, from echo or from being saved as a very small file. Rebuilding the voice brings it back. Listen to the result before you publish.');
-  if (stats.clipFraction > T.CLIP_FRACTION) reasons.push('The sound distorts in places because it was recorded too loud. Cleaning can’t fix that, so turn the microphone level down next time.');
   if (quiet) reasons.push('It is very quiet: Leveling brings it up to a normal level.');
   if (loud) reasons.push('It is very loud: Leveling brings it down to a normal level.');
   if (stats.layout === 'one-side') reasons.push('Only one side of this stereo file has sound; the other side stays silent.');

@@ -36,6 +36,10 @@ VERSION = 2
 ECHO_DROP_DB = 10.5  # the level can't fall faster than this within 60 ms (dB): the voice rings on, as in a large or bare room
 DULL_TILT_DB = -19.0  # the top of the speech band sits this far below its middle (dB) or more: a muffled voice
 PHONE_HZ = 6600.0  # the speech stops at this frequency or lower: a phone call or a very small file
+CLIP_FRACTION = 0.002  # more of the samples than this are clipped: the sound distorts from being recorded too loud
+# How each rebuild reason is said after "it sounded ...".
+REBUILD_WORDS = {"echoey": "echoey", "muffled": "muffled", "phone": "like a phone call", "distorted": "distorted",
+                 "unclear": "unclear"}
 MIN_SECONDS = 2.0  # the website recommends nothing for less sound than this
 
 STRENGTH_CLASSES = ("gentle", "balanced", "strong", "max")
@@ -110,7 +114,9 @@ def model_decision(stats: dict, model: dict | None = None) -> ModelDecision:
 class Recommendation:
     strength: str  # "gentle" | "balanced" | "strong" | "max"
     rebuild: bool
-    rebuild_reason: str | None  # why: "echoey", "muffled", or "unclear" (the trees only); None when not rebuilt
+    # why, the first that applies: "echoey", "muffled", "phone" (the highs are missing), "distorted" (recorded too loud), or
+    # "unclear" (the trees only); None when not rebuilt
+    rebuild_reason: str | None
     restore_highs: bool
     heavy_remover: bool  # the stronger noise remover (noise figure below HEAVY_BELOW_DB)
     no_speech: bool  # nobody speaks: middle strength, nothing else
@@ -131,6 +137,8 @@ def recommend(stats: dict, min_seconds: float = MIN_SECONDS, model: dict | None 
     phone = stats["bandwidthHz"] <= PHONE_HZ
     echoey = drop is not None and drop < ECHO_DROP_DB
     dull = not phone and tilt is not None and tilt <= DULL_TILT_DB
-    rebuild = echoey or dull or m.rebuild
-    reason = "echoey" if echoey else "muffled" if dull else "unclear" if rebuild else None
+    clipped = (stats.get("clipFraction") or 0.0) > CLIP_FRACTION
+    reasons = [r for r, on in (("echoey", echoey), ("muffled", dull), ("phone", phone), ("distorted", clipped), ("unclear", m.rebuild)) if on]
+    rebuild = bool(reasons)
+    reason = reasons[0] if reasons else None
     return Recommendation(m.strength, rebuild, reason, m.restore_highs, heavy, False, noise_db)

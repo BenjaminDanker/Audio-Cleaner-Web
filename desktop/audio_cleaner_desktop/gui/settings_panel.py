@@ -101,8 +101,9 @@ class SettingsPanel(QFrame):
             "Each file is listened to before it is cleaned and gets what fits it:\n"
             "\u2022 Noise reduction: Gentle for a quiet recording, up to Maximum for a noisy one\n"
             "\u2022 Background noise: the way of removing noise that suits it\n"
-            "\u2022 Missing highs: brought back when they are missing (phone calls, small files)\n"
-            "\u2022 Rebuild the voice: when it sounds echoey, muffled or unclear (needs its model, downloaded once)\n\n"
+            "\u2022 Missing highs: brought back when they are missing and the voice isn\u2019t rebuilt\n"
+            "\u2022 Rebuild the voice: when it sounds echoey, muffled, damaged or like a phone call, or distorts from being "
+            "recorded too loud (needs its model, downloaded once)\n\n"
             "The noise is measured by the noise remover itself, so wind, keyboards and chatter count as much as a "
             "steady hiss. The list shows what each file got. Untick it to choose these yourself.",
             self._auto,
@@ -194,12 +195,14 @@ class SettingsPanel(QFrame):
         layout.addWidget(sub_row)
 
         self._highs = QCheckBox("Restore missing highs (phone-quality recordings)")
-        self._highs.setToolTip("For phone calls and other recordings that sound dull or muffled")
+        self._highs.setToolTip("For a recording that is only missing its high sounds (phone calls, voice messages, small "
+                               "files) and otherwise sounds fine")
         self._echo = WrapCheck("Remove speaker echo using the second audio track (your desktop sound)")
         self._echo.setToolTip("For recordings with your desktop sound on a second audio track")
         self._rebuild = WrapCheck("Rebuild the voice")
-        self._rebuild.setToolTip("Also removes room echo and brings back dull sound. It takes several times longer. "
-                                 "Noise reduction and Background noise do not apply then.")
+        self._rebuild.setToolTip("For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from "
+                                 "recording too loud. It takes several times longer. Noise reduction and Background "
+                                 "noise do not apply then.")
         extra_row = _Row(
             "Extra cleanup",
             "Restore missing highs: phone calls, voice messages, old or low-quality recordings have lost their high "
@@ -211,8 +214,9 @@ class SettingsPanel(QFrame):
             "OBS can record that: in Settings > Output (Output Mode: Advanced) > Recording, tick audio tracks 1 "
             "and 2; then in Edit > Advanced Audio Properties put your mic on track 1 only and Desktop Audio on "
             "track 2 only. Files with one audio track are cleaned as usual.\n\n"
-            "Rebuild the voice: instead of filtering the noise out, Audio Cleaner rebuilds the voice, which also "
-            "removes room echo and brings back dull sound. It takes several times longer, and on very echoey "
+            "Rebuild the voice: instead of filtering the noise out, Audio Cleaner rebuilds the whole voice. Use it for a "
+            "recording made in an echoey room, a muffled voice, phone-quality or damaged sound (voice messages, very "
+            "small files) or distortion from recording too loud. It takes several times longer, and on very echoey "
             "recordings it can change a word, so listen before you publish. The Noise reduction and Background "
             "noise settings do not apply to it.",
         )

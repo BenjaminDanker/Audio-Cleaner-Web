@@ -6,7 +6,7 @@ import { usePricing } from '../hooks.js';
 const DESCRIPTIONS = {
   'denoise/standard': 'Background noise removed, the voice kept natural',
   'leveling/standard': 'The voice evened out and the loudness set for podcast, YouTube or broadcast; with Denoising or Voice rebuild, or on its own',
-  'denoise/rebuild': 'For echoey rooms: the voice is rebuilt, which also removes room echo and restores dull sound',
+  'denoise/rebuild': 'For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt',
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
   'transcribe/premium': 'The same files, best for accents, noisy rooms and specialist words',
   'stream_denoise/light': 'Cleans up your mic while you talk',

@@ -38,7 +38,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "unclear",
+   "rebuildWhy": [
+    "unclear"
+   ]
   }
  },
  "echoey": {
@@ -80,7 +84,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "echoey",
+   "rebuildWhy": [
+    "echoey"
+   ]
   }
  },
  "muffled": {
@@ -122,7 +130,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "muffled",
+   "rebuildWhy": [
+    "muffled"
+   ]
   }
  },
  "phone": {
@@ -164,7 +176,11 @@
    "rebuild": true,
    "restoreHighs": true,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "phone",
+   "rebuildWhy": [
+    "phone"
+   ]
   }
  },
  "noisy": {
@@ -206,7 +222,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "unclear",
+   "rebuildWhy": [
+    "unclear"
+   ]
   }
  },
  "clipped": {
@@ -248,7 +268,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "distorted",
+   "rebuildWhy": [
+    "distorted"
+   ]
   }
  },
  "gated": {
@@ -290,7 +314,9 @@
    "rebuild": false,
    "restoreHighs": false,
    "heavy": false,
-   "noSpeech": true
+   "noSpeech": true,
+   "rebuildReason": null,
+   "rebuildWhy": []
   }
  },
  "stereo": {
@@ -332,7 +358,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "unclear",
+   "rebuildWhy": [
+    "unclear"
+   ]
   }
  },
  "dual_mono": {
@@ -374,7 +404,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "unclear",
+   "rebuildWhy": [
+    "unclear"
+   ]
   }
  },
  "hum": {
@@ -416,7 +450,9 @@
    "rebuild": false,
    "restoreHighs": false,
    "heavy": false,
-   "noSpeech": true
+   "noSpeech": true,
+   "rebuildReason": null,
+   "rebuildWhy": []
   }
  },
  "silence": {
@@ -458,7 +494,9 @@
    "rebuild": false,
    "restoreHighs": false,
    "heavy": false,
-   "noSpeech": true
+   "noSpeech": true,
+   "rebuildReason": null,
+   "rebuildWhy": []
   }
  },
  "short": {
@@ -536,7 +574,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "unclear",
+   "rebuildWhy": [
+    "unclear"
+   ]
   }
  },
  "long_stereo": {
@@ -578,7 +620,11 @@
    "rebuild": true,
    "restoreHighs": false,
    "heavy": true,
-   "noSpeech": false
+   "noSpeech": false,
+   "rebuildReason": "unclear",
+   "rebuildWhy": [
+    "unclear"
+   ]
   }
  }
 }

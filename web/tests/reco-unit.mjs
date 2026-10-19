@@ -3,7 +3,7 @@
 // (obs-plugin/core/src/input_advice.cpp) are the website's. Needs no browser and no backend:  node tests/reco-unit.mjs
 // (The agreement with the server's own functions: server/tests/test_reco_agreement.py.)
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HEAVY_BELOW_DB, planWindows, RATE } from '../src/media/analysis.js';
@@ -97,6 +97,7 @@ check('automatic settings always pick Denoising (never Off or the free cleanup) 
   const clean = rec(noisy(10, 55));
   assert.deepEqual([clean.noise, clean.strength, clean.leveling, clean.nothing], ['denoise', 'gentle', true, false]);
   assert.equal(clean.heavy, false);
+  assert.equal(clean.rebuild, false); // a clean, close, full-band voice is not rebuilt
   const mild = analyse([noisy(10, 22)]);
   const mildRec = rec(noisy(10, 22));
   assert.equal(mildRec.noise, 'denoise');
@@ -111,15 +112,18 @@ check('automatic settings always pick Denoising (never Off or the free cleanup) 
 });
 
 // A grid of measurements (not audio): what the file advice makes of each must be the model's decisions, plus the rules it kept.
+// The values around every threshold of the rules (6600 Hz, 10.5 dB, -19 dB, 0.002) are on it, on both sides.
 const gridStats = () => {
   const out = [];
   for (const noiseDb of [-3, 8, 14, 18, 20, 23, 26, 32, 45]) {
-    for (const bandwidthHz of [3800, 6500, 8000, 12000, 24000]) {
-      for (const tiltDb of [-45, -30, -20, -12]) {
-        for (const dropDb of [null, 6, 14, 30]) {
+    for (const bandwidthHz of [3800, 6500, 6600, 6601, 8000, 12000, 24000]) {
+      for (const tiltDb of [-45, -30, -19, -17, -12, null]) { // (null: not measured; where the model asks to restore the highs without the rule rebuilding)
+        for (const dropDb of [null, 6, 10.5, 14, 30]) {
           for (const floorDb of [-35, -60, -80]) {
-            out.push({ seconds: 20, segments: 1, noiseDb, floorDb, levelDb: floorDb + 30, peakDb: floorDb + 34, silentFraction: 0.05, speechFraction: 0.5,
-              bandDynDb: 20, hasSpeech: true, bandwidthHz, tiltDb, dropDb, clipFraction: 0, peak: 0.7, layout: 'mono', loudnessLufs: -22 });
+            for (const clipFraction of [0, 0.002, 0.003, 0.05]) {
+              out.push({ seconds: 20, segments: 1, noiseDb, floorDb, levelDb: floorDb + 30, peakDb: floorDb + 34, silentFraction: 0.05, speechFraction: 0.5,
+                bandDynDb: 20, hasSpeech: true, bandwidthHz, tiltDb, dropDb, clipFraction, peak: 0.7, layout: 'mono', loudnessLufs: -22 });
+            }
           }
         }
       }
@@ -128,60 +132,213 @@ const gridStats = () => {
   return out;
 };
 
-check('files: strength, rebuild and restore highs follow the model; rebuild is also chosen for an echo or a muffled voice; heavy stays the rule', () => {
-  const seen = { rebuildModel: 0, restore: 0, rebuildRule: 0, strengths: new Set() };
+// Why the voice is rebuilt, from the measurements alone: the rules written out here with their numbers, not read from T.
+const causesOf = (s) => ({
+  echo: s.dropDb != null && s.dropDb < 10.5, // the level falls less than 10.5 dB within 60 ms
+  dull: s.bandwidthHz > 6600 && s.tiltDb != null && s.tiltDb <= -19, // muffled: a phone call is not "muffled", it is a phone call
+  phone: s.bandwidthHz <= 6600, // the speech stops at 6600 Hz or lower
+  clipped: s.clipFraction > 0.002, // more than 0.2 % of the samples are clipped
+});
+const CAUSES = ['echo', 'dull', 'phone', 'clipped'];
+const onlyCauses = (...names) => (s) => { const c = causesOf(s); return CAUSES.every((k) => c[k] === names.includes(k)); };
+const anyCause = (s) => Object.values(causesOf(s)).some(Boolean);
+
+// Every sentence of the rebuild / restore advice, word for word.
+const SAY = {
+  echo: 'The voice sounds echoey, as if it was recorded in a big or bare room.',
+  dull: 'The voice sounds muffled.',
+  phone: 'It sounds like a phone call or a very small file: the high sounds are missing.',
+  clipped: 'The sound distorts in places because it was recorded too loud.',
+  clarity: 'The voice has lost some of its clarity, from echo or from being saved as a very small file.',
+  fix: 'Rebuilding the voice fixes this. Listen to the result before you publish.',
+  next: 'Next time, turn the microphone level down.',
+  restore: 'Some of the high sounds are missing. Restoring them makes the voice clearer.',
+};
+const SAY_ALL = new Set(Object.values(SAY));
+/** the rebuild/restore sentences among the reasons, in the order given */
+const said = (r) => r.reasons.filter((t) => SAY_ALL.has(t));
+/** what they must be for these measurements (and what the model says) */
+function expectedSaid(s, m) {
+  const c = causesOf(s);
+  if (c.echo || c.dull || c.phone || c.clipped || m.rebuild) {
+    const out = CAUSES.filter((k) => c[k]).map((k) => SAY[k]);
+    if (!out.length) out.push(SAY.clarity); // only the model asked
+    out.push(SAY.fix);
+    if (c.clipped) out.push(SAY.next);
+    return out;
+  }
+  return m.restoreHighs ? [SAY.restore] : [];
+}
+const GONE = /Cleaning can.t fix|microphone level down next time/i; // the old advice: now said as "Next time, turn the microphone level down."
+
+check('the rebuild rules use these numbers: a phone call is 6600 Hz or lower, echo is a fall under 10.5 dB, muffled is -19 dB or lower, distortion is more than 0.2 % clipped', () => {
+  assert.deepEqual([T.PHONE_HZ, T.ECHO_DROP_DB, T.DULL_TILT_DB, T.CLIP_FRACTION], [6600, 10.5, -19, 0.002]);
+});
+
+check('files: rebuild = echoey || muffled || phone || clipped || the model, on the whole grid; strength and restore highs stay the model\'s; heavy stays the rule; every grid row says exactly the sentences its causes call for', () => {
+  const seen = { rebuildModel: 0, restore: 0, rebuildRule: 0, strengths: new Set(), rebuilt: 0, kept: 0, only: {}, edge: {}, restoreKept: 0, restoreRebuilt: 0, multi: 0 };
+  const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
   for (const s of gridStats()) {
     const r = recommendForFile(s, {});
     const m = modelDecision(s);
     const v = noiseVerdict(s);
-    const echoey = s.dropDb != null && s.dropDb < T.ECHO_DROP_DB;
-    const dull = s.bandwidthHz > T.PHONE_HZ && s.tiltDb <= T.DULL_TILT_DB;
+    const c = causesOf(s);
     const where = JSON.stringify(s);
     assert.equal(r.strength, m.strength, where);
-    assert.equal(r.restoreHighs, m.restoreHighs, where); // no longer "phone => restore"
-    assert.equal(r.rebuild, echoey || dull || m.rebuild, where);
+    assert.equal(r.restoreHighs, m.restoreHighs, where); // what the model says, also where the voice is rebuilt (the sentence and the line are what change)
+    assert.equal(r.rebuild, c.echo || c.dull || c.phone || c.clipped || m.rebuild, where);
     assert.equal(r.heavy, v.heavy && !v.clean, where);
     assert.deepEqual([r.noise, r.leveling, r.nothing, r.noSpeech], ['denoise', true, false, false]);
-    assert.equal(r.line.startsWith(r.rebuild ? 'Voice rebuild' : 'Denoising'), true, r.line);
+    // the sentences: each cause once, in the order echoey, muffled, phone, distorts; then the one fix; "Next time" only for distortion
+    assert.deepEqual(said(r), expectedSaid(s, m), where);
+    assert.equal(r.reasons.filter((t) => t === SAY.fix).length, r.rebuild ? 1 : 0, where);
+    assert.equal(r.reasons.includes(SAY.next), c.clipped, where);
+    assert.equal(r.reasons.includes(SAY.restore), !r.rebuild && m.restoreHighs, where); // the restore sentence only when the voice is not rebuilt
+    assert.ok(!r.reasons.some((t) => GONE.test(t)), where);
+    assert.ok(!r.reasons.some((t) => /Restoring them/.test(t) && r.rebuild), where);
+    // the line: Voice rebuild replaces Denoising (and "restore the highs", which a rebuild does not need)
+    if (r.rebuild) assert.match(r.line, /^Voice rebuild, leveling, (Standard|Extra accurate) subtitles$/, r.line);
+    else assert.equal(r.line.startsWith('Denoising ('), true, r.line);
+    assert.equal(/restore the highs/.test(r.line), !r.rebuild && m.restoreHighs, r.line);
+    // reachability counters
     if (m.rebuild) seen.rebuildModel++;
     if (m.restoreHighs) seen.restore++;
-    if (!m.rebuild && (echoey || dull)) seen.rebuildRule++;
+    if (!m.rebuild && anyCause(s)) seen.rebuildRule++;
     seen.strengths.add(r.strength);
+    if (r.rebuild) seen.rebuilt++; else seen.kept++;
+    if (m.restoreHighs) bump(seen, r.rebuild ? 'restoreRebuilt' : 'restoreKept');
+    if (CAUSES.filter((k) => c[k]).length > 1) seen.multi++;
+    for (const k of CAUSES) if (onlyCauses(k)(s) && !m.rebuild) bump(seen.only, k);
+    if (!anyCause(s) && m.rebuild) bump(seen.only, 'model');
+    // both sides of each threshold
+    if (!m.rebuild) {
+      if (s.bandwidthHz === 6600 && onlyCauses('phone')(s)) bump(seen.edge, 'phone 6600 Hz is a phone call');
+      if (s.bandwidthHz === 6601 && !r.rebuild) bump(seen.edge, 'phone 6601 Hz is not');
+      if (s.clipFraction === 0.002 && !r.rebuild) bump(seen.edge, 'exactly 0.002 clipped is not distortion');
+      if (s.clipFraction === 0.003 && onlyCauses('clipped')(s)) bump(seen.edge, '0.003 clipped is');
+      if (s.dropDb === 10.5 && !r.rebuild) bump(seen.edge, 'a fall of exactly 10.5 dB is not an echo');
+      if (s.dropDb === 6 && onlyCauses('echo')(s)) bump(seen.edge, 'a fall of 6 dB is an echo');
+      if (s.tiltDb === -19 && onlyCauses('dull')(s)) bump(seen.edge, 'exactly -19 dB is muffled');
+      if (s.tiltDb === -17 && s.bandwidthHz > 6600 && !r.rebuild) bump(seen.edge, '-17 dB is not');
+    }
     REASONS.push(...r.reasons, r.line);
   }
   // the grid reaches every branch, or the checks above prove nothing
-  assert.ok(seen.rebuildModel > 0 && seen.restore > 0 && seen.rebuildRule > 0, JSON.stringify({ ...seen, strengths: [...seen.strengths] }));
-  assert.ok(seen.strengths.size >= 3, [...seen.strengths].join());
+  const shown = JSON.stringify({ ...seen, strengths: [...seen.strengths] });
+  assert.ok(seen.rebuildModel > 0 && seen.restore > 0 && seen.rebuildRule > 0 && seen.rebuilt > 0 && seen.kept > 0, shown);
+  assert.ok(seen.restoreKept > 0 && seen.restoreRebuilt > 0 && seen.multi > 0, shown);
+  for (const k of [...CAUSES, 'model']) assert.ok(seen.only[k] > 0, `nothing but "${k}" is on the grid: ${shown}`);
+  for (const k of ['phone 6600 Hz is a phone call', 'phone 6601 Hz is not', 'exactly 0.002 clipped is not distortion', '0.003 clipped is',
+    'a fall of exactly 10.5 dB is not an echo', 'a fall of 6 dB is an echo', 'exactly -19 dB is muffled', '-17 dB is not']) assert.ok(seen.edge[k] > 0, `${k}: ${shown}`);
+  assert.ok(seen.strengths.size >= 3, shown);
 });
 
-check('files: the reasons say what was chosen (echo, muffled, restore highs for a phone call or not, quiet and gentle)', () => {
+check('files: each cause has its sentence, and they come in the order echoey, muffled, phone, distorts, then "Rebuilding the voice fixes this", then "Next time" for distortion', () => {
   const grid = gridStats();
-  const find = (f) => grid.find(f);
-  const text = (s) => recommendForFile(s, {}).reasons.join(' ');
-  const rb = (s) => modelDecision(s).rebuild;
-  const rs = (s) => modelDecision(s).restoreHighs;
-  const echo = find((s) => s.dropDb === 6 && s.bandwidthHz > T.PHONE_HZ);
-  assert.match(text(echo), /echoey/);
-  assert.equal(recommendForFile(echo, {}).rebuild, true);
-  const dull = find((s) => s.dropDb == null && s.bandwidthHz > T.PHONE_HZ && s.tiltDb <= T.DULL_TILT_DB);
-  assert.match(text(dull), /muffled|lost some of its clarity/);
-  assert.equal(recommendForFile(dull, {}).rebuild, true);
-  const phoneRestore = find((s) => s.bandwidthHz <= T.PHONE_HZ && rs(s));
-  const otherRestore = find((s) => s.bandwidthHz > T.PHONE_HZ && rs(s));
-  const phoneNo = find((s) => s.bandwidthHz <= T.PHONE_HZ && !rs(s));
-  assert.ok(phoneRestore && otherRestore && phoneNo, 'the grid has no phone-bandwidth / wide-band examples for the restore head');
-  assert.match(text(phoneRestore), /phone call or a very small file/);
-  assert.match(text(otherRestore), /Some of the high sounds are missing/);
-  assert.doesNotMatch(text(phoneNo), /high sounds are missing/); // a phone-bandwidth file the model leaves alone gets no restore
-  assert.equal(recommendForFile(phoneNo, {}).restoreHighs, false);
-  const modelOnly = find((s) => rb(s) && !(s.dropDb != null && s.dropDb < T.ECHO_DROP_DB) && !(s.bandwidthHz > T.PHONE_HZ && s.tiltDb <= T.DULL_TILT_DB));
-  assert.ok(modelOnly, 'the grid has no case where only the model asks for the voice rebuild');
-  assert.match(text(modelOnly), /lost some of its clarity/);
-  const gentleClean = find((s) => s.noiseDb >= T.CLEAN_AT_LEAST && modelDecision(s).strength === 'gentle');
-  assert.ok(gentleClean);
-  assert.match(text(gentleClean), /clean and quiet/);
-  const notGentle = find((s) => modelDecision(s).strength === 'max');
-  assert.match(text(notGentle), /Maximum is enough/);
+  const find = (f, what) => { const s = grid.find(f); assert.ok(s, `the grid has no ${what}`); return s; };
+  const text = (s) => recommendForFile(s, {}).reasons;
+  const noModel = (s) => !modelDecision(s).rebuild;
+  const cases = [
+    ['an echo', onlyCauses('echo'), [SAY.echo, SAY.fix]],
+    ['a muffled voice', onlyCauses('dull'), [SAY.dull, SAY.fix]],
+    ['a phone call', onlyCauses('phone'), [SAY.phone, SAY.fix]],
+    ['distortion', onlyCauses('clipped'), [SAY.clipped, SAY.fix, SAY.next]],
+    ['echo and a phone call', onlyCauses('echo', 'phone'), [SAY.echo, SAY.phone, SAY.fix]],
+    ['echo and a muffled voice', onlyCauses('echo', 'dull'), [SAY.echo, SAY.dull, SAY.fix]],
+    ['a phone call that distorts', onlyCauses('phone', 'clipped'), [SAY.phone, SAY.clipped, SAY.fix, SAY.next]],
+    ['everything but a phone call', onlyCauses('echo', 'dull', 'clipped'), [SAY.echo, SAY.dull, SAY.clipped, SAY.fix, SAY.next]],
+    ['echo, a phone call and distortion', onlyCauses('echo', 'phone', 'clipped'), [SAY.echo, SAY.phone, SAY.clipped, SAY.fix, SAY.next]],
+  ];
+  for (const [what, f, want] of cases) {
+    const s = find((x) => f(x) && noModel(x), `file with ${what} that the model leaves alone`);
+    const r = recommendForFile(s, {});
+    assert.equal(r.rebuild, true, what);
+    assert.deepEqual(said(r), want, what);
+    // the sentences follow the strength sentence and come before the loudness and subtitle ones
+    const at = (t) => r.reasons.indexOf(t);
+    assert.ok(at(want[0]) > r.reasons.findIndex((t) => / is enough|clean and quiet/.test(t)), what);
+    assert.ok(at(want[want.length - 1]) < r.reasons.findIndex((t) => /^For subtitles/.test(t)), what);
+  }
+  // a muffled voice is never also "a phone call": below 6600 Hz only the phone sentence is said
+  assert.ok(grid.filter((s) => s.bandwidthHz <= 6600).every((s) => !text(s).includes(SAY.dull)));
+  // only the model asked: the plain sentence, no cause named
+  const modelOnly = find((s) => !anyCause(s) && modelDecision(s).rebuild, 'file that only the model asks to rebuild');
+  assert.deepEqual(said(recommendForFile(modelOnly, {})), [SAY.clarity, SAY.fix]);
+  assert.match(text(modelOnly).join(' '), /lost some of its clarity/);
+  // and a cause is named, the plain sentence is not added
+  assert.ok(grid.every((s) => !(anyCause(s) && text(s).includes(SAY.clarity))));
+  // the voice is not rebuilt and the model wants the highs back: that sentence (a phone call never gets here: it is rebuilt)
+  const restore = find((s) => !anyCause(s) && !modelDecision(s).rebuild && modelDecision(s).restoreHighs, 'file that gets its highs restored without a rebuild');
+  assert.deepEqual(said(recommendForFile(restore, {})), [SAY.restore]);
+  assert.match(recommendForFile(restore, {}).line, /restore the highs/);
+  const noRestore = find((s) => !anyCause(s) && !modelDecision(s).rebuild && !modelDecision(s).restoreHighs, 'file that is left alone');
+  assert.deepEqual(said(recommendForFile(noRestore, {})), []);
+  assert.equal(recommendForFile(noRestore, {}).rebuild, false);
+  // the voice is rebuilt, so restoring the highs is not said even where the model wants it
+  const rebuiltAndRestore = find((s) => anyCause(s) && modelDecision(s).restoreHighs, 'file that is rebuilt and has its highs missing');
+  assert.ok(!text(rebuiltAndRestore).includes(SAY.restore) && recommendForFile(rebuiltAndRestore, {}).restoreHighs === true);
+  const phoneAny = grid.filter((s) => s.bandwidthHz <= 6600 && s.clipFraction <= 0.002);
+  assert.ok(phoneAny.length > 100 && phoneAny.every((s) => recommendForFile(s, {}).rebuild && text(s).includes(SAY.phone) && !text(s).includes(SAY.restore)));
+  const gentleClean = find((s) => s.noiseDb >= T.CLEAN_AT_LEAST && modelDecision(s).strength === 'gentle', 'clean file at Gentle');
+  assert.match(text(gentleClean).join(' '), /clean and quiet/);
+  const notGentle = find((s) => modelDecision(s).strength === 'max', 'file at Maximum');
+  assert.match(text(notGentle).join(' '), /Maximum is enough/);
+});
+
+check('files: a measurement that is missing is not a cause (no clipping figure, no tilt, no fall)', () => {
+  const grid = gridStats();
+  const calm = grid.find((s) => !anyCause(s) && !modelDecision(s).rebuild && s.tiltDb === -12 && s.dropDb === 30 && s.clipFraction === 0);
+  assert.ok(calm);
+  const base = recommendForFile(calm, {});
+  assert.equal(base.rebuild, false);
+  for (const gone of [{ clipFraction: null }, { clipFraction: undefined }, { clipFraction: NaN }]) {
+    const r = recommendForFile({ ...calm, ...gone }, {});
+    assert.deepEqual([r.rebuild, said(r)], [base.rebuild, said(base)], JSON.stringify(gone));
+  }
+  const dropless = grid.find((s) => !anyCause(s) && s.dropDb == null && s.clipFraction === 0 && s.tiltDb === -12 && !modelDecision(s).rebuild);
+  assert.ok(dropless);
+  assert.equal(recommendForFile(dropless, {}).rebuild, false);
+  assert.equal(recommendForFile({ ...dropless, tiltDb: null }, {}).reasons.includes(SAY.dull), false);
+  assert.equal(recommendForFile({ ...dropless, dropDb: null }, {}).reasons.includes(SAY.echo), false);
+});
+
+// ---- the causes heard in generated recordings (the grid above is made-up numbers) ------------------------------------------
+const hotOf = (x) => x.map((a) => Math.max(-0.9995, Math.min(0.9995, a * 8))); // recorded too loud: clipped at the top
+/** k times slower, so a voice that stops at 8 kHz stops below 2.7 kHz: a phone call, or a very small file */
+const slowedBy = (x, k) => Float32Array.from({ length: x.length * k }, (_, i) => { const p = i / k; const j = Math.floor(p); const f = p - j; return x[j] * (1 - f) + (x[j + 1] ?? x[j]) * f; });
+/** the voice rings on: four feedback delays of 21 to 51 ms (a big, bare room) */
+const echoedBy = (x) => {
+  const y = Float32Array.from(x);
+  for (let i = 0; i < y.length; i++) for (const d of [1013, 1423, 1801, 2251]) if (i >= d) y[i] += (0.55 * 2 * y[i - d]) / 4;
+  const peak = y.reduce((m, a) => Math.max(m, Math.abs(a)), 0);
+  return y.map((a) => (a * 0.5) / peak);
+};
+const heard = (x) => { const st = analyse([x]); const r = recommendForFile(st, {}); REASONS.push(...r.reasons, r.line); return { st, r }; };
+
+check('recordings: a phone-quality, an echoey and a too-loud recording get their voice rebuilt, each with its own sentence and the one fix; a clean one is left alone', () => {
+  const clean = noisy(10, 55);
+  const base = heard(clean);
+  assert.ok(base.st.bandwidthHz > 6600 && base.st.tiltDb > -19 && base.st.dropDb > 10.5 && base.st.clipFraction === 0, JSON.stringify(base.st)); // nothing wrong with it
+  assert.deepEqual([base.r.rebuild, said(base.r)], [false, []]);
+
+  const loud = heard(hotOf(clean));
+  assert.ok(loud.st.clipFraction > 0.002, String(loud.st.clipFraction));
+  assert.equal(loud.r.rebuild, true);
+  assert.ok(said(loud.r).includes(SAY.clipped) && said(loud.r).at(-2) === SAY.fix && said(loud.r).at(-1) === SAY.next, said(loud.r).join(' | '));
+  assert.match(loud.r.line, /^Voice rebuild, leveling/);
+
+  const phone = heard(slowedBy(noisy(4, 40), 3));
+  assert.ok(phone.st.bandwidthHz <= 6600 && phone.st.clipFraction === 0, JSON.stringify(phone.st));
+  assert.equal(phone.r.rebuild, true);
+  assert.ok(said(phone.r).includes(SAY.phone) && !said(phone.r).includes(SAY.dull) && !said(phone.r).includes(SAY.next) && said(phone.r).at(-1) === SAY.fix, said(phone.r).join(' | '));
+  assert.ok(!phone.r.reasons.includes(SAY.restore) && !/restore the highs/.test(phone.r.line)); // rebuilt, not restored
+
+  const room = heard(echoedBy(noisy(8, 40)));
+  assert.ok(room.st.dropDb < 10.5 && room.st.clipFraction === 0, JSON.stringify(room.st));
+  assert.equal(room.r.rebuild, true);
+  assert.ok(said(room.r).includes(SAY.echo) && !said(room.r).includes(SAY.next) && said(room.r).at(-1) === SAY.fix, said(room.r).join(' | '));
+
+  for (const h of [loud, phone, room]) assert.deepEqual(said(h.r), expectedSaid(h.st, modelDecision(h.st))); // the same as the rules say for these numbers
 });
 
 check('files: the strength sentence says "With it, ..." where the stronger remover is used, and the usual sentence where it is not', () => {
@@ -269,6 +426,28 @@ check('live room test: noise removal stays on (a quiet room gets Gentle), the st
   assert.equal(silent.settings.denoise, false); // nothing heard: nothing changes
 });
 
+check('live room test is unchanged: a too-loud microphone is told "turn it down" and nothing else, and the rebuild causes (echo, a phone-quality sound, a muffled voice) say nothing there', () => {
+  const NOW = { denoise: true, strength: 'gentle', captions: 'local' };
+  const clean = noisy(10, 55);
+  const loud = roomChanges(analyse([hotOf(clean)]), NOW);
+  assert.deepEqual(loud.notes, ['Your microphone is too loud and distorts: turn it down.']);
+  assert.deepEqual(roomChanges(analyse([clean]), NOW).notes, []);
+  for (const x of [echoedBy(noisy(8, 40)), slowedBy(noisy(4, 40), 3)]) {
+    const r = roomChanges(analyse([x]), NOW);
+    assert.deepEqual(r.notes, []);
+    assert.deepEqual(Object.keys(r.settings).sort(), ['captions', 'denoise', 'strength']); // no rebuild among the live settings
+    assert.ok(r.changes.every((c) => c.key === 'strength' || c.key === 'captions'));
+  }
+  for (const s of gridStats()) { // the note is about the clipping figure alone
+    const r = roomChanges(s, NOW);
+    assert.deepEqual(r.notes, s.clipFraction > 0.002 ? ['Your microphone is too loud and distorts: turn it down.'] : [], JSON.stringify(s));
+    assert.ok(![...r.changes.map((c) => c.text), ...r.notes].some((t) => /rebuil|Next time|\bphone\b|\becho|muffled/i.test(t)), JSON.stringify(s));
+  }
+  const src = readFileSync(join(ROOT, 'web', 'src', 'recommend-room.js'), 'utf8');
+  assert.ok(src.includes("'Your microphone is too loud and distorts: turn it down.'"));
+  assert.ok(!/rebuil/i.test(src), 'the live advice does not talk about rebuilding the voice'); // that is for files (src/recommend.js)
+});
+
 // ---- wording and the plugin's copy of the numbers -----------------------------------------------------------------------
 check('every sentence follows the copy rules (tests/copy.mjs): no model names, no corporate words', () => {
   const copy = readFileSync(join(ROOT, 'web', 'tests', 'copy.mjs'), 'utf8');
@@ -279,6 +458,21 @@ check('every sentence follows the copy rules (tests/copy.mjs): no model names, n
   const texts = [...new Set(REASONS)];
   for (const t of texts) for (const re of banned) assert.ok(!re.test(t), `"${t}" matches ${re}`);
   for (const t of texts) assert.ok(!/\bheavy\b|\blight\b|DFN|model|AI\b/i.test(t), `"${t}" talks about the machinery`);
+  for (const t of texts) assert.ok(!GONE.test(t), `"${t}" is the old advice`); // "Cleaning can’t fix that, so turn the microphone level down next time."
+  for (const t of Object.values(SAY)) assert.ok(texts.includes(t), `the advice never said: ${t}`); // every sentence above was produced, and so was checked
+});
+
+check('the old sentence "Cleaning can’t fix that" is nowhere in the website or its docs', () => {
+  const found = [];
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); } else if (/\.(jsx?|mjs|css|html|md)$/.test(e.name) && GONE.test(readFileSync(p, 'utf8'))) found.push(p.replace(ROOT, ''));
+    }
+  };
+  walk(join(ROOT, 'web', 'src'));
+  walk(join(ROOT, 'docs'));
+  assert.deepEqual(found, []);
 });
 
 check('the plugin uses the same thresholds as the website', () => {

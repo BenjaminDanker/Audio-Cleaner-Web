@@ -88,11 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--rebuild-voice", action="store_true",
-        help="rebuild the voice instead of filtering noise: also removes room echo; slow, needs its model",
+        help="rebuild the voice instead of filtering noise: fixes room echo, a muffled voice, phone-quality or damaged sound "
+        "and distortion from recording too loud; slow, needs its model",
     )
     p.add_argument(
         "--no-auto-rebuild", action="store_true",
-        help="do not rebuild the voice of files that need it (echo, a muffled or unclear voice; by default they are, when its model is installed)",
+        help="do not rebuild the voice of files that need it (echo, a muffled or unclear voice, phone-quality sound, distortion; "
+        "by default they are, when its model is installed)",
     )
     p.add_argument(
         "--parallel", type=int, choices=range(0, 5), default=1, metavar="N",

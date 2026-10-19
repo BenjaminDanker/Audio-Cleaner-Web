@@ -29,6 +29,18 @@ def test_help_lists_the_options_and_the_automatic_choices():
     assert "auto" in r.stdout
 
 
+def test_help_says_what_the_voice_is_rebuilt_for():
+    """The help of --rebuild-voice and --no-auto-rebuild names the same causes as the automatic choice (echo, a muffled voice,
+    phone-quality or damaged sound, distortion from recording too loud)."""
+    r = run("--help")
+    assert r.returncode == 0
+    flat = re.sub(r"\s+", "", r.stdout)  # (argparse wraps lines, also at a hyphen)
+    for words in ("fixes room echo, a muffled voice, phone-quality or damaged sound and distortion from recording too loud",
+                  "(echo, a muffled or unclear voice, phone-quality sound, distortion; by default they are, when its model is installed)"):
+        assert re.sub(r"\s+", "", words) in flat, words
+    assert "also removes room echo" not in " ".join(r.stdout.split())  # the old text
+
+
 @pytest.mark.native
 def test_selftest_passes_and_builds_the_window():
     """`--selftest --gui` runs everything `--selftest` does, and also builds the window and the preview."""
