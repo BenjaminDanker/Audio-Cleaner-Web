@@ -297,6 +297,148 @@ async def upload(job_id: str, request: Request, principal: auth.Principal = Depe
     return {"ok": True}
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# What the browser uploads for a timeline (acw/editing.py "Subtitles per part, and the parts the browser does itself")
+# ---------------------------------------------------------------------------------------------------------------------
+def _browser_context(job_id: str, kind: str, start: float, end: float, principal: auth.Principal) -> dict:
+    """Checks an upload of the browser's work and finds what it is for: the job, the part of its current timeline with exactly this
+    range, how many samples a FLAC for it must hold. Raises HTTPException / JobError (answered by the caller)."""
+    enforce("browser_upload", principal.user_id)
+    job, params = editing.job_for_uploads(principal.user_id, job_id, principal.api_key_id)
+    if not end > start:
+        raise jobs.JobError("end must be after start.", 400)
+    tl, part = editing.upload_target(job, params, kind, start, end)
+    ctx = {"job": job, "params": params, "part": part, "timeline": tl}
+    if kind == "noise":
+        ctx["samples"] = editing.noise_expected(job, params, part)
+        ctx["channels"] = editing.job_channels(job, params)
+        ctx["max_bytes"] = min(get_settings().max_upload_bytes, ctx["samples"] * 4 * 2 + 1024 * 1024)
+    return ctx
+
+
+def _browser_stored(ctx: dict, request_user: str) -> None:
+    """Something arrived: an edit of a finished job (its files are kept 2 hours from now), or the wait of a job that has not been queued."""
+    job = ctx["job"]
+    if job["status"] == "done":
+        jobs.touch(job["id"])
+    else:
+        db.execute("UPDATE jobs SET expires_at = MAX(expires_at, ?) WHERE id = ? AND status = 'uploading'", (db.now() + jobs.UPLOAD_FIRST_BYTE_SECONDS, job["id"]))
+        jobs.mark_uploaded(job["id"], source=False)  # (the job goes to the queue when this was the last thing it waited for)
+
+
+def _precheck_noise(ctx: dict, length: str | None) -> None:
+    if length is not None and length.isdigit() and int(length) > ctx["max_bytes"]:
+        raise HTTPException(status_code=413, detail="That is larger than a FLAC of this part can be.")
+
+
+def _finish_noise(ctx: dict, tmp, user_id: str) -> None:
+    """The file arrived: its header must say 48 kHz, the job's channels and exactly the part's samples; then it replaces any earlier one."""
+    with open(tmp, "rb") as f:
+        head = f.read(64)
+    try:
+        rate, channels, samples = editing.flac_header(head)
+    except ValueError as e:
+        raise jobs.JobError(str(e), 400)
+    if rate != 48000:
+        raise jobs.JobError(f"The FLAC must be 48 kHz (this one is {rate} Hz).", 400)
+    if (ctx["channels"] is not None and channels != ctx["channels"]) or (ctx["channels"] is None and channels not in (1, 2)):
+        raise jobs.JobError(f"The FLAC must have the job's audio channels ({ctx['channels'] or '1 or 2'}), this one has {channels}.", 400)
+    if samples != ctx["samples"]:
+        raise jobs.JobError(f"The FLAC must hold exactly the part: {ctx['samples']} samples at 48 kHz (this one has {samples}).", 400)
+    final = editing.browser_dir(ctx["job"]["id"]) / editing.noise_name(ctx["part"].start, ctx["part"].end)
+    os.replace(tmp, final)
+    _browser_stored(ctx, user_id)
+
+
+@router.put("/{job_id}/browser/noise")
+async def upload_browser_noise(
+    job_id: str,
+    request: Request,
+    start: float = Query(ge=0, le=10**6),
+    end: float = Query(gt=0, le=10**6),
+    principal: auth.Principal = Depends(auth.require_scope("jobs")),
+) -> dict:
+    """The audio the browser cleaned for a noise part of the job's timeline that says `browser: true`: FLAC, 48 kHz, the job's channels,
+    exactly the part's range (`start` and `end` as in the timeline). It becomes the noise layer's output there. Uploading again replaces it."""
+    try:
+        ctx = await anyio.to_thread.run_sync(_browser_context, job_id, "noise", start, end, principal)
+        _precheck_noise(ctx, request.headers.get("content-length"))
+    except jobs.JobError as e:
+        return _error(e)
+    d = editing.browser_dir(job_id)
+    data_dir = get_settings().data_dir
+    tmp = d / f"{editing.noise_name(ctx['part'].start, ctx['part'].end)}.{os.urandom(4).hex()}.tmp"
+    user_throttle = uploads.for_user(principal.user_id)
+    received = 0
+    pending: list[bytes] = []
+    pending_n = 0
+    try:
+        d.mkdir(mode=0o700, exist_ok=True)
+        if await anyio.to_thread.run_sync(_disk_free, data_dir) < jobs.DISK_RESERVE // 2 + ctx["max_bytes"]:
+            raise HTTPException(status_code=507, detail="We're short on storage space right now. Please try again a bit later.")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        stream = request.stream().__aiter__()
+        with os.fdopen(fd, "wb") as f:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(stream.__anext__(), UPLOAD_IDLE_SECONDS)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    raise HTTPException(status_code=408, detail="The upload stalled; please try again.")
+                if not chunk:
+                    continue
+                received += len(chunk)
+                if received > ctx["max_bytes"]:
+                    raise HTTPException(status_code=413, detail="That is larger than a FLAC of this part can be.")
+                await uploads.take(user_throttle, len(chunk))
+                pending.append(chunk)
+                pending_n += len(chunk)
+                if pending_n >= UPLOAD_WRITE_BLOCK:
+                    await anyio.to_thread.run_sync(f.write, b"".join(pending))
+                    pending, pending_n = [], 0
+            if pending:
+                await anyio.to_thread.run_sync(f.write, b"".join(pending))
+        await anyio.to_thread.run_sync(_finish_noise, ctx, tmp, principal.user_id)
+    except jobs.JobError as e:
+        tmp.unlink(missing_ok=True)
+        return _error(e)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return {"ok": True}
+
+
+def _store_cues(ctx: dict, raw: bytes, user_id: str) -> None:
+    from acw_common import subtitles
+
+    try:
+        cues = subtitles.check_cues(json.loads(raw.decode("utf-8")), ctx["part"].start, ctx["part"].end)
+    except (ValueError, UnicodeDecodeError) as e:
+        raise jobs.JobError(str(e) if not isinstance(e, UnicodeDecodeError) else "The body must be JSON.", 400)
+    editing.store_cues(ctx["job"]["id"], ctx["part"], cues)
+    _browser_stored(ctx, user_id)
+
+
+@router.put("/{job_id}/browser/cues")
+async def upload_browser_cues(
+    job_id: str,
+    request: Request,
+    start: float = Query(ge=0, le=10**6),
+    end: float = Query(gt=0, le=10**6),
+    principal: auth.Principal = Depends(auth.require_scope("jobs")),
+) -> dict:
+    """The cues the browser transcribed for a free subtitle part of the job's timeline: a JSON list `[{start, end, text}]` in file time,
+    inside the part (`start` and `end` as in the timeline), at most 1 MB. Uploading again replaces them."""
+    try:
+        ctx = await anyio.to_thread.run_sync(_browser_context, job_id, "cues", start, end, principal)
+        body = await request.body()  # (the body limit, acw/bodylimit.py, has cut anything bigger)
+        await anyio.to_thread.run_sync(_store_cues, ctx, body, principal.user_id)
+    except jobs.JobError as e:
+        return _error(e)
+    return {"ok": True}
+
+
 def _is_plain_file(path) -> bool:
     """A regular file on the job directory's own device, never a link: outputs are made by the sandboxed runner."""
     try:
@@ -516,7 +658,7 @@ def quote(job_id: str, body: QuoteBody, principal: auth.Principal = Depends(auth
     try:
         job, params = editing.job_for_edit(principal.user_id, job_id, principal.api_key_id)
         seconds = editing.file_seconds(job, params)
-        tl = editing.parse_timeline(body.timeline, seconds) if body.timeline is not None else editing.saved_timeline(job, params, seconds)
+        tl = editing.parse_for_job(params, body.timeline, seconds) if body.timeline is not None else editing.saved_timeline(job, params, seconds)
         q = editing.make_quote(job, params, tl)
     except jobs.JobError as e:
         return _error(e)
@@ -624,3 +766,30 @@ def preview(
                  "X-Total-Samples": str(f["n"]), "X-Stretch-Scale": repr(scale), "X-Stretch-Layer": layer,
                  "X-Stretch-Missing": json.dumps([[round(a / 48000, 3), round(b / 48000, 3)] for a, b in missing], separators=(",", ":"))},
     )
+
+
+@router.get("/{job_id}/peaks/{layer}")
+def peaks(job_id: str, layer: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """What a layer holds, outlined for drawing: `{rate: 4, seconds, peaks: [...]}`, one value per quarter second of the recording: the largest
+    absolute sample over all channels (0 to 1, three decimals), or `null` where that layer is not in the cache for that moment. The layers
+    are the preview's (`source`, `echo`, `noise`, `rebuild`) on the same sample grid. `404 not_cached` when nothing of the layer is cached.
+    Made from the cached blocks and kept per block, so asking again is cheap; `pending: true` when the time of this call ran out before
+    every block had its outline (the values of those blocks are `null` for now: ask again). Same sign-in, rate limit and `503` as the preview."""
+    if layer not in ("source", "echo", "noise", "rebuild"):
+        raise HTTPException(status_code=404, detail="Not available.")
+    try:
+        job, params = editing.job_for_edit(principal.user_id, job_id, principal.api_key_id)
+    except jobs.JobError as e:
+        return _error(e)
+    if not (params.get("edit") or {}).get("facts"):
+        return _error(jobs.JobError("Nothing is cached for this job yet.", 404, code=editing.NOT_CACHED))
+    enforce("kept_cut", principal.user_id)
+    try:
+        out = editing.peaks_of(job, params, layer)
+    except stretch.Busy:
+        raise HTTPException(status_code=503, detail="Busy right now, please try again in a moment.", headers={"Retry-After": "2"})
+    except stretch.Failed:
+        raise HTTPException(status_code=500, detail="Couldn’t outline that layer. Please try again.")
+    if out is None:
+        return _error(jobs.JobError(f"None of {layer} is cached for this job.", 404, code=editing.NOT_CACHED))
+    return JSONResponse(out, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

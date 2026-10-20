@@ -4,6 +4,7 @@ Uploads of up to 4 GB and result downloads used to share one process and one SSH
 WebSocket, so a big transfer could add latency to live sessions (head-of-line blocking in the tunnel's TCP
 stream, one event loop, one home uplink). This process serves only
   * PUT  /api/jobs/{id}/input            the upload
+  * PUT  /api/jobs/{id}/browser/noise    the audio the browser cleaned for a part of a timeline (a file too)
   * GET  /api/jobs/{id}/outputs/{name}   a result download
   * GET  /api/downloads/...              the OBS plugin's release files, mirrored
                                          from the build service by acw/mirror.py and served from our own domain
@@ -91,6 +92,7 @@ def create_bulk_app() -> FastAPI:
 
     router = APIRouter(prefix="/api/jobs", tags=["jobs"])
     router.add_api_route("/{job_id}/input", jobs_routes.upload, methods=["PUT"])
+    router.add_api_route("/{job_id}/browser/noise", jobs_routes.upload_browser_noise, methods=["PUT"])
     router.add_api_route("/{job_id}/outputs/{name}", jobs_routes.download, methods=["GET"])
     app.include_router(router)
     app.include_router(downloads_routes.router)

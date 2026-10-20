@@ -156,6 +156,17 @@ def _max_seconds(job: dict, params: dict) -> int:
     return pricing.max_job_seconds(params["denoise_tier"])
 
 
+def _options_for_spec(job: dict, params: dict) -> dict:
+    """The job's options as the runner reads them. A job whose subtitles are made per part (a subtitles layer in its timeline) has no
+    whole-file language or translations of its own: the languages the parts translate into (all of them: the files are put together from
+    every part) are what its caption files are written in."""
+    spec = editing.spec_for(job, params)
+    if not spec or "subtitles" not in spec:
+        return params["options"]
+    langs = list(dict.fromkeys(t for p in spec["subtitles"]["parts"] for t in p["translate"]))
+    return {**params["options"], "translate": langs}
+
+
 def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
     """Write the runner's instructions. `billed` is the measured length of the audio (known after the
     probe): the main stage never decodes more than that, and its CPU limit is sized from it and the tier."""
@@ -172,7 +183,7 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         "input": f"input{params['input_ext']}",
         "input_ext": params["input_ext"],
         "output_stem": jobs.safe_stem(jobs.display_name(job)),
-        "options": params["options"],
+        "options": _options_for_spec(job, params),
         "max_seconds": max_seconds,
         "cpu_seconds": cpu_seconds,  # generous; the wall-clock timeout is the real limit
         "address_space_bytes": 32 * 1024**3,  # memory-mapped scratch files count here, not in RAM
@@ -361,6 +372,7 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
 
 RESULT_MAX_BYTES = 1_000_000
 OUTPUT_KINDS = {"audio", "captions", "transcript", "segments", "video"}
+TEXT_KINDS = ("captions", "transcript", "segments")  # the caption files, the transcript and the segments: what the subtitles make
 
 
 def _read_result(path: Path) -> dict:
@@ -399,7 +411,7 @@ def _job_cost(job: dict, params: dict, seconds: float, billed: dict | None = Non
     """What the job costs for `seconds` of audio, at the prices it was created with. `billed`: what a job made with a timeline reports
     having run (editing.billable_from), else the whole timeline is charged."""
     if (params.get("edit") or {}).get("first_run"):
-        return editing.first_run_cost(job["kind"], params, seconds, billed)
+        return editing.first_run_cost(job["kind"], params, seconds, billed, job["id"])
     # Translations: what was asked for until the job is done, then only the languages that were made.
     asked = params.get("options", {}).get("translate") or []
     made = params.get("translated", asked)
@@ -494,12 +506,13 @@ def _complete(job: dict, d: Path, res: dict) -> None:
     report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
     kept = rerun.collect_kept(params, d, res.get("kept") or params.get("kept_reported"))
     keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}"} | rerun.kept_files(kept)
-            | {editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS})
+            | {editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS, editing.BROWSER, editing.SUBS})
     for p in d.iterdir():
         if p.name not in keep:
             _remove(d, p)
     params.pop("kept_reported", None)
     params["kept"] = kept
+    editing.clear_chunks(job["id"])
     first_run = bool((params.get("edit") or {}).get("first_run"))  # a job made with a timeline: charged for what ran
     if job["kind"] in ("denoise", "denoise_transcribe"):
         params = editing.absorb(job, params, report)
@@ -560,27 +573,31 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
         jobs.finish_failed(job, rerun.TOO_LATE)
         return
     duration = float(job["duration_seconds"])
-    report = editing.sanitize_report(res.get("editor"), d, duration)
+    report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
     outputs = _verified_outputs(d, res)
     old = json.loads(fresh["outputs_json"] or "[]")
-    audio_changed = run["op"] != "suggest"
-    if audio_changed:
-        if not any(o["kind"] == "audio" for o in outputs):
-            raise StageFailed("Processing failed; you were not charged.", "the run made no audio")
-        # the other results stay (captions, transcript); a video made with the old audio does not fit any more
-        keep_old = [o for o in old if o["kind"] not in ("audio", "video") and o["file"] not in {x["file"] for x in outputs}]
-        outputs = [*(o for o in outputs if o["kind"] == "audio"), *keep_old]
+    audio_changed = run["op"] != "suggest" and run.get("audio", True)  # (a run that only changes the subtitles leaves the sound alone)
+    text_changed = run["op"] != "suggest" and run.get("subs") is not None  # the caption files are put together again
+    if audio_changed and not any(o["kind"] == "audio" for o in outputs):
+        raise StageFailed("Processing failed; you were not charged.", "the run made no audio")
+    if audio_changed or text_changed:
+        # the other results stay (captions and transcript unless they were made again); a video made with the old sound or captions does
+        # not fit any more
+        gone = {"video", *(["audio"] if audio_changed else []), *(TEXT_KINDS if text_changed else ())}
+        keep_old = [o for o in old if o["kind"] not in gone and o["file"] not in {x["file"] for x in outputs}]
+        outputs = [*(o for o in outputs if (o["kind"] == "audio" and audio_changed) or (o["kind"] in TEXT_KINDS and text_changed)), *keep_old]
     else:
         outputs = old
     kept = params.get("kept") or {}
     if audio_changed:
         kept = {k: v for k, v in kept.items() if k == "segments"}  # the copies of the old strength slider no longer fit the audio
-    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS}
-            | rerun.kept_files(kept))
+    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS,
+                                            editing.BROWSER, editing.SUBS} | rerun.kept_files(kept))
     for p in d.iterdir():
         if p.name not in keep:
             _remove(d, p)
-    params = editing.absorb(job, params, report, op=run["op"])
+    editing.clear_chunks(job["id"])
+    params = editing.absorb(job, params, report, op=run["op"], processed=run["timeline"])
     params["kept"] = kept
     if report.get("suggestions"):
         editing.write_suggestions(job["id"], report["suggestions"])
@@ -590,7 +607,8 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
     params.pop("run", None)
     est = int(job["est_cost_micros"] or 0)
     billed = report.get("billed")
-    charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0])
+    subs_charge = editing.subtitle_charge(job["id"], run["subs"], run["subtitle_rates"]) if run.get("subs") else 0  # (what was made, translations that failed excepted)
+    charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0] + subs_charge)
     if run["op"] == "suggest":
         charge = 0
     with db.tx() as c:
@@ -643,18 +661,25 @@ def _decide(job: dict, extra: dict, duration: float) -> bool:
 def process(job: dict, extra: dict) -> None:
     try:
         d = _write_spec(job, extra, job.get("duration_seconds"))
+        params = json.loads(job["params_json"])
         if job["next_stage"] == "finalize":
             res = run_stage(job, d, "finalize", 1800)
             job["duration_seconds"] = db.one("SELECT duration_seconds FROM jobs WHERE id = ?", (job["id"],))["duration_seconds"]
-            _complete(job, d, res)
+            (_complete_edit if params.get("run") else _complete)(job, d, res)
             return
-        params = json.loads(job["params_json"])
         if job["next_stage"] == "edit":
             # An edit run (editing.py): the recording is known, measured and priced already; one stage makes the missing blocks of the
             # timeline, renders it and writes the audio.
             duration = float(job["duration_seconds"])
             d = _write_spec(job, extra, duration)
             res = run_stage(job, d, "edit", jobs.stage_limits(duration, _max_seconds(job, params))[1])
+            if res.get("needs_cloud_asr"):
+                # Subtitle parts that need the internet (Accurate transcription, translations): the web process makes them, then the
+                # runner puts the files together (the same way a job made with a timeline and subtitles goes on after its first stage)
+                jobs.update_params(job["id"], editor_reported=editing.sanitize_report(res.get("editor"), d, duration))
+                db.execute("UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', progress = 85, heartbeat_at = ? WHERE id = ?",
+                           (db.now(), job["id"]))
+                return
             _complete_edit(job, d, res)
             return
         if params.get("rerun") or job["next_stage"] == "main":

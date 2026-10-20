@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from . import alerts, auth, db, httpstack, jobs, retention, webhooks
+from . import alerts, auth, db, editing, httpstack, jobs, retention, webhooks
 from . import health as health_checks
 from .api import auth_routes, billing_routes, contact_routes, downloads_routes, jobs_routes, keys_routes
 from . import translate
@@ -34,7 +34,10 @@ _CLOUD_STAGES = {"asr": "Transcribing", "translate": "Translating"}
 
 def _needs_transcription(job: dict) -> bool:
     """The job's cloud work starts with extra-accurate transcription (its segments are not there yet)."""
-    return json.loads(job["params_json"]).get("transcribe_tier") == "premium" and not (jobs.job_dir(job["id"]) / "segments.json").exists()
+    params = json.loads(job["params_json"])
+    if editing.has_subtitle_layer(params):  # subtitles made part by part: some part's speech chunks wait for it
+        return editing.subtitle_cloud_phase(job["id"], params) == "asr"
+    return params.get("transcribe_tier") == "premium" and not (jobs.job_dir(job["id"]) / "segments.json").exists()
 
 
 def _claim_cloud_jobs(limit: int, phase: str | None = None) -> list[dict]:
@@ -87,6 +90,44 @@ async def _translate(job: dict, targets: list[str]) -> None:
         await asyncio.to_thread(jobs.set_notice, job["id"], f"The {what} translation couldn’t be made this time, so you weren’t charged for it.")
 
 
+def _clip_part(part_dir, e: dict) -> None:
+    """The text of an Accurate part, which was made from its speech chunks, cut to the part (editing.py)."""
+    from acw_common import captions
+    from acw_common import subtitles as st
+
+    path = part_dir / "segments.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    segs = st.clip_segments(captions.segments_from_json(data.get("segments") or []), e["start"], e["end"])
+    path.write_text(json.dumps({**data, "segments": captions.segments_to_json(segs)}), encoding="utf-8")
+
+
+async def _run_subtitle_parts(job: dict, params: dict) -> None:
+    """The cloud work of a job whose subtitles are made part by part: the Accurate parts' transcription (one phase), then the
+    translations of every part (the other phase), each into the part's own folder (editing.subtitle_cloud_work). A translation that can't
+    be made is left out, said in the notice and not charged."""
+    work = await asyncio.to_thread(editing.subtitle_cloud_work, job["id"], params)
+    base = jobs.job_dir(job["id"]) / editing.SUBS
+    if work["asr"]:
+        for e in work["asr"]:
+            d = base / e["key"]
+            await openai_asr.run_for_job(d, e["language"], (e["end"] - e["start"]) + 30)
+            await asyncio.to_thread(_clip_part, d, e)
+        again = await asyncio.to_thread(editing.subtitle_cloud_work, job["id"], params)
+        if again["translate"]:
+            await asyncio.to_thread(_set_stage, job["id"], "Waiting to translate")
+            return
+    else:
+        await asyncio.to_thread(_set_stage, job["id"], "Translating")
+        failed: list[str] = []
+        for e, targets in work["translate"]:
+            done = await translate.translate_job(base / e["key"], targets)
+            failed += [t for t in targets if t not in done]
+        if failed:
+            what = " and ".join(translate.LANGUAGE_NAMES.get(t, t) for t in dict.fromkeys(failed))
+            await asyncio.to_thread(jobs.set_notice, job["id"], f"The {what} translation couldn’t be made this time for some parts, so you weren’t charged for it.")
+    await asyncio.to_thread(_cloud_done, job)
+
+
 async def _run_cloud_job(job: dict) -> None:
     """The steps of a job that need the internet: extra-accurate transcription, then translations. Work already
     done is kept on disk, so a restart or a failed attempt doesn't pay for it twice. One call does one phase:
@@ -102,6 +143,9 @@ async def _run_cloud_job(job: dict) -> None:
     try:
         params = json.loads(job["params_json"])
         opts = params["options"]
+        if editing.has_subtitle_layer(params):
+            await _run_subtitle_parts(job, params)
+            return
         if _needs_transcription(job):
             await openai_asr.run_for_job(jobs.job_dir(job["id"]), opts.get("language"), job["duration_seconds"] or job["claimed_seconds"])
             if opts.get("translate"):

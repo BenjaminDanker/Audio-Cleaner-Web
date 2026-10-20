@@ -155,11 +155,18 @@ def job_needs(job: dict) -> tuple[int, int]:
     seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
     if params.get("run"):  # an edit run decodes the recording and renders into scratch files (editing.py)
         run = params["run"]
-        return JOB_MEM, scratch_bytes("denoise", seconds, int(params.get("channels") or 2), echo=bool(run.get("echo")))
+        from . import editing
+
+        return (JOB_MEM + (LOCAL_ASR_MEM if editing.local_asr_wanted(params) else 0),
+                scratch_bytes("denoise", seconds, int(params.get("channels") or 2), echo=bool(run.get("echo"))))
     rerun = params.get("rerun")  # a re-run only does part of the work (rerun.py)
     mem = JOB_MEM + (
         LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" and (not rerun or rerun.get("transcribe")) else 0
     )
+    if (params.get("edit") or {}).get("first_run"):
+        from . import editing
+
+        mem += LOCAL_ASR_MEM if editing.local_asr_wanted(params) else 0
     if rerun and rerun.get("clean") in ("reuse", "none") and not rerun.get("transcribe"):
         return mem, 0
     return mem, scratch_bytes(job["kind"], seconds, echo=params.get("options", {}).get("echo_reference_track", False))
@@ -516,17 +523,21 @@ def estimate_timeline(kind: str, denoise_tier: str | None, transcribe_tier: str 
     """The price of a job made with a timeline: each step's parts, from an empty cache (editing.py), and the subtitles."""
     from . import editing
 
-    tl, d_tier = editing.prepare_timeline_job(kind, denoise_tier, options, duration_seconds, timeline)
+    tl, d_tier = editing.prepare_timeline_job(kind, denoise_tier, options, duration_seconds, timeline, transcribe_tier)
     if not 0.5 <= duration_seconds <= pricing.MAX_JOB_SECONDS:
         raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
-    opts = validate_options(kind, d_tier, transcribe_tier, options)
+    opts = validate_options(editing.options_kind(kind, tl), d_tier, transcribe_tier, options)
     rates = editing.step_rates()
     micros, lines, _ = editing.price_timeline(tl, duration_seconds, rates)
     n = len(opts["translate"])
-    t_tier = transcribe_tier if kind != "denoise" else None
+    t_tier = transcribe_tier if kind != "denoise" and not tl.layers["subtitles"] else None
     t_rates = pricing.job_rates("transcribe", None, t_tier, n)
     total = micros + (pricing.job_cost_micros("transcribe", None, t_tier, duration_seconds, t_rates, n) if t_tier else 0)
     text_lines = price_lines(t_rates, None, t_tier, duration_seconds, n) if t_tier else []
+    if tl.layers["subtitles"]:  # the subtitle parts: each at its quality's rate and its translations (free parts cost nothing)
+        sub = editing.subtitle_plan(None, tl, editing.subtitle_rates())
+        total += sub["micros"]
+        text_lines = sub["lines"]
     return {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
@@ -555,7 +566,7 @@ def replay_of(user_id: str, key: str, body_hash: str, c=None) -> dict | None:
     None for a new key. The same key with other job details is a conflict (409). `c`: inside a transaction."""
     q = c.execute if c is not None else db.conn().execute
     row = q(
-        "SELECT k.body_hash, k.job_id, k.created_at, j.est_cost_micros, j.params_json FROM idempotency_keys k LEFT JOIN jobs j ON j.id = k.job_id"
+        "SELECT k.body_hash, k.job_id, k.created_at, j.est_cost_micros, j.params_json, j.claimed_seconds, j.duration_seconds FROM idempotency_keys k LEFT JOIN jobs j ON j.id = k.job_id"
         " WHERE k.user_id = ? AND k.key = ?",
         (user_id, key),
     ).fetchone()
@@ -563,8 +574,14 @@ def replay_of(user_id: str, key: str, body_hash: str, c=None) -> dict | None:
         return None
     if not hmac.compare_digest(row["body_hash"].encode(), body_hash.encode()):
         raise JobError("This Idempotency-Key was already used for a different job. Use a new key for a new job.", 409)
-    maximum = row["params_json"] is not None and automatic.pending(json.loads(row["params_json"]))
-    return {"id": row["job_id"], "estCostMicros": row["est_cost_micros"] or 0, **({"maximum": True} if maximum else {})}
+    params = json.loads(row["params_json"]) if row["params_json"] is not None else None
+    maximum = params is not None and automatic.pending(params)
+    from . import editing
+
+    needs = editing.pending_needs({"id": row["job_id"], "claimed_seconds": row["claimed_seconds"], "duration_seconds": row["duration_seconds"]}, params) \
+        if params is not None else None
+    return {"id": row["job_id"], "estCostMicros": row["est_cost_micros"] or 0, **({"maximum": True} if maximum else {}),
+            **({"needs": needs} if needs else {})}
 
 
 def create_job(
@@ -593,11 +610,11 @@ def create_job(
     if timeline is not None:
         from . import editing
 
-        tl, denoise_tier = editing.prepare_timeline_job(kind, denoise_tier, options, claimed_seconds, timeline)
+        tl, denoise_tier = editing.prepare_timeline_job(kind, denoise_tier, options, claimed_seconds, timeline, transcribe_tier)
     check_duration(kind, denoise_tier, claimed_seconds)
     if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
         raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
-    opts = validate_options(kind, denoise_tier, transcribe_tier, options)
+    opts = validate_options(editing.options_kind(kind, tl) if tl is not None else kind, denoise_tier, transcribe_tier, options)
     # The one hard limit: the upload and its scratch files must fit on disk, on top of what other uploads
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
@@ -616,7 +633,7 @@ def create_job(
     params = {
         "options": opts,
         "denoise_tier": denoise_tier if kind != "transcribe" else None,
-        "transcribe_tier": transcribe_tier if kind != "denoise" else None,
+        "transcribe_tier": transcribe_tier if kind != "denoise" and not (tl is not None and tl.layers["subtitles"]) else None,
         "input_ext": ext,
         "display_name": clean_display_name(display_name),
     }
@@ -631,6 +648,8 @@ def create_job(
 
         params["edit"] = {"timeline": tl.to_json(), "first_run": True}
         params["edit_rates"] = editing.step_rates()
+        if tl.layers["subtitles"]:
+            params["subtitle_rates"] = editing.subtitle_rates()
         params["rates"] = pricing.job_rates("transcribe", None, params["transcribe_tier"], n_translate)
         est = editing.first_run_cost(kind, params, claimed_seconds)
     elif plan:
@@ -695,7 +714,8 @@ def create_job(
     except Exception:
         shutil.rmtree(job_dir(job_id), ignore_errors=True)
         raise
-    return {"id": job_id, "estCostMicros": est, **({"maximum": True} if plan else {})}
+    wanted = editing.all_uploads(tl) if tl is not None else []
+    return {"id": job_id, "estCostMicros": est, **({"maximum": True} if plan else {}), **({"needs": wanted} if wanted else {})}
 
 
 def input_path(job: dict) -> Path:
@@ -724,11 +744,25 @@ def set_notice(job_id: str, notice: str) -> None:
         c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(params), job_id))
 
 
-def mark_uploaded(job_id: str) -> None:
+def mark_uploaded(job_id: str, source: bool = True) -> None:
+    """The job's file (`source`) or something else it waits for (the browser's work for a timeline's browser parts and free subtitles,
+    editing.py) has arrived: when the file is in and nothing else is awaited it is queued, else it stays `uploading` and waits (for
+    another UPLOAD_WINDOW_SECONDS after the last arrival, like an upload that is still coming). The one place a job leaves `uploading`."""
+    now = db.now()
+    if source:
+        db.execute("UPDATE jobs SET uploaded_at = COALESCE(uploaded_at, ?) WHERE id = ? AND status = 'uploading'", (now, job_id))
+    row = db.one("SELECT * FROM jobs WHERE id = ? AND status = 'uploading' AND uploaded_at IS NOT NULL", (job_id,))
+    if row is None:
+        return
+    from . import editing
+
+    if editing.pending_needs(dict(row), json.loads(row["params_json"])):
+        db.execute("UPDATE jobs SET expires_at = ? WHERE id = ? AND status = 'uploading'", (now + UPLOAD_WINDOW_SECONDS, job_id))
+        return
     db.execute(
-        "UPDATE jobs SET status = 'queued', next_stage = 'probe', queued_at = ?, uploaded_at = ?, expires_at = NULL"
-        " WHERE id = ? AND status = 'uploading'",
-        (db.now(), db.now(), job_id),
+        "UPDATE jobs SET status = 'queued', next_stage = 'probe', queued_at = ?, expires_at = NULL"
+        " WHERE id = ? AND status = 'uploading' AND uploaded_at IS NOT NULL",
+        (now, job_id),
     )
     invalidate_queue_cache()
 
@@ -757,6 +791,7 @@ def finish_failed(
             # (they are the person's work), the money is released and the run's record says why (editing.py).
             reverted = True
             params.pop("run", None)
+            params.pop("editor_reported", None)
             edit = dict(params.get("edit") or {})
             edit["lastRun"] = {"op": run.get("op"), "ok": False, "error": message[:300], "at": db.now()}
             params["edit"] = edit
@@ -813,7 +848,9 @@ def requeue(job: dict, next_stage: str | None = None, keep_place: bool = False) 
         editing.clear_scratch(d)
         return
     # (the blocks a stopped run had made are kept: they are exactly what the run starts again from)
-    keep = {f"input{params['input_ext']}", "blocks", *(params.get("rerun") or {}).get("linked", [])}  # a re-run's files from its source
+    from . import editing
+
+    keep = {f"input{params['input_ext']}", "blocks", editing.BROWSER, editing.SUBS, *(params.get("rerun") or {}).get("linked", [])}  # a re-run's files from its source
     for p in d.iterdir():
         if p.name in keep:
             continue
@@ -968,6 +1005,11 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         e = params.get("edit") or {}
         out["edit"] = {"available": job["status"] == "done", "hasTimeline": bool(e.get("timeline")), "run": (params.get("run") or {}).get("op"),
                        "lastRun": e.get("lastRun"), "suggestions": bool(e.get("suggestions"))}
+        from . import editing
+
+        needs = editing.pending_needs(job, params)  # what the browser still has to send for the timeline's browser parts and free subtitles
+        if needs is not None:
+            out["needs"] = needs
     if params.get("automatic"):
         out["chosen"] = params.get("chosen")  # null until the file has been listened to
         if automatic.pending(params):

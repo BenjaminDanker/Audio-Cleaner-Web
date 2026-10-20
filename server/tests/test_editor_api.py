@@ -134,7 +134,7 @@ def test_timelines_are_checked_strictly(client, signed_in):
     jid = edit_job(uid)
     bad = {
         "not an object": [1, 2],
-        "version": {"version": 2, "seconds": 600, "layers": {}},
+        "version": {"version": 3, "seconds": 600, "layers": {}},
         "unknown layer": {"version": 1, "seconds": 600, "layers": {"bass": [part(0, 1)]}},
         "unknown key": {"version": 1, "seconds": 600, "layers": {}, "extra": 1},
         "unknown setting": {"version": 1, "seconds": 600, "layers": {"noise": [{**noise(0, 5), "speed": 2}]}},

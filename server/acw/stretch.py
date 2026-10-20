@@ -128,3 +128,29 @@ def assemble(job_dir: Path, first: int, count: int, channels: list) -> tuple[byt
                 pass
             break
     return proc.stdout, scale if 0.0 < scale <= 1.0 else 1.0
+
+
+def peaks(job_dir: Path, spec: dict, timeout: float = 60.0) -> dict:
+    """The loudness outline the confined `acw.worker.peaker` reads from cached blocks (`{"blocks": [{"name", "at"}]}`) or from the recording's
+    copy (`{"file", "channels", "scale"}`): its JSON answer (see peaker.py). Shares the places of the cuts."""
+    import json as _json
+
+    if not _places.acquire(timeout=WAIT_SECONDS):
+        raise Busy()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "acw.worker.peaker", str(get_settings().bin_dir), str(job_dir), _json.dumps(spec, separators=(",", ":"))],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=timeout, env=_environment(), cwd=str(job_dir), start_new_session=True,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("the outline of %s timed out", job_dir)
+        raise Failed("timed out")
+    finally:
+        _places.release()
+    if proc.returncode != 0:
+        log.warning("the outline of %s failed (%s): %s", job_dir, proc.returncode, proc.stderr[-300:].decode("utf-8", "replace"))
+        raise Failed("the outline could not be made")
+    try:
+        return _json.loads(proc.stdout)
+    except ValueError:
+        raise Failed("the outline could not be read")

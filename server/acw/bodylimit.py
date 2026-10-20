@@ -17,9 +17,11 @@ import time
 DEFAULT_LIMIT = 64 * 1024
 WEBHOOK_LIMIT = 1024 * 1024
 TIMELINE_LIMIT = 256 * 1024  # a timeline is up to 200 KB of JSON (editing.TIMELINE_MAX_BYTES)
+CUES_LIMIT = 1024 * 1024  # the cues of one free subtitle part (editing.CUES_MAX_BYTES)
 BODY_IDLE_SECONDS = 20
 
-_UPLOAD = re.compile(r"^/api/jobs/[0-9a-f]{32}/input$")
+_UPLOAD = re.compile(r"^/api/jobs/[0-9a-f]{32}/(?:input|browser/noise)$")  # (the cleaned audio of a part is a file too: its route checks its size)
+_CUES = re.compile(r"^/api/jobs/[0-9a-f]{32}/browser/cues$")
 # the routes that take a timeline: creating (or estimating) a job, saving one, quoting, processing, exporting
 _TIMELINE = re.compile(r"^/api/jobs(?:/estimate|/[0-9a-f]{32}/(?:timeline|quote|process|export))?$")
 _WEBHOOK = "/api/stripe/webhook"
@@ -41,6 +43,8 @@ class BodyLimitMiddleware:
             return WEBHOOK_LIMIT
         if _TIMELINE.match(path):
             return TIMELINE_LIMIT
+        if _CUES.match(path):
+            return CUES_LIMIT
         return self.default
 
     async def __call__(self, scope, receive, send):

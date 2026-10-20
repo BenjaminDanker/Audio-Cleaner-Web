@@ -196,10 +196,10 @@ def gpu_stages(job: dict) -> list[str]:
         return list(params["run"].get("gpu") or [])
     if (params.get("edit") or {}).get("first_run"):  # a job made with a timeline: by the layers it has
         layers = (params["edit"].get("timeline") or {}).get("layers") or {}
-        stages = ["transcribe"] if params.get("transcribe_tier") == "local" else []
+        stages = ["transcribe"] if params.get("transcribe_tier") == "local" or any(p.get("quality") == "standard" for p in layers.get("subtitles") or []) else []
         if layers.get("rebuild"):
             stages.append("rebuild")
-        elif any(p.get("remover", "auto") in ("auto", "heavy") for p in layers.get("noise") or []):
+        elif any(p.get("remover", "auto") in ("auto", "heavy") for p in layers.get("noise") or [] if not p.get("browser")):
             stages.append("heavy")
         return stages
     if opts.get("echo_reference_track"):

@@ -54,6 +54,7 @@ def test_only_the_bulk_routes_exist():
     assert _paths(create_bulk_app()) == {
         ("GET", "/api/health"),
         ("PUT", "/api/jobs/{job_id}/input"),
+        ("PUT", "/api/jobs/{job_id}/browser/noise"),  # the audio a browser cleaned for a part of a timeline: a file too
         ("GET", "/api/jobs/{job_id}/outputs/{name}"),
         # the OBS plugin's release files (acw/api/downloads_routes.py): GET and HEAD each. The desktop app's
         # updates and models come from its own GitHub releases, not from here.

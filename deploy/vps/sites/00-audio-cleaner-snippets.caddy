@@ -35,7 +35,8 @@
 # /api/*: the API, routed to the process that serves it.
 (acw_api) {
 	handle /api/* {
-		@acw_upload path_regexp ^/api/jobs/[0-9a-f]{32}/input$
+		@acw_upload path_regexp ^/api/jobs/[0-9a-f]{32}/(input|browser/noise)$
+		@acw_cues path_regexp ^/api/jobs/[0-9a-f]{32}/browser/cues$
 		@acw_download path_regexp ^/api/(jobs/[0-9a-f]{32}/outputs/|downloads/)
 		@acw_webhook path /api/stripe/webhook
 		# The live WebSocket (audio frames; compression would only add delay) is never compressed.
@@ -51,6 +52,14 @@
 				max_size 64KB
 			}
 			import acw_bulk
+		}
+		handle @acw_cues {
+			request_body {
+				max_size 1MB
+			}
+			reverse_proxy 127.0.0.1:18790 {
+				import acw_upstream
+			}
 		}
 		handle @acw_ws {
 			request_body {

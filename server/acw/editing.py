@@ -125,6 +125,269 @@ def price(billable: dict, rates: dict[str, int]) -> tuple[int, list[dict]]:
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# Subtitles per part, and the parts the browser does itself (timeline version 2)
+# ---------------------------------------------------------------------------------------------------------------------
+BROWSER = "browser"  # the job's folder of what the browser uploaded: the cleaned noise parts (FLAC) and the cues of free subtitles (JSON)
+SUBS = "subs"  # ... and of the subtitle parts' results, one folder per part (segments.json, segments.<lang>.json, asr_chunks/)
+NEEDS_UPLOADS = "needs_uploads"
+CUES_MAX_BYTES = 1_000_000  # the JSON of one free part's cues
+NOISE_BYTES_PER_SECOND = 48_000 * 2 * 4  # most a FLAC of 48 kHz audio can take per second and channel (32-bit samples, no compression)
+TRANSCRIBE_SPEED = {"standard": "transcribe_local", "accurate": "transcribe_premium"}
+
+
+def subtitle_rates() -> dict[str, int]:
+    """Micros per minute of the subtitle steps at today's price list (pinned with the job, like `step_rates`): Standard and Accurate
+    transcription per part, and a translation per part and language."""
+    return {"transcribe_standard": pricing.rate("transcribe", "local").micros_per_minute,
+            "transcribe_accurate": pricing.rate("transcribe", "premium").micros_per_minute,
+            "translate": pricing.rate("transcribe_translate", "standard").micros_per_minute}
+
+
+def _ms(t: float) -> int:
+    return int(round(float(t) * 1000))
+
+
+def noise_name(start: float, end: float) -> str:
+    return f"noise-{_ms(start)}-{_ms(end)}.flac"
+
+
+def cues_name(start: float, end: float) -> str:
+    return f"cues-{_ms(start)}-{_ms(end)}.json"
+
+
+def browser_dir(job_id: str) -> Path:
+    return jobs.job_dir(job_id) / BROWSER
+
+
+def subtitle_key(part) -> str:
+    """The folder name of a subtitle part's results: where it is, its quality and language (what its transcription depends on)."""
+    st = part.settings
+    return f"{_ms(part.start)}-{_ms(part.end)}-{st['quality'][0]}-{st['language'] or 'auto'}"
+
+
+def subtitle_dir(job_id: str, part) -> Path:
+    return jobs.job_dir(job_id) / SUBS / subtitle_key(part)
+
+
+def _read_json(path: Path, limit: int = 2_000_000):
+    """A small JSON file of the job's folder, never through a link; None when it is missing or not sane."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode) or os.fstat(f.fileno()).st_size > limit:
+                return None
+            return json.loads(f.read().decode("utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+
+
+def wants_uploads(raw: object) -> bool:
+    """A stored timeline (JSON) has parts that need something from the browser: a noise part it cleans, subtitles it makes."""
+    layers = (raw or {}).get("layers") if isinstance(raw, dict) else None
+    layers = layers or {}
+    return (any(isinstance(p, dict) and p.get("browser") for p in layers.get("noise") or [])
+            or any(isinstance(p, dict) and p.get("quality") == "free" for p in layers.get("subtitles") or []))
+
+
+def all_uploads(tl) -> list[dict]:
+    """What the browser has to send for a timeline: the cleaned audio of each of its browser noise parts and the cues of each free
+    subtitle part, `{kind: "noise" | "cues", start, end}` in time order."""
+    out = [{"kind": "noise", "start": p.start, "end": p.end} for p in tl.browser_parts()]
+    out += [{"kind": "cues", "start": p.start, "end": p.end} for p in tl.free_parts()]
+    return sorted(out, key=lambda n: (n["start"], n["end"], n["kind"]))
+
+
+def cues_of(job_id: str, part) -> list[dict] | None:
+    """The cues the browser uploaded for a free part, as they were checked; None when none (or they were for another language)."""
+    data = _read_json(browser_dir(job_id) / cues_name(part.start, part.end), CUES_MAX_BYTES + 1000)
+    if not isinstance(data, dict) or data.get("language") != part.settings.get("language") or not isinstance(data.get("cues"), list):
+        return None
+    return data["cues"]
+
+
+def needs_for(job_id: str, tl) -> list[dict]:
+    """What the timeline still needs the browser to upload for this job: its browser noise parts and free subtitle parts that have nothing
+    stored yet (or, for a free part, only cues made for another language)."""
+    have_dir = browser_dir(job_id)
+    out = []
+    for n in all_uploads(tl):
+        if n["kind"] == "noise":
+            if not _regular(have_dir / noise_name(n["start"], n["end"])):
+                out.append(n)
+        elif cues_of(job_id, next(p for p in tl.free_parts() if p.start == n["start"] and p.end == n["end"])) is None:
+            out.append(n)
+    return out
+
+
+def pending_needs(job: dict, params: dict) -> list[dict] | None:
+    """What the job's working timeline still needs the browser to send; None when its timeline has no such part (so there is nothing to
+    report, and the job is exactly the job it always was)."""
+    raw = (params.get("edit") or {}).get("timeline")
+    if not wants_uploads(raw):
+        return None
+    try:
+        tl = _tl().Timeline.from_json(raw, seconds=file_seconds(job, params))
+    except _tl().TimelineError:
+        return None
+    return needs_for(job["id"], tl)
+
+
+def uploads_fingerprint(job_id: str, tl) -> tuple[str, str]:
+    """(the audio the browser cleaned, the subtitles with the cues the browser made) a timeline stands on, as short texts; "" for none.
+    A render is remembered with them (`edit.browser_rendered`, `edit.subs_rendered`): what a quote compares to know the result files are
+    current."""
+    import hashlib
+
+    def stat_of(name: str) -> list:
+        try:
+            st = os.stat(browser_dir(job_id) / name)
+            return [name, st.st_size, st.st_mtime_ns]
+        except OSError:
+            return [name, None]
+
+    def digest(obj) -> str:
+        return hashlib.sha1(json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+
+    audio = [stat_of(noise_name(p.start, p.end)) for p in tl.browser_parts()]
+    subs = [p.to_json() for p in tl.parts(_tl().SUBTITLES)]
+    cues = [stat_of(cues_name(p.start, p.end)) for p in tl.free_parts()]
+    return (digest(audio) if audio else "", digest([subs, cues]) if subs else "")
+
+
+def _cost(rate_per_minute: int, seconds: int) -> int:
+    return step_micros(rate_per_minute, seconds, 0.0)
+
+
+def subtitle_plan(job_id: str | None, tl, rates: dict[str, int]) -> dict:
+    """What the subtitles layer needs made, and what that costs: for each part `{key, start, end, quality, language, translate, free,
+    transcribe (a paid transcription has to run), translate_run (the translations that have to run)}`. `job_id` None: from nothing (a
+    job's first run); else whatever the job's folder already holds is not made again and not charged again. Free parts cost nothing.
+    Price of a part = its quality's rate x its whole seconds (rounded up) + the translation rate x the same seconds for each language
+    to make. `rates`: `subtitle_rates()`, as pinned."""
+    parts, lines_by = [], {"standard": [0, 0], "accurate": [0, 0]}
+    tr_seconds, tr_micros, langs = 0, 0, set()
+    micros = 0
+    for p in tl.parts(_tl().SUBTITLES):
+        st = p.settings
+        free = st["quality"] == "free"
+        have = None if free or job_id is None else _read_json(subtitle_dir(job_id, p) / "segments.json", 20_000_000)
+        spoken = have.get("language") if isinstance(have, dict) else None
+        e = {"key": subtitle_key(p), "start": p.start, "end": p.end, "quality": st["quality"], "language": st["language"],
+             "translate": list(st["translate"]), "free": free, "transcribe": not free and not isinstance(have, dict), "translate_run": []}
+        if not free:
+            e["translate_run"] = [t for t in st["translate"] if t != spoken
+                                  and (job_id is None or not _regular(subtitle_dir(job_id, p) / f"segments.{t}.json"))]
+        secs = max(1, math.ceil(p.seconds - 1e-9))
+        if e["transcribe"]:
+            m = _cost(rates[f"transcribe_{st['quality']}"], secs)
+            lines_by[st["quality"]][0] += secs
+            lines_by[st["quality"]][1] += m
+            micros += m
+        for t in e["translate_run"]:
+            m = _cost(rates["translate"], secs)
+            tr_seconds, tr_micros = tr_seconds + secs, tr_micros + m
+            langs.add(t)
+            micros += m
+        parts.append(e)
+    lines = []
+    for quality, (secs, m) in lines_by.items():
+        if secs:
+            r = pricing.rate("transcribe", "local" if quality == "standard" else "premium")
+            lines.append({"item": "transcribe" if quality == "standard" else "transcribe_accurate", "label": r.label, "quantity": 1,
+                          "seconds": secs, "fixedSeconds": 0.0, "usdPerMinute": rates[f"transcribe_{quality}"] / pricing.MICROS_PER_USD, "micros": m})
+    if tr_seconds:
+        lines.append({"item": "translate", "label": pricing.rate("transcribe_translate", "standard").label, "quantity": len(langs),
+                      "seconds": tr_seconds, "fixedSeconds": 0.0, "usdPerMinute": rates["translate"] / pricing.MICROS_PER_USD, "micros": tr_micros})
+    work = sum(e["transcribe"] or bool(e["translate_run"]) for e in parts)
+    return {"parts": parts, "micros": micros, "lines": lines, "work": work,
+            "seconds": {"standard": lines_by["standard"][0], "accurate": lines_by["accurate"][0], "translate": tr_seconds}}
+
+
+def subtitle_charge(job_id: str, plan: dict, rates: dict[str, int]) -> int:
+    """What the subtitle work of `plan` costs once it has run: the transcriptions and translations that were planned and exist now (a
+    translation that could not be made is not charged)."""
+    total = 0
+    for e in plan["parts"]:
+        if e["free"]:
+            continue
+        d = jobs.job_dir(job_id) / SUBS / e["key"]
+        secs = max(1, math.ceil(e["end"] - e["start"] - 1e-9))
+        if e["transcribe"] and _regular(d / "segments.json"):
+            total += _cost(rates[f"transcribe_{e['quality']}"], secs)
+        total += sum(_cost(rates["translate"], secs) for t in e["translate_run"] if _regular(d / f"segments.{t}.json"))
+    return total
+
+
+def subtitle_seconds(plan: dict) -> float:
+    """A rough wall-clock time for the subtitle work of a plan (the queue estimate)."""
+    S = jobs.SPEED
+    return sum(S[TRANSCRIBE_SPEED[e["quality"]]] * (e["end"] - e["start"]) for e in plan["parts"] if e["transcribe"])
+
+
+def subtitle_spec(tl) -> dict:
+    """What the runner is told about the subtitles layer: every part (it makes what its folder lacks and puts them all together)."""
+    return {"parts": [{"key": subtitle_key(p), "start": p.start, "end": p.end, **{k: p.settings[k] for k in ("quality", "language", "translate")}}
+                      for p in tl.parts(_tl().SUBTITLES)]}
+
+
+def browser_spec(job_id: str, tl) -> list[dict]:
+    """The browser-cleaned noise parts the runner reads: where each is and the file the browser sent for it."""
+    return [{"start": p.start, "end": p.end, "file": f"{BROWSER}/{noise_name(p.start, p.end)}"} for p in tl.browser_parts()]
+
+
+def has_subtitle_layer(params: dict) -> bool:
+    """The job's working timeline has subtitle parts (so its subtitles are made per part, not for the whole file)."""
+    layers = ((params.get("edit") or {}).get("timeline") or {}).get("layers") or {}
+    return bool(layers.get("subtitles"))
+
+
+def local_asr_wanted(params: dict) -> bool:
+    """The job's next run transcribes with the local recogniser (which needs its memory): Standard subtitle parts that are still to make."""
+    run = params.get("run")
+    if run:
+        return any(e["transcribe"] and e["quality"] == "standard" for e in (run.get("subs") or {}).get("parts", []))
+    layers = ((params.get("edit") or {}).get("timeline") or {}).get("layers") or {}
+    return any(p.get("quality") == "standard" for p in layers.get("subtitles") or [])
+
+
+def subtitle_cloud_phase(job_id: str, params: dict) -> str | None:
+    """What the subtitle parts still need from the web process, which alone reaches the internet: "asr" (an Accurate part whose speech
+    chunks wait for the transcription), "translate" (a translation still to make) or None (nothing: the files can be put together)."""
+    spec = subtitle_cloud_work(job_id, params)
+    if spec["asr"]:
+        return "asr"
+    return "translate" if spec["translate"] else None
+
+
+def subtitle_cloud_work(job_id: str, params: dict) -> dict:
+    """{"asr": [part dicts whose chunks wait], "translate": [(part dict, [languages]) still to make]}, from the job's folder."""
+    parts = (params.get("run") or {}).get("subs", {}).get("parts") if params.get("run") else None
+    if parts is None:
+        tl = _tl().Timeline.from_json(params["edit"]["timeline"], seconds=float(params["edit"]["timeline"]["seconds"]))
+        parts = subtitle_plan(None, tl, params.get("subtitle_rates") or subtitle_rates())["parts"]
+    out: dict = {"asr": [], "translate": []}
+    base = jobs.job_dir(job_id) / SUBS
+    for e in parts:
+        if e["free"]:
+            continue
+        d = base / e["key"]
+        done = _regular(d / "segments.json")
+        if e["quality"] == "accurate" and not done and (d / "asr_chunks" / "index.json").is_file():
+            out["asr"].append(e)
+            continue
+        if not done:
+            continue
+        spoken = (_read_json(d / "segments.json", 20_000_000) or {}).get("language")
+        todo = [t for t in e["translate"] if t != spoken and not _regular(d / f"segments.{t}.json")]
+        if todo:
+            out["translate"].append((e, todo))
+    return out
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # Facts and the planning stand-in for the recording
 # ---------------------------------------------------------------------------------------------------------------------
 def sanitize_facts(raw: object, d: Path) -> dict | None:
@@ -274,6 +537,16 @@ def parse_timeline(raw: object, seconds: float, *, slack: float = 0.5):
         raise bad(str(e)) from None
 
 
+def parse_for_job(params: dict, raw: object, seconds: float):
+    """`parse_timeline` for a timeline of an existing job: one that already has its subtitles made for the whole file (a transcription
+    tier of its own) cannot also have subtitle parts."""
+    tl = parse_timeline(raw, seconds)
+    if tl.layers["subtitles"] and params.get("transcribe_tier"):
+        raise bad("This job's subtitles were set for the whole file, so a timeline can't have subtitle parts. Make the subtitles in a new job.",
+                  code="timeline_options")
+    return tl
+
+
 def editable_kind(job: dict) -> bool:
     return job["kind"] in ("denoise", "denoise_transcribe")
 
@@ -380,28 +653,45 @@ def make_quote(job: dict, params: dict, tl, *, rates: dict[str, int] | None = No
         plan = ed.plan(planned, inputs, cache_for(job["id"]), prev)
     except ed.EditorError as e:
         raise bad(str(e)) from None
-    unchanged = rendered is not None and with_removers(tl, edit.get("resolved"))[0] == rendered
-    if unchanged:
-        billable, total, lines = {}, 0, []  # the result files already hold exactly this
+    browser_fp, subs_fp = uploads_fingerprint(job["id"], tl)
+    subs = subtitle_plan(job["id"], tl, params.get("subtitle_rates") or subtitle_rates())
+    # (what the sound depends on is compared without the subtitles; the audio a browser sent counts as part of it)
+    audio_same = (rendered is not None and with_removers(tl.audio(), edit.get("resolved"))[0] == rendered.audio()
+                  and browser_fp == (edit.get("browser_rendered") or ""))
+    subs_same = subs_fp == (edit.get("subs_rendered") or "") and not subs["work"]
+    unchanged = audio_same and subs_same
+    if audio_same:
+        billable, total, lines = {}, 0, []  # the result files already hold exactly this sound
     else:
         billable = ed.billable(plan)
         total, lines = price(billable, rates)
+    total, lines = total + subs["micros"], [*lines, *subs["lines"]]
     rebuild_s = _blocks().union_seconds(plan.asked.get("rebuild", []))
     if rebuild_s > pricing.MAX_REBUILD_SECONDS:
         raise bad(f"Voice rebuild takes up to {pricing.MAX_REBUILD_SECONDS // 60} minutes of a recording at a time; this timeline asks for {rebuild_s / 60:.0f}.")
     summary = plan.summary()
+    steps = {s: {"blocks": r["blocks"], "seconds": billable.get(s, {}).get("seconds", 0)} for s, r in summary.items()
+             if r["blocks"] or billable.get(s)}
+    asked = asked_summary(plan)
+    if subs["work"]:
+        todo = [e for e in subs["parts"] if e["transcribe"] or e["translate_run"]]
+        steps["subtitles"] = {"parts": len(todo), "seconds": sum(subs["seconds"].values())}
+        asked["subtitles"] = round(sum(e["end"] - e["start"] for e in todo), 3)
     return {
         "free": total == 0,
         "unchanged": unchanged,
+        "audioSame": audio_same,
         "approximate": approx,
         "micros": total,
         "lines": lines,
         "billable": billable,
-        "steps": {s: {"blocks": r["blocks"], "seconds": billable.get(s, {}).get("seconds", 0)} for s, r in summary.items()
-                  if r["blocks"] or billable.get(s)},
+        "subs": subs,
+        "subsSame": subs_same,
+        "needs": needs_for(job["id"], tl) if wants_uploads(tl.to_json()) else None,
+        "steps": steps,
         "misses": len(plan.misses),
-        "asked": asked_summary(plan),
-        "needsProcess": bool(plan.misses or billable),
+        "asked": asked,
+        "needsProcess": bool(plan.misses or billable or subs["work"]),
         "rates": rates,
         "plan": plan,
         "timeline": tl,
@@ -416,11 +706,14 @@ def gpu_stages_of(plan) -> list[str]:
 
 def public_quote(q: dict) -> dict:
     """The quote as the API says it."""
-    return {
+    out = {
         "estCostMicros": q["micros"], "estCostUsd": q["micros"] / pricing.MICROS_PER_USD, "free": q["free"], "unchanged": q["unchanged"],
         "needsProcess": q["needsProcess"], "approximate": q["approximate"], "lines": q["lines"], "steps": q["steps"], "asked": q["asked"],
         "timeline": q["timeline"].to_json(),
     }
+    if q.get("needs") is not None:
+        out["needs"] = q["needs"]  # what the timeline still needs the browser to upload (empty: everything is in)
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -542,10 +835,10 @@ def stretch_removers(tl, params: dict, resolved: dict | None, first: int, end: i
             continue
         if a > pos:
             segs.append((pos, a, fallback))
-        r = p.settings.get("remover")
+        r = "browser" if p.settings.get("browser") else p.settings.get("remover")  # (a browser part has no model blocks: not cached here)
         if r == "auto":
             r = (resolved or {}).get(part_key(p.start, p.end))
-        if r not in ("light", "heavy"):
+        if r != "browser" and r not in ("light", "heavy"):
             r = "light" if _intersect(has.get("light", []), [(a, b)]) or not _intersect(has.get("heavy", []), [(a, b)]) else "heavy"
         segs.append((a, b, r))
         pos = b
@@ -596,6 +889,8 @@ def plan_stretch(job: dict, params: dict, layer: str, first: int, count: int) ->
     else:
         has = {s: covered(layer_coverage(job, params, tl, s)) for s in ("light", "heavy")}
         for a, b, r in stretch_removers(tl, params, (params.get("edit") or {}).get("resolved"), first, end, has):
+            if r == "browser":
+                continue
             plan = _plan_of(job, params, probe_timeline(tl, "noise", r), inputs)
             if plan is not None:
                 take(plan, r, [(a, b)])
@@ -611,6 +906,110 @@ def plan_stretch(job: dict, params: dict, layer: str, first: int, count: int) ->
         got = _intersect(got, _merge(have[c]))
     missing = _subtract((first, end), got) if active else []
     return {"channels": chans, "missing": [(a - first, b - first) for a, b in missing]}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Outlines: the loudness of what a layer holds, for drawing it
+# ---------------------------------------------------------------------------------------------------------------------
+PEAKS_RATE = 4  # values per second of the recording
+PEAKS_WINDOW = SR // PEAKS_RATE
+PEAKS_BUDGET_SECONDS = 25.0  # how long one request works on blocks that have no outline yet (the rest follow on the next call)
+PEAKS_PER_RUN = 24  # blocks one confined run reads
+
+
+def _read_outline(path: Path) -> dict | None:
+    data = _read_json(path, 4_000_000)
+    if isinstance(data, dict) and isinstance(data.get("first"), int) and isinstance(data.get("p"), list) and all(isinstance(v, (int, float)) for v in data["p"]):
+        return data
+    return None
+
+
+def _write_outline(path: Path, data: dict) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, separators=(",", ":")))
+    os.replace(tmp, path)
+
+
+def peaks_of(job: dict, params: dict, layer: str) -> dict | None:
+    """The outline of a layer (`source`, `echo`, `noise` or `rebuild`, the stems of the preview, on its sample grid): `{"rate": 4,
+    "seconds", "peaks": [...]}`, one value per quarter second, the largest absolute sample over all channels (0 to 1, three decimals),
+    `None` where the layer is not in the cache for that moment. Made from the cached blocks (decoded by the confined helper, never here)
+    and kept per block next to it (`blocks/<name>.peaks`, the recording's in `kept-source.peaks`), so a block is read once. None when
+    nothing of the layer is cached; `pending` is added when the time of this call ran out before every block had its outline."""
+    from . import stretch
+
+    f = (params.get("edit") or {}).get("facts")
+    n = int(f["n"])
+    windows = -(-n // PEAKS_WINDOW)
+    d = jobs.job_dir(job["id"])
+    out: list[float | None] = [None] * windows
+    pending = False
+    if layer == "source":
+        entry = f.get("source")
+        if not entry or not _regular(d / entry["file"]):
+            return None
+        side = d / (Path(entry["file"]).stem + ".peaks")
+        got = _read_outline(side)
+        if got is None:
+            got = stretch.peaks(d, {"file": entry["file"], "channels": f["channels"], "scale": float(entry["scale"])}, timeout=240.0)
+            if not isinstance(got.get("p"), list):
+                raise stretch.Failed("the outline could not be read")
+            _write_outline(side, {"first": 0, "p": got["p"]})
+        for i, v in enumerate(got["p"][:windows]):
+            out[i] = v
+    else:
+        plan = plan_stretch(job, params, layer, 0, n)
+        wanted: dict[str, dict] = {}
+        for chan in plan["channels"]:
+            for b in chan or []:
+                wanted.setdefault(b["name"], b)
+        have: dict[str, dict] = {}
+        todo: list[dict] = []
+        for name, b in wanted.items():
+            got = _read_outline(d / BLOCKS / f"{name}.peaks")
+            if got is None:
+                todo.append({"name": name, "at": b["at"]})
+            else:
+                have[name] = got
+        import time as _time
+
+        t0 = _time.monotonic()
+        for i in range(0, len(todo), PEAKS_PER_RUN):
+            if _time.monotonic() - t0 > PEAKS_BUDGET_SECONDS:
+                pending = True
+                break
+            made = stretch.peaks(d, {"blocks": todo[i:i + PEAKS_PER_RUN]})
+            for name, got in made.items():
+                if name in wanted and isinstance(got, dict) and isinstance(got.get("first"), int) and isinstance(got.get("p"), list):
+                    _write_outline(d / BLOCKS / f"{name}.peaks", {"first": got["first"], "p": got["p"]})
+                    have[name] = got
+        unknown = [False] * windows  # under a block that has no outline yet (the time ran out)
+        for chan in plan["channels"]:
+            for b in chan or []:
+                got = have.get(b["name"])
+                for w in range(b["from"] // PEAKS_WINDOW, min(windows, -(-b["to"] // PEAKS_WINDOW))):
+                    if got is None:
+                        unknown[w] = True
+                        continue
+                    i = w - got["first"]
+                    if 0 <= i < len(got["p"]):
+                        out[w] = got["p"][i] if out[w] is None else max(out[w], got["p"][i])
+        # a window the cache lacks (in all of it) is absent; one with nothing missing but no block under it is silence the removers skip
+        absent = [False] * windows
+        for a, z in plan["missing"]:
+            for w in range(-(-a // PEAKS_WINDOW), min(windows, z // PEAKS_WINDOW)):
+                absent[w] = True
+        for w in range(windows):
+            if absent[w] or unknown[w]:
+                out[w] = None
+            elif out[w] is None:
+                out[w] = 0.0
+    if all(v is None for v in out):
+        return None
+    result = {"rate": PEAKS_RATE, "seconds": round(n / SR, 3), "peaks": [None if v is None else round(min(1.0, float(v)), 3) for v in out]}
+    if pending:
+        result["pending"] = True
+    return result
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -695,8 +1094,8 @@ def sanitize_report(raw: object, d: Path, seconds: float) -> dict:
     if raw.get("rendered") is not None:
         try:
             rt = _tl().Timeline.from_json(raw["rendered"], seconds=facts["n"] / SR if facts else seconds)
-            if all(p.settings.get("remover") in ("light", "heavy") for p in rt.layers["noise"]):
-                out["rendered"] = rt.to_json()
+            if all(p.settings.get("browser") or p.settings.get("remover") in ("light", "heavy") for p in rt.layers["noise"]):
+                out["rendered"] = rt.audio().to_json()
         except (_tl().TimelineError, KeyError, TypeError):
             pass
     if "billed" in raw:
@@ -710,10 +1109,24 @@ def sanitize_report(raw: object, d: Path, seconds: float) -> dict:
     return out
 
 
-def absorb(job: dict, params: dict, report: dict, *, op: str | None = None) -> dict:
+def absorb(job: dict, params: dict, report: dict, *, op: str | None = None, processed: object | None = None) -> dict:
     """The job's parameters with a run's report in them: the facts, the removers that were decided, the timeline that was rendered
-    (the one the result files hold), and a line in its history."""
+    (the one the result files hold), a line in its history, and the browser's uploads and subtitles the result files stand on
+    (`processed`: the timeline that was run, default the job's working one)."""
     edit = dict(params.get("edit") or {})
+    raw = processed if processed is not None else edit.get("timeline")
+    if op != "suggest":  # (a search for suggestions renders nothing: the result files stand on what they stood on)
+        for k in ("browser_rendered", "subs_rendered"):
+            edit.pop(k, None)
+    if op != "suggest" and raw and (wants_uploads(raw) or ((raw.get("layers") or {}).get("subtitles") if isinstance(raw, dict) else None)):
+        try:
+            f = report.get("facts") or edit.get("facts")
+            fingerprints = uploads_fingerprint(job["id"], _tl().Timeline.from_json(raw, seconds=f["n"] / SR if f else file_seconds(job, params)))
+        except (_tl().TimelineError, KeyError, TypeError):
+            fingerprints = ("", "")
+        for k, v in zip(("browser_rendered", "subs_rendered"), fingerprints):
+            if v:
+                edit[k] = v
     if report.get("facts"):
         edit["facts"] = report["facts"]
     if report.get("resolved"):
@@ -758,7 +1171,7 @@ def clear_scratch(d: Path) -> None:
     try:
         for p in d.iterdir():
             n = p.name
-            if n in SCRATCH_NAMES or n.startswith("result-") or n.startswith("editor-") or n == "asr_chunks":
+            if n in SCRATCH_NAMES or n.startswith(("result-", "editor-", "browser-")) or n == "asr_chunks":
                 if p.is_dir() and not p.is_symlink():
                     shutil.rmtree(p, ignore_errors=True)
                 else:
@@ -778,10 +1191,17 @@ def steps_in(tl) -> int:
     return max(1, sum(1 for n in ("echo", "noise", "rebuild") if tl.layers[n]))
 
 
-def prepare_timeline_job(kind: str, denoise_tier: str | None, options: dict, claimed_seconds: float, raw: object):
-    """The checks of a job made with a timeline: it needs audio steps, replaces the choices the timeline makes (the tier, strength,
-    remover, Leveling, loudness, echo removal, automatic settings), and every part is inside the file. Returns (Timeline, the tier the
-    job stores)."""
+def options_kind(kind: str, tl) -> str:
+    """The kind whose options a job made with `tl` is checked as: with subtitle parts the subtitle choices are the parts' own (no tier, no
+    whole-file language or translations), so its options are those of a job that cleans the sound."""
+    return "denoise" if tl.layers[_tl().SUBTITLES] else kind
+
+
+def prepare_timeline_job(kind: str, denoise_tier: str | None, options: dict, claimed_seconds: float, raw: object,
+                         transcribe_tier: str | None = None):
+    """The checks of a job made with a timeline: it needs audio steps or subtitles, replaces the choices the timeline makes (the tier,
+    strength, remover, Leveling, loudness, echo removal, automatic settings; with subtitle parts also the subtitle quality, language and
+    translations), and every part is inside the file. Returns (Timeline, the tier the job stores)."""
     if kind not in ("denoise", "denoise_transcribe"):
         raise bad("A timeline is for jobs with noise removal or Leveling: use kind denoise or denoise_transcribe.")
     if denoise_tier is not None:
@@ -790,8 +1210,14 @@ def prepare_timeline_job(kind: str, denoise_tier: str | None, options: dict, cla
     if clash:
         raise bad(f"A timeline replaces these options, leave them out: {', '.join(clash)}.", code="timeline_options")
     tl = parse_timeline(raw, claimed_seconds, slack=0.1 * claimed_seconds + 5.0)
-    if not any(tl.layers[n] for n in ("echo", "noise", "rebuild", "leveling")):
+    if not any(tl.layers[n] for n in ("echo", "noise", "rebuild", "leveling", "subtitles")):
         raise bad("The timeline has no parts: it would not do anything.")
+    if tl.layers["subtitles"]:
+        clash = [name for name, given in (("transcribeTier", transcribe_tier is not None), ("options.language", (options or {}).get("language") is not None),
+                                          ("options.translate", bool((options or {}).get("translate")))) if given]
+        if clash:
+            raise bad(f"A timeline with subtitles says the quality, language and translations of each part: leave these out: {', '.join(clash)}.",
+                      code="timeline_options")
     rebuild_s = sum(p.seconds for p in tl.layers["rebuild"])
     if rebuild_s > pricing.MAX_REBUILD_SECONDS:
         raise bad(f"Voice rebuild takes up to {pricing.MAX_REBUILD_SECONDS // 60} minutes of a recording at a time; this timeline asks for {rebuild_s / 60:.0f}.")
@@ -822,15 +1248,20 @@ def price_timeline(tl, seconds: float, rates: dict[str, int]) -> tuple[int, list
     return micros, lines, billable
 
 
-def first_run_cost(kind: str, params: dict, seconds: float, billed: dict | None = None) -> int:
+def first_run_cost(kind: str, params: dict, seconds: float, billed: dict | None = None, job_id: str | None = None) -> int:
     """What a job made with a timeline costs for a recording of `seconds`: its parts (`billed`: the runner's report of what ran, else the
-    whole timeline) at the rates pinned with the job, and the subtitles."""
+    whole timeline) at the rates pinned with the job, and the subtitles: the whole-file ones as always, or its subtitle parts (`job_id`
+    given and `billed`: the ones that were made, else all of them)."""
     rates = params.get("edit_rates") or step_rates()
+    tl = _tl().Timeline.from_json(params["edit"]["timeline"], seconds=seconds)
     if billed is None:
-        tl = _tl().Timeline.from_json(params["edit"]["timeline"], seconds=seconds)
         edit = price_timeline(tl, seconds, rates)[0]
     else:
         edit = price(billed, rates)[0]
+    if tl.layers["subtitles"]:
+        sr = params.get("subtitle_rates") or subtitle_rates()
+        plan = subtitle_plan(None, tl, sr)
+        edit += plan["micros"] if billed is None or job_id is None else subtitle_charge(job_id, plan, sr)
     text = pricing.job_cost_micros("transcribe", None, params.get("transcribe_tier"), seconds, params.get("rates"),
                                    len((params.get("options") or {}).get("translate") or [])) if kind != "denoise" else 0
     return edit + text
@@ -848,8 +1279,8 @@ def run_label(params: dict) -> str:
 def timeline_label(params: dict) -> str:
     """The name of a first run made with a timeline (the layers it has)."""
     tl = (params.get("edit") or {}).get("timeline") or {}
-    names = {"echo": "Echo removal", "noise": "Denoising", "rebuild": "Voice rebuild", "leveling": "Leveling"}
-    have = [names[k] for k in ("rebuild", "noise", "echo", "leveling") if (tl.get("layers") or {}).get(k)]
+    names = {"echo": "Echo removal", "noise": "Denoising", "rebuild": "Voice rebuild", "leveling": "Leveling", "subtitles": "Subtitles"}
+    have = [names[k] for k in ("rebuild", "noise", "echo", "leveling", "subtitles") if (tl.get("layers") or {}).get(k)]
     return " + ".join(have) or "Edited"
 
 
@@ -859,8 +1290,11 @@ def timeline_seconds(raw: dict, seconds: float, channels: int) -> float:
     per = {"echo": S["echo"], "noise": S["denoise_auto"], "rebuild": S["denoise_rebuild"], "leveling": S["leveling"]}
     total = 0.0
     for name, parts in ((raw or {}).get("layers") or {}).items():
-        if name in per:
-            total += per[name] * sum(max(0.0, min(seconds, p["end"]) - max(0.0, p["start"])) for p in parts) * channels
+        if name == "subtitles":
+            total += sum(S[TRANSCRIBE_SPEED[p["quality"]]] * max(0.0, min(seconds, p["end"]) - max(0.0, p["start"])) for p in parts
+                         if p.get("quality") in TRANSCRIBE_SPEED)
+        elif name in per:
+            total += per[name] * sum(max(0.0, min(seconds, p["end"]) - max(0.0, p["start"])) for p in parts if not p.get("browser")) * channels
     return total
 
 
@@ -890,6 +1324,13 @@ def spec_for(job: dict, params: dict) -> dict | None:
     else:
         out.update(op="first", timeline=e.get("timeline") if e.get("first_run") else None, previous=None, audio_format=None,
                    suggest=not params.get("rerun") and 0 < float(job.get("duration_seconds") or job["claimed_seconds"]) <= get_settings().suggest_max_seconds)
+    raw = out.get("timeline")
+    if raw and (wants_uploads(raw) or (raw.get("layers") or {}).get("subtitles") or run and run.get("subs") is not None):
+        tl = _tl().Timeline.from_json(raw, seconds=file_seconds(job, params))
+        out["browser"] = browser_spec(job["id"], tl)
+        out["audio"] = bool(run["audio"]) if run and "audio" in run else any(tl.layers[n] for n in _tl().LAYERS)
+        if (not run and tl.layers["subtitles"]) or (run and run.get("subs") is not None):  # the files put together from the parts
+            out["subtitles"] = subtitle_spec(tl)
     return out
 
 
@@ -919,6 +1360,83 @@ def job_for_edit(user_id: str, job_id: str, api_key_id: str | None, *, need_done
     return job, params
 
 
+def job_for_uploads(user_id: str, job_id: str, api_key_id: str | None) -> tuple[dict, dict]:
+    """The job and its parameters for an upload of the browser's work (cleaned noise parts, cues of free subtitles): the account's own job
+    (an API key: one it made itself) that is still waiting for its uploads (`uploading`) or is finished and idle (`done`), with a
+    timeline that has such parts."""
+    row = db.one("SELECT * FROM jobs WHERE id = ? AND user_id = ?", (job_id, user_id)) if len(job_id) == 32 else None
+    if row is None or (api_key_id is not None and row["api_key_id"] != api_key_id):
+        raise jobs.JobError("Job not found.", 404, code=JOB_NOT_FOUND)
+    job = dict(row)
+    params = json.loads(job["params_json"])
+    if not editable_kind(job):
+        raise jobs.JobError("This job has no sound to edit (it makes subtitles only).", 409, code=NOT_EDITABLE)
+    if job["status"] in ("expired", "failed", "canceled"):
+        raise jobs.JobError("This job’s files are already cleared away. Start it again from your file.", 409, code=FILES_GONE)
+    if job["status"] not in ("uploading", "done") or params.get("run"):
+        raise jobs.JobError("This job is being processed. Wait for it to finish.", 409, code=BUSY)
+    return job, params
+
+
+def upload_target(job: dict, params: dict, kind: str, start: float, end: float):
+    """The part of the job's current (working) timeline an upload is for, found by its exact range: a browser noise part (`noise`) or a free
+    subtitle part (`cues`). Raises JobError 400 when the timeline has no such part."""
+    raw = (params.get("edit") or {}).get("timeline")
+    what = "cleaned in the browser" if kind == "noise" else "free subtitles"
+    if not wants_uploads(raw):
+        raise jobs.JobError(f"This job's timeline has no part with {what}.", 400)
+    tl = _tl().Timeline.from_json(raw, seconds=file_seconds(job, params))
+    for p in (tl.browser_parts() if kind == "noise" else tl.free_parts()):
+        if _ms(p.start) == _ms(start) and _ms(p.end) == _ms(end):
+            return tl, p
+    raise jobs.JobError(f"No part of this job's timeline from {start:g} to {end:g} s has {what}. The parts are listed in `needs`.", 400)
+
+
+def noise_expected(job: dict, params: dict, part) -> int:
+    """How many samples (48 kHz) the browser's FLAC for a noise part must hold: the part's range, as the editor counts it."""
+    n = None
+    f = (params.get("edit") or {}).get("facts")
+    if f:
+        n = int(f["n"])
+    a, b = int(round(part.start * SR)), int(round(part.end * SR))
+    return (min(b, n) if n is not None else b) - a
+
+
+def job_channels(job: dict, params: dict) -> int | None:
+    """The channels of the job's audio (as the editor works on it) when the job knows them (after its file was probed), else None."""
+    f = (params.get("edit") or {}).get("facts")
+    return int(f["channels"]) if f else (int(params["channels"]) if params.get("channels") else None)
+
+
+def flac_header(head: bytes) -> tuple[int, int, int]:
+    """(sample rate, channels, samples) from the first bytes of a FLAC file (its STREAMINFO block); ValueError for anything else. Only the
+    header is read here: the web process never decodes an upload, the sandboxed runner does when the audio is used."""
+    if len(head) < 42 or head[:4] != b"fLaC" or (head[4] & 0x7F) != 0 or int.from_bytes(head[5:8], "big") < 34:
+        raise ValueError("That is not a FLAC file.")
+    info = int.from_bytes(head[18:26], "big")
+    rate, channels, samples = info >> 44, ((info >> 41) & 0x7) + 1, info & ((1 << 36) - 1)
+    return rate, channels, samples
+
+
+def store_cues(job_id: str, part, cues: list[dict]) -> None:
+    d = browser_dir(job_id)
+    d.mkdir(mode=0o700, exist_ok=True)
+    final = d / cues_name(part.start, part.end)
+    tmp = final.with_name(final.name + ".tmp")
+    tmp.write_text(json.dumps({"language": part.settings.get("language"), "cues": cues}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, final)
+
+
+def clear_chunks(job_id: str) -> None:
+    """The speech chunks of Accurate parts (cut from the upload for the transcription) once the files are made."""
+    root = jobs.job_dir(job_id) / SUBS
+    try:
+        for d in root.iterdir():
+            shutil.rmtree(d / "asr_chunks", ignore_errors=True)
+    except OSError:
+        pass
+
+
 def timeline_info(job: dict, params: dict) -> dict:
     """The answer of GET /api/jobs/{id}/timeline: the timeline, what is cached of each layer, the suggestions, how to read the preview."""
     seconds = file_seconds(job, params)
@@ -943,6 +1461,12 @@ def timeline_info(job: dict, params: dict) -> dict:
         "cacheBytes": cache_size(job["id"]),
         "preview": None,
     }
+    if wants_uploads(tl.to_json()):
+        out["needs"] = needs_for(job["id"], tl)
+    if tl.layers["subtitles"]:  # the subtitle parts whose text exists (made, or uploaded by the browser)
+        out["cached"]["subtitles"] = [[p.start, p.end] for p in tl.layers["subtitles"]
+                                      if (cues_of(job["id"], p) is not None if p.settings["quality"] == "free"
+                                          else _regular(subtitle_dir(job["id"], p) / "segments.json"))]
     if f and f.get("source") and job["status"] == "done":
         out["preview"] = {"layers": ["source", "echo", "noise", "rebuild"], "samples": f["n"], "channels": f["channels"],
                           "sourceScale": f["source"]["scale"], "stretchMaxSeconds": jobs.STRETCH_MAX_SECONDS}
@@ -953,7 +1477,17 @@ def save_timeline(user_id: str, job_id: str, api_key_id: str | None, raw: object
     """PUT /api/jobs/{id}/timeline: check and keep the working timeline. An edit: the job's files are kept 2 hours from now."""
     job, params = job_for_edit(user_id, job_id, api_key_id)
     seconds = file_seconds(job, params)
-    tl = parse_timeline(raw, seconds)
+    tl = parse_for_job(params, raw, seconds)
+    store_timeline(job_id, tl)
+    fresh = db.one("SELECT expires_at FROM jobs WHERE id = ?", (job_id,))
+    out = {"timeline": tl.to_json(), "expiresAt": fresh["expires_at"]}
+    if wants_uploads(out["timeline"]):
+        out["needs"] = needs_for(job_id, tl)
+    return out
+
+
+def store_timeline(job_id: str, tl) -> None:
+    """Keep `tl` as the working timeline of a finished, idle job (an edit: its files are kept 2 hours from now)."""
     with db.tx() as c:
         row = c.execute("SELECT params_json, status FROM jobs WHERE id = ?", (job_id,)).fetchone()
         cur = json.loads(row["params_json"])
@@ -964,15 +1498,13 @@ def save_timeline(user_id: str, job_id: str, api_key_id: str | None, raw: object
         cur["edit"] = edit
         c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(cur), job_id))
     jobs.touch(job_id)
-    fresh = db.one("SELECT expires_at FROM jobs WHERE id = ?", (job_id,))
-    return {"timeline": tl.to_json(), "expiresAt": fresh["expires_at"]}
 
 
 def estimate_seconds(q: dict, seconds: float, channels: int) -> float:
     """A rough wall-clock time for the run of a quote: what its missing blocks take, a decode and the render."""
     ed = _ed()
     work = sum(ed.compute_estimate(q["plan"]).values()) / 1.5
-    return work + jobs.SPEED["leveling"] * seconds * channels
+    return work + jobs.SPEED["leveling"] * seconds * channels + subtitle_seconds(q["subs"])
 
 
 def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: object | None = None, *, max_cost_micros: int | None = None,
@@ -999,7 +1531,13 @@ def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: o
         run = {"op": op, "timeline": tl.to_json(), "previous": None, "lines": [], "asked": {}, "gpu": [], "echo": False}
         est_seconds = jobs.SPEED["suggest"] * seconds
     else:
-        tl = parse_timeline(raw, seconds) if raw is not None else saved_timeline(job, params, seconds)
+        tl = parse_for_job(params, raw, seconds) if raw is not None else saved_timeline(job, params, seconds)
+        missing = needs_for(job_id, tl)
+        if missing:  # the timeline becomes the working one, so the uploads that are asked for can be matched with it
+            if raw is not None:
+                store_timeline(job_id, tl)
+            raise jobs.JobError("The browser's work for some parts of this timeline has to be uploaded first.", 409, code=NEEDS_UPLOADS,
+                                extra={"needs": missing})
         q = make_quote(job, params, tl, rates=rates)
         if q["unchanged"] and fmt == params["options"].get("audio_format", "flac"):
             raise jobs.JobError("Nothing would change: the result files already hold this timeline.", 400, code=NOTHING_TO_CHANGE)
@@ -1021,6 +1559,12 @@ def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: o
         prev, _ = for_planning(rendered, edit.get("resolved")) if rendered is not None else (None, False)
         run = {"op": op, "timeline": tl.to_json(), "previous": prev.to_json() if prev is not None else None, "lines": q["lines"],
                "asked": q["asked"], "gpu": q["gpu"], "echo": bool(tl.layers["echo"]), "rates": rates}
+        if q["subs"]["parts"] or not q["subsSame"]:  # the subtitle work and what it costs (the rates pinned with the job)
+            run["subs"] = None if q["subsSame"] else {"parts": q["subs"]["parts"]}
+            run["subtitle_rates"] = params.get("subtitle_rates") or subtitle_rates()
+        run["audio"] = (not q["audioSame"]) or fmt != params["options"].get("audio_format", "flac")  # the sound is rendered again
+        if run.get("subs") and any(e["transcribe"] and e["quality"] == "standard" for e in run["subs"]["parts"]) and "transcribe" not in run["gpu"]:
+            run["gpu"] = [*run["gpu"], "transcribe"]  # (the local recogniser has the card's places too)
     need_seconds = 2 * (est_seconds + jobs.MODEL_LOAD_SECONDS)
     from . import rerun
 

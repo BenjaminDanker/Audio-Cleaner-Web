@@ -136,6 +136,7 @@ LIMITS = {
     "api": (120, 2.0),                 # general API calls
     "job_create": (20, 20 / 3600),
     "upload": (30, 30 / 3600),
+    "browser_upload": (240, 240 / 3600),  # the pieces a browser sends for one timeline (cleaned parts, cues): many per job, so not the 30 an hour of `upload`
     "edit_plan": (120, 2.0),           # timeline reads and saves, quotes of the per-part editor (a plan costs a little CPU)
     "kept_cut": (120, 2.0),            # stretches of a job's kept copies per account (the strength slider asks for two every ~10 s of playing, more when seeking)
     "checkout": (10, 10 / 3600),

@@ -183,8 +183,13 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     stem = spec["output_stem"]
     threads = int(spec.get("threads", 2))
     outputs: list[dict] = []
-    denoise = spec["kind"] in ("denoise", "denoise_transcribe")
-    transcribe = spec["kind"] in ("transcribe", "denoise_transcribe")
+    ed_spec = spec.get("editor")  # the per-part editor (editrun.py): the block cache, the recording's facts, the suggestions
+    # A job whose timeline has subtitle parts makes its subtitles part by part (editrun.subtitles_prepare), not for the whole file; and one
+    # whose timeline has no sound parts (subtitles only) renders no audio.
+    parts_mode = bool(ed_spec) and ed_spec.get("subtitles") is not None
+    no_audio = bool(ed_spec) and not ed_spec.get("audio", True)
+    denoise = spec["kind"] in ("denoise", "denoise_transcribe") and not no_audio
+    transcribe = spec["kind"] in ("transcribe", "denoise_transcribe") and not parts_mode
     # A re-run starts from the copies the job it came from kept (rerun.py): "clean" says what to do about the sound
     # ("full": from the upload, as a first run; "denoised" / "rebuilt": from the kept noise removal / rebuilt voice;
     # "reuse": the cleaned sound of the source job is as wanted), "transcribe" whether the transcript is made again.
@@ -194,7 +199,6 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     denoise_run = denoise and clean_mode != "reuse"
     t0 = time.time()
 
-    ed_spec = spec.get("editor")  # the per-part editor (editrun.py): the block cache, the recording's facts, the suggestions
     editor_report: dict = {}
     cache = None
     needs_cloud = False
@@ -225,6 +229,13 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 **({"cache": cache, "input_id": f"{ed_spec['source_id']}~r"} if cache is not None else {}),
             )
             del mic
+    if parts_mode:
+        from acw.worker import editrun
+
+        emit(stage="Decoding", progress=2)
+        if x is None and denoise_run:
+            x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
+        needs_cloud = editrun.subtitles_prepare(job_dir, spec, ff, probe, x, limit, emit, base=5, span=asr_end - 5)
     if transcribe_run:
         # Transcribe first, from the original audio: every recogniser we tested
         # scores worse on denoised speech (docs/research/asr.md).
@@ -361,7 +372,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         del x, y
         for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy", "kept-decoded.f32"):
             (job_dir / scratch).unlink(missing_ok=True)
-    elif denoise:
+    elif denoise and not no_audio:
         # The cleaned sound of the job this one came from is what is wanted (only the subtitles change): reused as it is,
         # or in the other file type that was asked for.
         from acw_common.ffmpeg import AUDIO_FORMATS
@@ -377,12 +388,16 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             cleaned_path = ff.write_audio(pipeline.as_output(audio), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
 
+    if no_audio:  # a timeline of subtitles only: the sound was not rendered, so the result files hold the recording as it is
+        from acw_common.timeline import Timeline
+
+        editor_report.update(rendered=Timeline(probe.duration).to_json(), billed={})
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
     )
     # Translations need the internet, which this sandbox doesn't have: they run outside it, then `finalize` writes the files.
     # (A re-run that kept some languages only asks for the others.)
-    missing = [lang for lang in (opts.get("translate") or []) if not (job_dir / f"segments.{lang}.json").is_file()]
+    missing = [lang for lang in (opts.get("translate") or []) if not (job_dir / f"segments.{lang}.json").is_file()] if not parts_mode else []
     needs_cloud = needs_cloud or bool(missing)
     result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
               "echo_skipped": echo_skipped, "noise": noise_used, "kept": kept_out, "editor": editor_report}
@@ -398,13 +413,16 @@ ASR_SEGMENT_MAX_S = 15.0
 ASR_MERGE_GAP_S = 0.4
 
 
-def _write_asr_chunks(ff, job_dir: Path, x16) -> None:
+def _write_asr_chunks(ff, job_dir: Path, x16, offset: float = 0.0, window: tuple[float, float] | None = None) -> None:
     """Cut 16 kHz audio into speech segments of at most ASR_SEGMENT_MAX_S
-    (Silero VAD, bundled with faster-whisper) and encode each as mp3 (64 kbps, a few chunks per FFmpeg run)."""
+    (Silero VAD, bundled with faster-whisper) and encode each as mp3 (64 kbps, a few chunks per FFmpeg run).
+    `offset`: the second of the recording `x16` begins at (the chunks' times are in the recording's time); `window`: (from, to) seconds
+    of `x16` that belong to the part being transcribed (the rest is only context for the speech detector): the chunks are cut to it
+    (a piece under a quarter of a second is dropped), so no sound outside it is sent for transcription."""
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     chunk_dir = job_dir / "asr_chunks"
-    chunk_dir.mkdir(exist_ok=True)
+    chunk_dir.mkdir(parents=True, exist_ok=True)
     sr = 16000
     spans = get_speech_timestamps(
         x16,
@@ -418,9 +436,12 @@ def _write_asr_chunks(ff, job_dir: Path, x16) -> None:
             merged[-1][1] = b
         else:
             merged.append([a, b])
+    if window is not None:
+        lo, hi = int(window[0] * sr), int(window[1] * sr)
+        merged = [[max(a, lo), min(b, hi)] for a, b in merged if min(b, hi) - max(a, lo) >= sr // 4]
     names = [f"{i:04d}" for i in range(len(merged))]
     ff.write_audio_chunks(x16, sr, [(a, b) for a, b in merged], chunk_dir, names)
-    chunks = [{"file": f"{n}.mp3", "offset": a / sr, "seconds": (b - a) / sr} for n, (a, b) in zip(names, merged)]
+    chunks = [{"file": f"{n}.mp3", "offset": offset + a / sr, "seconds": (b - a) / sr} for n, (a, b) in zip(names, merged)]
     (chunk_dir / "index.json").write_text(json.dumps({"chunks": chunks}))
 
 
@@ -434,6 +455,11 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
     outputs = list(state["outputs"])
     subtitle_file = None
     language = None
+    if (spec.get("editor") or {}).get("subtitles") is not None:  # subtitles made part by part: put the parts together first
+        from acw.worker import editrun
+
+        emit(stage="Putting the subtitles together", progress=91)
+        editrun.merge_subtitles(job_dir, spec)
     seg_path = job_dir / "segments.json"
     if seg_path.exists():
         emit(stage="Writing captions", progress=92)

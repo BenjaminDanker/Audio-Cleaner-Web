@@ -4,8 +4,15 @@ This module runs in the confined process that handles the untrusted upload: it h
 `spec["editor"]` and reads back what it reports (`result["editor"]`), which the worker checks before it believes any of it.
 
     stage_edit        an edit run: decode the recording, decide the removers that are still "auto", plan the timeline against the job's
-                      block cache, make the missing blocks and render the timeline into the result audio (or only find suggestions)
+                      block cache, make the missing blocks and render the timeline into the result audio (or only find suggestions);
+                      the subtitle parts that are still to make are transcribed (Standard here, Accurate in the web process) and the
+                      caption files put together
     render_first      the first run of a job made with a timeline: the same, from an empty cache
+    load_browser      the audio the browser cleaned for the noise parts that say `browser: true`
+    subtitles_prepare / merge_subtitles
+                      the timeline's subtitle parts: transcribe what the job's folder lacks (Standard with the local recogniser; Accurate
+                      parts are cut into speech chunks for the web process), then put every part's segments, the translations and the
+                      free parts' uploaded cues together as segments.json / segments.<lang>.json (acw_common.subtitles)
     legacy_report     the first run of a job made without one (`pipeline.clean_audio`): what the editor needs to know about it
     EchoWholeFile     lets clean_audio fill the cache after a whole-file echo removal under the editor's block identities
 """
@@ -20,6 +27,8 @@ import numpy as np
 SR = 48_000
 SOURCE = "kept-source"
 BLOCKS = "blocks"
+SUBS = "subs"  # acw/editing.py: the subtitle parts' folders
+BROWSER = "browser"  # ... and what the browser uploaded
 
 
 def part_key(start: float, end: float) -> str:
@@ -173,9 +182,180 @@ def render(job_dir: Path, spec: dict, ff, probe, x, emit, *, base: int = 5, span
     summary = plan.summary()
     computed = {s: r["blocks"] for s, r in summary.items() if r["blocks"]}
     prog = lambda f: emit(stage="Cleaning" if f < 0.9 else "Leveling", progress=int(base + 2 + (span - 2) * f))  # noqa: E731
-    y = editor.render(tl, inputs, cache, runner_of(spec), work_dir=job_dir, progress=prog)
-    report = {"rendered": tl.to_json(), "resolved": resolved, "billed": billed, "computed": computed}
+    browser = load_browser(job_dir, spec, ff, x)
+    y = editor.render(tl, inputs, cache, runner_of(spec), work_dir=job_dir, progress=prog, browser=browser)
+    report = {"rendered": tl.audio().to_json(), "resolved": resolved, "billed": billed, "computed": computed}
     return y, report, notice
+
+
+def load_browser(job_dir: Path, spec: dict, ff, x: np.ndarray):
+    """The `editor.BrowserAudio` of the noise parts the browser cleaned: each uploaded FLAC decoded (to a file, memory-mapped) to the
+    recording's channels, cut or padded with silence to exactly its part. None when the timeline has no such part."""
+    from acw_common import editor
+
+    parts = spec["editor"].get("browser") or []
+    if not parts:
+        return None
+    n, ch = len(x), x.shape[1]
+    pieces = []
+    for i, b in enumerate(parts):
+        a, z = max(0, min(n, int(round(b["start"] * SR)))), max(0, min(n, int(round(b["end"] * SR))))
+        if z <= a:
+            continue
+        want = z - a
+        path = job_dir / b["file"]
+        if want < SR // 10:  # (too short to decode as a file of its own: left as it was)
+            pieces.append((a, np.array(x[a:z], dtype=np.float32)))
+            continue
+        raw = job_dir / f"browser-{i}.f32"
+        y = ff.decode_to_file(path, ff.probe(path), SR, ch, want / SR + 1.0, raw)
+        if len(y) != want:  # the file said how many samples it has; what it holds is checked here
+            fixed = np.lib.format.open_memmap(job_dir / f"browser-{i}.npy", mode="w+", dtype=np.float32, shape=(want, ch))
+            fixed[:] = 0.0
+            m = min(want, len(y))
+            fixed[:m] = y[:m]
+            y = fixed
+        pieces.append((a, y))
+    return editor.BrowserAudio(pieces)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Subtitles per part
+# ---------------------------------------------------------------------------------------------------------------------
+def _ms(t: float) -> int:
+    return int(round(float(t) * 1000))
+
+
+def _write_json(path: Path, obj) -> None:
+    import json
+
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _read_json(path: Path):
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def subtitles_prepare(job_dir: Path, spec: dict, ff, probe, x: np.ndarray | None, limit: float, emit, base: int = 5, span: int = 40) -> bool:
+    """Transcribe the subtitle parts the job's folder does not hold yet (`subs/<key>/segments.json`), part by part, each with a little
+    sound around it for context (acw_common.subtitles.padded) that is cut away again: Standard parts here with the local recogniser
+    (language detected on the part when it says none); Accurate parts are cut into speech chunks (`subs/<key>/asr_chunks`, only the
+    part's own speech) for the web process, which alone reaches the internet. `x`: the decoded recording (48 kHz), or None (then the
+    16 kHz mono sound is decoded here). Returns True when something is left for the web process: chunks to transcribe, translations to
+    make. Free parts have nothing to do here (the browser transcribed them)."""
+    from acw_common import pipeline, transcribe
+    from acw_common import subtitles as st
+    from acw_common.captions import segments_to_json
+
+    parts = [p for p in spec["editor"]["subtitles"]["parts"] if p["quality"] != "free"]
+    root = job_dir / SUBS
+    models = Path(spec["models_dir"])
+    threads = int(spec.get("threads", 2))
+    total = len(x) / SR if x is not None else float(probe.duration)
+    full16: list = []
+
+    def speech(a_s: float, b_s: float) -> np.ndarray:
+        """The 16 kHz mono sound of the recording from second a_s to b_s."""
+        if x is not None:
+            return pipeline.to_speech_16k(x[int(round(a_s * SR)):min(len(x), int(round(b_s * SR)))])
+        if not full16:
+            emit(stage="Decoding", progress=base)
+            full16.append(ff.decode(job_dir / spec["input"], probe, 16000, 1, limit)[:, 0])
+        return full16[0][int(round(a_s * 16000)):int(round(b_s * 16000))]
+
+    todo = [p for p in parts if not (root / p["key"] / "segments.json").is_file() and not (root / p["key"] / "asr_chunks" / "index.json").is_file()]
+    seconds_all = sum(p["end"] - p["start"] for p in todo) or 1.0
+    done_s = 0.0
+    for p in todo:
+        d = root / p["key"]
+        d.mkdir(parents=True, exist_ok=True)
+        pa, pb = st.padded(p["start"], p["end"], total)
+        audio = speech(pa, pb)
+        first = base + span * done_s / seconds_all
+        share = span * (p["end"] - p["start"]) / seconds_all
+        emit(stage="Transcribing", progress=int(first))
+        if p["quality"] == "accurate":
+            from acw.worker import runner
+
+            runner._write_asr_chunks(ff, d, audio, offset=pa, window=(p["start"] - pa, p["end"] - pa))
+        else:
+            lang = p["language"]
+            if lang is None:
+                emit(stage="Detecting language", progress=int(first))
+                lang = transcribe.detect_language(audio, models / "whisper" / "base", models / "whisper" / "small", threads)
+            report = lambda f, first=first, share=share: emit(stage="Transcribing", progress=int(first + share * f))  # noqa: E731
+            engine = transcribe.pick_engine(lang)
+            if engine.startswith("parakeet"):
+                segs = transcribe.transcribe_parakeet(audio, models / engine, models / "silero-vad", device=spec.get("asr_device", "cpu"),
+                                                      threads=threads, progress=report)
+            else:
+                segs, lang = transcribe.transcribe(audio, models / "whisper" / spec.get("whisper_model", "large-v3-turbo"), language=lang,
+                                                   threads=threads, progress=report)
+            segs = st.clip_segments(st.shift(segs, pa), p["start"], p["end"])
+            _write_json(d / "segments.json", {"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
+        done_s += p["end"] - p["start"]
+    return cloud_left(job_dir, spec)
+
+
+def cloud_left(job_dir: Path, spec: dict) -> bool:
+    """Something of the subtitle parts is left that only the web process can make: chunks waiting for Accurate transcription, or a
+    translation (of a part that has its text) that is not made yet and is not into the language the part is in."""
+    root = job_dir / SUBS
+    for p in spec["editor"]["subtitles"]["parts"]:
+        if p["quality"] == "free":
+            continue
+        d = root / p["key"]
+        if not (d / "segments.json").is_file():
+            if p["quality"] == "accurate" and (d / "asr_chunks" / "index.json").is_file():
+                return True
+            continue
+        spoken = _read_json(d / "segments.json").get("language")
+        if any(t != spoken and not (d / f"segments.{t}.json").is_file() for t in p["translate"]):
+            return True
+    return False
+
+
+def merge_subtitles(job_dir: Path, spec: dict) -> None:
+    """Put the subtitle parts together as the job's `segments.json` (the original text of every part, in time order) and
+    `segments.<lang>.json` (each translated language: the translations of the parts that asked for it), which the usual caption writer
+    (runner.stage_finalize) turns into the files. A free part's segments are the cues its browser uploaded. Whatever segment files the
+    folder held from an earlier run are replaced; with no text at all there are none."""
+    from acw_common import captions
+    from acw_common import subtitles as st
+
+    root = job_dir / SUBS
+    merged = []
+    for p in spec["editor"]["subtitles"]["parts"]:
+        start, end = p["start"], p["end"]
+        if p["quality"] == "free":
+            f = job_dir / BROWSER / f"cues-{_ms(start)}-{_ms(end)}.json"
+            data = _read_json(f) if f.is_file() else {}
+            merged.append({"start": start, "end": end, "language": p["language"], "engine": "browser", "translations": {},
+                           "segments": st.segments_from_cues(data.get("cues") or [], start, end)})
+            continue
+        d = root / p["key"]
+        if not (d / "segments.json").is_file():
+            continue
+        data = _read_json(d / "segments.json")
+        segs = st.clip_segments(captions.segments_from_json(data.get("segments") or []), start, end)
+        tr = {}
+        for lang in p["translate"]:
+            tf = d / f"segments.{lang}.json"
+            if tf.is_file():
+                tr[lang] = st.clip_segments(captions.segments_from_json(_read_json(tf).get("segments") or []), start, end)
+        merged.append({"start": start, "end": end, "language": data.get("language") or p["language"], "engine": data.get("engine"),
+                       "translations": tr, "segments": segs})
+    for old in job_dir.glob("segments*.json"):
+        old.unlink()
+    main, translated = st.combine(merged)
+    if main is not None:
+        _write_json(job_dir / "segments.json", main)
+        for lang, payload in translated.items():
+            _write_json(job_dir / f"segments.{lang}.json", payload)
 
 
 def stage_edit(job_dir: Path, spec: dict, ff, emit) -> dict:
@@ -200,14 +380,32 @@ def stage_edit(job_dir: Path, spec: dict, ff, emit) -> dict:
     if ed["op"] == "suggest":
         report["suggestions"] = find_suggestions(x, spec, emit, 10, 85)
     else:
-        y, rep, notice = render(job_dir, spec, ff, probe, x, emit, base=5, span=80, op=ed["op"])
-        report.update(rep)
-        fmt = ed.get("audio_format") or spec["options"].get("audio_format", "flac")
-        emit(stage="Writing the audio", progress=90)
-        out = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{spec['output_stem']}-cleaned", fmt)
-        result["outputs"] = [{"file": out.name, "kind": "audio"}]
-        result["notice"] = notice
-        del y
+        has_subs = ed.get("subtitles") is not None
+        audio = ed.get("audio", True)  # (a run that only changes the subtitles leaves the sound as it is)
+        used = 0
+        if has_subs:
+            used = 40 if audio else 80
+            result["needs_cloud_asr"] = subtitles_prepare(job_dir, spec, ff, probe, x, limit, emit, base=5, span=used)
+        if audio:
+            y, rep, notice = render(job_dir, spec, ff, probe, x, emit, base=5 + used, span=80 - used, op=ed["op"])
+            report.update(rep)
+            fmt = ed.get("audio_format") or spec["options"].get("audio_format", "flac")
+            emit(stage="Writing the audio", progress=90)
+            out = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{spec['output_stem']}-cleaned", fmt)
+            result["outputs"] = [{"file": out.name, "kind": "audio"}]
+            result["notice"] = notice
+            del y
+        else:
+            report["billed"] = {}
+        if has_subs:
+            # the caption files are put together here, or after the web process has made its part (runner.stage_finalize reads this)
+            import json
+
+            (job_dir / "main-state.json").write_text(json.dumps({"outputs": result["outputs"], "cleaned": None, "has_video": False}))
+            if not result.get("needs_cloud_asr"):
+                from acw.worker import runner
+
+                result.update(runner.stage_finalize(job_dir, spec))
     emit(stage="Done", progress=100)
     result.update(editor=report, seconds_spent=time.time() - t0, duration=probe.duration)
     for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy"):
