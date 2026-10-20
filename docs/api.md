@@ -27,7 +27,7 @@ There is no changelog beyond the git history of this file.
 |---|---|
 | Any API call | 120 in a burst, then 2 a second, per network (IPv6 per /64). Polling one job every 2 s is fine; poll several jobs with `GET /api/jobs` instead of one request each |
 | Creating jobs (`POST /api/jobs`) | 20 an hour per account and per network. A repeat of an `Idempotency-Key` costs nothing |
-| Uploads | 30 an hour per account |
+| Uploads | 30 an hour per account (the file of a job). The pieces a browser sends for a timeline (`PUT .../browser/noise` and `.../browser/cues`, section 8) have their own limit: 240 an hour per account |
 | Active jobs | 3 per account at once (`429`, "wait for one to finish") and at most 8 GiB of uploads waiting (`429`) |
 | Creating API keys (browser) | 10 an hour; at most 10 active keys |
 | Live sessions | 60 starts an hour per account, 90 per network; four at once per account (see the live protocol) |
@@ -63,9 +63,9 @@ live worker, stuck jobs, missing model files and the ledger check.
 | 403 | the key lacks the scope, the account is suspended, or **the key's monthly spending cap is reached** (then the header `X-Error-Code: key_spending_cap` is set and the message says how much is left and when it starts over) |
 | 404 | the job doesn't exist, isn't yours (for changing a job: not one this key made), or the output isn't available |
 | 408 | an upload stalled for 30 s |
-| 409 | the job is in the wrong state for this (upload when not waiting for one, cancel after it started, delete while it runs), an `Idempotency-Key` was used for different details, or a finished job can't be changed again (its files are gone, `job_files_gone`; see sections 7 and 8) |
+| 409 | the job is in the wrong state for this (upload when not waiting for one, cancel after it started, delete while it runs), an `Idempotency-Key` was used for different details, a finished job can't be changed again (its files are gone, `job_files_gone`; see sections 7 and 8), or a timeline needs uploads from the browser that are not there yet (`needs_uploads`, section 8) |
 | 411 | the upload has no `Content-Length`, or it differs from the `sizeBytes` given at creation |
-| 413 | the file is bigger than allowed (`maxUploadBytes` of `/api/billing/pricing`), or the upload is longer than declared |
+| 413 | the file is bigger than allowed (`maxUploadBytes` of `/api/billing/pricing`), the upload is longer than declared, or the cues of a free subtitle part are over 1 MB |
 | 422 | the JSON doesn't match the shape (`fields` lists which) |
 | 429 | a rate limit above (`Retry-After` says when), or the account already has the most file jobs in progress (`code: too_many_active_jobs`, default 3; changing a finished job counts) |
 | 507 | the host is short on disk right now; try again later |
@@ -160,7 +160,7 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
  "timeline": {"version": 1, "seconds": 612.4, "layers": {"noise": [{"start": 100, "end": 160.5, "strength_db": 40, "remover": "auto"}]}}}
 ```
 
-Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.automatic`, see "Automatic settings"). `uploadUrl` is relative to the base, **without** a leading slash
+Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.automatic`, see "Automatic settings"; and `"needs": [{kind, start, end}, ...]` for a timeline with parts the browser makes itself, see below). `uploadUrl` is relative to the base, **without** a leading slash
 (`api/jobs/<id>/input`). Fields:
 
 | Field | Rules |
@@ -173,7 +173,7 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 | `durationSeconds` | 0.5 s up to 14,400 s (4 h); up to 5,400 s (90 min) with `rebuild`. From the client: the server measures the file after the upload and prices what it finds, within the API key's monthly limit. The measured length may be at most 10 % (+5 s) longer than this, else the job fails before any work and nothing is charged |
 | `displayName` | optional, shown as the job's name and used for result file names. Up to 300 characters sent, cut to 120 after control, bidirectional and zero-width characters are removed |
 | `callbackUrl` | optional, see "Finish notifications" |
-| `timeline` | optional: only the parts it names are processed, and charged (section 8). Replaces `denoiseTier` and the options that say what is done to the sound (`atten_lim_db`, `noise`, `leveling`, `loudness_lufs`, `echo_reference_track`, `automatic`): leave them out (`400 timeline_options`). Needs `kind` `denoise` or `denoise_transcribe`; the subtitle options work as always. Without it the whole file is processed per the options, as before |
+| `timeline` | optional: only the parts it names are processed, and charged (section 8). Replaces `denoiseTier` and the options that say what is done to the sound (`atten_lim_db`, `noise`, `leveling`, `loudness_lufs`, `echo_reference_track`, `automatic`): leave them out (`400 timeline_options`). Needs `kind` `denoise` or `denoise_transcribe`. The subtitle options work as always, unless the timeline has a `subtitles` layer (timeline version 2): then every part says its own quality, language and translations, and `transcribeTier`, `options.language` and `options.translate` must be left out (`400 timeline_options`; a null language or an empty `translate` counts as left out), and `kind` `denoise_transcribe` needs no `transcribeTier`. Without a timeline the whole file is processed per the options, as before |
 | `free` | `true` is refused (400): jobs here are always paid. The free tools run in the visitor's browser |
 
 `options` (the whole object must be under 2000 characters; unknown keys are ignored):
@@ -196,6 +196,8 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 There is no option for restoring the high sounds a recording has lost (phone calls, voice messages, very small files): the fix is
 `denoiseTier: "rebuild"`, which makes them again with the rest of the voice. An old client's `restore_highs` is an option like any
 other this page does not list: it is ignored (not stored, not priced, not reported). `denoiseTier: "off"` needs `leveling` on.
+
+**A timeline with parts the browser makes itself.** A noise part with `"browser": true` is cleaned by the visitor's browser (free), and a subtitle part with quality `free` is transcribed by it (free); both are sent to the server as uploads (section 8, "Uploads from the browser"). A job created with such a timeline answers with `needs`, the list of those uploads, `[{"kind": "noise" | "cues", "start": 100, "end": 160.5}, ...]` in time order, and so does `GET /api/jobs/{id}` (`needs` is there for any job whose timeline has such parts, `[]` once everything is in; it is left out for every other job). **The job is not queued until the file (`PUT .../input`) and every upload of `needs` are in**, in any order; until then it stays `uploading` (each arrival restarts its upload window of an hour) and is cancelled like any upload that does not finish. `needs` lists the parts of the timeline as the server read it (neighbours with the same settings are one part).
 
 #### Automatic settings: `options.automatic: true`
 
@@ -273,7 +275,9 @@ failed (402, 429, ...) doesn't use the key up. Use a new key per file; a good on
 
 Same `kind`, `denoiseTier`, `transcribeTier`, `durationSeconds`, `options` and `timeline` as creating (no file fields); makes no
 job and holds nothing. Applies the same checks and limits, so it answers the same `400`s. With a `timeline` the price is that of its parts
-(section 8), `lines` carry `seconds` and `fixedSeconds`, and the answer repeats the checked `timeline`.
+(section 8), `lines` carry `seconds` and `fixedSeconds`, and the answer repeats the checked `timeline`. The subtitle parts of a version 2 timeline are lines
+too: `transcribe` (Standard parts), `transcribe_accurate` (Accurate parts) and `translate` (`quantity` = the number of languages); parts the browser
+makes (free subtitles, `"browser": true` noise) cost nothing and have no line.
 
 ```json
 {"estCostMicros": 102167, "estCostUsd": 0.102167, "durationSeconds": 612.4, "maxSeconds": 14400,
@@ -301,7 +305,7 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
 
 ### 4. Poll: `GET /api/jobs/{id}` (and `GET /api/jobs`)
 
-`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,sourceJobId,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,editedAt,hardDeadlineAt,edit?,redo?,callback?,chosen?,maximum?}`
+`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,sourceJobId,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,editedAt,hardDeadlineAt,edit?,needs?,redo?,callback?,chosen?,maximum?}`
 
 - `status`: `uploading → queued → running → (cloud_asr) → done | failed | canceled | expired`. A restart of the
   service never fails a job: it goes back to `queued` and starts again.
@@ -331,6 +335,7 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
   (its upload exists) and which kept copies it can start from. `preview` is for the website's strength slider (the two
   signals `GET /api/jobs/{id}/kept/noise` and `.../kept/input`, 24-bit FLAC, sample for sample the same length, for a recording of any
   length; section 5a): `{samples, channels, plan, scale: {noise, input}, bytes: {noise, input}, stretchMaxSeconds, energy?}`.
+- `needs` (jobs with audio steps, only when the timeline has parts the browser makes): what the browser still has to upload, `[{kind, start, end}]`, empty once everything is in (section 8, "Uploads from the browser").
 - `callback`: only when a `callbackUrl` was given, see below.
 - `chosen`, `maximum`: only for a job made with `options.automatic`: what was decided and why (`null` until the file has been listened to),
   and `true` while `estCostMicros` is still the most it can cost. See "Automatic settings".
@@ -431,7 +436,7 @@ is made), and **export** the result files. Nothing here applies to a job that on
 are what the website's editor uses. All of them need the `jobs` scope (or a browser session); a key can only use them on jobs it made itself,
 a browser session on any job of its account; anything else is `404 job_not_found`, like a job that doesn't exist.
 
-**The timeline** (JSON, `version` 1):
+**The timeline** (JSON, `version` 1, or `version` 2 when it has subtitles or a part cleaned in the browser):
 
 ```json
 {"version": 1, "seconds": 612.4, "layers": {
@@ -444,28 +449,36 @@ a browser session on any job of its account; anything else is `404 job_not_found
 | Layer | Meaning and settings |
 |---|---|
 | `echo` | remove the speaker echo (needs the file's second audio track); no settings |
-| `noise` | remove the noise: `strength_db` (above 0, at most 100; 12 gentle, 24 balanced, 40 strong, 100 maximum; the words `gentle balanced strong max` are accepted), `remover` `auto` (default: decided per part when it runs), `light` or `heavy` |
+| `noise` | remove the noise: `strength_db` (above 0, at most 100; 12 gentle, 24 balanced, 40 strong, 100 maximum; the words `gentle balanced strong max` are accepted), `remover` `auto` (default: decided per part when it runs), `light` or `heavy`. Version 2: `"browser": true` instead of these: the visitor's browser cleaned that range itself, free, and uploads the result (see "Uploads from the browser"); strength and remover are not used (they may be sent, they are not kept) |
 | `rebuild` | rebuild the voice; no settings. **Where noise removal and Voice rebuild both cover a moment, Voice rebuild wins** and the noise removal there is not run |
 | `leveling` | even out the voice and set the loudness: `loudness_lufs` from -70 to 0, or `null` to keep the level |
+| `subtitles` (version 2) | make the subtitles of the part: `quality` `free` (the browser transcribes it and uploads the cues), `standard` or `accurate` (the server transcribes it), `language` (a code, or `null` to detect it), `translate` (up to 3 codes, none the part's own language, only with `standard` or `accurate`). See "Subtitles per part" |
 
 Times are seconds (kept to the millisecond). The parts of a layer never overlap: a part painted over others replaces them (in the JSON the later part wins),
 neighbours with the same settings are one part. A layer that is missing has no parts. The default timeline of a job is every step it was made with on the
-whole file (what it did), and a job made without a timeline of its own shows exactly that. **Subtitles stay whole-file job options**, outside the
-timeline. Checked strictly (`400 bad_timeline`, the message says what): the format and version, unknown keys, layers and settings, numbers, every part
+whole file (what it did), and a job made without a timeline of its own shows exactly that (without subtitles: those are the job's whole-file options, unless it has a `subtitles` layer).
+**Version.** `version` 1 is what the first version of this format says; `version` 2 adds the `subtitles` layer and `"browser": true` noise parts, nothing else. Both are accepted. The server
+answers with version 2 only for a timeline that uses one of the two, so every other timeline is written back exactly as before (older programs read only version 1); a version 1 document that
+uses them is `400 bad_timeline`. A part cleaned in the browser may not overlap an echo part: echo removal runs before the noise removal and the browser can't do it
+(`400 bad_timeline`, "Echo removal can't be used on a part cleaned in the browser"); where Voice rebuild overlaps it, Voice rebuild wins, as over any noise removal.
+Checked strictly (`400 bad_timeline`, the message says what): the format and version, unknown keys, layers and settings, numbers, every part
 inside the recording (a hair, 0.5 s, past the end is cut to it), at most **500 parts per layer** and at most **200 KB** of JSON (`413` past 256 KB).
 Where a timeline is accepted: in `POST /api/jobs` and `POST /api/jobs/estimate` (`timeline`: only its parts are processed and charged), `PUT .../timeline`,
 and in the bodies below.
 
 | Call | Body | Answer |
 |---|---|---|
-| `GET /api/jobs/{id}/timeline` | | `{timeline, custom, rendered, seconds, channels, secondTrack, cached, suggestions, run, lastRun, expiresAt, editedAt, hardDeadlineAt, cacheBytes, preview}`: `timeline` the working timeline (what was last saved, processed or exported; else the default), `custom` whether it is a saved one, `rendered` the timeline the result files hold (`null` if unknown), `seconds` the recording's length, `secondTrack` whether echo removal is possible, `cached` what is cached per layer as `[[start, end], ...]` seconds: `echo`, `noise` (either remover; `light` and `heavy` apart) and `rebuild` (Leveling is not cached, it is made again at each render), `suggestions` as below or `null`, `preview` how to read the stretches below (`{layers, samples, channels, sourceScale, stretchMaxSeconds}`, `null` before the job has its recording copy). Works while the job runs too. **Not an edit** |
-| `PUT /api/jobs/{id}/timeline` | `{timeline}` | `{timeline, expiresAt}`: the checked timeline as saved (merged, clamped). The job must be `done` and idle (`409 job_busy` while it is processed). **An edit** |
+| `GET /api/jobs/{id}/timeline` | | `{timeline, custom, rendered, seconds, channels, secondTrack, cached, needs?, suggestions, run, lastRun, expiresAt, editedAt, hardDeadlineAt, cacheBytes, preview}`: `timeline` the working timeline (what was last saved, processed or exported; else the default), `custom` whether it is a saved one, `rendered` the timeline the result files hold (`null` if unknown), `seconds` the recording's length, `secondTrack` whether echo removal is possible, `cached` what is cached per layer as `[[start, end], ...]` seconds: `echo`, `noise` (either remover; `light` and `heavy` apart) and `rebuild` (Leveling is not cached, it is made again at each render) and, for a timeline with subtitle parts, `subtitles` (the parts whose text exists: made, or uploaded), `needs` (only when the timeline has parts the browser makes: the uploads it still waits for, `[]` once they are in), `suggestions` as below or `null`, `preview` how to read the stretches below (`{layers, samples, channels, sourceScale, stretchMaxSeconds}`, `null` before the job has its recording copy). Works while the job runs too. **Not an edit** |
+| `PUT /api/jobs/{id}/timeline` | `{timeline}` | `{timeline, expiresAt, needs?}`: the checked timeline as saved (merged, clamped); `needs` as above when it has parts the browser makes. The job must be `done` and idle (`409 job_busy` while it is processed). **An edit** |
 | `POST /api/jobs/{id}/quote` | `{timeline?}` (omitted: the saved one) | the price, below. Holds and runs nothing. **An edit.** Not a job: it does not count toward the active-job limit |
-| `POST /api/jobs/{id}/process` | `{timeline?, maxCostMicros?, audioFormat?}` | `{id, run: {id, op: "process"}, estCostMicros, holdMicros, free, approximate, expiresAt}`: the job goes back to `queued` (poll `GET /api/jobs/{id}`; its earlier outputs stay listed until the new ones replace them). The timeline given becomes the working timeline. `audioFormat`: the file type of the result (as `options.audio_format`, which it also sets). **An edit.** Counts toward the active-job limit |
+| `POST /api/jobs/{id}/process` | `{timeline?, maxCostMicros?, audioFormat?}` | `{id, run: {id, op: "process"}, estCostMicros, holdMicros, free, approximate, expiresAt}`: the job goes back to `queued` (poll `GET /api/jobs/{id}`; its earlier outputs stay listed until the new ones replace them). The timeline given becomes the working timeline. `audioFormat`: the file type of the result (as `options.audio_format`, which it also sets). A timeline whose browser parts or free subtitles have no upload yet is `409 needs_uploads` (below). **An edit.** Counts toward the active-job limit |
 | `POST /api/jobs/{id}/export` | the same | the same with `op: "export"`: the result files rendered from the cache alone, **free**, for a quote of nothing. A timeline that has something to make is `409 needs_processing` with `quote` in the answer. **An edit.** Counts toward the active-job limit |
 | `GET /api/jobs/{id}/suggestions` | | `{suggestions: {seconds, whole: {rebuild, remover, strength}, suggestions: [{start, end, kind: "part"\|"clipping", rebuild, noise: {strength_db, remover}\|null, reasons: [plain words]}], madeAt}\|null}` |
 | `POST /api/jobs/{id}/suggestions` | | looks for suggestions of a job that has none: a free run (`op: "suggest"`, the answer of `process`), poll the job. Counts toward the active-job limit |
 | `GET /api/jobs/{id}/preview/{source\|echo\|noise\|rebuild}?start=&seconds=` | | a stretch of what the job holds, below |
+| `GET /api/jobs/{id}/peaks/{source\|echo\|noise\|rebuild}` | | the loudness outline of a layer, below |
+| `PUT /api/jobs/{id}/browser/noise?start=&end=` | FLAC | the audio a browser cleaned for a noise part, below |
+| `PUT /api/jobs/{id}/browser/cues?start=&end=` | `[{start, end, text}]` | the cues a browser transcribed for a free subtitle part, below |
 
 **Quote.** `POST .../quote` answers
 
@@ -480,7 +493,9 @@ and in the bodies below.
 `steps` is what has to be made: per step the missing blocks and the whole seconds billed; `asked` the seconds of the recording each step is asked for;
 `unchanged` says the result files already hold this timeline (nothing to do, price 0); `approximate` that a part with `remover: "auto"` is not decided yet
 (it counts as the light remover; it is decided when it runs and charged for what runs, never more than the hold, which covers the dearer remover);
-`free` that the price is 0. `lines` add up to `estCostMicros`.
+`free` that the price is 0. `lines` add up to `estCostMicros`. For a timeline with subtitle parts `lines` also has `transcribe`, `transcribe_accurate` and `translate`, `steps.subtitles` is
+`{parts, seconds}` (the parts that have text or translations to make, and their whole seconds), `asked.subtitles` the seconds of the recording they cover, and `needs` lists the uploads the timeline still waits for (only when it has parts the browser
+makes). A change of subtitles alone leaves the sound alone (it is not rendered again, nor charged) and `unchanged` is true only when the result files hold these subtitles too (the same parts, and the same cues uploaded for the free ones).
 
 **Price.** For each step that runs, `rate per second x (the whole seconds of the parts asked for, rounded up, in the blocks that have to be made
 + the step's fixed per-run amount expressed as equivalent seconds)`, each step rounded up to a micro. The context a model also reads around a part is
@@ -495,6 +510,12 @@ the last render (a new strength under Leveling changes it; a Leveling part with 
 | `rebuild` (Voice rebuild) | 30,000 ($1.80 an hour) | 4.3 GPU-s, 0.203 per second | 21.18 | 10,591 |
 | `leveling` (Leveling) | 1,000 ($0.06 an hour) | 1.28 CPU-s, 0.013 per second | 98.46 | 1,641 |
 
+**Subtitle parts** are priced per part, from the price list (`transcribe` / `local`: Standard, 4,000 micros a minute; `transcribe` / `premium`: Accurate, 15,000; `transcribe_translate`: 4,000 per language), with no fixed
+amount: for each part, `the quality's rate x the part's whole seconds (rounded up)`, plus `the translation rate x the same seconds` for each language that has to be made, each rounded up to a micro. Free parts and
+parts cleaned in the browser cost nothing. Whatever the job holds already is not made or charged again: the text of a part with the same range, quality and language is kept (a new language costs only
+its translation), and a translation into the language a part turns out to be in is not made. A translation that can't be made is left out, said in `notice` and not charged. The rates are pinned with the job (a run is held at the
+quote's), and the charge is for what was made, never more than the hold.
+
 (The rates are the price list's, `GET /api/billing/pricing`; echo removal has its own row there, `echo` / `standard`, and a job made the old way is
 charged it per second when echo removal is on, in its own line. The fixed amounts are the measured cost of starting a step in its own sealed process, at the step's own rate.) The whole file with
 the default steps costs today's price plus about 2 % of ten minutes, 0.4 % of an hour: 600,000 micros an hour of Denoising + Leveling becomes
@@ -504,7 +525,7 @@ nothing has no line; the hold is made at the quote and the charge is for what ra
 **Run.** A process or export is the job going back through the normal queue, sandbox and workers (Voice rebuild and the heavy remover on the card,
 `400` with "paused" when it is down and the timeline needs it): the missing blocks are made and cached, then the timeline is rendered (joins between
 parts, Leveling per part) into the result audio. Video results are not made by a run: audio is what the server makes (the website's own remux
-flow puts it back into the video). The captions and transcript of the job stay as they were. If a run fails or is canceled the job is as it was
+flow puts it back into the video). The captions and transcript of the job stay as they were, unless the run changes the subtitles of a job that makes them part by part: then they are put together again from all the parts (see below). If a run fails or is canceled the job is as it was
 (`edit.lastRun`), the money is released and the files stay. After the first process of a job made the old way, its old strength-slider copies (`redo`) no longer fit
 and are deleted; use the preview below.
 
@@ -525,14 +546,47 @@ rate limit (a burst of 120, then 2 a second) and `503` when busy as the kept cop
 quieter, phone-like, distorted, clipped) and stores what fits each better, with the reasons in plain words, ranges and proposed settings (about 0.22
 s of work per second of audio). The server's are the record; a longer recording gets them on request (`POST .../suggestions`).
 
-**Retention.** The job's files (upload, cached blocks, recording copy, results) are deleted **2 hours after its last edit** (`expiresAt`) and never
+**Subtitles per part.** A version 2 timeline can have a `subtitles` layer, in a job made with `kind` `denoise` or `denoise_transcribe` (no `transcribeTier`, no
+`options.language` or `options.translate`; a job whose subtitles were set for the whole file can't have subtitle parts, `400 timeline_options`). Each part is
+`{start, end, quality, language, translate}`: `quality` `free`, `standard` or `accurate` (required), `language` a code of the website's list (`en es fr de it pt nl pl ru uk tr ar hi ja ko zh sv da fi no cs el he id vi hu ro th`; `accurate` also takes any other 2 to 3 letter code its engine knows) or `null` to detect it,
+`translate` up to 3 codes from the same list, never the part's own language, only with `standard` or `accurate` (`400 bad_timeline` with the reason otherwise); neighbours with the same settings are one part. The parts may sit
+on a recording that is otherwise not touched: a timeline with subtitle parts and no sound parts makes no audio file. Standard and Accurate parts are transcribed by the server part by part, with a little sound around
+each (2 s each side, for context; what is said there is not part of it) and the cues are cut to the part and put in file time. Each language of `translate` gets the cues of the parts that asked for it. A free part is transcribed
+by the browser, which uploads its cues. All parts are put together into the job's usual caption files, with the same names and formats as always (`options.caption_formats`: `<stem>.srt`, `<stem>.vtt`,
+`<stem>-transcript.txt` with the original text of every part in time order, and `<stem>.<lang>.srt|vtt` / `<stem>.<lang>-transcript.txt` for each translated language); their `lang` is the language most of the speech is in. A change to one part (or its
+language, quality or translations) makes only what that part needs; the rest is kept (see "Price").
+
+**Uploads from the browser.** A timeline can have parts the visitor's browser makes itself, free: noise parts with `"browser": true` (the browser cleaned that range) and subtitle parts with quality `free` (the browser transcribed it).
+The server needs the result of each, and says so: `needs` is `[{"kind": "noise" | "cues", "start", "end"}]`, in the create answer (a job made with such a timeline is **not queued until the file and every upload are in**), in `GET /api/jobs/{id}`,
+in `GET .../timeline`, in `PUT .../timeline` and in a quote. `409 needs_uploads` (`code` and `X-Error-Code`, with `needs` in the answer) answers a `process` or `export` whose timeline needs uploads it does not have; the timeline of that
+request becomes the job's working timeline, so the client uploads what `needs` lists and calls `process` again. Both uploads must match a browser noise part / free subtitle part of the job's **working timeline exactly**
+(`start` and `end` in seconds to the millisecond, as in `needs`), else `400`; uploading again replaces the earlier one. They are kept in the job's folder (`browser/`), deleted with the job, and need the job to be `uploading` or
+`done` and idle (`409 job_busy` while it is queued or running; the same ownership rules as the other calls here). A finished job's upload is an edit (its files are kept 2 hours from now); the limit is 240 uploads an hour per account (`429`).
+
+| Call | Body | Rules |
+|---|---|---|
+| `PUT /api/jobs/{id}/browser/noise?start=&end=` | FLAC, 48 kHz, with the channels of the job's audio, exactly the part's range | `exactly` means `round(end x 48000) - round(start x 48000)` samples (the header says how many; the end of the recording cuts the last part short); not 48 kHz, another number of samples or other channels is `400` and the message says which. At most `samples x 8 + 1 MB` bytes (`413`). The file is decoded and used only when the job runs (a damaged one fails the run, nothing charged). It becomes the noise layer's output for the part (strength and remover are not used); **Leveling then applies on top as usual**, and Voice rebuild wins where it overlaps. Answers `{ok: true}` |
+| `PUT /api/jobs/{id}/browser/cues?start=&end=` | JSON `[{start, end, text}]` in file time, inside the part | at most 1 MB and 20,000 cues; a cue a hair (0.5 s) outside the part is cut to it, further is `400`; cues with no text are dropped. They are the part's text (no translation: free parts have none). Cues sent for another language than the part's current one are not used: `needs` lists the part again. Answers `{ok: true}` |
+
+**Outlines.** `GET /api/jobs/{id}/peaks/{layer}`, `layer` one of `source`, `echo`, `noise`, `rebuild` (the stems of the preview stretches, on the same sample grid), answers
+
+```json
+{"rate": 4, "seconds": 612.4, "peaks": [0.0, 0.012, 0.31, null, "..."]}
+```
+
+one value per 0.25 s of the recording (`ceil(seconds x 4)` of them): the largest absolute sample over all channels in that quarter second, 0 to 1, rounded to 3 decimals; `null` where that layer is not in the cache
+for that moment (the same moments `X-Stretch-Missing` of the preview lists; the noise layer of a part cleaned in the browser is never cached here). The values are made from the cached blocks and kept per block in the
+job's cache (the recording's in `kept-source.peaks`), so asking again is cheap; if the time of one call (25 s) runs out before every block has its values, the blocks left are `null` for now and the answer has `"pending": true`
+(ask again). `404 not_cached` when nothing of the layer is cached. Same sign-in, scopes, ownership, retention (a read, not an edit) and rate limit (`503` when busy) as the preview stretches.
+
+**Retention.** The job's files (upload, cached blocks, recording copy, the browser's uploads, the subtitle parts' text, results) are deleted **2 hours after its last edit** (`expiresAt`) and never
 later than **6 hours after the upload** (`hardDeadlineAt`). Edits: a run finishing, `PUT .../timeline`, a quote, a process, an export (and a re-run).
 Reads and previews are not edits. A run that cannot finish before the 6 hours is refused (`409 job_expiring`), one that only finishes in their last minute is stopped
 and not charged.
 
-Errors (`code`, also in `X-Error-Code`): `400 bad_timeline`, `400 timeline_options` (a timeline with the options it replaces), `400 nothing_to_change`
+Errors (`code`, also in `X-Error-Code`): `400 bad_timeline`, `400 timeline_options` (a timeline with the options it replaces, or subtitle parts beside whole-file subtitle options), `400 nothing_to_change`
 (the result files already hold this timeline), `404 job_not_found`, `404 not_cached`, `409 job_not_editable`, `409 job_files_gone`,
-`409 job_not_finished`, `409 job_busy`, `409 needs_processing`, `409 job_expiring`, `409 price_changed` (the price is above `maxCostMicros`),
+`409 job_not_finished`, `409 job_busy`, `409 needs_processing`, `409 needs_uploads` (with `needs`), `409 job_expiring`, `409 price_changed` (the price is above `maxCostMicros`),
 `429 too_many_active_jobs` (a process, export or suggestions run is a job in progress; quotes, timelines and previews are not), `402`, `403`
 (`key_spending_cap`), `507`.
 

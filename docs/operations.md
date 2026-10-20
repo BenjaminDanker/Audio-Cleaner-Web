@@ -135,7 +135,7 @@ Ports on primary-ram (all loopback) and how they reach the VPS:
 |---|---|---|---|
 | `acw-web` | `127.0.0.1:8790` | `127.0.0.1:18790` via `acw-tunnel` (`-o IPQoS=lowdelay`) | everything except the bulk routes and live: sign-in, API, billing |
 | `acw-live` | `127.0.0.1:8795` | `127.0.0.1:18795` via `acw-tunnel-live` (`-o IPQoS=lowdelay`) | the live WebSocket (`/api/stream/ws`) only |
-| `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`), result downloads (`GET /api/jobs/{id}/outputs/{name}`) and the release downloads (`GET /api/downloads/...`) only |
+| `acw-bulk` | `127.0.0.1:8794` | `127.0.0.1:18794` via `acw-tunnel-bulk` (`-o IPQoS=throughput`) | uploads (`PUT /api/jobs/{id}/input`, and `PUT /api/jobs/{id}/browser/noise`, the audio a browser cleaned for a part of a timeline; the VPS matcher `acw_upload` names both, and the cues of free subtitle parts, `.../browser/cues`, go to `acw-web` with a 1 MB body limit), result downloads (`GET /api/jobs/{id}/outputs/{name}`) and the release downloads (`GET /api/downloads/...`) only |
 | `acw-mirror.timer` | none (a oneshot every 10 minutes) | nothing: it only fetches from the release service | copies the newest release files to `data/downloads/` ("Release downloads") |
 
 Check from the VPS with `curl -s 127.0.0.1:18790/api/health`, `curl -s 127.0.0.1:18794/api/health` and

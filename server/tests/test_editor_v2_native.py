@@ -140,6 +140,16 @@ def test_an_edit_run_makes_only_the_subtitle_parts_that_changed(client, signed_i
     spent = row(jid)["cost_micros"]
     assert spent == part_cost("transcribe_standard", 6) + editing.step_micros(editing.step_rates()["light"], 3, 0.27 / 0.116)
     audio_before = (folder(jid) / "talk-cleaned.flac").read_bytes()
+    # the outline of what the remover made (blocks decoded by the confined helper, kept next to them): the 8 s file is one block
+    out = client.get(f"/api/jobs/{jid}/peaks/noise")
+    assert out.status_code == 200, out.text
+    pk = out.json()["peaks"]
+    n = params_of(jid)["edit"]["facts"]["n"]
+    assert len(pk) == -(-n // 12_000) and all(v is not None and 0.0 <= v <= 1.0 for v in pk) and max(pk) > 0.01
+    cleaned = ff().decode(folder(jid) / "input.wav", ff().probe(folder(jid) / "input.wav"), SR, 1, SECONDS + 5)
+    assert max(pk) <= float(np.max(np.abs(cleaned))) + 0.01  # (the remover does not make it louder)
+    assert list((folder(jid) / "blocks").glob("*.peaks")) and client.get(f"/api/jobs/{jid}/peaks/noise").json() == out.json()
+    assert client.get(f"/api/jobs/{jid}/peaks/echo").status_code == 404 and client.get(f"/api/jobs/{jid}/peaks/rebuild").status_code == 404
     # an Accurate part is added: only it is made and paid for; the sound is not rendered again and the first part's text is kept
     second = v2(SECONDS, noise=first["layers"]["noise"], subtitles=[sub(0, 5.5, "standard", "en"), sub(5.5, 8, "accurate", "en", ["fr"])])
     q = client.post(f"/api/jobs/{jid}/quote", json={"timeline": second}, headers=h).json()
