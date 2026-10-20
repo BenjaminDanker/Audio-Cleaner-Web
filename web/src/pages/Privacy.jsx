@@ -25,7 +25,7 @@ export default function Privacy() {
   const { contact } = useAuth();
   const form = contact ? <Link to="/contact">contact form</Link> : null;
   return (
-    <Legal title="Privacy Policy" sections={SECTIONS} version="2026-10-18">
+    <Legal title="Privacy Policy" sections={SECTIONS} version="2026-10-20">
       <h2 id="who">1. Who we are</h2>
       <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{(form || email) && <> Contact: {form && <>use the {form}</>}{form && email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
       <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
