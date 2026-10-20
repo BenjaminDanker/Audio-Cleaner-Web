@@ -15,7 +15,7 @@ The services run as the account `acw` (section "Accounts" below), so everything 
   models/     DeepFilterNet3_onnx.tar.gz, dpdfnet/, sidon/, parakeet-v2/, parakeet-v3/, captions-en/,
               silero-vad/, whisper/{large-v3-turbo,small}   (every file, its source and sha256: deploy/models.lock)
   wasm/       df.js + df_bg.wasm for the browser build
-  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), lock.sha, metrics.prom,
+  data/       acw.sqlite3, jobs/, stream.sock, backups/ (pre-deploy snapshots), legal/ (every published Terms and Privacy Policy), lock.sha, metrics.prom,
               downloads/ (the mirrored release files, see "Release downloads")                          (0700)
   secrets/    acw.env (web, secrets), acw-worker.env, vps.env, backup.env/backup.pass, github-releases-read.token  (0700, files 0600)
 /home/acw/.ssh/acw_tunnel(.pub), known_hosts   the tunnel key and the VPS host key (no login key of the owner's)
@@ -97,7 +97,7 @@ deploy/publish-web.sh                  # build the site and rsync it to the VPS 
 What `install.sh` does, in order: prints the commit and what is running now (file jobs, live sessions);
 **refuses** (unless `--force`) when the working tree has uncommitted changes, when the commit is not a
 descendant of the deployed `app/VERSION`, or when live sessions are running and the web or live worker would be
-restarted; checks that every Python file parses; takes a database snapshot (`data/backups`, verified like the
+restarted; checks that every Python file parses; checks the Terms and Privacy Policy versions ("Legal versions" below; this refusal is not lifted by `--force`); takes a database snapshot (`data/backups`, verified like the
 nightly one; a failing snapshot stops the deploy); installs the locked packages (`pip install --require-hashes`) only when a pin
 changed; keeps the old code as `app.prev` and copies the new; runs `deploy/fetch-models.sh` (downloads and verifies what
 `deploy/models.lock` lists, never touching a correct file); runs `init-db`; installs changed unit files; then
@@ -479,6 +479,8 @@ scratch copy, `PRAGMA integrity_check` must say `ok`, and every account's balanc
 entries and its held amount the sum of its active holds. A snapshot that fails is renamed `*.bad`, the unit fails (you
 get a mail) and `backup-status.json` records why (the monitor reads it). `deploy/install.sh` takes the same kind of
 snapshot into `data/backups` before every deploy.
+The same run copies `data/legal` (the archive of every published Terms and Privacy Policy, "Legal versions") to `legal/` in the backup folder; it never
+replaces a file there, and a copy that differs from its original fails the backup. (The off-machine copy below is the database snapshot only.)
 
 **Off the machine (switched off until you configure it).** Create `~/audio-cleaner/secrets/backup.env` (0600):
 
@@ -514,6 +516,47 @@ acw-ctl start acw-stream acw-web 'acw-worker@1' 'acw-worker@2' acw-monitor.timer
 Jobs that were in flight are re-queued or failed by the normal sweeps; stripe events that were missed are picked up
 by the reconcile loop, and Stripe re-sends events it did not get an answer for. Drill it once on a copy (restore into a
 scratch `ACW_DATA_DIR`, run `check-money`) before you need it.
+
+## Legal versions
+
+Every version of the Terms of Service and the Privacy Policy that goes live is kept, as the visitor read it, with a hash of its text, so that
+what a user accepted (the audit log records it) can be shown later. Nothing here is public.
+
+**Where.** `~acw/audio-cleaner/data/legal/{terms,privacy}-<version>.html` (a standalone page: the text, its version and the date it was rendered)
+and `{terms,privacy}-<version>-no-contact.html` (the same text with the contact form off, see below), and `<file>.sha256` next to each (the SHA-256
+of the *text*, 64 hex characters). Files are written by `deploy/legal-archive.sh` as acw (0600), and
+never overwritten. The nightly backup copies the folder to `/mnt/mc-storage/audio-cleaner-backups/legal/`. To check a saved page on its own (no
+React needed): `node web/scripts/legal-snapshot.mjs --hash-of terms-2026-10-20.html` prints the hash recomputed from the file; it has to equal the `.sha256`.
+
+**What is hashed.** `web/scripts/legal-snapshot.mjs` renders `Terms.jsx` and `Privacy.jsx` with React (`SITE` from `web/src/site.js` filled in, the
+contact form on and off) and hashes the text: tags dropped, white space normalised, each link's target after its words. A change of
+markup or style does not change the hash; a changed word, number or link does. `node scripts/legal-snapshot.mjs` prints both hashes and writes
+nothing; `--out DIR` writes the pages.
+
+**Two variants.** Whether the contact form is on (`/api/me` says `contactForm`: mail is set up) changes the text in a few places (the link to the form
+in the body and the "Questions?" line), and that can flip without a deploy. So each version has two texts, with their own hashes: `sha256` (form on)
+and `sha256NoContact` (form off) in `web/legal-versions.json`; both are archived, pinned, checked and backed up. A change to either needs a new date.
+
+**Changing a text.** Edit the page; then, in the same commit:
+
+1. change the version date in the page (`version="..."` in `web/src/pages/Terms.jsx` or `Privacy.jsx`) and, for the Terms, `LEGAL_VERSION` in
+   `web/src/components/Legal.jsx` and `TOS_VERSION` in `server/acw/auth.py` (the three are one date: signed-in users get the "We've updated our Terms"
+   notice because `TOS_VERSION` differs from what they accepted). A second change on the same day: add a letter (`2026-10-21b`);
+2. update the pin: `cd web && npm run legal:pin` (writes `web/legal-versions.json`; it refuses when a text changed under an unchanged date);
+3. deploy as usual (`deploy/install.sh`).
+
+`web/tests/legal-versions.mjs` (in `tests/run.sh`; or `node tests/legal-versions.mjs`) fails when a page's text no longer matches the pin
+under the same date, when the pin is for another date, or when the Terms' three dates differ. `install.sh` runs the same checks before anything
+is touched (`deploy/legal-archive.sh --check`, not lifted by `--force`), and `publish-web.sh` saves the pages just before the website goes live.
+If the file for a version exists with another hash the deploy stops with a message naming the file: the text was edited without a new date.
+Same hash: nothing to do.
+
+**Acceptance records.** `install.sh` copies `web/legal-versions.json` to `~/audio-cleaner/app/legal-versions.json`. Each acceptance (sign-in,
+credit purchase or job creation = "continued use", the notice's button = "notice") adds to the audit log an entry `tos_accepted` with the detail
+`2026-10-20 sha256:<hash of the Terms text> contact-form:on (sign-in)`. The hash is of the variant that was live: the server asks the same
+question as `/api/me` (is mail set up) and records `contact-form:on` or `off` with the matching hash; if it cannot tell, the "on" hash is recorded
+with `contact-form:unknown`. With no usable pin (missing, lacking that variant, or for another version) the detail is the version alone and the
+journal says so.
 
 ## Log retention
 
@@ -591,6 +634,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 | `data/jobs/` | uploads, the copies kept for changing a job again, the editor's block cache and recording copy, results | all of a job's files go together, 2 hours (`ACW_JOB_RETENTION_MINUTES`) after its last edit (finishing a run, a timeline save, a quote, a process, an export, a re-run) and never later than 6 hours (`ACW_JOB_MAX_RETENTION_MINUTES`) after the upload arrived (`jobs.expiry`; `jobs.sweep`, from the web process every 30 s and from each worker every 60 s, so the deletion is accurate to about a minute), or at once with "Delete now" (which also takes the jobs made from it); the files of a failed or canceled job go at once and leftover folders after an hour; a deleted account's files at once. Sizes: "What a job keeps" below. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve (which counts the kept copies, `jobs.kept_bytes`) watch it |
 | `data/acw.sqlite3` and `-wal` | the database, see above | the table above; the log file stays ~4 MB (SQLite checkpoints it by itself) |
 | `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
+| `data/legal/` (and its copy `legal/` in the backup folder) | two small files (and their hashes) per version of the Terms and the Privacy Policy, never deleted | a few tens of KB per version change |
 | `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`, `gpu-worker-alive`) | rewritten in place, fixed names | a few KB in all |
 | `/mnt/mc-storage/audio-cleaner-backups` | nightly snapshot, gzipped | the newest 30, plus at most 3 failed (`*.bad`) and `backup-status.json`; also pruned on a night when the backup fails. About a quarter of the database size each: ~250 MB x 30 = 7.5 GB at the worst example above. Not ours: a stray `Audio-Cleaner-desktop-repo.bundle` (16 MB) |
 | The off-machine copy (if set up) | one encrypted file a night | "the remote end keeps everything": prune it there (Backups) |

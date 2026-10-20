@@ -3,6 +3,9 @@
 # Requires the one-time VPS setup (deploy/vps/setup.sh, docs/vps.md). deploy/install.sh runs this
 # by itself when web/ changed, so you rarely need to call it directly.
 #
+# The Terms and the Privacy Policy that go live are archived just before (deploy/legal-archive.sh): data/legal/<doc>-<version>.html in
+# acw's data folder, never overwritten. A text changed under an unchanged version date stops this script before anything is published.
+#
 # Visitors never see a half-published site: the new hashed files go in first (the old page does not point
 # at them), the entry page is swapped last (index.html and its .gz and .zst together), and the previous release's
 # hashed files stay for one more release, so a tab that is still open on the old page keeps loading its scripts.
@@ -17,8 +20,10 @@ if [ -n "$ACW_SERVICE_USER" ] && [ "$(id -un)" = "$ACW_SERVICE_USER" ]; then
 fi
 cd "$REPO/web"
 npm ci --no-audit --no-fund
+bash "$REPO/deploy/legal-archive.sh" --check   # before the build: a changed text under an unchanged version date stops here
 npm run sync-dfn
 VITE_BASE=/ npm run build
+bash "$REPO/deploy/legal-archive.sh"           # the build passed: save the versions that are about to go live (nothing for one already saved)
 # Pre-compress for Caddy's `precompressed zstd gzip`: zstd for browsers that take it (about a third smaller than gzip on
 # the WebAssembly files; level 19 keeps the window at 8 MB, the most browsers accept), gzip for the rest. Media is already
 # compressed: left alone.

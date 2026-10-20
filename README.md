@@ -65,7 +65,7 @@ npm run test:all -- free ui       # only these suites
 `/tmp/acw-webtest-<uid>`, empty base path, `ACW_LIVE_TRIAL_SECONDS=0`) and stops it after the suite. It exits non-zero if a
 suite exits non-zero or prints a `FAIL` line; logs are in the state dir. `tests/backend.sh start|stop|env` runs a backend by
 hand for a single `node tests/<suite>.mjs`. Overrides: `AC_HOME`, `ACW_BIN_DIR`, `ACW_MODELS_DIR`, `ACW_PYTHON`, `ACW_MODEL_SRC`,
-`ACW_TEST_STATE`, `E2E_FILES`. The per-part editor has three suites: `editor-unit` (the timeline, the mix and the browser's
+`ACW_TEST_STATE`, `E2E_FILES`. `legal-versions` (no backend: the Terms/Privacy text against `web/legal-versions.json`, and the Terms' version dates) is in the default list. The per-part editor has three suites: `editor-unit` (the timeline, the mix and the browser's
 suggestions, no backend), `suggest-agreement` (the browser's suggestions against `common/acw_common/suggest.py` on generated files;
 runs `tests/suggest-py.py`, a few minutes) and `editor` (the page, on a backend; `EDITOR_SHOTS=<dir>` saves screenshots).
 

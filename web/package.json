@@ -29,7 +29,11 @@
     "test:subtitles": "node tests/subtitles.mjs",
     "test:editor": "node tests/editor.mjs",
     "test:editor-unit": "node tests/editor-unit.mjs",
-    "test:suggest": "node tests/suggest-agreement.mjs"
+    "test:suggest": "node tests/suggest-agreement.mjs",
+    "test:legal": "node tests/legal-versions.mjs",
+    "legal:snapshot": "node scripts/legal-snapshot.mjs",
+    "legal:verify": "node scripts/legal-snapshot.mjs --verify",
+    "legal:pin": "node scripts/legal-snapshot.mjs --pin"
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.0",

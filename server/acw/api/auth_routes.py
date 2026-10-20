@@ -371,7 +371,7 @@ def accept_tos(body: TosBody, request: Request, principal: auth.Principal = Depe
         "UPDATE users SET tos_version = ?, tos_accepted_at = ? WHERE id = ?",
         (auth.TOS_VERSION, db.now(), principal.user_id),
     )
-    db.audit("user", "tos_accepted", user_id=principal.user_id, detail=auth.TOS_VERSION, ip=client_ip(request))
+    db.audit("user", "tos_accepted", user_id=principal.user_id, detail=auth.tos_detail("notice"), ip=client_ip(request))
     return {"ok": True}
 
 

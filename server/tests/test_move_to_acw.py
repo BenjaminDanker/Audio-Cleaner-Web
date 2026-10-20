@@ -176,11 +176,13 @@ def test_stage_for_acw_puts_the_commit_in_a_fresh_folder_and_keeps_four(tmp_path
 # ------------------------------------------------------------------ install.sh: owner part and server part
 
 def _staged_copy(dst: Path, with_info=True):
-    """What `git archive HEAD deploy server common native` + DEPLOY_INFO gives, from the working tree (no .git)."""
+    """What `git archive HEAD deploy server common native web/legal-versions.json` + DEPLOY_INFO gives, from the working tree (no .git)."""
     ign = shutil.ignore_patterns("__pycache__", "target", "libDF", "tract", "node_modules", "*.pyc")
     for sub in ("deploy", "native", "common/acw_common", "server/acw"):
         shutil.copytree(ROOT / sub, dst / sub, ignore=ign)
     shutil.copy(ROOT / "server" / "requirements.lock", dst / "server" / "requirements.lock")
+    (dst / "web").mkdir()
+    shutil.copy(ROOT / "web" / "legal-versions.json", dst / "web" / "legal-versions.json")  # install.sh ships it next to the code
     if with_info:
         (dst / "DEPLOY_INFO").write_text("commit=abc1234\nbranch=on-prem\nsubject=a test\n")
 

@@ -27,6 +27,8 @@
 # changed, and a unit whose unit file changed. The SSH tunnels are never restarted for a code change. A stopping
 # file worker puts its job back in the queue; a restarting acw-bulk ends the uploads that are in flight.
 # The previous copy of the code is kept as app.prev: deploy/rollback.sh brings it back.
+# Whatever --force says, it also refuses when the Terms or the Privacy Policy text changed without a new version date, or the pin
+# web/legal-versions.json is stale (deploy/legal-archive.sh; docs/operations.md, "Legal versions"). publish-web.sh archives them.
 # Layout (acw's home): ~/audio-cleaner/{app,app.prev,venv,bin,models,data,secrets}
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,7 +54,7 @@ for arg in "$@"; do
     --packages-only) PACKAGES_ONLY=1; SERVER_ONLY=1 ;;
     --lock-changed) LOCK_FORCED=1 ;;
     --native-from=*) NATIVE_FROM="${arg#*=}" ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "unknown option $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -131,6 +133,13 @@ for root in sys.argv[1:]:
             bad = 1
 sys.exit(bad)
 PY
+
+  # The Terms and the Privacy Policy as they are about to go live (docs/operations.md, "Legal versions"): the pin that the server
+  # records with every acceptance has to match the pages, and a text changed under an unchanged version date stops the deploy here,
+  # before anything is restarted. (Nothing is written yet: deploy/publish-web.sh archives the versions when the website goes live.)
+  if [ "$ROLE" != server ]; then
+    bash "$REPO/deploy/legal-archive.sh" --check || { echo "refusing to deploy: the Terms / Privacy Policy versions (above)" >&2; exit 1; }
+  fi
 fi
 
 # ---- The parts that need the owner's VPS login key and the owner's checkout: the website and the smoke test (which
@@ -163,7 +172,7 @@ vps_parts() {  # vps_parts STATUS -> the status after both
 if [ "$ROLE" = owner ]; then
   as_acw true 2>/dev/null \
     || { echo "cannot run commands as $ACW_SERVICE_USER without a password (sudo -n -u $ACW_SERVICE_USER true failed): see /etc/sudoers.d/acw, deploy/host/move-to-acw.sh" >&2; exit 1; }
-  STAGE="$(stage_for_acw "$COMMIT" deploy server common native)"
+  STAGE="$(stage_for_acw "$COMMIT" deploy server common native web/legal-versions.json)"
   printf 'commit=%s\nbranch=%s\nsubject=%s\n' "$COMMIT" "$BRANCH" "$SUBJECT" | put_as_acw /dev/stdin "$STAGE/DEPLOY_INFO" 644
   echo "staged $COMMIT for $ACW_SERVICE_USER in $STAGE"
   pass=()
@@ -392,6 +401,9 @@ rsync -ac --delete --filter='-p __pycache__/' "$REPO/common/acw_common/" "$H/app
 echo "$COMMIT" > "$H/app/VERSION"
 # The release mirror reads the archive list of the model files from here (the code copy above has no deploy/ folder).
 install -m 600 "$REPO/deploy/models.lock" "$H/app/models.lock"
+# The SHA-256 of the Terms text that goes into the audit record of every acceptance (acw/auth.py reads it from here). One source of
+# truth: web/legal-versions.json, which web/tests/legal-versions.mjs and deploy/legal-archive.sh keep equal to the page.
+install -m 600 "$REPO/web/legal-versions.json" "$H/app/legal-versions.json"
 chmod -R go-rwx "$H/app"
 
 # ---- 7. Native code, models and programs (see the stamps above). With the owner's run the programs arrive built
