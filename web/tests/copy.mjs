@@ -2,10 +2,11 @@
 // below is also what tests/reco-unit.mjs checks its sentences against); the legal pages have no unfinished placeholders, the
 // licences are real texts, and they say the service is not offered in the EU/EEA, the UK or Switzerland (and that such a card
 // is not charged); the privacy page's retention answers and the landing FAQ match what the server does; the job step names and the
-// ledger wording are plain. Needs the test backend (port 8792) with `npm run build` output; the signed-in parts use a fresh account.
+// ledger wording are plain. The signed-in scan covers the editor with a file chosen (its tooltips too, and its Output menu, Details,
+// Your files and All the options window). Needs the test backend (port 8792) with `npm run build` output; the signed-in parts use a fresh account.
 // Usage: node tests/copy.mjs
 import { join } from 'node:path';
-import { BASE, FILES, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, check, dropFile, launch, pick, setVoice, signIn, summary } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
@@ -35,8 +36,8 @@ async function visibleText(page, { skipCode = false } = {}) {
     for (const o of document.querySelectorAll('option')) parts.push(o.textContent);
     for (const d of document.querySelectorAll('details')) parts.push(d.textContent); // closed answers are not in innerText
     for (const m of document.querySelectorAll('meta[name=description],meta[property^="og:"],meta[name^="twitter:"]')) parts.push(m.getAttribute('content') || '');
-    for (const e of document.querySelectorAll('[aria-label],[title],[placeholder],img[alt]')) {
-      for (const a of ['aria-label', 'title', 'placeholder', 'alt']) if (e.getAttribute(a)) parts.push(e.getAttribute(a));
+    for (const e of document.querySelectorAll('[aria-label],[title],[placeholder],img[alt],[data-tip]')) {
+      for (const a of ['aria-label', 'title', 'placeholder', 'alt', 'data-tip']) if (e.getAttribute(a)) parts.push(e.getAttribute(a)); // (data-tip: the editor's tooltips)
     }
     return parts.join('\n');
   }, skipCode);
@@ -78,24 +79,68 @@ await check('copy: public pages (signed out, the sign-in page for /app and /app/
   return '10 pages clean';
 });
 
-await check('copy: signed-in pages (Cleanup with a file and its options, Billing, Live, Account) show no internals', async () => {
+await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the editor with a file chosen (its tracks, inspector, tooltips, Output menu, Details, Your files and the All the options window) show no internals', async () => {
   await signIn(page, EMAIL);
   const bad = [];
   for (const p of ['/app', '/app/billing', '/app/live', '/app/account']) bad.push(...(await scan(page, p)));
+  const scanHere = async (where) => {
+    const text = await visibleText(page);
+    bad.push(...findings(text).map((x) => `${where}: ${x}`));
+    if (/\bhighs\b/i.test(text)) bad.push(`${where}: "highs" is still on the page`);
+    if (await page.locator('input[name=highs], input[name=highs-alone]').count()) bad.push(`${where}: a Restore highs box is still there`);
+  };
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
+  await scanHere('/app with a file');
   await pick(page, 'subs', 'accurate');
-  bad.push(...findings(await visibleText(page)).map((x) => `/app with a file: ${x}`));
-  // the paid options of each noise choice, and no Restore highs in any of them (the step is gone)
-  for (const noise of ['denoise', 'off']) {
+  await scanHere('/app with a file, Extra accurate subtitles');
+  // the paid options of each noise choice (Voice rebuild too: it is paused on this backend, which says so), and no Restore highs in any of them (the step is gone)
+  for (const noise of ['denoise', 'off', 'browser']) {
     await pick(page, 'noise', noise);
-    const text = await visibleText(page);
-    bad.push(...findings(text).map((x) => `/app, noise ${noise}: ${x}`));
-    if (/\bhighs\b/i.test(text)) bad.push(`/app, noise ${noise}: "highs" is still on the page`);
-    if (await page.locator('input[name=highs], input[name=highs-alone]').count()) bad.push(`/app, noise ${noise}: a Restore highs box is still there`);
+    await scanHere(`/app, noise ${noise}`);
+  }
+  await setVoice(page, 'rebuild').catch(() => {});
+  await scanHere('/app, Voice rebuild');
+  for (const [id, popId, name] of [['output-button', 'output-pop', 'the Output menu'], ['bar-det', 'details', 'Details']]) {
+    await page.getByTestId(id).click();
+    await page.getByTestId(popId).waitFor();
+    await scanHere(`/app, ${name}`);
+    await page.getByTestId(id).click();
+  }
+  await page.getByTestId('info-open').click();
+  await page.getByTestId('info-modal').waitFor();
+  await scanHere('/app, All the options');
+  await page.getByTestId('info-close').click();
+  // a finished job's page (stubbed, with its timeline): Your files and the finished bar
+  const now = Math.floor(Date.now() / 1000);
+  const done = { id: 'copydone', kind: 'denoise', free: false, status: 'done', inputName: 'copydone.wav', displayName: 'copydone.wav', createdAt: now - 60, finishedAt: now - 30, durationSeconds: 60, progress: 100, stage: '', costMicros: 1500, expiresAt: now + 7000, queuePosition: null, queueWaitSeconds: null,
+    outputs: [{ name: 'copydone-cleaned.flac', kind: 'audio', bytes: 1000 }], transcribeTier: 'local', edit: { available: true, hasTimeline: false, run: null, lastRun: null, suggestions: false } };
+  await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: [done], limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
+  await page.route('**/api/jobs/copydone/timeline', (r) => r.fulfill({ json: {
+    timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, custom: false, rendered: null, seconds: 60, channels: 1,
+    secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null } }));
+  await page.route('**/api/jobs/copydone/peaks/**', (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
+  try {
+    await page.goto(`${BASE}/app/job/copydone`);
+    await page.getByTestId('download-again').waitFor({ timeout: 20000 });
+    await scanHere('a finished job page');
+    for (const [id, popId, name] of [['bar-files', 'files', 'Your files'], ['output-button', 'output-pop', 'the Output menu']]) {
+      await page.getByTestId(id).click();
+      await page.getByTestId(popId).waitFor();
+      await scanHere(`a finished job page, ${name}`);
+      await page.getByTestId(id).click();
+    }
+    await page.getByTestId('info-open').click();
+    await page.getByTestId('info-modal').waitFor();
+    await scanHere('a finished job page, All the options');
+    await page.getByTestId('info-close').click();
+  } finally {
+    await page.unroute('**/api/jobs');
+    await page.unroute('**/api/jobs/copydone/timeline');
+    await page.unroute('**/api/jobs/copydone/peaks/**');
   }
   if (bad.length) throw new Error(bad.join(' | '));
-  return '4 pages + the options for a file clean';
+  return '4 pages + the editor (a file chosen, the menus, All the options, a finished job) clean';
 });
 
 await check('legal: Terms and Privacy have no unfinished placeholders ("to be confirmed", [brackets], "undefined") and no empty contact links', async () => {

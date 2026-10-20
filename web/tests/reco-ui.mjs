@@ -1,5 +1,6 @@
-// "Automatic best settings" on the Cleanup page and the paid "Test my room" on the Live page, in a real browser. The numbers
-// behind the advice are checked in tests/reco-unit.mjs; here the page must show the same choices for the same audio.
+// "Automatic" in the editor (the Cleanup page once a file is chosen; its choices are the sections of the Voice, Leveling and Subtitles
+// tracks) and the paid "Test my room" on the Live page, in a real browser. The numbers behind the advice are checked in
+// tests/reco-unit.mjs; here the page must show the same choices for the same audio.
 // Needs no backend: the API is answered by this script (page.route), and the audio is generated here. Point it at any server that
 // serves the built site at the root (the test backend on 8792 by default):
 //   E2E_ORIGIN=http://127.0.0.1:8792 node tests/reco-ui.mjs
@@ -95,57 +96,71 @@ async function newPage(extraArgs = {}) {
   return { ctx, page, problems };
 }
 
-const read = (page) => page.evaluate(() => ({
-  noise: document.querySelector('input[name=noise]:checked')?.value,
-  subs: document.querySelector('input[name=subs]:checked')?.value,
-  strength: document.querySelector('input[name=strength]:checked')?.value,
-  recommended: document.querySelectorAll('.reco-badge, [data-testid^=reco-noise], [data-testid^=reco-subs]').length > 0 || /Recommended/.test(document.querySelector('form')?.innerText || ''),
-  leveling: !!document.querySelector('input[name=leveling]:checked, input[name=leveling-alone]:checked'),
-  loudness: document.querySelector('#loud, #loud-alone')?.value,
-  rebuild: !!document.querySelector('input[name=rebuild]:checked'),
-  auto: document.querySelector('input[name=auto]')?.checked,
-  status: document.querySelector('[data-testid=reco-status]')?.textContent || '',
-  line: document.querySelector('[data-testid=reco-line]')?.textContent || '',
-  why: [...document.querySelectorAll('[data-testid=reco-why] li')].map((l) => l.textContent),
-  rebuildHint: document.querySelector('[data-testid=rebuild-hint]')?.textContent || '',
-  pageText: document.body.innerText + ' ' + [...document.querySelectorAll('details')].map((d) => d.textContent).join(' '),
-}));
+// The choices as the editor shows them (the sections of the tracks the whole file is in): the words of the old form's radios.
+const read = (page) => page.evaluate(() => {
+  const pressed = (act) => [...document.querySelectorAll(`.studio button[data-act=${act}]`)].find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.v;
+  const mode = ['off', 'noise', 'rebuild'].find((m) => document.querySelector(`[data-testid=voice-${m}]`)?.getAttribute('aria-checked') === 'true');
+  const lvl = pressed('l-lvl');
+  const text = (id) => document.querySelector(`[data-testid=${id}]`)?.textContent || '';
+  return {
+    noise: mode === 'off' ? 'off' : mode === 'noise' && pressed('v-kind') === 'free' ? 'browser' : 'denoise',
+    mode,
+    kind: pressed('v-kind'),
+    subs: ['off', 'browser', 'standard', 'accurate'][pressed('s-q')],
+    strength: ['gentle', 'balanced', 'strong', 'max'][pressed('v-str') - 1],
+    recommended: document.querySelectorAll('.reco-badge, [data-testid^=reco-noise], [data-testid^=reco-subs]').length > 0 || /Recommended/.test(document.querySelector('.studio')?.innerText || ''),
+    leveling: lvl !== undefined && lvl !== '0',
+    loudness: { 1: '-16', 2: '-14', 3: '-23', 4: 'keep' }[lvl],
+    rebuild: mode === 'rebuild',
+    auto: document.querySelector('.studio button[data-act=auto]')?.getAttribute('aria-checked') === 'true',
+    status: text('reco-status'),
+    line: text('reco-line'),
+    pick: text('reco-pick'),
+    why: [...document.querySelectorAll('[data-testid=reco-why] li')].map((l) => l.textContent),
+    rebuildHint: document.querySelector('[data-testid=voice-rebuild]')?.dataset.tip || '',
+    pageText: document.body.innerText + ' ' + [...document.querySelectorAll('details')].map((d) => d.textContent).join(' ') + ' ' + [...document.querySelectorAll('[data-tip]')].map((e) => e.dataset.tip).join(' '),
+  };
+});
 
 async function open(page, path) {
   await page.goto(`${BASE}/app`);
   await page.waitForSelector('input[type=file]', { timeout: 20000 });
   await page.setInputFiles('input[type=file]', path);
   await page.getByTestId('start').waitFor({ timeout: 20000 });
-  await page.getByTestId('reco-line').waitFor({ timeout: 30000 });
+  await page.getByTestId('reco-line').waitFor({ state: 'attached', timeout: 30000 }); // (the reasons are inside "Why these choices", closed)
   return read(page);
 }
 
 {
   const { ctx, page, problems } = await newPage();
 
-  await check('clean recording: Denoising at Gentle is set, with the reasons in plain words; Standard subtitles and Leveling are on, the loudness target is YouTube; nothing is marked "Recommended"', async () => {
+  await check('clean recording: Standard noise removal at Gentle is set, with the reasons in plain words (inside "Why these choices"); Standard subtitles and Leveling are on, the loudness target is YouTube; nothing is marked "Recommended"', async () => {
     const t0 = Date.now();
     const s = await open(page, FILES.clean);
-    if (s.noise !== 'denoise' || s.strength !== 'gentle') throw new Error(`noise ${s.noise}/${s.strength}: ${s.line}`);
+    if (s.noise !== 'denoise' || s.kind !== 'paid' || s.strength !== 'gentle') throw new Error(`noise ${s.noise}/${s.kind}/${s.strength}: ${s.line}`);
+    if ((await page.getByTestId('reco-details').evaluate((d) => d.open)) !== false) throw new Error('the reasons should be closed at first');
+    if (!/^Why these choices$/.test((await page.getByTestId('reco-details').locator('summary').innerText()).trim())) throw new Error('the closed box is not called "Why these choices"');
     if (s.recommended) throw new Error('something is still marked Recommended');
     if (!/clean and quiet/.test(s.why.join(' '))) throw new Error(s.why.join(' | '));
     if (s.subs !== 'standard') throw new Error(`subtitles ${s.subs}`);
     if (!s.leveling || s.rebuild) throw new Error(`leveling ${s.leveling} rebuild ${s.rebuild}`);
     if (s.loudness !== '-14') throw new Error(`loudness ${s.loudness}`);
     if (!/Set automatically for this file/.test(s.status)) throw new Error(`status: ${s.status}`);
+    await page.getByTestId('reco-details').locator('summary').click();
+    if (!(await page.getByTestId('reco-why').isVisible()) || !(await page.getByTestId('reco-line').isVisible())) throw new Error('the reasons do not show when opened');
     return `${Date.now() - t0} ms: ${s.line}`;
   });
 
-  await check('clean recording: the voice is not rebuilt, nothing is said about rebuilding, and the hint of the Rebuild the voice option names what it is for', async () => {
+  await check('clean recording: the voice is not rebuilt, nothing is said about rebuilding, and the tooltip of the Voice rebuild option names what it is for', async () => {
     const s = await open(page, FILES.clean);
     if (s.rebuild || /^Voice rebuild/.test(s.line)) throw new Error(`rebuilt: ${s.line}`);
     for (const t of [SAY.fix, SAY.next, SAY.echo, SAY.phone, SAY.clipped, SAY.restore]) if (s.why.includes(t)) throw new Error(`says "${t}": ${s.why.join(' | ')}`);
-    // the words of src/hints.js, with the price of this page's price list (Voice rebuild 3.00 an hour = $0.05 a minute)
-    if (s.rebuildHint !== 'For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt, which also brings back the high sounds that are missing. Slower, $0.05 a minute, and on very echoey recordings it can change a word, so listen before you publish.') throw new Error(`hint: ${s.rebuildHint}`);
+    // the words of src/studio/copy.js, with the price of this page's price list (Voice rebuild 3.00 an hour = $0.05 a minute)
+    if (s.rebuildHint !== 'For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt, which also brings back the high sounds that are missing. Keeps only speech, so game sounds, music and room sound are gone. Slower, $0.05 a minute, files up to 90 minutes. On very echoey recordings it can change a word, so listen before you publish.') throw new Error(`hint: ${s.rebuildHint}`);
     if (/Cleaning can.t fix/.test(s.pageText)) throw new Error('the old advice is on the page');
   });
 
-  await check('a phone-quality, an echoey and a too-loud recording are set to Voice rebuild (the strength choice goes away), each with its own sentence, the fix, and for distortion "Next time, turn the microphone level down."; Undo turns the rebuild off again', async () => {
+  await check('a phone-quality, an echoey and a too-loud recording are set to Voice rebuild (the strength choices go away), each with its own sentence, the fix, and for distortion "Next time, turn the microphone level down."; Undo turns the rebuild off again', async () => {
     const seen = [];
     for (const [name, says, notSays] of [
       ['phone', [SAY.phone, SAY.fix], [SAY.next, SAY.clipped, SAY.restore]],
@@ -154,6 +169,7 @@ async function open(page, path) {
     ]) {
       const s = await open(page, REBUILD_FILES[name]);
       if (s.noise !== 'denoise' || !s.rebuild) throw new Error(`${name}: not set to Voice rebuild: ${JSON.stringify({ ...s, pageText: '' })}`);
+      if ((await page.getByTestId('track-voice').getByTestId('section').allInnerTexts()).join() !== 'Rebuild') throw new Error(`${name}: the Voice track does not say Rebuild`);
       if (!/^Voice rebuild, leveling, (Standard|Extra accurate) subtitles$/.test(s.line)) throw new Error(`${name}: line "${s.line}"`);
       if (s.strength !== undefined) throw new Error(`${name}: the strength is still offered (${s.strength}) for a rebuilt voice`);
       const found = says.map((t) => s.why.indexOf(t));
@@ -175,6 +191,7 @@ async function open(page, path) {
   await check('steady noise sets Denoising at the strength the model picks (Strong for these two files; the stronger remover only for a lot of noise); a lot of noise says so and sets Extra accurate subtitles and Leveling; a recording with no one speaking sets Denoising, Leveling and no subtitles', async () => {
     const mild = await open(page, FILES.mild);
     if (mild.noise !== 'denoise' || mild.strength !== 'strong' || !mild.leveling || /stronger noise remover/.test(mild.why.join(' '))) throw new Error(`mild: ${JSON.stringify(mild)}`);
+    if ((await page.getByTestId('track-voice').getByTestId('section').allInnerTexts()).join() !== 'Strong') throw new Error('the Voice track does not say Strong');
     const loud = await open(page, FILES.loud);
     if (loud.noise !== 'denoise' || !/stronger noise remover/.test(loud.why.join(' '))) throw new Error(`loud: ${JSON.stringify(loud)}`);
     if (loud.subs !== 'accurate' || !loud.leveling || loud.strength !== 'strong') throw new Error(`loud: ${JSON.stringify(loud)}`);
@@ -183,27 +200,37 @@ async function open(page, path) {
     return `mild -> ${mild.noise}/${mild.strength}; loud -> ${loud.noise}/${loud.strength}/${loud.subs}; hum -> ${hum.line}`;
   });
 
-  await check('Leveling is a plain checkbox: picking Off or Denoising leaves it as it is', async () => {
+  await check('Leveling is its own track: picking Voice Off or Noise removal leaves it as it is', async () => {
     await open(page, FILES.clean);
-    for (const v of ['off', 'denoise']) {
-      await page.locator(`label.choice:has(input[name=noise][value=${v}])`).click();
+    for (const v of ['off', 'noise']) {
+      await page.getByTestId(`voice-${v}`).click();
       if (!(await read(page)).leveling) throw new Error(`Leveling switched off by ${v}`);
     }
-    await page.locator('input[name=leveling]').uncheck();
-    for (const v of ['off', 'denoise']) {
-      await page.locator(`label.choice:has(input[name=noise][value=${v}])`).click();
+    await page.locator('.studio button[data-act=l-lvl][data-v="0"]').click();
+    for (const v of ['off', 'noise']) {
+      await page.getByTestId(`voice-${v}`).click();
       if ((await read(page)).leveling) throw new Error(`Leveling switched on by ${v}`);
     }
   });
 
-  await check('Undo puts the choices back to the usual start and switches the automatic setting off (remembered for the next file)', async () => {
+  await check('Undo puts the choices back to the usual start and switches Automatic off (remembered for the next file); "Use them again" (after a change by hand) sets them over everything', async () => {
     const before = await open(page, FILES.loud);
     if (before.subs !== 'accurate') throw new Error(`not set: ${JSON.stringify(before)}`);
+    // (the usual start of the editor has no subtitles; the old form started with Standard subtitles on)
     await page.getByTestId('reco-undo').click();
     const s = await read(page);
-    if (s.noise !== 'denoise' || s.subs !== 'standard' || !s.leveling || s.rebuild || s.auto) throw new Error(`after undo: ${JSON.stringify(s)}`);
+    if (s.noise !== 'denoise' || s.kind !== 'paid' || s.strength !== 'balanced' || s.subs !== 'off' || !s.leveling || s.loudness !== '-14' || s.rebuild || s.auto) throw new Error(`after undo: ${JSON.stringify(s)}`);
+    if (await page.getByTestId('reco-status').count() || await page.getByTestId('reco-undo').count()) throw new Error('the automatic line is still there after Undo');
     const next = await page.evaluate(() => localStorage.getItem('acw.autoSettings'));
     if (next !== 'off') throw new Error(`stored: ${next}`);
+    // switching Automatic on again sets them again; a change by hand turns Undo into "Use them again"
+    await page.locator('.studio button[data-act=auto]').click();
+    await page.getByTestId('reco-status').waitFor({ timeout: 30000 });
+    if ((await read(page)).subs !== 'accurate') throw new Error('Automatic on again did not set the choices');
+    await page.locator('.studio button[data-act=s-q][data-v="0"]').click();
+    if (!/changed by you/.test((await read(page)).status) || !(await page.getByTestId('reco-apply').count()) || (await page.getByTestId('reco-apply').innerText()).trim() !== 'Use them again') throw new Error('no "Use them again" after a change by hand: ' + (await read(page)).status);
+    await page.getByTestId('reco-apply').click();
+    if ((await read(page)).subs !== 'accurate') throw new Error('"Use them again" did not set them');
     await page.evaluate(() => localStorage.removeItem('acw.autoSettings'));
   });
 
@@ -222,16 +249,16 @@ async function open(page, path) {
     await slow.page.waitForSelector('input[type=file]', { timeout: 20000 });
     await slow.page.setInputFiles('input[type=file]', FILES.loud);
     await slow.page.getByTestId('reco-listening').waitFor({ timeout: 20000 });
-    await slow.page.locator('label.choice:has(input[name=subs][value=off])').click();
-    await slow.page.getByTestId('reco-line').waitFor({ timeout: 60000 });
+    await slow.page.locator('.studio button[data-act=s-q][data-v="2"]').click(); // Standard (the listen would pick Extra accurate for this file)
+    await slow.page.getByTestId('reco-line').waitFor({ state: 'attached', timeout: 60000 });
     const s = await read(slow.page);
     await slow.ctx.close();
-    if (s.subs !== 'off') throw new Error(`the person's subtitle choice was changed: ${s.subs}`);
+    if (s.subs !== 'standard') throw new Error(`the person's subtitle choice was changed: ${s.subs}`);
     if (s.noise !== 'denoise' || !s.leveling) throw new Error(`the rest was not set: ${JSON.stringify(s)}`);
     if (!/changed by you/.test(s.status)) throw new Error(`status: ${s.status}`);
   });
 
-  await check('with Automatic best settings off, nothing is listened to or changed; the starting choices are Denoising, Standard subtitles, Leveling, YouTube loudness, no rebuild', async () => {
+  await check('with Automatic off, nothing is listened to or changed; the starting choices are Standard noise removal, Leveling at YouTube loudness, no subtitles, no rebuild', async () => {
     const off = await newPage({ storageState: { cookies: [], origins: [{ origin: BASE, localStorage: [{ name: 'acw.autoSettings', value: 'off' }] }] } });
     await off.page.goto(`${BASE}/app`);
     await off.page.waitForSelector('input[type=file]', { timeout: 20000 });
@@ -241,12 +268,13 @@ async function open(page, path) {
     const s = await read(off.page);
     const listening = await off.page.getByTestId('reco-listening').count();
     await off.ctx.close();
-    if (listening || s.line) throw new Error('it listened anyway');
+    if (listening || s.line || s.status) throw new Error('it listened anyway');
     if (s.auto !== false) throw new Error('the switch should be off');
-    if (s.noise !== 'denoise' || s.subs !== 'standard' || !s.leveling || s.loudness !== '-14' || s.rebuild) throw new Error(JSON.stringify(s));
+    // (the usual start of the editor has no subtitles; the old form started with Standard subtitles on)
+    if (s.noise !== 'denoise' || s.kind !== 'paid' || s.subs !== 'off' || !s.leveling || s.loudness !== '-14' || s.rebuild) throw new Error(JSON.stringify(s));
   });
 
-  await check('no page errors on the Cleanup page', async () => {
+  await check('no page errors in the editor', async () => {
     if (problems.length) throw new Error(problems.join(' | '));
   });
   await ctx.close();
