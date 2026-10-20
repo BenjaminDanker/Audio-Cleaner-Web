@@ -44,7 +44,7 @@ import numpy as np
 
 from . import blocks, clarity, dfn, dpdfnet, pipeline, restore
 from .aec import echo_block
-from .timeline import Timeline
+from .timeline import Timeline, TimelineError
 
 SR = blocks.SAMPLE_RATE
 STEPS = ("echo", "light", "heavy", "rebuild", "leveling")  # the billing steps, in the order they run
@@ -219,6 +219,8 @@ def _main_segments(noise: list, rebuild: list, n: int) -> list[Seg]:
             nz = next((s for x, y, s in noise if x <= a < y), None)
             if nz is None:
                 kind, st = "pass", {}
+            elif nz.get("browser"):
+                kind, st = "browser", {"browser": True}  # the browser's own noise removal, uploaded (BrowserAudio): no model runs
             else:
                 if nz["remover"] not in ("light", "heavy"):
                     raise EditorError("the noise remover of every part must be light or heavy: resolve 'auto' first (resolve_removers)")
@@ -278,6 +280,10 @@ class Layout:
         echo = tl.samples("echo", n)
         if echo and inputs.reference is None:
             raise EditorError("echo removal needs the file's second audio track (the reference)")
+        try:
+            tl.check()
+        except TimelineError as e:  # (an echo part over a part the browser cleaned)
+            raise EditorError(str(e)) from None
         self.echo_parts = [(a, b) for a, b, _ in echo]
         self.echo = _fill(echo, n, "echo", "off")
         self.echo_joins = _a_joins(self.echo, "echo")
@@ -629,6 +635,30 @@ class _LRU:
         return v
 
 
+class BrowserAudio:
+    """What the browser made of the noise parts that say `browser: true` (the noise layer's output there, instead of a remover's): pieces
+    (first sample, samples (n, channels) float32 at 48 kHz; a memory map is fine), each covering exactly its part. Outside the pieces the
+    recording itself is what a signal reads."""
+
+    def __init__(self, pieces: list[tuple[int, np.ndarray]]):
+        self.pieces = sorted(((int(a), x) for a, x in pieces), key=lambda p: p[0])
+
+    def covers(self, a: int, b: int) -> bool:
+        pos = a
+        for first, x in self.pieces:
+            if first <= pos < first + len(x):
+                pos = first + len(x)
+        return pos >= b
+
+    def fill(self, out: np.ndarray, a: int) -> None:
+        """Copy the pieces' samples over `out` (the recording's samples from `a`)."""
+        b = a + len(out)
+        for first, x in self.pieces:
+            x0, x1 = max(a, first), min(b, first + len(x))
+            if x1 > x0:
+                out[x0 - a:x1 - a] = x[x0 - first:x1 - first]
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Joins: measures
 # ---------------------------------------------------------------------------------------------------------------------
@@ -673,9 +703,16 @@ def find_pause(lead: np.ndarray, lead_start: int, t0: int, max_shift: int) -> tu
 # ---------------------------------------------------------------------------------------------------------------------
 class _Render:
     def __init__(self, tl: Timeline, inputs: Inputs, cache: blocks.BlockCache, runner: Runner | None, out: np.ndarray | None,
-                 work_dir: Path | None, progress, cancel):
+                 work_dir: Path | None, progress, cancel, browser: BrowserAudio | None = None):
         self.tl, self.inputs, self.cache, self.runner = tl, inputs, cache, runner
         self.lay = Layout(tl, inputs)
+        self.browser = browser
+        for seg in self.lay.main:
+            if seg.kind == "browser" and (browser is None or not browser.covers(seg.a, seg.b)):
+                raise EditorError("a part cleaned in the browser has no uploaded audio")
+        for _, x in (browser.pieces if browser else []):
+            if x.ndim != 2 or x.shape[1] != inputs.channels:
+                raise EditorError("the audio cleaned in the browser must have the recording's channels")
         self.keys = _Keys(self.lay, inputs)
         self.n, self.ch = inputs.n, inputs.channels
         self.work_dir, self.progress, self.cancel = work_dir, progress, cancel
@@ -829,7 +866,16 @@ class _Render:
                 lv_ot = _active_level_db(self.pass_sig(other, E, oa, ob))
                 j.gain_db = float(np.clip(lv_ot - lv_rb, -MATCH_MAX_DB, MATCH_MAX_DB))
 
+    def browser_sig(self, E: np.ndarray, a: int, b: int) -> np.ndarray:
+        """The browser's audio over [a, b) where it has some (all of its part), the recording elsewhere (a join reaches a little past a part)."""
+        y = np.array(E[a:b], dtype=np.float32)
+        if self.browser is not None:
+            self.browser.fill(y, a)
+        return y
+
     def pass_sig(self, seg: Seg, E: np.ndarray, a: int, b: int) -> np.ndarray:
+        if seg.kind == "browser":
+            return self.browser_sig(E, a, b)
         return self.noise_sig(seg, E, a, b) if seg.kind == "noise" else np.array(E[a:b])
 
     def rebuild_gain(self, segs: list[Seg], joins: list[Join], i: int, a: int, b: int) -> np.ndarray | None:
@@ -886,6 +932,8 @@ class _Render:
                 return E[a:b]
             if seg.kind == "noise":
                 return self.noise_sig(seg, E, a, b)
+            if seg.kind == "browser":
+                return self.browser_sig(E, a, b)
             y = self.rebuild_sig(seg, a, b)
             g = self.rebuild_gain(lay.main, lay.main_joins, i, a, b)
             return y if g is None else y * g[:, None]
@@ -947,11 +995,12 @@ def render(
     work_dir: str | Path | None = None,
     progress: Callable[[float], None] | None = None,
     cancel: threading.Event | None = None,
+    browser: BrowserAudio | None = None,
 ) -> np.ndarray:
     """The audio the timeline stands for, (samples, channels) float32, channels as `pipeline.channel_plan` has them (a channel that
     duplicates another is the same result, a silent one stays silent). Blocks the cache lacks are run with `runner` and put in
     the cache (`cache` None: kept for this call only, in `work_dir` when given); `out`: written into this array (e.g. a memory
-    map). The noise remover of every part must be decided ("light" / "heavy": resolve_removers). The default timeline
+    map). `browser`: the audio of the noise parts the browser cleaned (they need it). The noise remover of every part must be decided ("light" / "heavy": resolve_removers). The default timeline
     (every layer on the whole file) is what `pipeline.clean_audio` makes of the same recording, and fills the same cache."""
     wd = Path(work_dir) if work_dir is not None else None
     own = None
@@ -963,7 +1012,7 @@ def render(
             cache = blocks.MemoryCache()
     if out is not None and out.shape != (inputs.n, inputs.channels):
         raise ValueError("out must be shaped (samples, channels) like the recording")
-    r = _Render(tl, inputs, cache, runner, out, wd, progress, cancel)
+    r = _Render(tl, inputs, cache, runner, out, wd, progress, cancel, browser)
     try:
         return r.run()
     finally:
@@ -971,5 +1020,5 @@ def render(
             shutil.rmtree(own, ignore_errors=True)
 
 
-__all__ = ["Inputs", "Runner", "Layout", "Plan", "Task", "StepCost", "STEP_COSTS", "EditorError", "plan", "billable",
+__all__ = ["Inputs", "Runner", "BrowserAudio", "Layout", "Plan", "Task", "StepCost", "STEP_COSTS", "EditorError", "plan", "billable",
            "compute_estimate", "resolve_removers", "render", "find_pause"]

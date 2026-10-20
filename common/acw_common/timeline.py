@@ -10,13 +10,23 @@ A recording has LAYERS, one per step, and each layer covers PARTS of the timelin
               (measured: chaining them adds nothing), so the noise removal there is not run
     leveling  even out the voice and set the loudness: loudness_lufs (-70..0; null keeps the level)
 
-The default, `Timeline.whole_file`, is every layer you ask for on the whole file: what `pipeline.clean_audio` does. Subtitles
-are not part of the timeline (they stay whole-file). The JSON:
+and, from version 2, a layer that is not part of the sound:
+
+    subtitles  quality "free" (the browser transcribes it) | "standard" | "accurate" (the server transcribes it), language (a
+               code, null: detect) and translate (up to 3 codes, not the part's language, only with standard or accurate)
+
+The default, `Timeline.whole_file`, is every layer you ask for on the whole file: what `pipeline.clean_audio` does (no subtitles).
+The JSON:
 
     {"version": 1, "seconds": 123.4, "layers": {
         "noise": [{"start": 0, "end": 123.4, "strength_db": 40, "remover": "auto"}],
         "rebuild": [{"start": 30.5, "end": 60}],
         "leveling": [{"start": 0, "end": 123.4, "loudness_lufs": -16}]}}
+
+VERSION 2 adds two things: the `subtitles` layer, and `"browser": true` on a noise part (the browser cleaned that range itself and
+uploaded it; strength and remover are then not used and left out of the JSON; an echo part may not overlap it). `to_json` says
+version 2 only for a timeline that uses one of them, so every timeline the first version could say is written exactly as before
+(old builds of the desktop app read only version 1); `from_json` reads both, and a version 1 document may not use the new things.
 
 Times are seconds, kept to the millisecond and clamped to [0, seconds]. The parts of a layer never overlap: a part painted
 over old ones replaces them (`Timeline.paint`; in JSON the later part wins), neighbours with the same settings are merged, an
@@ -27,14 +37,25 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 SAMPLE_RATE = 48_000
-VERSION = 1
+VERSION = 1  # the version a timeline without anything new is written in
+VERSION_2 = 2  # ... and the one that has subtitles or browser-cleaned parts
+VERSIONS = (VERSION, VERSION_2)
+#: The layers that make the sound, in the order the steps run in; each layer's input is the result of the ones before it.
 LAYERS = ("echo", "noise", "rebuild", "leveling")
-#: The order the steps run in; each layer's input is the result of the ones before it.
+SUBTITLES = "subtitles"
+ALL_LAYERS = (*LAYERS, SUBTITLES)
+QUALITIES = ("free", "standard", "accurate")
+#: The languages of the website's lists (web/src/jobs.js LANGUAGES, server/acw/translate.py): what free and standard subtitles take
+#: and what a translation can be made into. Accurate subtitles also take any other 2-3 letter code the engine knows.
+LANGUAGES = ("en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk", "tr", "ar", "hi", "ja", "ko", "zh", "sv", "da", "fi", "no",
+             "cs", "el", "he", "id", "vi", "hu", "ro", "th")
+MAX_TRANSLATIONS = 3
 REMOVERS = ("auto", "light", "heavy")
 STRENGTHS = {"gentle": 12.0, "balanced": 24.0, "strong": 40.0, "max": 100.0, "maximum": 100.0}
 MAX_PARTS = 500  # per layer
@@ -56,22 +77,70 @@ def _number(v: Any, what: str) -> float:
     return float(v)
 
 
+def _language(raw: object, quality: str) -> str | None:
+    """A subtitle language: a code of LANGUAGES (accurate: any 2-3 letter code), or None to detect it."""
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str):
+        raise TimelineError("language must be a code such as en, or null to detect it")
+    code = raw.strip().lower()
+    if code in LANGUAGES or (quality == "accurate" and re.fullmatch(r"[a-z]{2,3}", code)):
+        return code
+    raise TimelineError(f"unknown language {raw[:8]!r} for {quality} subtitles")
+
+
+def _subtitles(raw: dict) -> dict:
+    quality = raw.pop("quality", None)
+    if quality not in QUALITIES:
+        raise TimelineError("subtitles need a quality: free, standard or accurate")
+    language = _language(raw.pop("language", None), quality)
+    translate = raw.pop("translate", None)
+    if translate is None:
+        translate = []
+    if not isinstance(translate, list) or not all(isinstance(t, str) for t in translate):
+        raise TimelineError("translate must be a list of language codes")
+    codes = list(dict.fromkeys(t.strip().lower() for t in translate if t.strip()))
+    if len(codes) > MAX_TRANSLATIONS:
+        raise TimelineError(f"at most {MAX_TRANSLATIONS} translation languages for a part")
+    for code in codes:
+        if code not in LANGUAGES:
+            raise TimelineError(f"unknown translation language {code[:8]!r}")
+        if code == language:
+            raise TimelineError("a translation language is the same as the spoken language of the part")
+    if codes and quality == "free":
+        raise TimelineError("Translations need Standard or Accurate subtitles: free subtitles are made in the browser and can't be translated")
+    return {"quality": quality, "language": language, "translate": codes}
+
+
+def _clone(settings: dict) -> dict:
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in settings.items()}
+
+
 def _settings(layer: str, raw: dict | None) -> dict:
     """The settings of a part of `layer`, checked and complete (defaults filled in)."""
     raw = dict(raw or {})
-    if layer == "noise":
-        strength = raw.pop("strength_db", raw.pop("strength", 100.0))
-        if isinstance(strength, str):
-            if strength.lower() not in STRENGTHS:
-                raise TimelineError(f"unknown strength {strength!r} (gentle, balanced, strong, max, or a number of dB)")
-            strength = STRENGTHS[strength.lower()]
-        strength = _number(strength, "strength_db")
-        if not 0.0 < strength <= 100.0:
-            raise TimelineError("strength_db must be above 0 and at most 100")
-        remover = raw.pop("remover", "auto")
-        if remover not in REMOVERS:
-            raise TimelineError(f"remover must be one of {', '.join(REMOVERS)}")
-        out = {"strength_db": float(strength), "remover": remover}
+    if layer == SUBTITLES:
+        out = _subtitles(raw)
+    elif layer == "noise":
+        browser = raw.pop("browser", False)
+        if not isinstance(browser, bool):
+            raise TimelineError("browser must be true or false")
+        if browser:  # cleaned by the browser: the strength and the remover are not used (and not kept)
+            raw.pop("strength_db", None), raw.pop("strength", None), raw.pop("remover", None)
+            out = {"browser": True}
+        else:
+            strength = raw.pop("strength_db", raw.pop("strength", 100.0))
+            if isinstance(strength, str):
+                if strength.lower() not in STRENGTHS:
+                    raise TimelineError(f"unknown strength {strength!r} (gentle, balanced, strong, max, or a number of dB)")
+                strength = STRENGTHS[strength.lower()]
+            strength = _number(strength, "strength_db")
+            if not 0.0 < strength <= 100.0:
+                raise TimelineError("strength_db must be above 0 and at most 100")
+            remover = raw.pop("remover", "auto")
+            if remover not in REMOVERS:
+                raise TimelineError(f"remover must be one of {', '.join(REMOVERS)}")
+            out = {"strength_db": float(strength), "remover": remover}
     elif layer == "leveling":
         lufs = raw.pop("loudness_lufs", DEFAULT_LOUDNESS)
         if lufs is not None:
@@ -111,7 +180,7 @@ class Timeline:
         if seconds < 0:
             raise TimelineError("seconds must not be negative")
         self.seconds = ms(seconds)
-        self.layers: dict[str, list[Part]] = {name: [] for name in LAYERS}
+        self.layers: dict[str, list[Part]] = {name: [] for name in ALL_LAYERS}
         for name, parts in (layers or {}).items():
             if name not in self.layers:
                 raise TimelineError(f"unknown layer {name!r}")
@@ -147,7 +216,13 @@ class Timeline:
 
     def copy(self) -> "Timeline":
         t = Timeline(self.seconds)
-        t.layers = {name: [Part(p.start, p.end, dict(p.settings)) for p in parts] for name, parts in self.layers.items()}
+        t.layers = {name: [Part(p.start, p.end, _clone(p.settings)) for p in parts] for name, parts in self.layers.items()}
+        return t
+
+    def audio(self) -> "Timeline":
+        """A copy with only the layers that make the sound (what the result audio depends on: no subtitles)."""
+        t = self.copy()
+        t.layers[SUBTITLES] = []
         return t
 
     def _layer(self, layer: str) -> list[Part]:
@@ -167,9 +242,9 @@ class Timeline:
                 out.append(p)
                 continue
             if p.start < a:
-                out.append(Part(p.start, a, dict(p.settings)))
+                out.append(Part(p.start, a, _clone(p.settings)))
             if p.end > b:
-                out.append(Part(b, p.end, dict(p.settings)))
+                out.append(Part(b, p.end, _clone(p.settings)))
         self.layers[layer] = out
         return self
 
@@ -204,6 +279,26 @@ class Timeline:
     def covers(self, layer: str, t: float) -> bool:
         return any(p.start <= t < p.end for p in self._layer(layer))
 
+    def browser_parts(self) -> list[Part]:
+        """The noise parts the browser cleaned itself (`browser: true`)."""
+        return [p for p in self.layers["noise"] if p.settings.get("browser")]
+
+    def free_parts(self) -> list[Part]:
+        """The subtitle parts the browser transcribes itself (quality free)."""
+        return [p for p in self.layers[SUBTITLES] if p.settings.get("quality") == "free"]
+
+    def uses_v2(self) -> bool:
+        """Whether the timeline has something the first version could not say (subtitles, a browser-cleaned part)."""
+        return bool(self.layers[SUBTITLES]) or any(p.settings.get("browser") for p in self.layers["noise"])
+
+    def check(self) -> "Timeline":
+        """Raises TimelineError for what no single part can tell: an echo part overlapping a part the browser cleaned (echo removal
+        runs before the noise removal, and the browser can't do it)."""
+        for b in self.browser_parts():
+            if any(e.start < b.end and b.start < e.end for e in self.layers["echo"]):
+                raise TimelineError("Echo removal can't be used on a part cleaned in the browser")
+        return self
+
     def samples(self, layer: str, n: int) -> list[tuple[int, int, dict]]:
         """The parts of a layer as sample ranges (a, b, settings) of a recording of `n` samples, clamped, empty ones dropped."""
         out = []
@@ -226,8 +321,8 @@ class Timeline:
 
     # ---- JSON ----------------------------------------------------------------------------------------------------
     def to_json(self) -> dict:
-        return {"version": VERSION, "seconds": self.seconds,
-                "layers": {name: [p.to_json() for p in self.layers[name]] for name in LAYERS if self.layers[name]}}
+        return {"version": VERSION_2 if self.uses_v2() else VERSION, "seconds": self.seconds,
+                "layers": {name: [p.to_json() for p in self.layers[name]] for name in ALL_LAYERS if self.layers[name]}}
 
     def dumps(self) -> str:
         return json.dumps(self.to_json(), sort_keys=True, separators=(",", ":"))
@@ -247,8 +342,8 @@ class Timeline:
         if extra:
             raise TimelineError(f"unknown key {extra[0]!r}")
         version = obj.get("version")
-        if isinstance(version, bool) or version != VERSION:
-            raise TimelineError(f"unsupported timeline version {version!r} (this code reads version {VERSION})")
+        if isinstance(version, bool) or version not in VERSIONS:
+            raise TimelineError(f"unsupported timeline version {version!r} (this code reads versions {VERSION} and {VERSION_2})")
         length = seconds if seconds is not None else obj.get("seconds")
         if length is None:
             raise TimelineError("the timeline needs seconds (the length of the recording)")
@@ -257,8 +352,10 @@ class Timeline:
         if not isinstance(layers, dict):
             raise TimelineError("layers must be an object")
         for name, parts in layers.items():
-            if name not in LAYERS:
+            if name not in ALL_LAYERS:
                 raise TimelineError(f"unknown layer {name!r}")
+            if name == SUBTITLES and version < VERSION_2:
+                raise TimelineError(f"the subtitles layer needs timeline version {VERSION_2}")
             if not isinstance(parts, list):
                 raise TimelineError(f"{name} must be a list of parts")
             if len(parts) > 4 * MAX_PARTS:
@@ -268,4 +365,6 @@ class Timeline:
                     raise TimelineError(f"every part of {name} needs start and end")
                 rest = {k: v for k, v in p.items() if k not in ("start", "end")}
                 t.paint(name, p["start"], p["end"], rest)  # later parts replace earlier ones
-        return t
+        if version < VERSION_2 and t.uses_v2():
+            raise TimelineError(f"a part cleaned in the browser needs timeline version {VERSION_2}")
+        return t.check()

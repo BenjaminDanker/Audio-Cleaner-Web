@@ -769,3 +769,85 @@ def test_echo_parts_use_the_echo_blocks_and_the_models_read_the_echo_free_record
     partial = Timeline(inp.seconds).paint("echo", 4, 9)
     y2 = editor.render(partial, inp, cache, editor.Runner(LIB, MODEL))
     assert np.array_equal(y2[: 4 * SR - 1200, 0], x[: 4 * SR - 1200, 0]) and np.array_equal(y2[9 * SR + 1200:, 0], x[9 * SR + 1200:, 0])
+
+
+# ------------------------------------------------------------------------------------------ parts the browser cleaned
+
+def with_browser(seconds, browser, noise=(), rebuild=(), level=None):
+    tl = Timeline(seconds)
+    for a, b in browser:
+        tl.paint("noise", a, b, {"browser": True})
+    for a, b, db, rm in noise:
+        tl.paint("noise", a, b, {"strength_db": db, "remover": rm})
+    for a, b in rebuild:
+        tl.paint("rebuild", a, b)
+    if level is not None:
+        tl.paint("leveling", 0.0, seconds, {"loudness_lufs": level})
+    return tl
+
+
+def test_a_browser_cleaned_part_runs_no_model_costs_nothing_and_leaves_leveling_its_price():
+    inp = make(100)
+    tl = with_browser(100, [(10, 60)], noise=[(70, 90, 24.0, "light")], level=-16.0)
+    p = editor.plan(tl, inp, None)
+    assert {(t.s // SR, t.e // SR) for t in p.tasks} == {(60, 90), (90, 100)} and p.layout.main[1].kind == "browser"  # (the remover's part and the join margin after it: nothing for the browser's)
+    b = editor.billable(p)
+    assert set(b) == {"light", "leveling"} and b["light"]["seconds"] == 20 and b["leveling"]["seconds"] == 100
+    only = editor.plan(with_browser(100, [(0, 100)]), inp, None)
+    assert only.tasks == [] and only.misses == [] and editor.billable(only) == {}
+    # Voice rebuild wins where it overlaps: the browser's part is split around it, and only the rebuild runs there
+    both = editor.plan(with_browser(100, [(10, 60)], rebuild=[(20, 30)]), inp, None)
+    assert [s.kind for s in both.layout.main] == ["pass", "browser", "rebuild", "browser", "pass"]
+    assert editor.billable(both)["rebuild"]["seconds"] == 10 and "light" not in editor.billable(both)
+    # a change to the browser part's range is not a model run either
+    cache = blocks.MemoryCache()
+    fill(cache, p, inp)
+    assert editor.plan(with_browser(100, [(15, 55)], noise=[(70, 90, 24.0, "light")], level=-16.0), inp, cache).misses == []
+
+
+def test_the_noise_layer_outputs_the_browsers_audio_in_its_part_and_the_recording_elsewhere_with_a_ramp():
+    inp = make(10)
+    x = inp.source
+    cleaned = np.full((4 * SR, 1), 0.07, np.float32)
+    b = editor.BrowserAudio([(2 * SR, cleaned)])
+    tl = with_browser(10, [(2, 6)])
+    y = editor.render(tl, inp, None, None, browser=b)
+    assert np.array_equal(y[: int(1.9 * SR)], x[: int(1.9 * SR)]) and np.array_equal(y[int(6.1 * SR):], x[int(6.1 * SR):])
+    assert np.all(y[int(2.1 * SR): int(5.9 * SR)] == 0.07)
+    # the join is the 100 ms ramp of a noise floor that changes, centred on the part's edge, and has no step; the browser's audio
+    # exists from the edge on (before it its side of the ramp is the recording)
+    z0, d = 2 * SR - 2400, 4800
+    ramp = y[z0: z0 + d, 0]
+    t = np.arange(d) / d
+    other = np.where(np.arange(d) < 2400, x[z0: z0 + d, 0], 0.07)
+    want = (1 - t) * x[z0: z0 + d, 0] + t * other
+    assert np.max(np.abs(ramp - want)) < 1e-3
+    # Leveling goes on top of what the noise layer made, as always
+    leveled = editor.render(with_browser(10, [(2, 6)], level=-16.0), inp, None, None, browser=b)
+    assert not np.allclose(leveled, y) and np.all(np.isfinite(leveled))
+    # the browser's audio keeps its place when Voice rebuild takes a stretch of its part
+    cache = blocks.MemoryCache()
+    both = with_browser(10, [(2, 8)], rebuild=[(4, 5)])
+    fill(cache, editor.plan(both, inp, cache), inp, rebuilt_gain=0.1)
+    out = editor.render(both, inp, cache, None, browser=editor.BrowserAudio([(2 * SR, np.full((6 * SR, 1), 0.07, np.float32))]))
+    assert np.all(out[int(2.2 * SR): int(3.6 * SR)] == 0.07) and np.all(out[int(5.5 * SR): int(7.8 * SR)] == 0.07)
+    assert not np.any(out[int(4.3 * SR): int(4.7 * SR)] == 0.07)
+
+
+def test_the_browsers_audio_has_to_be_there_and_fit():
+    inp = make(10, channels=2)
+    tl = with_browser(10, [(2, 6)])
+    with pytest.raises(editor.EditorError, match="no uploaded audio"):
+        editor.render(tl, inp, None, None)
+    with pytest.raises(editor.EditorError, match="no uploaded audio"):
+        editor.render(tl, inp, None, None, browser=editor.BrowserAudio([(2 * SR, np.zeros((3 * SR, 2), np.float32))]))  # (it stops short of the part)
+    with pytest.raises(editor.EditorError, match="channels"):
+        editor.render(tl, inp, None, None, browser=editor.BrowserAudio([(2 * SR, np.zeros((4 * SR, 1), np.float32))]))
+    ok = editor.render(tl, inp, None, None, browser=editor.BrowserAudio([(2 * SR, np.zeros((4 * SR, 2), np.float32))]))
+    assert ok.shape == (10 * SR, 2) and not ok[int(2.2 * SR): int(5.8 * SR)].any()
+    b = editor.BrowserAudio([(0, np.zeros((5, 1), np.float32)), (5, np.zeros((5, 1), np.float32))])
+    assert b.covers(0, 10) and not b.covers(0, 11) and b.covers(3, 7)
+    # echo removal over a part the browser cleaned is refused here too (the server refuses it when it reads the timeline)
+    both = Timeline(10.0).paint("noise", 2, 6, {"browser": True}).paint("echo", 5, 8)
+    with pytest.raises(editor.EditorError, match="Echo removal"):
+        editor.plan(both, editor.Inputs(inp.source, "r", reference=np.zeros(10 * SR, np.float32), reference_id="ref"))

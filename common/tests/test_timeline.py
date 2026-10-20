@@ -8,7 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from acw_common import pipeline  # noqa: E402
-from acw_common.timeline import LAYERS, VERSION, Timeline, TimelineError  # noqa: E402
+from acw_common.timeline import ALL_LAYERS, LANGUAGES, LAYERS, VERSION, VERSION_2, Timeline, TimelineError  # noqa: E402
 
 
 def test_whole_file_defaults_are_every_asked_layer_on_the_whole_file():
@@ -92,7 +92,7 @@ def test_in_json_the_later_part_wins():
 @pytest.mark.parametrize("doc", [
     [],  # not an object
     {"seconds": 10},  # no version
-    {"version": 2, "seconds": 10},  # a version this code does not know
+    {"version": 3, "seconds": 10},  # a version this code does not know
     {"version": True, "seconds": 10},
     {"version": 1},  # no length
     {"version": 1, "seconds": "ten"},
@@ -137,3 +137,96 @@ def test_the_copy_is_independent_and_defaults_fill_in():
     assert len(t.parts("noise")) == 1 and len(c.parts("noise")) == 3
     assert t.parts("noise")[0].settings == {"strength_db": 100.0, "remover": "auto"}
     assert t.covers("noise", 0) and not t.covers("noise", 40.0) and not t.covers("rebuild", 1)
+
+
+# ---------------------------------------------------------------------------------------------------- version 2
+
+def sub(a, b, quality="standard", language="en", translate=()):
+    return {"start": a, "end": b, "quality": quality, "language": language, "translate": list(translate)}
+
+
+def part_settings(quality="standard", language="en", translate=()):
+    return {"quality": quality, "language": language, "translate": list(translate)}
+
+
+V2 = {"version": 2, "seconds": 100, "layers": {
+    "noise": [{"start": 0, "end": 10, "browser": True}, {"start": 10, "end": 40, "strength_db": 24, "remover": "light"}],
+    "subtitles": [sub(0, 50, "standard", "en", ["es", "fr"]), sub(60, 70, "free", None), sub(80, 90, "accurate", "haw")]}}
+
+
+def test_version_1_is_written_exactly_as_before_and_version_2_only_for_something_new():
+    v1 = {"version": 1, "seconds": 50.0, "layers": {"noise": [{"start": 0.0, "end": 50.0, "strength_db": 100.0, "remover": "light"}],
+                                                   "leveling": [{"start": 0.0, "end": 50.0, "loudness_lufs": -16.0}]}}
+    assert Timeline.from_json(v1).to_json() == v1 and VERSION == 1 and VERSION_2 == 2
+    assert Timeline.whole_file(60.0).to_json()["version"] == 1 and list(Timeline.whole_file(60.0).to_json()["layers"]) == ["noise", "leveling"]
+    assert ALL_LAYERS == (*LAYERS, "subtitles") and Timeline(10.0).layers["subtitles"] == []
+    assert Timeline.from_json({**v1, "version": 2}).to_json() == v1  # (version 2 that says nothing new is version 1 again)
+    assert Timeline.from_json(V2).to_json()["version"] == 2
+    t = Timeline(100.0).paint("subtitles", 0, 5, part_settings()).erase("subtitles", 0, 5)
+    assert t.to_json()["version"] == 1 and "subtitles" not in t.to_json()["layers"]
+    assert Timeline(100.0).paint("noise", 0, 5, {"browser": True}).to_json()["version"] == 2
+    # a version 1 document may not use the new things, whatever the reader is
+    for layers in ({"subtitles": [sub(0, 5)]}, {"noise": [{"start": 0, "end": 5, "browser": True}]}):
+        with pytest.raises(TimelineError, match="version 2"):
+            Timeline.from_json({"version": 1, "seconds": 10, "layers": layers})
+    # the audio layers alone, and the json an old build can read
+    assert Timeline.from_json(V2).audio().layers["subtitles"] == [] and Timeline.from_json(V2).audio().layers["noise"] == Timeline.from_json(V2).layers["noise"]
+
+
+def test_the_subtitles_layer_is_checked_and_its_parts_merge_like_the_others():
+    t = Timeline.from_json(V2)
+    assert t.to_json() == {"version": 2, "seconds": 100.0, "layers": {
+        "noise": [{"start": 0.0, "end": 10.0, "browser": True}, {"start": 10.0, "end": 40.0, "strength_db": 24.0, "remover": "light"}],
+        "subtitles": [{"start": 0.0, "end": 50.0, "quality": "standard", "language": "en", "translate": ["es", "fr"]},
+                      {"start": 60.0, "end": 70.0, "quality": "free", "language": None, "translate": []},
+                      {"start": 80.0, "end": 90.0, "quality": "accurate", "language": "haw", "translate": []}]}}
+    assert [p.start for p in t.free_parts()] == [60.0] and [p.end for p in t.browser_parts()] == [10.0]
+    t.paint("subtitles", 50, 60, part_settings("standard", "en", ["es", "fr"]))  # same settings as its neighbour: one part
+    assert [(p.start, p.end) for p in t.parts("subtitles")][:2] == [(0.0, 60.0), (60.0, 70.0)]
+    t.paint("subtitles", 20, 30, part_settings("accurate", "de"))  # painted over: the old part is split
+    assert [(p.start, p.end, p.settings["quality"]) for p in t.parts("subtitles")][:3] == [(0.0, 20.0, "standard"), (20.0, 30.0, "accurate"), (30.0, 60.0, "standard")]
+    c = t.copy()
+    c.layers["subtitles"][0].settings["translate"].append("it")
+    assert t.layers["subtitles"][0].settings["translate"] == ["es", "fr"]  # (a copy shares nothing)
+    # codes: lists of the site for free and standard, any 2-3 letter code for accurate; a language is detected when null or ""
+    assert set(LANGUAGES) == {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk", "tr", "ar", "hi", "ja", "ko", "zh", "sv", "da", "fi", "no", "cs", "el", "he", "id", "vi", "hu", "ro", "th"}
+    assert Timeline(10.0).paint("subtitles", 0, 5, {"quality": "standard", "language": ""}).parts("subtitles")[0].settings["language"] is None
+    assert Timeline(10.0).paint("subtitles", 0, 5, {"quality": "free", "language": " EN "}).parts("subtitles")[0].settings["language"] == "en"
+    assert Timeline(10.0).paint("subtitles", 0, 5, {"quality": "standard", "translate": ["ES", "es", "fr"]}).parts("subtitles")[0].settings["translate"] == ["es", "fr"]
+    bad = [
+        {"quality": "perfect"}, {}, {"quality": None}, {"quality": "free", "translate": ["es"]},
+        {"quality": "standard", "language": "en", "translate": ["en"]}, {"quality": "standard", "translate": ["es", "fr", "de", "it"]},
+        {"quality": "standard", "language": "haw"}, {"quality": "free", "language": "haw"}, {"quality": "accurate", "language": "english"},
+        {"quality": "standard", "language": 5}, {"quality": "standard", "translate": "es"}, {"quality": "standard", "translate": ["haw"]},
+        {"quality": "standard", "speed": 2},
+    ]
+    for settings in bad:
+        with pytest.raises(TimelineError):
+            Timeline(10.0).paint("subtitles", 0, 5, settings)
+    with pytest.raises(TimelineError, match="Standard or Accurate"):
+        Timeline(10.0).paint("subtitles", 0, 5, {"quality": "free", "translate": ["es"]})
+
+
+def test_a_noise_part_the_browser_cleans_has_no_strength_or_remover_and_no_echo_over_it():
+    t = Timeline(100.0).paint("noise", 10, 20, {"browser": True, "strength_db": 12, "remover": "heavy"})
+    assert t.parts("noise")[0].settings == {"browser": True}
+    assert Timeline(100.0).paint("noise", 0, 5, {"browser": False}).parts("noise")[0].settings == {"strength_db": 100.0, "remover": "auto"}
+    with pytest.raises(TimelineError):
+        Timeline(100.0).paint("noise", 0, 5, {"browser": "yes"})
+    with pytest.raises(TimelineError):
+        Timeline(100.0).paint("rebuild", 0, 5, {"browser": True})
+    # neighbours merge; a part painted over it ends it
+    t.paint("noise", 20, 30, {"browser": True})
+    assert [(p.start, p.end) for p in t.parts("noise")] == [(10.0, 30.0)]
+    t.paint("noise", 15, 18, {"strength_db": 40, "remover": "light"})
+    assert [p.settings.get("browser", False) for p in t.parts("noise")] == [True, False, True]
+    doc = {"version": 2, "seconds": 100, "layers": {"noise": [{"start": 10, "end": 20, "browser": True}], "echo": [{"start": 15, "end": 25}]}}
+    with pytest.raises(TimelineError) as e:
+        Timeline.from_json(doc)
+    assert str(e.value) == "Echo removal can't be used on a part cleaned in the browser"
+    doc["layers"]["echo"] = [{"start": 20, "end": 25}, {"start": 5, "end": 10}]  # touching is not overlapping
+    assert Timeline.from_json(doc).parts("echo")
+    # the only place it is checked is where a timeline is read: building one by hand with the desktop's `paint` stays possible
+    Timeline(100.0).paint("noise", 10, 20, {"browser": True}).paint("echo", 15, 25)
+    with pytest.raises(TimelineError):
+        Timeline(100.0).paint("noise", 10, 20, {"browser": True}).paint("echo", 15, 25).check()
