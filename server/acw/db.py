@@ -339,6 +339,11 @@ MIGRATIONS = [
     # from: they are deleted together).
     ("jobs", "source_job_id", "ALTER TABLE jobs ADD COLUMN source_job_id TEXT"),
     ("jobs", "root_job_id", "ALTER TABLE jobs ADD COLUMN root_job_id TEXT"),
+    # The retention clock of a job's files (acw.editing): they go 2 hours after the last edit (`edited_at`: a run finishing, a
+    # timeline save, a quote, a process or an export) and at the latest 6 hours after the upload arrived (`uploaded_at`; a
+    # re-run keeps its source's). `expires_at` is the moment that results in.
+    ("jobs", "uploaded_at", "ALTER TABLE jobs ADD COLUMN uploaded_at INTEGER"),
+    ("jobs", "edited_at", "ALTER TABLE jobs ADD COLUMN edited_at INTEGER"),
     # callbackUrl of a job: delivered by the web process (acw.webhooks) when the job ends. state: pending | delivered | failed.
     (
         "job_callbacks",

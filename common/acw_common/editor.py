@@ -680,8 +680,8 @@ class _Render:
         self.n, self.ch = inputs.n, inputs.channels
         self.work_dir, self.progress, self.cancel = work_dir, progress, cancel
         self.lru = _LRU(cache)
+        self.temp: list[Path] = []  # (before the first `alloc`: it records the scratch files it makes here)
         self.out = out if out is not None else self.alloc("out")
-        self.temp: list[Path] = []
         self._scale: float | None = None
 
     # ---- buffers

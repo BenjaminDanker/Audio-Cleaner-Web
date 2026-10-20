@@ -16,12 +16,13 @@ pipeline.remove_echo), so a whole-file run fills the cache the editor reads and 
 the cache has.
 
 Blocks are numpy float32 arrays of the block's core ([start, end), no context). `BlockCache` is anything with `get(key)`,
-`put(key, array)` and `has(key)`: `MemoryCache` and `DirCache` are here, the server brings its own.
+`put(key, array)` and `has(key)`: `MemoryCache`, `DirCache` (float32 .npy files) and `FlacCache` (24-bit FLAC files, the server's) are here.
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -148,6 +149,94 @@ class DirCache:
 
     def has(self, key: str) -> bool:
         return self.path(key).is_file()
+
+
+class FlacCache:
+    """Blocks as 24-bit FLAC files in a folder (one per key, named by the key's hash): the server's block cache, about a third of
+    the .npy's size (a 30 s mono block of speech is about 1.3 MB). A block read back is within one 24-bit step (1.2e-7 of full
+    scale) of the block that was stored; a sample louder than CEILING is scaled down into it when written and the scale is kept in
+    a small file next to it (`<name>.scale`, only then), so a block of any level comes back at its level.
+
+    `ff` is an acw_common.ffmpeg.FFmpeg: needed to `put` and `get`; without one the cache can only say what it `has` (the web
+    process plans with it: it never opens a file the sandboxed runner wrote). Only regular files count (never a link)."""
+
+    CEILING = 0.98
+    SUFFIX = ".flac"
+
+    def __init__(self, directory: str | Path, ff=None, *, create: bool = True) -> None:
+        self.dir = Path(directory)
+        if create:
+            self.dir.mkdir(parents=True, exist_ok=True)
+        self.ff = ff
+        self.puts = 0
+        self._lock = threading.Lock()
+
+    def name(self, key: str) -> str:
+        return hashlib.sha1(key.encode()).hexdigest()
+
+    def path(self, key: str) -> Path:
+        return self.dir / (self.name(key) + self.SUFFIX)
+
+    def has(self, key: str) -> bool:
+        try:
+            return stat.S_ISREG(os.lstat(self.path(key)).st_mode)
+        except OSError:
+            return False
+
+    def _scale(self, path: Path) -> float:
+        try:
+            v = float(path.with_suffix(".scale").read_text())
+        except (OSError, ValueError):
+            return 1.0
+        return v if 0.0 < v <= 1.0 else 1.0
+
+    def put(self, key: str, block: np.ndarray) -> None:
+        if self.ff is None:
+            raise ValueError("a FlacCache without an FFmpeg can only look")
+        x = np.asarray(block, dtype=np.float32).reshape(-1)
+        peak = float(np.max(np.abs(x))) if len(x) else 0.0
+        scale = 1.0 if peak <= self.CEILING else self.CEILING / peak
+        final = self.path(key)
+        tmp = self.dir / f"{self.name(key)}-{os.getpid()}-{threading.get_ident()}"  # (no dot in it: the encoder sets the suffix)
+        written = self.ff.write_audio(x, SAMPLE_RATE, tmp, "flac24", gain=scale)  # <tmp>.flac
+        side = final.with_suffix(".scale")
+        if scale != 1.0:
+            side_tmp = side.with_name(side.name + ".tmp")
+            side_tmp.write_text(repr(scale))
+            os.replace(side_tmp, side)
+        else:
+            side.unlink(missing_ok=True)
+        os.replace(written, final)
+        with self._lock:
+            self.puts += 1
+
+    def get(self, key: str) -> np.ndarray | None:
+        if not self.has(key):
+            return None
+        if self.ff is None:
+            raise ValueError("a FlacCache without an FFmpeg can only look")
+        path = self.path(key)
+        r = self.ff._run([self.ff.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", "-protocol_whitelist", "file", "-f", "flac", "-i",
+                          str(path), "-f", "f32le", "-ac", "1", "-ar", str(SAMPLE_RATE), "pipe:1"], timeout=300)
+        if r.returncode != 0 or not r.stdout:
+            return None
+        y = np.frombuffer(r.stdout, dtype=np.float32)
+        scale = self._scale(path)
+        return (y / np.float32(scale)).astype(np.float32) if scale != 1.0 else y.copy()
+
+    def bytes_used(self) -> int:
+        """Disk the folder's blocks take."""
+        total = 0
+        try:
+            for p in self.dir.iterdir():
+                try:
+                    st = os.lstat(p)
+                    total += st.st_size if stat.S_ISREG(st.st_mode) else 0
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return total
 
 
 def block_key(step: str, input_id: str, *parts: object) -> str:

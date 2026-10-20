@@ -199,6 +199,15 @@ def add_job(uid, status="queued", *, created_ago=0, finished_ago=None, kind="den
     return jid
 
 
+def deadline_in(job_id: str, seconds: int) -> int:
+    """Move the job's upload so that its hard deadline (6 hours after the upload) is `seconds` from now; returns that moment."""
+    from acw import jobs as _jobs
+
+    cap = _jobs.get_settings().job_max_retention_seconds
+    db.execute("UPDATE jobs SET uploaded_at = ? WHERE id = ? OR root_job_id = ?", (db.now() + seconds - cap, job_id, job_id))
+    return db.now() + seconds
+
+
 def folder(job_id: str) -> Path:
     return jobs.job_dir(job_id)
 

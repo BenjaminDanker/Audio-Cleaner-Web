@@ -95,7 +95,7 @@ def test_change_and_save_again_end_to_end(client, signed_in, speech, tmp_path):
     a = start_job(client, h, data)
     assert _run_worker_once("done") == a
     first = row(a)
-    assert files_of(a) == {"input.wav", "kept-noise.flac", "kept-input.flac", "talk-cleaned.flac"}
+    assert files_of(a) == {"input.wav", "kept-noise.flac", "kept-input.flac", "talk-cleaned.flac", "kept-source.flac", "blocks", "suggestions.json"}
     assert first["expires_at"] == first["finished_at"] + 7200
     shown = client.get(f"/api/jobs/{a}").json()
     assert shown["redo"]["available"] and shown["redo"]["noise"] and shown["expiresAt"] == first["expires_at"]
@@ -163,7 +163,7 @@ def test_change_and_save_again_end_to_end(client, signed_in, speech, tmp_path):
     chain = [a, r1, r2, r3]
     assert [row(j)["root_job_id"] for j in chain] == [None, a, a, a]
     assert [row(j)["source_job_id"] for j in chain] == [None, a, r1, r2]
-    assert {row(j)["expires_at"] for j in chain} == {first["expires_at"]}
+    assert {row(j)["expires_at"] for j in chain} == {row(r3)["expires_at"]}  # every re-run is an edit: the chain ends together, 2 hours after the last
     assert client.get(f"/api/jobs/{r3}").json()["sourceJobId"] == r2
 
     # (5) when the two hours are over, everything of the chain goes together and a new change is refused

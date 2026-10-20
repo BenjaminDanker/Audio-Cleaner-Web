@@ -83,9 +83,15 @@ class Settings:
 
     max_upload_bytes: int = 4 * 1024**3
     workers: int = 3  # file-job worker units (ACW_WORKERS), used for queue estimates
-    # How long a file job's upload, its intermediate copies and its results are kept together, counted from when the
-    # job finishes (ACW_JOB_RETENTION_MINUTES; the sweeps run every 30 to 60 seconds, so it is accurate to about a minute).
+    # How long a file job's upload, its cached blocks, its intermediate copies and its results are kept together, counted from
+    # its last edit (finishing a run, a timeline save, a quote, a process or an export; ACW_JOB_RETENTION_MINUTES), and never
+    # later than `job_max_retention_seconds` after the upload (ACW_JOB_MAX_RETENTION_MINUTES). The sweeps run every 30 to 60
+    # seconds, so the deletion is accurate to about a minute.
     job_retention_seconds: int = 2 * 3600
+    job_max_retention_seconds: int = 6 * 3600
+    # A first run looks for suggestions (acw_common.suggest: about 0.22 s per second of audio) for recordings up to this long
+    # (ACW_SUGGEST_MAX_MINUTES); a longer one gets them when they are asked for (POST /api/jobs/{id}/suggestions).
+    suggest_max_seconds: int = 3600
     # File jobs an account may have at once (uploading, waiting, running; re-runs count). ACW_MAX_ACTIVE_JOBS.
     max_active_jobs: int = 3
     stream_worker_socket: Path | None = None
@@ -168,6 +174,8 @@ def get_settings() -> Settings:
         max_upload_bytes=_env_int("ACW_MAX_UPLOAD_BYTES", 4 * 1024**3),
         workers=_env_int("ACW_WORKERS", 3),
         job_retention_seconds=60 * max(1, _env_int("ACW_JOB_RETENTION_MINUTES", 120)),
+        job_max_retention_seconds=60 * max(1, _env_int("ACW_JOB_MAX_RETENTION_MINUTES", 360)),
+        suggest_max_seconds=60 * max(0, _env_int("ACW_SUGGEST_MAX_MINUTES", 60)),
         max_active_jobs=max(1, _env_int("ACW_MAX_ACTIVE_JOBS", 3)),
         stream_worker_socket=Path(_env("ACW_STREAM_SOCKET", str(data_dir / "stream.sock"))),
     )

@@ -12,6 +12,7 @@ longer has, and lets several jobs run at once without overdrawing.
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
 
 from .. import db
@@ -409,6 +410,9 @@ def history_page(user_id: str, limit: int = 100) -> tuple[list[dict], bool]:
             r["tier"] = p.get("denoise_tier") or p.get("transcribe_tier")
             r["minutes"] = round((j["duration_seconds"] or 0) / 60, 1)
             r["displayName"] = p.get("display_name") or j["input_name"]
+            m = re.match(r"^(Edited[^:]*): .* \((\d+(?:\.\d+)?) min\)$", r["description"] or "", re.S)
+            if m:  # a run of the per-part editor (editing.py): named for the steps it ran, for the minutes it processed
+                r["label"], r["minutes"] = m.group(1), float(m.group(2))
         elif s is not None:
             parts = []
             if s["denoise_tier"]:

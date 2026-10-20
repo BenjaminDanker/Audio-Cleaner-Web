@@ -190,7 +190,19 @@ def gpu_stages(job: dict) -> list[str]:
     lightly noisy under "auto" is cleaned by DeepFilterNet3 on the GPU worker's own CPU threads."""
     params = json.loads(job["params_json"])
     opts = params.get("options", {})
-    if job.get("next_stage") == "finalize" or opts.get("echo_reference_track"):
+    if job.get("next_stage") == "finalize":
+        return []
+    if params.get("run"):  # an edit run (editing.py): the steps its missing blocks need, found when it was quoted
+        return list(params["run"].get("gpu") or [])
+    if (params.get("edit") or {}).get("first_run"):  # a job made with a timeline: by the layers it has
+        layers = (params["edit"].get("timeline") or {}).get("layers") or {}
+        stages = ["transcribe"] if params.get("transcribe_tier") == "local" else []
+        if layers.get("rebuild"):
+            stages.append("rebuild")
+        elif any(p.get("remover", "auto") in ("auto", "heavy") for p in layers.get("noise") or []):
+            stages.append("heavy")
+        return stages
+    if opts.get("echo_reference_track"):
         return []
     rerun = params.get("rerun")  # a re-run only runs what it says (rerun.py): the blend and Leveling are CPU work
     stages = ["transcribe"] if params.get("transcribe_tier") == "local" and (not rerun or rerun.get("transcribe")) else []

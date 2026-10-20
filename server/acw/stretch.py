@@ -10,6 +10,10 @@ is cut and written again without a loss).
 The cutting is done by `acw.worker.cutter`, a confined program of its own (FFmpeg inside the same kind of sandbox as the job
 runner, with nothing writable), because the kept files were made by the runner, which handles untrusted uploads: this process
 never opens them with a decoder itself. A few cuts run at once; the rest wait a moment, then are told to come back.
+
+The per-part editor's preview (`GET /api/jobs/{id}/preview/{source|echo|noise|rebuild}`, acw/editing.py) uses the same helper for the
+recording (`source`, cut like a kept copy) and a second one for what the block cache holds of a step (`assemble`: the stretch is put
+together from the 30 s blocks it overlaps by `acw.worker.assembler`, confined the same way). Both share the places above.
 """
 from __future__ import annotations
 
@@ -90,3 +94,37 @@ def cut(path: Path, first: int, count: int) -> bytes:
         log.warning("cutting %s failed (%s): %s", path, proc.returncode, proc.stderr[-300:].decode("utf-8", "replace"))
         raise Failed("the cut failed")
     return proc.stdout
+
+
+def assemble(job_dir: Path, first: int, count: int, channels: list) -> tuple[bytes, float]:
+    """(the FLAC of the stretch [first, first + count) of a step made from its cached blocks, the scale it was brought down by when
+    it was louder than a 24-bit file holds: the samples are the stretch times it). `channels`: per output channel the block files that
+    overlap it (editing.plan_stretch), or None for a channel that is silent. Samples the cache does not hold are silence."""
+    import json as _json
+
+    if not _places.acquire(timeout=WAIT_SECONDS):
+        raise Busy()
+    try:
+        spec = _json.dumps({"first": first, "count": count, "channels": channels}, separators=(",", ":"))
+        proc = subprocess.run(
+            [sys.executable, "-m", "acw.worker.assembler", str(get_settings().bin_dir), str(job_dir), spec],
+            capture_output=True, stdin=subprocess.DEVNULL, timeout=TIMEOUT_SECONDS, env=_environment(), cwd=str(job_dir),
+            start_new_session=True,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("assembling a stretch of %s timed out", job_dir)
+        raise Failed("timed out")
+    finally:
+        _places.release()
+    if proc.returncode != 0 or not proc.stdout.startswith(b"fLaC"):
+        log.warning("assembling a stretch of %s failed (%s): %s", job_dir, proc.returncode, proc.stderr[-300:].decode("utf-8", "replace"))
+        raise Failed("the stretch could not be made")
+    scale = 1.0
+    for line in proc.stderr.decode("utf-8", "replace").splitlines()[::-1]:
+        if line.startswith("scale="):
+            try:
+                scale = float(line[6:])
+            except ValueError:
+                pass
+            break
+    return proc.stdout, scale if 0.0 < scale <= 1.0 else 1.0

@@ -134,7 +134,7 @@ def test_the_job_list_shows_what_is_still_within_its_two_hours(client, signed_in
     ids = [j["id"] for j in body["jobs"]]
     assert set(ids) == set(shown.values()), {k for k, v in {**shown, **hidden}.items() if (v in ids) != (k in shown)}
     assert not set(ids) & set(hidden.values())
-    assert body["limits"] == {"maxActiveJobs": 3, "retentionSeconds": 7200}
+    assert body["limits"] == {"maxActiveJobs": 3, "retentionSeconds": 7200, "maxRetentionSeconds": 21600}
     done = next(j for j in body["jobs"] if j["id"] == shown["done"])
     assert done["status"] == "done" and done["expiresAt"] == clock.t - 60 + 7200 and done["redo"]["available"] is True
     assert next(j for j in body["jobs"] if j["id"] == shown["failed"])["expiresAt"] is None
@@ -144,9 +144,10 @@ def test_the_job_list_limits_and_window_follow_the_settings(client, signed_in, c
     """limits.maxActiveJobs / retentionSeconds are the configured values, and the listing window is the configured one."""
     uid, _ = signed_in
     set_env(monkeypatch, ACW_MAX_ACTIVE_JOBS=5, ACW_JOB_RETENTION_MINUTES=30)
-    inside, outside = make_done_job(uid, finished_ago=1799), make_done_job(uid, finished_ago=1800)
+    # (jobs finished under this retention have the deadline it gave them)
+    inside, outside = make_done_job(uid, finished_ago=1799, expires_in=1), make_done_job(uid, finished_ago=1800, expires_in=0)
     body = client.get("/api/jobs").json()
-    assert body["limits"] == {"maxActiveJobs": 5, "retentionSeconds": 1800}
+    assert body["limits"] == {"maxActiveJobs": 5, "retentionSeconds": 1800, "maxRetentionSeconds": 21600}
     assert [j["id"] for j in body["jobs"]] == [inside]
     assert outside not in [j["id"] for j in body["jobs"]]
 

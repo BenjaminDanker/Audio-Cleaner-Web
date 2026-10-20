@@ -111,8 +111,22 @@ also removes the shared-UID risk with the Minecraft servers.
   worker and sandbox. It starts from files the sandboxed runner itself made earlier (the kept copies): the worker takes only
   the fixed names `kept-noise.flac`, `kept-rebuilt.flac`, `kept-input.flac`, only as regular files in the job's folder (`lstat`), with
   the numbers the runner reported validated (`rerun.sanitize_kept`), and hard-links them into the new job's folder (the sandbox itself
-  can't create links). A re-run never extends the files' lifetime: it ends with the job it came from (the upload is one of the linked files, so
-  it goes then too, and "Delete now" deletes the whole chain).
+  can't create links). A re-run is an edit of the chain (its files are kept 2 hours from then) and nothing of the chain outlives 6 hours after the upload
+  (the upload is one of the linked files, so it goes then too, and "Delete now" deletes the whole chain).
+- The per-part editor (`acw/editing.py`, `GET|PUT /api/jobs/{id}/timeline`, `quote`, `process`, `export`, `suggestions`, `preview/{layer}`): the same
+  authentication and scope as the other calls on a job, and the re-run's ownership rule: the job is looked up by id **and** account, and an API key only
+  reaches the jobs it made itself (anything else is `404 job_not_found`); a browser session needs its CSRF token for every write. A timeline from a client is
+  checked strictly before anything is stored or priced (format and version, unknown keys, layers and settings, numbers, every part inside the file, at most 500
+  parts a layer, at most 200 KB, a body limit of 256 KB on those routes only); a process holds its quote in the transaction that stores the run, with the
+  account's balance, the key's cap and the active-job limit (quotes and previews are not jobs; process, export and suggestions runs are); a run charges
+  for what the runner reports having run (`billed`, whole seconds per step, bounds-checked, priced with *our* fixed amounts and the rates pinned at
+  the start) and never more than the hold. What the runner reports is checked before it is believed (`editing.sanitize_report`: the facts' numbers and
+  the recording's copy only as a regular file, the removers' names, the rendered timeline through the same parser, the suggestions' shape); the web
+  process plans from those facts and **never decodes a file the runner wrote**: the recording's stretches are cut by `worker/cutter.py` and the cache's by
+  `worker/assembler.py`, which confines itself the same way (Landlock: the job's block folder read-only and nothing writable, no sockets, CPU /
+  memory / file-size limits, a 20 s timeout), decodes only files named `<sha1>.flac` that are regular files, and writes the stretch to its standard output.
+  The cache's files are keyed by a hash, only ever written by the runner, and deleted with the job. Reads of the timeline and previews are not edits, so
+  an open tab cannot hold a job's files past their 2 hours.
 - Stretches of the kept copies (`GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=`, `acw/stretch.py`): the same authentication, scope and
   ownership as the other reads of a job (the job is looked up by id **and** account; a link or a non-regular file in the place of a copy is a
   404), numbers validated and the length capped at 30 s, a rate limit of its own (`kept_cut`, per account, 429 with `Retry-After`) and at most 4
@@ -253,7 +267,7 @@ network, so it is built to reach nothing but the public internet:
   address goes away once the old clients have moved (docs/operations.md, "Domain").
 - The pet-companion tunnel key on the VPS is restricted like ours (`permitlisten="127.0.0.1:18788"`,
   `command="/bin/false"`: no shell; docs/vps.md).
-- No malware/CSAM scanning of uploads (audio-only product, files deleted 2 hours after a job finishes);
+- No malware/CSAM scanning of uploads (audio-only product, files deleted 2 hours after a job's last edit and at the latest 6 hours after the upload);
   revisit if video volume grows.
 - Backups: a nightly snapshot goes to `/mnt/mc-storage/audio-cleaner-backups`
   (another disk, 30 kept; `acw-backup.timer`) and is checked right after writing (SQLite integrity and ledger

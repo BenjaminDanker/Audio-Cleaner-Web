@@ -81,7 +81,7 @@ def test_premium_transcription_stage_machine(client, signed_in, monkeypatch, sam
     assert ledger.balance(uid)["held_micros"] == 0
     # nothing but the results, the upload and the copies kept for changing the job again is left on disk (all go together, 2 hours later)
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id).iterdir()}
-    assert left == names | {"input.wav", "kept-noise.flac", "kept-input.flac", "segments.json"}
+    assert left == names | {"input.wav", "kept-noise.flac", "kept-input.flac", "segments.json", "blocks", "kept-source.flac", "suggestions.json"}
 
 
 def test_garbage_upload_fails_cleanly_and_refunds(client, signed_in):

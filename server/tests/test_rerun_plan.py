@@ -437,21 +437,21 @@ def test_translations_in_lists_only_two_letter_regular_files(tmp_path):
 
 # ------------------------------------------------------------------------------ expiry arithmetic
 
-def test_completion_expiry_is_two_hours_for_a_first_job_and_never_later_than_the_source_for_a_rerun(monkeypatch):
-    """expires = now + retention; a re-run: at most the source's deadline."""
+def test_expiry_is_two_hours_after_the_last_edit_and_never_later_than_six_hours_after_the_upload(monkeypatch):
+    """jobs.expiry(now, uploaded_at): now + retention, at most upload + the cap; the re-run's deadline is the cap."""
     now = 1_000_000
-    assert rerun.completion_expiry({}, {}, now) == now + 7200
-    far = {"rerun": {"deadline": now + 5 * 3600}}
-    assert rerun.completion_expiry({}, far, now) == now + 7200  # never longer than the retention either
-    soon = {"rerun": {"deadline": now + 1800}}
-    assert rerun.completion_expiry({}, soon, now) == now + 1800  # ends with the job it came from
-    assert rerun.completion_expiry({}, {"rerun": {"deadline": now + 119}}, now) == now + 119  # never later, however little is left
+    assert jobs.expiry(now, now - 60) == now + 7200
+    assert jobs.expiry(now, now - 5 * 3600) == now - 5 * 3600 + 6 * 3600  # an hour left of the six
+    assert jobs.expiry(now, now - 6 * 3600 + 119) == now + 119  # never later, however little is left
+    assert jobs.expiry(now, None) == now + 7200
     assert rerun.too_late({"rerun": {"deadline": now + 60}}, now) and rerun.too_late({"rerun": {"deadline": now - 10}}, now)
     assert not rerun.too_late({"rerun": {"deadline": now + 61}}, now) and not rerun.too_late({}, now)
-    assert rerun.completion_expiry({}, {"rerun": {"deadline": None}}, now) == now + 7200
-    set_env(monkeypatch, ACW_JOB_RETENTION_MINUTES=30)
-    assert rerun.completion_expiry({}, {}, now) == now + 1800
-    assert rerun.completion_expiry({}, soon, now) == now + 1800
+    monkeypatch.setenv("ACW_JOB_RETENTION_MINUTES", "30")
+    monkeypatch.setenv("ACW_JOB_MAX_RETENTION_MINUTES", "50")
+    from acw.config import get_settings
+
+    get_settings.cache_clear()
+    assert jobs.expiry(now, now - 600) == now + 1800 and jobs.expiry(now, now - 2400) == now + 600
 
 
 def test_too_late_is_true_in_the_last_minute_and_after_the_deadline():

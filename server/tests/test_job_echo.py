@@ -106,7 +106,24 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     assert job["notice"] is None
     assert _speaker_vs_voice_db(with_echo_removal, tmp_path) < _speaker_vs_voice_db(without, tmp_path) - 10
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job["id"]).iterdir()}
-    assert left == {"rec-cleaned.wav", "input.mkv", "kept-noise.flac", "kept-input.flac"}  # scratch files are gone; the upload and the kept copies stay
+    # scratch files are gone; the upload, the kept copies and the per-part editor's (block cache, the recording, suggestions) stay
+    assert left == {"rec-cleaned.wav", "input.mkv", "kept-noise.flac", "kept-input.flac", "blocks", "kept-source.flac", "suggestions.json"}
+    # the whole-file run (echo removal, then the noise remover) filled the editor's cache under the editor's own block identities: the job's
+    # timeline (echo removal and noise removal on the whole file) needs nothing to be made, and the quote of editing it says so
+    import json
+
+    from acw import editing
+
+    row = dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
+    params = json.loads(row["params_json"])
+    assert params["edit"]["facts"]["reference"] is True and "echo" in editing.default_timeline(row, params, 6.0).to_json()["layers"]
+    q = editing.make_quote(row, params, editing.default_timeline(row, params, editing.file_seconds(row, params)))
+    assert q["misses"] == 0 and q["unchanged"] is True
+    softer = editing.default_timeline(row, params, editing.file_seconds(row, params))
+    softer.paint("noise", 0.0, softer.seconds, {"strength_db": 24.0, "remover": softer.parts("noise")[0].settings["remover"]})
+    softer.erase("leveling", 0.0, softer.seconds)
+    q = editing.make_quote(row, params, softer)
+    assert q["misses"] == 0 and q["micros"] == 0 and q["unchanged"] is False  # a new strength: the cache has every block
 
 
 @NATIVE

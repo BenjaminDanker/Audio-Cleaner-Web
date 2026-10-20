@@ -9,9 +9,10 @@ doing the heavy work and captures the real cost on success. Free jobs reserve
 seconds of the daily allowance the same way.
 
 What a job keeps: its upload, the intermediate copies a later "change and save again" starts from (KEPT_NOISE: the noise
-removal at full strength, KEPT_REBUILT: the rebuilt voice, the transcript) and its results stay in the job's folder for
-`job_retention_seconds` (2 hours) after it finishes and are deleted together (`sweep`, or at once with "Delete now", which
-also takes the re-runs made from it). A failed or canceled job's files go at once.
+removal at full strength, KEPT_REBUILT: the rebuilt voice, the transcript), the per-part editor's block cache and recording
+copy (editing.py) and its results stay in the job's folder until `expiry`: 2 hours (`job_retention_seconds`) after its last
+edit, and never later than 6 hours (`job_max_retention_seconds`) after the upload arrived. They are deleted together (`sweep`,
+or at once with "Delete now", which also takes the re-runs made from it). A failed or canceled job's files go at once.
 
 A re-run (`create_rerun`) is a job of its own, linked to its source (`source_job_id`; `root_job_id` is the first job of the
 chain): `plan_rerun` decides which steps run again, from which kept copy; the files it needs are hard-linked into its folder
@@ -92,6 +93,7 @@ SPEED = {
     "echo": 0.03,
     "transcribe_local": 0.12,
     "transcribe_premium": 0.08,
+    "suggest": 0.22,  # the search for suggestions (acw_common.suggest, 0.22 s per audio second measured at 2 threads), a first run's extra and an on-demand run's all
 }
 MODEL_LOAD_SECONDS = 12  # a job runs two or three fresh sandboxed stages that each load their models (measured 1.1 to 4.8 s per stage, 2026-10-19)
 # Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
@@ -151,6 +153,9 @@ def job_needs(job: dict) -> tuple[int, int]:
         return int(0.3 * GB), 0
     params = json.loads(job["params_json"])
     seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
+    if params.get("run"):  # an edit run decodes the recording and renders into scratch files (editing.py)
+        run = params["run"]
+        return JOB_MEM, scratch_bytes("denoise", seconds, int(params.get("channels") or 2), echo=bool(run.get("echo")))
     rerun = params.get("rerun")  # a re-run only does part of the work (rerun.py)
     mem = JOB_MEM + (
         LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" and (not rerun or rerun.get("transcribe")) else 0
@@ -166,7 +171,16 @@ def job_seconds(job: dict) -> float:
     audio = float(job.get("duration_seconds") or job["claimed_seconds"])
     channels = max(1, min(2, int(params.get("channels") or 2)))
     opts = params.get("options", {})
+    if params.get("run"):  # an edit run: what its blocks take (editing.py), and the render
+        return float(params["run"].get("est_seconds") or 0.0) + MODEL_LOAD_SECONDS
     t = 0.0
+    if (params.get("edit") or {}).get("first_run"):  # a job made with a timeline: only its parts
+        from . import editing
+
+        t += editing.timeline_seconds(params["edit"]["timeline"], audio, channels)
+        if params.get("transcribe_tier") and (not params.get("rerun") or params["rerun"].get("transcribe")):
+            t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
+        return t + MODEL_LOAD_SECONDS
     # A re-run does only part of the work: from a kept noise removal the blend and Leveling; from a kept rebuilt
     # voice Leveling; the transcription only when it runs again.
     rerun = params.get("rerun")
@@ -224,11 +238,12 @@ def queued_ids() -> list[str]:
 
 
 class JobError(Exception):
-    def __init__(self, message: str, status: int = 400, retry_after: int | None = None, code: str | None = None):
+    def __init__(self, message: str, status: int = 400, retry_after: int | None = None, code: str | None = None, extra: dict | None = None):
         super().__init__(message)
         self.status = status
         self.retry_after = retry_after  # seconds, sent as Retry-After with a 429
         self.code = code  # sent as X-Error-Code and "code" in the answer, for clients that want to tell this error from others
+        self.extra = extra  # more fields of the answer (the quote of an export that needs processing)
 
 
 TOO_MANY_JOBS = "too_many_active_jobs"
@@ -254,6 +269,34 @@ def seconds_until_utc_midnight() -> int:
 
 def utc_day() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def expiry(now: int, uploaded_at: int | None) -> int:
+    """When a job's files are deleted if its last edit is at `now`: 2 hours later, and never later than 6 hours after the upload
+    arrived (`uploaded_at`; unknown: as if it arrived now)."""
+    settings = get_settings()
+    return min(now + settings.job_retention_seconds, int(uploaded_at or now) + settings.job_max_retention_seconds)
+
+
+def hard_deadline(job: dict) -> int:
+    """The latest moment a job's files can still be there: 6 hours after the upload arrived."""
+    return int(job.get("uploaded_at") or job["created_at"]) + get_settings().job_max_retention_seconds
+
+
+def touch(job_id: str) -> None:
+    """An edit (a quote, a timeline save, a process or an export, a re-run): the files of the job, and of every job made from the same
+    upload, go 2 hours from now instead (never past the 6 hours after the upload). Only finished jobs; one that is running gets its
+    deadline when it finishes."""
+    now = db.now()
+    row = db.one("SELECT id, root_job_id FROM jobs WHERE id = ?", (job_id,))
+    if row is None:
+        return
+    root = row["root_job_id"] or row["id"]
+    cap = get_settings().job_max_retention_seconds
+    db.execute(
+        "UPDATE jobs SET edited_at = ?, expires_at = MIN(?, COALESCE(uploaded_at, created_at) + ?) WHERE status = 'done' AND (id = ? OR root_job_id = ?)",
+        (now, now + get_settings().job_retention_seconds, cap, root, root),
+    )
 
 
 def job_dir(job_id: str) -> Path:
@@ -426,10 +469,13 @@ def automatic_plan(kind: str, t_tier: str | None, raw_options: dict, opts: dict)
     return {"fixed": fixed, "candidates": automatic.candidates(kind, t_tier, opts, fixed, len(opts["translate"]))}
 
 
-def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, duration_seconds: float, options: dict) -> dict:
+def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, duration_seconds: float, options: dict,
+             timeline: object | None = None) -> dict:
     """The price of a job before it exists (no hold, nothing stored): the same checks and the same price as creating
     it, with the parts of the price listed. POST /api/jobs/estimate. With `options.automatic` the price is the most the
     decision could end in (`maximum`), and `outcomes` lists the ways it can end."""
+    if timeline is not None:
+        return estimate_timeline(kind, denoise_tier, transcribe_tier, duration_seconds, options, timeline)
     check_duration(kind, denoise_tier, duration_seconds)
     opts = validate_options(kind, denoise_tier, transcribe_tier, options)
     d_tier = denoise_tier if kind != "transcribe" else None
@@ -458,6 +504,33 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
                             "estCostMicros": automatic.cost(kind, t_tier, c, duration_seconds, n)} for c in cands]
         out["fixed"] = plan["fixed"]
     return out
+
+
+def estimate_timeline(kind: str, denoise_tier: str | None, transcribe_tier: str | None, duration_seconds: float, options: dict,
+                      timeline: object) -> dict:
+    """The price of a job made with a timeline: each step's parts, from an empty cache (editing.py), and the subtitles."""
+    from . import editing
+
+    tl, d_tier = editing.prepare_timeline_job(kind, denoise_tier, options, duration_seconds, timeline)
+    if not 0.5 <= duration_seconds <= pricing.MAX_JOB_SECONDS:
+        raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")
+    opts = validate_options(kind, d_tier, transcribe_tier, options)
+    rates = editing.step_rates()
+    micros, lines, _ = editing.price_timeline(tl, duration_seconds, rates)
+    n = len(opts["translate"])
+    t_tier = transcribe_tier if kind != "denoise" else None
+    t_rates = pricing.job_rates("transcribe", None, t_tier, n)
+    total = micros + (pricing.job_cost_micros("transcribe", None, t_tier, duration_seconds, t_rates, n) if t_tier else 0)
+    text_lines = price_lines(t_rates, None, t_tier, duration_seconds, n) if t_tier else []
+    return {
+        "estCostMicros": total,
+        "estCostUsd": total / pricing.MICROS_PER_USD,
+        "durationSeconds": duration_seconds,
+        "maxSeconds": pricing.MAX_JOB_SECONDS,
+        "lines": [*lines, *text_lines],
+        "options": opts,
+        "timeline": tl.to_json(),
+    }
 
 
 class Replay(Exception):
@@ -503,6 +576,7 @@ def create_job(
     api_key_id: str | None = None,
     callback_url: str | None = None,
     idempotency: tuple[str, str] | None = None,
+    timeline: object | None = None,
 ) -> dict:
     settings = get_settings()
     ext = Path(filename).suffix.lower()
@@ -510,6 +584,11 @@ def create_job(
         raise JobError("Unsupported file type.")
     if not 0 < size_bytes <= settings.max_upload_bytes:
         raise JobError(f"Files must be under {settings.max_upload_bytes // 1024**2} MB.", 413)
+    tl = None
+    if timeline is not None:
+        from . import editing
+
+        tl, denoise_tier = editing.prepare_timeline_job(kind, denoise_tier, options, claimed_seconds, timeline)
     check_duration(kind, denoise_tier, claimed_seconds)
     if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
         raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
@@ -518,8 +597,12 @@ def create_job(
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
 
-    disk_need = (size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"])
+    disk_need = (size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"] or bool(tl and tl.layers["echo"]))
                  + kept_bytes(kind, claimed_seconds, denoise_tier=denoise_tier) + DISK_RESERVE)
+    if kind in ("denoise", "denoise_transcribe"):
+        from . import editing
+
+        disk_need += editing.cache_bytes(claimed_seconds, 2, editing.steps_in(tl) if tl is not None else 1)
     disk_free = hostload.get(settings.data_dir).snapshot().disk_free
     if disk_free < disk_need:
         raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
@@ -536,7 +619,15 @@ def create_job(
     n_translate = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
     plan = automatic_plan(kind, params["transcribe_tier"], options, opts)
-    if plan:
+    if tl is not None:
+        # A job made with a timeline: only its parts are processed and charged (editing.py); the subtitles are priced as always.
+        from . import editing
+
+        params["edit"] = {"timeline": tl.to_json(), "first_run": True}
+        params["edit_rates"] = editing.step_rates()
+        params["rates"] = pricing.job_rates("transcribe", None, params["transcribe_tier"], n_translate)
+        est = editing.first_run_cost(kind, params, claimed_seconds)
+    elif plan:
         # held for the most it can cost; the decision (automatic.py) shrinks the hold to what will be charged
         params["automatic"] = plan
         top, est = automatic.dearest(kind, params["transcribe_tier"], automatic.within(plan["candidates"], claimed_seconds), claimed_seconds,
@@ -629,9 +720,9 @@ def set_notice(job_id: str, notice: str) -> None:
 
 def mark_uploaded(job_id: str) -> None:
     db.execute(
-        "UPDATE jobs SET status = 'queued', next_stage = 'probe', queued_at = ?, expires_at = NULL"
+        "UPDATE jobs SET status = 'queued', next_stage = 'probe', queued_at = ?, uploaded_at = ?, expires_at = NULL"
         " WHERE id = ? AND status = 'uploading'",
-        (db.now(), job_id),
+        (db.now(), db.now(), job_id),
     )
     invalidate_queue_cache()
 
@@ -644,24 +735,51 @@ def finish_failed(
     `only_from` limits it to jobs still in one of those states (cancel: not once a worker has started) and
     `not_stage` to jobs whose next stage is another one (cancel: not once the paid-for transcription is done).
     True when the job was moved to `status` by this call."""
+    reverted = False
     with db.tx() as c:
-        cur = c.execute("SELECT status, next_stage FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+        cur = c.execute("SELECT status, next_stage, params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()
         if cur is None or cur["status"] in ("done", "failed", "canceled", "expired"):
             return False
         if only_from is not None and cur["status"] not in only_from:
             return False
         if not_stage is not None and cur["next_stage"] == not_stage:
             return False
-        c.execute(
-            "UPDATE jobs SET status = ?, error = ?, finished_at = ?, expires_at = ? WHERE id = ?",
-            (status, message[:500], db.now(), db.now() + get_settings().job_retention_seconds, job["id"]),
-        )
+        params = json.loads(cur["params_json"])
+        run = params.get("run")
+        if run:
+            # An edit run that ends without its result (canceled, failed, too late): the job is as it was before it, its files stay
+            # (they are the person's work), the money is released and the run's record says why (editing.py).
+            reverted = True
+            params.pop("run", None)
+            edit = dict(params.get("edit") or {})
+            edit["lastRun"] = {"op": run.get("op"), "ok": False, "error": message[:300], "at": db.now()}
+            params["edit"] = edit
+            c.execute(
+                "UPDATE jobs SET status = 'done', next_stage = 'probe', error = NULL, params_json = ?, progress = 100, stage = 'Done',"
+                " worker_id = NULL, expires_at = ? WHERE id = ?",
+                (json.dumps(params), expiry(db.now(), _uploaded_at(c, job["id"])), job["id"]),
+            )
+        else:
+            c.execute(
+                "UPDATE jobs SET status = ?, error = ?, finished_at = ?, expires_at = ? WHERE id = ?",
+                (status, message[:500], db.now(), db.now() + get_settings().job_retention_seconds, job["id"]),
+            )
         if job.get("hold_id"):
             ledger.release_hold(job["hold_id"], c=c)
     invalidate_queue_cache()
-    shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
+    if reverted:
+        from . import editing
+
+        editing.clear_scratch(job_dir(job["id"]))
+    else:
+        shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
     metrics.job_ended(job["id"])
     return True
+
+
+def _uploaded_at(c, job_id: str) -> int | None:
+    row = c.execute("SELECT COALESCE(uploaded_at, created_at) AS t FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    return row["t"] if row else None
 
 
 def requeue(job: dict, next_stage: str | None = None, keep_place: bool = False) -> None:
@@ -683,7 +801,13 @@ def requeue(job: dict, next_stage: str | None = None, keep_place: bool = False) 
     if job.get("next_stage") == "finalize":
         return  # finalize only reads what the earlier stages left
     params = json.loads(job["params_json"])
-    keep = {f"input{params['input_ext']}", *(params.get("rerun") or {}).get("linked", [])}  # a re-run's files from its source
+    if params.get("run"):  # an edit run: the job's files are the person's work; only the run's scratch goes
+        from . import editing
+
+        editing.clear_scratch(d)
+        return
+    # (the blocks a stopped run had made are kept: they are exactly what the run starts again from)
+    keep = {f"input{params['input_ext']}", "blocks", *(params.get("rerun") or {}).get("linked", [])}  # a re-run's files from its source
     for p in d.iterdir():
         if p.name in keep:
             continue
@@ -777,6 +901,14 @@ def callbacks_for(job_ids: list[str]) -> dict[str, dict]:
 
 def label_of(kind: str, params: dict) -> str:
     """The customer-facing name of what a job does: the price list's words; for a re-run, the steps it did again."""
+    if params.get("run"):
+        from . import editing
+
+        return editing.run_label(params)
+    if (params.get("edit") or {}).get("first_run"):
+        from . import editing
+
+        return " + ".join([editing.timeline_label(params), *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
     if params.get("rerun"):
         from . import rerun
 
@@ -821,8 +953,15 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "outputs": [{"name": o["file"], "kind": o["kind"], "bytes": o.get("bytes"), **({"lang": o["lang"]} if o.get("lang") else {})} for o in outputs],
         "createdAt": job["created_at"],
         "finishedAt": job["finished_at"],
+        # when the files are deleted: 2 hours after the last edit, never later than `hardDeadlineAt` (6 hours after the upload)
         "expiresAt": job["expires_at"] if job["status"] == "done" else None,
+        "editedAt": job.get("edited_at") or job["finished_at"],
+        "hardDeadlineAt": hard_deadline(job),
     }
+    if job["kind"] in ("denoise", "denoise_transcribe"):
+        e = params.get("edit") or {}
+        out["edit"] = {"available": job["status"] == "done", "hasTimeline": bool(e.get("timeline")), "run": (params.get("run") or {}).get("op"),
+                       "lastRun": e.get("lastRun"), "suggestions": bool(e.get("suggestions"))}
     if params.get("automatic"):
         out["chosen"] = params.get("chosen")  # null until the file has been listened to
         if automatic.pending(params):
@@ -847,9 +986,14 @@ def sweep() -> None:
     # 'canceling' was a transient state of older versions of the cancel request.
     for job in db.all_rows("SELECT * FROM jobs WHERE status = 'canceling'"):
         finish_failed(dict(job), "Canceled.", status="canceled")
-    # The retention is a ceiling: results that were made when it was longer end with it too.
-    db.execute("UPDATE jobs SET expires_at = finished_at + ? WHERE status = 'done' AND finished_at IS NOT NULL AND expires_at > finished_at + ?",
-               (get_settings().job_retention_seconds,) * 2)
+    # The retention is a ceiling: files that were given a later deadline (a longer retention, an older rule) end with these two:
+    # 2 hours after the last edit, and 6 hours after the upload.
+    settings = get_settings()
+    db.execute(
+        "UPDATE jobs SET expires_at = MIN(COALESCE(edited_at, finished_at) + ?, COALESCE(uploaded_at, created_at) + ?) WHERE status = 'done'"
+        " AND COALESCE(edited_at, finished_at) IS NOT NULL AND expires_at > MIN(COALESCE(edited_at, finished_at) + ?, COALESCE(uploaded_at, created_at) + ?)",
+        (settings.job_retention_seconds, settings.job_max_retention_seconds) * 2,
+    )
     for job in db.all_rows("SELECT id FROM jobs WHERE status = 'done' AND expires_at <= ?", (now,)):
         shutil.rmtree(job_dir(job["id"]), ignore_errors=True)
         db.execute("UPDATE jobs SET status = 'expired', outputs_json = NULL WHERE id = ? AND status = 'done'", (job["id"],))

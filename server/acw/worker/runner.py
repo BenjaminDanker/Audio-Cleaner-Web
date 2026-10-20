@@ -11,6 +11,8 @@ Stages:
             for cloud ASR, write outputs
   finalize  build caption files from segments.json and mux them (used after
             cloud ASR, or directly from main)
+  edit      an edit run of the per-part editor: make the missing blocks of a timeline, render it into the result audio, or find
+            suggestions (editrun.py; acw/editing.py describes the whole thing)
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-STAGES = ("probe", "analyse", "main", "finalize")
+STAGES = ("probe", "analyse", "main", "finalize", "edit")
 
 
 def emit(**kw) -> None:
@@ -66,6 +68,10 @@ def main() -> int:
             result = stage_analyse(job_dir, spec)
         elif stage == "main":
             result = stage_main(job_dir, spec)
+        elif stage == "edit":
+            from acw.worker import editrun
+
+            result = editrun.stage_edit(job_dir, spec, _ff(spec), emit)
         else:
             result = stage_finalize(job_dir, spec)
         result["ok"] = True
@@ -166,7 +172,7 @@ def clean_options(spec: dict, profile: str):
 
 
 def stage_main(job_dir: Path, spec: dict) -> dict:
-    from acw_common import dpdfnet, pipeline
+    from acw_common import dpdfnet, editor, pipeline
     from acw_common import kept as kept_copies
 
     ff = _ff(spec)
@@ -188,6 +194,9 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     denoise_run = denoise and clean_mode != "reuse"
     t0 = time.time()
 
+    ed_spec = spec.get("editor")  # the per-part editor (editrun.py): the block cache, the recording's facts, the suggestions
+    editor_report: dict = {}
+    cache = None
     needs_cloud = False
     cleaned_path = None
     notice = None
@@ -202,9 +211,16 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
             emit(stage="Removing echo", progress=2)
             mic = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
+            if ed_spec and denoise_run and clean_mode == "full" and not ed_spec.get("timeline"):
+                from acw.worker import editrun
+
+                cache = editrun.cache_for(job_dir, ff)
+                if editrun.needs_facts(ed_spec, job_dir):
+                    editor_report["facts"] = editrun.facts_of(editor.Inputs(mic, ed_spec["source_id"]), ff, probe, job_dir)  # (the recording as it came)
             x = pipeline.remove_echo(
                 ff, src, probe, mic, limit, work_dir=job_dir,
                 progress=lambda f: emit(stage="Removing echo", progress=int(2 + 3 * f)),
+                **({"cache": cache, "input_id": f"{ed_spec['source_id']}~r"} if cache is not None else {}),
             )
             del mic
     if transcribe_run:
@@ -263,7 +279,15 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
         progress = lambda f: emit(stage="Cleaning" if f < 0.95 else "Leveling", progress=int(start + 2 + span * f))  # noqa: E731
         used: dict = {}
         echo_flag = bool(opts.get("echo_reference_track"))
-        if clean_mode in ("denoised", "rebuilt"):
+        if ed_spec and ed_spec.get("timeline"):
+            # A job made with a timeline: only its parts are made and charged, from an empty block cache (editrun.render; the echo
+            # removal, the noise removers and Voice rebuild run on their blocks, Leveling per part)
+            from acw.worker import editrun
+
+            y, editor_report, tl_notice = editrun.render(job_dir, spec, ff, probe, x, emit, base=start + 2, span=span, op="first")
+            editor_report["facts"] = editrun.facts_of(editor.Inputs(x, ed_spec["source_id"]), ff, probe, job_dir)
+            notice = notice or tl_notice
+        elif clean_mode in ("denoised", "rebuilt"):
             # From the copy the source job kept: no noise model runs (the blend for the strength, Leveling). The copy was made from the same recording (pipeline.redo_denoised / redo_rebuilt).
             entry = rerun["kept"]["noise" if clean_mode == "denoised" else "rebuilt"]
             emit(stage="Cleaning", progress=start + 2)
@@ -282,6 +306,18 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
             # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
             # time estimate on it; clean_audio then uses the same choice.
             kept: dict = {}  # a short recording's measurement doubles as its full-strength cleaning (pipeline.Measured)
+            block_cache: dict = {}  # the editor's block cache is filled by this run (editrun.py): the next edit only runs what is missing
+            if ed_spec and clean_mode == "full":
+                from acw.worker import editrun
+
+                echo_done = cache is not None  # (the blocks of the echo removal went there already, and the facts, from the recording as it came)
+                cache = cache or editrun.cache_for(job_dir, ff)
+                if not echo_done and editrun.needs_facts(ed_spec, job_dir):
+                    editor_report["facts"] = editrun.facts_of(editor.Inputs(x, ed_spec["source_id"]), ff, probe, job_dir)
+                if echo_done:
+                    block_cache = {"cache": editrun.EchoWholeFile(cache, ed_spec["source_id"], len(x)), "input_id": editrun.EchoWholeFile.MARK}
+                else:
+                    block_cache = {"cache": cache, "input_id": ed_spec["source_id"]}
             if rebuild or leveling_only:
                 profile = opts.get("noise", "auto")
             else:
@@ -310,7 +346,12 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
                 report=used,
                 measured=kept.get("measured"),
                 keep=keep_copy,
+                **block_cache,
             )
+        if ed_spec and ed_spec.get("suggest") and clean_mode == "full":
+            from acw.worker import editrun
+
+            editor_report["suggestions"] = editrun.find_suggestions(x, spec, emit, 86, 6)
         noise_used = used.get("noise")
         fmt = opts.get("audio_format", "flac")
         cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
@@ -342,7 +383,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     missing = [lang for lang in (opts.get("translate") or []) if not (job_dir / f"segments.{lang}.json").is_file()]
     needs_cloud = needs_cloud or bool(missing)
     result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
-              "noise": noise_used, "kept": kept_out}
+              "noise": noise_used, "kept": kept_out, "editor": editor_report}
     if not needs_cloud:
         result.update(stage_finalize(job_dir, spec))
     return result

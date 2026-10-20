@@ -166,6 +166,8 @@ await check('retention: the landing FAQ, the Privacy page (section 4) and the Te
   await page.waitForSelector('main h1');
   const section4 = (await page.locator('#files ~ ul').first().innerText()).replace(/\s+/g, ' ');
   if (!/kept for 2 hours/.test(section4) || !/Results[^.]*available for download for 2 hours/.test(section4) || !/deleted together with the upload/.test(section4)) throw new Error('Privacy section 4: ' + section4.slice(0, 500));
+  // the editor's rule: 2 hours after the last change, and never later than 6 hours after the upload
+  if (!/after your last change to the job/.test(section4) || !/deleted 6 hours after the upload/.test(section4) || !/6 hours after the upload at the latest/.test(section4)) throw new Error('Privacy section 4 lacks the last-change / 6 hours rule: ' + section4.slice(0, 700));
   bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `privacy: ${x}`));
   const pr = await page.locator('#retention ~ ul').first().innerText();
   for (const need of [/7 years/, /12 months/, /90 days/, /30 days/, /contact form/, /free live trial/]) if (!need.test(pr)) throw new Error(`Privacy retention lacks ${need}`);
@@ -174,6 +176,7 @@ await check('retention: the landing FAQ, the Privacy page (section 4) and the Te
   await page.waitForSelector('main h1');
   const section8 = (await page.locator('#data ~ ul').first().innerText()).replace(/\s+/g, ' ');
   if (!/kept together for 2 hours/.test(section8) || !/deleted together/.test(section8)) throw new Error('Terms section 8: ' + section8.slice(0, 500));
+  if (!/after the last change to a job/.test(section8) || !/no more than 6 hours after the upload/.test(section8)) throw new Error('Terms section 8 lacks the last-change / 6 hours rule: ' + section8.slice(0, 500));
   bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `terms: ${x}`));
   if (bad.length) throw new Error(bad.join(' | '));
   return '2 hours, together, on the landing page, Privacy and Terms';
@@ -196,7 +199,10 @@ await check('retention: the signed-in Cleanup page (the list note and "Good to k
   await page.goto(`${BASE}/developers`);
   await page.waitForSelector('pre.code');
   const dev = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
-  if (!/kept together for 2 hours after the job is done, then deleted together/.test(dev)) throw new Error('Developers page: no 2 hours answer for the files');
+  if (!/kept together for 2 hours after the job.s last change[^.]*never more than 6 hours after the upload, then deleted together/.test(dev)) throw new Error('Developers page: no 2 hours / 6 hours answer for the files');
+  for (const need of [/Editing part by part/, /\/api\/jobs\/\{id\}\/timeline/, /\/api\/jobs\/\{id\}\/quote/, /\/api\/jobs\/\{id\}\/process/, /\/api\/jobs\/\{id\}\/export/, /preview\/\{layer\}/, /suggestions/, /bad_timeline/, /needs_processing/, /not_cached/, /2 hours after the last edit/, /Voice rebuild wins/, /no minimum/]) {
+    if (!need.test(dev)) throw new Error(`Developers page lacks ${need}`);
+  }
   // the API's idempotency keys are remembered for 24 hours: that is not about files
   bad.push(...oldRetention(dev.replace(/within 24 hours/g, '').replace(/Keys are remembered for 24 hours, per account\./g, '')).map((x) => `developers: ${x}`));
   if (bad.length) throw new Error(bad.join(' | '));

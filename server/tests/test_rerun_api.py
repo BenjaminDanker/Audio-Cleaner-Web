@@ -14,7 +14,7 @@ from acw import db, jobs, rerun
 from acw.billing import ledger, pricing
 from acw.config import get_settings
 
-from .rerun_support import (GB, account, add_job, api_key, clock, complete_like_the_worker, count, files_of, folder, kept_record,  # noqa: F401
+from .rerun_support import (GB, account, add_job, api_key, clock, complete_like_the_worker, count, deadline_in, files_of, folder, kept_record,  # noqa: F401
                             make_done_job, other_browser, params_of, roomy_disk, row, same_file, set_env)  # noqa: F401
 
 pytestmark = pytest.mark.usefixtures("roomy_disk")
@@ -130,16 +130,20 @@ def test_job_not_finished_for_a_job_that_is_not_done(client, signed_in, status):
 
 
 def test_job_expiring_when_there_is_too_little_time_left_for_the_work(client, signed_in, clock):
-    """409 job_expiring: the re-run must be able to finish (twice its rough time and five minutes) before the job is cleared."""
+    """409 job_expiring: the re-run must be able to finish (twice its rough time and five minutes) before the job's files are cleared
+    at the latest (6 hours after the upload)."""
     uid, h = funded(client, signed_in)
-    nearly = make_done_job(uid, expires_in=100, seconds=60)
+    nearly = make_done_job(uid, seconds=60)
+    deadline_in(nearly, 100)
     for estimate in (True, False):
         body = assert_error(post(client, h, nearly, estimate, **STRENGTH), 409, "job_expiring")
         assert "about to be cleared away" in body["detail"]
-    roomy = make_done_job(uid, expires_in=3000, seconds=60)
+    roomy = make_done_job(uid, seconds=60)
+    deadline_in(roomy, 3000)
     assert post(client, h, roomy, True, **STRENGTH).status_code == 200
     # the longer the work, the more time it needs: with 30 minutes left a blend of an hour of audio fits, noise removal does not
-    hour = make_done_job(uid, expires_in=1800, seconds=3600)
+    hour = make_done_job(uid, seconds=3600)
+    deadline_in(hour, 1800)
     assert post(client, h, hour, True, options={"atten_lim_db": 24}).status_code == 200
     assert_error(post(client, h, hour, True, options={"noise": "heavy"}), 409, "job_expiring")
     assert_error(post(client, h, hour, False, options={"noise": "heavy"}), 409, "job_expiring")
@@ -403,14 +407,14 @@ def test_the_estimate_is_the_price_the_hold_is_made_for(client, signed_in, gpu_u
     assert e["estCostMicros"] == price and e["estCostUsd"] == price / 1e6 and e["free"] is (price == 0)
     assert sum(line["micros"] for line in e["lines"]) == price
     assert [line["item"] for line in e["lines"]] == [k for k in ("denoise", "leveling", "transcribe", "translate") if k in rates]
-    assert e["steps"]["clean"] == clean and e["durationSeconds"] == 90.5 and e["expiresAt"] == row(src)["expires_at"]
+    assert e["steps"]["clean"] == clean and e["durationSeconds"] == 90.5 and abs(e["expiresAt"] - (db.now() + 7200)) <= 2
     assert e["availableMicros"] == 5_000_000 and e["affordable"] is True
     # estimating makes and holds nothing
     assert count("jobs") == jobs_before and ledger.balance(uid) == spent_before and count("holds") == 0
     made = post(client, h, src, **body)
     assert made.status_code == 200, made.text
     out = made.json()
-    assert out["estCostMicros"] == e["estCostMicros"] and out["free"] is e["free"] and out["expiresAt"] == row(src)["expires_at"]
+    assert out["estCostMicros"] == e["estCostMicros"] and out["free"] is e["free"] and abs(out["expiresAt"] - row(src)["expires_at"]) <= 2
     new = row(out["id"])
     assert new["est_cost_micros"] == price and new["status"] == "queued"
     if price:
@@ -472,7 +476,7 @@ def test_the_new_job_row_params_and_hard_linked_folder(client, signed_in):
     assert (p["denoise_tier"], p["transcribe_tier"], p["input_ext"], p["channels"]) == ("standard", None, ".wav", 2)
     assert p["rates"] == {"leveling": 1_000} and p["noise_profile"] == "light"
     assert p["kept"] == {k: sp["kept"][k] for k in ("noise", "input")}
-    assert p["rerun"] == {"source": src, "root": src, "deadline": old["expires_at"], "clean": "denoised", "transcribe": False,
+    assert p["rerun"] == {"source": src, "root": src, "deadline": jobs.hard_deadline(old), "clean": "denoised", "transcribe": False,
                           "reuse_audio": None, "translate_new": [], "paid": ["leveling"],
                           "linked": ["input.wav", "kept-input.flac", "kept-noise.flac"]}
     assert files_of(new_id) == {"input.wav", "kept-input.flac", "kept-noise.flac"}
@@ -519,7 +523,7 @@ def test_what_a_rerun_links_follows_the_plan(client, signed_in, gpu_up, monkeypa
 
 
 def test_a_rerun_of_a_rerun_keeps_the_root_and_ends_with_the_job_it_came_from(client, signed_in):
-    """root_job_id is the first job of the chain, source_job_id the one it was made from, the deadline the latter's expiry."""
+    """root_job_id is the first job of the chain, source_job_id the one it was made from, the deadline the chain's 6 hours."""
     uid, h = funded(client, signed_in)
     root = make_done_job(uid)
     first = make_done_job(uid, source=root, root=root, expires_in=3000)
@@ -527,17 +531,17 @@ def test_a_rerun_of_a_rerun_keeps_the_root_and_ends_with_the_job_it_came_from(cl
     assert r.status_code == 200
     new = row(r.json()["id"])
     assert (new["source_job_id"], new["root_job_id"]) == (first, root)
-    assert params_of(new["id"])["rerun"]["root"] == root and params_of(new["id"])["rerun"]["deadline"] == row(first)["expires_at"]
-    assert r.json()["expiresAt"] == row(first)["expires_at"]
+    assert params_of(new["id"])["rerun"]["root"] == root and params_of(new["id"])["rerun"]["deadline"] == jobs.hard_deadline(row(first))
+    assert abs(r.json()["expiresAt"] - row(first)["expires_at"]) <= 2
 
 
 def test_deleting_or_sweeping_the_source_does_not_break_a_linked_rerun(client, signed_in, clock):
     """Hard links: the re-run's files survive the source's folder being deleted."""
     uid, h = funded(client, signed_in)
-    src = make_done_job(uid, expires_in=4000)
-    new_id = post(client, h, src, **STRENGTH).json()["id"]
+    src = make_done_job(uid)
+    new_id = post(client, h, src, **STRENGTH).json()["id"]  # (starting it is an edit: the source has two hours from now)
     expected = {n: (folder(new_id) / n).read_bytes() for n in files_of(new_id)}
-    clock.advance(4000)
+    clock.advance(7200)
     jobs.sweep()  # the source is due: its folder goes
     assert row(src)["status"] == "expired" and not folder(src).exists()
     assert {n: (folder(new_id) / n).read_bytes() for n in files_of(new_id)} == expected
@@ -559,35 +563,41 @@ def test_a_rerun_never_changes_the_source_files(client, signed_in):
 OUT = "talk-cleaned-2.flac"  # the new audio result of a re-run (the runner writes it next to the linked files)
 
 
-@pytest.mark.parametrize("left, waited", [(7200, 60), (3600, 60), (1800, 600), (400, 0)])
-def test_a_rerun_never_ends_later_than_the_job_it_came_from(client, signed_in, clock, left, waited):
-    """expires_at of the finished re-run <= the source's; with plenty of time left it is exactly the source's."""
+@pytest.mark.parametrize("uploaded_ago, waited", [(60, 60), (3 * 3600, 60), (5 * 3600 + 1800, 600), (6 * 3600 - 700, 100)])
+def test_a_rerun_is_an_edit_the_chain_goes_two_hours_after_it_finishes_never_past_six_hours_after_the_upload(client, signed_in, clock, uploaded_ago, waited):
+    """A re-run counts as an edit of its source: when it finishes the job it came from and itself have 2 hours from then, and none of
+    the chain is kept past 6 hours after the upload (the re-run's `deadline`)."""
     uid, h = funded(client, signed_in)
-    src = make_done_job(uid, expires_in=left, finished_ago=7200 - left)
+    src = make_done_job(uid, finished_ago=30)
+    hard = deadline_in(src, 6 * 3600 - uploaded_ago)
     created = post(client, h, src, **FREE_STRENGTH)
     assert created.status_code == 200, created.text
     new_id = created.json()["id"]
-    assert params_of(new_id)["rerun"]["deadline"] == row(src)["expires_at"]
+    assert params_of(new_id)["rerun"]["deadline"] == hard
+    assert row(src)["expires_at"] == min(clock.t + 7200, hard) and row(src)["edited_at"] == clock.t  # starting it is an edit
     clock.advance(waited)
     done = complete_like_the_worker(new_id, outputs=[OUT])
-    assert done["status"] == "done" and done["finished_at"] == clock.t
-    assert done["expires_at"] == row(src)["expires_at"]  # <= the source's, and as late as allowed
+    assert done["status"] == "done" and done["finished_at"] == clock.t and done["edited_at"] == clock.t
+    want = min(clock.t + 7200, hard)
+    assert done["expires_at"] == want and row(src)["expires_at"] == want
     # the upload and the copies are kept for the same time, and the job can be changed again
     assert files_of(new_id) == {"input.wav", "kept-noise.flac", "kept-input.flac", OUT}
     shown = client.get(f"/api/jobs/{new_id}").json()
-    assert shown["expiresAt"] == row(src)["expires_at"] and shown["redo"]["available"] and shown["redo"]["noise"] and "preview" in shown["redo"]
+    assert shown["expiresAt"] == want and shown["redo"]["available"] and shown["redo"]["noise"] and "preview" in shown["redo"]
+    assert shown["hardDeadlineAt"] == hard and shown["editedAt"] == clock.t
     assert [o["name"] for o in shown["outputs"]] == [OUT]
-    clock.advance(left)  # the source's time is up: the sweep takes both together
+    clock.advance(want - clock.t)  # the time is up: the sweep takes the chain together
     jobs.sweep()
     assert row(src)["status"] == "expired" and row(new_id)["status"] == "expired"
 
 
 @pytest.mark.parametrize("advance", [1500, 940])
-def test_a_rerun_that_is_only_done_when_its_source_is_about_to_go_is_stopped_and_not_charged(client, signed_in, clock, advance):
-    """A long wait in the queue: its results could not be downloaded before they go and it never extends the deletion time, so
-    it ends failed, the hold is given back, and no file of it stays (60 s or less before the end, or after it)."""
+def test_a_rerun_that_is_only_done_when_the_chains_six_hours_are_about_to_end_is_stopped_and_not_charged(client, signed_in, clock, advance):
+    """A long wait in the queue: its results could not be downloaded before the files go (6 hours after the upload), so it ends
+    failed, the hold is given back, and no file of it stays (60 s or less before the end, or after it)."""
     uid, h = funded(client, signed_in)
-    src = make_done_job(uid, seconds=60, expires_in=1000, finished_ago=6200)
+    src = make_done_job(uid, seconds=60, finished_ago=6200)
+    deadline_in(src, 1000)
     start = ledger.balance(uid)["balance_micros"]
     new_id = post(client, h, src, **STRENGTH).json()["id"]
     clock.advance(advance)
@@ -598,14 +608,15 @@ def test_a_rerun_that_is_only_done_when_its_source_is_about_to_go_is_stopped_and
     assert_error(post(client, h, new_id, **STRENGTH), 409, "job_not_finished")
 
 
-def test_a_rerun_finishing_a_little_before_its_source_ends_with_it(client, signed_in, clock):
-    """Never extends: with more than a minute left it keeps everything and ends exactly with the source."""
+def test_a_rerun_finishing_a_little_before_the_six_hours_end_keeps_everything_until_then(client, signed_in, clock):
+    """With more than a minute left it keeps everything and ends exactly at the hard deadline."""
     uid, h = funded(client, signed_in)
-    src = make_done_job(uid, expires_in=500, finished_ago=6700)
+    src = make_done_job(uid, finished_ago=30)
+    hard = deadline_in(src, 500)
     new_id = post(client, h, src, **FREE_STRENGTH).json()["id"]
-    clock.advance(400)  # 100 seconds left of the source's time
+    clock.advance(400)  # 100 seconds left
     done = complete_like_the_worker(new_id, outputs=[OUT])
-    assert done["status"] == "done" and done["expires_at"] == row(src)["expires_at"] and "input.wav" in files_of(new_id)
+    assert done["status"] == "done" and done["expires_at"] == hard and "input.wav" in files_of(new_id)
 
 
 def test_a_paid_rerun_is_charged_once_with_a_labelled_ledger_line_and_a_free_one_not_at_all(client, signed_in, clock):

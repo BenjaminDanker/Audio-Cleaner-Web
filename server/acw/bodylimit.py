@@ -16,9 +16,12 @@ import time
 
 DEFAULT_LIMIT = 64 * 1024
 WEBHOOK_LIMIT = 1024 * 1024
+TIMELINE_LIMIT = 256 * 1024  # a timeline is up to 200 KB of JSON (editing.TIMELINE_MAX_BYTES)
 BODY_IDLE_SECONDS = 20
 
 _UPLOAD = re.compile(r"^/api/jobs/[0-9a-f]{32}/input$")
+# the routes that take a timeline: creating (or estimating) a job, saving one, quoting, processing, exporting
+_TIMELINE = re.compile(r"^/api/jobs(?:/estimate|/[0-9a-f]{32}/(?:timeline|quote|process|export))?$")
 _WEBHOOK = "/api/stripe/webhook"
 
 
@@ -36,6 +39,8 @@ class BodyLimitMiddleware:
             return None
         if path == _WEBHOOK:
             return WEBHOOK_LIMIT
+        if _TIMELINE.match(path):
+            return TIMELINE_LIMIT
         return self.default
 
     async def __call__(self, scope, receive, send):

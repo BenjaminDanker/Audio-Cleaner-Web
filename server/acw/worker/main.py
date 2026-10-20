@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import automatic, broker, db, hostload, jobs, keycaps, metrics, rerun
+from .. import automatic, broker, db, editing, hostload, jobs, keycaps, metrics, rerun
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -183,6 +183,8 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         **({"rerun": {"clean": params["rerun"]["clean"], "transcribe": params["rerun"]["transcribe"],
                       "reuse_audio": params["rerun"].get("reuse_audio"), "kept": params.get("kept") or {}}}
            if params.get("rerun") else {}),
+        # the per-part editor (editing.py): what the run is, the timeline it makes, and what identifies the recording in the block cache
+        **({"editor": ed} if (ed := editing.spec_for(job, params)) else {}),
     }
     (d / "spec.json").write_text(json.dumps(spec))
     return d
@@ -391,8 +393,11 @@ def _read_result(path: Path) -> dict:
     return res
 
 
-def _job_cost(job: dict, params: dict, seconds: float) -> int:
-    """What the job costs for `seconds` of audio, at the prices it was created with."""
+def _job_cost(job: dict, params: dict, seconds: float, billed: dict | None = None) -> int:
+    """What the job costs for `seconds` of audio, at the prices it was created with. `billed`: what a job made with a timeline reports
+    having run (editing.billable_from), else the whole timeline is charged."""
+    if (params.get("edit") or {}).get("first_run"):
+        return editing.first_run_cost(job["kind"], params, seconds, billed)
     # Translations: what was asked for until the job is done, then only the languages that were made.
     asked = params.get("options", {}).get("translate") or []
     made = params.get("translated", asked)
@@ -441,8 +446,9 @@ def _reprice(job: dict, duration: float) -> None:
         job["est_cost_micros"] = cost
 
 
-def _complete(job: dict, d: Path, res: dict) -> None:
-    outputs = []
+def _verified_outputs(d: Path, res: dict) -> list[dict]:
+    """The result files the runner names that are regular files on the job's own device (a link it planted is not an output)."""
+    outputs: list[dict] = []
     dev = os.stat(d).st_dev
     for o in res.get("outputs", []):
         name = o["file"]
@@ -456,49 +462,152 @@ def _complete(job: dict, d: Path, res: dict) -> None:
             lang = o.get("lang")
             outputs.append({"file": name, "kind": o["kind"], "bytes": st.st_size,
                             **({"lang": lang} if isinstance(lang, str) and re.fullmatch(r"[a-z]{2,3}", lang) else {})})
+    return outputs
+
+
+def _remove(d: Path, p: Path) -> None:
+    if p.is_dir() and not p.is_symlink():
+        import shutil
+
+        shutil.rmtree(p, ignore_errors=True)
+    else:
+        p.unlink(missing_ok=True)
+
+
+def _complete(job: dict, d: Path, res: dict) -> None:
+    outputs = _verified_outputs(d, res)
     fresh = db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))
     params = json.loads(fresh["params_json"] if fresh is not None else job["params_json"])
     duration = float(job.get("duration_seconds") or job["claimed_seconds"])
-    # What stays in the folder besides the results, until the job is deleted (2 hours): the upload, and the copies a later
-    # "change and save again" starts from (rerun.py).
+    # What stays in the folder besides the results, until the job's deadline (jobs.expiry): the upload, the copies a later
+    # "change and save again" starts from (rerun.py) and the per-part editor's (editing.py: the block cache, the recording,
+    # the suggestions).
     now = db.now()
-    if rerun.too_late(params, now):  # nobody could download these before the job it came from is cleared away
+    if rerun.too_late(params, now) or now + rerun.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(job):  # nobody could download these in time
         jobs.finish_failed(job, rerun.TOO_LATE)
         return
+    report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
     kept = rerun.collect_kept(params, d, res.get("kept") or params.get("kept_reported"))
-    keep = {o["file"] for o in outputs} | {f"input{params['input_ext']}"} | rerun.kept_files(kept)
+    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}"} | rerun.kept_files(kept)
+            | {editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS})
     for p in d.iterdir():
         if p.name not in keep:
-            if p.is_dir():
-                import shutil
-
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                p.unlink(missing_ok=True)
+            _remove(d, p)
     params.pop("kept_reported", None)
     params["kept"] = kept
+    first_run = bool((params.get("edit") or {}).get("first_run"))  # a job made with a timeline: charged for what ran
+    if job["kind"] in ("denoise", "denoise_transcribe"):
+        params = editing.absorb(job, params, report)
+        e = params["edit"]
+        if not e.get("rendered") and e.get("facts"):
+            e["rendered"] = editing.derived_rendered(job, params)  # (None when it cannot be known: everything is then made again)
+            if e["rendered"] is None:
+                e.pop("rendered")
+        if report.get("suggestions"):
+            editing.write_suggestions(job["id"], report["suggestions"])
+        if report.get("suggestions") or report.get("has_suggestions"):
+            e["suggestions"] = True
     # Charging and finishing are one step: a job is never "done" without its charge, and a failure
     # after the charge can't be reported as "not charged". Only a job that is still running completes.
     with db.tx() as c:
+        uploaded = c.execute("SELECT COALESCE(uploaded_at, created_at) AS t FROM jobs WHERE id = ?", (job["id"],)).fetchone()["t"]
         n = c.execute(
             "UPDATE jobs SET status = 'done', progress = 100, stage = 'Done', outputs_json = ?, cost_micros = 0,"
-            " finished_at = ?, expires_at = ? WHERE id = ? AND status = 'running'",
-            (json.dumps(outputs), now, rerun.completion_expiry(job, params, now), job["id"]),
+            " finished_at = ?, edited_at = ?, expires_at = ? WHERE id = ? AND status = 'running'",
+            (json.dumps(outputs), now, now, jobs.expiry(now, uploaded), job["id"]),
         ).rowcount
         if not n:
             log.warning("job %s is no longer running; not completing it", job["id"])
             return
         # (read again inside the transaction: the notice and the translated languages are written by other processes)
-        cur = json.loads(c.execute("SELECT params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()["params_json"])
+        costing = json.loads(c.execute("SELECT params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()["params_json"])
+        cur = dict(costing)
         cur.pop("kept_reported", None)
+        cur.pop("editor_reported", None)
         cur["kept"] = kept
+        if "edit" in params:
+            cur["edit"] = params["edit"]
         c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(cur), job["id"]))
         if job["hold_id"]:
+            cost = _job_cost(job, costing, duration, report.get("billed") if first_run else None)
+            if first_run:
+                cost = min(cost, int(job.get("est_cost_micros") or cost))  # (a job made with a timeline never pays more than it was held for)
             cost = ledger.capture_hold(
-                job["hold_id"], _job_cost(job, cur, duration),
-                f"{jobs.label_of(job['kind'], cur)}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
+                job["hold_id"], cost,
+                f"{jobs.label_of(job['kind'], costing)}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
+    jobs.touch(job["id"])  # finishing is an edit of the job and of the chain it belongs to: they keep their files together
+    metrics.job_ended(job["id"])
+
+
+def _complete_edit(job: dict, d: Path, res: dict) -> None:
+    """The end of an edit run (editing.py): the new audio replaces the old, the cache and the report are kept, the run is charged for
+    what it ran (never more than the quote it was held at), and the job is finished again with a new deadline."""
+    fresh = db.one("SELECT params_json, outputs_json FROM jobs WHERE id = ?", (job["id"],))
+    params = json.loads(fresh["params_json"])
+    run = params.get("run")
+    if not run:
+        log.warning("job %s has no run to complete", job["id"])
+        return
+    now = db.now()
+    if now + rerun.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(job):
+        jobs.finish_failed(job, rerun.TOO_LATE)
+        return
+    duration = float(job["duration_seconds"])
+    report = editing.sanitize_report(res.get("editor"), d, duration)
+    outputs = _verified_outputs(d, res)
+    old = json.loads(fresh["outputs_json"] or "[]")
+    audio_changed = run["op"] != "suggest"
+    if audio_changed:
+        if not any(o["kind"] == "audio" for o in outputs):
+            raise StageFailed("Processing failed; you were not charged.", "the run made no audio")
+        # the other results stay (captions, transcript); a video made with the old audio does not fit any more
+        keep_old = [o for o in old if o["kind"] not in ("audio", "video") and o["file"] not in {x["file"] for x in outputs}]
+        outputs = [*(o for o in outputs if o["kind"] == "audio"), *keep_old]
+    else:
+        outputs = old
+    kept = params.get("kept") or {}
+    if audio_changed:
+        kept = {k: v for k, v in kept.items() if k == "segments"}  # the copies of the old strength slider no longer fit the audio
+    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS}
+            | rerun.kept_files(kept))
+    for p in d.iterdir():
+        if p.name not in keep:
+            _remove(d, p)
+    params = editing.absorb(job, params, report, op=run["op"])
+    params["kept"] = kept
+    if report.get("suggestions"):
+        editing.write_suggestions(job["id"], report["suggestions"])
+        params["edit"]["suggestions"] = True
+    if report.get("rendered") is None and audio_changed:
+        params["edit"].pop("rendered", None)  # (should not happen: the runner always says what it rendered)
+    params.pop("run", None)
+    est = int(job["est_cost_micros"] or 0)
+    billed = report.get("billed")
+    charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0])
+    if run["op"] == "suggest":
+        charge = 0
+    with db.tx() as c:
+        uploaded = c.execute("SELECT COALESCE(uploaded_at, created_at) AS t, COALESCE(cost_micros, 0) AS spent FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+        n = c.execute(
+            "UPDATE jobs SET status = 'done', next_stage = 'probe', progress = 100, stage = 'Done', outputs_json = ?, params_json = ?,"
+            " finished_at = ?, edited_at = ?, expires_at = ?, error = NULL, worker_id = NULL WHERE id = ? AND status = 'running'",
+            (json.dumps(outputs), json.dumps(params), now, now, jobs.expiry(now, uploaded["t"]), job["id"]),
+        ).rowcount
+        if not n:
+            log.warning("job %s is no longer running; not completing it", job["id"])
+            return
+        if job["hold_id"]:
+            asked = max([0.0, *(run.get("asked") or {}).values()])
+            charged = ledger.capture_hold(
+                job["hold_id"], charge,
+                f"{editing.run_label({'run': run})}: {jobs.display_name(job)[:60]} ({asked / 60:.1f} min)", c=c,
+            )
+        else:
+            charged = 0
+        c.execute("UPDATE jobs SET cost_micros = ?, est_cost_micros = ? WHERE id = ?", (uploaded["spent"] + charged, charged, job["id"]))
+    jobs.touch(job["id"])
     metrics.job_ended(job["id"])
 
 
@@ -535,6 +644,14 @@ def process(job: dict, extra: dict) -> None:
             _complete(job, d, res)
             return
         params = json.loads(job["params_json"])
+        if job["next_stage"] == "edit":
+            # An edit run (editing.py): the recording is known, measured and priced already; one stage makes the missing blocks of the
+            # timeline, renders it and writes the audio.
+            duration = float(job["duration_seconds"])
+            d = _write_spec(job, extra, duration)
+            res = run_stage(job, d, "edit", jobs.stage_limits(duration, _max_seconds(job, params))[1])
+            _complete_edit(job, d, res)
+            return
         if params.get("rerun") or job["next_stage"] == "main":
             # A re-run knows its file: the source job measured it, and priced it (the hold is the price). So does an automatic job
             # a worker handed over to the card once it had decided on a rebuild: probed, measured, decided and priced already.
@@ -565,6 +682,14 @@ def process(job: dict, extra: dict) -> None:
             jobs.set_notice(job["id"], res["notice"])
         if res.get("kept"):
             jobs.update_params(job["id"], kept_reported=res["kept"])  # the finishing step may run after the cloud stage
+        if res.get("editor"):
+            # What the per-part editor needs to know (editing.py), checked now: the suggestions go to their file at once, the rest
+            # waits in the job's record for the finishing step (which may run after the cloud stage).
+            rep = editing.sanitize_report(res["editor"], d, duration)
+            if rep.get("suggestions"):
+                editing.write_suggestions(job["id"], rep.pop("suggestions"))
+                rep["has_suggestions"] = True
+            jobs.update_params(job["id"], editor_reported=rep)
         if res.get("needs_cloud_asr"):
             db.execute(
                 "UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', progress = 85,"

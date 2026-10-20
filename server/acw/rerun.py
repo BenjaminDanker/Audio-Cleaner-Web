@@ -1,6 +1,7 @@
 """Cheap re-runs of a finished job ("Change and save again" for paid jobs).
 
-A finished job keeps, in its folder, until it is deleted (2 hours after it finished, jobs.sweep): the upload, the noise
+A finished job keeps, in its folder, until it is deleted (2 hours after its last edit and at the latest 6 hours after the upload,
+jobs.expiry, jobs.sweep): the upload, the noise
 removal at full strength (`kept-noise.flac`) or the rebuilt voice (`kept-rebuilt.flac`) when those ran, the transcript
 (`segments.json`, `segments.<lang>.json`) and its results. A re-run is a new job (`source_job_id`, `root_job_id`) that
 starts from the latest of those copies and runs only the steps whose inputs changed:
@@ -19,8 +20,12 @@ Everything else (file type, name, which subtitle files, subtitles in the video) 
 (web/src/finish.js). The steps that run are the paid ones listed in the price; encoding and the strength blend are free.
 
 The files a re-run needs are hard-linked into its folder (no copy: disk grows only by what it makes), so deleting one job of
-a chain never breaks another, and "Delete now" deletes the whole chain (the upload with it). A re-run ends at the same time
-as the job it came from and never extends it (`deadline`).
+a chain never breaks another, and "Delete now" deletes the whole chain (the upload with it). A re-run is an edit: it gives the job it
+came from, and itself, 2 hours from its last edit, and nothing of the chain outlives 6 hours after the upload (`deadline`).
+
+It is the whole-file case of the per-part editor (editing.py): a job that has a timeline of its own (made with one, or edited with
+the quote / process / export endpoints) is not re-run this way (`409 job_edited`): its changes are quotes and processes of the
+timeline. The cached blocks, the recording copy and the suggestions of the source are linked into the re-run like the kept copies.
 """
 from __future__ import annotations
 
@@ -32,7 +37,7 @@ import shutil
 import stat
 from pathlib import Path
 
-from . import db, jobs, keycaps
+from . import db, editing, jobs, keycaps
 from .billing import ledger, pricing
 from .config import get_settings
 
@@ -42,9 +47,9 @@ JOB_NOT_FOUND = "job_not_found"  # no such job, or not yours: an API key can onl
 NOT_FINISHED = "job_not_finished"
 FILES_GONE = "job_files_gone"  # the job's files are cleared away (expired or deleted): start again from the file
 NOTHING_TO_CHANGE = "nothing_to_change"  # the choices would give the files the job already has
-EXPIRING = "job_expiring"  # too close to the end of the job's 2 hours to run again
+EXPIRING = "job_expiring"  # too close to the end of the job's 6 hours (after the upload) to run again
 PRICE_CHANGED = "price_changed"  # the price is above `maxCostMicros`
-# A re-run must be able to finish, and its results be downloaded, before the job it came from is cleared away.
+# A re-run must be able to finish, and its results be downloaded, before the job's files are cleared away at the latest.
 DEADLINE_MARGIN_SECONDS = 300
 # A re-run that is only done this close to the end of the job it came from (or later) is not kept: see too_late.
 MIN_DELIVERY_SECONDS = 60
@@ -151,6 +156,12 @@ def kept_files(kept: dict) -> set[str]:
     return names
 
 
+def is_edited(params: dict) -> bool:
+    """The job has a timeline of its own (made with one, or edited): its changes are the editor's (editing.py), not a re-run's."""
+    e = params.get("edit") or {}
+    return bool(e.get("timeline") or e.get("runs"))
+
+
 def audio_output(job: dict) -> dict | None:
     for o in json.loads(job["outputs_json"] or "[]"):
         if o.get("kind") == "audio":
@@ -165,6 +176,8 @@ def redo_info(job: dict) -> dict:
     if job["status"] != "done":
         return out
     params = json.loads(job["params_json"])
+    if is_edited(params):
+        return out
     d = jobs.job_dir(job["id"])
     if not _regular(jobs.input_path(job)):
         return out
@@ -326,6 +339,8 @@ def _source(user_id: str, job_id: str, api_key_id: str | None) -> dict:
     d = jobs.job_dir(src["id"])
     if not d.is_dir() or not _regular(jobs.input_path(src)):
         raise jobs.JobError(GONE, 409, code=FILES_GONE)
+    if is_edited(json.loads(src["params_json"])):
+        raise jobs.JobError("This job has a timeline of its own: change it with the timeline's quote and process, not a re-run.", 409, code="job_edited")
     return src
 
 
@@ -357,7 +372,7 @@ def estimate(user_id: str, job_id: str, api_key_id: str | None, denoise_tier: st
         "durationSeconds": seconds,
         "lines": jobs.price_lines(rates, d_tier, t_tier, seconds, n),
         "steps": {"clean": plan["clean"], "transcribe": plan["transcribe"], "translate": plan["translate_new"]},
-        "expiresAt": src["expires_at"],
+        "expiresAt": jobs.expiry(db.now(), src.get("uploaded_at") or src["created_at"]),
         "options": new,
         "denoiseTier": d_tier,
         "transcribeTier": t_tier,
@@ -369,9 +384,9 @@ def _check(plan: dict, d_tier: str | None, t_tier: str | None, src: dict, sp: di
         raise jobs.JobError("Nothing would change: these choices give the files this job already has.", code=NOTHING_TO_CHANGE)
     if plan["clean"] == "full" and d_tier == "rebuild":
         jobs.check_duration(kind, d_tier, seconds)  # the card must be up, and the file short enough for the rebuild
-    deadline = src["expires_at"] or 0
+    deadline = jobs.hard_deadline(src)
     need = _seconds_needed(plan, kind, d_tier, t_tier, sp, seconds)
-    if deadline and deadline - db.now() < need + DEADLINE_MARGIN_SECONDS:
+    if deadline - db.now() < need + DEADLINE_MARGIN_SECONDS:
         raise jobs.JobError("This one is about to be cleared away, so there isn’t time to change it again. Start it again from your file.", 409, code=EXPIRING)
 
 
@@ -446,12 +461,15 @@ def create_rerun(user_id: str, job_id: str, *, denoise_tier: str | None = None, 
         "rates": rates,
         "kept": kept,
         "rerun": {
-            "source": src["id"], "root": root, "deadline": src["expires_at"], "clean": plan["clean"], "transcribe": plan["transcribe"],
+            "source": src["id"], "root": root, "deadline": jobs.hard_deadline(src), "clean": plan["clean"], "transcribe": plan["transcribe"],
             "reuse_audio": plan["reuse_audio"], "translate_new": plan["translate_new"], "paid": plan["paid"], "linked": linked,
         },
     }
     if sp.get("noise_profile"):
         params["noise_profile"] = sp["noise_profile"]
+    if sp.get("edit"):  # the per-part editor's record of the recording travels with its cache (editing.py)
+        params["edit"] = {k: v for k, v in sp["edit"].items() if k in ("facts", "resolved", "rendered", "suggestions")}
+        params["edit"].pop("rendered", None)  # (this job renders its own options)
     now = db.now()
     tier = "/".join(t for t in (d_tier, t_tier) if t)
     try:
@@ -462,6 +480,7 @@ def create_rerun(user_id: str, job_id: str, *, denoise_tier: str | None = None, 
         for name in dict.fromkeys(wanted):
             link(src_dir / name, dst / name)
             linked.append(name)
+        link_editor_files(src_dir, dst, linked)
         with db.tx() as c:
             jobs.check_active_limit(c, user_id)
             hold_id = None
@@ -473,16 +492,17 @@ def create_rerun(user_id: str, job_id: str, *, denoise_tier: str | None = None, 
                     raise jobs.JobError(f"This costs about ${est / 1e6:.2f}; your available balance is ${e.available / 1e6:.2f}.", 402) from e
             c.execute(
                 "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, next_stage, input_name, input_bytes, received_bytes,"
-                " claimed_seconds, duration_seconds, hold_id, est_cost_micros, created_at, queued_at, api_key_id, source_job_id, root_job_id)"
-                " VALUES (?,?,?,?, 'queued', ?, 'probe', ?,?,?,?,?,?,?,?,?,?,?,?)",
+                " claimed_seconds, duration_seconds, hold_id, est_cost_micros, created_at, queued_at, uploaded_at, api_key_id, source_job_id, root_job_id)"
+                " VALUES (?,?,?,?, 'queued', ?, 'probe', ?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (new_id, user_id, kind, tier, json.dumps(params), src["input_name"], src["input_bytes"], src["received_bytes"],
-                 seconds, seconds, hold_id, est, now, now, api_key_id, src["id"], root),
+                 seconds, seconds, hold_id, est, now, now, src.get("uploaded_at") or src["created_at"], api_key_id, src["id"], root),
             )
     except BaseException:
         shutil.rmtree(dst, ignore_errors=True)
         raise
+    jobs.touch(src["id"])  # a re-run is an edit of the job it came from: its files go 2 hours from now
     jobs.invalidate_queue_cache()
-    return {"id": new_id, "estCostMicros": est, "free": est == 0, "expiresAt": src["expires_at"]}
+    return {"id": new_id, "estCostMicros": est, "free": est == 0, "expiresAt": jobs.expiry(now, src.get("uploaded_at") or src["created_at"])}
 
 
 def chain(job: dict) -> list[dict]:
@@ -505,18 +525,23 @@ def chain_active(job: dict) -> bool:
 
 
 def too_late(params: dict, now: int) -> bool:
-    """A re-run that is only finishing when the job it came from is about to be cleared away (it waited in the queue longer than
-    planned): its results could not be downloaded before they go, and a re-run never extends the deletion time, so it ends as
-    failed and is not charged (`TOO_LATE`)."""
+    """A re-run that is only finishing when the chain's files are about to be cleared away (6 hours after the upload; it waited in
+    the queue longer than planned): its results could not be downloaded before they go, so it ends as failed and is not charged
+    (`TOO_LATE`)."""
     rr = params.get("rerun")
     return bool(rr and rr.get("deadline") and now + MIN_DELIVERY_SECONDS >= int(rr["deadline"]))
 
 
-def completion_expiry(job: dict, params: dict, now: int) -> int:
-    """When the results of a job that has just finished are deleted: 2 hours from now, and for a re-run never later than
-    the job it came from (its upload, its kept copies and all the jobs made from the same upload go together)."""
-    expires = now + get_settings().job_retention_seconds
-    rr = params.get("rerun")
-    if rr and rr.get("deadline"):
-        expires = min(expires, int(rr["deadline"]))
-    return expires
+def link_editor_files(src_dir: Path, dst: Path, linked: list[str]) -> None:
+    """The per-part editor's files of the source (the block cache, the recording copy, the suggestions) linked into a re-run's folder:
+    no disk copy, and a block never changes once written (editing.py)."""
+    for name in (f"{editing.SOURCE}.flac", editing.SUGGESTIONS):
+        if _regular(src_dir / name):
+            link(src_dir / name, dst / name)
+            linked.append(name)
+    blocks = src_dir / editing.BLOCKS
+    if blocks.is_dir() and not blocks.is_symlink():
+        (dst / editing.BLOCKS).mkdir(mode=0o700, exist_ok=True)
+        for p in blocks.iterdir():
+            if _regular(p):
+                link(p, dst / editing.BLOCKS / p.name)

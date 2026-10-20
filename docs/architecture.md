@@ -110,6 +110,35 @@ stereo, where the two whole copies are fetched once to blend them), otherwise th
 new job's file downloads by itself). The free noise removal in the browser keeps its two signals in memory and plays them through the same
 player (`memorySource`).
 
+## The per-part editor
+
+A job with audio steps holds a **timeline** (`acw_common/timeline.py`, JSON v1: layers echo / noise / rebuild / leveling, each with parts and
+settings; Voice rebuild wins where it overlaps noise removal; subtitles stay whole-file options) and a **block cache**. Every model step runs on a
+fixed block grid (`acw_common/blocks.py`: 30 s for the noise removers and echo removal with the context each needs, 14 s windows for Voice
+rebuild) and a block is keyed by the step, the model, the audio it read and where it is, never by the strength: the server stores them as 24-bit
+FLAC in the job's `blocks/` folder (`blocks.FlacCache`; a block read back is within one 24-bit step). `acw/editing.py` is the server's side:
+
+- **Planning without audio.** The web process never decodes an upload. What planning needs about the recording (its length, channels, which
+  channels are cleaned, the stretches the noise removers run on, whether there is a second track: the *facts*) is measured by the sandboxed
+  runner and kept in the job's record; `editing.inputs_for` stands them in for the samples of `editor.Inputs`, so `editor.plan` (the cache misses),
+  `editor.billable` and the price are computed in the web process, and a stretch of the cache is cut by confined helpers (below).
+- **Runs.** A job's first run fills the cache: `pipeline.clean_audio` is given the cache (and, after a whole-file echo removal, a wrapper that
+  rewrites its keys to the editor's own block identities, `worker/editrun.EchoWholeFile`), writes the recording as `kept-source.flac`, reports
+  the facts and looks for suggestions (`acw_common/suggest.py`). A job made *with* a timeline renders it through `editor.render` instead, from
+  an empty cache, so only its parts are made and charged. An **edit run** (`process`, `export`, `suggest`) puts the finished job back in the queue
+  (`next_stage` `edit`, `params.run`; the job is `queued` / `running` again with a new hold): the runner's `edit` stage (`worker/editrun.py`) decodes the
+  recording, decides the removers still on "auto" (`editor.resolve_removers`), plans against the cache, makes the missing blocks and renders the
+  timeline (joins, Leveling per part) into the result audio. It reports what it ran (`billed`: whole seconds per step), which the worker prices
+  with the rates pinned in the run and the fixed amounts of `editor.STEP_COSTS`, never above the hold. A run that ends without its result
+  (canceled, failed, too late) restores the job as it was (`jobs.finish_failed`), files and cache kept, money released.
+  Voice rebuild and the heavy remover go to the card's worker (`broker.gpu_stages` reads the run's own list).
+- **Price.** For each step that runs: rate per second x (the whole seconds asked for in the blocks that are made, rounded up + the step's fixed
+  per-run cost as equivalent seconds); context is never billed, no minimum, cache hits free, Leveling where it runs on changed audio
+  (`editor.plan(previous=...)`, the timeline the result files hold). The rates are the price list's (echo removal's own: 2,600 micros a minute).
+- **Preview.** `GET /api/jobs/{id}/preview/{source|echo|noise|rebuild}` hands out sample-aligned stretches (`worker/cutter.py` for the
+  recording, `worker/assembler.py` for what the blocks hold: each block is decoded, put at its place and the stretch written as one FLAC, in a
+  confined process like the cutter), and says what is not cached; the page mixes strengths and layers itself.
+
 ## Live: the order
 
 The live engine (`native/live`, `bin/acw-live`): echo canceller (when the client sends the speaker reference) → DeepFilterNet3 + high-pass +
@@ -133,10 +162,12 @@ shared too: `native/deepfilter/build.sh` produces the server `.so`, the desktop
 
 - Uploads land in `data/jobs/<id>/input.*` (0600) and stay there with the job's other files: the copies kept for changing it
   again (the noise removal at full strength, the rebuilt voice, the recording as the remover heard it, the transcript) and its
-  results. They are deleted together 2 hours after the job finishes (`ACW_JOB_RETENTION_MINUTES`, `jobs.sweep` every 30 to 60
-  seconds), or at once with "Delete now" (which also takes every job made from the same upload); the files of a failed or
-  canceled job go at once. Changing a finished job (`acw/rerun.py`) is a new job that hard-links what it needs from the old
-  folder, runs only the steps whose inputs changed and never outlives the job it came from (section "Changing a finished job" below).
+  results, and the per-part editor's block cache, recording copy and suggestions (section "The per-part editor"). They are deleted together
+  2 hours after the job's last edit (a run finishing, a timeline save, a quote, a process, an export, a re-run: `ACW_JOB_RETENTION_MINUTES`)
+  and never later than 6 hours after the upload arrived (`ACW_JOB_MAX_RETENTION_MINUTES`; `jobs.expiry`, `jobs.sweep` every 30 to 60
+  seconds), or at once with "Delete now" (which also takes every job made from the same upload); the files of a failed or canceled job go at
+  once. Changing a finished job (`acw/rerun.py`) is a new job that hard-links what it needs from the old folder, runs only the steps whose
+  inputs changed and is an edit of the chain: nothing of it outlives 6 hours after the upload (section "Changing a finished job" below).
 - Live audio is never written to disk. Captions are not stored.
 - The browser tier sends nothing to the server.
 - The database keeps accounts, ledger, payments, job metadata and an audit log. File names are removed

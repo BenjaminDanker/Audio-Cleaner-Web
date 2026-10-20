@@ -7,13 +7,14 @@ import os
 import re
 import stat
 import time
+from typing import Any
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, jobs, keycaps, rerun, stretch, webhooks
+from .. import auth, db, editing, jobs, keycaps, rerun, stretch, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -40,6 +41,7 @@ class CreateJob(BaseModel):
     displayName: str | None = Field(default=None, max_length=300)
     callbackUrl: str | None = Field(default=None, max_length=600)
     options: dict = Field(default_factory=dict)
+    timeline: Any = None  # only its parts are processed and charged (acw_common.timeline format v1, docs/api.md); checked by editing.parse_timeline
 
 
 class EstimateJob(BaseModel):
@@ -50,6 +52,31 @@ class EstimateJob(BaseModel):
     transcribeTier: str | None = Field(default=None, max_length=32)
     durationSeconds: float = Field(gt=0)
     options: dict = Field(default_factory=dict)
+    timeline: Any = None
+
+
+class TimelineBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    timeline: Any
+
+
+class QuoteBody(BaseModel):
+    """The timeline to quote (omitted: the job's saved one)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeline: Any = None
+
+
+class RunBody(BaseModel):
+    """Process or export: the timeline (omitted: the saved one), the price the caller was quoted, the audio file type of the result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    timeline: Any = None
+    maxCostMicros: int | None = Field(default=None, ge=0, le=10**12)  # a higher price now is refused (409 price_changed)
+    audioFormat: str | None = Field(default=None, max_length=8)
 
 
 class RerunJob(BaseModel):
@@ -86,7 +113,7 @@ def _error(e: jobs.JobError) -> JSONResponse:
         headers["Retry-After"] = str(e.retry_after or 60)
     if e.code:
         headers["X-Error-Code"] = e.code
-    return JSONResponse(status_code=e.status, content={"detail": str(e), **({"code": e.code} if e.code else {})}, headers=headers)
+    return JSONResponse(status_code=e.status, content={"detail": str(e), **({"code": e.code} if e.code else {}), **(e.extra or {})}, headers=headers)
 
 
 def _upload_url(job_id: str) -> str:
@@ -136,6 +163,7 @@ def create(body: CreateJob, request: Request, response: Response, principal: aut
             api_key_id=principal.api_key_id,
             callback_url=callback,
             idempotency=idem,
+            timeline=body.timeline,
         )
     except jobs.Replay as r:  # a parallel request with the same key won
         return _replayed({"id": r.job_id, "estCostMicros": r.est_cost_micros}, response)
@@ -162,9 +190,9 @@ def estimate(body: EstimateJob, principal: auth.Principal = Depends(auth.require
     if len(json.dumps(body.options)) > 2000:
         raise HTTPException(status_code=400, detail="options too large")
     try:
-        out = jobs.estimate(body.kind, body.denoiseTier, body.transcribeTier, body.durationSeconds, body.options)
+        out = jobs.estimate(body.kind, body.denoiseTier, body.transcribeTier, body.durationSeconds, body.options, body.timeline)
     except jobs.JobError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))
+        return _error(e)
     except ValueError as e:  # pricing errors
         raise HTTPException(status_code=400, detail=str(e))
     available = ledger.balance(principal.user_id)["available_micros"]
@@ -291,17 +319,21 @@ def _disk_free(path) -> int:
 def list_jobs(principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
     # What is still there: the jobs in progress, and the finished ones until their files are cleared away (2 hours after they
     # finished; a failed or canceled job's files are gone at once, so it is listed for as long as the others).
+    now = db.now()
     rows = db.all_rows(
         "SELECT * FROM jobs WHERE user_id = ? AND status != 'expired'"
-        " AND (status IN ('uploading', 'queued', 'running', 'cloud_asr', 'canceling') OR COALESCE(finished_at, created_at) > ?)"
+        " AND (status IN ('uploading', 'queued', 'running', 'cloud_asr', 'canceling')"
+        "      OR (status = 'done' AND COALESCE(expires_at, ?) > ?)"
+        "      OR (status != 'done' AND COALESCE(finished_at, created_at) > ?))"
         " ORDER BY created_at DESC LIMIT 50",
-        (principal.user_id, db.now() - get_settings().job_retention_seconds),
+        (principal.user_id, now + 1, now, now - get_settings().job_retention_seconds),
     )
     queue = jobs.queue_snapshot() if any(r["status"] == "queued" for r in rows) else ([], {})  # shared for a second across requests
     callbacks = jobs.callbacks_for([r["id"] for r in rows])
     settings = get_settings()
     return {"jobs": [jobs.public_job(dict(r), queue, callbacks) for r in rows],
-            "limits": {"maxActiveJobs": settings.max_active_jobs, "retentionSeconds": settings.job_retention_seconds}}
+            "limits": {"maxActiveJobs": settings.max_active_jobs, "retentionSeconds": settings.job_retention_seconds,
+                       "maxRetentionSeconds": settings.job_max_retention_seconds}}
 
 
 @router.get("/{job_id}")
@@ -436,4 +468,159 @@ def kept_copy(
     return Response(
         content=data, media_type="audio/flac",
         headers={**headers, "X-Stretch-Start": str(first), "X-Stretch-Samples": str(count), "X-Total-Samples": str(total)},
+    )
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The per-part editor (acw/editing.py, docs/api.md "Editing a job")
+# ---------------------------------------------------------------------------------------------------------------------
+def _with_balance(out: dict, principal: auth.Principal) -> dict:
+    available = ledger.balance(principal.user_id)["available_micros"]
+    out["availableMicros"] = available
+    out["affordable"] = available >= out["estCostMicros"]
+    if principal.api_key_id:
+        limit = keycaps.key_limit(principal.api_key_id)
+        if limit is not None:
+            out["keyLimit"] = limit
+    return out
+
+
+@router.get("/{job_id}/timeline")
+def get_timeline(job_id: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """The job's timeline (what it was made with, or what was last saved), what the cache holds of each layer as time ranges, the
+    suggestions, and how to read the preview stretches. Not an edit: it does not extend the job's files."""
+    enforce("edit_plan", principal.user_id)
+    try:
+        job, params = editing.job_for_edit(principal.user_id, job_id, principal.api_key_id, need_done=False)
+        return editing.timeline_info(job, params)
+    except jobs.JobError as e:
+        return _error(e)
+
+
+@router.put("/{job_id}/timeline")
+def put_timeline(job_id: str, body: TimelineBody, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """Save the working timeline (checked strictly: format, parts inside the file, at most 500 parts a layer, at most 200 KB).
+    An edit: the job's files are kept 2 hours from now (never past 6 hours after the upload)."""
+    enforce("edit_plan", principal.user_id)
+    try:
+        return editing.save_timeline(principal.user_id, job_id, principal.api_key_id, body.timeline)
+    except jobs.JobError as e:
+        return _error(e)
+
+
+@router.post("/{job_id}/quote")
+def quote(job_id: str, body: QuoteBody, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """What a timeline needs and costs on this job: exactly the blocks the cache lacks, with the price of making them, nothing held.
+    An edit: it keeps the job's files 2 hours from now. It does not count toward the simultaneous jobs."""
+    enforce("edit_plan", principal.user_id)
+    try:
+        job, params = editing.job_for_edit(principal.user_id, job_id, principal.api_key_id)
+        seconds = editing.file_seconds(job, params)
+        tl = editing.parse_timeline(body.timeline, seconds) if body.timeline is not None else editing.saved_timeline(job, params, seconds)
+        q = editing.make_quote(job, params, tl)
+    except jobs.JobError as e:
+        return _error(e)
+    jobs.touch(job_id)
+    fresh = db.one("SELECT expires_at FROM jobs WHERE id = ?", (job_id,))
+    return _with_balance({**editing.public_quote(q), "expiresAt": fresh["expires_at"]}, principal)
+
+
+def _run(job_id: str, op: str, body: RunBody, request: Request, principal: auth.Principal):
+    enforce("job_create", principal.user_id)
+    enforce("job_create", f"ip:{client_net(client_ip(request))}")
+    try:
+        return editing.start_run(principal.user_id, job_id, principal.api_key_id, op, body.timeline, max_cost_micros=body.maxCostMicros,
+                                 audio_format=body.audioFormat)
+    except keycaps.KeyCapReached as e:
+        raise HTTPException(status_code=403, detail=str(e), headers=KEY_CAP_HEADERS)
+    except jobs.JobError as e:
+        return _error(e)
+    except ValueError as e:  # pricing errors
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{job_id}/process")
+def process(job_id: str, body: RunBody, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """Make what the quote says (only the blocks the cache lacks, through the normal queue, sandbox and workers), then render the
+    timeline into the result audio. Held at the quote, charged for what ran, one ledger line. Counts toward the simultaneous jobs."""
+    return _run(job_id, "process", body, request, principal)
+
+
+@router.post("/{job_id}/export")
+def export(job_id: str, body: RunBody, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """Render the timeline into the result audio from the cache alone: free, for a change that needs nothing made (a strength, a
+    layer on or off, anything the cache holds). A timeline that has to be processed is refused with 409 `needs_processing`."""
+    return _run(job_id, "export", body, request, principal)
+
+
+@router.get("/{job_id}/suggestions")
+def get_suggestions(job_id: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """The suggestions made for the job (parts that sound different from the rest, with plain-word reasons and settings), or null."""
+    enforce("edit_plan", principal.user_id)
+    try:
+        editing.job_for_edit(principal.user_id, job_id, principal.api_key_id, need_done=False)
+    except jobs.JobError as e:
+        return _error(e)
+    return {"suggestions": editing.read_suggestions(job_id)}
+
+
+@router.post("/{job_id}/suggestions")
+def make_suggestions(job_id: str, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
+    """Find suggestions for a job that has none (a job made before they existed, or one whose search did not finish): a free run
+    through the queue; poll the job. Counts toward the simultaneous jobs."""
+    return _run(job_id, "suggest", RunBody(), request, principal)
+
+
+@router.get("/{job_id}/preview/{layer}")
+def preview(
+    job_id: str,
+    layer: str,
+    start: float | None = Query(default=None, ge=0, le=10**6),
+    seconds: float | None = Query(default=None, gt=0, le=10**6),
+    principal: auth.Principal = Depends(auth.require_scope("jobs")),
+) -> Response:
+    """A short stretch of what the job holds, for a page that mixes strengths and layers itself: `source` (the recording), `echo`
+    (the echo-free voice), `noise` (the noise removal at full strength) or `rebuild` (the rebuilt voice), 24-bit FLAC, 48 kHz,
+    the same `start` and `seconds` (at most 30) giving stretches that line up sample for sample, one channel per channel of the
+    recording. Only what is cached: samples that are not are silence and listed in `X-Stretch-Missing` (404 `not_cached` when none
+    is). Headers: `X-Stretch-Start`, `X-Stretch-Samples`, `X-Total-Samples`, `X-Stretch-Scale` (the samples are the stretch times
+    it), `X-Stretch-Missing` (JSON, seconds from the start of the stretch). Same sign-in and rate limit as the kept copies."""
+    if layer not in ("source", "echo", "noise", "rebuild"):
+        raise HTTPException(status_code=404, detail="Not available.")
+    try:
+        job, params = editing.job_for_edit(principal.user_id, job_id, principal.api_key_id)
+    except jobs.JobError as e:
+        return _error(e)
+    f = (params.get("edit") or {}).get("facts")
+    if not f:
+        return _error(jobs.JobError("Nothing is cached for this job yet.", 404, code=editing.NOT_CACHED))
+    enforce("kept_cut", principal.user_id)
+    try:
+        first, count = stretch.span(start, seconds, int(f["n"]))
+    except stretch.OutOfRange as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    d = jobs.job_dir(job_id)
+    missing: list[tuple[int, int]] = []
+    try:
+        if layer == "source":
+            entry = f.get("source")
+            if not entry or not _is_plain_file(d / entry["file"]):
+                return _error(jobs.JobError("The recording is not cached.", 404, code=editing.NOT_CACHED))
+            data, scale = stretch.cut(d / entry["file"], first, count), float(entry["scale"])
+        else:
+            plan = editing.plan_stretch(job, params, layer, first, count)
+            if not any(plan["channels"]) and plan["missing"]:
+                return _error(jobs.JobError(f"None of this stretch is cached for {layer}.", 404, code=editing.NOT_CACHED,
+                                            extra={"missing": [[round(a / 48000, 3), round(b / 48000, 3)] for a, b in plan["missing"]]}))
+            missing = plan["missing"]
+            data, scale = stretch.assemble(d, first, count, plan["channels"])
+    except stretch.Busy:
+        raise HTTPException(status_code=503, detail="Busy right now, please try again in a moment.", headers={"Retry-After": "2"})
+    except stretch.Failed:
+        raise HTTPException(status_code=500, detail="Couldn’t cut that part of the sound. Please try again.")
+    return Response(
+        content=data, media_type="audio/flac",
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "X-Stretch-Start": str(first), "X-Stretch-Samples": str(count),
+                 "X-Total-Samples": str(f["n"]), "X-Stretch-Scale": repr(scale), "X-Stretch-Layer": layer,
+                 "X-Stretch-Missing": json.dumps([[round(a / 48000, 3), round(b / 48000, 3)] for a, b in missing], separators=(",", ":"))},
     )
