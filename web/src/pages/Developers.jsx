@@ -302,8 +302,8 @@ curl -s $BASE/api/jobs/3f2c.../rerun ${hdr} -H "Content-Type: application/json" 
       </Section>
 
       <Section id="edit" title="Editing part by part">
-        <p>A finished job with sound steps (Denoising, Voice rebuild, Leveling, echo removal) can be edited part by part. It holds a <b>timeline</b>: which step is applied to which part of the recording, each part with its own settings. A job made the usual way has the default timeline: every step it was made with, on the whole file. You change the timeline, ask what that would cost (a <b>quote</b>), <b>process</b> it (only what is missing is made) and <b>export</b> the result files. Subtitles are not part of the timeline: they stay options of the job. A key can edit only the jobs it made; your signed-in session can edit any job of the account; anything else is <code>404</code> with the code <code>job_not_found</code>.</p>
-        <Code label="A timeline">{`{"version": 1, "seconds": 612.4, "layers": {
+        <p>A finished job with sound steps (Denoising, Voice rebuild, Leveling, echo removal) can be edited part by part. It holds a <b>timeline</b>: which step is applied to which part of the recording, each part with its own settings. A job made the usual way has the default timeline: every step it was made with, on the whole file. You change the timeline, ask what that would cost (a <b>quote</b>), <b>process</b> it (only what is missing is made) and <b>export</b> the result files. From version 2 on the timeline can also hold the <b>subtitles</b>, part by part (see below); a job made the usual way, with its subtitles set for the whole file, keeps them as options of the job. A key can edit only the jobs it made; your signed-in session can edit any job of the account; anything else is <code>404</code> with the code <code>job_not_found</code>.</p>
+        <Code label="A timeline (version 1; version 2 below)">{`{"version": 1, "seconds": 612.4, "layers": {
    "echo":     [{"start": 0, "end": 612.4}],
    "noise":    [{"start": 0, "end": 612.4, "strength_db": 40, "remover": "auto"}],
    "rebuild":  [{"start": 130.5, "end": 160}],
@@ -312,12 +312,31 @@ curl -s $BASE/api/jobs/3f2c.../rerun ${hdr} -H "Content-Type: application/json" 
           head={['Layer', 'What it does']}
           rows={[
             ['echo', 'Removes the speaker echo (the file needs its second audio track). No settings.'],
-            ['noise', 'Removes the noise. strength_db is above 0 and at most 100 (12 gentle, 24 balanced, 40 strong, 100 maximum). remover is auto (decided for each part when it runs), light or heavy.'],
+            ['noise', 'Removes the noise. strength_db is above 0 and at most 100 (12 gentle, 24 balanced, 40 strong, 100 maximum). remover is auto (decided for each part when it runs), light or heavy. Version 2: "browser": true instead of these means the visitor’s browser cleaned that range itself, free, and uploads the result (see Uploads from the browser); the strength may be sent for showing, the remover is not used.'],
             ['rebuild', 'Rebuilds the voice. No settings. Where noise removal and Voice rebuild both cover a moment, Voice rebuild wins and the noise removal there is not run.'],
             ['leveling', 'Evens out the voice and sets the loudness: loudness_lufs from -70 to 0, or null to keep the level.'],
+            ['subtitles (version 2)', 'Writes down what is said in the part: quality is free (the browser transcribes it and uploads the words), standard or accurate (we transcribe it); language is a code or null to detect it; translate is up to 3 codes, never the part’s own language, only with standard or accurate.'],
           ]}
         />
-        <p>Times are in seconds. The parts of a layer never overlap: a part put over others replaces them, and neighbours with the same settings are one part. A timeline is checked strictly (<code>400</code> with the code <code>bad_timeline</code> and what is wrong): every part inside the recording, at most 500 parts in a layer, at most 200&nbsp;KB. You can also give a <code>timeline</code> when you create a job (and when you ask for its estimate): then only those parts are processed and charged, and you leave out the settings the timeline replaces (<code>denoiseTier</code>, <code>atten_lim_db</code>, <code>noise</code>, <code>leveling</code>, <code>loudness_lufs</code>, <code>echo_reference_track</code>, <code>automatic</code>).</p>
+        <h3>Version 2: subtitles and parts cleaned in the browser</h3>
+        <p><code>version</code> 1 is the first form of the format; <code>version</code> 2 adds the <code>subtitles</code> layer and <code>"browser": true</code> noise parts, nothing else. Both are accepted. We answer with version 2 only for a timeline that uses one of the two, so every other timeline is written back as before; a version 1 document that uses them is <code>400</code> <code>bad_timeline</code>. A part cleaned in the browser may not overlap an echo part (echo removal runs first and the browser cannot do it); where Voice rebuild overlaps it, Voice rebuild wins.</p>
+        <Code label="A timeline with subtitles and a part cleaned in the browser">{`{"version": 2, "seconds": 612.4, "layers": {
+   "noise":     [{"start": 0, "end": 300, "strength_db": 24, "remover": "auto"},
+                 {"start": 300, "end": 330, "browser": true, "strength_db": 24}],
+   "subtitles": [{"start": 0, "end": 300, "quality": "standard", "language": "en", "translate": ["es"]},
+                 {"start": 300, "end": 612.4, "quality": "free", "language": null, "translate": []}]}}`}</Code>
+        <h3>Subtitles per part</h3>
+        <p>A job with a <code>subtitles</code> layer is made with <code>kind</code> <code>denoise</code> or <code>denoise_transcribe</code> and <b>no</b> <code>transcribeTier</code>, <code>options.language</code> or <code>options.translate</code>: every part says its own quality, language and translations (<code>400</code> <code>timeline_options</code> otherwise; a job whose subtitles were set for the whole file cannot have subtitle parts). A timeline with subtitle parts and no sound parts makes no audio file. Standard and accurate parts are transcribed by us part by part (with a little sound around each part for context; what is said there is not part of it); a free part is transcribed by the browser. All parts are put together into the job&rsquo;s usual caption files (<code>options.caption_formats</code>), and each language of <code>translate</code> gets the parts that asked for it. A change to one part makes only what that part needs.</p>
+        <h3>Uploads from the browser</h3>
+        <p>A timeline can have parts the visitor&rsquo;s browser makes itself, free: noise parts with <code>"browser": true</code> and subtitle parts with quality <code>free</code>. We need the result of each, and say so: <code>needs</code> is <code>[&#123;"kind": "noise" | "cues", "start", "end"&#125;]</code>, in time order, in the answer to creating the job (a job made with such a timeline is <b>not queued until the file and every upload are in</b>), in <code>GET /api/jobs/&#123;id&#125;</code>, <code>GET</code> and <code>PUT</code> of the timeline and in a quote (empty once everything is in). A <code>process</code> or <code>export</code> whose timeline needs uploads it does not have is <code>409</code> with the code <code>needs_uploads</code> and the list in <code>needs</code>; that timeline becomes the working one, so upload what it lists and call again. An upload must match a part of the working timeline exactly (<code>start</code> and <code>end</code> in seconds to the millisecond, as in <code>needs</code>), and again replaces the earlier one. They need the job to be uploading or done and idle (<code>409 job_busy</code> while it is queued or running), count as an edit for a finished job, and have a limit of their own (240 an hour for each account, <code>429</code>).</p>
+        <Table
+          head={['Call', 'Body and rules']}
+          rows={[
+            ['PUT /api/jobs/{id}/browser/noise?start=&end=', 'FLAC, 48 kHz, with the channels of the job’s audio, exactly the part’s range: round(end × 48000) − round(start × 48000) samples (the end of the recording cuts the last part short). Not 48 kHz, another number of samples or other channels is 400 and says which; at most samples × 8 + 1 MB (413). It becomes the noise layer’s output for the part.'],
+            ['PUT /api/jobs/{id}/browser/cues?start=&end=', 'JSON [{"start", "end", "text"}] in file time, inside the part: at most 1 MB and 20,000 cues; a cue half a second outside the part is cut to it, further is 400; cues with no text are dropped. No translations: free parts have none.'],
+          ]}
+        />
+        <p>Times are in seconds. The parts of a layer never overlap: a part put over others replaces them, and neighbours with the same settings are one part. A timeline is checked strictly (<code>400</code> with the code <code>bad_timeline</code> and what is wrong): every part inside the recording, at most 500 parts in a layer, at most 200&nbsp;KB. You can also give a <code>timeline</code> when you create a job (and when you ask for its estimate): then only those parts are processed and charged, and you leave out the settings the timeline replaces (<code>denoiseTier</code>, <code>atten_lim_db</code>, <code>noise</code>, <code>leveling</code>, <code>loudness_lufs</code>, <code>echo_reference_track</code>, <code>automatic</code>). With parts the browser makes, the answer to creating the job also has <code>needs</code> (see Uploads from the browser).</p>
         <Table
           head={['Call', 'What it does']}
           rows={[
@@ -329,6 +348,7 @@ curl -s $BASE/api/jobs/3f2c.../rerun ${hdr} -H "Content-Type: application/json" 
             ['GET /api/jobs/{id}/suggestions', 'Parts that sound different from the rest, each with reasons in plain words, their time range and the settings we propose. null if there are none.'],
             ['POST /api/jobs/{id}/suggestions', 'Looks for suggestions of a job that has none (a free run; watch the job).'],
             ['GET /api/jobs/{id}/preview/{layer}', 'A short stretch of what the job holds, see below.'],
+            ['GET /api/jobs/{id}/peaks/{layer}', 'The loudness outline of a layer for drawing: four values a second, see below.'],
           ]}
         />
         <h3>What a quote costs</h3>
@@ -343,6 +363,7 @@ curl -s $BASE/api/jobs/3f2c.../rerun ${hdr} -H "Content-Type: application/json" 
             ['Leveling', '$0.001', '98.5'],
           ]}
         />
+        <p>The subtitle parts of a version 2 timeline are priced for each part with no fixed amount: the rate of its quality (Standard $0.004 a minute, Accurate $0.015) times its whole seconds rounded up, plus $0.004 a minute for each language to translate into. Free parts and parts cleaned in the browser cost nothing, and what the job holds already is not made or charged again.</p>
         <Code label="Quote, then process">{`curl -s $BASE/api/jobs/3f2c.../quote ${hdr} -H "Content-Type: application/json" \
   -d '{"timeline": {"version": 1, "seconds": 612.4, "layers": {"noise": [{"start": 100, "end": 130.2, "strength_db": 40, "remover": "light"}]}}}'
 # -> {"estCostMicros": 5000, "free": false, "needsProcess": true, "approximate": false,
@@ -355,18 +376,21 @@ curl -s $BASE/api/jobs/3f2c.../process ${hdr} -H "Content-Type: application/json
         <p>The quote&rsquo;s <code>lines</code> add up to <code>estCostMicros</code>; <code>unchanged</code> says the result files already hold this timeline; <code>approximate</code> that a part with <code>remover: "auto"</code> is not decided yet (it is priced as the light remover and charged for what runs, never more than was set aside). Each process is one line in your credit history, for example &ldquo;Edited (Denoising + Leveling)&rdquo; with the minutes processed. A process or export counts toward the jobs in progress; if it fails or is canceled the job stays as it was and the money comes back. Voice rebuild and the heavy remover need the machine that rebuilds voices, which can be paused for a moment. Video results are not made by a process: you get the audio, and the website puts it back into the video.</p>
         <h3>Preview stretches</h3>
         <p><code>GET /api/jobs/&#123;id&#125;/preview/&#123;source|echo|noise|rebuild&#125;?start=&lt;seconds&gt;&amp;seconds=&lt;n&gt;</code> gives a short stretch (24-bit FLAC, 48&nbsp;kHz, at most 30 seconds, one channel for each channel of the recording) of your recording (<code>source</code>), the echo-free voice, the noise removal at full strength or the rebuilt voice, so a player can mix strengths and layers itself. The same <code>start</code> and <code>seconds</code> give stretches that line up sample for sample. Only what is made is there: the rest is silence and listed in the <code>X-Stretch-Missing</code> header (seconds from the start of the stretch), and a stretch with nothing made is <code>404</code> with the code <code>not_cached</code>. <code>X-Stretch-Scale</code> says how much a loud stretch was brought down (divide by it). A strength <code>a = 10^(-dB/20)</code> is <code>(1 - a) * noise + a * (the recording or the echo-free voice)</code>. It needs the same sign-in and has the same limits as the stretches of the kept copies above.</p>
+        <h3>Outlines</h3>
+        <p><code>GET /api/jobs/&#123;id&#125;/peaks/&#123;source|echo|noise|rebuild&#125;</code> answers <code>&#123;"rate": 4, "seconds": 612.4, "peaks": [0.0, 0.012, 0.31, null, ...]&#125;</code>: one value for each quarter second of the recording, the largest absolute sample over all channels (0 to 1, three decimals), and <code>null</code> where that layer is not made for that moment (the noise of a part cleaned in the browser is never made here). When the time of one call runs out before every block has its values the answer has <code>"pending": true</code>: ask again. <code>404</code> with the code <code>not_cached</code> when nothing of the layer is made. Reading it is not an edit; the sign-in and limits are those of the preview stretches.</p>
         <h3>How long the files stay</h3>
         <p>Your upload, everything made from it and the results are deleted <b>2 hours after the last edit</b> and never later than <b>6 hours after the upload</b>; <code>expiresAt</code> and <code>hardDeadlineAt</code> on the job say when. Finishing a run, saving a timeline, a quote, a process and an export are edits; reading the timeline or a preview is not. An edit that cannot finish before the 6 hours are over is refused (<code>409 job_expiring</code>).</p>
         <Table
           head={['Status and code', 'What it means']}
           rows={[
             ['400 bad_timeline', 'The timeline is not valid (the message says what), or asks for more Voice rebuild than one run takes.'],
-            ['400 timeline_options', 'A timeline together with settings it replaces.'],
+            ['400 timeline_options', 'A timeline together with settings it replaces (with subtitle parts also transcribeTier, language and translate), or subtitle parts in a job whose subtitles were set for the whole file.'],
             ['400 nothing_to_change', 'The result files already hold this timeline.'],
             ['404 not_cached', 'Nothing of that stretch is made yet.'],
             ['409 job_not_editable', 'The job only makes subtitles.'],
             ['409 job_busy', 'The job is being processed: wait for it.'],
             ['409 needs_processing', 'An export of something that has to be made first: process it (the quote is in the answer).'],
+            ['409 needs_uploads', 'The timeline has parts the browser makes whose uploads are not here yet: the list is in needs.'],
             ['409 price_changed', 'The price is above your maxCostMicros.'],
             ['429 too_many_active_jobs', 'A process, an export or a search for suggestions is a job in progress. Quotes, timelines and previews are not.'],
             ['402, 403, 507', 'As for creating a job.'],
@@ -463,7 +487,7 @@ export function isFromAudioCleaner(secret, header, rawBody) {
           rows={[
             ['Any API call', 'A burst of 120, then 2 a second, for each network. Polling one job every 2 seconds is fine; to watch many, list them with GET /api/jobs.'],
             ['Creating jobs', '20 an hour for each account and each network. A repeat of an Idempotency-Key doesn’t count.'],
-            ['Uploads', '30 an hour for each account. Upload speed is shared out fairly.'],
+            ['Uploads', '30 an hour for each account. Upload speed is shared out fairly. The pieces a browser sends for a timeline have a limit of their own: 240 an hour.'],
             ['Jobs at once', '3 file jobs in progress for each account (changing a finished job counts), and no more than 8 GiB of uploads waiting.'],
             ['Live sessions', '60 starts an hour for each account and 4 running at once; see the live page.'],
           ]}
