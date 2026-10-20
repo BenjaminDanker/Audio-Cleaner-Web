@@ -1,10 +1,10 @@
 // The main paths against the local backend, one per feature: sign-in (and the API's sign-in answers), the price list against
-// the server's own list, a paid file job (Denoising + Leveling, the estimate, the download), a paid subtitles job, the billing
+// the server's own list, a paid file job (Denoising + Leveling in the editor, the price on Start, the request, the download), a paid subtitles job, the billing
 // flow (top-up rules, the checkout return, a refused card, refunds), API keys, and the account (export, deletion, sign-out).
 // Usage: node tests/e2e.mjs [section ...]   sections: basic auth studio transcribe billing keys account
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, dropFile, launch, loginLink, pick, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, loginLink, mainButton, pick, setLeveling, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
 
 const only = process.argv.slice(2);
 const want = (s) => only.length === 0 || only.includes(s);
@@ -15,14 +15,22 @@ const got = []; // the files the page downloaded (they start by themselves when 
 page.on('download', (d) => got.push(d));
 const gotoApp = async (path) => { await page.goto(`${BASE}${path}`); await page.waitForSelector('main h1', { timeout: 15000 }); };
 
-async function waitJob(name, timeout = 240000) {
-  const card = page.locator('[data-testid=job]', { hasText: name }).first();
-  await card.waitFor({ timeout: 30000 });
-  await page.waitForFunction((n) => {
-    const c = [...document.querySelectorAll('[data-testid=job]')].find((e) => e.textContent.includes(n));
-    return c && ['done', 'failed', 'canceled'].includes(c.getAttribute('data-status'));
-  }, name, { timeout });
-  return card;
+/** The price on Start has arrived: the server's estimate comes 400 ms after the last change (until then Start shows no price). */
+const startPrice = async () => {
+  await page.waitForTimeout(700);
+  await page.waitForFunction(() => /^Start · /.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 15000 });
+};
+/** The editor's price words ("Free", "<$0.001", "$0.024", "$1.50"). */
+const words = (m) => (m <= 0 ? 'Free' : m < 1000 ? '<$0.001' : `$${m >= 100000 || m % 10000 === 0 ? (m / 1e6).toFixed(2) : (m / 1e6).toFixed(3)}`);
+/** Output menu: open it (a no-op when it is open) and close it again. */
+const openOutput = async () => { if (!(await page.getByTestId('output-pop').count())) await page.getByTestId('output-button').click(); await page.getByTestId('output-pop').waitFor(); };
+const closeOutput = async () => { if (await page.getByTestId('output-pop').count()) await page.getByTestId('output-button').click(); };
+/** Your files: the names of the files listed (the first word of each row), then closed again. */
+async function madeFiles() {
+  await page.getByTestId('bar-files').click();
+  const names = (await page.getByTestId('made-file').allInnerTexts()).map((t) => t.split(/\s+/)[0]);
+  await page.getByTestId('bar-files').click();
+  return names;
 }
 
 if (want('basic')) {
@@ -133,39 +141,46 @@ if (want('studio')) {
     }
   });
 
-  await check('a paid file job, Denoising + Leveling: the estimate on Start, the request that is sent, the finished file downloads by itself (Download again brings it again), the balance drops', async () => {
+  await check('a paid file job, Denoising + Leveling: the price on Start (the one the job is held at), the request that is sent, the finished file downloads by itself (Download again brings it again), the balance drops', async () => {
     await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'denoise');
-    await page.getByTestId('estimate').waitFor();
-    const est = await page.getByTestId('estimate').innerText();
-    if (!/\$0\.0[0-9]+/.test(est)) throw new Error('estimate: ' + est);
-    if (!/^Start – about \$0\.0/.test(await page.getByTestId('start').innerText())) throw new Error('start label: ' + await page.getByTestId('start').innerText());
-    if (!(await page.locator('input[type=checkbox][name=leveling]').isChecked())) throw new Error('Leveling is on by default with Denoising');
+    await setLeveling(page, 'youtube'); // (Leveling goes with Denoising unless it is switched off)
+    await startPrice();
+    const est = await mainButton(page);
+    if (!/^Start · \$0\.0[0-9]+$/.test(est)) throw new Error('start label: ' + est);
+    await page.getByTestId('bar-det').click();
+    const total = await page.getByTestId('details-total').innerText();
+    await page.getByTestId('bar-det').click();
+    if (!/^\$0\.0[0-9]+$/.test(total) || est !== `Start · ${total}`) throw new Error(`Details total ${total} vs ${est}`);
+    if ((await page.locator('.studio button[data-act=l-lvl][data-v="2"]').getAttribute('aria-pressed')) !== 'true') throw new Error('Leveling is on with Denoising');
     got.length = 0;
     const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith('/api/jobs') && r.method() === 'POST'), page.getByTestId('start').click()]);
     const body = req.postDataJSON();
-    if (body.kind !== 'denoise' || body.denoiseTier !== 'standard' || body.options.leveling !== true || body.options.audio_format !== 'flac') throw new Error('job sent: ' + JSON.stringify(body));
+    // the price on Start is what the server holds for the job: the answer to the request has it
+    const created = await (await req.response()).json();
+    if (est !== `Start · ${words(created.estCostMicros)}`) throw new Error(`Start said "${est}", the job was made at ${created.estCostMicros} micros`);
+    const layers = body.timeline?.layers || {};
+    if (body.kind !== 'denoise' || 'denoiseTier' in body || 'leveling' in body.options || body.options.audio_format !== 'flac' || Object.keys(layers).sort().join() !== 'leveling,noise'
+      || layers.noise[0].remover !== 'auto' || layers.leveling[0].loudness_lufs !== -14 || layers.noise.length !== 1 || layers.leveling.length !== 1) throw new Error('job sent: ' + JSON.stringify(body));
     await page.waitForURL(/\/app\/job\/[0-9a-f]{32}$/, { timeout: 90000 }); // Start opens the job's own page
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    const card = await waitJob('noisy.'); // uncompressed WAV is uploaded as noisy.flac
-    const status = await card.getAttribute('data-status');
-    if (status !== 'done') throw new Error('status ' + status + ' ' + (await card.innerText()));
-    await card.getByTestId('result').waitFor({ timeout: 60000 }); // its last step is over and the files are down
+    await waitCardDone(page); // (uncompressed WAV is uploaded as noisy.flac)
+    await waitResult(page, 'result', 60000); // its last step is over and the files are down
     await page.screenshot({ path: join(SHOTS, 'studio-done.png'), fullPage: true });
     if (got.length !== 1 || !got[0].suggestedFilename().endsWith('.flac')) throw new Error('the audio a server job makes should come down by itself as one FLAC, got ' + got.map((d) => d.suggestedFilename()));
     const dl = got[0];
     const p = join(FILES, 'out-studio.flac');
     await dl.saveAs(p);
-    if ((await card.getByTestId('download-again').count()) !== 1) throw new Error('want exactly one Download again button');
-    const [again] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download-again').click()]);
+    if ((await page.getByTestId('download-again').count()) !== 1) throw new Error('want exactly one Download again button');
+    const [again] = await Promise.all([page.waitForEvent('download'), page.getByTestId('download-again').click()]);
     if (again.suggestedFilename() !== dl.suggestedFilename()) throw new Error('again: ' + again.suggestedFilename());
-    // the balance is on the Cleanup page, not on the job's page: "Your jobs" goes there, and the finished job is one of its rows
-    await page.getByTestId('all-jobs').click();
+    // the balance is on the Cleanup page, not on the job's page: the header's Cleanup link goes there, and the finished job is one of its rows
+    await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Cleanup', exact: true }).click();
     await page.waitForURL(/\/app$/);
     await page.waitForFunction(() => document.querySelector('[data-testid=available]')?.textContent !== '$5.00', null, { timeout: 15000 });
     await page.locator('[data-testid=job-row][data-status=done]', { hasText: 'noisy.' }).first().waitFor({ timeout: 15000 }).catch(() => { throw new Error('the finished job is not a row on the Cleanup page'); });
-    return `${est.split('\n')[0]}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;
+    return `${est}; downloaded ${dl.suggestedFilename()} ${statSync(p).size} bytes; balance ${await page.getByTestId('available').innerText()}`;
   });
 }
 
@@ -175,22 +190,25 @@ if (want('transcribe')) {
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'standard');
-    await page.getByTestId('estimate').waitFor();
+    await openOutput(); // (the Output menu starts with the SRT only; the old form ticked all three)
+    await page.getByTestId('cap-vtt').check();
+    await page.getByTestId('cap-txt').check();
+    await closeOutput();
+    await startPrice();
+    if (!/^Start · (\$0\.0[0-9]+|<\$0\.001)$/.test(await mainButton(page))) throw new Error('start label: ' + await mainButton(page));
     got.length = 0;
-    await page.getByRole('button', { name: /^Start – about/ }).click();
+    await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    const card = await waitJob('noisy.', 300000);
-    const st = await card.getAttribute('data-status');
-    if (st !== 'done') throw new Error(st + ' ' + (await card.innerText()));
-    await card.getByTestId('result').waitFor({ timeout: 60000 });
-    const names = await card.getByTestId('made-file').locator('.oname').allInnerTexts();
+    await waitCardDone(page, 300000);
+    await waitResult(page, 'result', 60000);
+    const names = await madeFiles();
     const dls = got.map((d) => d.suggestedFilename()).sort();
     if (dls.length !== 3 || !/-transcript\.txt$/.test(dls[0]) || !/\.srt$/.test(dls[1]) || !/\.vtt$/.test(dls[2])) throw new Error('downloaded by itself: ' + dls);
     const txt = got.find((d) => /\.txt$/.test(d.suggestedFilename()));
     await txt.saveAs(join(FILES, 'out-transcript.txt'));
     const text = readFileSync(join(FILES, 'out-transcript.txt'), 'utf8').trim();
     if (!text) throw new Error('empty transcript');
-    if ((await card.getByRole('button', { name: /Download/ }).count()) !== 1) throw new Error('want one Download again button, no per-file buttons');
+    if ((await page.getByRole('button', { name: /Download/ }).count()) !== 1) throw new Error('want one Download again button, no per-file buttons');
     return `${names.join(', ')} | "${text.slice(0, 80)}"`;
   });
 
@@ -199,20 +217,23 @@ if (want('transcribe')) {
     await dropFile(page, join(FILES, 'speech.mp4'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'standard');
+    await openOutput();
     await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
-    for (const label of ['SRT', 'VTT']) await page.locator('label.check').filter({ hasText: new RegExp(`^${label}$`) }).locator('input').uncheck();
-    await page.getByTestId('estimate').waitFor();
+    await page.getByTestId('cap-txt').check();
+    for (const k of ['srt', 'vtt']) await page.getByTestId(`cap-${k}`).uncheck();
+    await startPrice();
     const hint = await page.getByTestId('will-download').innerText();
     if (!/speech-subtitled\.mkv/.test(hint) || !/TXT/.test(hint) || /SRT|VTT/.test(hint)) throw new Error('the line before Start: ' + hint);
+    await closeOutput();
     got.length = 0;
-    await page.getByRole('button', { name: /^Start – about/ }).click();
+    await page.getByTestId('start').click();
     await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-    const card = await waitJob('speech.', 300000);
-    if ((await card.getAttribute('data-status')) !== 'done') throw new Error(await card.innerText());
-    await card.getByTestId('result').waitFor({ timeout: 90000 });
+    await waitCardDone(page, 300000);
+    await waitResult(page, 'result', 90000);
     const dls = got.map((d) => d.suggestedFilename()).sort();
     if (dls.join() !== 'speech-subtitled.mkv,speech-transcript.txt' && !(dls.length === 2 && /-subtitled\.mkv$/.test(dls[0]) && /-transcript\.txt$/.test(dls[1]))) throw new Error('downloaded by itself: ' + dls);
-    if ((await card.getByTestId('made-file').count()) !== 2) throw new Error('the card should list the two files: ' + await card.getByTestId('made').innerText());
+    const listed = await madeFiles();
+    if (listed.length !== 2) throw new Error('Your files should list the two files: ' + listed);
     await page.screenshot({ path: join(SHOTS, 'studio-video-subs.png'), fullPage: true });
     return dls.join(', ');
   });
