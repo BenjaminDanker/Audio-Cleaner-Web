@@ -584,9 +584,9 @@ export class Session {
     // the job exists: from here on its page finishes it by itself (finish.js)
     const wantsNow = { ...wants, soundHere: false, subsHere: false };
     this.id = out.id;
-    this.takeSnapshot(tracks, choice);
     const fin = beginFinish({ ...out, displayName: file.name, outputs: [] }, { file, info, wants: wantsNow, browser: share ? share.catch(() => {}) : null });
     this.fin = fin;
+    this.takeSnapshot(tracks, choice);
     this.job = { id: out.id, status: 'uploading', kind, displayName: file.name, inputName: file.name, durationSeconds: T, outputs: [], progress: 0 };
     this.register();
     this.welcome = startedNote(out);
@@ -603,8 +603,11 @@ export class Session {
     return { id: out.id, job: out };
   }
 
-  takeSnapshot(tracks, choice) {
-    this.snap = { tracks: clone(tracks), choice: choice ? { format: choice.format, name: choice.name, size: choice.size } : null, sfiles: this.out.sfiles.slice(), burn: this.out.burn };
+  /** What the files hold now: the tracks, the file type and name (as the finishing step has them: a video with only subtitles inside is an MKV), the subtitle files. */
+  takeSnapshot(tracks, choice, fin = this.fin) {
+    const w = fin?.effective?.();
+    const made = w && (w.sound || w.embed) ? { format: w.format, name: w.name, size: w.size } : choice ? { format: choice.format, name: choice.name, size: choice.size } : null;
+    this.snap = { tracks: clone(tracks), choice: made, sfiles: this.out.sfiles.slice(), burn: this.out.burn };
   }
 
   /** A run with nothing on our side: the Free noise removal and subtitles, made here. */

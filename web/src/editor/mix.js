@@ -324,7 +324,7 @@ export class MixPlayer {
     const prep = prepare({ ...model, missing: missingOf(e) });
     const { start, seconds } = this._span(k);
     const env = envelope(prep, start, start + seconds);
-    const at = (t) => this.startedAt + t;
+    const at = (t) => Math.max(0, this.startedAt + t); // (playing from 0:08 when the audio clock reads 0:03 puts the start of the first stretch before time 0, which AudioParam refuses)
     const f = prep.lufs == null ? 1 : levelFactor(this._refDb(), prep.lufs);
     const sched = (param, values, map = (v) => v) => {
       param.cancelScheduledValues(0);

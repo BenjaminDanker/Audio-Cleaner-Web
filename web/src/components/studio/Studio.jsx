@@ -163,7 +163,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const estMicros = !server ? 0 : !rates ? null : multi ? (est.state === 'ok' ? est.micros : null) : c.total;
   const changedTracks = done && !!session.snap && !sameTracks(S.tracks, session.snap.tracks, T);
   const outNow = useMemo(() => ({ format: choice.format, name: choice.name, size: choice.size }), [choice.format, choice.name, choice.size]);
-  const changedOut = done && !!session.snap && (!!session.snap.choice && (session.snap.choice.format !== outNow.format || session.snap.choice.name !== outNow.name || session.snap.choice.size !== outNow.size)
+  const mediaMade = !fin || (() => { const w = fin.effective(); return !!(w.sound || w.embed); })(); // (the file type and name only matter when a media file is made)
+  const changedOut = done && !!session.snap && (mediaMade && !!session.snap.choice && (session.snap.choice.format !== outNow.format || session.snap.choice.name !== outNow.name || session.snap.choice.size !== outNow.size)
     || !sameOut(session.snap.sfiles, session.out.sfiles) || session.snap.burn !== session.out.burn);
   const changed = changedTracks || changedOut;
   const canEdit = !!job && (isLocal || !!job.edit?.available || (session.S && !job.edit));
@@ -383,7 +384,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const commit = (fn) => { session.commit(fn); };
   const apply = (tr, patch) => { if (processing || locked || !session.hasAudio) return; commit((st) => applyToSel(st, tr, patch)); };
   const selectRange = (s, e, open) => {
-    s = clamp(Math.round(s), 0, T); e = clamp(Math.round(e), 0, T);
+    // (whole seconds; a part that ends within a second of the end of a recording of a fractional length goes to the very end, else it leaves a sliver)
+    s = clamp(Math.round(s), 0, T); e = clamp(Math.round(e), 0, T); if (T - e < 1) e = T;
     setSel(S, [{ s, e: Math.max(e, s + 1 > T ? T : s + 1) }]);
     if (open && mobile && S.sel) setSheet(true);
     rerender();
