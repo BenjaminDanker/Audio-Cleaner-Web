@@ -93,21 +93,27 @@ def speech_sample(audio_16k: np.ndarray, seconds: float = 30.0, floor_dbfs: floa
 LANGUAGE_CONFIDENCE = 0.6
 
 
-def _detect(audio_16k: np.ndarray, path: Path, threads: int) -> tuple[str, float]:
+def _detect(audio_16k: np.ndarray, path: Path, threads: int, held: dict | None = None) -> tuple[str, float]:
     from faster_whisper import WhisperModel
 
-    model = WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
+    key = ("detect", str(path), threads)
+    model = held.get(key) if held is not None else None
+    if model is None:
+        model = WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=threads, num_workers=1)
+        if held is not None:
+            held[key] = model
     language, prob, _all = model.detect_language(speech_sample(audio_16k).astype(np.float32, copy=False))
     return language, float(prob)
 
 
-def detect_language(audio_16k: np.ndarray, quick_model_path: Path, sure_model_path: Path, threads: int = 4) -> str:
+def detect_language(audio_16k: np.ndarray, quick_model_path: Path, sure_model_path: Path, threads: int = 4, held: dict | None = None) -> str:
     """Spoken language of the first 30 s of speech. A quick Whisper model (base) decides when it is at least
     LANGUAGE_CONFIDENCE sure; when it isn't (short clips, speech under other voices) a bigger one (small) does: the
-    bigger model's answers at about a quarter of its CPU (docs/research/heavy-2026-10.md)."""
-    language, prob = _detect(audio_16k, quick_model_path, threads)
+    bigger model's answers at about a quarter of its CPU (docs/research/heavy-2026-10.md). `held`: a dict the caller keeps while it
+    detects the language of several stretches in a row: the models are loaded once into it instead of once per call."""
+    language, prob = _detect(audio_16k, quick_model_path, threads, held)
     if prob < LANGUAGE_CONFIDENCE:
-        language, _ = _detect(audio_16k, sure_model_path, threads)
+        language, _ = _detect(audio_16k, sure_model_path, threads, held)
     return language
 
 
@@ -148,12 +154,19 @@ def transcribe_parakeet(
     threads: int = 4,
     progress=None,
     cancel: threading.Event | None = None,
+    held: dict | None = None,
 ) -> list[Segment]:
     """Parakeet TDT with Silero VAD segmentation (<=30 s pieces at pauses) and
     token timestamps. device "cuda" needs onnxruntime-gpu and raises when the
-    encoder could not get the card (never a slow run on the CPU instead)."""
+    encoder could not get the card (never a slow run on the CPU instead). `held`: a dict the caller keeps while it transcribes several
+    stretches in a row: the model (2.4 GB of weights) and the speech detector are loaded once into it, and again only when the model
+    asked for changes (one model is held at a time)."""
     import onnx_asr
     import onnxruntime as ort
+
+    key = (str(model_path), str(vad_path), device, threads)
+    if held is not None and held.get("key") == key:
+        return _parakeet_run(held["model"], held["vad"], audio_16k, device, progress, cancel)
 
     so = ort.SessionOptions()
     so.intra_op_num_threads = min(threads, _PARAKEET_CPU_THREADS) if device == "cpu" else 2
@@ -169,6 +182,11 @@ def transcribe_parakeet(
         # input length (~50 s each on a GTX 960 instead of 0.2 s). The arena grows by what is asked instead of by powers
         # of two: same transcript, 0.3-0.6 GB less of the card (3.2 GB at the peak on 11 minutes of speech instead of 3.5).
         providers = [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC", "arena_extend_strategy": "kSameAsRequested"})]
+    if held is not None:
+        held.clear()  # (the model that was held, if another, goes before this one is loaded)
+        import gc
+
+        gc.collect()
     model = onnx_asr.load_model("nemo-conformer-tdt", str(model_path), sess_options=so, providers=providers)
     if device == "cuda" and model.asr._encoder.get_providers()[0] != "CUDAExecutionProvider":
         # onnxruntime only logs it when CUDA can't be loaded and runs on the CPU
@@ -181,6 +199,12 @@ def transcribe_parakeet(
     vad_so.intra_op_num_threads = 1
     vad_so.inter_op_num_threads = 1
     vad = onnx_asr.load_vad("silero", path=str(vad_path), sess_options=vad_so, providers=["CPUExecutionProvider"])
+    if held is not None:
+        held.update(key=key, model=model, vad=vad)
+    return _parakeet_run(model, vad, audio_16k, device, progress, cancel)
+
+
+def _parakeet_run(model, vad, audio_16k: np.ndarray, device: str, progress, cancel) -> list[Segment]:
     total = len(audio_16k) / SAMPLE_RATE
     pieces = model.with_vad(vad, max_speech_duration_s=30, min_silence_duration_ms=500,
                             batch_size=1 if device == "cpu" else _PARAKEET_GPU_BATCH).with_timestamps()

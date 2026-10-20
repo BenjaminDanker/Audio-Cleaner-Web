@@ -161,10 +161,16 @@ def test_browser_noise_parts_cost_nothing_and_the_job_waits_for_them(client, sig
     est = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": tl}, headers=h).json()
     assert est["estCostMicros"] == expected({"leveling": 61}) and [l["item"] for l in est["lines"]] == ["leveling"]
     assert est["timeline"]["layers"]["noise"] == [{"start": 100.0, "end": 160.5, "browser": True}]  # no strength, no remover
-    # strength and remover are not used: they may be sent and are not kept
+    # the strength the person chose is kept for the page and used for nothing (not the price, not the work); the remover is not kept
     again = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {},
                                                     "timeline": v2(600, noise=[{**browser(100, 160.5), "strength_db": 24, "remover": "heavy"}], leveling=[level(100, 160.5)])}, headers=h)
-    assert again.json()["timeline"] == est["timeline"]
+    assert again.json()["timeline"]["layers"]["noise"] == [{"start": 100.0, "end": 160.5, "browser": True, "strength_db": 24.0}]
+    assert again.json()["estCostMicros"] == est["estCostMicros"] and again.json()["lines"] == est["lines"]
+    # neighbours with different strengths are separate parts, each of them uploaded on its own
+    two = client.post("/api/jobs", json={"kind": "denoise", "filename": "talk.wav", "sizeBytes": 1000, "durationSeconds": 600, "timeline": v2(600, noise=[
+        {**browser(10, 20), "strength_db": 12}, {**browser(20, 30), "strength_db": 40}, {**browser(30, 40), "strength_db": 40}])}, headers=h)
+    assert two.status_code == 200 and two.json()["needs"] == [{"kind": "noise", "start": 10.0, "end": 20.0}, {"kind": "noise", "start": 20.0, "end": 40.0}]
+    assert params_of(two.json()["id"])["edit"]["timeline"]["layers"]["noise"][1] == {"start": 20.0, "end": 40.0, "browser": True, "strength_db": 40.0}
     # a browser part with nothing else: nothing to pay
     only = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": v2(600, noise=[browser(10, 20)])}, headers=h).json()
     assert only["estCostMicros"] == 0 and only["lines"] == []
@@ -574,3 +580,179 @@ def test_window_peaks_count_from_the_start_of_the_recording():
     first, p = peaker.window_peaks(y, 6_000)  # a block that starts in the middle of a window holds only its own samples of it
     assert first == 0 and p == [0.5, 0.25, 0.75]  # (samples 6,000 to 36,000 of the recording: windows 0, 1 and 2)
     assert peaker.window_peaks(y[:5], 24_000 * 3 + 7) == (6, [0.0])
+
+
+def test_a_new_strength_on_a_browser_part_changes_nothing_in_the_sound_or_the_price(client, signed_in):
+    uid, h = funded(client, signed_in)
+    jid = edit_job(uid, seconds=600.0, rendered="empty")
+    tl = tl_with(jid, noise=[{**browser(100, 130), "strength_db": 12}], leveling=[level(100, 130)])
+    assert client.put(f"/api/jobs/{jid}/timeline", json={"timeline": tl}, headers=h).status_code == 200
+    assert put_noise(client, h, jid, 100, 130, flac(30 * SR)).status_code == 200
+    t = Timeline.from_json(tl)
+    p = params_of(jid)
+    p["edit"]["rendered"] = t.audio().to_json()
+    p["edit"]["browser_rendered"] = editing.uploads_fingerprint(jid, t)[0]
+    save_params(jid, p)
+    assert client.get(f"/api/jobs/{jid}/timeline").json()["timeline"]["layers"]["noise"] == [{"start": 100.0, "end": 130.0, "browser": True, "strength_db": 12.0}]
+    q = quote(client, h, jid, tl).json()
+    assert q["unchanged"] is True and q["estCostMicros"] == 0
+    stronger = tl_with(jid, noise=[{**browser(100, 130), "strength_db": 40}], leveling=[level(100, 130)])
+    q = quote(client, h, jid, stronger).json()
+    assert q["unchanged"] is True and q["estCostMicros"] == 0 and q["timeline"]["layers"]["noise"][0]["strength_db"] == 40.0
+    assert client.post(f"/api/jobs/{jid}/process", json={"timeline": stronger}, headers=h).json()["code"] == "nothing_to_change"
+    # saving it keeps the strength, so the page shows it after a reload
+    assert client.put(f"/api/jobs/{jid}/timeline", json={"timeline": stronger}, headers=h).json()["timeline"]["layers"]["noise"][0]["strength_db"] == 40.0
+    assert client.get(f"/api/jobs/{jid}/timeline").json()["timeline"]["layers"]["noise"][0]["strength_db"] == 40.0
+
+
+def test_standard_parts_are_made_one_after_the_other_with_the_model_held_for_all_of_them(tmp_path, monkeypatch):
+    """editrun.subtitles_prepare: every part of one language gets the same `held` dicts (the model is loaded once, in transcribe), parts of
+    the same model are made in a row, and what was held is let go when the run is over."""
+    import numpy as np
+
+    from acw.worker import editrun
+    from acw_common import transcribe
+    from acw_common.captions import Segment
+
+    calls = []
+
+    def parakeet(audio, model, vad, *, device, threads, progress, held):
+        calls.append(("parakeet", model.name, id(held), held.setdefault("n", 0)))
+        held["n"] += 1
+        return [Segment(0.5, 1.0, "hi")]
+
+    def whisper_detect(audio, quick, sure, threads, held=None):
+        calls.append(("detect", id(held)))
+        return "es" if len([c for c in calls if c[0] == "detect"]) == 1 else "ja"
+
+    monkeypatch.setattr(transcribe, "transcribe_parakeet", parakeet)
+    monkeypatch.setattr(transcribe, "detect_language", whisper_detect)
+    monkeypatch.setattr(transcribe, "transcribe", lambda audio, path, **kw: calls.append(("whisper", kw["model"])) or ([Segment(0.5, 1.0, "yo")], kw["language"]))
+    monkeypatch.setattr(transcribe, "load_model", lambda path, threads: "the whisper model")
+    unloaded = []
+    monkeypatch.setattr(transcribe, "unload", lambda: unloaded.append(True))
+    x = np.zeros((20 * SR, 1), np.float32)
+    parts = [{"key": f"k{i}", "start": 2.0 * i, "end": 2.0 * i + 1.5, "quality": "standard", "language": lang, "translate": []}
+             for i, lang in enumerate(["en", None, "es", "en", "ja"])]
+    spec = {"models_dir": str(tmp_path), "threads": 2, "input": "input.wav", "editor": {"subtitles": {"parts": parts}}}
+    probe = type("P", (), {"duration": 20.0})()
+    left = editrun.subtitles_prepare(tmp_path, spec, None, probe, x, 100.0, lambda **kw: None)
+    assert left is False and unloaded == [True]
+    done = sorted(p.name for p in (tmp_path / "subs").iterdir())
+    assert done == ["k0", "k1", "k2", "k3", "k4"] and all((tmp_path / "subs" / k / "segments.json").is_file() for k in done)
+    names = [c[:2] for c in calls if c[0] != "detect"]
+    # the English parts first, one after the other (parakeet-v2), then Spanish (v3), Japanese (Whisper's, loaded through transcribe.load_model),
+    # and the part whose language is found out last (here Spanish again: the model that is held is v3, still)
+    assert names == [("parakeet", "parakeet-v2")] * 2 + [("parakeet", "parakeet-v3"), ("whisper", "the whisper model"), ("parakeet", "parakeet-v3")]
+    held_ids = {c[2] for c in calls if c[0] == "parakeet"}
+    assert len(held_ids) == 1 and [c[3] for c in calls if c[0] == "parakeet"] == [0, 1, 2, 3]  # (one dict for the whole run)
+    assert len({c[1] for c in calls if c[0] == "detect"}) == 1  # ... and one for the language models
+
+
+# ------------------------------------------------------------------------- a run never leaves the job half changed
+
+def a_run(client, h, jid, ext="flac"):
+    """A job with an old result, and a process of a paid change queued on it (so there is a hold); returns (the timeline, the folder)."""
+    d = folder(jid)
+    (d / "talk-cleaned.flac").write_bytes(b"OLD AUDIO")
+    db.execute("UPDATE jobs SET outputs_json = ? WHERE id = ?", (json.dumps([{"file": "talk-cleaned.flac", "kind": "audio", "bytes": 9}]), jid))
+    tl = tl_of(jid, noise=[noise(0, 30)])
+    r = client.post(f"/api/jobs/{jid}/process", json={"timeline": tl, **({"audioFormat": ext} if ext != "flac" else {})}, headers=h)
+    assert r.status_code == 200, r.text
+    db.execute("UPDATE jobs SET status = 'running', worker_id = 't', started_at = ? WHERE id = ?", (db.now(), jid))
+    return tl, d
+
+
+def the_runner_ends(d, tl, ext="flac"):
+    """What the sandboxed runner leaves for the server when it is through: the new audio under its temporary name, the scratch, its answer."""
+    (d / f"talk-cleaned.{ext}.run").write_bytes(b"NEW AUDIO")
+    (d / "decoded.f32").write_bytes(b"scratch")
+    billed = {"light": {"seconds": 30}}
+    return {"ok": True, "outputs": [{"file": f"talk-cleaned.{ext}.run", "kind": "audio"}],
+            "editor": {"billed": billed, "resolved": {}, "rendered": Timeline.from_json(tl, seconds=600).to_json()}}
+
+
+def test_the_new_audio_takes_the_old_ones_place_only_when_the_run_is_complete(client, signed_in):
+    uid, h = funded(client, signed_in)
+    jid = edit_job(uid, seconds=600.0, rendered="empty")
+    tl, d = a_run(client, h, jid)
+    before = params_of(jid)["edit"].get("rendered")
+    res = the_runner_ends(d, tl)
+    # while the run runs the old result is what is there, and what the record says
+    assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and (d / "talk-cleaned.flac.run").read_bytes() == b"NEW AUDIO"
+    worker._complete_edit(row(jid), d, res)
+    done = row(jid)
+    assert done["status"] == "done" and (d / "talk-cleaned.flac").read_bytes() == b"NEW AUDIO"
+    assert [o["file"] for o in json.loads(done["outputs_json"])] == ["talk-cleaned.flac"] and json.loads(done["outputs_json"])[0]["bytes"] == 9
+    assert files_of(jid) >= {"talk-cleaned.flac"} and not {n for n in files_of(jid) if n.endswith((".run", ".bak"))} and "decoded.f32" not in files_of(jid)
+    assert params_of(jid)["edit"]["rendered"] != before and params_of(jid)["edit"]["rendered"]["layers"]["noise"][0]["end"] == 30.0
+
+
+def test_a_run_that_fails_leaves_the_old_audio_and_the_record_that_matches_it(client, signed_in):
+    uid, h = funded(client, signed_in)
+    jid = edit_job(uid, seconds=600.0, rendered="empty")
+    tl, d = a_run(client, h, jid)
+    before = params_of(jid)["edit"]["rendered"]
+    the_runner_ends(d, tl)  # the runner had written the new audio when the run failed (the web process's part of it, say)
+    assert jobs.finish_failed(row(jid), "Extra accurate transcription failed; you were not charged.") is True
+    done = row(jid)
+    assert done["status"] == "done" and (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO"
+    assert not {n for n in files_of(jid) if n.endswith(".run")} and "decoded.f32" not in files_of(jid)
+    p = params_of(jid)
+    assert p["edit"]["rendered"] == before and "run" not in p and p["edit"]["lastRun"]["ok"] is False
+    assert [o["file"] for o in json.loads(done["outputs_json"])] == ["talk-cleaned.flac"] and ledger.balance(uid)["held_micros"] == 0
+    # the run's own failure (the runner dies, the job is put back): the same
+    tl, d = a_run(client, h, jid)
+    the_runner_ends(d, tl)
+    db.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (jid,))
+    jobs.requeue(row(jid))
+    assert not {n for n in files_of(jid) if n.endswith(".run")} and (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO"
+
+
+def test_a_run_that_cannot_be_committed_puts_the_old_audio_back(client, signed_in, monkeypatch):
+    uid, h = funded(client, signed_in)
+    jid = edit_job(uid, seconds=600.0, rendered="empty")
+    tl, d = a_run(client, h, jid)
+    res = the_runner_ends(d, tl)
+    held = ledger.balance(uid)["held_micros"]
+
+    def broken(*a, **k):
+        raise RuntimeError("the ledger is down")
+
+    monkeypatch.setattr(ledger, "capture_hold", broken)
+    with pytest.raises(RuntimeError):
+        worker._complete_edit(row(jid), d, res)
+    assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and not {n for n in files_of(jid) if n.endswith((".run", ".bak"))}
+    assert row(jid)["status"] == "running" and "run" in params_of(jid) and ledger.balance(uid)["held_micros"] == held
+    # the job was canceled meanwhile: nothing changes either
+    monkeypatch.undo()
+    res = the_runner_ends(d, tl)
+    db.execute("UPDATE jobs SET status = 'canceled' WHERE id = ?", (jid,))
+    worker._complete_edit(row(jid), d, res)
+    assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and not {n for n in files_of(jid) if n.endswith(".bak")}
+
+
+def test_a_new_file_type_replaces_the_old_file_only_with_the_commit(client, signed_in, monkeypatch):
+    uid, h = funded(client, signed_in)
+    jid = edit_job(uid, seconds=600.0, rendered="empty")
+    tl, d = a_run(client, h, jid, ext="wav")
+    res = the_runner_ends(d, tl, ext="wav")
+    monkeypatch.setattr(ledger, "capture_hold", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    with pytest.raises(RuntimeError):
+        worker._complete_edit(row(jid), d, res)
+    assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and not (d / "talk-cleaned.wav").exists()  # (the old file was never touched)
+    monkeypatch.undo()
+    worker._complete_edit(row(jid), d, the_runner_ends(d, tl, ext="wav"))
+    assert (d / "talk-cleaned.wav").read_bytes() == b"NEW AUDIO" and not (d / "talk-cleaned.flac").exists()
+    assert [o["file"] for o in json.loads(row(jid)["outputs_json"])] == ["talk-cleaned.wav"]
+
+
+def test_audio_that_was_being_put_in_place_when_the_process_stopped_is_put_back_when_the_run_starts_again(client, signed_in):
+    uid, h = funded(client, signed_in)
+    jid = edit_job(uid, seconds=600.0, rendered="empty")
+    d = folder(jid)
+    (d / "talk-cleaned.flac").write_bytes(b"NEW AUDIO")  # the swap had happened, the commit had not
+    (d / "talk-cleaned.flac.bak").write_bytes(b"OLD AUDIO")
+    (d / "talk-cleaned.flac.run").write_bytes(b"x")
+    editing.clear_scratch(d)
+    assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and not {n for n in files_of(jid) if n.endswith((".bak", ".run"))}

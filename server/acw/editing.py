@@ -1164,13 +1164,67 @@ def cache_size(job_id: str) -> int:
 
 
 SCRATCH_NAMES = {"decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy", "kept-decoded.f32", "spec.json", "main-state.json"}
+STAGED = ".run"  # the audio an edit run made, under this extra ending, until the run is complete (`swap_in`)
+BACKUP = ".bak"  # ... and the audio it replaces, while the run is being committed
+
+
+def final_name(name: str) -> str:
+    """The name a file of an edit run's result has once the run is complete: its temporary ending taken off."""
+    return name[:-len(STAGED)] if name.endswith(STAGED) else name
+
+
+def swap_in(d: Path, staged: dict[str, str]) -> list[tuple[Path, Path, Path | None]]:
+    """Put the audio of a finished run in its place: each temporary file (`staged` maps its name to its final name) replaces the file with the
+    final name, which is kept as `<name>.bak` until `commit_swap`. Returns what `undo_swap` / `commit_swap` need."""
+    done: list[tuple[Path, Path, Path | None]] = []
+    try:
+        for tmp_name, final_name_ in staged.items():
+            final, tmp = d / final_name_, d / tmp_name
+            bak = d / (final_name_ + BACKUP) if final.exists() else None
+            if bak is not None:
+                os.replace(final, bak)
+            os.replace(tmp, final)
+            done.append((final, tmp, bak))
+    except BaseException:
+        undo_swap(done)
+        raise
+    return done
+
+
+def undo_swap(done: list[tuple[Path, Path, Path | None]]) -> None:
+    """The run did not complete: the old audio is back, the new is dropped."""
+    for final, tmp, bak in reversed(done):
+        try:
+            if bak is not None:
+                os.replace(bak, final)
+            else:
+                final.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def commit_swap(done: list[tuple[Path, Path, Path | None]]) -> None:
+    for _final, _tmp, bak in done:
+        if bak is not None:
+            bak.unlink(missing_ok=True)
 
 
 def clear_scratch(d: Path) -> None:
-    """Remove what a run leaves behind besides the job's files (the memory-mapped scratch, the spec and the results of its stages)."""
+    """Remove what a run leaves behind besides the job's files (the memory-mapped scratch, the spec and the results of its stages, the
+    audio it made under a temporary name; audio that a run was putting in its place when it stopped goes back to what it was)."""
     try:
         for p in d.iterdir():
             n = p.name
+            if n.endswith(BACKUP) and not p.is_dir():
+                try:
+                    os.replace(p, p.with_name(n[:-len(BACKUP)]))
+                except OSError:
+                    pass
+                continue
+            if n.endswith(STAGED) and not p.is_dir():
+                p.unlink(missing_ok=True)
+                continue
             if n in SCRATCH_NAMES or n.startswith(("result-", "editor-", "browser-")) or n == "asr_chunks":
                 if p.is_dir() and not p.is_symlink():
                     shutil.rmtree(p, ignore_errors=True)

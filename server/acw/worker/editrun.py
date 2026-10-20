@@ -249,7 +249,6 @@ def subtitles_prepare(job_dir: Path, spec: dict, ff, probe, x: np.ndarray | None
     make. Free parts have nothing to do here (the browser transcribed them)."""
     from acw_common import pipeline, transcribe
     from acw_common import subtitles as st
-    from acw_common.captions import segments_to_json
 
     parts = [p for p in spec["editor"]["subtitles"]["parts"] if p["quality"] != "free"]
     root = job_dir / SUBS
@@ -268,37 +267,55 @@ def subtitles_prepare(job_dir: Path, spec: dict, ff, probe, x: np.ndarray | None
         return full16[0][int(round(a_s * 16000)):int(round(b_s * 16000))]
 
     todo = [p for p in parts if not (root / p["key"] / "segments.json").is_file() and not (root / p["key"] / "asr_chunks" / "index.json").is_file()]
+    # (the parts that need the same model are made one after the other, and the model is loaded once for all of them: it is the 2.4 GB one
+    # for most languages; the parts whose language is found out come last, each with whichever model its language needs)
+    todo.sort(key=lambda p: transcribe.pick_engine(p["language"]) if p["language"] and p["quality"] == "standard" else "~")
     seconds_all = sum(p["end"] - p["start"] for p in todo) or 1.0
     done_s = 0.0
-    for p in todo:
-        d = root / p["key"]
-        d.mkdir(parents=True, exist_ok=True)
-        pa, pb = st.padded(p["start"], p["end"], total)
-        audio = speech(pa, pb)
-        first = base + span * done_s / seconds_all
-        share = span * (p["end"] - p["start"]) / seconds_all
-        emit(stage="Transcribing", progress=int(first))
-        if p["quality"] == "accurate":
-            from acw.worker import runner
-
-            runner._write_asr_chunks(ff, d, audio, offset=pa, window=(p["start"] - pa, p["end"] - pa))
-        else:
-            lang = p["language"]
-            if lang is None:
-                emit(stage="Detecting language", progress=int(first))
-                lang = transcribe.detect_language(audio, models / "whisper" / "base", models / "whisper" / "small", threads)
-            report = lambda f, first=first, share=share: emit(stage="Transcribing", progress=int(first + share * f))  # noqa: E731
-            engine = transcribe.pick_engine(lang)
-            if engine.startswith("parakeet"):
-                segs = transcribe.transcribe_parakeet(audio, models / engine, models / "silero-vad", device=spec.get("asr_device", "cpu"),
-                                                      threads=threads, progress=report)
-            else:
-                segs, lang = transcribe.transcribe(audio, models / "whisper" / spec.get("whisper_model", "large-v3-turbo"), language=lang,
-                                                   threads=threads, progress=report)
-            segs = st.clip_segments(st.shift(segs, pa), p["start"], p["end"])
-            _write_json(d / "segments.json", {"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
-        done_s += p["end"] - p["start"]
+    asr_held: dict = {}  # the Parakeet model and the speech detector
+    detect_held: dict = {}  # the small models that find out the language
+    try:
+        for p in todo:
+            _make_part(job_dir, spec, ff, root, p, speech, st, transcribe, models, threads, emit, base, span, done_s, seconds_all, total, asr_held, detect_held)
+            done_s += p["end"] - p["start"]
+    finally:
+        asr_held.clear()
+        detect_held.clear()
+        transcribe.unload()  # (the Whisper model, if one was loaded)
     return cloud_left(job_dir, spec)
+
+
+def _make_part(job_dir, spec, ff, root, p, speech, st, transcribe, models, threads, emit, base, span, done_s, seconds_all, total, asr_held, detect_held) -> None:
+    """One subtitle part: its text (Standard) or its speech chunks (Accurate), into its folder."""
+    from acw_common.captions import segments_to_json
+
+    d = root / p["key"]
+    d.mkdir(parents=True, exist_ok=True)
+    pa, pb = st.padded(p["start"], p["end"], total)
+    audio = speech(pa, pb)
+    first = base + span * done_s / seconds_all
+    share = span * (p["end"] - p["start"]) / seconds_all
+    emit(stage="Transcribing", progress=int(first))
+    if p["quality"] == "accurate":
+        from acw.worker import runner
+
+        runner._write_asr_chunks(ff, d, audio, offset=pa, window=(p["start"] - pa, p["end"] - pa))
+    else:
+        lang = p["language"]
+        if lang is None:
+            emit(stage="Detecting language", progress=int(first))
+            lang = transcribe.detect_language(audio, models / "whisper" / "base", models / "whisper" / "small", threads, held=detect_held)
+        report = lambda f, first=first, share=share: emit(stage="Transcribing", progress=int(first + share * f))  # noqa: E731
+        engine = transcribe.pick_engine(lang)
+        if engine.startswith("parakeet"):
+            segs = transcribe.transcribe_parakeet(audio, models / engine, models / "silero-vad", device=spec.get("asr_device", "cpu"),
+                                                  threads=threads, progress=report, held=asr_held)
+        else:
+            whisper = models / "whisper" / spec.get("whisper_model", "large-v3-turbo")
+            segs, lang = transcribe.transcribe(audio, whisper, language=lang, threads=threads, progress=report,
+                                               model=transcribe.load_model(whisper, threads))  # (kept by transcribe, loaded once)
+        segs = st.clip_segments(st.shift(segs, pa), p["start"], p["end"])
+        _write_json(d / "segments.json", {"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
 
 
 def cloud_left(job_dir: Path, spec: dict) -> bool:
@@ -391,7 +408,13 @@ def stage_edit(job_dir: Path, spec: dict, ff, emit) -> dict:
             report.update(rep)
             fmt = ed.get("audio_format") or spec["options"].get("audio_format", "flac")
             emit(stage="Writing the audio", progress=90)
-            out = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{spec['output_stem']}-cleaned", fmt)
+            # (under a temporary name: the server puts it in the old one's place when the whole run is complete; acw/editing.py swap_in)
+            from acw_common.ffmpeg import AUDIO_FORMATS
+
+            made = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / "run-audio", fmt)
+            final = (job_dir / f"{spec['output_stem']}-cleaned").with_suffix(AUDIO_FORMATS[fmt][0])
+            out = final.with_name(final.name + ".run")
+            made.replace(out)
             result["outputs"] = [{"file": out.name, "kind": "audio"}]
             result["notice"] = notice
             del y

@@ -575,6 +575,10 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
     duration = float(job["duration_seconds"])
     report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
     outputs = _verified_outputs(d, res)
+    # The audio of the run is written under a temporary name next to the old (editing.STAGED); it takes the old one's place only when the
+    # run is complete, so the files on disk always are what the stored record says.
+    staged = {o["file"]: editing.final_name(o["file"]) for o in outputs if editing.final_name(o["file"]) != o["file"]}
+    outputs = [{**o, "file": editing.final_name(o["file"])} for o in outputs]
     old = json.loads(fresh["outputs_json"] or "[]")
     audio_changed = run["op"] != "suggest" and run.get("audio", True)  # (a run that only changes the subtitles leaves the sound alone)
     text_changed = run["op"] != "suggest" and run.get("subs") is not None  # the caption files are put together again
@@ -593,8 +597,9 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
         kept = {k: v for k, v in kept.items() if k == "segments"}  # the copies of the old strength slider no longer fit the audio
     keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS,
                                             editing.BROWSER, editing.SUBS} | rerun.kept_files(kept))
+    # (until the run is committed the old results and the new audio's temporary names stay where they are)
     for p in d.iterdir():
-        if p.name not in keep:
+        if p.name not in keep | set(staged) | {o["file"] for o in json.loads(fresh["outputs_json"] or "[]")}:
             _remove(d, p)
     editing.clear_chunks(job["id"])
     params = editing.absorb(job, params, report, op=run["op"], processed=run["timeline"])
@@ -611,25 +616,35 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
     charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0] + subs_charge)
     if run["op"] == "suggest":
         charge = 0
-    with db.tx() as c:
-        uploaded = c.execute("SELECT COALESCE(uploaded_at, created_at) AS t, COALESCE(cost_micros, 0) AS spent FROM jobs WHERE id = ?", (job["id"],)).fetchone()
-        n = c.execute(
-            "UPDATE jobs SET status = 'done', next_stage = 'probe', progress = 100, stage = 'Done', outputs_json = ?, params_json = ?,"
-            " finished_at = ?, edited_at = ?, expires_at = ?, error = NULL, worker_id = NULL WHERE id = ? AND status = 'running'",
-            (json.dumps(outputs), json.dumps(params), now, now, jobs.expiry(now, uploaded["t"]), job["id"]),
-        ).rowcount
-        if not n:
-            log.warning("job %s is no longer running; not completing it", job["id"])
-            return
-        if job["hold_id"]:
-            asked = max([0.0, *(run.get("asked") or {}).values()])
-            charged = ledger.capture_hold(
-                job["hold_id"], charge,
-                f"{editing.run_label({'run': run})}: {jobs.display_name(job)[:60]} ({asked / 60:.1f} min)", c=c,
-            )
-        else:
-            charged = 0
-        c.execute("UPDATE jobs SET cost_micros = ?, est_cost_micros = ? WHERE id = ?", (uploaded["spent"] + charged, charged, job["id"]))
+    swapped = editing.swap_in(d, staged)
+    try:
+        with db.tx() as c:
+            uploaded = c.execute("SELECT COALESCE(uploaded_at, created_at) AS t, COALESCE(cost_micros, 0) AS spent FROM jobs WHERE id = ?", (job["id"],)).fetchone()
+            n = c.execute(
+                "UPDATE jobs SET status = 'done', next_stage = 'probe', progress = 100, stage = 'Done', outputs_json = ?, params_json = ?,"
+                " finished_at = ?, edited_at = ?, expires_at = ?, error = NULL, worker_id = NULL WHERE id = ? AND status = 'running'",
+                (json.dumps(outputs), json.dumps(params), now, now, jobs.expiry(now, uploaded["t"]), job["id"]),
+            ).rowcount
+            if not n:
+                log.warning("job %s is no longer running; not completing it", job["id"])
+                editing.undo_swap(swapped)
+                return
+            if job["hold_id"]:
+                asked = max([0.0, *(run.get("asked") or {}).values()])
+                charged = ledger.capture_hold(
+                    job["hold_id"], charge,
+                    f"{editing.run_label({'run': run})}: {jobs.display_name(job)[:60]} ({asked / 60:.1f} min)", c=c,
+                )
+            else:
+                charged = 0
+            c.execute("UPDATE jobs SET cost_micros = ?, est_cost_micros = ? WHERE id = ?", (uploaded["spent"] + charged, charged, job["id"]))
+    except BaseException:
+        editing.undo_swap(swapped)  # (the old audio is back: the record, which did not change, and the files agree)
+        raise
+    editing.commit_swap(swapped)
+    for p in d.iterdir():  # (and now the old results that the new ones replaced, under other names, can go)
+        if p.name not in keep:
+            _remove(d, p)
     jobs.touch(job["id"])
     metrics.job_ended(job["id"])
 

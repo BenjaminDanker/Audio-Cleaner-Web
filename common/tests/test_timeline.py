@@ -207,19 +207,29 @@ def test_the_subtitles_layer_is_checked_and_its_parts_merge_like_the_others():
         Timeline(10.0).paint("subtitles", 0, 5, {"quality": "free", "translate": ["es"]})
 
 
-def test_a_noise_part_the_browser_cleans_has_no_strength_or_remover_and_no_echo_over_it():
+def test_a_noise_part_the_browser_cleans_keeps_the_strength_it_was_sent_but_has_no_remover():
     t = Timeline(100.0).paint("noise", 10, 20, {"browser": True, "strength_db": 12, "remover": "heavy"})
-    assert t.parts("noise")[0].settings == {"browser": True}
+    assert t.parts("noise")[0].settings == {"browser": True, "strength_db": 12.0}  # (kept for the page; the remover is not)
+    assert Timeline(100.0).paint("noise", 10, 20, {"browser": True, "strength": "strong"}).parts("noise")[0].settings == {"browser": True, "strength_db": 40.0}
+    assert Timeline(100.0).paint("noise", 10, 20, {"browser": True, "strength_db": None}).parts("noise")[0].settings == {"browser": True}
+    assert Timeline(100.0).paint("noise", 10, 20, {"browser": True}).to_json()["layers"]["noise"] == [{"start": 10.0, "end": 20.0, "browser": True}]
+    assert t.to_json()["layers"]["noise"] == [{"start": 10.0, "end": 20.0, "browser": True, "strength_db": 12.0}] and t.to_json()["version"] == 2
     assert Timeline(100.0).paint("noise", 0, 5, {"browser": False}).parts("noise")[0].settings == {"strength_db": 100.0, "remover": "auto"}
-    with pytest.raises(TimelineError):
-        Timeline(100.0).paint("noise", 0, 5, {"browser": "yes"})
+    for bad in ({"browser": "yes"}, {"browser": True, "strength_db": 0}, {"browser": True, "strength_db": 101}, {"browser": True, "strength_db": "huge"}):
+        with pytest.raises(TimelineError):
+            Timeline(100.0).paint("noise", 0, 5, bad)
     with pytest.raises(TimelineError):
         Timeline(100.0).paint("rebuild", 0, 5, {"browser": True})
-    # neighbours merge; a part painted over it ends it
-    t.paint("noise", 20, 30, {"browser": True})
+    # neighbours with the same settings merge, those with different strengths (or one with none) stay separate parts
+    t.paint("noise", 20, 30, {"browser": True, "strength_db": 12})
     assert [(p.start, p.end) for p in t.parts("noise")] == [(10.0, 30.0)]
-    t.paint("noise", 15, 18, {"strength_db": 40, "remover": "light"})
-    assert [p.settings.get("browser", False) for p in t.parts("noise")] == [True, False, True]
+    t.paint("noise", 30, 40, {"browser": True, "strength_db": 40})
+    t.paint("noise", 40, 50, {"browser": True})
+    assert [(p.start, p.end, p.settings.get("strength_db")) for p in t.parts("noise")] == [(10.0, 30.0, 12.0), (30.0, 40.0, 40.0), (40.0, 50.0, None)]
+    # what the sound depends on does not: the strength is gone, so the three are one part there
+    assert [(p.start, p.end, p.settings) for p in t.audio().parts("noise")] == [(10.0, 50.0, {"browser": True})]
+    t.paint("noise", 15, 18, {"strength_db": 40, "remover": "light"})  # a part painted over it ends it
+    assert [p.settings.get("browser", False) for p in t.parts("noise")] == [True, False, True, True, True]
     doc = {"version": 2, "seconds": 100, "layers": {"noise": [{"start": 10, "end": 20, "browser": True}], "echo": [{"start": 15, "end": 25}]}}
     with pytest.raises(TimelineError) as e:
         Timeline.from_json(doc)

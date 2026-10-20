@@ -24,7 +24,8 @@ The JSON:
         "leveling": [{"start": 0, "end": 123.4, "loudness_lufs": -16}]}}
 
 VERSION 2 adds two things: the `subtitles` layer, and `"browser": true` on a noise part (the browser cleaned that range itself and
-uploaded it; strength and remover are then not used and left out of the JSON; an echo part may not overlap it). `to_json` says
+uploaded it; the remover is then not used and left out of the JSON, and a `strength_db` that was sent is kept (so a page can show the strength
+the person chose) but never used in processing or pricing; an echo part may not overlap it). `to_json` says
 version 2 only for a timeline that uses one of them, so every timeline the first version could say is written exactly as before
 (old builds of the desktop app read only version 1); `from_json` reads both, and a version 1 document may not use the new things.
 
@@ -116,6 +117,19 @@ def _clone(settings: dict) -> dict:
     return {k: (list(v) if isinstance(v, list) else v) for k, v in settings.items()}
 
 
+def _strength(raw: dict) -> float:
+    """A noise strength in dB, from `strength_db` or its short name `strength`, a number or a word (gentle, balanced, strong, max)."""
+    strength = raw.pop("strength_db", raw.pop("strength", 100.0))
+    if isinstance(strength, str):
+        if strength.lower() not in STRENGTHS:
+            raise TimelineError(f"unknown strength {strength!r} (gentle, balanced, strong, max, or a number of dB)")
+        strength = STRENGTHS[strength.lower()]
+    strength = _number(strength, "strength_db")
+    if not 0.0 < strength <= 100.0:
+        raise TimelineError("strength_db must be above 0 and at most 100")
+    return float(strength)
+
+
 def _settings(layer: str, raw: dict | None) -> dict:
     """The settings of a part of `layer`, checked and complete (defaults filled in)."""
     raw = dict(raw or {})
@@ -125,22 +139,19 @@ def _settings(layer: str, raw: dict | None) -> dict:
         browser = raw.pop("browser", False)
         if not isinstance(browser, bool):
             raise TimelineError("browser must be true or false")
-        if browser:  # cleaned by the browser: the strength and the remover are not used (and not kept)
-            raw.pop("strength_db", None), raw.pop("strength", None), raw.pop("remover", None)
-            out = {"browser": True}
+        if browser:  # cleaned by the browser: no remover; a strength that was sent is kept for the page, and used for nothing
+            raw.pop("remover", None)
+            sent = "strength_db" in raw or "strength" in raw
+            if sent and raw.get("strength_db", raw.get("strength")) is None:
+                raw.pop("strength_db", None), raw.pop("strength", None)
+                sent = False
+            out = {"browser": True, **({"strength_db": _strength(raw)} if sent else {})}
         else:
-            strength = raw.pop("strength_db", raw.pop("strength", 100.0))
-            if isinstance(strength, str):
-                if strength.lower() not in STRENGTHS:
-                    raise TimelineError(f"unknown strength {strength!r} (gentle, balanced, strong, max, or a number of dB)")
-                strength = STRENGTHS[strength.lower()]
-            strength = _number(strength, "strength_db")
-            if not 0.0 < strength <= 100.0:
-                raise TimelineError("strength_db must be above 0 and at most 100")
+            strength = _strength(raw)
             remover = raw.pop("remover", "auto")
             if remover not in REMOVERS:
                 raise TimelineError(f"remover must be one of {', '.join(REMOVERS)}")
-            out = {"strength_db": float(strength), "remover": remover}
+            out = {"strength_db": strength, "remover": remover}
     elif layer == "leveling":
         lufs = raw.pop("loudness_lufs", DEFAULT_LOUDNESS)
         if lufs is not None:
@@ -220,9 +231,12 @@ class Timeline:
         return t
 
     def audio(self) -> "Timeline":
-        """A copy with only the layers that make the sound (what the result audio depends on: no subtitles)."""
-        t = self.copy()
-        t.layers[SUBTITLES] = []
+        """What the result audio depends on: only the layers that make the sound (no subtitles), and a part the browser cleaned without the
+        strength the page keeps for it (neighbours that are then equal are one part, so two timelines that sound the same are equal)."""
+        t = Timeline(self.seconds)
+        for name in LAYERS:
+            for p in self.layers[name]:
+                t.paint(name, p.start, p.end, {"browser": True} if p.settings.get("browser") else p.settings)
         return t
 
     def _layer(self, layer: str) -> list[Part]:
