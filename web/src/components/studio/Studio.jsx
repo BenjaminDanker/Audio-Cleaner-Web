@@ -144,10 +144,9 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   session.env = { rates, pricing, rebuildOk: !rebuildOffered || !!pricing?.rebuildAvailable, active, maxActive };
 
   // ---- the price ----
-  const multi = Object.values(S.tracks).some((L) => L.length > 1);
   const kind = jobKind(S.tracks);
   useEffect(() => {
-    if (stage !== 'ready' || !kind || !multi || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }
+    if (stage !== 'ready' || !kind || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }
     const body = session.estimateBody({ choice, plan });
     if (!body) return undefined;
     setEst((e) => ({ ...e, state: 'loading', error: '' }));
@@ -159,8 +158,9 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       );
     }, 400);
     return () => { clearTimeout(t); ctl.abort(); };
-  }, [stage, kind, multi, ver, rates, choice.format]); // eslint-disable-line react-hooks/exhaustive-deps
-  const estMicros = !server ? 0 : !rates ? null : multi ? (est.state === 'ok' ? est.micros : null) : c.total;
+  }, [stage, kind, ver, rates, choice.format]); // eslint-disable-line react-hooks/exhaustive-deps
+  // a job on our side is priced as it will be held: its timeline's price, which counts what each run costs besides the minutes (docs/api.md section 8)
+  const estMicros = !server ? 0 : !rates ? null : est.state === 'ok' ? est.micros : null;
   const changedTracks = done && !!session.snap && !sameTracks(S.tracks, session.snap.tracks, T);
   const outNow = useMemo(() => ({ format: choice.format, name: choice.name, size: choice.size }), [choice.format, choice.name, choice.size]);
   const mediaMade = !fin || (() => { const w = fin.effective(); return !!(w.sound || w.embed); })(); // (the file type and name only matter when a media file is made)
@@ -894,8 +894,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   const ctx = {
     S, session, tips, stage, sheet, mobile, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, ph, zoom, pins, hear, hearText, heard, data,
-    scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, serverTotal: !server ? 0 : est.state === 'ok' && multi ? est.micros : null,
-    partsNote: multi && est.state === 'ok', pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
+    scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, serverTotal: !server ? 0 : est.state === 'ok' ? est.micros : null,
+    partsNote: server && est.state === 'ok', pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
     disabled: processing, willDownload, tooBigNote, mkvNote, primaryDisabled,
     h: { onDb, slideStart, slideEnd, onVideo: (f) => fin?.setVideo(f) },
   };

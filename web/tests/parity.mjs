@@ -350,18 +350,18 @@ await check('Leveling: Keep original loudness is the fifth option, Keep (the tim
   return 'Keep';
 });
 
-await check('Leveling: Leveling on its own, without noise removal, makes a paid job at the Leveling price alone', async () => {
+await check('Leveling: Leveling on its own, without noise removal, makes a paid job whose timeline has Leveling alone, at the price the server gives for it', async () => {
   await open('noisy.wav');
-  await setVoice(page, 'off');
   await setSubs(page, 'off');
-  const rate = (await pricing()).rates.find((r) => r.product === 'leveling').usdPerMinute;
-  const label = await mainButton(page);
-  has(label, /^Start · /);
-  const secs = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
-  const want = Math.ceil((Math.round(rate * 1e6) * Math.ceil(secs)) / 60);
-  const shown = want < 1000 ? '<$0.001' : `$${(want / 1e6).toFixed(want % 10000 === 0 ? 2 : 3)}`;
-  if (label.replace('Start · ', '') !== shown) throw new Error(`${label} vs ${shown}`);
-  return `${label}`;
+  const done = page.waitForResponse((r) => r.url().endsWith('/api/jobs/estimate') && r.request().postDataJSON().timeline.layers.noise === undefined, { timeout: 20000 });
+  await setVoice(page, 'off');
+  const res = await done;
+  const body = res.request().postDataJSON();
+  if (Object.keys(body.timeline.layers).join() !== 'leveling') throw new Error('layers ' + Object.keys(body.timeline.layers));
+  const micros = (await res.json()).estCostMicros;
+  const shown = micros < 1000 ? '<$0.001' : `$${(micros / 1e6).toFixed(micros >= 100000 || micros % 10000 === 0 ? 2 : 3)}`;
+  await page.waitForFunction((t) => document.querySelector('[data-testid=start]')?.textContent === t, `Start · ${shown}`, { timeout: 10000 });
+  return `${await mainButton(page)} (${micros} micros)`;
 });
 
 /* ================================================================================================ Subtitles */
@@ -636,7 +636,18 @@ await check('The result file: this browser can\'t make some types; audio saved a
 
 /* ================================================================================================ Price, credit and limits */
 
-await check('Price, credit and limits: Start · price uses the real price list (here a changed list, to prove it)', async () => {
+await check('Price, credit and limits: Start · price is the real price (the server\'s estimate for what will be held; here the answer is changed to prove the page does not make it up)', async () => {
+  const asked = [];
+  await page.route('**/api/jobs/estimate', (r) => { asked.push(r.request().postDataJSON()); return r.fulfill({ json: { estCostMicros: 1234567, estCostUsd: 1.234567, lines: [], availableMicros: 5000000, affordable: true } }); });
+  try {
+    await open('noisy.wav');
+    await page.waitForFunction(() => /^Start · \$1\.23$/.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 15000 });
+    if (!asked.length || asked.at(-1).kind !== 'denoise' || !asked.at(-1).timeline?.layers?.noise) throw new Error('the estimate was not asked for the timeline: ' + JSON.stringify(asked.at(-1)));
+    return await mainButton(page);
+  } finally { await page.unroute('**/api/jobs/estimate'); }
+});
+
+await check('Price, credit and limits: the price lines of Details come from the live price list (changed here to prove it)', async () => {
   const real = await pricing();
   const fake = JSON.parse(JSON.stringify(real));
   for (const r of fake.rates) if (r.product === 'denoise' && r.tier === 'standard') r.usdPerMinute = 1.2;
@@ -645,11 +656,11 @@ await check('Price, credit and limits: Start · price uses the real price list (
     await open('long10min.mp3');
     await setLeveling(page, 'off');
     await setSubs(page, 'off');
+    await page.getByTestId('bar-det').click();
     const secs = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
     const want = Math.ceil((1200000 * Math.ceil(secs)) / 60); // billed per second of audio, a started second counts
-    const label = await mainButton(page);
-    if (label !== `Start · $${(want / 1e6).toFixed(want >= 100000 ? 2 : 3)}`) throw new Error(`${label} vs ${want} (${secs} s)`);
-    return label;
+    has(await txt(page.getByTestId('details')), new RegExp(`Noise removal · \\d+:\\d\\d \\$${(want / 1e6).toFixed(want >= 100000 ? 2 : 3).replace('.', '\\.')}`));
+    return 'Details: ' + (await txt(page.getByTestId('details'))).slice(0, 80);
   } finally { await page.unroute('**/api/billing/pricing'); }
 });
 
