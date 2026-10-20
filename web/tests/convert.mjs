@@ -1,15 +1,15 @@
 // The output picker (src/media/convert.js, src/components/OutputPicker.jsx): the file type and the name of a result, made in the
 // browser. Audio -> WAV / FLAC / MP3 / Ogg (and M4A where this browser can encode AAC), video -> sound only, a sound file -> a video
 // with a black picture, a video kept as it is (MKV) or made smaller (MP4 at 480p), the name and the type list following each
-// other, the name a paid job is saved under; every result comes down by itself, and Change and save again brings the new type.
-// The files that come out are looked at with ffprobe. An encoder the headless Chromium
-// lacks is reported as a skip.
+// other, the name a paid job is saved under; every result comes down by itself, and Save changes brings the new type.
+// The choices live in the editor's Output menu (OutputFields). The files that come out are looked at with ffprobe. An encoder the
+// headless Chromium lacks is reported as a skip.
 // Needs the local backend (port 8792), `npm run build` output and the fixtures. Usage: node tests/convert.mjs
 import { execFileSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || `e2e-convert-${Date.now()}@example.com`; // a fresh account: its job list starts empty
 const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
@@ -44,52 +44,58 @@ if (!existsSync(big)) {
   }
 }
 
-// Before Start the file type and name are chosen in the form; after the result is made they can change in the card
-// ("Change and save again"), and saving brings down the files with the new choice.
+// Before Start the file type and name are chosen in the Output menu; after the result is made they can change there too
+// ("Save changes"), and saving brings down the files with the new choice.
 const downloads = [];
 page.on('download', (d) => downloads.push(d));
-const FORM = '.job-form [data-testid=output-fields]';
-const formField = (id) => page.locator(`${FORM} [data-testid=${id}]`);
-const field = (id) => page.locator('[data-testid=job] [data-testid=again-fields]').first().locator(`[data-testid=${id}]`);
+const field = (id) => page.locator(`[data-testid=output-pop] [data-testid=${id}]`);
+const formField = field;
 const optionValues = (f) => f('out-format').locator('option').evaluateAll((os) => os.map((o) => o.value));
+const openOutput = async () => {
+  if (!(await page.getByTestId('output-pop').count())) await page.getByTestId('output-button').click();
+  await field('out-format').waitFor();
+  await page.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+};
+const closeOutput = async () => { if (await page.getByTestId('output-pop').count()) await page.getByTestId('output-button').click(); };
+/** What Your files says about the last file made (its note, e.g. "copied as it is"). */
+const madeNote = async () => {
+  await page.getByTestId('bar-files').click();
+  const t = (await page.getByTestId('made-note').first().textContent().catch(() => '')) || '';
+  await page.getByTestId('bar-files').click();
+  return t;
+};
 
-/** Drop a file on the Cleanup page (the free cleanup is the starting choice): the form is ready, nothing started. */
+/** Drop a file on the Cleanup page (the free cleanup is the starting choice): the editor is ready, nothing started. */
 async function prepare(file) {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, file));
-  await formField('out-format').waitFor();
-  await page.waitForFunction(() => { const s = document.querySelector('.job-form [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+  await openOutput();
 }
 
-/** Start the free cleanup and wait for the result card (its files come down by themselves). */
+/** Start the free cleanup and wait for the editor to hand the files over (they come down by themselves). */
 async function startFree() {
   downloads.length = 0;
-  await page.getByRole('button', { name: 'Start – free' }).click();
-  await page.waitForSelector('[data-testid=job] [data-testid=result]', { timeout: 180000 });
+  await closeOutput();
+  await page.getByTestId('start').click();
+  await waitResult(page, 'result', 180000);
 }
 const runFree = async (file) => { await prepare(file); await startFree(); };
 
-async function openAgain() {
-  const d = page.getByTestId('again').first();
-  if (!(await d.evaluate((e) => e.open))) await d.locator('summary').click();
-  await field('out-format').waitFor();
-  await page.waitForFunction(() => { const s = document.querySelector('[data-testid=again-fields] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
-}
-
-/** In the card: set the name (and so the type), save again, and return the downloaded file's path and the note shown. */
+/** On the finished page: set the name (and so the type), Save changes, and return the downloaded file's path and the note shown. */
 async function saveAs(name, { format, size } = {}) {
-  await openAgain();
+  await openOutput();
   if (format) await field('out-format').selectOption(format);
   if (name != null) await field('out-name').fill(name);
   if (size) await field('out-size').selectOption(size);
-  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 120000 }), field('again-save').click()]);
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 120000 }), page.getByTestId('save-changes').click()]);
   const p = join(FILES, `conv-${dl.suggestedFilename()}`);
   await dl.saveAs(p);
-  await page.waitForFunction(() => !document.querySelector('[data-testid=again-save]').disabled, null, { timeout: 120000 });
-  return { p, name: dl.suggestedFilename(), note: (await page.getByTestId('made-note').first().textContent().catch(() => '')) || '' };
+  await waitResult(page, 'result', 120000);
+  await page.getByTestId('download-again').waitFor({ timeout: 120000 });
+  return { p, name: dl.suggestedFilename(), note: await madeNote() };
 }
 
-await check('audio: the name starts as <name>-cleaned.<type> in the form, the type list is only what this browser can make, and the name and the list follow each other both ways', async () => {
+await check('audio: the name starts as <name>-cleaned.<type> in the Output menu, the type list is only what this browser can make, and the name and the list follow each other both ways', async () => {
   await prepare('noisy.wav');
   if ((await formField('out-name').inputValue()) !== 'noisy-cleaned.wav') throw new Error('default name');
   const vals = await optionValues(formField);
@@ -117,15 +123,16 @@ await check('a name that cannot be used (unknown ending, no ending, empty, a for
   return 'refused, then accepted';
 });
 
-await check('free cleanup of a sound file: the chosen file comes down by itself as the only file; the card lists it with its size, has one Download again and no variant buttons', async () => {
+await check('free cleanup of a sound file: the chosen file comes down by itself as the only file; Your files lists it with its size, the bar has one Download again and no variant buttons', async () => {
   await formField('out-name').fill('chosen name.flac');
   await startFree();
   const names = downloads.map((d) => d.suggestedFilename());
   if (names.join() !== 'chosen name.flac') throw new Error('downloaded by itself: ' + names);
-  const card = page.getByTestId('job').first();
-  const files = await card.getByTestId('made-file').allInnerTexts();
+  await page.getByTestId('bar-files').click();
+  const files = await page.getByTestId('made-file').allInnerTexts();
+  await page.getByTestId('bar-files').click();
   if (files.length !== 1 || !/chosen name\.flac/.test(files[0]) || !/\d(\.\d)? (KB|MB)/.test(files[0])) throw new Error('listed: ' + files);
-  if ((await card.getByTestId('download-again').count()) !== 1 || (await card.getByRole('button', { name: /24-bit|16-bit|Video with/ }).count())) throw new Error('buttons');
+  if ((await page.getByTestId('download-again').count()) !== 1 || (await page.getByRole('button', { name: /24-bit|16-bit|Video with/ }).count())) throw new Error('buttons');
   return files[0].replace(/\s+/g, ' ');
 });
 
@@ -147,7 +154,7 @@ await check('audio to each type: WAV, FLAC, MP3 (its encoder is fetched only now
     const r = await saveAs('speech.m4a');
     if (probe(r.p).a.codec_name !== 'aac') throw new Error('m4a is not AAC');
     out.push(`${r.name} aac`);
-  } else if ((await optionValues(field)).includes('m4a')) {
+  } else if (await openOutput().then(() => optionValues(field)).then((v) => v.includes('m4a'))) {
     throw new Error('m4a offered without an AAC encoder');
   }
   return out.join(', ');
@@ -189,40 +196,31 @@ await check('video made smaller: a 1280x720 video at 480p is encoded again with 
   return `${r.name} ${i.v.codec_name} ${i.v.width}x${i.v.height}, ${i.a.codec_name}; ${r.note}`;
 });
 
-const waitCard = async (text) => {
-  const card = page.locator('[data-testid=job]', { hasText: text }).first();
-  await card.waitFor({ timeout: 30000 });
-  await page.waitForFunction((t) => {
-    const c = [...document.querySelectorAll('[data-testid=job]')].find((e) => e.textContent.includes(t));
-    return c && ['done', 'failed', 'canceled'].includes(c.dataset.status);
-  }, text, { timeout: 240000 });
-  if ((await card.getAttribute('data-status')) !== 'done') throw new Error(await card.innerText());
-  return card;
-};
-
 await check('paid job: a Denoising job for a sound file with a chosen name and type comes down by itself under that name (and again with Download again); changing the type and saving brings the new type', async () => {
   admin('grant', EMAIL, '5', 'convert test');
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'noise', 'denoise');
+  await openOutput();
   await formField('out-name').fill('episode one.mp3');
   const hint = await page.getByTestId('will-download').innerText();
   if (!/episode one\.mp3/.test(hint)) throw new Error('the line before Start: ' + hint);
+  await closeOutput();
   downloads.length = 0;
   await page.getByTestId('start').click();
   await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-  const card = await waitCard('noisy');
-  await card.getByTestId('result').waitFor({ timeout: 60000 });
+  await waitCardDone(page);
+  await waitResult(page, 'result', 90000);
   if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'episode one.mp3') throw new Error('downloaded by itself: ' + downloads.map((d) => d.suggestedFilename()));
   const p = join(FILES, 'conv-paid.mp3');
   await downloads[0].saveAs(p);
   if (probe(p).a.codec_name !== 'mp3') throw new Error('not MP3');
-  const [again] = await Promise.all([page.waitForEvent('download'), card.getByTestId('download-again').click()]);
+  const [again] = await Promise.all([page.waitForEvent('download'), page.getByTestId('download-again').click()]);
   if (again.suggestedFilename() !== 'episode one.mp3') throw new Error('again: ' + again.suggestedFilename());
-  // change the type and save again: the new type comes down (the server's sound is converted here)
-  await card.getByTestId('again').locator('summary').click();
-  await card.getByTestId('again-fields').getByTestId('out-format').selectOption('flac');
-  const [flac] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), card.getByTestId('again-save').click()]);
+  // change the type and Save changes: the new type comes down (the server's sound is converted here)
+  await openOutput();
+  await field('out-format').selectOption('flac');
+  const [flac] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.getByTestId('save-changes').click()]);
   if (flac.suggestedFilename() !== 'episode one.flac') throw new Error('after changing the type: ' + flac.suggestedFilename());
   await flac.saveAs(join(FILES, 'conv-paid-again.flac'));
   if (probe(join(FILES, 'conv-paid-again.flac')).a.codec_name !== 'flac') throw new Error('not FLAC');
@@ -233,12 +231,14 @@ await check('paid job on a video: the video with the cleaned sound comes down by
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'test.mp4'));
   await pick(page, 'noise', 'denoise');
+  await openOutput();
   await formField('out-format').selectOption('mkv');
+  await closeOutput();
   downloads.length = 0;
   await page.getByTestId('start').click();
   await page.getByTestId('submitted').waitFor({ timeout: 60000 });
-  const card = await waitCard('test.mp4');
-  await card.getByTestId('result').waitFor({ timeout: 90000 });
+  await waitCardDone(page);
+  await waitResult(page, 'result', 90000);
   if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'test-cleaned.mkv') throw new Error('downloaded by itself: ' + downloads.map((d) => d.suggestedFilename()));
   const p = join(FILES, 'conv-paid-video.mkv');
   await downloads[0].saveAs(p);
@@ -247,14 +247,14 @@ await check('paid job on a video: the video with the cleaned sound comes down by
   await page.screenshot({ path: join(SHOTS, 'convert-paid-video.png'), fullPage: true });
   // after a reload this tab has no copy of the video: it is asked for once
   await page.reload();
-  const again = page.locator('[data-testid=job]', { hasText: 'test.mp4' }).first();
-  await again.getByTestId('download-again').waitFor({ timeout: 30000 });
-  if (!/Choose the original video/.test(await again.getByTestId('download-again').innerText())) throw new Error('should ask for the video: ' + await again.getByTestId('download-again').innerText());
+  const again = page.getByTestId('download-again');
+  await again.waitFor({ timeout: 30000 });
+  if (!/Choose the original video/.test(await again.innerText())) throw new Error('should ask for the video: ' + await again.innerText());
   downloads.length = 0;
-  await again.locator('input[aria-label="Choose the original video"]').setInputFiles(join(FILES, 'test.mp4'));
-  await again.getByTestId('result').waitFor({ timeout: 90000 });
+  await page.getByTestId('need-video-input').setInputFiles(join(FILES, 'test.mp4'));
+  await waitResult(page, 'result', 90000);
   if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'test-cleaned.mkv') throw new Error('after choosing the video: ' + downloads.map((d) => d.suggestedFilename()));
-  if (!/Download again/.test(await again.getByTestId('download-again').innerText())) throw new Error('then it is a plain Download again');
+  if (!/Download again/.test(await again.innerText())) throw new Error('then it is a plain Download again');
   return `${downloads[0].suggestedFilename()} ${i.v.codec_name}+${i.a.codec_name}; asked for the video once after the reload`;
 });
 
