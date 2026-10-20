@@ -84,16 +84,16 @@ KEPT_PER_HOUR_PER_CHANNEL = int(0.4 * GB)
 # remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
 # reports its choice the estimate sits in between), the voice rebuild instead of both, echo removal, and transcription.
 SPEED = {
-    "denoise_light": 0.05,
-    "denoise_auto": 0.15,
-    "denoise_heavy": 0.27,
+    "denoise_light": 0.08,  # x1.54 since the 30 s block grid with 16 s of context (common/acw_common/blocks.py)
+    "denoise_auto": 0.25,
+    "denoise_heavy": 0.49,  # x1.8 since the 30 s block grid with 24 s of context
     "denoise_rebuild": 0.14,  # on the card (the only place it runs): 8.2 s per minute (broker.GPU_WORK)
     "leveling": 0.01,  # Leveling on its own (with noise removal it is part of the denoise figures)
     "echo": 0.03,
     "transcribe_local": 0.12,
     "transcribe_premium": 0.08,
 }
-MODEL_LOAD_SECONDS = 20  # every stage starts a fresh sandboxed process that loads its models
+MODEL_LOAD_SECONDS = 12  # a job runs two or three fresh sandboxed stages that each load their models (measured 1.1 to 4.8 s per stage, 2026-10-19)
 # Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
 # cleaning and local transcription) and wall-clock seconds per second of audio.
 CPU_PER_AUDIO_SECOND = 8
