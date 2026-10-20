@@ -64,9 +64,10 @@ def candidates(kind: str, t_tier: str | None, options: dict, fixed: list[str], n
     job at all (`rebuild_blocker` without the length and the card: those are asked when the price is worked out, `within`, and when
     the decision is made). The hold covers the dearest of them."""
     leveling = bool(options.get("leveling")) if "leveling" in fixed else True
-    out = [{"tier": "standard", "rates": pricing.job_rates(kind, "standard", t_tier, n_translate, leveling)}]
+    echo = bool(options.get("echo_reference_track"))
+    out = [{"tier": "standard", "rates": pricing.job_rates(kind, "standard", t_tier, n_translate, leveling, echo)}]
     if rebuild_blocker(options, fixed) is None:
-        out.append({"tier": "rebuild", "rates": pricing.job_rates(kind, "rebuild", t_tier, n_translate, leveling)})
+        out.append({"tier": "rebuild", "rates": pricing.job_rates(kind, "rebuild", t_tier, n_translate, leveling, echo)})
     return out
 
 
@@ -78,7 +79,7 @@ def within(cands: list[dict], seconds: float) -> list[dict]:
 def cost(kind: str, t_tier: str | None, cand: dict, seconds: float, n_translate: int) -> int:
     """What a job that ends as `cand` costs for `seconds` of audio."""
     rates = cand["rates"]
-    return pricing.job_cost_micros(kind, cand["tier"], t_tier, seconds, rates, n_translate, "leveling" in rates)
+    return pricing.job_cost_micros(kind, cand["tier"], t_tier, seconds, rates, n_translate, "leveling" in rates, "echo" in rates)
 
 
 def dearest(kind: str, t_tier: str | None, cands: list[dict], seconds: float, n_translate: int) -> tuple[dict, int]:
@@ -203,7 +204,7 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
         if cand is None:
             raise ValueError(f"no {tier} outcome was priced for this job")
         rates = {k: v for k, v in cand["rates"].items() if k != "leveling" or opts["leveling"]}
-        new_cost = pricing.job_cost_micros(kind, tier, t_tier, seconds, rates, n, "leveling" in rates)
+        new_cost = pricing.job_cost_micros(kind, tier, t_tier, seconds, rates, n, "leveling" in rates, "echo" in rates)
         params.update(options=opts, denoise_tier=tier, rates=rates, chosen=decision["chosen"])
         params["automatic"] = {"fixed": params["automatic"]["fixed"]}  # (the candidates were only for the hold)
         est = row["est_cost_micros"]

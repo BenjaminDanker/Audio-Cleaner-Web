@@ -106,6 +106,7 @@ Price list (`rates`; per minute of audio, counted by the second, rounded up; amo
 | `denoise` / `standard` | Denoising |
 | `denoise` / `rebuild` | Voice rebuild (files up to 90 minutes) |
 | `leveling` / `standard` | Leveling: charged when `options.leveling` is true (the default) on a `denoise` job; `denoiseTier: "off"` makes a job that only levels |
+| `echo` / `standard` | Echo removal (with the file's second audio track): charged, by the second, when `options.echo_reference_track` is true on a `denoise` or `denoise_transcribe` job and the file has a second track (a one-track file is processed without it and not charged for it); its own line in the estimate and the ledger |
 | `transcribe` / `local` | Subtitles & transcript |
 | `transcribe` / `premium` | Subtitles & transcript, extra accurate |
 | `transcribe_translate` / `standard` | one translation of the subtitles, **per language** |
@@ -187,7 +188,7 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 | `embed_subtitles` | `true` | put the subtitles into the video; needs the whole video uploaded |
 | `loudness_lufs` | `-16` | target loudness, a number from -30 to -9 (`400` outside it), or `null` to leave the level as it is. Podcast about -16, online video -14, broadcast -23 |
 | `atten_lim_db` | `100` | how much noise may be removed: any number, clamped to 6-100 dB. The website's strengths are 12 (gentle), 24, 40 and 100 (max). Doesn't apply to `rebuild` |
-| `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Included in the price. A single-track file is processed normally and `notice` says so |
+| `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Charged at its own price (`echo` / `standard` in the price list, about a third of Denoising's) on top of the job's other steps; a job made before this price existed keeps the prices it was made with (no echo line, nothing charged for it). A single-track file is processed normally, `notice` says so, and echo removal is not charged |
 | `noise` | `auto` | `auto` (measured per file), `light`, `heavy` (better when the noise is nearly as loud as the voice). Doesn't apply to `rebuild` |
 | `leveling` | `true` | Leveling (its own price): the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. |
 | `automatic` | `false` | `true`: the server listens to the file and decides what you did not give yourself, like the website's "Automatic best settings" (next section). Must be a boolean; needs `kind` `denoise` or `denoise_transcribe` and `denoiseTier: "standard"` |
@@ -397,7 +398,7 @@ Body of both calls: only what changes (the rest stays as the job had it): `{deno
 | `options.leveling`, `options.loudness_lufs` | from the kept noise removal: the blend, Leveling (when on) | Leveling's price whenever it runs; free when it is off |
 | `denoiseTier: "rebuild"` | the voice is rebuilt from the upload | the full Voice rebuild price (plus Leveling when on) |
 | `denoiseTier: "standard"` (from a rebuild) | from the kept noise removal; if the job never had one, noise removal runs from the upload | free, or the Denoising price when it had to run |
-| `options.noise`, `options.echo_reference_track` | noise removal runs again from the upload | the Denoising price (plus Leveling when on) |
+| `options.noise`, `options.echo_reference_track` | noise removal runs again from the upload | the Denoising price (plus echo removal's own price when it is on, and Leveling when on) |
 | `transcribeTier`, `options.language` | the transcript is written again from the upload (always from the original sound) | the subtitle price |
 | `options.translate` | only the languages not already made (from the kept transcript) | per new language |
 | `options.audio_format`, `options.caption_formats` | the files are written again from what is there | free |
@@ -494,8 +495,8 @@ the last render (a new strength under Leveling changes it; a Leveling part with 
 | `rebuild` (Voice rebuild) | 30,000 ($1.80 an hour) | 4.3 GPU-s, 0.203 per second | 21.18 | 10,591 |
 | `leveling` (Leveling) | 1,000 ($0.06 an hour) | 1.28 CPU-s, 0.013 per second | 98.46 | 1,641 |
 
-(The rates are the price list's, `GET /api/billing/pricing`; echo removal, which is part of Denoising for a job made the old way, has the rate of its
-own share of the work. The fixed amounts are the measured cost of starting a step in its own sealed process, at the step's own rate.) The whole file with
+(The rates are the price list's, `GET /api/billing/pricing`; echo removal has its own row there, `echo` / `standard`, and a job made the old way is
+charged it per second when echo removal is on, in its own line. The fixed amounts are the measured cost of starting a step in its own sealed process, at the step's own rate.) The whole file with
 the default steps costs today's price plus about 2 % of ten minutes, 0.4 % of an hour: 600,000 micros an hour of Denoising + Leveling becomes
 601,992. One ledger line per process run: `Edited (Denoising + Leveling): talk.wav (0.5 min)` with the minutes processed; an export that costs
 nothing has no line; the hold is made at the quote and the charge is for what ran, at most the hold.

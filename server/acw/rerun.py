@@ -12,7 +12,7 @@ starts from the latest of those copies and runs only the steps whose inputs chan
   Voice rebuild off                             the kept noise removal, or noise removal from the upload (paid) when the job
                                                 never had one
   Leveling or loudness with Voice rebuild       Leveling from the kept rebuilt voice
-  another noise type or echo removal            noise removal from the upload (paid)
+  another noise type or echo removal            noise removal from the upload (paid; echo removal is its own line)
   another subtitle kind, or the language        transcription again from the upload (paid)
   more translation languages                    only the new ones (paid)
 
@@ -233,6 +233,8 @@ def plan_rerun(src_params: dict, src_outputs_audio: dict | None, d_tier: str | N
                 clean = "reuse"
             else:
                 clean = "full"
+                if new["echo_reference_track"]:
+                    paid.append("echo")
                 if new["leveling"]:
                     paid.append("leveling")
         elif d_tier == "rebuild":
@@ -247,6 +249,8 @@ def plan_rerun(src_params: dict, src_outputs_audio: dict | None, d_tier: str | N
             else:
                 clean = "full"
                 paid.append("denoise")
+                if new["echo_reference_track"]:
+                    paid.append("echo")
                 if new["leveling"]:
                     paid.append("leveling")
         else:
@@ -263,6 +267,8 @@ def plan_rerun(src_params: dict, src_outputs_audio: dict | None, d_tier: str | N
             else:
                 clean = "full"
                 paid.append("denoise")
+                if new["echo_reference_track"]:
+                    paid.append("echo")
                 if new["leveling"]:
                     paid.append("leveling")
         if clean == "reuse":
@@ -402,6 +408,8 @@ def rerun_label(rates: dict[str, int], d_tier: str | None, t_tier: str | None) -
     parts = []
     if "denoise" in rates:
         parts.append("Voice rebuild" if d_tier == "rebuild" else "Denoising")
+    if "echo" in rates:
+        parts.append("Echo removal")
     if "leveling" in rates:
         parts.append("Leveling")
     if "transcribe" in rates:

@@ -30,6 +30,9 @@ _RATE_LIST = [
     # Leveling: evens out the voice and sets the loudness; with Denoising or Voice rebuild, or on its own ("off" noise tier).
     # About 5 % of Denoising's CPU; Denoising + Leveling stays at the 0.60 USD an hour Denoising cost before.
     Rate("leveling", "standard", "Leveling", 1_000),
+    # Echo removal (with the file's second audio track): its own price, about 29 % of Denoising (the measured CPU of each). The one
+    # constant: the per-part editor's price for it (editing.step_rates) is this one too.
+    Rate("echo", "standard", "Echo removal", 2_600),
     Rate("transcribe", "local", "Transcription", 4_000),
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Per extra language, on top of the transcription (text only goes to the speech partner; a few cents an hour).
@@ -100,12 +103,15 @@ NO_DENOISE = "off"
 
 
 def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, translate_languages: int = 0,
-              leveling: bool = False) -> dict[str, int]:
+              leveling: bool = False, echo: bool = False) -> dict[str, int]:
     """Micros per minute of each part of a job at today's prices. Stored with the job, so a price
-    change never applies to a job that was already created. `translate` is per language."""
+    change never applies to a job that was already created (a job made before echo removal had its own price has no "echo" here:
+    it is not charged). `translate` is per language. `echo`: echo removal is on (it goes with the cleaning kinds)."""
     out: dict[str, int] = {}
     if kind in ("denoise", "denoise_transcribe") and denoise_tier and denoise_tier != NO_DENOISE:
         out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
+    if kind in ("denoise", "denoise_transcribe") and echo:
+        out["echo"] = rate("echo", "standard").micros_per_minute
     if kind in ("denoise", "denoise_transcribe") and leveling:
         out["leveling"] = rate("leveling", "standard").micros_per_minute
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
@@ -117,15 +123,18 @@ def job_rates(kind: str, denoise_tier: str | None, transcribe_tier: str | None, 
 
 def job_cost_micros(
     kind: str, denoise_tier: str | None, transcribe_tier: str | None, seconds: float, rates: dict[str, int] | None = None,
-    translate_languages: int = 0, leveling: bool = False,
+    translate_languages: int = 0, leveling: bool = False, echo: bool = False,
 ) -> int:
     """`rates` (from job_rates) pins the prices; without it the current price list applies. `translate_languages`:
     how many translations are charged (asked for when estimating, made when the job is done); `leveling`: whether
-    Leveling is part of it (a job's charge: "leveling" in its pinned rates, so a job made before it had a price never pays for it)."""
+    Leveling is part of it (a job's charge: "leveling" in its pinned rates, so a job made before it had a price never pays for it);
+    `echo`: the same for echo removal ("echo" in the pinned rates)."""
     rates = rates or {}
     total = 0
     if kind in ("denoise", "denoise_transcribe") and denoise_tier and denoise_tier != NO_DENOISE:
         total += cost_micros("denoise", denoise_tier, seconds, rates.get("denoise"))
+    if kind in ("denoise", "denoise_transcribe") and echo:
+        total += cost_micros("echo", "standard", seconds, rates.get("echo"))
     if kind in ("denoise", "denoise_transcribe") and leveling:
         total += cost_micros("leveling", "standard", seconds, rates.get("leveling"))
     if kind in ("transcribe", "denoise_transcribe") and transcribe_tier:
@@ -135,7 +144,7 @@ def job_cost_micros(
     return max(total, MIN_JOB_CHARGE_MICROS) if total else 0
 
 
-RERUN_ITEMS = ("denoise", "leveling", "transcribe", "translate")
+RERUN_ITEMS = ("denoise", "echo", "leveling", "transcribe", "translate")
 
 
 def rerun_rates(denoise_tier: str | None, transcribe_tier: str | None, paid: list[str]) -> dict[str, int]:
@@ -144,6 +153,8 @@ def rerun_rates(denoise_tier: str | None, transcribe_tier: str | None, paid: lis
     out: dict[str, int] = {}
     if "denoise" in paid and denoise_tier and denoise_tier != NO_DENOISE:
         out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
+    if "echo" in paid:
+        out["echo"] = rate("echo", "standard").micros_per_minute
     if "leveling" in paid:
         out["leveling"] = rate("leveling", "standard").micros_per_minute
     if "transcribe" in paid and transcribe_tier:
@@ -157,7 +168,7 @@ def rerun_cost_micros(rates: dict[str, int], seconds: float, translate_languages
     """What a re-run costs: each step it does again, per second of audio rounded up, at the prices pinned with the job."""
     secs = max(0, math.ceil(seconds))
     per = lambda micros: math.ceil(micros * secs / 60)  # noqa: E731
-    total = sum(per(rates[k]) for k in ("denoise", "leveling", "transcribe") if k in rates)
+    total = sum(per(rates[k]) for k in ("denoise", "echo", "leveling", "transcribe") if k in rates)
     if "translate" in rates:
         total += translate_languages * per(rates["translate"])
     return total

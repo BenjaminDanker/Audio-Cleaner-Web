@@ -76,6 +76,8 @@ def _job_parts(kind: str, params: dict, cost: int, seconds: float) -> dict[str, 
     secs = max(0, math.ceil(seconds or 0))
     if "denoise" in rates and tier and tier != pricing.NO_DENOISE:
         out["Voice rebuild" if tier == "rebuild" else "Denoising"] = math.ceil(rates["denoise"] * secs / 60)
+    if "echo" in rates:
+        out["Echo removal"] = math.ceil(rates["echo"] * secs / 60)
     if "leveling" in rates:
         out["Leveling"] = math.ceil(rates["leveling"] * secs / 60)
     if "transcribe" in rates and t_tier:

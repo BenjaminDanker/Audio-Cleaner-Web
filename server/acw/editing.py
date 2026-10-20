@@ -74,7 +74,6 @@ BLOCKS_PER_HOUR_PER_CHANNEL = int(0.35 * GB)
 # Customer-facing names of the steps (the price list's words: what you get, never how it is made).
 ITEM = {"echo": ("echo", "Echo removal"), "light": ("denoise", "Denoising"), "heavy": ("denoise", "Denoising"),
         "rebuild": ("rebuild", "Voice rebuild"), "leveling": ("leveling", "Leveling")}
-ECHO_MICROS_PER_MINUTE = 2_600  # echo removal's own rate: Denoising's x (0.034 / 0.116 CPU-seconds per second, the measured cost of each)
 
 
 def _ed():
@@ -95,7 +94,7 @@ def _tl():
 def step_rates() -> dict[str, int]:
     """Micros per minute of audio of each step that can run, at today's price list (pinned with every run)."""
     denoise = pricing.rate("denoise", "standard").micros_per_minute
-    return {"echo": ECHO_MICROS_PER_MINUTE, "light": denoise, "heavy": denoise,
+    return {"echo": pricing.rate("echo", "standard").micros_per_minute, "light": denoise, "heavy": denoise,
             "rebuild": pricing.rate("denoise", "rebuild").micros_per_minute,
             "leveling": pricing.rate("leveling", "standard").micros_per_minute}
 

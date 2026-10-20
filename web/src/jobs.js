@@ -132,6 +132,8 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   let name = file.name;
   let extracted = false;
   const options = { ...body.options };
+  // a job made with parts: the timeline says what is done, and the options it replaces must not be sent (docs/api.md section 8)
+  const twoTracks = body.timeline ? !!body.timeline.layers?.echo?.length : !!options.echo_reference_track;
   const wantsEmbed = !!(options.embed_subtitles && info?.hasVideo);
   // Only for a video this browser can't open (it goes up whole anyway): otherwise the subtitles are put in here, afterwards.
   if (wantsEmbed) options.output_video = true;
@@ -139,7 +141,7 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
     onStage?.('extract');
     try {
       // Echo removal needs the desktop sound too: keep the first two audio tracks, not just the first.
-      const out = await extractAudio(file, { tracks: options.echo_reference_track ? 2 : 1, onProgress: (p) => onProgress?.({ phase: 'extract', frac: p }), signal });
+      const out = await extractAudio(file, { tracks: twoTracks ? 2 : 1, onProgress: (p) => onProgress?.({ phase: 'extract', frac: p }), signal });
       if (out && out.blob.size < file.size * 0.9) {
         blob = out.blob;
         name = out.filename;

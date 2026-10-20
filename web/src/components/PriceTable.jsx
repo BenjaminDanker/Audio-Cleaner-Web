@@ -6,6 +6,7 @@ import { usePricing } from '../hooks.js';
 const DESCRIPTIONS = {
   'denoise/standard': 'Background noise removed, the voice kept natural',
   'leveling/standard': 'The voice evened out and the loudness set for podcast, YouTube or broadcast; with Denoising or Voice rebuild, or on its own',
+  'echo/standard': 'Speaker echo taken out of your voice track by using the second audio track (your desktop sound); with Denoising',
   'denoise/rebuild': 'For an echoey room, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud: the whole voice is rebuilt',
   'transcribe/local': 'Subtitles and transcripts (SRT, VTT, TXT)',
   'transcribe/premium': 'The same files, best for accents, noisy rooms and specialist words',
@@ -25,7 +26,7 @@ const LABELS = {
 
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
-  { id: 'files', title: 'Files', products: ['denoise', 'leveling', 'transcribe', 'transcribe_translate'] },
+  { id: 'files', title: 'Files', products: ['denoise', 'echo', 'leveling', 'transcribe', 'transcribe_translate'] },
   { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions', 'stream_translate'] },
 ];
 

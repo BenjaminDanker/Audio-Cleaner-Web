@@ -22,7 +22,12 @@ function Countdown({ expiresAt }) {
   if (!expiresAt) return null;
   const left = expiresAt - now / 1000;
   if (left <= 0) return <span className="muted small">Your files are being cleared away.</span>;
-  return <span className="muted small" data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>;
+  return (
+    <span className="muted small">
+      <span data-testid="expiry">Files are cleared away in {human(Math.max(60, Math.round(left / 60) * 60))}</span>
+      <span data-testid="expiry-rule"> (2 hours after your last change, at most 6 hours after the upload)</span>
+    </span>
+  );
 }
 
 /**
@@ -41,9 +46,10 @@ export default function JobCard({ job, onChanged, onDeleted }) {
   const finishing = job.status === 'done' && (st.phase === 'waiting' || st.phase === 'building' || st.phase === 'saving');
 
   // The job finished while this tab was open: its last step and the downloads happen by themselves.
+  // (also when it is done again with a new finishing time: a save in Fix a moment, which can be over before the list was looked at in between)
   useEffect(() => {
     if (job.status === 'done') fin.auto();
-  }, [job.status, fin]);
+  }, [job.status, job.finishedAt, fin]);
 
   async function act(fn) {
     setBusy(true); setErr('');
@@ -98,7 +104,7 @@ export default function JobCard({ job, onChanged, onDeleted }) {
 
       {job.status === 'done' && (
         <>
-          <ResultPanel job={job} fin={fin} />
+          <ResultPanel job={job} fin={fin} onChanged={onChanged} />
           <div className="row-between">
             {job.local ? (
               <span className="small muted">Kept in this tab only, until you leave or reload the page.</span>

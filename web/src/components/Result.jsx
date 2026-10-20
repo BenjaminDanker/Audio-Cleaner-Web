@@ -11,7 +11,9 @@ import { BlendPlayer, dbAt, gainsFor, matchGain, mixOf, posOf, previewFits, stre
 import { canHoldSubtitles, FORMAT } from '../media/convert.js';
 import { STRENGTHS } from '../strengths.js';
 import AbPlayer from './AbPlayer.jsx';
+import WhichOne from './WhichOne.jsx';
 import { FinishProgress } from './Progress.jsx';
+import FixAMoment from './editor/FixAMoment.jsx';
 import { IconDownload } from './Icons.jsx';
 import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
@@ -341,6 +343,7 @@ function SaveAgain({ fin, job, redo }) {
               <span><b>Rebuild the voice</b><span className="hint block">{rebuildHint(redo.rates.rebuild)}</span></span>
             </label>
           )}
+          {redo.canDenoise && !!redo.rates.rebuild && <WhichOne id="which-one-again" />}
           {redo.server && redo.tier && (
             <div className="stack">
               <label className="check">
@@ -393,7 +396,16 @@ function SaveAgain({ fin, job, redo }) {
           )}
         </div>
       )}
-      {!showPaid && !job.local && job.redo && !job.redo.available && (
+      {job.edit?.available && !job.local && (
+        <p className="hint mb0" data-testid="again-editor-link">
+          To change the sound of one part, or to try Voice rebuild on just a moment, use{' '}
+          <button type="button" className="btn btn-ghost btn-sm" data-testid="again-open-editor" onClick={() => window.dispatchEvent(new CustomEvent('acw:open-editor', { detail: job.id }))}>Fix a moment</button>.
+        </p>
+      )}
+      {!showPaid && !job.local && job.edit?.hasTimeline && (
+        <p className="hint mb0" data-testid="again-edited">The sound of this file is changed in Fix a moment now. File type, name and subtitle files can still be changed here.</p>
+      )}
+      {!showPaid && !job.local && !job.edit?.hasTimeline && job.redo && !job.redo.available && (
         <p className="hint mb0" data-testid="again-gone">The files this needs are cleared away, so strength, Leveling and the other paid choices can’t be changed any more. File type, name and subtitle files still can.</p>
       )}
       {hasMedia && <OutputFields choice={choice} info={info} idPrefix={`again-${job.id}`} disabled={busy} />}
@@ -440,7 +452,7 @@ function SaveAgain({ fin, job, redo }) {
  * the listen toggle (with the strength slider where the job has the sound for it), and the choices that can still change.
  * The same for a job done on our side and a free one made here.
  */
-export default function ResultPanel({ job, fin }) {
+export default function ResultPanel({ job, fin, onChanged }) {
   const st = useFinish(fin);
   const picker = useRef(null);
   const [listen, setListen] = useState(false);
@@ -518,6 +530,7 @@ export default function ResultPanel({ job, fin }) {
         <summary>Change and save again</summary>
         {again && <SaveAgain fin={fin} job={job} redo={redo} />}
       </details>
+      <FixAMoment job={job} fin={fin} onChanged={onChanged} />
     </div>
   );
 }

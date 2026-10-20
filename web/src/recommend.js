@@ -16,7 +16,7 @@ export { liveSettingsFor, roomChanges, strengthFor, T } from './recommend-room.j
  * @param {{language?: string}} ctx language: what is picked for the subtitles ('' = detect automatically)
  * @returns {null | {
  *   noise: 'off'|'browser'|'denoise', strength: string, heavy: boolean, rebuild: boolean, leveling: boolean,
- *   subs: 'standard'|'accurate'|null, nothing: boolean, noSpeech: boolean, reasons: string[], line: string }}
+ *   subs: 'standard'|'accurate'|null, nothing: boolean, noSpeech: boolean, reasons: string[], pick: string, line: string }}
  */
 export function recommendForFile(stats, ctx = {}) {
   if (!stats || !(stats.seconds >= 2) || stats.noiseDb == null) return null;
@@ -44,6 +44,17 @@ export function recommendForFile(stats, ctx = {}) {
   const strength = m.strength;
   const quietAndGentle = v.clean && strength === 'gentle';
 
+  // which of the two ways to clean the voice, and why, in the terms of "Which one should I pick?" (components/WhichOne.jsx)
+  const heard = [];
+  if (echoey) heard.push('the voice sounds echoey');
+  if (dull) heard.push('the voice sounds muffled');
+  if (phone) heard.push('it sounds like a phone call or a very small file');
+  if (clipped) heard.push('the sound distorts from being recorded too loud');
+  if (rebuild && !heard.length) heard.push('the voice has lost some of its clarity');
+  const pick = rebuild
+    ? `Voice rebuild: ${heard.length > 1 ? `${heard.slice(0, -1).join(', ')} and ${heard[heard.length - 1]}` : heard[0]}.`
+    : 'Denoising: the voice is already clear, so it is kept exactly as recorded and only the background sound is taken out.';
+  reasons.push(pick);
   if (quietAndGentle) reasons.push('It’s clean and quiet: Denoising takes out what little there is, gently.');
   else if (v.heavy) reasons.push('There is a lot of background noise, nearly as loud as the voice: Denoising uses its stronger noise remover for this.');
   else reasons.push('There is some background noise: Denoising takes it out.');
@@ -77,6 +88,6 @@ export function recommendForFile(stats, ctx = {}) {
   const nothing = false;
   const bits = [rebuild ? 'Voice rebuild' : `Denoising (${strengthName(strength)})`];
   bits.push('leveling', `${subs === 'accurate' ? 'Extra accurate' : 'Standard'} subtitles`);
-  return { noise, strength, heavy: v.heavy && !v.clean, rebuild, leveling, subs, nothing, noSpeech: false, reasons, line: bits.join(', ') };
+  return { noise, strength, heavy: v.heavy && !v.clean, rebuild, leveling, subs, nothing, noSpeech: false, reasons, pick, line: bits.join(', ') };
 }
 

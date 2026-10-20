@@ -444,6 +444,10 @@ def price_lines(rates: dict[str, int], d_tier: str | None, t_tier: str | None, s
         r = pricing.rate("denoise", d_tier)
         lines.append({"item": "denoise", "label": r.label, "quantity": 1, "usdPerMinute": rates["denoise"] / pricing.MICROS_PER_USD,
                       "micros": pricing.cost_micros("denoise", d_tier, seconds, rates["denoise"])})
+    if "echo" in rates:
+        r = pricing.rate("echo", "standard")
+        lines.append({"item": "echo", "label": r.label, "quantity": 1, "usdPerMinute": rates["echo"] / pricing.MICROS_PER_USD,
+                      "micros": pricing.cost_micros("echo", "standard", seconds, rates["echo"])})
     if "leveling" in rates:
         r = pricing.rate("leveling", "standard")
         lines.append({"item": "leveling", "label": r.label, "quantity": 1, "usdPerMinute": rates["leveling"] / pricing.MICROS_PER_USD,
@@ -482,14 +486,15 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
     t_tier = transcribe_tier if kind != "denoise" else None
     n = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
+    echo = kind != "transcribe" and opts["echo_reference_track"]
     plan = automatic_plan(kind, t_tier, options, opts)
     if plan:
         cands = automatic.within(plan["candidates"], duration_seconds)
         top, total = automatic.dearest(kind, t_tier, cands, duration_seconds, n)
         rates, d_tier = top["rates"], top["tier"]  # the lines are the dearest outcome's
     else:
-        rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling)
-        total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling)
+        rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling, echo)
+        total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling, echo)
     out = {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
@@ -618,6 +623,7 @@ def create_job(
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     n_translate = len(opts["translate"])
     leveling = kind != "transcribe" and opts["leveling"]
+    echo = kind != "transcribe" and opts["echo_reference_track"]
     plan = automatic_plan(kind, params["transcribe_tier"], options, opts)
     if tl is not None:
         # A job made with a timeline: only its parts are processed and charged (editing.py); the subtitles are priced as always.
@@ -634,9 +640,9 @@ def create_job(
                                      n_translate)
         params["rates"] = top["rates"]
     else:
-        params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling)
+        params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling, echo)
         est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
-                                      leveling)
+                                      leveling, echo)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:

@@ -155,7 +155,7 @@ export async function splitParts(parts, channels) {
 /* ------------------------------------------------------------------------------------------------ the two copies of a job on our side */
 
 let decoder = null;
-function decodeAudio(bytes) {
+export function decodeAudio(bytes) {
   const Ctx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   if (!Ctx) return Promise.reject(new Error('This browser can’t play the strengths side by side.'));
   decoder ||= new Ctx(1, 1, SAMPLE_RATE);
@@ -183,7 +183,7 @@ async function fetchBytes(url, { signal, onBytes }) {
 }
 
 /** Decoded audio -> one Float32Array of exactly `samples` per kept channel, brought back up by `scale` (a loud sample was brought down when kept, acw_common/kept.py). */
-function channelsOf(decoded, { samples, channels, scale }) {
+export function channelsOf(decoded, { samples, channels, scale }) {
   const inv = 1 / scale;
   const out = [];
   for (let c = 0; c < channels; c++) {

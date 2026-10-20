@@ -10,12 +10,13 @@ import { BASE, FILES, check, dropFile, launch, pick, signIn, summary } from './h
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
 const BANNED = [
-  /DeepFilterNet/i, /\bDFN/i, /Whisper/i, /Parakeet/i, /FastConformer/i, /sherpa/i, /OpenAI/i, /gpt-/i, /WebAssembly/i, /\bwasm\b/i,
+  /DeepFilterNet/i, /\bDFN/i, /\bWhisper\b/, /Parakeet/i, /FastConformer/i, /sherpa/i, /OpenAI/i, /gpt-/i, /WebAssembly/i, /\bwasm\b/i,
   /on-prem/i, /self-hosted/i, /home server/i, /server-side/i, /\bour servers?\b/i,
   /premium/i,
   /\bupgrade/i, /\benterprise\b/i, /\bsolutions?\b/i, /\btiers?\b/i, /\bplans?\b/i, /\bpro\b/i, /professional/i, /seamless/i, /leverage/i,
   /Create a free account/i, /Get started today/i,
   /\bStudio\b/i, /transcribe page/i, /free transcription/i, /no (account|sign-in)/i,
+  /\bpolish(ed|es|ing)?\b|\bPolish (your|the|it|up|this|that|my)\b/, // never "polish"
   /Restore (missing )?highs/i, /missing highs/i, /AP-BWE/i, // (restoring highs is not offered any more: a recording that lost them is rebuilt)
 ];
 
@@ -187,14 +188,14 @@ await check('retention: the signed-in Cleanup page (the list note and "Good to k
   await page.goto(`${BASE}/app`);
   await page.getByTestId('jobs-note').waitFor();
   const note = (await page.getByTestId('jobs-note').innerText()).replace(/\s+/g, ' ');
-  if (!/for 2 hours after it.s done/.test(note)) throw new Error('the list note: ' + note);
+  if (!/for 2 hours after your last change to it, and at most 6 hours after the upload/.test(note)) throw new Error('the list note: ' + note);
   const good = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
-  if (!/upload and your results are kept together for 2 hours after a file is done[^.]*deleted together/.test(good)) throw new Error('Cleanup "Good to know": ' + good.slice(-700));
+  if (!/upload and your results are kept together for 2 hours after your last change to a file \(at most 6 hours after the upload\)[^.]*deleted together/.test(good)) throw new Error('Cleanup "Good to know": ' + good.slice(-700));
   bad.push(...oldRetention(good).map((x) => `cleanup: ${x}`));
   await page.goto(`${BASE}/app/account`);
   await page.waitForSelector('main h1');
   const acct = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
-  if (!/uploads and results are deleted 2 hours after a file is done/.test(acct)) throw new Error('Account page: ' + acct.slice(0, 600));
+  if (!/uploads and results are deleted 2 hours after your last change to a job, and at most 6 hours after the upload/.test(acct)) throw new Error('Account page: ' + acct.slice(0, 600));
   bad.push(...oldRetention(acct).map((x) => `account: ${x}`));
   await page.goto(`${BASE}/developers`);
   await page.waitForSelector('pre.code');

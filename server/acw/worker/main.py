@@ -385,6 +385,8 @@ def _read_result(path: Path) -> dict:
             raise StageFailed("Processing failed; you were not charged.", "malformed outputs")
         if res.get("kept") is not None and not isinstance(res["kept"], dict):
             raise StageFailed("Processing failed; you were not charged.", "malformed kept")
+        if not isinstance(res.get("echo_skipped", False), bool):
+            raise StageFailed("Processing failed; you were not charged.", "malformed echo_skipped")
         for key in ("notice", "noise", "language"):
             if res.get(key) is not None and not isinstance(res[key], str):
                 raise StageFailed("Processing failed; you were not charged.", f"malformed {key}")
@@ -404,12 +406,15 @@ def _job_cost(job: dict, params: dict, seconds: float, billed: dict | None = Non
     if automatic.pending(params):
         # (not decided: it ends up charged for the most it can cost, which is what was held)
         return automatic.pending_cost(job["kind"], params, seconds)
+    rates = dict(params.get("rates") or {})
+    if params.get("echo_skipped"):
+        rates.pop("echo", None)  # (a file with one audio track had no echo removal: it is not charged)
     if params.get("rerun"):
         # A re-run pays only for the steps it did again (its pinned rates are just those), and for the new languages it made.
         new = params["rerun"].get("translate_new") or []
-        return pricing.rerun_cost_micros(params.get("rates") or {}, seconds, len([lang for lang in made if lang in new]))
-    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, params.get("rates"), len(made),
-                                   "leveling" in (params.get("rates") or {}))
+        return pricing.rerun_cost_micros(rates, seconds, len([lang for lang in made if lang in new]))
+    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, rates, len(made),
+                                   "leveling" in rates, "echo" in rates)
 
 
 # A job made with an API key must say how long its file is (an API client knows): the measured length may be this
@@ -680,6 +685,8 @@ def process(job: dict, extra: dict) -> None:
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
+        if res.get("echo_skipped"):
+            jobs.update_params(job["id"], echo_skipped=True)  # (no second track: the echo removal that was asked for is not charged)
         if res.get("kept"):
             jobs.update_params(job["id"], kept_reported=res["kept"])  # the finishing step may run after the cloud stage
         if res.get("editor"):

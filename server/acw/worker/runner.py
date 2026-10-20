@@ -204,8 +204,10 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     kept_out: dict = {}  # the copies kept for a later "change and save again" (reported to the worker, which checks them)
     asr_end = 45 if denoise_run else 90  # progress when transcription is done
     x = None  # the decoded audio, echo-free when the second track was used
+    echo_skipped = False  # echo removal was asked for but the file has no second track (so it is not charged)
     if opts.get("echo_reference_track") and (denoise_run or transcribe_run):
         if probe.audio_tracks < 2:
+            echo_skipped = True
             notice = "This file has only one audio track, so there was no desktop sound to remove echo with. It was processed without echo removal."
         else:
             # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
@@ -383,7 +385,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     missing = [lang for lang in (opts.get("translate") or []) if not (job_dir / f"segments.{lang}.json").is_file()]
     needs_cloud = needs_cloud or bool(missing)
     result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
-              "noise": noise_used, "kept": kept_out, "editor": editor_report}
+              "echo_skipped": echo_skipped, "noise": noise_used, "kept": kept_out, "editor": editor_report}
     if not needs_cloud:
         result.update(stage_finalize(job_dir, spec))
     return result

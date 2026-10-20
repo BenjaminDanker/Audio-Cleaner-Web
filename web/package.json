@@ -26,7 +26,10 @@
     "test:fixes": "node tests/fixes.mjs",
     "test:contact": "node tests/contact.mjs",
     "test:convert": "node tests/convert.mjs",
-    "test:subtitles": "node tests/subtitles.mjs"
+    "test:subtitles": "node tests/subtitles.mjs",
+    "test:editor": "node tests/editor.mjs",
+    "test:editor-unit": "node tests/editor-unit.mjs",
+    "test:suggest": "node tests/suggest-agreement.mjs"
   },
   "dependencies": {
     "@huggingface/transformers": "4.3.0",

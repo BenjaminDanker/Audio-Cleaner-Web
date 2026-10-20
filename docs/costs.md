@@ -31,6 +31,7 @@ pay for.
 | Product | Price | Electricity | OpenAI | Stripe ($20 top-up) | Net | Margin |
 |---|---|---|---|---|---|---|
 | Studio clean | $0.0100 | $0.00001 | - | $0.00044 | $0.00955 | 95% |
+| Echo removal (with Denoising, a file's second track) | $0.0026 | <$0.00001 | - | $0.00011 | $0.00248 | 95% |
 | Transcription (standard, Parakeet/Whisper) | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
 | Transcription, extra accurate | $0.0150 | <$0.00001 | $0.0045 | $0.00066 | $0.00984 | 66% |
 | Live noise removal | $0.0040 | $0.00001 | - | $0.00018 | $0.00381 | 95% |
@@ -39,6 +40,10 @@ pay for.
 
 With $10 top-ups every margin drops by 1.5 points; with $50 top-ups it rises
 by 0.9. If Stripe Tax is switched on, subtract another 0.5 points.
+
+Echo removal has its own price, `echo` / `standard` in `server/acw/billing/pricing.py`: 2,600 micros a minute, about 29 % of
+Denoising's, the ratio of the measured CPU of the two (0.034 and 0.116 CPU-seconds per second of audio). The per-part editor prices
+the same step with the same constant. A job made before the price existed keeps the prices it was made with (nothing for echo).
 
 Electricity per minute of audio (wall power, upper bound): Studio clean
 23.5 CPU-s; standard transcription with Parakeet 22 CPU-s on the CPU, or ~2.4

@@ -157,7 +157,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['loudness_lufs', '-16', 'The loudness to aim for, a number from -30 to -9 (podcast -16, online video -14, broadcast -23), or null to leave the level alone. Outside the range is a 400.'],
             ['atten_lim_db', '100', 'How much noise may be taken out, in dB, kept between 6 (gentle) and 100 (as much as possible). The website offers 12, 24, 40 and 100. Does not apply when the voice is rebuilt.'],
             ['noise', 'auto', '"auto" measures the recording and picks; "light" suits hiss, hum and a quiet room; "heavy" suits noise almost as loud as the voice. Does not apply when the voice is rebuilt.'],
-            ['echo_reference_track', 'false', 'true or false (anything else is a 400). Removes speaker echo from the first audio track by using the second one (the sound from your speakers, as OBS can record it). Included in the price.'],
+            ['echo_reference_track', 'false', 'true or false (anything else is a 400). Removes speaker echo from the first audio track by using the second one (the sound from your speakers, as OBS can record it). Charged at its own price, per second, in its own line (a file with only one audio track is processed without it and not charged for it).'],
             ['leveling', 'true', 'true or false. Leveling, with its own price: evens out the voice and sets the loudness. false returns the cleaned voice as it is.'],
             ['automatic', 'false', 'true or false. true lets us listen to the file and decide the settings you did not give yourself, like the website’s Automatic best settings. Needs "denoise" or "denoise_transcribe" with denoiseTier "standard". See Automatic settings below.'],
           ]}
@@ -204,6 +204,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
   "rates": [
     {"product": "denoise", "tier": "standard", "label": "Denoising", "usdPerMinute": 0.009, "usdPerHour": 0.54, "available": true},
     {"product": "leveling", "tier": "standard", "label": "Leveling", "usdPerMinute": 0.001, "usdPerHour": 0.06, "available": true},
+    {"product": "echo", "tier": "standard", "label": "Echo removal", "usdPerMinute": 0.0026, "usdPerHour": 0.156, "available": true},
     {"product": "transcribe_translate", "tier": "standard", "label": "Translated subtitles, per language", "usdPerMinute": 0.004, "...": "..."}
   ],
   "maxJobSeconds": 14400, "maxRebuildSeconds": 5400, "maxUploadBytes": 4294967296,
@@ -254,7 +255,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['leveling, loudness_lufs', 'From the kept noise removal: Leveling is charged at its price whenever it runs; with it off the change is free.'],
             ['denoiseTier: "rebuild"', 'The voice is rebuilt from your upload, at the full Voice rebuild price.'],
             ['denoiseTier: "standard" (from a rebuild)', 'The kept noise removal is used. If the job never had one, noise removal runs and is charged.'],
-            ['noise, echo_reference_track', 'Noise removal runs again from your upload and is charged.'],
+            ['noise, echo_reference_track', 'Noise removal runs again from your upload and is charged (echo removal, when it is on, in its own line).'],
             ['transcribeTier, language', 'The transcript is written again from your original sound and is charged. Other languages in translate cost only for the new ones.'],
             ['audio_format, caption_formats', 'The files are written again from what is already there. Free.'],
           ]}

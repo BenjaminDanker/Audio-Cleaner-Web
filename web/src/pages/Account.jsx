@@ -90,7 +90,7 @@ export default function Account() {
 
       <section className="card stack" aria-labelledby="data-h">
         <h2 id="data-h" className="mb0">Your data</h2>
-        <p className="mb0 muted">Download everything we keep about your account (profile, sign-in methods, sessions, key details, credit history, payments, job and live history) as a JSON file. Your audio isn’t part of it, because we only keep it for a short while: uploads and results are deleted 2 hours after a file is done.</p>
+        <p className="mb0 muted">Download everything we keep about your account (profile, sign-in methods, sessions, key details, credit history, payments, job and live history) as a JSON file. Your audio isn’t part of it, because we only keep it for a short while: uploads and results are deleted 2 hours after your last change to a job, and at most 6 hours after the upload.</p>
         <div><button type="button" className="btn btn-secondary" disabled={!!busy} onClick={download}>{busy === 'export' ? 'Preparing…' : 'Download my data'}</button></div>
         {msg && <div className={`banner banner-${msg.kind}`} role={msg.kind === 'error' ? 'alert' : 'status'}>{msg.text}</div>}
       </section>

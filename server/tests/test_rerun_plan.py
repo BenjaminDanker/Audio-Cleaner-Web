@@ -49,8 +49,8 @@ TRANS = dict(kind="denoise_transcribe", t="local", segments={"language": "en"}, 
     pytest.param(PLAIN, {"noise": "light"}, "denoised", ["leveling"], True, id="noise-kind-auto-chose-is-the-kept-one"),
     pytest.param(PLAIN, {"noise": "heavy"}, "full", ["denoise", "leveling"], True, id="other-noise-kind-runs-noise-removal"),
     pytest.param(FREE, {"noise": "heavy"}, "full", ["denoise"], True, id="other-noise-kind-without-leveling"),
-    pytest.param(PLAIN, {"echo_reference_track": True}, "full", ["denoise", "leveling"], True, id="echo-on-runs-noise-removal"),
-    pytest.param(FREE, {"echo_reference_track": True}, "full", ["denoise"], True, id="echo-on-without-leveling"),
+    pytest.param(PLAIN, {"echo_reference_track": True}, "full", ["denoise", "echo", "leveling"], True, id="echo-on-runs-noise-removal-and-echo-removal"),
+    pytest.param(FREE, {"echo_reference_track": True}, "full", ["denoise", "echo"], True, id="echo-on-without-leveling"),
     pytest.param(PLAIN, {"audio_format": "wav"}, "reuse", [], True, id="file-type-only-is-free-work"),
 ])
 def test_what_runs_again_for_a_change_of_choices(src_kw, change, clean, paid, work):
@@ -194,7 +194,7 @@ def test_caption_files_only_are_free_work_from_the_kept_transcript():
 def test_subtitles_with_echo_removal_changes_start_over_from_the_upload():
     """A transcript kept without echo removal does not fit echo removal on: noise removal and transcription both run."""
     plan = replan(source(**TRANS), echo_reference_track=True)
-    assert (plan["clean"], plan["transcribe"], plan["paid"]) == ("full", True, ["denoise", "leveling", "transcribe"])
+    assert (plan["clean"], plan["transcribe"], plan["paid"]) == ("full", True, ["denoise", "echo", "leveling", "transcribe"])
 
 
 def test_adding_and_dropping_subtitles():
@@ -257,7 +257,8 @@ def test_rerun_rates_only_include_the_steps_that_run_at_todays_prices():
     assert r("standard", "premium", ["transcribe", "translate"]) == {"transcribe": 15_000, "translate": 4_000}
     assert r(None, "local", ["translate"]) == {"translate": 4_000}
     assert r("standard", None, ["transcribe"]) == {}  # no subtitle tier: nothing to price
-    assert pricing.RERUN_ITEMS == ("denoise", "leveling", "transcribe", "translate")
+    assert pricing.RERUN_ITEMS == ("denoise", "echo", "leveling", "transcribe", "translate")
+    assert r("standard", None, ["denoise", "echo", "leveling"]) == {"denoise": 9_000, "echo": 2_600, "leveling": 1_000}
 
 
 def test_rerun_cost_is_per_second_rounded_up_per_step_and_per_language():
@@ -282,9 +283,9 @@ def test_rerun_cost_is_per_second_rounded_up_per_step_and_per_language():
 def test_a_rerun_that_runs_everything_costs_what_the_same_first_job_costs():
     """Paying for every step again is the price of a new job with the same choices."""
     rates = pricing.rerun_rates("standard", "local", list(pricing.RERUN_ITEMS))
-    first = pricing.job_rates("denoise_transcribe", "standard", "local", 2, True)
+    first = pricing.job_rates("denoise_transcribe", "standard", "local", 2, True, True)
     assert rates == first and set(rates) == set(pricing.RERUN_ITEMS)
-    assert pricing.rerun_cost_micros(rates, 123.4, 2) == pricing.job_cost_micros("denoise_transcribe", "standard", "local", 123.4, first, 2, True)
+    assert pricing.rerun_cost_micros(rates, 123.4, 2) == pricing.job_cost_micros("denoise_transcribe", "standard", "local", 123.4, first, 2, True, True)
 
 
 # ---------------------------------------------------------------------------------------- labels
@@ -297,6 +298,7 @@ def test_the_label_names_the_steps_that_ran_again():
     assert lab({"denoise": 9_000, "leveling": 1_000}, "standard", None) == "Changed and saved again (Denoising + Leveling)"
     assert lab({"denoise": 30_000}, "rebuild", None) == "Changed and saved again (Voice rebuild)"
     assert lab({"leveling": 1_000}, "off", None) == "Changed and saved again (Leveling)"
+    assert lab({"denoise": 9_000, "echo": 2_600, "leveling": 1_000}, "standard", None) == "Changed and saved again (Denoising + Echo removal + Leveling)"
     assert lab({"transcribe": 4_000}, "standard", "local") == "Changed and saved again (Subtitles & transcript)"
     assert lab({"transcribe": 15_000}, None, "premium") == "Changed and saved again (Subtitles & transcript, extra accurate)"
     assert lab({"translate": 4_000}, None, "local") == "Changed and saved again (Translated subtitles)"

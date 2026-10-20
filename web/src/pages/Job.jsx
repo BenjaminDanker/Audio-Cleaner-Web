@@ -73,7 +73,7 @@ export default function Job() {
       {gone && (
         <div className="card stack" data-testid="job-gone">
           <p className="mb0"><b>This job isn’t here any more.</b></p>
-          <p className="muted mb0">Your files are cleared away 2 hours after a file is done, or when you delete them, and a free run made in your browser is gone when you leave or reload the page. What you paid is in your <Link to="/app/billing">billing history</Link>.</p>
+          <p className="muted mb0">Your files are cleared away 2 hours after your last change to a file (at most 6 hours after the upload), or when you delete them, and a free run made in your browser is gone when you leave or reload the page. What you paid is in your <Link to="/app/billing">billing history</Link>.</p>
           <div><Link to="/app" className="btn btn-primary">Start another file</Link></div>
         </div>
       )}

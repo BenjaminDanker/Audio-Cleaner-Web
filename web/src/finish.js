@@ -46,7 +46,7 @@ export function loadWants(id) {
     return null;
   }
 }
-/** Forget the choices of jobs the server no longer lists (their files are cleared away 2 hours after they finish). */
+/** Forget the choices of jobs the server no longer lists (their files are cleared away 2 hours after the last change to them). */
 export function pruneWants(ids) {
   try {
     const keep = new Set([...ids, ...finishes.keys()]); // a job this tab just made may not be in the list yet
@@ -444,6 +444,24 @@ export class Finish {
     } finally {
       if (this.ctl === ctl) this.ctl = null;
     }
+  }
+
+  /**
+   * The job was sent back through the editor (a save): when it is done again its new files come down by themselves, as after the first
+   * run. What was made for the earlier result (the files, the sound blended here) is forgotten.
+   */
+  rearm() {
+    this.ctl?.abort();
+    this.thisTab = true;
+    this.autoStarted = false;
+    this.made = null;
+    this.cache.clear();
+    if (this.wavUrl) URL.revokeObjectURL(this.wavUrl);
+    this.pcm = null; this.wav = null; this.wavUrl = '';
+    this.blendedDb = null; this.strengthDb = null;
+    this.pair = null; this.pairParts = null; this.pairLoad = null; this.source = null; this.sourceKey = '';
+    if (this.wants) { const w = { ...this.wants }; delete w.blend; this.wants = w; saveWants(this.id, w); }
+    this.set({ phase: 'idle', progress: 0, files: [], note: '', error: '', pending: null, strengthDb: null });
   }
 
   /** The job just finished while this tab was open: finish it by itself, once. */

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from acw import db, jobs
-from acw.billing import ledger
+from acw.billing import ledger, pricing
 from acw_common.ffmpeg import FFmpeg
 
 from .test_job_pipeline import HOME, _run_worker_once
@@ -26,13 +26,13 @@ def create(client, h, **options):
     }, headers=h)
 
 
-def test_the_option_is_taken_as_true_or_false_and_costs_nothing_extra(client, signed_in):
+def test_the_option_is_taken_as_true_or_false_and_has_its_own_price(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
     plain = create(client, h)
     on = create(client, h, echo_reference_track=True)
     assert plain.status_code == on.status_code == 200, (plain.text, on.text)
-    assert on.json()["estCostMicros"] == plain.json()["estCostMicros"] > 0
+    assert on.json()["estCostMicros"] == plain.json()["estCostMicros"] + pricing.cost_micros("echo", "standard", SECONDS) > 0
     assert client.get(f"/api/jobs/{plain.json()['id']}").json()["options"]["echo_reference_track"] is False
     assert client.get(f"/api/jobs/{on.json()['id']}").json()["options"]["echo_reference_track"] is True
     assert create(client, h, echo_reference_track="yes").status_code == 400
@@ -104,6 +104,9 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     assert job["notice"] is None
     job, with_echo_removal = _clean(client, h, data, echo_reference_track=True)
     assert job["notice"] is None
+    row = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
+    assert row["cost_micros"] == pricing.job_cost_micros("denoise", "standard", None, row["duration_seconds"], leveling=True, echo=True)
+    assert row["cost_micros"] > pricing.job_cost_micros("denoise", "standard", None, row["duration_seconds"], leveling=True)
     assert _speaker_vs_voice_db(with_echo_removal, tmp_path) < _speaker_vs_voice_db(without, tmp_path) - 10
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job["id"]).iterdir()}
     # scratch files are gone; the upload, the kept copies and the per-part editor's (block cache, the recording, suggestions) stay
@@ -133,3 +136,6 @@ def test_one_track_file_is_cleaned_normally_with_a_notice(client, signed_in, tmp
     job, out = _clean(client, h, _recording(tmp_path, two_tracks=False), echo_reference_track=True)
     assert "only one audio track" in job["notice"]
     assert len(out) > 1000
+    # no second track, no echo removal: it is not charged (the hold was for it, the charge is for what ran)
+    row = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
+    assert row["cost_micros"] == pricing.job_cost_micros("denoise", "standard", None, row["duration_seconds"], leveling=True)

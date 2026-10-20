@@ -16,6 +16,10 @@ import { denoiseFile } from '../media/pipeline.js';
 import { preloadSpeech, speechLoadState, subscribeSpeechLoad, subtitleFiles, transcribeFile } from '../media/speech.js';
 import { buildWav, wavFits } from '../media/wav.js';
 import { FinishProgress, ProgressPanel, SubtitlesProgress } from './Progress.jsx';
+import PlanParts from './editor/PlanParts.jsx';
+import WhichOne from './WhichOne.jsx';
+import { Timeline } from '../editor/timeline.js';
+import { estimateWithTimeline } from '../editor/api.js';
 import OutputFields, { useOutputChoice } from './OutputPicker.jsx';
 import FileDrop, { SERVER_FORMATS } from './FileDrop.jsx';
 import StrengthPicker from './StrengthPicker.jsx';
@@ -151,6 +155,10 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const [noiseKind, setNoiseKind] = useState('auto');
   const [leveling, setLeveling] = useState(true); // Leveling (paid, on our side): even out the voice, set the loudness. With noise removal Off it runs on its own.
   const [rebuild, setRebuild] = useState(false); // Voice rebuild (its own price)
+  const [partsEver, setPartsEver] = useState(false); // "Choose parts (optional)" was opened for this file
+  const [only, setOnly] = useState(false); // ... and it processes only the chosen parts
+  const [plan, setPlan] = useState(null); // {tl, dirty}: what the person made of it
+  const [planEst, setPlanEst] = useState({ state: 'idle', data: null, error: '' }); // the server's price for the parts
   const [strength, setStrength] = useState('max'); // Denoising
   const [localStrength, setLocalStrength] = useState('max'); // in the browser
   const [caps, setCaps] = useState({ srt: true, vtt: true, txt: true });
@@ -231,6 +239,8 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const denoiseTier = soundOnly ? 'off' : rebuild && rebuildRate ? 'rebuild' : 'standard';
   const levelingRate = findRate(pricing, 'leveling', 'standard');
   const withLeveling = serverClean && leveling; // Leveling is charged on its own line
+  const withEcho = !!(wantsDenoise && echo && hasSecondTrack); // so is echo removal
+  const echoRate = findRate(pricing, 'echo', 'standard');
   const standardRate = findRate(pricing, 'transcribe', 'local');
   const translateRate = findRate(pricing, 'transcribe_translate', 'standard');
   const fileReco = useMemo(() => (stats ? recommendForFile(stats, { language }) : null), [stats, language]);
@@ -251,14 +261,46 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const eta = procEta == null ? null : procEta + (loadLeft || 0) + finishEta;
   const tail = wantsBrowser && procEta && finishEta ? Math.min(0.4, finishEta / (procEta + finishEta)) : 0; // its share of the progress bar
 
-  const est = useMemo(() => {
+  const classicEst = useMemo(() => {
     if (!kind) return 0;
-    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling });
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
+    return estimateMicros(pricing, { kind, denoiseTier, transcribeTier: tier, seconds: duration, translate: translations.length, leveling: withLeveling, echo: withEcho });
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling, withEcho]);
   const breakdown = useMemo(() => {
     if (kind !== 'denoise_transcribe' || !duration) return null;
-    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
-  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling]);
+    return [estimateMicros(pricing, { kind: 'denoise', denoiseTier, seconds: duration, leveling: withLeveling, echo: withEcho }), estimateMicros(pricing, { kind: 'transcribe', transcribeTier: tier, seconds: duration, translate: translations.length })];
+  }, [pricing, kind, tier, duration, denoiseTier, translations.length, withLeveling, withEcho]);
+
+  // ---- "Choose parts (optional)": the whole file as the choices above say, and what the person makes of it ----
+  const partsAvailable = !!(serverClean && file && info && duration && info.hasAudio !== false && (kind === 'denoise' || kind === 'denoise_transcribe'));
+  const rebuildingNow = rebuild && !!rebuildRate;
+  const formBase = useMemo(() => {
+    if (!duration) return null;
+    return Timeline.wholeFile(duration, {
+      echo: withEcho,
+      noise: wantsDenoise && !rebuildingNow ? { strength_db: strengthDb(strength), remover: noiseKind } : false,
+      rebuild: wantsDenoise && rebuildingNow,
+      leveling: withLeveling ? { loudness_lufs: LOUDNESS.find((l) => l.id === loudness)?.value ?? null } : false,
+    });
+  }, [duration, withEcho, wantsDenoise, rebuildingNow, strength, noiseKind, withLeveling, loudness]);
+  const planBase = useMemo(() => (only && duration ? new Timeline(duration) : formBase), [only, duration, formBase]);
+  const partsMode = partsAvailable && partsEver && !!plan && (only ? !plan.tl.isEmpty() : plan.dirty);
+  const planKey = partsMode ? JSON.stringify(plan.tl.toJSON().layers) : '';
+  useEffect(() => {
+    if (!partsMode) { setPlanEst({ state: 'idle', data: null, error: '' }); return undefined; }
+    setPlanEst((e) => ({ ...e, state: 'loading', error: '' }));
+    const ctl = new AbortController();
+    const t = setTimeout(() => {
+      estimateWithTimeline({
+        kind, transcribeTier: serverText ? tier : null, durationSeconds: duration, timeline: plan.tl,
+        options: { language: language || null, translate: translations },
+      }, ctl.signal).then(
+        (data) => setPlanEst({ state: 'ok', data, error: '' }),
+        (e) => { if (e?.name !== 'AbortError') setPlanEst({ state: 'error', data: null, error: e.detail || e.message || 'Couldn’t work out the price of these parts.' }); },
+      );
+    }, 400);
+    return () => { clearTimeout(t); ctl.abort(); };
+  }, [planKey, partsMode, kind, tier, serverText, duration, language, translations.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+  const est = partsMode ? (planEst.state === 'ok' ? planEst.data.estCostMicros : null) : classicEst;
 
   async function choose(f) {
     if (f.size < TINY_FILE_BYTES) {
@@ -273,6 +315,9 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
     setError('');
     setEmbed(false);
     setEcho(false);
+    setPartsEver(false);
+    setOnly(false);
+    setPlan(null);
     // every file starts from the usual choices: Denoising, Standard subtitles, Leveling, no rebuild
     setSubs('standard');
     setNoise('denoise');
@@ -425,6 +470,8 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
   const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
   if (kind && file && file.size > maxUpload && !canShrink) problems.push(`This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.`);
   if (kind && maxActive && active >= maxActive) problems.push(tooManyText(active));
+  if (partsMode && planEst.state === 'error') problems.push(planEst.error);
+  if (partsAvailable && partsEver && only && plan && plan.tl.isEmpty()) problems.push('Choose at least one part to process, or switch back to the whole file.');
   if (kind && est == null && duration && pricingError) problems.push('We couldn’t load the prices just now, so this can’t start yet.');
   if (kind && est != null && balance && est > balance.available_micros) problems.push(`This costs about ${money(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`);
   if (info && !wantsBrowser && !localSubs && !kind) problems.push('Choose at least one thing to do: noise removal, subtitles, or both.');
@@ -506,9 +553,15 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
         noise: noiseKind,
         leveling,
         atten_lim_db: strengthDb(strength),
-        echo_reference_track: !!(wantsDenoise && echo && hasSecondTrack),
+        echo_reference_track: withEcho,
       },
     };
+    if (partsMode) {
+      // the parts say what is done to which stretch: they replace the tier and the options for the sound (docs/api.md section 8)
+      body.denoiseTier = null;
+      body.timeline = plan.tl.toJSON();
+      for (const k of ['noise', 'leveling', 'loudness_lufs', 'atten_lim_db', 'echo_reference_track']) delete body.options[k];
+    }
     try {
       const out = await submitJob({
         file: f, info: i, body, signal,
@@ -666,7 +719,7 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
                       <span data-testid="reco-listening"><span className="spinner" aria-hidden="true" /> {autoLine}</span>
                     ) : applied && reco ? (
                       <>
-                        <span className="auto-text"><b data-testid="reco-status">{autoLine}</b> <span className="muted" data-testid="reco-line">{reco.line}</span></span>
+                        <span className="auto-text"><b data-testid="reco-status">{autoLine}</b> <span className="muted" data-testid="reco-line">{reco.line}</span> <span className="muted" data-testid="reco-pick">{reco.pick}</span></span>
                         {custom
                           ? <button type="button" className="btn btn-ghost btn-sm" onClick={() => applyReco(reco, info, true)} disabled={busy} data-testid="reco-apply">Use them again</button>
                           : <button type="button" className="btn btn-ghost btn-sm" onClick={undoAuto} disabled={busy} data-testid="reco-undo">Undo</button>}
@@ -746,11 +799,12 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
                       title="Rebuild the voice" hintId="rebuild-hint" hint={rebuildHint(rebuildRate)}
                     />
                   )}
+                  {rebuildOffered && <WhichOne id="which-one-form" />}
                   {hasSecondTrack && (
                     <Toggle
                       name="echo" checked={echo} onChange={(e) => setEcho(e.target.checked)} disabled={busy}
-                      title="Remove speaker echo using the second audio track (your desktop sound)"
-                      hint="OBS can record your mic and your desktop audio on separate tracks. Put the mic on track 1 and the desktop sound on track 2."
+                      title="Remove speaker echo using the second audio track (your desktop sound)" hintId="echo-hint"
+                      hint={`OBS can record your mic and your desktop audio on separate tracks. Put the mic on track 1 and the desktop sound on track 2.${echoRate ? ` Echo removal costs ${rate(echoRate.usdPerMinute)} a minute on top.` : ''}`}
                     />
                   )}
                   <GoodToKnow k={rebuilding ? 'rebuild' : 'denoise'} />
@@ -775,6 +829,33 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
                   </div>
                 </div>
               </Step>
+            )}
+
+            {partsAvailable && (
+              <details className="parts-box" onToggle={(e) => { if (e.currentTarget.open) setPartsEver(true); }} data-testid="parts-box">
+                <summary data-testid="parts-summary">
+                  <span className="entry-t">
+                    <b>Choose parts (optional)</b>
+                    <span className="hint" data-testid="parts-now">
+                      {only ? `Now: only the chosen parts${plan && !plan.tl.isEmpty() ? '' : ' (none yet)'}` : partsMode ? 'Now: the whole file, with some parts done differently' : 'Now: the whole file'}
+                    </span>
+                  </span>
+                </summary>
+                {partsEver && (
+                  <div className="parts-body" data-testid="parts-body">
+                    <PlanParts
+                      key={`${file.name}-${file.size}-${duration}`} file={file} info={info} seconds={duration} base={planBase} secondTrack={withEcho} onPlan={setPlan}
+                      planControl={(
+                        <span className="ed-bseg ed-bseg-plan" role="group" aria-label="What to process">
+                          <button type="button" data-testid="plan-whole" aria-pressed={!only} onClick={() => setOnly(false)}>Whole file</button>
+                          <button type="button" data-testid="plan-only" aria-pressed={only} onClick={() => setOnly(true)}>Only parts</button>
+                        </span>
+                      )}
+                    />
+                    <p className="hint mb0">Every layer starts on the whole file, as set above. Choose a part to change just that; with Only parts, nothing else is processed or charged.</p>
+                  </div>
+                )}
+              </details>
             )}
 
             <Step title="Subtitles and transcript" lead="Write down what is said, in the language you choose.">
@@ -873,7 +954,7 @@ export default function JobForm({ onSubmitted, active = 0, maxActive = null }) {
               {kind && duration && est != null && (
                 <p className="mb0" data-testid="estimate">
                   <b>Estimated cost: {money(est)}</b>{' '}
-                  <span className="hint">for {human(duration)} of audio{breakdown ? ` (cleaning ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? '; the subtitles made on your device are free' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
+                  <span className="hint">for {partsMode ? `the parts you chose (${human(duration)} of audio in all)` : `${human(duration)} of audio`}{breakdown && !partsMode ? ` (cleaning ${money(breakdown[0])} + subtitles ${money(breakdown[1])})` : localSubs ? '; the subtitles made on your device are free' : ''}. You only pay for what gets processed. {BILLING_NOTE}</span>
                 </p>
               )}
               {lengthUnknown && <p className="hint mb0" data-testid="length-unknown">Your browser can&rsquo;t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.</p>}
