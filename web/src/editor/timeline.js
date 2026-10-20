@@ -42,8 +42,10 @@ export function settingsOf(layer, raw = {}) {
   const r = { ...(raw || {}) };
   let out;
   if (layer === 'noise' && r.browser === true) {
-    // the browser cleaned this range itself and uploaded it: strength and remover are not used (and not kept)
+    // the browser cleaned this range itself and uploaded it: the strength it used is kept for showing, the remover is not used
     out = { browser: true };
+    const db = Number(r.strength_db ?? r.strength);
+    if (Number.isFinite(db) && db > 0 && db <= 100) out.strength_db = db;
   } else if (layer === 'noise') {
     let db = r.strength_db ?? r.strength ?? 100;
     if (typeof db === 'string') {

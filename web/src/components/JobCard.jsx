@@ -46,7 +46,6 @@ export default function JobCard({ job, onChanged, onDeleted }) {
   const finishing = job.status === 'done' && (st.phase === 'waiting' || st.phase === 'building' || st.phase === 'saving');
 
   // The job finished while this tab was open: its last step and the downloads happen by themselves.
-  // (also when it is done again with a new finishing time: a save in Fix a moment, which can be over before the list was looked at in between)
   useEffect(() => {
     if (job.status === 'done') fin.auto();
   }, [job.status, job.finishedAt, fin]);
@@ -104,7 +103,7 @@ export default function JobCard({ job, onChanged, onDeleted }) {
 
       {job.status === 'done' && (
         <>
-          <ResultPanel job={job} fin={fin} onChanged={onChanged} />
+          <ResultPanel job={job} fin={fin} />
           <div className="row-between">
             {job.local ? (
               <span className="small muted">Kept in this tab only, until you leave or reload the page.</span>

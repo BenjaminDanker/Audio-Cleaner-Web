@@ -319,7 +319,7 @@ export function toTimeline(tracks, seconds) {
   const tl = new Timeline(seconds);
   const end = (x) => seconds && x.e >= seconds - 0.0005 ? seconds : x.e;
   for (const x of tracks.voice) {
-    if (x.mode === 1 && x.kind === 'free') tl.paint('noise', x.s, end(x), { browser: true });
+    if (x.mode === 1 && x.kind === 'free') tl.paint('noise', x.s, end(x), { browser: true, strength_db: dbOf(x) });
     else if (x.mode === 1) tl.paint('noise', x.s, end(x), { strength_db: dbOf(x), remover: REMOVERS[x.rem || 0] });
     else if (x.mode === 2) tl.paint('rebuild', x.s, end(x), {});
   }
@@ -367,7 +367,11 @@ export function fromTimeline(tl, seconds, { subs = null } = {}) {
     const nz = tl.partAt('noise', m);
     const base = { str: 2, kind: 'paid', rem: 0, db: null };
     if (rb) push('voice', a, b, { ...base, mode: 2 });
-    else if (nz && nz.settings.browser) push('voice', a, b, { ...base, mode: 1, kind: 'free', str: 3 });
+    else if (nz && nz.settings.browser) {
+      const db = nz.settings.strength_db;
+      const lvl = db ? Math.min(3, levelOf(db) || 3) : 3;
+      push('voice', a, b, { ...base, mode: 1, kind: 'free', str: lvl, db: db && Math.abs(STR_DB[lvl] - db) > 0.01 ? Math.min(db, 40) : null });
+    }
     else if (nz) {
       const db = nz.settings.strength_db;
       const lvl = levelOf(db) || 1;

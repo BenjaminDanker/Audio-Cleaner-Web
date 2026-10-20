@@ -3,22 +3,25 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router';
 import { api } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import JobCard from '../components/JobCard.jsx';
-import { useLocalCards } from '../finish.js';
+import Studio from '../components/studio/Studio.jsx';
+import { finishOf, useLocalCards } from '../finish.js';
 import { usePageTitle } from '../hooks.js';
-import { jobTitle } from '../jobs.js';
+import { activeCount, jobTitle } from '../jobs.js';
+import { Session, sessionFor } from '../studio/session.js';
 import { useJobs } from '../useJobs.js';
 
 /**
- * One job on a page of its own (/app/job/<id>): its progress while it runs, and its result when it is done (Download again,
- * listen, Change and save again, Delete now). The address works after a reload and with back and forward; it stays good until the
- * job's files are cleared away. "Start another file" goes back to the form.
+ * One job on a page of its own (/app/job/<id>): the editor, with its progress while it runs and its result when it is done (Your
+ * files, Download again, Save changes, Delete now). A job the editor can't open (one made through the API with no audio steps, a job
+ * that failed or was canceled) shows as a card. The address works after a reload and with back and forward; it stays good until the
+ * job's files are cleared away. "Different file" goes back to the Cleanup page.
  */
 export default function Job() {
   const { id } = useParams();
   const { refresh } = useAuth();
   const nav = useNavigate();
   const loc = useLocation();
-  const { jobs, error, reload } = useJobs({ onFinished: refresh });
+  const { jobs, limits, error, reload } = useJobs({ onFinished: refresh });
   const [solo, setSolo] = useState(null); // the job asked for by itself, when the list doesn't have it: {job} or {gone: true}
   const [welcome, setWelcome] = useState(() => loc.state?.submitted || '');
   const localCards = useLocalCards(); // a free run made in this tab has no job on our side: it lives in this tab only
@@ -59,6 +62,19 @@ export default function Job() {
   }, [jobs, listed, solo, id, isLocal]);
 
   const gone = !job && (isLocal ? true : solo?.gone || (error && jobs?.length === 0 && !solo));
+  // the editor opens jobs that have audio steps (and any card or job made in this tab); a failed or canceled one shows what happened
+  const editable = !!job && !['failed', 'canceled', 'expired'].includes(job.status) && (isLocal || !!sessionFor(job.id) || !!job.edit);
+  const session = editable ? (sessionFor(job.id) || Session.forJob(job, finishOf(job))) : null;
+  if (editable && session) {
+    return (
+      <div data-testid="job-page">
+        <Studio
+          key={job.id} session={session} job={job} fin={finishOf(job)} welcome={welcome} active={activeCount(jobs)} maxActive={limits?.maxActiveJobs || null}
+          onNewFile={() => nav('/app')} onChanged={() => { reload(); refresh(); }} onDeleted={() => nav('/app', { replace: true })}
+        />
+      </div>
+    );
+  }
   return (
     <div className="container page stack-lg" data-testid="job-page">
       <header className="row-between">

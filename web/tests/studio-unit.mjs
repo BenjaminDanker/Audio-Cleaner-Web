@@ -14,7 +14,7 @@ const bundle = await build({
     contents: `
       export * from '../src/editor/timeline.js';
       export * from '../src/editor/tracks.js';
-      export { heardSeries, layerPeaks, roughDb } from '../src/editor/peaks.js';
+      export { heardSeries, layerPeaks, roughDb, rangePeaks, overlayPeaks } from '../src/editor/peaks.js';
       export { prepare } from '../src/editor/mix.js';
       export { outputPlan, problemsFor, jobKind, wantsOf, browserVerdict, subsVerdict, inGigabytes } from '../src/studio/plan.js';
       export { fitPcm, samplesOf, piecesIn, rangeFor } from '../src/studio/runs.js';
@@ -36,7 +36,7 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputF
 const {
   Timeline, TimelineError, makeState, edit, splitAll, setSel, toggleRange, selTitle, cost, delta, valSig, sameTracks, ratesFrom, money, toTimeline, fromTimeline,
   freshTracks, vkey, uni, overl, applyToSel, freePatch, echoBlocked, undo, redo, pushUndo, recoPatches, applyReco, toSuggestion, autoDone, needsServer, serverSound,
-  changesSound, freeNoiseRanges, freeSubRanges, fmt, lenTxt, perMinute, heardSeries, layerPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
+  changesSound, freeNoiseRanges, freeSubRanges, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
 } = m;
 
@@ -80,8 +80,8 @@ await check('timeline v2: the subtitles layer (quality, language, translations) 
     { start: 50, end: 100, quality: 'free', language: null, translate: [] },
   ]);
   const b = new Timeline(100);
-  b.paint('noise', 10, 20, { browser: true, strength_db: 12 }); // (strength and remover are not kept for a browser part)
-  assert.deepEqual(b.toJSON(), { version: 2, seconds: 100, layers: { noise: [{ start: 10, end: 20, browser: true }] } });
+  b.paint('noise', 10, 20, { browser: true, strength_db: 12, remover: 'heavy' }); // (the strength is kept for showing, the remover is not)
+  assert.deepEqual(b.toJSON(), { version: 2, seconds: 100, layers: { noise: [{ start: 10, end: 20, browser: true, strength_db: 12 }] } });
   assert.deepEqual(Timeline.fromJSON(j).toJSON(), j);
   assert.deepEqual(Timeline.fromJSON(b.toJSON()).toJSON(), b.toJSON());
 });
@@ -244,7 +244,7 @@ await check('mapping: Standard noise removal -> noise {strength_db, remover}, Vo
   assert.deepEqual(j.layers.noise, [
     { start: 0, end: 20, strength_db: 12, remover: 'auto' },
     { start: 20, end: 40, strength_db: 40, remover: 'heavy' },
-    { start: 60, end: 80, browser: true },
+    { start: 60, end: 80, browser: true, strength_db: 40 },
   ]);
   assert.deepEqual(j.layers.rebuild, [{ start: 40, end: 60 }]);
   assert.deepEqual(j.layers.echo, [{ start: 0, end: 100 }]);
@@ -273,7 +273,7 @@ await check('mapping: a timeline read back from a job becomes the tracks it was 
   t.paint('noise', 0, 100, { strength_db: 24, remover: 'light' });
   t.paint('noise', 10, 20, { strength_db: 30, remover: 'auto' });
   t.paint('rebuild', 40, 50);
-  t.paint('noise', 60, 70, { browser: true });
+  t.paint('noise', 60, 70, { browser: true, strength_db: 12 });
   t.paint('leveling', 0, 50, { loudness_lufs: -14 });
   t.paint('leveling', 50, 80, { loudness_lufs: null });
   t.paint('leveling', 80, 100, { loudness_lufs: -20 });
@@ -281,7 +281,7 @@ await check('mapping: a timeline read back from a job becomes the tracks it was 
   const tr = fromTimeline(t, 100);
   const v = tr.voice.map((x) => [x.s, x.e, x.mode, x.kind, x.str, x.db, x.rem]);
   assert.deepEqual(v, [[0, 10, 1, 'paid', 2, null, 1], [10, 20, 1, 'paid', 2, 30, 0], [20, 40, 1, 'paid', 2, null, 1], [40, 50, 2, 'paid', 2, null, 0],
-    [50, 60, 1, 'paid', 2, null, 1], [60, 70, 1, 'free', 3, null, 0], [70, 100, 1, 'paid', 2, null, 1]]);
+    [50, 60, 1, 'paid', 2, null, 1], [60, 70, 1, 'free', 1, null, 0], [70, 100, 1, 'paid', 2, null, 1]]);
   assert.deepEqual(tr.level.map((x) => [x.s, x.e, x.lvl, x.lufs]), [[0, 50, 2, null], [50, 80, 4, null], [80, 100, 9, -20]]);
   assert.deepEqual(tr.subs.map((x) => [x.q, x.lang, x.tr]), [[3, 'fr', ['en']]]);
   assert.equal(lvlOfLufs(-16), 1);
@@ -369,6 +369,22 @@ await check('waveform: a part the browser cleaned is already at its strength: th
   const prep = prepare({ tl, hear: { echo: true, noise: true, rebuild: true, leveling: true }, cached: { noise: [[0, 8]] }, secondTrack: false });
   const layers = { source: { rate: 4, a: new Float32Array(32).fill(0.8) }, noise: { rate: 4, a: new Float32Array(32).fill(0.1) } };
   near(heardSeries({ N: 8, T: 8, prep, layers, top: 0.8 })[2], 0.125, 1e-5);
+});
+
+await check('waveform: the peaks of a range cleaned in the browser sit on the recording\'s grid and fill the places the server has none for (its noise layer is never cached there)', async () => {
+  const f = new Float32Array(48000 * 2); // two seconds of mono, 1.0 s .. 3.0 s of the recording
+  f[0] = 0.5; f[24000] = 0.25; f[48000] = 0.75; f[96000 - 1] = 0.1;
+  const p = await rangePeaks({ parts: [new Blob([f])], channels: 1, frames: 96000 }, 1.0);
+  assert.equal(p.from, 4);
+  assert.equal(p.a.length, 8);
+  assert.deepEqual([p.a[0], p.a[2], p.a[4], p.a[7]].map((v) => Math.round(v * 100) / 100), [0.5, 0.25, 0.75, 0.1]);
+  const server = layerPeaks({ rate: 4, seconds: 4, peaks: [0.3, 0.3, 0.3, 0.3, null, null, 0.2, null, null, null, null, null, null, null, null, null] });
+  const merged = overlayPeaks(server, [p], 4);
+  assert.equal(merged.a[0], Math.fround(0.3)); // (what the server has stays)
+  assert.equal(merged.a[4], 0.5); // (a null is filled)
+  assert.equal(merged.a[6], Math.fround(0.2));
+  assert.equal(overlayPeaks(null, [p], 4).a.length, 16);
+  assert.equal(overlayPeaks(server, [], 4), server);
 });
 
 /* ------------------------------------------------------------------------------------------------ the files and what stops a start */

@@ -1,12 +1,14 @@
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { useAuth } from '../auth.jsx';
-import JobForm from '../components/JobForm.jsx';
+import FileDrop, { SERVER_FORMATS } from '../components/FileDrop.jsx';
 import JobRow from '../components/JobRow.jsx';
+import Studio from '../components/studio/Studio.jsx';
 import { pruneWants, useLocalCards } from '../finish.js';
-import { balanceMoney } from '../format.js';
+import { balanceMoney, shownName } from '../format.js';
 import { usePageTitle } from '../hooks.js';
 import { activeCount } from '../jobs.js';
+import { Session } from '../studio/session.js';
 import { useJobs } from '../useJobs.js';
 
 export default function Cleanup() {
@@ -15,11 +17,38 @@ export default function Cleanup() {
   const { jobs, limits, error, reload } = useJobs({ onFinished: refresh });
   const localCards = useLocalCards(); // free runs made in this tab: no job on our side, listed like the others
   const all = useMemo(() => (jobs ? [...localCards, ...jobs] : jobs), [localCards, jobs]);
+  const [draft, setDraft] = useState(null); // the file that was chosen: the editor is its page until it runs
+  const [reading, setReading] = useState('');
+  const [problem, setProblem] = useState('');
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; draft?.dispose(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // the choices kept for jobs the server no longer lists (their files are cleared away 2 hours after the last change to them) go too
   useEffect(() => {
     if (jobs && !error) pruneWants(jobs.map((j) => j.id));
   }, [jobs, error]);
+
+  async function choose(f) {
+    setProblem('');
+    setReading(f.name);
+    try {
+      const s = await Session.open(f);
+      if (alive.current) setDraft(s);
+    } catch (e) {
+      setProblem(e.message || 'Could not read that file. Please pick another one.');
+    } finally {
+      setReading('');
+    }
+  }
+  function another() {
+    draft?.dispose();
+    setDraft(null);
+    setProblem('');
+  }
+
+  if (draft) {
+    return <Studio session={draft} active={activeCount(jobs)} maxActive={limits?.maxActiveJobs || null} onNewFile={another} />;
+  }
 
   return (
     <div className="container page stack-lg">
@@ -30,7 +59,12 @@ export default function Cleanup() {
         </div>
       </header>
 
-      <JobForm onSubmitted={reload} active={activeCount(jobs)} maxActive={limits?.maxActiveJobs || null} />
+      <section className="card stack" aria-labelledby="newjob-h">
+        <h2 id="newjob-h" className="mb0">Add a file</h2>
+        {!reading && <FileDrop onFile={choose} accept={SERVER_FORMATS} hint="or click to pick one. Almost any audio or video file: MP3, WAV, M4A, FLAC, WMA, AMR, MP4, MOV, MKV, AVI, WMV, MPEG and more." />}
+        {reading && <p role="status" className="muted"><span className="spinner" aria-hidden="true" /> Reading {shownName(reading)}…</p>}
+        {problem && <div className="banner banner-error" role="alert" data-testid="job-error">{problem}</div>}
+      </section>
 
       <section aria-labelledby="jobs-h" className="stack">
         <div className="row-between">
@@ -63,7 +97,7 @@ export default function Cleanup() {
             <li>Free noise removal happens <b>in your browser</b>, so that file never leaves your device.</li>
             <li>Uploading a video for us to work on? Only its <b>sound</b> is uploaded. Your browser puts the clean sound back into the video afterwards.</li>
             <li>Your upload and your results are kept together for <b>2 hours after your last change</b> to a file (at most 6 hours after the upload), so you can listen, download again or change it, and then they are deleted together. You can delete them sooner.</li>
-            <li>Open <b>Fix a moment</b> on a finished file to change just one part of it: a few seconds with an echo, a louder stretch, a muffled answer. You see the price before you save, and a new strength is often free.</li>
+            <li>Choose a part of your file on the timeline to change just that part: a few seconds with an echo, a louder stretch, a muffled answer. You see the price before you save, and a new strength is often free.</li>
             <li>Changing a finished file only redoes the steps that changed, so a new strength is often free. The price is shown before you confirm.</li>
             <li>You pay for what gets processed, by the second. A job that fails or is canceled costs nothing.</li>
           </ul>

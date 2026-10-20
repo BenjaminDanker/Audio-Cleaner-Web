@@ -133,6 +133,34 @@ export async function pcmPeaks(pcm, top, N = PEAK_COUNT) {
   return { N, o: Array.from(pk, (v) => v / (top || 1)), m: Array.from(ms, (q, i) => (0.8 * Math.sqrt(q / Math.max(1, cnt[i]))) / rtop) };
 }
 
+/** The peaks (4 a second, on the recording's grid) of a range cleaned in this browser: {from, a}, `a[i]` for the quarter second `from + i`. */
+export async function rangePeaks(pcm, start, rate = 4) {
+  const ch = Math.max(1, pcm.channels || 1);
+  const from = Math.floor(start * rate);
+  const a = new Float32Array(Math.max(1, Math.ceil(((start * 48000 + pcm.frames) / 48000) * rate) - from));
+  let at = 0;
+  for (const blob of pcm.parts) {
+    const f = new Float32Array(await blob.arrayBuffer());
+    const n = Math.floor(f.length / ch);
+    for (let i = 0; i < n; i++) {
+      const bin = Math.min(a.length - 1, Math.floor(((start * 48000 + at + i) / 48000) * rate) - from);
+      for (let c = 0; c < ch; c++) { const v = Math.abs(f[i * ch + c]); if (v > a[bin]) a[bin] = v; }
+    }
+    at += n;
+    await tick();
+  }
+  return { from, a };
+}
+
+/** Put peaks made here into a layer from the server where it has none (a part cleaned in the browser is not in the server's cache): returns the layer. */
+export function overlayPeaks(layer, patches, seconds, rate = 4) {
+  if (!patches?.length) return layer;
+  const n = Math.ceil(seconds * rate);
+  const out = layer ? { rate: layer.rate, a: Float32Array.from(layer.a) } : { rate, a: new Float32Array(n).fill(NaN) };
+  for (const p of patches) for (let i = 0; i < p.a.length; i++) if (p.from + i < out.a.length && !Number.isFinite(out.a[p.from + i])) out.a[p.from + i] = p.a[i];
+  return out;
+}
+
 /* ------------------------------------------------------------------------------------------------ what is heard */
 
 /** A server answer {rate, seconds, peaks: [number|null]} as an array of numbers (NaN where it is not made). */
