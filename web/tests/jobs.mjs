@@ -1,15 +1,15 @@
-// Every file job has a page of its own (/app/job/<id>) and the Cleanup page lists the jobs as short rows:
+// Every file job has a page of its own (/app/job/<id>, the editor) and the Cleanup page lists the jobs as short rows:
 //  1. Start opens the job's page (the "Got it" note once), its progress and the time left, its result, the file that comes down by itself,
 //     the same page after a reload, and back / forward;
 //  2. the list on /app: a row per job with a progress bar and the time left while it works, the 2-hour countdown when it is done,
 //     Open goes to the job's page, a job that ends while the list is on screen downloads by itself;
-//  3. "Start another file", Delete now (asks first) and the address of a deleted job;
-//  4. at most 3 file jobs at once: the form says so before Start, the server says so (429, too_many_active_jobs) when asked anyway;
+//  3. "Different file" (and the header's Cleanup link), Delete now in Your files (asks first) and the address of a deleted job;
+//  4. at most 3 file jobs at once: the editor says so before Start, the server says so (429, too_many_active_jobs) when asked anyway;
 //  5. a job past its 2 hours is not listed and its page says it is gone.
 // Needs the test backend (tests/run.sh jobs) and the fixtures. Usage: node tests/jobs.mjs
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { BASE, FILES, JOB_PATH, SHOTS, admin, apiCall, check, dropFile, jobIdOf, launch, listJobs, pick, pyRun, signIn, summary } from './helpers.mjs';
+import { BASE, FILES, JOB_PATH, SHOTS, admin, apiCall, check, dropFile, jobIdOf, launch, listJobs, pick, pyRun, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
 
 const EMAIL = `jobs-${Date.now()}@example.com`;
 const TOO_MANY = 'You have 3 files being processed. Start this one when one of them is done.';
@@ -24,9 +24,15 @@ await page.goto(`${BASE}/app`); // loaded again: the credit is on the page
 await page.getByTestId('available').waitFor();
 
 const gotoApp = async (path = '/app') => { await page.goto(`${BASE}${path}`); await page.getByTestId('available').or(page.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
-const card = () => page.getByTestId('job').first();
+const studio = () => page.getByTestId('studio');
 const status = (loc) => loc.getAttribute('data-status', { timeout: 3000 }).catch(() => null);
 const sleep = (ms) => page.waitForTimeout(ms);
+const mainNav = () => page.getByRole('navigation', { name: 'Main' });
+/** The page's way back to the list: the Cleanup link of the header. */
+const toList = () => mainNav().getByRole('link', { name: 'Cleanup', exact: true }).click();
+/** The editor's Your files popover, opened (and closed again). */
+const openFiles = async () => { if (!(await page.getByTestId('files').count())) await page.getByTestId('bar-files').click(); await page.getByTestId('files').waitFor(); };
+const closeFiles = async () => { if (await page.getByTestId('files').count()) await page.getByTestId('bar-files').click(); };
 
 /** On /app: drop a file, ask for paid Denoising, press Start and wait for the job's own page. Answers the job's id. */
 async function startPaidJob(file = 'noisy.wav') {
@@ -34,23 +40,12 @@ async function startPaidJob(file = 'noisy.wav') {
   await page.getByTestId('available').waitFor();
   await dropFile(page, join(FILES, file));
   await pick(page, 'noise', 'denoise');
-  await page.getByTestId('estimate').waitFor();
+  await waitStartPrice();
   await page.getByTestId('start').click();
   await page.waitForURL(JOB_PATH, { timeout: 90000 });
   return jobIdOf(page);
 }
-
-/** Waits until the job card on the page has ended; throws with the card's text unless it is done. */
-async function waitCardDone(timeout = 240000) {
-  const t0 = Date.now();
-  for (;;) {
-    const st = await status(card());
-    if (st === 'done') return;
-    if (st === 'failed' || st === 'canceled') throw new Error(`job ${st}: ${(await card().innerText()).slice(0, 300)}`);
-    if (Date.now() - t0 > timeout) throw new Error(`still ${st} after ${timeout / 1000} s`);
-    await sleep(500);
-  }
-}
+const waitStartPrice = () => page.waitForFunction(() => /^Start · /.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 15000 });
 const waitDownloads = async (n, timeout = 40000) => {
   const t0 = Date.now();
   while (got.length < n && Date.now() - t0 < timeout) await sleep(250);
@@ -60,23 +55,23 @@ const waitDownloads = async (n, timeout = 40000) => {
 // ---------------------------------------------------------------------------------------------------- 1. the job's page
 
 let A; // the first job: its id
-await check('Start on /app opens the job\'s own page /app/job/<id> (the page for this job, titled with the file) and says "Got it" once at the top; going back is the form, forward is the job again', async () => {
+await check('Start on /app opens the job\'s own page /app/job/<id> (the editor for this job, titled with the file) and says "Got it" once at the top; going back is the form, forward is the job again', async () => {
   got.length = 0;
   A = await startPaidJob();
   if (!/\/app\/job\/[0-9a-f]{32}$/.test(page.url())) throw new Error(page.url());
   const banner = (await page.getByTestId('submitted').innerText()).trim();
   if (!/^Got it, we’re on it\./.test(banner)) throw new Error(`banner: ${banner}`);
-  await card().waitFor(); // the page shows "Job" until the job is loaded
-  if (!/noisy\.wav/.test(await page.locator('h1').innerText())) throw new Error('title: ' + await page.locator('h1').innerText());
-  if ((await card().getAttribute('data-job-id')) !== A) throw new Error('the card is for another job');
-  if ((await page.getByTestId('all-jobs').count()) !== 1 || (await page.getByTestId('start-another').count()) !== 1) throw new Error('"Your jobs" and "Start another file" are not both on the page');
+  await studio().waitFor(); // the page shows "Job" until the job is loaded
+  if (!/noisy\.wav/.test(await page.getByTestId('file-name').innerText())) throw new Error('title: ' + await page.getByTestId('file-name').innerText());
+  if ((await studio().getAttribute('data-job-id')) !== A) throw new Error('the page is for another job');
+  if ((await page.getByTestId('different-file').count()) !== 1 || (await mainNav().getByRole('link', { name: 'Cleanup', exact: true }).count()) !== 1) throw new Error('"Different file" and the header\'s Cleanup link are not both on the page');
   // the page replaced its own history entry, so back is the form (not another job page) and forward brings the job without the note
   await page.goBack();
   await page.waitForURL(/\/app$/);
   await page.getByTestId('start').or(page.locator('input[type=file]')).first().waitFor({ timeout: 10000 });
   await page.goForward();
   await page.waitForURL(JOB_PATH);
-  await card().waitFor();
+  await studio().waitFor();
   if (await page.getByTestId('submitted').count()) throw new Error('the note came back with forward');
   return `${banner.slice(0, 70)} (${A.slice(0, 8)}…)`;
 });
@@ -87,14 +82,15 @@ await check('while it runs: a progress bar that moves and a line with the time l
   let sawQueue = false;
   const t0 = Date.now();
   for (;;) {
-    const st = await status(card());
+    const st = await studio().getAttribute('data-stage', { timeout: 1000 }).catch(() => null);
     if (st === 'done') break;
-    if (st === 'failed' || st === 'canceled') throw new Error(`job ${st}: ${(await card().innerText()).slice(0, 300)}`);
+    const cs = await status(page.getByTestId('job').first()); // (a job that failed or was canceled shows as a card)
+    if (cs === 'failed' || cs === 'canceled') throw new Error(`job ${cs}: ${(await page.getByTestId('job').first().innerText()).slice(0, 300)}`);
     if (Date.now() - t0 > 240000) throw new Error('did not finish; last seen ' + [...lines].join(' | '));
-    if (st === 'queued') sawQueue = true;
     const line = page.getByTestId('job-line');
     if (await line.count()) {
       const text = await line.innerText({ timeout: 2000 }).catch(() => '');
+      if (/^In line/.test(text.trim())) sawQueue = true;
       if (text.trim()) lines.add(text.trim());
       const v = await page.getByTestId('job-progress').evaluate((p) => p.value, null, { timeout: 2000 }).catch(() => 0);
       top = Math.max(top, v);
@@ -109,57 +105,59 @@ await check('while it runs: a progress bar that moves and a line with the time l
   return `${all.length} different lines, e.g. "${all[Math.floor(all.length / 2)]}"; bar up to ${Math.round(top)}%${sawQueue ? '; was in line first' : ''}`;
 });
 
-await check('done: the result panel, the file comes down by itself (once, FLAC), the card says the cost and when the files are cleared away, Download again works', async () => {
-  await waitCardDone();
-  await card().getByTestId('result').waitFor({ timeout: 90000 });
+await check('done: the editor hands the files over, the file comes down by itself (once, FLAC), Your files says the cost and when the files are cleared away, Download again works', async () => {
+  await waitCardDone(page);
+  await waitResult(page, 'result', 90000);
   await waitDownloads(1);
   if (got.length !== 1 || !/^noisy.*\.flac$/.test(got[0])) throw new Error('downloaded by itself: ' + got.join(', '));
-  const text = await card().innerText();
-  if (!/Cost \$0\.0\d+/.test(text)) throw new Error('no cost: ' + text.slice(-200));
-  const expiry = (await card().getByTestId('expiry').innerText()).trim();
+  await openFiles();
+  const text = (await page.getByTestId('files').innerText()).replace(/\s+/g, ' ');
+  if (!/Cost (\$0\.0\d+|<\$0\.001)/.test(text)) throw new Error('no cost: ' + text.slice(-200));
+  const expiry = (await page.getByTestId('expiry').innerText()).trim();
   if (!/^Files are cleared away in (2 h 00|1 h 5\d) min$/.test(expiry)) throw new Error('expiry: ' + expiry);
+  await closeFiles();
   got.length = 0;
-  await card().getByTestId('download-again').click();
+  await page.getByTestId('download-again').click();
   await waitDownloads(1);
   if (got.length !== 1 || !/\.flac$/.test(got[0])) throw new Error('Download again: ' + got.join(', '));
   await page.screenshot({ path: join(SHOTS, 'jobs-page-done.png'), fullPage: true });
   return `${expiry}; ${got[0]}`;
 });
 
-await check('reload keeps the page: the same address and job, the result panel and Download again (no new note, no download by itself); Listen and Change and save again are there', async () => {
+await check('reload keeps the page: the same address and job, the finished editor and Download again (no new note, no download by itself); Listen (play and the speaker buttons) and changing it (the inspector, the Output menu) are there', async () => {
   const url = page.url();
   got.length = 0;
   await page.reload();
-  await card().waitFor({ timeout: 20000 });
+  await studio().waitFor({ timeout: 20000 });
+  await page.getByTestId('download-again').waitFor({ timeout: 20000 });
   if (page.url() !== url) throw new Error(`address ${page.url()}`);
-  if ((await card().getAttribute('data-job-id')) !== A || (await status(card())) !== 'done') throw new Error('not the same finished job');
+  if ((await studio().getAttribute('data-job-id')) !== A || (await studio().getAttribute('data-stage')) !== 'done') throw new Error('not the same finished job');
   if (await page.getByTestId('submitted').count()) throw new Error('the note came back after a reload');
-  await page.locator('[data-testid=result], [data-testid=result-pending]').first().waitFor();
   await sleep(1500);
   if (got.length) throw new Error('a reload downloaded by itself: ' + got.join(', '));
-  for (const id of ['download-again', 'listen', 'again']) if (!(await card().getByTestId(id).count())) throw new Error(`${id} is missing after a reload`);
-  await card().getByTestId('download-again').click();
+  for (const id of ['download-again', 'play', 'hear-voice', 'hear-level', 'inspector', 'output-button', 'bar-files']) if (!(await page.getByTestId(id).count())) throw new Error(`${id} is missing after a reload`);
+  await page.getByTestId('download-again').click();
   await waitDownloads(1);
   if (got.length !== 1 || !/\.flac$/.test(got[0])) throw new Error('Download again after a reload: ' + got.join(', '));
   return `${got[0]} again after the reload`;
 });
 
-await check('back and forward between /app and the job page land on the same job, with its result; "Your jobs" and the list\'s Open link both lead back to it', async () => {
-  await page.getByTestId('all-jobs').click();
+await check('back and forward between /app and the job page land on the same job, with its result; the header\'s Cleanup link and the list\'s Open link both lead back to it', async () => {
+  await toList();
   await page.waitForURL(/\/app$/);
   await page.getByTestId('job-row').first().waitFor({ timeout: 15000 });
   await page.goBack();
   await page.waitForURL(JOB_PATH);
-  await card().waitFor();
-  if ((await card().getAttribute('data-job-id')) !== A || (await status(card())) !== 'done') throw new Error('back: not the same finished job');
-  await card().getByTestId('download-again').waitFor();
+  await studio().waitFor();
+  if ((await studio().getAttribute('data-job-id')) !== A || (await studio().getAttribute('data-stage')) !== 'done') throw new Error('back: not the same finished job');
+  await page.getByTestId('download-again').waitFor();
   await page.goForward();
   await page.waitForURL(/\/app$/);
   await page.locator(`[data-testid=job-row][data-job-id="${A}"]`).waitFor({ timeout: 15000 });
   await page.locator(`[data-testid=job-row][data-job-id="${A}"]`).getByTestId('job-open').click();
   await page.waitForURL(JOB_PATH);
   if (jobIdOf(page) !== A) throw new Error('Open went to ' + jobIdOf(page));
-  await card().getByTestId('download-again').waitFor();
+  await page.getByTestId('download-again').waitFor();
   return 'same job both ways';
 });
 
@@ -169,13 +167,13 @@ let B1;
 let B2;
 await check('/app lists a short row for each job (no full cards): an active job has a progress bar and a line with its step and the time left, a queued one says "In line"', async () => {
   got.length = 0;
-  await page.getByTestId('start-another').click();
+  await page.getByTestId('different-file').click();
   await page.waitForURL(/\/app$/);
   B1 = await startPaidJob();
-  await page.getByTestId('start-another').click();
+  await page.getByTestId('different-file').click();
   await page.waitForURL(/\/app$/);
   B2 = await startPaidJob();
-  await page.getByTestId('all-jobs').click();
+  await toList();
   await page.waitForURL(/\/app$/);
   const rowOf = (id) => page.locator(`[data-testid=job-row][data-job-id="${id}"]`);
   for (const id of [A, B1, B2]) await rowOf(id).waitFor({ timeout: 15000 });
@@ -207,7 +205,7 @@ await check('/app lists a short row for each job (no full cards): an active job 
   if (!lines.some((l) => /(about \d+ min|less than a minute|about \d+ h \d\d min) left$/.test(l))) throw new Error('no time left in any row line: ' + [...new Set(lines)].join(' | '));
   if (inLine && !/^In line/.test(inLine)) throw new Error('a queued row says: ' + inLine);
   const row = await rowOf(A).innerText();
-  if (/Download again|Delete now|Change and save again/.test(row)) throw new Error('a row has the card\'s buttons: ' + row);
+  if (/Download again|Delete now|Save changes|Change and save again/.test(row)) throw new Error('a row has the editor\'s buttons: ' + row);
   await page.screenshot({ path: join(SHOTS, 'jobs-list-active.png'), fullPage: true });
   return `"${[...new Set(lines)].slice(-2).join('" / "')}"${inLine ? `; queued row: "${inLine}"` : ''}`;
 });
@@ -228,20 +226,20 @@ await check('a job that ends while the list is on screen downloads by itself; it
   await done.getByTestId('job-open').click();
   await page.waitForURL(JOB_PATH);
   if (jobIdOf(page) !== B2) throw new Error('Open went to ' + jobIdOf(page));
-  await card().getByTestId('download-again').waitFor({ timeout: 20000 });
+  await page.getByTestId('download-again').waitFor({ timeout: 20000 });
   return `${expiry}; the older job: ${old}; 2 files by themselves`;
 });
 
 // ---------------------------------------------------------------------------------------------------- 3. start another, delete now
 
-await check('"Start another file" goes back to the form with nothing chosen; "Your jobs" goes to the list', async () => {
-  await page.getByTestId('start-another').click();
+await check('"Different file" goes back to the form with nothing chosen; the header\'s Cleanup link goes to the list', async () => {
+  await page.getByTestId('different-file').click();
   await page.waitForURL(/\/app$/);
   await page.locator('input[type=file]').waitFor({ state: 'attached', timeout: 10000 });
   if (await page.getByTestId('start').count()) throw new Error('a file is still chosen');
   await page.goBack();
   await page.waitForURL(JOB_PATH);
-  await page.getByTestId('all-jobs').click();
+  await toList();
   await page.waitForURL(/\/app$/);
   await page.locator('[data-testid=job-row]').first().waitFor();
   return 'form, then list';
@@ -249,17 +247,20 @@ await check('"Start another file" goes back to the form with nothing chosen; "Yo
 
 await check('Delete now asks first ("Keep them" backs out), "Yes, delete" returns to /app, the row is gone, the old address says the job is gone, and its files are really deleted', async () => {
   await page.goto(`${BASE}/app/job/${B2}`);
-  await card().getByTestId('download-again').waitFor({ timeout: 20000 });
-  const outName = await card().getByTestId('made-file').first().locator('.oname').innerText();
-  await card().getByRole('button', { name: 'Delete now' }).click();
-  await card().getByTestId('delete-confirm').waitFor();
-  const ask = await card().getByTestId('delete-confirm').innerText();
+  await page.getByTestId('download-again').waitFor({ timeout: 20000 });
+  await openFiles();
+  const outName = (await page.getByTestId('made-file').first().locator('span').first().evaluate((e) => e.firstChild.textContent)).trim();
+  if (!/^noisy.*\.flac$/.test(outName)) throw new Error('the file listed in Your files: ' + outName);
+  const files = page.getByTestId('files');
+  await files.getByRole('button', { name: 'Delete now' }).click();
+  await page.getByTestId('delete-confirm').waitFor();
+  const ask = await page.getByTestId('delete-confirm').innerText();
   if (!/Delete everything of this file now/.test(ask) || !/can’t be brought back/.test(ask)) throw new Error('confirmation: ' + ask);
-  await card().getByRole('button', { name: 'Keep them' }).click();
-  if (!(await card().getByRole('button', { name: 'Delete now' }).count())) throw new Error('"Keep them" did not go back');
+  await files.getByRole('button', { name: 'Keep them' }).click();
+  if (!(await files.getByRole('button', { name: 'Delete now' }).count())) throw new Error('"Keep them" did not go back');
   if ((await apiCall(page, 'GET', `jobs/${B2}`)).body.status !== 'done') throw new Error('deleted without a Yes');
-  await card().getByRole('button', { name: 'Delete now' }).click();
-  await card().getByRole('button', { name: 'Yes, delete' }).click();
+  await files.getByRole('button', { name: 'Delete now' }).click();
+  await files.getByRole('button', { name: 'Yes, delete' }).click();
   await page.waitForURL(/\/app$/, { timeout: 15000 });
   await page.getByTestId('jobs-note').waitFor();
   await page.locator(`[data-testid=job-row][data-job-id="${B1}"]`).waitFor({ timeout: 15000 }); // the other job is still there
@@ -268,7 +269,7 @@ await check('Delete now asks first ("Keep them" backs out), "Yes, delete" return
   await page.getByTestId('job-gone').waitFor({ timeout: 15000 });
   const gone = await page.getByTestId('job-gone').innerText();
   if (!/isn’t here any more/.test(gone) || !/2 hours/.test(gone)) throw new Error('gone page: ' + gone);
-  if (await page.getByTestId('job').count()) throw new Error('the job card is shown for a deleted job');
+  if (await page.getByTestId('job').count() || await page.getByTestId('studio').count()) throw new Error('the job is shown for a deleted job');
   const file = await apiCall(page, 'GET', `jobs/${B2}/outputs/${encodeURIComponent(outName)}`);
   if (file.status !== 404) throw new Error(`the result is still downloadable (${file.status})`);
   const dataDir = process.env.ACW_DATA_DIR;
@@ -296,7 +297,7 @@ await check('the list answers {jobs, limits}: 3 jobs at once, files kept 2 hours
   return `limits ${JSON.stringify(l.limits)}; 3 held`;
 });
 
-await check('the form warns before Start when the list already shows 3 active jobs: exactly the server\'s message, and Start stays off', async () => {
+await check('the editor warns before Start when the list already shows 3 active jobs: exactly the server\'s message, and Start stays off', async () => {
   await gotoApp('/app');
   await page.waitForFunction(() => document.querySelectorAll('[data-testid=job-row][data-status=uploading]').length === 3, null, { timeout: 15000 });
   const first = page.locator('[data-testid=job-row][data-status=uploading]').first();
@@ -304,8 +305,8 @@ await check('the form warns before Start when the list already shows 3 active jo
   if (!/upload/i.test(await first.getByTestId('row-line').innerText())) throw new Error('row line: ' + await first.getByTestId('row-line').innerText());
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'noise', 'denoise');
-  await page.getByTestId('estimate').waitFor();
-  const warn = page.locator('.banner-warn', { hasText: 'files being processed' });
+  await waitStartPrice();
+  const warn = page.locator('[data-testid=notes] .banner-warn', { hasText: 'files being processed' });
   await warn.waitFor({ timeout: 10000 });
   const text = (await warn.innerText()).trim();
   if (text !== TOO_MANY) throw new Error(`"${text}"`);
@@ -323,7 +324,7 @@ await check('the server says the same when the page did not know (a list that ca
     await gotoApp('/app');
     await dropFile(page, join(FILES, 'noisy.wav'));
     await pick(page, 'noise', 'denoise');
-    await page.getByTestId('estimate').waitFor();
+    await waitStartPrice();
     if (await page.locator('.banner-warn', { hasText: 'files being processed' }).count()) throw new Error('warned although the list said nothing');
     // counted by the server itself (the page's own list is the one that is being made empty)
     const serverCount = async () => (await (await context.request.get(`${BASE}/api/jobs`)).json()).jobs.length;
@@ -362,7 +363,7 @@ await check('the API: a 4th file job is refused with 429, the code too_many_acti
   await gotoApp('/app');
   await dropFile(page, join(FILES, 'noisy.wav'));
   await pick(page, 'noise', 'denoise');
-  await page.getByTestId('estimate').waitFor();
+  await waitStartPrice();
   if (await page.locator('.banner-warn', { hasText: 'files being processed' }).count()) throw new Error('the warning stays after the jobs ended');
   if (!(await page.getByTestId('start').isEnabled())) throw new Error('Start stays off after the jobs ended');
   return `${r.status} ${r.body.code}, "${r.body.detail}"`;
@@ -370,7 +371,7 @@ await check('the API: a 4th file job is refused with 429, the code too_many_acti
 
 // ---------------------------------------------------------------------------------------------------- 5. past its 2 hours
 
-await check('the countdown on a row and on the job\'s page follows the job\'s own end: with 20 minutes left both say so', async () => {
+await check('the countdown on a row and in Your files on the job\'s page follows the job\'s own end: with 20 minutes left both say so', async () => {
   pyRun(`
 import time
 from acw import db
@@ -383,8 +384,9 @@ db.execute("UPDATE jobs SET finished_at = ?, expires_at = ? WHERE id = ?", (t - 
   const inRow = (await row.getByTestId('row-expiry').innerText()).trim();
   if (!/^Files are cleared away in (19|20) min 00 s$/.test(inRow)) throw new Error('row: ' + inRow);
   await page.goto(`${BASE}/app/job/${A}`);
-  await card().getByTestId('expiry').waitFor({ timeout: 15000 });
-  const onPage = (await card().getByTestId('expiry').innerText()).trim();
+  await page.getByTestId('download-again').waitFor({ timeout: 15000 });
+  await openFiles();
+  const onPage = (await page.getByTestId('expiry').innerText()).trim();
   if (!/^Files are cleared away in (19|20) min 00 s$/.test(onPage)) throw new Error('job page: ' + onPage);
   return `${inRow} / ${onPage}`;
 });
@@ -408,7 +410,7 @@ db.execute("UPDATE jobs SET finished_at = ?, expires_at = ? WHERE id = ?", (t - 
   if (await page.locator(`[data-testid=job-row][data-job-id="${A}"]`).count()) throw new Error('an expired job is on the list');
   await page.goto(`${BASE}/app/job/${A}`);
   await page.getByTestId('job-gone').waitFor({ timeout: 15000 });
-  if (await page.getByTestId('job').count()) throw new Error('a card for an expired job');
+  if (await page.getByTestId('job').count() || await page.getByTestId('studio').count()) throw new Error('a card or editor for an expired job');
   const dataDir = process.env.ACW_DATA_DIR;
   if (dataDir && existsSync(join(dataDir, 'jobs', A))) throw new Error('the expired job\'s folder is still on disk');
   const r = await apiCall(page, 'GET', `jobs/${A}`);
