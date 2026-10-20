@@ -1,4 +1,4 @@
-// The suggestions of a job, shared by the "Fix a moment" row (its badge) and the editor: fetched once per job (GET /api/jobs/{id}/suggestions,
+// The suggestions of a job, used by the editor (its pins and count): fetched once per job (GET /api/jobs/{id}/suggestions,
 // made by the server after the first run), with the ones the person dismissed remembered in this browser.
 
 import { useCallback, useSyncExternalStore } from 'react';

@@ -1,4 +1,4 @@
-// Free subtitles made in the browser (Cleanup page, "Free, in your browser"): the right words, the SRT/VTT/TXT files that come down
+// Free subtitles made in the browser (the editor's Subtitles track, "Free"): the right words, the SRT/VTT/TXT files that come down
 // by themselves (exactly the ones chosen, and again with Download again), a recording longer than one 30 s piece, a video that gets
 // them inside (MKV, with the transcript), nothing about the file is uploaded, and our side
 // never accepts a free subtitles job. The speech model comes from the model host (Hugging Face; here the local copy of
@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, FILES, SHOTS, check, dropFile, launch, mirror, pick, signIn, summary, waitResult } from './helpers.mjs';
+import { BASE, FILES, SHOTS, check, dropFile, launch, mirror, pick, resultAttr, signIn, summary, waitResult } from './helpers.mjs';
 
 const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
 const FFPROBE = process.env.FFPROBE || join(homedir(), 'audio-cleaner', 'bin', 'ffprobe');
@@ -29,22 +29,24 @@ const downloads = []; // everything the page downloaded, in order: it starts by 
 page.on('download', (d) => downloads.push(d));
 const names = () => downloads.map((d) => d.suggestedFilename()).sort();
 
-/** Runs free subtitles (`caps`: the formats left ticked; the rest are unticked) and waits for the result card. */
+/** Runs free subtitles (`caps`: the formats left ticked; the rest are unticked) and waits for the editor to hand the files over. */
 async function run(file, { noise = 'off', embed = false, caps = ['srt', 'vtt', 'txt'] } = {}) {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, file));
   await pick(page, 'noise', noise);
   await pick(page, 'subs', 'browser');
+  await page.getByTestId('output-button').click(); // the Output menu: the subtitle files and "into the video"
   if (embed) await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).check();
-  for (const [id, label] of [['srt', 'SRT'], ['vtt', 'VTT'], ['txt', 'TXT']]) {
-    const box = page.locator('label.check').filter({ hasText: new RegExp(`^${label}$`) }).locator('input');
+  for (const id of ['srt', 'vtt', 'txt']) {
+    const box = page.getByTestId(`cap-${id}`);
     if (caps.includes(id)) await box.check(); else await box.uncheck();
   }
+  await page.getByTestId('output-button').click();
   downloads.length = 0;
   const t0 = Date.now();
-  await page.getByRole('button', { name: 'Start – free' }).click();
+  await page.getByTestId('start').click();
   await waitResult(page, 'result', 180000);
-  return { res: page.getByTestId('result').first(), ms: Date.now() - t0 };
+  return { res: page.getByTestId('studio'), ms: Date.now() - t0 };
 }
 
 /** The file a download brought, saved under `name` in the fixtures folder. */
@@ -59,9 +61,11 @@ await check('subtitles, free: a short recording gives the right words; SRT, VTT 
   calls.length = 0;
   models.reset();
   const { res, ms } = await run('speech.wav');
-  const preview = await res.getByTestId('subs-preview').innerText();
+  await page.getByTestId('bar-files').click(); // Your files: the beginning of what was said, then the files
+  const preview = await page.getByTestId('subs-preview').innerText();
+  await page.getByTestId('bar-files').click();
   if (!SAID.test(preview)) throw new Error(`preview: ${preview}`);
-  if ((await res.getAttribute('data-language')) !== 'en') throw new Error(`language ${await res.getAttribute('data-language')}`);
+  if ((await resultAttr(page, 'language')) !== 'en') throw new Error(`language ${await resultAttr(page, 'language')}`);
   if (names().join() !== 'speech-transcript.txt,speech.srt,speech.vtt') throw new Error('downloaded by itself: ' + names());
   const srt = readFileSync(await saved(byName('speech.srt'), 'subs.srt'), 'utf8');
   if (!/^1\n00:00:\d\d,\d{3} --> 00:00:\d\d,\d{3}\n/.test(srt) || !SAID.test(srt)) throw new Error(`srt: ${srt.slice(0, 200)}`);
@@ -70,9 +74,9 @@ await check('subtitles, free: a short recording gives the right words; SRT, VTT 
   const txt = readFileSync(await saved(byName('speech-transcript.txt'), 'subs.txt'), 'utf8');
   if (!SAID.test(txt)) throw new Error(txt);
   // one button brings all three again; there is no button per format
-  if (await res.getByRole('button', { name: /^(SRT|VTT|TXT)$/ }).count()) throw new Error('a button per subtitle format is back');
+  if (await page.getByRole('button', { name: /^(SRT|VTT|TXT)$/ }).count()) throw new Error('a button per subtitle format is back');
   downloads.length = 0;
-  await res.getByTestId('download-again').click();
+  await page.getByTestId('download-again').click();
   for (let i = 0; i < 40 && downloads.length < 3; i++) await page.waitForTimeout(250);
   if (names().join() !== 'speech-transcript.txt,speech.srt,speech.vtt') throw new Error('downloaded again: ' + names());
   const posted = calls.filter((c) => c.startsWith('POST') || c.includes('/jobs/'));
@@ -110,11 +114,11 @@ await check('subtitles, free: a model file that is not the pinned one (changed b
     await dropFile(p, join(FILES, 'speech.wav'));
     await pick(p, 'noise', 'off');
     await pick(p, 'subs', 'browser');
-    await p.getByRole('button', { name: 'Start – free' }).click();
+    await p.getByTestId('start').click();
     await p.getByTestId('job-error').waitFor({ timeout: 120000 });
     const err = await p.getByTestId('job-error').innerText();
     if (!/subtitle maker couldn.t start/.test(err)) throw new Error('error text: ' + err); // the worker's own reason is not passed on
-    if (await p.getByTestId('job').count()) throw new Error('subtitles were made with a changed file');
+    if (await p.locator('[data-testid=studio][data-phase=ready]').count()) throw new Error('subtitles were made with a changed file');
     if (!models.byName()['preprocessor_config.json']) throw new Error('the changed file was never requested, so the refusal is not the one under test');
     return err.split('\n')[0];
   } finally {
@@ -133,31 +137,33 @@ await check('subtitles, free, video: embedded + TXT gives exactly two files by t
   const text = execFileSync(FFMPEG, ['-v', 'error', '-i', p, '-map', '0:s:0', '-f', 'srt', '-'], { encoding: 'utf8' });
   if (!SAID.test(text)) throw new Error(text);
   if (!SAID.test(readFileSync(await saved(byName('speech-transcript.txt'), 'subs-video.txt'), 'utf8'))) throw new Error('transcript');
-  // no separate button for a video without subtitles, and the card lists the two files
-  const card = page.getByTestId('job').first();
-  if ((await card.getByTestId('made-file').count()) !== 2 || (await card.getByTestId('download-again').count()) !== 1) throw new Error('the card should list two files and have one Download again');
+  // no separate button for a video without subtitles, and Your files lists the two files
+  await page.getByTestId('bar-files').click();
+  if ((await page.getByTestId('made-file').count()) !== 2 || (await page.getByTestId('download-again').count()) !== 1) throw new Error('Your files should list two files and the bar have one Download again');
+  await page.getByTestId('bar-files').click();
   downloads.length = 0;
-  await res.getByTestId('download-again').click();
+  await page.getByTestId('download-again').click();
   for (let i = 0; i < 60 && downloads.length < 2; i++) await page.waitForTimeout(250);
   if (names().join() !== 'speech-subtitled.mkv,speech-transcript.txt') throw new Error('downloaded again: ' + names());
   await page.screenshot({ path: join(SHOTS, 'subs-video.png'), fullPage: true });
   return kinds.join(', ');
 });
 
-await check('subtitles, free: Change and save again with the subtitle formats and the video: the new choice is what comes down (SRT instead of TXT; the video without the subtitles inside is not offered as a variant)', async () => {
-  const card = page.getByTestId('job').first();
-  await card.getByTestId('again').locator('summary').click();
-  const panel = card.getByTestId('again-fields');
-  await panel.waitFor();
-  await panel.getByTestId('again-cap-srt').check();
-  await panel.getByTestId('again-cap-txt').uncheck();
+await check('subtitles, free: Save changes with the subtitle formats and the video: the new choice is what comes down (SRT instead of TXT; the video without the subtitles inside is not offered as a variant)', async () => {
+  await page.getByTestId('output-button').click();
+  await page.getByTestId('cap-srt').check();
+  await page.getByTestId('cap-txt').uncheck();
+  await page.getByTestId('output-button').click();
   downloads.length = 0;
-  await panel.getByTestId('again-save').click();
+  await page.getByTestId('save-changes').click();
   for (let i = 0; i < 80 && downloads.length < 2; i++) await page.waitForTimeout(250);
   if (names().join() !== 'speech-subtitled.mkv,speech.srt') throw new Error('downloaded: ' + names());
-  await panel.getByTestId('again-embed').uncheck();
+  await page.getByTestId('download-again').waitFor();
+  await page.getByTestId('output-button').click();
+  await page.getByRole('checkbox', { name: /Put the subtitles into the video/ }).uncheck();
+  await page.getByTestId('output-button').click();
   downloads.length = 0;
-  await panel.getByTestId('again-save').click();
+  await page.getByTestId('save-changes').click();
   for (let i = 0; i < 40 && downloads.length < 1; i++) await page.waitForTimeout(250);
   await page.waitForTimeout(1500);
   if (names().join() !== 'speech.srt') throw new Error('without the video inside: ' + names());

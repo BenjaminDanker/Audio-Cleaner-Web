@@ -10,9 +10,9 @@ import { findRate, loadPricing, useNow, usePricing } from '../../hooks.js';
 import { ACTIVE, jobPath, queueText, stageText } from '../../jobs.js';
 import { heardSeries } from '../../editor/peaks.js';
 import { dismiss as dismissSuggestion } from '../../editor/suggest.js';
-import { HEAR_ALL, MixPlayer, prepare } from '../../editor/mix.js';
+import { MixPlayer, describe, prepare } from '../../editor/mix.js';
 import {
-  applyToSel, cost as costOf, covered, delta as deltaOf, echoBlocked, edit, freePatch, fmt, money, needsServer, overl, pushUndo, ranges, ratesFrom, sameOut, sameTracks,
+  applyToSel, cost as costOf, covered, dbOf, delta as deltaOf, echoBlocked, edit, freePatch, fmt, money, needsServer, overl, pushUndo, ranges, ratesFrom, sameOut, sameTracks,
   selTitle, setSel, splitAll, toggleRange, toTimeline, uni, trOf,
 } from '../../editor/tracks.js';
 import { BlendPlayer, gainsFor, matchGain, memorySource, previewFits } from '../../media/blend.js';
@@ -240,7 +240,9 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
           engineRef.current = bp;
           eng = bp;
           bp.prepare();
-          bp.setGains(gainsFor(fin.currentStrength()).full, gainsFor(fin.currentStrength()).input);
+          const v0 = live.current.S.tracks.voice[0];
+      const g0 = gainsFor(v0 && v0.mode === 1 ? dbOf(v0) : fin.currentStrength());
+      bp.setGains(g0.full, g0.input);
           setEngineVer((n) => n + 1);
         }).catch(() => {});
       } else if (localAb && el && abUrl) {
@@ -267,7 +269,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (eng instanceof MixPlayer) eng.remix();
     else if (eng instanceof AbEngine) eng.setHearCleaned(hear.voice);
     else if (eng instanceof BlendPlayer && fin) {
-      const db = fin.currentStrength();
+      const v0 = S.tracks.voice[0];
+      const db = v0 && v0.mode === 1 ? dbOf(v0) : fin.currentStrength(); // (the strength being tried, not only the one saved)
       const sums = eng.source.sums ? eng.source.sums() : null;
       const g = hear.voice ? gainsFor(db, { sums }) : { full: 0, input: sums ? matchGain(sums, 1) : 1 };
       eng.setGains(g.full, g.input);
@@ -340,6 +343,14 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       return heardSeries({ N: data.N, T, prep: prepare(model), layers: L, top });
     } catch { return null; }
   }, [done, data, isLocal, localPeaks, hear, session.layers, tl, ver]); // eslint-disable-line react-hooks/exhaustive-deps
+  // what is heard at the playhead (the gains the mix plays), for the page's own checks
+  const gains = useMemo(() => {
+    if (!done || !tl || isLocal) return '';
+    try {
+      const d = describe(prepare(model), ph);
+      return JSON.stringify(Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Math.round(v * 1000) / 1000])));
+    } catch { return ''; }
+  }, [done, tl, hear, ph, ver]); // eslint-disable-line react-hooks/exhaustive-deps
   const hearText = useMemo(() => {
     const L = [['voice', 'Voice'], ['echo', 'Echo removal'], ['level', 'Leveling']].filter(([tr]) => tr !== 'echo' || S.second);
     const off = L.filter(([tr]) => !hear[tr]);
@@ -416,6 +427,12 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
         }
         const keep = fin.effective();
         const wants = { ...keep, ...w, soundHere: isLocal ? keep.soundHere : false, subsHere: isLocal ? keep.subsHere : false };
+        const db = reblendDb();
+        if (db != null) {
+          // a new strength for the free cleanup made here: put together again from the two signals it kept (free, nothing is made twice)
+          try { await fin.blendTo(db); await fin.run({ save: true, wants }); session.takeSnapshot(S.tracks, choice); session.touch(); say('Saved'); } catch (e) { session.error = e?.message || 'Couldn’t save this. Please try again.'; session.touch(); }
+          return;
+        }
         if (!changedTracks) { await session.saveChanges({ choice, plan, wants, quote: null, refresh }); say('Saved'); return; }
         session.savedAt = job.finishedAt;
         const r = await session.saveChanges({ choice, plan, wants, quote: quote.q, refresh, onStarted: refreshAll });
@@ -425,6 +442,16 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       if (finState.phase === 'needvideo' || (finState.phase === 'idle' && fin?.needsVideo(fin.effective()))) { rootRef.current?.querySelector('[data-testid=need-video-input]')?.click(); return; }
       fin?.again();
     }
+  };
+
+  // only the strength of a free cleanup made here changed: the new sound is a blend of the two signals the run kept
+  const reblendDb = () => {
+    if (!isLocal || !fin?.pairParts || !changedTracks || !session.snap) return null;
+    const v = S.tracks.voice;
+    const w = session.snap.tracks.voice;
+    if (v.length !== 1 || w.length !== 1 || v[0].mode !== 1 || v[0].kind !== 'free' || w[0].mode !== 1 || w[0].kind !== 'free') return null;
+    const flat = (t) => { const c = clone(t); c.voice.forEach((x) => { x.str = 0; x.db = null; }); return c; };
+    return sameTracks(flat(S.tracks), flat(session.snap.tracks), T) ? dbOf(v[0]) : null;
   };
 
   const doDelete = async () => {
@@ -848,7 +875,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     : session.applied && reco
       ? (
         <>
-          <span className="auto-text"><b data-testid="reco-status">{session.custom ? 'Set automatically, then changed by you.' : 'Set automatically for this file.'}</b> <span className="muted" data-testid="reco-line">{reco.line}</span> <span className="muted" data-testid="reco-pick">{reco.pick}</span></span>
+          <span className="auto-text"><b data-testid="reco-status">{session.custom ? 'Set automatically, then changed by you.' : 'Set automatically for this file.'}</b></span>
           {session.custom
             ? <button type="button" className="link" data-act="auto-again" data-testid="reco-apply">Use them again</button>
             : <button type="button" className="link" data-act="auto-undo" data-testid="reco-undo">Undo</button>}
@@ -874,7 +901,14 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   };
 
   return (
-    <div className="studio" ref={rootRef} data-testid="studio" data-stage={stage} onClick={onClick} onChange={onChange} onInput={() => {}}>
+    <div
+      className="studio" ref={rootRef} data-testid="studio" data-stage={stage} data-phase={done ? finState.phase : undefined} onClick={onClick} onChange={onChange}
+      {...(done && fin?.pcm ? { 'data-rms': fin.pcm.rms.toFixed(6), 'data-peak': fin.pcm.peak.toFixed(4), 'data-frames': fin.pcm.frames, 'data-channels': fin.pcm.channels } : {})}
+      {...(done && fin?.subs ? { 'data-cues': fin.subs.cues.length, 'data-language': fin.subs.language } : {})}
+      {...(done && finState.strengthDb != null ? { 'data-strength-db': finState.strengthDb.toFixed(2) } : {})}
+      {...(done && gains ? { 'data-gains': gains } : {})}
+      data-time={ph.toFixed(2)} data-playing={playing ? 'yes' : 'no'} data-seconds={T} data-changed={done ? (changedTracks ? 'tracks' : changedOut ? 'output' : 'no') : undefined}
+    >
       <div className="container ws" data-stage={stage}>
         {notes.length > 0 && (
           <div className="notes" data-testid="notes">
@@ -912,10 +946,11 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
                     )}
                   </div>
                   {session.auto && autoLine && <p className="autol" aria-live="polite" data-testid="reco">{autoLine}</p>}
-                  {session.auto && session.applied && reco?.reasons?.length > 0 && (
-                    <details className="auto-why">
+                  {session.auto && session.applied && reco && (
+                    <details className="auto-why" data-testid="reco-details">
                       <summary>Why these choices</summary>
-                      <ul className="reco-why small muted" data-testid="reco-why">{reco.reasons.map((r) => <li key={r}>{r}</li>)}</ul>
+                      <p className="muted small mb0"><span data-testid="reco-line">{reco.line}</span> <span data-testid="reco-pick">{reco.pick}</span></p>
+                      {reco.reasons?.length > 0 && <ul className="reco-why small muted" data-testid="reco-why">{reco.reasons.map((r) => <li key={r}>{r}</li>)}</ul>}
                     </details>
                   )}
                   {sgLine}

@@ -15,7 +15,7 @@ function badgeClass(status) {
 
 /**
  * One job of "Your jobs": its name, what it is doing and, while it is active, a progress bar with the time left, so several
- * can be watched at once. "Open" goes to the job's own page (its progress or result, Download again, Change and save again,
+ * can be watched at once. "Open" goes to the job's own page (its progress or result, Download again, Save changes,
  * Delete now). A job that finishes while this list is on screen is finished here too (its files download by themselves).
  */
 export default function JobRow({ job }) {

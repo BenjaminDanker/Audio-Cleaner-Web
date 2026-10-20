@@ -6,7 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BASE, FILES, check, dropFile, launch, mirror, pick, signIn, summary, waitResult } from './helpers.mjs';
+import { BASE, FILES, check, dropFile, launch, mirror, pick, resultAttr, signIn, summary, waitResult } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
 
@@ -69,29 +69,47 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
       job('que1', { status: 'queued', progress: 0, queuePosition: 2, queueWaitSeconds: 60, estimateSeconds: 120, expiresAt: null, finishedAt: null }),
       job('upl1', { status: 'uploading', progress: 0, expiresAt: null, finishedAt: null }),
       job('done1', { outputs: [{ name: 'done1-cleaned.flac', kind: 'audio', bytes: 1000 }], redo: { available: false } }),
+      // a job the editor opens (it has audio steps): its timeline and outlines are stubbed below
+      job('edone', { outputs: [{ name: 'edone-cleaned.flac', kind: 'audio', bytes: 1000 }], edit: { available: true, hasTimeline: false, run: null, lastRun: null, suggestions: false } }),
       job('bad1', { status: 'failed', error: 'We couldn’t read that file. You were not charged.', expiresAt: null }),
     ];
     await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list, limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
+    await page.route('**/api/jobs/edone/timeline', (r) => r.fulfill({ json: {
+      timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, custom: false, rendered: null, seconds: 60, channels: 1,
+      secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null } }));
+    await page.route('**/api/jobs/edone/peaks/**', (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
     try {
       const probs = [];
       await page.goto(`${BASE}/app`);
       await page.getByTestId('job-row').first().waitFor();
-      if ((await page.getByTestId('job-row').count()) !== 5) throw new Error(`${await page.getByTestId('job-row').count()} rows, wanted 5`);
+      if ((await page.getByTestId('job-row').count()) !== 6) throw new Error(`${await page.getByTestId('job-row').count()} rows, wanted 6`);
       for (const x of await page.evaluate(audit)) probs.push(`/app (rows): ${x}`);
-      for (const id of ['run1', 'que1', 'done1', 'bad1']) {
+      for (const id of ['run1', 'que1', 'done1', 'bad1', 'edone']) {
         await page.goto(`${BASE}/app/job/${id}`);
-        await page.getByTestId('job').waitFor();
-        if (id === 'done1') {
-          await page.getByTestId('again').locator('summary').click();
-          await page.getByTestId('again-fields').waitFor();
+        await (id === 'edone' ? page.getByTestId('studio') : page.getByTestId('job')).waitFor();
+        if (id === 'edone') {
+          // the editor's popovers and the "All the options" window are part of the scan
+          await page.getByTestId('output-button').click();
+          await page.getByTestId('output-pop').waitFor();
+          for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id} (output): ${x}`);
+          await page.getByTestId('output-button').click();
+          await page.getByTestId('bar-files').click();
+          for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id} (your files): ${x}`);
+          await page.getByTestId('bar-files').click();
+          await page.getByTestId('info-open').click();
+          await page.getByTestId('info-modal').waitFor();
+          for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id} (all the options): ${x}`);
+          await page.getByTestId('info-close').click();
         }
         await page.waitForTimeout(200);
         for (const x of await page.evaluate(audit)) probs.push(`/app/job/${id}: ${x}`);
       }
       if (probs.length) throw new Error(probs.join(' | '));
-      return 'rows and 4 job pages clean';
+      return 'rows and 5 job pages clean';
     } finally {
       await page.unroute('**/api/jobs');
+      await page.unroute('**/api/jobs/edone/timeline');
+      await page.unroute('**/api/jobs/edone/peaks/**');
     }
   });
   await browser.close();
@@ -121,20 +139,20 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     await page.goto(`${BASE}/app`);
     await dropFile(page, join(FILES, 'speech.wav'));
     await pick(page, 'noise', 'browser');
-    await page.getByRole('button', { name: 'Start – free' }).click();
+    await page.getByTestId('start').click();
     await waitResult(page, 'result', 120000);
-    if (Number(await page.locator('[data-testid=result]').getAttribute('data-rms')) < 0.001) throw new Error('silent under CSP');
-    // Change and save again as an MP3 (the encoder is a worker)
-    await page.getByTestId('again').locator('summary').click();
-    const again = page.getByTestId('again-fields');
-    await again.getByTestId('out-name').fill('csp.mp3');
-    const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), again.getByTestId('again-save').click()]);
+    if (Number(await resultAttr(page, 'rms')) < 0.001) throw new Error('silent under CSP');
+    // Save changes as an MP3 (the encoder is a worker)
+    await page.getByTestId('output-button').click();
+    await page.getByTestId('out-name').fill('csp.mp3');
+    await page.getByTestId('output-button').click();
+    const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 60000 }), page.getByTestId('save-changes').click()]);
     await dl.saveAs(join(FILES, 'csp-out.mp3'));
     await page.goto(`${BASE}/app`);
     await dropFile(page, join(FILES, 'speech.wav'));
     await pick(page, 'noise', 'off');
     await pick(page, 'subs', 'browser');
-    await page.getByRole('button', { name: 'Start – free' }).click();
+    await page.getByTestId('start').click();
     await waitResult(page, 'result', 180000);
     await page.goto(`${BASE}/app/live`);
     await page.getByTestId('live-start').click();

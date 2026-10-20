@@ -344,3 +344,5 @@
 .studio .pg progress.bar { min-width: 90px; box-shadow: inset 0 0 0 1px var(--border); }
 .studio .auto-why { padding-left: 0; }
 .studio .autoc .auto-why .reco-why { margin-top: 4px; }
+.studio .pg { min-width: 0; overflow: hidden; }
+.studio .pg .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

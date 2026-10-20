@@ -199,7 +199,9 @@ export class Session {
   afterWave() {
     if (this.waveDone) return;
     this.waveDone = true;
-    if (this.hasAudio && this.auto && !navigator.connection?.saveData) this.listen();
+    // a browser that asks to save data downloads nothing before Start (the quick listen and the search for moments both need the noise remover)
+    if (navigator.connection?.saveData) return;
+    if (this.hasAudio && this.auto) this.listen();
     else this.findMoments();
   }
 
@@ -366,20 +368,29 @@ export class Session {
       this.subsWhole = !!subs && !(data.rendered || data.base).parts('subtitles').length;
       const made = fromTimeline(data.rendered || data.base, T, { subs });
       const working = data.base === data.rendered || !data.rendered ? made : fromTimeline(data.base, T, { subs });
-      // a remover that was left to us ("Auto") is decided when it runs: the files hold the one that was picked, which is not a change
+      // what the files hold, as the person made it: the sound timeline the files hold has no subtitles, a remover that was left to us ("Auto")
+      // is decided when it runs, and a part the browser cleaned may not say its strength: none of that is a change
+      if (data.rendered && !data.rendered.parts('subtitles').length && data.base.parts('subtitles').length) made.subs = clone(working.subs);
       for (const x of made.voice) {
         const w = working.voice.find((y) => y.s <= x.s + 1e-6 && y.e >= x.e - 1e-6);
-        if (w && w.mode === 1 && w.rem === 0 && x.mode === 1) x.rem = 0;
+        if (!w || w.mode !== 1 || x.mode !== 1) continue;
+        if (w.rem === 0) x.rem = 0;
+        if (w.kind === 'free' && x.kind === 'free') { x.str = w.str; x.db = w.db; }
       }
-      const hadEdits = this.S && this.S.T === T && this.S.past.length > 0;
-      if (!this.S || !hadEdits || force) {
+      const rebuilt = !this.S || !(this.S.T === T && this.S.past.length > 0) || force;
+      if (rebuilt) {
         this.T = T;
         this.S = makeState(T, { second: data.secondTrack, auto: false });
         this.S.tracks = clone(working);
       }
       this.S.second = !!data.secondTrack;
       const keep = this.snap?.choice;
-      this.snap = { tracks: clone(made), choice: keep || null, sfiles: this.out.sfiles.slice(), burn: this.out.burn };
+      if (!keep) {
+        // a job this tab did not start: the subtitle files and "into the video" it was asked for (kept with it in this browser, else what it made)
+        const w = this.fin?.wants || {};
+        this.out = { sfiles: ['srt', 'vtt', 'txt'].filter((k) => w.caps?.[k]), burn: !!w.embed };
+      }
+      this.snap = { tracks: rebuilt || !this.snap ? clone(made) : this.snap.tracks, choice: keep || null, sfiles: this.out.sfiles.slice(), burn: this.out.burn };
       this.paid = job.costMicros || 0;
       this.applied = false;
       if (data.suggestions) this.loadJobSuggestions();
@@ -476,7 +487,7 @@ export class Session {
     let failed = false;
     try {
       if (server) return await this.startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, estimate });
-      return await this.startLocal({ file, info, tracks, T, wants, freeNoise, freeSubs, ctl });
+      return await this.startLocal({ file, info, tracks, T, wants, choice, freeNoise, freeSubs, ctl });
     } catch (e) {
       failed = true;
       if (e?.name === 'AbortError' || ctl.signal.aborted) {
@@ -595,7 +606,7 @@ export class Session {
   }
 
   /** A run with nothing on our side: the Free noise removal and subtitles, made here. */
-  async startLocal({ file, info, tracks, T, wants, freeNoise, freeSubs, ctl }) {
+  async startLocal({ file, info, tracks, T, wants, choice, freeNoise, freeSubs, ctl }) {
     const results = await Promise.allSettled([
       freeNoise.length ? this.localNoise({ file, info, T, freeNoise, ctl }) : Promise.resolve(null),
       freeSubs.length ? this.localSubs({ file, info, T, freeSubs, ctl }) : Promise.resolve(null),
@@ -630,7 +641,7 @@ export class Session {
     this.id = id;
     this.fin = fin;
     this.job = fin.job;
-    this.takeSnapshot(tracks, null);
+    this.takeSnapshot(tracks, choice);
     this.register();
     return { id, job: fin.job };
   }

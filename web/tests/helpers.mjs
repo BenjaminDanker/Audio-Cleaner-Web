@@ -70,52 +70,96 @@ export function skip(name, reason) {
 }
 export const summary = () => results;
 
-/** Waits for a result (data-testid), or fails at once with the page's own error text instead of waiting out the timeout. */
-export async function waitResult(page, testid, timeout = 300000) {
-  const either = page.locator(`[data-testid=${testid}], [data-testid=job-error]`).first();
+/**
+ * Waits until the files of the editor's recording are made (and handed over): the editor says data-phase="ready" once its last step is
+ * done, or fails at once with the page's own error text instead of waiting out the timeout. `_testid` is kept for the older calls.
+ */
+export async function waitResult(page, _testid = 'result', timeout = 300000) {
+  const either = page.locator('[data-testid=studio][data-phase=ready], [data-testid=job-error], [data-testid=made-error]').first();
   await either.waitFor({ timeout });
   if (await page.getByTestId('job-error').count()) throw new Error(`the page says: ${await page.getByTestId('job-error').first().innerText()}`);
+  if (await page.getByTestId('made-error').count()) throw new Error(`the page says: ${await page.getByTestId('made-error').first().innerText()}`);
 }
 
-// ---- the Cleanup page's options (drop a file, then pick what to do) ----
+/** What the finished editor says about the sound and words made in the browser (data-rms, data-peak, data-frames, data-channels, data-cues, data-language, data-strength-db). */
+export const resultAttr = (page, name) => page.getByTestId('studio').getAttribute(`data-${name}`);
+
+// ---- the editor (the Cleanup page once a file is chosen, and a job's page) ----
+export const studio = (page) => page.getByTestId('studio');
+const LEVELS = { off: 0, podcast: 1, youtube: 2, broadcast: 3, keep: 4 };
+const QUALITIES = { off: 0, free: 1, standard: 2, accurate: 3 };
+const STRENGTH = { gentle: 1, balanced: 2, strong: 3, max: 4 };
+
+/** The quick listen that sets the best choices ("Automatic") is over, and the waveform has been read. */
+export async function settleRecommendation(page) {
+  await page.waitForFunction(() => !document.querySelector('[data-testid=reco-listening]') && document.querySelector('[data-testid=waveform]')?.dataset.reading === 'no', null, { timeout: 60000 });
+}
+/** Automatic on or off (the switch under the file's name). */
+export async function setAuto(page, on) {
+  const sw = page.locator('.studio button[data-act=auto]');
+  if ((await sw.getAttribute('aria-checked')) !== String(on)) await sw.click();
+}
+export const setVoice = (page, mode) => page.getByTestId(`voice-${mode}`).click(); // 'off' | 'noise' | 'rebuild'
+/** Free (in the browser) or Standard noise removal for the selection (Noise removal is switched on first). */
+export async function setKind(page, kind) {
+  if ((await page.getByTestId('voice-noise').getAttribute('aria-checked')) !== 'true') await setVoice(page, 'noise');
+  await page.locator(`.studio button[data-act=v-kind][data-v=${kind}]`).click();
+}
+export async function setStrength(page, name) { await page.locator(`.studio button[data-act=v-str][data-v="${STRENGTH[name]}"]`).click(); }
+export async function setLeveling(page, name) { await page.locator(`.studio button[data-act=l-lvl][data-v="${LEVELS[name]}"]`).click(); }
+export async function setSubs(page, name) { await page.locator(`.studio button[data-act=s-q][data-v="${QUALITIES[name]}"]`).click(); }
+
 /**
- * Click one of the option cards: group 'noise' (off | browser | denoise) or 'subs' (off | browser | standard | accurate).
- * Leveling is a plain checkbox that no noise choice changes, so picking noise Off also unticks "Leveling on its own" (else a free job would be a paid one).
+ * The old Cleanup form's two groups on the editor: group 'noise' (off | browser | denoise) and 'subs' (off | browser | standard | accurate).
+ * Leveling is its own track, paid and done on our side: picking noise Off or Free also turns it off (else a free job would be a paid one, as Leveling was
+ * not offered with the free cleanup on the old form).
  */
 export async function pick(page, group, value) {
-  await page.locator(`label.choice:has(input[name=${group}][value=${value}])`).click();
-  if (group === 'noise' && value === 'off') await page.locator('input[name=leveling-alone]').uncheck();
-}
-/** The quick listen that sets the best choices ("Automatic best settings") is over. */
-export async function settleRecommendation(page) {
-  await page.waitForFunction(() => !document.querySelector('[data-testid=reco-listening]'), null, { timeout: 30000 });
+  if (group === 'noise') {
+    if (value === 'off') { await setVoice(page, 'off'); await setLeveling(page, 'off'); } else if (value === 'browser') { await setKind(page, 'free'); await setLeveling(page, 'off'); } else await setKind(page, 'paid');
+  } else await setSubs(page, value === 'browser' ? 'free' : value);
 }
 /**
- * Puts the options back to what they were before the paid defaults: the free in-browser cleanup when the browser can do it (else
- * Denoising), Maximum strength, no rebuild, subtitles Off. The checks that are about something else than the automatic settings start from there.
+ * Puts the choices back to what they were before the paid defaults: the free in-browser cleanup when the browser can do it (else
+ * Standard), Maximum strength where there is a choice, Leveling off, no Voice rebuild, subtitles Off. The checks that are about something
+ * else than the automatic settings start from there.
  */
 export async function restoreOldDefaults(page) {
-  const card = (v) => page.locator(`label.choice:has(input[name=noise][value=${v}]):not(.is-disabled)`);
-  const want = (await card('browser').count()) ? 'browser' : 'denoise';
-  if (!(await page.locator(`input[name=noise][value=${want}]`).isChecked())) await card(want).click();
-  const max = page.locator(`input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max]`);
-  if ((await max.count()) && !(await max.isChecked())) await page.locator(`label:has(input[name=${want === 'browser' ? 'lstrength' : 'strength'}][value=max])`).click();
-  const rebuild = page.locator('input[name=rebuild]');
-  if ((await rebuild.count()) && (await rebuild.isChecked())) await rebuild.uncheck();
-  // the subtitles start out Off, as before the paid defaults
-  if (!(await page.locator('input[name=subs][value=off]').isChecked())) await page.locator('label.choice:has(input[name=subs][value=off])').click();
+  await setAuto(page, false);
+  const free = page.locator('.studio button[data-act=v-kind][data-v=free]');
+  await setVoice(page, 'noise');
+  if ((await free.count()) && (await free.getAttribute('aria-disabled')) !== 'true') await setKind(page, 'free'); else await setKind(page, 'paid');
+  await setSubs(page, 'off');
+  await setLeveling(page, 'off');
 }
 /**
- * Drop a file on the Cleanup page and wait until it has been looked at (the Start button shows up and the recommendation is in).
- * The options are then put back to the old defaults (restoreOldDefaults); pass { recommended: true } to keep what was recommended.
+ * Choose a file on the Cleanup page and wait until it has been looked at (the editor shows its waveform and the quick listen is over).
+ * The choices are then put back to the old defaults (restoreOldDefaults); pass { recommended: true } to keep what was recommended.
  */
 export async function dropFile(page, path, { recommended = false } = {}) {
   await page.setInputFiles('input[type=file]', path);
-  await page.getByTestId('start').waitFor({ timeout: 20000 });
+  await page.getByTestId('start').waitFor({ timeout: 30000 });
   await settleRecommendation(page);
   if (!recommended) await restoreOldDefaults(page);
   await page.waitForTimeout(300);
 }
+/** Drag across the waveform from second `s` to second `e` (the editor takes whole seconds). */
+export async function dragRange(page, s, e) {
+  const wf = page.getByTestId('waveform');
+  const box = await wf.boundingBox();
+  const T = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
+  const x = (t) => box.x + (t / T) * box.width;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x(s), y);
+  await page.mouse.down();
+  await page.mouse.move(x((s + e) / 2), y, { steps: 4 });
+  await page.mouse.move(x(e), y, { steps: 4 });
+  await page.mouse.up();
+}
+/** The selection's title ("Whole file · 0:11", "0:03–0:08 · 5 s"). */
+export const selectionTitle = (page) => page.locator('.studio .js-title').innerText();
+/** The price on the main button ("Start · $0.003", "Save changes · Free"). */
+export const mainButton = (page) => page.locator('.studio .bb .btn-lg').innerText();
 
 // ---- helpers for the suites about job pages and changing a job again (jobs.mjs, redo.mjs) ----
 export const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
@@ -161,15 +205,18 @@ export async function waitJobDone(page, id, { timeout = 300000 } = {}) {
 /** The id of the job whose page the page is on. */
 export const jobIdOf = (page) => /\/app\/job\/([0-9a-f]{32}|local-[0-9a-z]+)/.exec(new URL(page.url()).pathname)?.[1] || null;
 
-/** On a job's page: waits until the job card says done (throws with the card's text when the job failed or was canceled). */
+/**
+ * On a job's page: waits until the editor shows the job done (returns the editor's locator), or throws with the page's text when the job
+ * failed or was canceled (those show as a card).
+ */
 export async function waitCardDone(page, timeout = 240000) {
-  const card = page.getByTestId('job').first();
   const t0 = Date.now();
   for (;;) {
-    const st = await card.getAttribute('data-status', { timeout: 3000 }).catch(() => null);
-    if (st === 'done') return card;
-    if (st === 'failed' || st === 'canceled') throw new Error(`the job ${st}: ${(await card.innerText()).slice(0, 300)}`);
-    if (Date.now() - t0 > timeout) throw new Error(`the job is still ${st} after ${timeout / 1000} s`);
+    const st = await page.locator('[data-testid=studio]').first().getAttribute('data-stage', { timeout: 500 }).catch(() => null);
+    if (st === 'done') return studio(page);
+    const cs = await page.getByTestId('job').first().getAttribute('data-status', { timeout: 500 }).catch(() => null);
+    if (cs === 'failed' || cs === 'canceled') throw new Error(`the job ${cs}: ${(await page.getByTestId('job').first().innerText()).slice(0, 300)}`);
+    if (Date.now() - t0 > timeout) throw new Error(`the job is still ${st || cs} after ${timeout / 1000} s`);
     await page.waitForTimeout(500);
   }
 }

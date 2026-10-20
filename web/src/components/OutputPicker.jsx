@@ -6,8 +6,8 @@ import {
 
 // "What should the result be called, and what kind of file?" A name box with a file-type list attached to its right,
 // and (for a video) the picture size. Typing another ending changes the list; picking from the list changes the ending.
-// Only what this browser can really make for this file is in the list. Used on the Cleanup form (the choice is made before
-// Start, and the result is downloaded by itself) and on a finished result ("Change and save again"). Nothing here uploads anything.
+// Only what this browser can really make for this file is in the list. Used in the editor's Output menu (the choice is made before
+// Start and can be changed on a finished result; the result is downloaded by itself). Nothing here uploads anything.
 
 const defaultName = (file, id) => `${stem(file?.name)}-cleaned.${FORMAT[id]?.ext || 'wav'}`;
 const AUDIO_DEFAULT_FOR = (file) => (/\.webm$/i.test(file?.name || '') ? 'ogg' : 'm4a');

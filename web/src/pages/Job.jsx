@@ -63,7 +63,7 @@ export default function Job() {
 
   const gone = !job && (isLocal ? true : solo?.gone || (error && jobs?.length === 0 && !solo));
   // the editor opens jobs that have audio steps (and any card or job made in this tab); a failed or canceled one shows what happened
-  const editable = !!job && !['failed', 'canceled', 'expired'].includes(job.status) && (isLocal || !!sessionFor(job.id) || !!job.edit);
+  const editable = !!job && !['failed', 'canceled', 'expired'].includes(job.status) && (isLocal || !!sessionFor(job.id) || (!!job.edit && (job.edit.available || job.status !== 'done')));
   const session = editable ? (sessionFor(job.id) || Session.forJob(job, finishOf(job))) : null;
   if (editable && session) {
     return (

@@ -1,6 +1,6 @@
 // Website fixes that keep their own checks: the pure safety helpers (a return link that must stay on this site, the WAV size
-// limit), a page file that cannot be loaded (one retry, then a friendly screen, never a white page), and the delete-now
-// confirmation for a finished job. The rest of the old audit checks are covered by the suites next to this one.
+// limit), a page file that cannot be loaded (one retry, then a friendly screen, never a white page), the delete-now
+// confirmation for a finished job, and what a finished job hands over after a reload. The rest of the old audit checks are covered by the suites next to this one.
 // Needs the local test backend (port 8792, see helpers.mjs) serving `npm run build`. Usage: node tests/fixes.mjs [section ...]
 // sections: pure pages jobs
 import { BASE, check, launch, signIn, summary } from './helpers.mjs';
@@ -131,32 +131,42 @@ if (want('jobs')) {
     }
   });
 
-  await check('what was asked for decides what is downloaded: only the TXT and the sound were ticked (the server also kept a VTT for the video), so only those two come down; Change and save again adds the SRT', async () => {
-    const j = stubJob('d3', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']);
+  await check('what was asked for decides what is downloaded: only the TXT and the sound were ticked (the server also kept a VTT for the video), so only those two come down; Save changes adds the SRT', async () => {
+    // (this job is one the editor opens: it has audio steps, so the page asks for its timeline, which is stubbed here)
+    const j = { ...stubJob('d3', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']), transcribeTier: 'local', edit: { available: true, hasTimeline: false, run: null, lastRun: null, suggestions: false } };
     await withJobs([j], 'd3');
+    await page.route('**/api/jobs/d3/timeline', (r) => r.fulfill({ json: {
+      timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, custom: false, rendered: null, seconds: 60, channels: 1,
+      secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null,
+    } }));
+    await page.route('**/api/jobs/d3/peaks/**', (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
     await page.goto(`${BASE}/app/job/d3`);
     await page.evaluate(() => localStorage.setItem('acw.wants.d3', JSON.stringify({
       sound: true, format: 'flac', name: 'noisy-cleaned.flac', size: 'same', subs: true, caps: { srt: false, vtt: false, txt: true }, embed: false, soundHere: false, subsHere: false,
     })));
     try {
       await page.reload();
-      const card = page.getByTestId('job').first();
-      await card.getByTestId('download-again').waitFor();
-      const rows = await card.getByTestId('made-file').locator('.oname').allInnerTexts();
+      await page.getByTestId('download-again').waitFor();
+      await page.getByTestId('bar-files').click();
+      const rows = await page.getByTestId('made-file').locator('span').first().innerText().then(async () => (await page.getByTestId('made-file').allInnerTexts()).map((t) => t.split(/\s+/)[0]));
       if (rows.sort().join() !== 'noisy-cleaned.flac,noisy-transcript.txt') throw new Error('listed: ' + rows);
+      await page.getByTestId('bar-files').click();
       downloads.length = 0;
-      await card.getByTestId('download-again').click();
+      await page.getByTestId('download-again').click();
       await waitFor(2);
       if (sorted().join() !== 'noisy-cleaned.flac,noisy-transcript.txt') throw new Error('downloaded: ' + sorted());
-      await card.getByTestId('again').locator('summary').click();
-      await card.getByTestId('again-cap-srt').check();
+      await page.getByTestId('output-button').click();
+      await page.getByTestId('cap-srt').check();
+      await page.getByTestId('output-button').click();
       downloads.length = 0;
-      await card.getByTestId('again-save').click();
+      await page.getByTestId('save-changes').click();
       await waitFor(3);
       if (sorted().join() !== 'noisy-cleaned.flac,noisy-transcript.txt,noisy.srt') throw new Error('after adding the SRT: ' + sorted());
       return 'TXT + sound, then + SRT';
     } finally {
       await without('d3');
+      await page.unroute('**/api/jobs/d3/timeline');
+      await page.unroute('**/api/jobs/d3/peaks/**');
     }
   });
 

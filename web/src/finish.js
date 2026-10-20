@@ -26,7 +26,7 @@ const abortError = () => new DOMException('Canceled', 'AbortError');
 /* ------------------------------------------------------------------------------------------------ what was asked for */
 
 /**
- * What the person asked for, saved with the job in this browser so that "Download again" and "Change and save again" know it
+ * What the person asked for, saved with the job in this browser so that "Download again" and "Save changes" know it
  * after a reload (the server only keeps its own files):
  *   {sound, format, name, size, subs, caps:{srt,vtt,txt}, embed, soundHere, subsHere, blend?:{db}}
  * sound: the cleaned sound is part of the result, as `name` (a file type `format`, picture `size` for a video).

@@ -119,7 +119,7 @@ export default function Timeline({ ctx }) {
       <div className="tsc" ref={scrollRef}>
         <div className="row wr">
           <div className="lab" />
-          <div className="trk pl" id="wave" ref={waveRef} data-testid="wave">
+          <div className="trk pl" id="wave" ref={waveRef} data-testid="wave" data-seconds={T}>
             <i className="bands">{R.map((r) => <i key={`${r.s}-${r.e}`} className={`band${r.s <= 0 && r.e >= T ? ' whole' : ''}`} style={{ left: pct(r.s), width: pct(r.e - r.s) }} />)}</i>
             <div className="ruler">
               <div id="ticks">
