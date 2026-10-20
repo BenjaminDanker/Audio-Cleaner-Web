@@ -109,11 +109,27 @@ def test_the_result_lines_up_in_time_with_the_recording(ff, tmp_path):
 
 
 @needs_ff
-def test_block_boundaries_do_not_change_the_result(room, monkeypatch):
-    monkeypatch.setattr(pipeline, "ECHO_BLOCK", 3 * SR + 17)
-    blocks = pipeline.remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, work_dir=room["dir"])
-    assert blocks.shape == room["y"].shape
-    assert np.abs(blocks - room["y"]).max() < 1e-6
+def test_blocks_of_the_grid_take_the_echo_out_like_one_pass(room, monkeypatch, tmp_path):
+    """Echo removal runs on the block grid (blocks.GRID_ECHO: 30 s blocks, each with a fresh canceller that adapts on the 10 s before
+    it). A short grid puts several blocks, and seams, into the 14 s file: the blocks whose context reaches the start of the file are the
+    one pass bit for bit, the later ones adapt on their own context, and the result is as good (the waveform of a later block is
+    not the one pass's: echo removal converges in quality, not in waveform). Changed from "block boundaries do not change the result"
+    (1e-6) when whole-file echo removal went from one continuous canceller to this grid."""
+    from acw_common import blocks
+
+    monkeypatch.setattr(blocks, "GRID_ECHO", blocks.Grid(3 * SR / SR + 17 / SR, 6.0, 0.01))
+    got = pipeline.remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, work_dir=tmp_path)  # (not room["dir"]: the result is a file there)
+    x, y, near = room["x"], room["y"], room["near"]
+    assert got.shape == y.shape and np.isfinite(got).all()
+    assert not np.array_equal(got, y)  # the later blocks did adapt on their own context
+    assert np.abs(got[: 6 * SR] - y[: 6 * SR]).max() < 1e-6  # the blocks whose 6 s of context reach the file start
+    assert rms_db(x[FAR_ONLY]) - rms_db(got[FAR_ONLY]) > 20  # echo mostly gone, also in a block that adapted on 6 s
+    kept, voice = got[NEAR_ONLY, 0], near[NEAR_ONLY]
+    assert abs(rms_db(kept) - rms_db(voice)) < 1.5
+    assert np.corrcoef(np.abs(np.fft.rfft(kept)), np.abs(np.fft.rfft(voice)))[0, 1] > 0.95
+    snr = 10 * np.log10(np.sum(y.astype(np.float64) ** 2) / np.sum((got.astype(np.float64) - y) ** 2))
+    assert snr > 25, snr  # (measured: 32 dB on this recording, with 6 s of context)
+    print(f"echo removal, blocks of 3 s with 6 s of context vs one pass: SNR {snr:.1f} dB")
 
 
 @needs_ff

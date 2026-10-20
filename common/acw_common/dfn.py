@@ -19,6 +19,8 @@ from pathlib import Path
 
 import numpy as np
 
+from . import blocks as _blocks
+
 SAMPLE_RATE = 48_000
 # DeepFilterNet3 outputs audio delayed by this many samples (STFT + 2 hops of
 # lookahead). Other models (e.g. the low-latency DFN3-LL): see model_delay().
@@ -176,6 +178,52 @@ def _denoise_contiguous(inst: _Instances, x: np.ndarray, cancel=None) -> np.ndar
     return df.process(padded, cancel)[delay:delay + n]
 
 
+def run_windows(
+    x: np.ndarray,
+    lib_path: str | Path,
+    model_path: str | Path,
+    windows: list[_blocks.Window],
+    deliver,
+    *,
+    atten_lim_db: float = 100.0,
+    threads: int = 4,
+    progress=None,
+    cancel: threading.Event | None = None,
+) -> None:
+    """Run the model over each window (lo, s, e, hi) of mono `x` (sample positions in x) on its own, from a fresh state:
+    it reads x[lo:hi] and `deliver(i, block)` gets the result for [s, e) (float32, the model's delay removed). The windows
+    are independent, so they run in `threads` threads; `deliver` is called under a lock. This is the block run of the
+    editor's cache and of every whole-file run (`denoise_array`)."""
+    if not windows:
+        return
+    inst = _Instances(lib_path, model_path, atten_lim_db)
+    total = sum(e - s for _, s, e, _ in windows) or 1
+    done = 0
+    lock = threading.Lock()
+
+    def work(i: int) -> None:
+        nonlocal done
+        lo, s, e, hi = windows[i]
+        y = _denoise_contiguous(inst, np.ascontiguousarray(x[lo:hi], dtype=np.float32), cancel)
+        core = y[s - lo:e - lo]
+        with lock:
+            deliver(i, core)
+            done += e - s
+            if progress:
+                progress(min(done / total, 1.0))
+
+    try:
+        workers = max(1, min(threads, len(windows)))
+        if workers == 1:
+            for i in range(len(windows)):
+                work(i)
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(work, range(len(windows))))
+    finally:
+        inst.close()
+
+
 def denoise_array(
     x: np.ndarray,
     lib_path: str | Path,
@@ -183,15 +231,27 @@ def denoise_array(
     *,
     atten_lim_db: float = 100.0,
     threads: int = 4,
-    segment_seconds: float = 60.0,
-    overlap_seconds: float = 0.5,  # warm-up each side (2 s and 0.5 s both match a contiguous run at 54 dB SNR)
+    segment_seconds: float | None = None,
+    overlap_seconds: float | None = None,
     progress=None,
     cancel: threading.Event | None = None,
     out: np.ndarray | None = None,
+    grid: _blocks.Grid | None = None,
+    grid_offset: int = 0,
+    hooks: _blocks.BlockHooks | None = None,
 ) -> np.ndarray:
-    """Denoise mono 48 kHz float32 audio. Long inputs are cut into segments
-    with `overlap_seconds` of warm-up context on each side, processed in
-    parallel, and joined with a short equal-power crossfade.
+    """Denoise mono 48 kHz float32 audio.
+
+    The default is the editor's block run (blocks.GRID_LIGHT): the file is cut into 30 s blocks at multiples of 30 s from the
+    start of the file, each run on its own from a fresh model state with 16 s of the recording before it and 0.25 s after
+    it (>= 58 dB against one contiguous run, so no audible seams; compute x1.54), and the blocks are exact: no
+    crossfade. The grid does not depend on `threads`, so the same input always gives the same blocks. `grid_offset`: the
+    sample position of x[0] in the whole file, when x is only a stretch of it (the grid is the whole file's). `hooks`: a
+    block cache (blocks.BlockHooks: the cached blocks are not run again, the others are stored) for full-strength runs.
+
+    With `segment_seconds` and/or `overlap_seconds` the older cut is used instead: segments of that length (60 s) with
+    `overlap_seconds` (0.5 s) of warm-up each side, run in parallel and joined with a 50 ms equal-power crossfade; a single
+    thread runs the file contiguously.
 
     Results go straight into `out` (any writable 1-D float32 array or view of
     len(x), e.g. a column of a memory-mapped file), so memory use doesn't grow
@@ -200,6 +260,11 @@ def denoise_array(
     n = len(x)
     if out is None:
         out = np.empty(n, dtype=np.float32)
+    if segment_seconds is None and overlap_seconds is None:
+        return _denoise_blocks(x, lib_path, model_path, out, atten_lim_db, threads, progress, cancel,
+                               grid or _blocks.grid_of("light"), grid_offset, hooks)
+    segment_seconds = 60.0 if segment_seconds is None else segment_seconds
+    overlap_seconds = 0.5 if overlap_seconds is None else overlap_seconds
     seg = int(segment_seconds * SAMPLE_RATE)
     ov = int(overlap_seconds * SAMPLE_RATE)
     inst = _Instances(lib_path, model_path, atten_lim_db)
@@ -247,4 +312,38 @@ def denoise_array(
         for i in range(1, len(bounds)):
             s = bounds[i][0]
             out[s:s + fade] = tails[i - 1] * (1 - ramp) + heads[i] * ramp
+    return out
+
+
+def _denoise_blocks(x, lib_path, model_path, out, atten_lim_db, threads, progress, cancel, grid, offset, hooks) -> np.ndarray:
+    n = len(x)
+    if hooks is not None and atten_lim_db < 100.0:
+        raise ValueError("cached blocks are full-strength runs: the strength is a blend afterwards")
+    wins = _blocks.grid_windows(offset, offset + n, grid)
+    todo: list[_blocks.Window] = []
+    hit_samples = 0
+    for lo, s, e, hi in wins:
+        w = (lo - offset, s - offset, e - offset, hi - offset)
+        hit = hooks.get((lo, s, e, hi)) if hooks is not None else None
+        if hit is not None and len(hit) == e - s:
+            out[w[1]:w[2]] = hit
+            hit_samples += e - s
+        else:
+            todo.append(w)
+
+    def deliver(i: int, core: np.ndarray) -> None:
+        lo, s, e, hi = todo[i]
+        out[s:e] = core
+        if hooks is not None:
+            hooks.put((lo + offset, s + offset, e + offset, hi + offset), core)
+
+    base = hit_samples / n if n else 1.0
+
+    def prog(f: float) -> None:
+        if progress:
+            progress(base + f * (1.0 - base))
+
+    run_windows(x, lib_path, model_path, todo, deliver, atten_lim_db=atten_lim_db, threads=threads, progress=prog, cancel=cancel)
+    if progress:
+        progress(1.0)
     return out

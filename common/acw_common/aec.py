@@ -77,3 +77,19 @@ def cancel_echo(mic: np.ndarray, ref: np.ndarray, block: int = SAMPLE_RATE) -> n
     parts = [aec.process(mic[i:i + block], ref[i:i + block]) for i in range(0, n, block)]
     parts.append(aec.flush())
     return np.concatenate(parts)[:n]
+
+
+def echo_block(mic: np.ndarray, ref: np.ndarray, lo: int, s: int, e: int, hi: int) -> np.ndarray:
+    """The echo-free samples [s, e) of `mic` (float32 mono): a fresh canceller is fed mic[lo:hi] and ref[lo:hi] (the part
+    of the recording before `s` lets it adapt, `hi` is at least `e` + DELAY_SAMPLES; a reference that ends early counts as
+    silence) and its output, which lags by DELAY_SAMPLES, is shifted back so the result lines up with the recording. At the
+    very end of the recording the last DELAY_SAMPLES are silent (nothing is left to push through). One block of the
+    editor's grid (blocks.GRID_ECHO): whole-file echo removal is all of its blocks."""
+    aec = EchoCanceller()
+    r = np.asarray(ref[lo:hi], np.float32)
+    y = np.concatenate([aec.process(np.asarray(mic[lo:hi], np.float32), r), aec.flush()])
+    a, b = s - lo + DELAY_SAMPLES, e - lo + DELAY_SAMPLES
+    out = np.zeros(e - s, np.float32)
+    part = y[a:b]
+    out[:len(part)] = part
+    return out

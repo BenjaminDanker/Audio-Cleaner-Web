@@ -13,6 +13,10 @@ clearly better (DeepFilterNet3 is better on lighter noise). "auto" measures the 
 Keeping it in one place means a file cleaned on the desktop sounds exactly
 like the same file cleaned on the website.
 
+Every model step runs on the block grid of blocks.py (30 s blocks, each with the context of the recording around it that the
+step measured to need), whole file or part: a whole-file run IS all the blocks, so there is one code path, no seams, and a
+block cache (`cache` / `input_id` of clean_audio) that a run fills is the one editor.render reads.
+
 Strength (the attenuation limit) is a blend, in the time domain, of the noise remover's full-strength output with the
 recording itself (`blend_strength`): the models always run at full strength, so that output can be kept and the
 strength and leveling changed afterwards without running a model again (`redo_denoised`,
@@ -29,14 +33,13 @@ from pathlib import Path
 
 import numpy as np
 
-from . import clarity, dfn, dpdfnet, restore
-from .aec import DELAY_SAMPLES as AEC_DELAY_SAMPLES, EchoCanceller
+from . import blocks, clarity, dfn, dpdfnet, restore
+from .aec import echo_block
 from .dfn import Cancelled
 from .ffmpeg import FFmpeg, ProbeResult
 
 SAMPLE_RATE = dfn.SAMPLE_RATE
 MAX_CHANNELS = 2
-ECHO_BLOCK = SAMPLE_RATE * 30
 
 Progress = Callable[[float], None]
 
@@ -338,8 +341,14 @@ def clean_audio(
     restore_model_dir: str | Path | None = None,
     measured: Measured | None = None,
     keep: Keep | None = None,
+    cache: blocks.BlockCache | None = None,
+    input_id: str | None = None,
 ) -> np.ndarray:
     """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
+
+    `cache`, with `input_id` (anything that identifies the samples of `x`; editor.Inputs.source_id when x is the recording
+    itself): the model steps use the editor's block cache, so blocks already in it are not run again and the others are
+    stored in it (the strength is a blend afterwards: the cache holds full-strength blocks only).
 
     `progress` gets a fraction in [0, 1]; denoising is ~95% of the work.
     Setting `cancel` aborts with `Cancelled`. The result is written into `out`
@@ -355,6 +364,8 @@ def clean_audio(
     if x.ndim == 1:
         x = x[:, None]
     channels = x.shape[1]
+    if cache is not None and input_id is None:
+        raise ValueError("a block cache needs input_id")
     if opts.restore_voice:
         if restore_model_dir is None or not restore.available(restore_model_dir):
             raise FileNotFoundError(f"voice rebuilding needs Sidon's models (not in {restore_model_dir})")
@@ -363,6 +374,8 @@ def clean_audio(
         y = restore.restore(
             x, restore_model_dir, threads=threads, cancel=cancel, out=out, device=opts.device,
             progress=(lambda f: progress(0.95 * f)) if progress else None,
+            hooks=None if cache is None else blocks.cache_hooks(cache, lambda d: blocks.rebuild_key(
+                input_id, d[0], d[1], len(x), restore._WINDOW_SECONDS, restore._OVERLAP_SECONDS)),
         )
         y = y[:, None] if y.ndim == 1 else y
         if keep is not None:
@@ -414,6 +427,9 @@ def clean_audio(
         if (measured is not None and profile == "light" and spans == [(0, len(x))]
                 and len(measured.mono) == len(x) and np.array_equal(measured.mono, x[:, ch])):
             y[:, ch] = measured.light  # the measurement already cleaned exactly this at full strength (any strength is a blend of it)
+            if cache is not None:  # (the measurement ran on the same grid: these are the blocks a block run makes)
+                for lo, s, e, hi in blocks.grid_windows(0, len(x), blocks.grid_of("light")):
+                    cache.put(blocks.block_key("light", input_id, ch, lo, s, e, hi), y[s:e, ch])
             if progress:
                 progress(share * (k + 1) / len(todo))
             continue
@@ -426,15 +442,19 @@ def clean_audio(
 
             if a > 0 or b < len(x):
                 y[done_end(spans, a), ch] = 0.0  # the silence before this span
+            extra: dict = dict(grid_offset=a)  # the blocks are the file's grid cells; x[a:b] is a stretch of the file
+            if cache is not None:
+                step = "heavy" if profile == "heavy" else "light"
+                extra["hooks"] = blocks.cache_hooks(cache, lambda d, step=step, ch=ch: blocks.block_key(step, input_id, ch, *d))
             if profile == "heavy":
                 dpdfnet.denoise_array(
                     x[a:b, ch], atten_lim_db=100.0, threads=threads, progress=prog, cancel=cancel,
-                    out=y[a:b, ch], model_path=heavy, device=opts.device,
+                    out=y[a:b, ch], model_path=heavy, device=opts.device, **extra,
                 )
             else:
                 dfn.denoise_array(
                     x[a:b, ch], lib_path, model_path, atten_lim_db=100.0, threads=threads, progress=prog,
-                    cancel=cancel, out=y[a:b, ch],
+                    cancel=cancel, out=y[a:b, ch], **extra,
                 )
             done += b - a
         if spans[-1][1] < len(x):
@@ -476,12 +496,17 @@ def remove_echo(
     *,
     progress: Progress | None = None,
     cancel: threading.Event | None = None,
+    cache: blocks.BlockCache | None = None,
+    input_id: str | None = None,
 ) -> np.ndarray:
     """Take the speaker echo out of `mic` (the decoded first track, (samples, channels)) using the file's
     second audio track, which carries what the speakers played. Run it before noise removal.
 
-    Works in blocks, so with `work_dir` (reference and result are scratch files there) RAM stays flat for
-    long files. Returns an array shaped like `mic`; `mic` itself when the file has no second track."""
+    Works on the echo block grid (blocks.GRID_ECHO: 30 s blocks, each run with a fresh canceller that has the 10 s of the
+    recording before it to adapt on; the canceller converges well inside that, so the blocks join without a seam), so with
+    `work_dir` (reference and result are scratch files there) RAM stays flat for long files. `cache` / `input_id` (what
+    identifies mic and the reference together): the editor's block cache, as in clean_audio. Returns an array shaped
+    like `mic`; `mic` itself when the file has no second track."""
     if probe.audio_tracks < 2:
         return mic
     if work_dir is None:
@@ -489,33 +514,27 @@ def remove_echo(
     else:
         ref = ff.decode_to_file(src, probe, SAMPLE_RATE, 1, max_seconds, Path(work_dir) / "reference.f32", track=1)
     ref = ref[:, 0]  # a shorter reference counts as silence at the end
+    if cache is not None and input_id is None:
+        raise ValueError("a block cache needs input_id")
     n, channels = mic.shape
     out = (
         np.empty(mic.shape, dtype=np.float32) if work_dir is None
         else np.lib.format.open_memmap(Path(work_dir) / "echo-free.npy", mode="w+", dtype=np.float32, shape=mic.shape)
     )
+    wins = blocks.grid_windows(0, n, blocks.grid_of("echo"))
     for ch in range(channels):
-        aec = EchoCanceller()
-        done = 0
-        skip = AEC_DELAY_SAMPLES  # the canceller delays the signal by this much: drop it, so the result lines up in time
-
-        def put(part: np.ndarray) -> None:
-            nonlocal done, skip
-            if skip:
-                k = min(skip, len(part))
-                part, skip = part[k:], skip - k
-            part = part[:n - done]
-            out[done:done + len(part), ch] = part
-            done += len(part)
-
-        for a in range(0, n, ECHO_BLOCK):
+        for k, (lo, s, e, hi) in enumerate(wins):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            put(aec.process(mic[a:a + ECHO_BLOCK, ch], ref[a:a + ECHO_BLOCK]))
+            key = blocks.block_key("echo", input_id, ch, lo, s, e, hi) if cache is not None else None
+            y = cache.get(key) if cache is not None else None
+            if y is None or len(y) != e - s:
+                y = echo_block(mic[:, ch], ref, lo, s, e, hi)
+                if cache is not None:
+                    cache.put(key, y)
+            out[s:e, ch] = y
             if progress:
-                progress((ch + min(a + ECHO_BLOCK, n) / n) / channels)
-        put(aec.flush())
-        out[done:, ch] = 0.0  # the end is padded with silence: the length is unchanged
+                progress((ch + (k + 1) / len(wins)) / channels)
     return out
 
 

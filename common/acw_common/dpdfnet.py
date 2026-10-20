@@ -66,6 +66,7 @@ from pathlib import Path
 import numpy as np
 import scipy.fft
 
+from . import blocks as _blocks
 from .dfn import Cancelled  # same exception, so callers catch one type
 
 SAMPLE_RATE = 48_000
@@ -309,8 +310,10 @@ class _Sink:
     """Routes a stream's output (absolute sample positions, delay removed) into
     `out` / small head+tail crossfade buffers, applying the atten-lim blend."""
 
-    def __init__(self, x, ch, out, lo, s, e, head, tail, alpha):
+    def __init__(self, x, ch, out, lo, s, e, head, tail, alpha, origin=0, col=None):
         self.x, self.ch, self.out = x, ch, out
+        # `out` holds the samples from position `origin` on, in column `col` (default: the channel itself)
+        self.origin, self.col = origin, ch if col is None else col
         # Absolute sample index of the next stream output sample: the stream starts
         # HOP samples before x[lo] (reflection pad) and lags by MODEL_DELAY.
         self.pos = lo - HOP - MODEL_DELAY
@@ -334,7 +337,7 @@ class _Sink:
             self.head_buf[h0 - self.s:h1 - self.s] = seg[:h1 - h0]
         m0, m1 = max(lo, self.s + self.head), min(hi, self.e)
         if m1 > m0:
-            self.out[m0:m1, self.ch] = seg[m0 - lo:m1 - lo]
+            self.out[m0 - self.origin:m1 - self.origin, self.col] = seg[m0 - lo:m1 - lo]
         t0, t1 = max(lo, self.e), hi
         if t1 > t0:
             self.tail_buf[t0 - self.e:t1 - self.e] = seg[t0 - lo:t1 - lo]
@@ -344,8 +347,10 @@ class _Row:
     """One segment: stream x[lo:hi] of channel `ch`; its results for [s, e) go to the output (plus `head` / `tail`
     crossfade samples kept in the sink)."""
 
-    def __init__(self, ch, lo, hi, s, e, head, tail):
+    def __init__(self, ch, lo, hi, s, e, head, tail, out=None, origin=0, col=0):
         self.ch, self.lo, self.hi, self.s, self.e, self.head, self.tail = ch, lo, hi, s, e, head, tail
+        # a row with its own `out` (holding the samples from `origin` on, column `col`) is not written to the shared output
+        self.out, self.origin, self.col = out, origin, col
 
     @property
     def length(self) -> int:
@@ -364,7 +369,8 @@ def _stream_rows(model: _Model, x, rows: list[_Row], out, alpha, cancel, report)
     the others."""
     nb = len(rows)
     streams = [_Stream(model, _col(x, r.ch, r.lo, min(r.hi, r.lo + HOP + 1))) for r in rows]
-    sinks = [_Sink(x, r.ch, out, r.lo, r.s, r.e, r.head, r.tail, alpha) for r in rows]
+    sinks = [_Sink(x, r.ch, out, r.lo, r.s, r.e, r.head, r.tail, alpha) if r.out is None
+             else _Sink(x, r.ch, r.out, r.lo, r.s, r.e, r.head, r.tail, alpha, r.origin, r.col) for r in rows]
     block = _BLOCK_FRAMES * HOP
     need = max(r.length for r in rows) + HOP + MODEL_DELAY  # stream samples needed to cover every row
     pos = [r.lo for r in rows]
@@ -422,12 +428,25 @@ def denoise_array(
     cancel: threading.Event | None = None,
     out: np.ndarray | None = None,
     model_path: str | Path | None = None,
-    segment_seconds: float = 60.0,
-    overlap_seconds: float = 2.0,
+    segment_seconds: float | None = None,
+    overlap_seconds: float | None = None,
     device: str = "cpu",
+    grid: _blocks.Grid | None = None,
+    grid_offset: int = 0,
+    hooks: _blocks.BlockHooks | None = None,
 ) -> np.ndarray:
     """Denoise 48 kHz float32 audio, (n,) or (n, channels), each channel on its
-    own. Returns an array shaped like `x`; results go straight into `out` when
+    own.
+
+    The default is the editor's block run (blocks.GRID_HEAVY): 30 s blocks at multiples of 30 s from the start of the file,
+    each run on its own from a fresh model state with 24 s of the recording before it and 0.25 s after it (about 41 dB
+    against one contiguous run, PESQ >= 4.4; it never reaches 50 dB; compute x1.8), exact blocks without crossfade. The
+    grid does not depend on `threads`. `grid_offset`: the position of x[0] in the whole file when x is a stretch of it.
+    `hooks`: a block cache (blocks.BlockHooks, one channel only) for full-strength runs. With `segment_seconds` and/or
+    `overlap_seconds` the older cut is used: segments (60 s) with that much warm-up (2 s) and a 50 ms crossfade, the
+    segments made smaller to spread a short file over `threads`.
+
+    Returns an array shaped like `x`; results go straight into `out` when
     given (any writable float32 array/memmap of x's shape), so memory use does
     not grow with the file length. `progress(fraction)` is called regularly;
     setting `cancel` makes the call raise `Cancelled` within ~2 s of audio. `device` "cuda" streams the segments
@@ -462,6 +481,11 @@ def denoise_array(
                 f = min(done / total_work, 1.0)
             progress(f)
 
+    if segment_seconds is None and overlap_seconds is None:
+        return _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, grid or _blocks.grid_of("heavy"),
+                               grid_offset, hooks, out)
+    segment_seconds = 60.0 if segment_seconds is None else segment_seconds
+    overlap_seconds = 2.0 if overlap_seconds is None else overlap_seconds
     ov = int(overlap_seconds * SAMPLE_RATE)
     seg, cut = _plan(n, chans, threads, int(segment_seconds * SAMPLE_RATE), ov)
     if not cut:
@@ -529,6 +553,129 @@ def denoise_array(
             for i in range(1, len(bounds)):
                 s = bounds[i][0]
                 out2[s:s + fade, c] = tails[c, i - 1] * (1 - ramp) + heads[c, i] * ramp
+    if progress:
+        progress(1.0)
+    return out
+
+
+def _groups(rows: list[_Row], model: _Model, threads: int) -> list[list[_Row]]:
+    """Batches of similar length, one per call; at least one per thread so every thread has work."""
+    if not rows:
+        return []
+    rows.sort(key=lambda r: -r.length)
+    if model.gpu:
+        # as full as the card takes: a call costs nearly the same for 4 rows as for 16
+        return [rows[i:i + model.max_batch] for i in range(0, len(rows), model.max_batch)]
+    nbatch = max(min(threads, len(rows)), math.ceil(len(rows) / model.max_batch))
+    base, extra = divmod(len(rows), nbatch)
+    groups, i = [], 0
+    for g in range(nbatch):
+        size = base + (g < extra)
+        groups.append(rows[i:i + size])
+        i += size
+    return groups
+
+
+def _drive(model: _Model, x, groups: list[list[_Row]], out, alpha, cancel, report, workers: int, after=None) -> None:
+    def work(group: list[_Row]) -> None:
+        _run_rows(model, x, group, out, alpha, cancel, report)
+        if after is not None:
+            after(group)
+
+    if workers > 1 and len(groups) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(groups))) as pool:
+            list(pool.map(work, groups))
+    else:
+        for g in groups:
+            work(g)
+
+
+def run_windows(
+    x: np.ndarray,
+    windows: list[_blocks.Window],
+    deliver,
+    *,
+    channel: int = 0,
+    model_path: str | Path | None = None,
+    threads: int = 4,
+    device: str = "cpu",
+    progress=None,
+    cancel: threading.Event | None = None,
+) -> None:
+    """Run the model over each window (lo, s, e, hi) of channel `channel` of `x` on its own, from a fresh state: it reads
+    [lo, hi) and `deliver(i, block)` gets the result for [s, e) (float32, delay removed, full strength). The windows of a
+    call are batched through the model together (up to MAX_BATCH rows on the CPU, as many as the card takes on the GPU), each
+    row exactly the model on that window. `deliver` is called under a lock. This is the block run of the editor's cache."""
+    if not windows:
+        return
+    model = _load(str(model_path or default_model_path()), device)
+    workers = 1 if model.gpu else threads
+    rows = []
+    for i, (lo, s, e, hi) in enumerate(windows):
+        r = _Row(channel, lo, hi, s, e, 0, 0, out=np.zeros((e - s, 1), dtype=np.float32), origin=s, col=0)
+        r.index = i
+        rows.append(r)
+    total = sum(e - s for _, s, e, _ in windows) or 1
+    done = 0
+    lock = threading.Lock()
+
+    def report(k: int) -> None:
+        nonlocal done
+        if k and progress:
+            with lock:
+                done += k
+                f = min(done / total, 1.0)
+            progress(f)
+
+    def after(group: list[_Row]) -> None:
+        with lock:
+            for r in group:
+                deliver(r.index, r.out[:, 0])
+
+    _drive(model, x, _groups(rows, model, threads), None, 0.0, cancel, report, workers, after)
+    if progress:
+        progress(1.0)
+
+
+def _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, grid, offset, hooks, out) -> np.ndarray:
+    """The block run of `denoise_array`: every channel's grid blocks as rows, the cached ones taken from `hooks`."""
+    n = x.shape[0]
+    chans = out2.shape[1]
+    if hooks is not None and (chans != 1 or alpha):
+        raise ValueError("a block cache needs one channel at full strength: the strength is a blend afterwards")
+    rows: list[_Row] = []
+    desc: dict[int, tuple] = {}
+    hit = 0
+    for c in range(chans):
+        for lo, s, e, hi in _blocks.grid_windows(offset, offset + n, grid):
+            cached = hooks.get((lo, s, e, hi)) if hooks is not None else None
+            if cached is not None and len(cached) == e - s:
+                out2[s - offset:e - offset, c] = cached
+                hit += e - s
+                continue
+            r = _Row(c, lo - offset, hi - offset, s - offset, e - offset, 0, 0)
+            desc[id(r)] = (lo, s, e, hi)
+            rows.append(r)
+    total = max(n * chans, 1)
+    done = hit
+    lock = threading.Lock()
+    if hit and progress:
+        progress(min(hit / total, 1.0))
+
+    def report(k: int) -> None:
+        nonlocal done
+        if k and progress:
+            with lock:
+                done += k
+                f = min(done / total, 1.0)
+            progress(f)
+
+    def put(group: list[_Row]) -> None:
+        if hooks is not None:
+            for r in group:
+                hooks.put(desc[id(r)], out2[r.s:r.e, 0].copy())
+
+    _drive(model, x, _groups(rows, model, threads), out2, alpha, cancel, report, workers, put)
     if progress:
         progress(1.0)
     return out
