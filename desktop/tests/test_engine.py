@@ -9,7 +9,7 @@ import pytest
 
 from acw_common import analysis, captions, clarity, pipeline, reco_model
 from acw_common.ffmpeg import MediaError
-from audio_cleaner_desktop import engine, resources
+from audio_cleaner_desktop import engine, labels, resources
 
 from conftest import ffprobe_json
 
@@ -438,7 +438,7 @@ def test_a_file_that_needs_it_gets_its_voice_rebuilt(clip_wav, tmp_path, monkeyp
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert len(asked) == 1 and fake_clean[-1].restore_voice
     assert result.rebuilt == reason and result.strength is None  # rebuilt: no noise reduction strength was used
-    assert result.notice == f"the voice was rebuilt because it sounded {WORDS[reason]}"
+    assert result.notice == labels.rebuild_reason_text(reason)
     # without the model: cleaned the usual way (with the strength the model picked), and told how to fix it
     monkeypatch.setattr(resources, "voice_model_dir", lambda: None)
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "b")
@@ -472,7 +472,7 @@ def test_a_phone_recording_and_a_too_loud_one_are_rebuilt_now_whatever_the_trees
     measured_as(stats)
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert fake_clean[-1].restore_voice and result.rebuilt == reason and result.strength is None
-    assert result.notice == f"the voice was rebuilt because it sounded {WORDS[reason]}"
+    assert result.notice == labels.rebuild_reason_text(reason)
 
 
 @pytest.mark.native
@@ -491,7 +491,7 @@ def test_a_phone_recording_is_rebuilt_and_only_that_is_said(clip_wav, tmp_path, 
     measured_as(measurement(reason="phone"))
     result = engine.process(clip_wav, engine.JobOptions(strength="auto", auto_rebuild=True), out_dir=tmp_path / "a")
     assert fake_clean[-1].restore_voice and result.rebuilt == "phone"
-    assert result.notice == "the voice was rebuilt because it sounded like a phone call"
+    assert result.notice == labels.rebuild_reason_text("phone") and "like a phone call" in result.notice and "keeps only speech" in result.notice
 
 
 @pytest.mark.native

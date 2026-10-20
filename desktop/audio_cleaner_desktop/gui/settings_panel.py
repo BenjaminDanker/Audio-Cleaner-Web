@@ -1,15 +1,16 @@
 """The settings card: every option has a short tooltip and a "?" button with a longer explanation."""
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import engine, resources, sysinfo
 from ..labels import (  # noqa: F401 - the wording lives in labels.py (no Qt there); these names stay importable from here
     FORMAT_LABELS, LOUDNESS_LABELS, LOUDNESS_SHORT, NOISE_LABELS, STRENGTH_LABELS, SUBTITLE_LABELS, VIDEO_SIZE_LABELS,
 )
+from ..labels import WHICH_TEXT, WHICH_TITLE
 from ..updater import UpdateController
 from . import tips
 from .preferences import Preferences
@@ -89,7 +90,9 @@ class SettingsPanel(QFrame):
             "\u2022 Rebuild the voice: when it sounds echoey, muffled, damaged or like a phone call, or distorts from being "
             "recorded too loud (needs its model, downloaded once)\n\n"
             "The noise is measured by the noise remover itself, so wind, keyboards and chatter count as much as a "
-            "steady hiss. The list shows what each file got. Untick it to choose these yourself.",
+            "steady hiss. The list shows what each file got, and why: noise reduction keeps your voice exactly as recorded, "
+            "while rebuilding the voice fixes echo, a muffled or phone-quality voice and distortion but keeps only speech. "
+            "Untick it to choose these yourself.",
             self._auto,
         ))
 
@@ -102,7 +105,8 @@ class SettingsPanel(QFrame):
             "\u2022 Balanced: most of the noise goes, the room still sounds like a room.\n"
             "\u2022 Strong: nearly all of it goes.\n"
             "\u2022 Maximum: removes as much as it can. Best for noisy places.\n\n"
-            "Not sure? Maximum works well for most voice recordings. Try Gentle if the voice starts to sound thin.",
+            "Not sure? Maximum works well for most voice recordings. Try Gentle if the voice starts to sound thin.\n\n"
+            f"{WHICH_TITLE}\n{WHICH_TEXT}",
             self._strength,
         ))
 
@@ -116,7 +120,9 @@ class SettingsPanel(QFrame):
             self._noise,
         )
         self._auto_note = QLabel("Picked for each file while \u201cAutomatic best settings\u201d is on.")
-        self._auto_extra_note = QLabel("Rebuilding the voice is picked for each file while \u201cAutomatic best settings\u201d is on.")
+        self._auto_extra_note = QLabel("Rebuilding the voice is picked for each file while \u201cAutomatic best settings\u201d is on, "
+                                       "when it sounds echoey, muffled, damaged or distorted (it fixes that but keeps only speech); "
+                                       "otherwise noise reduction is used, which keeps your voice exactly as recorded.")
         self._auto_extra_note.setObjectName("Small")
         self._auto_extra_note.setWordWrap(True)
         self._auto_extra_note.hide()
@@ -194,11 +200,26 @@ class SettingsPanel(QFrame):
             "recording made in an echoey room, a muffled voice, phone-quality or damaged sound (voice messages, very "
             "small files) or distortion from recording too loud. It takes several times longer, and on very echoey "
             "recordings it can change a word, so listen before you publish. The Noise reduction and Background "
-            "noise settings do not apply to it.",
+            "noise settings do not apply to it.\n\n"
+            f"{WHICH_TITLE}\n{WHICH_TEXT}",
         )
         extra_row.layout_.addWidget(self._auto_extra_note)
         extra_row.layout_.addWidget(self._echo)
         extra_row.layout_.addWidget(self._rebuild)
+        self._which = QToolButton()
+        self._which.setText(WHICH_TITLE)
+        self._which.setCheckable(True)
+        self._which.setArrowType(Qt.ArrowType.RightArrow)
+        self._which.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._which.setToolTip("How noise reduction and Rebuild the voice differ")
+        self._which_text = QLabel(WHICH_TEXT)
+        self._which_text.setObjectName("Small")
+        self._which_text.setWordWrap(True)
+        self._which_text.hide()
+        self._which.toggled.connect(lambda on: (self._which_text.setVisible(on),
+                                                self._which.setArrowType(Qt.ArrowType.DownArrow if on else Qt.ArrowType.RightArrow)))
+        extra_row.layout_.addWidget(self._which, 0, Qt.AlignmentFlag.AlignLeft)
+        extra_row.layout_.addWidget(self._which_text)
         self.voice_panel = SpeechModelPanel(
             self.voice_downloader, need="Rebuilding the voice needs an extra model", what="the model that rebuilds the voice",
         )

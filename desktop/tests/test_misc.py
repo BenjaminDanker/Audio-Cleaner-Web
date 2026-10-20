@@ -112,23 +112,23 @@ def test_automatic_best_settings_are_on_by_default_and_keep_the_manual_choices(t
 
 def test_history_says_which_strength_was_picked():
     auto = {"strength": "auto", "noise": "auto", "leveling": False}
-    assert describe_settings({**auto, "picked_strength": "balanced"}, False) == "Balanced noise reduction (picked for this file)"
-    assert describe_settings({**auto, "picked_strength": "max"}, False) == "Maximum noise reduction (picked for this file)"
+    assert describe_settings({**auto, "picked_strength": "balanced"}, False) == "Balanced noise reduction (picked for this file; keeps your voice as recorded)"
+    assert describe_settings({**auto, "picked_strength": "max"}, False) == "Maximum noise reduction (picked for this file; keeps your voice as recorded)"
     assert describe_settings(auto, False) == "noise reduction picked for the file"  # e.g. a run that failed
     assert describe_settings({**auto, "picked_strength": "bogus"}, False) == "noise reduction picked for the file"
     # a strength chosen by hand is what is shown, whatever else is stored
     assert describe_settings({"strength": "gentle", "leveling": False, "picked_strength": "max"}, False) == "Gentle noise reduction"
     assert describe_settings({**auto, "rebuild_voice": True, "picked_strength": "max"}, False) == "voice rebuilt"
-    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "echoey"}, False) == "voice rebuilt (it sounded echoey)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "echoey"}, False) == "voice rebuilt (it sounded echoey; keeps only speech)"
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "muffled", "leveling": True, "loudness": "youtube"},
-                             False) == "voice rebuilt (it sounded muffled), leveled (YouTube)"
-    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "unclear"}, False) == "voice rebuilt (it sounded unclear)"
+                             False) == "voice rebuilt (it sounded muffled; keeps only speech), leveled (YouTube)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "unclear"}, False) == "voice rebuilt (it sounded unclear; keeps only speech)"
     # every reason is said in its own words ("it sounded phone" is not English), whatever was stored
-    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "phone"}, False) == "voice rebuilt (it sounded like a phone call)"
-    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "distorted"}, False) == "voice rebuilt (it sounded distorted)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "phone"}, False) == "voice rebuilt (it sounded like a phone call; keeps only speech)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "distorted"}, False) == "voice rebuilt (it sounded distorted; keeps only speech)"
     assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "phone", "leveling": True, "loudness": "youtube"},
-                             False) == "voice rebuilt (it sounded like a phone call), leveled (YouTube)"
-    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "something new"}, False) == "voice rebuilt (it sounded something new)"
+                             False) == "voice rebuilt (it sounded like a phone call; keeps only speech), leveled (YouTube)"
+    assert describe_settings({**auto, "auto_rebuild": True, "picked_rebuild": "something new"}, False) == "voice rebuilt (it sounded something new; keeps only speech)"
 
 
 def test_history_keeps_the_automatic_choices():

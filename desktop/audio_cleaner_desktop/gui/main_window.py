@@ -19,13 +19,14 @@ from PySide6.QtWidgets import (
 
 from acw_common.ffmpeg import MediaError
 
-from .. import __version__, config, copies, engine, models, resources, sysinfo
+from .. import __version__, config, copies, editor_session, engine, models, resources, sysinfo
 from ..updater import UpdateController
 from . import media, queue_view, shell, tips
 from .about import AboutDialog
 from .history import DONE, FAILED, Entry, HistoryStore
 from .history_view import HistoryPage, format_spent, settings_dict
 from .job_view import JobEnv
+from .plan_dialog import PlanDialog
 from .player import PreviewPane
 from .preferences import Preferences
 from .queue_view import CANCELLED, DONE as ITEM_DONE, FAILED as ITEM_FAILED, RUNNING, WAITING, FileItem, FileRow, QueueView
@@ -384,6 +385,7 @@ class MainWindow(QMainWindow):
             row.previewRequested.connect(self.show_preview)
             row.revealRequested.connect(self._reveal)
             row.againRequested.connect(self.clean_again)
+            row.partsRequested.connect(self.choose_parts)
             row.moveRequested.connect(self._move)
             self.view.add(row)
             if self._missing:
@@ -431,6 +433,21 @@ class MainWindow(QMainWindow):
                 self.queue.start()
         self._refresh_state()
 
+    def choose_parts(self, item_id: int) -> None:
+        """Open "Choose parts" for a file that is waiting: the per-part editor in plan mode. What is chosen is cleaned with the file."""
+        item = self._items.get(item_id)
+        if item is None or item.state != WAITING or item.id in self._queued:
+            return
+        dialog = PlanDialog(item.path, item.path.name, item.has_video, self.prefs.job_options(), state=item.plan_state,
+                            scratch=self.history.jobs_root, parent=self, open_plan=self._open_plan)
+        dialog.exec()
+        if dialog.result() != dialog.DialogCode.Accepted:
+            return
+        item.timeline, item.plan_state, item.parts_note = dialog.timeline(), dialog.state(), dialog.summary()
+        self._refresh_row(item)
+
+    _open_plan = staticmethod(editor_session.PlanSession.open)
+
     def _take_place_of_previous(self, item: FileItem, paths: list[Path]) -> tuple[list[Path], bool]:
         """After "Clean again": give each new file the name of the earlier result of the same type, once that
         earlier file is safely in the Recycle Bin / Trash. Files that were changed since, or that can't be
@@ -475,8 +492,8 @@ class MainWindow(QMainWindow):
         item.options = self.prefs.job_options()
         self._queued.add(item.id)
         item.keep_dir = copies.plan_job_dir(self.history.jobs_root)  # where this run keeps the copies that let its result be changed later
-        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name, keep_dir=item.keep_dir),
-                       first=first)
+        self.queue.add(Job(item.id, item.path, item.options, self.prefs.output_dir(), output_name=item.out_name, keep_dir=item.keep_dir,
+                           timeline=item.timeline), first=first)
         return True
 
     # -- what the result is called ------------------------------------------------
@@ -825,7 +842,7 @@ class MainWindow(QMainWindow):
             notes.append("no speech found for subtitles")
         item.picked_strength, item.picked_rebuild = result.strength, result.rebuilt
         if result.strength:
-            notes.append(f"{dict(STRENGTH_LABELS)[result.strength]} noise reduction picked for this file")
+            notes.append(f"{dict(STRENGTH_LABELS)[result.strength]} noise reduction picked for this file: it keeps your voice exactly as recorded")
         if result.notice:
             notes.append(result.notice)
         item.message = "; ".join(notes)
@@ -902,7 +919,8 @@ class MainWindow(QMainWindow):
         item.keep_dir = None
         self.history.add(Entry(
             name=item.path.name, source=str(item.path), duration=item.duration, has_video=item.has_video,
-            settings={**settings_dict(options), **({"picked_strength": item.picked_strength}
+            settings={**settings_dict(options), **({"parts": True} if item.timeline is not None else {}),
+                      **({"picked_strength": item.picked_strength}
                                                     if status == DONE and item.picked_strength else {}),
                       **({"picked_rebuild": item.picked_rebuild} if status == DONE and item.picked_rebuild else {})},
             seconds_taken=elapsed, outputs=outputs, status=status, message=message,

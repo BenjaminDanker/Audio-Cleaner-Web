@@ -93,6 +93,13 @@ def build_parser() -> argparse.ArgumentParser:
         "by default they are, when its model is installed)",
     )
     p.add_argument(
+        "--timeline", metavar="FILE",
+        help="process only the parts a timeline file says (one file only): a JSON file with the layers echo, noise, rebuild and leveling, "
+        "each with parts that have their own settings (see docs/desktop.md). Parts outside every part of a layer are left as they are. "
+        "Then --strength, --noise, --echo-track, --rebuild-voice, --no-leveling and --loudness are not used; the file type, subtitles "
+        "and video size are",
+    )
+    p.add_argument(
         "--parallel", type=int, choices=range(0, 5), default=1, metavar="N",
         help="files cleaned at once, 1-4, or 0 for Automatic (default: 1); never more than the memory allows",
     )
@@ -138,7 +145,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.output_name is not None and len(args.files) != 1:
             parser.error("--output-name works for one file at a time; use --format to choose the type of several")
-        return cli.run(args.files, args.output_dir, options, args.parallel, args.output_name, args.output_format)
+        timeline = None
+        if args.timeline is not None:
+            timeline, problem = cli.load_timeline(args.timeline)
+            if timeline is None:
+                parser.error(problem)
+        return cli.run(args.files, args.output_dir, options, args.parallel, args.output_name, args.output_format, timeline)
 
     from .gui.app import run
 

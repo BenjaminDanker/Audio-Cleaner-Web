@@ -219,11 +219,12 @@ def reasons_for(part: Decision, whole: Decision) -> list[str]:
             out.append("sounds like it needs rebuilding")
     elif whole.rebuild and not part.rebuild:
         out.append("sounds fine here, no rebuild needed")
+    noisier = cleaner = False
     if part.noise_db is not None and whole.noise_db is not None:
-        if part.noise_db <= whole.noise_db - NOISY_DB:
-            out.append("is noisier")
-        elif part.noise_db >= whole.noise_db + NOISY_DB:
-            out.append("is cleaner")
+        noisier = part.noise_db <= whole.noise_db - NOISY_DB
+        cleaner = part.noise_db >= whole.noise_db + NOISY_DB
+    if part.rebuild and noisier:
+        out.append("is noisier")
     if part.level_db is not None and whole.level_db is not None and not (math.isnan(part.level_db) or math.isnan(whole.level_db)):
         if part.level_db <= whole.level_db - QUIET_DB:
             out.append("is quiet")
@@ -231,9 +232,14 @@ def reasons_for(part: Decision, whole: Decision) -> list[str]:
             out.append("is loud")
     if not part.rebuild and part.remover != whole.remover:
         out.append("needs the stronger noise remover" if part.remover == "heavy" else "needs only the lighter noise remover")
-    if not part.rebuild and part.strength != whole.strength and not any(r in out for r in ("is noisier", "is cleaner")):
+    if not part.rebuild and part.strength != whole.strength:
+        # the reason follows the setting proposed: a stronger setting is never explained by "is cleaner", nor a gentler one by
+        # "is noisier" (the noise figure and the trained choice can disagree: some noises need more removal at a lower level)
         order = reco_model.STRENGTH_CLASSES
-        out.append("needs a stronger noise removal" if order.index(part.strength) > order.index(whole.strength) else "needs a gentler noise removal")
+        if order.index(part.strength) > order.index(whole.strength):
+            out.append("is noisier" if noisier else "has noise that needs a stronger setting")
+        else:
+            out.append("is cleaner" if cleaner else "needs a gentler noise removal")
     return out
 
 

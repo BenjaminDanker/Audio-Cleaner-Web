@@ -1,4 +1,6 @@
-"""Change and save again (redo.py), with the real engine and the real noise removal on a short clip: the saved copies a job keeps, the
+"""Change and save again of an OLD job (redo.py: one made before the per-part editor, with the whole copies noise.flac / rebuilt.flac /
+input.flac; `copies.KEEP_BLOCKS` is off here so the engine writes them as it did; jobs made now keep blocks, test_editor_job.py). With the real
+engine and the real noise removal on a short clip: the saved copies a job keeps, the
 strength blend equals a fresh run at that strength, later steps rerun without a model, the steps that do run a model (Voice rebuild
 on, noise removal in a job that has none), subtitles from the saved transcript, naming and replacing, and every way the original or the
 copies can be unusable."""
@@ -16,6 +18,11 @@ from acw_common.ffmpeg import MediaError
 from audio_cleaner_desktop import blend, copies, engine, redo, resources
 
 SR = pipeline.SAMPLE_RATE
+
+
+@pytest.fixture(autouse=True)
+def old_style_copies(monkeypatch):
+    monkeypatch.setattr(copies, "KEEP_BLOCKS", False)
 
 
 def load(path) -> np.ndarray:

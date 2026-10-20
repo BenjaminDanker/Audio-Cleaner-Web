@@ -93,6 +93,9 @@ QLabel#Badge {{
 }}
 QLabel#Badge[kind="video"] {{ background: {t.brand}; color: white; }}
 
+QFrame#Sugg {{ background: {t.surface.name()}; border: 1px solid {t.border.name()}; border-radius: 10px; }}
+QFrame#Sugg[focus="true"] {{ border: 2px solid #7c4dff; background: {"#241a3f" if t.dark else "#f3effe"}; }}
+
 QFrame#Row {{ background: transparent; border-radius: 10px; }}
 QFrame#Row:hover {{ background: {t.hover.name()}; }}
 QWidget#RowHolder {{ background: transparent; }}

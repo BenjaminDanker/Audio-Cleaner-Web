@@ -101,9 +101,11 @@ def test_reasons_are_plain_words():
     D = suggest.Decision
     whole = D(False, "light", "gentle", 30.0, -30.0)
     assert suggest.reasons_for(D(True, "light", "gentle", 30.0, -30.0, ("distorted",)), whole) == ["sounds distorted"]
-    assert suggest.reasons_for(D(False, "heavy", "strong", 12.0, -30.0), whole)[:1] == ["is noisier"]
+    assert suggest.reasons_for(D(False, "heavy", "strong", 12.0, -30.0), whole) == ["needs the stronger noise remover", "is noisier"]
     assert "is quiet" in suggest.reasons_for(D(False, "light", "gentle", 30.0, -42.0), whole)
-    assert "is cleaner" in suggest.reasons_for(D(False, "light", "balanced", 40.0, -30.0), whole)
+    assert "is cleaner" not in suggest.reasons_for(D(False, "light", "balanced", 40.0, -30.0), whole)  # a stronger setting is never "cleaner"
+    assert "has noise that needs a stronger setting" in suggest.reasons_for(D(False, "light", "balanced", 40.0, -30.0), whole)
+    assert suggest.reasons_for(D(False, "light", "gentle", 40.0, -30.0), D(False, "light", "balanced", 30.0, -30.0)) == ["is cleaner"]
     assert "sounds like a phone call" in suggest.reasons_for(D(True, "light", "gentle", 30.0, -30.0, ("phone", "muffled")), whole)
     assert suggest.reasons_for(D(False, "light", "gentle", 30.0, -30.0), D(True, "light", "gentle", 30.0, -30.0)) == ["sounds fine here, no rebuild needed"]
 

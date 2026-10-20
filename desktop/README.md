@@ -11,7 +11,9 @@ nothing but a normal web request with the app version).
 
 - `audio_cleaner_desktop/engine.py` cleans one file (no Qt; used by the window and the command line)
 - `audio_cleaner_desktop/copies.py`, `blend.py`, `redo.py` the saved copies of a job, the strength blend, change-and-save-again (no Qt)
-- `audio_cleaner_desktop/gui/` the window: queue, settings, preview, the Jobs tab (list, job view, live strength), About
+- `audio_cleaner_desktop/editor_job.py`, `editor_session.py`, `editor_model.py`, `live_mix.py` the per-part editor ("Fix a moment" and "Choose parts"): a job's block
+  cache, quotes, saving a timeline, suggestions, the live mix per part (no Qt)
+- `audio_cleaner_desktop/gui/` the window: queue, settings, preview, the Jobs tab (list, job view, the editor, live sound), About
 - `audio_cleaner_desktop/cli.py` the `--cli` and `--selftest` modes
 - `vendor/` native pieces for running from source (git-ignored, filled by the packaging scripts):
   `native/{libdf, ffmpeg, ffprobe}`, `licenses/`, and for tests and runs from source (never bundled) the noise models in
@@ -38,9 +40,24 @@ From the repository root, with `PYTHONPATH=desktop:common`:
 python -m audio_cleaner_desktop                       # the window; FILE... are queued
 python -m audio_cleaner_desktop --cli in.mp4 -o out/  # no window (see --help for the options)
 python -m audio_cleaner_desktop --cli talk.mp4 --output-name talk.mp3   # just the sound (also --format mp3, --video-size 720)
+python -m audio_cleaner_desktop --cli talk.mp4 --timeline parts.json  # only the parts a timeline file says (below)
 python -m audio_cleaner_desktop --selftest [--gui]    # checks the bundled native pieces (--gui: and the window)
 python -m audio_cleaner_desktop --download-models     # all the models (noise removal first), from a terminal
 ```
+
+A timeline file says what to do to which part of one recording (the format of `common/acw_common/timeline.py`, also the website's API):
+
+```json
+{"version": 1, "layers": {
+  "noise":    [{"start": 10, "end": 40, "strength_db": 24, "remover": "auto"}],
+  "rebuild":  [{"start": 41, "end": 44}],
+  "leveling": [{"start": 0, "end": 120, "loudness_lufs": -16}]}}
+```
+
+Times are seconds. Layers: `echo` (needs the file's second audio track), `noise` (`strength_db` 12 Gentle, 24 Balanced, 40 Strong, 100 Maximum, or the
+names; `remover` `auto`, `light`, `heavy`), `rebuild` (where it is on, it wins over the noise removal), `leveling` (`loudness_lufs` -70..0 or `null`).
+What a layer does not cover is left as it is. With `--timeline`, `--strength`, `--noise`, `--echo-track`, `--rebuild-voice`, `--no-leveling` and
+`--loudness` are not used. In the window the same editor is "Fix a moment" in a job and "Choose parts" under a waiting file.
 
 ## Tests
 

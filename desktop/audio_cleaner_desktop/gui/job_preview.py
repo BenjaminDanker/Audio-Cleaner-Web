@@ -60,7 +60,7 @@ class JobPreview(PreviewPane):
 
     def set_strength(self, db: float) -> None:
         if self._stream is not None:
-            self._stream.set_strength(db)
+            self._stream.set_strength(db)  # (a live mix of parts ignores it: each part has its own strength)
 
     def set_exact(self, exact: bool) -> None:
         if self._stream is not None:

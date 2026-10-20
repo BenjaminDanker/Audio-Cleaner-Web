@@ -37,11 +37,12 @@ import numpy as np
 from acw_common import kept, pipeline
 from acw_common.ffmpeg import MediaError
 
-from . import blend, copies, engine, resources
+from . import blend, copies, editor_job, engine, resources
 
 log = logging.getLogger(__name__)
 
 SOUND_BLEND, SOUND_LEVEL_REBUILT, SOUND_REBUILD, SOUND_NOISE = "blend", "level_rebuilt", "rebuild", "noise"
+SOUND_EDITOR = "editor"  # a job that keeps blocks (editor_job.py): the sound is made from its timeline
 TEXT_KINDS = ("srt", "vtt", "txt")
 
 
@@ -57,6 +58,7 @@ class Wanted:
     language: str = "auto"
     video_size: str = "same"
     output_name: str = ""  # the whole file name, its ending says the type
+    timeline: dict | None = None  # a job that keeps blocks: what to do to which part (acw_common.timeline JSON); None: the choices above, whole file
 
     def options(self) -> engine.JobOptions:
         """The same choices as the engine's options (the strength is the nearest name; what is used is `atten_lim_db`)."""
@@ -130,6 +132,29 @@ def _without_number(stem: str) -> str:
 
 # ---------------------------------------------------------------------------------------------------- what a change needs
 
+def timeline_of(job: copies.JobCopies, wanted: Wanted):
+    """The timeline a change of a job that keeps blocks stands for: the one the editor gave, else the choices on the whole file. None when
+    it is not valid."""
+    from acw_common.timeline import Timeline, TimelineError
+
+    seconds = editor_job.seconds_of(job)
+    try:
+        if wanted.timeline is not None:
+            return Timeline.from_json(wanted.timeline, seconds=seconds)
+        remover = job.made.get("noise_option") if job.made.get("noise_option") in ("light", "heavy") else (
+            job.made.get("noise") if job.made.get("noise") in ("light", "heavy") else "auto")
+        return Timeline.whole_file(
+            seconds, echo=bool(job.echo), noise=False if wanted.rebuild_voice else {"strength_db": min(wanted.atten_lim_db, 100.0), "remover": remover},
+            rebuild=wanted.rebuild_voice, leveling={"loudness_lufs": engine.LOUDNESS_TARGETS[wanted.loudness]} if wanted.leveling else False)
+    except TimelineError:
+        return None
+
+
+def _blocks_there_for(job: copies.JobCopies, tl, step: str) -> bool:
+    q = editor_job.quote_for(job, tl)
+    return q is not None and not any(t.step == step for t in q.plan.misses)
+
+
 @dataclass
 class Plan:
     """What a change would do, in words fit for the user, and what stops it."""
@@ -152,7 +177,23 @@ def plan(
     p = Plan()
     if not original.ok:
         p.problems.append(f"{original.text} Everything but the subtitle files needs the original.")
-    if wanted.rebuild_voice:
+    if job.has_blocks:
+        tl = timeline_of(job, wanted)
+        p.sound = SOUND_EDITOR
+        q = editor_job.quote_for(job, tl) if tl is not None else None
+        if q is None:
+            p.slow = True
+            p.steps.append("Make the parts that are not made yet, then put the sound together")
+        elif q.nothing:
+            p.steps.append("Put the sound together from what is already processed" + (", level it" if tl.layers["leveling"] else ""))
+        else:
+            p.slow = True
+            p.steps.append(f"Process what changed ({editor_job.say_time(q.seconds)}), then put the sound together")
+        if tl is not None and tl.layers["rebuild"] and not voice_model and not _blocks_there_for(job, tl, "rebuild"):
+            p.problems.append("The model that rebuilds the voice is not installed. Download it in Settings.")
+        if tl is not None and not noise_models and tl.layers["noise"]:
+            p.problems.append("The noise removal models are not installed.")
+    elif wanted.rebuild_voice:
         if job.has(copies.REBUILT):
             p.sound = SOUND_LEVEL_REBUILT
             p.steps.append("Use the rebuilt voice that was saved" + (", level it" if wanted.leveling else ""))
@@ -292,7 +333,14 @@ def run(
         try:
             _check_cancel(cancel)
             report(0.02)
-            x = _recording(job, ff, src, info, work, cancel)
+            inputs = None
+            if sound_plan.sound == SOUND_EDITOR:
+                inputs = editor_job.decode(ff, src, info, work, reference=True, cancel=cancel, source_id=job.source_id)
+                x = inputs.source
+                if job.samples and len(x) != job.samples:
+                    raise MediaError("The original no longer matches the saved copies (it is not the same length), so it can't be changed and saved again.")
+            else:
+                x = _recording(job, ff, src, info, work, cancel)
             report(0.1)
             segments, language = None, None
             if wanted.subtitles != "off":
@@ -300,7 +348,7 @@ def run(
                 if sound_plan.transcribe:
                     segments, language = engine._transcribe(
                         ff, src, info, work, options, threads, report.span(0.1, 0.4), cancel,
-                        echo_free=x if job.echo else None,
+                        echo_free=x if job.echo and inputs is None else None,
                     )
                     keeper.transcript(segments, language, job.echo)
                 else:
@@ -311,9 +359,11 @@ def run(
                     sub_tmp.write_text(engine._subtitle_text(sub_kind, segments, language), encoding="utf-8")
             start = 0.4 if sound_plan.transcribe else 0.1
             used: dict = {}
-            y = _sound(job, wanted, sound_plan, ff, x, work, cancel, threads, report.span(start, 0.9), used, keeper)
+            y = _sound(job, wanted, sound_plan, ff, x, work, cancel, threads, report.span(start, 0.9), used, keeper, inputs)
             _check_cancel(cancel)
             made = _made(job, wanted, sound_plan.sound, used, language, ext)
+            if used.get("timeline") is not None:
+                notice = "; ".join(filter(None, [notice, used.get("notice")])) or None
             kept_info = engine._write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,
                                       work=work, progress=report.span(0.9, 0.99))
             if info.audio_tracks > 1:
@@ -331,6 +381,8 @@ def run(
                     sub_old = replace.with_suffix(sub_final.suffix)
                     sub_final = take_place(sub_final, sub_old, trash) if sub_old.exists() else sub_final
             job.made.update(made)
+            if used.get("timeline") is not None:
+                editor_job.remember(job, used["timeline"], used.get("decided"))
             job.add_save([final, *([sub_final] if sub_final else [])], made)
         except BaseException as e:
             x = y = None
@@ -355,6 +407,10 @@ def run(
 
 def _made(job: copies.JobCopies, wanted: Wanted, sound: str, used: dict, language: str | None, ext: str) -> dict:
     """The choices the new result was made with (copies.JobCopies.made)."""
+    if sound == SOUND_EDITOR:
+        return {**editor_job.made_from_timeline(used["timeline"], echo=bool(job.echo)), "noise_option": job.made.get("noise_option", "auto"),
+                "audio_format": engine.AUDIO_ENDINGS.get(ext, "same"), "subtitles": wanted.subtitles, "language": language or wanted.language,
+                "video_size": wanted.video_size}
     rebuilt = sound in (SOUND_REBUILD, SOUND_LEVEL_REBUILT)
     atten = None if rebuilt else float(wanted.atten_lim_db)
     return {
@@ -392,9 +448,18 @@ def _recording(job: copies.JobCopies, ff, src: Path, info, work: Path, cancel: t
 
 def _sound(
     job: copies.JobCopies, wanted: Wanted, p: Plan, ff, x: np.ndarray, work: Path, cancel: threading.Event, threads: int,
-    progress: engine.Progress, used: dict, keeper: copies.Keeper,
+    progress: engine.Progress, used: dict, keeper: copies.Keeper, inputs=None,
 ) -> np.ndarray:
     """The cleaned sound for `wanted`, (samples, channels) float32."""
+    if p.sound == SOUND_EDITOR:
+        tl = timeline_of(job, wanted)
+        if tl is None:
+            raise MediaError("The timeline is not valid.")
+        y, done, decided, notice, _ = editor_job.render_timeline(
+            tl, inputs, job.block_cache(ff), work=work, threads=threads, known=job.editor.get("resolved"), progress=progress, cancel=cancel,
+            out=pipeline.output_buffer(x, work))
+        used.update(timeline=done, decided=decided, notice=notice, noise=None)
+        return y
     opts = pipeline.CleanOptions(
         atten_lim_db=wanted.atten_lim_db, leveling=wanted.leveling, loudness_lufs=engine.LOUDNESS_TARGETS[wanted.loudness],
     )
@@ -447,7 +512,7 @@ class Prepared:
 
 def can_slide(job: copies.JobCopies) -> bool:
     """The job has what the strength slider blends (a saved noise removal), apart from the original itself being unchanged."""
-    return job.has(copies.NOISE) and not (job.echo and not job.has(copies.INPUT))
+    return not job.has_blocks and job.has(copies.NOISE) and not (job.echo and not job.has(copies.INPUT))
 
 
 def prepare_stream(

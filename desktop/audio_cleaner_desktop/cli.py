@@ -37,8 +37,27 @@ class _ProgressLine:
             print("\r" + " " * (len(self._label) + 7) + "\r", end="")
 
 
+def load_timeline(path: str) -> tuple[dict | None, str]:
+    """Read and check a timeline JSON file (acw_common.timeline, version 1). Returns (the timeline, "") or (None, what is wrong)."""
+    import json
+
+    from acw_common.timeline import Timeline, TimelineError
+
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except OSError as e:
+        return None, f"Can't read the timeline file {path}: {e.strerror or e}"
+    except ValueError:
+        return None, f"The timeline file {path} is not valid JSON."
+    try:
+        Timeline.from_json(raw, seconds=raw.get("seconds", engine.MAX_SECONDS) if isinstance(raw, dict) else None)
+    except TimelineError as e:
+        return None, f"The timeline file {path} is not valid: {e}"
+    return raw, ""
+
+
 def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, parallel: int = 1,
-        output_name: str | None = None, output_format: str | None = None) -> int:
+        output_name: str | None = None, output_format: str | None = None, timeline: dict | None = None) -> int:
     """Clean each input. Returns 0 when all succeed, 1 when any fails, 130 on Ctrl+C. `parallel` is the number
     of files cleaned at once (1-4, or 0 for Automatic), never more than the memory allows. `output_name` is the
     file name of the result (one input only); `output_format` the type ("mp3", "mp4", ...) of every result."""
@@ -61,6 +80,15 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
         print("Rebuilding the voice needs its model. Download it first: open Audio Cleaner, Settings, Extra cleanup "
               "(or run with --download-models).", file=sys.stderr)
         return 1
+    if timeline is not None:
+        if len(inputs) != 1:
+            print("--timeline works for one file at a time: its times are those of one recording.", file=sys.stderr)
+            return 1
+        layers = timeline.get("layers") if isinstance(timeline, dict) else None
+        if isinstance(layers, dict) and layers.get("rebuild") and resources.voice_model_dir() is None:
+            print("The timeline rebuilds the voice, which needs its model. Download it first: open Audio Cleaner, Settings, Extra cleanup "
+                  "(or run with --download-models).", file=sys.stderr)
+            return 1
     cancel = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: cancel.set())
     sysinfo.lower_priority()
@@ -75,7 +103,8 @@ def run(inputs: list[str], out_dir: str | None, options: engine.JobOptions, para
         line = _ProgressLine(label, tty=False if at_once > 1 else None)
         try:
             result = engine.process(name, options, out_dir=out_dir, progress=line, cancel=cancel, threads=threads,
-                                    output_name=output_name, output_format=output_format)
+                                    output_name=output_name, output_format=output_format,
+                                    **({"timeline": timeline} if timeline is not None else {}))
         except engine.Cancelled:
             line.finish()
             print(f"{label}  cancelled", file=sys.stderr)

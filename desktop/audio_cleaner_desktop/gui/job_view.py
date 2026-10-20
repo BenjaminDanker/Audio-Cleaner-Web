@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from acw_common.ffmpeg import MediaError
 
-from .. import blend, copies, engine, labels, redo, resources
+from .. import blend, copies, editor_session, engine, labels, redo, resources
 from . import shell
 from .history import DONE, Entry, HistoryStore
 from .job_preview import JobPreview
@@ -42,6 +42,7 @@ class JobEnv:
     trash: Callable[[Path], bool] = shell.move_to_trash
     scratch: Callable[[], Path | None] = lambda: None  # where the live sound is prepared; None: next to the saved copies
     live: Callable[[], bool] = lambda: True  # prepare the sound for live listening (off where there is no sound output)
+    open_session: Callable = editor_session.Session.open  # a job that keeps blocks, opened in the editor (editor_session.py)
 
 
 class _Worker(QThread):
@@ -115,6 +116,7 @@ class JobView(QWidget):
         self._db = 100.0
         self._building = False
         self.preview: JobPreview | None = None
+        self._player_in_editor = False  # the player sits in the editor (a job that keeps blocks), not in the Listen card
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 16, 0, 0)
@@ -155,6 +157,10 @@ class JobView(QWidget):
         self._build_results()
         self._build_copies()
         self._build_listen()
+        from .job_editor import JobEditor  # (it imports this module's helpers)
+
+        self._ed = JobEditor(self)
+        self._body.addWidget(self._ed.card)
         self._build_change()
         self._body.addStretch(1)
 
@@ -228,8 +234,9 @@ class JobView(QWidget):
 
     def _build_change(self) -> None:
         self._change_card, layout = _card("Change and save again")
-        intro = _small("Pick what to change and save it as a new file next to the old one. Only the steps that come after the saved "
-                       "copies run again, so this takes seconds.")
+        self._change_title = layout.itemAt(0).widget()
+        self._change_intro = intro = _small("Pick what to change and save it as a new file next to the old one. Only the steps that come after "
+                                            "the saved copies run again, so this takes seconds.")
         layout.addWidget(intro)
         self._rebuild = WrapCheck("Rebuild the voice")
         self._rebuild.setToolTip("Rebuild the voice instead of removing the noise: for echo, a phone-quality sound or a muffled voice. "
@@ -313,7 +320,8 @@ class JobView(QWidget):
         self._check = self.job.check_original() if self.job else copies.OriginalCheck("missing")
         self.banner.hide()
         self._fill()
-        self._start_preparing()
+        if not self._ed.show():
+            self._start_preparing()
         return True
 
     def _fill(self) -> None:
@@ -474,6 +482,7 @@ class JobView(QWidget):
             loudness=self._loudness.currentData() or engine.DEFAULT_LOUDNESS, subtitles=self._subtitles.currentData() or "off",
             language=(self.job.made.get("language") if self.job and self.job.made.get("language") in engine.LANGUAGES else "auto"),
             video_size=(self.job.made.get("video_size") if self.job else "same") or "same", output_name=self._name.text().strip(),
+            timeline=self._ed.timeline_json() if self._ed.active else None,
         )
 
     def plan(self) -> redo.Plan | None:
@@ -500,8 +509,12 @@ class JobView(QWidget):
         if self.entry is None:
             return
         job = self.job
-        self._listen_card.setVisible(True)
+        edit = self._ed.active  # the job keeps blocks: its sound is changed in the editor
+        self._listen_card.setVisible(not edit)
         self._change_card.setVisible(job is not None)
+        for w in (self._rebuild, self._leveling, self._loudness, self._save, self._change_intro):
+            w.setVisible(not edit)
+        self._change_title.setText("Save as a new file" if edit else "Change and save again")
         problem = self._slide_problem()
         rebuild_on = job is not None and self._rebuild.isChecked()
         can_slide = not problem and not rebuild_on
@@ -545,6 +558,8 @@ class JobView(QWidget):
         self._save_subs.setEnabled(can_text)
         self._back.setEnabled(not busy)
         self._delete.setEnabled(not busy)
+        if edit:
+            self._ed.refresh_bar()
 
     _live_note = ""
 
@@ -644,6 +659,7 @@ class JobView(QWidget):
         prepared, self._prepared = self._prepared, None
         if prepared is not None:
             prepared.close()
+        self._ed.unload()
 
     def shutdown(self, timeout_ms: int | None = None) -> bool:
         """The window is closing: stop a save that is running (waiting at most `timeout_ms` for it), then unload. Returns whether
@@ -692,7 +708,7 @@ class JobView(QWidget):
             replace = target if answer == "replace" else None
         env = self._env
         worker = _Worker(lambda cancel, progress: env.run(job, wanted, progress=progress, cancel=cancel, replace=replace, trash=env.trash), self)
-        worker.progress.connect(lambda f: self._save_bar.setValue(int(f * 1000)))
+        worker.progress.connect(lambda f: (self._save_bar.setValue(int(f * 1000)), self._ed.busy(True, f)))
         worker.done.connect(self._saved)
         worker.failed.connect(self._save_failed)
         worker.stopped.connect(lambda: self._save_over("Stopped. Nothing was saved."))
@@ -702,6 +718,7 @@ class JobView(QWidget):
         self._stop.show()
         self._save.setText("Saving...")
         self.banner.hide()
+        self._ed.busy(True, 0.0)
         self._refresh_all()
         worker.start()
 
@@ -713,6 +730,7 @@ class JobView(QWidget):
         self._save_bar.hide()
         self._stop.hide()
         self._save.setText("Save as a new file")
+        self._ed.busy(False)
 
     def _stop_save(self) -> None:
         if self._save_thread is not None:
@@ -742,6 +760,10 @@ class JobView(QWidget):
                     "strength_db": made.get("atten_lim_db")}
         settings.pop("picked_strength", None)
         settings.pop("picked_rebuild", None)
+        if made.get("parts"):
+            settings["parts"] = True
+        else:
+            settings.pop("parts", None)
         self._store.set_job_result(entry.id, paths, settings, self.job.dir.name, self.job.bytes())
         self.entry = self._store.get(entry.id)
         self._check = self.job.check_original()
@@ -757,9 +779,10 @@ class JobView(QWidget):
             set_property(self._status, "state", "done")
         finally:
             self._building = False
+        self._ed.saved()
         self._refresh_all()
         self.changed.emit()
-        if self._prepared is None and self._prepare_thread is None and not self._slide_problem():
+        if not self._ed.active and self._prepared is None and self._prepare_thread is None and not self._slide_problem():
             self._start_preparing()  # a step that ran now made the copy the slider needs
 
     def save_subtitles_only(self) -> None:
@@ -801,7 +824,8 @@ class JobView(QWidget):
         self._check = self.job.check_original()
         self.banner.show_message("Found it. This job can be changed and saved again.", "info")
         self._fill_copies()
-        self._start_preparing()
+        if not self._ed.show():
+            self._start_preparing()
         self._refresh_all()
 
 

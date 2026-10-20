@@ -8,6 +8,10 @@ Every cleaned file gets a folder of its own in the app's data folder (`jobs/<32 
     rebuilt.flac      the rebuilt voice, before Leveling, when Voice rebuild ran
     input.flac        the recording with the speaker echo taken out, when that ran (the strength blends it back in)
     segments.json     the transcript, when subtitles were made
+    blocks/           the block cache of the per-part editor (acw_common.blocks.FlacCache, 24-bit FLAC): what each step made, block by
+                      block (the noise removal at full strength, the rebuilt voice, the echo-free recording). A normal run fills it, an
+                      edit reads it and only makes the blocks it does not have. It replaces noise.flac / rebuilt.flac / input.flac
+                      for jobs made now; jobs made before keep those copies (editor_job.migrate turns them into blocks on demand)
 
 The results and the original are NOT copied: they are the user's own files and stay where they are. The job only remembers where
 the original was, and its fingerprint (size, modified time and a hash of 16 parts of it) to know whether it is still the same
@@ -40,17 +44,26 @@ log = logging.getLogger(__name__)
 JOBS_DIR = "jobs"
 MANIFEST = "job.json"
 VERSION = 1
-NOISE, REBUILT, INPUT, TRANSCRIPT = "noise", "rebuilt", "input", "transcript"
+NOISE, REBUILT, INPUT, TRANSCRIPT, BLOCKS = "noise", "rebuilt", "input", "transcript", "blocks"
 AUDIO_KINDS = (NOISE, REBUILT, INPUT)
+BLOCKS_DIR = "blocks"
+#: A run keeps its block cache (`blocks/`). False makes it keep the whole copies jobs had before the per-part editor (noise.flac ...): for the
+#: tests of those old jobs, which the app still opens.
+KEEP_BLOCKS = True
 TRANSCRIPT_FILE = "segments.json"
 KIND_NAMES = {
     NOISE: "Noise removal at full strength", REBUILT: "Rebuilt voice", INPUT: "Recording without the speaker echo",
-    TRANSCRIPT: "Transcript",
+    TRANSCRIPT: "Transcript", BLOCKS: "Processed parts (what each step made, to change one part later)",
 }
 _NAME = re.compile(r"^[0-9a-f]{32}$")
 PART_SIZE = 16 * 1024
 PART_COUNT = 16
 ORPHAN_SECONDS = 24 * 3600  # a job folder nothing in the list points to is swept away after this long
+
+
+def source_id_of(fp: dict) -> str:
+    """What identifies the samples of an original in every block's key: its size and a hash of 16 parts of it (`fingerprint`)."""
+    return "d" + hashlib.sha1(f"{fp.get('size')}:{fp.get('parts')}".encode()).hexdigest()[:20]
 
 
 def jobs_root(data_dir: Path) -> Path:
@@ -318,6 +331,8 @@ class JobCopies:
         e = self.data["copies"].get(kind)
         if not isinstance(e, dict):
             return None
+        if kind == BLOCKS:
+            return e if self._blocks_there(e) else None
         if kind == TRANSCRIPT:
             return e if _plain_file(self.dir, e.get("file"), e.get("bytes")) else None
         try:
@@ -333,6 +348,52 @@ class JobCopies:
     def has(self, kind: str) -> bool:
         return self.entry(kind) is not None
 
+    # -- the block cache (the per-part editor) --------------------------------------------------------------
+
+    def _blocks_there(self, e: dict) -> bool:
+        """The manifest names a block folder that is a real folder (not a link) holding at least one block."""
+        if e.get("dir") != BLOCKS_DIR or not isinstance(e.get("source_id"), str):
+            return False
+        path = self.dir / BLOCKS_DIR
+        try:
+            if not stat.S_ISDIR(os.lstat(path).st_mode):
+                return False
+            with os.scandir(path) as it:
+                return any(x.name.endswith(".flac") and x.is_file(follow_symlinks=False) for x in it)
+        except OSError:
+            return False
+
+    @property
+    def has_blocks(self) -> bool:
+        return self.has(BLOCKS)
+
+    @property
+    def source_id(self) -> str:
+        """What identifies the samples of the original in every block's key (its size and a hash of 16 parts of it)."""
+        return source_id_of(self.fingerprint)
+
+    def set_blocks(self, samples: int, echo: bool) -> None:
+        """Record that the job's blocks are being kept (written before the first block is made, so a job that fails halfway keeps
+        the blocks it had)."""
+        self.data["samples"] = int(samples)
+        self.data["echo"] = bool(echo)
+        self.data["copies"][BLOCKS] = {"dir": BLOCKS_DIR, "source_id": self.source_id}
+        self.save()
+
+    def block_cache(self, ff: FFmpeg):
+        """The job's block cache (made when it is first asked for)."""
+        from acw_common import blocks
+
+        return blocks.FlacCache(self.dir / BLOCKS_DIR, ff)
+
+    @property
+    def editor(self) -> dict:
+        """What the per-part editor remembers about the job: the timeline of the last result, the decisions "automatic" made, the
+        recording's facts and waveform, the suggestions (editor_job.py)."""
+        e = self.data.get("editor")
+        if not isinstance(e, dict):
+            e = self.data["editor"] = {}
+        return e
     def put_audio(self, kind: str, entry: dict, **extra) -> None:
         """Record a copy `kept.save` has just written (its size is read from disk)."""
         entry = {**entry, **extra}
@@ -363,7 +424,11 @@ class JobCopies:
     def drop(self, kind: str) -> None:
         """Forget a copy and delete its file (e.g. before it is written again)."""
         e = self.data["copies"].pop(kind, None)
-        if isinstance(e, dict) and _plain_file(self.dir, e.get("file"), None):
+        if kind == BLOCKS:
+            path = self.dir / BLOCKS_DIR
+            if path.is_dir() and not path.is_symlink():
+                _rmtree(path)
+        elif isinstance(e, dict) and _plain_file(self.dir, e.get("file"), None):
             try:
                 (self.dir / e["file"]).unlink()
             except OSError:
@@ -371,14 +436,14 @@ class JobCopies:
         self.save()
 
     def kinds(self) -> list[str]:
-        return [k for k in (NOISE, REBUILT, INPUT, TRANSCRIPT) if self.has(k)]
+        return [k for k in (BLOCKS, NOISE, REBUILT, INPUT, TRANSCRIPT) if self.has(k)]
 
     def __bool__(self) -> bool:  # a job with no copy at all is not worth a folder
         return bool(self.kinds())
 
     def sizes(self) -> list[tuple[str, int]]:
         """(kind, bytes) of each copy that is there."""
-        return [(k, int(self.data["copies"][k]["bytes"])) for k in self.kinds()]
+        return [(k, scan_bytes(self.dir / BLOCKS_DIR) if k == BLOCKS else int(self.data["copies"][k]["bytes"])) for k in self.kinds()]
 
     def bytes(self) -> int:
         """Disk the whole folder takes."""
@@ -391,6 +456,29 @@ class JobCopies:
 
 
 # ---------------------------------------------------------------------------------------------------- written while a job runs
+
+class QuietCache:
+    """The job's block cache as a run that is only cleaning a file sees it: a block that cannot be written (disk full, an encoder that failed)
+    is left out and reported (`on_lost`), never failing the job. The run does not read the blocks back, so nothing else changes."""
+
+    def __init__(self, cache, on_lost) -> None:
+        self.cache, self.on_lost = cache, on_lost
+        self._lost: set[str] = set()
+
+    def has(self, key: str) -> bool:
+        return key not in self._lost and self.cache.has(key)
+
+    def get(self, key: str):
+        return None if key in self._lost else self.cache.get(key)
+
+    def put(self, key: str, block) -> None:
+        try:
+            self.cache.put(key, block)
+        except (OSError, RuntimeError) as e:  # a full disk, an encoder that failed: the job itself goes on
+            log.warning("could not keep a block: %s", e)
+            self._lost.add(key)
+            self.on_lost(e)
+
 
 class Keeper:
     """Writes a job's copies as the job goes (engine.process): each one is recorded in job.json as soon as it is complete, so a job
@@ -435,6 +523,23 @@ class Keeper:
             self.job.put_transcript(segments, language, echo)
         except OSError as e:
             log.warning("could not keep the transcript: %s", e)
+            self.lost = self.lost or "it could not be written"
+
+    def quiet(self, cache):
+        """`cache` as a run that must not fail over it sees it (QuietCache); what it could not write is `lost`."""
+        def lost(e: BaseException) -> None:
+            self.lost = "the disk is full" if getattr(e, "errno", None) == 28 else "it could not be written"
+
+        return QuietCache(cache, lost)
+
+    def blocks(self, samples: int, echo: bool) -> None:
+        """The job keeps its block cache from here on (engine.process, before the first model runs)."""
+        if self.job is None:
+            return
+        try:
+            self.job.set_blocks(samples, echo)
+        except OSError as e:
+            log.warning("could not start the block cache: %s", e)
             self.lost = self.lost or "it could not be written"
 
     def made(self, **choices) -> None:

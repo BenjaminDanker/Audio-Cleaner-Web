@@ -60,6 +60,9 @@ class FileItem:
     job_name: str = ""  # the name asked for in the job that is running (or ran last)
     name_hint: bool = False  # show why the name can't be used (the box was left, or a start was refused)
     keep_dir: Path | None = None  # the folder the saved copies of the run in line (or running) go to
+    timeline: dict | None = None  # "Choose parts": what to do to which part (None: the whole file with the settings as they are)
+    plan_state: dict | None = None  # what the Choose parts window showed when it was closed (to open it again where it was left)
+    parts_note: str = ""  # one line about it for the row
 
 
 class DropZone(QFrame):
@@ -152,6 +155,7 @@ class FileRow(QFrame):
     previewRequested = Signal(int)
     revealRequested = Signal(int)
     againRequested = Signal(int)
+    partsRequested = Signal(int)  # "Choose parts"
     moveRequested = Signal(int, int)
     nameEdited = Signal(int, str)  # the text of the name box, as typed
     endingPicked = Signal(int, str)  # a type chosen in the list (".mp3")
@@ -265,6 +269,15 @@ class FileRow(QFrame):
         set_property(self._hint, "state", "failed")
         self._hint.hide()
         box.addWidget(self._hint)
+        parts = QHBoxLayout()
+        self._parts = QPushButton("Choose parts...")
+        self._parts.setObjectName("Link")
+        self._parts.setToolTip("Optional: clean only some parts of this file, or give a part its own settings. Shows the file with a "
+                               "waveform; nothing is processed until you clean it.")
+        self._parts.clicked.connect(lambda: self.partsRequested.emit(self.item.id))
+        parts.addWidget(self._parts)
+        parts.addStretch(1)
+        box.addLayout(parts)
         parent.addWidget(self._editor)
         self._namebox.textEdited.connect(self._typed)
         self._namebox.editingFinished.connect(lambda: self.nameDone.emit(self.item.id))
@@ -304,6 +317,8 @@ class FileRow(QFrame):
         self._hint.setVisible(show)
         set_property(self._namebox, "invalid", show)
         editable = item.probed and item.state != RUNNING
+        self._parts.setVisible(item.state == WAITING and item.probed)
+        self._parts.setText("Change the chosen parts..." if item.timeline is not None else "Choose parts...")
         self._namebox.setEnabled(editable)
         self._format.setEnabled(editable)
 
@@ -365,6 +380,8 @@ class FileRow(QFrame):
             parts.append(format_size(item.path.stat().st_size))
         except OSError:
             pass
+        if item.parts_note:
+            parts.append(item.parts_note)
         return "  ·  ".join(parts)
 
 

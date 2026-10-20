@@ -434,7 +434,8 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     mono; a stereo recording whose sides differ takes twice that, one whose sides are the same or one of them silent is kept once); the
     rebuilt voice about the same; the transcript a few kB; `input.flac` (echo removal only) about 0.36 GB per hour. A job
     that rebuilt the voice and was never changed holds only the rebuilt voice. The page shows each job's size and the total (the
-    `copies_bytes` column, counted again at start-up by `HistoryStore.reconcile`).
+    `copies_bytes` column, counted again at start-up by `HistoryStore.reconcile`). **Jobs made with the per-part editor keep `blocks/` instead of
+    these three files (see "Fix a moment" below); the numbers above are for older jobs and the blocks take about the same.**
   * *The original.* The job remembers its path and a fingerprint: size, modified time and a hash of 16 parts of the file (`copies.fingerprint`).
     Before anything is done with a copy it is checked (`copies.check_original`): same size and modified time is accepted without reading;
     a different modified time only if the parts hash the same (a copy put back); anything else is "changed", and a missing file is "moved".
@@ -465,6 +466,54 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     folder and just shows and deletes; a stopped job keeps nothing; a job that failed after its noise removal keeps that copy and can be
     saved again from the job view; a copy that cannot be written (disk full) never fails the job, the notice says it can't be changed later.
     Folders nothing points to are swept after a day.
+* **Fix a moment: the per-part editor** (the same core as the website's, `common/acw_common/{timeline,editor,blocks,suggest}.py`; the
+  desktop's side is `editor_job.py`, `editor_session.py`, `editor_model.py`, `live_mix.py` (no Qt) and `gui/{job_editor,part_editor,wave_strip,plan_dialog}.py`).
+  Local processing is free, so the bar shows time, not price.
+  * *The block cache replaces the whole copies.* A job made now keeps `blocks/` (24-bit FLAC, `blocks.FlacCache`: what each step made, block by
+    block: the noise removal at full strength, the rebuilt voice, the echo-free recording) instead of `noise.flac`, `rebuilt.flac` and `input.flac`.
+    A normal run fills it (`engine.process` gives `pipeline.clean_audio` and `pipeline.remove_echo` the cache and `input_id`; after echo removal
+    `EchoWholeFile` rewrites the keys to the editor's own, as on the server), so an edit only makes the blocks it does not have: a new strength
+    is a blend of blocks (no model runs), Voice rebuild on one part makes the blocks of that part, Leveling runs over what changed. The disk is
+    the same as the old noise copy (about 0.25 GB per hour of mono; measured 65 KB per second of speech); `job.json` also keeps the recording's
+    facts and waveform (so a quote needs no decoding), the timeline of the latest result, the decisions "automatic" made, and the suggestions.
+    The job id of every key is the original's fingerprint (`copies.source_id_of`). Deleting a job removes the folder as before.
+  * *Old jobs.* A job with `noise.flac` etc. opens as before (strength slider, Change and save again). Its "Fix a moment" card offers "Get this job
+    ready": the copies are cut into blocks (`editor_job.migrate`, the same samples, nothing removed until every block is written) and the old
+    files are removed. A job that removed echo but did not keep the echo-free recording cannot be migrated.
+  * *The editor* (design "Moments", `/acw-editor-designs/c-moments`, with "Show all layers" from the timeline design): the player, a strip under it
+    (ruler with a pin for each suggestion, the waveform, the playhead, the selected part with two handles; click moves the playhead, drag across the
+    waveform or a row chooses a part), "Hear" chips (Noise removal, Voice rebuild, Echo removal when the file has a second track, Leveling) and
+    the Moment, Part, Change panel. Part settings: strength Off / Gentle / Balanced / Strong / Maximum, the remover (automatic / light / heavy),
+    Voice rebuild on or off (it wins where both are on, and the panel says so), Leveling on or off with one loudness target for the job, echo removal
+    on or off. All edits are `Timeline.paint` / `erase`, so the draft is always a valid timeline. "Which one should I pick?" (`labels.WHICH_TEXT`)
+    says in plain words how noise reduction and Rebuild the voice differ; the settings, the part panel and the notes on a result use the same words.
+  * *Live sound* (`live_mix.LiveMix`, played by the same `LivePlayer` as the strength slider): the recording and what each step made are laid out sample
+    for sample in scratch files (read from the cache), and every piece the sound card asks for is mixed from the timeline: noise removal per part
+    ((1 - a) x the remover's sound + a x the recording, 100 ms ramps between parts), Voice rebuild with 250 ms equal-power edges (where it is on the
+    noise removal is not heard), echo removal with 50 ms ramps, Leveling by loudness (each leveled part is brought to the target, at most 12 dB;
+    the compressor and limiter come with the saved file). A part whose blocks are not in the cache yet is heard without that change, and the strip
+    says so. The saved file is made by `editor.render` (joins that look for a pause, loudness matching, the whole of Leveling), not by this mix.
+  * *Quote and Save.* The bar says "No changes yet", "Changes: nothing to process" (only blocks that are there are used) or "Process changes · about
+    40 s" (`editor.plan` over the facts the job kept; `editor_job.CPU_COSTS` turns the plan's compute seconds into wall-clock seconds on one core
+    of an ordinary computer: the light remover and Leveling as measured, the heavy remover 1.8 x the light one, Voice rebuild about 30 x, divided by
+    the threads). Save runs `redo.run` with a timeline: the original is decoded, only the missing blocks are made (cancelable, with progress), the
+    timeline is rendered, and the result is a new file next to the last one (the same naming and Replace rules as Change and save again). Subtitles,
+    file type and name stay in the card below.
+  * *Suggestions* (`suggest.suggest`): found in the background when a job is opened for the first time (up to 20 minutes of audio; a longer
+    recording has a "Find moments to fix" button), cancelable, kept in `job.json`. Each is a card with the apply button, Show me, Dismiss, and Undo
+    after it was applied (the parts it replaced are put back, whatever was edited since).
+  * *Choose parts* (plan mode): a waiting file's row has "Choose parts..." which opens the same editor on the file as it is (the waveform and
+    suggestions; nothing is processed, so only the recording is heard). The settings of the file are the whole-file defaults (when "Automatic best
+    settings" is on they are decided by listening, as a run would); "Only parts" processes only the parts chosen with "Only this part". The bar says
+    "Whole file · about 3 min" or "Chosen parts · about 40 s". "Use these parts" gives the queue a timeline (`Job.timeline`), which
+    `engine.process(..., timeline=...)` runs: only the parts are processed and the rest is left as it is; the settings are fixed when it is chosen.
+  * *Command line.* `--timeline FILE` (one input file): a JSON file in `acw_common.timeline` format, for example
+    `{"version": 1, "layers": {"noise": [{"start": 10, "end": 40, "strength_db": 24, "remover": "auto"}], "rebuild": [{"start": 41, "end": 44}],
+    "leveling": [{"start": 0, "end": 120, "loudness_lufs": -16}]}}`. Times are seconds (clamped to the file), `strength_db` is 12 / 24 / 40 / 100 (or
+    "gentle", "balanced", "strong", "max"), `remover` is `auto`, `light` or `heavy`, `loudness_lufs` is -70..0 or `null` (keep the level), the
+    layers are `echo` (needs a second audio track), `noise`, `rebuild` and `leveling`; parts of a layer must not overlap (a later one wins).
+    A layer that is missing is not applied. `--strength`, `--noise`, `--echo-track`, `--rebuild-voice`, `--no-leveling` and `--loudness` are not
+    used then; `--format`, `--output-name`, `--subtitles` and `--video-size` are.
 * **Only the Windows and macOS builds can show the system encoders work.** Linux has none, so the tests there (and in
   development) take the MPEG-4 path; the CI tests on Windows and macOS accept either codec.
 * **Preview of videos.** The sound plays in Qt's player; the picture is decoded by our own FFmpeg at the preview's size and shown against the sound's clock (`gui/video_preview.py`). Qt's player decodes every frame and holds the sound back when the picture is late, so an 8K video on a slower PC played in slow motion. Now late frames are dropped, the decoder jumps ahead to the key frame nearest the sound when it falls behind, and decodes key frames only if it keeps falling behind; the sound is never held back. Formats our FFmpeg does not decode (AV1) still use Qt's player. That is why the FFmpeg build includes video decoders and the scaler (`build_ffmpeg.sh` VIDEO_DECODERS).

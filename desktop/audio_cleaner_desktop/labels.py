@@ -25,10 +25,12 @@ VIDEO_SIZE_LABELS = {
 
 
 def describe_settings(s: dict, has_video: bool) -> str:
-    if s.get("rebuild_voice"):
+    if s.get("parts"):
+        parts = ["chosen parts, each with its own settings"]
+    elif s.get("rebuild_voice"):
         parts = ["voice rebuilt"]
     elif s.get("picked_rebuild"):
-        parts = [f"voice rebuilt (it sounded {reco_model.REBUILD_WORDS.get(s['picked_rebuild'], s['picked_rebuild'])})"]
+        parts = [f"voice rebuilt (it sounded {reco_model.REBUILD_WORDS.get(s['picked_rebuild'], s['picked_rebuild'])}; keeps only speech)"]
     elif isinstance(s.get("strength_db"), (int, float)) and not isinstance(s.get("strength_db"), bool):
         parts = [f"{blend.strength_name(float(s['strength_db']))} noise reduction ({float(s['strength_db']):.0f} dB)"
                  if blend.strength_key(float(s["strength_db"])) is None
@@ -36,7 +38,7 @@ def describe_settings(s: dict, has_video: bool) -> str:
     else:
         picked = s.get("picked_strength") if s.get("strength") == engine.AUTO_STRENGTH else None
         if s.get("strength") == engine.AUTO_STRENGTH:
-            parts = [f"{dict(STRENGTH_LABELS)[picked]} noise reduction (picked for this file)" if picked in engine.STRENGTHS
+            parts = [f"{dict(STRENGTH_LABELS)[picked]} noise reduction (picked for this file; keeps your voice as recorded)" if picked in engine.STRENGTHS
                      else "noise reduction picked for the file"]
         else:
             parts = [dict(STRENGTH_LABELS).get(s.get("strength"), "Maximum") + " noise reduction"]
@@ -63,3 +65,32 @@ def settings_dict(options: engine.JobOptions) -> dict:
         "rebuild_voice": options.rebuild_voice, "auto_rebuild": options.auto_rebuild,
         "video_size": options.video_size,
     }
+
+
+# The choice between noise reduction and Rebuild the voice, in plain words (the settings, the job's part panel and the notes on a result
+# all use these, so the same thing is said everywhere).
+WHICH_TITLE = "Which one should I pick?"
+WHICH_NOISE = (
+    "Noise reduction keeps your voice exactly as recorded and never changes a word. Laughs, shouts, whispers and singing stay as they were. "
+    "It works on any length, it is fast, and the gentler strengths keep some room sound. It removes most background sound, game sounds included."
+)
+WHICH_REBUILD = (
+    "Rebuild the voice makes the voice again from scratch, so it also fixes echo, a muffled or phone-quality voice and distortion from "
+    "recording too loud. The result is very clean and can sound slightly too clean. It keeps only speech: game sounds, music and room sound "
+    "are all gone, and laughs, shouts and singing may come out oddly. On a very echoey recording it can change a word, so listen before you "
+    "publish. It is slower, and it works in many languages."
+)
+WHICH_TEXT = f"Noise reduction: {WHICH_NOISE[len('Noise reduction '):]}\n\nRebuild the voice: {WHICH_REBUILD[len('Rebuild the voice '):]}"
+WHICH_SHORT = {"noise": "Noise reduction keeps your voice exactly as recorded.",
+               "rebuild": "Rebuild the voice fixes echo, a muffled or phone-quality voice and distortion, but keeps only speech."}
+
+
+def rebuild_reason_text(reason: str | None) -> str:
+    """Why the voice was rebuilt when the automatic settings chose it, in the terms of the choice above."""
+    word = reco_model.REBUILD_WORDS.get(reason or "", reason or "damaged")
+    return (f"the voice was rebuilt because it sounded {word}: rebuilding fixes that, but keeps only speech (game sounds, music and "
+            "room sound are gone)")
+
+
+def noise_pick_text() -> str:
+    return "noise reduction picked: it keeps your voice exactly as recorded"

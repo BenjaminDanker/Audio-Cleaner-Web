@@ -41,6 +41,7 @@ _VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".flv", ".avi"}
 
 class PreviewPane(QFrame):
     closed = Signal()
+    positionMoved = Signal(int)  # the playing position in ms (the editor's playhead follows it)
     _subtitles_read = Signal(object, object)  # key, cues (read on a worker thread)
 
     def __init__(self, parent: QWidget | None = None):
@@ -345,6 +346,19 @@ class PreviewPane(QFrame):
         if not self._scrubbing:
             self._slider.setValue(pos)
         self._show_position(pos)
+        self.positionMoved.emit(pos)
+
+    def seek_ms(self, ms: int) -> None:
+        """Jump to a moment (the editor's strip, a suggestion's "Show me")."""
+        if self._player is not None:
+            self._player.setPosition(max(0, int(ms)))
+            self._seek_picture(int(ms))
+            self._slider.setValue(int(ms))
+
+    def play_from(self, ms: int) -> None:
+        self.seek_ms(ms)
+        if self._player is not None and self._player.playbackState() != self._mm.QMediaPlayer.PlaybackState.PlayingState:
+            self._player.play()
 
     def _show_position(self, pos: int) -> None:
         total = self._player.duration() if self._player is not None else 0

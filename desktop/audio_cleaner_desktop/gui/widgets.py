@@ -174,6 +174,13 @@ class Segmented(QWidget):
     def set_enabled_key(self, key: str, enabled: bool) -> None:
         self._buttons[key].setEnabled(enabled)
 
+    def clear(self) -> None:
+        """No button is on (a value that none of them stands for)."""
+        self._group.setExclusive(False)
+        for b in self._buttons.values():
+            b.setChecked(False)
+        self._group.setExclusive(True)
+
     def step(self, current: _Segment, delta: int) -> None:
         enabled = [b for b in self._buttons.values() if b.isEnabled()]
         target = enabled[(enabled.index(current) + delta) % len(enabled)]

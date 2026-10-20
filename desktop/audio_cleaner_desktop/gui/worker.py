@@ -31,6 +31,7 @@ class Job:
     out_dir: Path | None = None
     output_name: str | None = None  # the file name of the result (its ending says the type); None = the usual name
     keep_dir: Path | None = None  # folder for the job's saved copies (copies.py); None = keep none
+    timeline: dict | None = None  # what to do to which part (acw_common.timeline JSON, chosen in "Choose parts"); None = the whole file
 
 
 def failure_message(error: BaseException) -> str:
@@ -63,6 +64,8 @@ class _JobThread(QThread):
             extra = {"output_name": job.output_name} if job.output_name is not None else {}
             if job.keep_dir is not None:
                 extra["keep_dir"] = job.keep_dir
+            if job.timeline is not None:
+                extra["timeline"] = job.timeline
             result = self._runner(
                 job.path, job.options, out_dir=job.out_dir, threads=self._threads, cancel=self.cancel,
                 progress=lambda f: self.progress.emit(job.id, f), **extra,
