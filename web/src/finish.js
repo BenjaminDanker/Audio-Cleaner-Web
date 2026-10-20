@@ -132,6 +132,12 @@ export class Finish {
     if (!this.wants) this.wants = loadWants(job.id) || derivedWants(job);
   }
 
+  /** New choices of what to make (file type, name, subtitle files...), kept with the job in this browser. */
+  setWants(wants) {
+    this.wants = wants;
+    saveWants(this.id, wants);
+  }
+
   get outputs() { return this.job?.outputs || []; }
 
   /** Where the slider's two signals come from: 'here' (this browser made them), 'server' (the job kept them), or null. */

@@ -7,6 +7,7 @@ import { Pairer } from './dfnstream.js';
 import { interleave } from './wav.js';
 
 const MAX_IN_FLIGHT = 3;
+export const PREROLL_SECONDS = 5; // a part of a recording is cleaned from this much earlier, so the remover has settled when the part starts
 
 function concat(list) {
   const out = new Float32Array(list.reduce((n, a) => n + a.length, 0));
@@ -22,15 +23,17 @@ export const STAGE_LOADING = 'Getting the noise remover ready…';
  * The noise remover always runs at full strength; the strength `attenDb` is the blend of its output with the recording
  * (media/blend.js: exactly what the remover does at that limit). That way the full-strength output and the recording can be
  * kept (`keepPair`) and the strength changed afterwards, free, on this device.
+ * A `range` ({start, end} seconds) cleans only that part: it is read from PREROLL_SECONDS earlier (the remover settles on the sound before
+ * it), and what comes out is trimmed to the part, so the result is just as long as the part.
  * @param {File} file
- * @param {{attenDb:number, durationHint:number|null, signal?:AbortSignal, keepPair?:boolean,
+ * @param {{attenDb:number, durationHint:number|null, signal?:AbortSignal, keepPair?:boolean, range?:{start:number,end:number},
  *   onProgress?:(p:{done:number,total:number|null,rate:number,eta:number|null,elapsed:number})=>void,
  *   onStage?:(s:string)=>void}} opts
  * @returns {Promise<{parts:Blob[], channels:number, frames:number, sampleRate:number, peak:number, rms:number,
  *   seconds:number, srcChannels:number, sourceRate:number, elapsed:number, pair:{full:Blob[], input:Blob[]}|null}>}
  *   `pair`: the full-strength output and the recording, interleaved float32 parts of the same length (only with keepPair)
  */
-export async function denoiseFile(file, { attenDb, durationHint, signal, onProgress, onStage, keepPair = false }) {
+export async function denoiseFile(file, { attenDb, durationHint, signal, onProgress, onStage, keepPair = false, range = null }) {
   const started = performance.now();
   let engine = null;
   const abort = () => engine?.terminate();
@@ -48,6 +51,8 @@ export async function denoiseFile(file, { attenDb, durationHint, signal, onProgr
     let srcChannels = 1;
     let sourceRate = TARGET_RATE;
     let processed = 0; // input frames sent
+    const from = range ? Math.max(0, range.start - PREROLL_SECONDS) : 0;
+    let lead = range ? Math.round((range.start - from) * TARGET_RATE) : 0; // frames of the sound before the part still to drop from the answers
     const inflight = [];
     let firstDone = 0; // time when first chunk completed (start of steady state)
     let firstDoneFrames = 0;
@@ -67,7 +72,13 @@ export async function denoiseFile(file, { attenDb, durationHint, signal, onProgr
       return { ys, xs };
     };
 
-    const collect = ({ ys, xs }) => {
+    const collect = (aligned) => {
+      let { ys, xs } = aligned;
+      if (lead > 0) {
+        const k = Math.min(lead, ys[0].length);
+        lead -= k;
+        if (k) { ys = ys.map((y) => y.subarray(k)); xs = xs.map((x) => x.subarray(k)); }
+      }
       const n = ys[0].length;
       if (n === 0) return;
       const outs = share > 0 ? ys.map((y, c) => {
@@ -118,7 +129,7 @@ export async function denoiseFile(file, { attenDb, durationHint, signal, onProgr
     };
 
     onStage?.('Reading the file…');
-    for await (const ev of decodeToChunks(file, { signal })) {
+    for await (const ev of decodeToChunks(file, range ? { signal, start: from, end: range.end } : { signal })) {
       if (signal?.aborted) throw new DOMException('Canceled', 'AbortError');
       if (ev.type === 'info') {
         channels = ev.channels;

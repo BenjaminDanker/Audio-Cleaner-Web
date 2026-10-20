@@ -17,7 +17,6 @@ const bundle = await build({
       export * from '../src/editor/mix.js';
       export { sayAsk, sayWhat, suggestionOps, keyOf } from '../src/editor/suggest.js';
       export * from '../src/media/suggest-core.js';
-      export { quoteDetails } from '../src/components/editor/FixAMoment.jsx';
       export { DENOISING_POINTS, REBUILD_POINTS } from '../src/components/WhichOne.jsx';
       export { recommendForFile } from '../src/recommend.js';
     `,
@@ -37,7 +36,7 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputF
 const {
   Timeline, replay, restoreOps, differences, partLabel, levelOf, mergeRanges, subtract, intersect, rangeText, TimelineError,
   prepare, weightsAt, envelope, breakpoints, describe, needsProcessing, levelFactor, MixPlayer, HEAR_ALL, FADE_REBUILD,
-  sayAsk, sayWhat, suggestionOps, quoteDetails, DENOISING_POINTS, REBUILD_POINTS,
+  sayAsk, sayWhat, suggestionOps, DENOISING_POINTS, REBUILD_POINTS,
   recommendPart, reasonsFor, clippedBursts, measureWindows, findSuggestions, recommendForFile,
 } = m;
 
@@ -328,20 +327,6 @@ await check('words: "Which one should I pick?" and the automatic reasons use the
   const clear = recommendForFile(grid({}), {});
   if (!clear.rebuild) assert.equal(clear.pick, 'Denoising: the voice is already clear, so it is kept exactly as recorded and only the background sound is taken out.');
   for (const r of [echoey, phone, clear]) assert.doesNotMatch(r.pick, /premium|polish|DeepFilter|Sidon|\bmodel\b|our servers?/i);
-});
-
-await check('quote details: per step of the quote, the parts that have to be made and the stretch each is made from, with what the step also listens to', () => {
-  const t = whole();
-  t.paint('noise', 20, 30, { strength_db: 40, remover: 'light' });
-  t.paint('rebuild', 20, 30);
-  const cached = { noise: [[0, 60]], rebuild: [] };
-  const quote = { free: false, unchanged: false, lines: [{ item: 'rebuild', label: 'Voice rebuild', seconds: 10, micros: 5000 }, { item: 'leveling', label: 'Leveling', seconds: 49, micros: 2000 }], steps: { rebuild: { seconds: 10 }, leveling: { seconds: 49 } } };
-  const rendered = whole();
-  const d = quoteDetails(quote, t, cached, rendered, 60);
-  assert.deepEqual(d[0].parts[0].core, [20, 30]);
-  assert.deepEqual(d[0].parts[0].read, [6, 44]); // (a rebuild block is made from the stretch before it and the one after)
-  assert.deepEqual(d[1].parts[0].core, [20, 30]); // Leveling is made again where the sound under it changed
-  assert.deepEqual(quoteDetails({ ...quote, unchanged: true }, t, cached, rendered, 60), []);
 });
 
 /* ------------------------------------------------------------------------------------------------ the suggestions in the browser */

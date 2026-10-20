@@ -124,10 +124,10 @@ export function kindLabel(job) {
  * the audio is uploaded (falls back to uploading the whole file). With options.echo_reference_track the first two
  * audio tracks are kept (a file with only one has nothing to extract and goes up whole). Uncompressed WAV/AIFF audio is losslessly encoded to
  * FLAC first (falls back to the original). The declared filename and sizeBytes always describe what is uploaded.
- * @returns {Promise<{id:string, estCostMicros:number, extracted:boolean, compressed:{from:number,to:number}|null,
+ * @returns {Promise<{id:string, estCostMicros:number, needs:{kind:string,start:number,end:number}[], extracted:boolean, compressed:{from:number,to:number}|null,
  *   uploadBytes:number, originalBytes:number, uploadName:string}>}
  */
-export async function submitJob({ file, info, body, onStage, onProgress, onCompressed, signal }) {
+export async function submitJob({ file, info, body, onStage, onProgress, onCompressed, onCreated, signal }) {
   let blob = file;
   let name = file.name;
   let extracted = false;
@@ -180,6 +180,7 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
     // visitor chose it, which is what the job list shows.
     body: { ...body, filename: name, displayName: stripBidi(file.name).slice(0, 200), sizeBytes: blob.size, durationSeconds: Math.max(0.5, body.durationSeconds), options },
   });
+  onCreated?.(created); // (a timeline with parts the browser does itself says here what it has to send: `created.needs`)
   onStage?.('upload');
   try {
     await uploadBlob(created.uploadUrl, blob, { signal, onProgress: (loaded, total) => onProgress?.({ phase: 'upload', loaded, total, frac: loaded / total }) });
@@ -187,5 +188,5 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
     api(`jobs/${created.id}/cancel`, { method: 'POST', redirectOn401: false }).catch(() => {});
     throw e;
   }
-  return { id: created.id, estCostMicros: created.estCostMicros, extracted, compressed, uploadBytes: blob.size, originalBytes: file.size, uploadName: name };
+  return { id: created.id, estCostMicros: created.estCostMicros, needs: created.needs || [], extracted, compressed, uploadBytes: blob.size, originalBytes: file.size, uploadName: name };
 }

@@ -56,6 +56,9 @@ export function dismiss(id, key) {
   set(id, { dismissed: d });
 }
 
+/** What is known about a job's suggestions now (not reactive): {loaded, list, dismissed}. */
+export const suggestionState = (id) => store(id).state;
+
 export function forgetSuggestions(id) {
   stores.delete(id);
 }

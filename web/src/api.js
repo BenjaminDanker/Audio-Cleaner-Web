@@ -123,7 +123,9 @@ function errorFrom(res, data) {
     wait = retryAfterSeconds(res.headers?.get?.('Retry-After'));
     if (wait) detail = withWait(detail, wait);
   }
-  return new ApiError(detail, res.status, data?.fields, wait, code);
+  const err = new ApiError(detail, res.status, data?.fields, wait, code);
+  err.body = data && typeof data === 'object' ? data : null; // the rest of the answer (e.g. the `needs` of 409 needs_uploads)
+  return err;
 }
 
 export async function fetchMe() {

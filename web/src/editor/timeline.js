@@ -5,11 +5,16 @@
 // all use them.
 
 export const LAYERS = ['echo', 'noise', 'rebuild', 'leveling'];
+/** Version 2 adds a layer that is not part of the sound (the subtitles) and noise parts the browser cleaned itself. */
+export const SUBTITLES = 'subtitles';
+export const ALL_LAYERS = [...LAYERS, SUBTITLES];
+export const QUALITIES = ['free', 'standard', 'accurate'];
+export const MAX_TRANSLATIONS = 3;
 export const MAX_PARTS = 500;
 export const DEFAULT_LOUDNESS = -16;
 
 /** The names a person sees (the price list's words). */
-export const LAYER_NAMES = { echo: 'Echo removal', noise: 'Noise removal', rebuild: 'Voice rebuild', leveling: 'Leveling' };
+export const LAYER_NAMES = { echo: 'Echo removal', noise: 'Noise removal', rebuild: 'Voice rebuild', leveling: 'Leveling', subtitles: 'Subtitles' };
 
 /** Noise removal strengths: dB of the attenuation limit, as the server takes them. `off` is no part at all. */
 export const NOISE_LEVELS = [
@@ -36,7 +41,10 @@ export class TimelineError extends Error {}
 export function settingsOf(layer, raw = {}) {
   const r = { ...(raw || {}) };
   let out;
-  if (layer === 'noise') {
+  if (layer === 'noise' && r.browser === true) {
+    // the browser cleaned this range itself and uploaded it: strength and remover are not used (and not kept)
+    out = { browser: true };
+  } else if (layer === 'noise') {
     let db = r.strength_db ?? r.strength ?? 100;
     if (typeof db === 'string') {
       const named = NOISE_LEVELS.find((l) => l.id === db.toLowerCase()) || (db.toLowerCase() === 'maximum' ? NOISE_LEVELS[4] : null);
@@ -55,6 +63,16 @@ export function settingsOf(layer, raw = {}) {
       if (!Number.isFinite(lufs) || lufs < -70 || lufs > 0) throw new TimelineError('loudness_lufs must be between -70 and 0 (or null)');
     }
     out = { loudness_lufs: lufs };
+  } else if (layer === SUBTITLES) {
+    const quality = r.quality;
+    if (!QUALITIES.includes(quality)) throw new TimelineError('subtitles need a quality: free, standard or accurate');
+    const language = r.language === undefined || r.language === null || r.language === '' ? null : String(r.language).trim().toLowerCase();
+    if (language !== null && !/^[a-z]{2,3}$/.test(language)) throw new TimelineError('language must be a code such as en, or null to detect it');
+    const translate = [...new Set((r.translate || []).map((c) => String(c).trim().toLowerCase()).filter(Boolean))];
+    if (translate.length > MAX_TRANSLATIONS) throw new TimelineError(`at most ${MAX_TRANSLATIONS} translation languages for a part`);
+    if (translate.includes(language)) throw new TimelineError('a translation language is the same as the spoken language of the part');
+    if (translate.length && quality === 'free') throw new TimelineError('Translations need Standard or Accurate subtitles: free subtitles are made in the browser and can’t be translated');
+    out = { quality, language, translate };
   } else if (layer === 'echo' || layer === 'rebuild') {
     out = {};
   } else {
@@ -65,19 +83,20 @@ export function settingsOf(layer, raw = {}) {
 
 const sameSettings = (a, b) => {
   const ka = Object.keys(a);
-  return ka.length === Object.keys(b).length && ka.every((k) => a[k] === b[k]);
+  return ka.length === Object.keys(b).length && ka.every((k) => (Array.isArray(a[k]) ? JSON.stringify(a[k]) === JSON.stringify(b[k]) : a[k] === b[k]));
 };
+const cloneSettings = (s) => Object.fromEntries(Object.entries(s).map(([k, v]) => [k, Array.isArray(v) ? [...v] : v]));
 
 export class Timeline {
   constructor(seconds) {
     this.seconds = ms(Math.max(0, Number(seconds) || 0));
-    this.layers = { echo: [], noise: [], rebuild: [], leveling: [] };
+    this.layers = { echo: [], noise: [], rebuild: [], leveling: [], subtitles: [] };
   }
 
   /** Every layer asked for on the whole file. `noise` / `leveling`: true for the defaults, an object for these settings. */
-  static wholeFile(seconds, { echo = false, noise = true, rebuild = false, leveling = true } = {}) {
+  static wholeFile(seconds, { echo = false, noise = true, rebuild = false, leveling = true, subtitles = false } = {}) {
     const t = new Timeline(seconds);
-    for (const [name, on] of [['echo', echo], ['noise', noise], ['rebuild', rebuild], ['leveling', leveling]]) {
+    for (const [name, on] of [['echo', echo], ['noise', noise], ['rebuild', rebuild], ['leveling', leveling], ['subtitles', subtitles]]) {
       if (on) t.paint(name, 0, t.seconds, typeof on === 'object' ? on : undefined);
     }
     return t;
@@ -85,7 +104,7 @@ export class Timeline {
 
   copy() {
     const t = new Timeline(this.seconds);
-    for (const n of LAYERS) t.layers[n] = this.layers[n].map((p) => ({ start: p.start, end: p.end, settings: { ...p.settings } }));
+    for (const n of ALL_LAYERS) t.layers[n] = this.layers[n].map((p) => ({ start: p.start, end: p.end, settings: cloneSettings(p.settings) }));
     return t;
   }
 
@@ -105,8 +124,8 @@ export class Timeline {
     const out = [];
     for (const p of this.layers[layer]) {
       if (p.end <= a || p.start >= b) { out.push(p); continue; }
-      if (p.start < a) out.push({ start: p.start, end: a, settings: { ...p.settings } });
-      if (p.end > b) out.push({ start: b, end: p.end, settings: { ...p.settings } });
+      if (p.start < a) out.push({ start: p.start, end: a, settings: cloneSettings(p.settings) });
+      if (p.end > b) out.push({ start: b, end: p.end, settings: cloneSettings(p.settings) });
     }
     this.layers[layer] = out;
     return this;
@@ -146,13 +165,19 @@ export class Timeline {
   }
 
   isEmpty() {
-    return LAYERS.every((n) => !this.layers[n].length);
+    return ALL_LAYERS.every((n) => !this.layers[n].length);
   }
 
+  /** Does this timeline use what version 2 added (subtitles, or noise cleaned by the browser)? */
+  usesV2() {
+    return this.layers.subtitles.length > 0 || this.layers.noise.some((p) => p.settings.browser === true);
+  }
+
+  /** The server's JSON. Version 2 only for a timeline that needs it, so the rest is written exactly as before. */
   toJSON() {
     const layers = {};
-    for (const n of LAYERS) if (this.layers[n].length) layers[n] = this.layers[n].map((p) => ({ start: p.start, end: p.end, ...p.settings }));
-    return { version: 1, seconds: this.seconds, layers };
+    for (const n of ALL_LAYERS) if (this.layers[n].length) layers[n] = this.layers[n].map((p) => ({ start: p.start, end: p.end, ...cloneSettings(p.settings) }));
+    return { version: this.usesV2() ? 2 : 1, seconds: this.seconds, layers };
   }
 
   equals(other) {
@@ -160,12 +185,14 @@ export class Timeline {
   }
 
   static fromJSON(obj, seconds = null) {
-    if (!obj || typeof obj !== 'object' || obj.version !== 1) throw new TimelineError('unsupported timeline');
+    if (!obj || typeof obj !== 'object' || ![1, 2].includes(obj.version)) throw new TimelineError('unsupported timeline');
     const t = new Timeline(seconds ?? obj.seconds);
     for (const [name, parts] of Object.entries(obj.layers || {})) {
-      if (!LAYERS.includes(name)) throw new TimelineError(`unknown layer ${name}`);
+      if (!ALL_LAYERS.includes(name)) throw new TimelineError(`unknown layer ${name}`);
+      if (obj.version === 1 && name === SUBTITLES) throw new TimelineError('subtitles need version 2');
       for (const p of parts) {
         const { start, end, ...rest } = p;
+        if (obj.version === 1 && rest.browser) throw new TimelineError('browser parts need version 2');
         t.paint(name, start, end, rest);
       }
     }

@@ -56,7 +56,7 @@ function take(list, n) {
   return out;
 }
 
-async function* viaMediabunny(file, { signal }) {
+async function* viaMediabunny(file, { signal, from = 0, to = Infinity }) {
   const { mb, input } = await openInput(file);
   try {
     const track = await input.getPrimaryAudioTrack();
@@ -68,12 +68,13 @@ async function* viaMediabunny(file, { signal }) {
     let rate = 0;
     const chunker = new Chunker(channels);
     const sink = new mb.AudioSampleSink(track);
-    yield { type: 'info', channels, sourceRate: await track.getSampleRate(), srcChannels };
+    const firstRate = await track.getSampleRate();
+    yield { type: 'info', channels, sourceRate: firstRate, srcChannels, base: from };
     // Respect sample timestamps: containers carry encoder priming (AAC: 1024 frames, MP3, Opus) as negative start
     // times or edit lists, and audio may start after the video. Trim negative time, pad gaps with silence, so the
     // cleaned audio stays in sync with the video.
-    let pos = 0; // source frames emitted so far (timeline starts at t = 0)
-    for await (const sample of sink.samples()) {
+    let pos = Math.round(from * firstRate); // source frames emitted so far (the timeline starts at t = 0; a range starts at `from`)
+    for await (const sample of from > 0 || to < Infinity ? sink.samples(from, to) : sink.samples()) {
       if (signal?.aborted) throw new DOMException('Canceled', 'AbortError');
       try {
         if (!resamplers || rate !== sample.sampleRate) {
@@ -134,7 +135,7 @@ async function* viaLibav(file, opts) {
     if (ev.type === 'info') {
       channels = ev.srcChannels === 2 ? 2 : 1;
       chunker = new Chunker(channels);
-      yield { type: 'info', channels, sourceRate: ev.sourceRate, srcChannels: ev.srcChannels };
+      yield { type: 'info', channels, sourceRate: ev.sourceRate, srcChannels: ev.srcChannels, base: 0 };
       continue;
     }
     if (!resamplers || rate !== ev.rate) {
@@ -171,7 +172,7 @@ async function* viaWebAudio(file, { signal }) {
   }
   const n = decoded.numberOfChannels;
   const channels = n === 2 ? 2 : 1;
-  yield { type: 'info', channels, sourceRate: decoded.sampleRate, srcChannels: n };
+  yield { type: 'info', channels, sourceRate: decoded.sampleRate, srcChannels: n, base: 0 };
   const total = decoded.length;
   const planes = Array.from({ length: n }, (_, i) => decoded.getChannelData(i));
   for (let pos = 0; pos < total; pos += CHUNK_FRAMES) {
@@ -188,11 +189,40 @@ async function* viaWebAudio(file, { signal }) {
   }
 }
 
+/** Keeps only the part of the stream between `start` and `end` seconds (the decoders that can't start in the middle read from the top). */
+async function* trimmed(gen, start, end) {
+  const S0 = Math.round(start * TARGET_RATE);
+  const S1 = end === Infinity ? Infinity : Math.round(end * TARGET_RATE);
+  let at = 0; // the frame (48 kHz, from the start of the file) the next chunk begins at
+  for await (const ev of gen) {
+    if (ev.type === 'info') { at = Math.round((ev.base || 0) * TARGET_RATE); yield { ...ev, base: start }; continue; }
+    const n = ev.chunk[0].length;
+    const a = at;
+    at += n;
+    if (a >= S1) return;
+    if (a + n <= S0) continue;
+    const from = Math.max(0, S0 - a);
+    const to = Math.min(n, S1 - a);
+    yield { type: 'chunk', chunk: from === 0 && to === n ? ev.chunk : ev.chunk.map((c) => c.slice(from, to)) };
+    if (a + n >= S1) return;
+  }
+}
+
 /**
  * Async generator of events: first {type:'info', channels, sourceRate, srcChannels}, then
  * {type:'chunk', chunk: Float32Array[]} (48 kHz, one array per output channel).
+ * `start` / `end` (seconds): only that part of the recording; mediabunny starts right there, the other decoders read up to it.
  */
 export async function* decodeToChunks(file, opts = {}) {
+  const { start = 0, end = Infinity } = opts;
+  if (start > 0 || end < Infinity) {
+    yield* trimmed(decodeAll(file, { ...opts, from: Math.max(0, start), to: end === Infinity ? Infinity : end + 0.5 }), Math.max(0, start), end);
+    return;
+  }
+  yield* decodeAll(file, opts);
+}
+
+async function* decodeAll(file, opts) {
   let produced = false;
   try {
     for await (const ev of viaMediabunny(file, opts)) {

@@ -127,13 +127,14 @@ function quietestCut(buf) {
 }
 
 /**
- * Subtitles for a whole recording, made in this browser.
+ * Subtitles for a whole recording, made in this browser. With `range` ({start, end} seconds) only that part, its times counted from the
+ * start of the recording.
  * @param {File} file
- * @param {{language?:string|null, durationHint?:number|null, signal?:AbortSignal,
+ * @param {{language?:string|null, durationHint?:number|null, signal?:AbortSignal, range?:{start:number,end:number},
  *   onProgress?:(p:{done:number,total:number|null,eta:number|null})=>void, onStage?:(s:string)=>void}} opts
  * @returns {Promise<{segments:{start:number,end:number,text:string}[], language:string, seconds:number}>}
  */
-export async function transcribeFile(file, { language = null, durationHint = null, signal, onProgress, onStage } = {}) {
+export async function transcribeFile(file, { language = null, durationHint = null, signal, onProgress, onStage, range = null } = {}) {
   const abort = () => stopSpeech();
   signal?.addEventListener('abort', abort, { once: true });
   const started = performance.now();
@@ -145,7 +146,8 @@ export async function transcribeFile(file, { language = null, durationHint = nul
     const segments = [];
     let buf = new Float32Array(WINDOW * 2);
     let have = 0;
-    let offset = 0; // seconds before buf[0]
+    const first = range ? range.start : 0;
+    let offset = first; // seconds before buf[0] (from the start of the recording)
     let resampler = null;
     let workStarted = 0;
     let workDone = 0;
@@ -155,7 +157,7 @@ export async function transcribeFile(file, { language = null, durationHint = nul
       const total = durationHint || null;
       const elapsed = (performance.now() - (workStarted || started)) / 1000;
       const rate = workDone > 0 && elapsed > 0 ? workDone / elapsed : 0;
-      onProgress({ done: offset, total, eta: total && rate ? Math.max(0, (total - offset) / rate) : null });
+      onProgress({ done: offset - first, total, eta: total && rate ? Math.max(0, (total - (offset - first)) / rate) : null });
     };
     const run = async (piece) => {
       if (signal?.aborted) throw new DOMException('Canceled', 'AbortError');
@@ -178,7 +180,7 @@ export async function transcribeFile(file, { language = null, durationHint = nul
       have += mono.length;
     };
 
-    for await (const ev of decodeToChunks(file, { signal })) {
+    for await (const ev of decodeToChunks(file, range ? { signal, start: range.start, end: range.end } : { signal })) {
       if (ev.type !== 'chunk') continue;
       const ch = ev.chunk;
       let mono = ch[0];

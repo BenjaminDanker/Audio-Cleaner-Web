@@ -45,7 +45,7 @@ export function prepare(model) {
   const wanted = {
     rebuild: intersect(ranges('rebuild'), have('rebuild')),
     echo: secondTrack ? intersect(ranges('echo'), have('echo')) : [],
-    noise: tl.parts('noise').map((p) => ({ ranges: intersect([[p.start, p.end]], have('noise')), a: mixOf(p.settings.strength_db) })),
+    noise: tl.parts('noise').map((p) => ({ ranges: intersect([[p.start, p.end]], have('noise')), a: p.settings.browser ? 0 : mixOf(p.settings.strength_db) })), // (a part the browser cleaned is already at its strength)
   };
   const lv = tl.parts('leveling');
   return {
