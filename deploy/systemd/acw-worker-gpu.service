@@ -1,5 +1,5 @@
 [Unit]
-Description=Audio Cleaner GPU transcription worker (no network)
+Description=Audio Cleaner GPU worker: heavy noise removal, Voice rebuild, fast transcription (no network)
 OnFailure=acw-alert@%n.service
 
 [Service]

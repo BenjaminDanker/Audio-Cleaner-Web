@@ -112,6 +112,15 @@ the older code: check the "running now" line and wait for jobs to finish.)
 
 Rollback keeps units, packages and the database as they are; schema changes are additive.
 
+### Node.js
+
+The website is built on primary-ram with Node 22 (the same major as CI); `deploy/publish-web.sh` stops on anything older
+than 20. Ubuntu 24.04's own `nodejs` is 18, so Node comes from NodeSource:
+
+    curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh
+    sudo apt-get install -y nodejs        # replaces Ubuntu's nodejs and npm packages
+    node --version                        # v22.x
+
 ## Services (acw's user units, linger on)
 
 ```bash

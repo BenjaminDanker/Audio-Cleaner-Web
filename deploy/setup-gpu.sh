@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Optional: the GPU transcription worker's Python environment (acw's ~/audio-cleaner/venv-gpu; run by the owner it
+# Optional: the GPU worker's Python environment, for heavy noise removal, Voice rebuild and fast transcription (acw's
+# ~/audio-cleaner/venv-gpu; run by the owner it
 # stages these files for acw and runs this script there as acw).
 # Needs an NVIDIA driver (nvidia-smi works). Then run deploy/install.sh, which
 # enables acw-worker-gpu when this environment exists.

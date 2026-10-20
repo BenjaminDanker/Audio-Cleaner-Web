@@ -548,9 +548,9 @@ def check_installation(now: int) -> list[Finding]:
         pass
     gpu_unit_active = states.get("acw-worker-gpu.service", {}).get("ActiveState") == "active"
     out.append(Finding("gpu_worker_silent", gpu_unit_active and age is not None and age > 45 * 60 and running == 0,
-                       "The GPU transcription worker is not reporting in",
+                       "The GPU worker is not reporting in",
                        "The GPU worker is running but has not marked itself idle for over 45 minutes while nothing else is running; "
-                       "CPU workers are taking the transcription jobs it should.\nCheck: acw-logs acw-worker-gpu -n 60 --no-pager\n"))
+                       "its work (heavy noise removal, Voice rebuild, fast transcription) waits or runs more slowly on the CPU workers.\nCheck: acw-logs acw-worker-gpu -n 60 --no-pager\n"))
     return out
 
 

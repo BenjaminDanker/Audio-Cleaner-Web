@@ -20,6 +20,13 @@ if [ -n "$ACW_SERVICE_USER" ] && [ "$(id -un)" = "$ACW_SERVICE_USER" ]; then
   exit 1
 fi
 cd "$REPO/web"
+# The website's libraries need Node 20 or newer (CI builds with 22); an older one only warns at npm ci and breaks later.
+node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ "$node_major" -lt 20 ]; then
+  echo "publish-web.sh: Node $(node --version 2>/dev/null || echo missing) is too old; the website needs Node 20 or newer (22 like CI)." >&2
+  echo "  Install Node 22 (docs/operations.md, \"Node.js\"), then run the deploy again." >&2
+  exit 1
+fi
 npm ci --no-audit --no-fund
 LEGAL_ENV="$(bash "$REPO/deploy/legal-archive.sh")"   # version and archive the Terms and the Privacy Policy; the versions for the build (stdout)
 while IFS='=' read -r name value; do export "$name=$value"; done <<< "$LEGAL_ENV"
