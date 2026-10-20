@@ -6,10 +6,6 @@ held equals the sum of its active holds). A snapshot that fails is moved aside a
 with an error (so the unit fails and the owner is mailed) and the result is written to `backup-status.json`
 for the monitor.
 
-The archive of the published Terms and Privacy Policy (data/legal, one file per version, never changed: deploy/legal-archive.sh,
-docs/operations.md "Legal versions") is copied to <DIR>/legal in the same run. A file that is there already is left alone; one whose
-copy differs from it fails the backup, because an archived version must never change.
-
 Optional copy off this machine: set ACW_BACKUP_OFFBOX to an rsync destination (`user@host:/path/` or a local
 directory), plus either ACW_BACKUP_AGE_RECIPIENT (an age public key) or ACW_BACKUP_PASSPHRASE_FILE (a file with
 a passphrase for `gpg --symmetric`). The file is encrypted before it leaves; nothing happens when the variable
@@ -28,7 +24,6 @@ import time
 from pathlib import Path
 
 from . import db
-from .config import get_settings
 
 STATUS_FILE = "backup-status.json"
 KEEP_BAD = 3
@@ -105,34 +100,6 @@ def copy_offbox(gz: Path, dest: str) -> str:
     return enc.name
 
 
-def sync_legal(out_dir: Path) -> int:
-    """Copy data/legal (the archive of every published Terms and Privacy Policy) to out_dir/legal. Returns how many files were new.
-    Files are never replaced: a copy that differs from its original means an archived version changed, which is an error."""
-    src = get_settings().data_dir / "legal"
-    if not src.is_dir():
-        return 0
-    dst = out_dir / "legal"
-    copied = 0
-    try:
-        dst.mkdir(exist_ok=True, mode=0o700)
-        for f in sorted(src.iterdir()):
-            if not f.is_file() or f.name.startswith(".") or f.name.endswith(".part"):  # (.part: the deploy is writing it right now)
-                continue
-            target = dst / f.name
-            if target.exists():
-                if target.read_bytes() != f.read_bytes():
-                    raise BackupError(f"legal archive: {f.name} differs from its copy in {dst}; an archived version must never change")
-                continue
-            tmp = dst / f".{f.name}.tmp"
-            shutil.copyfile(f, tmp)
-            os.chmod(tmp, 0o600)
-            tmp.replace(target)
-            copied += 1
-    except OSError as e:
-        raise BackupError(f"copying the legal archive failed: {e}") from e
-    return copied
-
-
 def _prune(out_dir: Path, keep: int) -> None:
     """Old snapshots go, also when tonight's failed (for instance the off-machine copy): a backup that fails every night
     must not fill the disk. Failed snapshots (*.bad) are kept for a look, but only the newest few."""
@@ -163,7 +130,6 @@ def run(out_dir: Path, keep: int = 30) -> Path:
         status.update(result)
         if result["integrity"] != "ok" or result["ledger"] != "ok":
             raise BackupError(f"snapshot failed its checks: {result}")
-        status["legal"] = sync_legal(out_dir)
         dest = os.environ.get("ACW_BACKUP_OFFBOX")
         if dest:
             status["offbox"] = copy_offbox(final, dest)

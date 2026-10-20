@@ -1,6 +1,6 @@
 # Checks for the server, the shared audio code, the live engine, the website and the deploy scripts: the server and
 # common tests on Python 3.12 with the locked packages (the same set production runs), the live engine's unit tests
-# (native/live), the website build, and shellcheck on deploy/*.sh (the host scripts and the acw-* wrappers in deploy/host/ included). Tests that need FFmpeg, libDF or the models skip themselves here; they run on the production host.
+# (native/live), the website build and the Terms/Privacy text test, and shellcheck on deploy/*.sh (the host scripts and the acw-* wrappers in deploy/host/ included). Tests that need FFmpeg, libDF or the models skip themselves here; they run on the production host.
 # Every third-party action is pinned to a full commit SHA.
 name: Server and website
 
@@ -94,6 +94,11 @@ jobs:
           mkdir -p public/dfn
           for f in df.js LICENSE-MIT LICENSE-APACHE; do echo stand-in > "public/dfn/$f"; done
           npm run build
+
+      - name: Terms and Privacy text (renders, hashes the same way every time, versions are decided from the hash)
+        # No server archive needed: deploy/legal-archive.sh does the real versioning on the production host (docs/operations.md, "Legal versions").
+        working-directory: web
+        run: node tests/legal-versions.mjs
 
   shell:
     name: Deploy scripts (shellcheck)

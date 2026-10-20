@@ -111,7 +111,7 @@ def login(client, email="user@example.com", accept_tos=True):
     me = client.get("/api/me").json()
     h = {"X-CSRF-Token": me["csrfToken"], "Origin": ORIGIN}
     if accept_tos:
-        assert client.post("/api/account/tos", json={"version": auth.TOS_VERSION}, headers=h).status_code == 200
+        assert client.post("/api/account/tos", json={"version": auth.tos_version()}, headers=h).status_code == 200
     return me["user"]["id"], h
 
 

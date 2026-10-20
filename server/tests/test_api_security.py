@@ -33,7 +33,7 @@ def test_session_cookie_is_httponly_and_only_its_hash_is_stored(client):
 
 def test_state_changes_need_csrf_and_origin(client):
     _, h = login(client, accept_tos=False)
-    body = {"version": auth.TOS_VERSION}
+    body = {"version": auth.tos_version()}
     assert client.post("/api/account/tos", json=body).status_code == 403
     assert client.post("/api/account/tos", json=body, headers={"X-CSRF-Token": "nope"}).status_code == 403
     assert client.post("/api/account/tos", json=body, headers={**h, "Origin": "https://evil.example"}).status_code == 403
@@ -85,7 +85,7 @@ def test_terms_are_recorded_at_sign_in_and_again_when_they_change(client):
     assert client.post("/api/jobs", json=body, headers=h).status_code == 402  # no credit; no Terms step either
     db.execute("UPDATE users SET tos_version = 'old' WHERE id = ?", (uid,))
     client.post("/api/jobs", json=body, headers=h)  # continuing to use the service accepts the new version
-    assert db.one("SELECT tos_version FROM users WHERE id = ?", (uid,))["tos_version"] == auth.TOS_VERSION
+    assert db.one("SELECT tos_version FROM users WHERE id = ?", (uid,))["tos_version"] == auth.tos_version()
     assert db.one("SELECT count(*) AS n FROM audit_log WHERE user_id = ? AND action = 'tos_accepted'", (uid,))["n"] == 2
 
 

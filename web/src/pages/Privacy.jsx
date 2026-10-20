@@ -1,6 +1,5 @@
 import { Link } from 'react-router';
-import { useAuth } from '../auth.jsx';
-import Legal from '../components/Legal.jsx';
+import Legal, { LEGAL_VERSIONS } from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
 import { operatorLine, SITE } from '../site.js';
 
@@ -22,12 +21,10 @@ export default function Privacy() {
   usePageTitle('Privacy Policy');
   const operator = operatorLine() || 'the operator of this site';
   const email = SITE.supportEmail.trim();
-  const { contact } = useAuth();
-  const form = contact ? <Link to="/contact">contact form</Link> : null;
   return (
-    <Legal title="Privacy Policy" sections={SECTIONS} version="2026-10-20">
+    <Legal title="Privacy Policy" sections={SECTIONS} version={LEGAL_VERSIONS.privacy}>
       <h2 id="who">1. Who we are</h2>
-      <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services.{(form || email) && <> Contact: {form && <>use the {form}</>}{form && email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}.</>} The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
+      <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services. Contact: use the <Link to="/contact">contact form</Link>{email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}. The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
       <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
 
       <h2 id="browser">2. Free noise removal and subtitles in your browser</h2>
@@ -88,7 +85,7 @@ export default function Privacy() {
       </ul>
 
       <h2 id="rights">9. Your rights</h2>
-      <p>Depending on where you live (for example under the CCPA) you may have the right to access, correct, delete or export your data, and to object to or restrict some processing. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, {form || email ? <>{form && <>write to us through the {form} (choose &ldquo;Privacy or my data&rdquo;; the same form helps with refunds and billing questions)</>}{form && email && ', or '}{email && <>email us at <a href={`mailto:${email}`}>{email}</a></>}</> : <>use the <Link to="/app/account">Account page</Link></>} and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
+      <p>Depending on where you live (for example under the CCPA) you may have the right to access, correct, delete or export your data, and to object to or restrict some processing. You can download a copy of your data or delete your account yourself on the <Link to="/app/account">Account page</Link>; for anything else, write to us through the <Link to="/contact">contact form</Link> (choose &ldquo;Privacy or my data&rdquo;; the same form helps with refunds and billing questions){email && ', or '}{email && <>email us at <a href={`mailto:${email}`}>{email}</a></>} and we will respond within the time the law requires. Our legal bases are performing our contract with you, our legitimate interest in security and abuse prevention, and legal obligations (such as tax records).</p>
 
       <h2 id="security">10. Security</h2>
       <p>Connections use TLS. Session tokens, sign-in links and API keys are stored only as hashes. Billing and key management need a signed-in browser session, and state-changing requests are protected against cross-site request forgery. No system is perfectly secure; tell us if you find a problem.</p>

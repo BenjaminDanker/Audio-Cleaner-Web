@@ -1,14 +1,15 @@
 import { Link } from 'react-router';
-import { useAuth } from '../auth.jsx';
 import { SITE } from '../site.js';
 
-export const LEGAL_VERSION = '2026-10-20';
+// The version of the Terms and of the Privacy Policy, filled in by the build (vite.config.js) from what deploy/legal-archive.sh
+// decided: the date a text first went live (docs/operations.md, "Legal versions"). Nobody edits a version by hand. Without a deploy
+// (npm run dev, the tests) both are "dev".
+export const LEGAL_VERSIONS = __LEGAL_VERSIONS__;
+export const LEGAL_VERSION = LEGAL_VERSIONS.terms; // the Terms' version, which signed-in users accept
 
-/** Wrapper for legal text: version and table of contents. `version`: this page's own version date, when it changed
- *  after LEGAL_VERSION (the Terms' version, which signed-in users accept). */
+/** Wrapper for legal text: version and table of contents. `version`: this page's own version (LEGAL_VERSIONS.terms or .privacy). */
 export default function Legal({ title, sections, version = LEGAL_VERSION, children }) {
   const email = SITE.supportEmail.trim();
-  const { contact } = useAuth();
   return (
     <>
       <div className="container page">
@@ -23,9 +24,7 @@ export default function Legal({ title, sections, version = LEGAL_VERSION, childr
             </ol>
           </nav>
           {children}
-          {contact
-            ? <p className="small muted">Questions? <Link to="/contact">Write to us</Link>{email && <>, or email <a href={`mailto:${email}`}>{email}</a></>}. Or see <Link to="/">the home page</Link>.</p>
-            : email && <p className="small muted">Questions? Email <a href={`mailto:${email}`}>{email}</a>, or see <Link to="/">the home page</Link>.</p>}
+          <p className="small muted">Questions? <Link to="/contact">Write to us</Link>{email && <>, or email <a href={`mailto:${email}`}>{email}</a></>}. Or see <Link to="/">the home page</Link>.</p>
         </article>
       </div>
     </>

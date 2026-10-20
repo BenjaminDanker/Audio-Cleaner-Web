@@ -58,6 +58,17 @@ function sitePlugin(origin, base) {
   };
 }
 
+// The version of the Terms and of the Privacy Policy (src/components/Legal.jsx): deploy/legal-archive.sh decides them from the text
+// and deploy/publish-web.sh passes them in the environment. "dev" for a build outside a deploy (npm run dev, the tests, CI).
+function legalVersions() {
+  const one = (name) => {
+    const v = process.env[name] || 'dev';
+    if (!/^[0-9A-Za-z._-]{1,32}$/.test(v)) throw new Error(`${name}=${JSON.stringify(v)} is not a version`);
+    return v;
+  };
+  return JSON.stringify({ terms: one('ACW_LEGAL_TERMS_VERSION'), privacy: one('ACW_LEGAL_PRIVACY_VERSION') });
+}
+
 // The app is served under VITE_BASE (default "/": its own domain; e.g. "/audio/" when it shares a host).
 // API calls go to `${BASE_URL}api/` on the same origin, so no CORS and cookie auth just works.
 export default defineConfig(({ mode }) => {
@@ -73,7 +84,7 @@ export default defineConfig(({ mode }) => {
     // The speech runtime's build that loads its WebAssembly from where we say (the gated public/dfn/ort/ folder,
     // src/media/transcribe.worker.js) instead of having a 26 MB copy of it put among the public assets.
     resolve: { conditions: ['onnxruntime-web-use-extern-wasm', ...defaultClientConditions] },
-    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_JS_SIZE__: JSON.stringify(dfnJsSize()), __MODEL_HOST__: JSON.stringify(modelHost()), __LIBAV_DIR__: JSON.stringify(libavDir()), __ORT_DIR__: JSON.stringify(ortDir()) },
+    define: { __DFN_VERSION__: JSON.stringify(dfnVersion()), __DFN_JS_SIZE__: JSON.stringify(dfnJsSize()), __MODEL_HOST__: JSON.stringify(modelHost()), __LIBAV_DIR__: JSON.stringify(libavDir()), __ORT_DIR__: JSON.stringify(ortDir()), __LEGAL_VERSIONS__: legalVersions() },
     worker: { format: 'es' },
     build: {
       target: 'es2022',

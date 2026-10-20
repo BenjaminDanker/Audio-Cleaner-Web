@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +31,6 @@ from .security import (
     user_agent,
 )
 
-TOS_VERSION = "2026-10-20"
 log = logging.getLogger(__name__)
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 # A browser that has not been seen for this long must sign in again (the session also has a fixed life).
@@ -109,47 +107,53 @@ def link_identity(provider: str, provider_user_id: str, email: str, display_name
 
 # ---------------------------------------------------------------- sessions
 
-def terms_sha256(contact_form: bool = True) -> str | None:
-    """SHA-256 of the text of the Terms at TOS_VERSION, from web/legal-versions.json (the pin that web/tests/legal-versions.mjs keeps equal
-    to the page; deploy/install.sh ships it next to the code as <app>/legal-versions.json). The text has two variants, with the contact form
-    on (`sha256`) and off (`sha256NoContact`); `contact_form` picks one. None when the file is missing, unreadable, lacks that variant or
-    pins another version than TOS_VERSION: an acceptance is then recorded without a hash, never with the hash of other text."""
-    here = Path(__file__).resolve().parent.parent  # deployed: <app>/acw/auth.py; a checkout: <repo>/server/acw/auth.py
-    override = os.environ.get("ACW_LEGAL_VERSIONS")
-    for f in ([Path(override)] if override else []) + [here / "legal-versions.json", here.parent / "web" / "legal-versions.json"]:
-        if not f.is_file():
-            continue
-        try:
-            terms = json.loads(f.read_text(encoding="utf-8"))["terms"]
-            digest = str(terms["sha256" if contact_form else "sha256NoContact"])
-            if terms["version"] == TOS_VERSION and re.fullmatch(r"[0-9a-f]{64}", digest):
-                return digest
-            log.warning("%s pins Terms version %s, not %s: acceptances are recorded without a text hash", f, terms.get("version"), TOS_VERSION)
-        except (OSError, ValueError, KeyError, TypeError) as e:
-            log.warning("cannot read the Terms pin %s: %s", f, e)
-        return None
-    return None
+# The Terms that are live: data/legal/current.json, written by deploy/legal-archive.sh when a deploy sees new text (docs/operations.md,
+# "Legal versions"): {"terms": {"version": "2026-10-20", "sha256": "<hash of the text>"}, "privacy": {...}}. Without it (development, the tests) the
+# version is "dev" and acceptances carry no hash.
+DEV_TOS_VERSION = "dev"
+_VERSION_RE = re.compile(r"[0-9A-Za-z._-]{1,32}")
+_terms_seen: dict = {"key": None, "value": (DEV_TOS_VERSION, None)}
 
 
-def contact_form_on() -> bool | None:
-    """Whether the contact form is on right now (the same answer /api/me gives: mail is set up), None when that cannot be told."""
+def _read_terms(f: Path, exists: bool) -> tuple[str, str | None]:
+    say = log.warning if get_settings().production else log.info
+    if not exists:
+        say("%s is missing: the Terms version is %s and acceptances carry no text hash (deploy/legal-archive.sh writes it)", f, DEV_TOS_VERSION)
+        return DEV_TOS_VERSION, None
     try:
-        from . import alerts
+        terms = json.loads(f.read_text(encoding="utf-8"))["terms"]
+        version, digest = str(terms["version"]), str(terms["sha256"])
+        if _VERSION_RE.fullmatch(version) and re.fullmatch(r"[0-9a-f]{64}", digest):
+            return version, digest
+        raise ValueError("not a version and a SHA-256")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        log.warning("cannot use %s (%s): the Terms version is %s and acceptances carry no text hash", f, e, DEV_TOS_VERSION)
+        return DEV_TOS_VERSION, None
 
-        return bool(alerts.contact_configured())
-    except Exception:  # noqa: BLE001 - recording an acceptance must never fail on this
-        log.warning("cannot tell whether the contact form is on", exc_info=True)
-        return None
+
+def terms_current() -> tuple[str, str | None]:
+    """(version, SHA-256 of the text) of the Terms that are live. Read again whenever the file changes, so a deploy needs no restart."""
+    f = get_settings().data_dir / "legal" / "current.json"
+    try:
+        st = f.stat()
+        key = (str(f), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (str(f), None, None)
+    if _terms_seen["key"] != key:
+        _terms_seen.update(key=key, value=_read_terms(f, key[1] is not None))
+    return _terms_seen["value"]
+
+
+def tos_version() -> str:
+    """The version of the Terms users accept; a user whose recorded version differs sees the "We've updated our Terms" notice."""
+    return terms_current()[0]
 
 
 def tos_detail(how: str | None = None) -> str:
-    """The audit detail of an acceptance: the version, the hash of the Terms text that was on the website (the variant with the contact
-    form on or off, as it is now; if that cannot be told, the "on" text and `contact-form:unknown`), and how it came about,
-    e.g. "2026-10-20 sha256:60a6d548... contact-form:on (sign-in)"."""
-    contact = contact_form_on()
-    digest = terms_sha256(contact is not False)
-    note = f" sha256:{digest} contact-form:{'unknown' if contact is None else 'on' if contact else 'off'}" if digest else ""
-    return TOS_VERSION + note + (f" ({how})" if how else "")
+    """The audit detail of an acceptance: the version, the hash of the Terms text it names and how it came about,
+    e.g. "2026-10-20 sha256:60a6d548... (sign-in)"; just the version (and how) when there is no hash (development)."""
+    version, digest = terms_current()
+    return version + (f" sha256:{digest}" if digest else "") + (f" ({how})" if how else "")
 
 
 def accept_terms(user_id: str, how: str, ip: str | None = None) -> None:
@@ -157,9 +161,10 @@ def accept_terms(user_id: str, how: str, ip: str | None = None) -> None:
     by signing in (the sign-in page says so), or by continuing to use the
     service after the Terms changed. Kept as consent evidence (disputes)."""
     row = db.one("SELECT tos_version FROM users WHERE id = ?", (user_id,))
-    if row is None or row["tos_version"] == TOS_VERSION:
+    version = tos_version()
+    if row is None or row["tos_version"] == version:
         return
-    db.execute("UPDATE users SET tos_version = ?, tos_accepted_at = ? WHERE id = ?", (TOS_VERSION, db.now(), user_id))
+    db.execute("UPDATE users SET tos_version = ?, tos_accepted_at = ? WHERE id = ?", (version, db.now(), user_id))
     db.audit("user", "tos_accepted", user_id=user_id, detail=tos_detail(how), ip=ip)
 
 

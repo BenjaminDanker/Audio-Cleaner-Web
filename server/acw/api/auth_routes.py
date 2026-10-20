@@ -329,6 +329,7 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
             # This key's own monthly spending limit and what it has used (absent when it has none).
             **({"keyLimit": limit} if (limit := keycaps.key_limit(principal.api_key_id)) else {}),
         }
+    tos_version = auth.tos_version()
     return {
         "signedIn": True,
         "contactForm": contact,
@@ -338,8 +339,8 @@ def me(principal: auth.Principal | None = Depends(auth.optional_principal)) -> d
             "displayName": user["display_name"],
             "isAdmin": bool(user["is_admin"]),
             "status": user["status"],
-            "tosAccepted": user["tos_version"] == auth.TOS_VERSION,
-            "tosVersion": auth.TOS_VERSION,
+            "tosAccepted": user["tos_version"] == tos_version,
+            "tosVersion": tos_version,
             "createdAt": user["created_at"],
         },
         "csrfToken": principal.csrf_token,
@@ -365,11 +366,12 @@ class TosBody(BaseModel):
 
 @me_router.post("/account/tos")
 def accept_tos(body: TosBody, request: Request, principal: auth.Principal = Depends(auth.require_session)) -> dict:
-    if body.version != auth.TOS_VERSION:
+    version = auth.tos_version()
+    if body.version != version:
         raise HTTPException(status_code=409, detail="Terms changed, reload the page.")
     db.execute(
         "UPDATE users SET tos_version = ?, tos_accepted_at = ? WHERE id = ?",
-        (auth.TOS_VERSION, db.now(), principal.user_id),
+        (version, db.now(), principal.user_id),
     )
     db.audit("user", "tos_accepted", user_id=principal.user_id, detail=auth.tos_detail("notice"), ip=client_ip(request))
     return {"ok": True}

@@ -1,6 +1,5 @@
 import { Link } from 'react-router';
-import { useAuth } from '../auth.jsx';
-import Legal from '../components/Legal.jsx';
+import Legal, { LEGAL_VERSIONS } from '../components/Legal.jsx';
 import { usePageTitle } from '../hooks.js';
 import { operatorLine, SITE } from '../site.js';
 
@@ -26,9 +25,8 @@ export default function Terms() {
   const jurisdiction = SITE.jurisdiction.trim();
   const email = SITE.supportEmail.trim();
   const address = SITE.legalAddress.trim();
-  const { contact } = useAuth();
   return (
-    <Legal title="Terms of Service" sections={SECTIONS} version="2026-10-20">
+    <Legal title="Terms of Service" sections={SECTIONS} version={LEGAL_VERSIONS.terms}>
       <h2 id="about">1. About these terms</h2>
       <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By signing in (which creates your account the first time) you agree to them, and buying credit or using a paid feature confirms it. If you do not agree, do not use the Service. The free noise removal runs on your own device; it needs a free account, but no credit.</p>
       <p><b>Where the Service is available.</b> The Service is not available to people in the European Union or European Economic Area (EU/EEA), the United Kingdom or Switzerland. Please do not create an account, buy credit or use the Service if you are there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
@@ -115,11 +113,9 @@ export default function Terms() {
       <p>
         These terms are governed by the laws of {jurisdiction || 'the place where the operator is established'}, and the courts {jurisdiction ? <>of {jurisdiction}</> : 'there'} have exclusive jurisdiction, without affecting any mandatory consumer rights you have in your country of residence. If a provision is unenforceable, the rest stays in force. These terms are the whole agreement between you and us about the Service.
       </p>
-      {(contact || email || address) && (
-        <p>
-          Contact: {contact && <>use the <Link to="/contact">contact form</Link></>}{contact && (email || address) ? ', or ' : ''}{email && <a href={`mailto:${email}`}>{email}</a>}{email && address ? ', ' : ''}{address}
-        </p>
-      )}
+      <p>
+        Contact: use the <Link to="/contact">contact form</Link>{email || address ? ', or ' : ''}{email && <a href={`mailto:${email}`}>{email}</a>}{email && address ? ', ' : ''}{address}
+      </p>
     </Legal>
   );
 }

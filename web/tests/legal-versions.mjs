@@ -1,11 +1,17 @@
-// The version dates of the Terms and the Privacy Policy: the text of each page has to match web/legal-versions.json (the pin), unless
-// its version date was changed; and the Terms' date has to be the same in the page, LEGAL_VERSION (src/components/Legal.jsx) and
-// TOS_VERSION (server/acw/auth.py), because that date is what signed-in users accept and what the audit log records. No backend, no browser.
-// Fails with: change the version date in the page, LEGAL_VERSION/TOS_VERSION where they apply, and update the pin (npm run legal:pin).
+// The Terms and the Privacy Policy text, as the deploy versions them (docs/operations.md, "Legal versions"): both pages render, their text
+// is extracted and hashed the same way every time, the hash does not depend on the version shown, and the version of a text is decided
+// from the hash alone (new text -> today's date, -2, -3 for more changes the same day; known text -> its version). No server archive, no
+// backend, no browser: the CI web job runs this too.
 // Usage: node tests/legal-versions.mjs
 import assert from 'node:assert/strict';
-import { archiveHtml, hashOfArchive, pinProblems, readPin, renderAll, sha256, textOf, variantsOf, versionProblems } from '../scripts/legal-snapshot.mjs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { archiveHtml, archiveName, currentJson, decide, hashOfArchive, parseIndex, renderAll, sha256, textHash, textOf } from '../scripts/legal-snapshot.mjs';
 
+const WEB = fileURLToPath(new URL('..', import.meta.url));
 let failed = 0;
 async function check(name, fn) {
   try {
@@ -19,56 +25,27 @@ async function check(name, fn) {
 
 const r = await renderAll();
 
-await check('both pages render, with the contact form on and off, with their version date; the text hashes are the same every time', async () => {
+await check('both pages render with their text, the contact form always on; the text hashes are the same every time', async () => {
   for (const k of ['terms', 'privacy']) {
-    assert.match(r[k].version, /^\d{4}-\d{2}-\d{2}/, `${k} version`);
     assert.ok(r[k].text.length > 5000, `${k}: only ${r[k].text.length} characters of text`);
     assert.match(r[k].sha256, /^[0-9a-f]{64}$/);
-    assert.match(r[k].noContact.sha256, /^[0-9a-f]{64}$/);
-    assert.notEqual(r[k].noContact.sha256, r[k].sha256, `${k}: the contact form should show in the text`);
-    assert.ok(r[k].text.includes('[/contact]') && !r[k].noContact.text.includes('[/contact]'), `${k}: the link to the contact form`);
+    assert.ok(r[k].text.includes('[/contact]'), `${k}: the link to the contact form`);
   }
   const again = await renderAll();
+  for (const k of ['terms', 'privacy']) assert.equal(again[k].sha256, r[k].sha256);
+  assert.match(r.terms.text, /^Terms of Service\nVersion dev\.\n/);
+  assert.match(r.privacy.text, /^Privacy Policy\nVersion dev\.\n/);
+  return `terms ${r.terms.sha256.slice(0, 12)}, privacy ${r.privacy.sha256.slice(0, 12)}`;
+});
+
+await check('the pages show the versions the build gives them, and the hash does not change with them', async () => {
+  const v = await renderAll({ terms: '2030-05-06', privacy: '2030-05-06-2' });
+  assert.match(v.terms.text, /^Terms of Service\nVersion 2030-05-06\.\n/);
+  assert.match(v.privacy.text, /^Privacy Policy\nVersion 2030-05-06-2\.\n/);
   for (const k of ['terms', 'privacy']) {
-    assert.equal(again[k].sha256, r[k].sha256);
-    assert.equal(again[k].noContact.sha256, r[k].noContact.sha256);
+    assert.notEqual(v[k].text, r[k].text);
+    assert.equal(v[k].sha256, r[k].sha256, `${k}: the version line is not part of the hash`);
   }
-  assert.match(r.terms.text, /^Terms of Service\nVersion /);
-  assert.match(r.privacy.text, /^Privacy Policy\nVersion /);
-  return `terms ${r.terms.version} ${r.terms.sha256.slice(0, 12)}/${r.terms.noContact.sha256.slice(0, 12)}, privacy ${r.privacy.version} ${r.privacy.sha256.slice(0, 12)}/${r.privacy.noContact.sha256.slice(0, 12)}`;
-});
-
-await check('the text of each page matches web/legal-versions.json (a changed text needs a new version date and a new pin)', () => {
-  const problems = pinProblems(r, readPin());
-  assert.deepEqual(problems, [], problems.join('\n'));
-});
-
-await check('the Terms version is the same in the page, LEGAL_VERSION and TOS_VERSION', () => {
-  const problems = versionProblems(r);
-  assert.deepEqual(problems, [], problems.join('\n'));
-});
-
-await check('a text changed under an unchanged version date fails (either variant) and says what to change; a new date without the pin fails too', () => {
-  const pin = Object.fromEntries(['terms', 'privacy'].map((k) => [k, { version: r[k].version, sha256: r[k].sha256, sha256NoContact: r[k].noContact.sha256 }])); // (what the real pin would be)
-  assert.equal(pinProblems(r, pin).length, 0);
-  for (const [field, which] of [['sha256', 'contact form on'], ['sha256NoContact', 'contact form off']]) {
-    const same = pinProblems(r, { ...pin, terms: { ...pin.terms, [field]: sha256('an earlier wording') } });
-    assert.equal(same.length, 1);
-    for (const w of ['Terms of Service', 'the text changed', which, 'still', 'version date', 'LEGAL_VERSION', 'TOS_VERSION', 'update the pin']) assert.ok(same[0].includes(w), `message lacks "${w}": ${same[0]}`);
-  }
-  const older = { ...pin, privacy: { version: '2020-01-01', sha256: sha256('x'), sha256NoContact: sha256('y') } };
-  const stale = pinProblems(r, older);
-  assert.equal(stale.length, 1);
-  assert.ok(stale[0].includes('Privacy Policy') && stale[0].includes('pins 2020-01-01') && stale[0].includes('Update the pin'), stale[0]);
-  assert.equal(pinProblems(r, { terms: pin.terms }).length, 1); // no entry for the other page
-  const oneVariant = pinProblems(r, { ...pin, terms: { version: pin.terms.version, sha256: pin.terms.sha256 } });
-  assert.ok(oneVariant.length === 1 && oneVariant[0].includes('lacks'), oneVariant.join());
-});
-
-await check('a Terms date that differs from LEGAL_VERSION or TOS_VERSION is reported', () => {
-  const p = versionProblems({ ...r, terms: { ...r.terms, version: '2000-01-01' } });
-  assert.equal(p.length, 1);
-  assert.ok(p[0].includes('2000-01-01') && p[0].includes('LEGAL_VERSION') && p[0].includes('TOS_VERSION'), p[0]);
 });
 
 await check('the hash is of the text: markup and classes do not change it, words and link targets do', () => {
@@ -78,24 +55,93 @@ await check('the hash is of the text: markup and classes do not change it, words
   assert.notEqual(sha256(textOf(a.replace('welcome', 'welcome back'))), base);
   assert.notEqual(sha256(textOf(a.replace('/privacy', '/terms'))), base);
   assert.equal(textOf('<p>a &ldquo;b&rdquo; &#x27;c&#39; &lt;d&gt;</p>'), 'a “b” \'c\' <d>\n');
+  const withVersion = (v) => textOf(`<h1>Terms</h1><p>Version ${v}.</p><p>Body</p>`);
+  assert.equal(textHash(withVersion('2026-01-01')), textHash(withVersion('dev')));
+  assert.notEqual(textHash(withVersion('1').replace('Body', 'Other body')), textHash(withVersion('1')));
 });
 
-await check('the archive has a page for each variant, named after the version; each carries its version, the render date and a hash that can be recomputed from the file alone', () => {
-  const files = variantsOf(r);
-  assert.deepEqual(files.map((v) => v.file), [
-    `terms-${r.terms.version}.html`, `terms-${r.terms.version}-no-contact.html`, `privacy-${r.privacy.version}.html`, `privacy-${r.privacy.version}-no-contact.html`,
-  ]);
+await check('an archived page is a standalone document with its version and a hash that can be recomputed from the file alone', async () => {
+  const v = await renderAll({ terms: '2030-05-06', privacy: '2030-05-06' });
   const seen = new Set();
-  for (const v of files) {
-    const html = archiveHtml(v.doc, v.page, r.site, { renderedAt: '2026-01-02T03:04:05Z', commit: 'abc1234', variant: v.variant });
+  for (const k of ['terms', 'privacy']) {
+    const html = archiveHtml(k, v[k], v.site, { renderedAt: '2026-01-02T03:04:05Z', commit: 'abc1234' });
     seen.add(hashOfArchive(html));
-    assert.equal(hashOfArchive(html), v.sha256, v.file);
-    assert.ok(html.includes(`<meta name="legal-version" content="${v.version}">`) && html.includes(`<meta name="legal-variant" content="${v.variant}">`));
-    assert.ok(html.includes('2026-01-02T03:04:05Z') && html.includes('abc1234') && html.includes(v.sha256) && html.startsWith('<!doctype html>'));
-    assert.notEqual(hashOfArchive(html.replace('Version ', 'Versions ')), v.sha256);
+    assert.equal(hashOfArchive(html), r[k].sha256, `${k}: the archived page hashes like the page`);
+    assert.ok(html.includes('<meta name="legal-version" content="2030-05-06">') && html.includes('Version 2030-05-06.'));
+    assert.ok(html.includes('2026-01-02T03:04:05Z') && html.includes('abc1234') && html.includes(r[k].sha256) && html.startsWith('<!doctype html>'));
+    assert.notEqual(hashOfArchive(html.replace('</h1>', ' (edited)</h1>')), r[k].sha256);
   }
-  assert.equal(seen.size, 4); // four different texts
+  assert.equal(seen.size, 2);
+  assert.equal(archiveName('terms', '2030-05-06-2'), 'terms-2030-05-06-2.html');
   assert.throws(() => hashOfArchive('<html>nothing</html>'), /not an archived legal page/);
+});
+
+const H1 = 'a'.repeat(64);
+const H2 = 'b'.repeat(64);
+const H3 = 'c'.repeat(64);
+const none = { terms: H1, privacy: H2 };
+const idx = (...e) => e.map(([doc, version, sha256]) => ({ doc, version, sha256 }));
+
+await check('a text nobody archived yet is called today\'s date; a text that is archived keeps its version', () => {
+  assert.deepEqual(decide(none, [], '2026-10-20'), {
+    terms: { version: '2026-10-20', sha256: H1, isNew: true }, privacy: { version: '2026-10-20', sha256: H2, isNew: true },
+  });
+  const archive = idx(['terms', '2026-10-20', H1], ['privacy', '2026-09-01', H2]);
+  const later = decide(none, archive, '2026-12-24');
+  assert.deepEqual([later.terms.version, later.terms.isNew, later.privacy.version, later.privacy.isNew], ['2026-10-20', false, '2026-09-01', false]);
+  // one page changed, the other did not: only the changed one gets a new version
+  const half = decide({ terms: H3, privacy: H2 }, archive, '2026-12-24');
+  assert.deepEqual([half.terms.version, half.terms.isNew, half.privacy.version, half.privacy.isNew], ['2026-12-24', true, '2026-09-01', false]);
+});
+
+await check('a second and third change on the same day get -2 and -3; a version is never reused; an old text that comes back is its old version again', () => {
+  const day = [['terms', '2026-10-20', H1]];
+  assert.equal(decide({ terms: H3, privacy: H2 }, idx(...day), '2026-10-20').terms.version, '2026-10-20-2');
+  assert.equal(decide({ terms: 'd'.repeat(64), privacy: H2 }, idx(...day, ['terms', '2026-10-20-2', H3]), '2026-10-20').terms.version, '2026-10-20-3');
+  // (an archived page whose hash is not known still holds its version)
+  assert.equal(decide({ terms: H3, privacy: H2 }, idx(['terms', '2026-10-20', null]), '2026-10-20').terms.version, '2026-10-20-2');
+  assert.equal(decide({ terms: H3, privacy: H2 }, idx(['terms', '2026-10-20', H1], ['terms', '2026-10-20-2', 'e'.repeat(64)]), '2026-10-20').terms.version, '2026-10-20-3');
+  // the first text again after a change: its own version, not a new one
+  const back = decide({ terms: H1, privacy: H2 }, idx(...day, ['terms', '2026-10-21', H3]), '2026-10-22');
+  assert.deepEqual([back.terms.version, back.terms.isNew], ['2026-10-20', false]);
+  // the other page's versions do not count
+  assert.equal(decide({ terms: H3, privacy: H2 }, idx(['privacy', '2026-10-20', H2]), '2026-10-20').terms.version, '2026-10-20');
+  assert.throws(() => decide(none, [], 'yesterday'), /not a date/);
+});
+
+await check('the archive listing the shell script prints is read as it is: pages only, a lost hash is unknown', () => {
+  const listing = [`terms-2026-10-20.html ${H1}`, `terms-2026-10-20-2.html -`, `privacy-2026-10-20.html ${H2}`, 'current.json x', 'terms-2026-10-20.html.sha256 y', 'notes.txt', ''].join('\n');
+  assert.deepEqual(parseIndex(listing), idx(['terms', '2026-10-20', H1], ['terms', '2026-10-20-2', null], ['privacy', '2026-10-20', H2]));
+});
+
+await check('the command line decides from a listing, writes the new pages and current.json, and leaves the archived ones alone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'legal-test-'));
+  try {
+    const run = (listing, today) => execFileSync('node', ['scripts/legal-snapshot.mjs', '--decide', '--index', '-', '--today', today, '--out', dir],
+      { input: listing, encoding: 'utf8', cwd: WEB }).trim().split('\n').map((l) => l.split(' '));
+    const first = run('', '2026-10-20');
+    assert.deepEqual(first.map((l) => [l[0], l[1], l[3]]), [['terms', '2026-10-20', 'new'], ['privacy', '2026-10-20', 'new']]);
+    assert.deepEqual(readdirSync(dir).sort(), ['current.json', 'privacy-2026-10-20.html', 'privacy-2026-10-20.html.sha256', 'terms-2026-10-20.html', 'terms-2026-10-20.html.sha256']);
+    const [terms, privacy] = first;
+    assert.equal(readFileSync(join(dir, 'terms-2026-10-20.html.sha256'), 'utf8'), `${terms[2]}\n`);
+    assert.equal(hashOfArchive(readFileSync(join(dir, 'terms-2026-10-20.html'), 'utf8')), terms[2]);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'current.json'), 'utf8')), {
+      terms: { version: '2026-10-20', sha256: terms[2] }, privacy: { version: '2026-10-20', sha256: privacy[2] },
+    });
+    assert.equal(readFileSync(join(dir, 'current.json'), 'utf8'), currentJson({ terms: { version: '2026-10-20', sha256: terms[2] }, privacy: { version: '2026-10-20', sha256: privacy[2] } }));
+    // the same texts a month later: the same versions, nothing new to write
+    const empty = mkdtempSync(join(tmpdir(), 'legal-test-'));
+    try {
+      const again = execFileSync('node', ['scripts/legal-snapshot.mjs', '--decide', '--index', '-', '--today', '2026-11-20', '--out', empty],
+        { input: `terms-2026-10-20.html ${terms[2]}\nprivacy-2026-10-20.html ${privacy[2]}\n`, encoding: 'utf8', cwd: WEB });
+      assert.equal(again, `terms 2026-10-20 ${terms[2]} archived\nprivacy 2026-10-20 ${privacy[2]} archived\n`);
+      assert.deepEqual(readdirSync(empty), ['current.json']);
+    } finally {
+      rmSync(empty, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 process.exit(failed ? 1 : 0);
