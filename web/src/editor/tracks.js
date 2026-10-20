@@ -201,11 +201,13 @@ export const tot = (x) => Math.max(0, Math.ceil(x - EPS));
 export function cost(tracks, R) {
   const rate = R || { noise: 0, rebuild: 0, echo: 0, level: 0, std: 0, ext: 0, tr: 0 };
   const c = { nPaid: 0, nFree: 0, rSec: 0, eSec: 0, lSec: 0, sStd: 0, sExt: 0, sFree: 0, trSec: 0, trLangs: [] };
-  tracks.voice.forEach((x) => { const d = x.e - x.s; if (x.mode === 1) { if (x.kind === 'free') c.nFree += d; else c.nPaid += d; } else if (x.mode === 2) c.rSec += d; });
-  tracks.echo.forEach((x) => { if (x.on) c.eSec += x.e - x.s; });
-  tracks.level.forEach((x) => { if (x.lvl) c.lSec += x.e - x.s; });
+  // billed per second of audio: a started second counts (only the last section of a recording can end inside a second)
+  const secs = (x) => Math.ceil(x.e - x.s - EPS);
+  tracks.voice.forEach((x) => { const d = secs(x); if (x.mode === 1) { if (x.kind === 'free') c.nFree += d; else c.nPaid += d; } else if (x.mode === 2) c.rSec += d; });
+  tracks.echo.forEach((x) => { if (x.on) c.eSec += secs(x); });
+  tracks.level.forEach((x) => { if (x.lvl) c.lSec += secs(x); });
   tracks.subs.forEach((x) => {
-    const d = x.e - x.s;
+    const d = secs(x);
     const t = trOf(x);
     if (x.q === 1) c.sFree += d; else if (x.q === 2) c.sStd += d; else if (x.q === 3) c.sExt += d;
     c.trSec += d * t.length;
@@ -236,7 +238,7 @@ export function delta(now, old, T, R) {
   let x = 0;
   for (const [a, b] of segments(T, now, old)) {
     const m = (a + b) / 2;
-    const d = b - a;
+    const d = Math.ceil(b - a - EPS);
     const vn = at(now, 'voice', m);
     const vo = at(old, 'voice', m);
     if (vn.mode === 1 && vn.kind === 'paid' && !(vo.mode === 1 && vo.kind === 'paid')) x += rate.noise * d;

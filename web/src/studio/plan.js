@@ -1,7 +1,7 @@
 // What the editor's choices mean for the files: which files the result has, whether the subtitles can go into the video, and what stops a
 // start (the messages are the Cleanup form's, word for word). Pure functions of the tracks and the output choice.
 
-import { balanceMoney, money as siteMoney } from '../format.js';
+import { balanceMoney, money as siteMoney, stem } from '../format.js';
 import { tooManyText } from '../jobs.js';
 import { canHoldSubtitles, defaultFormatId } from '../media/convert.js';
 import { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, needsServer, serverSound } from '../editor/tracks.js';
@@ -72,12 +72,14 @@ export function jobKind(tracks) {
 }
 
 /** The choices as the Finish step wants them (finish.js `wants`). `local`: no job on our side; the sound and subtitles are made here. */
-export function wantsOf({ tracks, plan, choice, out, file, local }) {
+export function wantsOf({ tracks, plan, choice, out, file, fileName = '', local }) {
   const w = {
     sound: plan.cleaning, format: choice.format, name: choice.name.trim(), size: choice.size,
     subs: plan.wantsText, caps: { srt: out.sfiles.includes('srt'), vtt: out.sfiles.includes('vtt'), txt: out.sfiles.includes('txt') },
     embed: plan.embedNow, soundHere: local && anyFreeNoise(tracks), subsHere: local && anyFreeSubs(tracks),
   };
+  // subtitles into the video with no cleaning: the video keeps its own sound, as an MKV
+  if (!plan.cleaning && plan.embedNow) Object.assign(w, { format: 'mkv', size: 'same', name: `${stem(fileName || file?.name)}-subtitled.mkv` });
   return w;
 }
 

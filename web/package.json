@@ -29,6 +29,9 @@
     "test:subtitles": "node tests/subtitles.mjs",
     "test:editor": "node tests/editor.mjs",
     "test:editor-unit": "node tests/editor-unit.mjs",
+    "test:studio-unit": "node tests/studio-unit.mjs",
+    "test:parity": "node tests/parity.mjs",
+    "test:parts": "node tests/parts.mjs",
     "test:suggest": "node tests/suggest-agreement.mjs",
     "test:legal": "node tests/legal-versions.mjs"
   },

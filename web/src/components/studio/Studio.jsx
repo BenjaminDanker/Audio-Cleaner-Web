@@ -5,7 +5,7 @@ import { api } from '../../api.js';
 import { useAuth } from '../../auth.jsx';
 import { etaSeconds, etaText } from '../../eta.js';
 import { forgetFinish, removeLocalCard } from '../../finish.js';
-import { balanceMoney, bytes, human } from '../../format.js';
+import { balanceMoney, bytes, human, shownName } from '../../format.js';
 import { findRate, loadPricing, useNow, usePricing } from '../../hooks.js';
 import { ACTIVE, jobPath, queueText, stageText } from '../../jobs.js';
 import { heardSeries } from '../../editor/peaks.js';
@@ -362,7 +362,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (job && job.status === 'done' && fin && !saving) fin.auto();
   }, [job?.status, job?.finishedAt, fin, saving]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (job && !isLocal && job.status === 'done' && !saving) session.loadJob({ force: !!session.server });
+    // a run that finished since the tracks were last read (a save): they are read again; the first time, edits already made here are kept
+    if (job && !isLocal && job.status === 'done' && !saving) session.loadJob({ force: session.loadedAt != null && session.loadedAt !== job.finishedAt });
   }, [job?.finishedAt, job?.status, saving]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!saving && session.run?.saving && job && job.status === 'done') { session.run = null; session.stage = 'ready'; session.touch(); }
@@ -418,7 +419,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     }
     if (done) {
       if (changed) {
-        const w = wantsOf({ tracks: S.tracks, plan, choice, out: session.out, file: session.file, local: isLocal });
+        const w = wantsOf({ tracks: S.tracks, plan, choice, out: session.out, file: session.file, fileName: session.fileName, local: isLocal });
         if (isLocal && changedTracks) {
           // a card made here: the new tracks run again from the file
           const res = await session.start({ choice, plan, refresh });
@@ -485,11 +486,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     const v = b.dataset.v;
     if (pop && a !== 'pop' && !ev.target.closest('.pop')) setPop(null);
     if (suppress.current && (a === 'sec' || a === 'sheet')) return;
-    if (b.getAttribute('aria-disabled') === 'true') {
-      const why = b.dataset.tip;
-      if (why && !['hear'].includes(a)) say(why.length > 160 ? why.slice(-160) : why);
-      return;
-    }
+    if (b.getAttribute('aria-disabled') === 'true') return; // its tooltip says why
     switch (a) {
       case 'newfile': onNewFile?.(); break;
       case 'auto': session.setAuto(!session.auto); break;
@@ -639,7 +636,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
         return;
       }
       const area = ev.target.closest('.main');
-      if (!area || ev.target.closest('.top')) return;
+      if (!area || ev.target.closest('#top')) return; // (not the top part: the heard line over the waveform is an svg with the class "top" too)
       const btn = ev.target.closest('button');
       if (btn && !btn.classList.contains('sec')) return;
       drag = { mode: 'new', x0: ev.clientX, t0: edgeT(rawT(ev.clientX)), moved: false, trk: area, pid: ev.pointerId, add: ev.shiftKey, base: Sx.sel ? Sx.sel.map((r) => ({ s: r.s, e: r.e })) : [] };
@@ -711,7 +708,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
         Lx.session.touch();
       }
     };
-    const outside = (ev) => { if (L().pop && !ev.target.closest('.pop, .bb')) L().setPop(null); };
+    // (the path is read from the event: what was clicked may be gone from the page by now, drawn again by the click itself)
+    const outside = (ev) => { if (L().pop && !ev.composedPath().some((n) => n.classList && (n.classList.contains('pop') || n.classList.contains('bb')))) L().setPop(null); };
     document.addEventListener('pointerdown', down);
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', end);
@@ -902,12 +900,12 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   return (
     <div
-      className="studio" ref={rootRef} data-testid="studio" data-stage={stage} data-phase={done ? finState.phase : undefined} onClick={onClick} onChange={onChange}
+      className="studio" ref={rootRef} data-testid="studio" data-job-id={job?.id} data-stage={stage} data-phase={done ? finState.phase : undefined} onClick={onClick} onChange={onChange}
       {...(done && fin?.pcm ? { 'data-rms': fin.pcm.rms.toFixed(6), 'data-peak': fin.pcm.peak.toFixed(4), 'data-frames': fin.pcm.frames, 'data-channels': fin.pcm.channels } : {})}
       {...(done && fin?.subs ? { 'data-cues': fin.subs.cues.length, 'data-language': fin.subs.language } : {})}
       {...(done && finState.strengthDb != null ? { 'data-strength-db': finState.strengthDb.toFixed(2) } : {})}
       {...(done && gains ? { 'data-gains': gains } : {})}
-      data-time={ph.toFixed(2)} data-playing={playing ? 'yes' : 'no'} data-seconds={T} data-changed={done ? (changedTracks ? 'tracks' : changedOut ? 'output' : 'no') : undefined}
+      data-time={ph.toFixed(2)} data-playing={playing ? 'yes' : 'no'} data-held={playInfo.held ?? 0} data-buffering={playInfo.buffering ? 'yes' : 'no'} data-seconds={T} data-changed={done ? (changedTracks ? 'tracks' : changedOut ? 'output' : 'no') : undefined}
     >
       <div className="container ws" data-stage={stage}>
         {notes.length > 0 && (
@@ -932,7 +930,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
               </div>
               <div className="tinfo">
                 <div className="tname">
-                  <h1 className="fname" data-testid="file-name">{session.fileName}</h1>
+                  <h1 className="fname" data-testid="file-name">{shownName(session.fileName)}</h1>
                   <p className="fmeta" data-testid="file-meta">{fileMeta} · <button type="button" className="link" data-act="newfile" data-testid="different-file">Different file</button></p>
                 </div>
                 <div className="autoc">

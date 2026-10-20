@@ -356,6 +356,7 @@ export class Session {
     const job = this.job;
     if (!job || job.local || this.loading) return;
     if (this.server && !force) return;
+    const finishedAt = job.finishedAt;
     this.loading = true;
     this.touch();
     try {
@@ -391,6 +392,7 @@ export class Session {
         this.out = { sfiles: ['srt', 'vtt', 'txt'].filter((k) => w.caps?.[k]), burn: !!w.embed };
       }
       this.snap = { tracks: rebuilt || !this.snap ? clone(made) : this.snap.tracks, choice: keep || null, sfiles: this.out.sfiles.slice(), burn: this.out.burn };
+      this.loadedAt = finishedAt ?? null;
       this.paid = job.costMicros || 0;
       this.applied = false;
       if (data.suggestions) this.loadJobSuggestions();

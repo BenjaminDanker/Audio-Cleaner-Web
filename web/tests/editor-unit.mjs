@@ -87,7 +87,7 @@ await check('timeline: the JSON is the server\'s (version 1, layers, settings wi
   for (const bad of [{ strength_db: 0 }, { strength_db: 101 }, { remover: 'fast' }, { strength: 'loud' }]) assert.throws(() => new Timeline(10).paint('noise', 0, 5, bad), TimelineError, JSON.stringify(bad));
   assert.throws(() => new Timeline(10).paint('leveling', 0, 5, { loudness_lufs: 5 }), TimelineError);
   assert.throws(() => new Timeline(10).paint('mystery', 0, 5), TimelineError);
-  assert.throws(() => Timeline.fromJSON({ version: 2, seconds: 1, layers: {} }), TimelineError);
+  assert.throws(() => Timeline.fromJSON({ version: 3, seconds: 1, layers: {} }), TimelineError); // (version 2 is the subtitles and browser-cleaned parts now: tests/studio-unit.mjs)
   assert.throws(() => new Timeline(10).paint('noise', 5, 2), TimelineError);
 });
 

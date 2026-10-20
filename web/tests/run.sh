@@ -11,7 +11,7 @@ WEB=$(dirname "$HERE")
 STATE=${ACW_TEST_STATE:-/tmp/acw-webtest-$(id -u)}
 export ACW_TEST_STATE=$STATE
 SUITES=("$@")
-[ ${#SUITES[@]} -gt 0 ] || SUITES=(blend-unit editor-unit legal-versions suggest-agreement contact convert copy e2e editor files fixes flac free jobs live offline redo stretch reco-model reco-unit reco-ui subtitles ui)
+[ ${#SUITES[@]} -gt 0 ] || SUITES=(blend-unit editor-unit studio-unit legal-versions suggest-agreement contact convert copy e2e editor files fixes flac free jobs live offline parity parts redo stretch reco-model reco-unit reco-ui subtitles ui)
 
 mkdir -p "$STATE"
 exec 9>"$STATE.lock"

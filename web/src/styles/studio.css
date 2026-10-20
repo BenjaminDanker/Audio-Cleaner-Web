@@ -346,3 +346,5 @@
 .studio .autoc .auto-why .reco-why { margin-top: 4px; }
 .studio .pg { min-width: 0; overflow: hidden; }
 .studio .pg .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* the bar at the bottom covers the end of the page: the site's footer gets room under it */
+body:has(.studio) .site-footer { padding-bottom: 100px; }

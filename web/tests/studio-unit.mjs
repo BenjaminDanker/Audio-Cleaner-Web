@@ -217,11 +217,12 @@ await check('prices: only what is new is charged for a finished recording (delta
   assert.equal(delta(S.tracks, old, 180, R), 7500); // taking a step away never costs
 });
 
-await check('prices: a fractional length works (the last section ends at the recording\'s end)', () => {
+await check('prices: a fractional length works (the last section ends at the recording\'s end) and a started second counts, as the server bills it', () => {
   const S = state(47.3);
   edit(S, 'voice', 10, 47.3, { mode: 2 });
-  near(cost(S.tracks, R).rSec, 37.3);
+  assert.equal(cost(S.tracks, R).rSec, 38); // 37.3 s
   assert.equal(S.tracks.voice[S.tracks.voice.length - 1].e, 47.3);
+  assert.equal(cost(state(604.04).tracks, R).nPaid, 605);
 });
 
 /* ------------------------------------------------------------------------------------------------ the mapping to the server's timeline */
@@ -420,6 +421,11 @@ await check('files: wantsOf is what the finishing step (finish.js) takes: the so
   const w = wantsOf({ tracks: S.tracks, plan, choice: { ...choiceOf('wav'), name: ' x.wav ' }, out: { sfiles: ['srt', 'txt'], burn: false }, file: null, local: true });
   assert.deepEqual(w, { sound: true, format: 'wav', name: 'x.wav', size: 'same', subs: true, caps: { srt: true, vtt: false, txt: true }, embed: false, soundHere: true, subsHere: true });
   assert.equal(wantsOf({ tracks: S.tracks, plan, choice: choiceOf('wav'), out: out0, file: null, local: false }).soundHere, false);
+  // subtitles into a video with nothing cleaned: the video keeps its own sound, as an MKV under its own name
+  const T3 = state(); edit(T3, 'voice', 0, 180, { mode: 0 }); edit(T3, 'level', 0, 180, { lvl: 0 }); edit(T3, 'subs', 0, 180, { q: 1 });
+  const p3 = outputPlan({ tracks: T3.tracks, info: VIDEO, file: { name: 'talk.mp4', size: 1e6 }, choice: choiceOf('mp4'), out: { sfiles: ['txt'], burn: true } });
+  const w3 = wantsOf({ tracks: T3.tracks, plan: p3, choice: choiceOf('mp4'), out: { sfiles: ['txt'], burn: true }, file: { name: 'talk.mp4' }, local: true });
+  assert.deepEqual([w3.sound, w3.embed, w3.format, w3.name, w3.size], [false, true, 'mkv', 'talk-subtitled.mkv', 'same']);
 });
 
 await check('start: the messages that stop it are the Cleanup form\'s, word for word (no sound, too long, too big, too many files, prices, credit, nothing chosen, no format, MKV)', () => {
