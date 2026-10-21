@@ -323,10 +323,10 @@
 .studio .tlw .row.wr .lab { align-self: end; }
 .studio .tlw.zoomed .wf, .studio .tlw.zoomed .trk.tr { touch-action: pan-x pan-y; }
 .studio .rng { grid-template-columns: minmax(0, 1fr); gap: 6px; border-left-color: var(--brand); --c: var(--brand); }
-.studio .rr { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.studio .rr .srl { width: 38px; }
+.studio .rr { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+.studio .rr .srl { width: 38px; flex: none; }
 .studio .rr .btn-sm { min-height: 32px; padding: 3px 9px; }
-.studio .rr .btn-ghost { margin-left: auto; }
+.studio .rr .btn-ghost { margin-left: auto; padding-inline: 4px; white-space: nowrap; font-size: 0.85rem; }
 .studio .rv { font: 700 1rem var(--mono); min-width: 3em; text-align: center; }
 .studio .slr { display: grid; gap: 2px; margin-top: 4px; }
 .studio .slr input[type="range"] { width: 100%; accent-color: var(--c); }
