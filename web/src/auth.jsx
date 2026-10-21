@@ -24,18 +24,25 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  const retry = useRef(0);
   const refresh = useCallback(async () => {
+    clearTimeout(retry.current);
     try {
       const me = await fetchMe();
       apply(me);
       return me;
-    } catch {
-      // Network or server trouble: keep what we have (`known` stays false until the server has answered once, so the
-      // header does not offer "Sign in" to someone who may well be signed in), but unblock the UI.
+    } catch (e) {
+      // Network or server trouble, or too many requests: keep what we have (`known` stays false until the server has answered
+      // once, so nobody is sent to the sign-in page for a busy moment), unblock the UI, and while the server has never answered
+      // ask again (after the wait it asked for, if it did)
       setState((s) => ({ ...s, ready: true }));
+      if (!stateRef.current.known) retry.current = setTimeout(() => refreshRef.current(), Math.min(30, Math.max(2, e?.retryAfter || 3)) * 1000);
       return null;
     }
   }, [apply]);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+  useEffect(() => () => clearTimeout(retry.current), []);
 
   useEffect(() => {
     refresh();

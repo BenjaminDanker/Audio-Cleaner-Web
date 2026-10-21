@@ -27,9 +27,9 @@ function Loading() {
 }
 
 function RequireAuth({ children }) {
-  const { ready, signedIn } = useAuth();
+  const { ready, known, signedIn } = useAuth();
   const loc = useLocation();
-  if (!ready) return <Loading />;
+  if (!ready || !known) return <Loading />; // (until the server has answered: a busy moment is not being signed out)
   if (!signedIn) {
     rememberReturn(loc.pathname);
     return <Navigate to="/login" replace state={{ from: loc.pathname }} />;
