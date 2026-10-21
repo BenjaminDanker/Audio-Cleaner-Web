@@ -98,6 +98,33 @@ if (want('auth')) {
       await ctx.close();
     }
   });
+  await check('a busy server (429 on the account check) at page load does not sign the visitor out: the loading screen waits, the check is asked again after the Retry-After, and the page loads once it is answered', async () => {
+    const ctx = await browser.newContext();
+    const p1 = await ctx.newPage();
+    try {
+      await signIn(p1, EMAIL);
+      const paths = []; // every address the page was at
+      p1.on('framenavigated', (f) => { if (f === p1.mainFrame()) paths.push(new URL(f.url()).pathname); });
+      const asked = []; // when /api/me was asked: the first two answers are 429 (Retry-After 2)
+      await p1.route('**/api/me', (r) => {
+        asked.push(Date.now());
+        return asked.length <= 2 ? r.fulfill({ status: 429, headers: { 'Retry-After': '2' }, json: { detail: 'Too many requests.' } }) : r.continue();
+      });
+      await p1.goto(`${BASE}/app`);
+      await p1.waitForFunction(() => document.querySelector('.loading-screen'), null, { timeout: 10000 });
+      await p1.waitForTimeout(3000); // past the first answer and the retry, which is refused too
+      if (asked.length !== 2) throw new Error(`after 3 s the account check had been asked ${asked.length} times (expected 2: the page, then the retry after the wait)`);
+      if (new URL(p1.url()).pathname !== '/app' || paths.includes('/login')) throw new Error(`the page went to ${paths.join(' -> ')} while the server was busy`);
+      if (!(await p1.locator('.loading-screen').count()) || (await p1.getByTestId('available').count())) throw new Error('not the loading screen while the check has not been answered');
+      await p1.getByTestId('available').waitFor({ timeout: 10000 }); // the third ask is answered: the page is there
+      if (paths.includes('/login') || new URL(p1.url()).pathname !== '/app') throw new Error(`the page ended at ${paths.join(' -> ')}`);
+      const gaps = [asked[1] - asked[0], asked[2] - asked[1]].map((ms) => Math.round(ms / 100) / 10);
+      if (gaps.some((g) => g < 1.9 || g > 5)) throw new Error(`the check was asked again after ${gaps} s (the server said 2)`);
+      return `asked ${asked.length} times, again after ${gaps.join(' s and ')} s, never left ${[...new Set(paths)].join(', ')}`;
+    } finally {
+      await ctx.close();
+    }
+  });
 }
 
 if (want('studio')) {

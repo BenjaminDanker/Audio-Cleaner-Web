@@ -81,7 +81,7 @@ async function waitEditor() {
   await page.waitForFunction(() => document.querySelector('[data-testid=waveform]')?.dataset.reading === 'no', null, { timeout: 40000 });
 }
 const openJob = async (id) => { await spare(); await page.goto(`${BASE}/app/job/${id}`); await waitEditor(); };
-/** Waits until a page load's worth of calls (70) is spare in the server's per-client allowance, so a long run does not see 429 (which also signs the page out). */
+/** Waits until `need` calls are spare in the server's per-client allowance (a burst of 120, refilled at 2 a second), so the pace of a long run does not meet 429. A load of the editor makes only about 14 calls (a finished job's page; a file chosen on /app, 6), but what a test does after it (saving, its quotes, the stretches it plays) comes in bursts: 30 spare was not enough (a job's page answered 429 in the middle of a check), 70 is. */
 async function spare(need = 70) {
   for (;;) {
     let tokens = 120; let last = reqTimes[0] ?? Date.now();
@@ -301,7 +301,7 @@ await check('Leveling turned on for a job made without it is a paid step by itse
   await waitSaved();
   if (got.length !== 1) throw new Error('downloaded by itself: ' + got.map((g) => g.name));
   const j = await jobOf(J2);
-  if (j.costMicros - cost0 !== q.estCostMicros) throw new Error(`cost ${cost0} -> ${j.costMicros}, wanted +${q.estCostMicros}`);
+  if (j.costMicros - cost0 !== q.estCostMicros) throw new Error(`cost ${cost0} -> ${j.costMicros}, wanted +${q.estCostMicros}${j.costMicros === undefined ? ` (the job's page answered: ${JSON.stringify(j).slice(0, 160)})` : ''}`);
   await gotoApp('/app/billing');
   const rows = (await ledgerRows()).filter((t) => /Edited \(/.test(t));
   const usd = `−$${(q.estCostMicros / 1e6).toFixed(4)}`;
