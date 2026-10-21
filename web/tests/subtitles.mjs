@@ -79,7 +79,8 @@ await check('subtitles, free: a short recording gives the right words; SRT, VTT 
   await page.getByTestId('download-again').click();
   for (let i = 0; i < 40 && downloads.length < 3; i++) await page.waitForTimeout(250);
   if (names().join() !== 'speech-transcript.txt,speech.srt,speech.vtt') throw new Error('downloaded again: ' + names());
-  const posted = calls.filter((c) => c.startsWith('POST') || c.includes('/jobs/'));
+  // (the price of the recommended plan is asked for, the length and the options, until Free is chosen; no job, no upload)
+  const posted = calls.filter((c) => (c.startsWith('POST') || c.includes('/jobs/')) && !/^POST \S*\/jobs\/estimate$/.test(c));
   if (posted.length) throw new Error(`sent to the server: ${posted.join(', ')}`);
   if (calls.some((c) => c.includes('/dfn/models/'))) throw new Error('the speech model was fetched from the site: ' + calls.join(', '));
   const got = models.byName(); // every pinned file, one download each
