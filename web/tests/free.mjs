@@ -69,7 +69,8 @@ await check('free: a mono 48 kHz WAV is cleaned in the browser (length kept, not
 });
 
 await check('free: nothing about the file is sent to our server (only the account, prices and the job list are read)', async () => {
-  const odd = apiCalls.filter((c) => !/api\/me$|billing\/pricing$|^GET .*api\/jobs$/.test(c));
+  // (the price of the recommended Standard plan is asked for (the length and the options, never the file) until Free is chosen; nothing else goes: no job, no upload)
+  const odd = apiCalls.filter((c) => !/api\/me$|billing\/pricing$|^GET .*api\/jobs$|^POST .*api\/jobs\/estimate$/.test(c));
   if (odd.length) throw new Error(odd.join(', '));
   return apiCalls.join(', ');
 });
