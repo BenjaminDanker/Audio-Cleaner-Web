@@ -949,8 +949,8 @@ def label_of(kind: str, params: dict) -> str:
 
         return editing.run_label(params)
     edit = params.get("edit") or {}
-    # a job made with a timeline has no tiers: it is named for its layers, also once its first run is over (the charge line is written then)
-    if edit.get("first_run") or (edit.get("timeline") and params.get("denoise_tier") is None):
+    # a job made with a timeline (it alone has `edit_rates`; its stored tier is only a placeholder) is named for its layers, also once its first run is over
+    if edit.get("first_run") or (edit.get("timeline") and params.get("edit_rates")):
         from . import editing
 
         return " + ".join([editing.timeline_label(params), *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
