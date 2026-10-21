@@ -37,6 +37,9 @@ MEM_MIN = 2 * GB
 SWAP_MIN_USED = 512 * 1024**2
 SWAP_GROWTH = 256 * 1024**2
 SWAP_WINDOW_S = 30 * 60
+# Swap growing is only worth a mail while RAM is really tight: with plenty available the kernel just moves idle pages out
+# (harmless). This is the free memory the job workers keep for the host (jobs.py), where world starts reopen.
+SWAP_TIGHT = 6 * GB
 RESTART_WINDOW_S = 30 * 60
 RESTART_ALERT_AT = 2
 FULL_PER_HOUR = int(os.environ.get("ACW_ALERT_FULL_THRESHOLD", "10"))
@@ -398,10 +401,10 @@ def check_resources(data_dir: Path, mem: dict[str, int], swap_hist: list, now: i
     swap_hist = [s for s in swap_hist if s[0] > now - SWAP_WINDOW_S] + [[now, used]]
     grew = used - swap_hist[0][1]
     findings.append(Finding(
-        "swap_growing", used >= SWAP_MIN_USED and grew >= SWAP_GROWTH,
+        "swap_growing", used >= SWAP_MIN_USED and grew >= SWAP_GROWTH and bool(mem) and avail < SWAP_TIGHT,
         f"Swap use is growing ({_fmt_gb(used)} in use)",
-        f"Swap in use grew by {_fmt_gb(grew)} in the last {SWAP_WINDOW_S // 60} minutes and is now {_fmt_gb(used)}: "
-        f"the machine is short of RAM.\n\n{ctx()}\n", confirm=2,
+        f"Swap in use grew by {_fmt_gb(grew)} in the last {SWAP_WINDOW_S // 60} minutes and is now {_fmt_gb(used)}, with only "
+        f"{_fmt_gb(avail)} of RAM available: the machine is short of RAM.\n\n{ctx()}\n", confirm=2,
     ))
     return findings, swap_hist
 
