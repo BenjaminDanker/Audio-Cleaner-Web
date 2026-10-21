@@ -742,6 +742,34 @@ def test_a_job_made_with_a_timeline_is_charged_for_what_it_ran_and_leaves_its_re
     assert q["unchanged"] is True and q["free"] is True
 
 
+def test_a_leveling_only_job_made_with_a_timeline_is_named_leveling_in_its_charge_line_and_the_billing_list(client, signed_in):
+    uid, h = funded(client, signed_in)
+    tl = {"version": 1, "seconds": 60, "layers": {"leveling": [level(10, 20.2)]}}
+    r = client.post("/api/jobs", json={"kind": "denoise", "filename": "talk.wav", "sizeBytes": 1000, "durationSeconds": 60, "timeline": tl,
+                                      "options": {"audio_format": "flac"}}, headers=h)
+    assert r.status_code == 200, r.text
+    jid = r.json()["id"]
+    assert client.get(f"/api/jobs/{jid}").json()["label"] == "Leveling"
+    hold = r.json()["estCostMicros"]
+    assert hold == expected({"leveling": 11})
+    n = 60 * SR
+    db.execute("UPDATE jobs SET status = 'running', duration_seconds = 60, uploaded_at = ?, worker_id = 't', next_stage = 'main' WHERE id = ?", (db.now(), jid))
+    d = folder(jid)
+    (d / "input.wav").write_bytes(b"x")
+    (d / "talk-cleaned.flac").write_bytes(b"audio")
+    (d / "kept-source.flac").write_bytes(b"fLaC")
+    res = {"ok": True, "outputs": [{"file": "talk-cleaned.flac", "kind": "audio"}],
+           "editor": {"billed": {"leveling": {"seconds": 11}}, "rendered": tl, "resolved": {},
+                      "facts": {"n": n, "channels": 1, "plan": [0], "spans": {"0": [[0, n]]}, "rebuild_mid": False, "reference": False}}}
+    worker._complete(row(jid), d, res)
+    assert row(jid)["status"] == "done" and "first_run" not in params_of(jid)["edit"]  # the first run is over: the label no longer comes from it
+    lines = db.all_rows("SELECT * FROM ledger WHERE user_id = ? AND kind = 'usage'", (uid,))
+    assert len(lines) == 1 and lines[0]["description"] == "Leveling: talk.wav (1.0 min)"
+    line = next(x for x in client.get("/api/billing/history").json()["ledger"] if x["kind"] == "usage")
+    assert line["label"] == "Leveling" and line["displayName"] == "talk.wav"
+    assert client.get(f"/api/jobs/{jid}").json()["label"] == "Leveling"
+
+
 def test_the_old_rerun_is_for_jobs_without_a_timeline_of_their_own(client, signed_in):
     uid, h = funded(client, signed_in)
     plain = make_done_job(uid)
