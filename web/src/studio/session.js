@@ -637,6 +637,7 @@ export class Session {
       pcm: cleaned?.pcm || null, wav, wavUrl: wav ? URL.createObjectURL(wav) : '', subs: subsFiles, failed: failedParts,
       ...(cleaned?.pcm.pair ? { pairParts: cleaned.pcm.pair, pairChannels: cleaned.pcm.channels, strengthDb: cleaned.attenDb } : {}),
     });
+    if (cleaned?.pcm.pair) fin.set({ strengthDb: cleaned.attenDb }); // the page shows the strength it was made with
     this.setTask('finish', { text: 'Putting it together…', frac: 0 });
     const off = fin.subscribe(() => this.setTask('finish', { text: 'Putting it together…', frac: fin.state.progress }));
     await fin.run({ save: true, signal: ctl.signal });

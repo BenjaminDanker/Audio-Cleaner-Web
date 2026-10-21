@@ -172,6 +172,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const lockedWhy = locked ? 'The files this needs are cleared away, so strength, Leveling and the other paid choices can’t be changed any more. File type, name and subtitle files still can.' : '';
 
   // what saving the changes costs: our side's quote for a job of parts (a card made here: starting again costs what the paid parts cost)
+  // (asked again when the timeline it prices changes, not on every redraw: a redraw would cancel the answer on its way)
+  const quoteKey = changedTracks && job && !isLocal && canEdit ? JSON.stringify(session.timelineOf(S.tracks).toJSON()) : '';
   useEffect(() => {
     if (!changedTracks || !job || isLocal || !canEdit) { setQuote({ state: 'idle', q: null, error: '' }); return undefined; }
     setQuote((q) => ({ ...q, state: 'loading', error: '' }));
@@ -183,7 +185,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       );
     }, 450);
     return () => { clearTimeout(t); ctl.abort(); };
-  }, [changedTracks, ver, job?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [changedTracks, quoteKey, job?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const deltaMicros = changedTracks ? (quote.state === 'ok' && quote.q ? quote.q.estCostMicros : isLocal ? c.total : deltaOf(S.tracks, session.snap.tracks, T, rates)) : 0;
   const affordableSave = quote.state !== 'ok' || !quote.q || quote.q.affordable !== false;
 
@@ -422,7 +424,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (done) {
       if (changed) {
         const w = wantsOf({ tracks: S.tracks, plan, choice, out: session.out, file: session.file, fileName: session.fileName, local: isLocal });
-        if (isLocal && changedTracks) {
+        const db = reblendDb();
+        if (isLocal && changedTracks && db == null) {
           // a card made here: the new tracks run again from the file
           const res = await session.start({ choice, plan, refresh });
           if (res?.id) nav(jobPath(res.id));
@@ -430,7 +433,6 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
         }
         const keep = fin.effective();
         const wants = { ...keep, ...w, soundHere: isLocal ? keep.soundHere : false, subsHere: isLocal ? keep.subsHere : false };
-        const db = reblendDb();
         if (db != null) {
           // a new strength for the free cleanup made here: put together again from the two signals it kept (free, nothing is made twice)
           try { await fin.blendTo(db); await fin.run({ save: true, wants }); session.takeSnapshot(S.tracks, choice); session.touch(); say('Saved'); } catch (e) { session.error = e?.message || 'Couldn’t save this. Please try again.'; session.touch(); }
