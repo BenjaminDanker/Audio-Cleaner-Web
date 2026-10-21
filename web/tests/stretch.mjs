@@ -1,18 +1,19 @@
-// The strength slider on a recording of any length: a 40 minute mono file (generated here: a moving tone in pink noise) is cleaned by the
-// real worker, then
+// The editor on a recording of any length: a 40 minute mono file (generated here: a moving tone in pink noise) is cleaned by the real worker
+// (a job made through the API with no timeline, so it also keeps its two copies), then
 //  1. the job keeps both copies (the recording is no longer dropped for a long file) and says how to read them;
-//  2. the slider plays from short stretches (GET .../kept/{noise|input}?start=&seconds=): never a whole copy, a few seconds held at a time,
-//     the next stretch fetched ahead, a seek fetches the stretches there, a change of strength asks for nothing;
-//  3. playing across stretch borders keeps going (the time moves on without a pause) and the end of the recording stops it;
-//  4. the memory of the page stays small: the renderer's resident memory grows by far less than the two whole copies (921 MB) would take;
-//  5. saving a new strength (no Leveling) is a free re-run on our side for this length: "Save this strength · Free", a new job, its file
-//     comes down by itself, and it is the blend of the two copies at that strength (checked on a window of the file, decoded to float).
+//  2. the preview stretches (GET .../preview/{source|noise}?start=&seconds=): the same short FLACs with the headers that say what is in them;
+//  3. the editor plays from short stretches of the layers it needs: never a whole copy, a few seconds held at a time, the next stretch fetched
+//     ahead, a seek fetches the stretches there, a change of strength asks for nothing;
+//  4. playing across stretch borders keeps going (the time moves on without a pause) and the end of the recording stops it;
+//  5. the memory of the page stays small: the renderer's resident memory grows by far less than the two whole copies (921 MB) would take;
+//  6. saving another strength (no Leveling) is free for this length: "Save changes · Free", an export on the same job, no new job, its file
+//     comes down by itself, and it is the blend of the two layers at that strength (checked on a window of the file, decoded to float).
 // Needs the test backend (tests/run.sh stretch) and ffmpeg. Takes a few minutes (the cleaning of 40 minutes). Usage: node tests/stretch.mjs
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASE, FFMPEG, JOB_PATH, admin, apiCall, check, jobIdOf, launch, signIn, summary, waitJobDone } from './helpers.mjs';
+import { BASE, FFMPEG, admin, apiCall, check, launch, signIn, studio, summary, waitCardDone, waitJobDone, waitResult } from './helpers.mjs';
 
 const EMAIL = `stretch-${Date.now()}@example.com`;
 const MINUTES = 40;
@@ -24,24 +25,25 @@ mkdirSync(WORK, { recursive: true });
 const { browser, context, page, logs } = await launch();
 const got = [];
 page.on('download', (d) => got.push({ name: d.suggestedFilename(), download: d }));
-const kept = []; // every request for a kept copy: path and query
+const asked = []; // every request for a preview stretch: path and query
 const requests = [];
-page.on('request', (r) => {
+context.on('request', (r) => {
   const u = new URL(r.url());
-  if (/\/kept\/(noise|input)$/.test(u.pathname)) kept.push(u.pathname + u.search);
+  if (/\/preview\/(source|noise|rebuild|echo)$/.test(u.pathname)) asked.push(u.pathname + u.search);
   if (u.pathname.startsWith('/api/')) requests.push(`${r.method()} ${u.pathname}`);
 });
 await signIn(page, EMAIL);
 admin('grant', EMAIL, '5', 'stretch test');
 
 const sleep = (ms) => page.waitForTimeout(ms);
-const card = () => page.getByTestId('job').first();
-const blend = () => card().getByTestId('blend-player');
-const attr = (n) => blend().getAttribute(n);
-const timeText = () => card().locator('[data-testid=blend-player] .time').innerText().then((t) => t.split('/')[0].trim());
-const secs = (t) => t.split(':').map(Number).reduce((s, v) => s * 60 + v, 0);
 const near = (a, b, tol, what) => { if (!(Math.abs(a - b) <= tol)) throw new Error(`${what}: ${a} vs ${b}`); };
 const stretchQuery = (u) => { const q = new URL(u, BASE).searchParams; return { start: Number(q.get('start')), seconds: Number(q.get('seconds')), has: q.has('start') && q.has('seconds') }; };
+const layerOf = (u) => u.split('?')[0].split('/').pop();
+const startsOf = (list) => [...new Set(list.map(stretchQuery).map((x) => x.start))].sort((a, b) => a - b);
+const attr = (n) => studio(page).getAttribute(n);
+const timeNow = async () => Number(await attr('data-time'));
+const held = async () => Number(await attr('data-held'));
+const countBy = (re) => requests.filter((r) => re.test(r)).length;
 
 /** Resident memory (MB) of the browser's renderer processes, from /proc (Linux): the page's audio buffers live there. */
 async function rendererMb() {
@@ -63,10 +65,21 @@ const decode = (path, args = []) => {
   return new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
 };
 
+/** Click the waveform at second t (moves the playhead; a 40 minute recording is a few seconds a pixel). */
+async function seekTo(t) {
+  await page.getByTestId('waveform').scrollIntoViewIfNeeded();
+  const box = await page.getByTestId('waveform').boundingBox();
+  const T = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
+  await page.mouse.click(box.x + (t / T) * box.width, box.y + box.height / 2);
+  await sleep(200);
+  return timeNow();
+}
+
 let JOB;
 let preview;
+let cost0 = 0;
 
-await check(`setup: a ${MINUTES} minute mono recording is cleaned (Denoising, light remover, no Leveling) and the job keeps both copies`, async () => {
+await check(`setup: a ${MINUTES} minute mono recording is cleaned (Denoising, light remover, no Leveling, through the API with no timeline) and the job keeps both copies`, async () => {
   const flac = join(WORK, 'long.flac');
   execFileSync(FFMPEG, ['-v', 'error', '-f', 'lavfi', '-i', `sine=f=220:r=48000:d=${SECONDS}`, '-f', 'lavfi', '-i', `anoisesrc=c=pink:a=0.08:r=48000:d=${SECONDS}`,
     '-filter_complex', '[0][1]amix=inputs=2:normalize=0,volume=0.8', '-ac', '1', '-c:a', 'flac', '-compression_level', '0', '-y', flac], { timeout: 300000 });
@@ -86,6 +99,7 @@ await check(`setup: a ${MINUTES} minute mono recording is cleaned (Denoising, li
   const redo = done.redo;
   if (!redo?.available || !redo.noise || !redo.preview) throw new Error('redo: ' + JSON.stringify(redo));
   preview = redo.preview;
+  cost0 = done.costMicros;
   near(preview.samples, SECONDS * SR, SR, 'samples');
   if (!(preview.bytes.noise > 1e6) || !(preview.bytes.input > 1e6) || preview.stretchMaxSeconds !== 30) throw new Error('preview: ' + JSON.stringify(preview));
   if (!(preview.energy?.full > 0) || !(preview.energy?.input > 0)) throw new Error('no energy sums: ' + JSON.stringify(preview.energy));
@@ -110,150 +124,191 @@ await check('the endpoint: a stretch of each copy is a small FLAC with the heade
   return seen.join(', ');
 });
 
-let baseline = 0;
-let peak = 0; // the most the renderer held while the checks played
-await check('the slider: opening Listen on the job page shows the player at once (no whole copy is fetched, only the first stretches), the strength starts at what the job was made with, and the page holds a few seconds of sound', async () => {
-  await page.goto(`${BASE}/app/job/${JOB}`);
-  await card().getByTestId('download-again').waitFor({ timeout: 30000 });
-  baseline = await rendererMb();
-  kept.length = 0;
-  await card().getByTestId('listen').locator('summary').click();
-  await blend().waitFor({ timeout: 60000 });
-  if ((await attr('data-source')) !== 'server' || (await attr('data-db')) !== '100.00') throw new Error(`source ${await attr('data-source')}, ${await attr('data-db')} dB`);
-  await page.waitForFunction(() => Number(document.querySelector('[data-testid=blend-player]')?.getAttribute('data-held')) >= 3, null, { timeout: 30000 });
-  const q = kept.map(stretchQuery);
-  if (kept.length < 6 || !q.every((x) => x.has && x.seconds > 0 && x.seconds <= 10.000001)) throw new Error('requests: ' + kept.join(' '));
-  if (new Set(kept.map((u) => u.split('?')[0].split('/').pop())).size !== 2) throw new Error('not both copies: ' + kept.join(' '));
-  const starts = [...new Set(q.map((x) => x.start))].sort((a, b) => a - b);
-  if (starts.join() !== '0,10,20') throw new Error('stretches asked for: ' + starts);
-  return `${kept.length} requests: stretches at ${starts.join(', ')} s of both copies`;
+await check('the preview endpoint the editor plays from: a stretch of the recording and of the noise removal is a small FLAC with the same headers, they line up sample for sample, a start past the end is refused, more than 30 seconds gives 30', async () => {
+  const seen = [];
+  for (const layer of ['source', 'noise']) {
+    const res = await context.request.get(`${BASE}/api/jobs/${JOB}/preview/${layer}?start=1507.000000&seconds=10.000000`);
+    if (res.status() !== 200 || !/^audio\/flac/.test(res.headers()['content-type'] || '')) throw new Error(`${layer}: ${res.status()} ${await res.text()}`);
+    const h = res.headers();
+    if (h['x-stretch-start'] !== String(1507 * SR) || h['x-stretch-samples'] !== String(10 * SR) || h['x-total-samples'] !== String(preview.samples) || !(Number(h['x-stretch-scale']) > 0)) throw new Error('headers ' + JSON.stringify(h));
+    const body = await res.body();
+    if (body.subarray(0, 4).toString('latin1') !== 'fLaC' || body.length > 4e6) throw new Error(`${layer}: ${body.length} bytes`);
+    seen.push(`${layer} ${(body.length / 1e6).toFixed(2)} MB`);
+  }
+  if ((await context.request.get(`${BASE}/api/jobs/${JOB}/preview/noise?start=${SECONDS + 5}&seconds=1`)).status() !== 400) throw new Error('a start past the end');
+  const long = await context.request.get(`${BASE}/api/jobs/${JOB}/preview/source?start=100&seconds=900`);
+  if (long.headers()['x-stretch-samples'] !== String(30 * SR)) throw new Error('not capped: ' + long.headers()['x-stretch-samples']);
+  return seen.join(', ');
 });
 
-await check('a change of strength asks for nothing: the four names and the range change the gains of the two signals that are already here', async () => {
-  const before = kept.length;
+let baseline = 0;
+let peak = 0; // the most the renderer held while the checks played
+await check('the editor: opening the job page asks only for the first short stretches of the layers it plays (no whole copy), the strength starts at what the job was made with, and the page holds a few seconds of sound', async () => {
+  asked.length = 0;
+  await page.goto(`${BASE}/app/job/${JOB}`);
+  await studio(page).waitFor({ timeout: 60000 });
+  await page.locator('[data-stage=done][data-testid=studio]').waitFor({ timeout: 60000 });
+  await page.getByTestId('hear-voice').waitFor();
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid=studio]')?.getAttribute('data-held')) >= 3 && document.querySelector('[data-testid=studio]')?.getAttribute('data-buffering') === 'no', null, { timeout: 60000 });
+  baseline = await rendererMb();
+  const q = asked.map(stretchQuery);
+  if (asked.length < 6 || !q.every((x) => x.has && x.seconds > 0 && x.seconds <= 10.000001)) throw new Error('requests: ' + asked.join(' '));
+  if ([...new Set(asked.map(layerOf))].sort().join() !== 'noise,source') throw new Error('not just the two layers: ' + asked.join(' '));
+  const starts = startsOf(asked);
+  if (starts.join() !== '0,10,20') throw new Error('stretches asked for: ' + starts);
+  if ((await page.getByTestId('strength-name').innerText()) !== 'Maximum (100 dB)') throw new Error('strength ' + await page.getByTestId('strength-name').innerText());
+  if ((await page.getByTestId('hearing').innerText().catch(() => 'Hearing: everything')) !== 'Hearing: everything') throw new Error('hearing');
+  return `${asked.length} requests: stretches at ${starts.join(', ')} s of both layers`;
+});
+
+await check('a change of strength asks for nothing: the four names and the slider change the gains of the two signals that are already here', async () => {
+  const before = asked.length;
   for (const [id, db] of [['balanced', 24], ['gentle', 12], ['strong', 40], ['max', 100]]) {
-    await card().getByTestId(`strength-set-${id}`).click();
-    await page.waitForFunction((x) => document.querySelector('[data-testid=blend-player]')?.getAttribute('data-db') === x, db.toFixed(2), { timeout: 5000 });
+    await page.locator(`.studio button[data-act=v-str][data-v="${{ gentle: 1, balanced: 2, strong: 3, max: 4 }[id]}"]`).click();
+    await page.waitForFunction((x) => document.querySelector('[data-testid=strength-name]')?.textContent.includes(`(${x} dB)`), db, { timeout: 5000 });
     const a = db >= 100 ? 0 : 10 ** (-db / 20);
-    const full = Number(await attr('data-gain-full'));
-    const input = Number(await attr('data-gain-input'));
-    near(input / (full + input), a, 2e-3, `${db} dB share of the recording`);
+    const g = JSON.parse(await attr('data-gains'));
+    near(g.source / (g.source + g.noise), a, 2e-3, `${db} dB share of the recording`);
   }
+  await page.getByTestId('strength-slider').fill('1.5');
   await sleep(500);
-  if (kept.length !== before) throw new Error(`${kept.length - before} requests for a change of strength`);
+  if (asked.length !== before) throw new Error(`${asked.length - before} requests for a change of strength`);
   return 'no requests';
 });
 
-await check('Play: the sound starts, the time moves on across the borders of stretches (a seek to 25:07, three seconds before a border) without pausing, the next stretches are asked for ahead, and the old ones are let go', async () => {
-  await card().getByTestId('strength-set-balanced').click();
-  kept.length = 0;
-  await card().getByTestId('blend-seek').fill('1507');
-  await sleep(600); // (the stretches there are fetched after a short pause, before Play, so that Play starts at once)
-  await card().getByTestId('blend-play').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid=blend-play]')?.textContent === 'Pause', null, { timeout: 8000 });
-  await page.waitForFunction(() => Number(document.querySelector('[data-testid=blend-player]')?.getAttribute('data-held')) >= 3 && document.querySelector('[data-testid=blend-player]')?.getAttribute('data-buffering') === 'no', null, { timeout: 30000 });
-  const starts0 = [...new Set(kept.map(stretchQuery).map((x) => x.start))].sort((a, b) => a - b);
-  if (starts0[0] !== 1500 || starts0.some((s) => s < 1500 || s > 1520)) throw new Error('stretches asked for after the seek: ' + starts0);
+await check('Play: the sound starts, the time moves on across the borders of stretches (a seek to about 25:07) without pausing, the next stretches are asked for ahead, and the old ones are let go', async () => {
+  await page.locator('.studio button[data-act=v-str][data-v="2"]').click(); // Balanced: both layers are heard
+  asked.length = 0;
+  const t0 = await seekTo(1507);
+  near(t0, 1507, 8, 'the playhead after a click at 25:07'); // (a pixel is a few seconds of 40 minutes)
+  const first = Math.floor(t0 / 10) * 10;
+  await sleep(600); // (the stretches there are fetched at the seek, before Play, so that Play starts at once: they are counted from the seek)
+  await page.getByTestId('play').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.getAttribute('data-playing') === 'yes', null, { timeout: 8000 });
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid=studio]')?.getAttribute('data-held')) >= 3 && document.querySelector('[data-testid=studio]')?.getAttribute('data-buffering') === 'no', null, { timeout: 30000 });
+  const starts0 = startsOf(asked);
+  if (starts0[0] !== first || starts0.some((s) => s < first || s > first + 20)) throw new Error(`stretches asked for after the seek to ${t0}: ${starts0}`);
   const times = [];
-  const t0 = Date.now();
+  const t1 = Date.now();
   let stalled = 0;
-  while (Date.now() - t0 < 9000) {
+  while (Date.now() - t1 < 12000) {
     peak = Math.max(peak, await rendererMb());
-    times.push(secs(await timeText()));
+    times.push(await timeNow());
     if ((await attr('data-buffering')) === 'yes') stalled++;
     await sleep(400);
   }
-  if (!(times.at(-1) >= 1512)) throw new Error('the time never passed the border at 25:10: ' + times.join(' '));
+  if (!(times.at(-1) >= Math.ceil(t0 / 10) * 10 + 2)) throw new Error('the time never passed the next border: ' + times.join(' '));
   for (let i = 1; i < times.length; i++) if (times[i] < times[i - 1] || times[i] - times[i - 1] > 2) throw new Error('the time jumped: ' + times.join(' '));
   if (stalled > 1) throw new Error(`waited for sound ${stalled} times`);
-  const held = Number(await attr('data-held'));
-  const starts = [...new Set(kept.map(stretchQuery).map((x) => x.start))].sort((a, b) => a - b);
-  if (starts.some((s) => s < 1500) || !starts.includes(1530)) throw new Error('stretches asked for while playing: ' + starts);
-  if (held > 4) throw new Error(`${held} stretches held`);
-  await card().getByTestId('blend-play').click();
-  return `time ${times[0]} → ${times.at(-1)} s without a gap; stretches asked for ${starts.join(', ')}; ${held} held`;
+  const now = await held();
+  const starts = startsOf(asked);
+  const at = Math.floor(times.at(-1) / 10) * 10;
+  if (starts.some((s) => s < first) || !starts.includes(at + 20)) throw new Error(`stretches asked for while playing (the time is ${times.at(-1)}): ${starts}`);
+  if (now > 4) throw new Error(`${now} stretches held`);
+  await page.getByTestId('play').click();
+  return `time ${times[0]} → ${times.at(-1)} s without a gap; stretches asked for ${starts.join(', ')}; ${now} held`;
 });
 
-await check('a seek far away: Pause, move the range to 10:00 and Play: the stretches around 10:00 are fetched (only those, none of 0:00), and it plays on from there', async () => {
-  kept.length = 0;
-  await card().getByTestId('blend-seek').fill('600');
+await check('a seek far away: move to 10:00 and Play: the stretches around 10:00 are fetched (only those, none of 0:00), and it plays on from there; seeking again and again while it plays asks only for where it ends up', async () => {
+  asked.length = 0;
+  const t = await seekTo(600);
+  near(t, 600, 8, 'seek to 10:00');
   await sleep(400);
-  await card().getByTestId('blend-play').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid=blend-play]')?.textContent === 'Pause', null, { timeout: 8000 });
-  await page.waitForFunction(() => { const t = document.querySelector('[data-testid=blend-player] .time')?.textContent || ''; return /^10:0[2-9]|^10:[1-5]/.test(t); }, null, { timeout: 30000 });
-  const starts = [...new Set(kept.map(stretchQuery).map((x) => x.start))].sort((a, b) => a - b);
-  if (!starts.includes(600) || starts.some((s) => s < 590 || s > 640)) throw new Error('stretches asked for: ' + starts);
-  // dragging the range while it plays asks only for where it ends up
-  kept.length = 0;
-  for (const v of ['900', '1200', '1800']) await card().getByTestId('blend-seek').fill(v);
-  await page.waitForFunction(() => /^30:/.test(document.querySelector('[data-testid=blend-player] .time')?.textContent || ''), null, { timeout: 30000 });
+  await page.getByTestId('play').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.getAttribute('data-playing') === 'yes', null, { timeout: 8000 });
+  await page.waitForFunction((x) => Number(document.querySelector('[data-testid=studio]')?.getAttribute('data-time')) > x + 2, t, { timeout: 30000 });
+  const starts = startsOf(asked);
+  if (starts.some((s) => s < Math.floor(t / 10) * 10 - 10 || s > Math.floor(t / 10) * 10 + 40)) throw new Error('stretches asked for: ' + starts); // (the one before the playhead's own may be asked for too, near a border)
+  // dragging the position while it plays: a few seeks one after the other in one go (the last one is where it plays)
+  asked.length = 0;
+  const target = await page.evaluate(() => {
+    const wf = document.getElementById('wf');
+    const T = Number(document.querySelector('[data-testid=wave]').getAttribute('data-seconds'));
+    const r = wf.getBoundingClientRect();
+    for (const s of [900, 1200, 1800]) wf.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + (s / T) * r.width, clientY: r.top + r.height / 2 }));
+    return (1800 / T) * 100;
+  });
+  await page.waitForFunction(() => Number(document.querySelector('[data-testid=studio]')?.getAttribute('data-time')) > 1790, null, { timeout: 30000 });
   await sleep(500);
-  await page.waitForFunction(() => document.querySelector('[data-testid=blend-player]')?.getAttribute('data-buffering') === 'no' && Number(document.querySelector('[data-testid=blend-player]')?.getAttribute('data-held')) >= 3, null, { timeout: 30000 });
-  const after = [...new Set(kept.map(stretchQuery).map((x) => x.start))].sort((a, b) => a - b);
-  if (!after.includes(1800) || after.some((s) => s < 1790 || s > 1830)) throw new Error('stretches asked for after dragging: ' + after);
-  const time = secs(await timeText());
-  if (!(time >= 1800 && time < 1830)) throw new Error('playing at ' + time);
-  await card().getByTestId('blend-play').click();
-  return `10:00 → ${starts.join(', ')}; dragging to 30:00 → ${after.join(', ')}`;
+  await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.getAttribute('data-buffering') === 'no' && Number(document.querySelector('[data-testid=studio]')?.getAttribute('data-held')) >= 3, null, { timeout: 30000 });
+  const after = startsOf(asked);
+  const now = await timeNow();
+  if (after.some((s) => s < 1790 || s > 1850)) throw new Error(`stretches asked for after dragging (the time is ${now}): ${after}`);
+  if (!(now >= 1790 && now < 1850)) throw new Error('playing at ' + now);
+  await page.getByTestId('play').click();
+  return `10:00 → ${starts.join(', ')}; dragging to 30:00 (${target.toFixed(0)}% of the way) → ${after.join(', ')}`;
 });
 
-await check('the end: from 39:55 it plays the last, shorter stretch to the end, the button goes back to Play and the time rests at the start', async () => {
-  await card().getByTestId('blend-seek').fill(String(SECONDS - 5));
+await check('the end: from the last seconds it plays the last stretch to the end, the button goes back to Play and the time rests at the end', async () => {
+  asked.length = 0;
+  // (a mouse click a few pixels from the very edge of the picture lands on the end handle of the selection, not on the picture: the click is sent to the picture itself)
+  await page.evaluate((s) => {
+    const wf = document.getElementById('wf');
+    const T = Number(document.querySelector('[data-testid=wave]').getAttribute('data-seconds'));
+    const r = wf.getBoundingClientRect();
+    wf.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + (s / T) * r.width, clientY: r.top + r.height / 2 }));
+  }, SECONDS - 4);
+  await sleep(200);
+  const t = await timeNow();
+  near(t, SECONDS - 4, 1, 'the playhead after a click near the end');
   await sleep(400);
-  await card().getByTestId('blend-play').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid=blend-play]')?.textContent === 'Pause', null, { timeout: 8000 });
-  await page.waitForFunction(() => document.querySelector('[data-testid=blend-play]')?.textContent === 'Play', null, { timeout: 30000 });
-  const last = kept.map(stretchQuery).filter((x) => x.start >= SECONDS - 10);
+  await page.getByTestId('play').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.getAttribute('data-playing') === 'yes', null, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelector('[data-testid=studio]')?.getAttribute('data-playing') === 'no', null, { timeout: 30000 })
+    .catch(async (e) => { throw new Error(`still playing 30 s after a start at ${t.toFixed(1)} s: time ${await timeNow()}, buffering ${await attr('data-buffering')}, held ${await attr('data-held')}, asked ${startsOf(asked)} (${e.message.split('\n')[0]})`); });
+  if ((await page.getByTestId('play').getAttribute('aria-label')) !== 'Play') throw new Error('the button says ' + await page.getByTestId('play').getAttribute('aria-label'));
+  const last = asked.map(stretchQuery).filter((x) => x.start >= SECONDS - 10);
   if (!last.length) throw new Error('no request for the last stretch');
-  return `the last stretch: ${last.map((x) => `${x.start}+${x.seconds}`).join(' ')}`;
+  near(await timeNow(), SECONDS, 1, 'the time rests at the end');
+  return `from ${t.toFixed(0)} s; the last stretch: ${last.map((x) => `${x.start}+${x.seconds}`).join(' ')}`;
 });
 
-await check('memory: nothing but stretches was ever fetched (no whole copy), at most 4 stretches are held, and the renderer\'s memory is far below the 921 MB the two whole copies would take', async () => {
-  const whole = kept.filter((u) => !u.includes('?'));
-  if (whole.length) throw new Error('whole copies fetched: ' + whole.join(' '));
-  const held = Number(await attr('data-held'));
-  if (held > 4) throw new Error(`${held} held`);
-  const now = await rendererMb();
-  const grew = Math.max(now, peak) - baseline;
-  if (!(grew < 250)) throw new Error(`the renderer grew by ${grew.toFixed(0)} MB (${baseline.toFixed(0)} → ${Math.max(now, peak).toFixed(0)})`);
-  return `${held} stretches held at the end; renderer ${baseline.toFixed(0)} MB before, ${peak.toFixed(0)} at the most while playing, ${now.toFixed(0)} now (+${grew.toFixed(0)} at the most); the two whole copies would be ${(SECONDS * SR * 4 * 2 / 1048576).toFixed(0)} MB`;
+await check('memory: nothing but short stretches was ever fetched (no whole copy), at most 4 stretches are held, and the renderer\'s memory is far below the 921 MB the two whole copies would take', async () => {
+  const whole = asked.filter((u) => !u.includes('?'));
+  if (whole.length || requests.some((r) => /\/kept\//.test(r))) throw new Error('whole copies fetched: ' + whole.join(' '));
+  const now = await held();
+  if (now > 4) throw new Error(`${now} held`);
+  const rss = await rendererMb();
+  const grew = Math.max(rss, peak) - baseline;
+  if (!(grew < 250)) throw new Error(`the renderer grew by ${grew.toFixed(0)} MB (${baseline.toFixed(0)} → ${Math.max(rss, peak).toFixed(0)})`);
+  return `${now} stretches held at the end; renderer ${baseline.toFixed(0)} MB before, ${peak.toFixed(0)} at the most while playing, ${rss.toFixed(0)} now (+${grew.toFixed(0)} at the most); the two whole copies would be ${(SECONDS * SR * 4 * 2 / 1048576).toFixed(0)} MB`;
 });
 
-let rerun;
-await check('saving another strength with nothing after the noise removal is a free re-run on our side at this length: "Save this strength · Free", a new job opens, its file comes down by itself', async () => {
-  await card().getByTestId('strength-set-balanced').click();
-  const save = card().getByTestId('blend-save');
-  await save.waitFor({ timeout: 10000 });
-  await page.waitForFunction(() => /Free$/.test((document.querySelector('[data-testid=blend-save]')?.textContent || '').trim()), null, { timeout: 15000 });
-  const label = (await save.innerText()).replace(/\s+/g, ' ').trim();
-  if (label !== 'Save this strength · Free') throw new Error('label: ' + label);
-  if (!/Put together on our side, free/.test(await card().innerText())) throw new Error('no words about where it is made');
+await check('saving another strength with nothing after the noise removal is free at this length: "Save changes · Free", an export on the same job (no new job, no re-run), its file comes down by itself', async () => {
+  await page.locator('.studio button[data-act=v-str][data-v="2"]').click(); // Balanced
+  await page.waitForFunction(() => { const b = document.querySelector('[data-testid=save-changes]'); return b && !b.disabled; }, null, { timeout: 30000 });
+  const label = (await page.getByTestId('save-changes').innerText()).replace(/\s+/g, ' ').trim();
+  if (label !== 'Save changes · Free') throw new Error('label: ' + label);
+  const jobs = countBy(/^POST \/api\/jobs$/);
   got.length = 0;
-  const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith(`/api/jobs/${JOB}/rerun`) && r.method() === 'POST'), save.click()]);
+  const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith(`/api/jobs/${JOB}/export`) && r.method() === 'POST'), page.getByTestId('save-changes').click()]);
   const body = req.postDataJSON();
-  if (JSON.stringify(body.options) !== '{"atten_lim_db":24}' || body.denoiseTier || body.transcribeTier) throw new Error('sent: ' + JSON.stringify(body));
-  await page.waitForURL((u) => JOB_PATH.test(u.pathname) && !u.pathname.endsWith(JOB), { timeout: 30000 });
-  rerun = jobIdOf(page);
-  const done = await waitJobDone(page, rerun, { timeout: 900000 });
-  if (done.status !== 'done' || done.costMicros !== 0 || done.options.atten_lim_db !== 24 || done.sourceJobId !== JOB) throw new Error(`re-run: ${done.status} cost ${done.costMicros} atten ${done.options.atten_lim_db}`);
+  if ('maxCostMicros' in body || body.timeline?.layers?.noise?.length !== 1 || body.timeline.layers.noise[0].strength_db !== 24) throw new Error('sent: ' + JSON.stringify(body).slice(0, 300));
+  await page.locator('[data-testid=studio][data-stage=processing]').waitFor({ timeout: 30000 });
+  await waitCardDone(page, 900000);
+  await waitResult(page, 'result', 600000);
   const t0 = Date.now();
   while (!got.length && Date.now() - t0 < 120000) await sleep(300);
   if (got.length !== 1 || !/\.flac$/.test(got[0].name)) throw new Error('downloaded by itself: ' + got.map((g) => g.name));
   await got[0].download.saveAs(join(WORK, 'balanced.flac'));
-  if (kept.some((u) => !u.includes('?'))) throw new Error('a whole copy was fetched to save');
-  return `${label}; ${got[0].name} (${(statSync(join(WORK, 'balanced.flac')).size / 1e6).toFixed(1)} MB), cost 0`;
+  const done = (await apiCall(page, 'GET', `jobs/${JOB}`)).body;
+  if (done.status !== 'done' || done.costMicros !== cost0 || !done.edit?.hasTimeline) throw new Error(`the job: ${done.status} cost ${done.costMicros} (was ${cost0}) ${JSON.stringify(done.edit)}`);
+  if (countBy(/^POST \/api\/jobs$/) !== jobs || countBy(/rerun$/)) throw new Error('a new job or a re-run was asked for');
+  if (asked.some((u) => !u.includes('?')) || requests.some((r) => /\/kept\//.test(r))) throw new Error('a whole copy was fetched to save');
+  return `${label}; ${got[0].name} (${(statSync(join(WORK, 'balanced.flac')).size / 1e6).toFixed(1)} MB), cost unchanged`;
 });
 
-await check('what comes down is the blend of the two copies at that strength: a window of the file (at 25:07, 10 s) equals (1 - a) * noise + a * input from the two stretches, to the 16-bit file\'s precision', async () => {
+await check('what comes down is the blend of the two layers at that strength: a window of the file (at 25:07, 10 s) equals (1 - a) * noise removal + a * recording from the two stretches, to the 16-bit file\'s precision; the slider holds that strength after a reload', async () => {
   const a = 10 ** (-24 / 20);
-  const windowOf = async (which) => {
-    const res = await context.request.get(`${BASE}/api/jobs/${JOB}/kept/${which}?start=1507.000000&seconds=10.000000`);
-    const p = join(WORK, `${which}.flac`);
+  const windowOf = async (layer) => {
+    const res = await context.request.get(`${BASE}/api/jobs/${JOB}/preview/${layer}?start=1507.000000&seconds=10.000000`);
+    const scale = Number(res.headers()['x-stretch-scale']) || 1;
+    const p = join(WORK, `${layer}.flac`);
     writeFileSync(p, await res.body());
-    return decode(p);
+    return decode(p).map((v) => v / scale);
   };
   const full = await windowOf('noise');
-  const input = await windowOf('input');
+  const input = await windowOf('source');
   const file = decode(join(WORK, 'balanced.flac'), ['-ss', '1507', '-t', '10']);
   if (full.length !== 10 * SR || input.length !== 10 * SR || Math.abs(file.length - 10 * SR) > 2) throw new Error(`lengths ${full.length} ${input.length} ${file.length}`);
   let worst = 0;
@@ -269,11 +324,11 @@ await check('what comes down is the blend of the two copies at that strength: a 
   if (!(rms > 1e-3)) throw new Error('a silent file: ' + rms);
   if (!(apart > 1e-3)) throw new Error('the file is the full-strength sound, not the blend: ' + apart);
   if (!(worst < 3e-4)) throw new Error(`the file differs from the blend by ${worst}`);
-  // and the slider is on the new job's page too (the copies were carried over)
-  await card().getByTestId('listen').locator('summary').click();
-  await blend().waitFor({ timeout: 60000 });
-  if ((await attr('data-db')) !== '24.00') throw new Error('starts at ' + await attr('data-db'));
-  return `rms ${rms.toFixed(4)} (${apart.toFixed(4)} away from the full-strength sound), worst difference from the blend ${worst.toExponential(1)}; the new job's slider starts at Balanced`;
+  await page.goto(`${BASE}/app/job/${JOB}`);
+  await page.locator('[data-stage=done][data-testid=studio]').waitFor({ timeout: 60000 });
+  await page.getByTestId('strength-name').waitFor();
+  if ((await page.getByTestId('strength-name').innerText()) !== 'Balanced (24 dB)') throw new Error('starts at ' + await page.getByTestId('strength-name').innerText());
+  return `rms ${rms.toFixed(4)} (${apart.toFixed(4)} away from the full-strength sound), worst difference from the blend ${worst.toExponential(1)}; the slider starts at Balanced`;
 });
 
 rmSync(WORK, { recursive: true, force: true });
