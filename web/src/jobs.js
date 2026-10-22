@@ -135,9 +135,11 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   // a job made with parts: the timeline says what is done, and the options it replaces must not be sent (docs/api.md section 8)
   const twoTracks = body.timeline ? !!body.timeline.layers?.echo?.length : !!options.echo_reference_track;
   const wantsEmbed = !!(options.embed_subtitles && info?.hasVideo);
-  // Only for a video this browser can't open (it goes up whole anyway): otherwise the subtitles are put in here, afterwards.
-  if (wantsEmbed) options.output_video = true;
-  if (!wantsEmbed && info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
+  // Only for a video this browser can't open (it goes up whole anyway): otherwise the subtitles are put in here, afterwards. A video made on
+  // our side (another file type or size this browser can't make, options.video_out) goes up whole too.
+  const whole = wantsEmbed || !!(options.video_out && info?.hasVideo);
+  if (whole) options.output_video = true;
+  if (!whole && info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
     onStage?.('extract');
     try {
       // Echo removal needs the desktop sound too: keep the first two audio tracks, not just the first.

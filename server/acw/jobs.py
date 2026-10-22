@@ -36,8 +36,12 @@ from . import automatic, db, keycaps, metrics
 from .billing import ledger, pricing
 from .config import get_settings
 
-KINDS = {"denoise", "transcribe", "denoise_transcribe"}
+# "convert": a video made in another file type or picture size, nothing else (options.video_out).
+KINDS = {"denoise", "transcribe", "denoise_transcribe", "convert"}
 AUDIO_FORMATS = {"wav", "flac", "mp3", "m4a", "opus"}
+# options.video_out: the video result's file type and the shorter side of its picture (None: the original size).
+VIDEO_OUT_FORMATS = ("mp4", "mov", "mkv", "webm")
+VIDEO_OUT_SIZES = (480, 720, 1080, 1440, 2160)
 CAPTION_FORMATS = {"srt", "vtt", "txt", "json"}
 # Anything FFmpeg reads well; the sandboxed probe decides for real (ffmpeg.ALLOWED_FORMATS).
 ALLOWED_EXTS = {
@@ -94,6 +98,7 @@ SPEED = {
     "transcribe_local": 0.12,
     "transcribe_premium": 0.08,
     "suggest": 0.22,  # the search for suggestions (acw_common.suggest, 0.22 s per audio second measured at 2 threads), a first run's extra and an on-demand run's all
+    "encode": 0.32,  # the picture made again (options.video_out): x264 on 4 threads, 1080p30 (the card's NVENC: 0.14)
 }
 MODEL_LOAD_SECONDS = 12  # a job runs two or three fresh sandboxed stages that each load their models (measured 1.1 to 4.8 s per stage, 2026-10-19)
 # Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
@@ -180,7 +185,7 @@ def job_seconds(job: dict) -> float:
     opts = params.get("options", {})
     if params.get("run"):  # an edit run: what its blocks take (editing.py), and the render
         return float(params["run"].get("est_seconds") or 0.0) + MODEL_LOAD_SECONDS
-    t = 0.0
+    t = SPEED["encode"] * audio if encodes(params) else 0.0
     if (params.get("edit") or {}).get("first_run"):  # a job made with a timeline: only its parts
         from . import editing
 
@@ -211,6 +216,54 @@ def job_seconds(job: dict) -> float:
     if params.get("transcribe_tier") and (not rerun or rerun.get("transcribe")):
         t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
     return t + MODEL_LOAD_SECONDS
+
+
+def encodes(params: dict) -> bool:
+    """Will the job make the picture of its video again (options.video_out)? Until its file is read it may (None counts)."""
+    return bool(params.get("options", {}).get("video_out")) and params.get("picture_encode") is not False
+
+
+def convert_cost(params: dict, seconds: float) -> int:
+    """What the video conversion of a job costs for `seconds` (its pinned `convert_rate`): only when the picture is made again, which
+    is known once the file is read (`picture_encode`; before that only a new picture size makes it certain)."""
+    rate = params.get("convert_rate")
+    return pricing.cost_micros("convert", "standard", seconds, rate) if rate and params.get("picture_encode") else 0
+
+
+def convert_line(params: dict, seconds: float) -> dict | None:
+    """The price line of a video conversion: `maybe` while it is not known whether the picture is made again (then its micros are not
+    part of the total)."""
+    rate = params.get("convert_rate")
+    if not rate:
+        return None
+    return {"item": "convert", "label": pricing.rate("convert", "standard").label, "quantity": 1, "usdPerMinute": rate / pricing.MICROS_PER_USD,
+            "micros": pricing.cost_micros("convert", "standard", seconds, rate), **({"maybe": True} if params.get("picture_encode") is None else {})}
+
+
+def video_out_of(options: dict) -> dict | None:
+    """options.video_out checked: {"format": one of VIDEO_OUT_FORMATS, "size": one of VIDEO_OUT_SIZES or None}, or None."""
+    vo = options.get("video_out")
+    if vo is None:
+        return None
+    if not isinstance(vo, dict) or set(vo) - {"format", "size"}:
+        raise JobError("video_out must be {format, size}")
+    fmt = vo.get("format")
+    if fmt not in VIDEO_OUT_FORMATS:
+        raise JobError(f"video_out.format must be one of {', '.join(VIDEO_OUT_FORMATS)}")
+    size = vo.get("size")
+    if size is not None and (isinstance(size, bool) or size not in VIDEO_OUT_SIZES):
+        raise JobError(f"video_out.size must be one of {', '.join(map(str, VIDEO_OUT_SIZES))}, or null for the original size")
+    return {"format": fmt, "size": size}
+
+
+def convert_params(opts: dict) -> dict:
+    """What a job with a video conversion stores: the rate (pinned like every price) and whether the picture is made again (a new size:
+    yes; MKV at the original size: no, it holds any picture; another file type only: known once the file is read)."""
+    vo = opts.get("video_out")
+    if not vo:
+        return {}
+    encode = True if vo["size"] else False if vo["format"] == "mkv" else None
+    return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": encode}
 
 
 def stage_limits(seconds: float, max_seconds: float) -> tuple[int, int]:
@@ -332,6 +385,8 @@ def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, 
     """Customer-facing name of what a job does (the same words as the price list). `leveling`: Leveling is part of it
     (for a stored job: "leveling" in its pinned rates)."""
     parts = []
+    if kind == "convert":
+        return pricing.rate("convert", "standard").label
     if kind in ("denoise", "denoise_transcribe"):
         if denoise_tier != pricing.NO_DENOISE:
             parts.append("Voice rebuild" if denoise_tier == "rebuild" else "Denoising")
@@ -356,6 +411,8 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
         pricing.rate("denoise", denoise_tier or "")
     if kind in ("transcribe", "denoise_transcribe"):
         pricing.rate("transcribe", transcribe_tier or "")
+    if kind == "convert" and (denoise_tier or transcribe_tier):
+        raise JobError("A conversion (kind convert) has no denoiseTier or transcribeTier.")
     out: dict = {}
     fmt = options.get("audio_format", "flac")  # lossless like WAV, about half the size to download
     if not isinstance(fmt, str) or fmt not in AUDIO_FORMATS:
@@ -380,6 +437,12 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
         raise JobError("translations need subtitles or a transcript")
     out["output_video"] = bool(options.get("output_video", True))
     out["embed_subtitles"] = bool(options.get("embed_subtitles", True))
+    # The video result in another file type or picture size (made from the whole video, so it has to be uploaded whole).
+    out["video_out"] = video_out_of(options)
+    if out["video_out"] and not out["output_video"]:
+        raise JobError("video_out needs output_video")
+    if kind == "convert" and not out["video_out"]:
+        raise JobError("A conversion (kind convert) needs options.video_out: the file type and picture size of the video.")
     lufs = options.get("loudness_lufs", -16.0)
     if lufs is not None:
         try:
@@ -502,12 +565,15 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
     else:
         rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling, echo)
         total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling, echo)
+    cv = convert_params(opts)
+    total += convert_cost(cv, duration_seconds)
+    line = convert_line(cv, duration_seconds)
     out = {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
         "durationSeconds": duration_seconds,
         "maxSeconds": pricing.max_job_seconds(d_tier if not plan else "standard"),
-        "lines": price_lines(rates, d_tier, t_tier, duration_seconds, n),
+        "lines": [*price_lines(rates, d_tier, t_tier, duration_seconds, n), *([line] if line else [])],
         "options": opts,
     }
     if plan:
@@ -538,6 +604,11 @@ def estimate_timeline(kind: str, denoise_tier: str | None, transcribe_tier: str 
         sub = editing.subtitle_plan(None, tl, editing.subtitle_rates())
         total += sub["micros"]
         text_lines = sub["lines"]
+    cv = convert_params(opts)
+    total += convert_cost(cv, duration_seconds)
+    line = convert_line(cv, duration_seconds)
+    if line:
+        text_lines = [*text_lines, line]
     return {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
@@ -607,6 +678,8 @@ def create_job(
     if not 0 < size_bytes <= settings.max_upload_bytes:
         raise JobError(f"Files must be under {settings.max_upload_bytes // 1024**2} MB.", 413)
     tl = None
+    if timeline is not None and kind == "convert":
+        raise JobError("A conversion (kind convert) has no timeline.")
     if timeline is not None:
         from . import editing
 
@@ -625,6 +698,8 @@ def create_job(
         from . import editing
 
         disk_need += editing.cache_bytes(claimed_seconds, 2, editing.steps_in(tl) if tl is not None else 1)
+    if opts["video_out"]:
+        disk_need += size_bytes  # the converted video, about as big as the upload
     disk_free = hostload.get(settings.data_dir).snapshot().disk_free
     if disk_free < disk_need:
         raise JobError("We're short on storage space right now. Please try again a bit later.", 507)
@@ -636,6 +711,7 @@ def create_job(
         "transcribe_tier": transcribe_tier if kind != "denoise" and not (tl is not None and tl.layers["subtitles"]) else None,
         "input_ext": ext,
         "display_name": clean_display_name(display_name),
+        **convert_params(opts),
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
     n_translate = len(opts["translate"])
@@ -662,6 +738,7 @@ def create_job(
         params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling, echo)
         est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
                                       leveling, echo)
+    est += convert_cost(params, claimed_seconds)  # (another file type only: known once the file is read, then held if it is made again)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
@@ -943,7 +1020,15 @@ def callbacks_for(job_ids: list[str]) -> dict[str, dict]:
 
 
 def label_of(kind: str, params: dict) -> str:
-    """The customer-facing name of what a job does: the price list's words; for a re-run, the steps it did again."""
+    """The customer-facing name of what a job does: the price list's words; for a re-run, the steps it did again. A video conversion
+    that makes the picture again is named too."""
+    base = _label_of(kind, params)
+    if kind != "convert" and not params.get("run") and params.get("convert_rate") and params.get("picture_encode"):
+        return f"{base} + {pricing.rate('convert', 'standard').label}"
+    return base
+
+
+def _label_of(kind: str, params: dict) -> str:
     if params.get("run"):
         from . import editing
 

@@ -13,7 +13,7 @@ import {
   recoPatches, redo as redoState, sameTracks, setSel, snapJ, splitAll, toSuggestion, toTimeline, undo as undoState, vkey, freeOnlySuggestion } from '../editor/tracks.js';
 import { bytes } from '../format.js';
 import { submitJob } from '../jobs.js';
-import { buildLimit, serverAudioFormat } from '../media/convert.js';
+import { buildLimit, serverAudioFormat, serverSize } from '../media/convert.js';
 import { analyseFile } from '../media/analyse.js';
 import { preloadDenoiser } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
@@ -24,7 +24,7 @@ import { startSuggestions, suggestVerdict } from '../media/suggest-run.js';
 import { buildWav } from '../media/wav.js';
 import { recommendForFile } from '../recommend.js';
 import { newLocalJobId } from '../localid.js';
-import { browserVerdict, inGigabytes, jobKind, outputPlan, subsVerdict, supported, TINY_FILE_BYTES, wantsOf } from './plan.js';
+import { browserVerdict, inGigabytes, jobKind, outputPlan, subsVerdict, supported, TINY_FILE_BYTES, videoOutOf, wantsOf } from './plan.js';
 import { cleanRange, fitPcm, joinSegments, pcmToFlac, samplesOf, splicePcm, transcribeRange } from './runs.js';
 
 const AUTO_KEY = 'acw.autoSettings'; // this browser's choice for "Automatic" (on unless switched off)
@@ -531,8 +531,8 @@ export class Session {
     this.touch();
     const tracks = clone(this.S.tracks);
     const T = this.T;
-    const wants = wantsOf({ tracks, plan, choice, out: this.out, file, local: !needsServer(tracks) });
-    const server = needsServer(tracks);
+    const server = needsServer(tracks) || !!plan.serverConvert; // (a video this browser can't make goes up whole, to be made on our side)
+    const wants = wantsOf({ tracks, plan, choice, out: this.out, file, local: !server });
     this.restoredNote = false;
     const freeNoise = freeNoiseRanges(tracks);
     const freeSubs = freeSubRanges(tracks);
@@ -606,11 +606,11 @@ export class Session {
   }
 
   async startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, estimate }) {
-    const tl = toTimeline(tracks, T);
-    const kind = jobKind(tracks);
+    const kind = jobKind(tracks, plan);
+    const videoOut = videoOutOf(plan, choice, serverSize(choice.size));
     // a job made with parts says what is done in its timeline (docs/api.md section 8): the subtitles' quality, language and translations are the
-    // subtitle parts' own, so the job carries no tier of its own
-    const body = {
+    // subtitle parts' own, so the job carries no tier of its own; a conversion alone (kind convert) is only its video_out
+    const body = kind === 'convert' ? { kind, durationSeconds: T || 1, options: { video_out: videoOut } } : {
       kind,
       durationSeconds: T || 1,
       options: {
@@ -618,8 +618,9 @@ export class Session {
         // putting subtitles into the video here needs a subtitle file, even when only the transcript was ticked
         caption_formats: plan.wantsText ? ['srt', 'vtt', 'txt'].filter((c) => this.out.sfiles.includes(c) || (c === 'vtt' && plan.embedHere && !this.out.sfiles.includes('srt'))) : [],
         embed_subtitles: !!(plan.embedNow && plan.embedOnServer),
+        ...(videoOut ? { video_out: videoOut } : {}),
       },
-      timeline: tl.toJSON(),
+      timeline: toTimeline(tracks, T).toJSON(),
     };
     let share = null;
     const out = await submitJob({
@@ -678,7 +679,7 @@ export class Session {
     const failedParts = { sound: freeNoise.length > 0 && !cleaned, subs: freeSubs.length > 0 && !subsFiles };
     if (bad) this.error = bad.reason?.message || '';
     const made = { sound: !!cleaned, subs: !!subsFiles };
-    const label = made.sound && made.subs ? 'Free noise removal and subtitles' : made.sound ? 'Free noise removal' : 'Free subtitles';
+    const label = made.sound && made.subs ? 'Free noise removal and subtitles' : made.sound ? 'Free noise removal' : made.subs ? 'Free subtitles' : 'File conversion';
     const id = newLocalJobId();
     const fin = beginFinish({
       id, local: true, free: true, status: 'done', kind: 'denoise', label, displayName: file.name, inputName: file.name,
@@ -820,9 +821,15 @@ export class Session {
   /** The price of these tracks before the job exists: the server's estimate for a timeline of parts (it counts what each run costs besides). */
   estimateBody({ choice, plan }) {
     const tracks = this.S.tracks;
-    const kind = jobKind(tracks);
+    const kind = jobKind(tracks, plan);
     if (!kind) return null;
-    return { kind, durationSeconds: this.T, options: { audio_format: serverAudioFormat(choice.format, this.file, this.info), caption_formats: ['srt', 'vtt', 'txt'] }, timeline: toTimeline(tracks, this.T).toJSON() };
+    const videoOut = videoOutOf(plan, choice, serverSize(choice.size));
+    if (kind === 'convert') return { kind, durationSeconds: this.T, options: { video_out: videoOut } };
+    return {
+      kind, durationSeconds: this.T,
+      options: { audio_format: serverAudioFormat(choice.format, this.file, this.info), caption_formats: ['srt', 'vtt', 'txt'], ...(videoOut ? { video_out: videoOut } : {}) },
+      timeline: toTimeline(tracks, this.T).toJSON(),
+    };
   }
 
   /** The price of saving the changes of a job (nothing is held by asking). */

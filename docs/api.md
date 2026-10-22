@@ -110,6 +110,7 @@ Price list (`rates`; per minute of audio, counted by the second, rounded up; amo
 | `transcribe` / `local` | Subtitles & transcript |
 | `transcribe` / `premium` | Subtitles & transcript, extra accurate |
 | `transcribe_translate` / `standard` | one translation of the subtitles, **per language** |
+| `convert` / `standard` | Video conversion (`options.video_out`): per minute of video, charged only when the picture is made again (a new size, or a file type that can't hold it as it is); copying it into another file type is free |
 | `stream_denoise` / `light` | Live noise removal |
 | `stream_captions` / `local` | Live captions (English) |
 | `stream_captions` / `premium` | Live captions, extra accurate |
@@ -147,7 +148,7 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
 ### 1. Create: `POST /api/jobs`
 
 ```json
-{"kind": "denoise" | "transcribe" | "denoise_transcribe",
+{"kind": "denoise" | "transcribe" | "denoise_transcribe" | "convert",
  "denoiseTier": "standard" | "rebuild" | "off", "transcribeTier": "local" | "premium",
  "filename": "talk.mp4", "sizeBytes": 123456, "durationSeconds": 612.4,
  "displayName": "My talk.wav",
@@ -156,7 +157,7 @@ Python (standard `requests`): `r = requests.post(f"{BASE}/api/jobs", json=body, 
              "language": "en" | null, "output_video": true, "embed_subtitles": true,
              "loudness_lufs": -16 | null, "atten_lim_db": 100, "echo_reference_track": false,
              "noise": "auto|light|heavy", "leveling": true, "translate": ["es", "de"],
-             "automatic": false},
+             "automatic": false, "video_out": {"format": "mp4", "size": 720} | null},
  "timeline": {"version": 1, "seconds": 612.4, "layers": {"noise": [{"start": 100, "end": 160.5, "strength_db": 40, "remover": "auto"}]}}}
 ```
 
@@ -165,7 +166,7 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 
 | Field | Rules |
 |---|---|
-| `kind` | `denoise` (clean the sound), `transcribe` (subtitles and transcript), or both |
+| `kind` | `denoise` (clean the sound), `transcribe` (subtitles and transcript), or both; or `convert`: only `options.video_out` (no tiers, no timeline) |
 | `denoiseTier` | required for `denoise` kinds: `standard` (Denoising), `rebuild` (Voice rebuild, its own price: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; `atten_lim_db` and `noise` don't apply to it; it also brings back the high sounds a phone call or a very small file has lost; files up to 90 minutes), or `off` (no noise removal: only Leveling, so `options.leveling` must then be on). Leveling (`options.leveling`, on by default) is its own line on the bill. |
 | `transcribeTier` | required for `transcribe` kinds: `local` (Standard) or `premium` (extra accurate; audio goes to a speech partner, see the privacy policy) |
 | `filename` | its extension must be one we read: audio `wav rf64 w64 mp3 mp2 mpa m4a m4b m4r aac flac ogg oga opus spx wma aiff aif aifc caf au snd amr ac3 eac3 dts mka wv ape tta mpc`, video `mp4 m4v mov webm mkv avi wmv asf flv f4v 3gp 3g2 ts mts m2ts mpg mpeg vob mxf dv ogv rm rmvb`; anything else is `400 Unsupported file type.` Only the extension is used; the name never becomes a path |
@@ -186,6 +187,7 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 | `translate` | `[]` | up to 3 target languages (two-letter codes from the translation list, not the spoken one); needs a transcription kind. The subtitles and transcript are also made in those languages (`<stem>.<lang>.srt\|vtt`, `<stem>.<lang>-transcript.txt`), priced per language. A language that can't be made is left out, said in `notice` and not charged |
 | `output_video` | `true` | for a video input: give a video back (with the cleaned sound). `false`: audio only |
 | `embed_subtitles` | `true` | put the subtitles into the video; needs the whole video uploaded |
+| `video_out` | `null` | the video result in another file type or picture size: `{"format": "mp4"\|"mov"\|"mkv"\|"webm", "size": 480\|720\|1080\|1440\|2160\|null}` (`size`: the shorter side in pixels, the shape kept; `null` keeps the size). Needs the whole video uploaded and `output_video`. The picture is copied when the new file type can hold it at its size (free; MKV holds any); otherwise it is made again, priced as Video conversion (above). With `size` the estimate and the hold include it; for another file type only that is known once the file is read: the estimate lists the line with `"maybe": true` (not in the total), and the hold grows then if needed (the job fails, uncharged, when the balance is short) |
 | `loudness_lufs` | `-16` | target loudness, a number from -30 to -9 (`400` outside it), or `null` to leave the level as it is. Podcast about -16, online video -14, broadcast -23 |
 | `atten_lim_db` | `100` | how much noise may be removed: any number, clamped to 6-100 dB. The website's strengths are 12 (gentle), 24, 40 and 100 (max). Doesn't apply to `rebuild` |
 | `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Charged at its own price (`echo` / `standard` in the price list, about a third of Denoising's) on top of the job's other steps; a job made before this price existed keeps the prices it was made with (no echo line, nothing charged for it). A single-track file is processed normally, `notice` says so, and echo removal is not charged |
@@ -247,8 +249,10 @@ uploaded (before echo removal), about a minute of it spread over the file, in a 
 available there (`400`): send the settings you want instead, for example `denoiseTier: "rebuild"`.
 
 A video result keeps the input's container when it can hold the streams (`mp4 mov m4v mkv webm`); other containers
-come back as MKV. Other audio tracks are kept unchanged and subtitles go in where the container can hold them; only
-the first audio track is cleaned. The website converts container and picture size in the browser; the API doesn't.
+come back as MKV, unless `options.video_out` asks for another file type or size. Other audio tracks are kept unchanged and subtitles
+go in where the container can hold them; only the first audio track is cleaned (a conversion alone keeps the sound, made in the new
+file type's own kind when it can't hold it as it is). The website converts file type and picture size in the browser, for free, and asks
+for `video_out` only for a video it can't convert itself.
 
 `embed_subtitles` makes the service put the subtitles into the video, which needs the whole video uploaded. The
 website only asks for it for a video the browser can't open (it goes up whole anyway); otherwise it uploads the

@@ -190,6 +190,7 @@ export function ratesFrom(pricing) {
   return {
     noise: per('denoise', 'standard'), rebuild: per('denoise', 'rebuild'), echo: per('echo', 'standard'), level: per('leveling', 'standard'),
     std: per('transcribe', 'local'), ext: per('transcribe', 'premium'), tr: per('transcribe_translate', 'standard'),
+    cv: per('convert', 'standard'), // Video conversion on our side (a video this browser can't make), when the picture is made again
   };
 }
 /** Micros a minute, for the words: noise 9000 -> "$0.009 a minute". */

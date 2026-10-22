@@ -37,6 +37,11 @@ _RATE_LIST = [
     Rate("transcribe", "premium", "Transcription, extra accurate", 15_000),
     # Per extra language, on top of the transcription (text only goes to the speech partner; a few cents an hour).
     Rate("transcribe_translate", "standard", "Translated subtitles, per language", 4_000),
+    # Video conversion on our side (a video the browser can't convert itself), per minute of video, charged only when the picture is
+    # made again (a new size, or a file type that can't hold it as it is); copying it into another file type is free. Measured on a
+    # 1080p30 recording: x264 about 1.2 CPU-seconds a second of video, the card's NVENC about 0.25 (broker.GPU_WORK); about 2/3 of
+    # Denoising, the whole video coming in and going out included.
+    Rate("convert", "standard", "Video conversion", 6_000),
     # Live streaming
     Rate("stream_denoise", "light", "Live noise removal", 4_000),
     Rate("stream_captions", "local", "Live captions", 6_000),

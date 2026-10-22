@@ -215,8 +215,9 @@ export async function videoPlan(info, container, px = 0, dims = null) {
 /**
  * Everything the "save as" list may hold, with whether this browser can make each for this file.
  * `serverAudio`: the sound itself comes from our server (paid cleaning), which writes any audio format, so only the
- * video files depend on this browser.
- * @returns {Promise<{id:string, kind:'audio'|'video', label:string, ok:boolean, why:string}[]>}
+ * video files depend on this browser. A video type this browser can't make for a video is made on our side (`server`: the whole
+ * video is uploaded; docs/api.md options.video_out).
+ * @returns {Promise<{id:string, kind:'audio'|'video', label:string, ok:boolean, why:string, server?:boolean}[]>}
  */
 export async function listOutputs({ info, serverAudio = false }) {
   const caps = await outputCaps();
@@ -232,27 +233,32 @@ export async function listOutputs({ info, serverAudio = false }) {
   };
   for (const f of FORMATS.filter((x) => x.kind === 'audio')) out.push({ id: f.id, kind: 'audio', label: f.label, ok: audio[f.id][0], why: audio[f.id][1] });
   const videoSource = !!info?.hasVideo && !info?.viaLibav;
-  if (info?.hasVideo ? videoSource : true) {
-    for (const f of FORMATS.filter((x) => x.kind === 'video')) {
-      const plan = await videoPlan(info, f.id, 0);
-      const audioOk = audioCodecsFor(caps, f.id).length > 0;
-      out.push({ id: f.id, kind: 'video', label: f.label, ok: plan.ok && audioOk, why: plan.ok ? 'This browser can’t write the sound for this kind of file.' : plan.why });
-    }
+  for (const f of FORMATS.filter((x) => x.kind === 'video')) {
+    const plan = info?.hasVideo && !videoSource ? { ok: false, why: '' } : await videoPlan(info, f.id, 0);
+    const audioOk = audioCodecsFor(caps, f.id).length > 0;
+    if (plan.ok && audioOk) out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '' });
+    else if (info?.hasVideo) out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '', server: true }); // made on our side
+    else out.push({ id: f.id, kind: 'video', label: f.label, ok: false, why: plan.ok ? 'This browser can’t write the sound for this kind of file.' : plan.why });
   }
   return out;
 }
 
-/** Which picture sizes can be made for this container (the first, 'same', always can when the format is offered). */
-export async function listSizes(info, container) {
+/** Which picture sizes can be made for this container (the first, 'same', always can when the format is offered). A size this browser
+ * can't make for a video is made on our side (`server`); with `server` (a file type made on our side) every size is. */
+export async function listSizes(info, container, server = false) {
   const out = [];
   for (const s of SIZES) {
-    if (!s.px) { out.push({ ...s, ok: true }); continue; }
+    if (!s.px) { out.push({ ...s, ok: true, ...(server ? { server: true } : {}) }); continue; }
+    if (server) { out.push({ ...s, ok: true, server: true }); continue; }
     const d = info?.width && info?.height ? scaledDims(info.width, info.height, s.px) : null;
     const plan = await videoPlan(info, container, s.px, d);
-    out.push({ ...s, ok: plan.ok, why: plan.why });
+    out.push(plan.ok ? { ...s, ok: true } : info?.hasVideo ? { ...s, ok: true, server: true } : { ...s, ok: false, why: plan.why });
   }
   return out;
 }
+
+/** The picture size our side is asked for: the shorter side in pixels, or null for the original size (docs/api.md options.video_out). */
+export const serverSize = (id) => (SIZES.find((s) => s.id === id)?.px || null);
 
 /** The format a result starts out as: the video's own kind of file when it is kept, WAV otherwise. */
 export function defaultFormatId(file, info, keepVideo = true, serverAudio = false) {

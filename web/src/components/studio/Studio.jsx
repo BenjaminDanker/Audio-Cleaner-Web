@@ -14,7 +14,7 @@ import { dismiss as dismissSuggestion } from '../../editor/suggest.js';
 import { MixPlayer, describe, prepare } from '../../editor/mix.js';
 import {
   applyToSel, cost as costOf, covered, dbOf, delta as deltaOf, echoBlocked, edit, freePatch, fmt, hasWork, money, needsServer, overl, pushUndo, ranges, ratesFrom, sameOut, sameTracks,
-  selTitle, setSel, splitAll, toggleRange, toTimeline, uni, trOf,
+  selTitle, setSel, splitAll, toggleRange, toTimeline, tot, uni, trOf,
 } from '../../editor/tracks.js';
 import { BlendPlayer, gainsFor, matchGain, memorySource, previewFits } from '../../media/blend.js';
 import { buildLimit } from '../../media/convert.js';
@@ -134,7 +134,6 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const info = session.info;
   const hasFileHere = !!session.file;
   const reading = session.wave.state === 'reading';
-  const server = needsServer(S.tracks);
   const c = useMemo(() => costOf(S.tracks, rates), [ver, rates]); // eslint-disable-line react-hooks/exhaustive-deps
   const soundFromServer = useMemo(() => (done && job && !job.local ? !!fin?.serverAudio : needsServer(S.tracks) && c.paidAny && (c.nPaid + c.rSec + c.eSec + c.lSec > 0)), [ver, done, job?.id, fin, c]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -143,7 +142,9 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const outInfo = useMemo(() => info || fin?.inputInfo || null, [info, fin?.inputName, fin?.info]); // eslint-disable-line react-hooks/exhaustive-deps
   const initial = useMemo(() => (job && fin ? (() => { const w = fin.effective(); return w.sound || w.embed ? { name: w.name, format: w.format, size: w.size } : null; })() : session.draftChoice || null), [job?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const choice = useOutputChoice({ file: outFile, info: outInfo, serverAudio: soundFromServer, initial });
-  const plan = useMemo(() => outputPlan({ tracks: S.tracks, info: outInfo, file: session.file || outFile, choice, out: session.out, limit: buildLimit() }), [ver, outInfo, choice.format, choice.isVideoFile, session.out.burn]); // eslint-disable-line react-hooks/exhaustive-deps
+  const plan = useMemo(() => outputPlan({ tracks: S.tracks, info: outInfo, file: session.file || outFile, choice, out: session.out, limit: buildLimit() }), [ver, outInfo, choice.format, choice.isVideoFile, choice.size, choice.server, choice.touched, choice.valid, session.out.burn]); // eslint-disable-line react-hooks/exhaustive-deps
+  // our side is needed for a priced part, or for a video this browser can't make (it goes up whole: plan.serverConvert)
+  const server = plan.server;
   const verdict = useMemo(() => (info ? browserVerdict(info, { wavFits }) : { ok: false, why: 'Your original file isn’t in this tab, so this can’t be done here.' }), [info]);
   const sVerdict = useMemo(() => (info ? subsVerdict(info) : { ok: false, why: 'Your original file isn’t in this tab, so this can’t be done here.' }), [info]);
   const rebuildOffered = !!findRate(pricing, 'denoise', 'rebuild');
@@ -151,11 +152,18 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   session.env = { rates, pricing, rebuildOk: !rebuildOffered || !!pricing?.rebuildAvailable, active, maxActive, signedIn };
 
   // ---- the price ----
-  const kind = jobKind(S.tracks);
+  const kind = jobKind(S.tracks, plan);
+  // a video made on our side: Video conversion, certain at a new size (another file type only: once the file is read, so "if needed")
+  const convertLine = est.data?.lines?.find((l) => l.item === 'convert') || null;
+  const copyOnly = choice.size === 'same' && choice.format === 'mkv'; // (MKV holds any picture: copied as it is, free)
+  const convertMicros = plan.serverConvert && rates?.cv && !copyOnly ? tot(rates.cv * Math.ceil(T)) : 0;
+  const conversion = plan.serverConvert
+    ? (copyOnly ? { free: true, server: true } : { micros: convertLine ? convertLine.micros : convertMicros, maybe: convertLine ? !!convertLine.maybe : choice.size === 'same' })
+    : plan.converting ? { free: true } : null;
   useEffect(() => {
     if (stage !== 'ready' || !kind || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }
     // signed out there is nobody to ask: the price list is public, so the price is worked out here from it (what the file is is never asked)
-    if (!signedIn) { setEst({ state: 'ok', micros: c.total, error: '', local: true }); return undefined; }
+    if (!signedIn) { setEst({ state: 'ok', micros: c.total + (conversion && !conversion.free && !conversion.maybe ? convertMicros : 0), error: '', local: true }); return undefined; }
     const body = session.estimateBody({ choice, plan });
     if (!body) return undefined;
     setEst((e) => ({ ...e, state: 'loading', error: '' }));
@@ -167,7 +175,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       );
     }, 400);
     return () => { clearTimeout(t); ctl.abort(); };
-  }, [stage, kind, ver, rates, choice.format, signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [stage, kind, ver, rates, choice.format, choice.size, plan.serverConvert, signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
   // a job on our side is priced as it will be held: its timeline's price, which counts what each run costs besides the minutes (docs/api.md section 8)
   const estMicros = !server ? 0 : !rates ? null : est.state === 'ok' ? est.micros : null;
   const changedTracks = done && !!session.snap && !sameTracks(S.tracks, session.snap.tracks, T);
@@ -209,8 +217,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   // Offline, the paid parts can't be started by anyone, and signing in isn't possible either.
   // (until the account check has been answered nobody is told to sign in: it may be a busy moment, not a visitor who is signed out)
   const account = needsAccount(server, signedIn) && known && !offline && (stage === 'ready' || (done && isLocal && changedTracks));
-  const canStart = stage === 'ready' && !!session.file && !!info && !reading && problems.length === 0 && (!server || (estMicros != null && !offline && known)) && (!cleaning || choice.valid)
-    && hasWork(S.tracks);
+  const canStart = stage === 'ready' && !!session.file && !!info && !reading && problems.length === 0 && (!server || (estMicros != null && !offline && known))
+    && (!(cleaning || plan.converting) || choice.valid) && (hasWork(S.tracks) || plan.converting);
 
   // ---- the picture and the sound ----
   useEffect(() => {
@@ -840,7 +848,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   const willDownload = (() => {
     const parts = [];
-    if (plan.cleaning) parts.push(`${choice.name.trim()}${plan.embedNow ? ' (with the subtitles inside)' : ''}`);
+    if (plan.cleaning || plan.converting) parts.push(`${choice.name.trim()}${plan.embedNow ? ' (with the subtitles inside)' : ''}`);
     else if (plan.embedNow) parts.push(`${(session.fileName || 'audio').replace(/\.[^.]+$/, '')}-subtitled.mkv (the video with the subtitles inside)`);
     if (plan.wantsText) {
       const f = [['srt', 'SRT'], ['vtt', 'VTT'], ['txt', 'TXT']].filter(([k]) => session.out.sfiles.includes(k)).map(([, l]) => l);
@@ -849,7 +857,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     return parts.join(' and ');
   })();
   const tooBigNote = plan.wantsText && plan.videoResult && plan.tooBigHere ? `This browser can’t rebuild a video this big (over ${Math.round((buildLimit() / 1024 ** 3) * 10) / 10} GB); Chrome, Edge or Firefox can. You’ll get the subtitle files to load in your player or video editor.` : '';
-  const mkvNote = !plan.cleaning && plan.embedFormat && plan.embedFormat !== 'mkv' && plan.embedFormat !== 'webm' ? plan.embedFormat.toUpperCase() : '';
+  const mkvNote = !plan.cleaning && !plan.converting && plan.embedFormat && plan.embedFormat !== 'mkv' && plan.embedFormat !== 'webm' ? plan.embedFormat.toUpperCase() : '';
 
   // the long-recording estimate of the Free cleanup
   const loadLeft = denoiserLoad.done ? 0 : denoiserLoad.secondsLeft;
@@ -931,7 +939,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const ctx = {
     S, session, tips, stage, sheet, mobile, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, ph, zoom, pins, hear, hearText, heard, data,
     scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, serverTotal: !server ? 0 : est.state === 'ok' ? est.micros : null,
-    partsNote: server && est.state === 'ok' && !est.local, localPrice: server && est.state === 'ok' && !!est.local, pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
+    partsNote: needsServer(S.tracks) && est.state === 'ok' && !est.local, localPrice: server && est.state === 'ok' && !!est.local, conversion, pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
     disabled: processing, willDownload, tooBigNote, mkvNote, primaryDisabled,
     h: { onDb, slideStart, slideEnd, onVideo: (f) => fin?.setVideo(f) },
   };

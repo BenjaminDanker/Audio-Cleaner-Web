@@ -113,7 +113,7 @@ export default function Inspector({ ctx }) {
           )}
           {eta ? <p className="note mt0" data-testid="eta">Should take about {human(eta)} on this device{loadLeft ? ' (including getting the noise remover ready)' : ''}.</p> : null}
           {session.second && <p className="note mt0" data-testid="echo-browser-note">{tips['echo.free']}</p>}
-          {info?.hasVideo && info?.viaLibav && <p className="note mt0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can’t rebuild this video type, so you’ll get the cleaned sound as a WAV file. Denoising gives you the whole video back.</p>}
+          {info?.hasVideo && info?.viaLibav && <p className="note mt0" data-testid="audio-only-note">Your browser can clean the sound of this video, but can’t rebuild this video type, so you’ll get the cleaned sound as a WAV file. For the video, pick a video file type under Output: it’s made on our side, with the whole video uploaded.</p>}
         </div>
       )}
     </div>

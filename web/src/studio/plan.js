@@ -3,7 +3,7 @@
 
 import { balanceMoney, money as siteMoney, stem } from '../format.js';
 import { tooManyText } from '../jobs.js';
-import { canHoldSubtitles, defaultFormatId } from '../media/convert.js';
+import { canHoldSubtitles, defaultFormatId, formatOfName } from '../media/convert.js';
 import { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, hasWork, needsServer, serverSound } from '../editor/tracks.js';
 
 export const MAX_SECONDS = 6 * 3600; // the most the browser will take (Free noise removal and subtitles)
@@ -43,43 +43,62 @@ export function browserVerdict(info, { ok = supported, wavFits = null } = {}) {
   return { ok: true, why: '' };
 }
 
+/** Does the output choice convert the file by itself: another file type than the file's own, or another picture size, chosen by the person? */
+export function convertsFile({ file, choice }) {
+  if (!file || !choice?.valid || !choice.touched) return false;
+  return choice.format !== formatOfName(file.name) || (!!choice.picture && choice.size !== 'same');
+}
+
 /**
  * The result files as the choices say: a cleaned sound (as `choice`'s type and name) when the sound is changed, the subtitle files, and the
  * subtitles inside the video. `limit`: the biggest video this browser can put together (media/convert.js buildLimit; null: any).
+ * `converting`: nothing else changes the file, but it is wanted in another file type or size (free here; a video this browser can't make
+ * is made on our side: `serverConvert`, the whole video uploaded, docs/api.md options.video_out).
  */
 export function outputPlan({ tracks, info, file, choice, out, limit = null }) {
   const cleaning = changesSound(tracks);
   const wantsText = anySubs(tracks);
   const serverText = anyPaidSubs(tracks);
   const isVideo = !!info?.hasVideo;
+  const converting = !cleaning && convertsFile({ file, choice });
+  const serverConvert = isVideo && !!choice?.server && !!choice?.isVideoFile && (cleaning || converting);
   // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the browser can't
   // open goes up whole, and then our side puts them in. A recording with no picture can get them in the plain black video made here when
   // a video file type is picked.
   const videoResult = isVideo ? !cleaning || !!choice?.isVideoFile : cleaning && !!choice?.isVideoFile;
-  const embedOnServer = serverText && isVideo && !info?.viaMediabunny;
+  const embedOnServer = isVideo && (serverConvert || (serverText && !info?.viaMediabunny));
   const tooBigHere = isVideo && !embedOnServer && !!file && limit != null && file.size > limit;
-  const canEmbed = wantsText && videoResult && !tooBigHere && (serverText || !isVideo || !!info?.viaMediabunny);
+  const canEmbed = wantsText && videoResult && !tooBigHere && (serverText || serverConvert || !isVideo || !!info?.viaMediabunny);
   const embedNow = canEmbed && !!out?.burn;
   const embedHere = embedNow && !embedOnServer;
   // A subtitles-only video keeps its own file type when that can carry them (WebM), else it becomes MKV.
-  const embedFormat = cleaning ? choice?.format : isVideo ? defaultFormatId(file, info, true) : null;
-  return { cleaning, wantsText, serverText, isVideo, videoResult, embedOnServer, tooBigHere, canEmbed, embedNow, embedHere, embedFormat };
+  const embedFormat = cleaning || converting ? choice?.format : isVideo ? defaultFormatId(file, info, true) : null;
+  const server = needsServer(tracks) || serverConvert;
+  return { cleaning, converting, serverConvert, server, wantsText, serverText, isVideo, videoResult, embedOnServer, tooBigHere, canEmbed, embedNow, embedHere, embedFormat };
 }
 
-/** What kind of job our side runs for these tracks (docs/api.md section 8: a job made with parts is `denoise`, its subtitles are parts too), or null when nothing needs it. */
-export function jobKind(tracks) {
-  return needsServer(tracks) ? 'denoise' : null;
+/** What kind of job our side runs for these tracks (docs/api.md section 8: a job made with parts is `denoise`, its subtitles are parts too;
+ * a video made on our side with nothing else to do is `convert`), or null when nothing needs it. */
+export function jobKind(tracks, plan = null) {
+  if (needsServer(tracks)) return 'denoise';
+  if (!plan?.serverConvert) return null;
+  return hasWork(tracks) ? 'denoise' : 'convert'; // (the free parts go along as the browser's uploads)
+}
+
+/** What our side is asked for the video (docs/api.md options.video_out), or null when the browser makes it. */
+export function videoOutOf(plan, choice, size) {
+  return plan?.serverConvert ? { format: choice.format, size } : null;
 }
 
 /** The choices as the Finish step wants them (finish.js `wants`). `local`: no job on our side; the sound and subtitles are made here. */
 export function wantsOf({ tracks, plan, choice, out, file, fileName = '', local }) {
   const w = {
-    sound: plan.cleaning, format: choice.format, name: choice.name.trim(), size: choice.size,
+    sound: plan.cleaning, convert: !!plan.converting, serverVideo: !!plan.serverConvert, format: choice.format, name: choice.name.trim(), size: choice.size,
     subs: plan.wantsText, caps: { srt: out.sfiles.includes('srt'), vtt: out.sfiles.includes('vtt'), txt: out.sfiles.includes('txt') },
     embed: plan.embedNow, soundHere: local && anyFreeNoise(tracks), subsHere: local && anyFreeSubs(tracks),
   };
-  // subtitles into the video with no cleaning: the video keeps its own sound, as an MKV
-  if (!plan.cleaning && plan.embedNow) Object.assign(w, { format: 'mkv', size: 'same', name: `${stem(fileName || file?.name)}-subtitled.mkv` });
+  // subtitles into the video with no cleaning and no other file type or size: the video keeps its own sound, as an MKV
+  if (!plan.cleaning && !plan.converting && plan.embedNow) Object.assign(w, { format: 'mkv', size: 'same', name: `${stem(fileName || file?.name)}-subtitled.mkv` });
   return w;
 }
 
@@ -89,12 +108,12 @@ export function problemsFor({
   partsError = '', noParts = false,
 }) {
   const problems = [];
-  const server = needsServer(tracks);
+  const server = needsServer(tracks) || !!plan?.serverConvert;
   if (info?.hasAudio === false) problems.push({ text: 'This file has no audio track.' });
   if (server && duration && maxJob && duration > maxJob) problems.push({ text: `Files can be at most ${Math.floor(maxJob / 3600)} hours long.` });
   const maxUpload = pricing?.maxUploadBytes || DEFAULT_MAX_UPLOAD_BYTES;
   // A video's picture is not uploaded and uncompressed WAV/AIFF is packed smaller first; anything else goes up as it is.
-  const canShrink = (info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || '');
+  const canShrink = !plan?.serverConvert && ((info?.hasVideo && info?.viaMediabunny) || /^pcm/.test(info?.audioCodec || ''));
   if (server && file && file.size > maxUpload && !canShrink) {
     problems.push({ text: `This file is ${gigabytes(file.size)}. The most we can take for upload is ${gigabytes(maxUpload)}. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.` });
   }
@@ -104,9 +123,9 @@ export function problemsFor({
   if (server && est != null && balance && est > balance.available_micros) {
     problems.push({ text: `This costs about ${siteMoney(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`, kind: 'credit' });
   }
-  if (info && !hasWork(tracks)) problems.push({ text: 'Choose at least one thing to do: noise removal, subtitles, or both.' });
+  if (info && !hasWork(tracks) && !plan?.converting) problems.push({ text: 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.' });
   if (plan.wantsText && !out.sfiles.length) problems.push({ text: 'Choose at least one caption or transcript format.' });
-  if (plan.embedHere && plan.cleaning && !canHoldSubtitles(choice.format)) {
+  if (plan.embedHere && (plan.cleaning || plan.converting) && !canHoldSubtitles(choice.format)) {
     problems.push({ text: `Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.` });
   }
   if (noParts) problems.push({ text: 'Choose at least one part to process, or switch back to the whole file.' });

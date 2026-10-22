@@ -6,8 +6,9 @@ import {
 
 // "What should the result be called, and what kind of file?" A name box with a file-type list attached to its right,
 // and (for a video) the picture size. Typing another ending changes the list; picking from the list changes the ending.
-// Only what this browser can really make for this file is in the list. Used in the editor's Output menu (the choice is made before
-// Start and can be changed on a finished result; the result is downloaded by itself). Nothing here uploads anything.
+// What this browser can really make for this file is in the list; a video type or size it can't make for a video is made on our side
+// (marked so: the whole video is then uploaded). Used in the editor's Output menu (the choice is made before Start and can be changed on a
+// finished result; the result is downloaded by itself). Nothing here uploads anything.
 
 const defaultName = (file, id) => `${stem(file?.name)}-cleaned.${FORMAT[id]?.ext || 'wav'}`;
 const AUDIO_DEFAULT_FOR = (file) => (/\.webm$/i.test(file?.name || '') ? 'ogg' : 'm4a');
@@ -70,14 +71,15 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
     setNameState((n) => nameForFormat(n, id));
   }, [outputs, okIds, format]);
 
-  const picture = !!info?.hasVideo && !info?.viaLibav && FORMAT[format]?.kind === 'video';
+  const picture = !!info?.hasVideo && FORMAT[format]?.kind === 'video';
+  const serverFormat = !!outputs?.find((o) => o.id === format)?.server;
   useEffect(() => {
     setSizes(null);
     if (!picture) { setSize('same'); return undefined; }
     let alive = true;
-    listSizes(info, format).then((l) => { if (alive) setSizes(l); }).catch(() => { if (alive) setSizes([{ ...SIZES[0], ok: true }]); });
+    listSizes(info, format, serverFormat).then((l) => { if (alive) setSizes(l); }).catch(() => { if (alive) setSizes([{ ...SIZES[0], ok: true }]); });
     return () => { alive = false; };
-  }, [picture, info, format]);
+  }, [picture, info, format, serverFormat]);
   useEffect(() => {
     if (sizes && !sizes.find((s) => s.id === size)?.ok) setSize('same');
   }, [sizes, size]);
@@ -95,9 +97,11 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
   }, []);
 
   const hint = file && info ? checkName(name, okIds) : '';
+  // made on our side: a video type, or a picture size, this browser can't make for this video
+  const server = picture && (serverFormat || !!sizes?.find((s) => s.id === size)?.server);
   return {
-    outputs, sizes, format, name, size, setSize, typeName, pickFormat, hint, valid: !!file && !!info && !!outputs && !hint,
-    okIds, picture, isVideoFile: FORMAT[format]?.kind === 'video',
+    outputs, sizes, format, name, size, setSize: (v) => { setSize(v); setTouched(true); }, typeName, pickFormat, hint, valid: !!file && !!info && !!outputs && !hint,
+    okIds, picture, isVideoFile: FORMAT[format]?.kind === 'video', server, touched,
     defaultVideo: () => defaultFormatId(file, info, true),
     defaultAudio: () => AUDIO_DEFAULT_FOR(file),
   };
@@ -118,7 +122,8 @@ function missingNote(outputs) {
 export default function OutputFields({ choice, info, idPrefix = 'out', disabled = false, plainBlackNote = true }) {
   const { outputs, sizes, format, name, size, hint } = choice;
   const audio = (outputs || []).filter((o) => o.ok && o.kind === 'audio');
-  const video = (outputs || []).filter((o) => o.ok && o.kind === 'video');
+  const video = (outputs || []).filter((o) => o.ok && o.kind === 'video' && !o.server);
+  const videoServer = (outputs || []).filter((o) => o.ok && o.kind === 'video' && o.server);
   const missing = missingNote(outputs);
   const blackPicture = choice.isVideoFile && !info?.hasVideo;
   const px = SIZES.find((s) => s.id === size)?.px || 0;
@@ -150,6 +155,11 @@ export default function OutputFields({ choice, info, idPrefix = 'out', disabled 
                 {video.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
               </optgroup>
             )}
+            {videoServer.length > 0 && (
+              <optgroup label="Video, made on our side">
+                {videoServer.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+              </optgroup>
+            )}
           </select>
         </div>
         <span id={`${idPrefix}-hint`} className={hint ? 'hint hint-bad' : 'hint'} data-testid="out-hint" role={hint ? 'alert' : undefined}>
@@ -164,16 +174,20 @@ export default function OutputFields({ choice, info, idPrefix = 'out', disabled 
             id={`${idPrefix}-size`} className="select" value={size} data-testid="out-size"
             onChange={(e) => choice.setSize(e.target.value)} disabled={disabled || !sizes}
           >
-            {(sizes || SIZES.slice(0, 1)).filter((s) => s.ok !== false).map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            {(sizes || SIZES.slice(0, 1)).filter((s) => s.ok !== false).map((s) => <option key={s.id} value={s.id}>{s.label}{s.server && !choice.outputs?.find((o) => o.id === format)?.server ? ' (made on our side)' : ''}</option>)}
           </select>
           <span className="hint" data-testid="out-size-note">
-            {onlySame
-              ? 'This browser can’t re-encode this video, so only the original size is offered.'
-              : bigger
-                ? 'That’s bigger than the original. The picture is only stretched, so it won’t look sharper and the file gets bigger.'
-                : px
-                  ? 'The picture is made again at this size on your device, so it takes a little longer.'
-                  : 'The picture is copied as it is whenever the new file type can hold it.'}
+            {choice.server
+              ? `Made on our side, so the whole video is uploaded. ${px
+                ? 'Making the picture at a new size is priced as Video conversion.'
+                : 'Copying the picture as it is into this file type is free; if the file type can’t hold it, it’s made again, priced as Video conversion. MKV holds any.'}`
+              : onlySame
+                ? 'This browser can’t re-encode this video, so only the original size is offered.'
+                : bigger
+                  ? 'That’s bigger than the original. The picture is only stretched, so it won’t look sharper and the file gets bigger.'
+                  : px
+                    ? 'The picture is made again at this size on your device, so it takes a little longer.'
+                    : 'The picture is copied as it is whenever the new file type can hold it.'}
           </span>
         </div>
       )}

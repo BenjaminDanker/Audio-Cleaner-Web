@@ -409,7 +409,13 @@ def _read_result(path: Path) -> dict:
 
 def _job_cost(job: dict, params: dict, seconds: float, billed: dict | None = None) -> int:
     """What the job costs for `seconds` of audio, at the prices it was created with. `billed`: what a job made with a timeline reports
-    having run (editing.billable_from), else the whole timeline is charged."""
+    having run (editing.billable_from), else the whole timeline is charged. A video conversion counts when the picture is made again."""
+    return _steps_cost(job, params, seconds, billed) + jobs.convert_cost(params, seconds)
+
+
+def _steps_cost(job: dict, params: dict, seconds: float, billed: dict | None = None) -> int:
+    if job["kind"] == "convert":
+        return 0
     if (params.get("edit") or {}).get("first_run"):
         return editing.first_run_cost(job["kind"], params, seconds, billed, job["id"])
     # Translations: what was asked for until the job is done, then only the languages that were made.
@@ -452,13 +458,19 @@ def _reprice(job: dict, duration: float) -> None:
         try:
             with db.tx() as c:
                 keycaps.check(c, key_id, cost - job["est_cost_micros"])  # the key's limit holds for the real price too
-                ledger.extend_hold(job["hold_id"], cost - job["est_cost_micros"], c=c)
+                if job.get("hold_id"):
+                    ledger.extend_hold(job["hold_id"], cost - job["est_cost_micros"], c=c)
+                else:  # (a video conversion that was free until the file showed its picture has to be made again)
+                    job["hold_id"] = ledger.create_hold(job["user_id"], cost, "job", job["id"], c=c)
+                    c.execute("UPDATE jobs SET hold_id = ? WHERE id = ?", (job["hold_id"], job["id"]))
                 c.execute("UPDATE jobs SET est_cost_micros = ? WHERE id = ?", (cost, job["id"]))
         except keycaps.KeyCapReached as e:
             raise StageFailed(str(e))
         except (ledger.InsufficientFunds, ledger.LedgerError):
+            why = (" The picture of this video has to be made again for the file type or size you chose (Video conversion);"
+                   " MKV at the original size keeps it as it is, for free." if jobs.convert_cost(params, duration) else "")
             raise StageFailed(
-                f"This file is {duration / 60:.1f} min and costs ${cost / 1e6:.2f}, more than your available balance."
+                f"This file is {duration / 60:.1f} min and costs ${cost / 1e6:.2f}, more than your available balance.{why}"
             )
         job["est_cost_micros"] = cost
 
@@ -678,7 +690,9 @@ def process(job: dict, extra: dict) -> None:
         d = _write_spec(job, extra, job.get("duration_seconds"))
         params = json.loads(job["params_json"])
         if job["next_stage"] == "finalize":
-            res = run_stage(job, d, "finalize", 1800)
+            # (a video whose picture is made again takes as long as that takes)
+            seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
+            res = run_stage(job, d, "finalize", max(1800, int(seconds * jobs.SPEED["encode"] * 3)) if jobs.encodes(params) else 1800)
             job["duration_seconds"] = db.one("SELECT duration_seconds FROM jobs WHERE id = ?", (job["id"],))["duration_seconds"]
             (_complete_edit if params.get("run") else _complete)(job, d, res)
             return
@@ -710,6 +724,15 @@ def process(job: dict, extra: dict) -> None:
                 raise StageFailed("Processing failed; you were not charged.", "malformed probe result")
             if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, params) + 61):
                 raise StageFailed("Processing failed; you were not charged.", "implausible duration")
+            if params.get("options", {}).get("video_out"):
+                if job["kind"] == "convert" and not probe.get("has_video"):
+                    raise StageFailed("This file has no picture, so there is no video to convert. You weren't charged.")
+                # another file type or size: now it is known whether the picture is made again (charged) or copied (free)
+                pe = probe.get("picture_encode")
+                if not isinstance(pe, bool):
+                    raise StageFailed("Processing failed; you were not charged.", "malformed picture_encode")
+                params = jobs.update_params(job["id"], picture_encode=pe)
+                job["params_json"] = json.dumps(params)
             _reprice(job, duration)
             job["duration_seconds"] = duration
             params = json.loads(job["params_json"])

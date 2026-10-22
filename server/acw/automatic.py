@@ -207,6 +207,9 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
         new_cost = pricing.job_cost_micros(kind, tier, t_tier, seconds, rates, n, "leveling" in rates, "echo" in rates)
         params.update(options=opts, denoise_tier=tier, rates=rates, chosen=decision["chosen"])
         params["automatic"] = {"fixed": params["automatic"]["fixed"]}  # (the candidates were only for the hold)
+        from . import jobs
+
+        new_cost += jobs.convert_cost(params, seconds)  # (a video conversion is not part of the decision: it stays as it was)
         est = row["est_cost_micros"]
         if row["hold_id"] and 0 < new_cost < est:
             ledger.reduce_hold(row["hold_id"], new_cost, c=c)

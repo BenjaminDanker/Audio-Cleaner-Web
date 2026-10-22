@@ -27,8 +27,8 @@ export default function Privacy() {
       <p>{SITE.name} is operated by {operator}, the controller of your personal data for the account-based services. Contact: use the <Link to="/contact">contact form</Link>{email && ', or '}{email && <a href={`mailto:${email}`}>{email}</a>}. The <Link to="/terms">Terms of Service</Link> apply alongside this policy.</p>
       <p>The Service is not available to people in the EU/EEA, the UK or Switzerland, and we do not offer it there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
 
-      <h2 id="browser">2. Free noise removal and subtitles in your browser</h2>
-      <p>The free noise removal and the free subtitles on the <Link to="/app">Cleanup page</Link> process your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover and the subtitle maker themselves, and the public price list, none of which contain your data. You don’t need an account for them. The noise remover’s and the subtitle maker’s model files come from Hugging Face (huggingface.co), which, like any site your browser connects to, sees your IP address and browser type.</p>
+      <h2 id="browser">2. Free noise removal, subtitles and file conversion in your browser</h2>
+      <p>The free noise removal, the free subtitles and changing a file&rsquo;s type or video size on the <Link to="/app">Cleanup page</Link> process your file entirely on your device. Your audio and video are <b>not uploaded</b> and no server call carries your content. The only requests are for the web page, the noise remover and the subtitle maker themselves, and the public price list, none of which contain your data. You don’t need an account for them. The noise remover’s and the subtitle maker’s model files come from Hugging Face (huggingface.co), which, like any site your browser connects to, sees your IP address and browser type.</p>
       <p>If, without an account, you choose something that is done on our side and then sign in, your browser keeps a copy of the file and your choices in its own storage while you do, so you can carry on where you left off. That copy stays on your device, is never uploaded by this step, and is deleted as soon as it is restored, or after a day.</p>
 
       <h2 id="collect">3. What we collect</h2>
@@ -42,7 +42,7 @@ export default function Privacy() {
 
       <h2 id="files">4. Your files and transcripts</h2>
       <ul>
-        <li>For video, your browser extracts the audio track and uploads only that where it can; the video picture never leaves your device in that case.</li>
+        <li>For video, your browser extracts the audio track and uploads only that where it can; the video picture never leaves your device in that case. A video your browser can&rsquo;t convert itself is uploaded whole when you have it converted on our side (another file type or video size), and is kept and deleted like any upload (below).</li>
         <li>Uploaded input files, and the copies we keep of them so a result can be changed again quickly (the cleaned sound before your strength is applied, and the transcript), are <b>kept for 2 hours</b> after your last change to the job (finishing is the first; saving an edit, asking for a price, processing and exporting count too), and in any case are <b>deleted 6 hours after the upload</b>. The files of a job that fails or is canceled are deleted at once.</li>
         <li>Results (cleaned audio, captions, transcripts) are available for download for <b>2 hours</b> after your last change to the job (6 hours after the upload at the latest) and are then <b>deleted together with the upload</b>. You can delete them all sooner from the Cleanup page.</li>
         <li>We do not listen to your content, and we do <b>not use your audio or transcripts for training</b> models.</li>

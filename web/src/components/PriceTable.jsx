@@ -15,6 +15,7 @@ const DESCRIPTIONS = {
   'stream_captions/premium': 'Live captions in other languages too, best for accents and specialist words',
   'transcribe_translate/standard': 'The subtitles and transcript in another language, for each language you add',
   'stream_translate/standard': 'Your live captions in another language, for each language you add',
+  'convert/standard': 'Another file type or video size for a video your browser can’t convert itself, made on our side. Only when the picture has to be made again; copying it into another file type is free',
 };
 
 // The server's names for two rows say "Transcription"; everywhere else on the site this is "Subtitles & transcripts".
@@ -26,7 +27,7 @@ const LABELS = {
 
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
-  { id: 'files', title: 'Files', products: ['denoise', 'echo', 'leveling', 'transcribe', 'transcribe_translate'] },
+  { id: 'files', title: 'Files', products: ['denoise', 'echo', 'leveling', 'transcribe', 'transcribe_translate', 'convert'] },
   { id: 'live', title: 'Live streaming', products: ['stream_denoise', 'stream_captions', 'stream_translate'] },
 ];
 
@@ -79,6 +80,13 @@ function FreeRows({ title }) {
         <th scope="row">
           <span className="svc">Subtitles &amp; transcripts in your browser</span>
           <span className="small muted desc">Made on your own device, nothing is uploaded. Fine for clear speech; the paid ones below are more accurate.</span>
+        </th>
+        <td className="num"><span className="price-main">Free</span></td>
+      </tr>
+      <tr>
+        <th scope="row">
+          <span className="svc">File type and video size in your browser</span>
+          <span className="small muted desc">Another file type (MP4, MKV, WebM, MP3, …) or video size, on its own or with the rest. Made on your own device, nothing is uploaded.</span>
         </th>
         <td className="num"><span className="price-main">Free</span></td>
       </tr>

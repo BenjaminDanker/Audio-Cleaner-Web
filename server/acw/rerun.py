@@ -313,7 +313,15 @@ def merged_options(src_params: dict, options: dict | None) -> dict:
     (its options are the decided ones); the automatic mode itself does not go on: asking for it again is refused."""
     if (options or {}).get("automatic"):
         raise jobs.JobError(AUTOMATIC_RERUN)
-    return {**src_params["options"], **(options or {}), "automatic": False}
+    # (the video's file type and size stay as the source made them: the re-run's file was read with them)
+    return {**src_params["options"], **(options or {}), "automatic": False, "video_out": src_params["options"].get("video_out")}
+
+
+def convert_of(src_params: dict, new: dict) -> dict:
+    """A re-run makes the video again as the source did: when that made the picture again, so does the re-run, at today's price."""
+    if not new.get("video_out"):
+        return {}
+    return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": src_params.get("picture_encode")}
 
 
 def _tiers(src_params: dict, denoise_tier, transcribe_tier) -> tuple[str, str | None, str | None]:
@@ -370,13 +378,15 @@ def estimate(user_id: str, job_id: str, api_key_id: str | None, denoise_tier: st
     _check(plan, d_tier, t_tier, src, sp, kind, seconds)
     rates = pricing.rerun_rates(d_tier, t_tier, plan["paid"])
     n = len(plan["translate_new"])
-    total = pricing.rerun_cost_micros(rates, seconds, n)
+    cv = convert_of(sp, new)
+    total = pricing.rerun_cost_micros(rates, seconds, n) + jobs.convert_cost(cv, seconds)
+    line = jobs.convert_line(cv, seconds)
     return {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
         "free": total == 0,
         "durationSeconds": seconds,
-        "lines": jobs.price_lines(rates, d_tier, t_tier, seconds, n),
+        "lines": [*jobs.price_lines(rates, d_tier, t_tier, seconds, n), *([line] if line else [])],
         "steps": {"clean": plan["clean"], "transcribe": plan["transcribe"], "translate": plan["translate_new"]},
         "expiresAt": jobs.expiry(db.now(), src.get("uploaded_at") or src["created_at"]),
         "options": new,
@@ -440,7 +450,8 @@ def create_rerun(user_id: str, job_id: str, *, denoise_tier: str | None = None, 
     _check(plan, d_tier, t_tier, src, sp, kind, seconds)
     rates = pricing.rerun_rates(d_tier, t_tier, plan["paid"])
     n_translate = len(plan["translate_new"])
-    est = pricing.rerun_cost_micros(rates, seconds, n_translate)
+    cv = convert_of(sp, new)
+    est = pricing.rerun_cost_micros(rates, seconds, n_translate) + jobs.convert_cost(cv, seconds)
     if max_cost_micros is not None and est > max_cost_micros:
         raise jobs.JobError(f"This now costs about ${est / 1e6:.2f}, more than the ${max_cost_micros / 1e6:.2f} you were quoted.", 409, code=PRICE_CHANGED)
     from . import hostload
@@ -467,6 +478,7 @@ def create_rerun(user_id: str, job_id: str, *, denoise_tier: str | None = None, 
         "display_name": sp.get("display_name"),
         "channels": sp.get("channels"),
         "rates": rates,
+        **cv,
         "kept": kept,
         "rerun": {
             "source": src["id"], "root": root, "deadline": jobs.hard_deadline(src), "clean": plan["clean"], "transcribe": plan["transcribe"],

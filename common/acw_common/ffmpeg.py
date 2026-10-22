@@ -639,7 +639,10 @@ class FFmpeg:
             args += ["-i", path_arg(audio)]
             maps += ["-map", "1:a:0", "-c:a", "copy", "-c:a:0", acodec[0], "-b:a:0", acodec[1]]
         else:
-            maps += ["-map", "0:a:0", "-c:a", "copy"]
+            # the file's own sound (none is fine): copied, or encoded as the container's own kind when it can't hold it as it is
+            maps += ["-map", "0:a:0?", "-c:a", "copy"]
+            if not plan.get("audio0_copy", True):
+                maps += ["-c:a:0", acodec[0], "-b:a:0", acodec[1]]
         for index in plan["audio"]:  # the file's other audio tracks, as they were
             maps += ["-map", f"0:{index}"]
         maps += ["-disposition:a", "0", "-disposition:a:0", "default"]
@@ -680,8 +683,11 @@ _TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
 def _plan_extras(info: ProbeResult | None, ext: str) -> dict:
     """Which of the source's other audio tracks and its subtitles go into a container with extension `ext`."""
     if info is None:
-        return {"audio": [], "subs": [], "total_audio": 0, "total_subs": 0}
+        return {"audio": [], "subs": [], "total_audio": 0, "total_subs": 0, "audio0_copy": True}
     audio: list[int] = []
+    # the first audio track, when it is kept as it is (no new sound): can this container hold it?
+    first = info.audio_codecs[0] if info.audio_codecs else None
+    audio0_copy = first is None or ext not in _COPY_AUDIO or _COPY_AUDIO[ext] is None or first in _COPY_AUDIO[ext]
     if ext in _COPY_AUDIO:
         allowed = _COPY_AUDIO[ext]
         audio = [idx for idx, codec in zip(info.audio_indices[1:], info.audio_codecs[1:]) if allowed is None or codec in allowed]
@@ -692,7 +698,7 @@ def _plan_extras(info: ProbeResult | None, ext: str) -> dict:
     else:
         subs = []
     return {"audio": audio, "subs": subs, "total_audio": max(0, len(info.audio_indices) - 1),
-            "total_subs": len(info.subtitle_streams)}
+            "total_subs": len(info.subtitle_streams), "audio0_copy": audio0_copy}
 
 
 def _container_codecs(ext: str) -> tuple[list[str], str]:
@@ -710,9 +716,13 @@ def _container_codecs(ext: str) -> tuple[list[str], str]:
 class VideoOut:
     """What the picture of a result should be like. `short_side`: the pixels of the shorter side; the picture is resized
     to it (plain lanczos resizing, same shape, never turned from portrait to landscape or back; bigger than the
-    original only stretches it). None keeps the size."""
+    original only stretches it). None keeps the size. `encoders`: the picture encoders to try, best first (None: the
+    app's own choice, picture_encoders()); the server names its own (the card's NVENC, x264). `fast`: VP9 at its
+    real-time speed (about x264's cost) instead of the slower, smaller setting."""
 
     short_side: int | None = None
+    encoders: tuple[str, ...] | None = None
+    fast: bool = False
 
 
 def _even(x: float) -> int:
@@ -747,7 +757,8 @@ _COPY_VIDEO = {
 # Containers that are the same kind of file as far as the picture goes.
 _SAME_KIND = (frozenset({".mp4", ".m4v"}),)
 # How many bits a second a picture of one pixel and one frame gets (the efficient encoders need fewer).
-_BITS_PER_PIXEL = {"h264_mf": 0.07, "h264_videotoolbox": 0.07, "libvpx-vp9": 0.05, "mpeg4": 0.14, "flv": 0.16}
+_BITS_PER_PIXEL = {"h264_mf": 0.07, "h264_videotoolbox": 0.07, "libx264": 0.07, "h264_nvenc": 0.08, "libvpx-vp9": 0.05, "mpeg4": 0.14,
+                   "flv": 0.16}
 
 
 def picture_encoders(ext: str) -> list[str]:
@@ -793,9 +804,15 @@ def _picture_plan(info: ProbeResult | None, ext: str, video: VideoOut) -> dict |
     out = size or shown
     fps = info.video_fps or 30.0
     return {
-        "encoders": picture_encoders(ext), "size": size, "fps": fps, "out": out,
-        "source_bps": info.video_bitrate, "source_pixels": shown[0] * shown[1],
+        "encoders": list(video.encoders) if video.encoders else picture_encoders(ext), "size": size, "fps": fps, "out": out,
+        "source_bps": info.video_bitrate, "source_pixels": shown[0] * shown[1], "fast": video.fast,
     }
+
+
+def needs_picture_encode(info: ProbeResult | None, ext: str, video: VideoOut) -> bool:
+    """Is the picture of `info` made again for a result ending in `ext` at `video`'s size (a new size, or a file type that
+    can't hold it as it is)? False: it is copied."""
+    return _picture_plan(info, ext, video) is not None
 
 
 def _picture_args(encoder: str, picture: dict) -> list[str]:
@@ -812,7 +829,12 @@ def _picture_args(encoder: str, picture: dict) -> list[str]:
         args += ["-vf", f"scale={width}:{height}:flags=lanczos,setsar=1"]
     args += ["-c:v", encoder, "-b:v", str(bitrate), "-g", str(max(10, round(fps * 2))), "-pix_fmt", "yuv420p"]
     if encoder == "libvpx-vp9":
-        args += ["-deadline", "good", "-cpu-used", "4", "-row-mt", "1"]
+        args += ["-deadline", "realtime", "-cpu-used", "8"] if picture.get("fast") else ["-deadline", "good", "-cpu-used", "4"]
+        args += ["-row-mt", "1"]
+    elif encoder == "libx264":
+        args += ["-preset", "veryfast"]
+    elif encoder == "h264_nvenc":
+        args += ["-preset", "p4"]
     elif encoder == "h264_videotoolbox":
         args += ["-allow_sw", "1"]  # an Intel Mac without a hardware encoder
     return args

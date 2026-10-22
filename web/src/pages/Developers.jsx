@@ -93,7 +93,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
         <Table
           head={['Field', 'What it is']}
           rows={[
-            ['kind', '"denoise" cleans the sound, "transcribe" writes subtitles and a transcript, "denoise_transcribe" does both.'],
+            ['kind', '"denoise" cleans the sound, "transcribe" writes subtitles and a transcript, "denoise_transcribe" does both. "convert" only makes the video in another file type or size (options.video_out).'],
             ['denoiseTier', 'For cleaning: "standard" (Denoising), "rebuild" (Voice rebuild: the whole voice is rebuilt, for room echo, a muffled voice, phone-quality or damaged sound, or distortion from recording too loud; own price; files up to 90 minutes), or "off" (no noise removal, only Leveling: options.leveling must then be on). Leveling (options.leveling, on by default) has its own price.'],
             ['transcribeTier', <>For subtitles: <code>"local"</code> (Standard) or <code>"premium"</code> (extra accurate; the audio goes to a speech partner, see the <Link to="/privacy">Privacy Policy</Link>).</>],
             ['filename', 'Its ending must be one we can read. Audio: wav, rf64, w64, mp3, mp2, mpa, m4a, m4b, m4r, aac, flac, ogg, oga, opus, spx, wma, aiff, aif, aifc, caf, au, snd, amr, ac3, eac3, dts, mka, wv, ape, tta, mpc. Video: mp4, m4v, mov, webm, mkv, avi, wmv, asf, flv, f4v, 3gp, 3g2, ts, mts, m2ts, mpg, mpeg, vob, mxf, dv, ogv, rm, rmvb. Anything else is refused with "Unsupported file type." Only the ending is used; the name never becomes a path.'],
@@ -135,7 +135,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
 
         <h3>4. Download the results</h3>
         <p><code>GET /api/jobs/&#123;id&#125;/outputs/&#123;name&#125;</code> with a <code>name</code> from <code>outputs</code>. The file comes as an attachment. Your upload, the copies kept for <a href="#again">changing the job</a> and the results are kept together for <b>2 hours</b> after the job&rsquo;s last change (finishing is the first; saving, pricing, processing or exporting an <a href="#edit">edit</a> each count), and never more than <b>6 hours</b> after the upload, then deleted together for good. <code>expiresAt</code> says when.</p>
-        <p>A video comes back in its own container when it can hold the result (mp4, mov, m4v, mkv, webm), otherwise as MKV. Other audio tracks are kept as they were; only the first audio track is cleaned. Subtitles go into the video where the container can carry them.</p>
+        <p>A video comes back in its own container when it can hold the result (mp4, mov, m4v, mkv, webm), otherwise as MKV, unless <code>video_out</code> asks for another file type or size. Other audio tracks are kept as they were; only the first audio track is cleaned. Subtitles go into the video where the container can carry them.</p>
 
         <h3>5. Cancel or delete</h3>
         <Code label="Cancel and delete">{`curl -s -X POST   ${hdr} $BASE/api/jobs/3f2c.../cancel
@@ -154,6 +154,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
             ['translate', '[]', 'Up to 3 languages to translate the subtitles and transcript into (two letter codes: en, es, fr, de, it, pt, nl, pl, ru, uk, tr, ar, hi, ja, ko, zh, sv, da, fi, no, cs, el, he, id, vi), not the language spoken. Needs "transcribe" or "denoise_transcribe". Each language costs extra; a language that can’t be made is left out, said in "notice" and not charged.'],
             ['output_video', 'true', 'For a video: give a video back with the cleaned sound. false gives only the audio.'],
             ['embed_subtitles', 'true', 'Put the subtitles inside the video. This needs the whole video uploaded.'],
+            ['video_out', 'null', 'The video in another file type or picture size: {"format": "mp4", "mov", "mkv" or "webm", "size": 480, 720, 1080, 1440, 2160 or null for the original size}. Needs the whole video uploaded. Works with any kind, or alone with "kind": "convert". The picture is copied when the new file type can hold it at its size, which is free (MKV holds any); otherwise it is made again and priced as Video conversion. With a size that is known up front; for another file type only it is known once the file is read, so the estimate lists it with "maybe": true.'],
             ['loudness_lufs', '-16', 'The loudness to aim for, a number from -30 to -9 (podcast -16, online video -14, broadcast -23), or null to leave the level alone. Outside the range is a 400.'],
             ['atten_lim_db', '100', 'How much noise may be taken out, in dB, kept between 6 (gentle) and 100 (as much as possible). The website offers 12, 24, 40 and 100. Does not apply when the voice is rebuilt.'],
             ['noise', 'auto', '"auto" measures the recording and picks; "light" suits hiss, hum and a quiet room; "heavy" suits noise almost as loud as the voice. Does not apply when the voice is rebuilt.'],
@@ -211,7 +212,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
   "topup": {"minCents": 500, "maxCents": 50000, "presetsCents": [1000, 2000, 5000, 10000]},
   "paymentsEnabled": true, "taxAddedAtCheckout": false
 }`}</Code>
-        <p>The products are <code>denoise</code>, <code>transcribe</code>, <code>transcribe_translate</code> (one translation, per language), and for live <code>stream_denoise</code>, <code>stream_captions</code> and <code>stream_translate</code>. The prices on the <Link to={{ pathname: '/', hash: '#pricing' }}>home page</Link> come from the same list.</p>
+        <p>The products are <code>denoise</code>, <code>transcribe</code>, <code>transcribe_translate</code> (one translation, per language), <code>convert</code> (Video conversion, see <code>video_out</code> in <a href="#options">the options</a>), and for live <code>stream_denoise</code>, <code>stream_captions</code> and <code>stream_translate</code>. The prices on the <Link to={{ pathname: '/', hash: '#pricing' }}>home page</Link> come from the same list.</p>
         <p>To know what a job will cost before you create it, ask <code>POST /api/jobs/estimate</code>. It takes the same <code>kind</code>, <code>denoiseTier</code>, <code>transcribeTier</code>, <code>durationSeconds</code> and <code>options</code> as creating a job (no file fields), checks them the same way, and creates nothing and sets nothing aside.</p>
         <Code label="Estimate a job">{`curl -s $BASE/api/jobs/estimate ${hdr} -H "Content-Type: application/json" -d '{
   "kind": "denoise_transcribe", "denoiseTier": "standard", "transcribeTier": "local",

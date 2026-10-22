@@ -28,8 +28,10 @@ const abortError = () => new DOMException('Canceled', 'AbortError');
 /**
  * What the person asked for, saved with the job in this browser so that "Download again" and "Save changes" know it
  * after a reload (the server only keeps its own files):
- *   {sound, format, name, size, subs, caps:{srt,vtt,txt}, embed, soundHere, subsHere, blend?:{db}}
- * sound: the cleaned sound is part of the result, as `name` (a file type `format`, picture `size` for a video).
+ *   {sound, convert, serverVideo, format, name, size, subs, caps:{srt,vtt,txt}, embed, soundHere, subsHere, blend?:{db}}
+ * sound: the cleaned sound is part of the result, as `name` (a file type `format`, picture `size` for a video). convert: nothing changes the
+ * sound, but the file is wanted as `name` all the same (another file type or size: the file with its own sound). serverVideo: our side made
+ * the video (one this browser can't make), so that one is the result.
  * subs/caps: subtitle files by format. embed: the subtitles go inside the video. soundHere/subsHere: made in this
  * browser, so they exist only in this tab. blend: the strength (dB) the sound was saved with from the two copies the job kept
  * (a job on our side): made here, free, again whenever it is needed (after a reload too) while those copies exist.
@@ -71,7 +73,8 @@ function derivedWants(job) {
 
 /** The rough time the finishing step takes, in seconds (0: nothing to build, the file is handed over as it is). */
 export function finishSeconds(w, { info, file, serverAudio = false } = {}) {
-  if (!w?.sound && !w?.embed) return 0;
+  if (!w?.sound && !w?.embed && !w?.convert) return 0;
+  if (w.serverVideo) return 0;
   const def = FORMAT[w.format];
   if (!def) return 0;
   const seconds = info?.duration || 0;
@@ -228,8 +231,8 @@ export class Finish {
 
   get serverAudio() { return this.outputs.find((o) => o.kind === 'audio') || null; }
 
-  /** Our side made the finished video (a video type this browser can't open), and this browser has no better way. */
-  get useServerVideo() { return !!this.serverVideo && !(this.file && this.info?.viaMediabunny); }
+  /** Our side made the finished video (a video type or size this browser can't make), and this browser has no better way. */
+  get useServerVideo() { return !!this.serverVideo && (!!this.wants?.serverVideo || !(this.file && this.info?.viaMediabunny)); }
 
   /** The choices after taking away what did not work out. */
   effective() {
@@ -239,7 +242,7 @@ export class Finish {
     if (this.failed.sound && !w.soundHere) w.sound = false;
     if (this.failed.subs && !w.subsHere) { w.subs = false; w.embed = false; }
     if (w.blend && !(this.sliderSource === 'server' || this.pcm)) delete w.blend; // the copies it came from are gone: the sound as the job made it
-    if (!w.sound && w.embed) {
+    if (!w.sound && !w.convert && w.embed) {
       w.format = 'mkv'; w.size = 'same';
       if (!w.name || FORMAT[formatOfName(w.name)]?.kind !== 'video') w.name = `${stem(this.inputName)}-subtitled.mkv`;
     }
@@ -249,14 +252,14 @@ export class Finish {
   /** Does this need the original video, which this tab doesn't have? */
   needsVideo(w = this.effective()) {
     if (this.file || this.useServerVideo) return false;
-    if (!w.sound && !w.embed) return false;
+    if (!w.sound && !w.embed && !w.convert) return false;
     if (!this.inputInfo.hasVideo) return false;
     return !w.sound || FORMAT[w.format]?.kind === 'video';
   }
 
   /** The finished video made here: is it part of what will be built? (it takes longer than a sound file) */
   willBuild(w = this.effective()) {
-    return (w.sound || w.embed) && !(FORMAT[w.format]?.kind === 'audio' && !w.soundHere && !w.blend && this.serverAudio && FORMAT[w.format].exts.includes(endingOf(this.serverAudio.name)));
+    return (w.sound || w.embed || w.convert) && !(w.serverVideo && this.serverVideo) && !(FORMAT[w.format]?.kind === 'audio' && !w.soundHere && !w.blend && this.serverAudio && FORMAT[w.format].exts.includes(endingOf(this.serverAudio.name)));
   }
 
   /* ---- subtitles ---- */
@@ -326,8 +329,8 @@ export class Finish {
   }
 
   mediaPlan(w) {
-    if (!w.sound && !w.embed) return null;
-    if (this.useServerVideo && (w.embed || FORMAT[w.format]?.kind === 'video' || !this.serverAudio)) {
+    if (!w.sound && !w.embed && !w.convert) return null;
+    if (this.useServerVideo && (w.embed || FORMAT[w.format]?.kind === 'video' || (!this.serverAudio && !(w.convert && this.file)))) {
       const v = this.serverVideo;
       return { name: v.name, bytes: v.bytes, kind: 'media', label: 'Video', url: outputUrl(this.id, v.name) };
     }
@@ -336,7 +339,7 @@ export class Finish {
     const direct = !video && !w.soundHere && !w.blend && this.serverAudio && def.exts.includes(endingOf(this.serverAudio.name));
     return {
       name: cleanName(w.name) || this.serverAudio?.name || 'result', bytes: direct ? this.serverAudio.bytes : null, kind: 'media',
-      label: video ? (w.embed ? 'Video with subtitles' : 'Video') : 'Cleaned audio',
+      label: video ? (w.embed ? 'Video with subtitles' : 'Video') : w.sound ? 'Cleaned audio' : 'Audio',
     };
   }
 

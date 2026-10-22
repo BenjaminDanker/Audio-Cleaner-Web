@@ -93,7 +93,7 @@ def _ff(spec):
 
 
 def stage_probe(job_dir: Path, spec: dict) -> dict:
-    from acw_common.ffmpeg import MediaError
+    from acw_common.ffmpeg import MediaError, VideoOut, needs_picture_encode
 
     ff = _ff(spec)
     p = ff.probe(job_dir / spec["input"])
@@ -109,7 +109,11 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
                 "Use the standard cleanup for longer files."
             )
         raise MediaError(f"This file is {duration / 60:.1f} minutes long; the limit is {limit / 60:.0f} minutes.")
+    # A video asked for in another file type or size: is its picture made again (charged), or copied (free)?
+    vo = spec["options"].get("video_out")
+    picture_encode = needs_picture_encode(p, "." + vo["format"], VideoOut(short_side=vo["size"])) if vo and p.has_video else None
     return {
+        "picture_encode": picture_encode,
         "duration": duration,
         "container_duration": p.duration,
         "has_video": p.has_video,
@@ -447,6 +451,7 @@ def _write_asr_chunks(ff, job_dir: Path, x16, offset: float = 0.0, window: tuple
 
 def stage_finalize(job_dir: Path, spec: dict) -> dict:
     from acw_common import captions
+    from acw_common.ffmpeg import VideoOut
 
     ff = _ff(spec)
     opts = spec["options"]
@@ -508,21 +513,37 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
 
     if state["has_video"] and opts.get("output_video", True):
         cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None
-        if cleaned is not None or (subtitle_file is not None and opts.get("embed_subtitles", True)):
-            emit(stage="Rebuilding video", progress=95)
-            # Other containers (AVI, WMV, FLV, MPEG, ...) go to MKV: it holds any video codec we copy.
-            ext = spec["input_ext"] if spec["input_ext"] in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else ".mkv"
-            out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned'}{ext}"
+        vo = opts.get("video_out")  # another file type or picture size, asked for
+        if cleaned is not None or (subtitle_file is not None and opts.get("embed_subtitles", True)) or vo:
+            # (a conversion alone is all of the job's work)
+            first = 95 if cleaned is not None or subtitle_file is not None else 5
+            emit(stage="Making the video", progress=first)
+            if vo:
+                ext = "." + vo["format"]
+            else:
+                # Other containers (AVI, WMV, FLV, MPEG, ...) go to MKV: it holds any video codec we copy.
+                ext = spec["input_ext"] if spec["input_ext"] in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else ".mkv"
+            out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned' if subtitle_file is not None else 'converted'}{ext}"
             ff.mux_video(
                 job_dir / spec["input"],
                 cleaned,
                 out,
                 subtitles=subtitle_file if opts.get("embed_subtitles", True) else None,
                 sub_lang=_iso639_2(language),
+                video=VideoOut(short_side=vo["size"], encoders=_encoders(spec, ext), fast=True) if vo else None,
+                progress=(lambda f: emit(stage="Making the video", progress=int(first + (99 - first) * f))) if vo else None,
             )
             outputs.append({"file": out.name, "kind": "video"})
     emit(stage="Done", progress=100)
     return {"outputs": outputs, "language": language}
+
+
+def _encoders(spec: dict, ext: str) -> tuple[str, ...]:
+    """The picture encoders for a video result, best first: on the card's worker its NVENC (x264 if it refuses), else x264; WebM gets VP9
+    at its real-time speed (the card's encoder has no VP9)."""
+    if ext == ".webm":
+        return ("libvpx-vp9",)
+    return ("h264_nvenc", "libx264") if spec.get("gpu_devices") else ("libx264",)
 
 
 _ISO = {"en": "eng", "es": "spa", "fr": "fra", "de": "deu", "it": "ita", "pt": "por", "nl": "nld", "ja": "jpn",
