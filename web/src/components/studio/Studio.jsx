@@ -523,7 +523,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (b.getAttribute('aria-disabled') === 'true') return; // its tooltip says why
     switch (a) {
       case 'newfile': onNewFile?.(); break;
-      case 'auto': if (signedIn) session.setAuto(!session.auto); break; // (signed out it stays off; its tooltip says why)
+      case 'auto': session.setAuto(!session.auto); break;
       case 'auto-undo': session.undoAuto(); break;
       case 'auto-again': session.useAgain(); break;
       case 'sg-cancel': session.cancelMoments(); break;
@@ -974,7 +974,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
                 <div className="autoc">
                   <div className="autow" data-testid="auto-box">
                     <label className="auto" data-testid="auto-settings">
-                      <button type="button" className="sw" role="switch" aria-checked={signedIn && session.auto} aria-labelledby="auto-l" data-act="auto" disabled={!session.hasAudio} aria-disabled={signedIn ? undefined : 'true'} {...tipAttr(signedIn ? '' : 'Sign in to have the settings picked for your file. Without an account, every free option is on.')} />
+                      <button type="button" className="sw" role="switch" aria-checked={session.auto} aria-labelledby="auto-l" data-act="auto" disabled={!session.hasAudio} {...tipAttr(signedIn ? '' : 'Without an account, Automatic picks among the free options, in your browser. Sign in for the others too.')} />
                       <span id="auto-l">Automatic</span>
                     </label>
                     {pend > 0 && (

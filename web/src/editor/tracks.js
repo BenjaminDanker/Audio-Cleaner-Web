@@ -398,13 +398,29 @@ export function fromTimeline(tl, seconds, { subs = null } = {}) {
  * What "Automatic best settings" sets for a recording (recommend.js): one patch per track, for the whole file.
  * `rebuildOk`: Voice rebuild is on offer. `canBrowser`: this browser could do the Free noise removal (never chosen automatically).
  */
-export function recoPatches(r, { rebuildOk = true } = {}) {
+export function recoPatches(r, { rebuildOk = true, freeOnly = false } = {}) {
   const str = Math.max(1, STRENGTHS.findIndex((s) => s.id === r.strength) + 1);
+  // Without an account only the free options can be chosen: the same judgement, kept to them (a rebuild or the heavy remover
+  // becomes the strongest Free strength, Leveling stays off, any subtitles are the Free ones)
+  if (freeOnly) {
+    return {
+      voice: { mode: 1, kind: 'free', str: r.rebuild || r.heavy ? 3 : Math.min(str, 3), rem: 0, db: null },
+      level: { lvl: 0, lufs: null },
+      subs: { q: r.subs ? 1 : 0 },
+    };
+  }
   return {
     voice: r.rebuild && rebuildOk ? { mode: 2 } : { mode: 1, kind: 'paid', str, rem: 0, db: null },
     level: r.leveling ? { lvl: 2, lufs: null } : { lvl: 0, lufs: null },
     subs: r.subs === 'accurate' ? { q: 3 } : r.subs === 'standard' ? { q: 2 } : { q: 0 },
   };
+}
+/** A suggestion's change kept to the free options (without an account): Voice rebuild or a Standard strength becomes the nearest
+ *  Free strength (Free has no Max). */
+export function freeOnlySuggestion(g) {
+  if (g.patch.mode === 2) return { ...g, todo: STR[3], patch: { mode: 1, str: 3, kind: 'free', rem: 0, db: null } };
+  if (g.patch.mode === 1) { const str = Math.min(g.patch.str || 2, 3); return { ...g, todo: STR[str], patch: { ...g.patch, kind: 'free', str, rem: 0, db: null } }; }
+  return g;
 }
 /** Set the automatic choices on the sections that are still automatic (or on every section: `all`). They stay marked automatic. */
 export function applyReco(S, patches, { all = false } = {}) {

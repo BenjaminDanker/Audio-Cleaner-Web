@@ -10,8 +10,7 @@ import { filePeaks, layerPeaks, overlayPeaks, rangePeaks } from '../editor/peaks
 import { loadSuggestions, suggestionState } from '../editor/suggest.js';
 import {
   applyReco, autoDone, freeNoiseRanges, freeSubRanges, fromTimeline, makeState, needsServer, pushUndo,
-  recoPatches, redo as redoState, sameTracks, setSel, snapJ, splitAll, toSuggestion, toTimeline, undo as undoState, vkey,
-} from '../editor/tracks.js';
+  recoPatches, redo as redoState, sameTracks, setSel, snapJ, splitAll, toSuggestion, toTimeline, undo as undoState, vkey, freeOnlySuggestion } from '../editor/tracks.js';
 import { bytes } from '../format.js';
 import { submitJob } from '../jobs.js';
 import { buildLimit, serverAudioFormat } from '../media/convert.js';
@@ -138,9 +137,9 @@ export class Session {
     const guess = Math.min(Math.max(30, (file.size * 8) / 128000), 4 * 3600);
     s.T = info.duration || (s.lengthUnknown ? guess : 1);
     s.S = makeState(s.T, { second: s.second, auto: s.auto });
-    // Without an account nothing is set automatically: every free option this file can have is on instead. The switch is off for
-    // now without changing the choice this browser keeps, so it is as the person left it once they sign in.
-    if (!signedIn && info.hasAudio !== false) { s.signedOutStart = true; s.auto = false; s.freeStart(); }
+    // Without an account only the free options can be chosen: every free option this file can have is on from the start, and
+    // Automatic (which runs in this browser, nothing is sent) picks among them only.
+    if (!signedIn && info.hasAudio !== false) { s.signedOutStart = true; s.freeStart(); }
     if (info.hasAudio === false) {
       // a file with no sound has nothing to do
       s.S.tracks.voice[0].mode = 0; s.S.tracks.level[0].lvl = 0; s.S.tracks.echo[0].on = 0;
@@ -155,19 +154,18 @@ export class Session {
   freeStart() {
     const t = this.S.tracks;
     const free = browserVerdict(this.info).ok;
-    t.voice = [{ ...t.voice[0], mode: free ? 1 : 0, kind: 'free', str: 2, rem: 0, db: null, auto: false }];
+    const auto = !!this.auto; // (marked automatic while Automatic is on, so what it finds can still set them)
+    t.voice = [{ ...t.voice[0], mode: free ? 1 : 0, kind: 'free', str: 2, rem: 0, db: null, auto }];
     t.echo = [{ ...t.echo[0], on: 0, auto: false }];
-    t.level = [{ ...t.level[0], lvl: 0, auto: false }];
-    t.subs = [{ ...t.subs[0], q: subsVerdict(this.info).ok ? 1 : 0, lang: 'auto', tr: [], auto: false }];
+    t.level = [{ ...t.level[0], lvl: 0, auto }];
+    t.subs = [{ ...t.subs[0], q: subsVerdict(this.info).ok ? 1 : 0, lang: 'auto', tr: [], auto }];
   }
 
   /** Put back what a draft kept: the tracks, the selection, the suggestions, the file choices, and what the quick listen found. */
   restore(rec) {
     this.T = rec.seconds;
     this.lengthUnknown = !!rec.lengthUnknown;
-    // a draft is kept while its owner signs in: from here on their own choice for Automatic counts (the switch was only off for
-    // being signed out); the tracks stay as they were left
-    this.auto = storedAuto();
+    this.auto = !!rec.auto;
     this.signedOutStart = false;
     this.S = makeState(this.T, { second: this.second, auto: this.auto });
     this.S.tracks = rec.tracks;
@@ -274,7 +272,12 @@ export class Session {
 
   setRecommendation(r, { again = false } = {}) {
     if (!this.undoTo) this.undoTo = snapJ(this.S);
-    applyReco(this.S, recoPatches(r, { rebuildOk: this.env.rebuildOk !== false }), { all: again });
+    const p = recoPatches(r, { rebuildOk: this.env.rebuildOk !== false, freeOnly: !!this.signedOutStart });
+    if (this.signedOutStart) { // (only what this browser can do for this file)
+      if (!browserVerdict(this.info).ok) delete p.voice;
+      if (!subsVerdict(this.info).ok) delete p.subs;
+    }
+    applyReco(this.S, p, { all: again });
     this.applied = true;
     this.touch();
   }
@@ -354,7 +357,8 @@ export class Session {
       .map((x) => ({ ...x, key: x.key || `${x.kind}:${Math.round(x.start * 10)}-${Math.round(x.end * 10)}` }))
       .filter((x) => !dismissed.includes(x.key))
       .map((x) => {
-        const g = toSuggestion(x, this.T, ++this.sgN);
+        const g0 = toSuggestion(x, this.T, ++this.sgN);
+        const g = this.signedOutStart ? freeOnlySuggestion(g0) : g0;
         const was = old.get(g.key);
         return was ? { ...g, st: was.st } : g;
       });
