@@ -44,11 +44,13 @@ VIDEO_OUT_FORMATS = ("mp4", "mov", "mkv", "webm")
 VIDEO_OUT_SIZES = (480, 720, 1080, 1440, 2160)
 CAPTION_FORMATS = {"srt", "vtt", "txt", "json"}
 # Anything FFmpeg reads well; the sandboxed probe decides for real (ffmpeg.ALLOWED_FORMATS).
-ALLOWED_EXTS = {
-    # audio
+AUDIO_EXTS = {
     ".wav", ".rf64", ".w64", ".mp3", ".mp2", ".mpa", ".m4a", ".m4b", ".m4r", ".aac", ".flac", ".ogg", ".oga",
     ".opus", ".spx", ".wma", ".aiff", ".aif", ".aifc", ".caf", ".au", ".snd", ".amr", ".ac3", ".eac3", ".dts",
     ".mka", ".wv", ".ape", ".tta", ".mpc",
+}
+ALLOWED_EXTS = {
+    *AUDIO_EXTS,
     # video
     ".mp4", ".m4v", ".mov", ".webm", ".mkv", ".avi", ".wmv", ".asf", ".flv", ".f4v", ".3gp", ".3g2", ".ts",
     ".mts", ".m2ts", ".mpg", ".mpeg", ".vob", ".mxf", ".dv", ".ogv", ".rm", ".rmvb",
@@ -251,6 +253,12 @@ def convert_line(params: dict, seconds: float) -> dict | None:
 
 
 _CODEC_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+# A video asked for in another file type or size, from a file with no picture: the whole job is refused (or, found when the file is read,
+# fails uncharged), so nobody pays for part of what they asked for.
+NO_PICTURE = ("This file has no picture, so there is no video to make in another file type or size. Send it without video_out "
+              "(nothing was charged).")
 
 
 def video_out_of(options: dict) -> dict | None:
@@ -723,6 +731,8 @@ def create_job(
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_EXTS:
         raise JobError("Unsupported file type.")
+    if ext in AUDIO_EXTS and (options or {}).get("video_out"):
+        raise JobError(NO_PICTURE)
     if not 0 < size_bytes <= settings.max_upload_bytes:
         raise JobError(f"Files must be under {settings.max_upload_bytes // 1024**2} MB.", 413)
     tl = None
