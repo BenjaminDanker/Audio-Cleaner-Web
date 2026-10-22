@@ -214,7 +214,11 @@ await check('retention: the landing FAQ, the Privacy page (section 4) and the Te
   if (!/kept for 2 hours/.test(section4) || !/Results[^.]*available for download for 2 hours/.test(section4) || !/deleted together with the upload/.test(section4)) throw new Error('Privacy section 4: ' + section4.slice(0, 500));
   // the editor's rule: 2 hours after the last change, and never later than 6 hours after the upload
   if (!/after your last change to the job/.test(section4) || !/deleted 6 hours after the upload/.test(section4) || !/6 hours after the upload at the latest/.test(section4)) throw new Error('Privacy section 4 lacks the last-change / 6 hours rule: ' + section4.slice(0, 700));
-  bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `privacy: ${x}`));
+  // (the one sentence about the copy this browser keeps of the file while the person signs in is about their own device, not about uploads: it is deleted once restored, or after a day)
+  const KEPT_COPY = /That copy stays on your device, is never uploaded by this step, and is deleted as soon as it is restored, or after a day\./;
+  const privacy = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  if (!KEPT_COPY.test(privacy) || !/You don.t need an account for them\./.test(privacy)) throw new Error('Privacy lacks the sentences about the free tools without an account and the copy the browser keeps while signing in');
+  bad.push(...oldRetention(privacy.replace(KEPT_COPY, '')).map((x) => `privacy: ${x}`));
   const pr = await page.locator('#retention ~ ul').first().innerText();
   for (const need of [/7 years/, /12 months/, /90 days/, /30 days/, /contact form/, /free live trial/]) if (!need.test(pr)) throw new Error(`Privacy retention lacks ${need}`);
 
@@ -223,7 +227,9 @@ await check('retention: the landing FAQ, the Privacy page (section 4) and the Te
   const section8 = (await page.locator('#data ~ ul').first().innerText()).replace(/\s+/g, ' ');
   if (!/kept together for 2 hours/.test(section8) || !/deleted together/.test(section8)) throw new Error('Terms section 8: ' + section8.slice(0, 500));
   if (!/after the last change to a job/.test(section8) || !/no more than 6 hours after the upload/.test(section8)) throw new Error('Terms section 8 lacks the last-change / 6 hours rule: ' + section8.slice(0, 500));
-  bad.push(...oldRetention((await page.locator('main').innerText()).replace(/\s+/g, ' ')).map((x) => `terms: ${x}`));
+  const terms = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  if (!/including the free tools without an account/.test(terms) || !/need no account and no credit/.test(terms)) throw new Error('Terms lack the sentences about the free tools without an account');
+  bad.push(...oldRetention(terms).map((x) => `terms: ${x}`));
   if (bad.length) throw new Error(bad.join(' | '));
   return '2 hours, together, on the landing page, Privacy and Terms';
 });

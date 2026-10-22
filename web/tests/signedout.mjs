@@ -2,10 +2,17 @@
 // Free subtitles run to the end with nothing about the file sent (no job, no upload, no estimate), a plan that needs our side says
 // "Sign in to start" with its price worked out from the public price list, signing in brings the file and the editor's state back (and
 // the kept copy is deleted, or is not used after a day), the Live page's free test starts signed out and a paid session asks to sign in,
-// the pages that belong to an account still ask for sign-in, and signed in nothing changes.
+// the pages that belong to an account still ask for sign-in, and signed in nothing changes. Automatic works without an account as for
+// everybody (in the browser; nothing about the file is sent) but picks only among the free options: Free noise removal at the strength it
+// finds (the strongest Free one where it would rebuild the voice or use the heavy remover), Free subtitles where there is speech, no Leveling,
+// and the suggestions for moments offer Free strengths; with Automatic off every free option is on; the switch shows and saves this
+// browser's choice; and the kept work comes back after signing in with its tracks and its Automatic state as they were left.
 // Needs the local backend (port 8792, see helpers.mjs) with `ACW_MODEL_HOST=http://127.0.0.1:8798/ npm run build` output and the fixtures.
 // Usage: node tests/signedout.mjs
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { noisy, wavBytes } from './reco-audio.mjs';
 import {
   BASE, FILES, check, dragRange, dropFile, launch, loginLink, mainButton, mirror, pick, resultAttr, selectionTitle, setLeveling, signIn, summary, waitResult,
 } from './helpers.mjs';
@@ -13,6 +20,20 @@ import {
 const EMAIL = `signedout-${Date.now()}@example.com`;
 const NOISY = join(FILES, 'noisy.wav');
 const KEPT = 'acw.draft.saved';
+const AUTO = 'acw.autoSettings'; // this browser's choice for the editor's Automatic switch (absent: on)
+const MODELS = 'http://127.0.0.1:8798'; // the model host the free tools (the quick listen and the search for moments too) download the noise remover from
+// Generated recordings whose automatic choices are known (tests/reco-ui.mjs): where the signed-in editor sets Standard noise removal at
+// Gentle with Standard subtitles (clean), at Strong with the heavy remover and Extra accurate subtitles (loud), Voice rebuild (hot), and
+// Balanced with no subtitles because no one speaks (hum).
+const GEN = mkdtempSync(join(tmpdir(), 'signedout-'));
+const gen = (name, samples, rate = 48000) => { const f = join(GEN, name); writeFileSync(f, wavBytes(samples, rate)); return f; };
+const hotOf = (x) => x.map((a) => Math.max(-0.9995, Math.min(0.9995, a * 8)));
+const GENERATED = {
+  clean: gen('clean.wav', noisy(10, 60, 1)),
+  loud: gen('loud.wav', noisy(10, 2, 3, 'pink')),
+  hot: gen('too-loud.wav', hotOf(noisy(10, 55, 1))),
+  hum: gen('hum.wav', Float32Array.from({ length: 12 * 44100 }, (_, i) => 0.05 * Math.sin((2 * Math.PI * 50 * i) / 44100)), 44100),
+};
 
 const { browser, context, page, logs } = await launch([], { acceptDownloads: true });
 await mirror(); // the local model host the free tools download from
@@ -59,10 +80,63 @@ const age = (p, hours, { record = true, note = true } = {}) => p.evaluate(async 
   });
 }, { hours, record, note, KEPT });
 
-/** On a fresh signed-out page: a file, a plan that needs our side (Leveling on 2 to 6 s, Standard noise removal, Standard subtitles), then Sign in to start. */
-async function planAndLeave(p) {
+/** A fresh browser context (and its first page) that records what it asks of us (/api/...) and of the model host. `saved`: the Automatic choice this browser starts with (none: it never chose). */
+async function watched(saved = null) {
+  const storageState = saved ? { cookies: [], origins: [{ origin: BASE, localStorage: [{ name: AUTO, value: saved }] }] } : undefined;
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, ...(storageState ? { storageState } : {}) });
+  const seen = { api: [], models: [] };
+  ctx.on('request', (r) => {
+    const u = new URL(r.url());
+    if (u.pathname.startsWith('/api/')) seen.api.push(`${r.method()} ${u.pathname}`);
+    else if (u.origin === MODELS) seen.models.push(u.pathname);
+  });
+  return { ctx, p: await ctx.newPage(), seen };
+}
+/** What was asked of our side other than the account check and the public prices (nothing about the file is ever sent). */
+const sentToUs = (seen) => seen.api.filter((c) => !/^GET \/api\/(me|billing\/pricing)$/.test(c));
+/** This browser's saved choice for Automatic ('on', 'off', or null when it never chose). */
+const savedAuto = (p) => p.evaluate((k) => localStorage.getItem(k), AUTO);
+/** The editor as it stands: the Automatic switch, the choices of the tracks (the sections the whole file is in) and what shows of the quick listen and the moments. */
+const editorState = (p) => p.evaluate(() => {
+  const sw = document.querySelector('.studio button[data-act=auto]');
+  const pressed = (act) => [...document.querySelectorAll(`.studio button[data-act=${act}]`)].find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.v;
+  const id = (t) => document.querySelector(`[data-testid=${t}]`);
+  return {
+    checked: sw?.getAttribute('aria-checked'), ariaDisabled: sw?.getAttribute('aria-disabled'), tip: sw?.dataset.tip || '',
+    voice: ['off', 'noise', 'rebuild'].find((m) => id(`voice-${m}`)?.getAttribute('aria-checked') === 'true'),
+    kind: pressed('v-kind'), strength: pressed('v-str'), subs: pressed('s-q'), level: pressed('l-lvl'),
+    language: document.querySelector('.studio select[data-act=s-lang]')?.value,
+    analysis: ['reco-listening', 'reco-status', 'reco-line', 'sg-progress', 'sg-chip', 'sg-card', 'sg-unavailable', 'sg-canceled', 'sg-error'].filter((t) => id(t)),
+  };
+});
+/** Opens a file on a signed-out /app. With Automatic on it waits for what it set ("Set automatically for this file"); with it off, long enough for a quick listen to have begun. */
+async function openSignedOut(p, file, { automatic }) {
   await p.goto(`${BASE}/app`);
-  await dropFile(p, NOISY);
+  await p.getByTestId('free-no-account').waitFor({ timeout: 15000 });
+  await p.setInputFiles('input[type=file]', file);
+  await p.getByTestId('start').waitFor({ timeout: 30000 });
+  if (automatic) await p.getByTestId('reco-status').waitFor({ timeout: 90000 });
+  else { await p.waitForFunction(() => document.querySelector('[data-testid=waveform]')?.dataset.reading === 'no', null, { timeout: 60000 }); await p.waitForTimeout(3000); }
+  await p.waitForTimeout(300);
+}
+const FREE_LINE = /^(Noise removal, free|Subtitles, free) · \d+:\d\d Free$/;
+/** Nothing paid anywhere: Free noise removal (strength `str`: 1 Gentle, 2 Balanced, 3 Strong) and Free subtitles (`subs` 1) or none (0) for the whole file, no Leveling, and only free lines in the details. */
+async function freeOnly(p, { str, subs }, what) {
+  const s = await editorState(p);
+  if (s.voice !== 'noise' || s.kind !== 'free' || s.strength !== str) throw new Error(`${what}: voice ${s.voice} / ${s.kind} / strength ${s.strength}, wanted free / ${str}`);
+  if (s.subs !== subs || (subs === '1' && s.language !== 'auto')) throw new Error(`${what}: subtitles ${s.subs} / ${s.language}, wanted ${subs}`);
+  if (s.level !== '0') throw new Error(`${what}: Leveling ${s.level}`);
+  const title = await selectionTitle(p);
+  const lines = await detailLines(p);
+  if (!/^Whole file/.test(title) || lines.length !== (subs === '1' ? 2 : 1) || lines.some((l) => !FREE_LINE.test(l))) throw new Error(`${what}: ${title}; ${lines.join(' | ')}`);
+  if ((await mainButton(p)).trim() !== 'Start · Free') throw new Error(`${what}: button ${await mainButton(p)}`);
+  return `${title}; ${lines.join(' | ')}`;
+}
+
+/** On a fresh signed-out page: a file, a plan that needs our side (Leveling on 2 to 6 s, Standard noise removal, Standard subtitles), then Sign in to start. */
+async function planAndLeave(p, { keepAuto = false } = {}) {
+  await p.goto(`${BASE}/app`);
+  await dropFile(p, NOISY, { recommended: keepAuto }); // (keepAuto: Automatic stays on and sets what it finds first)
   await pick(p, 'noise', 'denoise');
   await pick(p, 'subs', 'standard');
   await p.getByTestId('waveform').scrollIntoViewIfNeeded();
@@ -91,6 +165,94 @@ await check('signed out: /app opens (no redirect), the header says Sign in, the 
   await page.waitForTimeout(800);
   onlyPublic('while the empty page was open');
   return text.replace(/\s+/g, ' ').slice(0, 90);
+});
+
+await check('signed out, Automatic on (the default): it listens in the browser and sets only free options for the whole file (Gentle / Strong with the heavy remover / Strong for a voice it would rebuild / Balanced with no subtitles when no one speaks), no Leveling, nothing paid and nothing about the file sent; the switch is on with a tooltip that says it picks among the free options', async () => {
+  const w = await watched();
+  try {
+    const got = [];
+    for (const [name, want] of [['clean', { str: '1', subs: '1' }], ['loud', { str: '3', subs: '1' }], ['hot', { str: '3', subs: '1' }], ['hum', { str: '2', subs: '0' }]]) {
+      await openSignedOut(w.p, GENERATED[name], { automatic: true });
+      const s = await editorState(w.p);
+      if (s.checked !== 'true' || s.ariaDisabled) throw new Error(`${name}: switch checked ${s.checked}, aria-disabled ${s.ariaDisabled}`);
+      if (s.voice === 'rebuild') throw new Error(`${name}: Voice rebuild was chosen`);
+      if (!/Set automatically/.test(await w.p.getByTestId('reco-status').innerText())) throw new Error(`${name}: status ${await w.p.getByTestId('reco-status').innerText()}`);
+      got.push(`${name}: ${(await freeOnly(w.p, want, name)).split('; ')[1]}`);
+    }
+    if (!w.seen.models.length) throw new Error('Automatic did not run: the model host was never asked for the noise remover');
+    if (sentToUs(w.seen).length) throw new Error('asked of our side: ' + sentToUs(w.seen).join(', '));
+    if (await savedAuto(w.p) !== null) throw new Error('the saved choice was written: ' + await savedAuto(w.p));
+    const sw = w.p.locator('.studio button[data-act=auto]');
+    if (!/picks among the free options/.test((await editorState(w.p)).tip)) throw new Error('tip: ' + (await editorState(w.p)).tip);
+    await sw.hover();
+    await w.p.waitForTimeout(1300);
+    const shown = await w.p.locator('[role=tooltip]:not([hidden])').allInnerTexts();
+    if (!shown.some((x) => /Without an account, Automatic picks among the free options/.test(x))) throw new Error('the tooltip did not show: ' + JSON.stringify(shown));
+    return got.join(' || ');
+  } finally {
+    await w.ctx.close();
+  }
+});
+
+await check('signed out, Automatic off (saved in this browser): nothing is listened to or sent, and every free option the file can have is on for the whole file (Free noise removal at Balanced, Free subtitles with the language detected, no Leveling); switching Automatic on works as for everybody (saved, free options only), and off again', async () => {
+  const w = await watched('off');
+  try {
+    await openSignedOut(w.p, NOISY, { automatic: false });
+    const s = await editorState(w.p);
+    if (s.checked !== 'false' || s.ariaDisabled) throw new Error(`switch: checked ${s.checked}, aria-disabled ${s.ariaDisabled}`);
+    if (s.analysis.length) throw new Error('the quick listen or the moments showed: ' + s.analysis.join(', '));
+    if (w.seen.models.length) throw new Error('the model host was asked for: ' + w.seen.models.join(', '));
+    if (sentToUs(w.seen).length) throw new Error('asked of our side: ' + sentToUs(w.seen).join(', '));
+    const start = await freeOnly(w.p, { str: '2', subs: '1' }, 'start');
+    if (await savedAuto(w.p) !== 'off') throw new Error('the saved choice became ' + await savedAuto(w.p));
+    const sw = w.p.locator('.studio button[data-act=auto]');
+    await sw.click(); // (an ordinary switch: it runs Automatic in the browser and saves the choice)
+    await w.p.waitForFunction(() => document.querySelector('.studio button[data-act=auto]')?.getAttribute('aria-checked') === 'true', null, { timeout: 5000 });
+    if (await savedAuto(w.p) !== 'on') throw new Error('switching it on saved ' + await savedAuto(w.p));
+    await w.p.getByTestId('reco-status').waitFor({ timeout: 90000 });
+    if (!w.seen.models.length) throw new Error('switched on, but it did not listen');
+    // (whatever it set, nothing is paid; the strength it finds for this file is the reco-ui suite's business)
+    const lines = await detailLines(w.p);
+    const on = await editorState(w.p);
+    if (on.voice !== 'noise' || on.kind !== 'free' || on.level !== '0' || lines.some((l) => !FREE_LINE.test(l)) || (await mainButton(w.p)).trim() !== 'Start · Free') throw new Error(`switched on: ${JSON.stringify(on)}; ${lines.join(' | ')}`);
+    if (sentToUs(w.seen).length) throw new Error('asked of our side: ' + sentToUs(w.seen).join(', '));
+    await sw.click();
+    await w.p.waitForFunction(() => document.querySelector('.studio button[data-act=auto]')?.getAttribute('aria-checked') === 'false', null, { timeout: 5000 });
+    if (await savedAuto(w.p) !== 'off') throw new Error('switching it off saved ' + await savedAuto(w.p));
+    return `${start}; on: ${lines.join(' | ')}`;
+  } finally {
+    await w.ctx.close();
+  }
+});
+
+await check('signed out, Automatic on: the suggestions for moments offer Free strengths (never Voice rebuild or Standard) and applying them leaves everything free', async () => {
+  const w = await watched();
+  try {
+    await openSignedOut(w.p, join(FILES, 'suggest-two-parts.wav'), { automatic: true });
+    await w.p.getByTestId('sg-chip').waitFor({ timeout: 120000 });
+    const cards = [];
+    for (let i = 0; i < 8; i++) {
+      if (!(await w.p.getByTestId('sg-card').count())) {
+        if (!(await w.p.getByTestId('sg-chip').count())) break;
+        await w.p.getByTestId('sg-chip').click();
+      }
+      await w.p.getByTestId('sg-card').waitFor({ timeout: 5000 });
+      const text = (await w.p.getByTestId('sg-card').innerText()).replace(/\s+/g, ' ').trim();
+      cards.push(text);
+      if (/rebuild|Standard|Max|Extra/i.test(text.split(' · ').slice(1).join(' · '))) throw new Error('a paid option is suggested: ' + text);
+      await w.p.getByTestId('sg-apply').click();
+      await w.p.waitForTimeout(400);
+    }
+    if (!cards.length) throw new Error('no suggestion was offered');
+    const lines = await detailLines(w.p);
+    const s = await editorState(w.p);
+    if (lines.some((l) => !FREE_LINE.test(l)) || s.level !== '0' || (await mainButton(w.p)).trim() !== 'Start · Free') throw new Error(`after applying: ${lines.join(' | ')}; leveling ${s.level}; ${await mainButton(w.p)}`);
+    if ((await w.p.getByTestId('track-voice').getByTestId('section').allInnerTexts()).some((t) => /rebuild/i.test(t))) throw new Error('a Voice rebuild section after applying');
+    if (sentToUs(w.seen).length) throw new Error('asked of our side: ' + sentToUs(w.seen).join(', '));
+    return `${cards.length} applied (${cards.join(' | ')}); ${lines.join(' | ')}`;
+  } finally {
+    await w.ctx.close();
+  }
 });
 
 await check('signed out: a Free noise removal run completes (the cleaned file downloads) and nothing about the file is sent: no job, no upload, no price asked for from our side, no request that is not a plain GET', async () => {
@@ -172,12 +334,44 @@ await check('signing in (the link opened in another tab) brings the file and the
   if (await kept(p2)) throw new Error('the kept copy is still there');
   if (await p2.evaluate((k) => localStorage.getItem(k), KEPT)) throw new Error('the note about the kept copy is still there');
   if (!calls2.includes('POST /api/jobs/estimate')) throw new Error('signed in, the price should be asked of our side: ' + calls2.join(', '));
+  // Automatic is as it was left (dropFile switched it off): the restored tracks are not set again
+  const auto = await editorState(p2);
+  if (auto.checked !== 'false' || auto.ariaDisabled) throw new Error(`the switch after signing in: checked ${auto.checked}, aria-disabled ${auto.ariaDisabled}`);
+  if (await savedAuto(p2) !== 'off') throw new Error('the saved choice after signing in: ' + await savedAuto(p2));
   // a second visit does not bring it back
   await p2.goto(`${BASE}/app`);
   await p2.getByTestId('jobs-note').waitFor();
   if (await p2.getByTestId('file-name').count()) throw new Error('it came back a second time');
   await p2.close();
   return `${name}, ${title}, ${out}`;
+});
+
+await check('Automatic on when leaving: after signing in the kept editor has the switch on, the tracks as left (not set again), and nothing listened to again', async () => {
+  const w = await watched();
+  try {
+    await planAndLeave(w.p, { keepAuto: true });
+    if ((await editorState(w.p)).checked !== 'true') throw new Error('Automatic was not on when leaving');
+    const left = await detailLines(w.p);
+    await w.p.getByTestId('start').click();
+    await w.p.waitForURL(/\/login$/, { timeout: 15000 });
+    if (await savedAuto(w.p) !== null) throw new Error('signed out, the saved choice became ' + await savedAuto(w.p));
+    const asked = w.seen.models.length; // (what the listen on the signed-out page needed)
+    const p2 = await w.ctx.newPage();
+    await p2.goto(loginLink(`signedout-on-${Date.now()}@example.com`));
+    await p2.getByTestId('draft-restored').waitFor({ timeout: 30000 });
+    await p2.waitForFunction(() => /^Start ·/.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 30000 });
+    await p2.waitForTimeout(3000);
+    const s = await editorState(p2);
+    if (s.checked !== 'true' || s.ariaDisabled) throw new Error(`the switch after signing in: checked ${s.checked}, aria-disabled ${s.ariaDisabled}`);
+    if (s.analysis.includes('reco-listening')) throw new Error('it listened again');
+    const lines = await detailLines(p2);
+    if (lines.join('|') !== left.join('|')) throw new Error(`choices: ${left.join(' | ')} -> ${lines.join(' | ')}`);
+    if (!lines.some((l) => /^Noise removal · /.test(l) && !/free/.test(l))) throw new Error('the paid choices were lost: ' + lines.join(' | '));
+    if (await savedAuto(p2) === 'off') throw new Error('the saved choice became off');
+    return `on before, on after; ${lines.join(' | ')}; (${asked} model files needed signed out)`;
+  } finally {
+    await w.ctx.close();
+  }
 });
 
 await check('a kept copy older than a day is not used and is deleted: when the page loads (the note says so), and when only the record is old', async () => {
@@ -267,6 +461,7 @@ await check('signed in nothing changes: the Cleanup page shows the jobs list and
     if (await p.getByTestId('free-no-account').count()) throw new Error('the signed-out line is shown');
     if (!seen.includes('GET /api/jobs')) throw new Error('no jobs list: ' + seen.join(', '));
     await dropFile(p, NOISY);
+    if ((await editorState(p)).tip) throw new Error('the signed-out tooltip is on the switch while signed in: ' + (await editorState(p)).tip);
     await pick(p, 'noise', 'denoise');
     await p.waitForFunction(() => /^Start · \$/.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 30000 });
     if (!seen.includes('POST /api/jobs/estimate')) throw new Error('no estimate: ' + seen.join(', '));
