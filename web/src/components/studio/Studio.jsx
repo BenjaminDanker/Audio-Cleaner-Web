@@ -33,6 +33,7 @@ import Bar from './Bar.jsx';
 import { IcAll, IcPause, IcPlay, IcRedo, IcMore, IcSplit, IcUndo, IcZoomIn, IcZoomOut, IcSpark } from './icons.jsx';
 import InfoModal from './InfoModal.jsx';
 import Inspector from './Inspector.jsx';
+import { tipAttr } from './ui.jsx';
 import Timeline from './Timeline.jsx';
 import { useTooltips } from './tooltips.js';
 
@@ -522,7 +523,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (b.getAttribute('aria-disabled') === 'true') return; // its tooltip says why
     switch (a) {
       case 'newfile': onNewFile?.(); break;
-      case 'auto': session.setAuto(!session.auto); break;
+      case 'auto': if (signedIn) session.setAuto(!session.auto); break; // (signed out it stays off; its tooltip says why)
       case 'auto-undo': session.undoAuto(); break;
       case 'auto-again': session.useAgain(); break;
       case 'sg-cancel': session.cancelMoments(); break;
@@ -973,7 +974,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
                 <div className="autoc">
                   <div className="autow" data-testid="auto-box">
                     <label className="auto" data-testid="auto-settings">
-                      <button type="button" className="sw" role="switch" aria-checked={session.auto} aria-labelledby="auto-l" data-act="auto" disabled={!session.hasAudio} />
+                      <button type="button" className="sw" role="switch" aria-checked={signedIn && session.auto} aria-labelledby="auto-l" data-act="auto" disabled={!session.hasAudio} aria-disabled={signedIn ? undefined : 'true'} {...tipAttr(signedIn ? '' : 'Sign in to have the settings picked for your file. Without an account, every free option is on.')} />
                       <span id="auto-l">Automatic</span>
                     </label>
                     {pend > 0 && (

@@ -56,7 +56,7 @@ export default function Cleanup() {
     setProblem('');
     setReading(f.name);
     try {
-      const s = await Session.open(f);
+      const s = await Session.open(f, { signedIn: known ? signedIn : true }); // (before the account check answers: as signed in)
       if (alive.current) setDraft(s);
     } catch (e) {
       setProblem(e.message || 'Could not read that file. Please pick another one.');

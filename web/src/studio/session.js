@@ -25,7 +25,7 @@ import { startSuggestions, suggestVerdict } from '../media/suggest-run.js';
 import { buildWav } from '../media/wav.js';
 import { recommendForFile } from '../recommend.js';
 import { newLocalJobId } from '../localid.js';
-import { inGigabytes, jobKind, outputPlan, supported, TINY_FILE_BYTES, wantsOf } from './plan.js';
+import { browserVerdict, inGigabytes, jobKind, outputPlan, subsVerdict, supported, TINY_FILE_BYTES, wantsOf } from './plan.js';
 import { cleanRange, fitPcm, joinSegments, pcmToFlac, samplesOf, splicePcm, transcribeRange } from './runs.js';
 
 const AUTO_KEY = 'acw.autoSettings'; // this browser's choice for "Automatic" (on unless switched off)
@@ -123,7 +123,7 @@ export class Session {
    * A file has been chosen: look at it. Rejects with a plain sentence when it can't be worked on. `draft`: the work that was kept across a
    * sign-in (studio/draft.js); the editor then starts where the person left it.
    */
-  static async open(file, { draft = null } = {}) {
+  static async open(file, { draft = null, signedIn = true } = {}) {
     if (file.size < TINY_FILE_BYTES) {
       throw new Error(file.size === 0 ? 'That file is empty (0 bytes). Please pick another one.' : 'That file is too small to hold any sound. Please pick another one.');
     }
@@ -138,6 +138,9 @@ export class Session {
     const guess = Math.min(Math.max(30, (file.size * 8) / 128000), 4 * 3600);
     s.T = info.duration || (s.lengthUnknown ? guess : 1);
     s.S = makeState(s.T, { second: s.second, auto: s.auto });
+    // Without an account nothing is set automatically: every free option this file can have is on instead. The switch is off for
+    // now without changing the choice this browser keeps, so it is as the person left it once they sign in.
+    if (!signedIn && info.hasAudio !== false) { s.signedOutStart = true; s.auto = false; s.freeStart(); }
     if (info.hasAudio === false) {
       // a file with no sound has nothing to do
       s.S.tracks.voice[0].mode = 0; s.S.tracks.level[0].lvl = 0; s.S.tracks.echo[0].on = 0;
@@ -148,11 +151,24 @@ export class Session {
     return s;
   }
 
+  /** Every free option this file can have, on for the whole file, and nothing paid (the start without an account). */
+  freeStart() {
+    const t = this.S.tracks;
+    const free = browserVerdict(this.info).ok;
+    t.voice = [{ ...t.voice[0], mode: free ? 1 : 0, kind: 'free', str: 2, rem: 0, db: null, auto: false }];
+    t.echo = [{ ...t.echo[0], on: 0, auto: false }];
+    t.level = [{ ...t.level[0], lvl: 0, auto: false }];
+    t.subs = [{ ...t.subs[0], q: subsVerdict(this.info).ok ? 1 : 0, lang: 'auto', tr: [], auto: false }];
+  }
+
   /** Put back what a draft kept: the tracks, the selection, the suggestions, the file choices, and what the quick listen found. */
   restore(rec) {
     this.T = rec.seconds;
     this.lengthUnknown = !!rec.lengthUnknown;
-    this.auto = !!rec.auto;
+    // a draft is kept while its owner signs in: from here on their own choice for Automatic counts (the switch was only off for
+    // being signed out); the tracks stay as they were left
+    this.auto = storedAuto();
+    this.signedOutStart = false;
     this.S = makeState(this.T, { second: this.second, auto: this.auto });
     this.S.tracks = rec.tracks;
     this.S.sel = rec.sel || null;
@@ -218,6 +234,7 @@ export class Session {
     this.T = t;
     this.lengthUnknown = false;
     this.S = makeState(t, { second: this.second, auto: this.auto });
+    if (this.signedOutStart) this.freeStart();
   }
 
   afterWave() {
