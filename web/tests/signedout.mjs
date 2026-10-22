@@ -322,6 +322,9 @@ const probeOf = (p) => {
   const j = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', p], { encoding: 'utf8' }));
   return { v: j.streams.find((x) => x.codec_type === 'video'), a: j.streams.find((x) => x.codec_type === 'audio'), dur: Number(j.format.duration) };
 };
+const BIG = join(FILES, 'big4k.avi'); // 10 s of a plain 4K picture at 30 frames a second (MPEG-4 in an AVI, read through libav) with the sound of noisy.wav: a few MB
+if (!existsSync(BIG)) execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x336699:size=3840x2160:rate=30:duration=10', '-i', NOISY, '-t', '10', '-map', '0:v', '-map', '1:a',
+  '-c:v', 'mpeg4', '-b:v', '1M', '-g', '300', '-threads', '4', '-c:a', 'ac3', '-b:a', '192k', BIG]);
 const NOTHING_TO_DO = 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.';
 const outField = (p, id) => p.locator(`[data-testid=output-pop] [data-testid=${id}]`);
 /** The Output menu open (and left open): the file type and size lists are ready. */
@@ -438,6 +441,49 @@ await check('signed out: a video type this browser can\'t make for a video (an A
   if ((await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).count())) throw new Error('it says nothing is chosen');
   onlyPublic('while choosing a type made on our side');
   return `${ours.label}: ${ours.values.join(', ')}; ${note.slice(0, 60)}…`;
+});
+
+/** The Details popup: its lines (the total apart) and the total. */
+async function detailsOf(p) {
+  await p.getByTestId('bar-det').click();
+  const lines = (await p.locator('[data-testid=details] ul.fl li:not(.tot)').allInnerTexts()).map((l) => l.replace(/\s+/g, ' ').trim());
+  const total = (await p.getByTestId('details-total').innerText()).trim();
+  await p.getByTestId('bar-det').click();
+  return { lines, total };
+}
+const COUNTS = (n) => new RegExp(`^Video conversion · counts ${n}× \\(bigger or faster than 1080p at 30 fps\\) `);
+
+await check('signed out: a video made on our side shows its price in Details worked out here from the public list and what the browser read of it: a 4K picture made again counts 4 times, a new size 2 times, the picture copied into MKV is free and says so; Start asks to sign in and nothing about the file is sent', async () => {
+  calls.length = 0;
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, BIG);
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'off');
+  await openOutput(page);
+  await outField(page, 'out-format').selectOption('webm'); // (the MPEG-4 picture does not go into WebM: made again, 4K at 30 frames a second is 4 units)
+  await closeOutput(page);
+  await page.waitForFunction(() => /Sign in to start/.test(document.querySelector('.studio .bb .btn-lg')?.textContent || ''), null, { timeout: 5000 });
+  let d = await detailsOf(page);
+  if (d.lines.length !== 1 || !COUNTS(4).test(d.lines[0]) || !/ \$0\.004$/.test(d.lines[0]) || d.total !== '$0.004') throw new Error('webm: ' + JSON.stringify(d));
+  await openOutput(page);
+  await outField(page, 'out-size').selectOption('720'); // 4K made 720p: half the original's pixels a second count, 2 units
+  await closeOutput(page);
+  d = await detailsOf(page);
+  if (d.lines.length !== 1 || !COUNTS(2).test(d.lines[0]) || !/ \$0\.002$/.test(d.lines[0]) || d.total !== '$0.002') throw new Error('webm 720p: ' + JSON.stringify(d));
+  await openOutput(page);
+  await outField(page, 'out-format').selectOption('mkv');
+  await outField(page, 'out-size').selectOption('same');
+  await closeOutput(page);
+  d = await detailsOf(page);
+  if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free' || d.total !== 'Free') throw new Error('mkv: ' + JSON.stringify(d));
+  if ((await mainButton(page)).trim() !== 'Sign in to start') throw new Error('button: ' + (await mainButton(page)));
+  await openOutput(page);
+  await outField(page, 'out-format').selectOption('mp4'); // (MPEG-4 goes into an MP4 as it is: the same free copy)
+  await closeOutput(page);
+  d = await detailsOf(page);
+  if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free') throw new Error('mp4: ' + JSON.stringify(d));
+  onlyPublic('while pricing a conversion on our side');
+  return 'webm 4×, 720p 2×, MKV and MP4 copied';
 });
 
 let before; // what the editor held before leaving, to compare with what comes back after signing in

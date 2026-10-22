@@ -206,6 +206,9 @@ async function prepareConversion(file) {
   await pick(page, 'subs', 'off');
   await openOutput();
 }
+const BIG = join(FILES, 'big4k.avi'); // 10 s of a plain 4K picture at 30 frames a second (MPEG-4 in an AVI, read through libav) with the sound of noisy.wav: a few MB
+if (!existsSync(BIG)) execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x336699:size=3840x2160:rate=30:duration=10', '-i', join(FILES, 'noisy.wav'), '-t', '10', '-map', '0:v', '-map', '1:a',
+  '-c:v', 'mpeg4', '-b:v', '1M', '-g', '300', '-threads', '4', '-c:a', 'ac3', '-b:a', '192k', BIG]);
 const NOTHING_TO_DO = 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.';
 const startLabel = () => page.locator('.studio .bb .btn-lg').innerText().then((t) => t.trim());
 const startReady = () => page.waitForFunction(() => !document.querySelector('[data-testid=notes] .banner-warn') && document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 10000 });
@@ -307,6 +310,83 @@ await check('made on our side: a video this browser can only read through libav 
   const mine = (g.find((x) => x.label === 'Video, made on our side') || { values: [] }).values;
   if (!here || !here.values.includes('mp4') || !here.values.includes('mkv') || mine.includes('mp4') || mine.includes('mkv')) throw new Error('groups for an MP4: ' + JSON.stringify(g));
   return `AVI: ${ours.values.join(', ')}; MP4: here ${here.values.join(', ')}${mine.length ? `, ours ${mine.join(', ')}` : ''}`;
+});
+
+/** The Details popup: its lines (the total apart) and the total. */
+async function detailsOf() {
+  await page.getByTestId('bar-det').click();
+  const lines = (await page.locator('[data-testid=details] ul.fl li:not(.tot)').allInnerTexts()).map((l) => l.replace(/\s+/g, ' ').trim());
+  const total = (await page.getByTestId('details-total').innerText()).trim();
+  await page.getByTestId('bar-det').click();
+  return { lines, total };
+}
+const COUNTS = (n) => new RegExp(`^Video conversion · counts ${n}× \\(bigger or faster than 1080p at 30 fps\\) `);
+
+await check('a video made on our side is priced up front from what the browser read of it: the estimate asked for carries the video\'s codec, size and frame rate, Details says how much the picture counts, and a copy into another type is free and says so', async () => {
+  const sent = [];
+  const onReq = (rq) => { const u = new URL(rq.url()); if (u.pathname === '/api/jobs/estimate') sent.push(rq.postDataJSON()); };
+  page.on('request', onReq);
+  try {
+    await prepareConversion('big4k.avi');
+    await field('out-format').selectOption('webm'); // the MPEG-4 picture does not go into WebM: made again; 4K at 30 frames a second is 4 units
+    await closeOutput();
+    await page.waitForFunction(() => /^Start · \$0\.004$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
+    let d = await detailsOf();
+    if (d.lines.length !== 1 || !COUNTS(4).test(d.lines[0]) || !/ \$0\.004$/.test(d.lines[0]) || d.total !== '$0.004') throw new Error('webm: ' + JSON.stringify(d));
+    const body = sent.at(-1);
+    if (body?.kind !== 'convert' || body.options.video_out.format !== 'webm' || body.options.video_out.size !== null) throw new Error('estimate asked: ' + JSON.stringify(body));
+    const source = body.options.video_out.source;
+    if (source?.codec !== 'mpeg4' || source.width !== 3840 || source.height !== 2160 || Math.abs(source.fps - 30) > 0.5) throw new Error('source: ' + JSON.stringify(source));
+    await openOutput();
+    await field('out-size').selectOption('720');
+    await closeOutput();
+    await page.waitForFunction(() => /^Start · \$0\.002$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
+    d = await detailsOf();
+    if (d.lines.length !== 1 || !COUNTS(2).test(d.lines[0]) || d.total !== '$0.002') throw new Error('webm 720p: ' + JSON.stringify(d));
+    if (sent.at(-1).options.video_out.size !== 720) throw new Error('estimate for 720p: ' + JSON.stringify(sent.at(-1)));
+    await openOutput();
+    await field('out-format').selectOption('mkv');
+    await field('out-size').selectOption('same');
+    await closeOutput();
+    await page.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
+    d = await detailsOf();
+    if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free' || d.total !== 'Free') throw new Error('mkv: ' + JSON.stringify(d));
+    const copied = sent.at(-1);
+    return `webm 4× ($0.004), 720p 2× ($0.002), MKV copied; source ${JSON.stringify(source)}; last estimate format ${copied.options.video_out.format}`;
+  } finally {
+    page.off('request', onReq);
+  }
+});
+
+await check('a picture copied on our side, end to end: an AVI into MKV is a free job (kind convert), the video comes down as made there with its own picture and sound, and costs nothing', async () => {
+  await prepareConversion('noisy.avi');
+  await field('out-format').selectOption('mkv');
+  await closeOutput();
+  await page.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
+  downloads.length = 0;
+  const posted = [];
+  const onReq = (rq) => { const u = new URL(rq.url()); if (rq.method() === 'POST' && u.pathname === '/api/jobs') posted.push(rq.postDataJSON()); };
+  page.on('request', onReq);
+  await page.getByTestId('start').click();
+  await page.getByTestId('submitted').waitFor({ timeout: 60000 });
+  await waitCardDone(page);
+  await waitResult(page, 'result', 90000);
+  page.off('request', onReq);
+  const job = posted.at(-1);
+  if (job?.kind !== 'convert' || job.options.video_out.format !== 'mkv' || job.options.video_out.source?.codec !== 'mpeg4' || job.denoiseTier) throw new Error('job asked for: ' + JSON.stringify(job));
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'noisy-converted.mkv') throw new Error('downloaded by itself: ' + downloads.map((d) => d.suggestedFilename()));
+  const p = join(FILES, 'conv-server-copy.mkv');
+  await downloads[0].saveAs(p);
+  const src = probe(join(FILES, 'noisy.avi'));
+  const got = probe(p);
+  if (got.v.codec_name !== src.v.codec_name || `${got.v.width}x${got.v.height}` !== `${src.v.width}x${src.v.height}` || got.a.codec_name !== src.a.codec_name || Math.abs(got.dur - src.dur) > 0.8) {
+    throw new Error(`picture ${src.v.codec_name} ${src.v.width}x${src.v.height} + ${src.a.codec_name} -> ${got.v?.codec_name} ${got.v?.width}x${got.v?.height} + ${got.a?.codec_name} ${got.dur}`);
+  }
+  await page.getByTestId('bar-files').click();
+  const paid = (await page.locator('[data-testid=files] .note b').first().innerText()).trim();
+  await page.getByTestId('bar-files').click();
+  if (paid !== 'Free') throw new Error('cost: ' + paid);
+  return `${got.v.codec_name}+${got.a.codec_name} copied into MKV, cost ${paid}`;
 });
 
 await check('paid job: a Denoising job for a sound file with a chosen name and type comes down by itself under that name (and again with Download again); changing the type and saving brings the new type', async () => {

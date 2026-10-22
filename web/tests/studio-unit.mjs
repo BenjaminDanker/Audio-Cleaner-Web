@@ -18,7 +18,7 @@ const bundle = await build({
       export { prepare } from '../src/editor/mix.js';
       export { outputPlan, problemsFor, jobKind, wantsOf, browserVerdict, subsVerdict, inGigabytes, convertsFile, videoOutOf } from '../src/studio/plan.js';
       export { Finish, finishSeconds } from '../src/finish.js';
-      export { listSizes, serverSize, formatOfName, SIZES } from '../src/media/convert.js';
+      export { listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork } from '../src/media/convert.js';
       export { fitPcm, samplesOf, piecesIn, rangeFor } from '../src/studio/runs.js';
       export { tipsFor, priceWords } from '../src/studio/copy.js';
       export { needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute } from '../src/access.js';
@@ -42,7 +42,7 @@ const {
   changesSound, freeNoiseRanges, freeSubRanges, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
   needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute, hasWork,
-  convertsFile, videoOutOf, Finish, finishSeconds, listSizes, serverSize, formatOfName, SIZES,
+  convertsFile, videoOutOf, Finish, finishSeconds, listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork,
 } = m;
 
 let failed = 0;
@@ -612,6 +612,98 @@ await check('convert: videoOutOf is what our side is asked for (type and size), 
   assert.equal(serverSize('same'), null);
   assert.deepEqual(['2160', '1440', '1080', '720', '480'].map(serverSize), [2160, 1440, 1080, 720, 480]);
   assert.equal(serverSize('nonsense'), null);
+});
+
+await check('convert: videoOutOf sends what the browser read of the video as source, only when it read something, and only for a video made on our side', () => {
+  const S = nothing();
+  const server = outputPlan({ tracks: S.tracks, info: VIDEO, file: MP4, choice: conv('webm', { server: true }), out: out0 });
+  const source = { codec: 'wmv2', width: 3840, height: 2160, fps: 30 };
+  assert.deepEqual(videoOutOf(server, conv('webm', { server: true }), 720, source), { format: 'webm', size: 720, source });
+  assert.deepEqual(videoOutOf(server, conv('webm', { server: true }), null, {}), { format: 'webm', size: null }); // (nothing read: no source at all)
+  assert.deepEqual(videoOutOf(server, conv('webm', { server: true }), null), { format: 'webm', size: null });
+  const here = outputPlan({ tracks: S.tracks, info: VIDEO, file: MP4, choice: conv('mkv'), out: out0 });
+  assert.equal(videoOutOf(here, conv('mkv'), null, source), null);
+});
+
+await check('convert: videoSourceHint is what the browser read of the video, inside the ranges our side accepts (codec name, 16 to 16384 pixels, 1 to 240 frames a second)', () => {
+  assert.deepEqual(videoSourceHint({ ffVideoCodec: 'h264', width: 1920, height: 1080, fps: 29.97003 }), { codec: 'h264', width: 1920, height: 1080, fps: 29.97 });
+  assert.deepEqual(videoSourceHint({ ffVideoCodec: 'wmv2', width: 320, height: 240, fps: 10 }), { codec: 'wmv2', width: 320, height: 240, fps: 10 });
+  assert.deepEqual(videoSourceHint({ ffVideoCodec: 'pcm_s16le', width: 1919.6, height: 1080.4, fps: 59.94 }), { codec: 'pcm_s16le', width: 1920, height: 1080, fps: 59.94 });
+  assert.deepEqual(videoSourceHint({ width: 16, height: 16384, fps: 1 }), { width: 16, height: 16384, fps: 1 }); // the ends are in
+  assert.deepEqual(videoSourceHint({ width: 16384, height: 16, fps: 240 }), { width: 16384, height: 16, fps: 240 });
+  for (const bad of ['H264', 'h 264', '', 'x'.repeat(33), 'h.264', null, undefined]) assert.equal('codec' in videoSourceHint({ ffVideoCodec: bad }), false, String(bad));
+  assert.equal('codec' in videoSourceHint({ ffVideoCodec: 'x'.repeat(32) }), true);
+  // a size needs both numbers inside the range, else none (our side takes both or neither)
+  for (const info of [{ width: 15, height: 1080 }, { width: 1920, height: 15 }, { width: 16385, height: 1080 }, { width: 1920, height: 16385 }, { width: 1920 }, { height: 1080 }, { width: null, height: null }, { width: NaN, height: 1080 }]) {
+    const got = videoSourceHint(info);
+    assert.equal('width' in got || 'height' in got, false, JSON.stringify(info));
+  }
+  for (const fps of [0, 0.5, 0.99, 241, 1000, -30, null, undefined, NaN]) assert.equal('fps' in videoSourceHint({ fps }), false, String(fps));
+  assert.deepEqual(videoSourceHint({ fps: 25 }), { fps: 25 });
+  assert.deepEqual(videoSourceHint(null), {});
+  assert.deepEqual(videoSourceHint(undefined), {});
+  assert.deepEqual(videoSourceHint({}), {});
+  assert.deepEqual(videoSourceHint({ hasVideo: true, viaLibav: true, duration: 10 }), {}); // (a probe that read no picture)
+});
+
+// the same numbers as the server's (common/tests/test_video_convert.py, server/tests/test_convert.py): the price shown before sending is the price held
+await check('convert: convertFactor counts making the picture again in units of 1080p at 30 frames a second, as the server does', () => {
+  const cases = [
+    [1920, 1080, 30, null, 1], [1920, 1080, 24, null, 1], [1280, 720, 30, null, 1], [640, 360, 60, null, 1], [16, 16, 30, null, 1],
+    [1920, 1080, 60, null, 2], [1920, 1080, 50, null, 1.67], [1920, 1080, 120, null, 4], [1920, 1080, 240, null, 8],
+    [2560, 1440, 30, null, 1.78], [2560, 1440, 60, null, 3.56], [3840, 2160, 30, null, 4], [3840, 2160, 60, null, 8], [7680, 4320, 30, null, 16],
+    [1280, 720, 60, null, 1], [1280, 720, 120, null, 1.78], [1280, 720, 240, null, 3.56],
+    [3840, 2160, 30, { width: 1920, height: 1080 }, 2], [3840, 2160, 30, { width: 1280, height: 720 }, 2], [3840, 2160, 60, { width: 1280, height: 720 }, 4],
+    [3840, 2160, 30, { width: 2560, height: 1440 }, 2], [1920, 1080, 30, { width: 3840, height: 2160 }, 4], [1280, 720, 30, { width: 1920, height: 1080 }, 1],
+    [1280, 720, 60, { width: 3840, height: 2160 }, 8], [1920, 1080, 30, { width: 2560, height: 1440 }, 1.78], [1600, 1200, 30, { width: 960, height: 720 }, 1],
+  ];
+  for (const [w, h, fps, out, want] of cases) assert.equal(convertFactor(w, h, fps, out), want, `${w}x${h}@${fps} -> ${JSON.stringify(out)}`);
+  // a frame rate outside 1 to 240 (or none) counts as 30
+  for (const fps of [undefined, null, 0, -1, 241, 500, NaN]) assert.equal(convertFactor(3840, 2160, fps), 4, String(fps));
+  assert.equal(convertFactor(3840, 2160, 240), 32);
+});
+
+await check('convert: serverPictureWork says whether the picture is made again and how much work that is, the same answers as the server for the same video', () => {
+  const info = (codec, w, h, fps) => ({ ffVideoCodec: codec ?? null, width: w ?? null, height: h ?? null, fps: fps ?? null });
+  // [type, size id, what was read, the file's ending, made again (null: not known), factor]
+  const cases = [
+    ['mp4', 'same', info('wmv2', 320, 240, 10), '.wmv', true, 1], ['mp4', 'same', info('h264', 1920, 1080, 30), '.mp4', false, 1],
+    ['mp4', 'same', info('h264', 1920, 1080, 30), '.m4v', false, 1], ['mp4', 'same', info('wmv2', 1920, 1080, 30), '.m4v', false, 1], // (M4V and MP4 are one kind of file)
+    ['mp4', 'same', info('wmv2', 1920, 1080, 30), '.mp4', false, 1], ['mp4', 'same', info('h264', 640, 480, 30), '.avi', false, 1],
+    ['mp4', 'same', info('mpeg4'), '.avi', false, 1], ['mp4', 'same', info('vp9'), '.webm', false, 1], ['mp4', 'same', info('msmpeg4v3'), '.avi', true, 1],
+    ['mp4', 'same', info('prores'), '.mov', true, 1], ['mov', 'same', info('hevc'), '.mkv', false, 1], ['mov', 'same', info('vp9'), '.webm', true, 1],
+    ['mov', 'same', info('prores'), '.mp4', false, 1], ['webm', 'same', info('h264'), '.mp4', true, 1], ['webm', 'same', info('vp8'), '.mkv', false, 1],
+    ['webm', 'same', info('av1'), '.mp4', false, 1], ['webm', 'same', info('wmv2'), '.webm', false, 1],
+    ['mkv', 'same', info('wmv2'), '.wmv', false, 1], ['mkv', 'same', info('h264'), '.mp4', false, 1], ['mkv', 'same', info('some_odd_codec'), '.avi', false, 1],
+    // the codec not read: only a change of type to one that needs the codec is not known
+    ['mp4', 'same', null, '.wmv', null, 1], ['mp4', 'same', { width: 1280, height: 720, fps: 30 }, '.avi', null, 1], ['webm', 'same', info(null, 1920, 1080), '.mp4', null, 1],
+    ['mov', 'same', null, null, null, 1], ['mp4', 'same', null, '.mp4', false, 1], ['mkv', 'same', null, '.wmv', false, 1],
+    // a new size: made again, unless it is the size the picture has (then the codec decides)
+    ['mp4', '720', info('h264', 1920, 1080, 30), '.mp4', true, 1], ['mkv', '720', info('wmv2', 1920, 1080, 30), '.wmv', true, 1],
+    ['mp4', '480', info('h264', 1280, 720, 30), '.mp4', true, 1], ['mp4', '1080', info('h264', 1280, 720, 30), '.mp4', true, 1], ['mp4', '720', null, '.wmv', true, 1],
+    ['mp4', '1080', info('h264', 1920, 1080, 30), '.mp4', false, 1], ['mp4', '1080', info('h264', 1080, 1920, 30), '.mp4', false, 1],
+    ['mp4', '720', info('h264', 1280, 720, 30), '.avi', false, 1], ['mp4', '1080', info('wmv2', 1920, 1080, 30), '.wmv', true, 1],
+    ['mkv', '1080', info('wmv2', 1920, 1080, 30), '.wmv', false, 1], ['mp4', '480', info('h264', 640, 480, 30), '.mp4', false, 1],
+    ['webm', '720', info('h264', 1280, 720, 30), '.mp4', true, 1],
+    // how big the work is
+    ['mp4', 'same', info('wmv2', 1920, 1080, 60), '.wmv', true, 2], ['mp4', 'same', info('wmv2', 1920, 1080, 50), '.wmv', true, 1.67], ['mp4', 'same', info('wmv2', 1920, 1080, 120), '.wmv', true, 4],
+    ['mp4', 'same', info('wmv2', 2560, 1440, 30), '.wmv', true, 1.78], ['mp4', 'same', info('wmv2', 3840, 2160, 30), '.wmv', true, 4], ['mp4', 'same', info('wmv2', 3840, 2160, 60), '.wmv', true, 8],
+    ['mp4', '2160', info('h264', 1920, 1080, 30), '.mp4', true, 4], ['mp4', '720', info('h264', 3840, 2160, 30), '.mp4', true, 2],
+    ['mp4', '1080', info('h264', 3840, 2160, 30), '.mp4', true, 2], ['mp4', '1440', info('h264', 3840, 2160, 30), '.mp4', true, 2],
+    ['mkv', '720', info('h264', 3840, 2160, 60), '.mp4', true, 4], ['mp4', '2160', info('h264', 1280, 720, 60), '.mp4', true, 8],
+    ['mp4', '720', info('h264', 1600, 1200, 30), '.mp4', true, 1], ['mp4', '1080', info('wmv2', 1920, 1080, 60), '.wmv', true, 2],
+    ['mkv', 'same', info('h264', 3840, 2160, 60), '.mp4', false, 8], // a copy has a factor too (the line says it), and is not charged for it
+    // a size with nothing said of the picture's: 16:9 at that size, at the frame rate if read
+    ['mp4', '2160', info('wmv2'), '.wmv', true, 4], ['mp4', '1440', info('wmv2'), '.wmv', true, 1.78], ['mp4', '1080', info('wmv2'), '.wmv', true, 1],
+    ['mkv', '480', null, null, true, 1], ['mp4', '1080', { fps: 60 }, '.wmv', true, 2], ['mp4', '2160', { fps: 24 }, '.wmv', true, 3.2],
+    ['mp4', 'same', info('wmv2', null, null, 60), '.wmv', true, 1],
+  ];
+  for (const [format, size, got, ext, encode, factor] of cases) {
+    const w = serverPictureWork(got, ext == null ? undefined : `talk${ext}`, format, size);
+    assert.deepEqual(w, { encode, factor }, `${format} ${size} ${JSON.stringify(got)} ${ext}`);
+  }
+  assert.deepEqual(serverPictureWork(null, undefined, 'mp4', 'same'), { encode: null, factor: 1 });
+  assert.deepEqual(serverPictureWork(undefined, 'a.wmv', 'mkv', 'same'), { encode: false, factor: 1 });
 });
 
 await check('convert: the sizes of a video type made on our side are all offered, marked as made there; the same-size choice is ok too', async () => {

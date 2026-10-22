@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from acw_common import ffmpeg as ffmod
-from acw_common.ffmpeg import FFmpeg, MediaError, VideoOut, needs_picture_encode
+from acw_common.ffmpeg import FFmpeg, MediaError, VideoOut, convert_factor, needs_picture_encode, picture_copies, picture_work
 
 from test_common import FF_DIR, FIXTURE_FFMPEG, needs_ff, probe_streams
 from test_video_out import probed, shown
@@ -66,6 +66,90 @@ def test_the_video_out_choices_reach_the_picture_plan():
     assert ffmod._picture_plan(probed(), ".mp4", VideoOut(short_side=720))["fast"] is False
     # no encoders named: the app's own choice, as before (this build of FFmpeg has no x264 of its own to rely on)
     assert ffmod._picture_plan(probed(), ".webm", VideoOut())["encoders"] == ["libvpx-vp9"]
+
+
+# -- can the new file type hold the picture as it is --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("codec, src_ext, ext, copies", [
+    ("h264", ".avi", ".mp4", True), ("hevc", ".mkv", ".mp4", True), ("mpeg4", ".avi", ".mp4", True), ("vp9", ".webm", ".mp4", True),
+    ("wmv2", ".wmv", ".mp4", False), ("msmpeg4v3", ".avi", ".mp4", False), ("prores", ".mov", ".mp4", False), ("vp8", ".webm", ".mp4", False),
+    ("prores", ".mp4", ".mov", True), ("hevc", ".mkv", ".mov", True), ("vp9", ".webm", ".mov", False),
+    ("vp8", ".mkv", ".webm", True), ("vp9", ".mp4", ".webm", True), ("av1", ".mkv", ".webm", True), ("h264", ".mp4", ".webm", False),
+    ("wmv2", ".wmv", ".mkv", True), ("anything_at_all", ".avi", ".mkv", True), ("h264", ".mp4", ".mkv", True),
+    # the same kind of file holds its own picture, whatever it is (M4V is an MP4)
+    ("wmv2", ".mp4", ".mp4", True), ("wmv2", ".m4v", ".mp4", True), ("wmv2", ".mp4", ".m4v", True), ("h264", ".webm", ".webm", True),
+    ("wmv2", ".mov", ".mov", True), (None, ".mp4", ".mp4", True), (None, ".m4v", ".mp4", True),
+    # a file type not listed takes anything; FLV takes H.264 and Flash video
+    ("wmv2", ".avi", ".avi", True), ("h264", ".mp4", ".flv", True), ("flv1", ".avi", ".flv", True), ("hevc", ".mp4", ".flv", False),
+    # the codec not known: only the file types that need no codec to answer
+    (None, ".wmv", ".mp4", None), (None, ".wmv", ".webm", None), (None, ".avi", ".mov", None), ("", ".avi", ".webm", None), (None, None, ".mp4", None),
+    (None, ".wmv", ".mkv", True), (None, None, ".mkv", True), (None, ".wmv", ".avi", True), (None, ".mp4", ".flv", None),
+    ("h264", None, ".mkv", True), ("h264", None, ".mp4", True), ("wmv2", None, ".mp4", False), ("wmv2", None, ".webm", False),
+])
+def test_a_picture_goes_into_a_file_type_as_it_is_when_that_type_holds_its_codec(codec, src_ext, ext, copies):
+    assert picture_copies(codec, src_ext, ext) is copies
+
+
+# -- how much work making the picture again is -------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("width, height, fps, out, factor", [
+    (1920, 1080, 30, None, 1.0),                  # the unit: a 1080p picture at 30 frames a second
+    (1920, 1080, 24, None, 1.0), (1280, 720, 30, None, 1.0), (640, 360, 60, None, 1.0), (16, 16, 30, None, 1.0),  # (never less than 1)
+    (1920, 1080, 60, None, 2.0), (1920, 1080, 50, None, 1.67), (1920, 1080, 120, None, 4.0), (1920, 1080, 240, None, 8.0),
+    (2560, 1440, 30, None, 1.78), (2560, 1440, 60, None, 3.56),
+    (3840, 2160, 30, None, 4.0), (3840, 2160, 60, None, 8.0), (7680, 4320, 30, None, 16.0),
+    (1280, 720, 60, None, 1.0), (1280, 720, 120, None, 1.78), (1280, 720, 240, None, 3.56),
+    (3840, 2160, 30, (1920, 1080), 2.0),          # a big picture made smaller: half the original's pixels a second still count
+    (3840, 2160, 30, (1280, 720), 2.0), (3840, 2160, 60, (1280, 720), 4.0), (3840, 2160, 30, (2560, 1440), 2.0),
+    (1920, 1080, 30, (3840, 2160), 4.0),          # made bigger: the result's pixels count
+    (1280, 720, 30, (1920, 1080), 1.0), (1280, 720, 60, (3840, 2160), 8.0), (1920, 1080, 30, (2560, 1440), 1.78),
+    (1920, 1080, 30, (1280, 720), 1.0),
+    (1600, 1200, 30, (960, 720), 1.0),
+])
+def test_the_work_is_counted_in_units_of_1080p_at_30_frames_a_second(width, height, fps, out, factor):
+    got = convert_factor(width, height, fps, out)
+    assert got == factor and isinstance(got, float)
+
+
+@pytest.mark.parametrize("fps", [None, 0, -1, -30.0, 241, 500, 1e9, float("nan")])
+def test_a_frame_rate_outside_zero_to_240_counts_as_30(fps):
+    assert convert_factor(3840, 2160, fps) == convert_factor(3840, 2160, 30) == 4.0
+    assert convert_factor(1920, 1080, fps, (3840, 2160)) == 4.0
+    assert convert_factor(640, 360, fps) == 1.0
+    assert convert_factor(3840, 2160, 240) == 32.0
+
+
+@pytest.mark.parametrize("info, ext, size, work", [
+    (dict(), ".mp4", None, (False, 1.0)),                                    # copied: nothing is made, the factor is 1
+    (dict(), ".mkv", None, (False, 1.0)), (dict(video_codec="wmv2", ext=".wmv"), ".mkv", None, (False, 1.0)),
+    (dict(video_width=3840, video_height=2160, video_fps=60.0), ".mkv", None, (False, 1.0)),
+    (dict(), ".webm", None, (True, 1.0)),
+    (dict(video_codec="wmv2", ext=".wmv"), ".mp4", None, (True, 1.0)),
+    (dict(video_codec="wmv2", ext=".wmv", video_width=3840, video_height=2160), ".mp4", None, (True, 4.0)),
+    (dict(video_codec="wmv2", ext=".wmv", video_fps=60.0), ".mp4", None, (True, 2.0)),
+    (dict(video_width=3840, video_height=2160, video_fps=60.0), ".webm", None, (True, 8.0)),
+    (dict(), ".mp4", 720, (True, 1.0)),
+    (dict(), ".mp4", 1080, (False, 1.0)),                                    # the size it already is
+    (dict(video_width=3840, video_height=2160), ".mp4", 720, (True, 2.0)),
+    (dict(video_width=3840, video_height=2160), ".mp4", 2160, (False, 1.0)),
+    (dict(), ".mp4", 2160, (True, 4.0)),
+    (dict(video_width=3840, video_height=2160, video_rotation=90), ".webm", None, (True, 4.0)),   # stored sideways: the same work
+    (dict(video_width=3840, video_height=2160, video_rotation=90), ".mp4", 720, (True, 2.0)),
+    (dict(video_width=3840, video_height=2160, video_rotation=90), ".mp4", 2160, (False, 1.0)),
+    (dict(video_width=1080, video_height=1920), ".mp4", 1080, (False, 1.0)),                      # portrait: the short side is the width
+    (dict(video_width=1080, video_height=1920), ".mp4", 720, (True, 1.0)),
+    (dict(video_width=0, video_height=0), ".webm", None, (True, 1.0)),
+])
+def test_picture_work_says_whether_the_picture_is_made_again_and_how_much_work_that_is(info, ext, size, work):
+    assert picture_work(probed(**info), ext, VideoOut(short_side=size)) == work
+    assert needs_picture_encode(probed(**info), ext, VideoOut(short_side=size)) is work[0]
+
+
+def test_there_is_nothing_to_make_for_no_picture():
+    assert picture_work(None, ".mp4", VideoOut(short_side=720)) == (False, 1.0)
+    assert picture_work(probed(has_video=False, video_codec=None), ".webm", VideoOut(short_side=720)) == (False, 1.0)
 
 
 # -- the picture options of each encoder ----------------------------------------------------------------------------
@@ -183,6 +267,45 @@ def sources(tmp_path_factory):
 @pytest.fixture
 def ff():
     return FFmpeg(FF_DIR, threads=2)
+
+
+@pytest.fixture(scope="module")
+def big(tmp_path_factory):
+    """A 4K picture at 60 frames a second, a few frames of it (a plain colour), and the same stored sideways and shown upright."""
+    d = tmp_path_factory.mktemp("big")
+    make(["-f", "lavfi", "-i", "color=c=0x336699:size=3840x2160:rate=60:duration=0.25", "-f", "lavfi", "-i", "sine=f=440:d=0.25", "-c:v", "mpeg4",
+          "-q:v", "20", "-c:a", "aac"], d / "big.mp4")
+    make(["-display_rotation", "90", "-i", str(d / "big.mp4"), "-c", "copy"], d / "turned.mp4")
+    return {"big": d / "big.mp4", "turned": d / "turned.mp4"}
+
+
+@needs_ff
+def test_the_work_of_real_files_is_read_from_what_the_probe_says(sources, big, ff):
+    wmv, mp4 = ff.probe(sources["wmv"]), ff.probe(sources["mp4"])
+    assert (wmv.video_codec, wmv.video_width, wmv.video_height) == ("wmv2", 320, 240) and wmv.video_fps == pytest.approx(10.0)
+    assert picture_work(wmv, ".mkv", VideoOut()) == (False, 1.0) and picture_work(wmv, ".mp4", VideoOut()) == (True, 1.0)
+    assert picture_work(wmv, ".webm", VideoOut(short_side=720)) == (True, 1.0)
+    assert picture_work(mp4, ".mp4", VideoOut()) == (False, 1.0) and picture_work(mp4, ".webm", VideoOut()) == (True, 1.0)
+    assert picture_work(mp4, ".mp4", VideoOut(short_side=240)) == (False, 1.0)
+    clip, turned = ff.probe(big["big"]), ff.probe(big["turned"])
+    assert (clip.video_codec, clip.video_width, clip.video_height, clip.video_rotation) == ("mpeg4", 3840, 2160, 0) and clip.video_fps == pytest.approx(60.0)
+    assert turned.video_rotation % 180 == 90 and (turned.video_width, turned.video_height) == (3840, 2160)
+    for info in (clip, turned):
+        assert picture_work(info, ".mp4", VideoOut()) == (False, 1.0)                  # MPEG-4 in an MP4: copied
+        assert picture_work(info, ".mkv", VideoOut()) == (False, 1.0)
+        assert picture_work(info, ".webm", VideoOut()) == (True, 8.0)                  # 4K at 60 frames a second made again: 8 units
+        assert picture_work(info, ".mp4", VideoOut(short_side=720)) == (True, 4.0)     # ... made 720p: half the original's pixels count
+        assert picture_work(info, ".mkv", VideoOut(short_side=1080)) == (True, 4.0)
+        assert picture_work(info, ".mp4", VideoOut(short_side=2160)) == (False, 1.0)   # the size it is
+        assert picture_work(info, ".mp4", VideoOut(short_side=1440)) == (True, 4.0)
+
+
+@needs_ff
+def test_a_4k_clip_made_720p_comes_out_720p_and_the_turned_one_stays_upright(big, ff, tmp_path):
+    out = ff.mux_video(big["big"], None, tmp_path / "o.mp4", video=VideoOut(short_side=720, encoders=("libx264",), fast=True))
+    assert shown(out) == (1280, 720) and kinds(out) == {"video": "h264", "audio": "aac"}
+    up = ff.mux_video(big["turned"], None, tmp_path / "t.mp4", video=VideoOut(short_side=720, encoders=("libx264",), fast=True))
+    assert shown(up) == (720, 1280)
 
 
 @needs_ff
