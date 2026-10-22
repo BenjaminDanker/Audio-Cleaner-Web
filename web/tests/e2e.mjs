@@ -98,7 +98,7 @@ if (want('auth')) {
       await ctx.close();
     }
   });
-  await check('a busy server (429 on the account check) at page load does not sign the visitor out: the loading screen waits, the check is asked again after the Retry-After, and the page loads once it is answered', async () => {
+  await check('a busy server (429 on the account check) at page load does not sign the visitor out: the page stays on /app without telling anyone to sign in, the check is asked again after the Retry-After, and the account\'s own parts (jobs, balance) appear once it is answered', async () => {
     const ctx = await browser.newContext();
     const p1 = await ctx.newPage();
     try {
@@ -111,11 +111,11 @@ if (want('auth')) {
         return asked.length <= 2 ? r.fulfill({ status: 429, headers: { 'Retry-After': '2' }, json: { detail: 'Too many requests.' } }) : r.continue();
       });
       await p1.goto(`${BASE}/app`);
-      await p1.waitForFunction(() => document.querySelector('.loading-screen'), null, { timeout: 10000 });
+      await p1.locator('input[type=file]').waitFor({ timeout: 10000 }); // (the free tools are there at once; the account's parts wait for the answer)
       await p1.waitForTimeout(3000); // past the first answer and the retry, which is refused too
       if (asked.length !== 2) throw new Error(`after 3 s the account check had been asked ${asked.length} times (expected 2: the page, then the retry after the wait)`);
       if (new URL(p1.url()).pathname !== '/app' || paths.includes('/login')) throw new Error(`the page went to ${paths.join(' -> ')} while the server was busy`);
-      if (!(await p1.locator('.loading-screen').count()) || (await p1.getByTestId('available').count())) throw new Error('not the loading screen while the check has not been answered');
+      if ((await p1.getByTestId('free-no-account').count()) || (await p1.getByTestId('available').count())) throw new Error('the page claims the visitor is signed out, or shows the balance, while the check has not been answered');
       await p1.getByTestId('available').waitFor({ timeout: 10000 }); // the third ask is answered: the page is there
       if (paths.includes('/login') || new URL(p1.url()).pathname !== '/app') throw new Error(`the page ended at ${paths.join(' -> ')}`);
       const gaps = [asked[1] - asked[0], asked[2] - asked[1]].map((ms) => Math.round(ms / 100) / 10);
@@ -440,7 +440,7 @@ if (want('account')) {
       await p2.waitForURL(/\/$/, { timeout: 15000 });
       await p2.getByTestId('account-deleted').waitFor({ timeout: 10000 });
       await p2.getByText('Your account has been deleted.').waitFor();
-      await p2.goto(`${BASE}/app`);
+      await p2.goto(`${BASE}/app/account`);
       await p2.waitForURL(/\/login$/);
       return 'refused while a job runs, deleted once it was finished, signed out';
     } finally {

@@ -65,7 +65,7 @@ npm run test:all -- free ui       # only these suites
 `/tmp/acw-webtest-<uid>`, empty base path, `ACW_LIVE_TRIAL_SECONDS=0`) and stops it after the suite. It exits non-zero if a
 suite exits non-zero or prints a `FAIL` line; logs are in the state dir. `tests/backend.sh start|stop|env` runs a backend by
 hand for a single `node tests/<suite>.mjs`. Overrides: `AC_HOME`, `ACW_BIN_DIR`, `ACW_MODELS_DIR`, `ACW_PYTHON`, `ACW_MODEL_SRC`,
-`ACW_TEST_STATE`, `E2E_FILES`. `legal-versions` (no backend: the Terms/Privacy text and how its version is decided) is in the default list. The editor screen (the Cleanup page once a file is chosen, and a job's page) has these suites: `studio-unit` (the four tracks
+`ACW_TEST_STATE`, `E2E_FILES`. `legal-versions` (no backend: the Terms/Privacy text and how its version is decided) is in the default list. `signedout` is the free tools without an account (the Cleanup and Live pages open signed out, the free runs send nothing about the file, a paid plan says "Sign in to start" and the file and choices come back after signing in). The editor screen (the Cleanup page once a file is chosen, and a job's page) has these suites: `studio-unit` (the four tracks
 and their rules, the prices from the price list, the mapping to the server's timeline version 2, the waveform of what is heard, what the
 choices mean for the files and what stops a start, the browser's share of a job; no backend), `editor-unit` (the timeline, the mix and the
 browser's suggestions, no backend), `suggest-agreement` (the browser's suggestions against `common/acw_common/suggest.py` on generated

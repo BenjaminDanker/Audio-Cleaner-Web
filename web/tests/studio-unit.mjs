@@ -19,6 +19,7 @@ const bundle = await build({
       export { outputPlan, problemsFor, jobKind, wantsOf, browserVerdict, subsVerdict, inGigabytes } from '../src/studio/plan.js';
       export { fitPcm, samplesOf, piecesIn, rangeFor } from '../src/studio/runs.js';
       export { tipsFor, priceWords } from '../src/studio/copy.js';
+      export { needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute } from '../src/access.js';
     `,
     resolveDir: HERE,
     loader: 'js',
@@ -38,6 +39,7 @@ const {
   freshTracks, vkey, uni, overl, applyToSel, freePatch, echoBlocked, undo, redo, pushUndo, recoPatches, applyReco, toSuggestion, autoDone, needsServer, serverSound,
   changesSound, freeNoiseRanges, freeSubRanges, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
+  needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute, hasWork,
 } = m;
 
 let failed = 0;
@@ -311,6 +313,52 @@ await check('needs: what runs on our side, what changes the sound, and the brows
   assert.equal(serverSound(S.tracks), false);
   edit(S, 'level', 0, 10, { lvl: 2 });
   assert.equal(serverSound(S.tracks), true);
+});
+
+await check('access: one rule for who needs an account. In the editor anything priced is done on our side (needsServer), in Live anything the price list has a row for; what runs in the browser has no price and needs nothing', () => {
+  const free = state(100);
+  edit(free, 'voice', 0, 100, { kind: 'free', str: 3 }); edit(free, 'level', 0, 100, { lvl: 0 }); edit(free, 'subs', 0, 100, { q: 1 });
+  assert.equal(editorNeedsAccount(free.tracks, false), false); // Free noise removal + Free subtitles: no account
+  assert.equal(editorNeedsAccount(free.tracks, true), false);
+  // every kind of priced part, one at a time, asks for an account when signed out and never when signed in
+  const priced = [
+    ['Standard noise removal', (S) => edit(S, 'voice', 0, 100, { mode: 1, kind: 'paid' })],
+    ['Voice rebuild', (S) => edit(S, 'voice', 0, 100, { mode: 2 })],
+    ['Echo removal', (S) => edit(S, 'echo', 0, 100, { on: 1 })],
+    ['Leveling', (S) => edit(S, 'level', 0, 100, { lvl: 2 })],
+    ['Standard subtitles', (S) => edit(S, 'subs', 0, 100, { q: 2 })],
+    ['Extra accurate subtitles', (S) => edit(S, 'subs', 0, 100, { q: 3 })],
+  ];
+  for (const [name, set] of priced) {
+    const S = state(100); edit(S, 'voice', 0, 100, { kind: 'free', str: 3 }); edit(S, 'level', 0, 100, { lvl: 0 }); edit(S, 'subs', 0, 100, { q: 1 });
+    set(S);
+    assert.equal(needsServer(S.tracks), true, name);
+    assert.equal(editorNeedsAccount(S.tracks, false), true, name);
+    assert.equal(editorNeedsAccount(S.tracks, true), false, name);
+  }
+  const part = state(100); edit(part, 'voice', 0, 100, { kind: 'free', str: 3 }); edit(part, 'level', 0, 100, { lvl: 0 }); edit(part, 'level', 40, 50, { lvl: 2 });
+  assert.equal(editorNeedsAccount(part.tracks, false), true);
+  assert.equal(needsAccount(false, false), false);
+  assert.equal(needsAccount(true, false), true);
+  assert.equal(needsAccount(true, true), false);
+  // work to do: whatever runs in the browser or on our side counts alike
+  assert.equal(hasWork(free.tracks), true);
+  const nothing = state(100); edit(nothing, 'voice', 0, 100, { mode: 0 }); edit(nothing, 'level', 0, 100, { lvl: 0 });
+  assert.equal(hasWork(nothing.tracks), false);
+  for (const [name, set] of priced) { const S = state(100); edit(S, 'voice', 0, 100, { mode: 0 }); edit(S, 'level', 0, 100, { lvl: 0 }); set(S); assert.equal(hasWork(S.tracks), true, name); }
+  // Live: in the browser it is made of no price list row; on our side of the rows the choice uses
+  const live = { denoise: true, captions: 'local', translations: 1 };
+  assert.deepEqual(liveProducts({ where: 'browser', ...live }), []);
+  assert.equal(liveNeedsServer({ where: 'browser', ...live }), false);
+  assert.deepEqual(liveProducts({ where: 'server', ...live }), [['stream_denoise', 'light'], ['stream_captions', 'local'], ['stream_translate', 'standard']]);
+  assert.equal(liveNeedsServer({ where: 'server', denoise: true, captions: '', translations: 0 }), true);
+  assert.equal(liveNeedsServer({ where: 'server', denoise: false, captions: 'premium', translations: 0 }), true);
+  assert.equal(liveNeedsServer({ where: 'server', denoise: false, captions: '', translations: 0 }), false); // nothing chosen, nothing priced
+  const rows = [{ product: 'stream_denoise', tier: 'light', usdPerMinute: 0.004 }, { product: 'stream_captions', tier: 'local', usdPerMinute: 0.002 }];
+  const rowOf = (p, t) => rows.find((r) => r.product === p && r.tier === t) || null;
+  near(livePerMinute({ where: 'server', denoise: true, captions: 'local' }, rowOf), 0.006);
+  assert.equal(livePerMinute({ where: 'server', denoise: true, captions: 'premium' }, rowOf), null); // a row the list lacks
+  assert.equal(livePerMinute({ where: 'browser', denoise: true, captions: 'local' }, rowOf), 0);
 });
 
 /* ------------------------------------------------------------------------------------------------ Automatic and suggestions */

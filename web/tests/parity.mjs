@@ -107,19 +107,26 @@ await check('Opening a file: Your jobs stays on the Cleanup page; opening a job 
   } finally { await s.off(); }
 });
 
-await check('Opening a file: sign-in is needed (signed out /app goes to /login), and "taking a short break" shows when the server is on a break', async () => {
+await check('Opening a file: the Cleanup page opens without signing in (the free tools; a job\'s page and billing still ask for sign-in), and "taking a short break" shows when the server is on a break (the editor stays, with a notice that the paid options are unavailable; billing shows the calm panel)', async () => {
   const other = await browser.newContext();
   const p = await other.newPage();
   await p.goto(`${BASE}/app`);
+  await p.getByTestId('free-no-account').waitFor({ timeout: 15000 });
+  if (new URL(p.url()).pathname !== '/app') throw new Error('signed-out /app went to ' + p.url());
+  await p.goto(`${BASE}/app/billing`);
   await p.waitForURL(/\/login/, { timeout: 15000 });
   await other.close();
   await page.route('**/api/me', (r) => r.fulfill({ status: 503, json: { detail: 'maintenance' } }));
   try {
     await page.goto(`${BASE}/app`);
+    await page.getByTestId('paid-offline').waitFor({ timeout: 15000 });
+    has(await txt(page.getByTestId('paid-offline')), /The paid options are unavailable right now\. The free ones still work\./);
+    if (!(await page.locator('input[type=file]').count())) throw new Error('no file picker while the server is on a break');
+    await page.goto(`${BASE}/app/billing`);
     await page.getByTestId('maintenance').waitFor({ timeout: 15000 });
     has(await txt(page.getByTestId('maintenance')), /We’ll be right back.*is taking a short break/);
   } finally { await page.unroute('**/api/me'); }
-  return 'login redirect; break banner';
+  return 'Cleanup opens; billing asks for sign-in; break: editor with a notice, billing panel';
 });
 
 /* ================================================================================================ Automatic settings */

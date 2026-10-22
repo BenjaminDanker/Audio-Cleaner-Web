@@ -1,5 +1,6 @@
-// The backend is down: the "taking a short break" banner, the calm panel instead of the paid tools, and both going away by
-// themselves once /api/health answers again (the page's own 30 s re-check, run on a fake clock so nothing waits).
+// The backend is down: the "taking a short break" banner, the calm panel instead of the pages that need the server (billing), the
+// Cleanup and Live pages staying usable for the free tools with a notice that the paid options are unavailable, and all of it going
+// away by themselves once /api/health answers again (the page's own 30 s re-check, run on a fake clock so nothing waits).
 // Starts its own tiny static server (port 8797, override with OFFLINE_PORT) that serves web/dist at the root and forwards
 // /api/* to a backend port it can switch at runtime: a dead port (what the proxy turns into HTTP 502), the front door's
 // maintenance answer, or the real test backend on 8792 for the recovery.
@@ -9,7 +10,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SHOTS, check, launch, summary } from './helpers.mjs';
+import { FILES, SHOTS, check, launch, pick, settleRecommendation, summary } from './helpers.mjs';
 
 const DIST = process.env.DIST || resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
 const PORT = Number(process.env.OFFLINE_PORT || 8797);
@@ -43,7 +44,7 @@ await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
 const TEXT = 'Audio Cleaner is taking a short break. Signing in and everything that needs an account will be back shortly.';
 const { browser, logs } = await launch();
 
-await check('offline: the banner says the server is on a short break (the backend does not answer), and the Cleanup page shows the calm panel instead of the tool', async () => {
+await check('offline: the banner says the server is on a short break (the backend does not answer), the Cleanup page still offers the free tools with a notice that the paid options are unavailable, and billing shows the calm panel', async () => {
   mode = 'dead-502';
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
@@ -54,21 +55,25 @@ await check('offline: the banner says the server is on a short break (the backen
     const text = (await banner.innerText()).replace(/\s*Dismiss\s*$/, '').trim();
     if (text !== TEXT) throw new Error(text);
     await page.goto(`${OFF}/app`);
+    await page.getByTestId('paid-offline').waitFor({ timeout: 10000 });
+    if (!(await page.locator('input[type=file]').count())) throw new Error('/app has no file picker while the server is down');
+    if (await page.getByTestId('maintenance').count()) throw new Error('/app shows the full-page panel');
+    if (/unavailable right now\. The free ones still work\./.test(await page.getByTestId('paid-offline').innerText()) === false) throw new Error('the notice: ' + await page.getByTestId('paid-offline').innerText());
+    await page.goto(`${OFF}/app/billing`);
     await page.getByTestId('maintenance').waitFor({ timeout: 10000 });
-    if (await page.locator('input[type=file]').count()) throw new Error('/app still offers a file picker while the server is down');
     await page.screenshot({ path: join(SHOTS, 'offline-banner.png') });
-    return 'banner and panel shown';
+    return 'banner, notice on Cleanup, panel on billing';
   } finally {
     await ctx.close();
   }
 });
 
-await check('maintenance (the front door answers 503): Cleanup and Billing show "We\'ll be right back" with no forms and no claim that anything still works; the panel has a Check now button', async () => {
+await check('maintenance (the front door answers 503): Billing and Account show "We\'ll be right back" with no forms and no claim that anything still works (the panel has a Check now button); Cleanup and Live keep the free tools with the notice', async () => {
   mode = 'maint';
   const ctx = await browser.newContext();
   const page = await ctx.newPage();
   try {
-    for (const p of ['/app', '/app/billing']) {
+    for (const p of ['/app/billing', '/app/account']) {
       await page.goto(`${OFF}${p}`);
       const panel = page.getByTestId('maintenance');
       await panel.waitFor({ timeout: 10000 });
@@ -77,7 +82,36 @@ await check('maintenance (the front door answers 503): Cleanup and Billing show 
       if (await page.locator('main input, main select, main form').count()) throw new Error(`${p}: a form is still on the page`);
       if (!(await panel.getByRole('button', { name: 'Check now' }).count())) throw new Error(`${p}: no Check now button`);
     }
-    return 'panel on Cleanup and Billing';
+    await page.goto(`${OFF}/app`);
+    await page.getByTestId('paid-offline').waitFor({ timeout: 10000 });
+    await page.goto(`${OFF}/app/live`);
+    await page.getByTestId('paid-offline').waitFor({ timeout: 10000 });
+    await page.getByTestId('live-free-banner').waitFor({ timeout: 10000 });
+    return 'panel on Billing and Account; notice on Cleanup and Live';
+  } finally {
+    await ctx.close();
+  }
+});
+
+await check('offline: a file can still be chosen. The editor shows the notice, the free options can be started, and a paid part cannot', async () => {
+  mode = 'dead-502';
+  const ctx = await browser.newContext();
+  const page = await ctx.newPage();
+  try {
+    await page.goto(`${OFF}/app`);
+    await page.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+    await page.getByTestId('start').waitFor({ timeout: 30000 });
+    await settleRecommendation(page);
+    await page.getByTestId('paid-offline').waitFor({ timeout: 10000 });
+    await pick(page, 'noise', 'browser');
+    await pick(page, 'subs', 'browser');
+    const free = page.getByTestId('start');
+    await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.textContent.trim() === 'Start · Free', null, { timeout: 10000 });
+    if (await free.isDisabled()) throw new Error('the free options cannot be started');
+    await pick(page, 'noise', 'denoise');
+    const label = (await free.innerText()).trim();
+    if (!(await free.isDisabled()) || /Sign in/.test(label)) throw new Error(`a paid part: "${label}", disabled ${await free.isDisabled()}`);
+    return `free: Start · Free; paid: "${label}" disabled`;
   } finally {
     await ctx.close();
   }

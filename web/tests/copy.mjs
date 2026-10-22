@@ -62,21 +62,21 @@ async function scan(page, path, waitFor, opts) {
 
 const { browser, page } = await launch();
 
-await check('copy: public pages (signed out, the sign-in page for /app and /app/live) show no internals and none of the avoided words', async () => {
+await check('copy: public pages (signed out, with the Cleanup and Live pages, which open without an account) show no internals and none of the avoided words', async () => {
   const bad = [];
   bad.push(...(await scan(page, '/', 'table tbody tr')));
   bad.push(...(await scan(page, '/#pricing', 'table tbody tr')));
-  bad.push(...(await scan(page, '/app')));
-  if (!/\/login/.test(page.url())) throw new Error('signed-out /app did not go to /login: ' + page.url());
-  bad.push(...(await scan(page, '/app/live')));
-  if (!/\/login/.test(page.url())) throw new Error('signed-out /app/live did not go to /login: ' + page.url());
+  bad.push(...(await scan(page, '/app', '[data-testid=free-no-account]')));
+  if (new URL(page.url()).pathname !== '/app') throw new Error('signed-out /app did not stay: ' + page.url());
+  bad.push(...(await scan(page, '/app/live', '[data-testid=keys-signin]')));
+  if (new URL(page.url()).pathname !== '/app/live') throw new Error('signed-out /app/live did not stay: ' + page.url());
   bad.push(...(await scan(page, '/login')));
   bad.push(...(await scan(page, '/contact')));
   bad.push(...(await scan(page, '/nope')));
   bad.push(...(await scan(page, '/developers', 'pre.code', { skipCode: true }))); // the API guide: code samples are exempt
   bad.push(...(await scan(page, '/developers/live', 'pre.code', { skipCode: true })));
   if (bad.length) throw new Error(bad.join(' | '));
-  return '10 pages clean';
+  return '10 pages clean (the sign-in page too)';
 });
 
 await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the editor with a file chosen (its tracks, inspector, tooltips, Output menu, Details, Your files and the All the options window) show no internals', async () => {
