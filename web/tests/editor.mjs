@@ -675,7 +675,7 @@ await check('Voice Off for the whole file and noise removal on one part is only 
   await setVoice(page, 'off');
   await sleep(300);
   if (!(await page.getByTestId('start').isDisabled())) throw new Error('Start is on with nothing to process');
-  await page.locator('[data-testid=notes] .banner-warn', { hasText: 'Choose at least one thing to do: noise removal, subtitles, or both.' }).waitFor();
+  await page.locator('[data-testid=notes] .banner-warn', { hasText: 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.' }).waitFor();
   await drag(10, 20);
   await setVoice(page, 'noise'); // (noise removal for the part only)
   await setStrength(page, 'strong');

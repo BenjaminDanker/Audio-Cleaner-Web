@@ -261,6 +261,44 @@ await check('retention: the signed-in Cleanup page (the list note and "Good to k
   return 'ok';
 });
 
+await check('file conversion: the Terms, the Privacy Policy and the price table say changing a file type or video size in the browser is free, needs no account and uploads nothing, and that a video the browser cannot convert is converted on our side (uploaded whole, copying free, making the picture again paid as Video conversion)', async () => {
+  const flat = async (path, wait) => {
+    await page.goto(`${BASE}${path}`);
+    await page.waitForSelector(wait);
+    return (await page.locator('main').innerText()).replace(/\s+/g, ' ');
+  };
+  const need = (what, text, res) => { for (const re of res) if (!re.test(text)) throw new Error(`${what} lacks ${re}`); };
+  const terms = await flat('/terms', 'main h1');
+  need('Terms', terms, [
+    /The free noise removal, the free subtitles and changing a file.s type or video size in your browser run on your own device and need no account and no credit\./,
+    /File type and video size\. Free in your browser, with no account; nothing is uploaded\. A video your browser can.t convert can be converted on our side: the whole video is uploaded, copying its picture into another file type is free, and making the picture again \(a new size, or a file type that can.t hold it as it is\) is paid, as Video conversion\./,
+    /The free noise removal and changing a file.s type or video size in your browser process files locally; nothing is uploaded\./,
+  ]);
+  const privacy = await flat('/privacy', 'main h1');
+  need('Privacy', privacy, [
+    /2\. Free noise removal, subtitles and file conversion in your browser/,
+    /The free noise removal, the free subtitles and changing a file.s type or video size on the Cleanup page process your file entirely on your device\. Your audio and video are not uploaded/,
+    /A video your browser can.t convert itself is uploaded whole when you have it converted on our side \(another file type or video size\), and is kept and deleted like any upload \(below\)\./,
+  ]);
+  // (the old sentences about the free tools are still there)
+  need('Privacy', privacy, [/You don.t need an account for them\./, /That copy stays on your device, is never uploaded by this step/]);
+  need('Terms', terms, [/including the free tools without an account/]);
+  // the price table: the free row, and Video conversion among the Files (its price is the server's list's, not pinned here)
+  const rate = (await (await fetch(`${BASE}/api/billing/pricing`)).json()).rates.find((r) => r.product === 'convert');
+  if (!rate || rate.label !== 'Video conversion') throw new Error('price list: ' + JSON.stringify(rate));
+  await page.goto(`${BASE}/#pricing`);
+  await page.waitForSelector('table.price-table tbody tr');
+  const rows = (await page.locator('table.price-table tr').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim());
+  const free = rows.find((r) => /^File type and video size in your browser/.test(r));
+  if (!free || !/Another file type \(MP4, MKV, WebM, MP3, …\) or video size, on its own or with the rest\. Made on your own device, nothing is uploaded\. Free$/.test(free)) throw new Error('free row: ' + free);
+  const paid = rows.find((r) => /^Video conversion/.test(r));
+  if (!paid || !/Another file type or video size for a video your browser can.t convert itself, made on our side\. Only when the picture has to be made again; copying it into another file type is free\b.*\/ min/.test(paid)) throw new Error('paid row: ' + paid);
+  const order = rows.map((r) => r.split(' ')[0] + ' ' + r.split(' ')[1]);
+  const iFree = rows.indexOf(free), iPaid = rows.indexOf(paid), iFiles = rows.findIndex((r) => r === 'Files'), iLive = rows.findIndex((r) => r === 'Live streaming');
+  if (!(iFree < iFiles && iFiles < iPaid && iPaid < iLive)) throw new Error(`rows are not in the groups Free / Files / Live: ${order.join(' | ')}`);
+  return `${free.slice(0, 60)}… | ${paid.slice(-24)}`;
+});
+
 await check('running jobs: the server\'s step names are shown in plain words on the list rows and on the job\'s page ("premium" and "cloud asr" never appear), an unknown step shows only a plain "Working on it" with the percentage on the row', async () => {
   const now = Math.floor(Date.now() / 1000);
   const job = (id, extra) => ({ id, kind: 'denoise', free: false, status: 'running', inputName: `${id}.wav`, createdAt: now, durationSeconds: 60, progress: 0, stage: '', outputs: [], costMicros: 0, expiresAt: null, queuePosition: null, queueWaitSeconds: null, ...extra });

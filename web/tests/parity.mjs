@@ -306,7 +306,7 @@ await check('Voice: Free: channels mixed to mono, time on this device, long-reco
   has(await txt(page.getByTestId('free-notes')), /This is a long recording \(2 h 01 min\)\. Cleaning it here could take about .* and needs a lot of memory\. Keep this tab open, or choose Denoising for long files\./);
   await open('noisy.avi');
   await setKind(page, 'free');
-  has(await txt(page.getByTestId('audio-only-note')), /^Your browser can clean the sound of this video, but can’t rebuild this video type, so you’ll get the cleaned sound as a WAV file\. Denoising gives you the whole video back\.$/);
+  has(await txt(page.getByTestId('audio-only-note')), /^Your browser can clean the sound of this video, but can’t rebuild this video type, so you’ll get the cleaned sound as a WAV file\. For the video, pick a video file type under Output: it’s made on our side, with the whole video uploaded\.$/);
   return 'channels, eta, long recording, audio-only';
 });
 

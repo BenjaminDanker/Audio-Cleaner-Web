@@ -1,7 +1,9 @@
 // The output picker (src/media/convert.js, src/components/OutputPicker.jsx): the file type and the name of a result, made in the
 // browser. Audio -> WAV / FLAC / MP3 / Ogg (and M4A where this browser can encode AAC), video -> sound only, a sound file -> a video
 // with a black picture, a video kept as it is (MKV) or made smaller (MP4 at 480p), the name and the type list following each
-// other, the name a paid job is saved under; every result comes down by itself, and Save changes brings the new type.
+// other, the name a paid job is saved under; every result comes down by itself, and Save changes brings the new type. Another file type or
+// video size is a feature of its own: with nothing else chosen it is free, runs in the browser (a card named File conversion) and gives the file
+// in the new type or size with its own sound; a video type this browser can't make for a video is offered as made on our side.
 // The choices live in the editor's Output menu (OutputFields). The files that come out are looked at with ffprobe. An encoder the
 // headless Chromium lacks is reported as a skip.
 // Needs the local backend (port 8792), `npm run build` output and the fixtures. Usage: node tests/convert.mjs
@@ -194,6 +196,117 @@ await check('video made smaller: a 1280x720 video at 480p is encoded again with 
   if (Math.abs(i.v.width / i.v.height - 16 / 9) > 0.02) throw new Error(`shape ${i.v.width}x${i.v.height}`);
   if (!/encoded again/.test(r.note)) throw new Error(`note: ${r.note}`);
   return `${r.name} ${i.v.codec_name} ${i.v.width}x${i.v.height}, ${i.a.codec_name}; ${r.note}`;
+});
+
+/** Drop a file with nothing else chosen (no noise removal, no Leveling, no subtitles): the file type and size are the only things left to choose. */
+async function prepareConversion(file) {
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, file));
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'off');
+  await openOutput();
+}
+const NOTHING_TO_DO = 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.';
+const startLabel = () => page.locator('.studio .bb .btn-lg').innerText().then((t) => t.trim());
+const startReady = () => page.waitForFunction(() => !document.querySelector('[data-testid=notes] .banner-warn') && document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 10000 });
+
+await check('file type alone: with the file\'s own type and size Start says what to choose; another type makes Start free, the file comes down in that type with its own picture and sound, and the card is named File conversion', async () => {
+  await prepareConversion('test.mp4');
+  await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
+  if (await page.getByTestId('start').isEnabled()) throw new Error('Start is on with nothing chosen');
+  await field('out-format').selectOption('mkv');
+  await field('out-name').fill('only the type.mkv');
+  await closeOutput();
+  await startReady();
+  if ((await startLabel()) !== 'Start · Free') throw new Error('button: ' + (await startLabel()));
+  const hint = await page.getByTestId('will-download').innerText().catch(() => '');
+  downloads.length = 0;
+  const calls = [];
+  const onReq = (rq) => { const u = new URL(rq.url()); if (u.pathname.startsWith('/api/') && rq.method() !== 'GET') calls.push(`${rq.method()} ${u.pathname}`); };
+  page.on('request', onReq);
+  await page.getByTestId('start').click();
+  await waitResult(page, 'result', 120000);
+  page.off('request', onReq);
+  if (calls.length) throw new Error('sent to our side: ' + calls.join(', '));
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'only the type.mkv') throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
+  const p = join(FILES, 'conv-only-type.mkv');
+  await downloads[0].saveAs(p);
+  const src = probe(join(FILES, 'test.mp4'));
+  const got = probe(p);
+  if (got.v.codec_name !== src.v.codec_name || `${got.v.width}x${got.v.height}` !== `${src.v.width}x${src.v.height}`) throw new Error(`picture ${src.v.codec_name} -> ${got.v?.codec_name}`);
+  if (got.a.codec_name !== src.a.codec_name || Math.abs(got.dur - src.dur) > 0.8) throw new Error(`sound ${src.a.codec_name} ${src.dur} -> ${got.a?.codec_name} ${got.dur}`);
+  // the card: Your files lists the one file; the Cleanup page's list names the job File conversion
+  await page.getByTestId('bar-files').click();
+  const files = await page.getByTestId('made-file').allInnerTexts();
+  await page.getByTestId('bar-files').click();
+  if (files.length !== 1 || !/only the type\.mkv/.test(files[0])) throw new Error('listed: ' + files);
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Cleanup', exact: true }).click();
+  await page.waitForURL(/\/app$/);
+  const row = (await page.locator('[data-testid=job-row]').first().innerText()).replace(/\s+/g, ' ');
+  if (!/File conversion/.test(row) || !/test\.mp4/.test(row)) throw new Error('card: ' + row);
+  return `${got.v.codec_name}+${got.a.codec_name} in MKV; ${hint.replace(/\s+/g, ' ').slice(0, 70)}; card: ${row.slice(0, 70)}`;
+});
+
+await check('video size alone: a 720p video at 480p is made again in the browser with the shape kept, for free, with nothing else chosen; a sound file in another type is the same', async () => {
+  const out = [];
+  if (existsSync(big) && (enc.avc || enc.vp9)) {
+    await prepareConversion('conv720.mp4');
+    await field('out-size').selectOption('480');
+    await closeOutput();
+    await startReady();
+    if ((await startLabel()) !== 'Start · Free') throw new Error('button: ' + (await startLabel()));
+    downloads.length = 0;
+    await page.getByTestId('start').click();
+    await waitResult(page, 'result', 180000);
+    if (downloads.length !== 1 || !/\.mp4$/.test(downloads[0].suggestedFilename())) throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
+    const p = join(FILES, 'conv-only-size.mp4');
+    await downloads[0].saveAs(p);
+    const i = probe(p);
+    if (i.v.height !== 480 || Math.abs(i.v.width / i.v.height - 16 / 9) > 0.02 || !i.a) throw new Error(`${i.v.width}x${i.v.height} sound ${i.a?.codec_name}`);
+    out.push(`${i.v.codec_name} ${i.v.width}x${i.v.height}`);
+  } else out.push('size skipped (no 720p fixture, or this Chromium can write neither H.264 nor VP9)');
+  await prepareConversion('noisy.wav');
+  await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
+  await field('out-format').selectOption('flac');
+  await field('out-name').fill('only the type.flac');
+  await closeOutput();
+  await startReady();
+  downloads.length = 0;
+  await page.getByTestId('start').click();
+  await waitResult(page, 'result', 120000);
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'only the type.flac') throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
+  const f = join(FILES, 'conv-only-type.flac');
+  await downloads[0].saveAs(f);
+  const s = probe(f);
+  if (s.a.codec_name !== 'flac' || Math.abs(s.dur - 10.6) > 0.8) throw new Error(`flac ${s.a.codec_name} ${s.dur}`);
+  out.push('flac');
+  return out.join('; ');
+});
+
+await check('made on our side: a video this browser can only read through libav (an AVI) is offered every video type under "Video, made on our side" and every size says so in the note; a video the browser opens itself is not offered its own type that way', async () => {
+  await prepareConversion('noisy.avi');
+  const groups = () => field('out-format').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+  let g = await groups();
+  const ours = g.find((x) => x.label === 'Video, made on our side');
+  if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm') throw new Error('groups: ' + JSON.stringify(g));
+  if (g.some((x) => x.label === 'Video')) throw new Error('a video type offered as made here: ' + JSON.stringify(g));
+  await field('out-format').selectOption('mp4');
+  const sizes = await field('out-size').evaluate((sel) => [...sel.querySelectorAll('option')].map((o) => o.value));
+  if (sizes.join() !== 'same,2160,1440,1080,720,480') throw new Error('sizes: ' + sizes);
+  // (the note says it is made on our side and uploaded whole, for every size; what it says about the price is the price list's business)
+  const note = (await field('out-size-note').innerText()).replace(/\s+/g, ' ');
+  if (!/^Made on our side, so the whole video is uploaded\./.test(note)) throw new Error('note: ' + note);
+  await field('out-size').selectOption('720');
+  const sized = (await field('out-size-note').innerText()).replace(/\s+/g, ' ');
+  if (!/^Made on our side, so the whole video is uploaded\./.test(sized)) throw new Error('size note: ' + sized);
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'test.mp4'));
+  await openOutput();
+  g = await groups();
+  const here = g.find((x) => x.label === 'Video');
+  const mine = (g.find((x) => x.label === 'Video, made on our side') || { values: [] }).values;
+  if (!here || !here.values.includes('mp4') || !here.values.includes('mkv') || mine.includes('mp4') || mine.includes('mkv')) throw new Error('groups for an MP4: ' + JSON.stringify(g));
+  return `AVI: ${ours.values.join(', ')}; MP4: here ${here.values.join(', ')}${mine.length ? `, ours ${mine.join(', ')}` : ''}`;
 });
 
 await check('paid job: a Denoising job for a sound file with a chosen name and type comes down by itself under that name (and again with Download again); changing the type and saving brings the new type', async () => {

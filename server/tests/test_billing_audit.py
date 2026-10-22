@@ -59,7 +59,7 @@ def forged_flac(tmp_path, real=120, claimed=10):
 
 
 def runner_spec(tmp_path, **kw):
-    return {"bin_dir": str(HOME / "bin"), "input": "forged.flac", "threads": 2, "max_seconds": pricing.MAX_JOB_SECONDS, **kw}
+    return {"bin_dir": str(HOME / "bin"), "input": "forged.flac", "threads": 2, "max_seconds": pricing.MAX_JOB_SECONDS, "options": {}, **kw}
 
 
 @NATIVE

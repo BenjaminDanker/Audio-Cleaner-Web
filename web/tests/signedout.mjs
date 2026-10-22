@@ -6,11 +6,14 @@
 // everybody (in the browser; nothing about the file is sent) but picks only among the free options: Free noise removal at the strength it
 // finds (the strongest Free one where it would rebuild the voice or use the heavy remover), Free subtitles where there is speech, no Leveling,
 // and the suggestions for moments offer Free strengths; with Automatic off every free option is on; the switch shows and saves this
-// browser's choice; and the kept work comes back after signing in with its tracks and its Automatic state as they were left.
+// browser's choice; switching it on when it started off sets the choices from what the quick listen finds; another file type or video size
+// with nothing else chosen is free and runs in the browser, and a video type this browser can't make is offered as made on our side (it needs
+// an account); and the kept work comes back after signing in with its tracks and its Automatic state as they were left.
 // Needs the local backend (port 8792, see helpers.mjs) with `ACW_MODEL_HOST=http://127.0.0.1:8798/ npm run build` output and the fixtures.
 // Usage: node tests/signedout.mjs
-import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { noisy, wavBytes } from './reco-audio.mjs';
 import {
@@ -18,6 +21,8 @@ import {
 } from './helpers.mjs';
 
 const EMAIL = `signedout-${Date.now()}@example.com`;
+const FFMPEG = process.env.FFMPEG || join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
+const FFPROBE = process.env.FFPROBE || join(homedir(), 'audio-cleaner', 'bin', 'ffprobe');
 const NOISY = join(FILES, 'noisy.wav');
 const KEPT = 'acw.draft.saved';
 const AUTO = 'acw.autoSettings'; // this browser's choice for the editor's Automatic switch (absent: on)
@@ -225,6 +230,30 @@ await check('signed out, Automatic off (saved in this browser): nothing is liste
   }
 });
 
+await check('signed out, Automatic started off: switching it on later sets the choices from what the quick listen finds, so they change from the starting ones (Strong for a loud recording, no subtitles where no one speaks), and are still free options only', async () => {
+  const got = [];
+  for (const [name, want, from] of [['loud', { str: '3', subs: '1' }, { str: '2', subs: '1' }], ['hum', { str: '2', subs: '0' }, { str: '2', subs: '1' }]]) {
+    const w = await watched('off'); // (a fresh browser that saved Automatic off: it starts with every free option on)
+    try {
+      await openSignedOut(w.p, GENERATED[name], { automatic: false });
+      await freeOnly(w.p, from, `${name} before`);
+      const before = await editorState(w.p);
+      if (before.checked !== 'false' || before.analysis.length || w.seen.models.length) throw new Error(`${name}: it listened before the switch: ${JSON.stringify(before)} ${w.seen.models.join(', ')}`);
+      await w.p.locator('.studio button[data-act=auto]').click();
+      await w.p.getByTestId('reco-status').waitFor({ timeout: 90000 });
+      const after = await editorState(w.p);
+      if (after.checked !== 'true') throw new Error(`${name}: the switch is ${after.checked}`);
+      if (!w.seen.models.length) throw new Error(`${name}: switched on, but it did not listen`);
+      if (after.strength === before.strength && after.subs === before.subs && after.kind === before.kind) throw new Error(`${name}: the choices did not change: ${JSON.stringify(after)}`);
+      got.push(`${name}: ${(await freeOnly(w.p, want, `${name} after`)).split('; ')[1]}`); // (what it found, and only free options)
+      if (sentToUs(w.seen).length) throw new Error(`${name}: asked of our side: ` + sentToUs(w.seen).join(', '));
+    } finally {
+      await w.ctx.close();
+    }
+  }
+  return got.join(' || ');
+});
+
 await check('signed out, Automatic on: the suggestions for moments offer Free strengths (never Voice rebuild or Standard) and applying them leaves everything free', async () => {
   const w = await watched();
   try {
@@ -287,6 +316,128 @@ await check('signed out: a Free subtitles run completes (the words are right, th
   if (!downloads.some((d) => d.suggestedFilename() === 'speech.srt')) throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
   onlyPublic('during the run');
   return `${cues} cues`;
+});
+
+const probeOf = (p) => {
+  const j = JSON.parse(execFileSync(FFPROBE, ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', p], { encoding: 'utf8' }));
+  return { v: j.streams.find((x) => x.codec_type === 'video'), a: j.streams.find((x) => x.codec_type === 'audio'), dur: Number(j.format.duration) };
+};
+const NOTHING_TO_DO = 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.';
+const outField = (p, id) => p.locator(`[data-testid=output-pop] [data-testid=${id}]`);
+/** The Output menu open (and left open): the file type and size lists are ready. */
+async function openOutput(p) {
+  if (!(await p.getByTestId('output-pop').count())) await p.getByTestId('output-button').click();
+  await outField(p, 'out-format').waitFor();
+  await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+}
+const closeOutput = async (p) => { if (await p.getByTestId('output-pop').count()) await p.getByTestId('output-button').click(); };
+
+await check('signed out: another file type or video size with nothing else chosen is free: with the file\'s own type and size Start says what to choose, with another type it is "Start · Free", the file comes down in the new type with its own sound, the card is "File conversion", and nothing about the file is sent', async () => {
+  calls.length = 0; downloads.length = 0;
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'test.mp4'));
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'off');
+  await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
+  if (await page.getByTestId('start').isEnabled()) throw new Error('Start is on with nothing chosen');
+  await openOutput(page);
+  await outField(page, 'out-format').selectOption('mkv');
+  await outField(page, 'out-name').fill('converted copy.mkv');
+  await closeOutput(page);
+  await page.waitForFunction(() => !document.querySelector('[data-testid=notes] .banner-warn') && document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
+  const label = (await mainButton(page)).trim();
+  if (label !== 'Start · Free') throw new Error('button: ' + label);
+  await page.getByTestId('start').click();
+  await waitResult(page, 'result', 120000);
+  if (!/\/app\/job\/local-/.test(new URL(page.url()).pathname)) throw new Error('page: ' + page.url());
+  if (downloads.length !== 1 || downloads[0].suggestedFilename() !== 'converted copy.mkv') throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
+  const out = join(GEN, 'converted-copy.mkv');
+  await downloads[0].saveAs(out);
+  const got = probeOf(out);
+  const src = probeOf(join(FILES, 'test.mp4'));
+  if (got.v?.codec_name !== src.v.codec_name || `${got.v.width}x${got.v.height}` !== `${src.v.width}x${src.v.height}`) throw new Error(`picture ${src.v.codec_name} ${src.v.width}x${src.v.height} -> ${got.v?.codec_name} ${got.v?.width}x${got.v?.height}`);
+  if (got.a?.codec_name !== src.a.codec_name || Math.abs(got.dur - src.dur) > 0.8) throw new Error(`sound ${src.a.codec_name} ${src.dur} -> ${got.a?.codec_name} ${got.dur}`);
+  onlyPublic('during the conversion');
+  // its card: made in this tab, named File conversion (the Cleanup page lists what was made here)
+  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Cleanup', exact: true }).click();
+  await page.waitForURL(/\/app$/);
+  const row = (await page.locator('[data-testid=job-row]').first().innerText()).replace(/\s+/g, ' ');
+  if (!/File conversion/.test(row) || !/test\.mp4/.test(row)) throw new Error('card: ' + row);
+  return `${got.v.codec_name}+${got.a.codec_name} in MKV, ${got.dur.toFixed(1)} s; card: ${row.slice(0, 80)}`;
+});
+
+await check('signed out: a new picture size alone converts in the browser too (a 720p video at 480p, the shape kept), and a sound file in another type is the same free conversion', async () => {
+  const enc = await page.evaluate(async () => {
+    const ok = async (c) => { try { return !!(await VideoEncoder.isConfigSupported(c)).supported; } catch { return false; } };
+    return (await ok({ codec: 'avc1.42001f', width: 640, height: 360, bitrate: 1e6 })) || (await ok({ codec: 'vp09.00.10.08', width: 640, height: 360, bitrate: 1e6 }));
+  }).catch(() => false);
+  const out = [];
+  if (enc) {
+    const big = join(FILES, 'conv720.mp4');
+    if (!existsSync(big)) execFileSync(FFMPEG, ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=1280x720:rate=25', '-i', NOISY, '-t', '4', '-map', '0:v', '-map', '1:a', '-c:v', 'libx264', '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', big]);
+    calls.length = 0; downloads.length = 0;
+    await page.goto(`${BASE}/app`);
+    await dropFile(page, big);
+    await pick(page, 'noise', 'off');
+    await pick(page, 'subs', 'off');
+    await openOutput(page);
+    await outField(page, 'out-size').selectOption('480');
+    await closeOutput(page);
+    await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
+    if ((await mainButton(page)).trim() !== 'Start · Free') throw new Error('button: ' + (await mainButton(page)));
+    await page.getByTestId('start').click();
+    await waitResult(page, 'result', 180000);
+    if (downloads.length !== 1 || !/\.mp4$/.test(downloads[0].suggestedFilename())) throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
+    const p = join(GEN, 'small.mp4');
+    await downloads[0].saveAs(p);
+    const got = probeOf(p);
+    if (got.v.height !== 480 || Math.abs(got.v.width / got.v.height - 16 / 9) > 0.02 || !got.a) throw new Error(`${got.v.width}x${got.v.height} ${got.a?.codec_name}`);
+    onlyPublic('during the resize');
+    out.push(`${got.v.width}x${got.v.height}`);
+  } else out.push('size skipped (this Chromium can write neither H.264 nor VP9)');
+  calls.length = 0; downloads.length = 0;
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, NOISY);
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'off');
+  await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).waitFor({ timeout: 5000 });
+  await openOutput(page);
+  await outField(page, 'out-format').selectOption('flac');
+  await closeOutput(page);
+  await page.waitForFunction(() => document.querySelector('[data-testid=start]')?.disabled === false, null, { timeout: 5000 });
+  if ((await mainButton(page)).trim() !== 'Start · Free') throw new Error('button: ' + (await mainButton(page)));
+  await page.getByTestId('start').click();
+  await waitResult(page, 'result', 120000);
+  if (downloads.length !== 1 || !/\.flac$/.test(downloads[0].suggestedFilename())) throw new Error('downloads: ' + downloads.map((d) => d.suggestedFilename()));
+  const f = join(GEN, 'copy.flac');
+  await downloads[0].saveAs(f);
+  const s = probeOf(f);
+  if (s.a?.codec_name !== 'flac' || Math.abs(s.dur - 10.6) > 0.8) throw new Error(`flac: ${s.a?.codec_name} ${s.dur}`);
+  onlyPublic('during the sound conversion');
+  out.push(`${downloads[0].suggestedFilename()} ${s.a.codec_name}`);
+  return out.join('; ');
+});
+
+await check('signed out: a video type this browser can\'t make for a video (an AVI is read through libav) is offered as "made on our side", and choosing it needs an account: Sign in to start', async () => {
+  calls.length = 0;
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, join(FILES, 'noisy.avi'));
+  await pick(page, 'noise', 'off');
+  await pick(page, 'subs', 'off');
+  await openOutput(page);
+  const groups = await outField(page, 'out-format').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+  const ours = groups.find((g) => g.label === 'Video, made on our side');
+  if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm') throw new Error('groups: ' + JSON.stringify(groups));
+  if (groups.some((g) => g.label === 'Video')) throw new Error('video types offered as made here: ' + JSON.stringify(groups));
+  await outField(page, 'out-format').selectOption('mkv');
+  const note = (await outField(page, 'out-size-note').innerText()).replace(/\s+/g, ' ');
+  if (!/^Made on our side, so the whole video is uploaded\./.test(note)) throw new Error('size note: ' + note);
+  await closeOutput(page);
+  await page.waitForFunction(() => /Sign in to start/.test(document.querySelector('.studio .bb .btn-lg')?.textContent || ''), null, { timeout: 5000 });
+  if (await page.getByTestId('start').isDisabled()) throw new Error('the button is disabled');
+  if ((await page.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).count())) throw new Error('it says nothing is chosen');
+  onlyPublic('while choosing a type made on our side');
+  return `${ours.label}: ${ours.values.join(', ')}; ${note.slice(0, 60)}…`;
 });
 
 let before; // what the editor held before leaving, to compare with what comes back after signing in

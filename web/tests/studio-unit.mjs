@@ -16,7 +16,9 @@ const bundle = await build({
       export * from '../src/editor/tracks.js';
       export { heardSeries, layerPeaks, roughDb, rangePeaks, overlayPeaks } from '../src/editor/peaks.js';
       export { prepare } from '../src/editor/mix.js';
-      export { outputPlan, problemsFor, jobKind, wantsOf, browserVerdict, subsVerdict, inGigabytes } from '../src/studio/plan.js';
+      export { outputPlan, problemsFor, jobKind, wantsOf, browserVerdict, subsVerdict, inGigabytes, convertsFile, videoOutOf } from '../src/studio/plan.js';
+      export { Finish, finishSeconds } from '../src/finish.js';
+      export { listSizes, serverSize, formatOfName, SIZES } from '../src/media/convert.js';
       export { fitPcm, samplesOf, piecesIn, rangeFor } from '../src/studio/runs.js';
       export { tipsFor, priceWords } from '../src/studio/copy.js';
       export { needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute } from '../src/access.js';
@@ -40,6 +42,7 @@ const {
   changesSound, freeNoiseRanges, freeSubRanges, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
   needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute, hasWork,
+  convertsFile, videoOutOf, Finish, finishSeconds, listSizes, serverSize, formatOfName, SIZES,
 } = m;
 
 let failed = 0;
@@ -467,7 +470,7 @@ await check('files: wantsOf is what the finishing step (finish.js) takes: the so
   edit(S, 'voice', 0, 180, { kind: 'free', str: 3 }); edit(S, 'level', 0, 180, { lvl: 0 }); edit(S, 'subs', 0, 180, { q: 1 });
   const plan = outputPlan({ tracks: S.tracks, info: AUDIO, file: { size: 1e6 }, choice: choiceOf('wav'), out: { sfiles: ['srt', 'txt'], burn: false } });
   const w = wantsOf({ tracks: S.tracks, plan, choice: { ...choiceOf('wav'), name: ' x.wav ' }, out: { sfiles: ['srt', 'txt'], burn: false }, file: null, local: true });
-  assert.deepEqual(w, { sound: true, format: 'wav', name: 'x.wav', size: 'same', subs: true, caps: { srt: true, vtt: false, txt: true }, embed: false, soundHere: true, subsHere: true });
+  assert.deepEqual(w, { sound: true, convert: false, serverVideo: false, format: 'wav', name: 'x.wav', size: 'same', subs: true, caps: { srt: true, vtt: false, txt: true }, embed: false, soundHere: true, subsHere: true });
   assert.equal(wantsOf({ tracks: S.tracks, plan, choice: choiceOf('wav'), out: out0, file: null, local: false }).soundHere, false);
   // subtitles into a video with nothing cleaned: the video keeps its own sound, as an MKV under its own name
   const T3 = state(); edit(T3, 'voice', 0, 180, { mode: 0 }); edit(T3, 'level', 0, 180, { lvl: 0 }); edit(T3, 'subs', 0, 180, { q: 1 });
@@ -492,7 +495,7 @@ await check('start: the messages that stop it are the Cleanup form\'s, word for 
   assert.equal(poor[0].text, 'This costs about $2.00, but your balance is $1.00. You can also choose the free options.');
   assert.equal(poor[0].kind, 'credit');
   const none = state(); edit(none, 'voice', 0, 180, { mode: 0 }); edit(none, 'level', 0, 180, { lvl: 0 });
-  assert.deepEqual(run({ tracks: none.tracks }), ['Choose at least one thing to do: noise removal, subtitles, or both.']);
+  assert.deepEqual(run({ tracks: none.tracks }), ['Choose at least one thing to do: noise removal, subtitles, or another file type or video size.']);
   const subs = state(); edit(subs, 'subs', 0, 180, { q: 2 });
   assert.deepEqual(run({ tracks: subs.tracks, out: { sfiles: [], burn: false } }), ['Choose at least one caption or transcript format.']);
   const burn = problemsFor({ ...base, tracks: subs.tracks, choice: choiceOf('mp4'), out: { sfiles: ['srt'], burn: true }, info: VIDEO,
@@ -509,6 +512,251 @@ await check('start: the free options say why they can not be used (no sound, a t
   assert.match(browserVerdict({ ...AUDIO, duration: 7 * 3600 }, { ok: true }).why, /longer than 6 hours/);
   assert.equal(subsVerdict(AUDIO, true).ok, true);
   assert.equal(subsVerdict(AUDIO, false).why, 'This browser can’t run the subtitle maker. Standard can (paid).');
+});
+
+/* ------------------------------------------------------------------------------------------------ file type and video size on their own */
+
+// A choice as the output picker gives it (OutputPicker.jsx useOutputChoice): `touched` once the person has picked a type or size, `server` for a
+// video type or size this browser can't make (made on our side).
+const conv = (format, o = {}) => ({
+  format, name: `x.${format}`, isVideoFile: ['mp4', 'mkv', 'mov', 'webm'].includes(format), size: 'same', valid: true, touched: true, picture: true, server: false,
+  okIds: ['mp4', 'mkv', 'wav'], ...o,
+});
+const nothing = () => { const S = state(); edit(S, 'voice', 0, 180, { mode: 0 }); edit(S, 'level', 0, 180, { lvl: 0 }); return S; }; // (nothing else chosen: no noise removal, no Leveling, no subtitles)
+const MP4 = { name: 'talk.mp4', size: 1e6 };
+
+await check('convert: another file type or picture size counts only when the person chose it and differs from the file\'s own', () => {
+  const yes = (o, file = MP4) => convertsFile({ file, choice: conv('mp4', o) });
+  assert.equal(yes({}), false); // the file's own type, the same size
+  assert.equal(yes({ format: 'mkv' }), true);
+  assert.equal(yes({ format: 'webm', server: true }), true);
+  assert.equal(yes({ size: '720' }), true); // a size other than 'same'
+  assert.equal(yes({ size: '480', picture: false }), false); // (a sound file has no picture to resize)
+  assert.equal(yes({ format: 'mkv', touched: false }), false); // what the picker started with is not a choice
+  assert.equal(yes({ format: 'mkv', valid: false }), false); // a name that can't be used
+  assert.equal(convertsFile({ file: null, choice: conv('mkv') }), false);
+  assert.equal(convertsFile({ file: MP4, choice: null }), false);
+  assert.equal(convertsFile({ file: { name: 'noisy.wav' }, choice: conv('mp3', { picture: false, isVideoFile: false }) }), true);
+  assert.equal(convertsFile({ file: { name: 'noisy.wav' }, choice: conv('wav', { picture: false, isVideoFile: false }) }), false);
+  assert.equal(convertsFile({ file: { name: 'Talk.MP4' }, choice: conv('mp4') }), false); // (the ending is read in any case)
+  assert.equal(convertsFile({ file: { name: 'm.m4v' }, choice: conv('mp4') }), false); // (m4v is an MP4)
+  // an AVI/WMV has no type of our own: any type chosen differs
+  assert.equal(convertsFile({ file: { name: 'old.avi' }, choice: conv('wav', { picture: false, isVideoFile: false }) }), true);
+  assert.equal(formatOfName('old.avi'), '');
+});
+
+await check('convert: outputPlan: converting on its own is the browser\'s (free) work; a type or size this browser can\'t make is serverConvert and needs our side', () => {
+  const S = nothing();
+  const plan = (choice, o = {}) => outputPlan({ tracks: o.tracks || S.tracks, info: o.info || VIDEO, file: o.file || MP4, choice, out: out0 });
+  let p = plan(conv('mkv'));
+  assert.deepEqual([p.cleaning, p.converting, p.serverConvert, p.server, p.embedFormat], [false, true, false, false, 'mkv']);
+  p = plan(conv('mp4'));
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [false, false, false]); // the file's own type and size: nothing to do
+  p = plan(conv('mp4', { size: '720' }));
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [true, false, false]); // (a size this browser can make)
+  p = plan(conv('mkv', { server: true }));
+  assert.deepEqual([p.converting, p.serverConvert, p.server, p.embedOnServer], [true, true, true, true]);
+  p = plan(conv('mkv', { server: true, touched: false }));
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [false, false, false]);
+  // only a video is made on our side, and only to a video type
+  p = plan(conv('mkv', { server: true }), { info: AUDIO, file: { name: 'a.wav', size: 1e6 } });
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [true, false, false]);
+  p = plan(conv('wav', { server: true, isVideoFile: false, picture: false }), { info: VIDEO, file: { name: 'a.avi', size: 1e6 } });
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [true, false, false]);
+  // cleaning, free in the browser: the sound is cleaned, the file type is not "converting" (the cleaning makes the file); on our side for the video all the same
+  const free = state(); edit(free, 'voice', 0, 180, { kind: 'free', str: 3 }); edit(free, 'level', 0, 180, { lvl: 0 });
+  p = plan(conv('mkv'), { tracks: free.tracks });
+  assert.deepEqual([p.cleaning, p.converting, p.serverConvert, p.server], [true, false, false, false]);
+  p = plan(conv('mkv', { server: true }), { tracks: free.tracks });
+  assert.deepEqual([p.cleaning, p.converting, p.serverConvert, p.server], [true, false, true, true]);
+  // a paid part is on our side with or without a conversion
+  const paid = state(); edit(paid, 'voice', 0, 180, { kind: 'paid', str: 3 });
+  p = plan(conv('mp4'), { tracks: paid.tracks });
+  assert.deepEqual([p.server, p.serverConvert], [true, false]);
+  // subtitles with nothing else changed, in another type: converting keeps the type chosen (it is not forced to MKV)
+  const subs = nothing(); edit(subs, 'subs', 0, 180, { q: 1 });
+  p = outputPlan({ tracks: subs.tracks, info: VIDEO, file: MP4, choice: conv('mkv'), out: { sfiles: ['srt'], burn: true } });
+  assert.deepEqual([p.cleaning, p.converting, p.embedFormat, p.embedNow], [false, true, 'mkv', true]);
+  p = outputPlan({ tracks: subs.tracks, info: VIDEO, file: MP4, choice: conv('mp4'), out: { sfiles: ['srt'], burn: true } });
+  assert.deepEqual([p.converting, p.embedFormat], [false, 'mp4']); // (the file's own type: not converting; the video keeps it, as before)
+  // the plan before this feature had no such fields: a plan with no choice at all still works
+  p = outputPlan({ tracks: S.tracks, info: AUDIO, file: { size: 1e6 }, choice: null, out: out0 });
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [false, false, false]);
+});
+
+await check('convert: jobKind(tracks, plan) is convert for a video made on our side with nothing else to do, denoise with a part, null when nothing needs our side', () => {
+  const S = nothing();
+  const mk = (tracks, choice) => outputPlan({ tracks, info: VIDEO, file: MP4, choice, out: out0 });
+  assert.equal(jobKind(S.tracks), null);
+  assert.equal(jobKind(S.tracks, null), null);
+  assert.equal(jobKind(S.tracks, mk(S.tracks, conv('mkv'))), null); // converted in the browser
+  assert.equal(jobKind(S.tracks, mk(S.tracks, conv('mkv', { server: true }))), 'convert');
+  const free = state(); edit(free, 'voice', 0, 180, { kind: 'free', str: 3 }); edit(free, 'level', 0, 180, { lvl: 0 });
+  assert.equal(jobKind(free.tracks, mk(free.tracks, conv('mkv', { server: true }))), 'denoise'); // the free parts go along as the browser's uploads
+  assert.equal(jobKind(free.tracks, mk(free.tracks, conv('mkv'))), null);
+  const paid = state(); edit(paid, 'voice', 0, 180, { kind: 'paid', str: 3 });
+  assert.equal(jobKind(paid.tracks), 'denoise');
+  assert.equal(jobKind(paid.tracks, mk(paid.tracks, conv('mkv', { server: true }))), 'denoise');
+});
+
+await check('convert: videoOutOf is what our side is asked for (type and size), only for a video made there', () => {
+  const S = nothing();
+  const server = outputPlan({ tracks: S.tracks, info: VIDEO, file: MP4, choice: conv('webm', { server: true }), out: out0 });
+  const got = videoOutOf(server, conv('webm', { server: true }), null);
+  assert.deepEqual([got.format, got.size], ['webm', null]);
+  const sized = videoOutOf(server, conv('mp4', { size: '720', server: true }), 720);
+  assert.deepEqual([sized.format, sized.size], ['mp4', 720]);
+  const here = outputPlan({ tracks: S.tracks, info: VIDEO, file: MP4, choice: conv('mkv'), out: out0 });
+  assert.equal(videoOutOf(here, conv('mkv'), null), null);
+  assert.equal(videoOutOf(null, conv('mkv'), null), null);
+  assert.equal(serverSize('same'), null);
+  assert.deepEqual(['2160', '1440', '1080', '720', '480'].map(serverSize), [2160, 1440, 1080, 720, 480]);
+  assert.equal(serverSize('nonsense'), null);
+});
+
+await check('convert: the sizes of a video type made on our side are all offered, marked as made there; the same-size choice is ok too', async () => {
+  const info = { hasVideo: true, width: 640, height: 480 };
+  const all = await listSizes(info, 'mp4', true);
+  assert.deepEqual(all.map((x) => x.id), SIZES.map((x) => x.id));
+  assert.ok(all.every((x) => x.ok === true && x.server === true));
+  assert.deepEqual(all.map((x) => x.px), SIZES.map((x) => x.px));
+});
+
+await check('convert: Start is possible with only another type or size, and with the file\'s own type and size the reason is the new sentence', () => {
+  const S = nothing();
+  const base = { info: VIDEO, file: MP4, tracks: S.tracks, est: null, duration: 180, maxJob: 4 * 3600, pricing: PRICING, pricingError: null, balance: { available_micros: 5e6 }, active: 0, maxActive: 3, out: out0 };
+  const texts = (choice, o = {}) => problemsFor({ ...base, ...o, choice, plan: outputPlan({ tracks: S.tracks, info: o.info || VIDEO, file: o.file || MP4, choice, out: out0 }) }).map((p) => p.text);
+  const NOTHING = 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.';
+  assert.deepEqual(texts(conv('mp4')), [NOTHING]); // the file's own type, the same size
+  assert.deepEqual(texts(conv('mp4', { touched: false })), [NOTHING]);
+  assert.deepEqual(texts(conv('mkv')), []);
+  assert.deepEqual(texts(conv('mp4', { size: '480' })), []);
+  assert.deepEqual(texts(conv('mkv', { server: true }), { est: 0 }), []);
+  assert.match(NOTHING, /another file type or video size\.$/);
+  // a name that can't be used is not a choice: the sentence is back
+  assert.deepEqual(texts(conv('mkv', { valid: false })), [NOTHING]);
+  // made on our side it is a job: the length, the upload size (the picture goes up whole, nothing is shrunk) and the balance matter
+  const server = conv('mkv', { server: true });
+  assert.deepEqual(texts(server, { duration: 5 * 3600 }), ['Files can be at most 4 hours long.']);
+  assert.deepEqual(texts(server, { file: { name: 'talk.mp4', size: 5 * 1024 ** 3 } }),
+    ['This file is 5 GB. The most we can take for upload is 4 GB. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.']);
+  assert.deepEqual(texts(conv('mkv'), { file: { name: 'talk.mp4', size: 5 * 1024 ** 3 } }), []); // (made in the browser: no upload, no limit)
+  assert.deepEqual(texts(server, { est: 2e6, balance: { available_micros: 1e6 } }), ['This costs about $2.00, but your balance is $1.00. You can also choose the free options.']);
+  assert.deepEqual(texts(conv('mkv'), { est: 2e6, balance: { available_micros: 1e6 } }), []); // (free in the browser: no price to be short of)
+  assert.deepEqual(texts(server, { active: 3 }), ['You have 3 files being processed. Start this one when one of them is done.']);
+  // subtitles put into the video need MKV for a converted file too
+  const subs = nothing(); edit(subs, 'subs', 0, 180, { q: 1 });
+  const mp4Subs = problemsFor({ ...base, tracks: subs.tracks, choice: conv('mp4', { size: '480' }), out: { sfiles: ['srt'], burn: true },
+    plan: outputPlan({ tracks: subs.tracks, info: VIDEO, file: MP4, choice: conv('mp4', { size: '480' }), out: { sfiles: ['srt'], burn: true } }) });
+  assert.deepEqual(mp4Subs.map((p) => p.text), ['Subtitles put into the video need an MKV file (most players can’t show them from MP4). Pick MKV, or untick “Put the subtitles into the video”.']);
+});
+
+await check('convert: wantsOf says convert for a file made in another type or size, and serverVideo when our side makes the video', () => {
+  const S = nothing();
+  const mk = (choice, o = out0, tracks = S.tracks, file = MP4) => {
+    const plan = outputPlan({ tracks, info: VIDEO, file, choice, out: o });
+    return wantsOf({ tracks, plan, choice: { ...choice, name: ' talk-new.mkv ' }, out: o, file, local: true });
+  };
+  assert.deepEqual(mk(conv('mkv', { size: 'same' })), {
+    sound: false, convert: true, serverVideo: false, format: 'mkv', name: 'talk-new.mkv', size: 'same', subs: false, caps: { srt: true, vtt: false, txt: false }, embed: false,
+    soundHere: false, subsHere: false,
+  });
+  const w = mk(conv('mp4', { size: '720', server: true }));
+  assert.deepEqual([w.convert, w.serverVideo, w.sound, w.format, w.size], [true, true, false, 'mp4', '720']);
+  assert.deepEqual([mk(conv('mp4')).convert, mk(conv('mp4')).serverVideo], [false, false]); // (the file's own type and size)
+  // a cleaned sound is not "convert": the cleaning makes the file
+  const free = state(); edit(free, 'voice', 0, 180, { kind: 'free', str: 3 }); edit(free, 'level', 0, 180, { lvl: 0 });
+  const c = mk(conv('mkv'), out0, free.tracks);
+  assert.deepEqual([c.sound, c.convert, c.soundHere], [true, false, true]);
+  const cs = mk(conv('mkv', { server: true }), out0, free.tracks);
+  assert.deepEqual([cs.sound, cs.convert, cs.serverVideo], [true, false, true]);
+  // subtitles inside a video converted at the same time: the type chosen stays (a subtitled-only video would be forced to MKV under its own name)
+  const subs = nothing(); edit(subs, 'subs', 0, 180, { q: 1 });
+  const sw = mk(conv('mkv', { size: '480' }), { sfiles: ['srt'], burn: true }, subs.tracks);
+  assert.deepEqual([sw.convert, sw.embed, sw.format, sw.name, sw.size], [true, true, 'mkv', 'talk-new.mkv', '480']);
+  const sw2 = mk(conv('mp4', { size: '480' }), { sfiles: ['srt'], burn: true }, subs.tracks);
+  assert.deepEqual([sw2.convert, sw2.embed, sw2.format, sw2.size], [true, true, 'mp4', '480']);
+  const subsOnly = mk(conv('mp4'), { sfiles: ['srt'], burn: true }, subs.tracks); // not converting: as before, an MKV under its own name
+  assert.deepEqual([subsOnly.convert, subsOnly.embed, subsOnly.format, subsOnly.name, subsOnly.size], [false, true, 'mkv', 'talk-subtitled.mkv', 'same']);
+});
+
+await check('convert: finishSeconds counts a conversion alone, and nothing for a video our side made', () => {
+  const info = { duration: 100 };
+  const file = { size: 2e8 };
+  const w = (o) => ({ sound: false, embed: false, convert: false, serverVideo: false, format: 'mkv', size: 'same', ...o });
+  assert.equal(finishSeconds(w({}), { info, file }), 0); // nothing to build
+  assert.equal(finishSeconds(null), 0);
+  assert.equal(finishSeconds(w({ convert: true }), { info, file }), 2 + 100 * 0.02 + 2); // a copy into another type: a little over the read
+  assert.equal(finishSeconds(w({ convert: true, format: 'mp4', size: '480' }), { info, file }), 3 + 100 * 0.5); // the picture made again here
+  assert.equal(finishSeconds(w({ convert: true, format: 'mp3' }), { info, file }), 2 + 100 * 0.03);
+  assert.equal(finishSeconds(w({ convert: true, format: 'wav' }), { info, file }), 1);
+  assert.equal(finishSeconds(w({ convert: true, format: 'flac' }), { info, file, serverAudio: true }), 0);
+  assert.equal(finishSeconds(w({ convert: true, serverVideo: true, format: 'mp4', size: '720' }), { info, file }), 0); // our side made it
+  assert.equal(finishSeconds(w({ sound: true, serverVideo: true }), { info, file }), 0);
+  assert.equal(finishSeconds(w({ sound: true }), { info, file }), 2 + 100 * 0.02 + 2); // (as before)
+});
+
+await check('convert: the finishing step hands over the video our side made, builds a conversion made here, and keeps the type chosen with subtitles', () => {
+  const wants = (o) => ({ sound: false, convert: true, serverVideo: false, format: 'mkv', name: 'talk-cleaned.mkv', size: 'same', subs: false, caps: {}, embed: false, soundHere: false, subsHere: false, ...o });
+  // a job on our side that made the video (its file is the result), in a tab that still has the original (which this browser can open)
+  const f = new Finish('job1');
+  f.job = { id: 'job1', outputs: [{ name: 'talk-converted.mkv', kind: 'video', bytes: 4321 }], displayName: 'talk.avi' };
+  f.file = { name: 'talk.avi', size: 1e6 };
+  f.info = { hasVideo: true, viaMediabunny: true, viaLibav: false, duration: 10 };
+  f.wants = wants({ serverVideo: true });
+  assert.equal(f.useServerVideo, true); // (a video our side was asked for is the result, even where this browser could make another)
+  const plan = f.mediaPlan(f.effective());
+  assert.deepEqual({ ...plan, url: undefined }, { name: 'talk-converted.mkv', bytes: 4321, kind: 'media', label: 'Video', url: undefined });
+  assert.match(plan.url, /\/api\/jobs\/job1\/outputs\/talk-converted\.mkv$/);
+  assert.equal(f.willBuild(f.effective()), false); // handed over as it is
+  assert.equal(f.needsVideo(f.effective()), false);
+  // the same without serverVideo in what was asked for: a tab that can open the video makes it here, and ignores the server's
+  f.wants = wants({ serverVideo: false });
+  assert.equal(f.useServerVideo, false);
+  assert.deepEqual(f.mediaPlan(f.effective()), { name: 'talk-cleaned.mkv', bytes: null, kind: 'media', label: 'Video' });
+  assert.equal(f.willBuild(f.effective()), true);
+  // a conversion made in this tab (a local card, no outputs from our side)
+  const g = new Finish('local1');
+  g.job = { id: 'local1', local: true, outputs: [] };
+  g.file = { name: 'talk.mp4', size: 1e6 };
+  g.info = { hasVideo: true, viaMediabunny: true, duration: 10 };
+  g.wants = wants({ name: 'talk-small.mp4', format: 'mp4', size: '480' });
+  assert.equal(g.useServerVideo, false);
+  assert.deepEqual(g.mediaPlan(g.effective()), { name: 'talk-small.mp4', bytes: null, kind: 'media', label: 'Video' });
+  assert.equal(g.willBuild(g.effective()), true);
+  assert.equal(g.needsVideo(g.effective()), false); // (the original is here)
+  // converted to a sound file with no cleaning: "Audio", not "Cleaned audio"
+  g.wants = wants({ name: 'talk.mp3', format: 'mp3' });
+  assert.deepEqual(g.mediaPlan(g.effective()), { name: 'talk.mp3', bytes: null, kind: 'media', label: 'Audio' });
+  g.wants = wants({ name: 'talk-cleaned.mp3', format: 'mp3', convert: false, sound: true, soundHere: true });
+  // nothing asked for: nothing made
+  g.wants = wants({ convert: false });
+  assert.equal(g.mediaPlan(g.effective()), null);
+  assert.equal(g.willBuild(g.effective()), false);
+  // after a reload this tab has no original: a conversion made here asks for the video once; one our side made does not
+  const h = new Finish('job2');
+  h.job = { id: 'job2', outputs: [], displayName: 'talk.mp4' };
+  h.wants = wants({});
+  assert.equal(h.needsVideo(h.effective()), true);
+  h.job = { id: 'job2', outputs: [{ name: 'talk-converted.webm', kind: 'video', bytes: 10 }], displayName: 'talk.avi' };
+  h.wants = wants({ serverVideo: true, format: 'webm' });
+  assert.equal(h.needsVideo(h.effective()), false);
+  assert.equal(h.mediaPlan(h.effective()).name, 'talk-converted.webm');
+  // a sound file converted to another sound type has no video to ask for
+  const a = new Finish('job3');
+  a.job = { id: 'job3', outputs: [], displayName: 'talk.wav' };
+  a.wants = wants({ format: 'mp3', name: 'talk.mp3' });
+  assert.equal(a.needsVideo(a.effective()), false);
+  // a conversion with subtitles in the video keeps its type (a video that only gets subtitles is an MKV under its own name)
+  const s = new Finish('job4');
+  s.job = { id: 'job4', local: true, outputs: [] };
+  s.file = { name: 'talk.mp4', size: 1e6 };
+  s.info = { hasVideo: true, viaMediabunny: true, duration: 10 };
+  s.wants = wants({ format: 'webm', name: 'talk.webm', embed: true, subs: true, caps: { srt: true }, subsHere: true });
+  assert.deepEqual([s.effective().format, s.effective().name], ['webm', 'talk.webm']);
+  s.wants = wants({ format: 'webm', name: 'talk.mp3', embed: true, subs: true, caps: { srt: true }, subsHere: true, convert: false });
+  s.subs = { srt: '1\n', vtt: 'WEBVTT', txt: 'x', language: 'en', empty: false };
+  assert.deepEqual([s.effective().format, s.effective().name, s.effective().size], ['mkv', 'talk-subtitled.mkv', 'same']);
 });
 
 /* ------------------------------------------------------------------------------------------------ the browser's share */
