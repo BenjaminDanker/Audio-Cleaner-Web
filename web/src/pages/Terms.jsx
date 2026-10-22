@@ -28,7 +28,7 @@ export default function Terms() {
   return (
     <Legal title="Terms of Service" sections={SECTIONS} version={LEGAL_VERSIONS.terms}>
       <h2 id="about">1. About these terms</h2>
-      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By signing in (which creates your account the first time) you agree to them, and buying credit or using a paid feature confirms it. If you do not agree, do not use the Service. The free noise removal runs on your own device; it needs a free account, but no credit.</p>
+      <p>These terms govern your use of {SITE.name} (the &ldquo;Service&rdquo;), operated by {operator} (&ldquo;we&rdquo;, &ldquo;us&rdquo;). By using the Service, including the free tools without an account, you agree to them; signing in (which creates your account the first time), buying credit or using a paid feature confirms it. If you do not agree, do not use the Service. The free noise removal and the free subtitles run on your own device and need no account and no credit.</p>
       <p><b>Where the Service is available.</b> The Service is not available to people in the European Union or European Economic Area (EU/EEA), the United Kingdom or Switzerland. Please do not create an account, buy credit or use the Service if you are there. If a card issued in one of those places is used, we cancel the payment before it is charged (and refund it in full if it ever was).</p>
       <p>We may update these terms. When we do, the version date changes and signed-in users see a notice on the website. Signing in or using the Service after the change means you accept the new version. If you do not accept it, stop using the Service; you can get back the unused part of a recent top-up with the self-service refund (section 4) and then close your account.</p>
 
@@ -42,7 +42,7 @@ export default function Terms() {
 
       <h2 id="services">3. The services</h2>
       <ul>
-        <li><b>Free noise removal and free subtitles.</b> Run locally in your browser from the Cleanup page (you sign in to use them). Your audio is not uploaded. Provided as is, without charge or warranty.</li>
+        <li><b>Free noise removal and free subtitles.</b> Run locally in your browser from the Cleanup page; no account is needed. Your audio is not uploaded. Provided as is, without charge or warranty.</li>
         <li><b>Paid file processing.</b> Processing of the files you upload, done on our side.</li>
         <li><b>Transcription and subtitles.</b> Free in your browser (above), Standard (paid, done by us), or Extra accurate (paid; the audio is sent to a third-party speech-recognition provider, see the Privacy Policy).</li>
         <li><b>Translations.</b> Paid subtitles and live captions can also be translated into other languages (paid per language; the text, not the audio, is translated by the same third-party provider). Translations are made by software and can be wrong: check them before you rely on them.</li>
