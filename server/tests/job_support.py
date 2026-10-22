@@ -222,6 +222,13 @@ def row(job_id: str) -> dict:
     return dict(db.one("SELECT * FROM jobs WHERE id = ?", (job_id,)))
 
 
+def set_card(others_mb: int, total_mb: int = 4096, age: float = 0.0) -> None:
+    """What the GPU worker last wrote about the card's memory (broker.publish_card_state), `age` seconds ago: what other programs hold."""
+    from acw import broker
+
+    broker._card_file().write_text(json.dumps({"total_mb": total_mb, "others_mb": others_mb, "at": time.time() - age}))
+
+
 def part_dir(job_id: str) -> Path:
     """The folder of the only subtitle part of a transcription made with whole-file options (subs/<key>): where its text and speech chunks go."""
     from acw import editing

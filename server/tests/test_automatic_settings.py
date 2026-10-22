@@ -20,7 +20,7 @@ from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw_common import reco_model
 
-from .job_support import api_key, count, files_of, other_browser, params_of, rebuilt, roomy_disk, row, standard, step  # noqa: F401 - fixtures
+from .job_support import api_key, count, files_of, other_browser, params_of, rebuilt, roomy_disk, row, set_card, standard, step  # noqa: F401 - fixtures
 from .test_job_echo import NATIVE
 from .test_job_pipeline import HOME, SAMPLE, _run_worker_once
 
@@ -399,10 +399,10 @@ def test_the_card_does_not_take_a_job_that_is_not_decided_yet(client, signed_in,
     assert worker.claim("cpu:1")["id"] == jid
 
 
-@pytest.mark.parametrize("why", ["too long", "card down", "own denoising", "echo"])
+@pytest.mark.parametrize("why", ["too long", "card down", "card full", "own denoising", "echo"])
 def test_where_a_rebuild_is_wanted_but_cannot_be_done_it_is_denoised_and_says_so(client, signed_in, monkeypatch, why):
     """The recording needs its voice rebuilt, but the file is too long, the card is not up, the request named Denoising settings, or
-    it asked for echo removal: Denoising instead, with the strength the model gives, and `chosen` says what was wanted and why not."""
+    it asked for echo removal, or the card has no room for it: Denoising instead, with the strength the model gives, and `chosen` says what was wanted and why not."""
     uid, h = signed_in
     ledger.credit(uid, 20_000_000, "grant", "t", "g")
     stats = _case_measurement({"rebuild": True, "reason": "echoey"})
@@ -418,6 +418,8 @@ def test_where_a_rebuild_is_wanted_but_cannot_be_done_it_is_denoised_and_says_so
         broker.mark_gpu_worker("alive")
     else:
         broker.mark_gpu_worker("stopped")
+    if why == "card full":
+        set_card(3500)  # the worker is up, but other programs hold the card's memory: 296 MB left of the 2600 the rebuild needs
     stages = Stages(monkeypatch, stats, duration=duration)
     jid = start(client, h, seconds=seconds, **options)
     take("cpu:1")
@@ -426,6 +428,7 @@ def test_where_a_rebuild_is_wanted_but_cannot_be_done_it_is_denoised_and_says_so
     chosen = done["chosen"]
     assert chosen["rebuild"] is False and chosen["rebuildWanted"] is True and done["denoiseTier"] == "standard"
     blocker = {"too long": "voice rebuilding takes files up to 90 minutes", "card down": "voice rebuilding is paused right now",
+               "card full": "voice rebuilding is paused right now",
                "own denoising": "you chose Denoising settings yourself", "echo": "voice rebuilding is not done together with echo removal"}[why]
     assert any(f"Rebuilding the voice would fix this, but {blocker}, so Denoising is used instead." == r for r in chosen["reasons"])
     assert done["notice"] and blocker in done["notice"] and "cleaned with Denoising instead" in done["notice"]
@@ -448,6 +451,26 @@ def test_the_card_coming_up_between_creating_and_deciding_is_enough(client, sign
     stages = Stages(monkeypatch, _case_measurement({"rebuild": True, "reason": "muffled"}))
     take("cpu:1")
     assert row(jid)["status"] == "queued" and row(jid)["next_stage"] == "main" and stages.stages == ["probe", "analyse"]
+
+
+@pytest.mark.parametrize("others_mb, rebuilt_voice", [(1196, True), (1197, False)])
+def test_the_rebuild_is_decided_only_while_the_card_has_room_for_it(client, signed_in, monkeypatch, others_mb, rebuilt_voice):
+    """The card is shared with the owner's training: with 2600 MB (and the margin) free the rebuild goes on the card, with one MB less
+    the job is denoised, and says why."""
+    uid, h = signed_in
+    ledger.credit(uid, 5_000_000, "grant", "t", "g")
+    broker.mark_gpu_worker("alive")
+    set_card(others_mb)
+    jid = start(client, h)
+    stages = Stages(monkeypatch, _case_measurement({"rebuild": True, "reason": "muffled"}))
+    take("cpu:1")
+    if rebuilt_voice:
+        assert row(jid)["status"] == "queued" and row(jid)["next_stage"] == "main" and stages.stages == ["probe", "analyse"]
+        assert params_of(jid)["chosen"]["rebuild"] is True and row(jid)["tier"] == "rebuild"
+    else:
+        done = client.get(f"/api/jobs/{jid}").json()
+        assert done["status"] == "done" and stages.stages == ["probe", "analyse", "main"] and done["chosen"]["rebuild"] is False
+        assert "voice rebuilding is paused right now" in done["notice"] and row(jid)["tier"] == "standard"
 
 
 # ------------------------------------------------------------------------------------------ what the request chose wins

@@ -60,6 +60,13 @@ def env(tmp_path, tmp_path_factory, monkeypatch):
 
     from acw.stream import routes
 
+    from acw import broker
+
+    def no_card(*a, **k):  # (no test measures the real card: the owner's model training may be using it; the card's memory is stubbed where tested)
+        raise FileNotFoundError("nvidia-smi")
+
+    no_card.real = broker._nvidia  # (for the test of the function itself)
+    monkeypatch.setattr(broker, "_nvidia", no_card)
     get_settings.cache_clear()
     db.reset_connection()
     limiter.reset()

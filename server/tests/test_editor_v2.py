@@ -123,7 +123,8 @@ def test_subtitles_in_a_timeline_replace_the_whole_file_subtitle_options_and_are
         "four translations": [sub(0, 10, "standard", "en", ["es", "fr", "de", "it"])],
         "no quality": [{"start": 0, "end": 10, "language": "en"}],
         "a quality we don't have": [sub(0, 10, "perfect")],
-        "an odd language for standard": [sub(0, 10, "standard", "haw")],
+        "an odd language for free": [sub(0, 10, "free", "haw")],
+        "a language that is not a code for standard": [sub(0, 10, "standard", "english")],
         "a language that is not a code": [sub(0, 10, "standard", 5)],
         "an unknown setting": [{**sub(0, 10), "speed": 2}],
         "translations that are not codes": [sub(0, 10, "standard", "en", ["xx"])],
@@ -132,9 +133,11 @@ def test_subtitles_in_a_timeline_replace_the_whole_file_subtitle_options_and_are
         r = client.post("/api/jobs", json={**base, "timeline": v2(600, subtitles=parts)}, headers=h)
         assert r.status_code == 400 and r.json()["code"] == "bad_timeline", (what, r.text)
     assert "Standard or Accurate" in client.post("/api/jobs", json={**base, "timeline": v2(600, subtitles=bad["free with a translation"])}, headers=h).json()["detail"]
-    # Accurate takes the other codes of its engine; a version 1 document may not have the new things; neighbours with equal settings merge
+    # Standard and Accurate take the other codes of their engines (free only the site's list); a version 1 document may not have the new things; neighbours with equal settings merge
     r = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": v2(600, subtitles=[sub(0, 10, "accurate", "haw"), sub(10, 20, "accurate", "haw")])}, headers=h)
     assert r.status_code == 200 and r.json()["timeline"]["layers"]["subtitles"] == [{**sub(0, 20, "accurate", "haw")}]
+    r = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": v2(600, subtitles=[sub(0, 10, "standard", "haw"), sub(10, 20, "standard", "haw")])}, headers=h)
+    assert r.status_code == 200 and r.json()["timeline"]["layers"]["subtitles"] == [{**sub(0, 20, "standard", "haw")}]
     r = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": {**ok, "version": 1}}, headers=h)
     assert r.status_code == 400 and "version 2" in r.json()["detail"]
     r = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": v2(600, subtitles=[sub(0, 10)]) | {"version": 3}}, headers=h)

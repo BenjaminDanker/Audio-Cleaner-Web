@@ -645,3 +645,47 @@ def test_the_cloud_loop_fails_a_cloud_job_without_subtitle_parts_and_charges_not
     assert failed["status"] == "failed" and failed["error"] == "Extra accurate transcription failed; you were not charged."
     assert ledger.balance(uid) == {"balance_micros": before, "held_micros": 0, "available_micros": before}
     assert not hasattr(appmod, "_translate")
+
+
+# ------------------------------------------------------------------------------------- subtitle languages
+
+@pytest.mark.parametrize("kind, tier, quality", [("transcribe", "local", "standard"), ("transcribe", "premium", "accurate"),
+                                                 ("denoise_transcribe", "local", "standard")])
+def test_standard_and_accurate_transcription_asked_for_with_options_take_any_language_code(client, signed_in, kind, tier, quality):
+    from acw.billing import pricing
+
+    from .conftest import settle_payment
+
+    uid, h = funded(signed_in, 50_000_000)
+    settle_payment(uid)  # (Accurate needs a first top-up)
+    sound = {"denoiseTier": "standard"} if kind == "denoise_transcribe" else {}
+    ask = {"kind": kind, "durationSeconds": 60, "transcribeTier": tier, "options": {"language": "haw"}, **sound}
+    text = pricing.cost_micros("transcribe", tier, 60)
+    estimate = client.post("/api/jobs/estimate", json=ask, headers=h)
+    assert estimate.status_code == 200, estimate.text
+    assert estimate.json()["estCostMicros"] == text + (standard(60) if kind == "denoise_transcribe" else 0)
+    made = client.post("/api/jobs", json={**ask, "filename": "talk.wav", "sizeBytes": 3000}, headers=h)
+    assert made.status_code == 200, made.text
+    jid = made.json()["id"]
+    assert made.json()["estCostMicros"] == estimate.json()["estCostMicros"] == held(uid)
+    parts = params_of(jid)["edit"]["timeline"]["layers"]["subtitles"]
+    assert parts == [{"start": 0.0, "end": 60.0, "quality": quality, "language": "haw", "translate": []}]
+    assert estimate.json()["timeline"]["layers"]["subtitles"] == parts
+
+
+def test_a_language_that_is_not_a_code_is_refused_and_free_subtitles_keep_the_sites_list(client, signed_in):
+    uid, h = funded(signed_in, 50_000_000)
+    for tier in ("local", "premium"):
+        r = client.post("/api/jobs/estimate", json={"kind": "transcribe", "durationSeconds": 60, "transcribeTier": tier, "options": {"language": "english"}}, headers=h)
+        assert r.status_code == 400, (tier, r.text)
+    # a timeline: the same codes for its Standard and Accurate parts, and a free part (the browser's recogniser) only the site's list
+    def part(quality, language):
+        return {"version": 2, "seconds": 60.0, "layers": {"subtitles": [{"start": 0.0, "end": 60.0, "quality": quality, "language": language, "translate": []}]}}
+
+    for quality in ("standard", "accurate"):
+        r = client.post("/api/jobs/estimate", json={"kind": "transcribe", "durationSeconds": 60, "timeline": part(quality, "haw")}, headers=h)
+        assert r.status_code == 200, (quality, r.text)
+    for path, extra in (("/api/jobs/estimate", {}), ("/api/jobs", {"filename": "talk.wav", "sizeBytes": 3000})):
+        r = client.post(path, json={"kind": "transcribe", "durationSeconds": 60, "timeline": part("free", "haw"), **extra}, headers=h)
+        assert r.status_code == 400 and r.json()["code"] == "bad_timeline" and "free subtitles" in r.json()["detail"], (path, r.text)
+        assert client.post(path, json={"kind": "transcribe", "durationSeconds": 60, "timeline": part("free", "es"), **extra}, headers=h).status_code == 200

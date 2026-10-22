@@ -188,7 +188,7 @@ def test_the_subtitles_layer_is_checked_and_its_parts_merge_like_the_others():
     c = t.copy()
     c.layers["subtitles"][0].settings["translate"].append("it")
     assert t.layers["subtitles"][0].settings["translate"] == ["es", "fr"]  # (a copy shares nothing)
-    # codes: lists of the site for free and standard, any 2-3 letter code for accurate; a language is detected when null or ""
+    # codes: the site's list for free (the browser's recogniser), any 2-3 letter code for standard and accurate; a language is detected when null or ""
     assert set(LANGUAGES) == {"en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk", "tr", "ar", "hi", "ja", "ko", "zh", "sv", "da", "fi", "no", "cs", "el", "he", "id", "vi", "hu", "ro", "th"}
     assert Timeline(10.0).paint("subtitles", 0, 5, {"quality": "standard", "language": ""}).parts("subtitles")[0].settings["language"] is None
     assert Timeline(10.0).paint("subtitles", 0, 5, {"quality": "free", "language": " EN "}).parts("subtitles")[0].settings["language"] == "en"
@@ -196,13 +196,22 @@ def test_the_subtitles_layer_is_checked_and_its_parts_merge_like_the_others():
     bad = [
         {"quality": "perfect"}, {}, {"quality": None}, {"quality": "free", "translate": ["es"]},
         {"quality": "standard", "language": "en", "translate": ["en"]}, {"quality": "standard", "translate": ["es", "fr", "de", "it"]},
-        {"quality": "standard", "language": "haw"}, {"quality": "free", "language": "haw"}, {"quality": "accurate", "language": "english"},
-        {"quality": "standard", "language": 5}, {"quality": "standard", "translate": "es"}, {"quality": "standard", "translate": ["haw"]},
+        {"quality": "free", "language": "haw"}, {"quality": "free", "language": "xx"}, {"quality": "accurate", "language": "english"},
+        {"quality": "standard", "language": "english"}, {"quality": "standard", "language": "e"}, {"quality": "standard", "language": "en1"},
+        {"quality": "standard", "language": "en-us"}, {"quality": "standard", "language": 5}, {"quality": "standard", "translate": "es"}, {"quality": "standard", "translate": ["haw"]},
         {"quality": "standard", "speed": 2},
     ]
     for settings in bad:
         with pytest.raises(TimelineError):
             Timeline(10.0).paint("subtitles", 0, 5, settings)
+    # standard and accurate subtitles take any 2-3 letter code (the server's recognisers know more than the site's list), written as lower case
+    for quality in ("standard", "accurate"):
+        for code, kept in (("haw", "haw"), ("HAW", "haw"), (" yo ", "yo"), ("ln", "ln"), ("en", "en"), ("zh", "zh")):
+            assert Timeline(10.0).paint("subtitles", 0, 5, {"quality": quality, "language": code}).parts("subtitles")[0].settings["language"] == kept
+    with pytest.raises(TimelineError, match="unknown language 'haw' for free subtitles"):
+        Timeline(10.0).paint("subtitles", 0, 5, {"quality": "free", "language": "haw"})
+    with pytest.raises(TimelineError, match="unknown translation language"):  # (a translation target stays in the site's list)
+        Timeline(10.0).paint("subtitles", 0, 5, {"quality": "accurate", "translate": ["haw"]})
     with pytest.raises(TimelineError, match="Standard or Accurate"):
         Timeline(10.0).paint("subtitles", 0, 5, {"quality": "free", "translate": ["es"]})
 
