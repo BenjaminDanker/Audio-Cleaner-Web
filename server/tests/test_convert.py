@@ -166,7 +166,7 @@ def test_no_source_means_none_is_kept():
 CODEC = "video_out.source.codec must be FFmpeg's codec name, like h264"
 
 
-@pytest.mark.parametrize("codec", ["H264", "h 264", "", "h264;ls", "x" * 33, "h.264", "../etc", "é", 264, True, ["h264"], {"a": 1}])
+@pytest.mark.parametrize("codec", ["H264", "h 264", "", "h264;ls", "x" * 33, "h.264", "../etc", "é", "h264\n", "\nh264", "h264 ", 264, True, ["h264"], {"a": 1}])
 def test_a_codec_name_is_a_plain_ffmpeg_name(codec):
     with pytest.raises(jobs.JobError) as e:
         checked_source({"codec": codec})
@@ -465,11 +465,20 @@ def test_the_lines_say_copied_or_maybe_and_only_a_sure_price_adds_to_the_total()
         assert counted == jobs.convert_cost(params, 600), encode
 
 
-@pytest.mark.xfail(strict=True, reason="PRODUCT BUG: the rate is ceil(rate * factor) in floating point, 1 micro a minute too much for about 1 factor in 16 (1.1 gives 6601, not 6600)")
-@pytest.mark.parametrize("factor, per_minute", [(1.1, 6_600), (1.12, 6_720), (1.35, 8_100), (2.2, 13_200)])
+@pytest.mark.parametrize("factor, per_minute", [(1.1, 6_600), (1.12, 6_720), (1.35, 8_100), (2.2, 13_200), (1.09, 6_540), (2.18, 13_080), (1.78, 10_680), (3.56, 21_360)])
 def test_the_rate_a_minute_is_exact_for_a_factor_with_two_decimals(factor, per_minute):
     assert jobs.convert_line(conv(True, factor), 60)["usdPerMinute"] == per_minute / 1e6
     assert jobs.convert_cost(conv(True, factor), 60) == per_minute
+
+
+def test_the_rate_is_exact_for_every_factor_the_probe_can_store():
+    """(whole micros: the factor has two decimals and the rate is a whole number, so the product is exact)"""
+    from fractions import Fraction
+
+    for hundredths in range(100, 6401):
+        factor = hundredths / 100
+        want = math.ceil(Fraction(CONVERT) * hundredths / 100)
+        assert jobs.convert_cost(conv(True, factor), 60) == want, factor
 
 
 # ------------------------------------------------------------------------------------------------------ estimates
