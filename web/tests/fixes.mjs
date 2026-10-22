@@ -136,7 +136,7 @@ if (want('jobs')) {
     const j = { ...stubJob('d3', ['noisy-cleaned.flac', 'noisy.srt', 'noisy.vtt', 'noisy-transcript.txt']), transcribeTier: 'local', edit: { available: true, hasTimeline: false, run: null, lastRun: null, suggestions: false } };
     await withJobs([j], 'd3');
     await page.route('**/api/jobs/d3/timeline', (r) => r.fulfill({ json: {
-      timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, custom: false, rendered: null, seconds: 60, channels: 1,
+      timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, rendered: null, seconds: 60, channels: 1,
       secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null,
     } }));
     await page.route('**/api/jobs/d3/peaks/**', (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));

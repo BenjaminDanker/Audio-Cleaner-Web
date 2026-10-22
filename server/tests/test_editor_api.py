@@ -173,7 +173,7 @@ def test_the_timeline_of_a_job_is_saved_returned_and_is_the_default_until_then(c
     body = r.json()
     default = {"version": 1, "seconds": 120.0, "layers": {"noise": [{"start": 0.0, "end": 120.0, "strength_db": 24.0, "remover": "light"}],
                                                           "leveling": [{"start": 0.0, "end": 120.0, "loudness_lufs": -16.0}]}}
-    assert body["timeline"] == default and body["rendered"] is None and body["custom"] is True  # (nothing was recorded as rendered: everything is made again; "custom" is true for every job now: they all have a timeline)
+    assert body["timeline"] == default and body["rendered"] is None and "custom" not in body  # (nothing was recorded as rendered: everything is made again; every job has a timeline, so there is nothing to say about a saved one)
     assert body["seconds"] == 120.0 and body["channels"] == 1 and body["secondTrack"] is False
     assert body["cached"] == {"echo": [], "noise": [], "light": [], "heavy": [], "rebuild": []} and body["suggestions"] is None
     assert body["preview"] is None and body["run"] is None and body["hardDeadlineAt"] == jobs.hard_deadline(row(jid))
@@ -181,7 +181,7 @@ def test_the_timeline_of_a_job_is_saved_returned_and_is_the_default_until_then(c
     put = client.put(f"/api/jobs/{jid}/timeline", json={"timeline": mine}, headers=h)
     assert put.status_code == 200 and put.json()["timeline"] == mine
     again = client.get(f"/api/jobs/{jid}/timeline").json()
-    assert again["timeline"] == mine and again["custom"] is True and again["rendered"] is None  # (saving a timeline does not change what was rendered)
+    assert again["timeline"] == mine and "custom" not in again and again["rendered"] is None  # (saving a timeline does not change what was rendered)
     # a part painted over another replaces it, neighbours with the same settings are one part
     messy = {"version": 1, "seconds": 120, "layers": {"noise": [noise(0, 10), noise(10, 20), noise(5, 8, 24)]}}
     saved = client.put(f"/api/jobs/{jid}/timeline", json={"timeline": messy}, headers=h).json()["timeline"]["layers"]["noise"]

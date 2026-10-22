@@ -505,7 +505,7 @@ await check('a job whose Voice is rebuilt gets no strength slider (and no streng
     const res = await route.fetch();
     const body = await res.json();
     const tl = { version: 1, seconds: body.seconds, layers: { rebuild: [{ start: 0, end: body.seconds }] } };
-    await route.fulfill({ response: res, json: { ...body, timeline: tl, rendered: tl, custom: true } });
+    await route.fulfill({ response: res, json: { ...body, timeline: tl, rendered: tl } });
   });
   try {
     await openJob(J1);

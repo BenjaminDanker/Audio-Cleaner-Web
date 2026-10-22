@@ -117,7 +117,7 @@ await check('copy: signed-in pages (Cleanup, Billing, Live, Account) and the edi
     outputs: [{ name: 'copydone-cleaned.flac', kind: 'audio', bytes: 1000 }], transcribeTier: 'local', edit: { available: true, hasTimeline: false, run: null, lastRun: null, suggestions: false } };
   await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: [done], limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
   await page.route('**/api/jobs/copydone/timeline', (r) => r.fulfill({ json: {
-    timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, custom: false, rendered: null, seconds: 60, channels: 1,
+    timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, rendered: null, seconds: 60, channels: 1,
     secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null } }));
   await page.route('**/api/jobs/copydone/peaks/**', (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
   try {

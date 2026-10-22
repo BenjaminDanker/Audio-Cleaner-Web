@@ -69,7 +69,7 @@ def test_the_job_pins_the_rate_holds_the_price_and_has_the_echo_step_on_the_whol
     assert p_on["edit_rates"]["echo"] == 2_600 and p_on["rates"] == {} and p_on["edit"]["first_run"] is True
     assert p_on["edit"]["timeline"]["layers"]["echo"] == [{"start": 0.0, "end": float(SECONDS)}]
     assert "echo" not in p_plain["edit"]["timeline"]["layers"]
-    assert p_on["whole_file"]["options"]["echo_reference_track"] is True and p_on["options"]["echo_reference_track"] is False  # (the timeline holds it now)
+    assert p_on["whole_file"]["options"]["echo_reference_track"] is True and p_on["options"]["echo_reference_track"] is True  # (the record keeps what was asked for; the timeline is what is made)
     assert editing.wants_echo(p_on) is True and editing.wants_echo(p_plain) is False
 
 

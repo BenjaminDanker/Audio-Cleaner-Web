@@ -75,7 +75,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
     ];
     await page.route('**/api/jobs', (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: list, limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
     await page.route('**/api/jobs/edone/timeline', (r) => r.fulfill({ json: {
-      timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, custom: false, rendered: null, seconds: 60, channels: 1,
+      timeline: { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 100, remover: 'auto' }] } }, rendered: null, seconds: 60, channels: 1,
       secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null } }));
     await page.route('**/api/jobs/edone/peaks/**', (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
     try {

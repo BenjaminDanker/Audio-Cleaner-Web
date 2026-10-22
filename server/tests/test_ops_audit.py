@@ -333,7 +333,6 @@ def test_admission_is_decided_before_the_write_lock_opens(monkeypatch):
     assert snap_calls == [0]
 
 
-@pytest.mark.xfail(strict=True, reason="KNOWN PRODUCT BUG (6379b3d): the broker places a job made with an echo part by its other steps; the GPU venv has no echo canceller")
 def test_a_gpu_worker_leaves_echo_jobs_to_the_cpu_workers():
     from acw.broker import gpu_stages
 
@@ -597,7 +596,7 @@ def test_ledger_history_pages_and_labels_a_finished_job_in_plain_words():
     rows, more = ledger.history_page(uid, 100)
     usage = next(r for r in rows if r["kind"] == "usage")
     assert not more
-    assert usage["label"] == "Denoising + Leveling + Subtitles"  # (named by the timeline's layers)
+    assert usage["label"] == "Denoising + Leveling + Subtitles, extra accurate"  # (named by the timeline's layers)
     assert (usage["product"], usage["minutes"], usage["displayName"]) == ("clean_transcript", 2.0, "My talk.wav")
     assert next(r for r in rows if r["kind"] == "topup")["label"] == "Top-up"
     for i in range(5):

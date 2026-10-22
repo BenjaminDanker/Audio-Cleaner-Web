@@ -283,6 +283,7 @@ def test_the_job_becomes_the_job_the_model_decided(client, signed_in, monkeypatc
     rec = reco_model.recommend(stats, min_seconds=0.0)
     chosen = done["chosen"]
     assert tier == chosen["denoiseTier"] and "maximum" not in done
+    assert row(jid)["tier"] == tier  # (the record's tier names what was decided, a Voice rebuild too)
     assert chosen["rebuild"] is (tier == "rebuild") and chosen["rebuildWanted"] is rec.rebuild and chosen["leveling"] is True
     assert chosen["reasons"] and all(isinstance(r, str) for r in chosen["reasons"]) and chosen["fixed"] == []
     main = stages.spec("main")

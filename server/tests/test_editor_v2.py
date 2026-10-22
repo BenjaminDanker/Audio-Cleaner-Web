@@ -86,7 +86,7 @@ def test_estimate_and_create_price_each_subtitle_part_and_free_parts_cost_nothin
     p = params_of(jid)
     assert p["transcribe_tier"] is None and p["subtitle_rates"] == rates() and p["edit"]["timeline"]["version"] == 2
     assert client.get(f"/api/jobs/{jid}").json()["needs"] == [{"kind": "cues", "start": 200.0, "end": 260.0}]
-    assert client.get(f"/api/jobs/{jid}").json()["label"] == "Subtitles"
+    assert client.get(f"/api/jobs/{jid}").json()["label"] == "Subtitles, extra accurate"  # (one of the parts is Accurate)
     # the same details, the same key: the repeat answers with the needs too
     again = client.post("/api/jobs", json=body, headers={**h, "Idempotency-Key": "k1"})
     repeat = client.post("/api/jobs", json=body, headers={**h, "Idempotency-Key": "k1"})
@@ -379,7 +379,7 @@ def test_get_timeline_returns_the_layers_and_what_is_made(client, signed_in):
     d.mkdir(parents=True)
     (d / "segments.json").write_text('{"language": "en", "segments": []}')
     shown = client.get(f"/api/jobs/{jid}/timeline").json()
-    assert shown["timeline"] == t.to_json() and shown["timeline"]["version"] == 2 and shown["custom"] is True
+    assert shown["timeline"] == t.to_json() and shown["timeline"]["version"] == 2
     assert shown["timeline"]["layers"]["noise"] == [{"start": 100.0, "end": 130.0, "browser": True}]
     assert shown["cached"]["subtitles"] == [[200.0, 260.0], [300.0, 330.0]]  # the accurate part has nothing yet
     assert shown["needs"] == [{"kind": "noise", "start": 100.0, "end": 130.0}]

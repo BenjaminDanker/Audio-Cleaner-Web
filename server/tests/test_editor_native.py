@@ -119,7 +119,7 @@ def test_a_job_made_with_a_timeline_only_processes_and_charges_its_parts(client,
     assert p["edit"]["facts"]["n"] == len(x) and p["edit"]["rendered"]["layers"]["noise"][0]["remover"] == "light"
     assert p["edit"]["suggestions"] is True and "first_run" not in p["edit"]
     shown = client.get(f"/api/jobs/{jid}/timeline").json()
-    assert shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and shown["custom"] is True and shown["suggestions"]["seconds"] > 0
+    assert shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and "custom" not in shown and shown["suggestions"]["seconds"] > 0
     assert shown["timeline"]["layers"]["noise"][0]["start"] == 2.0 and shown["preview"]["samples"] == len(x)
 
 
@@ -154,7 +154,7 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     src = folder(jid) / "input.wav"
     x = f.decode(src, f.probe(src), SR, 1, SECONDS + 5)
     shown = client.get(f"/api/jobs/{jid}/timeline").json()
-    assert shown["custom"] is True and shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and shown["suggestions"] is not None
+    assert shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and shown["suggestions"] is not None
     assert shown["timeline"]["layers"]["noise"] == [{"start": 0.0, "end": round(len(x) / SR, 3), "strength_db": 100.0, "remover": "light"}]
     # the editor's cache is the one the first run filled: rendering the job's timeline needs no model (no runner is given)
     cache = blocks.FlacCache(editing.blocks_dir(jid), f)

@@ -50,7 +50,7 @@ async function stubJob(id, extra = {}, timeline = null, tl = {}) {
   await page.route(new RegExp(`/api/jobs/${id}$`), (r) => (r.request().method() === 'GET' ? r.fulfill({ json: state.job }) : r.continue()));
   await page.route(`**/api/jobs/${id}/timeline`, (r) => r.fulfill({ json: {
     timeline: timeline || { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 24, remover: 'auto' }], leveling: [{ start: 0, end: 60, loudness_lufs: -14 }] } },
-    custom: false, rendered: null, seconds: 60, channels: 1, secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null, ...tl,
+    rendered: null, seconds: 60, channels: 1, secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null, ...tl,
   } }));
   await page.route(`**/api/jobs/${id}/peaks/**`, (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
   await page.route(`**/api/jobs/${id}/suggestions`, (r) => r.fulfill({ json: { suggestions: null } }));

@@ -11,10 +11,6 @@ from acw.worker import main as W
 from tests.job_support import queue_row
 from tests.test_billing_audit import make_job, user
 
-# KNOWN PRODUCT BUG (6379b3d): a job made with an echo part is placed by its other steps; its echo removal needs livekit, which the GPU worker's venv
-# does not have (the old rule left every echo job to the CPU workers).
-ECHO_ON_THE_CARD = pytest.mark.xfail(strict=True, reason="a job with echo removal is placed on the GPU worker, whose venv has no echo canceller")
-
 
 def job_row(*, kind="denoise", tier="standard", transcribe=None, noise="auto", echo=False, next_stage=None):
     """A job made with a timeline, from the options it stands for."""
@@ -40,7 +36,10 @@ def models(tmp_path, monkeypatch):
     (job_row(noise="light"), [], False),  # DeepFilterNet3 has no GPU path
     (job_row(tier="off", noise="heavy"), [], False),  # leveling on its own is CPU work
     (job_row(tier="off", kind="denoise_transcribe", transcribe="local"), ["transcribe"], False),  # local subtitles: Parakeet
-    pytest.param(job_row(echo=True), [], False, marks=ECHO_ON_THE_CARD),  # no echo canceller in the GPU venv
+    (job_row(echo=True), [], False),  # echo removal is CPU work, the whole job in one worker: the CPU workers' job
+    (job_row(echo=True, noise="light"), [], False),
+    (job_row(echo=True, tier="rebuild", noise="light"), ["rebuild"], True),  # unless it has a Voice rebuild, which only the card runs
+    (job_row(echo=True, kind="denoise_transcribe", transcribe="local"), [], False),
     (job_row(next_stage="finalize"), [], False),
     (job_row(kind="transcribe", transcribe="premium"), [], False),  # cloud transcription: nothing to run here
     (job_row(kind="transcribe", transcribe="local"), ["transcribe"], False),

@@ -5,6 +5,7 @@ of it; an automatic job gets its timeline once it is decided; and an edit of a j
 The runner's stages are replaced (tests/test_automatic_settings.py Stages), so no models are needed."""
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 
@@ -152,8 +153,6 @@ def test_creating_a_job_with_options_makes_a_job_with_the_timeline_they_stand_fo
     assert shown["estCostMicros"] == est["estCostMicros"]
 
 
-@pytest.mark.xfail(strict=True, reason="PRODUCT BUG: the job's options show the defaults of the choices the timeline replaced (atten_lim_db 100, noise auto, "
-                                       "leveling true, echo false, loudness -16), not what was asked for")
 def test_the_job_shows_the_options_it_was_asked_for(client, signed_in):
     uid, h = funded(signed_in)
     asked_for = {"atten_lim_db": 24, "noise": "heavy", "leveling": False, "echo_reference_track": True, "loudness_lufs": -20}
@@ -514,3 +513,135 @@ def test_a_run_that_made_no_video_is_not_charged_for_one(client, signed_in):
     # nothing was run (all in the cache) and no picture was made: nothing is charged, and the hold is let go
     assert ledger.balance(uid)["balance_micros"] == before and held(uid) == 0
     assert [o["kind"] for o in json.loads(row(jid)["outputs_json"])].count("video") == 0
+
+
+# ------------------------------------------------------------------------------------- placement, the record, the name, the cloud loop
+
+def placed(client, h, uid, **kw):
+    """A job made through the API and waiting in the queue: its row."""
+    jid = start(client, h, **kw)
+    return row(jid)
+
+
+def cancel(*ids):
+    for jid in ids:
+        db.execute("UPDATE jobs SET status = 'canceled' WHERE id = ?", (jid,))
+
+
+def test_a_job_with_echo_removal_stays_with_the_cpu_workers_unless_it_has_a_voice_rebuild(client, signed_in, gpu_up, monkeypatch):
+    uid, h = funded(signed_in, 50_000_000)
+    broker.mark_gpu_worker("idle")  # (the card is free: a CPU worker leaves a job to it only if it has a stage for it)
+    cleaned = placed(client, h, uid, options={"echo_reference_track": True, "noise": "heavy"}, filename="rec.mkv")
+    assert editing.wants_echo(json.loads(cleaned["params_json"])) and broker.gpu_stages(cleaned) == [] and broker.gpu_only(cleaned) is False
+    # the same job without echo removal is the card's, as before
+    plain = placed(client, h, uid, options={"noise": "heavy"})
+    assert broker.gpu_stages(plain) == ["heavy"]
+    cancel(plain["id"])
+    # a GPU worker leaves the echo job alone, a CPU worker takes it
+    monkeypatch.setattr(worker, "GPU_MODE", True)
+    assert worker.claim("gpu:t") is None
+    monkeypatch.setattr(worker, "GPU_MODE", False)
+    assert worker.claim("cpu:t")["id"] == cleaned["id"]
+    cancel(cleaned["id"])
+    # echo parts of a timeline sent with the job are the same
+    sent = placed(client, h, uid, timeline=whole(60, "echo", ("noise", {"strength_db": 100.0, "remover": "heavy"})), filename="rec.mkv")
+    assert broker.gpu_stages(sent) == []
+    cancel(sent["id"])
+    # with a Voice rebuild the job is the card's (only it runs the rebuild), echo removal or not
+    both = placed(client, h, uid, tier="rebuild", options={"echo_reference_track": True}, filename="rec.mkv")
+    assert broker.gpu_stages(both) == ["rebuild"] and broker.gpu_only(both) is True
+    monkeypatch.setattr(worker, "GPU_MODE", True)
+    assert worker.claim("gpu:t")["id"] == both["id"]
+    cancel(both["id"])
+    both_in_a_timeline = placed(client, h, uid, timeline=whole(60, "echo", "rebuild"), filename="rec.mkv")
+    assert broker.gpu_stages(both_in_a_timeline) == ["rebuild"] and broker.gpu_only(both_in_a_timeline) is True
+
+
+def test_the_echo_flag_alone_keeps_a_job_with_the_cpu_workers_too():
+    """An automatic job not decided yet has no timeline, only the options it was asked with."""
+    row_ = {"kind": "denoise_transcribe", "next_stage": None,
+            "params_json": json.dumps({"transcribe_tier": "local", "options": {"echo_reference_track": True}})}
+    assert broker.gpu_stages(row_) == []
+    row_["params_json"] = json.dumps({"transcribe_tier": "local", "options": {}})
+    assert broker.gpu_stages(row_) == ["transcribe"]
+
+
+def test_an_edit_run_with_echo_removal_stays_off_the_card_and_one_with_a_rebuild_goes_to_it(client, signed_in, gpu_up, monkeypatch):
+    uid, h = funded(signed_in, 50_000_000)
+    echo = edit_job(uid, seconds=600.0, channels=2, ref=True, rendered="empty")
+    tl = tl_of(echo, echo=[{"start": 0, "end": 60}], noise=[noise(0, 60, remover="heavy")])
+    assert client.post(f"/api/jobs/{echo}/process", json={"timeline": tl}, headers=h).status_code == 200
+    run = params_of(echo)["run"]
+    assert run["echo"] is True and run["gpu"] == ["heavy"]  # (the heavy remover would be the card's without the echo removal)
+    assert broker.gpu_stages(row(echo)) == [] and broker.gpu_only(row(echo)) is False
+    broker.mark_gpu_worker("idle")
+    monkeypatch.setattr(worker, "GPU_MODE", True)
+    assert worker.claim("gpu:t") is None
+    monkeypatch.setattr(worker, "GPU_MODE", False)
+    assert worker.claim("cpu:t")["id"] == echo
+    # without the echo part the same run is the card's
+    plain = edit_job(uid, seconds=600.0, rendered="empty")
+    assert client.post(f"/api/jobs/{plain}/process", json={"timeline": tl_of(plain, noise=[noise(0, 60, remover="heavy")])}, headers=h).status_code == 200
+    assert params_of(plain)["run"]["echo"] is False and broker.gpu_stages(row(plain)) == ["heavy"]
+    # with a rebuild in it the run is the card's whatever else it has
+    both = edit_job(uid, seconds=600.0, channels=2, ref=True, rendered="empty")
+    assert client.post(f"/api/jobs/{both}/process", json={"timeline": tl_of(both, echo=[{"start": 0, "end": 60}], rebuild=[{"start": 100, "end": 120}])},
+                       headers=h).status_code == 200
+    assert params_of(both)["run"]["echo"] is True and broker.gpu_stages(row(both))[0] == "rebuild" and broker.gpu_only(row(both)) is True
+
+
+def test_the_tier_of_the_record_names_a_voice_rebuild_and_a_decided_one(client, signed_in, gpu_up):
+    uid, h = funded(signed_in, 50_000_000)
+    made = {}
+    for name, kw in {"standard": {}, "rebuild": {"tier": "rebuild"}, "leveling alone": {"tier": "off"},
+                     "timeline with a rebuild": {"timeline": whole(60, "rebuild")}, "timeline without": {"timeline": whole(60, "noise", "leveling")}}.items():
+        jid = start(client, h, **kw)
+        made[name] = row(jid)["tier"]
+        cancel(jid)
+    assert made == {"standard": "standard", "rebuild": "rebuild", "leveling alone": "standard", "timeline with a rebuild": "rebuild",
+                    "timeline without": "standard"}
+
+
+def test_a_job_made_with_options_records_the_sound_choices_it_was_asked_for_and_the_subtitle_choices_only_in_the_timeline(client, signed_in):
+    uid, h = funded(signed_in)
+    sound = {"atten_lim_db": 24, "noise": "heavy", "leveling": False, "echo_reference_track": True, "loudness_lufs": -20}
+    jid = start(client, h, kind="denoise_transcribe", transcribe="local", filename="rec.mkv", options={**sound, "language": "en", "translate": ["es"]})
+    p = params_of(jid)
+    assert {k: p["options"][k] for k in sound} == {"atten_lim_db": 24.0, "noise": "heavy", "leveling": False, "echo_reference_track": True, "loudness_lufs": -20.0}
+    assert p["options"]["language"] is None and p["options"]["translate"] == []  # (on purpose: the part has them)
+    assert p["edit"]["timeline"]["layers"]["subtitles"] == [{"start": 0.0, "end": 60.0, "quality": "standard", "language": "en", "translate": ["es"]}]
+    shown = client.get(f"/api/jobs/{jid}").json()["options"]
+    assert {k: shown[k] for k in sound} == {k: float(v) if k in ("atten_lim_db", "loudness_lufs") else v for k, v in sound.items()}
+
+
+def test_the_name_of_a_job_says_extra_accurate_subtitles(client, signed_in):
+    parts = lambda *qualities: {"edit": {"timeline": {"layers": {"subtitles": [{"quality": q} for q in qualities]}}}}  # noqa: E731
+    assert editing.timeline_label(parts("standard")) == "Subtitles"
+    assert editing.timeline_label(parts("standard", "accurate")) == "Subtitles, extra accurate"
+    uid, h = funded(signed_in)
+    shown = {}
+    for name, kw in {"accurate": {"kind": "transcribe", "transcribe": "premium"}, "standard": {"kind": "denoise_transcribe", "transcribe": "local"},
+                     "both": {"kind": "denoise_transcribe", "transcribe": "premium", "options": {"leveling": False}}}.items():
+        jid = start(client, h, **kw)
+        shown[name] = client.get(f"/api/jobs/{jid}").json()["label"]
+        cancel(jid)
+    assert shown == {"accurate": "Subtitles, extra accurate", "standard": "Denoising + Leveling + Subtitles",
+                     "both": "Denoising + Subtitles, extra accurate"}
+
+
+def test_the_cloud_loop_fails_a_cloud_job_without_subtitle_parts_and_charges_nothing(client, signed_in):
+    from acw import app as appmod
+
+    uid, h = funded(signed_in)
+    before = ledger.balance(uid)["balance_micros"]
+    jid = start(client, h)  # a cleaning job: it has no subtitle part for the web process to do anything with
+    db.execute("UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', queued_at = ? WHERE id = ?", (db.now(), jid))
+    old_way = {"id": jid, "params_json": json.dumps({"transcribe_tier": "premium", "options": {"translate": ["es"]}})}
+    assert appmod._needs_transcription(old_way) is False  # (no whole-file transcription any more: only subtitle parts wait for it)
+    (cloud,) = appmod._claim_cloud_jobs(1)
+    assert not editing.has_subtitle_layer(json.loads(cloud["params_json"]))
+    asyncio.run(appmod._run_cloud_job(cloud))
+    failed = row(jid)
+    assert failed["status"] == "failed" and failed["error"] == "Extra accurate transcription failed; you were not charged."
+    assert ledger.balance(uid) == {"balance_micros": before, "held_micros": 0, "available_micros": before}
+    assert not hasattr(appmod, "_translate")

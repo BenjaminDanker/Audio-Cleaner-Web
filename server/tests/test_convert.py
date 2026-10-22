@@ -289,7 +289,8 @@ def stage_row(**p):
     (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", **vo("mp4", 720)}, picture_encode=True), ["heavy", "encode"], False),
     (stage_row(kind="denoise", tier="standard", options={"noise": "light", **vo("mp4", 720)}, picture_encode=True), ["encode"], False),
     (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", **vo("mp4", 720)}, picture_encode=False), ["heavy"], False),
-    (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", "echo_reference_track": True, **vo("webm")}, picture_encode=None), ["heavy", "encode"], False),
+    (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", "echo_reference_track": True, **vo("webm")}, picture_encode=None), [], False),  # (echo removal: the whole job, its picture too, stays with the CPU workers)
+    (stage_row(kind="denoise", tier="rebuild", options={"noise": "light", "echo_reference_track": True, **vo("mp4", 720)}, picture_encode=True), ["rebuild", "encode"], True),
     (stage_row(kind="denoise", tier="rebuild", options={"noise": "light", **vo("mp4", 720)}, picture_encode=True), ["rebuild", "encode"], True),
     (stage_row(kind="denoise_transcribe", tier="standard", transcribe="local", options={"noise": "light", **vo("mp4", 720)}, picture_encode=True),
      ["transcribe", "encode"], False),
