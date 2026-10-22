@@ -10,6 +10,7 @@ from acw import db, jobs
 from acw.billing import ledger, pricing
 from acw_common.ffmpeg import FFmpeg
 
+from .job_support import params_of, standard, step
 from .test_job_echo import NATIVE, SR
 from .test_job_pipeline import HOME, _run_worker_once
 
@@ -47,13 +48,14 @@ def test_stored_with_the_job_and_leveling_is_its_own_line_of_the_price(client, s
     old_client = create(client, h, restore_highs=True)  # a client that still sends the removed option
     assert plain.status_code == off.status_code == old_client.status_code == 200, (plain.text, off.text, old_client.text)
     # Leveling is its own line of the price: switching it off takes exactly that line away
-    assert off.json()["estCostMicros"] == pricing.cost_micros("denoise", "standard", 14) > 0
-    assert plain.json()["estCostMicros"] == off.json()["estCostMicros"] + pricing.cost_micros("leveling", "standard", 14)
+    assert off.json()["estCostMicros"] == standard(14, leveling=False) > 0
+    assert plain.json()["estCostMicros"] == off.json()["estCostMicros"] + step("leveling", 14)
     assert old_client.json()["estCostMicros"] == plain.json()["estCostMicros"]  # nothing is added for it
-    assert client.get(f"/api/jobs/{plain.json()['id']}").json()["options"]["leveling"] is True
-    assert client.get(f"/api/jobs/{off.json()['id']}").json()["options"]["leveling"] is False
-    stored = client.get(f"/api/jobs/{old_client.json()['id']}").json()["options"]
-    assert stored["leveling"] is True and "restore_highs" not in stored
+    # (the job is made with the timeline its options stand for: Leveling is a layer of it, or not)
+    layers = lambda r: params_of(r.json()["id"])["edit"]["timeline"]["layers"]  # noqa: E731
+    assert "leveling" in layers(plain) and "leveling" not in layers(off) and "noise" in layers(off)
+    stored = params_of(old_client.json()["id"])
+    assert "leveling" in layers(old_client) and "restore_highs" not in stored["options"] and "restore_highs" not in stored["whole_file"]["options"]
     assert create(client, h, leveling="no").status_code == 400
 
 
@@ -108,9 +110,8 @@ def test_a_job_stored_with_the_removed_option_runs_and_is_charged_without_it(cli
     import json as _json
 
     from acw.worker import main as worker
-    from acw.worker.runner import clean_options
 
-    from .rerun_support import complete_like_the_worker, params_of, row
+    from .job_support import complete_like_the_worker, row
 
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
@@ -123,11 +124,10 @@ def test_a_job_stored_with_the_removed_option_runs_and_is_charged_without_it(cli
     worker._write_spec(row(jid), worker._settings_extra(), 14.0)
     spec = _json.loads((jobs.job_dir(jid) / "spec.json").read_text())
     assert "highs_where_needed" not in spec
-    opts = clean_options(spec, "light")
-    assert not hasattr(opts, "restore_highs") and opts.noise == "light" and opts.leveling is True
-    assert worker._job_cost(row(jid), params_of(jid), 14.0) == pricing.cost_micros("denoise", "standard", 14) + pricing.cost_micros("leveling", "standard", 14)
+    assert set(spec["editor"]["timeline"]["layers"]) == {"noise", "leveling"} and "restore_highs" not in json.dumps(spec["editor"])
+    assert worker._job_cost(row(jid), params_of(jid), 14.0) == standard(14)
     done = complete_like_the_worker(jid, outputs=["rec-cleaned.flac"])
-    assert done["cost_micros"] == worker._job_cost(row(jid), params_of(jid), 14.0)
+    assert done["cost_micros"] == standard(14)  # (Denoising and Leveling: no price for the removed step)
     line = db.one("SELECT description FROM ledger WHERE ref_id = ?", (jid,))["description"]
     assert line.startswith("Denoising + Leveling:")
 
@@ -146,13 +146,11 @@ def test_leveling_alone_needs_leveling_and_is_priced_for_it(client, signed_in):
     made = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "off", "filename": "rec.wav", "sizeBytes": 1000,
                                           "durationSeconds": 14, "options": {}}, headers=h)
     assert made.status_code == 200, made.text
-    assert made.json()["estCostMicros"] == pricing.cost_micros("leveling", "standard", 14)
-    got = client.get(f"/api/jobs/{made.json()['id']}").json()
-    assert got["options"]["leveling"] is True
-    stored = json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (made.json()["id"],))["params_json"])
-    assert stored["rates"] == {"leveling": 1_000}
+    assert made.json()["estCostMicros"] == step("leveling", 14)
+    stored = params_of(made.json()["id"])
+    assert set(stored["edit"]["timeline"]["layers"]) == {"leveling"} and stored["edit_rates"]["leveling"] == 1_000  # (the one step, at its pinned price)
     e = client.post("/api/jobs/estimate", json={"kind": "denoise", "denoiseTier": "off", "durationSeconds": 600, "options": {}}, headers=h).json()
-    assert [x["item"] for x in e["lines"]] == ["leveling"] and e["estCostMicros"] == 10_000
+    assert [x["item"] for x in e["lines"]] == ["leveling"] and e["estCostMicros"] == step("leveling", 600)
 
 
 @NATIVE
@@ -164,4 +162,4 @@ def test_a_leveling_only_job_levels_without_removing_noise(client, signed_in, tm
     assert job["status"] == "done"
     assert abs(_level_db(out, tmp_path) - _level_db(data, tmp_path)) > 1.0  # the quiet recording is brought to the target
     row = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
-    assert row["cost_micros"] == pricing.cost_micros("leveling", "standard", row["duration_seconds"])
+    assert row["cost_micros"] == step("leveling", row["duration_seconds"])

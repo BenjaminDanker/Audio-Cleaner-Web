@@ -13,6 +13,7 @@ from acw.security import sha256_hex
 from acw.stream.features import Features
 
 from .conftest import login
+from .job_support import standard
 from .test_api_security import make_key
 from .test_live_trial import fake_worker  # noqa: F401 - a fixture: a fake live worker behind the real endpoint
 
@@ -168,24 +169,24 @@ def test_estimate_needs_the_jobs_scope_and_shows_the_keys_limit(client, signed_i
 def test_a_capped_key_cannot_start_a_job_over_its_cap_and_the_account_itself_is_not_capped(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
-    k = client.post("/api/keys", json={"name": "ci", "scopes": ["jobs"], "monthlyCapCents": 20}, headers=h)  # $0.20
-    assert k.status_code == 200 and k.json()["monthlyCapCents"] == 20
+    k = client.post("/api/keys", json={"name": "ci", "scopes": ["jobs"], "monthlyCapCents": 21}, headers=h)  # $0.21
+    assert k.status_code == 200 and k.json()["monthlyCapCents"] == 21
     kh = {"Authorization": f"Bearer {k.json()['key']}"}
     client.cookies.clear()
-    # 10 minutes of standard cleanup is $0.10
+    # 10 minutes of standard cleanup (Denoising and Leveling) is about $0.10
     assert client.post("/api/jobs", json=body(), headers=kh).status_code == 200
     assert client.post("/api/jobs", json=body(), headers=kh).status_code == 200
     c = client.post("/api/jobs", json=body(durationSeconds=60), headers=kh)
     assert c.status_code == 403 and c.headers["X-Error-Code"] == "key_spending_cap"
-    assert "monthly spending limit" in c.json()["detail"] and "$0.20" in c.json()["detail"]
-    assert count("jobs") == 2 and ledger.balance(uid)["held_micros"] == 200_000  # nothing held for the refused one
+    assert "monthly spending limit" in c.json()["detail"] and "$0.21" in c.json()["detail"]
+    assert count("jobs") == 2 and ledger.balance(uid)["held_micros"] == 2 * standard(600)  # nothing held for the refused one
     _, h2 = login(client)
     assert client.post("/api/jobs", json=body(), headers=h2).status_code in (200, 429)
 
 
 def test_the_cap_counts_real_cost_of_finished_jobs_and_ignores_failed_and_last_months(client, signed_in):
     uid, _ = signed_in
-    kh = key_headers(uid, "jobs", monthly_cap_micros=300_000)
+    kh = key_headers(uid, "jobs", monthly_cap_micros=190_000 + standard(660))  # (room for the 11 minutes and nothing more)
     key_id = db.one("SELECT id FROM api_keys")["id"]
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
     start, end = keycaps.month_bounds()
@@ -203,7 +204,7 @@ def test_the_cap_counts_real_cost_of_finished_jobs_and_ignores_failed_and_last_m
     add("canceled", None, 400_000, db.now())
     add("queued", None, 40_000, None)                  # running: its reservation counts
     assert keycaps.usage_for([key_id]) == {key_id: 190_000}
-    assert client.post("/api/jobs", json=body(durationSeconds=660), headers=kh).status_code == 200  # $0.11: 190k + 110k = 300k
+    assert client.post("/api/jobs", json=body(durationSeconds=660), headers=kh).status_code == 200  # about $0.11: 190k + 112k = the cap
     assert client.post("/api/jobs", json=body(durationSeconds=6), headers=kh).status_code == 403  # even $0.001 is over now
     assert keycaps.month_bounds(end)[0] == end  # the next month is a fresh allowance
 
@@ -211,17 +212,17 @@ def test_the_cap_counts_real_cost_of_finished_jobs_and_ignores_failed_and_last_m
 def test_the_card_shows_usage_and_the_cap_can_be_changed_or_removed(client, signed_in):
     uid, h = signed_in
     ledger.credit(uid, 50_000_000, "grant", "t", "g")
-    k = client.post("/api/keys", json={"name": "ci", "scopes": ["jobs"], "monthlyCapCents": 5}, headers=h).json()
+    k = client.post("/api/keys", json={"name": "ci", "scopes": ["jobs"], "monthlyCapCents": 6}, headers=h).json()
     kh = {"Authorization": f"Bearer {k['key']}"}
     listed = client.get("/api/keys").json()["keys"][0]
-    assert listed["monthlyCapCents"] == 5 and listed["usedThisMonthMicros"] == 0 and listed["capResetsAt"] > time.time()
+    assert listed["monthlyCapCents"] == 6 and listed["usedThisMonthMicros"] == 0 and listed["capResetsAt"] > time.time()
     cookies = dict(client.cookies)
     client.cookies.clear()
-    assert client.post("/api/jobs", json=body(durationSeconds=300), headers=kh).status_code == 200  # $0.05: exactly the cap
+    assert client.post("/api/jobs", json=body(durationSeconds=300), headers=kh).status_code == 200  # about $0.05, within the $0.06
     assert client.post("/api/jobs", json=body(durationSeconds=60), headers=kh).status_code == 403
     client.cookies.update(cookies)
     r = client.patch(f"/api/keys/{k['id']}", json={"monthlyCapCents": 100}, headers=h)
-    assert r.status_code == 200 and r.json()["monthlyCapCents"] == 100 and r.json()["usedThisMonthMicros"] == 50_000
+    assert r.status_code == 200 and r.json()["monthlyCapCents"] == 100 and r.json()["usedThisMonthMicros"] == standard(300)
     client.cookies.clear()
     assert client.post("/api/jobs", json=body(durationSeconds=60), headers=kh).status_code == 200  # raised: works now
     client.cookies.update(cookies)

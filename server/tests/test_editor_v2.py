@@ -12,7 +12,7 @@ from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw_common.timeline import Timeline
 
-from .rerun_support import SR, account, add_job, api_key, clock, files_of, folder, make_done_job, other_browser, params_of, roomy_disk, row  # noqa: F401
+from .job_support import SR, account, add_job, api_key, clock, files_of, folder, make_done_job, other_browser, params_of, roomy_disk, row  # noqa: F401
 from .test_editor_api import edit_job, expected, fill_cache, funded, level, noise, part, quote, save_params, tl_of
 
 pytestmark = pytest.mark.usefixtures("roomy_disk")
@@ -139,9 +139,11 @@ def test_subtitles_in_a_timeline_replace_the_whole_file_subtitle_options_and_are
     assert r.status_code == 400 and "version 2" in r.json()["detail"]
     r = client.post("/api/jobs/estimate", json={"kind": "denoise", "durationSeconds": 600, "options": {}, "timeline": v2(600, subtitles=[sub(0, 10)]) | {"version": 3}}, headers=h)
     assert r.status_code == 400
-    # kinds: a timeline is for jobs that clean the sound; and the subtitle layer is not for a job that was asked to transcribe the whole file
+    # kinds: a transcribe job is made with a timeline of subtitles, and has no sound steps to put in one
     r = client.post("/api/jobs", json={**base, "kind": "transcribe", "timeline": ok}, headers=h)
-    assert r.status_code == 400 and r.json()["code"] == "bad_timeline"
+    assert r.status_code == 200, r.text
+    r = client.post("/api/jobs", json={**base, "kind": "transcribe", "timeline": v2(600, noise=[noise(0, 60)], subtitles=[sub(0, 60)])}, headers=h)
+    assert r.status_code == 400 and r.json()["code"] == "bad_timeline" and "only has subtitles" in r.json()["detail"]
 
 
 def test_an_echo_part_over_a_part_cleaned_in_the_browser_is_refused(client, signed_in):
@@ -559,9 +561,13 @@ def test_the_outline_has_the_previews_auth_and_limits(client, signed_in, other_b
     assert oc.get(f"/api/jobs/{jid}/peaks/noise").status_code == 404
     key_id, kh = api_key(uid, "stream")
     assert client.get(f"/api/jobs/{jid}/peaks/noise", headers=kh).status_code == 403
-    sub_only = make_done_job(uid, kind="transcribe", transcribe_tier="local")
-    r = client.get(f"/api/jobs/{sub_only}/peaks/noise")
+    converted = make_done_job(uid)
+    db.execute("UPDATE jobs SET kind = 'convert' WHERE id = ?", (converted,))  # (a conversion has no timeline)
+    r = client.get(f"/api/jobs/{converted}/peaks/noise")
     assert r.status_code == 409 and r.json()["code"] == "job_not_editable"
+    sub_only = make_done_job(uid, kind="transcribe", transcribe_tier="local")  # (a transcription is made with a timeline too; nothing of it is cached)
+    r = client.get(f"/api/jobs/{sub_only}/peaks/noise")
+    assert r.status_code == 404 and r.json()["code"] == "not_cached"
     busy = edit_job(uid, seconds=600.0, rendered="empty")
     db.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (busy,))
     assert client.get(f"/api/jobs/{busy}/peaks/noise").status_code == 409

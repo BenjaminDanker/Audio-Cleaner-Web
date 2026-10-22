@@ -68,7 +68,7 @@ const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com';
       job('run1', { status: 'running', progress: 40, stage: 'Cleaning', estimateSeconds: 120, expiresAt: null, finishedAt: null }),
       job('que1', { status: 'queued', progress: 0, queuePosition: 2, queueWaitSeconds: 60, estimateSeconds: 120, expiresAt: null, finishedAt: null }),
       job('upl1', { status: 'uploading', progress: 0, expiresAt: null, finishedAt: null }),
-      job('done1', { outputs: [{ name: 'done1-cleaned.flac', kind: 'audio', bytes: 1000 }], redo: { available: false } }),
+      job('done1', { outputs: [{ name: 'done1-cleaned.flac', kind: 'audio', bytes: 1000 }] }),
       // a job the editor opens (it has audio steps): its timeline and outlines are stubbed below
       job('edone', { outputs: [{ name: 'edone-cleaned.flac', kind: 'audio', bytes: 1000 }], edit: { available: true, hasTimeline: false, run: null, lastRun: null, suggestions: false } }),
       job('bad1', { status: 'failed', error: 'We couldn’t read that file. You were not charged.', expiresAt: null }),

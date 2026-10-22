@@ -44,6 +44,7 @@ def _run_worker_once(expect_status):
 
 
 def test_premium_transcription_stage_machine(client, signed_in, monkeypatch, sample):
+    from acw import app as appmod
     from acw.asr import openai_asr
     from acw_common.captions import Segment
 
@@ -61,16 +62,20 @@ def test_premium_transcription_stage_machine(client, signed_in, monkeypatch, sam
     assert client.put(f"/api/jobs/{job_id}/input", content=data, headers=h).status_code == 200
 
     _run_worker_once("cloud_asr")
-    chunk_dir = Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id / "asr_chunks"
+    # (the subtitles are one part over the whole file: its speech chunks wait in the part's folder for the web process)
+    (part_dir,) = (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id / "subs").iterdir()
+    chunk_dir = part_dir / "asr_chunks"
     index = json.loads((chunk_dir / "index.json").read_text())
     assert index["chunks"] and (chunk_dir / index["chunks"][0]["file"]).stat().st_size > 1000
 
-    async def fake_chunks(_dir, _lang):
+    async def fake_chunks(_dir, _lang, **_limit):
         return [Segment(0.5, 3.0, "Hello from the premium engine.", speaker="A")]
 
     monkeypatch.setattr(openai_asr, "transcribe_chunks", fake_chunks)
-    asyncio.run(openai_asr.run_for_job(chunk_dir.parent, None))
-    db.execute("UPDATE jobs SET status='queued', next_stage='finalize' WHERE id = ?", (job_id,))
+    (cloud,) = appmod._claim_cloud_jobs(1, "asr")
+    asyncio.run(appmod._run_cloud_job(cloud))
+    after = db.one("SELECT status, next_stage FROM jobs WHERE id = ?", (job_id,))
+    assert (after["status"], after["next_stage"]) == ("queued", "finalize")  # (the web process hands the job back to the workers)
 
     _run_worker_once("done")
     job = client.get(f"/api/jobs/{job_id}").json()
@@ -79,9 +84,11 @@ def test_premium_transcription_stage_machine(client, signed_in, monkeypatch, sam
     assert "Hello from the premium engine." in client.get(f"/api/jobs/{job_id}/outputs/talk.srt").text
     assert job["costMicros"] > 0
     assert ledger.balance(uid)["held_micros"] == 0
-    # nothing but the results, the upload and the copies kept for changing the job again is left on disk (all go together, 2 hours later)
+    # nothing but the results, the upload and what the job's editor keeps (the cache, the recording, the parts' text) is left on disk
+    # (all go together, 2 hours later)
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id).iterdir()}
-    assert left == names | {"input.wav", "kept-noise.flac", "kept-input.flac", "segments.json", "blocks", "kept-source.flac", "suggestions.json"}
+    assert left == names | {"input.wav", "subs", "blocks", "kept-source.flac", "suggestions.json"}
+    assert not (part_dir / "asr_chunks").exists() and (part_dir / "segments.json").is_file()  # (the speech chunks are not kept)
 
 
 def test_garbage_upload_fails_cleanly_and_refunds(client, signed_in):

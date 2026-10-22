@@ -16,7 +16,7 @@ from acw_common import blocks, editor
 from acw_common.ffmpeg import FFmpeg
 from acw_common.timeline import Timeline
 
-from .rerun_support import SR, clock, files_of, folder, params_of, roomy_disk, row, set_env  # noqa: F401
+from .job_support import SR, clock, files_of, folder, params_of, roomy_disk, row, set_env  # noqa: F401
 from .test_job_pipeline import HOME, SAMPLE, _run_worker_once
 
 NATIVE = pytest.mark.skipif(
@@ -144,17 +144,17 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     data = speech.read_bytes()
-    jid = create(client, h, data)  # no timeline: the whole file, per the options, priced and run as before
-    assert row(jid)["est_cost_micros"] > 0 and "edit" not in params_of(jid)
+    jid = create(client, h, data)  # no timeline: the options become the one they stand for (the whole file)
+    assert row(jid)["est_cost_micros"] > 0 and params_of(jid)["whole_file"]["kind"] == "denoise" and params_of(jid)["edit"]["first_run"] is True
     assert _run_worker_once("done") == jid
     first = row(jid)
-    assert {"input.wav", "talk-cleaned.flac", "kept-noise.flac", "kept-input.flac", "kept-source.flac", "blocks", "suggestions.json"} == files_of(jid)
+    assert {"input.wav", "talk-cleaned.flac", "kept-source.flac", "blocks", "suggestions.json"} == files_of(jid)
     assert first["cost_micros"] == pricing_whole(SECONDS)
     f = ff()
     src = folder(jid) / "input.wav"
     x = f.decode(src, f.probe(src), SR, 1, SECONDS + 5)
     shown = client.get(f"/api/jobs/{jid}/timeline").json()
-    assert shown["custom"] is False and shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and shown["suggestions"] is not None
+    assert shown["custom"] is True and shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and shown["suggestions"] is not None
     assert shown["timeline"]["layers"]["noise"] == [{"start": 0.0, "end": round(len(x) / SR, 3), "strength_db": 100.0, "remover": "light"}]
     # the editor's cache is the one the first run filled: rendering the job's timeline needs no model (no runner is given)
     cache = blocks.FlacCache(editing.blocks_dir(jid), f)
@@ -179,8 +179,7 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     cleaned = render_like_the_server(jid, tl_json(noise=[noise(0, len(x) / SR, 100)]))
     assert np.max(np.abs(got[:len(x), 0] - ((1 - mix) * cleaned[:, 0] + mix * x[:, 0]))) < 1e-4  # a true blend of the cached full-strength output
     p = params_of(jid)
-    assert "kept-noise.flac" not in files_of(jid) and p["edit"]["runs"][-1]["op"] == "export" and p["kept"] == {}
-    assert client.get(f"/api/jobs/{jid}").json()["redo"] == {"available": False}  # the old slider's copies no longer fit: the editor is the way
+    assert p["edit"]["runs"][-1]["op"] == "export" and "kept" not in p and "redo" not in client.get(f"/api/jobs/{jid}").json()
     # a heavy remover on the last three seconds: only that is made and charged (the light blocks and the recording are cached)
     mixed = tl_json(noise=[noise(0, 5, 24), noise(5, len(x) / SR, 24, "heavy")])
     q = client.post(f"/api/jobs/{jid}/quote", json={"timeline": mixed}, headers=h).json()
@@ -231,10 +230,11 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
 
 
 def pricing_whole(seconds: float) -> int:
-    """What a whole-file Denoising + Leveling job costs (the price list, per second rounded up)."""
-    from acw.billing import pricing
+    """What a whole-file Denoising (light) + Leveling job costs: each step on the whole file, its rate x (the whole seconds + the fixed amount
+    of a run), per second rounded up."""
+    from .job_support import standard
 
-    return pricing.job_cost_micros("denoise", "standard", None, seconds, {"denoise": 9_000, "leveling": 1_000}, 0, True)
+    return standard(seconds)
 
 
 def smooth(n: int, seed: int, amp: float = 0.3) -> np.ndarray:

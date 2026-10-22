@@ -196,8 +196,10 @@ def test_the_ceiling_still_stops_a_stage_that_never_finishes(monkeypatch):
 
 def test_a_job_that_transcribes_and_cleans_decodes_the_file_once(tmp_path, monkeypatch):
     """The 48 kHz decode made for cleaning also gives the recogniser its 16 kHz audio (no second decode of the file)."""
-    from acw.worker import runner
+    from acw import editing, jobs
+    from acw.worker import editrun, runner
     from acw_common import pipeline
+    from acw_common.timeline import Timeline
 
     class Stop(Exception):
         pass
@@ -206,15 +208,18 @@ def test_a_job_that_transcribes_and_cleans_decodes_the_file_once(tmp_path, monke
         raise Stop
 
     calls = []
-    x = np.zeros((4800, 1), np.float32)
-    ff = SimpleNamespace(probe=lambda src: SimpleNamespace(audio_tracks=1), decode=lambda *a, **k: calls.append("decode 16 kHz"))
+    x = np.zeros((48_000, 1), np.float32)
+    ff = SimpleNamespace(probe=lambda src: SimpleNamespace(audio_tracks=1, duration=1.0), decode=lambda *a, **k: calls.append("decode 16 kHz"))
     monkeypatch.setattr(runner, "_ff", lambda spec: ff)
     monkeypatch.setattr(pipeline, "decode_for_clean", lambda *a, **k: calls.append("decode 48 kHz") or x)
     monkeypatch.setattr(pipeline, "to_speech_16k", lambda y: calls.append("to 16 kHz") or y[:, 0])
     monkeypatch.setattr(runner, "_write_asr_chunks", lambda *a, **k: calls.append("transcribe"))
-    monkeypatch.setattr(pipeline, "choose_noise_profile", stop)  # the cleaning starts: enough
+    monkeypatch.setattr(editrun, "render", stop)  # the cleaning starts: enough
+    options = jobs.validate_options("denoise_transcribe", "standard", "premium", {})
+    raw, _rest = editing.timeline_from_options("denoise_transcribe", "standard", "premium", options, 1.0)
     spec = {"kind": "denoise_transcribe", "transcribe_tier": "premium", "options": {}, "output_stem": "t", "input": "t.wav",
-            "max_seconds": 600, "lib_path": "lib", "dfn_model": "model"}
+            "max_seconds": 600, "models_dir": str(tmp_path / "models"),
+            "editor": {"timeline": raw, "source_id": "s", "subtitles": editing.subtitle_spec(Timeline.from_json(raw, seconds=1.0))}}
     with pytest.raises(Stop):
         runner.stage_main(tmp_path, spec)
     assert calls == ["decode 48 kHz", "to 16 kHz", "transcribe"]

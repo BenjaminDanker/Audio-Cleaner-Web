@@ -9,6 +9,8 @@ import pytest
 from acw import auth, db, jobs, translate
 from acw.billing import ledger, pricing
 
+from .job_support import part_dir
+
 
 def fake_model(monkeypatch, answer):
     """The speech partner's text model, answered by `answer(target, lines) -> list | Exception`."""
@@ -77,7 +79,8 @@ def _job_with_segments(tmp_path, langs):
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     jid = jobs.create_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local", filename="a.wav", size_bytes=1000,
                           claimed_seconds=60.0, options={"translate": langs})["id"]
-    d = jobs.job_dir(jid)
+    d = part_dir(jid)  # (the subtitles are one part over the whole file: its text and translations are in its folder)
+    d.mkdir(parents=True)
     segs = [{"start": 0.0, "end": 2.0, "text": "Hello there", "words": [[0, 1, "Hello"], [1, 2, "there"]]},
             {"start": 2.5, "end": 4.0, "text": "Good game", "words": []}]
     (d / "segments.json").write_text(json.dumps({"language": "en", "segments": segs}))
@@ -99,11 +102,11 @@ def test_translations_are_made_line_for_line_and_a_failed_language_is_left_out(m
     row = db.one("SELECT status, next_stage, params_json FROM jobs WHERE id = ?", (job["id"],))
     params = json.loads(row["params_json"])
     assert row["status"] == "queued" and row["next_stage"] == "finalize"
-    assert params["translated"] == ["es"] and "German" in params["notice"] and "weren’t charged" in params["notice"]
+    assert "German" in params["notice"] and "weren’t charged" in params["notice"]
     assert all("Hello there" in u or "Good game" in u for _, u in calls)  # only the text goes out
     # charged for the one language that was made
     job = dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
-    assert W._job_cost(job, params, 60) == pricing.job_cost_micros("transcribe", None, "local", 60, params["rates"], 1)
+    assert W._job_cost(job, params, 60, billed={}) == pricing.job_cost_micros("transcribe", None, "local", 60, None, 1)
     # a second run (restart) doesn't pay for Spanish again
     n = len(calls)
     asyncio.run(appmod._run_cloud_job({**job, "status": "cloud_asr"}))

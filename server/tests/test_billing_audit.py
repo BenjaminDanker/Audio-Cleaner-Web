@@ -398,32 +398,35 @@ def test_a_job_that_is_no_longer_running_is_not_charged_again():
 
 
 def test_job_prices_are_fixed_at_creation(monkeypatch):
+    from acw import editing
     from acw.worker import main as W
+
+    from .job_support import standard
 
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     job, d = running_job(uid)
-    assert json.loads(job["params_json"])["rates"] == {"denoise": 9_000, "leveling": 1_000}
+    pinned = json.loads(job["params_json"])["edit_rates"]  # (every job is made with a timeline; its parts' prices are pinned with it)
+    assert pinned["light"] == pinned["heavy"] == 9_000 and pinned["leveling"] == 1_000
     monkeypatch.setitem(pricing.RATES, ("denoise", "standard"), pricing.Rate("denoise", "standard", "x", 90_000))
     monkeypatch.setitem(pricing.RATES, ("leveling", "standard"), pricing.Rate("leveling", "standard", "x", 50_000))
+    assert editing.step_rates()["light"] == 90_000  # (today's list is dearer)
     W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
-    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == (
-        pricing.cost_micros("denoise", "standard", 600, 9_000) + pricing.cost_micros("leveling", "standard", 600, 1_000))
+    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == standard(600, rates=pinned)
 
 
-def test_an_older_job_without_a_leveling_price_never_pays_for_leveling():
+def test_a_job_made_without_leveling_never_pays_for_leveling():
     from acw.worker import main as W
+
+    from .job_support import standard
 
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    job, d = running_job(uid)
+    job, d = running_job(uid, options={"leveling": False})
     params = json.loads(job["params_json"])
-    params["rates"] = {"denoise": 10_000}  # made before Leveling had a price
-    job = {**job, "params_json": json.dumps(params)}
-    db.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (job["params_json"], job["id"]))
+    assert "leveling" not in params["edit"]["timeline"]["layers"] and params["edit_rates"]["leveling"] > 0
     W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
-    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == pricing.cost_micros(
-        "denoise", "standard", 600, 10_000)
+    assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == standard(600, leveling=False)
 
 
 def test_rebuild_is_limited_to_90_minutes_and_standard_is_not(gpu_up):

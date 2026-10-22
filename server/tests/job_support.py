@@ -1,7 +1,7 @@
-"""Shared helpers of the re-run tests ("Change and save again"): finished jobs made by hand with their folders (fake kept
-copies and outputs, no native binaries), accounts and API keys, a frozen clock and a roomy disk."""
+"""Shared helpers of the job tests: finished jobs made by hand with their folders (fake outputs, no native binaries) and the parameters a
+job made with a timeline has (every job is: editing.timeline_from_options), accounts and API keys, a frozen clock and a roomy disk."""
 import json
-import os
+import math
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,44 +92,59 @@ def set_env(monkeypatch, **env) -> None:
     get_settings.cache_clear()
 
 
+# ---------------------------------------------------------------------------------------------- what the steps of a timeline cost
+
+def step(name, seconds, rates=None):
+    """What one step costs for `seconds` of audio on the whole file: its rate x (the whole seconds + its fixed amount of a run), rounded up
+    (every job is made with a timeline, so this is the price of a job asked for with options too)."""
+    from acw import editing
+    from acw_common import editor
+
+    return editing.step_micros((rates or editing.step_rates())[name], math.ceil(seconds), editor.STEP_COSTS[name].fixed_equivalent_seconds)
+
+
+def standard(seconds, remover="light", leveling=True, rates=None):
+    """Denoising (with the remover said) and Leveling on the whole file: what a job decided or asked for as Denoising costs."""
+    return step(remover, seconds, rates) + (step("leveling", seconds, rates) if leveling else 0)
+
+
+def rebuilt(seconds, leveling=True, rates=None):
+    """Voice rebuild and Leveling on the whole file."""
+    return step("rebuild", seconds, rates) + (step("leveling", seconds, rates) if leveling else 0)
+
+
 # ------------------------------------------------------------------------------------------- fake finished jobs
 
-def kept_record(seconds=60.0, *, noise=True, input_copy=True, rebuilt=False, channels=2, echo=False, profile="light",
-                noise_opt="auto", segments=None) -> dict:
-    """The `kept` record a finished job stores (as rerun.collect_kept builds it)."""
-    cols = list(range(channels))
-    samples = int(seconds * SR)
-    base = {"channels": cols, "scale": 1.0, "samples": samples, "echo": echo}
-    kept: dict = {}
-    if noise:
-        kept["noise"] = {"file": "kept-noise.flac", **base, "profile": profile, "noise_opt": noise_opt, "plan": list(cols)}
-    if noise and input_copy:
-        kept["input"] = {"file": "kept-input.flac", **base}
-    if rebuilt:
-        kept["rebuilt"] = {"file": "kept-rebuilt.flac", **base}
-    if segments is not None:
-        kept["segments"] = {"tier": "local", "language": "en", "echo": False, "translations": [], **segments}
-    return kept
+def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, options=None, *, seconds=60.0, channels=2, ext=".wav") -> dict:
+    """The stored parameters of a finished job made with whole-file options: the timeline they stand for (first run), the prices of
+    its parts pinned, what was asked for kept in `whole_file` (as jobs.create_job stores them)."""
+    from acw import editing
 
-
-def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, options=None, *, seconds=60.0, kept=None, channels=2,
-               ext=".wav") -> dict:
-    """The stored parameters of a finished first-run job (real validated options and pinned rates)."""
     d_tier = denoise_tier if kind != "transcribe" else None
     t_tier = transcribe_tier if kind != "denoise" else None
-    opts = jobs.validate_options(kind, d_tier, t_tier, options or {})
-    leveling = kind != "transcribe" and opts["leveling"]
+    asked = jobs.validate_options(kind, d_tier, t_tier, options or {})
+    raw, rest = editing.timeline_from_options(kind, d_tier, t_tier, asked, seconds)
+    tl = editing.parse_timeline(raw, seconds)
     return {
-        "options": opts,
-        "denoise_tier": d_tier,
-        "transcribe_tier": t_tier,
+        "options": rest,
+        "denoise_tier": "standard" if kind != "transcribe" else None,  # (what editing.prepare_timeline_job says the job stores)
+        "transcribe_tier": None,
         "input_ext": ext,
         "display_name": None,
         "channels": channels,
-        "rates": pricing.job_rates(kind, d_tier, t_tier, len(opts["translate"]), leveling),
-        "kept": kept if kept is not None else {},
-        "noise_profile": "light",
+        "rates": {},
+        "edit": {"timeline": raw, "first_run": True},
+        "edit_rates": editing.step_rates(),
+        **({"subtitle_rates": editing.subtitle_rates()} if tl.layers["subtitles"] else {}),
+        "whole_file": {"kind": kind, "denoise_tier": d_tier, "transcribe_tier": t_tier, "options": asked},
+        **jobs.convert_params(rest, ext),
     }
+
+
+def queue_row(kind="denoise", denoise_tier="standard", transcribe_tier=None, options=None, *, next_stage=None, seconds=600.0) -> dict:
+    """The part of a job's row the broker and the worker read to place it (kind, next stage, parameters), made like a job's: with its
+    timeline."""
+    return {"kind": kind, "next_stage": next_stage, "params_json": json.dumps(job_params(kind, denoise_tier, transcribe_tier, options, seconds=seconds))}
 
 
 def file_bytes(job_id: str, name: str) -> bytes:
@@ -138,20 +153,16 @@ def file_bytes(job_id: str, name: str) -> bytes:
 
 
 def make_done_job(uid, *, kind="denoise", denoise_tier="standard", transcribe_tier=None, seconds=60.0, options=None,
-                  noise=True, input_copy=True, rebuilt=False, segments=None, channels=2, api_key_id=None, finished_ago=60,
-                  expires_in=None, root=None, source=None, cost=0, name="talk.wav", status="done", files=True, echo=False,
-                  noise_opt="auto", profile="light", ext=".wav", now=None) -> str:
-    """A finished job with its folder: the upload, the kept copies that `kept` names, the audio and caption results.
-    `finished_ago` seconds ago; it expires `expires_in` seconds from now (default: when the retention is over)."""
+                  channels=2, api_key_id=None, finished_ago=60, expires_in=None, cost=0, name="talk.wav", status="done", files=True,
+                  ext=".wav", now=None) -> str:
+    """A finished job with its folder: the upload, the audio and caption results. `finished_ago` seconds ago; it expires `expires_in`
+    seconds from now (default: when the retention is over)."""
     now = db.now() if now is None else now
     jid = db.new_id()
     has_denoise = kind != "transcribe"
     has_text = kind != "denoise"
-    kept = kept_record(seconds, noise=noise and has_denoise and denoise_tier == "standard", input_copy=input_copy,
-                       rebuilt=rebuilt, channels=channels, echo=echo, noise_opt=noise_opt, profile=profile,
-                       segments=segments if has_text else None)
-    params = job_params(kind, denoise_tier, transcribe_tier, options, seconds=seconds, kept=kept, channels=channels, ext=ext)
-    fmt = params["options"]["audio_format"]
+    params = job_params(kind, denoise_tier, transcribe_tier, options, seconds=seconds, channels=channels, ext=ext)
+    fmt = params["whole_file"]["options"]["audio_format"]
     stem = Path(name).stem
     outputs = []
     if has_denoise:
@@ -160,9 +171,6 @@ def make_done_job(uid, *, kind="denoise", denoise_tier="standard", transcribe_ti
         outputs += [{"file": f"{stem}.srt", "kind": "captions", "lang": "en"}, {"file": f"{stem}-transcript.txt", "kind": "transcript", "lang": "en"}]
     d = jobs.job_dir(jid)
     names = [f"input{ext}", *(o["file"] for o in outputs)]
-    names += [e["file"] for k, e in kept.items() if k in ("noise", "rebuilt", "input")]
-    if "segments" in kept:
-        names += ["segments.json", *(f"segments.{lang}.json" for lang in kept["segments"]["translations"])]
     if files:
         d.mkdir(parents=True, mode=0o700)
         for n in dict.fromkeys(names):
@@ -171,30 +179,28 @@ def make_done_job(uid, *, kind="denoise", denoise_tier="standard", transcribe_ti
         o["bytes"] = len(file_bytes(jid, o["file"]))
     finished = now - finished_ago
     expires = now + expires_in if expires_in is not None else finished + RETENTION
-    tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     db.execute(
         "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, next_stage, input_name, input_bytes, received_bytes, claimed_seconds,"
         " duration_seconds, est_cost_micros, cost_micros, progress, stage, outputs_json, created_at, queued_at, started_at, finished_at,"
-        " expires_at, api_key_id, source_job_id, root_job_id) VALUES (?,?,?,?,?,?,'probe',?,?,?,?,?,?,?,100,'Done',?,?,?,?,?,?,?,?,?)",
-        (jid, uid, kind, tier, status, json.dumps(params), name, 1000, 1000, seconds, seconds, cost, cost, json.dumps(outputs), finished - 30,
-         finished - 30, finished - 20, finished, expires, api_key_id, source, root),
+        " expires_at, api_key_id) VALUES (?,?,?,?,?,?,'probe',?,?,?,?,?,?,?,100,'Done',?,?,?,?,?,?,?)",
+        (jid, uid, kind, "", status, json.dumps(params), name, 1000, 1000, seconds, seconds, cost, cost, json.dumps(outputs), finished - 30,
+         finished - 30, finished - 20, finished, expires, api_key_id),
     )
     return jid
 
 
-def add_job(uid, status="queued", *, created_ago=0, finished_ago=None, kind="denoise", api_key_id=None, root=None, source=None) -> str:
+def add_job(uid, status="queued", *, created_ago=0, finished_ago=None, kind="denoise", api_key_id=None) -> str:
     """A job row in any state, without files (for the lists and the limits)."""
     jid = db.new_id()
     now = db.now()
-    params = {"options": jobs.validate_options("denoise", "standard", None, {}), "denoise_tier": "standard", "transcribe_tier": None,
-              "input_ext": ".wav", "display_name": None, "channels": 2, "kept": {}}
+    params = job_params(kind if kind != "convert" else "denoise")
     finished = None if finished_ago is None else now - finished_ago
     db.execute(
         "INSERT INTO jobs(id, user_id, kind, tier, status, params_json, input_name, input_bytes, claimed_seconds, est_cost_micros,"
-        " created_at, queued_at, finished_at, expires_at, api_key_id, source_job_id, root_job_id)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (jid, uid, kind, "standard", status, json.dumps(params), "talk.wav", 1000, 60.0, 0, now - created_ago, now - created_ago, finished,
-         None if finished is None else finished + RETENTION, api_key_id, source, root),
+        " created_at, queued_at, finished_at, expires_at, api_key_id)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (jid, uid, kind, "", status, json.dumps(params), "talk.wav", 1000, 60.0, 0, now - created_ago, now - created_ago, finished,
+         None if finished is None else finished + RETENTION, api_key_id),
     )
     return jid
 
@@ -204,7 +210,7 @@ def deadline_in(job_id: str, seconds: int) -> int:
     from acw import jobs as _jobs
 
     cap = _jobs.get_settings().job_max_retention_seconds
-    db.execute("UPDATE jobs SET uploaded_at = ? WHERE id = ? OR root_job_id = ?", (db.now() + seconds - cap, job_id, job_id))
+    db.execute("UPDATE jobs SET uploaded_at = ? WHERE id = ?", (db.now() + seconds - cap, job_id))
     return db.now() + seconds
 
 
@@ -214,6 +220,15 @@ def folder(job_id: str) -> Path:
 
 def row(job_id: str) -> dict:
     return dict(db.one("SELECT * FROM jobs WHERE id = ?", (job_id,)))
+
+
+def part_dir(job_id: str) -> Path:
+    """The folder of the only subtitle part of a transcription made with whole-file options (subs/<key>): where its text and speech chunks go."""
+    from acw import editing
+
+    raw = params_of(job_id)["edit"]["timeline"]
+    (part,) = editing._tl().Timeline.from_json(raw, seconds=raw["seconds"]).parts("subtitles")
+    return editing.subtitle_dir(job_id, part)
 
 
 def params_of(job_id: str) -> dict:
@@ -229,17 +244,10 @@ def count(table: str, where="1=1", args=()) -> int:
     return db.one(f"SELECT COUNT(*) AS n FROM {table} WHERE {where}", args)["n"]
 
 
-def same_file(a: Path, b: Path) -> bool:
-    """Both names are the same file on disk (a hard link, not a copy)."""
-    sa, sb = os.stat(a), os.stat(b)
-    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
-
-
-def complete_like_the_worker(job_id: str, outputs=(), kept=None, scratch=("decoded.f32", "spec.json", "main-state.json")) -> dict:
+def complete_like_the_worker(job_id: str, outputs=(), scratch=("decoded.f32", "spec.json", "main-state.json")) -> dict:
     """Finish a queued job the way the worker does after the runner reported a result: marks it running, writes the
     result files (and the scratch files the runner leaves behind) the runner would have made, then runs the worker's own
-    completion step (files kept or deleted, charge, expiry). `outputs`: file names of audio results; `kept`: what the
-    runner reports having kept. Returns the job's row."""
+    completion step (files kept or deleted, charge, expiry). `outputs`: file names of audio results. Returns the job's row."""
     from acw.worker import main as worker
 
     db.execute("UPDATE jobs SET status = 'running', worker_id = 't', started_at = ? WHERE id = ? AND status = 'queued'", (db.now(), job_id))
@@ -250,6 +258,6 @@ def complete_like_the_worker(job_id: str, outputs=(), kept=None, scratch=("decod
             (d / name).write_bytes(b"new:" + name.encode())
     (d / "asr_chunks").mkdir(exist_ok=True)
     (d / "asr_chunks" / "0000.mp3").write_bytes(b"x")
-    res = {"ok": True, "outputs": [{"file": n, "kind": "audio"} for n in outputs], "kept": kept or {}}
+    res = {"ok": True, "outputs": [{"file": n, "kind": "audio"} for n in outputs]}
     worker._complete(job, d, res)
     return row(job_id)

@@ -450,7 +450,7 @@ await check('a paid save is a process on the same job: it asks for exactly the p
   await waitDownloads(before + 1);
   if (got.length !== before + 1 || !/\.flac$/.test(got[got.length - 1])) throw new Error('the new file did not come down by itself: ' + got.join(', '));
   const proc = asked('POST', new RegExp(`/jobs/${J1.id}/process$`));
-  if (proc.length !== 1 || asked('POST', /\/rerun$/).length || asked('POST', /^\/api\/jobs$/).length !== jobsBefore) throw new Error(`${proc.length} process calls, a new job or a re-run was asked for`);
+  if (proc.length !== 1 || asked('POST', /\/rerun/).length || asked('POST', /^\/api\/jobs$/).length !== jobsBefore) throw new Error(`${proc.length} process calls, a new job or a re-run was asked for`);
   const sent = JSON.parse(proc[0].body);
   if (sent.maxCostMicros !== quoteMicros || !sent.timeline?.layers?.noise || sent.timeline.layers.leveling.length !== 2 || (sent.audioFormat ?? 'flac') !== 'flac') throw new Error('process body: ' + proc[0].body.slice(0, 300));
   if (page.url().endsWith(J1.id) === false) throw new Error('the page moved to ' + page.url());
@@ -470,7 +470,7 @@ await check('a paid save is a process on the same job: it asks for exactly the p
   return `${quoteMicros} micros, ${rows[0]}`;
 });
 
-await check('a job made through the API with no timeline (the old way) opens in the editor with the choices it was made with (Strong, Leveling), plays from the preview stretches, and nothing is priced until something changes; a job made by the website has a timeline and keeps no strength-slider copies', async () => {
+await check('a job made through the API with whole-file options opens in the editor with the timeline they stand for (Strong, Leveling), plays from the preview stretches, and nothing is priced until something changes; like a job made by the website it has a timeline and keeps no strength-slider copies', async () => {
   const file = join(FILES, 'noisy.wav');
   const made = await apiCall(page, 'POST', 'jobs', {
     kind: 'denoise', denoiseTier: 'standard', filename: 'api-old.wav', sizeBytes: statSync(file).size, durationSeconds: 10.6,
@@ -483,9 +483,9 @@ await check('a job made through the API with no timeline (the old way) opens in 
   if (!put.ok()) throw new Error(`upload ${put.status()} ${await put.text()}`);
   const done = await waitJobDone(page, id, { timeout: 240000 });
   if (done.status !== 'done') throw new Error(`the job ${done.status}: ${done.error}`);
-  if (!done.edit?.available || done.edit.hasTimeline || !done.redo?.preview) throw new Error('an old-way job: ' + JSON.stringify({ edit: done.edit, redo: !!done.redo }));
+  if (!done.edit?.available || !done.edit.hasTimeline || done.redo) throw new Error('a job made with options: ' + JSON.stringify({ edit: done.edit, redo: !!done.redo }));
   const mine = (await apiCall(page, 'GET', `jobs/${J1.id}`)).body;
-  if (!mine.edit?.hasTimeline || mine.redo?.preview || mine.redo?.available) throw new Error('a job made by the website has strength-slider copies: ' + JSON.stringify({ edit: mine.edit, redo: mine.redo }));
+  if (!mine.edit?.hasTimeline || mine.redo) throw new Error('a job made by the website has strength-slider copies: ' + JSON.stringify({ edit: mine.edit, redo: mine.redo }));
   const before = requests.length;
   await openJob(id);
   if ((await say('voice')) !== 'Strong 0:00–0:11') throw new Error('Voice: ' + await say('voice'));
@@ -985,19 +985,19 @@ await check('echo removal has its own price: the price table row and its line, t
   const on = (await page.getByTestId('details').innerText()).replace(/\s+/g, ' ');
   await page.getByTestId('bar-det').click();
   if (!/Echo removal · 0:\d\d (<\$0\.001|\$0\.\d+)/.test(on)) throw new Error('Details with echo removal: ' + on);
-  // our side: an estimate lists it as a line of its own, with a timeline and the old way
+  // our side: an estimate lists it as a line of its own, with a timeline and with whole-file options (which stand for the same timeline)
   const e = (await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', durationSeconds: 600, options: { audio_format: 'flac' }, timeline: { version: 1, seconds: 600, layers: { echo: [{ start: 0, end: 600 }] } } })).body;
   const line = e.lines.find((l) => l.item === 'echo');
   // (a timeline is priced like a run: the rate for the seconds, plus the fixed amount of starting the step, docs/api.md section 8)
   if (!line || line.label !== 'Echo removal' || line.micros !== Math.ceil(((0.0026 * 1e6) / 60) * (600 + line.fixedSeconds)) || e.estCostMicros !== e.lines.reduce((s, l) => s + l.micros, 0)) throw new Error('estimate lines: ' + JSON.stringify(e.lines));
   const old = (await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', denoiseTier: 'standard', durationSeconds: 600, options: { echo_reference_track: true } })).body;
   const oldLine = old.lines.find((l) => l.item === 'echo');
-  if (!oldLine || oldLine.micros !== 26000) throw new Error('estimate lines (the old way): ' + JSON.stringify(old.lines));
+  if (!oldLine || oldLine.label !== 'Echo removal' || oldLine.micros !== line.micros || oldLine.fixedSeconds !== line.fixedSeconds) throw new Error('estimate lines (whole-file options): ' + JSON.stringify(old.lines));
   await page.goto(`${BASE}/developers`);
   await page.waitForSelector('pre.code');
   const dev = (await page.locator('main').innerText()).replace(/\s+/g, ' ');
   if (!/Echo removal.*\$0\.0026/.test(dev) || !/own price, per second, in its own line/.test(dev)) throw new Error('Developers page does not give the echo price');
-  return `${line.micros} micros for ten minutes (${oldLine.micros} the old way); Details: ${on.slice(0, 80)}`;
+  return `${line.micros} micros for ten minutes (${oldLine.micros} with whole-file options); Details: ${on.slice(0, 80)}`;
 });
 
 await check('the editor of a job made with echo removal has the Echo removal track (a row, a speaker button, the switch), the job holds an echo part, and it was charged', async () => {

@@ -11,6 +11,7 @@ from acw import db, jobs, translate
 from acw.billing import ledger
 from acw.stream import live_translate
 from tests.conftest import settle_payment
+from tests.job_support import part_dir
 from tests.test_billing_audit import make_job, user
 
 _n = [0]
@@ -25,13 +26,20 @@ def _rich_user():
 
 
 def _cloud_job(_uid, tier, translate_to=None, with_segments=False):
+    """A transcription job waiting for the web process: its subtitles are one part over the whole file (every job is made with a
+    timeline); an Accurate part waits with its speech chunks written, a part with its text is only waiting to be translated."""
     uid = _rich_user()  # a user each: a person has at most three jobs going
     options = {"translate": translate_to} if translate_to else {}
     j = make_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier=tier, options=options)
     db.execute("UPDATE jobs SET status = 'cloud_asr', stage = 'Waiting to transcribe', queued_at = ?, duration_seconds = 60 WHERE id = ?",
                (db.now(), j))
+    d = part_dir(j)
+    d.mkdir(parents=True)
     if with_segments:
-        (jobs.job_dir(j) / "segments.json").write_text(json.dumps({"language": "en", "segments": [{"start": 0, "end": 1, "text": "hi"}]}))
+        (d / "segments.json").write_text(json.dumps({"language": "en", "segments": [{"start": 0, "end": 1, "text": "hi"}]}))
+    elif tier == "premium":
+        (d / "asr_chunks").mkdir()
+        (d / "asr_chunks" / "index.json").write_text("{}")
     return j
 
 

@@ -71,7 +71,7 @@ choices mean for the files and what stops a start, the browser's share of a job;
 browser's suggestions, no backend), `suggest-agreement` (the browser's suggestions against `common/acw_common/suggest.py` on generated
 files; runs `tests/suggest-py.py`, a few minutes), `editor` (the screen on a backend; `EDITOR_SHOTS=<dir>` saves screenshots), `parity` (one check for
 each row of the owner's checklist of today's file pages, so nothing of the old form, the job page, Change and save again or Fix a moment is lost)
-and `redo` (saving changes to a finished job, the strength slider, the kept copies of the API).
+and `redo` (saving changes to a finished job, the strength slider, a job made through the API opening in the editor).
 
 ## Licences
 

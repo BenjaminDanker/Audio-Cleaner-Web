@@ -3,7 +3,7 @@ the request's checks (video_out and the source the client read of the video), th
 name of the runner's finishing step; what a conversion costs: whether the picture is copied (free) or made again and its size factor
 (convert_params), the price and its line (convert_cost, convert_line), the estimates, the holds, Automatic settings, the worker deciding
 after the probe (the hold grows or is made then, a short balance fails the job uncharged, a copy is free, a sound file has no video to
-make), a re-run making the video as its source did and paying for it as it did; and the runner making real files from small
+make), and the runner making real files from small
 generated videos (no models are needed for a conversion)."""
 from __future__ import annotations
 
@@ -14,12 +14,12 @@ import subprocess
 
 import pytest
 
-from acw import automatic, broker, db, jobs, rerun
+from acw import automatic, broker, db, editing, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw.worker import runner
 
-from .rerun_support import count, make_done_job, params_of, roomy_disk, row, set_env  # noqa: F401 - fixtures
+from .job_support import count, make_done_job, params_of, rebuilt, roomy_disk, row, set_env, standard, step  # noqa: F401 - fixtures
 from .test_automatic_settings import Stages, measurement
 from .test_job_pipeline import HOME
 
@@ -28,7 +28,6 @@ pytestmark = pytest.mark.usefixtures("roomy_disk")
 FFMPEG = HOME / "bin" / "ffmpeg"
 FFPROBE = HOME / "bin" / "ffprobe"
 CONVERT = 6_000  # micros a minute of 1080p at 30 fps
-DENOISE, LEVELING = 9_000, 1_000
 
 
 def per(micros_per_minute, seconds):
@@ -228,15 +227,15 @@ def test_a_sound_file_asked_for_as_a_video_is_taken_and_the_video_is_free(client
             assert (p["picture_encode"], p["convert_factor"], p["convert_rate"]) == (False, 1.0, CONVERT), (ext, options)
             assert j["estCostMicros"] == 0 and row(j["id"])["hold_id"] is None and jobs.convert_cost(p, 600) == 0
             d = make(uid, kind="denoise", filename=f"talk{ext}", options=options)  # with cleaning: held for the cleaning alone
-            assert d["estCostMicros"] == 100_000 and params_of(d["id"])["picture_encode"] is False
+            assert d["estCostMicros"] == standard(600) and params_of(d["id"])["picture_encode"] is False
             assert jobs.label_of("denoise", params_of(d["id"])) == "Denoising + Leveling"  # (no "+ Video conversion": nothing is made again)
-    assert held(uid) == count("jobs", "kind = 'denoise'") * 100_000
+    assert held(uid) == count("jobs", "kind = 'denoise'") * standard(600)
     # an uppercase ending counts the same, and through the API
     assert params_of(make(uid, filename="TALK.WAV", options=vo("mp4", 720))["id"])["picture_encode"] is False
     for kind, extra in (("convert", {}), ("denoise", {"denoiseTier": "standard"})):
         r = client.post("/api/jobs", json={"kind": kind, "filename": "talk.mp3", "sizeBytes": 1000, "durationSeconds": 60, "options": vo("mp4", 720), **extra}, headers=h)
         assert r.status_code == 200, r.text
-        assert r.json()["estCostMicros"] == (0 if kind == "convert" else per(DENOISE + LEVELING, 60))
+        assert r.json()["estCostMicros"] == (0 if kind == "convert" else standard(60))
 
 
 def test_a_video_ending_is_judged_by_the_file_when_it_is_read_not_by_its_name(signed_in):
@@ -268,10 +267,17 @@ def test_the_job_page_names_a_conversion(client, signed_in):
 
 
 def stage_row(**p):
-    """A job row as the broker reads it (kind denoise unless told otherwise)."""
+    """A job row as the broker reads it (a conversion unless a kind is told: the other kinds are made with the timeline their options stand for)."""
     nxt = p.pop("next_stage", None)
     kind = p.pop("kind", "convert")
-    return {"kind": kind, "next_stage": nxt, "params_json": json.dumps({"denoise_tier": p.pop("tier", None), "transcribe_tier": p.pop("transcribe", None), **p})}
+    tier, transcribe, options = p.pop("tier", None), p.pop("transcribe", None), p.pop("options", {})
+    params = {"denoise_tier": None, "transcribe_tier": None, **p}
+    if kind == "convert":
+        params["options"] = options
+    else:
+        raw, rest = editing.timeline_from_options(kind, tier, transcribe, jobs.validate_options(kind, tier, transcribe, options), 600.0)
+        params.update(options=rest, edit={"first_run": True, "timeline": raw})
+    return {"kind": kind, "next_stage": nxt, "params_json": json.dumps(params)}
 
 
 @pytest.mark.parametrize("row_, stages, card_only", [
@@ -283,7 +289,7 @@ def stage_row(**p):
     (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", **vo("mp4", 720)}, picture_encode=True), ["heavy", "encode"], False),
     (stage_row(kind="denoise", tier="standard", options={"noise": "light", **vo("mp4", 720)}, picture_encode=True), ["encode"], False),
     (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", **vo("mp4", 720)}, picture_encode=False), ["heavy"], False),
-    (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", "echo_reference_track": True, **vo("webm")}, picture_encode=None), ["encode"], False),
+    (stage_row(kind="denoise", tier="standard", options={"noise": "heavy", "echo_reference_track": True, **vo("webm")}, picture_encode=None), ["heavy", "encode"], False),
     (stage_row(kind="denoise", tier="rebuild", options={"noise": "light", **vo("mp4", 720)}, picture_encode=True), ["rebuild", "encode"], True),
     (stage_row(kind="denoise_transcribe", tier="standard", transcribe="local", options={"noise": "light", **vo("mp4", 720)}, picture_encode=True),
      ["transcribe", "encode"], False),
@@ -523,15 +529,15 @@ def conv_line(micros, factor):
 
 def test_the_conversion_goes_on_top_of_the_other_work():
     plain = estimate("mp4", kind="denoise", tier="standard")
-    assert plain["estCostMicros"] == 100_000
+    assert plain["estCostMicros"] == standard(600)
     # the estimate has no file name: the picture is judged by its codec alone (MP4 holds H.264)
     made = estimate("mp4", 720, src("h264", 3840, 2160, 30), kind="denoise", tier="standard")
-    assert made["estCostMicros"] == 100_000 + 120_000 and [x["item"] for x in made["lines"]] == ["denoise", "leveling", "convert"]
+    assert made["estCostMicros"] == standard(600) + 120_000 and [x["item"] for x in made["lines"]] == ["denoise", "leveling", "convert"]
     assert made["lines"][-1] == conv_line(120_000, 2.0) and lines_add_up(made)
     copied = estimate("mkv", None, src("wmv2"), kind="denoise", tier="standard")
-    assert copied["estCostMicros"] == 100_000 and copied["lines"][-1]["copied"] is True and lines_add_up(copied)
+    assert copied["estCostMicros"] == standard(600) and copied["lines"][-1]["copied"] is True and lines_add_up(copied)
     maybe = estimate("mp4", None, None, kind="denoise", tier="standard")
-    assert maybe["estCostMicros"] == 100_000 and maybe["lines"][-1]["maybe"] is True and lines_add_up(maybe)
+    assert maybe["estCostMicros"] == standard(600) and maybe["lines"][-1]["maybe"] is True and lines_add_up(maybe)
     both = jobs.estimate("denoise_transcribe", "standard", "local", 600, vo("webm", None, src("h264", 1920, 1080, 60)))
     base = jobs.estimate("denoise_transcribe", "standard", "local", 600, {})
     assert both["estCostMicros"] == base["estCostMicros"] + 120_000 and both["lines"][-1] == conv_line(120_000, 2.0) and lines_add_up(both)
@@ -618,11 +624,11 @@ def test_a_conversion_needs_the_balance_for_its_factor(signed_in):
 def test_a_conversion_on_top_of_cleaning_is_held_with_it(signed_in):
     uid, _ = funded(signed_in)
     j = make(uid, kind="denoise", options=vo("mp4", 1080, src("h264", 3840, 2160, 30)), filename="a.mp4")
-    assert j["estCostMicros"] == 100_000 + 120_000 == held(uid)
+    assert j["estCostMicros"] == standard(600) + 120_000 == held(uid)
     k = make(uid, kind="denoise", options=vo("mp4"), filename="b.avi")  # (nothing said: the cleaning alone is held)
-    assert k["estCostMicros"] == 100_000 and params_of(k["id"])["picture_encode"] is None
+    assert k["estCostMicros"] == standard(600) and params_of(k["id"])["picture_encode"] is None
     c = make(uid, kind="denoise", options=vo("mkv", None, src("wmv2")), filename="c.wmv")
-    assert c["estCostMicros"] == 100_000 and params_of(c["id"])["picture_encode"] is False
+    assert c["estCostMicros"] == standard(600) and params_of(c["id"])["picture_encode"] is False
 
 
 def test_the_whole_upload_again_must_fit_on_the_disk(signed_in, monkeypatch):
@@ -792,7 +798,7 @@ def test_a_picture_that_turns_out_to_need_making_with_no_hold_and_too_little_bal
 
 def test_the_short_balance_of_a_cleaning_job_keeps_its_old_words_when_no_conversion_is_in_it(client, signed_in, monkeypatch):
     uid, h = signed_in
-    ledger.credit(uid, 100_000, "grant", "t", "g")
+    ledger.credit(uid, standard(600), "grant", "t", "g")
     VideoStages(monkeypatch, duration=1200.0, picture_encode=False, factor=1.0)
     jid = start(client, h, kind="denoise", seconds=600, **vo("mkv", None, src("wmv2")))
     take()
@@ -802,11 +808,11 @@ def test_the_short_balance_of_a_cleaning_job_keeps_its_old_words_when_no_convers
 
 def test_the_conversion_grows_the_hold_of_a_cleaning_job_and_is_charged_with_it(client, signed_in, monkeypatch):
     uid, h = funded(signed_in)
-    stages = VideoStages(monkeypatch, duration=600.0, picture_encode=True, factor=2.0, stats=measurement(strength="balanced", rebuild=False))
+    stages = VideoStages(monkeypatch, duration=600.0, picture_encode=True, factor=2.0, stats=measurement(strength="balanced", rebuild=False, heavy=False))
     jid = start(client, h, kind="denoise", seconds=300, **vo("mp4"))
-    assert held(uid) == 5 * (DENOISE + LEVELING)  # (nothing said about the picture: the cleaning alone, for the minutes said)
+    assert held(uid) == standard(300)  # (nothing said about the picture: the cleaning alone, for the minutes said)
     take()
-    steps = 10 * (DENOISE + LEVELING)  # read as 10 minutes
+    steps = standard(600)  # read as 10 minutes
     done = client.get(f"/api/jobs/{jid}", headers=h).json()
     assert done["status"] == "done" and done["costMicros"] == steps + 120_000 and held(uid) == 0
     assert ledger.balance(uid)["balance_micros"] == 5_000_000 - steps - 120_000
@@ -815,11 +821,11 @@ def test_the_conversion_grows_the_hold_of_a_cleaning_job_and_is_charged_with_it(
 
 def test_a_cleaning_job_with_the_picture_copied_is_charged_for_the_cleaning_alone(client, signed_in, monkeypatch):
     uid, h = funded(signed_in)
-    VideoStages(monkeypatch, duration=600.0, picture_encode=False, factor=4.0, stats=measurement(strength="balanced", rebuild=False))
+    VideoStages(monkeypatch, duration=600.0, picture_encode=False, factor=4.0, stats=measurement(strength="balanced", rebuild=False, heavy=False))
     jid = start(client, h, kind="denoise", seconds=600, **vo("mkv"))
     take()
     done = client.get(f"/api/jobs/{jid}", headers=h).json()
-    assert done["status"] == "done" and done["costMicros"] == 10 * (DENOISE + LEVELING) and done["label"] == "Denoising + Leveling"
+    assert done["status"] == "done" and done["costMicros"] == standard(600) and done["label"] == "Denoising + Leveling"
 
 
 @pytest.mark.parametrize("encode", ["yes", 1, 0, "true", [], {}, None])
@@ -854,14 +860,14 @@ def test_a_factor_from_one_to_sixty_four_is_kept_to_two_decimals(client, signed_
 
 
 @pytest.mark.parametrize("kind, options, steps", [
-    ("convert", vo("mp4", 720), 0), ("convert", vo("webm"), 0), ("denoise", vo("mp4", 720), 100_000), ("denoise", vo("mkv"), 100_000),
-    ("denoise", {"automatic": True, **vo("webm")}, 100_000),
+    ("convert", vo("mp4", 720), 0), ("convert", vo("webm"), 0), ("denoise", vo("mp4", 720), standard(600)), ("denoise", vo("mkv"), standard(600)),
+    ("denoise", {"automatic": True, **vo("webm")}, standard(600)),
 ])
 def test_a_file_that_turns_out_to_have_no_picture_gets_a_black_one_and_the_video_costs_nothing(client, signed_in, monkeypatch, kind, options, steps):
     """A video ending that holds only sound: the probe says nothing is made again; whatever was held for the picture is let go, the cleaning
     (when asked for) is charged as usual."""
     uid, h = funded(signed_in)
-    stages = VideoStages(monkeypatch, duration=600.0, has_video=False, stats=measurement(strength="balanced", rebuild=False))
+    stages = VideoStages(monkeypatch, duration=600.0, has_video=False, stats=measurement(strength="balanced", rebuild=False, heavy=False))
     jid = start(client, h, kind=kind, seconds=600, filename="talk.mkv", **options)
     take()
     done = client.get(f"/api/jobs/{jid}", headers=h).json()
@@ -892,10 +898,10 @@ def test_the_finishing_step_of_a_picture_made_again_gets_the_time_it_needs(signe
 
 def test_the_conversion_stays_in_the_hold_and_the_charge_when_automatic_settings_decide(client, signed_in, monkeypatch, gpu_up):
     uid, h = funded(signed_in, 20_000_000)
-    stages = VideoStages(monkeypatch, duration=600.0, picture_encode=True, factor=4.0, stats=measurement(strength="gentle", rebuild=False))
+    stages = VideoStages(monkeypatch, duration=600.0, picture_encode=True, factor=4.0, stats=measurement(strength="gentle", rebuild=False, heavy=False))
     jid = start(client, h, kind="denoise", seconds=600, automatic=True, **vo("mp4", None, src("wmv2", 3840, 2160, 30)))
     before = held(uid)
-    assert before == 10 * (30_000 + LEVELING) + 240_000  # the most the decision could end in (a voice rebuild), and the picture at 4x
+    assert before == rebuilt(600) + 240_000  # the most the decision could end in (a voice rebuild), and the picture at 4x
     seen = {}
     real = stages.__call__
 
@@ -906,7 +912,7 @@ def test_the_conversion_stays_in_the_hold_and_the_charge_when_automatic_settings
 
     monkeypatch.setattr(worker, "run_stage", run)
     take()
-    after = 10 * (DENOISE + LEVELING) + 240_000  # Denoising + Leveling as decided, and the picture as it was
+    after = standard(600) + 240_000  # Denoising + Leveling as decided, and the picture as it was
     assert seen == {"held": after, "est": after} and after < before
     done = client.get(f"/api/jobs/{jid}", headers=h).json()
     assert done["status"] == "done" and done["costMicros"] == after and done["label"] == "Denoising + Leveling + Video conversion"
@@ -917,102 +923,16 @@ def test_apply_adds_the_conversion_to_what_it_holds(signed_in, gpu_up):
     uid, _ = funded(signed_in, 20_000_000)
     jid = make(uid, kind="denoise", seconds=600, options={"automatic": True, **vo("mp4", 720, src("wmv2", 3840, 2160, 30))})["id"]
     db.execute("UPDATE jobs SET status = 'running', duration_seconds = 600 WHERE id = ?", (jid,))
-    decision = automatic.decide(params_of(jid), measurement(strength="gentle", rebuild=False), 600.0, card_up=True)
+    decision = automatic.decide(params_of(jid), measurement(strength="gentle", rebuild=False, heavy=False), 600.0, card_up=True)
     params = automatic.apply(jid, decision, 600.0)
-    steps = 10 * (DENOISE + LEVELING)
+    steps = standard(600)
     assert row(jid)["est_cost_micros"] == steps + 120_000 == held(uid)
     assert params["picture_encode"] is True and params["convert_factor"] == 2.0
     # with the picture copied there is nothing to add
     other = make(uid, kind="denoise", seconds=600, options={"automatic": True, **vo("mkv", None, src("wmv2", 3840, 2160, 60))}, filename="b.wmv")["id"]
     db.execute("UPDATE jobs SET status = 'running', duration_seconds = 600 WHERE id = ?", (other,))
-    automatic.apply(other, automatic.decide(params_of(other), measurement(strength="gentle", rebuild=False), 600.0, card_up=True), 600.0)
+    automatic.apply(other, automatic.decide(params_of(other), measurement(strength="gentle", rebuild=False, heavy=False), 600.0, card_up=True), 600.0)
     assert row(other)["est_cost_micros"] == steps
-
-
-# ------------------------------------------------------------------------------------------------------ re-runs
-
-def test_a_re_run_makes_the_video_as_the_source_did_whatever_it_is_asked():
-    src = {"options": jobs.validate_options("denoise", "standard", None, vo("mkv", 480))}
-    merged = rerun.merged_options(src, {"atten_lim_db": 24, "video_out": {"format": "webm", "size": None}})
-    assert merged["video_out"] == {"format": "mkv", "size": 480} and merged["atten_lim_db"] == 24 and merged["automatic"] is False
-    none = {"options": jobs.validate_options("denoise", "standard", None, {})}
-    assert rerun.merged_options(none, {"video_out": {"format": "mp4", "size": 720}})["video_out"] is None  # (it cannot be added later)
-    assert rerun.merged_options(src, None)["video_out"] == {"format": "mkv", "size": 480}
-
-
-def test_a_re_run_through_the_api_keeps_the_source_s_video_out(client, signed_in):
-    uid, h = funded(signed_in)
-    src = make_done_job(uid, seconds=60.0, options=vo("mp4", 720))
-    ask = {"options": {"atten_lim_db": 24, "video_out": {"format": "webm", "size": None}}}  # (the video's choices are not for changing here)
-    e = client.post(f"/api/jobs/{src}/rerun/estimate", json=ask, headers=h)
-    assert e.status_code == 200, e.text
-    assert e.json()["options"]["video_out"] == {"format": "mp4", "size": 720}
-    made = client.post(f"/api/jobs/{src}/rerun", json=ask, headers=h)
-    assert made.status_code == 200, made.text
-    assert json.loads(row(made.json()["id"])["params_json"])["options"]["video_out"] == {"format": "mp4", "size": 720}
-    # a job made without one cannot get one by a re-run
-    plain = make_done_job(uid, seconds=60.0)
-    e = client.post(f"/api/jobs/{plain}/rerun/estimate", json={"options": {"atten_lim_db": 24, "video_out": {"format": "mp4", "size": 720}}}, headers=h)
-    assert e.status_code == 200 and e.json()["options"]["video_out"] is None
-
-
-
-def converted_source(uid, picture_encode, factor=1.0, options=None, rate=CONVERT, **kw):
-    """A finished Denoising job whose video was made in another type or size (what the worker stores after its probe)."""
-    jid = make_done_job(uid, seconds=60.0, options={**(options if options is not None else vo("mp4", 720)), "leveling": True}, **kw)
-    p = params_of(jid)
-    p.update(convert_rate=rate, picture_encode=picture_encode, convert_factor=factor)
-    db.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(p), jid))
-    return jid
-
-
-def test_a_re_run_carries_how_big_the_picture_was_and_pays_by_it_at_todays_rate():
-    new = {"video_out": {"format": "mp4", "size": 720}}
-    assert rerun.convert_of({"picture_encode": True, "convert_factor": 4.0}, new) == {"convert_rate": CONVERT, "picture_encode": True, "convert_factor": 4.0}
-    assert rerun.convert_of({"picture_encode": False, "convert_factor": 2.0}, new) == {"convert_rate": CONVERT, "picture_encode": False, "convert_factor": 2.0}
-    assert rerun.convert_of({"picture_encode": True}, new) == {"convert_rate": CONVERT, "picture_encode": True, "convert_factor": 1.0}  # (before the factor)
-    assert rerun.convert_of({}, new) == {"convert_rate": CONVERT, "picture_encode": None, "convert_factor": 1.0}
-    assert rerun.convert_of({"picture_encode": True, "convert_rate": 3_000}, new)["convert_rate"] == CONVERT  # (today's rate, not the old one)
-    assert rerun.convert_of({"picture_encode": True, "convert_factor": 4.0}, {"video_out": None}) == {} and rerun.convert_of({}, {}) == {}
-    assert jobs.convert_cost(rerun.convert_of({"picture_encode": True, "convert_factor": 4.0}, new), 60) == 24_000
-    assert jobs.convert_cost(rerun.convert_of({"picture_encode": False, "convert_factor": 4.0}, new), 60) == 0
-
-
-def test_the_estimate_and_the_hold_of_a_re_run_include_the_conversion_by_its_factor(client, signed_in):
-    uid, h = funded(signed_in)
-    src_id = converted_source(uid, True, 2.0)
-    body = {"options": {"atten_lim_db": 24, "video_out": {"format": "webm", "size": None}}}  # (the video's choices are not for changing here)
-    e = client.post(f"/api/jobs/{src_id}/rerun/estimate", json=body, headers=h)
-    assert e.status_code == 200, e.text
-    e = e.json()
-    assert e["estCostMicros"] == per(LEVELING, 60) + per(12_000, 60) == 13_000 and e["options"]["video_out"] == {"format": "mp4", "size": 720}
-    assert [line["item"] for line in e["lines"]] == ["leveling", "convert"] and e["lines"][-1] == conv_line(12_000, 2.0) and lines_add_up(e)
-    assert count("jobs") == 1 and held(uid) == 0
-    made = client.post(f"/api/jobs/{src_id}/rerun", json=body, headers=h)
-    assert made.status_code == 200, made.text
-    new = made.json()["id"]
-    assert made.json()["estCostMicros"] == e["estCostMicros"] == held(uid) == row(new)["est_cost_micros"]
-    p = params_of(new)
-    assert (p["convert_rate"], p["picture_encode"], p["convert_factor"]) == (CONVERT, True, 2.0)
-    assert jobs.label_of(row(new)["kind"], p).endswith(" + Video conversion") and broker.gpu_stages(row(new)) == ["encode"]
-
-
-def test_a_re_run_of_a_copied_picture_pays_nothing_for_it(client, signed_in):
-    uid, h = funded(signed_in)
-    src_id = converted_source(uid, False, 4.0, options=vo("mkv"))
-    e = client.post(f"/api/jobs/{src_id}/rerun/estimate", json={"options": {"atten_lim_db": 24}}, headers=h).json()
-    assert e["estCostMicros"] == per(LEVELING, 60) and e["options"]["video_out"] == {"format": "mkv", "size": None}
-    assert e["lines"][-1] == {**conv_line(0, 4.0), "copied": True} and lines_add_up(e)
-    new = client.post(f"/api/jobs/{src_id}/rerun", json={"options": {"atten_lim_db": 24}}, headers=h).json()["id"]
-    assert held(uid) == per(LEVELING, 60) and params_of(new)["picture_encode"] is False and params_of(new)["convert_factor"] == 4.0
-    assert not jobs.label_of(row(new)["kind"], params_of(new)).endswith("Video conversion")
-
-
-def test_a_re_run_of_a_job_without_a_video_out_has_no_conversion(client, signed_in):
-    uid, h = funded(signed_in)
-    src_id = make_done_job(uid, seconds=60.0)
-    e = client.post(f"/api/jobs/{src_id}/rerun/estimate", json={"options": {"atten_lim_db": 24, "video_out": {"format": "mp4", "size": 720}}}, headers=h).json()
-    assert e["options"]["video_out"] is None and e["estCostMicros"] == per(LEVELING, 60) and [x["item"] for x in e["lines"]] == ["leveling"]
 
 
 # ------------------------------------------------------------------------------------ the runner, with real files

@@ -1,7 +1,7 @@
 // Saving a finished job again, and the strength slider (the editor's inspector on a job's page):
 //  1. the same job saved again on our side through Save changes: the paid choices (a new strength with Leveling on, Leveling alone), the quote
 //     and the price on the button, `process` (paid, on the SAME job, with the shown price) or `export` (free), the new files come down by
-//     themselves, one line "Edited (…)" in the billing history and none for a free save; no new job and no re-run from the website;
+//     themselves, one line "Edited (…)" in the billing history and none for a free save; no new job;
 //  2. what a free save makes equals what the editor plays for the same choice: the exported file against (1 - a) * noise removal + a * recording,
 //     both read from the preview stretches the editor mixes (below -60 dB of difference);
 //  3. the continuous slider in the inspector: the names and dB it shows ("Between X and Y (N dB)", the range runs over the four names), the
@@ -11,8 +11,8 @@
 //     the browser, free, with no job (mono and stereo);
 //  5. Voice rebuild: a job whose Voice is rebuilt has no strength slider; with Voice rebuild on offer (the price list is made to offer it) it is a
 //     row below noise removal with its words and price; Voice Off with Leveling on its own is a paid job priced as Leveling alone;
-//  6. the kept copies of a job made through the API with no timeline (GET .../kept/noise|input, `redo.preview`, POST .../rerun): owner only,
-//     audio/flac, the size the job says, carried over to a re-run, gone with the job.
+//  6. a job made through the API with whole-file options is made with a timeline: the editor opens it on that timeline, another account and a
+//     signed-out call get nothing, Delete removes the job.
 // Needs the test backend (tests/run.sh redo) and the fixtures. Usage: node tests/redo.mjs
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -168,7 +168,7 @@ await check('setup: two paid Standard noise removal jobs (J1 with Leveling, J2 w
   J2 = await startJob({ leveling: false });
   if (J1 === J2) throw new Error('same job twice');
   const j = await jobOf(J2);
-  if (!j.edit?.available || !j.edit.hasTimeline || j.redo?.preview) throw new Error('a job made by the website: ' + JSON.stringify({ edit: j.edit, redo: j.redo }));
+  if (!j.edit?.available || !j.edit.hasTimeline) throw new Error('a job made by the website: ' + JSON.stringify(j.edit));
   return `${J1.slice(0, 8)}… (${first}, Start said ${STARTED[J1]}), ${J2.slice(0, 8)}… (${got.map((g) => g.name)}, Start said ${STARTED[J2]})`;
 });
 
@@ -205,9 +205,9 @@ await check('the page says what is going on while it saves (the line and the pro
   await waitDownloads(1);
   if (got.length !== 1 || !/\.flac$/.test(got[0].name)) throw new Error('downloaded by itself: ' + got.map((g) => g.name));
   const done = await jobOf(J1);
-  if (done.status !== 'done' || done.sourceJobId || !done.edit?.hasTimeline) throw new Error(JSON.stringify({ s: done.status, src: done.sourceJobId, e: done.edit }));
+  if (done.status !== 'done' || !done.edit?.hasTimeline) throw new Error(JSON.stringify({ s: done.status, e: done.edit }));
   if ((await listJobs(page)).jobs.length !== jobsBefore) throw new Error('a new job appeared');
-  if (countBy(/rerun$/) || countBy(/^POST \/api\/jobs$/) !== 2) throw new Error('a re-run or a new job was asked for');
+  if (countBy(/^POST \/api\/jobs$/) !== 2) throw new Error('a new job was asked for');
   await openJob(J1);
   if (await page.getByTestId('submitted').count()) throw new Error('the note comes back after a reload');
   if ((await studio(page).getAttribute('data-changed')) !== 'no' || (await page.getByTestId('strength-name').innerText()) !== 'Strong (40 dB)') throw new Error(`after a reload: changed ${await studio(page).getAttribute('data-changed')}, strength ${await page.getByTestId('strength-name').innerText()}`);
@@ -234,7 +234,7 @@ await check('Leveling switched off with another strength is free on our side: th
   if (got.length !== 1 || !/^noisy.*\.flac$/.test(got[0].name)) throw new Error('downloaded: ' + got.map((g) => g.name));
   await got[0].download.saveAs(join(FILES, `redo-${TAG}-j1-balanced.flac`));
   if (page.url() !== url) throw new Error('the page moved to ' + page.url());
-  if (countBy(/process$/) !== processes || countBy(/export$/) !== exports + 1 || countBy(/rerun$/)) throw new Error('requests: a process or a re-run was asked for');
+  if (countBy(/process$/) !== processes || countBy(/export$/) !== exports + 1) throw new Error('requests: a process was asked for');
   if ((await listJobs(page)).jobs.length !== jobsBefore) throw new Error('a job was created');
   const j = await jobOf(J1);
   if (j.status !== 'done') throw new Error('the job changed');
@@ -433,7 +433,7 @@ await check('slider on our side, Save changes (Leveling off): a file at that str
   if (got.length !== 1) throw new Error('downloads: ' + got.map((g) => g.name));
   const p = join(FILES, `redo-${TAG}-j1-gentle.flac`);
   await got[0].download.saveAs(p);
-  if (countBy(/export$/) !== exports + 1 || countBy(/rerun$/) || (await listJobs(page)).jobs.length !== jobsBefore) throw new Error('a job or a re-run was requested');
+  if (countBy(/export$/) !== exports + 1 || (await listJobs(page)).jobs.length !== jobsBefore) throw new Error('a job was requested');
   const balanced = rms(decode(join(FILES, `redo-${TAG}-j1-balanced.flac`), 1));
   const gentle = rms(decode(p, 1));
   if (!(gentle > balanced)) throw new Error(`Gentle ${gentle.toFixed(5)} is not above Balanced ${balanced.toFixed(5)}`);
@@ -485,7 +485,7 @@ for (const [file, channels, label] of [['noisy.wav', 1, 'mono'], ['noisy24st.wav
     await page.waitForFunction((x) => Number(document.querySelector('[data-testid=studio]')?.getAttribute('data-rms')) > x, maxRms, { timeout: 15000 });
     const gentleRms = await dataRms();
     if ((await resultAttr(page, 'strength-db')) !== '12.00') throw new Error('data-strength-db after Gentle ' + await resultAttr(page, 'strength-db'));
-    const sent = requests.slice(req0).filter((r) => /rerun|^POST \/api\/jobs|process$|export$|quote$/.test(r));
+    const sent = requests.slice(req0).filter((r) => /^POST \/api\/jobs|process$|export$|quote$/.test(r));
     if (sent.length) throw new Error('requests: ' + sent.join(', '));
     if ((await listJobs(page)).jobs.length !== jobs0) throw new Error('a job was created');
     const fileMax = rms(decode(maxFile, channels));
@@ -593,79 +593,50 @@ await check('Voice Off, Leveling on its own: a paid job whose timeline is Leveli
   return `${start}; ${j.costMicros} micros = Leveling alone (${lv}); ${mine}`;
 });
 
-// ---------------------------------------------------------------------------------------------------- 6. the kept copies (API jobs with no timeline)
+// ---------------------------------------------------------------------------------------------------- 6. a job made through the API
 
-let K1;
-let apiRerun = null;
-await check('setup: a job made through the API with no timeline (Denoising, Leveling off) keeps both copies; a re-run through the API starts from them for nothing and carries them over', async () => {
+await check('a job made through the API with whole-file options (Denoising at Max, Leveling off) is made with a timeline: the editor opens it on that timeline; another account gets 404, signed out 401; Delete removes it', async () => {
   const file = join(FILES, 'noisy.wav');
   const made = await apiCall(page, 'POST', 'jobs', {
-    kind: 'denoise', denoiseTier: 'standard', filename: 'kept.wav', sizeBytes: statSync(file).size, durationSeconds: 10.6,
+    kind: 'denoise', denoiseTier: 'standard', filename: 'api.wav', sizeBytes: statSync(file).size, durationSeconds: 10.6,
     options: { noise: 'light', leveling: false, atten_lim_db: 100, output_video: false, audio_format: 'flac' },
   });
   if (made.status !== 200) throw new Error(`create ${made.status} ${JSON.stringify(made.body)}`);
-  K1 = made.body.id;
+  const id = made.body.id;
   const csrf = (await (await context.request.get(`${BASE}/api/me`)).json()).csrfToken;
-  const put = await context.request.put(`${BASE}/api/jobs/${K1}/input`, { data: readFileSync(file), headers: { 'X-CSRF-Token': csrf, 'Content-Type': 'application/octet-stream' }, timeout: 120000 });
+  const put = await context.request.put(`${BASE}/api/jobs/${id}/input`, { data: readFileSync(file), headers: { 'X-CSRF-Token': csrf, 'Content-Type': 'application/octet-stream' }, timeout: 120000 });
   if (!put.ok()) throw new Error(`upload ${put.status()} ${await put.text()}`);
-  const done = await waitJobDone(page, K1, { timeout: 240000 });
-  if (done.status !== 'done' || !done.redo?.available || !done.redo.noise || !done.redo.preview) throw new Error('the job: ' + JSON.stringify({ s: done.status, redo: done.redo }));
-  const r = await apiCall(page, 'POST', `jobs/${K1}/rerun`, { options: { atten_lim_db: 40 } });
-  if (r.status !== 200 || !r.body.free) throw new Error(`re-run ${r.status} ${JSON.stringify(r.body)}`);
-  apiRerun = r.body.id;
-  const again = await waitJobDone(page, apiRerun, { timeout: 240000 });
-  if (again.status !== 'done' || again.costMicros !== 0 || again.options.atten_lim_db !== 40 || again.sourceJobId !== K1) throw new Error(`re-run: ${again.status} cost ${again.costMicros} atten ${again.options.atten_lim_db} source ${again.sourceJobId}`);
-  if (!again.redo?.preview) throw new Error('the re-run has no kept copies: ' + JSON.stringify(again.redo));
-  return `${K1.slice(0, 8)}… and its free re-run ${apiRerun.slice(0, 8)}…, copies carried over`;
-});
-
-await check('kept copies: GET /api/jobs/<id>/kept/noise and /input are audio/flac for the owner (the size the job says), 404 for another account, 404 for anything else, 401 signed out; the job\'s redo block has the preview; the editor opens the job and plays it from the preview stretches', async () => {
-  const j = await jobOf(K1);
-  const redo = j.redo;
-  if (!redo?.available || !redo.noise || !redo.preview) throw new Error('redo: ' + JSON.stringify(redo));
-  const p = redo.preview;
-  if (!(p.samples > 400000) || !Array.isArray(p.channels) || !Array.isArray(p.plan) || !(p.scale?.noise > 0) || !(p.scale?.input > 0) || !(p.bytes?.noise > 1000) || !(p.bytes?.input > 1000)) throw new Error('preview: ' + JSON.stringify(p));
-  const seen = [];
-  for (const which of ['noise', 'input']) {
-    const res = await context.request.get(`${BASE}/api/jobs/${K1}/kept/${which}`);
-    if (res.status() !== 200 || !/^audio\/flac/.test(res.headers()['content-type'] || '')) throw new Error(`${which}: ${res.status()} ${res.headers()['content-type']}`);
-    const body = await res.body();
-    if (body.length !== p.bytes[which] || body.subarray(0, 4).toString('latin1') !== 'fLaC') throw new Error(`${which}: ${body.length} bytes (the job says ${p.bytes[which]}), starts ${body.subarray(0, 4).toString('latin1')}`);
-    if (!/no-store/.test(res.headers()['cache-control'] || '')) throw new Error('cacheable: ' + res.headers()['cache-control']);
-    seen.push(`${which} ${body.length} B`);
-  }
-  if ((await context.request.get(`${BASE}/api/jobs/${K1}/kept/other`)).status() !== 404) throw new Error('an unknown copy name is not a 404');
-  // another account
+  const done = await waitJobDone(page, id, { timeout: 240000 });
+  if (done.status !== 'done' || !done.edit?.available || !done.edit.hasTimeline || 'redo' in done || 'sourceJobId' in done) throw new Error('the job: ' + JSON.stringify({ s: done.status, edit: done.edit, redo: done.redo, src: done.sourceJobId }));
+  // the website opens such a job in the editor: its timeline is what the options stand for
+  await openJob(id);
+  if ((await say('voice')) !== 'Max 0:00–0:11' || (await say('level')) !== 'Off 0:00–0:11') throw new Error(`${await say('voice')} / ${await say('level')}`);
+  // the kept copies of the old way are gone
+  for (const which of ['noise', 'input']) if ((await context.request.get(`${BASE}/api/jobs/${id}/kept/${which}`)).status() !== 404) throw new Error(`/kept/${which} is still served`);
   const other = await browser.newContext();
   const op = await other.newPage();
   try {
     await signIn(op, `redo-other-${Date.now()}@example.com`);
-    for (const which of ['noise', 'input']) {
-      const res = await other.request.get(`${BASE}/api/jobs/${K1}/kept/${which}`);
-      if (res.status() !== 404) throw new Error(`another account got ${res.status()} for ${which}`);
-    }
-    const info = await other.request.get(`${BASE}/api/jobs/${K1}`);
+    const info = await other.request.get(`${BASE}/api/jobs/${id}`);
     if (info.status() !== 404) throw new Error('another account can read the job: ' + info.status());
+    const del = await other.request.delete(`${BASE}/api/jobs/${id}`, { headers: { 'X-CSRF-Token': (await (await other.request.get(`${BASE}/api/me`)).json()).csrfToken } });
+    if (del.status() !== 404) throw new Error('another account can delete the job: ' + del.status());
   } finally {
     await other.close();
   }
   const anon = await browser.newContext();
   try {
-    const res = await anon.request.get(`${BASE}/api/jobs/${K1}/kept/noise`);
+    const res = await anon.request.get(`${BASE}/api/jobs/${id}`);
     if (res.status() !== 401) throw new Error('signed out: ' + res.status());
   } finally {
     await anon.close();
   }
-  // the website opens such a job in the editor (its timeline is what it was made with) and plays it from the preview stretches, not from these copies
-  const keptBefore = requests.filter((r) => /\/kept\//.test(r)).length;
-  await openJob(K1);
-  if ((await say('voice')) !== 'Max 0:00–0:11' || (await say('level')) !== 'Off 0:00–0:11') throw new Error(`${await say('voice')} / ${await say('level')}`);
-  if (requests.filter((r) => /\/kept\//.test(r)).length !== keptBefore) throw new Error('the editor asked for the kept copies');
-  // and not once the job is deleted
-  const del = await apiCall(page, 'DELETE', `jobs/${apiRerun}`);
+  const del = await apiCall(page, 'DELETE', `jobs/${id}`);
   if (del.status !== 200) throw new Error('delete ' + del.status);
-  if ((await context.request.get(`${BASE}/api/jobs/${apiRerun}/kept/noise`)).status() !== 404) throw new Error('a deleted job still serves its copies');
-  return `${seen.join(', ')}; ${p.samples} samples, ${p.channels.length} ch, scale ${p.scale.noise.toFixed(3)}/${p.scale.input.toFixed(3)}; 404 after Delete`;
+  const gone = await apiCall(page, 'GET', `jobs/${id}`); // (the job stays in the list as expired; its files are gone)
+  if (gone.status !== 200 || gone.body.status !== 'expired' || (gone.body.outputs || []).length) throw new Error('a deleted job: ' + JSON.stringify({ s: gone.status, st: gone.body?.status, o: gone.body?.outputs }));
+  if ((await context.request.get(`${BASE}/api/jobs/${id}/outputs/api-cleaned.flac`)).status() !== 404) throw new Error('a deleted job still serves its result');
+  return `${id.slice(0, 8)}… opens on its timeline (Max, Leveling off); 404 for another account, 401 signed out, expired with no files after Delete`;
 });
 
 for (const f of readdirSync(FILES)) if (f.startsWith(`redo-${TAG}-`)) rmSync(join(FILES, f), { force: true }); // the files this run saved

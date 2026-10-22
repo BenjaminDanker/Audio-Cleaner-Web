@@ -4,8 +4,9 @@ website's "Automatic best settings", with the one shared function (acw_common/re
 The measurement is stubbed here (the runner's `analyse` stage returns stored sets of measurements, real ones from the website's
 code, whose decisions are known), so every branch of the decision is reached without models: what is held for the maximum, the
 hold shrinking to what was decided, the charge being what ran, the voice rebuild going to the card or falling back to Denoising
-and saying why, explicit fields winning, the API key's ownership and spending cap, and a re-run of the decided job. One test (native
-pieces needed) runs the real sandboxed stage on a real file."""
+and saying why, explicit fields winning, the API key's ownership and spending cap, and the decided job being a job made with the timeline
+the settings stand for (priced, held and charged like any other: each step's fixed amount of a run included). One test (native pieces
+needed) runs the real sandboxed stage on a real file."""
 from __future__ import annotations
 
 import json
@@ -14,19 +15,18 @@ from pathlib import Path
 
 import pytest
 
-from acw import automatic, broker, db, jobs, rerun
+from acw import automatic, broker, db, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw_common import reco_model
 
-from .rerun_support import api_key, count, files_of, kept_record, other_browser, params_of, roomy_disk, row  # noqa: F401 - fixtures
+from .job_support import api_key, count, files_of, other_browser, params_of, rebuilt, roomy_disk, row, standard, step  # noqa: F401 - fixtures
 from .test_job_echo import NATIVE
 from .test_job_pipeline import HOME, SAMPLE, _run_worker_once
 
 pytestmark = pytest.mark.usefixtures("roomy_disk")
 
 FIXTURE = json.loads((Path(__file__).resolve().parents[2] / "common" / "tests" / "fixtures" / "reco_model_js.json").read_text())
-DENOISE, LEVELING, REBUILD = 9_000, 1_000, 30_000  # micros per minute
 
 
 def per(micros_per_minute, seconds):
@@ -70,7 +70,7 @@ def start(client, h, uid=None, **kw) -> str:
 
 class Stages:
     """The sandboxed runner's stages, replaced: a probe that reports `duration`, a measurement that reports `stats`, and a main
-    stage that writes the result (and the copies a later change starts from). `calls` records (stage, spec, worker) in order."""
+    stage that writes the result. `calls` records (stage, spec, worker) in order."""
 
     def __init__(self, monkeypatch, stats, duration=60.0, channels=1):
         self.stats, self.duration, self.channels, self.calls = stats, duration, channels, []
@@ -86,12 +86,7 @@ class Stages:
         assert stage == "main"
         name = f"{spec['output_stem']}-cleaned.flac"
         (d / name).write_bytes(b"cleaned")
-        kept = {}
-        if spec["denoise_tier"] == "standard":
-            for f in ("kept-noise.flac", "kept-input.flac"):
-                (d / f).write_bytes(b"kept")
-            kept = kept_record(self.duration, channels=self.channels, profile=spec["options"]["noise"], noise_opt=spec["options"]["noise"])
-        return {"ok": True, "outputs": [{"file": name, "kind": "audio"}], "kept": kept, "notice": None, "noise": spec["options"]["noise"]}
+        return {"ok": True, "outputs": [{"file": name, "kind": "audio"}], "notice": None}
 
     @property
     def stages(self):
@@ -169,18 +164,19 @@ def test_what_the_request_gives_itself_is_what_wins():
 def test_the_estimate_is_the_most_the_decision_can_cost_and_says_so(client, signed_in):
     _, h = signed_in
     e = estimate(client, h, 600)
-    standard = 10 * (DENOISE + LEVELING)
-    rebuild = 10 * (REBUILD + LEVELING)  # the dearer outcome: the voice rebuilt, with Leveling
-    assert rebuild > standard
+    cheap = standard(600)
+    rebuild = rebuilt(600)  # the dearer outcome: the voice rebuilt, with Leveling
+    assert rebuild > cheap
     assert e["estCostMicros"] == rebuild == sum(x["micros"] for x in e["lines"]) and e["maximum"] is True
-    assert [x["item"] for x in e["lines"]] == ["denoise", "leveling"] and e["lines"][0]["label"] == "Voice rebuild" and e["fixed"] == []
+    assert [x["item"] for x in e["lines"]] == ["rebuild", "leveling"] and e["lines"][0]["label"] == "Voice rebuild" and e["fixed"] == []
+    assert [x["micros"] for x in e["lines"]] == [step("rebuild", 600), step("leveling", 600)]  # (the timeline's steps, each with its fixed amount of a run)
     assert e["outcomes"] == [
-        {"label": "Denoising + Leveling", "denoiseTier": "standard", "estCostMicros": standard},
+        {"label": "Denoising + Leveling", "denoiseTier": "standard", "estCostMicros": cheap},
         {"label": "Voice rebuild + Leveling", "denoiseTier": "rebuild", "estCostMicros": rebuild}]
     assert e["maxSeconds"] == 4 * 3600 and e["options"]["automatic"] is True
     # an ordinary estimate says nothing of this
     plain = client.post("/api/jobs/estimate", json={"kind": "denoise", "denoiseTier": "standard", "durationSeconds": 600}, headers=h).json()
-    assert plain["estCostMicros"] == standard and "maximum" not in plain
+    assert plain["estCostMicros"] == cheap and "maximum" not in plain
 
 
 def test_the_maximum_is_the_dearest_outcome_that_is_possible(client, signed_in):
@@ -188,30 +184,30 @@ def test_the_maximum_is_the_dearest_outcome_that_is_possible(client, signed_in):
     file over 90 minutes: no rebuild outcome."""
     _, h = signed_in
     e = estimate(client, h, 600, atten_lim_db=24)
-    assert [o["denoiseTier"] for o in e["outcomes"]] == ["standard"] and e["estCostMicros"] == 10 * (DENOISE + LEVELING)
+    assert [o["denoiseTier"] for o in e["outcomes"]] == ["standard"] and e["estCostMicros"] == standard(600)
     assert e["fixed"] == ["atten_lim_db"] and e["lines"][0]["label"] == "Denoising"
     e = estimate(client, h, 600, noise="heavy")
     assert [o["denoiseTier"] for o in e["outcomes"]] == ["standard"] and e["fixed"] == ["noise"]
     e = estimate(client, h, 600, leveling=False)
-    assert e["estCostMicros"] == 10 * REBUILD and [x["item"] for x in e["lines"]] == ["denoise"] and e["fixed"] == ["leveling"]
-    assert [o["estCostMicros"] for o in e["outcomes"]] == [10 * DENOISE, 10 * REBUILD]
+    assert e["estCostMicros"] == step("rebuild", 600) and [x["item"] for x in e["lines"]] == ["rebuild"] and e["fixed"] == ["leveling"]
+    assert [o["estCostMicros"] for o in e["outcomes"]] == [step("light", 600), step("rebuild", 600)]
     e = estimate(client, h, 600, noise="light", leveling=False)
-    assert e["estCostMicros"] == 10 * DENOISE and e["outcomes"] == [{"label": "Denoising", "denoiseTier": "standard", "estCostMicros": 10 * DENOISE}]
+    assert e["estCostMicros"] == step("light", 600) and e["outcomes"] == [{"label": "Denoising", "denoiseTier": "standard", "estCostMicros": step("light", 600)}]
     long = estimate(client, h, 91 * 60)  # too long to rebuild: only Denoising is possible
-    assert [o["denoiseTier"] for o in long["outcomes"]] == ["standard"] and long["estCostMicros"] == per(DENOISE + LEVELING, 91 * 60)
+    assert [o["denoiseTier"] for o in long["outcomes"]] == ["standard"] and long["estCostMicros"] == standard(91 * 60)
     edge = estimate(client, h, 90 * 60)  # exactly 90 minutes can still be rebuilt
-    assert [o["denoiseTier"] for o in edge["outcomes"]] == ["standard", "rebuild"] and edge["estCostMicros"] == per(REBUILD + LEVELING, 90 * 60)
+    assert [o["denoiseTier"] for o in edge["outcomes"]] == ["standard", "rebuild"] and edge["estCostMicros"] == rebuilt(90 * 60)
     # an old client's restore_highs is an unknown option: nothing changes
-    assert estimate(client, h, 600, restore_highs=True)["estCostMicros"] == 10 * (REBUILD + LEVELING)
+    assert estimate(client, h, 600, restore_highs=True)["estCostMicros"] == rebuilt(600)
 
 
 def test_subtitles_and_translations_are_part_of_every_outcome(client, signed_in):
     _, h = signed_in
     e = estimate(client, h, 600, kind="denoise_transcribe", transcribe="local", language="en", translate=["es"])
-    extra = 10 * 4_000 + 10 * 4_000
-    assert [x["item"] for x in e["lines"]] == ["denoise", "leveling", "transcribe", "translate"]
-    assert e["estCostMicros"] == 10 * (REBUILD + LEVELING) + extra
-    assert [o["estCostMicros"] for o in e["outcomes"]] == [10 * (DENOISE + LEVELING) + extra, e["estCostMicros"]]
+    extra = 10 * 4_000 + 10 * 4_000  # the subtitles are one part over the whole file: Standard transcription and one translation
+    assert [x["item"] for x in e["lines"]] == ["rebuild", "leveling", "transcribe", "translate"]
+    assert e["estCostMicros"] == rebuilt(600) + extra
+    assert [o["estCostMicros"] for o in e["outcomes"]] == [standard(600) + extra, e["estCostMicros"]]
 
 
 def test_the_hold_is_the_estimate_and_the_job_says_it_is_a_maximum(client, signed_in):
@@ -268,41 +264,48 @@ def _case_measurement(want):
 
 
 @pytest.mark.parametrize(("want", "tier"), CASES)
-def test_the_job_becomes_the_job_the_model_decided(client, signed_in, monkeypatch, gpu_up, as_card, want, tier):
-    """probe -> measure -> decide -> main: the main stage gets the decided tier and options, the job reports what was chosen and why,
-    and is charged for exactly what ran."""
+def test_the_job_becomes_the_job_the_model_decided(client, signed_in, monkeypatch, gpu_up, want, tier):
+    """probe -> measure -> decide -> main: the main stage gets the timeline the decided settings stand for, the job reports what was
+    chosen and why, and is charged for exactly what ran. Any worker measures and decides it; a decided rebuild goes on the card."""
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     stats = _case_measurement(want)
     stages = Stages(monkeypatch, stats)
     jid = start(client, h)
-    assert held(uid) == per(REBUILD + LEVELING, 60)  # the maximum (the voice rebuilt, with Leveling), until it is decided
-    take("gpu:t")
+    assert held(uid) == rebuilt(60)  # the maximum (the voice rebuilt, with Leveling), until it is decided
+    take("cpu:t")  # (the card does not take a job that is not decided yet)
+    if tier == "rebuild":
+        assert row(jid)["status"] == "queued" and row(jid)["next_stage"] == "main" and stages.stages == ["probe", "analyse"]
+        monkeypatch.setattr(worker, "GPU_MODE", True)  # the rebuild runs on the card only
+        take("gpu:t")
     done = client.get(f"/api/jobs/{jid}").json()
     assert done["status"] == "done" and stages.stages == ["probe", "analyse", "main"]
     rec = reco_model.recommend(stats, min_seconds=0.0)
     chosen = done["chosen"]
-    assert done["denoiseTier"] == tier == chosen["denoiseTier"] and "maximum" not in done
+    assert tier == chosen["denoiseTier"] and "maximum" not in done
     assert chosen["rebuild"] is (tier == "rebuild") and chosen["rebuildWanted"] is rec.rebuild and chosen["leveling"] is True
     assert chosen["reasons"] and all(isinstance(r, str) for r in chosen["reasons"]) and chosen["fixed"] == []
     main = stages.spec("main")
-    assert main["denoise_tier"] == tier and main["options"]["automatic"] is True
+    assert main["editor"]["timeline"] == params_of(jid)["edit"]["timeline"] and main["editor"]["op"] == "first"
     if tier == "standard":
         assert (chosen["strength"], chosen["attenLimDb"]) == (rec.strength, reco_model.STRENGTH_DB[rec.strength])
         assert (chosen["noise"], chosen["heavy"]) == (("heavy", True) if rec.heavy_remover else ("light", False))
-        assert (main["options"]["atten_lim_db"], main["options"]["noise"]) == (chosen["attenLimDb"], chosen["noise"])
         assert "restore_highs" not in main["options"] and "restoreHighs" not in chosen
-        assert done["options"]["atten_lim_db"] == chosen["attenLimDb"] and done["options"]["noise"] == chosen["noise"]
-        expect_label, rates = "Denoising + Leveling", {"denoise": DENOISE, "leveling": LEVELING}
+        expect_label, cost = "Denoising + Leveling", standard(60, chosen["noise"])
     else:
         assert (chosen["strength"], chosen["attenLimDb"], chosen["noise"], chosen["heavy"]) == (None, None, None, False)
-        expect_label, rates = "Voice rebuild + Leveling", {"denoise": REBUILD, "leveling": LEVELING}
+        expect_label, cost = "Voice rebuild + Leveling", rebuilt(60)
         assert any("Rebuilding the voice fixes this" in r for r in chosen["reasons"])
-    assert done["label"] == expect_label and params_of(jid)["rates"] == rates
+    assert done["label"] == expect_label and params_of(jid)["rates"] == {}
+    # the job is made with the timeline the decided settings stand for: every step on the whole file
+    layers = params_of(jid)["edit"]["timeline"]["layers"]
+    assert [p["loudness_lufs"] for p in layers["leveling"]] == [-16.0]
+    if tier == "standard":
+        assert "rebuild" not in layers and [(p["strength_db"], p["remover"]) for p in layers["noise"]] == [(chosen["attenLimDb"], chosen["noise"])]
+    else:
+        assert "noise" not in layers and [(p["start"], p["end"]) for p in layers["rebuild"]] == [(0.0, 60.0)]
     # charged for what ran, which is also the ledger line and what the account was left with
-    seconds = row(jid)["duration_seconds"]
-    cost = pricing.job_cost_micros("denoise", tier, None, seconds, rates, 0, True)
-    assert done["costMicros"] == cost and cost == sum(per(v, seconds) for v in rates.values())
+    assert done["costMicros"] == cost
     line = db.one("SELECT * FROM ledger WHERE ref_id = ?", (jid,))
     assert (-line["amount_micros"], line["description"]) == (cost, f"{expect_label}: talk.wav (1.0 min)")
     assert held(uid) == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000 - cost
@@ -312,10 +315,10 @@ def test_the_hold_shrinks_to_the_decision_when_it_is_made(client, signed_in, mon
     """The cheapest outcome frees the rest of the held money at once, before the main stage runs."""
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    stats = measurement(strength="gentle", rebuild=False)
+    stats = measurement(strength="gentle", rebuild=False, heavy=False)
     jid = start(client, h, seconds=600)
     before = db.one("SELECT * FROM holds WHERE ref_id = ?", (jid,))["amount_micros"]
-    assert before == held(uid) == 10 * (REBUILD + LEVELING) == row(jid)["est_cost_micros"]
+    assert before == held(uid) == rebuilt(600) == row(jid)["est_cost_micros"]
     seen = {}
 
     def run(job, d, stage, timeout):
@@ -329,7 +332,7 @@ def test_the_hold_shrinks_to_the_decision_when_it_is_made(client, signed_in, mon
     monkeypatch.setattr(worker, "run_stage", run)
     monkeypatch.setattr(worker, "_complete", lambda *a, **k: None)
     take()
-    after = 10 * (DENOISE + LEVELING)
+    after = standard(600)
     assert seen == {"held": after, "est": after, "hold": after, "tier": "standard"} and after < before
     shown = client.get(f"/api/jobs/{jid}").json()
     assert shown["estCostMicros"] == after and "maximum" not in shown and shown["chosen"]["denoiseTier"] == "standard"
@@ -339,19 +342,18 @@ def test_a_file_longer_than_it_was_said_to_be_is_held_for_its_real_length(client
     """The probe measures the real length first: the hold grows to the maximum for it (as for any job) before the decision."""
     uid, h = signed_in
     ledger.credit(uid, 20_000_000, "grant", "t", "g")
-    stats = measurement(strength="balanced", rebuild=False)
+    stats = measurement(strength="balanced", rebuild=False, heavy=False)
     stages = Stages(monkeypatch, stats, duration=300.0)
     jid = start(client, h, seconds=60)
-    assert held(uid) == per(REBUILD + LEVELING, 60)
+    assert held(uid) == rebuilt(60)
     seen = []
     real = worker._reprice
     monkeypatch.setattr(worker, "_reprice", lambda job, duration: real(job, duration) or seen.append((duration, held(uid))))
     take()
     done = client.get(f"/api/jobs/{jid}").json()
     assert done["status"] == "done" and done["durationSeconds"] == 300.0
-    assert seen == [(300.0, per(REBUILD + LEVELING, 300))]  # held for the maximum at the real length, before the decision
-    seconds = 300
-    assert done["costMicros"] == per(DENOISE, seconds) + per(LEVELING, seconds)
+    assert seen == [(300.0, rebuilt(300))]  # held for the maximum at the real length, before the decision
+    assert done["costMicros"] == standard(300)
     assert held(uid) == 0
 
 
@@ -367,31 +369,33 @@ def test_a_rebuild_decided_on_a_cpu_worker_goes_to_the_card_and_keeps_its_place(
     take("cpu:1")  # a CPU worker: probes, measures, decides on a rebuild, and gives the job up
     mid = row(jid)
     assert stages.stages == ["probe", "analyse"] and mid["status"] == "queued" and mid["worker_id"] is None
-    assert (mid["next_stage"], mid["queued_at"], mid["attempts"], mid["tier"]) == ("main", queued_at, 0, "rebuild")
+    assert (mid["next_stage"], mid["queued_at"], mid["attempts"]) == ("main", queued_at, 0)
     shown = client.get(f"/api/jobs/{jid}").json()
-    assert shown["chosen"]["rebuild"] is True and shown["denoiseTier"] == "rebuild" and shown["label"] == "Voice rebuild + Leveling"
+    assert shown["chosen"]["rebuild"] is True and shown["chosen"]["denoiseTier"] == "rebuild" and shown["label"] == "Voice rebuild + Leveling"
     assert shown["queuePosition"] == 1
-    assert mid["est_cost_micros"] == per(REBUILD + LEVELING, 60) and held(uid) == mid["est_cost_micros"]  # held for what will be charged
+    assert mid["est_cost_micros"] == rebuilt(60) and held(uid) == mid["est_cost_micros"]  # held for what will be charged
     assert files_of(jid) == {"input.wav"}  # scratch files are gone
     # the CPU workers leave it alone: it is a voice rebuild now (the card runs those only)
     assert worker.claim("cpu:2") is None
     monkeypatch.setattr(worker, "GPU_MODE", True)  # now the card's worker comes for it
     take("gpu:1")
     assert stages.stages == ["probe", "analyse", "main"]  # the card's worker goes straight on: no second probe, no second measurement
-    assert stages.calls[-1][1]["denoise_tier"] == "rebuild"
+    assert "rebuild" in stages.calls[-1][1]["editor"]["timeline"]["layers"]  # (the timeline the decision became)
     done = client.get(f"/api/jobs/{jid}").json()
-    assert done["status"] == "done" and done["costMicros"] == per(REBUILD, 60) + per(LEVELING, 60)
+    assert done["status"] == "done" and done["costMicros"] == rebuilt(60)
     assert held(uid) == 0
 
 
-def test_a_rebuild_decided_on_the_card_goes_straight_on(client, signed_in, monkeypatch, gpu_up, as_card):
+def test_the_card_does_not_take_a_job_that_is_not_decided_yet(client, signed_in, monkeypatch, gpu_up):
+    """Any worker measures an automatic job first (the card only runs what is decided as a rebuild)."""
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    stages = Stages(monkeypatch, _case_measurement({"rebuild": True, "reason": "phone"}))
     jid = start(client, h)
-    take("gpu:1")
-    assert stages.stages == ["probe", "analyse", "main"] and row(jid)["status"] == "done"
-    assert client.get(f"/api/jobs/{jid}").json()["chosen"]["rebuild"] is True
+    assert broker.gpu_stages(dict(row(jid))) == [] and broker.gpu_only(dict(row(jid))) is False
+    monkeypatch.setattr(worker, "GPU_MODE", True)
+    assert worker.claim("gpu:1") is None and row(jid)["status"] == "queued"
+    monkeypatch.setattr(worker, "GPU_MODE", False)
+    assert worker.claim("cpu:1")["id"] == jid
 
 
 @pytest.mark.parametrize("why", ["too long", "card down", "own denoising", "echo"])
@@ -426,8 +430,8 @@ def test_where_a_rebuild_is_wanted_but_cannot_be_done_it_is_denoised_and_says_so
     assert done["notice"] and blocker in done["notice"] and "cleaned with Denoising instead" in done["notice"]
     if why != "own denoising":
         assert chosen["strength"] == rec.strength and chosen["attenLimDb"] == reco_model.STRENGTH_DB[rec.strength]  # the model's call
-    main = stages.spec("main")
-    assert main["denoise_tier"] == "standard" and main["options"]["atten_lim_db"] == chosen["attenLimDb"]
+    layers = stages.spec("main")["editor"]["timeline"]["layers"]
+    assert "rebuild" not in layers and [p["strength_db"] for p in layers["noise"]] == [chosen["attenLimDb"]]
     assert done["label"].startswith("Denoising") and done["costMicros"] > 0
     assert held(uid) == 0
 
@@ -438,7 +442,7 @@ def test_the_card_coming_up_between_creating_and_deciding_is_enough(client, sign
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     broker.mark_gpu_worker("stopped")
     jid = start(client, h)  # Denoising + Leveling would be 10,000 a minute; the rebuild is dearer, and the card may come up
-    assert row(jid)["est_cost_micros"] == per(REBUILD + LEVELING, 60) == held(uid)
+    assert row(jid)["est_cost_micros"] == rebuilt(60) == held(uid)
     broker.mark_gpu_worker("alive")
     stages = Stages(monkeypatch, _case_measurement({"rebuild": True, "reason": "muffled"}))
     take("cpu:1")
@@ -459,9 +463,9 @@ def test_explicit_fields_win_over_the_decision_and_are_reported(client, signed_i
     assert (chosen["attenLimDb"], chosen["strength"], chosen["noise"], chosen["heavy"], chosen["leveling"]) == (24, "balanced", "light", False, False)
     assert chosen["fixed"] == ["atten_lim_db", "noise", "leveling"]
     assert chosen["reasons"][-1] == "You chose the noise strength, the noise type and Leveling yourself, so your choices are used."
-    main = stages.spec("main")["options"]
-    assert (main["atten_lim_db"], main["noise"], main["leveling"]) == (24, "light", False)
-    assert done["label"] == "Denoising" and done["costMicros"] == per(DENOISE, 60)  # only what was left on: nothing is added
+    layers = stages.spec("main")["editor"]["timeline"]["layers"]
+    assert [(p["strength_db"], p["remover"]) for p in layers["noise"]] == [(24, "light")] and "leveling" not in layers
+    assert done["label"] == "Denoising" and done["costMicros"] == step("light", 60)  # only what was left on: nothing is added
     # a strength that is not one of the four has no name
     other = start(client, h, atten_lim_db=30)
     take()
@@ -478,8 +482,8 @@ def test_a_field_that_is_not_fixed_is_still_decided(client, signed_in, monkeypat
     take()
     chosen = client.get(f"/api/jobs/{jid}").json()["chosen"]
     assert chosen["strength"] == "balanced" and chosen["leveling"] is False and chosen["fixed"] == ["leveling"] and chosen["noise"] == "light"
-    assert row(jid)["cost_micros"] == per(DENOISE, 60)
-    assert stages.spec("main")["options"]["leveling"] is False
+    assert row(jid)["cost_micros"] == step("light", 60) and "leveling" not in params_of(jid)["edit"]["timeline"]["layers"]
+    assert "leveling" not in stages.spec("main")["editor"]["timeline"]["layers"]
 
 
 # ----------------------------------------------------------------------------------------- the stage's answers are checked
@@ -542,12 +546,12 @@ def test_the_keys_monthly_cap_holds_for_the_maximum(client, signed_in):
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     _, capped = api_key(uid, cap=500_000)
     e = estimate(client, capped, 600)
-    assert e["estCostMicros"] == 310_000 and e["keyLimit"]["monthlyCapMicros"] == 500_000
+    assert e["estCostMicros"] == rebuilt(600) and e["keyLimit"]["monthlyCapMicros"] == 500_000
     _, tight = api_key(uid, cap=200_000)
-    refused = create(client, tight, 600)  # the maximum (a rebuild) is over the cap, though Denoising alone (100,000) would not be
+    refused = create(client, tight, 600)  # the maximum (a rebuild) is over the cap, though Denoising alone (about 102,000) would not be
     assert refused.status_code == 403 and refused.headers["X-Error-Code"] == "key_spending_cap" and count("jobs") == 0
-    assert create(client, tight, 600, atten_lim_db=40).status_code == 200  # Denoising only: 100,000 at most
-    assert create(client, capped, 600).status_code == 200  # 310,000 under the cap of 500,000
+    assert create(client, tight, 600, atten_lim_db=40).status_code == 200  # Denoising only: about 102,000 at most
+    assert create(client, capped, 600).status_code == 200  # the most it can cost (322,234) under the cap of 500,000
 
 
 def test_a_job_belongs_to_its_key_and_its_account(client, signed_in, other_browser, monkeypatch, gpu_up):
@@ -562,14 +566,15 @@ def test_a_job_belongs_to_its_key_and_its_account(client, signed_in, other_brows
     other_client, other_uid, other_h = other_browser
     assert other_client.get(f"/api/jobs/{jid}").status_code == 404  # another account sees nothing of it
     assert client.get(f"/api/jobs/{jid}", headers=b).status_code == 200  # the account's other key can read it ...
-    r = client.post(f"/api/jobs/{jid}/rerun/estimate", json={"options": {"atten_lim_db": 12}}, headers=b)
-    assert r.status_code == 404 and r.json()["code"] == "job_not_found"  # ... but only the key that made it can change it
-    assert client.post(f"/api/jobs/{jid}/rerun/estimate", json={"options": {"atten_lim_db": 12}}, headers=a).status_code == 200
+    r = client.get(f"/api/jobs/{jid}/timeline", headers=b)
+    assert r.status_code == 404  # ... but only the key that made it can change it
+    assert client.get(f"/api/jobs/{jid}/timeline", headers=a).status_code == 200
 
 
-# --------------------------------------------------------------------------------------------- re-running a decided job
+# ------------------------------------------------------------------------------------------ changing a decided job
 
-def test_a_rerun_of_a_decided_job_changes_its_choices_like_any_other_job(client, signed_in, monkeypatch, gpu_up):
+def test_a_decided_job_is_changed_like_any_job_through_its_timeline(client, signed_in, monkeypatch, gpu_up):
+    """The settings the decision made are the job's timeline: it is read, and edited, like the timeline of any job."""
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     key, a = api_key(uid)
@@ -578,36 +583,16 @@ def test_a_rerun_of_a_decided_job_changes_its_choices_like_any_other_job(client,
     jid = start(client, a)
     take()
     first = client.get(f"/api/jobs/{jid}").json()
-    assert first["status"] == "done" and first["redo"]["noise"] is True and first["chosen"]["strength"] == "balanced"
-    # the choices made are its settings now; the automatic mode itself does not go on
-    est = client.post(f"/api/jobs/{jid}/rerun/estimate", json={"options": {"atten_lim_db": 12}}, headers=a)
-    assert est.status_code == 200, est.text
-    out = est.json()
-    assert out["steps"]["clean"] == "denoised"  # from the kept noise removal: the strength is a blend, no model runs
-    assert out["options"]["automatic"] is False and out["options"]["atten_lim_db"] == 12
-    assert out["options"]["noise"] == first["chosen"]["noise"] and out["options"]["leveling"] is True
-    again = client.post(f"/api/jobs/{jid}/rerun/estimate", json={"options": {"automatic": True}}, headers=a)
-    assert again.status_code == 400 and "first run" in again.json()["detail"]
-    made = client.post(f"/api/jobs/{jid}/rerun", json={"options": {"atten_lim_db": 12}, "maxCostMicros": out["estCostMicros"]}, headers=a)
-    assert made.status_code == 200, made.text
-    rr = client.get(f"/api/jobs/{made.json()['id']}", headers=a).json()
-    assert rr["options"]["automatic"] is False and "chosen" not in rr and rr["sourceJobId"] == jid
-    # it can also be changed to the voice rebuild (a tier of its own), like any job
-    to_rebuild = client.post(f"/api/jobs/{jid}/rerun/estimate", json={"denoiseTier": "rebuild"}, headers=a)
-    assert to_rebuild.status_code == 200 and to_rebuild.json()["options"]["automatic"] is False
-
-
-def test_a_decided_rebuild_can_be_changed_to_leveling_only_like_any_rebuild(client, signed_in, monkeypatch, gpu_up, as_card):
-    uid, h = signed_in
-    ledger.credit(uid, 5_000_000, "grant", "t", "g")
-    key, a = api_key(uid)
-    Stages(monkeypatch, _case_measurement({"rebuild": True, "reason": "echoey"}))
-    jid = start(client, a)
-    take("gpu:1")
-    assert params_of(jid)["denoise_tier"] == "rebuild" and "automatic" in params_of(jid)
-    r = client.post(f"/api/jobs/{jid}/rerun/estimate", json={"options": {"leveling": False}}, headers=a)
-    assert r.status_code in (200, 409), r.text  # (no kept rebuilt copy was made by the stub: only that is asked)
-    assert r.status_code == 200 or r.json().get("code") in ("nothing_to_change", "job_files_gone")
+    assert first["status"] == "done" and first["chosen"]["strength"] == "balanced" and "redo" not in first and first["edit"]["hasTimeline"] is True
+    tl = client.get(f"/api/jobs/{jid}/timeline", headers=a)
+    assert tl.status_code == 200, tl.text
+    layers = tl.json()["timeline"]["layers"]
+    assert [(p["strength_db"], p["remover"]) for p in layers["noise"]] == [(first["chosen"]["attenLimDb"], first["chosen"]["noise"])]
+    assert [p["loudness_lufs"] for p in layers["leveling"]] == [-16.0]
+    assert first["options"].get("automatic") is None and params_of(jid)["automatic"] == {"fixed": []}  # (decided: only what the request fixed stays)
+    # the routes of the old "change and save again" are gone
+    for suffix in ("/rerun", "/rerun/estimate"):
+        assert client.post(f"/api/jobs/{jid}{suffix}", json={"options": {"atten_lim_db": 12}}, headers=a).status_code in (404, 405)
 
 
 # ------------------------------------------------------------------------------------------------ the ledger and the rest
@@ -629,8 +614,7 @@ def test_reduce_hold_gives_back_what_the_job_will_not_use(client, signed_in):
     assert ledger.invariant_problems() == {} or not any(ledger.invariant_problems().values())
 
 
-def test_a_job_charged_before_automatic_settings_existed_is_not_changed(client, signed_in, monkeypatch):
-    """An ordinary job has no automatic record and is priced, labelled and charged exactly as before."""
+def test_an_ordinary_job_has_no_automatic_record_and_is_the_timeline_its_options_stand_for(client, signed_in, monkeypatch):
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "talk.wav", "sizeBytes": 3000,
@@ -639,7 +623,8 @@ def test_a_job_charged_before_automatic_settings_existed_is_not_changed(client, 
     assert "maximum" not in r.json() and "automatic" not in params_of(jid)
     shown = client.get(f"/api/jobs/{jid}").json()
     assert "chosen" not in shown and "maximum" not in shown and shown["label"] == "Denoising + Leveling"
-    assert worker._job_cost(row(jid), params_of(jid), 60) == per(DENOISE + LEVELING, 60)
+    assert params_of(jid)["edit"]["first_run"] is True and params_of(jid)["whole_file"]["kind"] == "denoise"  # (before it has run)
+    assert worker._job_cost(row(jid), params_of(jid), 60) == standard(60) == r.json()["estCostMicros"]
 
 
 # ------------------------------------------------------------------------------------------ the real stage (native pieces)
@@ -667,9 +652,9 @@ def test_the_real_measurement_stage_decides_and_the_job_is_charged_for_what_ran(
     done = client.get(f"/api/jobs/{jid}").json()
     chosen = done["chosen"]
     assert chosen and chosen["denoiseTier"] == "standard" and chosen["strength"] in reco_model.STRENGTH_DB and chosen["reasons"]
-    assert done["options"]["atten_lim_db"] == chosen["attenLimDb"] and done["options"]["noise"] == chosen["noise"] in ("light", "heavy")
+    assert chosen["noise"] in ("light", "heavy")
+    layers = params_of(jid)["edit"]["timeline"]["layers"]
+    assert [(p["strength_db"], p["remover"]) for p in layers["noise"]] == [(chosen["attenLimDb"], chosen["noise"])]
     seconds = row(jid)["duration_seconds"]
-    rates = params_of(jid)["rates"]
-    assert rates == {"denoise": DENOISE, "leveling": LEVELING}
-    assert done["costMicros"] == sum(per(v, seconds) for v in rates.values()) and held(uid) == 0
+    assert 0 < done["costMicros"] <= standard(seconds, chosen["noise"]) and held(uid) == 0  # (what the runner reports it ran: never more than the timeline)
     assert done["label"] == "Denoising + Leveling"

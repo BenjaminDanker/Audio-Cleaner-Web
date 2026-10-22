@@ -1,5 +1,6 @@
-"""Echo removal on a file with one audio track (acw/worker/main.py, editing.py, rerun.py), without the native pieces: the whole job fails as soon as
-the file is read, before any work, uncharged; a re-run asking for it on such a file is refused. The real files are in test_job_echo.py."""
+"""Echo removal on a file with one audio track (acw/worker/main.py, editing.py), without the native pieces: the whole job fails as soon as the file
+is read, before any work, uncharged. The real files are in test_job_echo.py; an edit asking for it on such a file is refused by the editor
+(test_editor_api.py)."""
 import json
 
 import pytest
@@ -8,7 +9,7 @@ from acw import db, editing, jobs
 from acw.billing import ledger
 from acw.worker import main as worker
 
-from .rerun_support import count, make_done_job, params_of, roomy_disk  # noqa: F401 - fixtures
+from .job_support import roomy_disk  # noqa: F401 - fixtures
 from .test_automatic_settings import Stages
 
 pytestmark = pytest.mark.usefixtures("roomy_disk")
@@ -116,47 +117,3 @@ def test_a_job_that_wants_echo_removal_is_known_from_its_options_or_from_the_tim
     assert editing.wants_echo({"options": {}, "edit": {"first_run": True, "timeline": {"version": 1, "seconds": 60, "layers": {"echo": []}}}}) is False
     # (the timeline of a job that is not a first run is its saved one, not what it asked for)
     assert editing.wants_echo({"options": {}, "edit": {"timeline": first["edit"]["timeline"]}}) is False
-
-
-def test_a_file_is_known_to_have_one_track_from_the_probe_or_the_editors_facts():
-    assert editing.one_track({"audio_tracks": 1}) is True
-    assert editing.one_track({"edit": {"facts": {"reference": False}}}) is True
-    assert editing.one_track({"audio_tracks": 1, "edit": {"facts": {"reference": True}}}) is True
-    assert editing.one_track({"audio_tracks": 2}) is False and editing.one_track({"audio_tracks": 3}) is False
-    assert editing.one_track({"edit": {"facts": {"reference": True}}}) is False
-    assert editing.one_track({}) is False and editing.one_track({"edit": {}}) is False and editing.one_track({"audio_tracks": None}) is False
-
-
-# ------------------------------------------------------------------------------------------------------- re-runs
-
-def _source(uid, **changes):
-    jid = make_done_job(uid, seconds=60.0)
-    p = params_of(jid)
-    p.update(changes)
-    db.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(p), jid))
-    return jid
-
-
-@pytest.mark.parametrize("changes", [{"audio_tracks": 1}, {"edit": {"facts": {"reference": False}}}, {"audio_tracks": 1, "edit": {"facts": {"reference": False}}}])
-def test_a_re_run_asking_for_echo_removal_on_a_file_known_to_have_one_track_is_refused(client, signed_in, changes):
-    uid, h = signed_in
-    ledger.credit(uid, 2_000_000, "grant", "t", "g")
-    src = _source(uid, **changes)
-    ask = {"options": {"echo_reference_track": True}}
-    for suffix in ("/estimate", ""):
-        r = client.post(f"/api/jobs/{src}/rerun{suffix}", json=ask, headers=h)
-        assert r.status_code == 400 and r.json()["detail"] == jobs.NO_SECOND_TRACK, (suffix, r.text)
-    assert count("jobs") == 1 and ledger.balance(uid)["held_micros"] == 0
-    # without echo removal the same job can still be changed
-    r = client.post(f"/api/jobs/{src}/rerun/estimate", json={"options": {"atten_lim_db": 24}}, headers=h)
-    assert r.status_code == 200, r.text
-
-
-@pytest.mark.parametrize("changes", [{}, {"audio_tracks": 2}, {"audio_tracks": 3}, {"edit": {"facts": {"reference": True}}}])
-def test_a_re_run_may_ask_for_echo_removal_when_the_file_has_a_second_track_or_nothing_is_known(client, signed_in, changes):
-    uid, h = signed_in
-    ledger.credit(uid, 2_000_000, "grant", "t", "g")
-    src = _source(uid, **changes)
-    r = client.post(f"/api/jobs/{src}/rerun/estimate", json={"options": {"echo_reference_track": True}}, headers=h)
-    assert r.status_code == 200, r.text
-    assert [x["item"] for x in r.json()["lines"]][:1] == ["denoise"] and any(x["item"] == "echo" for x in r.json()["lines"])

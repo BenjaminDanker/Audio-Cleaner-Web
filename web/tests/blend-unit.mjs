@@ -10,7 +10,7 @@ import { build } from 'esbuild';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const bundle = await build({
   stdin: {
-    contents: "export * from '../src/media/blend.js'; export * from '../src/eta.js'; export { STRENGTHS } from '../src/strengths.js'; export { keptUrl } from '../src/api.js';",
+    contents: "export * from '../src/media/blend.js'; export * from '../src/eta.js'; export { STRENGTHS } from '../src/strengths.js';",
     resolveDir: HERE,
     loader: 'js',
   },
@@ -22,7 +22,7 @@ const bundle = await build({
   define: { 'import.meta.env.BASE_URL': '"/"' },
 });
 const m = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
-const { BlendPlayer, blendChannels, blendToPcm, dbAt, energySums, etaSeconds, etaText, forgetReadings, gainsFor, keptSource, keptUrl, matchGain, memorySource, mixOf, noteJobs, posOf, previewFits, splitParts, strengthName, STRENGTHS } = m;
+const { BlendPlayer, blendChannels, blendToPcm, dbAt, energySums, etaSeconds, etaText, forgetReadings, gainsFor, matchGain, memorySource, mixOf, noteJobs, posOf, previewFits, splitParts, strengthName, STRENGTHS } = m;
 
 let failed = 0;
 async function check(name, fn) {
@@ -644,54 +644,6 @@ await check('memorySource: hands out the same stretch of both signals from array
   const s = src.sums();
   assert.deepEqual(s, energySums(full, input));
   assert.equal(src.sums(), s, 'worked out once');
-});
-
-// keptSource and the URLs: fetch and decodeAudioData are replaced by fakes that record what was asked
-const urls = [];
-globalThis.window = globalThis;
-globalThis.OfflineAudioContext = class { decodeAudioData(bytes) { const n = new Float32Array(bytes).length; return Promise.resolve({ numberOfChannels: 1, getChannelData: () => Float32Array.from({ length: n }, (_, i) => (i + 1) / 1000) }); } };
-let answer = null;
-globalThis.fetch = async (url) => {
-  urls.push(url);
-  const q = new URL(url, 'http://x');
-  const first = Math.round(Number(q.searchParams.get('start')) * SR);
-  const count = Math.round(Number(q.searchParams.get('seconds')) * SR);
-  const headers = new Map(answer?.headers ?? [['X-Stretch-Start', String(first)], ['X-Stretch-Samples', String(count)]]);
-  return { ok: answer?.ok ?? true, headers: { get: (k) => headers.get(k) ?? null, has: (k) => headers.has(k) }, arrayBuffer: async () => new Float32Array(count).buffer };
-};
-
-await check('keptUrl: the whole copy has no query; a stretch names its first sample and length with six decimals that give the exact samples back (checked on 2000 positions)', () => {
-  assert.equal(keptUrl('abc', 'noise'), '/api/jobs/abc/kept/noise');
-  assert.equal(keptUrl('abc', 'input', { first: 480000, count: 480000 }), '/api/jobs/abc/kept/input?start=10.000000&seconds=10.000000');
-  let seed2 = 11;
-  for (let i = 0; i < 2000; i++) {
-    seed2 = (seed2 * 1103515245 + 12345) & 0x7fffffff;
-    const first = seed2 % (4 * 3600 * SR);
-    const count = 1 + (seed2 >> 3) % (30 * SR);
-    const q = new URL(keptUrl('j', 'noise', { first, count }), 'http://x').searchParams;
-    assert.equal(Math.round(Number(q.get('start')) * SR), first);
-    assert.equal(Math.round(Number(q.get('seconds')) * SR), count);
-  }
-});
-
-await check('keptSource: asks for the same stretch of both copies, scales a loud one back up, numbers the channels from the first kept one and passes on the energy sums; a wrong stretch or a refusal is an error', async () => {
-  const preview = { samples: 100 * SR, channels: [1], plan: [1, 1], scale: { noise: 0.5, input: 1 }, bytes: {}, stretchMaxSeconds: 30, energy: { full: 4, input: 5, cross: 3 } };
-  const src = keptSource('J1', preview);
-  assert.deepEqual(src.plan, [0, 0]);
-  assert.equal(src.maxSeconds, 30);
-  assert.deepEqual(src.sums(), { ef: 4, ei: 5, cfi: 3 });
-  const got = await src.read(10 * SR, 4);
-  assert.deepEqual(urls, ['/api/jobs/J1/kept/noise?start=10.000000&seconds=0.000083', '/api/jobs/J1/kept/input?start=10.000000&seconds=0.000083']);
-  assert.equal(got.full.length, 1);
-  assert.deepEqual(Array.from(got.full[0]), [1, 2, 3, 4].map((v) => f32(f32(v / 1000) * 2)), 'the loud copy is brought back up by its scale (1 / 0.5)');
-  assert.deepEqual(Array.from(got.input[0]), [1, 2, 3, 4].map((v) => f32(v / 1000)), 'the other is as it is');
-  assert.equal(keptSource('J1', { ...preview, energy: undefined }).sums(), null, 'no sums known');
-  assert.equal(keptSource('J1', { ...preview, energy: { full: 1, input: 'x', cross: 0 } }).sums(), null);
-  answer = { headers: [['X-Stretch-Start', '5'], ['X-Stretch-Samples', '4']] };
-  await assert.rejects(src.read(10 * SR, 4), /wrong part/);
-  answer = { ok: false };
-  await assert.rejects(src.read(10 * SR, 4), /Couldn’t get the sound/);
-  answer = null;
 });
 
 await check('previewFits: the whole recording is only ever held for 20 minutes of mono or 10 of stereo (the free run here, and saving a strength on this device)', () => {

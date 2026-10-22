@@ -16,7 +16,7 @@ from acw_common import blocks, editor
 from acw_common.ffmpeg import FFmpeg
 from acw_common.timeline import Timeline
 
-from .rerun_support import (SR, account, add_job, api_key, clock, count, deadline_in, files_of, folder, make_done_job,  # noqa: F401
+from .job_support import (SR, account, add_job, api_key, clock, count, deadline_in, files_of, folder, make_done_job,  # noqa: F401
                             other_browser, params_of, roomy_disk, row, set_env)  # noqa: F401
 from .test_job_pipeline import HOME
 
@@ -39,19 +39,19 @@ def save_params(jid: str, params: dict) -> None:
 
 def edit_job(uid, *, seconds=600.0, channels=1, api_key_id=None, ref=False, rendered="default", options=None, finished_ago=60, **kw) -> str:
     """A finished job of `seconds` with the editor's record of its recording (facts) and an empty block cache. `rendered`:
-    "default" (the job's options on the whole file, as a first run leaves it), "empty" (nothing is done to the sound), a timeline JSON, or
-    None (not recorded: the options' timeline counts)."""
-    jid = make_done_job(uid, seconds=seconds, channels=channels, api_key_id=api_key_id, noise=False, input_copy=False, finished_ago=finished_ago,
+    "default" (the timeline the job was made with, on the whole file, as a first run leaves it), "empty" (nothing is done to the sound), a
+    timeline JSON, or None (not recorded)."""
+    jid = make_done_job(uid, seconds=seconds, channels=channels, api_key_id=api_key_id, finished_ago=finished_ago,
                         options={"noise": "light", **(options or {})}, **kw)
     n = int(round(seconds * SR))
     p = params_of(jid)
-    p["edit"] = {"facts": {"n": n, "channels": channels, "plan": list(range(channels)), "spans": {str(c): [[0, n]] for c in range(channels)},
-                           "rebuild_mid": False, "reference": ref}}
+    made_with = p["edit"]["timeline"]  # (every job is made with a timeline: the one its options stand for)
+    p["edit"] = {"timeline": made_with, "facts": {"n": n, "channels": channels, "plan": list(range(channels)), "spans": {str(c): [[0, n]] for c in range(channels)},
+                                                  "rebuild_mid": False, "reference": ref}}
     save_params(jid, p)
     (folder(jid) / "blocks").mkdir(mode=0o700, exist_ok=True)
     if rendered == "default":
-        t = editing.default_timeline(row(jid), p, n / SR)
-        p["edit"]["rendered"] = t.to_json()
+        p["edit"]["rendered"] = made_with
         save_params(jid, p)
     elif rendered == "empty":
         p["edit"]["rendered"] = Timeline(n / SR).to_json()
@@ -173,7 +173,7 @@ def test_the_timeline_of_a_job_is_saved_returned_and_is_the_default_until_then(c
     body = r.json()
     default = {"version": 1, "seconds": 120.0, "layers": {"noise": [{"start": 0.0, "end": 120.0, "strength_db": 24.0, "remover": "light"}],
                                                           "leveling": [{"start": 0.0, "end": 120.0, "loudness_lufs": -16.0}]}}
-    assert body["timeline"] == default and body["rendered"] == default and body["custom"] is False
+    assert body["timeline"] == default and body["rendered"] is None and body["custom"] is True  # (nothing was recorded as rendered: everything is made again; "custom" is true for every job now: they all have a timeline)
     assert body["seconds"] == 120.0 and body["channels"] == 1 and body["secondTrack"] is False
     assert body["cached"] == {"echo": [], "noise": [], "light": [], "heavy": [], "rebuild": []} and body["suggestions"] is None
     assert body["preview"] is None and body["run"] is None and body["hardDeadlineAt"] == jobs.hard_deadline(row(jid))
@@ -181,7 +181,7 @@ def test_the_timeline_of_a_job_is_saved_returned_and_is_the_default_until_then(c
     put = client.put(f"/api/jobs/{jid}/timeline", json={"timeline": mine}, headers=h)
     assert put.status_code == 200 and put.json()["timeline"] == mine
     again = client.get(f"/api/jobs/{jid}/timeline").json()
-    assert again["timeline"] == mine and again["custom"] is True and again["rendered"] == default
+    assert again["timeline"] == mine and again["custom"] is True and again["rendered"] is None  # (saving a timeline does not change what was rendered)
     # a part painted over another replaces it, neighbours with the same settings are one part
     messy = {"version": 1, "seconds": 120, "layers": {"noise": [noise(0, 10), noise(10, 20), noise(5, 8, 24)]}}
     saved = client.put(f"/api/jobs/{jid}/timeline", json={"timeline": messy}, headers=h).json()["timeline"]["layers"]["noise"]
@@ -522,7 +522,11 @@ def test_a_key_needs_the_jobs_scope_and_a_browser_its_csrf_token(client, signed_
 def test_jobs_without_sound_or_files_are_not_editable(client, signed_in):
     uid, h = funded(client, signed_in)
     sub = make_done_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local")
-    r = client.get(f"/api/jobs/{sub}/timeline")
+    r = client.get(f"/api/jobs/{sub}/timeline")  # (subtitles are a part of the timeline: a job that only writes subtitles has one)
+    assert r.status_code == 200 and r.json()["timeline"]["version"] == 2 and r.json()["timeline"]["layers"]["subtitles"][0]["quality"] == "standard"
+    conversion = make_done_job(uid)
+    db.execute("UPDATE jobs SET kind = 'convert' WHERE id = ?", (conversion,))  # (a conversion has no timeline)
+    r = client.get(f"/api/jobs/{conversion}/timeline")
     assert r.status_code == 409 and r.json()["code"] == "job_not_editable"
     gone = make_done_job(uid, status="expired", files=False)
     assert client.get(f"/api/jobs/{gone}/timeline").status_code == 409 and client.get(f"/api/jobs/{gone}/timeline").json()["code"] == "job_files_gone"
@@ -597,13 +601,13 @@ def test_the_retention_follows_the_settings(client, signed_in, clock, monkeypatc
     assert row(jid)["expires_at"] == clock.t - 1500 - 60 + 3000 and client.get("/api/jobs").json()["limits"]["maxRetentionSeconds"] == 3000
 
 
-def test_the_chain_of_a_rerun_is_kept_together_when_any_of_it_is_edited(client, signed_in, clock):
+def test_an_edit_gives_that_job_alone_two_more_hours(client, signed_in, clock):
     uid, h = funded(client, signed_in)
     a = make_done_job(uid, finished_ago=0)
-    b = make_done_job(uid, finished_ago=0, source=a, root=a)
+    b = make_done_job(uid, finished_ago=0)
     clock.advance(3600)
     jobs.touch(b)
-    assert row(a)["expires_at"] == row(b)["expires_at"] == clock.t + 7200
+    assert row(b)["expires_at"] == clock.t + 7200 and row(a)["expires_at"] == clock.t - 3600 + 7200  # (jobs are not chained any more)
 
 
 # --------------------------------------------------------------------------------------------------- suggestions
@@ -650,7 +654,7 @@ def test_the_suggestions_of_a_first_run_are_stored_when_the_job_finishes(client,
     """The worker's finishing step: the runner's report (facts, suggestions) is checked, the suggestions go to their file, the facts
     to the job's record, the timeline the options stand for is what the result holds."""
     uid, h = funded(client, signed_in)
-    jid = make_done_job(uid, seconds=60.0, noise=False, input_copy=False, options={"noise": "light"}, status="queued", files=True)
+    jid = make_done_job(uid, seconds=60.0, options={"noise": "light"}, status="queued", files=True)
     db.execute("UPDATE jobs SET status = 'running', finished_at = NULL, outputs_json = NULL, hold_id = NULL, uploaded_at = ? WHERE id = ?", (db.now() - 90, jid))
     n = 60 * SR
     (folder(jid) / "kept-source.flac").write_bytes(b"fLaC")
@@ -662,7 +666,7 @@ def test_the_suggestions_of_a_first_run_are_stored_when_the_job_finishes(client,
     worker._complete(job, folder(jid), {"ok": True, "outputs": [{"file": "talk-cleaned.flac", "kind": "audio"}], "editor": report})
     p = params_of(jid)
     assert row(jid)["status"] == "done" and p["edit"]["facts"]["n"] == n and p["edit"]["facts"]["source"]["scale"] == 1.0 and p["edit"]["suggestions"] is True
-    assert p["edit"]["rendered"]["layers"]["noise"][0]["remover"] == "light" and p["edit"]["facts"]["reference"] is True
+    assert p["edit"]["timeline"]["layers"]["noise"][0]["remover"] == "light" and p["edit"]["facts"]["reference"] is True
     assert {"kept-source.flac", "suggestions.json"} <= files_of(jid)
     assert client.get(f"/api/jobs/{jid}/suggestions").json()["suggestions"]["suggestions"][0]["noise"]["remover"] == "heavy"
     assert row(jid)["expires_at"] == row(jid)["finished_at"] + 7200
@@ -707,9 +711,11 @@ def test_creating_a_job_with_a_timeline_checks_it_prices_only_its_parts_and_repl
                        ({"timeline": {"version": 3, "seconds": 600, "layers": {}}}, "bad_timeline")):
         r = client.post("/api/jobs", json={**base, "timeline": tl, **body}, headers=h)
         assert r.status_code == 400 and r.json()["code"] == code, (body, r.text)
-    # without a timeline everything is as it was: the whole file, per the options
+    # without a timeline the options become the one they stand for: the whole file, each step with its fixed amount of a run
     r = client.post("/api/jobs", json={**base, "denoiseTier": "standard"}, headers=h)
-    assert r.status_code == 200 and r.json()["estCostMicros"] == whole["estCostMicros"] and "edit" not in params_of(r.json()["id"])
+    assert r.status_code == 200 and r.json()["estCostMicros"] == whole["estCostMicros"]
+    made = params_of(r.json()["id"])
+    assert made["edit"]["first_run"] is True and sorted(made["edit"]["timeline"]["layers"]) == ["leveling", "noise"] and made["whole_file"]["denoise_tier"] == "standard"
 
 
 def test_a_job_made_with_a_timeline_is_charged_for_what_it_ran_and_leaves_its_record(client, signed_in):
@@ -770,19 +776,13 @@ def test_a_leveling_only_job_made_with_a_timeline_is_named_leveling_in_its_charg
     assert client.get(f"/api/jobs/{jid}").json()["label"] == "Leveling"
 
 
-def test_the_old_rerun_is_for_jobs_without_a_timeline_of_their_own(client, signed_in):
+def test_the_routes_of_the_old_rerun_are_gone_and_every_job_has_its_timeline(client, signed_in):
     uid, h = funded(client, signed_in)
     plain = make_done_job(uid)
-    r = client.post(f"/api/jobs/{plain}/rerun/estimate", json={"options": {"atten_lim_db": 24}}, headers=h)
-    assert r.status_code == 200, r.text  # the whole-file path, as the website uses it
-    assert client.post(f"/api/jobs/{plain}/rerun", json={"options": {"atten_lim_db": 24}}, headers=h).status_code == 200
-    mine = make_done_job(uid)
-    p = params_of(mine)
-    p["edit"] = {"timeline": {"version": 1, "seconds": 60.0, "layers": {}}}
-    save_params(mine, p)
-    r = client.post(f"/api/jobs/{mine}/rerun", json={"options": {"atten_lim_db": 24}}, headers=h)
-    assert r.status_code == 409 and r.json()["code"] == "job_edited"
-    assert client.get(f"/api/jobs/{mine}").json()["redo"] == {"available": False}
+    for suffix in ("/rerun/estimate", "/rerun"):
+        assert client.post(f"/api/jobs/{plain}{suffix}", json={"options": {"atten_lim_db": 24}}, headers=h).status_code in (404, 405)
+    shown = client.get(f"/api/jobs/{plain}").json()
+    assert "redo" not in shown and shown["edit"]["hasTimeline"] is True  # (a job asked for with options has the timeline they stand for)
 
 
 def test_a_gpu_step_needs_the_card_and_is_routed_to_it(client, signed_in, gpu_up):
@@ -827,7 +827,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
 
     from acw import hostload
 
-    need = jobs.scratch_bytes("denoise", 3600) + jobs.kept_bytes("denoise", 3600, denoise_tier="standard") + jobs.DISK_RESERVE + 1000
+    need = jobs.scratch_bytes("denoise", 3600) + jobs.DISK_RESERVE + 1000
     free = need + editing.cache_bytes(3600, 2, 1) - 1
     hostload.get = lambda d: SimpleNamespace(snapshot=lambda: SimpleNamespace(disk_free=free))  # (roomy_disk's patch is undone with the test)
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 1000, "durationSeconds": 3600,
@@ -911,23 +911,17 @@ def test_a_timeline_with_voice_rebuild_needs_the_card_and_goes_to_it(client, sig
     assert r.status_code == 400 and r.json()["code"] == "bad_timeline" and "90 minutes" in r.json()["detail"]
 
 
-def test_a_first_run_looks_for_suggestions_up_to_the_configured_length_and_a_rerun_does_not(client, signed_in, monkeypatch):
+def test_a_first_run_looks_for_suggestions_up_to_the_configured_length(client, signed_in, monkeypatch):
     uid, h = signed_in
     short = make_done_job(uid, seconds=600.0)
     long = make_done_job(uid, seconds=2 * HOUR)
-    again = make_done_job(uid, seconds=600.0)
-    p = params_of(again)
-    p["rerun"] = {"source": short}
-    save_params(again, p)
     spec = lambda jid: editing.spec_for(row(jid), params_of(jid))  # noqa: E731
     assert spec(short)["suggest"] is True and spec(short)["op"] == "first" and spec(short)["source_id"] == "j" + short
-    assert spec(long)["suggest"] is False and spec(again)["suggest"] is False
+    assert spec(long)["suggest"] is False
     set_env(monkeypatch, ACW_SUGGEST_MAX_MINUTES=180)
     assert spec(long)["suggest"] is True
     set_env(monkeypatch, ACW_SUGGEST_MAX_MINUTES=0)
     assert spec(short)["suggest"] is False  # (0: only on request)
     sub = make_done_job(uid, kind="transcribe", denoise_tier=None, transcribe_tier="local")
-    assert editing.spec_for(row(sub), params_of(sub)) is None  # a job without sound steps has no editor
-    # a re-run's blocks are the root's: the identity of the recording is the first job of the chain
-    child = make_done_job(uid, source=short, root=short)
-    assert editing.source_id(row(child)) == "j" + short
+    assert editing.spec_for(row(sub), params_of(sub)) is not None  # (a job with only subtitles is made with a timeline too: its subtitles part)
+    assert editing.spec_for(row(sub), params_of(sub))["timeline"]["layers"]["subtitles"][0]["quality"] == "standard"

@@ -12,6 +12,7 @@ from acw import db, jobs
 from acw.billing import ledger, pricing
 from acw_common.ffmpeg import FFmpeg
 
+from .job_support import params_of, standard, step
 from .test_job_pipeline import HOME, _run_worker_once
 
 SR = 48000
@@ -34,9 +35,11 @@ def test_the_option_is_taken_as_true_or_false_and_has_its_own_price(client, sign
     plain = create(client, h)
     on = create(client, h, echo_reference_track=True)
     assert plain.status_code == on.status_code == 200, (plain.text, on.text)
-    assert on.json()["estCostMicros"] == plain.json()["estCostMicros"] + pricing.cost_micros("echo", "standard", SECONDS) > 0
-    assert client.get(f"/api/jobs/{plain.json()['id']}").json()["options"]["echo_reference_track"] is False
-    assert client.get(f"/api/jobs/{on.json()['id']}").json()["options"]["echo_reference_track"] is True
+    assert plain.json()["estCostMicros"] == standard(SECONDS)
+    assert on.json()["estCostMicros"] == plain.json()["estCostMicros"] + step("echo", SECONDS) > 0
+    # (the job is made with the timeline its options stand for: echo removal is a layer of it, or not)
+    assert "echo" not in params_of(plain.json()["id"])["edit"]["timeline"]["layers"]
+    assert params_of(on.json()["id"])["edit"]["timeline"]["layers"]["echo"] == [{"start": 0.0, "end": float(SECONDS)}]
     assert create(client, h, echo_reference_track="yes").status_code == 400
 
 
@@ -107,12 +110,12 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     job, with_echo_removal = _clean(client, h, data, echo_reference_track=True)
     assert job["notice"] is None
     row = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
-    assert row["cost_micros"] == pricing.job_cost_micros("denoise", "standard", None, row["duration_seconds"], leveling=True, echo=True)
-    assert row["cost_micros"] > pricing.job_cost_micros("denoise", "standard", None, row["duration_seconds"], leveling=True)
+    assert row["cost_micros"] == standard(row["duration_seconds"]) + step("echo", row["duration_seconds"])
+    assert row["cost_micros"] > standard(row["duration_seconds"])
     assert _speaker_vs_voice_db(with_echo_removal, tmp_path) < _speaker_vs_voice_db(without, tmp_path) - 10
     left = {p.name for p in (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job["id"]).iterdir()}
-    # scratch files are gone; the upload, the kept copies and the per-part editor's (block cache, the recording, suggestions) stay
-    assert left == {"rec-cleaned.wav", "input.mkv", "kept-noise.flac", "kept-input.flac", "blocks", "kept-source.flac", "suggestions.json"}
+    # scratch files are gone; the upload and the per-part editor's (block cache, the recording, suggestions) stay
+    assert left == {"rec-cleaned.wav", "input.mkv", "blocks", "kept-source.flac", "suggestions.json"}
     # the whole-file run (echo removal, then the noise remover) filled the editor's cache under the editor's own block identities: the job's
     # timeline (echo removal and noise removal on the whole file) needs nothing to be made, and the quote of editing it says so
     import json
@@ -121,10 +124,12 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
 
     row = dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
     params = json.loads(row["params_json"])
-    assert params["edit"]["facts"]["reference"] is True and "echo" in editing.default_timeline(row, params, 6.0).to_json()["layers"]
-    q = editing.make_quote(row, params, editing.default_timeline(row, params, editing.file_seconds(row, params)))
+    seconds = editing.file_seconds(row, params)
+    made_with = editing.saved_timeline(row, params, seconds)
+    assert params["edit"]["facts"]["reference"] is True and "echo" in made_with.to_json()["layers"]
+    q = editing.make_quote(row, params, made_with)
     assert q["misses"] == 0 and q["unchanged"] is True
-    softer = editing.default_timeline(row, params, editing.file_seconds(row, params))
+    softer = editing.saved_timeline(row, params, seconds)
     softer.paint("noise", 0.0, softer.seconds, {"strength_db": 24.0, "remover": softer.parts("noise")[0].settings["remover"]})
     softer.erase("leveling", 0.0, softer.seconds)
     q = editing.make_quote(row, params, softer)
@@ -164,7 +169,7 @@ def test_a_file_with_one_track_fails_the_whole_job_uncharged_when_echo_removal_w
     assert job["notice"] is None and len(out) > 1000
     assert json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])["audio_tracks"] == 1
     row_ = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
-    assert row_["cost_micros"] == pricing.job_cost_micros("denoise", "standard", None, row_["duration_seconds"], leveling=True)
+    assert row_["cost_micros"] == standard(row_["duration_seconds"])
 
 
 @NATIVE
