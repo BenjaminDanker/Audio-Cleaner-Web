@@ -200,7 +200,6 @@ def gpu_stages(job: dict) -> list[str]:
 
 def _sound_stages(job: dict) -> list[str]:
     params = json.loads(job["params_json"])
-    opts = params.get("options", {})
     if job.get("next_stage") == "finalize":
         return []
     if params.get("run"):  # an edit run (editing.py): the steps its missing blocks need, found when it was quoted
@@ -213,18 +212,9 @@ def _sound_stages(job: dict) -> list[str]:
         elif any(p.get("remover", "auto") in ("auto", "heavy") for p in layers.get("noise") or [] if not p.get("browser")):
             stages.append("heavy")
         return stages
-    if opts.get("echo_reference_track"):
-        return []
-    rerun = params.get("rerun")  # a re-run only runs what it says (rerun.py): the blend and Leveling are CPU work
-    stages = ["transcribe"] if params.get("transcribe_tier") == "local" and (not rerun or rerun.get("transcribe")) else []
-    if job["kind"] in ("denoise", "denoise_transcribe") and (not rerun or rerun.get("clean") == "full"):
-        if params.get("denoise_tier") == "rebuild":
-            stages.append("rebuild")
-        elif params.get("denoise_tier") == "off":
-            pass  # Leveling on its own: a little CPU work, no model
-        elif opts.get("noise", "auto") in ("auto", "heavy"):
-            stages.append("heavy")
-    return stages
+    # an automatic job not decided yet (its file is measured on any worker first: automatic.py) or a conversion: the card only for what
+    # it decides, or for the picture
+    return ["transcribe"] if params.get("transcribe_tier") == "local" else []
 
 
 def gpu_only(job: dict) -> bool:

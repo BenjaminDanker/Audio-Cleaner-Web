@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import time
 from typing import Any
@@ -14,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, editing, jobs, keycaps, rerun, stretch, webhooks
+from .. import auth, db, editing, jobs, keycaps, stretch, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -77,17 +78,6 @@ class RunBody(BaseModel):
     timeline: Any = None
     maxCostMicros: int | None = Field(default=None, ge=0, le=10**12)  # a higher price now is refused (409 price_changed)
     audioFormat: str | None = Field(default=None, max_length=8)
-
-
-class RerunJob(BaseModel):
-    """"Change and save again": the choices that differ from the source job's (the others stay as they were)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    denoiseTier: str | None = Field(default=None, max_length=32)  # standard | rebuild | off; omitted: as before
-    transcribeTier: str | None = Field(default=None, max_length=32)  # local | premium | off (no subtitles); omitted: as before
-    options: dict = Field(default_factory=dict)
-    maxCostMicros: int | None = Field(default=None, ge=0, le=10**12)  # the quoted price: a higher one now is refused (409 price_changed)
 
 
 IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,128}$")  # visible ASCII, no spaces
@@ -500,54 +490,13 @@ def cancel(job_id: str, principal: auth.Principal = Depends(auth.require_scope("
 
 @router.delete("/{job_id}")
 def delete(job_id: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
-    """Delete everything of the job now instead of waiting for expiry: its upload, the copies kept for changing it again, its
-    results, and the same for every re-run made from it."""
+    """Delete everything of the job now instead of waiting for expiry: its upload, the editor's copies, its results."""
     job = _get_owned(job_id, principal)
-    if job["status"] in ("running", "cloud_asr", "queued", "uploading") or rerun.chain_active(job):
+    if job["status"] in ("running", "cloud_asr", "queued", "uploading"):
         raise HTTPException(status_code=409, detail="Cancel or wait for the job first.")
-    rerun.delete_chain(job)
+    shutil.rmtree(jobs.job_dir(job_id), ignore_errors=True)
     db.execute("UPDATE jobs SET status = 'expired', outputs_json = NULL WHERE id = ?", (job_id,))
     return {"ok": True}
-
-
-@router.post("/{job_id}/rerun/estimate")
-def rerun_estimate(job_id: str, body: RerunJob, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
-    """What "change and save again" with these choices would do and cost, before it is made: nothing is held or stored."""
-    if len(json.dumps(body.options)) > 2000:
-        raise HTTPException(status_code=400, detail="options too large")
-    try:
-        out = rerun.estimate(principal.user_id, job_id, principal.api_key_id, body.denoiseTier, body.transcribeTier, body.options)
-    except jobs.JobError as e:
-        return _error(e)
-    except ValueError as e:  # pricing errors
-        raise HTTPException(status_code=400, detail=str(e))
-    available = ledger.balance(principal.user_id)["available_micros"]
-    out["availableMicros"] = available
-    out["affordable"] = available >= out["estCostMicros"]
-    if principal.api_key_id:
-        limit = keycaps.key_limit(principal.api_key_id)
-        if limit is not None:
-            out["keyLimit"] = limit
-    return out
-
-
-@router.post("/{job_id}/rerun")
-def rerun_job(job_id: str, body: RerunJob, request: Request, principal: auth.Principal = Depends(auth.require_scope("jobs"))):
-    """"Change and save again": a new job from the files the finished job kept. It runs only the steps whose inputs changed
-    and is paid only for those (the price is `estimate`'s); it goes through the same queue and limits as any job."""
-    enforce("job_create", principal.user_id)
-    enforce("job_create", f"ip:{client_net(client_ip(request))}")
-    if len(json.dumps(body.options)) > 2000:
-        raise HTTPException(status_code=400, detail="options too large")
-    try:
-        return rerun.create_rerun(principal.user_id, job_id, denoise_tier=body.denoiseTier, transcribe_tier=body.transcribeTier,
-                                  options=body.options, api_key_id=principal.api_key_id, max_cost_micros=body.maxCostMicros)
-    except keycaps.KeyCapReached as e:
-        raise HTTPException(status_code=403, detail=str(e), headers=KEY_CAP_HEADERS)
-    except jobs.JobError as e:
-        return _error(e)
-    except ValueError as e:  # pricing errors
-        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/{job_id}/outputs/{name}")
@@ -569,53 +518,6 @@ def download(job_id: str, name: str, principal: auth.Principal = Depends(auth.re
     )
 
 
-@router.get("/{job_id}/kept/{which}")
-def kept_copy(
-    job_id: str,
-    which: str,
-    start: float | None = Query(default=None, ge=0, le=10**6),
-    seconds: float | None = Query(default=None, gt=0, le=10**6),
-    principal: auth.Principal = Depends(auth.require_scope("jobs")),
-) -> Response:
-    """The two copies the strength slider blends (24-bit FLAC, 48 kHz, sample for sample the same length): the noise removal
-    at full strength (`which` = noise) and the recording as the remover heard it (`input`). How to read them (channels, the
-    scale a loud sample was brought down by) is `redo.preview` of the job. Only the owner, only while the job's files exist.
-
-    With `start` and/or `seconds` the answer is only a stretch of the copy, whatever its length: `seconds` from the second `start`
-    (default 0), at most 30 seconds (more is cut to that), cut short by the end of the recording; the same numbers cut from the two
-    copies line up sample for sample. The headers say what is in it (`X-Stretch-Start`, `X-Stretch-Samples`, `X-Total-Samples`)."""
-    job = _get_owned(job_id, principal)
-    redo = rerun.redo_info(job) if job["status"] == "done" else {}
-    name = {"noise": f"{jobs.KEPT_NOISE}.flac", "input": f"{jobs.KEPT_INPUT}.flac"}.get(which)
-    if name is None or not redo.get("preview"):
-        raise HTTPException(status_code=404, detail="Not available.")
-    path = jobs.job_dir(job_id) / name
-    if not _is_plain_file(path):
-        raise HTTPException(status_code=404, detail="Not found.")
-    headers = {"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"}
-    if start is None and seconds is None:
-        return FileResponse(path, media_type="audio/flac", headers=headers)
-    enforce("kept_cut", principal.user_id)
-    total = int(redo["preview"]["samples"])
-    try:
-        first, count = stretch.span(start, seconds, total)
-    except stretch.OutOfRange as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    try:
-        data = stretch.cut(path, first, count)
-    except stretch.Busy:
-        raise HTTPException(status_code=503, detail="Busy right now, please try again in a moment.", headers={"Retry-After": "2"})
-    except stretch.Failed:
-        raise HTTPException(status_code=500, detail="Couldn’t cut that part of the sound. Please try again.")
-    return Response(
-        content=data, media_type="audio/flac",
-        headers={**headers, "X-Stretch-Start": str(first), "X-Stretch-Samples": str(count), "X-Total-Samples": str(total)},
-    )
-
-
-# ---------------------------------------------------------------------------------------------------------------------
-# The per-part editor (acw/editing.py, docs/api.md "Editing a job")
-# ---------------------------------------------------------------------------------------------------------------------
 def _with_balance(out: dict, principal: auth.Principal) -> dict:
     available = ledger.balance(principal.user_id)["available_micros"]
     out["availableMicros"] = available

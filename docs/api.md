@@ -99,14 +99,15 @@ Money is in **micros** (1 USD = 1,000,000) except Stripe amounts in **cents**.
 | GET | `/api/billing/history` | `{balance, ledger:[...], ledgerHasMore, payments:[{id,kind,status,amount_cents,refunded_cents,created_at}]}`. The newest 100 ledger entries, each `{id,amount_micros,kind,description,balance_after_micros,created_at,label}` plus, for usage entries, `product` (`clean`, `transcript`, `clean_transcript`, `live`), `tier`, `minutes` and `displayName` (the file name as the person chose it). `label` is the customer-facing name ("Top-up", "Denoising + Subtitles & transcript"); `ledgerHasMore` says older entries exist. |
 | POST | `/api/billing/refund` | `{paymentId}` refunds unused credit from a payment < 14 days old |
 
-Price list (`rates`; per minute of audio, counted by the second, rounded up; amounts in the response are in dollars):
+Price list (`rates`; per minute of audio, counted by the second, rounded up; amounts in the response are in dollars). Every job is made with a
+timeline, also one asked for with options (section 8), so each sound step that runs also has its small fixed amount for starting it:
 
 | `product` / `tier` | What it is |
 |---|---|
 | `denoise` / `standard` | Denoising |
 | `denoise` / `rebuild` | Voice rebuild (files up to 90 minutes) |
 | `leveling` / `standard` | Leveling: charged when `options.leveling` is true (the default) on a `denoise` job; `denoiseTier: "off"` makes a job that only levels |
-| `echo` / `standard` | Echo removal (with the file's second audio track): charged, by the second, when `options.echo_reference_track` is true on a `denoise` or `denoise_transcribe` job (a file with one audio track fails the job before any work, uncharged; a re-run of such a job asking for it is refused); its own line in the estimate and the ledger |
+| `echo` / `standard` | Echo removal (with the file's second audio track): charged, by the second, when `options.echo_reference_track` is true on a `denoise` or `denoise_transcribe` job (a file with one audio track fails the job before any work, uncharged); its own line in the estimate and the ledger |
 | `transcribe` / `local` | Subtitles & transcript |
 | `transcribe` / `premium` | Subtitles & transcript, extra accurate |
 | `transcribe_translate` / `standard` | one translation of the subtitles, **per language** |
@@ -190,7 +191,7 @@ Answer: `{id, estCostMicros, uploadUrl}` (and `"maximum": true` with `options.au
 | `video_out` | `null` | the video result in another file type or picture size: `{"format": "mp4"\|"mov"\|"mkv"\|"webm", "size": 480\|720\|1080\|1440\|2160\|null}` (`size`: the shorter side in pixels, the shape kept; `null` keeps the size), and optionally `source`: what you read of the video, `{"codec": FFmpeg's codec name ("h264", "wmv2", "vc1", ...), "width", "height", "fps"}`, so the price is known before the upload. Needs the whole video uploaded and `output_video`. The picture is copied when the new file type can hold its codec at its size (free; MKV holds any); otherwise it is made again, priced as Video conversion (above, with its size `factor`). Without `source.codec` a change of file type alone can't be priced up front: the estimate lists the line with `"maybe": true` (not in the total); a line that is free because the picture is copied says `"copied": true` (micros 0). A sound (a file with no picture) asked for as a video gets a plain black picture (one frame a second) with its sound, free. When the file is read the server works it out again from the file itself and charges that; if it costs more than was held, the hold grows (the job fails, uncharged, when the balance is short) |
 | `loudness_lufs` | `-16` | target loudness, a number from -30 to -9 (`400` outside it), or `null` to leave the level as it is. Podcast about -16, online video -14, broadcast -23 |
 | `atten_lim_db` | `100` | how much noise may be removed: any number, clamped to 6-100 dB. The website's strengths are 12 (gentle), 24, 40 and 100 (max). Doesn't apply to `rebuild` |
-| `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Charged at its own price (`echo` / `standard` in the price list, about a third of Denoising's) on top of the job's other steps; a job made before this price existed keeps the prices it was made with (no echo line, nothing charged for it). A file with only one audio track fails the whole job as soon as it is read, before any work, uncharged (echo removal was part of what was asked for); a re-run or an edit of such a job that asks for it is refused (`400`). The website doesn't offer it for such a file |
+| `echo_reference_track` | `false` | must be a boolean. Removes speaker echo from the first audio track (the mic) using the second track (the desktop sound), before noise removal; subtitles are written from the echo-free sound. Charged at its own price (`echo` / `standard` in the price list, about a third of Denoising's) on top of the job's other steps; a job made before this price existed keeps the prices it was made with (no echo line, nothing charged for it). A file with only one audio track fails the whole job as soon as it is read, before any work, uncharged (echo removal was part of what was asked for); an edit of such a job that asks for it is refused (`400`). The website doesn't offer it for such a file |
 | `noise` | `auto` | `auto` (measured per file), `light`, `heavy` (better when the noise is nearly as loud as the voice). Doesn't apply to `rebuild` |
 | `leveling` | `true` | Leveling (its own price): the clarity chain after the noise removal (level matching, high-pass, compressor, loudness to `loudness_lufs`, limiter); `false` returns the cleaned voice as it is (`loudness_lufs` then does nothing). Must be a boolean. |
 | `automatic` | `false` | `true`: the server listens to the file and decides what you did not give yourself, like the website's "Automatic best settings" (next section). Must be a boolean; needs `kind` `denoise` or `denoise_transcribe` and `denoiseTier: "standard"` |
@@ -309,7 +310,7 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
 
 ### 4. Poll: `GET /api/jobs/{id}` (and `GET /api/jobs`)
 
-`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,sourceJobId,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,editedAt,hardDeadlineAt,edit?,needs?,redo?,callback?,chosen?,maximum?}`
+`{id,kind,tier,label,free,status,stage,progress,error,inputName,durationSeconds,estCostMicros,costMicros,options,denoiseTier,transcribeTier,notice,queuePosition,queueWaitSeconds,estimateSeconds?,outputs:[{name,kind,bytes,lang?}],createdAt,finishedAt,expiresAt,editedAt,hardDeadlineAt,edit?,needs?,redo?,callback?,chosen?,maximum?}`
 
 - `status`: `uploading → queued → running → (cloud_asr) → done | failed | canceled | expired`. A restart of the
   service never fails a job: it goes back to `queued` and starts again.
@@ -323,22 +324,17 @@ upload (already uploaded, canceled, expired), `408` after 30 s without data, `41
 - `outputs[].kind`: `audio`, `video`, `captions`, `transcript`, `segments`; captions and transcripts carry `lang`.
   `name` is what the download URL takes.
 - `estimateSeconds`: while `queued` or `running`, a rough length of the whole job (for a "time left" before `progress` has moved).
-- `sourceJobId`: for a job made by changing another (section 7), that job's id.
-- `expiresAt`: when the upload, the copies kept for changing the job (including the cached blocks of section 8) and the results are all
+- `expiresAt`: when the upload, the editor's copies for changing the job (the cached blocks of section 8) and the results are all
   deleted: 2 hours after the job's **last edit** (`ACW_JOB_RETENTION_MINUTES`; finishing a run, saving a timeline, a quote, a process,
-  an export and a re-run each count as an edit, a read or a preview does not), and never later than `hardDeadlineAt`, 6 hours after the
+  and an export each count as an edit, a read or a preview does not), and never later than `hardDeadlineAt`, 6 hours after the
   upload arrived (`ACW_JOB_MAX_RETENTION_MINUTES`). `editedAt`: the last edit. The housekeeping sweep runs every 30 to 60 seconds, so
   the deletion is accurate to about a minute. While an edit run is `queued` or `running`, `expiresAt` is `null` (as for any running job) and
   gets its new value when the run ends.
-- `edit` (jobs with audio steps): `{available, hasTimeline, run, lastRun, suggestions}`: `available` when the job is `done` (it can be
+- `edit` (every job but a conversion): `{available, hasTimeline, run, lastRun, suggestions}`: `available` when the job is `done` (it can be
   edited, section 8), `hasTimeline` once it has a timeline of its own, `run` the operation (`process`, `export`, `suggest`) while one is
   queued or running (the job's `status` is then `queued` / `running` again, its earlier `outputs` stay listed), `lastRun`
   `{op, ok, at, error?}` of the last run (a run that failed or was canceled leaves the job as it was: `ok: false` and why),
   `suggestions` whether it has any.
-- `redo` (when `done`): `{available, noise, rebuilt, transcript, translations, preview?}`: whether the job can still be changed
-  (its upload exists) and which kept copies it can start from. `preview` is for the website's strength slider (the two
-  signals `GET /api/jobs/{id}/kept/noise` and `.../kept/input`, 24-bit FLAC, sample for sample the same length, for a recording of any
-  length; section 5a): `{samples, channels, plan, scale: {noise, input}, bytes: {noise, input}, stretchMaxSeconds, energy?}`.
 - `needs` (jobs with audio steps, only when the timeline has parts the browser makes): what the browser still has to upload, `[{kind, start, end}]`, empty once everything is in (section 8, "Uploads from the browser").
 - `callback`: only when a `callbackUrl` was given, see below.
 - `chosen`, `maximum`: only for a job made with `options.automatic`: what was decided and why (`null` until the file has been listened to),
@@ -353,84 +349,18 @@ which keep no files, are listed for 2 hours after they ended), in the same shape
 Streams the file as an attachment (`name` from `outputs`). `404` until the job is `done`, and after the results expire. Download
 promptly: they are deleted, together with the upload and the copies kept for changing the job, 2 hours after the job's last edit (`done` is the first; at the latest 6 hours after the upload), or at once with `DELETE`.
 
-### 5a. The two kept copies, in stretches: `GET /api/jobs/{id}/kept/{noise|input}`
-
-A finished Denoising job (the standard remover, not the Voice rebuild) made without a timeline of its own keeps, until its files are deleted (section 4, `expiresAt`), two signals on the same sample grid, of any
-length: `noise` (the noise removal at full strength) and `input` (the recording as the remover heard it). Any strength is exactly
-`(1 - a) * noise + a * input` with `a = 10^(-dB/20)` (`a = 0` from 100 dB), which is what the website's live strength slider plays and what a free
-re-run saves (section 7). `redo.preview` of the job tells how to read them: `samples` (the length, 48 kHz), `channels` (which channels of the
-recording are kept, e.g. `[0]`, or `[1]` alone), `plan` (for each channel of the result, the kept channel it is; `null`: silent), `scale`
-(a copy with a sample louder than 0.98 was scaled down by this factor before it was kept: divide by it), `bytes` (the sizes of the whole
-files), `stretchMaxSeconds` (30) and, when known, `energy` (`{full, input, cross}`: the sums of squares and of products over all
-samples and kept channels, the loudness of any blend is `(1-a)^2 full + a^2 input + 2a(1-a) cross`).
-
-Without parameters the answer is the whole copy (24-bit FLAC). With `start` and/or `seconds` it is only a stretch, small whatever the
-length of the recording:
-
-| Query | Meaning |
-|---|---|
-| `start` | seconds from the beginning, default `0`; rounded to the nearest sample (48 kHz). Six decimals name every sample exactly. At or past the end of the recording: `400` |
-| `seconds` | length, default and at most `30` (more is cut to 30); cut short by the end of the recording. Zero, negative or not a number: `422` |
-
-The answer is `200` `audio/flac`: 24-bit, 48 kHz, the kept channels, exactly those samples (a few seconds of speech are a few hundred kB). It decodes to the very
-values the whole copy has at those positions (nothing is lost), and the same `start` and `seconds` for `noise` and `input` give two stretches that
-line up sample for sample. Headers: `X-Stretch-Start` (the first sample), `X-Stretch-Samples` (how many) and `X-Total-Samples`;
-`Cache-Control: private, no-store`. A page or program that plays or mixes a long recording asks for the stretch around its position, the next
-one ahead of time and nothing else, and holds a few at a time.
-
-Same sign-in and key scope (`jobs`) as the other calls on a job; only the account's own jobs, `404` for any other, for a job that is not
-`done`, one without both copies (a Voice rebuild, Leveling on its own, a job made before the recording was kept, a job that has been edited with a
-timeline: for those use the preview stretches of section 8) and after the files are deleted or `DELETE`. Stretches have a limit of their own per account (a burst of 120, then 2 a second: playing needs about one every 5 seconds, a seek one more
-pair) and `429` with `Retry-After` when it is passed; `503` with `Retry-After` when the server is busy cutting for others.
-
 ### 6. Cancel and delete
 
 `POST /api/jobs/{id}/cancel`: while `uploading` or `queued`; releases the reservation. `409` once it has started, and
 once its extra-accurate transcription is done (only packaging is left: "almost done"). `DELETE /api/jobs/{id}`: deletes everything
-of the job now (the upload, the kept copies and the results) and the same for every job made from it by changing it (section 7);
-`409` while the job or one of those is active. Both answer `{ok:true}`.
+of the job now (the upload, the editor's copies and the results); `409` while the job is active. Both answer `{ok:true}`.
 
-### 7. Change a finished job: `POST /api/jobs/{id}/rerun/estimate` and `POST /api/jobs/{id}/rerun`
+### 7. Change a finished job
 
-Until its files are deleted (2 hours after its last edit, at the latest 6 hours after the upload), a job's upload and the intermediate results of the expensive steps stay in its folder:
-the noise removal at full strength (before strength and Leveling), the rebuilt voice when the Voice rebuild
-ran, the transcript (and its translations). Asking for the same file again with other choices starts from the latest
-kept copy and runs only the steps whose inputs changed. Only paid steps that really run are charged, at today's
-per-second prices pinned to the new job; the blend that sets the strength and writing the file cost nothing (Leveling is charged whenever it runs).
-
-Body of both calls: only what changes (the rest stays as the job had it): `{denoiseTier?, transcribeTier?, options?}`.
-`transcribeTier: "off"` leaves the subtitles out of the new job's files (on its own that changes nothing: `nothing_to_change`). `/rerun` also takes `maxCostMicros?`: the price you were quoted; a higher one now is `409 price_changed`.
-
-| You change | What runs again | Price |
-|---|---|---|
-| `options.atten_lim_db` | the blend of the kept noise removal and the recording (no model runs), for a recording of any length; `(1 - a) * full + a * input`, `a = 10^(-dB/20)`, in the time domain: the same arithmetic the noise remover does itself. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send `"leveling": false` as well for a free strength change | free; Leveling's price when Leveling is on |
-| `options.leveling`, `options.loudness_lufs` | from the kept noise removal: the blend, Leveling (when on) | Leveling's price whenever it runs; free when it is off |
-| `denoiseTier: "rebuild"` | the voice is rebuilt from the upload | the full Voice rebuild price (plus Leveling when on) |
-| `denoiseTier: "standard"` (from a rebuild) | from the kept noise removal; if the job never had one, noise removal runs from the upload | free, or the Denoising price when it had to run |
-| `options.noise`, `options.echo_reference_track` | noise removal runs again from the upload | the Denoising price (plus echo removal's own price when it is on, and Leveling when on) |
-| `transcribeTier`, `options.language` | the transcript is written again from the upload (always from the original sound) | the subtitle price |
-| `options.translate` | only the languages not already made (from the kept transcript) | per new language |
-| `options.audio_format`, `options.caption_formats` | the files are written again from what is there | free |
-
-`POST /api/jobs/{id}/rerun/estimate` runs and holds nothing and answers `{estCostMicros, estCostUsd, free, durationSeconds, lines,
-steps: {clean: "none"|"full"|"denoised"|"rebuilt"|"reuse", transcribe, translate}, expiresAt, options, denoiseTier, transcribeTier,
-availableMicros, affordable, keyLimit?}` (`lines` as in section 2, only the steps that run). `POST /api/jobs/{id}/rerun` holds the price
-and answers `{id, estCostMicros, free, expiresAt}`: a new job (poll, download and delete it like any other; it has `sourceJobId`; the
-credit history gets one line for it, "Changed and saved again" and the steps, none when it was free).
-
-- It uses the same queue, sandbox and worker as any job, counts toward the active-job limit and the key's spending cap, and is
-  priced for the length the first job measured.
-- It is an edit of the job it came from: starting it and finishing it give the job it came from, and the new job, 2 hours from then
-  (`expiresAt`), and nothing of the chain is kept past 6 hours after the upload (`hardDeadlineAt`); a change started too late to finish before
-  that is refused (`409 job_expiring`), and one that is still only finishing in the last minute of that time is stopped (`failed`, not charged)
-  because its results could not be downloaded in time.
-- It is the whole-file case of the per-part editor of section 8, and stays as it is for jobs without a timeline of their own. A job that has
-  one (made with a `timeline`, or saved / processed with one) is changed through section 8: a re-run of it is `409 job_edited`.
-- Who: the key that made a job can change it; the website session of the same account can change any job of the account;
-  a key can never change a job another key (or the website) made: that is `404 job_not_found`, like a job that doesn't exist.
-- Errors (with `code`, also in `X-Error-Code`): `404 job_not_found`, `409 job_files_gone` (deleted or past its time: start again from your file), `409 job_edited` (use section 8),
-  `409 job_not_finished`, `409 job_expiring`, `409 price_changed`, `400 nothing_to_change` (the choices give the files the job already has),
-  `429 too_many_active_jobs`, `402` (balance), `403` (`key_spending_cap`).
+Every job is made with a timeline, also one asked for with options: they become the timeline they stand for (each sound step on the whole
+file, the subtitles as one part over the whole file; for a file whose real length differs from `durationSeconds`, the timeline is made
+again for its real length once it is read). A finished job is changed by editing that timeline (section 8): ask for a quote, then process
+it; only what is missing runs, and only that is charged.
 
 ### 8. Edit a job part by part: timeline, quote, process, export, preview, suggestions
 
@@ -528,10 +458,10 @@ nothing has no line; the hold is made at the quote and the charge is for what ra
 
 **Run.** A process or export is the job going back through the normal queue, sandbox and workers (Voice rebuild and the heavy remover on the card,
 `400` with "paused" when it is down and the timeline needs it): the missing blocks are made and cached, then the timeline is rendered (joins between
-parts, Leveling per part) into the result audio. Video results are not made by a run: audio is what the server makes (the website's own remux
-flow puts it back into the video). The new audio is written under a temporary name and takes the old result's place only when the whole run is complete, so a run that fails or is stopped leaves the old audio and the record of it exactly as they were (the same goes for the job's other results). The captions and transcript of the job stay as they were, unless the run changes the subtitles of a job that makes them part by part: then they are put together again from all the parts (see below). If a run fails or is canceled the job is as it was
-(`edit.lastRun`), the money is released and the files stay. After the first process of a job made the old way, its old strength-slider copies (`redo`) no longer fit
-and are deleted; use the preview below.
+parts, Leveling per part) into the result audio. A video the server made (the whole video was uploaded, or a sound asked for as a video) is made
+again with the new sound or subtitles, the way the first run made it (its picture made again is charged again: Video conversion, in the quote's
+lines); otherwise audio is what the server makes (the website puts it back into the video itself). The new audio is written under a temporary name and takes the old result's place only when the whole run is complete, so a run that fails or is stopped leaves the old audio and the record of it exactly as they were (the same goes for the job's other results). The captions and transcript of the job stay as they were, unless the run changes the subtitles of a job that makes them part by part: then they are put together again from all the parts (see below). If a run fails or is canceled the job is as it was
+(`edit.lastRun`), the money is released and the files stay.
 
 **Cache.** `blocks/` in the job's folder: every block a model step made, 24-bit FLAC, keyed by the step, the model, the audio it read and where it is.
 A whole-file first run fills it (the blocks are on a 30 s grid for the noise removers and echo removal, 14 s windows for Voice rebuild), an edit only
@@ -544,7 +474,7 @@ removal at full strength: the remover of the timeline's noise part there, else t
 (`[[from, to], ...]` seconds from the start of the stretch); none cached is `404 not_cached` with `missing`. Headers: `X-Stretch-Start`, `X-Stretch-Samples`,
 `X-Total-Samples`, `X-Stretch-Scale` (the samples are the stretch times it: a loud stretch is brought down to fit a 24-bit file; divide by it),
 `X-Stretch-Layer`. For a strength `a = 10^(-dB/20)` the page plays `(1 - a) * noise + a * (the echo-free voice, or source)`. Same sign-in, same
-rate limit (a burst of 120, then 2 a second) and `503` when busy as the kept copies of section 5a.
+rate limit (a burst of 120, then 2 a second), and `503` when busy.
 
 **Suggestions.** The first run of a recording up to `ACW_SUGGEST_MAX_MINUTES` (60) also looks for parts that sound different from the rest (noisier,
 quieter, phone-like, distorted, clipped) and stores what fits each better, with the reasons in plain words, ranges and proposed settings (about 0.22
@@ -584,7 +514,7 @@ job's cache (the recording's in `kept-source.peaks`), so asking again is cheap; 
 (ask again). `404 not_cached` when nothing of the layer is cached. Same sign-in, scopes, ownership, retention (a read, not an edit) and rate limit (`503` when busy) as the preview stretches.
 
 **Retention.** The job's files (upload, cached blocks, recording copy, the browser's uploads, the subtitle parts' text, results) are deleted **2 hours after its last edit** (`expiresAt`) and never
-later than **6 hours after the upload** (`hardDeadlineAt`). Edits: a run finishing, `PUT .../timeline`, a quote, a process, an export (and a re-run).
+later than **6 hours after the upload** (`hardDeadlineAt`). Edits: a run finishing, `PUT .../timeline`, a quote, a process, an export.
 Reads and previews are not edits. A run that cannot finish before the 6 hours is refused (`409 job_expiring`), one that only finishes in their last minute is stopped
 and not charged.
 

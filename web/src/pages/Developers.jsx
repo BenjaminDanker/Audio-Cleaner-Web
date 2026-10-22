@@ -134,7 +134,7 @@ curl -s -OJ ${hdr} $BASE/api/jobs/3f2c.../outputs/talk-cleaned.wav`}</Code>
         </ul>
 
         <h3>4. Download the results</h3>
-        <p><code>GET /api/jobs/&#123;id&#125;/outputs/&#123;name&#125;</code> with a <code>name</code> from <code>outputs</code>. The file comes as an attachment. Your upload, the copies kept for <a href="#again">changing the job</a> and the results are kept together for <b>2 hours</b> after the job&rsquo;s last change (finishing is the first; saving, pricing, processing or exporting an <a href="#edit">edit</a> each count), and never more than <b>6 hours</b> after the upload, then deleted together for good. <code>expiresAt</code> says when.</p>
+        <p><code>GET /api/jobs/&#123;id&#125;/outputs/&#123;name&#125;</code> with a <code>name</code> from <code>outputs</code>. The file comes as an attachment. Your upload, the editor&rsquo;s copies for <a href="#again">changing the job</a> and the results are kept together for <b>2 hours</b> after the job&rsquo;s last change (finishing is the first; saving, pricing, processing or exporting an <a href="#edit">edit</a> each count), and never more than <b>6 hours</b> after the upload, then deleted together for good. <code>expiresAt</code> says when.</p>
         <p>A video comes back in its own container when it can hold the result (mp4, mov, m4v, mkv, webm), otherwise as MKV, unless <code>video_out</code> asks for another file type or size. Other audio tracks are kept as they were; only the first audio track is cleaned. Subtitles go into the video where the container can carry them.</p>
 
         <h3>5. Cancel or delete</h3>
@@ -195,11 +195,11 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
 }`}</Code>
         <p><code>reasons</code> says in plain words what was heard and what was done, and which options were yours. When the voice is rebuilt, <code>strength</code>, <code>attenLimDb</code> and <code>noise</code> are <code>null</code>.</p>
         <p><b>When the voice needs a rebuild but it can&rsquo;t be done</b> (the file is over 90 minutes long, voice rebuilding is paused, you gave Denoising settings, or <code>echo_reference_track</code> is on), the file is cleaned the usual way instead, with the strength we would have chosen. <code>rebuildWanted</code> is <code>true</code>, <code>rebuild</code> is <code>false</code>, the last reason says why, and <code>notice</code> repeats it. A rebuild waits in the same line as every Voice rebuild job, because it runs on its own machine.</p>
-        <p><b>Changing it afterwards.</b> The choices made are the job&rsquo;s settings now: <a href="#again">change them</a> like those of any job. <code>automatic</code> itself is refused there (<code>400</code>); send the settings you want, for example <code>denoiseTier</code> <code>&quot;rebuild&quot;</code>. The file is measured as it was uploaded (before any echo removal), and a job made with a key can only be changed with that key, as always.</p>
+        <p><b>Changing it afterwards.</b> The choices made become the job&rsquo;s timeline: <a href="#again">change it</a> like that of any job. The file is measured as it was uploaded (before any echo removal), and a job made with a key can only be changed with that key, as always.</p>
       </Section>
 
       <Section id="prices" title="Prices and estimates">
-        <p>The prices are per minute of audio, counted by the second and rounded up to the next second. <code>GET /api/billing/pricing</code> is public (no key needed) and lists them, plus the limits:</p>
+        <p>The prices are per minute of audio, counted by the second and rounded up to the next second; each sound step that runs also has a small fixed amount for starting it (<a href="#edit">Editing part by part</a>), the same for every job, whether you send options or a timeline. <code>GET /api/billing/pricing</code> is public (no key needed) and lists them, plus the limits:</p>
         <Code label="Price list">{`curl -s $BASE/api/billing/pricing
 {
   "rates": [
@@ -248,58 +248,7 @@ curl -s -X DELETE ${hdr} $BASE/api/jobs/3f2c...`}</Code>
       </Section>
 
       <Section id="again" title="Changing a finished job">
-        <p>For 2 hours after the last change to a job (6 hours after the upload at the latest), the files it needs to be changed are kept next to its results: your upload, the noise removal before its strength is applied, the rebuilt voice when there was one, and the transcript. In that time you can ask for the same file again with other choices. Only the steps whose inputs changed run again, and you pay only for the steps that cost something and really run again. Setting the strength and writing the file cost nothing.</p>
-        <Table
-          head={['You change', 'What runs again']}
-          rows={[
-            ['atten_lim_db', 'Nothing but a mix of the kept noise removal and your recording, for a recording of any length, which is free. Leveling comes after it, so with Leveling on (the default) it runs again and is charged; send leveling: false as well to change only the strength for free.'],
-            ['leveling, loudness_lufs', 'From the kept noise removal: Leveling is charged at its price whenever it runs; with it off the change is free.'],
-            ['denoiseTier: "rebuild"', 'The voice is rebuilt from your upload, at the full Voice rebuild price.'],
-            ['denoiseTier: "standard" (from a rebuild)', 'The kept noise removal is used. If the job never had one, noise removal runs and is charged.'],
-            ['noise, echo_reference_track', 'Noise removal runs again from your upload and is charged (echo removal, when it is on, in its own line).'],
-            ['transcribeTier, language', 'The transcript is written again from your original sound and is charged. Other languages in translate cost only for the new ones.'],
-            ['audio_format, caption_formats', 'The files are written again from what is already there. Free.'],
-          ]}
-        />
-        <h3>Hear and mix the strengths yourself</h3>
-        <p>A finished Denoising job keeps two signals on the same sample grid, whatever its length: <code>noise</code> (the noise removal at full strength) and <code>input</code> (your recording as the remover heard it). Every strength is <code>(1 - a) * noise + a * input</code> with <code>a = 10^(-dB/20)</code>. <code>GET /api/jobs/&#123;id&#125;/kept/&#123;noise|input&#125;?start=&lt;seconds&gt;&amp;seconds=&lt;n&gt;</code> hands out just a stretch of one of them as a small 24-bit FLAC: <code>start</code> in seconds (to the nearest sample at 48&nbsp;kHz), <code>seconds</code> at most 30 (the default). The same <code>start</code> and <code>seconds</code> for <code>noise</code> and <code>input</code> give two stretches that line up sample for sample, exactly the values the whole copies have there, so a player holds a few seconds at a time and fetches the next stretch ahead. How to read them (<code>channels</code>, <code>plan</code>, <code>scale</code>, <code>energy</code>) is in the job&rsquo;s <code>redo.preview</code>. Without <code>start</code> and <code>seconds</code> you get the whole copy. Only your own jobs, only while their files are kept, with a limit of its own for stretches (<code>429</code> with <code>Retry-After</code>). To save a strength, ask for a change as above: with <code>leveling: false</code> it is free for any length.</p>
-        <Code label="One stretch of each copy">{`curl -s "$BASE/api/jobs/3f2c.../kept/noise?start=125.5&seconds=10" ${hdr} -o noise.flac
-curl -s "$BASE/api/jobs/3f2c.../kept/input?start=125.5&seconds=10" ${hdr} -o input.flac
-# both: 480000 samples at 48 kHz, X-Stretch-Start: 6024000, X-Stretch-Samples: 480000`}</Code>
-        <h3>Ask for the price, then do it</h3>
-        <p><code>POST /api/jobs/&#123;id&#125;/rerun/estimate</code> takes the choices you want to change (the rest stay as they were): <code>denoiseTier</code>, <code>transcribeTier</code> (<code>"off"</code> leaves the subtitles out; on its own that changes nothing) and <code>options</code>. It runs nothing and sets nothing aside, and answers with what would run, its price as lines, and whether your balance can cover it. <code>POST /api/jobs/&#123;id&#125;/rerun</code> with the same body does it: it sets the price aside, makes a new job with its own <code>id</code> (watch it, download from it and delete it like any other), and answers <code>{'{"id", "estCostMicros", "free", "expiresAt"}'}</code>. Add <code>maxCostMicros</code> with the price you were quoted and the call is refused with <code>409</code> and the code <code>price_changed</code> if it is higher now.</p>
-        <Code label="Change a finished job">{`# what would it cost to keep Leveling on at a gentler strength?
-curl -s $BASE/api/jobs/3f2c.../rerun/estimate ${hdr} -H "Content-Type: application/json" \
-  -d '{"options": {"atten_lim_db": 24}}'
-# -> {"estCostMicros": 30184, "free": false, "lines": [{"item": "leveling", "label": "Leveling", "micros": 30184, ...}],
-#     "steps": {"clean": "denoised", "transcribe": false, "translate": []}, "expiresAt": 1760686820, "affordable": true, ...}
-
-# do it
-curl -s $BASE/api/jobs/3f2c.../rerun ${hdr} -H "Content-Type: application/json" \
-  -d '{"options": {"atten_lim_db": 24}, "maxCostMicros": 30184}'
-# -> {"id": "9a77...", "estCostMicros": 30184, "free": false, "expiresAt": 1760686820}`}</Code>
-        <ul>
-          <li>The new job goes through the same line and the same limits as any job: it counts toward the jobs in progress, and a key&rsquo;s spending limit holds for it.</li>
-          <li>A change counts as an edit of the job it came from: starting it and finishing it give the job it came from and the new job 2 hours from then (the answer&rsquo;s <code>expiresAt</code>), and nothing is kept past 6 hours after the upload. A change that cannot finish before then is refused, and one that is still only finishing in the last minute of that time is stopped and not charged.</li>
-          <li>A job that has its own timeline (made with one, or edited as <a href="#edit">below</a>) is changed there instead: asking for a change of it this way is <code>409</code> with the code <code>job_edited</code>.</li>
-          <li>A key can only change jobs that key made. Your signed-in website session can change any job of the account, including ones a key made. Anything else is <code>404</code> with the code <code>job_not_found</code>, the same answer as for a job that doesn&rsquo;t exist.</li>
-          <li>In your credit history a paid change is one line, &ldquo;Changed and saved again&rdquo; and the steps it did. A free one has no line.</li>
-          <li>A voice rebuild needs the same things as creating one (files up to 90 minutes, and it can be paused for a moment).</li>
-        </ul>
-        <Table
-          head={['Status and code', 'What it means']}
-          rows={[
-            ['404 job_not_found', 'No such job, or not one this key made.'],
-            ['409 job_files_gone', 'The job’s files are already deleted (their time passed, or it was deleted): start again from your file.'],
-            ['409 job_not_finished', 'Only a finished job can be changed.'],
-            ['409 job_edited', 'This job has its own timeline: change it as described under Editing part by part.'],
-            ['409 job_expiring', 'Too little of the 6 hours after the upload is left for the work to finish. Start again from your file.'],
-            ['409 price_changed', 'The price is above your maxCostMicros.'],
-            ['400 nothing_to_change', 'These choices give the files the job already has.'],
-            ['429 too_many_active_jobs', 'You already have the most file jobs in progress that an account may have. Try again when one is done.'],
-            ['402, 403', 'As for creating a job: not enough balance, or the key’s monthly spending limit (X-Error-Code: key_spending_cap).'],
-          ]}
-        />
+        <p>Every job is made with a timeline, also one you ask for with options: they become the timeline they stand for (each step on the whole file, the subtitles as one part over the whole file). To change a finished job, edit that timeline as described under <a href="#edit">Editing part by part</a>: ask for a quote, then process it. Only what is missing runs, and only that is charged. A job&rsquo;s files are kept for this for 2 hours after its last change (6 hours after the upload at the latest).</p>
       </Section>
 
       <Section id="edit" title="Editing part by part">

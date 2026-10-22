@@ -98,7 +98,7 @@ def facts_of(inputs, ff, probe, job_dir: Path, *, keep_source: bool = True) -> d
 
 
 def needs_facts(ed: dict, job_dir: Path) -> bool:
-    """The facts and the recording's FLAC are made when the job has none (a re-run's come linked from its source)."""
+    """The facts and the recording's FLAC are made when the job has none yet."""
     return not ed.get("facts") or not (job_dir / f"{SOURCE}.flac").is_file()
 
 
@@ -423,11 +423,16 @@ def stage_edit(job_dir: Path, spec: dict, ff, emit) -> dict:
             del y
         else:
             report["billed"] = {}
-        if has_subs:
-            # the caption files are put together here, or after the web process has made its part (runner.stage_finalize reads this)
+        video = bool(ed.get("video"))  # a video made on our side is made again (editing.make_quote), like the first run made it
+        if has_subs or video:
+            # the caption files are put together here, and the video made, or after the web process has made its part (runner.stage_finalize
+            # reads this); the video's sound is the new one (under its temporary name), or the job's as it is
             import json
 
-            (job_dir / "main-state.json").write_text(json.dumps({"outputs": result["outputs"], "cleaned": None, "has_video": False}))
+            cleaned = result["outputs"][0]["file"] if audio and result["outputs"] else ed.get("audio_file")
+            (job_dir / "main-state.json").write_text(json.dumps({"outputs": result["outputs"], "cleaned": cleaned if video else None,
+                                                                 "has_video": bool(probe.has_video) and video, "duration": probe.duration,
+                                                                 "video": video}))
             if not result.get("needs_cloud_asr"):
                 from acw.worker import runner
 

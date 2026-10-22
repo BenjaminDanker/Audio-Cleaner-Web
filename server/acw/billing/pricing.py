@@ -150,36 +150,6 @@ def job_cost_micros(
     return max(total, MIN_JOB_CHARGE_MICROS) if total else 0
 
 
-RERUN_ITEMS = ("denoise", "echo", "leveling", "transcribe", "translate")
-
-
-def rerun_rates(denoise_tier: str | None, transcribe_tier: str | None, paid: list[str]) -> dict[str, int]:
-    """Micros per minute of each step a re-run does again (and so pays for), at today's prices; stored with the job. `paid`:
-    the steps from RERUN_ITEMS that run. Steps that don't run (the strength blend and encoding never have a price) are not here."""
-    out: dict[str, int] = {}
-    if "denoise" in paid and denoise_tier and denoise_tier != NO_DENOISE:
-        out["denoise"] = rate("denoise", denoise_tier).micros_per_minute
-    if "echo" in paid:
-        out["echo"] = rate("echo", "standard").micros_per_minute
-    if "leveling" in paid:
-        out["leveling"] = rate("leveling", "standard").micros_per_minute
-    if "transcribe" in paid and transcribe_tier:
-        out["transcribe"] = rate("transcribe", transcribe_tier).micros_per_minute
-    if "translate" in paid:
-        out["translate"] = rate("transcribe_translate", "standard").micros_per_minute
-    return out
-
-
-def rerun_cost_micros(rates: dict[str, int], seconds: float, translate_languages: int = 0) -> int:
-    """What a re-run costs: each step it does again, per second of audio rounded up, at the prices pinned with the job."""
-    secs = max(0, math.ceil(seconds))
-    per = lambda micros: math.ceil(micros * secs / 60)  # noqa: E731
-    total = sum(per(rates[k]) for k in ("denoise", "echo", "leveling", "transcribe") if k in rates)
-    if "translate" in rates:
-        total += translate_languages * per(rates["translate"])
-    return total
-
-
 def public_price_list() -> list[dict]:
     return [
         {

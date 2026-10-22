@@ -636,7 +636,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 
 | Where | What grows | Bound |
 |---|---|---|
-| `data/jobs/` | uploads, the copies kept for changing a job again, the editor's block cache and recording copy, results | all of a job's files go together, 2 hours (`ACW_JOB_RETENTION_MINUTES`) after its last edit (finishing a run, a timeline save, a quote, a process, an export, a re-run) and never later than 6 hours (`ACW_JOB_MAX_RETENTION_MINUTES`) after the upload arrived (`jobs.expiry`; `jobs.sweep`, from the web process every 30 s and from each worker every 60 s, so the deletion is accurate to about a minute), or at once with "Delete now" (which also takes the jobs made from it); the files of a failed or canceled job go at once and leftover folders after an hour; a deleted account's files at once. Sizes: "What a job keeps" below. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve (which counts the kept copies, `jobs.kept_bytes`) watch it |
+| `data/jobs/` | uploads, the editor's block cache and recording copy, results | all of a job's files go together, 2 hours (`ACW_JOB_RETENTION_MINUTES`) after its last edit (finishing a run, a timeline save, a quote, a process, an export) and never later than 6 hours (`ACW_JOB_MAX_RETENTION_MINUTES`) after the upload arrived (`jobs.expiry`; `jobs.sweep`, from the web process every 30 s and from each worker every 60 s, so the deletion is accurate to about a minute), or at once with "Delete now"; the files of a failed or canceled job go at once and leftover folders after an hour; a deleted account's files at once. Sizes: "What a job keeps" below. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve (which counts the block cache, `editing.cache_bytes`) watch it |
 | `data/acw.sqlite3` and `-wal` | the database, see above | the table above; the log file stays ~4 MB (SQLite checkpoints it by itself) |
 | `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
 | `data/legal/` | one small page (and its hash) per version of the Terms and the Privacy Policy, plus `current.json`; never deleted | a few tens of KB per version change |
@@ -651,20 +651,13 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 | `/var/www/audio` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
 | `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; test fixtures and scratch; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
 
-**What a job keeps** (`data/jobs/<id>/`, until its deadline: 2 hours after its last edit, at the latest 6 hours after the upload; `acw_common/kept.py`, `server/acw/rerun.py`, `server/acw/editing.py`). Measured on a 130 s
-recording (`kept.save`, 24-bit FLAC): per hour of audio and per cleaned channel the noise removal at full strength takes about **0.29 GB**
-(0.14 GB for a stereo recording whose sides are nearly the same), the recording itself, kept next to it for the website's strength slider
-(**for any length**: the page plays short stretches of both, `acw/stretch.py`), **0.36 GB** (0.32 to 0.36 on speech mixed with street noise at
-0 to 20 dB, 0.40 on white noise at -34 dBFS, which is the worst case); the Voice rebuild keeps its output (about the same as the noise
-removal) and nothing else; the transcript is a few kB. A channel that repeats the other, or is silent, is kept once, or not at all. On top of
-that come the upload as it was sent (a FLAC of 1 h of mono speech: about 0.3 GB) and the results (a FLAC of the same: 0.3 GB). So a 1 hour mono
-Denoising file holds about **1.25 GB** for 2 hours (copies 0.65, upload 0.3, result 0.3; before, a file over 20 minutes had no slider copy and held
-0.9 GB), a 1 hour stereo one with two different channels about **2.5 GB**, a 4 hour mono file about 5 GB; `jobs.kept_bytes`
-(admission, `KEPT_PER_HOUR_PER_CHANNEL` = 0.4 GB per copy, a worst-case figure) reserves 0.8 GB per hour and channel for the two copies. At the
-example load of 1000 file jobs a day, 2 hours means about 83 jobs are on disk at any time instead of 1000. The re-run of a job hard-links what
-it needs (no copy), so it adds only what it writes (a strength change without Leveling writes the new result only). A stretch is cut on request
-(about 90 ms of one core: a process of a few ms and FFmpeg seeking by itself, at most 4 at once, 120 a burst then 2 a second per account, nothing
-stored). Setting `ACW_JOB_RETENTION_MINUTES` higher keeps all of this longer, lower shortens it (the Privacy Policy and the Terms say 2 hours after the last
+**What a job keeps** (`data/jobs/<id>/`, until its deadline: 2 hours after its last edit, at the latest 6 hours after the upload;
+`server/acw/editing.py`): the upload as it was sent (a FLAC of 1 h of mono speech: about 0.3 GB), the results (a FLAC of the same: 0.3 GB),
+the editor's copy of the recording (24-bit FLAC, `kept.save`: about 0.36 GB per hour and channel, 0.40 for the noisiest) and its block cache
+(what each step made, 24-bit FLAC, about the same per step that ran: `editing.cache_bytes` reserves it at creation). At the example load of
+1000 file jobs a day, 2 hours means about 83 jobs are on disk at any time instead of 1000. A preview stretch is cut on request (about 90 ms of
+one core: a process of a few ms and FFmpeg seeking by itself, at most 4 at once, 120 a burst then 2 a second per account, nothing stored).
+Setting `ACW_JOB_RETENTION_MINUTES` higher keeps all of this longer, lower shortens it (the Privacy Policy and the Terms say 2 hours after the last
 change and 6 hours after the upload: change them with these two settings).
 
 **The per-part editor adds** (`server/acw/editing.py`; the first two are written by every first run of a Denoising / Voice rebuild / Leveling job, the cache
@@ -899,8 +892,8 @@ When full, a new session is refused with the options that still fit; sessions th
 | `ACW_LOOP_LAG_LIMIT_MS` | `25` | the live process (`acw-live`) relays all live audio on one event loop: new live sessions are refused while it runs a 100 ms timer this late (p90 over 10 s). Running sessions are never cut. About 1.5% of a core per Opus session (2% per PCM session) was measured on 2026-10-18, so this rarely triggers |
 | `ACW_MAX_LIVE_SESSIONS` | `300` | sanity bound on live sessions in the web process (below uvicorn's `--limit-concurrency 500`) |
 | `ACW_MAX_ACTIVE_JOBS` | `3` | file jobs one account may have at once (uploading, waiting or running; changing a finished job counts): one more is refused with 429 and the code `too_many_active_jobs`, "You have 3 files being processed. Start this one when one of them is done." (per-key monthly caps are separate, `keycaps.py`) |
-| `ACW_JOB_RETENTION_MINUTES` | `120` | how long a job's upload, kept copies, block cache and results stay, counted from its last edit (finishing a run, a timeline save, a quote, a process, an export, a re-run) |
-| `ACW_JOB_MAX_RETENTION_MINUTES` | `360` | the most they stay, counted from when the upload arrived, whatever the edits (a re-run's chain ends together) |
+| `ACW_JOB_RETENTION_MINUTES` | `120` | how long a job's upload, block cache and results stay, counted from its last edit (finishing a run, a timeline save, a quote, a process, an export) |
+| `ACW_JOB_MAX_RETENTION_MINUTES` | `360` | the most they stay, counted from when the upload arrived, whatever the edits |
 | `ACW_SUGGEST_MAX_MINUTES` | `60` | a first run looks for the editor's suggestions (about 0.22 s per second of audio) for recordings up to this long; a longer one gets them when they are asked for; `0` turns them off for first runs |
 | `ACW_MAX_INTERRUPTIONS` | `3` | a job that a stopping worker puts back this many times is failed (not charged) instead of being retried for ever; a runner killed by the kernel for memory fails at once |
 

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import automatic, broker, db, editing, hostload, jobs, keycaps, metrics, rerun
+from .. import automatic, broker, db, editing, hostload, jobs, keycaps, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -189,11 +189,6 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         "address_space_bytes": 32 * 1024**3,  # memory-mapped scratch files count here, not in RAM
         "max_file_bytes": 16 * 1024**3,
         **({"billed_seconds": billed} if billed is not None else {}),
-        # a re-run starts from the copies its source job kept (jobs.py, rerun.py); a first run keeps its own (the noise removal
-        # and, next to it, the recording as the remover heard it, for the strength slider: any length, stretch.py)
-        **({"rerun": {"clean": params["rerun"]["clean"], "transcribe": params["rerun"]["transcribe"],
-                      "reuse_audio": params["rerun"].get("reuse_audio"), "kept": params.get("kept") or {}}}
-           if params.get("rerun") else {}),
         # the per-part editor (editing.py): what the run is, the timeline it makes, and what identifies the recording in the block cache
         **({"editor": ed} if (ed := editing.spec_for(job, params)) else {}),
     }
@@ -395,10 +390,6 @@ def _read_result(path: Path) -> dict:
             isinstance(o, dict) and isinstance(o.get("file"), str) and isinstance(o.get("kind"), str) for o in outs
         ):
             raise StageFailed("Processing failed; you were not charged.", "malformed outputs")
-        if res.get("kept") is not None and not isinstance(res["kept"], dict):
-            raise StageFailed("Processing failed; you were not charged.", "malformed kept")
-        if not isinstance(res.get("echo_skipped", False), bool):
-            raise StageFailed("Processing failed; you were not charged.", "malformed echo_skipped")
         for key in ("notice", "noise", "language"):
             if res.get(key) is not None and not isinstance(res[key], str):
                 raise StageFailed("Processing failed; you were not charged.", f"malformed {key}")
@@ -414,25 +405,13 @@ def _job_cost(job: dict, params: dict, seconds: float, billed: dict | None = Non
 
 
 def _steps_cost(job: dict, params: dict, seconds: float, billed: dict | None = None) -> int:
-    if job["kind"] == "convert":
-        return 0
+    """Every job is made with a timeline (its parts, at the prices pinned with it), but a conversion (only its video) and an automatic
+    job not decided yet (the most it can cost, which is what was held)."""
     if (params.get("edit") or {}).get("first_run"):
         return editing.first_run_cost(job["kind"], params, seconds, billed, job["id"])
-    # Translations: what was asked for until the job is done, then only the languages that were made.
-    asked = params.get("options", {}).get("translate") or []
-    made = params.get("translated", asked)
     if automatic.pending(params):
-        # (not decided: it ends up charged for the most it can cost, which is what was held)
         return automatic.pending_cost(job["kind"], params, seconds)
-    rates = dict(params.get("rates") or {})
-    if params.get("echo_skipped"):
-        rates.pop("echo", None)  # (a file with one audio track had no echo removal: it is not charged)
-    if params.get("rerun"):
-        # A re-run pays only for the steps it did again (its pinned rates are just those), and for the new languages it made.
-        new = params["rerun"].get("translate_new") or []
-        return pricing.rerun_cost_micros(rates, seconds, len([lang for lang in made if lang in new]))
-    return pricing.job_cost_micros(job["kind"], params["denoise_tier"], params["transcribe_tier"], seconds, rates, len(made),
-                                   "leveling" in rates, "echo" in rates)
+    return 0
 
 
 # A job made with an API key must say how long its file is (an API client knows): the measured length may be this
@@ -508,31 +487,23 @@ def _complete(job: dict, d: Path, res: dict) -> None:
     fresh = db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))
     params = json.loads(fresh["params_json"] if fresh is not None else job["params_json"])
     duration = float(job.get("duration_seconds") or job["claimed_seconds"])
-    # What stays in the folder besides the results, until the job's deadline (jobs.expiry): the upload, the copies a later
-    # "change and save again" starts from (rerun.py) and the per-part editor's (editing.py: the block cache, the recording,
-    # the suggestions).
+    # What stays in the folder besides the results, until the job's deadline (jobs.expiry): the upload and the per-part editor's files
+    # (editing.py: the block cache, the recording, the suggestions, what the browser sent).
     now = db.now()
-    if rerun.too_late(params, now) or now + rerun.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(job):  # nobody could download these in time
-        jobs.finish_failed(job, rerun.TOO_LATE)
+    if now + jobs.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(job):  # nobody could download these in time
+        jobs.finish_failed(job, jobs.TOO_LATE)
         return
     report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
-    kept = rerun.collect_kept(params, d, res.get("kept") or params.get("kept_reported"))
-    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}"} | rerun.kept_files(kept)
+    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}"}
             | {editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS, editing.BROWSER, editing.SUBS})
     for p in d.iterdir():
         if p.name not in keep:
             _remove(d, p)
-    params.pop("kept_reported", None)
-    params["kept"] = kept
     editing.clear_chunks(job["id"])
-    first_run = bool((params.get("edit") or {}).get("first_run"))  # a job made with a timeline: charged for what ran
-    if job["kind"] in ("denoise", "denoise_transcribe"):
+    first_run = bool((params.get("edit") or {}).get("first_run"))  # a job made with a timeline (all but a conversion): charged for what ran
+    if editing.editable_kind(job):
         params = editing.absorb(job, params, report)
         e = params["edit"]
-        if not e.get("rendered") and e.get("facts"):
-            e["rendered"] = editing.derived_rendered(job, params)  # (None when it cannot be known: everything is then made again)
-            if e["rendered"] is None:
-                e.pop("rendered")
         if report.get("suggestions"):
             editing.write_suggestions(job["id"], report["suggestions"])
         if report.get("suggestions") or report.get("has_suggestions"):
@@ -552,9 +523,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
         # (read again inside the transaction: the notice and the translated languages are written by other processes)
         costing = json.loads(c.execute("SELECT params_json FROM jobs WHERE id = ?", (job["id"],)).fetchone()["params_json"])
         cur = dict(costing)
-        cur.pop("kept_reported", None)
         cur.pop("editor_reported", None)
-        cur["kept"] = kept
         if "edit" in params:
             cur["edit"] = params["edit"]
         c.execute("UPDATE jobs SET params_json = ? WHERE id = ?", (json.dumps(cur), job["id"]))
@@ -567,7 +536,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
                 f"{jobs.label_of(job['kind'], costing)}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
-    jobs.touch(job["id"])  # finishing is an edit of the job and of the chain it belongs to: they keep their files together
+    jobs.touch(job["id"])  # (finishing is an edit of the job)
     metrics.job_ended(job["id"])
 
 
@@ -581,8 +550,8 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
         log.warning("job %s has no run to complete", job["id"])
         return
     now = db.now()
-    if now + rerun.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(job):
-        jobs.finish_failed(job, rerun.TOO_LATE)
+    if now + jobs.MIN_DELIVERY_SECONDS >= jobs.hard_deadline(job):
+        jobs.finish_failed(job, jobs.TOO_LATE)
         return
     duration = float(job["duration_seconds"])
     report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
@@ -601,21 +570,18 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
         # not fit any more
         gone = {"video", *(["audio"] if audio_changed else []), *(TEXT_KINDS if text_changed else ())}
         keep_old = [o for o in old if o["kind"] not in gone and o["file"] not in {x["file"] for x in outputs}]
-        outputs = [*(o for o in outputs if (o["kind"] == "audio" and audio_changed) or (o["kind"] in TEXT_KINDS and text_changed)), *keep_old]
+        outputs = [*(o for o in outputs if (o["kind"] == "audio" and audio_changed) or (o["kind"] in TEXT_KINDS and text_changed)
+                     or o["kind"] == "video"), *keep_old]  # (a video made on our side is made again: editrun.stage_edit)
     else:
         outputs = old
-    kept = params.get("kept") or {}
-    if audio_changed:
-        kept = {k: v for k, v in kept.items() if k == "segments"}  # the copies of the old strength slider no longer fit the audio
     keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS,
-                                            editing.BROWSER, editing.SUBS} | rerun.kept_files(kept))
+                                            editing.BROWSER, editing.SUBS})
     # (until the run is committed the old results and the new audio's temporary names stay where they are)
     for p in d.iterdir():
         if p.name not in keep | set(staged) | {o["file"] for o in json.loads(fresh["outputs_json"] or "[]")}:
             _remove(d, p)
     editing.clear_chunks(job["id"])
     params = editing.absorb(job, params, report, op=run["op"], processed=run["timeline"])
-    params["kept"] = kept
     if report.get("suggestions"):
         editing.write_suggestions(job["id"], report["suggestions"])
         params["edit"]["suggestions"] = True
@@ -625,7 +591,8 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
     est = int(job["est_cost_micros"] or 0)
     billed = report.get("billed")
     subs_charge = editing.subtitle_charge(job["id"], run["subs"], run["subtitle_rates"]) if run.get("subs") else 0  # (what was made, translations that failed excepted)
-    charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0] + subs_charge)
+    video_charge = int(run.get("convert_micros") or 0) if any(o["kind"] == "video" for o in outputs) else 0  # (its picture made again)
+    charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0] + subs_charge + video_charge)
     if run["op"] == "suggest":
         charge = 0
     swapped = editing.swap_in(d, staged)
@@ -711,9 +678,9 @@ def process(job: dict, extra: dict) -> None:
                 return
             _complete_edit(job, d, res)
             return
-        if params.get("rerun") or job["next_stage"] == "main":
-            # A re-run knows its file: the source job measured it, and priced it (the hold is the price). So does an automatic job
-            # a worker handed over to the card once it had decided on a rebuild: probed, measured, decided and priced already.
+        if job["next_stage"] == "main":
+            # An automatic job a worker handed over to the card once it had decided on a rebuild: probed, measured, decided and priced
+            # already.
             duration = float(job["duration_seconds"])
         else:
             probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
@@ -724,6 +691,10 @@ def process(job: dict, extra: dict) -> None:
                 raise StageFailed("Processing failed; you were not charged.", "malformed probe result")
             if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, params) + 61):
                 raise StageFailed("Processing failed; you were not charged.", "implausible duration")
+            # A job asked for with whole-file options: its timeline is made again for the length the file really has (editing.refit_whole_file)
+            if params.get("whole_file"):
+                params = editing.refit_whole_file(job["id"], params, duration)
+                job["params_json"] = json.dumps(params)
             # Echo removal needs the desktop sound on a second audio track: a file without one fails here, before any work, uncharged (the
             # echo removal was part of what was asked for). The website doesn't offer it for such a file.
             tracks = probe.get("audio_tracks")  # (None: not said; the runner then finds it out itself and fails the same way)
@@ -742,7 +713,9 @@ def process(job: dict, extra: dict) -> None:
             _reprice(job, duration)
             job["duration_seconds"] = duration
             params = json.loads(job["params_json"])
-            jobs.update_params(job["id"], channels=channels, **({"audio_tracks": tracks} if tracks is not None else {}))
+            # (what the file is: an edit makes its video again when our side made one, editing.make_quote)
+            jobs.update_params(job["id"], channels=channels, has_video=bool(probe.get("has_video")),
+                               **({"audio_tracks": tracks} if tracks is not None else {}))
         if automatic.pending(params):
             if _decide(job, extra, duration):
                 return  # handed over to the card's worker
@@ -754,10 +727,6 @@ def process(job: dict, extra: dict) -> None:
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])
-        if res.get("echo_skipped"):
-            jobs.update_params(job["id"], echo_skipped=True)  # (no second track: the echo removal that was asked for is not charged)
-        if res.get("kept"):
-            jobs.update_params(job["id"], kept_reported=res["kept"])  # the finishing step may run after the cloud stage
         if res.get("editor"):
             # What the per-part editor needs to know (editing.py), checked now: the suggestions go to their file at once, the rest
             # waits in the job's record for the finishing step (which may run after the cloud stage).

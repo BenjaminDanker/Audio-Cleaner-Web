@@ -7,8 +7,8 @@ It has no access to the database, secrets or the network.
 
 Stages:
   probe     inspect the upload, report duration/streams (for billing)
-  main      decode, denoise + clarity, transcribe locally or prepare chunks
-            for cloud ASR, write outputs
+  main      make the job's timeline: the subtitle parts (locally, or chunks
+            for cloud ASR), the sound steps on their parts, write outputs
   finalize  build caption files from segments.json and mux them (used after
             cloud ASR, or directly from main)
   edit      an edit run of the per-part editor: make the missing blocks of a timeline, render it into the result audio, or find
@@ -155,32 +155,11 @@ def decode_limit(spec: dict) -> float:
     return spec["max_seconds"] if billed is None else min(spec["max_seconds"], billed * 1.02 + 2)
 
 
-# The names of the copies a job keeps (jobs.KEPT_NOISE, jobs.KEPT_REBUILT: this module must not import the database code).
-KEPT_NOISE = "kept-noise"
-KEPT_REBUILT = "kept-rebuilt"
-KEPT_INPUT = "kept-input"
-
-
-def clean_options(spec: dict, profile: str):
-    """The cleaning choices of a job (pipeline.CleanOptions) from its spec: its options and tier, with the noise remover `profile`."""
-    from acw_common import pipeline
-
-    opts = spec["options"]
-    return pipeline.CleanOptions(
-        atten_lim_db=float(opts.get("atten_lim_db", 100.0)),
-        loudness_lufs=opts.get("loudness_lufs", -16.0),
-        leveling=bool(opts.get("leveling", True)),
-        noise=profile,
-        restore_voice=spec.get("denoise_tier") == "rebuild",
-        denoise=spec.get("denoise_tier") != "off",  # "off": Leveling on its own, no noise removal
-        device=spec.get("clean_device", "cpu"),
-    )
-
-
 def stage_main(job_dir: Path, spec: dict) -> dict:
-    from acw_common import dpdfnet, editor, pipeline
-    from acw_common.ffmpeg import MediaError
-    from acw_common import kept as kept_copies
+    """Every job is made one way, from its timeline (editrun.py): the subtitles part by part, then the sound steps on their parts (the block
+    cache is filled from nothing; a later edit runs only what is missing). A conversion has nothing to do here: its video is made in
+    `stage_finalize`."""
+    from acw_common import editor, pipeline
 
     ff = _ff(spec)
     limit = decode_limit(spec)
@@ -188,226 +167,54 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     probe = ff.probe(src)
     opts = spec["options"]
     stem = spec["output_stem"]
-    threads = int(spec.get("threads", 2))
     outputs: list[dict] = []
-    ed_spec = spec.get("editor")  # the per-part editor (editrun.py): the block cache, the recording's facts, the suggestions
-    # A job whose timeline has subtitle parts makes its subtitles part by part (editrun.subtitles_prepare), not for the whole file; and one
-    # whose timeline has no sound parts (subtitles only) renders no audio.
-    parts_mode = bool(ed_spec) and ed_spec.get("subtitles") is not None
-    no_audio = bool(ed_spec) and not ed_spec.get("audio", True)
-    denoise = spec["kind"] in ("denoise", "denoise_transcribe") and not no_audio
-    transcribe = spec["kind"] in ("transcribe", "denoise_transcribe") and not parts_mode
-    # A re-run starts from the copies the job it came from kept (rerun.py): "clean" says what to do about the sound
-    # ("full": from the upload, as a first run; "denoised" / "rebuilt": from the kept noise removal / rebuilt voice;
-    # "reuse": the cleaned sound of the source job is as wanted), "transcribe" whether the transcript is made again.
-    rerun = spec.get("rerun")
-    clean_mode = rerun["clean"] if rerun else "full"
-    transcribe_run = transcribe and (rerun is None or bool(rerun["transcribe"]))
-    denoise_run = denoise and clean_mode != "reuse"
+    ed_spec = spec.get("editor") or {}  # the per-part editor (editrun.py): the timeline, the block cache, the recording's facts, the suggestions
+    if spec["kind"] != "convert" and not ed_spec.get("timeline"):
+        raise ValueError("a job without a timeline")  # (every job but a conversion is made with one: editing.timeline_from_options)
+    parts_mode = ed_spec.get("subtitles") is not None  # subtitle parts (editrun.subtitles_prepare)
+    sound = bool(ed_spec.get("timeline")) and ed_spec.get("audio", True)  # (a timeline of subtitles only renders no audio)
     t0 = time.time()
-
     editor_report: dict = {}
-    cache = None
     needs_cloud = False
     cleaned_path = None
     notice = None
-    noise_used = None  # which noise remover ran ("light" | "heavy"), for the record
-    kept_out: dict = {}  # the copies kept for a later "change and save again" (reported to the worker, which checks them)
-    asr_end = 45 if denoise_run else 90  # progress when transcription is done
-    x = None  # the decoded audio, echo-free when the second track was used
-    echo_skipped = False  # (no longer happens: echo removal on a file with one audio track fails the job, uncharged, below)
-    if opts.get("echo_reference_track") and (denoise_run or transcribe_run):
-        if probe.audio_tracks < 2:
-            # (the worker refuses it once the file is read, before any work; this is for a re-run of a job from before that)
-            raise MediaError(NO_SECOND_TRACK)
-        else:
-            # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
-            emit(stage="Removing echo", progress=2)
-            mic = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
-            if ed_spec and denoise_run and clean_mode == "full" and not ed_spec.get("timeline"):
-                from acw.worker import editrun
-
-                cache = editrun.cache_for(job_dir, ff)
-                if editrun.needs_facts(ed_spec, job_dir):
-                    editor_report["facts"] = editrun.facts_of(editor.Inputs(mic, ed_spec["source_id"]), ff, probe, job_dir)  # (the recording as it came)
-            x = pipeline.remove_echo(
-                ff, src, probe, mic, limit, work_dir=job_dir,
-                progress=lambda f: emit(stage="Removing echo", progress=int(2 + 3 * f)),
-                **({"cache": cache, "input_id": f"{ed_spec['source_id']}~r"} if cache is not None else {}),
-            )
-            del mic
+    x = None  # the decoded recording
+    asr_end = 45 if sound else 90  # progress when the subtitles are done
     if parts_mode:
         from acw.worker import editrun
 
         emit(stage="Decoding", progress=2)
-        if x is None and denoise_run:
-            x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
+        if sound:
+            x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)  # (decoded once, for the subtitles and the sound)
         needs_cloud = editrun.subtitles_prepare(job_dir, spec, ff, probe, x, limit, emit, base=5, span=asr_end - 5)
-    if transcribe_run:
-        # Transcribe first, from the original audio: every recogniser we tested
-        # scores worse on denoised speech (docs/research/asr.md).
-        emit(stage="Decoding", progress=5 if x is not None else 2)
-        if x is None and denoise_run:
-            # Cleaned too: decode once, at the cleaning rate, and make the recogniser's 16 kHz mono from that.
-            x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
-        if x is not None:
-            speech_16k = pipeline.to_speech_16k(x)
-        else:
-            speech_16k = ff.decode(src, probe, 16000, 1, limit)[:, 0]
-        if spec["transcribe_tier"] == "premium":
-            emit(stage="Preparing", progress=5)
-            _write_asr_chunks(ff, job_dir, speech_16k)
-            needs_cloud = True
-        else:
-            from acw_common import transcribe
+    if sound:
+        from acw.worker import editrun
 
-            base = 5
-            emit(stage="Transcribing", progress=base)
-            models = Path(spec["models_dir"])
-            lang = opts.get("language")
-            if lang is None:
-                emit(stage="Detecting language", progress=base)
-                lang = transcribe.detect_language(speech_16k, models / "whisper" / "base", models / "whisper" / "small", threads)
-            engine = transcribe.pick_engine(lang)
-            report = lambda f: emit(stage="Transcribing", progress=int(base + (asr_end - base) * f))  # noqa: E731
-            if engine.startswith("parakeet"):
-                segs = transcribe.transcribe_parakeet(
-                    speech_16k, models / engine, models / "silero-vad",
-                    device=spec.get("asr_device", "cpu"), threads=threads, progress=report,
-                )
-            else:
-                segs, lang = transcribe.transcribe(
-                    speech_16k, models / "whisper" / spec.get("whisper_model", "large-v3-turbo"),
-                    language=lang, threads=threads, progress=report,
-                )
-            from acw_common.captions import segments_to_json
-
-            (job_dir / "segments.json").write_text(
-                json.dumps({"language": lang, "engine": "standard", "segments": segments_to_json(segs)})
-            )
-    if denoise_run:
-        start = asr_end if transcribe_run else (5 if x is not None else 2)
+        start = asr_end if parts_mode else 2
         emit(stage="Decoding", progress=start)
-        # Decoded and cleaned audio live in memory-mapped files in the job
-        # directory, so RAM use doesn't grow with the length of the upload.
+        # Decoded and cleaned audio live in memory-mapped files in the job directory, so RAM use doesn't grow with the length of the upload.
         if x is None:
             x = pipeline.decode_for_clean(ff, src, probe, limit, work_dir=job_dir)
-        span = 85 - start
-        rebuild = spec.get("denoise_tier") == "rebuild"
-        leveling_only = spec.get("denoise_tier") == "off"  # Leveling on its own: no noise removal
-        copts = lambda profile: clean_options(spec, profile)  # noqa: E731
-        progress = lambda f: emit(stage="Cleaning" if f < 0.95 else "Leveling", progress=int(start + 2 + span * f))  # noqa: E731
-        used: dict = {}
-        echo_flag = bool(opts.get("echo_reference_track"))
-        if ed_spec and ed_spec.get("timeline"):
-            # A job made with a timeline: only its parts are made and charged, from an empty block cache (editrun.render; the echo
-            # removal, the noise removers and Voice rebuild run on their blocks, Leveling per part)
-            from acw.worker import editrun
-
-            y, editor_report, tl_notice = editrun.render(job_dir, spec, ff, probe, x, emit, base=start + 2, span=span, op="first")
-            editor_report["facts"] = editrun.facts_of(editor.Inputs(x, ed_spec["source_id"]), ff, probe, job_dir)
-            notice = notice or tl_notice
-        elif clean_mode in ("denoised", "rebuilt"):
-            # From the copy the source job kept: no noise model runs (the blend for the strength, Leveling). The copy was made from the same recording (pipeline.redo_denoised / redo_rebuilt).
-            entry = rerun["kept"]["noise" if clean_mode == "denoised" else "rebuilt"]
-            emit(stage="Cleaning", progress=start + 2)
-            y = pipeline.output_buffer(x, job_dir)
-            y[:] = 0.0
-            kept_copies.load(ff, entry, job_dir, y, job_dir / "kept-decoded.f32")
-            if clean_mode == "denoised":
-                plan = entry["plan"]
-                if len(plan) != x.shape[1]:
-                    raise ValueError("the kept copy does not fit this recording")
-                y = pipeline.redo_denoised(x, y, plan, copts(entry["profile"]), progress=progress, report=used)
-                used["noise"] = entry["profile"]
-            else:
-                y = pipeline.redo_rebuilt(x, y, copts("auto"), progress=progress, report=used)
-        else:
-            # The noise remover is chosen here (measured on the echo-free recording), so the worker can base its
-            # time estimate on it; clean_audio then uses the same choice.
-            kept: dict = {}  # a short recording's measurement doubles as its full-strength cleaning (pipeline.Measured)
-            block_cache: dict = {}  # the editor's block cache is filled by this run (editrun.py): the next edit only runs what is missing
-            if ed_spec and clean_mode == "full":
-                from acw.worker import editrun
-
-                echo_done = cache is not None  # (the blocks of the echo removal went there already, and the facts, from the recording as it came)
-                cache = cache or editrun.cache_for(job_dir, ff)
-                if not echo_done and editrun.needs_facts(ed_spec, job_dir):
-                    editor_report["facts"] = editrun.facts_of(editor.Inputs(x, ed_spec["source_id"]), ff, probe, job_dir)
-                if echo_done:
-                    block_cache = {"cache": editrun.EchoWholeFile(cache, ed_spec["source_id"], len(x)), "input_id": editrun.EchoWholeFile.MARK}
-                else:
-                    block_cache = {"cache": cache, "input_id": ed_spec["source_id"]}
-            if rebuild or leveling_only:
-                profile = opts.get("noise", "auto")
-            else:
-                profile = pipeline.choose_noise_profile(x, spec["lib_path"], spec["dfn_model"], opts.get("noise", "auto"), keep=kept)
-            emit(stage="Leveling" if leveling_only else "Cleaning", progress=start + 2,
-                 **({} if rebuild or leveling_only else {"noise": profile}))
-
-            def keep_copy(name: str, y: Any, cols: list[int] | None) -> None:
-                """What a later "change and save again" starts from: the noise removal at full strength, or the rebuilt voice."""
-                if name == "denoised":
-                    entry = kept_copies.save(ff, y, cols, job_dir / KEPT_NOISE)
-                    kept_out["noise"] = {**entry, "echo": echo_flag, "profile": profile, "noise_opt": opts.get("noise", "auto"),
-                                         "plan": pipeline.channel_plan(x), "energy": kept_copies.energy(y, x, cols)}
-                    # the recording as the noise remover heard it (echo removed), on the same sample grid, for any length: with the
-                    # copy above it is what the page blends for its strength slider, exactly (web/src/media/blend.js), in short
-                    # stretches (acw/stretch.py); "energy" above is what keeps the loudness of a preview even
-                    kept_out["input"] = {**kept_copies.save(ff, x, cols, job_dir / KEPT_INPUT), "echo": echo_flag}
-                else:
-                    kept_out["rebuilt"] = {**kept_copies.save(ff, y, cols, job_dir / KEPT_REBUILT), "echo": echo_flag}
-
-            y = pipeline.clean_audio(
-                x, spec["lib_path"], spec["dfn_model"], copts(profile), threads=threads, progress=progress,
-                out=pipeline.output_buffer(x, job_dir),
-                heavy_model_path=Path(spec["models_dir"]) / "dpdfnet" / dpdfnet.MODEL_FILE,
-                restore_model_dir=Path(spec["models_dir"]) / "sidon",
-                report=used,
-                measured=kept.get("measured"),
-                keep=keep_copy,
-                **block_cache,
-            )
-        if ed_spec and ed_spec.get("suggest") and clean_mode == "full":
-            from acw.worker import editrun
-
+        y, editor_report, notice = editrun.render(job_dir, spec, ff, probe, x, emit, base=start + 2, span=85 - start, op="first")
+        editor_report["facts"] = editrun.facts_of(editor.Inputs(x, ed_spec["source_id"]), ff, probe, job_dir)
+        if ed_spec.get("suggest"):
             editor_report["suggestions"] = editrun.find_suggestions(x, spec, emit, 86, 6)
-        noise_used = used.get("noise")
-        fmt = opts.get("audio_format", "flac")
-        cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
+        cleaned_path = ff.write_audio(pipeline.as_output(y), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", opts.get("audio_format", "flac"))
         outputs.append({"file": cleaned_path.name, "kind": "audio"})
         del x, y
-        for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy", "kept-decoded.f32"):
+        for scratch in ("decoded.f32", "reference.f32", "echo-free.npy", "cleaned.npy"):
             (job_dir / scratch).unlink(missing_ok=True)
-    elif denoise and not no_audio:
-        # The cleaned sound of the job this one came from is what is wanted (only the subtitles change): reused as it is,
-        # or in the other file type that was asked for.
-        from acw_common.ffmpeg import AUDIO_FORMATS
-
-        fmt = opts.get("audio_format", "flac")
-        old = job_dir / rerun["reuse_audio"]
-        if old.suffix == AUDIO_FORMATS[fmt][0]:
-            cleaned_path = old
-        else:
-            emit(stage="Cleaning", progress=60)
-            p = ff.probe(old)
-            audio = ff.decode(old, p, pipeline.SAMPLE_RATE, min(max(p.audio_channels, 1), 2), limit)
-            cleaned_path = ff.write_audio(pipeline.as_output(audio), pipeline.SAMPLE_RATE, job_dir / f"{stem}-cleaned", fmt)
-        outputs.append({"file": cleaned_path.name, "kind": "audio"})
-
-    if no_audio:  # a timeline of subtitles only: the sound was not rendered, so the result files hold the recording as it is
+    elif ed_spec.get("timeline"):  # a timeline of subtitles only: the sound was not rendered, so the result files hold the recording as it is
         from acw_common.timeline import Timeline
 
         editor_report.update(rendered=Timeline(probe.duration).to_json(), billed={})
     (job_dir / "main-state.json").write_text(
         json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video, "duration": probe.duration})
     )
-    # Translations need the internet, which this sandbox doesn't have: they run outside it, then `finalize` writes the files.
-    # (A re-run that kept some languages only asks for the others.)
-    missing = [lang for lang in (opts.get("translate") or []) if not (job_dir / f"segments.{lang}.json").is_file()] if not parts_mode else []
-    needs_cloud = needs_cloud or bool(missing)
+    # Accurate subtitles and translations need the internet, which this sandbox doesn't have: they are made outside it, then `finalize`
+    # writes the files.
     result = {"needs_cloud_asr": needs_cloud, "duration": probe.duration, "seconds_spent": time.time() - t0, "notice": notice,
-              "echo_skipped": echo_skipped, "noise": noise_used, "kept": kept_out, "editor": editor_report}
+              "noise": None, "editor": editor_report}
     if not needs_cloud:
         result.update(stage_finalize(job_dir, spec))
     return result
@@ -514,7 +321,17 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
                 p.write_text(captions.to_text(tsegs), encoding="utf-8")
                 outputs.append({"file": p.name, "kind": "transcript", "lang": lang})
 
-    if state["has_video"] and opts.get("output_video", True):
+    # An edit run (editrun.stage_edit) makes the video again under a temporary name, which takes the old one's place when the run is complete
+    # (acw/editing.py swap_in); and with only a new sound its subtitles are the job's as they are.
+    staged = (spec.get("editor") or {}).get("op") not in (None, "first")
+    wants_video = state.get("video", True)
+    if subtitle_file is None and staged and wants_video and opts.get("embed_subtitles", True) and (job_dir / f"{stem}.srt").is_file():
+        subtitle_file = job_dir / f"{stem}.srt"
+
+    def made(out: Path) -> Path:
+        return out.replace(out.with_name(f"{stem}-{out.name.split('-', 1)[1]}.run")) if staged else out
+
+    if state["has_video"] and opts.get("output_video", True) and wants_video:
         cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None
         vo = opts.get("video_out")  # another file type or picture size, asked for
         if cleaned is not None or (subtitle_file is not None and opts.get("embed_subtitles", True)) or vo:
@@ -526,7 +343,7 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
             else:
                 # Other containers (AVI, WMV, FLV, MPEG, ...) go to MKV: it holds any video codec we copy.
                 ext = spec["input_ext"] if spec["input_ext"] in (".mp4", ".mov", ".m4v", ".mkv", ".webm") else ".mkv"
-            out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned' if subtitle_file is not None else 'converted'}{ext}"
+            out = job_dir / f"{'run' if staged else stem}-{'cleaned' if cleaned else 'captioned' if subtitle_file is not None else 'converted'}{ext}"
             ff.mux_video(
                 job_dir / spec["input"],
                 cleaned,
@@ -536,18 +353,18 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
                 video=VideoOut(short_side=vo["size"], encoders=_encoders(spec, ext), fast=True) if vo else None,
                 progress=(lambda f: emit(stage="Making the video", progress=int(first + (99 - first) * f))) if vo else None,
             )
-            outputs.append({"file": out.name, "kind": "video"})
-    elif not state["has_video"] and opts.get("video_out"):
+            outputs.append({"file": made(out).name, "kind": "video"})
+    elif not state["has_video"] and opts.get("video_out") and wants_video:
         # a sound asked for as a video: a plain black picture (one frame a second) with the sound, cleaned when it was cleaned
         vo = opts["video_out"]
         cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None
         ext = "." + vo["format"]
         emit(stage="Making the video", progress=95 if cleaned is not None or subtitle_file is not None else 5)
-        out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned' if subtitle_file is not None else 'converted'}{ext}"
+        out = job_dir / f"{'run' if staged else stem}-{'cleaned' if cleaned else 'captioned' if subtitle_file is not None else 'converted'}{ext}"
         ff.make_video(cleaned or job_dir / spec["input"], out, float(state.get("duration") or 0.0),
                       subtitles=subtitle_file if opts.get("embed_subtitles", True) else None, sub_lang=_iso639_2(language),
                       video=VideoOut(short_side=vo["size"], encoders=_encoders(spec, ext)))
-        outputs.append({"file": out.name, "kind": "video"})
+        outputs.append({"file": made(out).name, "kind": "video"})
     emit(stage="Done", progress=100)
     return {"outputs": outputs, "language": language}
 
@@ -559,9 +376,6 @@ def _encoders(spec: dict, ext: str) -> tuple[str, ...]:
         return ("libvpx-vp9",)
     return ("h264_nvenc", "libx264") if spec.get("gpu_devices") else ("libx264",)
 
-
-NO_SECOND_TRACK = ("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without echo removal "
-                   "(nothing was charged).")  # (the same words as acw.jobs.NO_SECOND_TRACK)
 
 _ISO = {"en": "eng", "es": "spa", "fr": "fra", "de": "deu", "it": "ita", "pt": "por", "nl": "nld", "ja": "jpn",
         "zh": "zho", "ko": "kor", "ru": "rus", "pl": "pol", "tr": "tur", "ar": "ara", "hi": "hin", "sv": "swe"}

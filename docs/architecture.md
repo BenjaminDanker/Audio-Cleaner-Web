@@ -79,36 +79,17 @@ The estimates shown to people and the slow-job monitor follow the work a job doe
 
 ## Changing a finished job
 
+Every job is made one way: with a timeline (next section). A job asked for with whole-file options (the API) gets the timeline they stand
+for when it is created (`editing.timeline_from_options`: each sound step on the whole file, the subtitles as one part over the whole file),
+made again for the file's real length once it is read (`editing.refit_whole_file`); an automatic job gets it once its settings are decided
+(`automatic.apply`). The first run renders it from an empty block cache (`editrun.render`), and a finished job is changed by editing it:
+only the blocks that are missing are made and charged.
+
 Strength is a blend: the noise models always run at full strength, and the result is `(1 - a) * full + a * input` with
 `a = 10^(-dB/20)` (`pipeline.blend_strength`; 100 dB or more: no blend). That is what libDF does itself in the STFT domain after its
-post filter and what DPDFNet does in the time domain; `common/tests/test_blend.py` (and `server/tests/test_rerun_worker.py`, end to end) check it against
-the models' own attenuation limit (SNR of the difference above 100 dB on every path). So the output of the noise step can be kept and
-everything after it redone without a model:
-
-```
-decode -> [echo removal] -> noise removal (full strength) --keep--> blend (strength) -> channel copies -> Leveling -> encode
-                          \-> Voice rebuild ------------keep--------------------------------------------> Leveling -> encode
-```
-
-A job keeps (`jobs.KEPT_NOISE`, `KEPT_REBUILT`, `KEPT_INPUT`, `segments*.json`; `acw_common.kept` writes them as 24-bit FLAC, exact to one 24-bit step, 1.2e-7
-of full scale) next to its upload, in its folder. `rerun.plan_rerun` decides, per set of new choices, what runs: `denoised` (from the kept
-noise removal), `rebuilt` (Leveling on the kept voice), `full` (a model from the upload), `reuse` (the result is already right) or `none`;
-transcription runs only when its tier or language changed. The re-run is an ordinary queued job (`params.rerun`) with its own hold, priced
-only for the paid steps that run (`pricing.rerun_rates`), its files hard-linked from the source (no disk copy) and `source_job_id` /
-`root_job_id` columns linking the chain.
-
-The strength slider of the result page (`web/src/media/blend.js`) blends the kept noise removal and the kept input in the browser, for a
-recording of **any length**: the input copy is kept for every Denoising job, and `GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=`
-(`acw/stretch.py`) hands out a stretch (at most 30 s) of either as a small 24-bit FLAC, cut sample-exact by `acw/worker/cutter.py` (FFmpeg
-seeks to the second before and trims by sample; the program confines itself like the job runner and writes nothing, so the web process never
-opens a runner-made file with a decoder). The same stretch of both copies lines up sample for sample. `BlendPlayer` plays 10 s stretches
-of both with a gain each, holds the one playing, one behind and two fetched ahead (4 at most, about 30 MB), fetches again after a seek,
-waits when a stretch is late, and a strength change is a change of two gains (nothing is fetched); the loudness match of a preview that is not
-the last step uses `energy` sums the runner measured when it kept the copies (`kept.energy`, in `redo.preview`). Saving a strength with
-nothing after the noise removal is free: made on the device for a recording that fits in memory (`previewFits`, 20 min of mono or 10 of
-stereo, where the two whole copies are fetched once to blend them), otherwise the same blend as a free re-run on our side (no model runs, the
-new job's file downloads by itself). The free noise removal in the browser keeps its two signals in memory and plays them through the same
-player (`memorySource`).
+post filter and what DPDFNet does in the time domain (`common/tests/test_blend.py` checks it against the models' own attenuation limit).
+So the block cache holds the noise removal at full strength, and a new strength needs no model. The free noise removal in the browser
+keeps its two signals in memory and its slider plays them (`web/src/media/blend.js`, `memorySource` and `BlendPlayer`).
 
 ## The per-part editor
 
@@ -160,14 +141,11 @@ shared too: `native/deepfilter/build.sh` produces the server `.so`, the desktop
 
 ## Data flow and retention
 
-- Uploads land in `data/jobs/<id>/input.*` (0600) and stay there with the job's other files: the copies kept for changing it
-  again (the noise removal at full strength, the rebuilt voice, the recording as the remover heard it, the transcript) and its
-  results, and the per-part editor's block cache, recording copy and suggestions (section "The per-part editor"). They are deleted together
-  2 hours after the job's last edit (a run finishing, a timeline save, a quote, a process, an export, a re-run: `ACW_JOB_RETENTION_MINUTES`)
-  and never later than 6 hours after the upload arrived (`ACW_JOB_MAX_RETENTION_MINUTES`; `jobs.expiry`, `jobs.sweep` every 30 to 60
-  seconds), or at once with "Delete now" (which also takes every job made from the same upload); the files of a failed or canceled job go at
-  once. Changing a finished job (`acw/rerun.py`) is a new job that hard-links what it needs from the old folder, runs only the steps whose
-  inputs changed and is an edit of the chain: nothing of it outlives 6 hours after the upload (section "Changing a finished job" below).
+- Uploads land in `data/jobs/<id>/input.*` (0600) and stay there with the job's other files: its results, and the per-part editor's
+  block cache, recording copy, suggestions and subtitle parts (section "The per-part editor"). They are deleted together 2 hours after the
+  job's last edit (a run finishing, a timeline save, a quote, a process, an export: `ACW_JOB_RETENTION_MINUTES`) and never later than 6
+  hours after the upload arrived (`ACW_JOB_MAX_RETENTION_MINUTES`; `jobs.expiry`, `jobs.sweep` every 30 to 60 seconds), or at once with
+  "Delete now"; the files of a failed or canceled job go at once.
 - Live audio is never written to disk. Captions are not stored.
 - The browser tier sends nothing to the server.
 - The database keeps accounts, ledger, payments, job metadata and an audit log. File names are removed

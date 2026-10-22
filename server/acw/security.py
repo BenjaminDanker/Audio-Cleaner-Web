@@ -138,7 +138,7 @@ LIMITS = {
     "upload": (30, 30 / 3600),
     "browser_upload": (240, 240 / 3600),  # the pieces a browser sends for one timeline (cleaned parts, cues): many per job, so not the 30 an hour of `upload`
     "edit_plan": (120, 2.0),           # timeline reads and saves, quotes of the per-part editor (a plan costs a little CPU)
-    "kept_cut": (120, 2.0),            # stretches of a job's kept copies per account (the strength slider asks for two every ~10 s of playing, more when seeking)
+    "kept_cut": (120, 2.0),            # preview stretches of a job per account (the editor's player asks for some every ~10 s of playing, more when seeking)
     "checkout": (10, 10 / 3600),
     "asset_fetch": (300, 300 / 86400),  # free-tool files per account per day (api/auth_routes.asset_check)
     "stream_start": (60, 60 / 3600),    # live starts per account per hour (failed starts count too)

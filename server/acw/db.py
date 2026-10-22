@@ -334,14 +334,13 @@ MIGRATIONS = [
         " user_id TEXT NOT NULL, key TEXT NOT NULL, body_hash TEXT NOT NULL, job_id TEXT NOT NULL,"
         " created_at INTEGER NOT NULL, PRIMARY KEY (user_id, key))",
     ),
-    # "Change and save again" (acw.jobs.create_rerun): a re-run is a job of its own that starts from the files its source job
-    # kept; `source_job_id` is the job it was made from, `root_job_id` the first job of the chain (the upload they all came
-    # from: they are deleted together).
+    # (no longer written: the re-runs of "change and save again", a job of its own made from another, are gone; a job is changed by editing
+    # its timeline. The columns stay so older databases open as they are.)
     ("jobs", "source_job_id", "ALTER TABLE jobs ADD COLUMN source_job_id TEXT"),
     ("jobs", "root_job_id", "ALTER TABLE jobs ADD COLUMN root_job_id TEXT"),
     # The retention clock of a job's files (acw.editing): they go 2 hours after the last edit (`edited_at`: a run finishing, a
-    # timeline save, a quote, a process or an export) and at the latest 6 hours after the upload arrived (`uploaded_at`; a
-    # re-run keeps its source's). `expires_at` is the moment that results in.
+    # timeline save, a quote, a process or an export) and at the latest 6 hours after the upload arrived (`uploaded_at`).
+    # `expires_at` is the moment that results in.
     ("jobs", "uploaded_at", "ALTER TABLE jobs ADD COLUMN uploaded_at INTEGER"),
     ("jobs", "edited_at", "ALTER TABLE jobs ADD COLUMN edited_at INTEGER"),
     # callbackUrl of a job: delivered by the web process (acw.webhooks) when the job ends. state: pending | delivered | failed.

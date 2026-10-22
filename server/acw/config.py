@@ -92,7 +92,7 @@ class Settings:
     # A first run looks for suggestions (acw_common.suggest: about 0.22 s per second of audio) for recordings up to this long
     # (ACW_SUGGEST_MAX_MINUTES); a longer one gets them when they are asked for (POST /api/jobs/{id}/suggestions).
     suggest_max_seconds: int = 3600
-    # File jobs an account may have at once (uploading, waiting, running; re-runs count). ACW_MAX_ACTIVE_JOBS.
+    # File jobs an account may have at once (uploading, waiting, running; edit runs count). ACW_MAX_ACTIVE_JOBS.
     max_active_jobs: int = 3
     stream_worker_socket: Path | None = None
 

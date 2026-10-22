@@ -104,17 +104,8 @@ also removes the shared-UID risk with the Minecraft servers.
 - `Idempotency-Key` on job creation: kept per account for 24 hours in `idempotency_keys` (the key text and a hash of
   the request body, no file data), swept by `jobs.sweep` and removed with the account. A repeat is answered before
   rate limits and money are touched; checked again inside the creation transaction against parallel requests.
-- Changing a finished job (`POST /api/jobs/{id}/rerun`, `acw/rerun.py`): the same authentication, scope, CSRF and job-creation rate limits as
-  creating one. The job is looked up by id **and** account; an API key can only change jobs that key made (`jobs.api_key_id`), a browser
-  session any job of its account, anything else is the same 404 as an unknown id. The new job is held and priced like any job (the
-  key's cap, the account's balance, the active-job limit are all checked in the transaction that stores it) and is run by the same queue,
-  worker and sandbox. It starts from files the sandboxed runner itself made earlier (the kept copies): the worker takes only
-  the fixed names `kept-noise.flac`, `kept-rebuilt.flac`, `kept-input.flac`, only as regular files in the job's folder (`lstat`), with
-  the numbers the runner reported validated (`rerun.sanitize_kept`), and hard-links them into the new job's folder (the sandbox itself
-  can't create links). A re-run is an edit of the chain (its files are kept 2 hours from then) and nothing of the chain outlives 6 hours after the upload
-  (the upload is one of the linked files, so it goes then too, and "Delete now" deletes the whole chain).
 - The per-part editor (`acw/editing.py`, `GET|PUT /api/jobs/{id}/timeline`, `quote`, `process`, `export`, `suggestions`, `preview/{layer}`): the same
-  authentication and scope as the other calls on a job, and the re-run's ownership rule: the job is looked up by id **and** account, and an API key only
+  authentication and scope as the other calls on a job, and one ownership rule: the job is looked up by id **and** account, and an API key only
   reaches the jobs it made itself (anything else is `404 job_not_found`); a browser session needs its CSRF token for every write. A timeline from a client is
   checked strictly before anything is stored or priced (format and version, unknown keys, layers and settings, numbers, every part inside the file, at most 500
   parts a layer, at most 200 KB, a body limit of 256 KB on those routes only); a process holds its quote in the transaction that stores the run, with the

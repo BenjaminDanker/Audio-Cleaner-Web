@@ -7,19 +7,15 @@
 //   full, input: Float32Array[] (one per kept channel, 48 kHz, the same length, sample for sample the same grid)
 //   plan: for every channel of the result, the kept channel it is (null: silent), e.g. [0, 0] = both sides are one recording
 //
-// Listening does not need the whole recording: a source (memorySource: arrays already here; keptSource: a job's two kept copies on
-// our side, fetched in short stretches) hands out the same stretch of both signals, and BlendPlayer plays them from a few
-// stretches held at a time (the one playing, the next ones fetched ahead, one behind).
+// Listening does not need the whole recording: a source (memorySource: the free noise removal's two signals, made here) hands out the
+// same stretch of both, and BlendPlayer plays them from a few stretches held at a time (the one playing, the next ones ahead, one behind).
 
-import { keptUrl } from '../api.js';
 import { STRENGTHS } from '../strengths.js';
 
 export const SAMPLE_RATE = 48000;
 /**
- * The most the page holds in memory when it needs a whole recording at once (the free noise removal here keeps its two signals,
- * and a strength is saved on this device from the whole copies): channel-seconds of audio (20 min of mono, 10 of stereo: about 460 MB
- * for both signals). The slider itself holds only a few seconds, whatever the length (BlendPlayer), and longer recordings are
- * saved with a free re-run on our side.
+ * The most the page holds in memory when it needs a whole recording at once (the free noise removal here keeps its two signals for
+ * the slider): channel-seconds of audio (20 min of mono, 10 of stereo: about 460 MB for both signals).
  */
 export const PREVIEW_MAX_CHANNEL_SECONDS = 1200;
 
@@ -162,26 +158,6 @@ export function decodeAudio(bytes) {
   return decoder.decodeAudioData(bytes).catch(() => { throw new Error('This browser can’t open the sound needed to try other strengths.'); });
 }
 
-async function fetchBytes(url, { signal, onBytes }) {
-  const res = await fetch(url, { credentials: 'same-origin', signal });
-  if (!res.ok) throw new Error('Couldn’t get the sound to try other strengths with. Please try again.');
-  if (!res.body || !onBytes) return res.arrayBuffer();
-  const reader = res.body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-    onBytes(total);
-  }
-  const all = new Uint8Array(total);
-  let o = 0;
-  for (const c of chunks) { all.set(c, o); o += c.length; }
-  return all.buffer;
-}
-
 /** Decoded audio -> one Float32Array of exactly `samples` per kept channel, brought back up by `scale` (a loud sample was brought down when kept, acw_common/kept.py). */
 export function channelsOf(decoded, { samples, channels, scale }) {
   const inv = 1 / scale;
@@ -202,41 +178,6 @@ export function channelsOf(decoded, { samples, channels, scale }) {
   return out;
 }
 
-async function decodeKept(bytes, spec) {
-  return channelsOf(await decodeAudio(bytes), spec);
-}
-
-/**
- * The two copies a job kept for the slider, whole and decoded: GET /api/jobs/{id}/kept/noise and /input (24-bit FLAC, sample for sample
- * the same grid). `preview` is the job's redo.preview. Resolves {full, input, plan}. For recordings that fit in memory (previewFits):
- * saving a strength on this device blends these; listening uses keptSource's stretches instead.
- */
-export async function loadKeptPair(jobId, preview, { signal, onProgress } = {}) {
-  const total = (preview.bytes?.noise || 0) + (preview.bytes?.input || 0);
-  const got = { noise: 0, input: 0 };
-  const report = () => onProgress?.(total ? Math.min(1, (got.noise + got.input) / total) : 0);
-  const [a, b] = await Promise.all(['noise', 'input'].map((which) => fetchBytes(keptUrl(jobId, which), { signal, onBytes: (n) => { got[which] = n; report(); } })));
-  const spec = (which) => ({ samples: preview.samples, channels: preview.channels.length, scale: preview.scale[which] });
-  const full = await decodeKept(a, spec('noise'));
-  const input = await decodeKept(b, spec('input'));
-  onProgress?.(1);
-  // the kept channels are numbered as the channels of the recording ([1] alone: only the right side); the plan counts from the first kept one
-  return { full, input, plan: keptPlan(preview) };
-}
-
-const keptPlan = (preview) => preview.plan.map((c) => (c == null ? null : c - preview.channels[0]));
-
-/** One stretch of a kept copy: `count` samples from sample `first`, decoded (GET .../kept/{which}?start=&seconds=, exactly those samples). */
-async function fetchStretch(jobId, which, { first, count }, scale, channels, signal) {
-  const res = await fetch(keptUrl(jobId, which, { first, count }), { credentials: 'same-origin', signal });
-  if (!res.ok) throw new Error('Couldn’t get the sound to try other strengths with. Please try again.');
-  const bytes = await res.arrayBuffer();
-  const start = Number(res.headers.get('X-Stretch-Start'));
-  const got = Number(res.headers.get('X-Stretch-Samples'));
-  if (res.headers.has('X-Stretch-Start') && (start !== first || got !== count)) throw new Error('Got the wrong part of the sound. Please try again.');
-  return { channels: channelsOf(await decodeAudio(bytes), { samples: count, channels, scale }), bytes: bytes.byteLength };
-}
-
 /* ------------------------------------------------------------------------------------------------ where the player's signals come from */
 
 /**
@@ -253,24 +194,6 @@ export function memorySource(pair) {
     maxSeconds: Infinity,
     sums: () => (sums ||= energySums(pair.full, pair.input)),
     read: async (first, count) => ({ full: pair.full.map((a) => a.subarray(first, first + count)), input: pair.input.map((a) => a.subarray(first, first + count)), bytes: 0 }),
-  };
-}
-
-/** A job's two kept copies on our side, fetched in stretches: only a few seconds of either are ever here. `preview` is the job's redo.preview. */
-export function keptSource(jobId, preview) {
-  const channels = preview.channels.length;
-  const e = preview.energy;
-  const sums = e && Number.isFinite(e.full) && Number.isFinite(e.input) && Number.isFinite(e.cross) ? { ef: e.full, ei: e.input, cfi: e.cross } : null;
-  return {
-    kind: 'server',
-    samples: preview.samples,
-    plan: keptPlan(preview),
-    maxSeconds: preview.stretchMaxSeconds || 30,
-    sums: () => sums,
-    async read(first, count, signal) {
-      const [a, b] = await Promise.all(['noise', 'input'].map((which) => fetchStretch(jobId, which, { first, count }, preview.scale[which], channels, signal)));
-      return { full: a.channels, input: b.channels, bytes: a.bytes + b.bytes };
-    },
   };
 }
 

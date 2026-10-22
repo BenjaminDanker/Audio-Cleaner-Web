@@ -8,16 +8,13 @@ duration) at creation; the worker re-prices from the probed duration before
 doing the heavy work and captures the real cost on success. Free jobs reserve
 seconds of the daily allowance the same way.
 
-What a job keeps: its upload, the intermediate copies a later "change and save again" starts from (KEPT_NOISE: the noise
-removal at full strength, KEPT_REBUILT: the rebuilt voice, the transcript), the per-part editor's block cache and recording
-copy (editing.py) and its results stay in the job's folder until `expiry`: 2 hours (`job_retention_seconds`) after its last
-edit, and never later than 6 hours (`job_max_retention_seconds`) after the upload arrived. They are deleted together (`sweep`,
-or at once with "Delete now", which also takes the re-runs made from it). A failed or canceled job's files go at once.
+Every job is made one way: with a timeline (editing.py). A job asked for with whole-file options gets the timeline they stand for
+(editing.timeline_from_options); a finished job is changed by editing its timeline, which runs only what is missing.
 
-A re-run (`create_rerun`) is a job of its own, linked to its source (`source_job_id`; `root_job_id` is the first job of the
-chain): `plan_rerun` decides which steps run again, from which kept copy; the files it needs are hard-linked into its folder
-(no disk copy), it is queued, run and paid like any job (only for the paid steps that run again), and it ends at the same time
-as the job it came from.
+What a job keeps: its upload, the per-part editor's block cache and recording copy (editing.py) and its results stay in the job's
+folder until `expiry`: 2 hours (`job_retention_seconds`) after its last edit, and never later than 6 hours
+(`job_max_retention_seconds`) after the upload arrived. They are deleted together (`sweep`, or at once with "Delete now"). A failed or
+canceled job's files go at once.
 """
 from __future__ import annotations
 
@@ -57,12 +54,14 @@ ALLOWED_EXTS = {
 }
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")
-# Names of the copies a job keeps (acw_common.kept): the noise removal's full-strength output and the rebuilt voice.
-KEPT_NOISE = "kept-noise"
-KEPT_REBUILT = "kept-rebuilt"
-KEPT_INPUT = "kept-input"  # the recording as the noise remover heard it, on the same sample grid (for the strength slider)
-# The strength slider plays short stretches of the two copies (GET /api/jobs/{id}/kept/{noise|input}?start=&seconds=, see
-# stretch.py), so both are kept for a recording of any length. A stretch is at most this many seconds.
+# A job that would only finish this close to the moment its files are cleared away (6 hours after the upload) is stopped instead: nobody
+# could download its results in time, so it ends as failed and is not charged.
+MIN_DELIVERY_SECONDS = 60
+TOO_LATE = "This took longer than expected and your files were about to be cleared away, so it was stopped. You weren’t charged."
+# An edit run needs this long before the files go, on top of what it takes (editing.start_run).
+DEADLINE_MARGIN_SECONDS = 300
+# The editor's preview plays short stretches of the recording and of what each step made (stretch.py). A stretch is at most this many
+# seconds.
 STRETCH_MAX_SECONDS = 30
 # Disk promised to uploads that are still arriving, per account, and the most a file may weigh per second of its
 # claimed length (320 Mbit/s: high-end video) unless it is small anyway. Without these a claim of a 4 GiB file
@@ -82,10 +81,6 @@ JOB_MEM = 1 * GB
 # cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
 LOCAL_ASR_MEM = int(3.2 * GB)
 SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
-# What one kept copy of a job takes, per hour of audio and kept channel (24-bit FLAC: the cleaned voice measured 0.29 to
-# 0.31 GB, the recording next to it 0.32 to 0.36 GB and up to 0.40 GB for a very noisy one; a recording whose channels are
-# the same is kept once). A Denoising job keeps two copies for any length, a Voice rebuild one.
-KEPT_PER_HOUR_PER_CHANNEL = int(0.4 * GB)
 # Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
 # monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
 # remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
@@ -133,15 +128,6 @@ def params_of(job_id: str) -> dict | None:
     return json.loads(row["params_json"]) if row else None
 
 
-def kept_bytes(kind: str, seconds: float, channels: int = 2, denoise_tier: str | None = None) -> int:
-    """Disk the kept copies of a job take (none for Leveling on its own or without cleaning): the noise removal, and next to
-    it the recording itself (for the strength slider; a Voice rebuild has no slider and keeps the rebuilt voice only)."""
-    if kind not in ("denoise", "denoise_transcribe") or denoise_tier == pricing.NO_DENOISE:
-        return 0
-    per_hour = KEPT_PER_HOUR_PER_CHANNEL * (1 if denoise_tier == "rebuild" else 2)
-    return int(seconds / 3600 * channels * per_hour)
-
-
 def scratch_bytes(kind: str, seconds: float, channels: int = 2, echo: bool = False) -> int:
     denoise = kind in ("denoise", "denoise_transcribe")
     if not (denoise or echo):
@@ -166,17 +152,12 @@ def job_needs(job: dict) -> tuple[int, int]:
 
         return (JOB_MEM + (LOCAL_ASR_MEM if editing.local_asr_wanted(params) else 0),
                 scratch_bytes("denoise", seconds, int(params.get("channels") or 2), echo=bool(run.get("echo"))))
-    rerun = params.get("rerun")  # a re-run only does part of the work (rerun.py)
-    mem = JOB_MEM + (
-        LOCAL_ASR_MEM if params.get("transcribe_tier") == "local" and (not rerun or rerun.get("transcribe")) else 0
-    )
-    if (params.get("edit") or {}).get("first_run"):
-        from . import editing
+    from . import editing
 
-        mem += LOCAL_ASR_MEM if editing.local_asr_wanted(params) else 0
-    if rerun and rerun.get("clean") in ("reuse", "none") and not rerun.get("transcribe"):
-        return mem, 0
-    return mem, scratch_bytes(job["kind"], seconds, echo=params.get("options", {}).get("echo_reference_track", False))
+    # (an automatic job not decided yet still has its whole-file subtitle tier: automatic.apply)
+    local = editing.local_asr_wanted(params) or params.get("transcribe_tier") == "local"
+    return (JOB_MEM + (LOCAL_ASR_MEM if local else 0),
+            scratch_bytes(job["kind"], seconds, int(params.get("channels") or 2), echo=editing.wants_echo(params)))
 
 
 def job_seconds(job: dict) -> float:
@@ -188,35 +169,17 @@ def job_seconds(job: dict) -> float:
     if params.get("run"):  # an edit run: what its blocks take (editing.py), and the render
         return float(params["run"].get("est_seconds") or 0.0) + MODEL_LOAD_SECONDS
     t = SPEED["encode"] * audio if encodes(params) else 0.0
-    if (params.get("edit") or {}).get("first_run"):  # a job made with a timeline: only its parts
+    if (params.get("edit") or {}).get("first_run"):  # every job but a conversion: only its timeline's parts
         from . import editing
 
         t += editing.timeline_seconds(params["edit"]["timeline"], audio, channels)
-        if params.get("transcribe_tier") and (not params.get("rerun") or params["rerun"].get("transcribe")):
-            t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
         return t + MODEL_LOAD_SECONDS
-    # A re-run does only part of the work: from a kept noise removal the blend and Leveling; from a kept rebuilt
-    # voice Leveling; the transcription only when it runs again.
-    rerun = params.get("rerun")
-    clean = rerun.get("clean", "full") if rerun else "full"
-    if job["kind"] in ("denoise", "denoise_transcribe"):
-        if clean == "denoised":
-            t += SPEED["leveling"] * audio * channels
-        elif clean == "rebuilt":
-            t += SPEED["leveling"] * audio * channels
-        elif clean in ("reuse", "none"):
-            pass
-        elif params.get("denoise_tier") == "rebuild":
-            t += SPEED["denoise_rebuild"] * audio * channels
-        elif params.get("denoise_tier") == pricing.NO_DENOISE:
-            t += SPEED["leveling"] * audio * channels
-        else:
-            profile = params.get("noise_profile") or opts.get("noise", "auto")
-            t += (SPEED["denoise_" + profile] if profile in ("light", "heavy") else SPEED["denoise_auto"]) * audio * channels
-    if opts.get("echo_reference_track") and (not rerun or clean in ("full", "denoised", "rebuilt") or rerun.get("transcribe")):
-        t += SPEED["echo"] * audio * channels
-    if params.get("transcribe_tier") and (not rerun or rerun.get("transcribe")):
-        t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
+    if automatic.pending(params):  # not decided yet: the most it can be (Denoising or Voice rebuild on the whole file, and the rest)
+        t += max(SPEED["denoise_auto"], SPEED["denoise_rebuild"]) * audio * channels
+        if opts.get("echo_reference_track"):
+            t += SPEED["echo"] * audio * channels
+        if params.get("transcribe_tier"):
+            t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
     return t + MODEL_LOAD_SECONDS
 
 
@@ -404,18 +367,13 @@ def hard_deadline(job: dict) -> int:
 
 
 def touch(job_id: str) -> None:
-    """An edit (a quote, a timeline save, a process or an export, a re-run): the files of the job, and of every job made from the same
-    upload, go 2 hours from now instead (never past the 6 hours after the upload). Only finished jobs; one that is running gets its
-    deadline when it finishes."""
+    """An edit (a quote, a timeline save, a process or an export): the job's files go 2 hours from now instead (never past the 6 hours
+    after the upload). Only a finished job; one that is running gets its deadline when it finishes."""
     now = db.now()
-    row = db.one("SELECT id, root_job_id FROM jobs WHERE id = ?", (job_id,))
-    if row is None:
-        return
-    root = row["root_job_id"] or row["id"]
     cap = get_settings().job_max_retention_seconds
     db.execute(
-        "UPDATE jobs SET edited_at = ?, expires_at = MIN(?, COALESCE(uploaded_at, created_at) + ?) WHERE status = 'done' AND (id = ? OR root_job_id = ?)",
-        (now, now + get_settings().job_retention_seconds, cap, root, root),
+        "UPDATE jobs SET edited_at = ?, expires_at = MIN(?, COALESCE(uploaded_at, created_at) + ?) WHERE status = 'done' AND id = ?",
+        (now, now + get_settings().job_retention_seconds, cap, job_id),
     )
 
 
@@ -599,8 +557,12 @@ def automatic_plan(kind: str, t_tier: str | None, raw_options: dict, opts: dict)
     sent, `opts`: validated."""
     if not opts["automatic"]:
         return None
+    from . import editing
+
     fixed = automatic.fixed_fields(raw_options)
-    return {"fixed": fixed, "candidates": automatic.candidates(kind, t_tier, opts, fixed, len(opts["translate"]))}
+    # (the prices of the timeline it becomes once decided are the ones of today, like any job's: automatic.apply)
+    return {"fixed": fixed, "candidates": automatic.candidates(kind, t_tier, opts, fixed, len(opts["translate"])),
+            "edit_rates": editing.step_rates(), "subtitle_rates": editing.subtitle_rates()}
 
 
 def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, duration_seconds: float, options: dict,
@@ -608,23 +570,33 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
     """The price of a job before it exists (no hold, nothing stored): the same checks and the same price as creating
     it, with the parts of the price listed. POST /api/jobs/estimate. With `options.automatic` the price is the most the
     decision could end in (`maximum`), and `outcomes` lists the ways it can end."""
+    if timeline is None and kind != "convert" and not (options or {}).get("automatic"):
+        # every job is made one way: whole-file options are the timeline they stand for (editing.timeline_from_options)
+        from . import editing
+
+        check_duration(kind, denoise_tier, duration_seconds)
+        asked = validate_options(kind, denoise_tier, transcribe_tier, options)
+        timeline, options = editing.timeline_from_options(kind, denoise_tier, transcribe_tier, asked, duration_seconds)
+        denoise_tier = transcribe_tier = None
     if timeline is not None:
+        from . import editing
+
+        timeline, options, transcribe_tier = editing.subtitles_into_timeline(timeline, transcribe_tier, options, duration_seconds)
         return estimate_timeline(kind, denoise_tier, transcribe_tier, duration_seconds, options, timeline)
     check_duration(kind, denoise_tier, duration_seconds)
     opts = validate_options(kind, denoise_tier, transcribe_tier, options)
-    d_tier = denoise_tier if kind != "transcribe" else None
+    # (only an automatic job, whose settings are decided once its file is read, and a conversion get here)
     t_tier = transcribe_tier if kind != "denoise" else None
-    n = len(opts["translate"])
-    leveling = kind != "transcribe" and opts["leveling"]
-    echo = kind != "transcribe" and opts["echo_reference_track"]
     plan = automatic_plan(kind, t_tier, options, opts)
+    lines: list[dict] = []
+    total = 0
     if plan:
+        from . import editing
+
         cands = automatic.within(plan["candidates"], duration_seconds)
-        top, total = automatic.dearest(kind, t_tier, cands, duration_seconds, n)
-        rates, d_tier = top["rates"], top["tier"]  # the lines are the dearest outcome's
-    else:
-        rates = pricing.job_rates(kind, d_tier, t_tier, n, leveling, echo)
-        total = pricing.job_cost_micros(kind, d_tier, t_tier, duration_seconds, rates, n, leveling, echo)
+        top, total = automatic.dearest(kind, t_tier, cands, duration_seconds, opts)
+        # the lines are the dearest outcome's: the timeline it would become (automatic.apply)
+        lines = editing.options_price(kind, top["tier"], t_tier, {**opts, "leveling": "leveling" in top["rates"]}, duration_seconds)[1]
     cv = convert_params(opts)
     total += convert_cost(cv, duration_seconds)
     line = convert_line(cv, duration_seconds)
@@ -632,14 +604,14 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
         "durationSeconds": duration_seconds,
-        "maxSeconds": pricing.max_job_seconds(d_tier if not plan else "standard"),
-        "lines": [*price_lines(rates, d_tier, t_tier, duration_seconds, n), *([line] if line else [])],
+        "maxSeconds": pricing.MAX_JOB_SECONDS,
+        "lines": [*lines, *([line] if line else [])],
         "options": opts,
     }
     if plan:
         out["maximum"] = True  # what is held; the charge is for the steps that actually run, and can be less
         out["outcomes"] = [{"label": automatic.outcome_label(kind, c), "denoiseTier": c["tier"],
-                            "estCostMicros": automatic.cost(kind, t_tier, c, duration_seconds, n)} for c in cands]
+                            "estCostMicros": automatic.cost(kind, t_tier, c, duration_seconds, opts)} for c in cands]
         out["fixed"] = plan["fixed"]
     return out
 
@@ -740,6 +712,21 @@ def create_job(
     tl = None
     if timeline is not None and kind == "convert":
         raise JobError("A conversion (kind convert) has no timeline.")
+    whole_file = None
+    if timeline is None and kind != "convert" and not (options or {}).get("automatic"):
+        # Every job is made one way: whole-file options are the timeline they stand for (editing.timeline_from_options), made again for the
+        # file's real length once it is read (editing.refit_whole_file).
+        from . import editing
+
+        check_duration(kind, denoise_tier, claimed_seconds)
+        asked = validate_options(kind, denoise_tier, transcribe_tier, options)
+        whole_file = {"kind": kind, "denoise_tier": denoise_tier, "transcribe_tier": transcribe_tier, "options": asked}
+        timeline, options = editing.timeline_from_options(kind, denoise_tier, transcribe_tier, asked, claimed_seconds)
+        denoise_tier = transcribe_tier = None
+    elif timeline is not None:
+        from . import editing
+
+        timeline, options, transcribe_tier = editing.subtitles_into_timeline(timeline, transcribe_tier, options, claimed_seconds)
     if timeline is not None:
         from . import editing
 
@@ -752,8 +739,7 @@ def create_job(
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
 
-    disk_need = (size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"] or bool(tl and tl.layers["echo"]))
-                 + kept_bytes(kind, claimed_seconds, denoise_tier=denoise_tier) + DISK_RESERVE)
+    disk_need = size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"] or bool(tl and tl.layers["echo"])) + DISK_RESERVE
     if kind in ("denoise", "denoise_transcribe"):
         from . import editing
 
@@ -772,11 +758,9 @@ def create_job(
         "input_ext": ext,
         "display_name": clean_display_name(display_name),
         **convert_params(opts, ext),
+        **({"whole_file": whole_file} if whole_file else {}),
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
-    n_translate = len(opts["translate"])
-    leveling = kind != "transcribe" and opts["leveling"]
-    echo = kind != "transcribe" and opts["echo_reference_track"]
     plan = automatic_plan(kind, params["transcribe_tier"], options, opts)
     if tl is not None:
         # A job made with a timeline: only its parts are processed and charged (editing.py); the subtitles are priced as always.
@@ -786,18 +770,17 @@ def create_job(
         params["edit_rates"] = editing.step_rates()
         if tl.layers["subtitles"]:
             params["subtitle_rates"] = editing.subtitle_rates()
-        params["rates"] = pricing.job_rates("transcribe", None, params["transcribe_tier"], n_translate)
+        params["rates"] = {}  # (its subtitles are parts of the timeline too)
         est = editing.first_run_cost(kind, params, claimed_seconds)
     elif plan:
         # held for the most it can cost; the decision (automatic.py) shrinks the hold to what will be charged
         params["automatic"] = plan
         top, est = automatic.dearest(kind, params["transcribe_tier"], automatic.within(plan["candidates"], claimed_seconds), claimed_seconds,
-                                     n_translate)
+                                     opts)
         params["rates"] = top["rates"]
-    else:
-        params["rates"] = pricing.job_rates(kind, params["denoise_tier"], params["transcribe_tier"], n_translate, leveling, echo)
-        est = pricing.job_cost_micros(kind, params["denoise_tier"], params["transcribe_tier"], claimed_seconds, params["rates"], n_translate,
-                                      leveling, echo)
+    else:  # (a conversion: its price is the video conversion's, below)
+        params["rates"] = {}
+        est = 0
     est += convert_cost(params, claimed_seconds)  # (another file type only: known once the file is read, then held if it is made again)
     now = db.now()
     tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
@@ -987,7 +970,7 @@ def requeue(job: dict, next_stage: str | None = None, keep_place: bool = False) 
     # (the blocks a stopped run had made are kept: they are exactly what the run starts again from)
     from . import editing
 
-    keep = {f"input{params['input_ext']}", "blocks", editing.BROWSER, editing.SUBS, *(params.get("rerun") or {}).get("linked", [])}  # a re-run's files from its source
+    keep = {f"input{params['input_ext']}", "blocks", editing.BROWSER, editing.SUBS}
     for p in d.iterdir():
         if p.name in keep:
             continue
@@ -1099,10 +1082,6 @@ def _label_of(kind: str, params: dict) -> str:
         from . import editing
 
         return " + ".join([editing.timeline_label(params), *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
-    if params.get("rerun"):
-        from . import rerun
-
-        return rerun.rerun_label(params.get("rates") or {}, params.get("denoise_tier"), params.get("transcribe_tier"))
     if automatic.pending(params):  # not decided yet: what it will do is not known
         return " + ".join(["Automatic settings", *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
     rates = params.get("rates") or {}
@@ -1134,7 +1113,6 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "label": label_of(job["kind"], params),
         "denoiseTier": params.get("denoise_tier"),
         "transcribeTier": params.get("transcribe_tier"),
-        "sourceJobId": job.get("source_job_id"),
         "durationSeconds": job["duration_seconds"] or job["claimed_seconds"],
         "estCostMicros": job["est_cost_micros"],
         "costMicros": job["cost_micros"],
@@ -1148,12 +1126,12 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
         "editedAt": job.get("edited_at") or job["finished_at"],
         "hardDeadlineAt": hard_deadline(job),
     }
-    if job["kind"] in ("denoise", "denoise_transcribe"):
+    from . import editing
+
+    if editing.editable_kind(job):
         e = params.get("edit") or {}
         out["edit"] = {"available": job["status"] == "done", "hasTimeline": bool(e.get("timeline")), "run": (params.get("run") or {}).get("op"),
                        "lastRun": e.get("lastRun"), "suggestions": bool(e.get("suggestions"))}
-        from . import editing
-
         needs = editing.pending_needs(job, params)  # what the browser still has to send for the timeline's browser parts and free subtitles
         if needs is not None:
             out["needs"] = needs
@@ -1163,10 +1141,6 @@ def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None,
             out["maximum"] = True  # estCostMicros is the most it can cost until then
     if job["status"] in ("queued", "running", "cloud_asr"):
         out["estimateSeconds"] = int(job_seconds(job))  # the whole job's rough length, for the wait before progress shows
-    if job["status"] == "done":
-        from . import rerun
-
-        out["redo"] = rerun.redo_info(job)
     if callback is not None:
         out["callback"] = callback
     return out

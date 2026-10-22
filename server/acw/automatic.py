@@ -8,7 +8,8 @@ request gives itself wins over the decision (`fixed_fields`).
 The job is created with `denoiseTier: "standard"`, held for the most it could cost (`candidates`: Denoising + Leveling,
 or Voice rebuild + Leveling, whichever is more: the rebuild, wherever it is possible) and queued like any job. A worker that takes it measures it after the probe, once
 (`decide`), and `apply` turns the job into the job that was decided: the tier, the options, the prices pinned with it, the estimate
-and the hold (shrunk to what will be charged). From there it is an ordinary job: charged for what ran, re-run like any other (the
+and the hold (shrunk to what will be charged). From there it is an ordinary job, made with the timeline the decided settings stand for
+(editing.timeline_from_options): charged for what ran, edited like any other (the
 choices made are its settings now). The voice rebuild runs only on the card, so a worker that is not the card's hands the job over
 once it has decided on a rebuild (`jobs.hand_over`); where a rebuild is wanted but cannot be done (the file is too long, the card is
 not up, the job names Denoising settings or echo removal), the recording is cleaned with Denoising and `chosen` says why.
@@ -76,15 +77,16 @@ def within(cands: list[dict], seconds: float) -> list[dict]:
     return [c for c in cands if c["tier"] != "rebuild" or seconds <= pricing.MAX_REBUILD_SECONDS]
 
 
-def cost(kind: str, t_tier: str | None, cand: dict, seconds: float, n_translate: int) -> int:
-    """What a job that ends as `cand` costs for `seconds` of audio."""
-    rates = cand["rates"]
-    return pricing.job_cost_micros(kind, cand["tier"], t_tier, seconds, rates, n_translate, "leveling" in rates, "echo" in rates)
+def cost(kind: str, t_tier: str | None, cand: dict, seconds: float, options: dict) -> int:
+    """What a job that ends as `cand` costs for `seconds` of audio: the price of the timeline it becomes (`apply`), like any job's."""
+    from . import editing
+
+    return editing.options_price(kind, cand["tier"], t_tier, {**options, "leveling": "leveling" in cand["rates"]}, seconds)[0]
 
 
-def dearest(kind: str, t_tier: str | None, cands: list[dict], seconds: float, n_translate: int) -> tuple[dict, int]:
+def dearest(kind: str, t_tier: str | None, cands: list[dict], seconds: float, options: dict) -> tuple[dict, int]:
     """(the dearest candidate, its price) at `seconds`."""
-    priced = [(cost(kind, t_tier, c, seconds, n_translate), c) for c in cands]
+    priced = [(cost(kind, t_tier, c, seconds, options), c) for c in cands]
     top = max(priced, key=lambda p: p[0])
     return top[1], top[0]
 
@@ -96,8 +98,7 @@ def pending(params: dict) -> bool:
 
 def pending_cost(kind: str, params: dict, seconds: float) -> int:
     """The most an undecided automatic job can cost for `seconds` of audio."""
-    return dearest(kind, params.get("transcribe_tier"), within(params["automatic"]["candidates"], seconds), seconds,
-                   len(params["options"].get("translate") or []))[1]
+    return dearest(kind, params.get("transcribe_tier"), within(params["automatic"]["candidates"], seconds), seconds, params["options"])[1]
 
 
 def outcome_label(kind: str, cand: dict) -> str:
@@ -198,17 +199,19 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
             return None
         kind, t_tier, tier = row["kind"], params.get("transcribe_tier"), decision["tier"]
         opts = {**params["options"], **decision["options"]}
-        n = len(opts.get("translate") or [])
-        # the prices pinned when the job was made: those of the candidate it ended as, without the parts that were not chosen
-        cand = next((c for c in params["automatic"]["candidates"] if c["tier"] == tier), None)
-        if cand is None:
+        if not any(c["tier"] == tier for c in params["automatic"]["candidates"]):
             raise ValueError(f"no {tier} outcome was priced for this job")
-        rates = {k: v for k, v in cand["rates"].items() if k != "leveling" or opts["leveling"]}
-        new_cost = pricing.job_cost_micros(kind, tier, t_tier, seconds, rates, n, "leveling" in rates, "echo" in rates)
-        params.update(options=opts, denoise_tier=tier, rates=rates, chosen=decision["chosen"])
-        params["automatic"] = {"fixed": params["automatic"]["fixed"]}  # (the candidates were only for the hold)
-        from . import jobs
+        # It becomes a job made with the timeline the decided settings stand for (every job is made one way: editing.timeline_from_options),
+        # at the prices pinned when it was made.
+        from . import editing, jobs
 
+        raw, rest = editing.timeline_from_options(kind, tier, t_tier, opts, seconds)
+        pinned = params["automatic"]
+        params.update(options=rest, denoise_tier="standard", transcribe_tier=None, rates={}, chosen=decision["chosen"],
+                      edit={**(params.get("edit") or {}), "timeline": raw, "first_run": True},
+                      edit_rates=pinned.get("edit_rates") or editing.step_rates(), subtitle_rates=pinned.get("subtitle_rates") or editing.subtitle_rates())
+        params["automatic"] = {"fixed": pinned["fixed"]}  # (the candidates were only for the hold)
+        new_cost = editing.first_run_cost(kind, params, seconds)
         new_cost += jobs.convert_cost(params, seconds)  # (a video conversion is not part of the decision: it stays as it was)
         est = row["est_cost_micros"]
         if row["hold_id"] and 0 < new_cost < est:
@@ -216,6 +219,6 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
             est = new_cost
         c.execute(
             "UPDATE jobs SET params_json = ?, tier = ?, est_cost_micros = ? WHERE id = ?",
-            (json.dumps(params), "/".join(t for t in (tier, t_tier) if t), est, job_id),
+            (json.dumps(params), "standard", est, job_id),
         )
         return params

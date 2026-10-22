@@ -8,7 +8,7 @@ import { outputUrl } from './api.js';
 import { saveBlob } from './download.js';
 import { stem } from './format.js';
 import { LANGUAGES } from './jobs.js';
-import { blendToPcm, keptSource, loadKeptPair, memorySource, previewFits, splitParts } from './media/blend.js';
+import { blendToPcm, memorySource, splitParts } from './media/blend.js';
 import { buildMedia, cleanName, endingOf, FORMAT, formatOfName, srtToVtt, vttToSrt } from './media/convert.js';
 import { probeMedia } from './media/mb.js';
 import { buildWav } from './media/wav.js';
@@ -33,8 +33,8 @@ const abortError = () => new DOMException('Canceled', 'AbortError');
  * sound, but the file is wanted as `name` all the same (another file type or size: the file with its own sound). serverVideo: our side made
  * the video (one this browser can't make), so that one is the result.
  * subs/caps: subtitle files by format. embed: the subtitles go inside the video. soundHere/subsHere: made in this
- * browser, so they exist only in this tab. blend: the strength (dB) the sound was saved with from the two copies the job kept
- * (a job on our side): made here, free, again whenever it is needed (after a reload too) while those copies exist.
+ * browser, so they exist only in this tab. blend: the strength (dB) the free cleanup's sound was saved with, from the two signals it kept
+ * in this tab (made here, free).
  */
 const KEY = 'acw.wants.';
 export function saveWants(id, wants) {
@@ -116,7 +116,7 @@ export class Finish {
     this.pairChannels = 0;
     this.pair = null; // the parts above as arrays (a free run here only: everything is in memory already)
     this.pairLoad = null;
-    this.source = null; // what the slider plays from (media/blend.js memorySource / keptSource)
+    this.source = null; // what the slider plays from (media/blend.js memorySource)
     this.sourceKey = '';
     this.blendedDb = null; // the strength this.pcm was blended at, for a job on our side
     this.strengthDb = null; // the strength of the sound made in this tab (set by the free cleanup, and whenever it is blended again)
@@ -143,14 +143,12 @@ export class Finish {
 
   get outputs() { return this.job?.outputs || []; }
 
-  /** Where the slider's two signals come from: 'here' (this browser made them), 'server' (the job kept them), or null. */
+  /** Where the slider's two signals come from: 'here' (the free cleanup made them in this browser), or null. */
   get sliderSource() {
-    if (this.pairParts) return 'here';
-    if (!this.job?.local && this.job?.redo?.preview && !this.useServerVideo) return 'server';
-    return null;
+    return this.pairParts ? 'here' : null;
   }
 
-  /** The cleaned sound in this tab is the one to use: made by the free cleanup here, or blended here from the job's kept copies. */
+  /** The cleaned sound in this tab is the one to use: made by the free cleanup here, or blended here from its two signals. */
   usesPcm(w) {
     return !!this.pcm && (!!w.soundHere || (!!w.blend && this.blendedDb === w.blend.db));
   }
@@ -162,20 +160,10 @@ export class Finish {
     return Number.isFinite(this.job?.options?.atten_lim_db) ? this.job.options.atten_lim_db : 100;
   }
 
-  /**
-   * The two signals as whole arrays. A free run made here has them already (kept for the slider and for saving other strengths). For a
-   * job on our side this fetches both kept copies whole; that is only for blending a new strength on this device (recordings that fit in
-   * memory, previewFits), and nothing is kept afterwards: the slider plays from short stretches (stretchSource).
-   */
-  ensurePair({ signal } = {}) {
+  /** The two signals as whole arrays: a free run made here has them (kept for the slider and for saving other strengths). */
+  ensurePair() {
     if (this.pair) return Promise.resolve(this.pair);
-    if (!this.pairParts) {
-      const preview = this.job?.redo?.preview;
-      if (!preview || !previewFits(this.job.durationSeconds || preview.samples / 48000, preview.channels.length)) {
-        return Promise.reject(new Error('This recording is too long to put together on this device.'));
-      }
-      return loadKeptPair(this.id, preview, { signal });
-    }
+    if (!this.pairParts) return Promise.reject(new Error('The sound to try other strengths with is not here any more.'));
     if (!this.pairLoad) {
       const ch = this.pairChannels;
       this.pairLoad = (async () => ({ full: await splitParts(this.pairParts.full, ch), input: await splitParts(this.pairParts.input, ch), plan: Array.from({ length: ch }, (_, i) => i) }))().then(
@@ -186,24 +174,11 @@ export class Finish {
     return this.pairLoad;
   }
 
-  /**
-   * What the slider plays from, whatever the length of the recording: the arrays of a free run made here, or the job's two kept
-   * copies on our side in short stretches (a few seconds are in memory at a time, never the whole recording).
-   */
+  /** What the slider plays from: the arrays of the free run made here. */
   async stretchSource() {
-    if (this.pairParts) {
-      if (this.sourceKey !== 'here') {
-        this.source = memorySource(await this.ensurePair());
-        this.sourceKey = 'here';
-      }
-      return this.source;
-    }
-    const preview = this.job?.redo?.preview;
-    if (!preview) throw new Error('The sound to try other strengths with is not here any more.');
-    const key = `${this.id}:${preview.samples}:${preview.channels.join(',')}:${preview.scale.noise}:${preview.scale.input}:${preview.energy?.full ?? ''}`;
-    if (this.sourceKey !== key) {
-      this.source = keptSource(this.id, preview);
-      this.sourceKey = key;
+    if (this.sourceKey !== 'here') {
+      this.source = memorySource(await this.ensurePair());
+      this.sourceKey = 'here';
     }
     return this.source;
   }
@@ -241,7 +216,7 @@ export class Finish {
     if (w.subsHere && (this.failed.subs || !this.subs)) { w.subs = false; w.embed = false; }
     if (this.failed.sound && !w.soundHere) w.sound = false;
     if (this.failed.subs && !w.subsHere) { w.subs = false; w.embed = false; }
-    if (w.blend && !(this.sliderSource === 'server' || this.pcm)) delete w.blend; // the copies it came from are gone: the sound as the job made it
+    if (w.blend && !this.pcm) delete w.blend; // the signals it came from are gone: the sound as it was made
     if (!w.sound && !w.convert && w.embed) {
       w.format = 'mkv'; w.size = 'same';
       if (!w.name || FORMAT[formatOfName(w.name)]?.kind !== 'video') w.name = `${stem(this.inputName)}-subtitled.mkv`;
@@ -360,10 +335,6 @@ export class Finish {
       const picture = video && info.hasVideo;
       const sound = {};
       if (w.sound) {
-        if (w.blend && !w.soundHere && !this.usesPcm(w)) {
-          report(0.02);
-          await this.blendTo(w.blend.db); // after a reload: from the copies the job kept
-        }
         if (this.usesPcm(w)) {
           sound.pcm = this.pcm; sound.wav = this.wav;
         } else {

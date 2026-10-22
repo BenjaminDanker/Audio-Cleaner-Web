@@ -1,19 +1,14 @@
-"""Short, sample-exact stretches of the copies a finished job kept, for the strength slider.
+"""Short, sample-exact stretches of what a job keeps, for the per-part editor's preview.
 
-`GET /api/jobs/{id}/kept/{noise|input}?start=<seconds>&seconds=<n>` answers with a 24-bit FLAC of just those samples of the
-noise removal at full strength (`noise`) or of the recording as the remover heard it (`input`). Both kept files have the same
-sample grid, so the same `start` and `seconds` give two stretches that line up sample for sample, and a page (or a program) can
-blend them at any strength (`(1 - a) * noise + a * input`, `a = 10^(-dB/20)`) and play a recording of any length while holding
-only a few seconds of it. A stretch decodes to the very values the whole kept file decodes to at those positions (24-bit FLAC
-is cut and written again without a loss).
+`GET /api/jobs/{id}/preview/{source|echo|noise|rebuild}` (acw/editing.py) answers with a 24-bit FLAC of just a stretch: of the
+recording (`source`, `cut` from the 24-bit copy the job keeps of it) or of what the block cache holds of a step (`assemble`: the stretch
+is put together from the 30 s blocks it overlaps). A stretch decodes to the very values the whole file decodes to at those positions
+(24-bit FLAC is cut and written again without a loss), so a page can play a recording of any length while holding only a few seconds of it.
 
-The cutting is done by `acw.worker.cutter`, a confined program of its own (FFmpeg inside the same kind of sandbox as the job
-runner, with nothing writable), because the kept files were made by the runner, which handles untrusted uploads: this process
-never opens them with a decoder itself. A few cuts run at once; the rest wait a moment, then are told to come back.
-
-The per-part editor's preview (`GET /api/jobs/{id}/preview/{source|echo|noise|rebuild}`, acw/editing.py) uses the same helper for the
-recording (`source`, cut like a kept copy) and a second one for what the block cache holds of a step (`assemble`: the stretch is put
-together from the 30 s blocks it overlaps by `acw.worker.assembler`, confined the same way). Both share the places above.
+The cutting is done by `acw.worker.cutter` and the putting together by `acw.worker.assembler`, confined programs of their own (FFmpeg
+inside the same kind of sandbox as the job runner, with nothing writable), because these files were made by the runner, which handles
+untrusted uploads: this process never opens them with a decoder itself. A few run at once; the rest wait a moment, then are told to come
+back.
 """
 from __future__ import annotations
 

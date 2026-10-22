@@ -563,45 +563,82 @@ def wants_echo(params: dict) -> bool:
 
 
 def editable_kind(job: dict) -> bool:
-    return job["kind"] in ("denoise", "denoise_transcribe")
+    """Every job made with a timeline (all of them are: the API's options become one, timeline_from_options); a conversion has none."""
+    return job["kind"] in ("denoise", "denoise_transcribe", "transcribe")
 
 
-def default_timeline(job: dict, params: dict, seconds: float):
-    """The timeline a job made without one stands for: its options, every step on the whole file (`Timeline.from_clean_options`;
-    a noise remover that was left to "auto" is the one the runner reported using). Empty for a job without audio steps."""
+# The subtitle quality of a timeline part for each transcription tier of the API's options.
+QUALITY_OF_TIER = {"local": "standard", "premium": "accurate"}
+
+
+def timeline_from_options(kind: str, denoise_tier: str | None, transcribe_tier: str | None, options: dict, seconds: float) -> tuple[dict, dict]:
+    """A job asked for with options (the API's whole-file choices, already checked: jobs.validate_options) as the timeline they stand for, so
+    every job is made one way (editrun.render, and the subtitles part by part): the sound steps on the whole file
+    (Timeline.from_clean_options), and the subtitles as one part over the whole file with the quality, language and
+    translations asked for. Returns (the timeline as JSON, the options the timeline does not hold)."""
     from acw_common import pipeline
 
-    tl = _tl()
-    if not editable_kind(job):
-        return tl.Timeline(seconds)
-    opts = params["options"]
-    tier = params.get("denoise_tier")
-    noise = opts.get("noise", "auto")
-    if noise == "auto" and params.get("noise_profile") in ("light", "heavy"):
-        noise = params["noise_profile"]
-    c = pipeline.CleanOptions(atten_lim_db=float(opts.get("atten_lim_db", 100.0)), loudness_lufs=opts.get("loudness_lufs", -16.0),
-                              leveling=bool(opts.get("leveling", True)), noise=noise, restore_voice=tier == "rebuild",
-                              denoise=tier != pricing.NO_DENOISE)
-    return tl.Timeline.from_clean_options(seconds, c, echo=bool(opts.get("echo_reference_track")))
+    raw: dict = {"version": 1, "seconds": seconds, "layers": {}}
+    if kind in ("denoise", "denoise_transcribe"):
+        c = pipeline.CleanOptions(atten_lim_db=float(options.get("atten_lim_db", 100.0)), loudness_lufs=options.get("loudness_lufs", -16.0),
+                                  leveling=bool(options.get("leveling", True)), noise=options.get("noise", "auto"),
+                                  restore_voice=denoise_tier == "rebuild", denoise=denoise_tier != pricing.NO_DENOISE)
+        raw = _tl().Timeline.from_clean_options(seconds, c, echo=bool(options.get("echo_reference_track"))).to_json()
+    subs = kind in ("transcribe", "denoise_transcribe") and transcribe_tier in QUALITY_OF_TIER
+    if subs:
+        raw = {**raw, "version": _tl().VERSION_2, "layers": {**raw["layers"], "subtitles": [
+            {"start": 0.0, "end": raw["seconds"], "quality": QUALITY_OF_TIER[transcribe_tier], "language": options.get("language"),
+             "translate": list(options.get("translate") or [])}]}}
+    rest = {k: v for k, v in options.items() if k not in REPLACED_OPTIONS and not (subs and k in ("language", "translate"))}
+    return raw, rest
+
+
+def subtitles_into_timeline(raw: object, transcribe_tier: str | None, options: dict, seconds: float) -> tuple[object, dict, str | None]:
+    """A timeline sent with whole-file subtitle choices (a transcription tier, options.language and .translate) and no subtitle parts of its
+    own: the subtitles become one part over the whole file, so they are made the one way (part by part). Returns (the timeline, the options
+    without those choices, the tier left: None when it went into the timeline)."""
+    layers = raw.get("layers") if isinstance(raw, dict) else None
+    if transcribe_tier not in QUALITY_OF_TIER or not isinstance(layers, dict) or layers.get("subtitles"):
+        return raw, options, transcribe_tier
+    end = raw.get("seconds") if isinstance(raw.get("seconds"), (int, float)) and not isinstance(raw.get("seconds"), bool) else seconds
+    part = {"start": 0.0, "end": end, "quality": QUALITY_OF_TIER[transcribe_tier], "language": (options or {}).get("language"),
+            "translate": list((options or {}).get("translate") or [])}
+    rest = {k: v for k, v in (options or {}).items() if k not in ("language", "translate")}
+    return {**raw, "version": _tl().VERSION_2, "layers": {**layers, "subtitles": [part]}}, rest, None
+
+
+def options_price(kind: str, denoise_tier: str | None, transcribe_tier: str | None, options: dict, seconds: float) -> tuple[int, list[dict]]:
+    """What a job asked for with options costs for `seconds`, at today's prices, and its lines: the price of the timeline they stand for (the
+    same as a job made with that timeline)."""
+    raw, _ = timeline_from_options(kind, denoise_tier, transcribe_tier, options, seconds)
+    tl = parse_timeline(raw, seconds)
+    micros, lines = price_timeline(tl, seconds, step_rates())[:2] if any(tl.layers[n] for n in _tl().LAYERS) else (0, [])
+    if tl.layers["subtitles"]:
+        sub = subtitle_plan(None, tl, subtitle_rates())
+        micros, lines = micros + sub["micros"], [*lines, *sub["lines"]]
+    return micros, lines
+
+
+def refit_whole_file(job_id: str, params: dict, seconds: float) -> dict:
+    """A job asked for with options covers the whole file, whatever its length turns out to be: once the file is read, its timeline is made
+    again for the length it has (`params["whole_file"]`: what was asked for). Returns the parameters."""
+    w = params.get("whole_file")
+    if not w:
+        return params
+    raw, _ = timeline_from_options(w["kind"], w["denoise_tier"], w["transcribe_tier"], w["options"], seconds)
+    return jobs.update_params(job_id, edit={**(params.get("edit") or {}), "timeline": raw})
 
 
 def saved_timeline(job: dict, params: dict, seconds: float):
-    """The job's working timeline: what was last saved (or given at creation), else the default; re-based on the recording's length."""
-    raw = (params.get("edit") or {}).get("timeline")
-    if raw:
-        return _tl().Timeline.from_json(raw, seconds=seconds)
-    return default_timeline(job, params, seconds)
+    """The job's working timeline: what was last saved, or the one it was made with (every job has one); re-based on the recording's
+    length."""
+    return _tl().Timeline.from_json((params.get("edit") or {}).get("timeline") or {"version": 1, "seconds": seconds, "layers": {}}, seconds=seconds)
 
 
 def rendered_timeline(job: dict, params: dict, seconds: float):
     """The timeline whose audio the job's result files hold (None: not known, so everything is made again)."""
     e = params.get("edit") or {}
-    if e.get("rendered"):
-        return _tl().Timeline.from_json(e["rendered"], seconds=seconds)
-    if e.get("first_run"):
-        return None
-    t = default_timeline(job, params, seconds)  # a job made before the editor: what its options say
-    return None if any(p.settings.get("remover") == "auto" for _, p in t) else t
+    return _tl().Timeline.from_json(e["rendered"], seconds=seconds) if e.get("rendered") else None
 
 
 def part_key(start: float, end: float) -> str:
@@ -681,6 +718,13 @@ def make_quote(job: dict, params: dict, tl, *, rates: dict[str, int] | None = No
         billable = ed.billable(plan)
         total, lines = price(billable, rates)
     total, lines = total + subs["micros"], [*lines, *subs["lines"]]
+    # A video made on our side (the whole video was uploaded, or a sound asked for as a video) is made again with a new sound or new
+    # subtitles, the way the first run made it: its picture made again is charged again (a video conversion, jobs.convert_cost).
+    opts = params.get("options") or {}
+    video = (bool(params.get("has_video")) or bool(opts.get("video_out"))) and bool(opts.get("output_video", True)) and not unchanged
+    convert = jobs.convert_cost(params, seconds) if video else 0
+    if convert:
+        total, lines = total + convert, [*lines, jobs.convert_line(params, seconds)]
     rebuild_s = _blocks().union_seconds(plan.asked.get("rebuild", []))
     if rebuild_s > pricing.MAX_REBUILD_SECONDS:
         raise bad(f"Voice rebuild takes up to {pricing.MAX_REBUILD_SECONDS // 60} minutes of a recording at a time; this timeline asks for {rebuild_s / 60:.0f}.")
@@ -711,6 +755,8 @@ def make_quote(job: dict, params: dict, tl, *, rates: dict[str, int] | None = No
         "plan": plan,
         "timeline": tl,
         "gpu": gpu_stages_of(plan),
+        "video": video,
+        "convertMicros": convert,
     }
 
 
@@ -1271,8 +1317,8 @@ def prepare_timeline_job(kind: str, denoise_tier: str | None, options: dict, cla
     """The checks of a job made with a timeline: it needs audio steps or subtitles, replaces the choices the timeline makes (the tier,
     strength, remover, Leveling, loudness, echo removal, automatic settings; with subtitle parts also the subtitle quality, language and
     translations), and every part is inside the file. Returns (Timeline, the tier the job stores)."""
-    if kind not in ("denoise", "denoise_transcribe"):
-        raise bad("A timeline is for jobs with noise removal or Leveling: use kind denoise or denoise_transcribe.")
+    if kind not in ("denoise", "denoise_transcribe", "transcribe"):
+        raise bad("A timeline is for jobs with noise removal, Leveling or subtitles: use kind denoise, denoise_transcribe or transcribe.")
     if denoise_tier is not None:
         raise bad("A timeline says what is done to each part: leave denoiseTier out.", code="timeline_options")
     clash = [k for k in REPLACED_OPTIONS if k in (options or {})]
@@ -1281,6 +1327,8 @@ def prepare_timeline_job(kind: str, denoise_tier: str | None, options: dict, cla
     tl = parse_timeline(raw, claimed_seconds, slack=0.1 * claimed_seconds + 5.0)
     if not any(tl.layers[n] for n in ("echo", "noise", "rebuild", "leveling", "subtitles")):
         raise bad("The timeline has no parts: it would not do anything.")
+    if kind == "transcribe" and any(tl.layers[n] for n in _tl().LAYERS):
+        raise bad("A transcribe job only has subtitles: use kind denoise_transcribe for sound steps too.")
     if tl.layers["subtitles"]:
         clash = [name for name, given in (("transcribeTier", transcribe_tier is not None), ("options.language", (options or {}).get("language") is not None),
                                           ("options.translate", bool((options or {}).get("translate")))) if given]
@@ -1367,18 +1415,6 @@ def timeline_seconds(raw: dict, seconds: float, channels: int) -> float:
     return total
 
 
-def derived_rendered(job: dict, params: dict) -> dict | None:
-    """The timeline a first run's result holds, from the job's options (every step on the whole file), when it is fully decided."""
-    f = (params.get("edit") or {}).get("facts")
-    if not f:
-        return None
-    try:
-        t = default_timeline(job, params, f["n"] / SR)
-    except _tl().TimelineError:
-        return None
-    return None if any(p.settings.get("remover") == "auto" for _, p in t) else t.to_json()
-
-
 def spec_for(job: dict, params: dict) -> dict | None:
     """What the runner is told about the per-part editor: the run (a first run, or an edit run's operation, timeline and the one it
     renders from), what identifies the recording in every cache key, and the removers already decided."""
@@ -1389,10 +1425,10 @@ def spec_for(job: dict, params: dict) -> dict | None:
     out = {"source_id": source_id(job), "resolved": e.get("resolved") or {}, "facts": e.get("facts")}
     if run:
         out.update(op=run["op"], timeline=run["timeline"], previous=run.get("previous"), audio_format=run.get("audio_format"),
-                   suggest=run["op"] == "suggest")
+                   suggest=run["op"] == "suggest", video=bool(run.get("video")), audio_file=run.get("audio_file"))
     else:
         out.update(op="first", timeline=e.get("timeline") if e.get("first_run") else None, previous=None, audio_format=None,
-                   suggest=not params.get("rerun") and 0 < float(job.get("duration_seconds") or job["claimed_seconds"]) <= get_settings().suggest_max_seconds)
+                   suggest=0 < float(job.get("duration_seconds") or job["claimed_seconds"]) <= get_settings().suggest_max_seconds)
     raw = out.get("timeline")
     if raw and (wants_uploads(raw) or (raw.get("layers") or {}).get("subtitles") or run and run.get("subs") is not None):
         tl = _tl().Timeline.from_json(raw, seconds=file_seconds(job, params))
@@ -1632,12 +1668,13 @@ def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: o
             run["subs"] = None if q["subsSame"] else {"parts": q["subs"]["parts"]}
             run["subtitle_rates"] = params.get("subtitle_rates") or subtitle_rates()
         run["audio"] = (not q["audioSame"]) or fmt != params["options"].get("audio_format", "flac")  # the sound is rendered again
+        if q["video"]:  # the video is made again too (with the new sound, or the job's sound as it is and the new subtitles)
+            current = next((o["file"] for o in json.loads(job.get("outputs_json") or "[]") if o["kind"] == "audio"), None)
+            run.update(video=True, audio_file=current, convert_micros=q["convertMicros"])
         if run.get("subs") and any(e["transcribe"] and e["quality"] == "standard" for e in run["subs"]["parts"]) and "transcribe" not in run["gpu"]:
             run["gpu"] = [*run["gpu"], "transcribe"]  # (the local recogniser has the card's places too)
     need_seconds = 2 * (est_seconds + jobs.MODEL_LOAD_SECONDS)
-    from . import rerun
-
-    if jobs.hard_deadline(job) - db.now() < need_seconds + rerun.DEADLINE_MARGIN_SECONDS:
+    if jobs.hard_deadline(job) - db.now() < need_seconds + jobs.DEADLINE_MARGIN_SECONDS:
         raise jobs.JobError("This one is about to be cleared away, so there isn’t time to process it again. Start it again from your file.", 409, code=EXPIRING)
     channels = f["channels"]
     disk_need = (jobs.scratch_bytes("denoise", seconds, channels, echo=run["echo"]) + (growth_bytes(q["plan"], channels) if q else 0)

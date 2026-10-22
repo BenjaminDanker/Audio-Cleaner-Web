@@ -223,17 +223,6 @@ export function outputUrl(jobId, name) {
   return `${API}jobs/${encodeURIComponent(jobId)}/outputs/${encodeURIComponent(name)}`;
 }
 
-/**
- * URL of one of the two copies the strength slider blends: `which` is 'noise' (full strength) or 'input' (the recording). Without
- * `stretch` the whole copy; with `{first, count}` (samples at 48 kHz) only that stretch of it, whatever the length of the recording.
- */
-export function keptUrl(jobId, which, stretch = null) {
-  const base = `${API}jobs/${encodeURIComponent(jobId)}/kept/${which}`;
-  if (!stretch) return base;
-  // six decimals name every sample of a 48 kHz grid exactly (the server rounds to the nearest sample)
-  return `${base}?start=${(stretch.first / 48000).toFixed(6)}&seconds=${(stretch.count / 48000).toFixed(6)}`;
-}
-
 /** wss:// or ws:// URL for the live stream endpoint, same origin as the page. */
 export function streamUrl() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

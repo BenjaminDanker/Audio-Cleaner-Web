@@ -1,10 +1,9 @@
 """Cuts a stretch out of a kept copy: `python -m acw.worker.cutter <bin dir> <kept file> <first sample> <samples>`.
 
-The strength slider of the website (and the API) plays a job's two kept copies (the noise removal at full strength and the
-recording, 24-bit FLAC, 48 kHz) in short pieces. This is how a piece is made: FFmpeg opens the file, goes to the second before
-`first`, drops the samples up to `first` and writes exactly `samples` samples to the standard output as the same kind of FLAC
-(24-bit, so nothing is lost: the stretch decodes to the very values the whole file decodes to at those positions). Two stretches
-cut with the same numbers from the two copies line up sample for sample.
+The editor's preview plays the job's copy of the recording (24-bit FLAC, 48 kHz) in short pieces (stretch.py). This is how a piece is
+made: FFmpeg opens the file, goes to the second before `first`, drops the samples up to `first` and writes exactly `samples` samples to
+the standard output as the same kind of FLAC (24-bit, so nothing is lost: the stretch decodes to the very values the whole file decodes
+to at those positions).
 
 The program confines itself first, like the job runner (sandbox.py): the file's folder is readable and nothing is writable
 (a pipe is all it writes to), no network, no sockets, hard CPU, memory and size limits, and then becomes FFmpeg (exec), so a damaged
