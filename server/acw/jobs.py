@@ -226,8 +226,10 @@ def encodes(params: dict) -> bool:
 
 
 def _convert_rate(params: dict) -> int:
-    """Micros a minute of the video conversion: the pinned rate times the picture's size factor (convert_factor)."""
-    return math.ceil(params["convert_rate"] * float(params.get("convert_factor") or 1.0))
+    """Micros a minute of the video conversion: the pinned rate times the picture's size factor (convert_factor, two decimals), in whole
+    numbers (a float product can land a hair above the exact one and round up a micro)."""
+    hundredths = round(float(params.get("convert_factor") or 1.0) * 100)
+    return -(-int(params["convert_rate"]) * hundredths // 100)
 
 
 def convert_cost(params: dict, seconds: float) -> int:
@@ -282,7 +284,7 @@ def video_out_of(options: dict) -> dict | None:
             raise JobError("video_out.source must be {codec?, width?, height?, fps?}")
         clean: dict = {}
         if src.get("codec") is not None:
-            if not isinstance(src["codec"], str) or not _CODEC_RE.match(src["codec"]):
+            if not isinstance(src["codec"], str) or not _CODEC_RE.fullmatch(src["codec"]):
                 raise JobError("video_out.source.codec must be FFmpeg's codec name, like h264")
             clean["codec"] = src["codec"]
         for key, lo, hi in (("width", 16, 16384), ("height", 16, 16384), ("fps", 1, 240)):
