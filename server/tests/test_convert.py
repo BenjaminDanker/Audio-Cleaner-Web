@@ -213,43 +213,37 @@ def test_the_other_keys_of_video_out_are_still_refused_and_the_source_is_checked
         assert r.status_code == 400 and r.json()["detail"].startswith("video_out"), (bad, r.text)
 
 
-# ----------------------------------------------------------------------------- a sound file has no picture to make
+# ------------------------------------------------------------ a sound asked for as a video gets a plain black picture, free
 
-def test_a_sound_file_s_ending_is_refused_with_video_out_when_the_job_is_made(client, signed_in):
-    uid, h = funded(signed_in)
+def test_a_sound_file_asked_for_as_a_video_is_taken_and_the_video_is_free(client, signed_in, monkeypatch):
+    set_env(monkeypatch, ACW_MAX_ACTIVE_JOBS=500)  # (a hundred and more jobs are made here)
+    uid, h = funded(signed_in, 50_000_000)
     assert jobs.AUDIO_EXTS <= jobs.ALLOWED_EXTS and not jobs.AUDIO_EXTS & {".mp4", ".mkv", ".avi", ".wmv", ".webm", ".mov", ".m4v", ".mxf", ".flv"}
     assert {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wma", ".aiff", ".mka", ".aac", ".ac3"} <= jobs.AUDIO_EXTS
+    asked = (vo("mkv"), vo("webm", 2160, src("h264", 3840, 2160, 60)))  # (a size and a source that would cost 8 times the work for a picture)
     for ext in sorted(jobs.AUDIO_EXTS):
-        for kind in ("convert", "denoise"):
-            with pytest.raises(jobs.JobError) as e:
-                make(uid, kind=kind, filename=f"talk{ext}", options=vo("mkv"))
-            assert str(e.value) == jobs.NO_PICTURE and e.value.status == 400, (ext, kind)
-        # any video_out is enough, whatever it asks for (and an uppercase ending counts the same)
-    with pytest.raises(jobs.JobError, match="no picture"):
-        make(uid, kind="denoise", filename="TALK.WAV", options=vo("mp4", 720, src("h264")))
-    assert count("jobs") == 0 and count("holds") == 0 and held(uid) == 0
-    # through the API
-    r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "talk.mp3", "sizeBytes": 1000, "durationSeconds": 60,
-                                       "options": vo("mp4")}, headers=h)
-    assert r.status_code == 400 and r.json()["detail"] == jobs.NO_PICTURE
-    r = client.post("/api/jobs", json={"kind": "convert", "filename": "talk.wav", "sizeBytes": 1000, "durationSeconds": 60, "options": vo("mkv")}, headers=h)
-    assert r.status_code == 400 and r.json()["detail"] == jobs.NO_PICTURE and count("jobs") == 0
+        for options in asked:
+            j = make(uid, filename=f"talk{ext}", options=options)  # a conversion alone
+            p = params_of(j["id"])
+            assert (p["picture_encode"], p["convert_factor"], p["convert_rate"]) == (False, 1.0, CONVERT), (ext, options)
+            assert j["estCostMicros"] == 0 and row(j["id"])["hold_id"] is None and jobs.convert_cost(p, 600) == 0
+            d = make(uid, kind="denoise", filename=f"talk{ext}", options=options)  # with cleaning: held for the cleaning alone
+            assert d["estCostMicros"] == 100_000 and params_of(d["id"])["picture_encode"] is False
+            assert jobs.label_of("denoise", params_of(d["id"])) == "Denoising + Leveling"  # (no "+ Video conversion": nothing is made again)
+    assert held(uid) == count("jobs", "kind = 'denoise'") * 100_000
+    # an uppercase ending counts the same, and through the API
+    assert params_of(make(uid, filename="TALK.WAV", options=vo("mp4", 720))["id"])["picture_encode"] is False
+    for kind, extra in (("convert", {}), ("denoise", {"denoiseTier": "standard"})):
+        r = client.post("/api/jobs", json={"kind": kind, "filename": "talk.mp3", "sizeBytes": 1000, "durationSeconds": 60, "options": vo("mp4", 720), **extra}, headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json()["estCostMicros"] == (0 if kind == "convert" else per(DENOISE + LEVELING, 60))
 
 
-def test_a_sound_file_without_video_out_and_a_video_file_with_it_are_made_as_usual(signed_in, monkeypatch):
-    set_env(monkeypatch, ACW_MAX_ACTIVE_JOBS=500)  # (a hundred jobs are made here)
-    uid, _ = funded(signed_in, 50_000_000)
-    for ext in sorted(jobs.AUDIO_EXTS):
-        for off in ({}, {"video_out": None}):
-            assert make(uid, kind="denoise", filename=f"talk{ext}", options=off)["id"]
-    for ext in (".mp4", ".mkv", ".avi", ".wmv", ".webm", ".mov", ".m4v", ".mpg", ".flv", ".ts"):
-        assert make(uid, filename=f"talk{ext}", options=vo("mkv"))["id"]  # (a video ending: the file itself is judged when it is read)
-
-
-def test_the_estimate_has_no_file_name_so_it_does_not_refuse(client, signed_in):
-    _, h = signed_in
-    r = client.post("/api/jobs/estimate", json={"kind": "denoise", "denoiseTier": "standard", "durationSeconds": 60, "options": vo("mp4", 720)}, headers=h)
-    assert r.status_code == 200, r.text
+def test_a_video_ending_is_judged_by_the_file_when_it_is_read_not_by_its_name(signed_in):
+    uid, _ = funded(signed_in)
+    j = make(uid, filename="talk.mkv", options=vo("mp4", 720))  # (it may hold only sound: the probe will say)
+    assert params_of(j["id"])["picture_encode"] is True and j["estCostMicros"] == 60_000
+    assert not hasattr(jobs, "NO_PICTURE")  # (no refusal any more)
 
 
 # ------------------------------------------------------------------------------------------------ the label, the card
@@ -658,17 +652,19 @@ class VideoStages(Stages):
     (`picture_encode`, `convert_factor`, as the real probe does); the main stage writes the video a conversion makes. A file with no
     picture reports `has_video` False and nothing about the picture. `during` is what the main stage saw of the money."""
 
-    def __init__(self, monkeypatch, duration=120.0, picture_encode=True, factor=1.0, has_video=True, stats=None):
+    def __init__(self, monkeypatch, duration=120.0, picture_encode=True, factor=1.0, has_video=True, stats=None, audio_tracks=None):
         super().__init__(monkeypatch, stats, duration=duration)
-        self.picture_encode, self.factor, self.has_video = picture_encode, factor, has_video
+        self.picture_encode, self.factor, self.has_video, self.audio_tracks = picture_encode, factor, has_video, audio_tracks
         self.during: dict = {}
 
     def __call__(self, job, d, stage, timeout):
         spec = json.loads((d / "spec.json").read_text()) if (d / "spec.json").exists() else {}
         if stage == "probe":
             self.calls.append((stage, spec, job.get("worker_id")))
-            picture = {"picture_encode": self.picture_encode, "convert_factor": self.factor} if self.has_video else {"picture_encode": None, "convert_factor": None}
-            return {"ok": True, "duration": self.duration, "channels": 1, "has_video": self.has_video, **picture}
+            # (a file with no picture: nothing is made again, as the real probe says)
+            picture = {"picture_encode": self.picture_encode, "convert_factor": self.factor} if self.has_video else {"picture_encode": False, "convert_factor": 1.0}
+            tracks = {} if self.audio_tracks is None else {"audio_tracks": self.audio_tracks}
+            return {"ok": True, "duration": self.duration, "channels": 1, "has_video": self.has_video, **picture, **tracks}
         if stage == "main":
             self.during = {"held": ledger.balance(job["user_id"])["held_micros"], "est": row(job["id"])["est_cost_micros"]}
             if spec["kind"] == "convert":
@@ -857,24 +853,23 @@ def test_a_factor_from_one_to_sixty_four_is_kept_to_two_decimals(client, signed_
     assert client.get(f"/api/jobs/{jid}", headers=h).json()["status"] == "done" and params_of(jid)["convert_factor"] == stored
 
 
-@pytest.mark.parametrize("kind, options", [("convert", vo("mp4", 720)), ("denoise", vo("mp4", 720)), ("denoise", vo("mkv")), ("denoise", {"automatic": True, **vo("webm")})])
-def test_a_file_that_turns_out_to_have_no_picture_fails_the_whole_job_uncharged(client, signed_in, monkeypatch, kind, options):
-    """video_out was part of what was asked for: nothing of the job is made, and nothing is charged (not even the cleaning)."""
+@pytest.mark.parametrize("kind, options, steps", [
+    ("convert", vo("mp4", 720), 0), ("convert", vo("webm"), 0), ("denoise", vo("mp4", 720), 100_000), ("denoise", vo("mkv"), 100_000),
+    ("denoise", {"automatic": True, **vo("webm")}, 100_000),
+])
+def test_a_file_that_turns_out_to_have_no_picture_gets_a_black_one_and_the_video_costs_nothing(client, signed_in, monkeypatch, kind, options, steps):
+    """A video ending that holds only sound: the probe says nothing is made again; whatever was held for the picture is let go, the cleaning
+    (when asked for) is charged as usual."""
     uid, h = funded(signed_in)
     stages = VideoStages(monkeypatch, duration=600.0, has_video=False, stats=measurement(strength="balanced", rebuild=False))
     jid = start(client, h, kind=kind, seconds=600, filename="talk.mkv", **options)
-    assert held(uid) > 0 or not options["video_out"]["size"]  # (the file is not known to have no picture yet: held as for any)
     take()
-    failed = client.get(f"/api/jobs/{jid}", headers=h).json()
-    assert failed["status"] == "failed" and failed["error"] == jobs.NO_PICTURE and not failed["costMicros"]
-    assert stages.stages == ["probe"]  # (no main stage, no measurement)
-    assert held(uid) == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000 and count("ledger", "kind = 'usage'") == 0
-    assert row(jid)["hold_id"] is None or db.one("SELECT status FROM holds WHERE id = ?", (row(jid)["hold_id"],))["status"] != "active"
-
-
-def test_the_no_picture_words_say_what_to_do():
-    assert jobs.NO_PICTURE == ("This file has no picture, so there is no video to make in another file type or size. Send it without video_out "
-                               "(nothing was charged).")
+    done = client.get(f"/api/jobs/{jid}", headers=h).json()
+    assert done["status"] == "done" and done["costMicros"] == steps
+    assert "main" in stages.stages and done["label"] == ("Video conversion" if kind == "convert" else "Denoising + Leveling")
+    p = params_of(jid)
+    assert (p["picture_encode"], p["convert_factor"]) == (False, 1.0) and jobs.convert_cost(p, 600) == 0
+    assert held(uid) == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000 - steps
 
 
 def test_the_finishing_step_of_a_picture_made_again_gets_the_time_it_needs(signed_in, monkeypatch):
@@ -1220,7 +1215,8 @@ def test_the_first_stage_says_whether_the_picture_is_made_again_and_how_big_the_
     # no video_out, or no picture: nothing to say
     assert runner.stage_probe(d, {**base, "input": "input.wmv", "options": {}})["picture_encode"] is None
     sound = runner.stage_probe(d, {**base, "input": "input.wav", "options": {"video_out": {"format": "mp4", "size": 720}}})
-    assert (sound["has_video"], sound["picture_encode"], sound["convert_factor"]) == (False, None, None)
+    assert (sound["has_video"], sound["picture_encode"], sound["convert_factor"]) == (False, False, 1.0)  # (a sound: nothing is made again)
+    assert sound["audio_tracks"] == 1
 
 
 
@@ -1259,26 +1255,91 @@ def test_the_finishing_step_names_the_file_and_gives_the_card_its_encoders(media
 
 
 
+def black_frame_max(path):
+    """The brightest value (0 to 255) of the first picture of a video file."""
+    out = subprocess.run([str(FFMPEG), "-v", "error", "-i", str(path), "-frames:v", "1", "-pix_fmt", "gray", "-f", "rawvideo", "-"], capture_output=True, check=True).stdout
+    return max(out) if out else -1
+
+
 @NATIVE
-@pytest.mark.parametrize("name", ["sound.mkv", "sound.mp4"])
-@pytest.mark.parametrize("kind, options, held_at_first", [
-    ("convert", vo("mp4", 720), per(CONVERT, 3)),
-    ("denoise", vo("mkv", 720), per(DENOISE + LEVELING, 3) + per(CONVERT, 3)),
+@pytest.mark.parametrize("name", ["talk.wav", "sound.mkv", "sound.mp4"])
+@pytest.mark.parametrize("fmt, size, vcodec, acodec, dims", [
+    ("mp4", None, "h264", "aac", (1280, 720)), ("mkv", 480, "h264", "aac", (854, 480)), ("webm", None, "vp9", "opus", (1280, 720)),
 ])
-def test_a_video_file_that_holds_only_sound_fails_the_whole_job_uncharged(client, signed_in, media, name, kind, options, held_at_first):
-    """The ending says video, the file has no picture: found when it is read. The first stage is the real one."""
+def test_a_sound_asked_for_as_a_video_comes_out_with_a_plain_black_picture_and_its_sound_for_nothing(client, signed_in, media, tmp_path, name, fmt, size, vcodec, acodec, dims):
     uid, h = funded(signed_in)
-    data = media[name]
-    body = {"kind": kind, "filename": name, "sizeBytes": len(data), "durationSeconds": 3, "options": options}
-    if kind != "convert":
-        body["denoiseTier"] = "standard"
-    r = client.post("/api/jobs", json=body, headers=h)
-    assert r.status_code == 200, r.text
-    jid = r.json()["id"]
-    assert held(uid) == held_at_first
-    assert client.put(f"/api/jobs/{jid}/input", content=data, headers=h).status_code == 200
+    jid = real_job(client, h, media, name, **vo(fmt, size))
     take()
-    failed = client.get(f"/api/jobs/{jid}", headers=h).json()
-    assert failed["status"] == "failed" and failed["error"] == jobs.NO_PICTURE and not failed["costMicros"]
-    assert held(uid) == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000 and count("ledger", "kind = 'usage'") == 0
-    assert not jobs.job_dir(jid).exists()  # (the upload is gone, as for any failed job)
+    done = client.get(f"/api/jobs/{jid}", headers=h).json()
+    assert done["status"] == "done", done["error"]
+    stem = name.rsplit(".", 1)[0]
+    assert [(o["name"], o["kind"]) for o in done["outputs"]] == [(f"{stem}-converted.{fmt}", "video")]
+    out = download(client, h, jid, f"{stem}-converted.{fmt}", tmp_path)
+    s = streams(out)
+    assert (s["video"]["codec_name"], s["audio"]["codec_name"]) == (vcodec, acodec) and (s["video"]["width"], s["video"]["height"]) == dims
+    assert black_frame_max(out) < 40  # (black: 16 is black in video levels)
+    assert abs(float(s["audio"].get("duration") or 0) - 3.0) < 1.0 or abs(float(s["video"].get("duration") or 3.0) - 3.0) < 1.5
+    # nothing is charged for the video, and whatever was held for it (a size asked of a video ending) is let go
+    p = params_of(jid)
+    assert (p["picture_encode"], p["convert_factor"]) == (False, 1.0) and done["costMicros"] == 0
+    assert held(uid) == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000
+
+
+@NATIVE
+def test_the_finishing_step_makes_the_black_picture_with_the_cleaned_sound_or_the_files_own(media, tmp_path, monkeypatch):
+    """stage_finalize for a sound asked for as a video: `<stem>-cleaned.<type>` with the cleaned sound, `-captioned` with only subtitles,
+    `-converted` with the file's own; the encoders are the spec's."""
+    import numpy as np
+
+    from acw_common import ffmpeg as ffmod
+    from acw_common.ffmpeg import FFmpeg
+
+    ff = FFmpeg(HOME / "bin")
+    d = tmp_path / "job"
+    d.mkdir()
+    (d / "input.wav").write_bytes(media["talk.wav"])  # 440 Hz
+    cleaned = ff.write_audio(0.3 * np.sin(2 * np.pi * 880 * np.arange(3 * 48000) / 48000).astype(np.float32), 48000, d / "clip-cleaned", "flac")  # 880 Hz
+    spec = {"bin_dir": str(HOME / "bin"), "threads": 1, "input": "input.wav", "input_ext": ".wav", "output_stem": "clip",
+            "options": {"video_out": {"format": "mp4", "size": None}, "output_video": True, "embed_subtitles": True, "caption_formats": ["srt"]}}
+
+    def peak_hz(path):
+        x = ff.decode(path, ff.probe(path), 16000, 1, 10.0)[:, 0]
+        return np.argmax(np.abs(np.fft.rfft(x[: 16000 * 2]))) / 2
+
+    def state(**kw):
+        (d / "main-state.json").write_text(json.dumps({"outputs": [], "cleaned": None, "has_video": False, "duration": 3.0, **kw}))
+
+    seen = []
+    real = ffmod.FFmpeg.make_video
+
+    def spy(self, audio, out, duration, *a, **kw):
+        seen.append((audio.name, out.name, round(duration, 1), kw.get("video")))
+        return real(self, audio, out, duration, *a, **kw)
+
+    monkeypatch.setattr(ffmod.FFmpeg, "make_video", spy)
+    # the file's own sound
+    state()
+    got = runner.stage_finalize(d, spec)
+    assert got["outputs"] == [{"file": "clip-converted.mp4", "kind": "video"}]
+    assert seen[0][:3] == ("input.wav", "clip-converted.mp4", 3.0) and (seen[0][3].short_side, seen[0][3].encoders) == (None, ("libx264",))
+    s = streams(d / "clip-converted.mp4")
+    assert (s["video"]["codec_name"], s["video"]["width"], s["video"]["height"], s["audio"]["codec_name"]) == ("h264", 1280, 720, "aac")
+    assert abs(peak_hz(d / "clip-converted.mp4") - 440) < 10 and black_frame_max(d / "clip-converted.mp4") < 40
+    # the cleaned sound, at the size asked for
+    state(cleaned="clip-cleaned.flac", outputs=[{"file": "clip-cleaned.flac", "kind": "audio"}])
+    got = runner.stage_finalize(d, {**spec, "options": {**spec["options"], "video_out": {"format": "mkv", "size": 480}}})
+    assert [o["file"] for o in got["outputs"]] == ["clip-cleaned.flac", "clip-cleaned.mkv"]
+    assert seen[1][:3] == ("clip-cleaned.flac", "clip-cleaned.mkv", 3.0) and seen[1][3].short_side == 480
+    assert abs(peak_hz(d / "clip-cleaned.mkv") - 880) < 10 and (streams(d / "clip-cleaned.mkv")["video"]["width"], streams(d / "clip-cleaned.mkv")["video"]["height"]) == (854, 480)
+    # only subtitles: the file's own sound with them in
+    state()
+    (d / "segments.json").write_text(json.dumps({"language": "en", "segments": [{"start": 0.2, "end": 2.0, "text": "hello there", "words": []}]}))
+    got = runner.stage_finalize(d, spec)
+    assert [o["file"] for o in got["outputs"] if o["kind"] == "video"] == ["clip-captioned.mp4"]
+    assert streams(d / "clip-captioned.mp4")["subtitle"]["codec_name"] == "mov_text"
+    # the card's worker: NVENC first, x264 after it (a name FFmpeg does not know stands for the refusing card)
+    (d / "segments.json").unlink()
+    monkeypatch.setattr(runner, "_encoders", lambda spec, ext: ("no_such_encoder", "libx264"))
+    (d / "clip-converted.mp4").unlink()
+    runner.stage_finalize(d, {**spec, "gpu_devices": ["/dev/nvidia0"]})
+    assert seen[-1][3].encoders == ("no_such_encoder", "libx264") and streams(d / "clip-converted.mp4")["video"]["codec_name"] == "h264"

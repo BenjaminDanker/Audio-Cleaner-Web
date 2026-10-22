@@ -558,8 +558,10 @@ await check('convert: outputPlan: converting on its own is the browser\'s (free)
   assert.deepEqual([p.converting, p.serverConvert, p.server, p.embedOnServer], [true, true, true, true]);
   p = plan(conv('mkv', { server: true, touched: false }));
   assert.deepEqual([p.converting, p.serverConvert, p.server], [false, false, false]);
-  // only a video is made on our side, and only to a video type
+  // a sound asked for as a video type this browser can't make: a plain black picture is made on our side (free), and only to a video type
   p = plan(conv('mkv', { server: true }), { info: AUDIO, file: { name: 'a.wav', size: 1e6 } });
+  assert.deepEqual([p.converting, p.serverConvert, p.server], [true, true, true]);
+  p = plan(conv('mkv'), { info: AUDIO, file: { name: 'a.wav', size: 1e6 } }); // (one this browser makes: made here)
   assert.deepEqual([p.converting, p.serverConvert, p.server], [true, false, false]);
   p = plan(conv('wav', { server: true, isVideoFile: false, picture: false }), { info: VIDEO, file: { name: 'a.avi', size: 1e6 } });
   assert.deepEqual([p.converting, p.serverConvert, p.server], [true, false, false]);
@@ -664,7 +666,7 @@ await check('convert: convertFactor counts making the picture again in units of 
 });
 
 await check('convert: serverPictureWork says whether the picture is made again and how much work that is, the same answers as the server for the same video', () => {
-  const info = (codec, w, h, fps) => ({ ffVideoCodec: codec ?? null, width: w ?? null, height: h ?? null, fps: fps ?? null });
+  const info = (codec, w, h, fps) => ({ hasVideo: true, ffVideoCodec: codec ?? null, width: w ?? null, height: h ?? null, fps: fps ?? null });
   // [type, size id, what was read, the file's ending, made again (null: not known), factor]
   const cases = [
     ['mp4', 'same', info('wmv2', 320, 240, 10), '.wmv', true, 1], ['mp4', 'same', info('h264', 1920, 1080, 30), '.mp4', false, 1],
@@ -699,11 +701,18 @@ await check('convert: serverPictureWork says whether the picture is made again a
     ['mp4', 'same', info('wmv2', null, null, 60), '.wmv', true, 1],
   ];
   for (const [format, size, got, ext, encode, factor] of cases) {
-    const w = serverPictureWork(got, ext == null ? undefined : `talk${ext}`, format, size);
+    const w = serverPictureWork(got == null ? { hasVideo: true } : { hasVideo: true, ...got }, ext == null ? undefined : `talk${ext}`, format, size);
     assert.deepEqual(w, { encode, factor }, `${format} ${size} ${JSON.stringify(got)} ${ext}`);
   }
-  assert.deepEqual(serverPictureWork(null, undefined, 'mp4', 'same'), { encode: null, factor: 1 });
-  assert.deepEqual(serverPictureWork(undefined, 'a.wmv', 'mkv', 'same'), { encode: false, factor: 1 });
+  assert.deepEqual(serverPictureWork({ hasVideo: true }, undefined, 'mp4', 'same'), { encode: null, factor: 1 });
+  assert.deepEqual(serverPictureWork({ hasVideo: true }, 'a.wmv', 'mkv', 'same'), { encode: false, factor: 1 });
+  // a sound asked for as a video gets a plain black picture, free: nothing is made again, whatever type or size is asked for
+  for (const sound of [{ hasVideo: false }, { hasVideo: false, ffVideoCodec: 'h264', width: 3840, height: 2160, fps: 60 }, null, undefined, {}]) {
+    for (const [format, size, name] of [['mp4', 'same', 'a.wav'], ['mkv', '2160', 'a.mp3'], ['webm', '720', undefined], ['mov', '480', 'a.flac']]) {
+      assert.deepEqual(serverPictureWork(sound, name, format, size), { encode: false, factor: 1, black: true }, `${JSON.stringify(sound)} ${format} ${size}`);
+    }
+  }
+  assert.equal('black' in serverPictureWork({ hasVideo: true }, 'a.wmv', 'mp4', 'same'), false);
 });
 
 await check('convert: the sizes of a video type made on our side are all offered, marked as made there; the same-size choice is ok too', async () => {

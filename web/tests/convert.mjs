@@ -389,6 +389,54 @@ await check('a picture copied on our side, end to end: an AVI into MKV is a free
   return `${got.v.codec_name}+${got.a.codec_name} copied into MKV, cost ${paid}`;
 });
 
+await check('a sound asked for as a video type this browser can\'t make is made on our side with a plain black picture, free, end to end: a conversion job, the video comes down with the sound, and costs nothing', async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
+  await ctx.addInitScript(() => { Object.defineProperty(window, 'VideoEncoder', { value: undefined, configurable: true }); }); // (a browser with no picture encoder)
+  const p = await ctx.newPage();
+  const got = [];
+  const posted = [];
+  p.on('download', (d) => got.push(d));
+  p.on('request', (rq) => { const u = new URL(rq.url()); if (rq.method() === 'POST' && u.pathname === '/api/jobs') posted.push(rq.postDataJSON()); });
+  try {
+    await signIn(p, EMAIL);
+    await p.goto(`${BASE}/app`);
+    await dropFile(p, join(FILES, 'noisy.wav'));
+    await pick(p, 'noise', 'off');
+    await pick(p, 'subs', 'off');
+    await p.getByTestId('output-button').click();
+    const of = (id) => p.locator(`[data-testid=output-pop] [data-testid=${id}]`);
+    await of('out-format').waitFor();
+    await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+    const groups = await of('out-format').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+    const ours = groups.find((g) => g.label === 'Video (plain black picture), made on our side');
+    if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm') throw new Error('groups: ' + JSON.stringify(groups));
+    await of('out-format').selectOption('mkv');
+    await p.getByTestId('output-button').click();
+    await p.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
+    await p.getByTestId('bar-det').click();
+    const lines = (await p.locator('[data-testid=details] ul.fl li:not(.tot)').allInnerTexts()).map((l) => l.replace(/\s+/g, ' ').trim());
+    await p.getByTestId('bar-det').click();
+    if (lines.join('|') !== 'Video with a plain black picture, on our side Free') throw new Error('details: ' + lines.join(' | '));
+    await p.getByTestId('start').click();
+    await p.getByTestId('submitted').waitFor({ timeout: 60000 });
+    await waitCardDone(p);
+    await waitResult(p, 'result', 90000);
+    const job = posted.at(-1);
+    if (job?.kind !== 'convert' || job.options.video_out.format !== 'mkv' || job.options.output_video !== true || job.denoiseTier) throw new Error('job asked for: ' + JSON.stringify(job));
+    if (got.length !== 1 || got[0].suggestedFilename() !== 'noisy-converted.mkv') throw new Error('downloaded by itself: ' + got.map((d) => d.suggestedFilename()));
+    const f = join(FILES, 'conv-black.mkv');
+    await got[0].saveAs(f);
+    const i = probe(f);
+    if (i.v?.codec_name !== 'h264' || `${i.v.width}x${i.v.height}` !== '1280x720' || !i.a || Math.abs(i.dur - 10.6) > 1) throw new Error(`picture ${i.v?.codec_name} ${i.v?.width}x${i.v?.height}, sound ${i.a?.codec_name}, ${i.dur} s`);
+    await p.getByTestId('bar-files').click();
+    const paid = (await p.locator('[data-testid=files] .note b').first().innerText()).trim();
+    if (paid !== 'Free') throw new Error('cost: ' + paid);
+    return `${i.v.codec_name} ${i.v.width}x${i.v.height} + ${i.a.codec_name}, ${i.dur.toFixed(1)} s, cost ${paid}`;
+  } finally {
+    await ctx.close();
+  }
+});
+
 await check('paid job: a Denoising job for a sound file with a chosen name and type comes down by itself under that name (and again with Download again); changing the type and saving brings the new type', async () => {
   admin('grant', EMAIL, '5', 'convert test');
   await page.goto(`${BASE}/app`);

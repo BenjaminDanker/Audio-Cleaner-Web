@@ -486,6 +486,43 @@ await check('signed out: a video made on our side shows its price in Details wor
   return 'webm 4×, 720p 2×, MKV and MP4 copied';
 });
 
+await check('signed out: a sound asked for as a video type this browser can\'t make gets a plain black picture made on our side, free: the types are offered under "Video (plain black picture), made on our side", Details says so, Start asks to sign in, and where the browser can make them itself they are its own', async () => {
+  const groupsOf = (pg) => outField(pg, 'out-format').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+  // here: the browser makes them (no group of the other kind)
+  await page.goto(`${BASE}/app`);
+  await dropFile(page, NOISY);
+  await openOutput(page);
+  const here = await groupsOf(page);
+  if (!here.some((g) => g.label === 'Video (plain black picture)' && g.values.join() === 'mp4,mov,mkv,webm') || here.some((g) => /made on our side/.test(g.label))) throw new Error('groups where the browser can make video: ' + JSON.stringify(here));
+  // a browser that cannot encode a picture: every video type for a sound is made on our side
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx.addInitScript(() => { Object.defineProperty(window, 'VideoEncoder', { value: undefined, configurable: true }); });
+  const p = await ctx.newPage();
+  const asked = [];
+  p.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) asked.push(`${r.method()} ${u.pathname}`); });
+  try {
+    await p.goto(`${BASE}/app`);
+    await dropFile(p, NOISY);
+    await pick(p, 'noise', 'off');
+    await pick(p, 'subs', 'off');
+    await openOutput(p);
+    const groups = await groupsOf(p);
+    const ours = groups.find((g) => g.label === 'Video (plain black picture), made on our side');
+    if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm' || groups.some((g) => g.label === 'Video (plain black picture)')) throw new Error('groups: ' + JSON.stringify(groups));
+    await outField(p, 'out-format').selectOption('mkv');
+    await closeOutput(p);
+    await p.waitForFunction(() => /Sign in to start/.test(document.querySelector('.studio .bb .btn-lg')?.textContent || ''), null, { timeout: 5000 });
+    const d = await detailsOf(p);
+    if (d.lines.join('|') !== 'Video with a plain black picture, on our side Free' || d.total !== 'Free') throw new Error('details: ' + JSON.stringify(d));
+    if (await p.locator('[data-testid=notes] .banner-warn', { hasText: NOTHING_TO_DO }).count()) throw new Error('it says nothing is chosen');
+    const odd = asked.filter((c) => !/^GET \/api\/(me|billing\/pricing)$/.test(c));
+    if (odd.length) throw new Error('sent: ' + odd.join(', '));
+    return `${ours.label}: ${ours.values.join(', ')}; ${d.lines[0]}`;
+  } finally {
+    await ctx.close();
+  }
+});
+
 let before; // what the editor held before leaving, to compare with what comes back after signing in
 await check('signed out: a plan with a paid part says "Sign in to start" with the price worked out from the public list (no estimate is asked for); Sign in to start keeps the file and goes to sign-in', async () => {
   calls.length = 0;

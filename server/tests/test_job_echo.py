@@ -1,4 +1,6 @@
-"""The echo_reference_track job option: validation, and the runner using a file's second audio track."""
+"""The echo_reference_track job option: validation, the runner using a file's second audio track, and a file with only one track: the whole
+job fails as soon as it is read, before any work, uncharged (the stubbed worker flow and the re-runs are in test_echo_one_track.py)."""
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -129,13 +131,55 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     assert q["misses"] == 0 and q["micros"] == 0 and q["unchanged"] is False  # a new strength: the cache has every block
 
 
+def _fail_on_one_track(client, h, uid, data, **body):
+    """A one-track file with echo removal asked for (by the option, or by echo parts of a timeline): the job fails at the first stage."""
+    before = ledger.balance(uid)
+    tier = {} if "timeline" in body else {"denoiseTier": "standard"}  # (a timeline says what is done to each part: no tier)
+    r = client.post("/api/jobs", json={"kind": "denoise", "filename": "rec.mkv", "sizeBytes": len(data), "durationSeconds": SECONDS, **tier, **body}, headers=h)
+    assert r.status_code == 200, r.text
+    job_id = r.json()["id"]
+    assert ledger.balance(uid)["held_micros"] > 0  # (it was held for, like any job)
+    assert client.put(f"/api/jobs/{job_id}/input", content=data, headers=h).status_code == 200
+    _run_worker_once("failed")
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["error"] == jobs.NO_SECOND_TRACK and not job["costMicros"] and not job["outputs"] and job["notice"] is None
+    assert ledger.balance(uid) == before  # nothing held, nothing charged
+    assert not (Path(os.environ["ACW_DATA_DIR"]) / "jobs" / job_id).exists()
+    return job
+
+
+def test_the_no_second_track_words_say_what_to_do():
+    assert jobs.NO_SECOND_TRACK == ("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without "
+                                    "echo removal (nothing was charged).")
+
+
 @NATIVE
-def test_one_track_file_is_cleaned_normally_with_a_notice(client, signed_in, tmp_path):
+def test_a_file_with_one_track_fails_the_whole_job_uncharged_when_echo_removal_was_asked_for(client, signed_in, tmp_path):
     uid, h = signed_in
     ledger.credit(uid, 2_000_000, "grant", "t", "g")
-    job, out = _clean(client, h, _recording(tmp_path, two_tracks=False), echo_reference_track=True)
-    assert "only one audio track" in job["notice"]
-    assert len(out) > 1000
-    # no second track, no echo removal: it is not charged (the hold was for it, the charge is for what ran)
-    row = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
-    assert row["cost_micros"] == pricing.job_cost_micros("denoise", "standard", None, row["duration_seconds"], leveling=True)
+    data = _recording(tmp_path, two_tracks=False)
+    _fail_on_one_track(client, h, uid, data, options={"output_video": False, "echo_reference_track": True})
+    # the same file without echo removal is cleaned as usual, and its single track is remembered
+    job, out = _clean(client, h, data)
+    assert job["notice"] is None and len(out) > 1000
+    assert json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])["audio_tracks"] == 1
+    row_ = db.one("SELECT cost_micros, duration_seconds FROM jobs WHERE id = ?", (job["id"],))
+    assert row_["cost_micros"] == pricing.job_cost_micros("denoise", "standard", None, row_["duration_seconds"], leveling=True)
+
+
+@NATIVE
+def test_echo_parts_in_the_timeline_of_a_file_with_one_track_fail_the_job_the_same_way(client, signed_in, tmp_path):
+    uid, h = signed_in
+    ledger.credit(uid, 2_000_000, "grant", "t", "g")
+    data = _recording(tmp_path, two_tracks=False)
+    tl = {"version": 1, "seconds": SECONDS, "layers": {"echo": [{"start": 0, "end": SECONDS}], "noise": [{"start": 0, "end": SECONDS, "strength_db": 40, "remover": "light"}]}}
+    _fail_on_one_track(client, h, uid, data, options={"output_video": False}, timeline=tl)
+
+
+@NATIVE
+def test_a_second_track_is_remembered_and_echo_removal_goes_on(client, signed_in, tmp_path):
+    uid, h = signed_in
+    ledger.credit(uid, 2_000_000, "grant", "t", "g")
+    job, _ = _clean(client, h, _recording(tmp_path, two_tracks=True), echo_reference_track=True)
+    assert job["notice"] is None
+    assert json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])["audio_tracks"] == 2

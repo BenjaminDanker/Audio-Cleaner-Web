@@ -419,3 +419,26 @@ def test_a_new_sound_still_replaces_the_first_track(sources, ff, tmp_path):
     clean = ff.write_audio(np.zeros(3 * 48000, np.float32), 48000, tmp_path / "clean", "flac")
     out = ff.mux_video(sources["wmv"], clean, tmp_path / "o.mkv")
     assert kinds(out) == {"video": "wmv2", "audio": "aac"}  # (cleaning a video: the cleaned sound is made in the container's kind, as before)
+
+
+@needs_ff
+def test_a_black_picture_for_a_sound_is_made_with_the_encoders_asked_for(sources, ff, tmp_path):
+    import numpy as np
+
+    sound = ff.write_audio(0.2 * np.sin(2 * np.pi * 440 * np.arange(3 * 48000) / 48000).astype(np.float32), 48000, tmp_path / "s", "flac")
+    report = {}
+    mp4 = ff.make_video(sound, tmp_path / "a.mp4", 3.0, video=VideoOut(encoders=("libx264",)), report=report)
+    assert kinds(mp4) == {"video": "h264", "audio": "aac"} and shown(mp4) == (1280, 720)
+    assert report == {"encoder": "libx264", "fallback": False}
+    # the first encoder that cannot run: the next one is used, and the report says so
+    mkv = ff.make_video(sound, tmp_path / "b.mkv", 3.0, video=VideoOut(short_side=480, encoders=("no_such_encoder", "libx264")), report=report)
+    assert kinds(mkv)["video"] == "h264" and shown(mkv) == (854, 480) and report == {"encoder": "libx264", "fallback": True}
+    web = ff.make_video(sound, tmp_path / "c.webm", 3.0, video=VideoOut(encoders=("libvpx-vp9",)), report=report)
+    assert kinds(web) == {"video": "vp9", "audio": "opus"} and report["encoder"] == "libvpx-vp9"
+    with pytest.raises(MediaError, match="Could not make a video file"):
+        ff.make_video(sound, tmp_path / "d.mp4", 3.0, video=VideoOut(encoders=("no_such_encoder",)))
+    # no encoders named (or no video at all): the app's own choice, as before (this build of FFmpeg has no x264 of its own to rely on)
+    for video in (None, VideoOut(), VideoOut(short_side=480)):
+        out = ff.make_video(sound, tmp_path / "e.mp4", 3.0, video=video, report=report)
+        assert kinds(out)["video"] in ("mpeg4", "h264") and report["encoder"] == ffmod.picture_encoders(".mp4")[0]
+
