@@ -1,6 +1,7 @@
 import { Suspense, useEffect } from 'react';
-import { Navigate, Route, Routes, useLocation } from 'react-router';
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router';
 import { lazyRetry as lazy } from './lazy.js';
+import { isLocalJobId } from './localid.js';
 import { forgetReturn, peekReturn, rememberReturn } from './returnTo.js';
 import { useAuth } from './auth.jsx';
 import Layout from './components/Layout.jsx';
@@ -38,13 +39,28 @@ function RequireAuth({ children }) {
 }
 
 // Signed in: go to the page the visitor wanted before signing in (once), then forget it. Looking at it while drawing is
-// harmless; clearing it is done in an effect so a repeated draw (StrictMode) still sees it.
+// harmless; clearing it is done in an effect so a repeated draw (StrictMode) still sees it. Signed out it does nothing, and the page
+// below it is drawn the same either way: the answer of the account check arriving must not start the page over (a file chosen
+// before it arrived stays chosen).
 function SignedIn({ children }) {
+  const { signedIn } = useAuth();
   const loc = useLocation();
-  const back = peekReturn();
-  useEffect(() => { forgetReturn(); }, []);
+  const back = signedIn ? peekReturn() : null;
+  useEffect(() => { if (signedIn) forgetReturn(); }, [signedIn]);
   if (back && back !== loc.pathname) return <Navigate to={back} replace />;
   return children;
+}
+
+// A page that opens without an account (the free tools).
+function OpenToAll({ children }) {
+  return <SignedIn>{children}</SignedIn>;
+}
+
+// A job's own page needs an account, unless it is a free run made in this tab: that one has no job on our side at all.
+function JobPage() {
+  const { id } = useParams();
+  if (isLocalJobId(id)) return <OpenToAll><Job /></OpenToAll>;
+  return <NeedsServer><RequireAuth><Job /></RequireAuth></NeedsServer>;
 }
 
 export default function App() {
@@ -55,10 +71,10 @@ export default function App() {
           <Route index element={<Landing />} />
           <Route path="login" element={<NeedsServer><Login /></NeedsServer>} />
           <Route path="login/verify" element={<LoginVerify />} />
-          <Route path="app" element={<NeedsServer><RequireAuth><Cleanup /></RequireAuth></NeedsServer>} />
-          <Route path="app/job/:id" element={<NeedsServer><RequireAuth><Job /></RequireAuth></NeedsServer>} />
+          <Route path="app" element={<OpenToAll><Cleanup /></OpenToAll>} />
+          <Route path="app/job/:id" element={<JobPage />} />
           <Route path="app/billing" element={<NeedsServer><RequireAuth><Billing /></RequireAuth></NeedsServer>} />
-          <Route path="app/live" element={<NeedsServer><RequireAuth><Live /></RequireAuth></NeedsServer>} />
+          <Route path="app/live" element={<OpenToAll><Live /></OpenToAll>} />
           <Route path="app/account" element={<NeedsServer><RequireAuth><Account /></RequireAuth></NeedsServer>} />
           <Route path="terms" element={<Terms />} />
           <Route path="privacy" element={<Privacy />} />

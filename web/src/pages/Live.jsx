@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
-import { api, streamUrl } from '../api.js';
+import { api, apiOffline, streamUrl } from '../api.js';
+import { liveNeedsServer, livePerMinute, needsAccount } from '../access.js';
 import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
 import ApiKeys from '../components/ApiKeys.jsx';
 import { IconBroadcast } from '../components/Icons.jsx';
+import { PaidOffline } from '../components/Maintenance.jsx';
 import PluginInstall from '../components/PluginInstall.jsx';
+import { SignInLink, useGoSignIn } from '../components/SignIn.jsx';
 import { balanceMoney, clock, dateTime, rate, moneyUsd, trialLeft } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
@@ -19,6 +22,8 @@ import { strengthDb } from '../strengths.js';
 export default function Live() {
   usePageTitle('Live & API keys');
   const { data: pricing } = usePricing();
+  const { ready, known, signedIn } = useAuth();
+  const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
   return (
     <div className="container page stack-lg">
       <header className="row">
@@ -28,12 +33,24 @@ export default function Live() {
           <p className="muted mb0">Clean mic audio and live captions for OBS. Your first two hours of live are free; after that you only pay while you’re live.</p>
         </div>
       </header>
+      {offline && <PaidOffline />}
       <div className="callout-grid">
-        <ApiKeys />
+        {signedIn ? <ApiKeys /> : ready && (known || offline) && <KeysSignIn offline={offline} />}
         <ObsSetup />
       </div>
-      <LiveDemo pricing={pricing} />
+      <LiveDemo pricing={pricing} offline={offline} />
     </div>
+  );
+}
+
+/** The API keys need an account: this stands in for them until the visitor signs in. */
+function KeysSignIn({ offline }) {
+  return (
+    <section className="card stack" aria-labelledby="keys-h" data-testid="keys-signin">
+      <h2 id="keys-h" className="mb0">API keys</h2>
+      <p className="mb0">Keys for the OBS plugin and for scripts belong to your account.{offline ? ' Sign-in is unavailable for a moment.' : ' Sign in to make one.'}</p>
+      {!offline && <div className="row"><SignInLink to="/app/live" className="btn btn-primary">Sign in</SignInLink></div>}
+    </section>
   );
 }
 
@@ -107,8 +124,9 @@ const STOPPED_TEXT = {
   trial_over: 'Your free trial is used up, so the session stopped.',
 };
 
-function LiveDemo({ pricing }) {
-  const { balance, refresh, trialLiveSecondsLeft } = useAuth();
+function LiveDemo({ pricing, offline }) {
+  const { balance, refresh, trialLiveSecondsLeft, signedIn, known } = useAuth();
+  const goSignIn = useGoSignIn();
   const [mode, setMode] = useState('free'); // 'free': everything in this browser | 'paid': on our servers, like the OBS plugin
   const [freeCaps, setFreeCaps] = useState(true);
   const [denoise, setDenoise] = useState(true);
@@ -138,14 +156,20 @@ function LiveDemo({ pricing }) {
   const den = findRate(pricing, 'stream_denoise', 'light');
   const capRates = { local: findRate(pricing, 'stream_captions', 'local'), premium: findRate(pricing, 'stream_captions', 'premium') };
   const cap = captions ? capRates[captions] : null;
-  const perMin = (denoise && den ? den.usdPerMinute : 0) + (cap ? cap.usdPerMinute : 0);
-  const priceKnown = !!pricing && (!denoise || !!den) && (!captions || !!cap);
+  const rowOf = (product, tier) => findRate(pricing, product, tier);
+  const paidPerMin = livePerMinute({ where: 'server', denoise, captions }, rowOf); // (null: the price list lacks a row of the choice)
+  const perMin = paidPerMin ?? 0;
+  const priceKnown = !!pricing && paidPerMin !== null;
   const offered = (!denoise || den?.available !== false) && (!captions || cap?.available !== false);
   const accurateListed = capRates.premium?.available !== false;
   const paidLanguage = language === 'mixed' ? '' : language; // 'mixed' belongs to the free test
   const mixed = captions === 'premium' && !!paidLanguage && !!language2 && language2 !== paidLanguage;
   const spoken = captions === 'premium' ? (mixed ? '' : paidLanguage) : 'en';
   const liveTargets = captions ? targets.filter((t) => t && t !== spoken) : [];
+  // The same rule as the editor's (access.js): what is chosen, as rows of the price list. Done in the browser it is made of none, so it
+  // needs no account; anything that has a price is done on our side and needs one.
+  const serverChoice = liveNeedsServer({ where: free ? 'browser' : 'server', denoise, captions, translations: liveTargets.length });
+  const mustSignIn = needsAccount(serverChoice, signedIn) && known;
   const onTrial = trialLiveSecondsLeft > 0 && captions !== 'premium' && liveTargets.length === 0; // the free trial covers Standard live only
   const translateRate = findRate(pricing, 'stream_translate', 'standard');
   const mediaOk = !!(navigator.mediaDevices?.getUserMedia && window.AudioWorklet && window.WebSocket);
@@ -314,7 +338,7 @@ function LiveDemo({ pricing }) {
       <div className="seg" role="radiogroup" aria-label="Which test" data-testid="live-mode">
         {[['free', 'Free, in your browser'], ['paid', 'Paid, done on our side']].map(([v, l]) => (
           <label key={v}>
-            <input type="radio" name="live-mode" value={v} checked={mode === v} disabled={busy} onChange={() => setMode(v)} />
+            <input type="radio" name="live-mode" value={v} checked={mode === v} disabled={busy || (v === 'paid' && offline)} onChange={() => setMode(v)} />
             <span>{l}</span>
           </label>
         ))}
@@ -328,7 +352,9 @@ function LiveDemo({ pricing }) {
         <>
           {onTrial
             ? <div className="banner banner-info" data-testid="live-trial-banner"><b>Covered by your free trial.</b> No credit is used until the trial runs out. <b>Please wear headphones</b>, or you’ll get feedback.</div>
-            : <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>}
+            : signedIn
+              ? <div className="banner banner-warn"><b>This uses credit.</b> Your balance: <b>{balanceMoney(balance?.available_micros ?? 0)}</b>. <b>Please wear headphones</b>, or you’ll get feedback.</div>
+              : <div className="banner banner-warn" data-testid="live-signin-banner"><b>This is paid.</b> Sign in to start it; your first two hours of live are free. <b>Please wear headphones</b>, or you’ll get feedback.</div>}
           <p className="mb0" data-testid="live-free-hint">This is how the OBS plugin works. Want to try without spending credit? Switch to the free test above.</p>
         </>
       )}
@@ -479,7 +505,7 @@ function LiveDemo({ pricing }) {
       )}
 
       <div className="row">
-        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => start()} disabled={busy || !mediaOk || (free ? !denoise && !freeCaps : (!denoise && !captions) || !priceKnown || !offered)} data-testid="live-start">{state === 'starting' ? 'Connecting…' : 'Start test'}</button>}
+        {!live && state !== 'stopping' && <button type="button" className="btn btn-primary btn-lg" onClick={() => (mustSignIn ? goSignIn('/app/live') : start())} disabled={busy || !mediaOk || (serverChoice && (offline || !known)) || (free ? !denoise && !freeCaps : (!denoise && !captions) || !priceKnown || !offered)} data-testid="live-start">{state === 'starting' ? 'Connecting…' : mustSignIn ? 'Sign in to start' : 'Start test'}</button>}
         {(live || state === 'stopping') && <button type="button" className="btn btn-danger btn-lg" onClick={stop} disabled={state === 'stopping'} data-testid="live-stop">{state === 'stopping' ? 'Stopping…' : 'Stop'}</button>}
         {live && <span className="badge badge-ok" role="status">Live</span>}
         <button type="button" className="btn btn-secondary" onClick={runRoomTest} disabled={!mediaOk || !!room || locked || (live && free)} data-testid="room-test">Test my room ({ROOM_TEST_SECONDS} s)</button>

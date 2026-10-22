@@ -12,7 +12,7 @@ const typeLabel = (id) => FORMAT[id]?.label.replace(/ \(.*\)$/, '') || String(id
 
 /** "Details": what the price is made of. */
 function Details({ ctx }) {
-  const { cost: c, total, deltaMicros, changed, serverTotal, partsNote } = ctx;
+  const { cost: c, total, deltaMicros, changed, serverTotal, partsNote, localPrice } = ctx;
   const L = [];
   const li = (a, b) => <li key={a}><span>{a}</span><span>{b}</span></li>;
   if (c.nPaid) L.push(li(`Noise removal · ${fmt(c.nPaid)}`, money(c.noise)));
@@ -32,6 +32,7 @@ function Details({ ctx }) {
         {changed && <li className="tot"><span>Save changes</span><span>{money(deltaMicros)}</span></li>}
       </ul>
       {partsNote && <p className="note">Includes a small amount for each run. Parts are rounded up to whole seconds.</p>}
+      {localPrice && <p className="note" data-testid="details-local">Worked out from the price list. Once you sign in, the price also includes a small amount for each run.</p>}
       <p className="note">You only pay for what gets processed. Billed per second of audio, no minimum charge.</p>
     </div>
   );

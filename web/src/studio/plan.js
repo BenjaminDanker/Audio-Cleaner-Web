@@ -4,7 +4,7 @@
 import { balanceMoney, money as siteMoney, stem } from '../format.js';
 import { tooManyText } from '../jobs.js';
 import { canHoldSubtitles, defaultFormatId } from '../media/convert.js';
-import { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, needsServer, serverSound } from '../editor/tracks.js';
+import { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, hasWork, needsServer, serverSound } from '../editor/tracks.js';
 
 export const MAX_SECONDS = 6 * 3600; // the most the browser will take (Free noise removal and subtitles)
 export const LONG_SECONDS = 2 * 3600; // in the browser, a recording this long takes a while
@@ -104,7 +104,7 @@ export function problemsFor({
   if (server && est != null && balance && est > balance.available_micros) {
     problems.push({ text: `This costs about ${siteMoney(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`, kind: 'credit' });
   }
-  if (info && !anyFreeNoise(tracks) && !anyFreeSubs(tracks) && !server) problems.push({ text: 'Choose at least one thing to do: noise removal, subtitles, or both.' });
+  if (info && !hasWork(tracks)) problems.push({ text: 'Choose at least one thing to do: noise removal, subtitles, or both.' });
   if (plan.wantsText && !out.sfiles.length) problems.push({ text: 'Choose at least one caption or transcript format.' });
   if (plan.embedHere && plan.cleaning && !canHoldSubtitles(choice.format)) {
     problems.push({ text: `Subtitles put into the video need an MKV file (most players can’t show them from ${choice.format.toUpperCase()}). Pick MKV, or untick “Put the subtitles into the video”.` });
@@ -113,4 +113,4 @@ export function problemsFor({
   return problems;
 }
 
-export { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, needsServer, serverSound };
+export { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, hasWork, needsServer, serverSound };

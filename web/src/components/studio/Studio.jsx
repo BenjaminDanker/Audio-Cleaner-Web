@@ -1,7 +1,8 @@
 import '../../styles/studio.css';
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { api } from '../../api.js';
+import { api, apiOffline } from '../../api.js';
+import { needsAccount } from '../../access.js';
 import { useAuth } from '../../auth.jsx';
 import { etaSeconds, etaText } from '../../eta.js';
 import { forgetFinish, removeLocalCard } from '../../finish.js';
@@ -12,7 +13,7 @@ import { heardSeries } from '../../editor/peaks.js';
 import { dismiss as dismissSuggestion } from '../../editor/suggest.js';
 import { MixPlayer, describe, prepare } from '../../editor/mix.js';
 import {
-  applyToSel, cost as costOf, covered, dbOf, delta as deltaOf, echoBlocked, edit, freePatch, fmt, money, needsServer, overl, pushUndo, ranges, ratesFrom, sameOut, sameTracks,
+  applyToSel, cost as costOf, covered, dbOf, delta as deltaOf, echoBlocked, edit, freePatch, fmt, hasWork, money, needsServer, overl, pushUndo, ranges, ratesFrom, sameOut, sameTracks,
   selTitle, setSel, splitAll, toggleRange, toTimeline, uni, trOf,
 } from '../../editor/tracks.js';
 import { BlendPlayer, gainsFor, matchGain, memorySource, previewFits } from '../../media/blend.js';
@@ -23,8 +24,11 @@ import { wavFits } from '../../media/wav.js';
 import { AbEngine, ElementEngine, syncPicture } from '../../studio/engine.js';
 import { tipsFor } from '../../studio/copy.js';
 import { browserVerdict, LONG_SECONDS, outputPlan, problemsFor, subsVerdict, supported, wantsOf, jobKind } from '../../studio/plan.js';
+import { keepDraft } from '../../studio/draft.js';
 import { forgetSession, warmUpDenoiser, warmUpSpeech } from '../../studio/session.js';
+import { PAID_OFFLINE } from '../Maintenance.jsx';
 import OutputFields, { useOutputChoice } from '../OutputPicker.jsx';
+import { useGoSignIn } from '../SignIn.jsx';
 import Bar from './Bar.jsx';
 import { IcAll, IcPause, IcPlay, IcRedo, IcMore, IcSplit, IcUndo, IcZoomIn, IcZoomOut, IcSpark } from './icons.jsx';
 import InfoModal from './InfoModal.jsx';
@@ -72,7 +76,9 @@ export default function Studio(props) {
 
 function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcome = '', active = 0, maxActive = null }) {
   const nav = useNavigate();
-  const { balance, refresh, contact } = useAuth();
+  const { balance, refresh, contact, signedIn, known } = useAuth();
+  const goSignIn = useGoSignIn();
+  const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
   const { data: pricing, error: pricingError } = usePricing();
   const rates = useMemo(() => ratesFrom(pricing), [pricing]);
   const tips = useMemo(() => tipsFor(pricing), [pricing]);
@@ -134,19 +140,21 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   // the output choice (OutputPicker): the file type, name and picture size
   const outFile = useMemo(() => session.file || (fin ? { name: fin.inputName } : null), [session.file, fin?.inputName]); // eslint-disable-line react-hooks/exhaustive-deps
   const outInfo = useMemo(() => info || fin?.inputInfo || null, [info, fin?.inputName, fin?.info]); // eslint-disable-line react-hooks/exhaustive-deps
-  const initial = useMemo(() => (job && fin ? (() => { const w = fin.effective(); return w.sound || w.embed ? { name: w.name, format: w.format, size: w.size } : null; })() : null), [job?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const initial = useMemo(() => (job && fin ? (() => { const w = fin.effective(); return w.sound || w.embed ? { name: w.name, format: w.format, size: w.size } : null; })() : session.draftChoice || null), [job?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const choice = useOutputChoice({ file: outFile, info: outInfo, serverAudio: soundFromServer, initial });
   const plan = useMemo(() => outputPlan({ tracks: S.tracks, info: outInfo, file: session.file || outFile, choice, out: session.out, limit: buildLimit() }), [ver, outInfo, choice.format, choice.isVideoFile, session.out.burn]); // eslint-disable-line react-hooks/exhaustive-deps
   const verdict = useMemo(() => (info ? browserVerdict(info, { wavFits }) : { ok: false, why: 'Your original file isn’t in this tab, so this can’t be done here.' }), [info]);
   const sVerdict = useMemo(() => (info ? subsVerdict(info) : { ok: false, why: 'Your original file isn’t in this tab, so this can’t be done here.' }), [info]);
   const rebuildOffered = !!findRate(pricing, 'denoise', 'rebuild');
   const rebuildPaused = rebuildOffered && !pricing?.rebuildAvailable;
-  session.env = { rates, pricing, rebuildOk: !rebuildOffered || !!pricing?.rebuildAvailable, active, maxActive };
+  session.env = { rates, pricing, rebuildOk: !rebuildOffered || !!pricing?.rebuildAvailable, active, maxActive, signedIn };
 
   // ---- the price ----
   const kind = jobKind(S.tracks);
   useEffect(() => {
     if (stage !== 'ready' || !kind || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }
+    // signed out there is nobody to ask: the price list is public, so the price is worked out here from it (what the file is is never asked)
+    if (!signedIn) { setEst({ state: 'ok', micros: c.total, error: '', local: true }); return undefined; }
     const body = session.estimateBody({ choice, plan });
     if (!body) return undefined;
     setEst((e) => ({ ...e, state: 'loading', error: '' }));
@@ -158,7 +166,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
       );
     }, 400);
     return () => { clearTimeout(t); ctl.abort(); };
-  }, [stage, kind, ver, rates, choice.format]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [stage, kind, ver, rates, choice.format, signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
   // a job on our side is priced as it will be held: its timeline's price, which counts what each run costs besides the minutes (docs/api.md section 8)
   const estMicros = !server ? 0 : !rates ? null : est.state === 'ok' ? est.micros : null;
   const changedTracks = done && !!session.snap && !sameTracks(S.tracks, session.snap.tracks, T);
@@ -196,8 +204,12 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     balance, active: activeCount, maxActive: maxActive || null, plan, choice, out: session.out, partsError: est.state === 'error' ? est.error : '',
   });
   const cleaning = plan.cleaning;
-  const canStart = stage === 'ready' && !!session.file && !!info && !reading && problems.length === 0 && (!server || estMicros != null) && (!cleaning || choice.valid)
-    && (server || S.tracks.voice.some((x) => x.mode === 1 && x.kind === 'free') || S.tracks.subs.some((x) => x.q === 1));
+  // The one rule for who can start what (access.js): a plan with a priced part is done on our side and needs an account; everything else runs here.
+  // Offline, the paid parts can't be started by anyone, and signing in isn't possible either.
+  // (until the account check has been answered nobody is told to sign in: it may be a busy moment, not a visitor who is signed out)
+  const account = needsAccount(server, signedIn) && known && !offline && (stage === 'ready' || (done && isLocal && changedTracks));
+  const canStart = stage === 'ready' && !!session.file && !!info && !reading && problems.length === 0 && (!server || (estMicros != null && !offline && known)) && (!cleaning || choice.valid)
+    && hasWork(S.tracks);
 
   // ---- the picture and the sound ----
   useEffect(() => {
@@ -413,7 +425,24 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (piece) selectRange(piece.s, piece.e, true);
   };
 
+  // A plan that needs an account: keep the file and the choices in this browser, go and sign in, and they are back on return (studio/draft.js).
+  const signInToStart = async () => {
+    if (!session.file) return;
+    try {
+      await keepDraft(session, choice);
+    } catch {
+      if (!session.keepFailed) {
+        session.keepFailed = true;
+        session.error = 'Your browser couldn’t keep this file while you sign in, so you would have to choose it again afterwards. Choose Sign in to start again to go on anyway.';
+        session.touch();
+        return;
+      }
+    }
+    goSignIn('/app');
+  };
+
   const onPrimary = async () => {
+    if (account && (stage === 'ready' ? canStart : true)) { await signInToStart(); return; }
     if (stage === 'ready') {
       if (!canStart) return;
       const res = await session.start({ choice, plan, refresh });
@@ -834,7 +863,9 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (stage === 'ready') {
       return {
         mid: { kind: 'details' }, building: false,
-        button: { label: estMicros != null || !server ? `Start · ${money(estMicros ?? 0)}` : 'Start', testid: 'start', state: 'start' },
+        button: account
+          ? { label: 'Sign in to start', testid: 'start', state: 'signin' }
+          : { label: estMicros != null || !server ? `Start · ${money(estMicros ?? 0)}` : 'Start', testid: 'start', state: 'start' },
       };
     }
     if (processing) {
@@ -848,7 +879,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
         building: true, button: { label: finState.phase === 'saving' ? 'Downloading…' : `Processing · ${p}%`, testid: 'processing', state: 'building' },
       };
     }
-    const label = changed ? `Save changes · ${money(deltaMicros)}` : finState.phase === 'error' ? 'Try again' : needVideo ? 'Choose the original video' : 'Download again';
+    const label = account ? 'Sign in to start' : changed ? `Save changes · ${money(deltaMicros)}` : finState.phase === 'error' ? 'Try again' : needVideo ? 'Choose the original video' : 'Download again';
     return { mid: { kind: 'files' }, building: false, button: { label, testid: changed ? 'save-changes' : 'download-again', state: changed ? 'save' : 'download' } };
   })();
   const primaryDisabled = stage === 'ready' ? !canStart : processing || building ? true
@@ -857,6 +888,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   // notes at the top
   const notes = [];
+  if (offline) notes.push({ key: 'offline', cls: 'banner banner-warn', text: PAID_OFFLINE, testid: 'paid-offline' });
+  if (session.restoredNote && stage === 'ready') notes.push({ key: 'back', cls: 'banner banner-success', text: `${signedIn ? 'You’re signed in. ' : ''}Your file and choices are back as you left them.`, testid: 'draft-restored' });
   if (session.error) notes.push({ key: 'error', cls: session.errorKind === 'storage' ? 'banner banner-warn' : 'banner banner-error', text: session.error, testid: 'job-error' });
   if (stage === 'ready') problems.forEach((p) => notes.push({ key: p.text, cls: 'banner banner-warn', text: p.text, kind: p.kind }));
   if (stage === 'ready' && session.lengthUnknown) notes.push({ key: 'len', cls: 'hint', text: 'Your browser can’t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.', testid: 'length-unknown' });
@@ -897,7 +930,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const ctx = {
     S, session, tips, stage, sheet, mobile, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, ph, zoom, pins, hear, hearText, heard, data,
     scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, serverTotal: !server ? 0 : est.state === 'ok' ? est.micros : null,
-    partsNote: server && est.state === 'ok', pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
+    partsNote: server && est.state === 'ok' && !est.local, localPrice: server && est.state === 'ok' && !!est.local, pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
     disabled: processing, willDownload, tooBigNote, mkvNote, primaryDisabled,
     h: { onDb, slideStart, slideEnd, onVideo: (f) => fin?.setVideo(f) },
   };

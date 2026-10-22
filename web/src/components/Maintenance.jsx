@@ -30,7 +30,15 @@ export function MaintenancePanel() {
   );
 }
 
-/** Wraps pages that cannot work without the server (Cleanup, Live, Billing, Account, sign-in). */
+/** The words for a page that still works with the server down: the free tools run in the browser, the paid options need our side. */
+export const PAID_OFFLINE = 'The paid options are unavailable right now. The free ones still work.';
+
+/** A short notice for the pages whose free tools run without the server (the editor, Live): shown instead of the calm full-page panel. */
+export function PaidOffline() {
+  return <div className="banner banner-warn" role="status" data-testid="paid-offline">{PAID_OFFLINE}</div>;
+}
+
+/** Wraps pages that cannot work without the server (Billing, Account, sign-in, a job on our side). The free tools do not use it. */
 export default function NeedsServer({ children }) {
   const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
   return offline ? <MaintenancePanel /> : children;

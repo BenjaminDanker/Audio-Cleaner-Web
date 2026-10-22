@@ -6,6 +6,7 @@ import JobCard from '../components/JobCard.jsx';
 import Studio from '../components/studio/Studio.jsx';
 import { finishOf, useLocalCards } from '../finish.js';
 import { usePageTitle } from '../hooks.js';
+import { isLocalJobId } from '../localid.js';
 import { activeCount, jobTitle } from '../jobs.js';
 import { Session, sessionFor } from '../studio/session.js';
 import { useJobs } from '../useJobs.js';
@@ -25,7 +26,7 @@ export default function Job() {
   const [solo, setSolo] = useState(null); // the job asked for by itself, when the list doesn't have it: {job} or {gone: true}
   const [welcome, setWelcome] = useState(() => loc.state?.submitted || '');
   const localCards = useLocalCards(); // a free run made in this tab has no job on our side: it lives in this tab only
-  const isLocal = id.startsWith('local-');
+  const isLocal = isLocalJobId(id);
   const listed = isLocal ? localCards.find((j) => j.id === id) || null : jobs?.find((j) => j.id === id) || null;
   const job = listed || solo?.job || null;
   usePageTitle(job ? jobTitle(job) : 'Job');

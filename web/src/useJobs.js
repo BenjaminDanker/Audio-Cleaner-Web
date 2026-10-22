@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
+import { useAuth } from './auth.jsx';
 import { noteJobs } from './eta.js';
 import { ACTIVE } from './jobs.js';
 
@@ -26,8 +27,10 @@ const tabHidden = () => typeof document !== 'undefined' && document.hidden;
  * (HTTP 429, Retry-After) or cannot be reached, polling slows down instead of hammering it, and a short note says so. A
  * sign-in that ran out (401) takes the visitor to the sign-in page like every other call. `limits`: what the server says about
  * jobs ({maxActiveJobs, retentionSeconds}); every fetch is also a reading for the time-left estimate (eta.js).
+ * Signed out there is no list to ask for (the free tools make no job on our side): nothing is fetched and the list is empty.
  */
 export function useJobs({ onFinished } = {}) {
+  const { ready, signedIn } = useAuth();
   const [jobs, setJobs] = useState(null);
   const [limits, setLimits] = useState(null);
   const [error, setError] = useState('');
@@ -37,6 +40,7 @@ export function useJobs({ onFinished } = {}) {
   finished.current = onFinished;
 
   const load = useCallback(async () => {
+    if (!signedIn) return;
     try {
       const r = await api('jobs');
       noteJobs(r.jobs);
@@ -47,11 +51,11 @@ export function useJobs({ onFinished } = {}) {
       setError(e.detail || 'Could not load your jobs.');
       setJobs((j) => j || []);
     }
-  }, []);
+  }, [signedIn]);
 
   useEffect(() => { load(); }, [load]);
 
-  const hasActive = !!jobs?.some((j) => ACTIVE.has(j.status));
+  const hasActive = signedIn && !!jobs?.some((j) => ACTIVE.has(j.status));
   useEffect(() => {
     if (!hasActive) return undefined;
     let stop = false;
@@ -103,5 +107,6 @@ export function useJobs({ onFinished } = {}) {
     return () => { stop = true; clearTimeout(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [hasActive]);
 
+  if (!signedIn) return { jobs: ready ? [] : null, limits: null, error: '', reload: load };
   return { jobs, limits, error, reload: load };
 }

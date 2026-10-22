@@ -280,6 +280,8 @@ export function serverSound(tracks) {
 export function changesSound(tracks) {
   return tracks.voice.some((x) => x.mode > 0) || tracks.echo.some((x) => x.on) || tracks.level.some((x) => x.lvl);
 }
+/** Does any track do anything at all (so there is something to start)? Whatever runs in the browser or on our side counts alike. */
+export const hasWork = (tracks) => changesSound(tracks) || tracks.subs.some((x) => x.q > 0);
 export const anyFreeNoise = (tracks) => tracks.voice.some((x) => x.mode === 1 && x.kind === 'free');
 export const anySubs = (tracks) => tracks.subs.some((x) => x.q > 0);
 export const anyFreeSubs = (tracks) => tracks.subs.some((x) => x.q === 1);

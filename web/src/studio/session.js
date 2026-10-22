@@ -24,6 +24,7 @@ import { preloadSpeech, subtitleFiles } from '../media/speech.js';
 import { startSuggestions, suggestVerdict } from '../media/suggest-run.js';
 import { buildWav } from '../media/wav.js';
 import { recommendForFile } from '../recommend.js';
+import { newLocalJobId } from '../localid.js';
 import { inGigabytes, jobKind, outputPlan, supported, TINY_FILE_BYTES, wantsOf } from './plan.js';
 import { cleanRange, fitPcm, joinSegments, pcmToFlac, samplesOf, splicePcm, transcribeRange } from './runs.js';
 
@@ -118,8 +119,11 @@ export class Session {
 
   /* ================================================================================================ opening */
 
-  /** A file has been chosen: look at it. Rejects with a plain sentence when it can't be worked on. */
-  static async open(file) {
+  /**
+   * A file has been chosen: look at it. Rejects with a plain sentence when it can't be worked on. `draft`: the work that was kept across a
+   * sign-in (studio/draft.js); the editor then starts where the person left it.
+   */
+  static async open(file, { draft = null } = {}) {
     if (file.size < TINY_FILE_BYTES) {
       throw new Error(file.size === 0 ? 'That file is empty (0 bytes). Please pick another one.' : 'That file is too small to hold any sound. Please pick another one.');
     }
@@ -139,8 +143,27 @@ export class Session {
       s.S.tracks.voice[0].mode = 0; s.S.tracks.level[0].lvl = 0; s.S.tracks.echo[0].on = 0;
     }
     s.wave = { state: 'reading', data: null };
+    if (draft) s.restore(draft);
     s.startWave();
     return s;
+  }
+
+  /** Put back what a draft kept: the tracks, the selection, the suggestions, the file choices, and what the quick listen found. */
+  restore(rec) {
+    this.T = rec.seconds;
+    this.lengthUnknown = !!rec.lengthUnknown;
+    this.auto = !!rec.auto;
+    this.S = makeState(this.T, { second: this.second, auto: this.auto });
+    this.S.tracks = rec.tracks;
+    this.S.sel = rec.sel || null;
+    this.S.sugg = rec.sugg || [];
+    if (rec.out) this.out = rec.out;
+    this.applied = !!rec.applied;
+    this.undoTo = rec.undoTo || null;
+    this.stats = rec.stats || null;
+    this.draftChoice = rec.choice || null; // the output choice (file type, name, picture size): the page starts from it
+    this.restored = { moments: rec.moments };
+    this.restoredNote = true;
   }
 
   /** A job from the list (no file in this tab, or its own session): the editor for it. */
@@ -178,8 +201,9 @@ export class Session {
       const r = await filePeaks(this.file, { signal: ctl.signal, info: this.info });
       if (ctl.signal.aborted) return;
       this.wave = { state: 'ok', data: r };
-      // the length the file really has (the browser could not tell it before, or told it a little differently)
-      if (this.lengthUnknown || !this.info.duration) this.setLength(r.dur);
+      // the length the file really has (the browser could not tell it before, or told it a little differently); work that was kept already
+      // knows it, unless it was kept before the length was found
+      if (this.lengthUnknown || (!this.info.duration && !this.restored)) this.setLength(r.dur);
     } catch (e) {
       if (e?.name === 'AbortError' || ctl.signal.aborted) return;
       this.wave = { state: 'none', data: null };
@@ -201,6 +225,8 @@ export class Session {
     this.waveDone = true;
     // a browser that asks to save data downloads nothing before Start (the quick listen and the search for moments both need the noise remover)
     if (navigator.connection?.saveData) return;
+    // work that was kept: the choices are as they were left (not set again), and the moments are looked for only if that was not done yet
+    if (this.restored) { if (this.restored.moments !== 'done') this.findMoments(); return; }
     if (this.hasAudio && this.auto) this.listen();
     else this.findMoments();
   }
@@ -331,6 +357,7 @@ export class Session {
 
   /** Change the tracks: undo is kept, a suggestion that is done is marked, and the page is told. */
   commit(fn) {
+    this.restoredNote = false;
     pushUndo(this.S);
     fn(this.S);
     autoDone(this.S);
@@ -484,10 +511,13 @@ export class Session {
     const T = this.T;
     const wants = wantsOf({ tracks, plan, choice, out: this.out, file, local: !needsServer(tracks) });
     const server = needsServer(tracks);
+    this.restoredNote = false;
     const freeNoise = freeNoiseRanges(tracks);
     const freeSubs = freeSubRanges(tracks);
     let failed = false;
     try {
+      // (the page asks to sign in instead of getting here; this keeps a job from being tried with no account all the same)
+      if (server && !this.env.signedIn) throw new Error('Sign in to start this. Your file and choices are kept while you do.');
       if (server) return await this.startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, estimate });
       return await this.startLocal({ file, info, tracks, T, wants, choice, freeNoise, freeSubs, ctl });
     } catch (e) {
@@ -627,7 +657,7 @@ export class Session {
     if (bad) this.error = bad.reason?.message || '';
     const made = { sound: !!cleaned, subs: !!subsFiles };
     const label = made.sound && made.subs ? 'Free noise removal and subtitles' : made.sound ? 'Free noise removal' : 'Free subtitles';
-    const id = `local-${Date.now().toString(36)}`;
+    const id = newLocalJobId();
     const fin = beginFinish({
       id, local: true, free: true, status: 'done', kind: 'denoise', label, displayName: file.name, inputName: file.name,
       createdAt: Math.floor(Date.now() / 1000), durationSeconds: info?.duration || T, outputs: [], costMicros: 0,
