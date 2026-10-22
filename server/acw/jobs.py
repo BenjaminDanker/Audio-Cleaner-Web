@@ -239,12 +239,14 @@ def convert_cost(params: dict, seconds: float) -> int:
 
 def convert_line(params: dict, seconds: float) -> dict | None:
     """The price line of a video conversion (with its size `factor`): `maybe` when it can't be told yet whether the picture is made again
-    (the client did not say the video's codec; then its micros are not part of the total)."""
+    (the client did not say the video's codec; then its micros, what it would cost, are not part of the total); `copied`: the picture is
+    copied as it is, free (micros 0)."""
     if not params.get("convert_rate"):
         return None
     rate = _convert_rate(params)
+    micros = 0 if params.get("picture_encode") is False else pricing.cost_micros("convert", "standard", seconds, rate)
     return {"item": "convert", "label": pricing.rate("convert", "standard").label, "quantity": 1, "usdPerMinute": rate / pricing.MICROS_PER_USD,
-            "factor": float(params.get("convert_factor") or 1.0), "micros": pricing.cost_micros("convert", "standard", seconds, rate),
+            "factor": float(params.get("convert_factor") or 1.0), "micros": micros,
             **({"maybe": True} if params.get("picture_encode") is None else {}), **({"copied": True} if params.get("picture_encode") is False else {})}
 
 

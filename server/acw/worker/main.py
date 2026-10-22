@@ -725,10 +725,13 @@ def process(job: dict, extra: dict) -> None:
             if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, params) + 61):
                 raise StageFailed("Processing failed; you were not charged.", "implausible duration")
             if params.get("options", {}).get("video_out"):
-                if job["kind"] == "convert" and not probe.get("has_video"):
-                    raise StageFailed("This file has no picture, so there is no video to convert. You weren't charged.")
-                # another file type or size: now it is known whether the picture is made again (charged) or copied (free)
-                pe, factor = probe.get("picture_encode"), probe.get("convert_factor")
+                if not probe.get("has_video"):
+                    if job["kind"] == "convert":
+                        raise StageFailed("This file has no picture, so there is no video to convert. You weren't charged.")
+                    pe, factor = False, 1.0  # (a sound file: there is no video to make, the rest of the job goes on)
+                else:
+                    # another file type or size: now it is known whether the picture is made again (charged) or copied (free)
+                    pe, factor = probe.get("picture_encode"), probe.get("convert_factor")
                 if not isinstance(pe, bool) or isinstance(factor, bool) or not isinstance(factor, (int, float)) or not 1.0 <= factor <= 64.0:
                     raise StageFailed("Processing failed; you were not charged.", "malformed picture_encode / convert_factor")
                 params = jobs.update_params(job["id"], picture_encode=pe, convert_factor=round(float(factor), 2))
