@@ -191,9 +191,15 @@ GPU_ALIVE_FRESH_S = 90
 def gpu_stages(job: dict) -> list[str]:
     """The GPU_WORK stages of `job` that make it a GPU job (empty: the CPU workers' job). A recording that turns out
     lightly noisy under "auto" is cleaned by DeepFilterNet3 on the GPU worker's own CPU threads. A video whose picture is made
-    again adds "encode"."""
+    again adds "encode". A job with echo removal (CPU work, the whole job in one worker) is the CPU workers', unless it has a Voice
+    rebuild, which only the card runs."""
+    from . import editing
+
+    params = json.loads(job["params_json"])
     stages = _sound_stages(job)
-    if job.get("next_stage") != "finalize" and jobs.encodes(json.loads(job["params_json"])):
+    if "rebuild" not in stages and (editing.wants_echo(params) or (params.get("run") or {}).get("echo")):
+        return []
+    if job.get("next_stage") != "finalize" and jobs.encodes(params):
         stages.append("encode")
     return stages
 

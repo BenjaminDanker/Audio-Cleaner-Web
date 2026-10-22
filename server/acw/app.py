@@ -33,11 +33,10 @@ _CLOUD_STAGES = {"asr": "Transcribing", "translate": "Translating"}
 
 
 def _needs_transcription(job: dict) -> bool:
-    """The job's cloud work starts with extra-accurate transcription (its segments are not there yet)."""
+    """The job's cloud work starts with extra-accurate transcription: some subtitle part's speech chunks wait for it (every job makes its
+    subtitles part by part)."""
     params = json.loads(job["params_json"])
-    if editing.has_subtitle_layer(params):  # subtitles made part by part: some part's speech chunks wait for it
-        return editing.subtitle_cloud_phase(job["id"], params) == "asr"
-    return params.get("transcribe_tier") == "premium" and not (jobs.job_dir(job["id"]) / "segments.json").exists()
+    return editing.has_subtitle_layer(params) and editing.subtitle_cloud_phase(job["id"], params) == "asr"
 
 
 def _claim_cloud_jobs(limit: int, phase: str | None = None) -> list[dict]:
@@ -76,18 +75,6 @@ def _beat(job_id: str) -> None:
 
 def _set_stage(job_id: str, stage: str) -> None:
     db.execute("UPDATE jobs SET stage = ?, heartbeat_at = ? WHERE id = ? AND status = 'cloud_asr'", (stage, db.now(), job_id))
-
-
-async def _translate(job: dict, targets: list[str]) -> None:
-    """The job's translations (segments.<lang>.json). A language that can't be made is left out, said in the job's
-    notice, and not charged (worker/main.py _job_cost counts `translated`)."""
-    await asyncio.to_thread(_set_stage, job["id"], "Translating")
-    done = await translate.translate_job(jobs.job_dir(job["id"]), targets)
-    await asyncio.to_thread(jobs.update_params, job["id"], translated=done)
-    missing = [translate.LANGUAGE_NAMES.get(t, t) for t in targets if t not in done]
-    if missing:
-        what = " and ".join(missing)
-        await asyncio.to_thread(jobs.set_notice, job["id"], f"The {what} translation couldn’t be made this time, so you weren’t charged for it.")
 
 
 def _clip_part(part_dir, e: dict) -> None:
@@ -142,18 +129,9 @@ async def _run_cloud_job(job: dict) -> None:
     beat = asyncio.create_task(heartbeat())
     try:
         params = json.loads(job["params_json"])
-        opts = params["options"]
-        if editing.has_subtitle_layer(params):
-            await _run_subtitle_parts(job, params)
-            return
-        if _needs_transcription(job):
-            await openai_asr.run_for_job(jobs.job_dir(job["id"]), opts.get("language"), job["duration_seconds"] or job["claimed_seconds"])
-            if opts.get("translate"):
-                await asyncio.to_thread(_set_stage, job["id"], "Waiting to translate")
-                return
-        elif opts.get("translate"):
-            await _translate(job, list(opts["translate"]))
-        await asyncio.to_thread(_cloud_done, job)
+        if not editing.has_subtitle_layer(params):
+            raise ValueError("a cloud job without subtitle parts")  # (every job makes its subtitles part by part)
+        await _run_subtitle_parts(job, params)
     except Exception:  # noqa: BLE001
         log.exception("cloud ASR failed for %s", job["id"])
         await asyncio.to_thread(jobs.finish_failed, job, "Extra accurate transcription failed; you were not charged.")

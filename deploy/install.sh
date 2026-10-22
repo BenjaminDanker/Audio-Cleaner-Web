@@ -392,6 +392,13 @@ if [ "$LOCK_CHANGED" = 1 ]; then
   "$H/venv/bin/pip" install -q --require-hashes -r "$REPO/server/requirements.lock"
   echo "$LOCK_SUM" > "$H/data/lock.sha"
 fi
+# The GPU worker's environment (made by deploy/setup-gpu.sh) follows its own lock the same way: a package it lacks, or has in
+# another version, is installed from deploy/requirements-gpu.lock (--no-deps, as setup-gpu.sh does), so it never drifts from
+# what the job runner needs there (it had gone without the echo canceller the lock names).
+if [ -x "$H/venv-gpu/bin/python" ] && [ -n "$(comm -23 <(lock_pins "$REPO/deploy/requirements-gpu.lock") <("$H/venv-gpu/bin/python" -m pip freeze 2>/dev/null | sed -E 's/ .*//' | tr 'A-Z_.' 'a-z--' | sort))" ]; then
+  echo "updating the GPU worker's packages from deploy/requirements-gpu.lock"
+  "$H/venv-gpu/bin/pip" install -q --require-hashes --no-deps -r "$REPO/deploy/requirements-gpu.lock"
+fi
 
 # ---- 6. Code: a copy, so editing the git checkout never changes production; the previous copy is kept
 if [ "$APP_CHANGED" = 1 ] && [ -d "$H/app/acw" ]; then

@@ -735,6 +735,8 @@ def create_job(
     if size_bytes > max(PLAUSIBLE_ANY_SIZE_BYTES, claimed_seconds * MAX_BYTES_PER_SECOND):
         raise JobError("That file is much larger than its length suggests. Please check the file and try again.")
     opts = validate_options(editing.options_kind(kind, tl) if tl is not None else kind, denoise_tier, transcribe_tier, options)
+    if whole_file:  # (the job's record says the sound choices that were asked for; its timeline is what is made of them)
+        opts = {**opts, **{k: whole_file["options"][k] for k in editing.REPLACED_OPTIONS if k in whole_file["options"]}}
     # The one hard limit: the upload and its scratch files must fit on disk, on top of what other uploads
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
@@ -783,7 +785,8 @@ def create_job(
         est = 0
     est += convert_cost(params, claimed_seconds)  # (another file type only: known once the file is read, then held if it is made again)
     now = db.now()
-    tier = "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
+    # (the record's tier, for the metrics and the ledger: a timeline job's stored tier is only a placeholder, so its Voice rebuild is named)
+    tier = "rebuild" if tl is not None and tl.layers["rebuild"] else "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
     try:
         d = job_dir(job_id)
         d.mkdir(parents=True, mode=0o700)

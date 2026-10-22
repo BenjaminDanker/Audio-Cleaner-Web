@@ -547,13 +547,6 @@ def parse_for_job(params: dict, raw: object, seconds: float):
     return tl
 
 
-def one_track(params: dict) -> bool:
-    """Is the job's file known to have a single audio track (so no echo removal; a re-run asking for it is refused)? From the probe, or the
-    editor's facts of the recording."""
-    facts = (params.get("edit") or {}).get("facts") or {}
-    return params.get("audio_tracks") == 1 or facts.get("reference") is False
-
-
 def wants_echo(params: dict) -> bool:
     """Does the job ask for echo removal: the whole-file option, or echo parts in the timeline it was made with?"""
     if (params.get("options") or {}).get("echo_reference_track"):
@@ -1396,8 +1389,11 @@ def run_label(params: dict) -> str:
 def timeline_label(params: dict) -> str:
     """The name of a first run made with a timeline (the layers it has)."""
     tl = (params.get("edit") or {}).get("timeline") or {}
-    names = {"echo": "Echo removal", "noise": "Denoising", "rebuild": "Voice rebuild", "leveling": "Leveling", "subtitles": "Subtitles"}
-    have = [names[k] for k in ("rebuild", "noise", "echo", "leveling", "subtitles") if (tl.get("layers") or {}).get(k)]
+    layers = tl.get("layers") or {}
+    accurate = any(p.get("quality") == "accurate" for p in layers.get("subtitles") or [])
+    names = {"echo": "Echo removal", "noise": "Denoising", "rebuild": "Voice rebuild", "leveling": "Leveling",
+             "subtitles": "Subtitles, extra accurate" if accurate else "Subtitles"}
+    have = [names[k] for k in ("rebuild", "noise", "echo", "leveling", "subtitles") if layers.get(k)]
     return " + ".join(have) or "Edited"
 
 
@@ -1551,7 +1547,6 @@ def timeline_info(job: dict, params: dict) -> dict:
     rendered = rendered_timeline(job, params, seconds)
     out: dict = {
         "timeline": tl.to_json(),
-        "custom": bool(e.get("timeline")),
         "rendered": rendered.to_json() if rendered is not None else None,
         "seconds": round(seconds, 3),
         "channels": (f or default_facts(job, params))["channels"],

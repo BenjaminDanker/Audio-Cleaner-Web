@@ -219,6 +219,6 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
             est = new_cost
         c.execute(
             "UPDATE jobs SET params_json = ?, tier = ?, est_cost_micros = ? WHERE id = ?",
-            (json.dumps(params), "standard", est, job_id),
+            (json.dumps(params), tier, est, job_id),
         )
         return params
