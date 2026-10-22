@@ -98,7 +98,8 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
 
   const hint = file && info ? checkName(name, okIds) : '';
   // made on our side: a video type, or a picture size, this browser can't make for this video
-  const server = picture && (serverFormat || !!sizes?.find((s) => s.id === size)?.server);
+  // (a sound has no picture sizes: a video type made on our side gets a plain black picture there)
+  const server = FORMAT[format]?.kind === 'video' && (serverFormat || (picture && !!sizes?.find((s) => s.id === size)?.server));
   return {
     outputs, sizes, format, name, size, setSize: (v) => { setSize(v); setTouched(true); }, typeName, pickFormat, hint, valid: !!file && !!info && !!outputs && !hint,
     okIds, picture, isVideoFile: FORMAT[format]?.kind === 'video', server, touched,
