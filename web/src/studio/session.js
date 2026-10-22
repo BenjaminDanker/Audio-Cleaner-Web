@@ -246,8 +246,9 @@ export class Session {
     else this.findMoments();
   }
 
-  /** A quick listen to the file (about a minute of it, spread over the whole), so the settings can start out right. */
-  async listen() {
+  /** A quick listen to the file (about a minute of it, spread over the whole), so the settings can start out right. `again`: what it finds
+   * goes over every choice (Automatic was switched on by hand), not only those still marked automatic. */
+  async listen({ again = false } = {}) {
     if (!this.file || !this.info || !this.hasAudio) return;
     this.listenCtl?.abort();
     const ctl = new AbortController();
@@ -259,7 +260,7 @@ export class Session {
       if (ctl.signal.aborted) return;
       this.stats = found;
       const r = found ? recommendForFile(found, { language: this.language }) : null;
-      if (r && this.auto) this.setRecommendation(r);
+      if (r && this.auto) this.setRecommendation(r, { again });
     } catch {
       /* canceled, or unreadable: the tracks keep their usual starting choices */
     } finally {
@@ -299,7 +300,7 @@ export class Session {
     }
     if (!this.hasAudio) { this.touch(); return; }
     if (this.reco) this.setRecommendation(this.reco, { again: true });
-    else if (!this.listening && this.file && this.stage === 'ready' && !this.job) this.listen();
+    else if (!this.listening && this.file && this.stage === 'ready' && !this.job) this.listen({ again: true });
     else this.touch();
     this.findMoments();
   }
