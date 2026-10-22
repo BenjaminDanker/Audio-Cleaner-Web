@@ -1332,9 +1332,9 @@ def prepare_timeline_job(kind: str, denoise_tier: str | None, options: dict, cla
     if rebuild_s > pricing.MAX_REBUILD_SECONDS:
         raise bad(f"Voice rebuild takes up to {pricing.MAX_REBUILD_SECONDS // 60} minutes of a recording at a time; this timeline asks for {rebuild_s / 60:.0f}.")
     if tl.layers["rebuild"]:
-        from .broker import gpu_worker_up
+        from .broker import rebuild_available
 
-        if not gpu_worker_up():  # (the card is the only place it runs)
+        if not rebuild_available():  # (the card is the only place it runs)
             raise jobs.JobError(jobs.REBUILD_PAUSED)
     return tl, "standard"
 
@@ -1650,9 +1650,9 @@ def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: o
         if max_cost_micros is not None and (micros if q["approximate"] else hold) > max_cost_micros:
             raise jobs.JobError(f"This now costs about ${hold / 1e6:.2f}, more than the ${max_cost_micros / 1e6:.2f} you were quoted.", 409, code=PRICE_CHANGED)
         if q["gpu"] and "rebuild" in q["gpu"]:
-            from .broker import gpu_worker_up
+            from .broker import rebuild_available
 
-            if not gpu_worker_up():
+            if not rebuild_available():
                 raise jobs.JobError(jobs.REBUILD_PAUSED)
         est_seconds = estimate_seconds(q, seconds, f["channels"])
         rendered = rendered_timeline(job, params, seconds)

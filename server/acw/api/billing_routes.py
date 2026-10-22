@@ -40,7 +40,7 @@ def get_pricing() -> dict:
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
         "maxUploadBytes": get_settings().max_upload_bytes,
         "maxRebuildSeconds": pricing.MAX_REBUILD_SECONDS,
-        "rebuildAvailable": broker.gpu_worker_up(),  # the voice rebuild runs only on the GPU
+        "rebuildAvailable": broker.rebuild_available(),  # the voice rebuild runs only on the card, and only when it has room
         "paymentsEnabled": stripe_service.enabled(),
         "taxAddedAtCheckout": get_settings().stripe_automatic_tax,
     }

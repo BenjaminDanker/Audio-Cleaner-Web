@@ -52,8 +52,9 @@ LAYERS = ("echo", "noise", "rebuild", "leveling")
 SUBTITLES = "subtitles"
 ALL_LAYERS = (*LAYERS, SUBTITLES)
 QUALITIES = ("free", "standard", "accurate")
-#: The languages of the website's lists (web/src/jobs.js LANGUAGES, server/acw/translate.py): what free and standard subtitles take
-#: and what a translation can be made into. Accurate subtitles also take any other 2-3 letter code the engine knows.
+#: The languages of the website's lists (web/src/jobs.js LANGUAGES, server/acw/translate.py): what free subtitles take (the browser's
+#: recogniser) and what a translation can be made into. Standard and accurate subtitles also take any other 2-3 letter code the server's
+#: recognisers know (the API's options.language always could).
 LANGUAGES = ("en", "es", "fr", "de", "it", "pt", "nl", "pl", "ru", "uk", "tr", "ar", "hi", "ja", "ko", "zh", "sv", "da", "fi", "no",
              "cs", "el", "he", "id", "vi", "hu", "ro", "th")
 MAX_TRANSLATIONS = 3
@@ -79,13 +80,13 @@ def _number(v: Any, what: str) -> float:
 
 
 def _language(raw: object, quality: str) -> str | None:
-    """A subtitle language: a code of LANGUAGES (accurate: any 2-3 letter code), or None to detect it."""
+    """A subtitle language: a code of LANGUAGES (standard and accurate: any 2-3 letter code), or None to detect it."""
     if raw is None or raw == "":
         return None
     if not isinstance(raw, str):
         raise TimelineError("language must be a code such as en, or null to detect it")
     code = raw.strip().lower()
-    if code in LANGUAGES or (quality == "accurate" and re.fullmatch(r"[a-z]{2,3}", code)):
+    if code in LANGUAGES or (quality in ("standard", "accurate") and re.fullmatch(r"[a-z]{2,3}", code)):
         return code
     raise TimelineError(f"unknown language {raw[:8]!r} for {quality} subtitles")
 

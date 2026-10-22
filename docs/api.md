@@ -482,7 +482,7 @@ s of work per second of audio). The server's are the record; a longer recording 
 
 **Subtitles per part.** A version 2 timeline can have a `subtitles` layer, in a job made with `kind` `denoise` or `denoise_transcribe` (no `transcribeTier`, no
 `options.language` or `options.translate`; a job whose subtitles were set for the whole file can't have subtitle parts, `400 timeline_options`). Each part is
-`{start, end, quality, language, translate}`: `quality` `free`, `standard` or `accurate` (required), `language` a code of the website's list (`en es fr de it pt nl pl ru uk tr ar hi ja ko zh sv da fi no cs el he id vi hu ro th`; `accurate` also takes any other 2 to 3 letter code its engine knows) or `null` to detect it,
+`{start, end, quality, language, translate}`: `quality` `free`, `standard` or `accurate` (required), `language` a code of the website's list (`en es fr de it pt nl pl ru uk tr ar hi ja ko zh sv da fi no cs el he id vi hu ro th`; `standard` and `accurate` also take any other 2 to 3 letter code their engines know) or `null` to detect it,
 `translate` up to 3 codes from the same list, never the part's own language, only with `standard` or `accurate` (`400 bad_timeline` with the reason otherwise); neighbours with the same settings are one part. The parts may sit
 on a recording that is otherwise not touched: a timeline with subtitle parts and no sound parts makes no audio file. Standard and Accurate parts are transcribed by the server part by part, with a little sound around
 each (2 s each side, for context; what is said there is not part of it) and the cues are cut to the part and put in file time. Each language of `translate` gets the cues of the parts that asked for it. A free part is transcribed

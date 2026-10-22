@@ -513,9 +513,9 @@ REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choo
 
 def check_duration(kind: str, denoise_tier: str | None, seconds: float) -> None:
     """The length of the file fits the job, and the job can be done now (the voice rebuild runs only on the GPU)."""
-    from .broker import gpu_worker_up
+    from .broker import rebuild_available
 
-    if denoise_tier == "rebuild" and kind != "transcribe" and not gpu_worker_up():
+    if denoise_tier == "rebuild" and kind != "transcribe" and not rebuild_available():
         raise JobError(REBUILD_PAUSED)
     if not 0.5 <= seconds <= pricing.MAX_JOB_SECONDS:
         raise JobError(f"Files must be under {pricing.MAX_JOB_SECONDS // 3600} hours.")

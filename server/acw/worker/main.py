@@ -92,6 +92,7 @@ def admission(
 
 
 _last_wait_log = 0.0
+_card_wait = False  # the GPU worker's last claim found a job it could run but the card had no room for it (broker.card_room)
 
 
 def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
@@ -100,7 +101,8 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
 
     The host is measured outside the database's write lock (a snapshot can sleep); the lock is only taken to
     check once more with fresh facts and to take the job."""
-    global _last_wait_log
+    global _last_wait_log, _card_wait
+    _card_wait = False
     now = db.now()
     rows = [dict(r) for r in db.all_rows(
         f"SELECT j.* FROM jobs j WHERE j.status = 'queued' ORDER BY {jobs.QUEUE_ORDER} LIMIT 50"
@@ -130,6 +132,7 @@ def claim(worker_id: str, load: hostload.HostLoad | None = None) -> dict | None:
 
     row, why, _ = pick(running_jobs(db.conn()))
     if row is None:
+        _card_wait = why.startswith("card:")
         if why and time.monotonic() - _last_wait_log > 60:
             _last_wait_log = time.monotonic()
             log.info("jobs wait (%s)", why)
@@ -308,6 +311,7 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
                     db.execute("UPDATE jobs SET heartbeat_at = ? WHERE id = ?", (db.now(), job["id"]))
                     if GPU_MODE:
                         broker.mark_gpu_worker("alive")
+                        broker.publish_card_state()
                 except Exception:  # noqa: BLE001
                     pass
             time.sleep(1)
@@ -639,7 +643,7 @@ def _decide(job: dict, extra: dict, duration: float) -> bool:
         raise StageFailed("Processing failed; you were not charged.", "malformed measurements")
     params = json.loads(db.one("SELECT params_json FROM jobs WHERE id = ?", (job["id"],))["params_json"])
     # The card is up when this is its worker, or when its marker says so (the same fact that lets a rebuild be ordered).
-    decision = automatic.decide(params, stats, duration, card_up=GPU_MODE or broker.gpu_worker_up())
+    decision = automatic.decide(params, stats, duration, card_up=broker.rebuild_available(live=GPU_MODE))
     if automatic.apply(job["id"], decision, duration) is None:
         raise StageFailed("Processing failed; you were not charged.", "the job was no longer waiting for its settings")
     chosen = decision["chosen"]
@@ -770,6 +774,7 @@ def main() -> None:
     log.info("worker %s started", worker_id)
     load = hostload.get(get_settings().data_dir)
     last_sweep = 0.0
+    last_card = 0.0
     while not _stop.is_set():
         if time.monotonic() - last_sweep > 60:
             last_sweep = time.monotonic()
@@ -779,10 +784,17 @@ def main() -> None:
                 log.exception("sweep failed")
         if GPU_MODE:
             broker.mark_gpu_worker("alive")
+            if time.monotonic() - last_card > 5:
+                last_card = time.monotonic()
+                try:
+                    broker.publish_card_state()
+                except OSError:
+                    log.exception("could not write the card's state")
         job = claim(worker_id, load)
         if job is None:
             if GPU_MODE:
-                broker.mark_gpu_worker("idle")
+                # waiting for room on the card is not idle: the CPU workers then take the jobs they can (all but the voice rebuild)
+                broker.mark_gpu_worker("busy" if _card_wait else "idle")
             _stop.wait(2.0)
             continue
         if GPU_MODE:

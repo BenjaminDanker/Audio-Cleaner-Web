@@ -224,7 +224,7 @@ def _sound_stages(job: dict) -> list[str]:
 
 
 def gpu_only(job: dict) -> bool:
-    """A job only the GPU worker takes: the voice rebuild."""
+    """A job only the GPU worker takes: the voice rebuild."""  # (admitted only when the card has room: card_room)
     return "rebuild" in gpu_stages(job)
 
 
@@ -265,6 +265,90 @@ def gpu_worker_up() -> bool:
     return _fresh(_gpu_marker("alive"), GPU_ALIVE_FRESH_S)
 
 
+# ------------------------------------------------------------------------------------------ the card's memory
+#
+# The card is shared: other programs on this machine (the owner's model training, as another user) can hold much of its memory. The
+# GPU worker, which sees the card, measures what they hold (`card_usage`) and writes it next to its markers every few seconds
+# (`publish_card_state`, also while a job runs). A card job is admitted only when its stages fit in what is left (GPU_WORK card_mb, plus
+# a margin), and the voice rebuild, which only the card runs, can only be ordered while it would fit (`rebuild_available`).
+CARD_MARGIN_MB = 300
+CARD_STATE_FRESH_S = 30
+
+
+def _card_file() -> Path:
+    return get_settings().data_dir / "gpu-card.json"
+
+
+def _nvidia(query: str, kind: str = "gpu") -> list[list[str]]:
+    out = subprocess.run(["nvidia-smi", f"--query-{kind}={query}", "--format=csv,noheader,nounits"],
+                         capture_output=True, text=True, timeout=5, check=True).stdout
+    return [[v.strip() for v in line.split(",")] for line in out.strip().splitlines() if line.strip()]
+
+
+def card_usage() -> dict | None:
+    """The card's memory now (MB): its total, and what programs of other users hold (with the driver's own and anything not listed, so
+    it never says more is free than there is). None without a card."""
+    try:
+        total, used = (int(v) for v in _nvidia("memory.total,memory.used")[0])
+        apps = _nvidia("pid,used_memory", "compute-apps")
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    mine = 0
+    for row in apps:
+        try:
+            pid, mb = int(row[0]), int(row[1])
+        except (ValueError, IndexError):
+            continue
+        try:
+            ours = os.stat(f"/proc/{pid}").st_uid == os.getuid()
+        except OSError:
+            ours = False
+        mine += mb if ours else 0
+    return {"total_mb": total, "others_mb": max(0, used - mine), "at": time.time()}
+
+
+def publish_card_state() -> None:
+    """The GPU worker writes what other programs hold of the card, for the processes that can't see it (`card_state`)."""
+    state = card_usage()
+    if state is None:
+        return
+    tmp = _card_file().with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    tmp.replace(_card_file())
+
+
+def card_state() -> dict | None:
+    """The card's memory as the GPU worker last wrote it, or None when that is not fresh (no worker, or it can't see the card)."""
+    try:
+        state = json.loads(_card_file().read_text())
+        return state if time.time() - float(state["at"]) < CARD_STATE_FRESH_S else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def card_need_mb(stages: list[str]) -> int:
+    """The most of the card a job with these stages holds at once (they run one after another)."""
+    return max((GPU_WORK[s].card_mb for s in stages if s in GPU_WORK), default=0)
+
+
+def card_room(stages: list[str], state: dict | None = None) -> tuple[bool, str]:
+    """Do these stages fit in the card's memory that other programs leave? (True, "") when they do, or when it can't be told."""
+    need = card_need_mb(stages)
+    state = state if state is not None else card_state()
+    if not need or state is None:
+        return True, ""
+    free = int(state["total_mb"]) - int(state["others_mb"]) - CARD_MARGIN_MB
+    if free >= need:
+        return True, ""
+    return False, f"card: {max(0, free)} MB free (other programs hold {state['others_mb']} of {state['total_mb']} MB), the job needs {need} MB"
+
+
+def rebuild_available(live: bool = False) -> bool:
+    """Can a voice rebuild be ordered now: the GPU worker is up and the card has room for it. `live`: measure the card now (the GPU
+    worker itself), else what the worker last wrote."""
+    return gpu_worker_up() and card_room(["rebuild"], card_usage() if live else None)[0]
+
+
 def gpu_card() -> dict:
     """The card's memory and load now (nvidia-smi); {"down": why} without one."""
     try:
@@ -302,7 +386,10 @@ def admit_job(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set
     left for the rest of the host; CPU only decides when other jobs already run (with nothing running the queue
     always moves, niced, so it yields to everything that outranks it)."""
     mem, disk = jobs.job_needs(job)
-    if gpu:  # the model lives in GPU memory
+    if gpu:  # the model lives in GPU memory, which other programs may hold much of (measured now: this is the GPU worker)
+        ok, why = card_room(gpu_stages(job), card_usage())
+        if not ok:
+            return False, why, 0
         mem = min(mem, jobs.JOB_MEM + jobs.GB)
     now = db.now()
     # Jobs started in the last minute may not have allocated their memory yet.
@@ -359,7 +446,8 @@ def snapshot() -> dict:
         "memory": {"available": snap.mem_available, "sliceHeadroom": snap.slice_headroom, "reserve": jobs.MEM_RESERVE},
         "disk": {"free": snap.disk_free, "reserve": jobs.DISK_RESERVE},
         "live": {"sessions": by_class, "liveCores": cores, "engine": live_engine_status()},
-        "gpu": {"worker": "idle" if gpu_worker_idle() else "busy" if gpu_worker_up() else "down", "card": gpu_card()},
+        "gpu": {"worker": "idle" if gpu_worker_idle() else "busy" if gpu_worker_up() else "down", "card": gpu_card(),
+                "othersMb": (card_state() or {}).get("others_mb"), "rebuildAvailable": rebuild_available()},
         "jobs": {"running": running, "queued": queued, "jobCpus": sorted(job_cpus(s.data_dir))},
     }
 
