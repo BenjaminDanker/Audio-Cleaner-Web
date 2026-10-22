@@ -467,8 +467,8 @@ def _reprice(job: dict, duration: float) -> None:
         except keycaps.KeyCapReached as e:
             raise StageFailed(str(e))
         except (ledger.InsufficientFunds, ledger.LedgerError):
-            why = (" The picture of this video has to be made again for the file type or size you chose (Video conversion);"
-                   " MKV at the original size keeps it as it is, for free." if jobs.convert_cost(params, duration) else "")
+            why = (" The picture of this video has to be made again for the file type or size you chose (Video conversion), more than"
+                   " the video first said; MKV at the original size keeps it as it is, for free." if jobs.convert_cost(params, duration) else "")
             raise StageFailed(
                 f"This file is {duration / 60:.1f} min and costs ${cost / 1e6:.2f}, more than your available balance.{why}"
             )
@@ -728,10 +728,10 @@ def process(job: dict, extra: dict) -> None:
                 if job["kind"] == "convert" and not probe.get("has_video"):
                     raise StageFailed("This file has no picture, so there is no video to convert. You weren't charged.")
                 # another file type or size: now it is known whether the picture is made again (charged) or copied (free)
-                pe = probe.get("picture_encode")
-                if not isinstance(pe, bool):
-                    raise StageFailed("Processing failed; you were not charged.", "malformed picture_encode")
-                params = jobs.update_params(job["id"], picture_encode=pe)
+                pe, factor = probe.get("picture_encode"), probe.get("convert_factor")
+                if not isinstance(pe, bool) or isinstance(factor, bool) or not isinstance(factor, (int, float)) or not 1.0 <= factor <= 64.0:
+                    raise StageFailed("Processing failed; you were not charged.", "malformed picture_encode / convert_factor")
+                params = jobs.update_params(job["id"], picture_encode=pe, convert_factor=round(float(factor), 2))
                 job["params_json"] = json.dumps(params)
             _reprice(job, duration)
             job["duration_seconds"] = duration

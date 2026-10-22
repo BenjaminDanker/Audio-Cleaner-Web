@@ -113,7 +113,25 @@ export async function libavProbe(file) {
     let streams;
     [fmt, streams] = await libav.ff_init_demuxer_file(name);
     const a = streams.find((s) => s.codec_type === libav.AVMEDIA_TYPE_AUDIO);
-    const v = streams.some((s) => s.codec_type === libav.AVMEDIA_TYPE_VIDEO);
+    const vs = streams.find((s) => s.codec_type === libav.AVMEDIA_TYPE_VIDEO);
+    const v = !!vs;
+    // the picture as the file says it (its codec by FFmpeg's name, size, frames a second): what a conversion on our side will cost is
+    // known from these before anything is uploaded (the picture itself can't be decoded here)
+    let picture = null;
+    if (vs) {
+      try {
+        const num = await libav.AVCodecParameters_framerate_num(vs.codecpar);
+        const den = await libav.AVCodecParameters_framerate_den(vs.codecpar);
+        const tb = vs.time_base_num > 0 ? vs.time_base_den / vs.time_base_num : 0; // (AVI and MPEG count time in frames)
+        const fps = num > 0 && den > 0 ? num / den : tb >= 5 && tb <= 120 ? tb : null;
+        picture = {
+          ffVideoCodec: await libav.avcodec_get_name(vs.codec_id),
+          width: await libav.AVCodecParameters_width(vs.codecpar) || null,
+          height: await libav.AVCodecParameters_height(vs.codecpar) || null,
+          fps,
+        };
+      } catch { /* not said: the price is checked once the file is read */ }
+    }
     const lo = await libav.AVFormatContext_duration(fmt);
     const hi = await libav.AVFormatContext_durationhi(fmt);
     const us = hi * 4294967296 + (lo >>> 0);
@@ -124,6 +142,7 @@ export async function libavProbe(file) {
       audioTracks: streams.filter((s) => s.codec_type === libav.AVMEDIA_TYPE_AUDIO).length,
       channels: a ? await libav.AVCodecParameters_ch_layout_nb_channels(a.codecpar) : null,
       sampleRate: a ? await libav.AVCodecParameters_sample_rate(a.codecpar) : null,
+      picture,
     };
   } catch {
     return null;

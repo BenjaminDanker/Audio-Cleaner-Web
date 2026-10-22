@@ -40,7 +40,8 @@ _RATE_LIST = [
     # Video conversion on our side (a video the browser can't convert itself), per minute of video, charged only when the picture is
     # made again (a new size, or a file type that can't hold it as it is); copying it into another file type is free. Measured on a
     # 1080p30 recording: x264 about 1.2 CPU-seconds a second of video, the card's NVENC about 0.25 (broker.GPU_WORK); about 2/3 of
-    # Denoising, the whole video coming in and going out included.
+    # Denoising, the whole video coming in and going out included. This is the price of 1080p at 30 fps or smaller: a bigger or faster
+    # picture counts in proportion to its pixels a second (acw_common.ffmpeg.convert_factor: 4K 4x, 60 fps 2x).
     Rate("convert", "standard", "Video conversion", 6_000),
     # Live streaming
     Rate("stream_denoise", "light", "Live noise removal", 4_000),

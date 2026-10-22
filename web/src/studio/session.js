@@ -13,7 +13,7 @@ import {
   recoPatches, redo as redoState, sameTracks, setSel, snapJ, splitAll, toSuggestion, toTimeline, undo as undoState, vkey, freeOnlySuggestion } from '../editor/tracks.js';
 import { bytes } from '../format.js';
 import { submitJob } from '../jobs.js';
-import { buildLimit, serverAudioFormat, serverSize } from '../media/convert.js';
+import { buildLimit, serverAudioFormat, serverSize, videoSourceHint } from '../media/convert.js';
 import { analyseFile } from '../media/analyse.js';
 import { preloadDenoiser } from '../media/denoise.js';
 import { probeMedia } from '../media/mb.js';
@@ -607,7 +607,7 @@ export class Session {
 
   async startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, estimate }) {
     const kind = jobKind(tracks, plan);
-    const videoOut = videoOutOf(plan, choice, serverSize(choice.size));
+    const videoOut = videoOutOf(plan, choice, serverSize(choice.size), videoSourceHint(info));
     // a job made with parts says what is done in its timeline (docs/api.md section 8): the subtitles' quality, language and translations are the
     // subtitle parts' own, so the job carries no tier of its own; a conversion alone (kind convert) is only its video_out
     const body = kind === 'convert' ? { kind, durationSeconds: T || 1, options: { video_out: videoOut } } : {
@@ -823,7 +823,7 @@ export class Session {
     const tracks = this.S.tracks;
     const kind = jobKind(tracks, plan);
     if (!kind) return null;
-    const videoOut = videoOutOf(plan, choice, serverSize(choice.size));
+    const videoOut = videoOutOf(plan, choice, serverSize(choice.size), videoSourceHint(this.info));
     if (kind === 'convert') return { kind, durationSeconds: this.T, options: { video_out: videoOut } };
     return {
       kind, durationSeconds: this.T,

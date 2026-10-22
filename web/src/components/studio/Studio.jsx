@@ -17,7 +17,7 @@ import {
   selTitle, setSel, splitAll, toggleRange, toTimeline, tot, uni, trOf,
 } from '../../editor/tracks.js';
 import { BlendPlayer, gainsFor, matchGain, memorySource, previewFits } from '../../media/blend.js';
-import { buildLimit } from '../../media/convert.js';
+import { buildLimit, serverPictureWork } from '../../media/convert.js';
 import { denoiserLoadState, subscribeDenoiserLoad } from '../../media/denoise.js';
 import { speechLoadState, subscribeSpeechLoad } from '../../media/speech.js';
 import { wavFits } from '../../media/wav.js';
@@ -155,10 +155,13 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const kind = jobKind(S.tracks, plan);
   // a video made on our side: Video conversion, certain at a new size (another file type only: once the file is read, so "if needed")
   const convertLine = est.data?.lines?.find((l) => l.item === 'convert') || null;
-  const copyOnly = choice.size === 'same' && choice.format === 'mkv'; // (MKV holds any picture: copied as it is, free)
-  const convertMicros = plan.serverConvert && rates?.cv && !copyOnly ? tot(rates.cv * Math.ceil(T)) : 0;
+  // (signed out, the same rules worked out here from the public price list: media/convert.js serverPictureWork)
+  const work = plan.serverConvert ? serverPictureWork(info, session.fileName || outFile?.name, choice.format, choice.size) : null;
+  const encodes = convertLine ? (convertLine.maybe ? null : !convertLine.copied) : work?.encode ?? null;
+  const factor = convertLine ? convertLine.factor || 1 : work?.factor || 1;
+  const convertMicros = plan.serverConvert && rates?.cv ? tot(rates.cv * factor * Math.ceil(T)) : 0;
   const conversion = plan.serverConvert
-    ? (copyOnly ? { free: true, server: true } : { micros: convertLine ? convertLine.micros : convertMicros, maybe: convertLine ? !!convertLine.maybe : choice.size === 'same' })
+    ? (encodes === false ? { free: true, server: true } : { micros: convertLine ? convertLine.micros : convertMicros, maybe: encodes == null, factor })
     : plan.converting ? { free: true } : null;
   useEffect(() => {
     if (stage !== 'ready' || !kind || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }

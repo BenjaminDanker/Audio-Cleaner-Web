@@ -15,7 +15,7 @@ const DESCRIPTIONS = {
   'stream_captions/premium': 'Live captions in other languages too, best for accents and specialist words',
   'transcribe_translate/standard': 'The subtitles and transcript in another language, for each language you add',
   'stream_translate/standard': 'Your live captions in another language, for each language you add',
-  'convert/standard': 'Another file type or video size for a video your browser can’t convert itself, made on our side. Only when the picture has to be made again; copying it into another file type is free',
+  'convert/standard': 'Another file type or video size for a video your browser can’t convert itself, made on our side. Only when the picture has to be made again; copying it into another file type is free. The price is for 1080p at 30 fps or smaller; bigger or faster video counts more (4K 4×, 60 fps 2×)',
 };
 
 // The server's names for two rows say "Transcription"; everywhere else on the site this is "Subtitles & transcripts".

@@ -85,9 +85,11 @@ export function jobKind(tracks, plan = null) {
   return hasWork(tracks) ? 'denoise' : 'convert'; // (the free parts go along as the browser's uploads)
 }
 
-/** What our side is asked for the video (docs/api.md options.video_out), or null when the browser makes it. */
-export function videoOutOf(plan, choice, size) {
-  return plan?.serverConvert ? { format: choice.format, size } : null;
+/** What our side is asked for the video (docs/api.md options.video_out; `source`: what this browser read of it, for the price), or null when
+ * the browser makes it. */
+export function videoOutOf(plan, choice, size, source = {}) {
+  if (!plan?.serverConvert) return null;
+  return { format: choice.format, size, ...(Object.keys(source).length ? { source } : {}) };
 }
 
 /** The choices as the Finish step wants them (finish.js `wants`). `local`: no job on our side; the sound and subtitles are made here. */

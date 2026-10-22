@@ -25,9 +25,10 @@ function Details({ ctx }) {
   if (c.trSec) L.push(li(`Translations · ${c.trLangs.map((l) => LANG[l]).join(', ')}`, money(c.tr)));
   if (c.sFree) L.push(li(`Subtitles, free · ${fmt(c.sFree)}`, 'Free'));
   const cv = ctx.conversion;
-  if (cv?.free) L.push(li(cv.server ? 'Video into MKV on our side (the picture is copied)' : 'File type or size, in your browser', 'Free'));
-  else if (cv?.maybe) L.push(li('Video conversion, only if the picture has to be made again (MKV never needs it)', `up to ${money(cv.micros)}`));
-  else if (cv) L.push(li('Video conversion', money(cv.micros)));
+  const big = cv?.factor > 1 ? ` · counts ${Math.round(cv.factor * 10) / 10}× (bigger or faster than 1080p at 30 fps)` : '';
+  if (cv?.free) L.push(li(cv.server ? 'Video on our side, the picture copied as it is' : 'File type or size, in your browser', 'Free'));
+  else if (cv?.maybe) L.push(li(`Video conversion, only if the picture has to be made again (MKV never needs it)${big}`, `up to ${money(cv.micros)}`));
+  else if (cv) L.push(li(`Video conversion${big}`, money(cv.micros)));
   return (
     <div className="pop pl-r" role="dialog" aria-label="Details" data-testid="details">
       <ul className="fl">

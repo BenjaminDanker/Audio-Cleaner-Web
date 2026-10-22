@@ -260,6 +260,47 @@ export async function listSizes(info, container, server = false) {
 /** The picture size our side is asked for: the shorter side in pixels, or null for the original size (docs/api.md options.video_out). */
 export const serverSize = (id) => (SIZES.find((s) => s.id === id)?.px || null);
 
+/** What this browser read of the video, sent with a conversion on our side so its price is known before the upload (docs/api.md
+ * video_out.source; our side checks it when it reads the file). */
+export function videoSourceHint(info) {
+  const out = {};
+  if (info?.ffVideoCodec && /^[a-z0-9_]{1,32}$/.test(info.ffVideoCodec)) out.codec = info.ffVideoCodec;
+  if (info?.width >= 16 && info?.height >= 16 && info.width <= 16384 && info.height <= 16384) { out.width = Math.round(info.width); out.height = Math.round(info.height); }
+  if (info?.fps >= 1 && info.fps <= 240) out.fps = Math.round(info.fps * 1000) / 1000;
+  return out;
+}
+
+// What our side does with the picture, the same rules as common/acw_common/ffmpeg.py (picture_copies, convert_factor): which picture
+// codecs each file type takes as they are (MKV takes any), and the unit of the price: making a 1080p picture at 30 frames a second again.
+const COPY_VIDEO = {
+  mp4: ['h264', 'hevc', 'mpeg4', 'av1', 'vp9', 'mpeg2video', 'mjpeg'],
+  mov: ['h264', 'hevc', 'mpeg4', 'prores', 'mjpeg', 'mpeg2video', 'dnxhd'],
+  webm: ['vp8', 'vp9', 'av1'],
+};
+const REFERENCE_PIXEL_RATE = 1920 * 1080 * 30;
+
+/** How many 1080p30 units making the picture again takes (see convert_factor): the result's pixels a second, or half the original's. */
+export function convertFactor(width, height, fps, out = null) {
+  const rate = fps > 0 && fps <= 240 ? fps : 30;
+  const src = width * height * rate;
+  const res = out ? out.width * out.height * rate : src;
+  return Math.round(Math.max(1, res / REFERENCE_PIXEL_RATE, src / 2 / REFERENCE_PIXEL_RATE) * 100) / 100;
+}
+
+/** A video made on our side as `format` at size `sizeId`: {encode: is the picture made again (null: its codec isn't known), factor}. */
+export function serverPictureWork(info, fileName, format, sizeId) {
+  const px = serverSize(sizeId);
+  const w = info?.width;
+  const h = info?.height;
+  const resize = !!px && !(w && h && Math.min(w, h) === px);
+  const own = formatOfName(fileName);
+  const copies = own === format || !COPY_VIDEO[format] ? true : info?.ffVideoCodec ? COPY_VIDEO[format].includes(info.ffVideoCodec) : null;
+  const encode = resize ? true : copies == null ? null : !copies;
+  const fps = info?.fps;
+  const factor = w && h ? convertFactor(w, h, fps, resize ? scaledDims(w, h, px) : null) : px ? convertFactor(...Object.values(scaledDims(16, 9, px)), fps) : 1;
+  return { encode, factor };
+}
+
 /** The format a result starts out as: the video's own kind of file when it is kept, WAV otherwise. */
 export function defaultFormatId(file, info, keepVideo = true, serverAudio = false) {
   if (info?.hasVideo && keepVideo && !info?.viaLibav) {

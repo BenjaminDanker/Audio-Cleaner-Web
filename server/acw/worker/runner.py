@@ -93,7 +93,7 @@ def _ff(spec):
 
 
 def stage_probe(job_dir: Path, spec: dict) -> dict:
-    from acw_common.ffmpeg import MediaError, VideoOut, needs_picture_encode
+    from acw_common.ffmpeg import MediaError, VideoOut, picture_work
 
     ff = _ff(spec)
     p = ff.probe(job_dir / spec["input"])
@@ -109,11 +109,12 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
                 "Use the standard cleanup for longer files."
             )
         raise MediaError(f"This file is {duration / 60:.1f} minutes long; the limit is {limit / 60:.0f} minutes.")
-    # A video asked for in another file type or size: is its picture made again (charged), or copied (free)?
+    # A video asked for in another file type or size: is its picture made again (charged, by its size factor), or copied (free)?
     vo = spec["options"].get("video_out")
-    picture_encode = needs_picture_encode(p, "." + vo["format"], VideoOut(short_side=vo["size"])) if vo and p.has_video else None
+    picture_encode, factor = picture_work(p, "." + vo["format"], VideoOut(short_side=vo["size"])) if vo and p.has_video else (None, None)
     return {
         "picture_encode": picture_encode,
+        "convert_factor": factor,
         "duration": duration,
         "container_duration": p.duration,
         "has_video": p.has_video,

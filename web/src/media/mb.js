@@ -45,14 +45,18 @@ export function elementDuration(file, timeoutMs = 8000) {
  * Inspect a file. Never throws; unknown fields are null/false.
  * @returns {Promise<{duration:number|null, hasVideo:boolean, hasAudio:boolean|null, audioCodec:string|null,
  *   videoCodec:string|null, channels:number|null, sampleRate:number|null, canDecode:boolean|null, viaMediabunny:boolean,
- *   viaLibav:boolean, audioTracks:number}>}  audioTracks: how many audio tracks the file holds (OBS can record mic and
- *   desktop sound as two). viaLibav: only libav.js (src/media/libav.js) can decode the audio here; the picture can't be kept.
+ *   viaLibav:boolean, audioTracks:number, width, height, fps, ffVideoCodec}>}  audioTracks: how many audio tracks the file holds (OBS can
+ *   record mic and desktop sound as two). viaLibav: only libav.js (src/media/libav.js) can decode the audio here; the picture can't be kept.
+ *   ffVideoCodec: the picture's codec by FFmpeg's name, and fps its frames a second (null: not known), for the price of a conversion on our side.
  */
+// mediabunny's codec names -> FFmpeg's (what our side reads the picture as)
+const FF_NAME = { avc: 'h264', hevc: 'hevc', vp8: 'vp8', vp9: 'vp9', av1: 'av1' };
+
 export async function probeMedia(file) {
   const info = {
     duration: null, hasVideo: false, hasAudio: null, audioCodec: null, videoCodec: null,
     channels: null, sampleRate: null, canDecode: null, viaMediabunny: false, viaLibav: false, audioTracks: 0,
-    width: null, height: null, videoCanDecode: null,
+    width: null, height: null, videoCanDecode: null, fps: null, ffVideoCodec: null,
   };
   try {
     const { input } = await openInput(file);
@@ -63,11 +67,16 @@ export async function probeMedia(file) {
     info.audioTracks = (await input.getAudioTracks()).length;
     if (vTrack) {
       info.videoCodec = await vTrack.getCodec();
+      info.ffVideoCodec = FF_NAME[info.videoCodec] || null;
       try {
         info.width = await vTrack.getDisplayWidth();
         info.height = await vTrack.getDisplayHeight();
         info.videoCanDecode = await vTrack.canDecode();
       } catch { /* the size is only needed for the picture-size choices */ }
+      try {
+        const rate = (await vTrack.computePacketStats(90)).averagePacketRate;
+        info.fps = rate > 0 && rate <= 240 ? rate : null;
+      } catch { /* only for the price of a conversion on our side */ }
     }
     if (aTrack) {
       info.audioCodec = await aTrack.getCodec();
@@ -94,6 +103,12 @@ export async function probeMedia(file) {
     const l = await libavProbe(file);
     if (l?.hasAudio) {
       Object.assign(info, { hasAudio: true, hasVideo: info.hasVideo || l.hasVideo, channels: l.channels || info.channels, sampleRate: l.sampleRate || info.sampleRate });
+      if (l.picture) {
+        info.ffVideoCodec = info.ffVideoCodec || l.picture.ffVideoCodec || null;
+        info.width = info.width || l.picture.width;
+        info.height = info.height || l.picture.height;
+        info.fps = info.fps || l.picture.fps;
+      }
       if (l.duration) info.duration = l.duration;
       info.audioTracks = l.audioTracks;
       info.canDecode = true;

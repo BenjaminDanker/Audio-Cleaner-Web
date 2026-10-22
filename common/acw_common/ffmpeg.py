@@ -782,6 +782,39 @@ def picture_bitrate(encoder: str, width: int, height: int, fps: float, source_bp
     return int(min(max(target, floor), 80_000_000))
 
 
+def picture_copies(codec: str | None, src_ext: str | None, ext: str) -> bool | None:
+    """Can a picture coded as `codec` (FFmpeg's name), from a file ending in `src_ext`, go into a file ending in `ext` as it is?
+    None: the codec is not known."""
+    same_kind = src_ext is not None and (ext == src_ext or any(ext in kind and src_ext in kind for kind in _SAME_KIND))
+    if same_kind or ext not in _COPY_VIDEO:
+        return True
+    return None if not codec else codec in _COPY_VIDEO[ext]
+
+
+# Video conversion is priced in units of the work of making a 1080p picture at 30 frames a second again (billing/pricing.py).
+REFERENCE_PIXEL_RATE = 1920 * 1080 * 30
+
+
+def convert_factor(width: int, height: int, fps: float | None, out: tuple[int, int] | None = None) -> float:
+    """How many 1080p30 units making a `width` x `height` picture at `fps` again takes (`out`: the result's size, None: the same): the
+    result's pixels a second, or half the original's when that is more (decoding and shrinking a big picture is work too), never less
+    than 1. Measured with x264 (2026-10-22): 1080p60 2.2x, 1440p 1.6x, 4K 3.3x, 4K to 1080p 2.3x, 4K to 720p 1.8x, 1080p to 4K 4.3x."""
+    rate = fps if fps and 0 < fps <= 240 else 30.0
+    src = width * height * rate
+    res = out[0] * out[1] * rate if out else src
+    return round(max(1.0, res / REFERENCE_PIXEL_RATE, src / 2 / REFERENCE_PIXEL_RATE), 2)
+
+
+def picture_work(info: ProbeResult | None, ext: str, video: VideoOut) -> tuple[bool, float]:
+    """(is the picture made again, convert_factor) for a result ending in `ext` at `video`'s size."""
+    plan = _picture_plan(info, ext, video)
+    if plan is None or info is None:
+        return False, 1.0
+    width, height = info.video_width, info.video_height
+    shown = (height, width) if info.video_rotation % 180 == 90 else (width, height)
+    return True, convert_factor(shown[0], shown[1], info.video_fps, plan["size"])
+
+
 def _picture_plan(info: ProbeResult | None, ext: str, video: VideoOut) -> dict | None:
     """What to do with the picture of `info` for a result ending in `ext`: None (copy it), or a dict with the encoders to
     try, the size, the frame rate and the bit rate base."""
@@ -795,8 +828,7 @@ def _picture_plan(info: ProbeResult | None, ext: str, video: VideoOut) -> dict |
         size = picture_size(width, height, info.video_sar, info.video_rotation, video.short_side)
         if size == shown and abs(info.video_sar - 1.0) < 0.01:
             size = None  # already that size
-    same_kind = ext == info.ext or any(ext in kind and info.ext in kind for kind in _SAME_KIND)
-    fits = same_kind or ext not in _COPY_VIDEO or info.video_codec in _COPY_VIDEO[ext]
+    fits = picture_copies(info.video_codec, info.ext, ext) is True
     if size is None and fits:
         return None
     if size is None and (shown[0] % 2 or shown[1] % 2):

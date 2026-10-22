@@ -321,7 +321,8 @@ def convert_of(src_params: dict, new: dict) -> dict:
     """A re-run makes the video again as the source did: when that made the picture again, so does the re-run, at today's price."""
     if not new.get("video_out"):
         return {}
-    return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": src_params.get("picture_encode")}
+    return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": src_params.get("picture_encode"),
+            "convert_factor": src_params.get("convert_factor", 1.0)}
 
 
 def _tiers(src_params: dict, denoise_tier, transcribe_tier) -> tuple[str, str | None, str | None]:
