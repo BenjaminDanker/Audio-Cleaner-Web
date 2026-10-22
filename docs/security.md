@@ -216,9 +216,9 @@ network, so it is built to reach nothing but the public internet:
 ## Abuse / fraud
 
 - Live audio must arrive at ~real-time pace (prevents using live pricing as cheap batch).
-- Free subtitles run in the browser, so they cost us no compute; their model files (about 80 MB) are served only to
-  signed-in browsers and count against the same daily per-account allowance as the noise remover's files
-  (`asset_fetch`); browsers keep them in their cache. Jobs on our side are never free.
+- Free subtitles run in the browser, so they cost us no compute; their model files (about 80 MB) come from Hugging Face
+  and the site's `/dfn/*` files are plain static files for everybody (no sign-in, no per-account allowance: the free tools
+  work without an account); browsers keep them in their cache. Jobs on our side are never free.
 - Job reservations: the per-account active-job count, the disk promised to uploads that are still arriving and the
   job row are checked and written in one transaction (parallel requests can't all pass). An account may have at most
   `ACW_MAX_ACTIVE_JOBS` (default 3) file jobs uploading, waiting or running at once (changing a finished job counts; the refusal is
@@ -281,5 +281,3 @@ network, so it is built to reach nothing but the public internet:
   then the main process serves the same routes as before. Still open from SEC-08: SQM on the home router, a smaller
   per-file cap for free jobs.
 - Logs: the user journal keeps client addresses until it rotates; set `MaxRetentionSec` once (docs/operations.md, "Log retention").
-- The `/dfn/*` forward-auth gate relies on Caddy's path normalisation; test `//`, `%2e`, upper-case once on the VPS
-  with the installed Caddy version (`curl -i https://audiocleaner.live//dfn/df.js` must not return the file without a session).

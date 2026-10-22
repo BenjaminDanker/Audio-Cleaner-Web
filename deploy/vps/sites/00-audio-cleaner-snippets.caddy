@@ -125,13 +125,10 @@
 		respond @acw_hidden 404
 		@acw_immutable path /assets/*
 		header @acw_immutable Cache-Control "public, max-age=31536000, immutable"
-		# The free in-browser tools' code (the noise remover's glue code, the speech runtime, the decoder): only for
-		# signed-in browsers (the home server checks the session and a daily cap per account). Their models come from
-		# Hugging Face.
+		# The free in-browser tools' code (the noise remover's glue code, the speech runtime, the decoder): plain static
+		# files from this VPS for everybody. The free tools work without an account, and with the home server down.
+		# Their models come from Hugging Face.
 		@acw_dfn path /dfn/*
-		forward_auth @acw_dfn 127.0.0.1:18790 {
-			uri /api/auth/asset-check
-		}
 		header @acw_dfn Cache-Control "private, max-age=604800"
 		# Every app route serves index.html: never cache it, only hashed assets.
 		@acw_html not path /assets/* /dfn/*
