@@ -257,10 +257,10 @@ def convert_line(params: dict, seconds: float) -> dict | None:
 _CODEC_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
-# A video asked for in another file type or size, from a file with no picture: the whole job is refused (or, found when the file is read,
-# fails uncharged), so nobody pays for part of what they asked for.
-NO_PICTURE = ("This file has no picture, so there is no video to make in another file type or size. Send it without video_out "
-              "(nothing was charged).")
+# Echo removal asked for on a file with one audio track: there is no desktop sound to remove the echo with. The whole job is refused (a job
+# whose file is known) or fails before any work, uncharged, so nobody pays for part of what they asked for.
+NO_SECOND_TRACK = ("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without echo removal "
+                   "(nothing was charged).")
 
 
 def video_out_of(options: dict) -> dict | None:
@@ -310,6 +310,8 @@ def convert_params(opts: dict, input_ext: str | None = None) -> dict:
     vo = opts.get("video_out")
     if not vo:
         return {}
+    if input_ext in AUDIO_EXTS:  # a sound: its video gets a plain black picture, free
+        return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": False, "convert_factor": 1.0}
     src = vo.get("source") or {}
     w, h, fps = src.get("width"), src.get("height"), src.get("fps")
     resize = vo["size"] is not None and not (w and h and min(w, h) == vo["size"])
@@ -733,8 +735,6 @@ def create_job(
     ext = Path(filename).suffix.lower()
     if ext not in ALLOWED_EXTS:
         raise JobError("Unsupported file type.")
-    if ext in AUDIO_EXTS and (options or {}).get("video_out"):
-        raise JobError(NO_PICTURE)
     if not 0 < size_bytes <= settings.max_upload_bytes:
         raise JobError(f"Files must be under {settings.max_upload_bytes // 1024**2} MB.", 413)
     tl = None

@@ -165,8 +165,11 @@ def render(job_dir: Path, spec: dict, ff, probe, x, emit, *, base: int = 5, span
             emit(stage="Reading the speaker track", progress=base)
             ref = ff.decode_to_file(job_dir / spec["input"], probe, SR, 1, limit, job_dir / "reference.f32", track=1)[:, 0]
         else:
-            tl.layers["echo"] = []
-            notice = "This file has only one audio track, so there was no desktop sound to remove echo with. It was processed without echo removal."
+            # (refused before: the job's file is known to have one track, editing.parse_for_job; this is for a job from before that)
+            from acw_common.ffmpeg import MediaError
+
+            raise MediaError("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without "
+                             "echo removal (nothing was charged).")
     inputs = editor.Inputs(x, ed["source_id"], reference=ref, reference_id="r" if ref is not None else None)
     emit(stage="Deciding what each part needs", progress=base + 1)
     tl, resolved = resolved_timeline(tl, inputs, spec)

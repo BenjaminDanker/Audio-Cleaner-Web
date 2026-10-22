@@ -111,8 +111,9 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
         raise MediaError(f"This file is {duration / 60:.1f} minutes long; the limit is {limit / 60:.0f} minutes.")
     # A video asked for in another file type or size: is its picture made again (charged, by its size factor), or copied (free)?
     vo = spec["options"].get("video_out")
-    picture_encode, factor = picture_work(p, "." + vo["format"], VideoOut(short_side=vo["size"])) if vo and p.has_video else (None, None)
+    picture_encode, factor = picture_work(p, "." + vo["format"], VideoOut(short_side=vo["size"])) if vo else (None, None)
     return {
+        "audio_tracks": p.audio_tracks,
         "picture_encode": picture_encode,
         "convert_factor": factor,
         "duration": duration,
@@ -178,6 +179,7 @@ def clean_options(spec: dict, profile: str):
 
 def stage_main(job_dir: Path, spec: dict) -> dict:
     from acw_common import dpdfnet, editor, pipeline
+    from acw_common.ffmpeg import MediaError
     from acw_common import kept as kept_copies
 
     ff = _ff(spec)
@@ -213,11 +215,11 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
     kept_out: dict = {}  # the copies kept for a later "change and save again" (reported to the worker, which checks them)
     asr_end = 45 if denoise_run else 90  # progress when transcription is done
     x = None  # the decoded audio, echo-free when the second track was used
-    echo_skipped = False  # echo removal was asked for but the file has no second track (so it is not charged)
+    echo_skipped = False  # (no longer happens: echo removal on a file with one audio track fails the job, uncharged, below)
     if opts.get("echo_reference_track") and (denoise_run or transcribe_run):
         if probe.audio_tracks < 2:
-            echo_skipped = True
-            notice = "This file has only one audio track, so there was no desktop sound to remove echo with. It was processed without echo removal."
+            # (the worker refuses it once the file is read, before any work; this is for a re-run of a job from before that)
+            raise MediaError(NO_SECOND_TRACK)
         else:
             # Before anything else: both the captions and the cleaned audio should start from the echo-free voice.
             emit(stage="Removing echo", progress=2)
@@ -398,7 +400,7 @@ def stage_main(job_dir: Path, spec: dict) -> dict:
 
         editor_report.update(rendered=Timeline(probe.duration).to_json(), billed={})
     (job_dir / "main-state.json").write_text(
-        json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video})
+        json.dumps({"outputs": outputs, "cleaned": cleaned_path.name if cleaned_path else None, "has_video": probe.has_video, "duration": probe.duration})
     )
     # Translations need the internet, which this sandbox doesn't have: they run outside it, then `finalize` writes the files.
     # (A re-run that kept some languages only asks for the others.)
@@ -535,6 +537,17 @@ def stage_finalize(job_dir: Path, spec: dict) -> dict:
                 progress=(lambda f: emit(stage="Making the video", progress=int(first + (99 - first) * f))) if vo else None,
             )
             outputs.append({"file": out.name, "kind": "video"})
+    elif not state["has_video"] and opts.get("video_out"):
+        # a sound asked for as a video: a plain black picture (one frame a second) with the sound, cleaned when it was cleaned
+        vo = opts["video_out"]
+        cleaned = job_dir / state["cleaned"] if state.get("cleaned") else None
+        ext = "." + vo["format"]
+        emit(stage="Making the video", progress=95 if cleaned is not None or subtitle_file is not None else 5)
+        out = job_dir / f"{stem}-{'cleaned' if cleaned else 'captioned' if subtitle_file is not None else 'converted'}{ext}"
+        ff.make_video(cleaned or job_dir / spec["input"], out, float(state.get("duration") or 0.0),
+                      subtitles=subtitle_file if opts.get("embed_subtitles", True) else None, sub_lang=_iso639_2(language),
+                      video=VideoOut(short_side=vo["size"], encoders=_encoders(spec, ext)))
+        outputs.append({"file": out.name, "kind": "video"})
     emit(stage="Done", progress=100)
     return {"outputs": outputs, "language": language}
 
@@ -546,6 +559,9 @@ def _encoders(spec: dict, ext: str) -> tuple[str, ...]:
         return ("libvpx-vp9",)
     return ("h264_nvenc", "libx264") if spec.get("gpu_devices") else ("libx264",)
 
+
+NO_SECOND_TRACK = ("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without echo removal "
+                   "(nothing was charged).")  # (the same words as acw.jobs.NO_SECOND_TRACK)
 
 _ISO = {"en": "eng", "es": "spa", "fr": "fra", "de": "deu", "it": "ita", "pt": "por", "nl": "nld", "ja": "jpn",
         "zh": "zho", "ko": "kor", "ru": "rus", "pl": "pol", "tr": "tur", "ar": "ara", "hi": "hin", "sv": "swe"}

@@ -138,7 +138,7 @@ export async function submitJob({ file, info, body, onStage, onProgress, onCompr
   // Only for a video this browser can't open (it goes up whole anyway): otherwise the subtitles are put in here, afterwards. A video made on
   // our side (another file type or size this browser can't make, options.video_out) goes up whole too.
   const whole = wantsEmbed || !!(options.video_out && info?.hasVideo);
-  if (whole) options.output_video = true;
+  if (whole || options.video_out) options.output_video = true;
   if (!whole && info?.hasVideo && info.viaMediabunny && info.hasAudio !== false) {
     onStage?.('extract');
     try {

@@ -565,7 +565,7 @@ class FFmpeg:
         timeout = max(7200.0, duration * 8)
         r = None
         used = 0
-        encoders = picture_encoders(ext)
+        encoders = list(video.encoders) if video is not None and video.encoders else picture_encoders(ext)
         for used, encoder in enumerate(encoders):
             args = self._black_args(audio, out, duration, subtitles, sub_lang, encoder, (width, height))
             r = self._run_encode(args, timeout, duration, progress)
@@ -806,7 +806,8 @@ def convert_factor(width: int, height: int, fps: float | None, out: tuple[int, i
 
 
 def picture_work(info: ProbeResult | None, ext: str, video: VideoOut) -> tuple[bool, float]:
-    """(is the picture made again, convert_factor) for a result ending in `ext` at `video`'s size."""
+    """(is the picture made again, convert_factor) for a result ending in `ext` at `video`'s size. A sound has no picture to make
+    again: its video gets a plain black one (make_video, one frame a second), which costs next to nothing."""
     plan = _picture_plan(info, ext, video)
     if plan is None or info is None:
         return False, 1.0

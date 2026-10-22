@@ -366,6 +366,10 @@ def _prepare(user_id: str, job_id: str, api_key_id: str | None, denoise_tier, tr
     # The upload's own length, as it was measured.
     seconds = float(src["duration_seconds"] or src["claimed_seconds"])
     new = jobs.validate_options(kind, d_tier, t_tier, merged_options(sp, options))
+    from . import editing
+
+    if new["echo_reference_track"] and editing.one_track(sp):  # (the file is known: refused now, not found out while it runs)
+        raise jobs.JobError(jobs.NO_SECOND_TRACK)
     d = jobs.job_dir(src["id"])
     files = {p.name for p in d.iterdir() if _regular(p)}
     plan = plan_rerun(sp, audio_output(src), d_tier, t_tier, new, files)

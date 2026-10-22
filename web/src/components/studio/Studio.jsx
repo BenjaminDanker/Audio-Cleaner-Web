@@ -161,7 +161,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const factor = convertLine ? convertLine.factor || 1 : work?.factor || 1;
   const convertMicros = plan.serverConvert && rates?.cv ? tot(rates.cv * factor * Math.ceil(T)) : 0;
   const conversion = plan.serverConvert
-    ? (encodes === false ? { free: true, server: true } : { micros: convertLine ? convertLine.micros : convertMicros, maybe: encodes == null, factor })
+    ? (work?.black ? { free: true, server: true, black: true }
+      : encodes === false ? { free: true, server: true } : { micros: convertLine ? convertLine.micros : convertMicros, maybe: encodes == null, factor })
     : plan.converting ? { free: true } : null;
   useEffect(() => {
     if (stage !== 'ready' || !kind || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }

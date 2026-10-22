@@ -724,10 +724,16 @@ def process(job: dict, extra: dict) -> None:
                 raise StageFailed("Processing failed; you were not charged.", "malformed probe result")
             if not (math.isfinite(duration) and 0 < duration <= _max_seconds(job, params) + 61):
                 raise StageFailed("Processing failed; you were not charged.", "implausible duration")
+            # Echo removal needs the desktop sound on a second audio track: a file without one fails here, before any work, uncharged (the
+            # echo removal was part of what was asked for). The website doesn't offer it for such a file.
+            tracks = probe.get("audio_tracks")  # (None: not said; the runner then finds it out itself and fails the same way)
+            if tracks is not None and (not isinstance(tracks, int) or isinstance(tracks, bool) or tracks < 0):
+                raise StageFailed("Processing failed; you were not charged.", "malformed audio_tracks")
+            if tracks is not None and tracks < 2 and editing.wants_echo(params):
+                raise StageFailed(jobs.NO_SECOND_TRACK)
             if params.get("options", {}).get("video_out"):
-                if not probe.get("has_video"):
-                    raise StageFailed(jobs.NO_PICTURE)  # (the video was part of what was asked for: nothing of the job is made or charged)
-                # another file type or size: now it is known whether the picture is made again (charged) or copied (free)
+                # another file type or size: now it is known whether the picture is made again (charged) or copied (free; a sound gets
+                # a plain black picture, free)
                 pe, factor = probe.get("picture_encode"), probe.get("convert_factor")
                 if not isinstance(pe, bool) or isinstance(factor, bool) or not isinstance(factor, (int, float)) or not 1.0 <= factor <= 64.0:
                     raise StageFailed("Processing failed; you were not charged.", "malformed picture_encode / convert_factor")
@@ -736,7 +742,7 @@ def process(job: dict, extra: dict) -> None:
             _reprice(job, duration)
             job["duration_seconds"] = duration
             params = json.loads(job["params_json"])
-            jobs.update_params(job["id"], channels=channels)
+            jobs.update_params(job["id"], channels=channels, **({"audio_tracks": tracks} if tracks is not None else {}))
         if automatic.pending(params):
             if _decide(job, extra, duration):
                 return  # handed over to the card's worker

@@ -156,7 +156,7 @@ export default function OutputFields({ choice, info, idPrefix = 'out', disabled 
               </optgroup>
             )}
             {videoServer.length > 0 && (
-              <optgroup label="Video, made on our side">
+              <optgroup label={info?.hasVideo ? 'Video, made on our side' : 'Video (plain black picture), made on our side'}>
                 {videoServer.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
               </optgroup>
             )}

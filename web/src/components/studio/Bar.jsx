@@ -26,7 +26,7 @@ function Details({ ctx }) {
   if (c.sFree) L.push(li(`Subtitles, free · ${fmt(c.sFree)}`, 'Free'));
   const cv = ctx.conversion;
   const big = cv?.factor > 1 ? ` · counts ${Math.round(cv.factor * 10) / 10}× (bigger or faster than 1080p at 30 fps)` : '';
-  if (cv?.free) L.push(li(cv.server ? 'Video on our side, the picture copied as it is' : 'File type or size, in your browser', 'Free'));
+  if (cv?.free) L.push(li(cv.black ? 'Video with a plain black picture, on our side' : cv.server ? 'Video on our side, the picture copied as it is' : 'File type or size, in your browser', 'Free'));
   else if (cv?.maybe) L.push(li(`Video conversion, only if the picture has to be made again (MKV never needs it)${big}`, `up to ${money(cv.micros)}`));
   else if (cv) L.push(li(`Video conversion${big}`, money(cv.micros)));
   return (

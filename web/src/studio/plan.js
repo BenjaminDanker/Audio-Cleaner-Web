@@ -61,7 +61,7 @@ export function outputPlan({ tracks, info, file, choice, out, limit = null }) {
   const serverText = anyPaidSubs(tracks);
   const isVideo = !!info?.hasVideo;
   const converting = !cleaning && convertsFile({ file, choice });
-  const serverConvert = isVideo && !!choice?.server && !!choice?.isVideoFile && (cleaning || converting);
+  const serverConvert = !!choice?.server && !!choice?.isVideoFile && (cleaning || converting); // (a sound: a black-picture video made there)
   // Subtitles in the video: put in here, in the browser, once the job is done (nothing extra is uploaded). Only a video the browser can't
   // open goes up whole, and then our side puts them in. A recording with no picture can get them in the plain black video made here when
   // a video file type is picked.

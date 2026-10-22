@@ -237,8 +237,7 @@ export async function listOutputs({ info, serverAudio = false }) {
     const plan = info?.hasVideo && !videoSource ? { ok: false, why: '' } : await videoPlan(info, f.id, 0);
     const audioOk = audioCodecsFor(caps, f.id).length > 0;
     if (plan.ok && audioOk) out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '' });
-    else if (info?.hasVideo) out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '', server: true }); // made on our side
-    else out.push({ id: f.id, kind: 'video', label: f.label, ok: false, why: plan.ok ? 'This browser can’t write the sound for this kind of file.' : plan.why });
+    else out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '', server: true }); // made on our side (a sound: a plain black picture)
   }
   return out;
 }
@@ -289,6 +288,7 @@ export function convertFactor(width, height, fps, out = null) {
 
 /** A video made on our side as `format` at size `sizeId`: {encode: is the picture made again (null: its codec isn't known), factor}. */
 export function serverPictureWork(info, fileName, format, sizeId) {
+  if (!info?.hasVideo) return { encode: false, factor: 1, black: true }; // a sound gets a plain black picture, free
   const px = serverSize(sizeId);
   const w = info?.width;
   const h = info?.height;

@@ -539,12 +539,27 @@ def parse_timeline(raw: object, seconds: float, *, slack: float = 0.5):
 
 def parse_for_job(params: dict, raw: object, seconds: float):
     """`parse_timeline` for a timeline of an existing job: one that already has its subtitles made for the whole file (a transcription
-    tier of its own) cannot also have subtitle parts."""
+    tier of its own) cannot also have subtitle parts. (Echo parts on a file without a second track are refused when it is priced: editor.Plan.)"""
     tl = parse_timeline(raw, seconds)
     if tl.layers["subtitles"] and params.get("transcribe_tier"):
         raise bad("This job's subtitles were set for the whole file, so a timeline can't have subtitle parts. Make the subtitles in a new job.",
                   code="timeline_options")
     return tl
+
+
+def one_track(params: dict) -> bool:
+    """Is the job's file known to have a single audio track (so no echo removal; a re-run asking for it is refused)? From the probe, or the
+    editor's facts of the recording."""
+    facts = (params.get("edit") or {}).get("facts") or {}
+    return params.get("audio_tracks") == 1 or facts.get("reference") is False
+
+
+def wants_echo(params: dict) -> bool:
+    """Does the job ask for echo removal: the whole-file option, or echo parts in the timeline it was made with?"""
+    if (params.get("options") or {}).get("echo_reference_track"):
+        return True
+    layers = (((params.get("edit") or {}).get("timeline") or {}).get("layers") or {}) if (params.get("edit") or {}).get("first_run") else {}
+    return bool(layers.get("echo"))
 
 
 def editable_kind(job: dict) -> bool:
