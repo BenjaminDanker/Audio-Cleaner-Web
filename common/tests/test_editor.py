@@ -456,7 +456,9 @@ def test_whole_file_leveling_is_clarity_process_over_the_file_that_is_todays_out
     y = editor.render(tl, inp, blocks.MemoryCache())
     want = clarity.process(x, x.copy(), SR, clarity.ClarityParams(loudness_lufs=-18.0))
     assert np.array_equal(y, want)
-    assert np.array_equal(pipeline.clean_audio(x, "none", "none", pipeline.CleanOptions(denoise=False, loudness_lufs=-18.0)), want)
+    # the whole-file choices (Leveling alone) are this timeline, whatever way they come
+    whole = Timeline.from_clean_options(inp.seconds, pipeline.CleanOptions(denoise=False, loudness_lufs=-18.0))
+    assert whole.to_json() == tl.to_json() and np.array_equal(editor.render(whole, inp), want)
     assert abs(lufs(y) + 18) < 1.0
 
 
@@ -591,22 +593,21 @@ def test_auto_removers_are_decided_per_part_from_its_noise_figure():
 
 @needs_dfn
 @needs_speech
-def test_whole_file_timeline_is_clean_audio_and_both_fill_the_same_cache():
+def test_a_whole_file_timeline_fills_the_cache_with_all_its_blocks_and_a_second_render_takes_every_block_from_it():
     x = real_noisy(70, 1)
     cache = blocks.MemoryCache()
     opts = pipeline.CleanOptions(atten_lim_db=24.0, noise="light")
-    ref = pipeline.clean_audio(x, LIB, MODEL, opts, threads=2, cache=cache, input_id="rec")
-    assert cache.puts == 3  # all blocks: 0-30 s, 30-60 s, 60-70 s
     inp = editor.Inputs(x, "rec")
     tl = Timeline.from_clean_options(inp.seconds, opts)
-    assert editor.plan(tl, inp, cache).misses == []  # the whole-file run left nothing to compute
-    got = editor.render(tl, inp, cache, editor.Runner(LIB, MODEL))
-    assert np.array_equal(got, ref)
-    # a second whole-file run takes every block from the cache: no model is loaded (the paths do not exist)
-    again = pipeline.clean_audio(x, "no-lib", "no-model", opts, threads=2, cache=cache, input_id="rec")
-    assert np.array_equal(again, ref)
+    assert editor.plan(tl, inp, cache).misses  # nothing is cached yet
+    ref = editor.render(tl, inp, cache, editor.Runner(LIB, MODEL, threads=2))
+    assert cache.puts == 3  # all blocks: 0-30 s, 30-60 s, 60-70 s
+    assert editor.plan(tl, inp, cache).misses == []  # the run left nothing to compute
+    # a second run takes every block from the cache: no model is loaded (the paths do not exist)
+    again = editor.render(tl, inp, cache, editor.Runner("no-lib", "no-model", threads=2))
+    assert np.array_equal(again, ref) and cache.puts == 3
     # without a cache: the same samples (the grid does not depend on it, nor on the threads)
-    assert np.array_equal(pipeline.clean_audio(x, LIB, MODEL, opts, threads=4), ref)
+    assert np.array_equal(editor.render(tl, inp, runner=editor.Runner(LIB, MODEL, threads=4)), ref)
 
 
 @needs_dfn
@@ -635,16 +636,20 @@ def test_whole_file_noise_removal_has_no_seam_steps_and_matches_a_contiguous_run
 def test_light_blocks_equal_the_contiguous_run_at_the_measured_level_and_a_cached_block_equals_a_fresh_one():
     x = real_noisy(70, 3)[:, 0]
     contiguous = dfn.denoise_array(x, LIB, MODEL, threads=1, segment_seconds=1e6, overlap_seconds=0.5)
-    cache = blocks.MemoryCache()
-    hooks = blocks.cache_hooks(cache, lambda d: blocks.block_key("light", "t", 0, *d))
-    first = dfn.denoise_array(x, LIB, MODEL, threads=2, hooks=hooks)
+    first = dfn.denoise_array(x, LIB, MODEL, threads=2)
     block = (30 * SR, 60 * SR)
     level = snr_db(contiguous[slice(*block)], first[slice(*block)])
     print(f"light block 30-60 s vs a contiguous run: {level:.1f} dB")
     assert level > 50  # (>= 58 dB measured on real recordings with 16 s of context)
+    # the editor's blocks are these blocks: a render fills the cache, and a second one takes them all from it
+    cache = blocks.MemoryCache()
+    inp = editor.Inputs(x[:, None].copy(), "t")
+    tl = noise_tl(70, (0, 70, 100.0, "light"))
+    made = editor.render(tl, inp, cache, editor.Runner(LIB, MODEL, threads=2))
+    assert snr_db(first, made[:, 0]) > 60
     puts = cache.puts
-    again = dfn.denoise_array(x, LIB, MODEL, threads=2, hooks=hooks)  # all hits
-    assert cache.puts == puts and np.array_equal(again, first)
+    again = editor.render(tl, inp, cache, runner=None)  # all hits
+    assert cache.puts == puts and np.array_equal(again, made)
     fresh = dfn.denoise_array(x[10 * SR:], LIB, MODEL, threads=2, grid_offset=10 * SR)  # a stretch of the file, on the file's grid
     assert np.array_equal(fresh[20 * SR:50 * SR], first[30 * SR:60 * SR])  # the 30-60 s block is the same block (its 16 s of context start after 10 s)
 
@@ -663,10 +668,11 @@ def test_heavy_blocks_follow_the_contiguous_run_closely_and_do_not_depend_on_the
     print(f"heavy blocks (3 s, 3 s context) vs a contiguous run: {level:.1f} dB")
     assert 35 < level < 120  # (close to the contiguous run, but not the same run: the contexts do not reach the start of the file)
     cache = blocks.MemoryCache()
-    hooks = blocks.cache_hooks(cache, lambda d: blocks.block_key("heavy", "t", 0, *d))
-    first = dpdfnet.denoise_array(x, threads=2, hooks=hooks)
+    inp = editor.Inputs(x[:, None].copy(), "t")
+    tl = noise_tl(12, (0, 12, 100.0, "heavy"))
+    first = editor.render(tl, inp, cache, editor.Runner(LIB, MODEL, threads=2))
     puts = cache.puts
-    assert puts == 4 and np.array_equal(dpdfnet.denoise_array(x, threads=2, hooks=hooks), first) and cache.puts == puts
+    assert puts == 4 and np.array_equal(editor.render(tl, inp, cache, runner=None), first) and cache.puts == puts
 
 
 @needs_heavy
@@ -706,12 +712,16 @@ def test_voice_rebuild_blocks_equal_the_whole_file_run_bit_for_bit(monkeypatch):
     assert restore.block_bounds(4, len(x))[1] == len(x) and len(got[4]) < restore.block_samples()
     # a whole-file run with a cache is all blocks; a run with some blocks cached makes only the others
     cache = blocks.MemoryCache()
-    hooks = blocks.cache_hooks(cache, lambda d: blocks.rebuild_key("t", d[0], d[1], len(x), 4.0, 0.5))
-    first = restore.restore(x, SIDON, threads=3, hooks=hooks)
-    assert cache.puts == restore.block_count(len(x)) and np.array_equal(first, whole)
-    del cache.blocks[blocks.rebuild_key("t", 0, 3, len(x), 4.0, 0.5)]  # (one block lost)
+    inp = editor.Inputs(x[:, None].copy(), "t")
+    tl = Timeline(x.shape[0] / SR).paint("rebuild", 0, x.shape[0] / SR)
+    runner = editor.Runner(restore_model_dir=SIDON, threads=3)
+    first = editor.render(tl, inp, cache, runner)
+    assert cache.puts == restore.block_count(len(x))
     puts = cache.puts
-    assert np.array_equal(restore.restore(x, SIDON, threads=3, hooks=hooks), whole) and cache.puts == puts + 1
+    assert np.array_equal(editor.render(tl, inp, cache, runner=None), first) and cache.puts == puts  # all from the cache
+    lost = next(t.key for t in editor.plan(tl, inp, cache).tasks if t.step == "rebuild")
+    del cache.blocks[lost]  # (one block lost)
+    assert np.array_equal(editor.render(tl, inp, cache, runner), first) and cache.puts == puts + 1
 
 
 def test_the_dither_of_a_window_is_seeded_by_its_index_and_the_first_window_is_what_it_always_was():
@@ -740,8 +750,9 @@ def test_render_with_real_models_matches_the_whole_file_steps_and_a_second_rende
     spy = Spy(cache)
     again = editor.render(tl, inp, spy, runner=None)  # nothing left to run: no runner needed, same samples
     assert np.array_equal(again, y)
-    # outside the rebuilt part (and its 0.45 s of join) the noise removal alone, Leveled: what clean_audio makes
-    whole = pipeline.clean_audio(x, LIB, MODEL, pipeline.CleanOptions(atten_lim_db=24.0, noise="light", leveling=False), threads=2)
+    # outside the rebuilt part (and its 0.45 s of join) the noise removal alone, Leveled: the whole-file noise removal
+    whole = editor.render(Timeline.from_clean_options(inp.seconds, pipeline.CleanOptions(atten_lim_db=24.0, noise="light", leveling=False)),
+                          inp, cache, runner)
     ref = clarity.process(x, np.array(whole), SR, clarity.ClarityParams())  # (the whole file Leveled: the leveling of the editor is measured per part)
     assert ref.shape == y.shape
     # a strength change reruns no model, and the rebuilt part is the same samples

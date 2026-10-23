@@ -14,7 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from acw_common import clarity, dfn, pipeline  # noqa: E402
+from acw_common import clarity, dfn, editor, pipeline  # noqa: E402
+from acw_common.timeline import Timeline  # noqa: E402
 from acw_common.ffmpeg import FFmpeg, MediaError  # noqa: E402
 
 HOME = Path.home() / "audio-cleaner"
@@ -79,6 +80,12 @@ def test_limiter_respects_ceiling_and_alignment():
     assert len(y) == len(x)
 
 
+def clean(x, opts, runner=None, **kw):
+    """The whole-file choices `opts` rendered the one way there is: the timeline they stand for, on the recording `x`."""
+    inp = editor.Inputs(np.ascontiguousarray(x, dtype=np.float32), "t")
+    return editor.render(Timeline.from_clean_options(inp.seconds, opts), inp, runner=runner, **kw)
+
+
 def test_clarity_keeps_shape_and_is_finite():
     _, noisy = voiced_noise(2.0)
     stereo = np.stack([noisy, noisy * 0.5], axis=1)
@@ -87,40 +94,35 @@ def test_clarity_keeps_shape_and_is_finite():
 
 
 @needs_dfn
-def test_clean_audio_reduces_noise_in_pauses():
-    clean, noisy = voiced_noise(3.0)
+def test_rendering_the_whole_file_reduces_noise_in_pauses():
+    clean_signal, noisy = voiced_noise(3.0)
     progress = []
-    y = pipeline.clean_audio(noisy, LIB, MODEL, pipeline.CleanOptions(leveling=False), threads=1, progress=progress.append)
+    y = clean(noisy, pipeline.CleanOptions(leveling=False, noise="light"), editor.Runner(LIB, MODEL, threads=1), progress=progress.append)
     assert y.shape == (len(noisy), 1) and np.isfinite(y).all()
     assert progress[-1] == 1.0 and progress == sorted(progress)
-    assert pause_gain_db(noisy, clean, y) > 10  # at least 10 dB less noise between syllables
+    assert pause_gain_db(noisy, clean_signal, y) > 10  # at least 10 dB less noise between syllables
 
 
-def test_clean_audio_without_denoising_and_without_leveling_returns_the_input(tmp_path):
+def test_rendering_without_denoising_and_without_leveling_returns_the_input(tmp_path):
     _, noisy = voiced_noise(2.0)
     missing = tmp_path / "no-such-library"  # no noise remover is loaded at all
-    report: dict = {}
     progress = []
     opts = pipeline.CleanOptions(denoise=False, leveling=False)
-    y = pipeline.clean_audio(noisy, missing, missing, opts, threads=1, progress=progress.append, report=report)
+    y = clean(noisy, opts, editor.Runner(missing, missing, threads=1), progress=progress.append)
     assert y.shape == (len(noisy), 1) and y.dtype == np.float32 and np.array_equal(y[:, 0], noisy)
-    assert report["noise"] == "none" and "noise_db" not in report
-    assert progress and progress[-1] == 1.0
-    out = np.zeros(len(noisy), dtype=np.float32)  # written into the given array
-    got = pipeline.clean_audio(noisy, missing, missing, opts, out=out)
-    assert np.array_equal(out, noisy) and np.shares_memory(got, out)
+    out = np.zeros((len(noisy), 1), dtype=np.float32)  # written into the given array
+    got = clean(noisy, opts, out=out)
+    assert np.array_equal(out[:, 0], noisy) and np.shares_memory(got, out)
 
 
-def test_clean_audio_without_denoising_only_levels_and_keeps_the_noise(tmp_path):
-    clean, noisy = voiced_noise(4.0)
+def test_rendering_without_denoising_only_levels_and_keeps_the_noise(tmp_path):
+    clean_signal, noisy = voiced_noise(4.0)
     missing = tmp_path / "no-such-library"
-    report: dict = {}
-    y = pipeline.clean_audio(noisy, missing, missing, pipeline.CleanOptions(denoise=False, leveling=True, loudness_lufs=-16.0),
-                             threads=1, report=report)
-    assert y.shape == (len(noisy), 1) and np.isfinite(y).all() and report["noise"] == "none"
+    y = clean(noisy, pipeline.CleanOptions(denoise=False, leveling=True, loudness_lufs=-16.0), editor.Runner(missing, missing, threads=1))
+    assert y.shape == (len(noisy), 1) and np.isfinite(y).all()
     assert not np.allclose(y[:, 0], noisy)  # evened out and set to the loudness
-    pauses = np.abs(clean) < 1e-4
-    voiced = np.abs(clean) > 0.05
+    pauses = np.abs(clean_signal) < 1e-4
+    voiced = np.abs(clean_signal) > 0.05
     gap_before = 20 * np.log10(np.sqrt(np.mean(noisy[voiced] ** 2)) / np.sqrt(np.mean(noisy[pauses] ** 2)))
     gap_after = 20 * np.log10(np.sqrt(np.mean(y[voiced, 0] ** 2)) / np.sqrt(np.mean(y[pauses, 0] ** 2)))
     assert gap_after < gap_before + 6  # the noise between syllables is still there (nothing like the 10+ dB denoising takes off)
@@ -244,6 +246,6 @@ def test_cancel_stops_quickly():
     threading.Timer(0.3, cancel.set).start()
     t0 = time.monotonic()
     with pytest.raises(pipeline.Cancelled):
-        pipeline.clean_audio(noisy, LIB, MODEL, threads=2, cancel=cancel)
+        clean(noisy, pipeline.CleanOptions(noise="light"), editor.Runner(LIB, MODEL, threads=2), cancel=cancel)
     assert time.monotonic() - t0 < 5
 

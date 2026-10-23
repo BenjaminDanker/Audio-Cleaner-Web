@@ -1,102 +1,44 @@
-"""The strength slider's arithmetic, the live blend the player reads, and the player that plays it: the blend is bit for bit what the
-pipeline puts in the saved file, changing the strength changes the very next piece of sound, and the player works with a sound card that
-pulls (QAudioSink) without needing one."""
+"""The named strengths (blend.py: the same scale as the website's) and the live player (gui/live_audio.LivePlayer) that plays the editor's live
+mix (live_mix.LiveMix): changing the timeline changes the very next piece of sound, and the player works with a sound card that pulls
+(QAudioSink) without needing one. What the mix sounds like is in test_editor_model.py."""
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from acw_common import pipeline
-from audio_cleaner_desktop import blend
+from acw_common.timeline import Timeline
+from audio_cleaner_desktop import blend, engine, live_mix
 
 from fake_media import FakeSink, MediaStatus, PlaybackState, namespace, sink_factory
 
-SR = blend.SAMPLE_RATE
+SR = live_mix.SR
 
 
-def signals(n=48000, seed=0):
+def mix_at(db: float, n: int = SR * 2, seed: int = 0):
+    """A live mix of two seconds (stereo) with made-up sound: the recording, and the light remover's blocks (a quieter sound), heard at `db`."""
     rng = np.random.default_rng(seed)
-    x = (0.1 * rng.standard_normal((n, 2))).astype(np.float32)
-    full = (0.05 * rng.standard_normal((n, 2))).astype(np.float32)
-    return full, x
+    src = (0.1 * rng.standard_normal((n, 2))).astype(np.float32)
+    layers = live_mix.Layers(src, [0, 1])
+    layers.array("light")[:] = (0.05 * rng.standard_normal((n, 2))).astype(np.float32)
+    layers.mark("light", 0, n)
+    return live_mix.LiveMix(layers, noise_timeline(n / SR, db))
+
+
+def noise_timeline(seconds: float, db: float) -> Timeline:
+    return Timeline(seconds).paint("noise", 0, seconds, {"strength_db": db, "remover": "light"})
 
 
 # ---------------------------------------------------------------------------------------------------- the scale
 
-def test_the_four_names_are_equally_spaced_on_the_slider_with_the_dB_between_them():
-    assert [blend.db_at(p) for p in (0, 1, 2, 3)] == [12.0, 24.0, 40.0, 100.0]
-    assert blend.db_at(0.5) == 18.0 and blend.db_at(2.5) == 70.0 and blend.db_at(-1) == 12.0 and blend.db_at(9) == 100.0
-    for db in (12, 15.5, 24, 33, 40, 70, 100):
-        assert blend.db_at(blend.pos_of(db)) == pytest.approx(db)
+def test_the_four_names_are_equally_spaced_on_the_scale_with_the_dB_between_them():
+    assert blend.POINTS == (12.0, 24.0, 40.0, 100.0)
+    assert [blend.pos_of(db) for db in blend.POINTS] == [0.0, 1.0, 2.0, 3.0]
+    assert blend.pos_of(18) == 0.5 and blend.pos_of(70) == 2.5 and blend.pos_of(5) == 0.0 and blend.pos_of(500) == 3.0
     assert [blend.strength_name(d) for d in (12, 24, 40, 100)] == ["Gentle", "Balanced", "Strong", "Maximum"]
     assert blend.strength_name(30) == "Between Balanced and Strong" and blend.strength_name(18) == "Between Gentle and Balanced"
     assert blend.strength_name(70) == "Between Strong and Maximum"
-    assert blend.strength_key(24.2) == "balanced" and blend.strength_key(30) is None and blend.snap(39.7) == 40.0 and blend.snap(31.3) == 31.3
-    from audio_cleaner_desktop import engine
-
+    assert blend.strength_key(24.2) == "balanced" and blend.strength_key(30) is None and blend.strength_key(100) == "max"
     assert {k: db for k, _, db in blend.NAMES} == engine.STRENGTHS  # the same four as the engine's
-
-
-def test_the_share_of_the_recording_is_the_pipelines():
-    assert blend.mix_of(100) == 0.0 and blend.mix_of(24) == pytest.approx(10 ** (-24 / 20)) and blend.mix_of(12) == pipeline.strength_mix(12)
-
-
-# ---------------------------------------------------------------------------------------------------- the blend
-
-@pytest.mark.parametrize("plan", [[0, 1], [0, 0], [0, None], [None, 1]])
-@pytest.mark.parametrize("db", [12.0, 24.0, 31.0, 40.0, 100.0])
-def test_the_blend_is_bit_for_bit_what_the_pipeline_writes(plan, db):
-    full, x = signals()
-    cols = sorted({c for c in plan if c is not None})
-    kept_full = np.zeros_like(full)
-    kept_full[:, cols] = full[:, cols]  # a saved copy only holds the channels that were cleaned
-    expected = kept_full.copy()
-    pipeline.blend_strength(expected, x, db, cols)
-    for c, src in enumerate(plan):  # what pipeline._after_noise does with the other channels
-        expected[:, c] = 0.0 if src is None else expected[:, src]
-    stream = blend.BlendStream(kept_full, x, plan, exact=True)
-    stream.set_strength(db)
-    got = np.concatenate([stream.read(s, 7000) for s in range(0, stream.frames, 7000)])
-    assert got.dtype == np.float32 and np.array_equal(got, expected)
-
-
-def test_the_loudness_match_keeps_the_volume_when_the_strength_moves():
-    full, x = signals(96000)
-    full *= 0.3  # the cleaned sound is quieter than the recording
-    stream = blend.BlendStream(full, x, [0, 1])
-    target = float(np.sqrt(np.mean(np.square(full))))
-    for db in (12.0, 24.0, 40.0, 100.0):
-        stream.set_strength(db)
-        heard = stream.read(0, stream.frames)
-        assert float(np.sqrt(np.mean(np.square(heard)))) == pytest.approx(target, rel=0.02)
-    stream.exact = True  # the saved file is exactly this blend: no match
-    stream.set_strength(12.0)
-    exact = stream.read(0, stream.frames)
-    plain = blend.blend_block(full, x, [0, 1], blend.mix_of(12.0))
-    assert np.array_equal(exact, plain)
-
-
-def test_original_plays_the_recording_through_the_same_stream_at_the_same_place():
-    full, x = signals()
-    stream = blend.BlendStream(full, x, [0, None], exact=True)
-    stream.set_original(True)
-    assert np.array_equal(stream.read(100, 50), x[100:150])  # every channel of the recording, even the one the cleaned sound leaves silent
-    stream.set_original(False)
-    assert not np.array_equal(stream.read(100, 50), x[100:150])
-
-
-def test_reads_past_the_end_are_short_and_pcm16_is_clipped_and_interleaved():
-    full, x = signals(1000)
-    stream = blend.BlendStream(full * 40, x, [0, 1], exact=True)
-    assert len(stream.read(900, 500)) == 100 and len(stream.read(1000, 10)) == 0 and len(stream.read(-5, 3)) == 3
-    pcm = np.frombuffer(stream.read_pcm16(0, 1000), dtype="<i2").reshape(-1, 2)
-    assert pcm.shape == (1000, 2) and pcm.max() <= 32767 and pcm.min() >= -32767 and (np.abs(pcm) == 32767).any()
-
-
-def test_a_copy_and_a_recording_of_different_lengths_are_refused():
-    full, x = signals(1000)
-    with pytest.raises(ValueError):
-        blend.BlendStream(full[:900], x, [0, 1])
 
 
 # ---------------------------------------------------------------------------------------------------- the player
@@ -106,8 +48,7 @@ def live(qapp):
     from audio_cleaner_desktop.gui import live_audio
 
     FakeSink.made.clear()
-    full, x = signals(SR * 2)
-    stream = blend.BlendStream(full, x, [0, 1], exact=True)
+    stream = mix_at(100.0)
     player = live_audio.LivePlayer(namespace(), sink_factory=sink_factory)
     events = {"state": [], "status": [], "errors": [], "positions": []}
     player.playbackStateChanged.connect(events["state"].append)
@@ -115,7 +56,7 @@ def live(qapp):
     player.errorOccurred.connect(lambda e, m: events["errors"].append(m))
     player.positionChanged.connect(events["positions"].append)
     player.load(stream)
-    yield player, stream, events, full, x
+    yield player, stream, events
     player.stop()
 
 
@@ -141,18 +82,17 @@ def test_the_card_gets_the_sound_in_order_and_the_position_follows_what_it_playe
     assert player.position() == 200
 
 
-def test_moving_the_strength_while_it_plays_changes_the_next_sound(live):
+def test_a_change_of_the_timeline_while_it_plays_changes_the_next_sound(live):
     player, stream, events, *_ = live
-    stream.set_strength(100.0)
     player.play()
     sink = FakeSink.made[-1]
     first = sink.pull(4800)
-    stream.set_strength(12.0)  # the slider is moved
+    stream.set_timeline(noise_timeline(2.0, 12.0))  # the strength of the part is changed in the editor
     second = sink.pull(4800)
-    stream.set_strength(100.0)
+    stream.set_timeline(noise_timeline(2.0, 100.0))
     assert first == stream.read_pcm16(0, 4800)
     assert second != stream.read_pcm16(4800, 4800)  # it was the gentler mix
-    stream.set_strength(12.0)
+    stream.set_timeline(noise_timeline(2.0, 12.0))
     assert second == stream.read_pcm16(4800, 4800)
 
 
@@ -201,8 +141,7 @@ def test_the_end_is_announced_once_and_play_starts_over(live):
 def test_a_sound_card_that_cannot_play_it_is_reported_not_raised(qapp):
     from audio_cleaner_desktop.gui import live_audio
 
-    full, x = signals(4800)
-    stream = blend.BlendStream(full, x, [0, 1], exact=True)
+    stream = mix_at(100.0, 4800)
 
     def refuse(rate, channels, device):
         raise RuntimeError("This computer's sound output can't play this live.")

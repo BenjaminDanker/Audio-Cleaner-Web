@@ -376,6 +376,6 @@ def test_the_automatic_strength_of_the_pipeline_is_the_models_where_the_measurem
         assert pipeline.automatic_choices(s["noiseDb"]) == (remover, pipeline.strength_for(s["noiseDb"]))
         differs += db != pipeline.strength_for(s["noiseDb"])
     assert differs > 20  # the model really decides differently from the rule on many recordings
-    # the figure given is the one used (clean_audio measures the recording's own, then measures the rest with it)
+    # the figure given is the one used (the engines measure the recording's own, then measure the rest with it)
     base = stats()
     assert pipeline.automatic_choices(5.0, {**base, "noiseDb": 99.0})[0] == "heavy"

@@ -9,7 +9,7 @@ import json
 import numpy as np
 import pytest
 
-from acw_common import blocks, dfn, dpdfnet, editor, kept, pipeline, restore
+from acw_common import blocks, dfn, dpdfnet, editor, pipeline, restore
 from acw_common.timeline import Timeline
 from audio_cleaner_desktop import __main__ as app_main
 from audio_cleaner_desktop import cli, copies, editor_job, editor_session, engine, redo, resources
@@ -60,7 +60,6 @@ def no_models(monkeypatch):
         monkeypatch.setattr(mod, "run_windows", boom)
     monkeypatch.setattr(restore, "restore", boom)
     monkeypatch.setattr(restore, "restore_blocks", boom)
-    monkeypatch.setattr(pipeline, "clean_audio", boom)
 
 
 def decode(path):
@@ -96,9 +95,9 @@ def test_an_edit_reuses_the_cache_so_a_new_strength_runs_no_model_and_equals_the
     x = pipeline.decode_for_clean(ff, clip, ff.probe(clip), 600)
     fresh = editor.render(tl, editor.Inputs(x, "other"), blocks.MemoryCache(), editor_job.runner(2))
     no_models(monkeypatch)
-    wanted = redo.Wanted(atten_lim_db=24.0, leveling=True, output_name="again.wav")
+    wanted = redo.Wanted(timeline=tl.to_json(), output_name="again.wav")
     p = redo.plan(job, wanted, job.check_original(), voice_model=False)
-    assert p.sound == redo.SOUND_EDITOR and not p.slow and p.ok
+    assert not p.slow and p.ok and p.steps[0].startswith("Put the sound together")
     out = redo.run(job, wanted)
     got = np.asarray(decode(out.output))
     assert job.made["atten_lim_db"] == 24.0 and job.made["strength"] == "balanced" and job.editor["timeline"]["layers"]["noise"][0]["strength_db"] == 24.0
@@ -170,36 +169,6 @@ def test_a_whole_file_run_with_echo_removal_fills_the_blocks_the_editor_plans_ag
 
 
 @pytest.mark.native
-def test_old_jobs_with_saved_copies_open_and_are_turned_into_blocks(clip, tmp_path, monkeypatch):
-    ff = engine.ffmpeg()
-    x = pipeline.decode_for_clean(ff, clip, ff.probe(clip), 600)
-    made = {}
-    pipeline.clean_audio(x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="light", leveling=False),
-                         keep=lambda name, y, cols: made.update(y=np.array(y), cols=cols))
-    folder = copies.new_job_dir(tmp_path / "jobs")
-    job = copies.JobCopies.create(folder, clip, copies.fingerprint(clip), engine.media_facts(ff.probe(clip)))
-    job.data["samples"] = len(x)
-    job.put_audio(copies.NOISE, kept.save(ff, made["y"], made["cols"], folder / "noise"), plan=[0], profile="light", echo=False)
-    job.made.update({"atten_lim_db": 100.0, "rebuilt": False, "leveling": False, "loudness": "podcast", "noise": "light", "echo": False})
-    job.save()
-    assert not job.has_blocks and editor_session.can_edit(job) and editor_job.needs_migration(job)
-    session = editor_session.Session.open(job, scratch_parent=tmp_path / "scratch")
-    try:
-        assert job.has_blocks and not job.has(copies.NOISE) and not (folder / "noise.flac").exists()  # the copy became blocks
-        assert editor_job.quote_for(job, editor_job.baseline_timeline(job)).nothing
-        assert session.mix is not None and session.mix.frames == len(x) and abs(session.mix.read(0, 4800)).max() > 0
-    finally:
-        session.close()
-    no_models(monkeypatch)
-    out = redo.run(job, redo.Wanted(atten_lim_db=24.0, leveling=False, output_name="migrated.wav"))
-    expected = pipeline.blend_strength(made["y"].copy(), x, 24.0)  # what the old copy gives at this strength
-    assert float(np.max(np.abs(decode(out.output) - expected[:, 0][:len(decode(out.output))]))) < 1e-3
-    # a job with nothing saved, or an original that changed, cannot be opened for editing
-    bare = copies.JobCopies.create(copies.new_job_dir(tmp_path / "jobs"), clip, copies.fingerprint(clip), {})
-    assert not editor_session.can_edit(bare) and not editor_session.can_edit(None)
-
-
-@pytest.mark.native
 def test_a_block_that_cannot_be_written_never_fails_the_job_and_the_notice_says_so(clip, tmp_path, monkeypatch):
     import errno
 
@@ -264,14 +233,14 @@ def test_voice_rebuild_on_one_part_makes_only_that_parts_blocks_and_wins_over_th
     monkeypatch.setattr(restore, "restore_blocks", fake_blocks)
     tl = editor_job.baseline_timeline(job)
     tl.paint("rebuild", 1.0, 2.0)
-    wanted = redo.Wanted(timeline=tl.to_json(), leveling=False, output_name="rebuilt-part.wav")
+    wanted = redo.Wanted(timeline=tl.to_json(), output_name="rebuilt-part.wav")
     p = redo.plan(job, wanted, job.check_original(), voice_model=True)
-    assert p.sound == redo.SOUND_EDITOR and p.slow and "Process what changed" in p.steps[0]
+    assert p.slow and "Process what changed" in p.steps[0]
     assert editor_job.quote_for(job, tl).steps == {"rebuild": 1}
     out = redo.run(job, wanted)
     assert asked == [[0]] and block_count(job) == before + 1  # one block for the part, no noise block again
     assert job.made["rebuilt"] is False and job.editor["timeline"]["layers"]["rebuild"][0]["start"] == 1.0
-    plain = redo.run(job, redo.Wanted(timeline=editor_job.baseline_timeline(job).to_json(), leveling=False, output_name="plain.wav"))
+    plain = redo.run(job, redo.Wanted(timeline=editor_job.baseline_timeline(job).to_json(), output_name="plain.wav"))
     heard, ref = decode(out.output), decode(plain.output)
     n = min(len(heard), len(ref))
     assert float(np.max(np.abs(heard[: int(0.6 * SR)] - ref[: int(0.6 * SR)]))) < 1e-3  # outside the part and its join: the same

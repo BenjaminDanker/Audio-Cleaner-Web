@@ -1,7 +1,7 @@
 """Strength is a blend: a noise model run at an attenuation limit of X dB gives (to float precision) the blend
 (1 - a) * full + a * recording of its own full-strength output with the recording, a = 10 ** (-X / 20). The pipeline therefore runs
-the models at full strength only and blends afterwards (pipeline.blend_strength), which lets a job keep the full-strength output and
-change strength and leveling later without a model run (pipeline.redo_denoised). Every path of clean_audio is checked
+the models at full strength only and blends afterwards (editor.render of the timeline), which lets a job keep the full-strength blocks
+and change strength and leveling later without a model run. Every path of the render is checked
 against the model's own limit: light (DeepFilterNet3) and heavy (DPDFNet-8), a short recording and one cut into segments, spans around
 digital silence, stereo, dual-mono. The SNR of the difference is above 100 dB on all of them (measured 138 dB light, 147 dB heavy)."""
 from __future__ import annotations
@@ -9,7 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from acw_common import dfn, dpdfnet, kept, pipeline
+from acw_common import blocks, dfn, dpdfnet, editor, kept, pipeline
+from acw_common.timeline import Timeline
 from acw_common.ffmpeg import FFmpeg
 
 from test_common import FF_DIR, LIB, MODEL, needs_dfn, needs_ff
@@ -44,17 +45,6 @@ def test_strength_mix_is_the_share_of_the_recording_that_stays():
     assert pipeline.strength_mix(100.0) == 0.0 and pipeline.strength_mix(120.0) == 0.0
     assert pipeline.strength_mix(20.0) == pytest.approx(0.1) and pipeline.strength_mix(40.0) == pytest.approx(0.01)
     assert pipeline.strength_mix(0.0) == 1.0 and pipeline.strength_mix(-20.0) == pytest.approx(0.1)  # a limit is a size, not a sign
-
-
-def test_blend_strength_works_in_place_on_the_chosen_channels_and_does_nothing_at_full_strength():
-    rng = np.random.default_rng(0)
-    x = rng.standard_normal((5000, 2)).astype(np.float32)
-    y = rng.standard_normal((5000, 2)).astype(np.float32)
-    kept_y = y.copy()
-    assert pipeline.blend_strength(y, x, 100.0) is y and np.array_equal(y, kept_y)
-    out = pipeline.blend_strength(y, x, 24.0, channels=[1])
-    assert out is y and np.array_equal(y[:, 0], kept_y[:, 0])  # channel 0 was not asked for
-    assert np.allclose(y[:, 1], blend(kept_y[:, 1], x[:, 1], 24.0), atol=1e-7)
 
 
 def test_automatic_choices_are_one_function():
@@ -104,15 +94,17 @@ def test_heavy_remover_cut_into_segments_follows_the_same_rule():
     assert snr_db(_heavy(x, 24.0, threads=4), blend(full, x, 24.0)) > 100
 
 
-# ---------------------------------------------------------------- every path of clean_audio
+# ---------------------------------------------------------------- every path of the render
 
-def _clean(x, db, noise, **kw):
+def _clean(x, db, noise, cache=None, runner=None):
+    """The whole file at strength `db` with the remover `noise`: the timeline those choices stand for, rendered."""
     opts = pipeline.CleanOptions(atten_lim_db=db, leveling=False, noise=noise)
-    return pipeline.clean_audio(x, LIB, MODEL, opts, threads=2, **kw)
+    inp = editor.Inputs(np.ascontiguousarray(x, dtype=np.float32), "t")
+    return editor.render(Timeline.from_clean_options(inp.seconds, opts), inp, cache, runner or editor.Runner(LIB, MODEL, threads=2))
 
 
 def _per_channel_reference(x, db, remover):
-    """What the pipeline gave before the strength was a blend: the model run at the limit on every channel, digital silence left silent."""
+    """What the models give on their own: the model run at the limit on every channel, digital silence left silent."""
     out = np.zeros_like(x)
     for c in range(x.shape[1]):
         for a, b in pipeline.sound_spans(x[:, c]):
@@ -121,7 +113,7 @@ def _per_channel_reference(x, db, remover):
 
 
 @needs_dfn
-def test_clean_audio_light_mono_stereo_and_dual_mono_equal_the_model_at_that_limit():
+def test_light_render_mono_stereo_and_dual_mono_equal_the_model_at_that_limit():
     db = 24.0
     mono = _speechlike(6, 5)
     stereo = np.stack([mono, _speechlike(6, 5, seed=2)], 1)
@@ -132,7 +124,7 @@ def test_clean_audio_light_mono_stereo_and_dual_mono_equal_the_model_at_that_lim
 
 
 @needs_dfn
-def test_clean_audio_light_around_digital_silence_equals_the_model_at_that_limit():
+def test_light_render_around_digital_silence_equals_the_model_at_that_limit():
     """Silent stretches are not run through the model; they stay silent (the recording there is zeros, so is its blend)."""
     x = _speechlike(10, 5)
     x = np.concatenate([x[: 4 * SR], np.zeros(3 * SR, np.float32), x[4 * SR:]])[:, None]
@@ -144,7 +136,7 @@ def test_clean_audio_light_around_digital_silence_equals_the_model_at_that_limit
 
 @needs_heavy
 @needs_dfn
-def test_clean_audio_heavy_mono_and_stereo_equal_the_model_at_that_limit(tmp_path):
+def test_heavy_render_mono_and_stereo_equal_the_model_at_that_limit(tmp_path):
     mono = _speechlike(8, 5)
     stereo = np.stack([mono, _speechlike(8, 5, seed=2)], 1)
     for x in (mono[:, None], stereo):
@@ -152,52 +144,38 @@ def test_clean_audio_heavy_mono_and_stereo_equal_the_model_at_that_limit(tmp_pat
         assert snr_db(_per_channel_reference(x, 24.0, _heavy), got) > 100
 
 
-@needs_dfn
-def test_a_weaker_strength_needs_no_extra_model_run_for_the_automatic_strength(monkeypatch):
-    """atten_lim_db=None: measured once, the strength that fits the file is the blend of the one full-strength run."""
-    from acw_common import analysis, reco_model
-
-    x = _speechlike(6, 10)[:, None]
-    report: dict = {}
-    got = pipeline.clean_audio(x, LIB, MODEL, pipeline.CleanOptions(atten_lim_db=None, leveling=False, noise="light"), threads=1, report=report)
-    stats = analysis.measure(x, LIB, MODEL)  # the same measurements, on their own: the strength is what the model says about them
-    assert report["atten_lim_db"] == reco_model.STRENGTH_DB[reco_model.recommend(stats, min_seconds=0.0).strength]
-    assert snr_db(_per_channel_reference(x, report["atten_lim_db"], _light), got) > 100
-
-
-# ---------------------------------------------------------------- redoing the later steps from the kept output
+# ---------------------------------------------------------------- a new strength from the cached blocks
 
 @needs_dfn
 @pytest.mark.parametrize("leveling", (False, True))
-def test_redoing_from_the_kept_full_strength_output_is_the_same_as_cleaning_again(leveling):
-    """The kept copy plus a new strength (and Leveling) gives, bit for bit, what a whole new run with that strength gives."""
+def test_a_new_strength_from_the_cached_blocks_is_the_same_as_rendering_again_from_nothing(leveling):
+    """The blocks of the first render plus a new strength (and Leveling) give, bit for bit, what a whole new render with that strength gives,
+    and no model runs for it."""
     x = np.stack([_speechlike(6, 8), _speechlike(6, 8, seed=2)], 1)
-    keep: dict = {}
+    inp = editor.Inputs(x, "t")
+    cache = blocks.MemoryCache()
+    runner = editor.Runner(LIB, MODEL, threads=1)
 
-    def hold(name, y, todo):
-        keep[name] = (y.copy(), todo)
-
-    first = pipeline.clean_audio(x, LIB, MODEL, pipeline.CleanOptions(atten_lim_db=100.0, leveling=leveling, noise="light"), threads=1, keep=hold)
-    full, todo = keep["denoised"]
-    assert todo == [0, 1] and first.shape == x.shape
-    for db in (12.0, 40.0):
+    def render(db, cache=None, runner=runner):
         opts = pipeline.CleanOptions(atten_lim_db=db, leveling=leveling, noise="light")
-        again = pipeline.clean_audio(x, LIB, MODEL, opts, threads=1)
-        redone = pipeline.redo_denoised(x, full.copy(), pipeline.channel_plan(x), opts)
-        assert np.array_equal(again, redone)
+        return editor.render(Timeline.from_clean_options(inp.seconds, opts), inp, cache, runner)
+
+    first = render(100.0, cache)
+    assert first.shape == x.shape and cache.puts > 0
+    puts = cache.puts
+    for db in (12.0, 40.0):
+        redone = render(db, cache, runner=None)  # no runner: any block still to make would fail
+        assert np.array_equal(render(db), redone)
+    assert cache.puts == puts
 
 
 @needs_dfn
-def test_redoing_with_the_two_sides_the_same_fills_the_copy_after_the_blend():
+def test_a_render_with_the_two_sides_the_same_makes_one_channel_and_copies_it():
     mono = _speechlike(5, 8)
     x = np.stack([mono, mono], 1)
-    keep: dict = {}
-    pipeline.clean_audio(x, LIB, MODEL, pipeline.CleanOptions(leveling=False, noise="light"), threads=1, keep=lambda n, y, t: keep.update({n: (y.copy(), t)}))
-    full, todo = keep["denoised"]
-    assert todo == [0] and pipeline.channel_plan(x) == [0, 0]
-    opts = pipeline.CleanOptions(atten_lim_db=24.0, leveling=False, noise="light")
-    redone = pipeline.redo_denoised(x, full.copy(), pipeline.channel_plan(x), opts)
-    assert np.array_equal(redone[:, 0], redone[:, 1]) and np.array_equal(redone, pipeline.clean_audio(x, LIB, MODEL, opts, threads=1))
+    assert pipeline.channel_plan(x) == [0, 0]
+    got = _clean(x, 24.0, "light")
+    assert np.array_equal(got[:, 0], got[:, 1]) and snr_db(_light(mono, 24.0), got[:, 0]) > 100
 
 
 # ---------------------------------------------------------------- the 24-bit copies

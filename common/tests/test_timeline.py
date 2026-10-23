@@ -22,7 +22,7 @@ def test_whole_file_defaults_are_every_asked_layer_on_the_whole_file():
     assert list(Timeline.whole_file(10.0, noise=False, leveling=False)) == []
 
 
-def test_from_clean_options_matches_what_clean_audio_does():
+def test_from_clean_options_is_the_timeline_the_whole_file_choices_stand_for():
     o = pipeline.CleanOptions(atten_lim_db=40.0, noise="heavy", loudness_lufs=-18.0)
     t = Timeline.from_clean_options(60.0, o, echo=True)
     assert t.parts("echo") and t.parts("noise")[0].settings == {"strength_db": 40.0, "remover": "heavy"}

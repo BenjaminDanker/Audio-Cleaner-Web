@@ -1,7 +1,7 @@
 """The Jobs tab (the old History page): the list (newest first, sorted, searched, paged), the job view opened from a row (saved copies and
-the disk they take, the original's state, the strength slider that changes the sound while it plays, "Change and save again"), deleting
-(copies and entry only), entries made before the copies existed, and the window recording what a job kept. Model runs and the sound
-card are stood in for (fake_media.py); the real engine is in test_redo.py."""
+the disk they take, the original's state, the editor it opens in, "Save as a new file"), deleting (copies and entry only), entries made
+before the copies existed, and the window recording what a job kept. Model runs, the editor's session and the sound card are stood in for
+(fake_media.py, and test_editor_gui.py's FakeSession); the real engine is in test_redo.py."""
 from __future__ import annotations
 
 import os
@@ -12,9 +12,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import QApplication
 
 from acw_common import captions
-from audio_cleaner_desktop import blend, copies, engine, redo
+from acw_common.timeline import Timeline
+from audio_cleaner_desktop import copies, editor_job, engine, redo
 from audio_cleaner_desktop.gui import history_view, job_preview, main_window, player
 from audio_cleaner_desktop.gui.history import DONE, FAILED, Entry, HistoryStore
 from audio_cleaner_desktop.gui.job_view import JobEnv
@@ -24,6 +26,7 @@ from audio_cleaner_desktop.gui.theme import ThemeWatcher
 import fake_media
 from conftest import wait_until
 from fake_media import FakeSink
+from test_editor_gui import FakeSession, open_session
 
 N = 96000  # two seconds
 
@@ -115,20 +118,13 @@ class FakeRun:
             subs = out.with_suffix("." + wanted.subtitles)
             subs.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello there\n")
             files.append(subs)
-        made = {"atten_lim_db": None if wanted.rebuild_voice else wanted.atten_lim_db, "rebuilt": wanted.rebuild_voice,
-                "leveling": wanted.leveling, "loudness": wanted.loudness, "subtitles": wanted.subtitles, "language": "auto"}
+        seconds = editor_job.seconds_of(job)
+        tl = Timeline.from_json(wanted.timeline, seconds=seconds) if wanted.timeline else editor_job.current_timeline(job, seconds)
+        made = {**editor_job.made_from_timeline(tl, echo=False), "subtitles": wanted.subtitles, "language": "auto"}
         job.made.update(made)
+        editor_job.remember(job, tl, {})
         job.add_save(files, made)
         return engine.JobResult(out, 2.0, False, subs, made=made, kept_dir=job.dir)
-
-
-def fake_prepare(job, *, cancel=None, scratch_parent=None, exact=False, threads=2):
-    rng = np.random.default_rng(3)
-    x = (0.1 * rng.standard_normal((N, 2))).astype(np.float32)
-    full = (0.05 * rng.standard_normal((N, 2))).astype(np.float32)
-    work = job.dir.parent / ".acw-work-test"
-    work.mkdir(exist_ok=True)
-    return redo.Prepared(blend.BlendStream(full, x, [0, 1], exact=exact), work)
 
 
 @pytest.fixture
@@ -138,12 +134,13 @@ def run():
 
 @pytest.fixture
 def env(run):
-    return JobEnv(voice_ready=lambda: True, speech_ready=lambda: True, noise_ready=lambda: True, run=run, prepare=fake_prepare,
-                  trash=lambda p: False, live=lambda: True)
+    return JobEnv(voice_ready=lambda: True, speech_ready=lambda: True, noise_ready=lambda: True, run=run, trash=lambda p: False,
+                  open_session=open_session)
 
 
 @pytest.fixture
 def page(qapp, store, env, media):
+    FakeSession.made.clear()
     ThemeWatcher(qapp)
     p = history_view.HistoryPage(store, env=env)
     p.confirm = lambda title, text: True
@@ -159,10 +156,11 @@ def entry_ids(page):
 
 
 def open_ready(page, entry_id):
-    """Open a job and wait until its live sound is ready."""
+    """Open a job and wait until its editor is up (the job view always opens it when the original is there)."""
     page.open_job(entry_id)
     view = page.view
-    assert wait_until(lambda: view._prepared is not None or (view._prepare_thread is None and view.preview is not None and not view.preview.live), 10)
+    assert wait_until(lambda: view._ed.editor is not None, 10)
+    QApplication.processEvents()
     return view
 
 
@@ -261,14 +259,14 @@ def test_a_job_whose_copies_cannot_be_removed_stays_and_the_user_is_told(page, s
     assert told == [[eid]] and store.get(eid) is not None and job.dir.exists()
 
 
-def test_deleting_the_job_that_is_open_closes_it_and_stops_the_sound(page, store, folder):
+def test_deleting_the_job_that_is_open_closes_its_editor_and_stops_the_sound(page, store, folder):
     job, eid = add_job(store, folder)
     view = open_ready(page, eid)
-    assert page.viewing == eid and view._prepared is not None
-    work = view._prepared.work
+    session = FakeSession.made[-1]
+    assert page.viewing == eid and view._ed.session is session and view.preview.live
     page.delete_entry(eid)
-    assert page.viewing is None and store.get(eid) is None and not job.dir.exists() and view._prepared is None
-    assert not work.exists()  # the scratch files of the live sound went with it
+    assert page.viewing is None and store.get(eid) is None and not job.dir.exists() and view._ed.session is None
+    assert session.closed and view.preview is None  # the editor's session (its scratch files) and the sound went with it
 
 
 # ---------------------------------------------------------------------------------------------------- old entries and failed jobs
@@ -280,9 +278,9 @@ def test_an_entry_made_before_the_copies_existed_still_shows_and_can_be_deleted(
     assert entry_ids(page) == [eid]
     page.open_job(eid)
     view = page.view
-    assert view.job is None and "before Audio Cleaner kept them" in view._copies_text.text() or "no saved copies" in view._copies_text.text()
-    assert not view._slider.isEnabled() and "before Audio Cleaner kept copies" in view._slide_note.text()
-    assert not view._change_card.isVisible() and view.preview is not None  # it can still be listened to
+    assert view.job is None and "no saved copies" in view._copies_text.text() and "can't be changed and saved again" in view._copies_text.text()
+    assert not view._change_card.isVisible() and not view._ed.card.isVisible() and view._ed.editor is None  # no editor: nothing to start from
+    assert view.preview is not None and view._listen_card.isVisible() and not view.preview.live  # it can still be listened to
     texts = [view._results_layout.itemAt(i).layout().itemAt(0).widget().text() for i in range(view._results_layout.count())]
     assert texts == [folder.result.name]
     page.delete_entry(eid)
@@ -294,9 +292,9 @@ def test_a_failed_job_with_copies_lists_them_and_can_still_be_saved(page, store,
     page.refresh()
     view = open_ready(page, eid)
     assert view._status.text() == "Failed" and "Saving the cleaned audio failed." in view._meta.text()
-    assert "No cleaned file was saved" in view._results_note.text() and view._change_card.isVisible()
+    assert "No cleaned file was saved" in view._results_note.text() and view._change_card.isVisible() and view._ed.editor is not None
     view._name.setText("late.wav")
-    assert view._save.isEnabled()
+    assert view._save.isEnabled() and view._ed.editor.save_button.isEnabled() is not None
     view.save()
     assert wait_until(lambda: not view.busy)
     assert store.get(eid).status == DONE and store.get(eid).outputs == [str(folder.dir / "late.wav")]
@@ -311,7 +309,8 @@ def test_a_job_with_a_folder_that_has_no_usable_manifest_is_listed_like_an_old_o
 
 # ---------------------------------------------------------------------------------------------------- the job view
 
-def test_the_job_view_lists_the_results_the_copies_and_the_disk_they_take(page, store, folder):
+def test_the_job_view_lists_the_results_the_copies_and_the_disk_they_take(page, store, folder, env):
+    env.open_session = lambda job, **kw: FakeSession(job, 2.0)  # (the editor opening in the background must not turn the copies into blocks here)
     job, eid = add_job(store, folder, transcript=True, rebuilt=True)
     page.open_job(eid)
     view = page.view
@@ -328,16 +327,15 @@ def test_the_job_view_lists_the_results_the_copies_and_the_disk_they_take(page, 
     assert page.viewing is None
 
 
-def test_a_moved_original_makes_the_strength_and_every_change_unavailable_and_it_can_be_found_again(page, store, folder):
+def test_a_moved_original_makes_every_change_unavailable_and_it_can_be_found_again(page, store, folder):
     job, eid = add_job(store, folder)
     moved = folder.dir / "renamed.wav"
     folder.original.rename(moved)
     page.open_job(eid)
     view = page.view
-    assert view._prepare_thread is None and view._prepared is None
-    assert not view._slider.isEnabled() and not any(b.isEnabled() for b in view._name_buttons.values())
-    assert "not at" in view._slide_note.text() and "can't be changed without it" in view._slide_note.text()
-    assert not view._save.isEnabled() and "needs the original" in view._save.toolTip()
+    assert view._ed.editor is None and view._ed.session is None and not FakeSession.made  # the editor needs the original
+    assert "not at" in view._ed._note.text() and "Fixing a moment needs the original" in view._ed._note.text()
+    assert not view._save.isEnabled() and "needs the original" in view._save.toolTip() and view._save.isVisibleTo(view)
     assert "not at" in view._original_text.text() and view._find.isVisible()
     # pointing at the wrong file is refused
     wrong = folder.dir / "other.wav"
@@ -345,11 +343,12 @@ def test_a_moved_original_makes_the_strength_and_every_change_unavailable_and_it
     view._choose_file = lambda: str(wrong)
     view._find_original()
     assert "not the same file" in view.banner._label.text() and not view._save.isEnabled()
-    # the right one is accepted; the job can be changed again
+    # the right one is accepted; the job can be changed again and its editor opens
     view._choose_file = lambda: str(moved)
     view._find_original()
-    assert view._check.ok and store.get(eid).source == str(moved) and view._save.isEnabled() and view._slider.isEnabled()
-    assert wait_until(lambda: view._prepared is not None, 10)
+    assert view._check.ok and store.get(eid).source == str(moved)
+    assert wait_until(lambda: view._ed.editor is not None, 10)
+    assert view._save.isEnabled() and not view._save.isVisibleTo(view)  # (the editor's own Save button saves now)
 
 
 def test_a_changed_original_is_said_and_cannot_be_found_by_hand(page, store, folder):
@@ -358,103 +357,55 @@ def test_a_changed_original_is_said_and_cannot_be_found_by_hand(page, store, fol
     page.open_job(eid)
     view = page.view
     assert view._check.state == "changed" and "changed" in view._original_text.text() and not view._find.isVisible()
-    assert not view._slider.isEnabled() and not view._save.isEnabled()
-    assert view._prepared is None and view._prepare_thread is None
+    assert not view._save.isEnabled() and view._save.isVisibleTo(view)  # (no editor is open: the Save card keeps its own button)
+    assert view._ed.editor is None and view._ed.session is None and "Fixing a moment needs the original" in view._ed._note.text()
 
 
-def test_the_strength_slider_changes_the_sound_while_it_plays(page, store, folder):
-    job, eid = add_job(store, folder, made={"atten_lim_db": 100.0, "leveling": False})
-    view = open_ready(page, eid)
-    pane = view.preview
-    assert pane.live and view._slider.isEnabled() and view._slide_note.text() == "What you hear is what you save."
-    stream = view._prepared.stream
-    assert stream.exact  # Leveling is off: the saved file is exactly this blend
-    pane.toggle()
-    sink = FakeSink.made[-1]
-    assert sink.started
-    first = sink.pull(4800)
-    assert first == stream.read_pcm16(0, 4800) and view._db == 100.0
-    # the named buttons, and the name shown
-    for key, label, db in blend.NAMES:
-        view._name_buttons[key].click()
-        assert view._db == db and stream.db == db and label in view._strength_label.text()
-    view._name_buttons["balanced"].click()
-    heard = sink.pull(4800)
-    assert heard == stream.read_pcm16(4800, 4800)
-    stream.set_strength(100.0)
-    assert heard != stream.read_pcm16(4800, 4800)  # it was the Balanced mix, not the full one
-    # the slider between two names
-    view._slider.setValue(150)
-    assert view._db == pytest.approx(blend.db_at(1.5)) and "Between Balanced and Strong" in view._strength_label.text()
-    assert stream.db == pytest.approx(view._db)
-    assert sink.pull(2400) == stream.read_pcm16(9600, 2400)  # the very next piece is mixed at the new strength
-
-
-def test_original_and_cleaned_are_heard_through_the_same_stream_so_the_place_stays(page, store, folder):
+def test_a_job_opens_in_the_editor_and_the_player_moves_into_it(page, store, folder):
     job, eid = add_job(store, folder)
     view = open_ready(page, eid)
-    pane = view.preview
-    pane.toggle()
-    sink = FakeSink.made[-1]
-    sink.pull(2400)
-    pane._which.set_value("original")
-    stream = view._prepared.stream
-    assert stream.original and not any(s is not sink for s in FakeSink.made)  # no new card: the same sound goes on
-    assert sink.pull(2400) == stream.read_pcm16(2400, 2400)
-    pane._which.set_value("cleaned")
-    assert not stream.original
+    ed = view._ed
+    assert view._player_in_editor and not view._listen_card.isVisible() and view.preview.live and ed.editor.slot.indexOf(view.preview) >= 0
+    assert not view._save.isVisibleTo(view) and ed.editor.save_button.isVisibleTo(ed.editor)
+    # none of the old controls: the strength slider, the strength buttons, Leveling, Loudness and Voice rebuild are the editor's now
+    assert not any(hasattr(view, name) for name in ("_slider", "_name_buttons", "_strength_label", "_rebuild", "_leveling", "_loudness", "_slide_note"))
+    assert not hasattr(ed, "_setup") and not hasattr(view, "_prepared") and not hasattr(view, "_prepare_thread")
+    assert not hasattr(JobEnv(), "prepare") and not hasattr(JobEnv(), "live")
 
 
-def test_leveling_off_or_on_says_whether_what_you_hear_is_what_you_save(page, store, folder):
-    job, eid = add_job(store, folder)
+def test_an_old_job_with_a_saved_copy_opens_in_the_editor_at_once(page, store, folder):
+    job, eid = add_job(store, folder, rebuilt=True)  # whole copies, no blocks: made before the block cache
+    assert not job.has_blocks
     view = open_ready(page, eid)
-    assert view._leveling.isChecked() and "Leveling is added when you save" in view._slide_note.text() and not view._prepared.stream.exact
-    view._leveling.setChecked(False)
-    assert view._prepared.stream.exact and view._slide_note.text() == "What you hear is what you save." and not view._loudness.isEnabled()
-    view._leveling.setChecked(True)
-    assert not view._prepared.stream.exact and view._loudness.isEnabled()
+    assert view._ed.editor is not None and not hasattr(view._ed, "_setup") and view._player_in_editor
+    job = copies.JobCopies.load(job.dir)
+    assert job.has_blocks and not job.has(copies.NOISE)  # (the open session made the job ready: editor_job.make_ready)
 
 
-def test_without_sound_support_the_strength_can_still_be_chosen_and_saved(page, store, folder, monkeypatch):
+def test_a_job_that_rebuilt_the_voice_opens_with_the_rebuild_on_its_whole_length(page, store, folder):
+    job, eid = add_job(store, folder, noise=False, rebuilt=True)
+    view = open_ready(page, eid)
+    done = view._ed.model.done
+    assert done.layers["rebuild"] and not done.layers["noise"]
+    assert view.plan() is not None and view._save.isEnabled()
+
+
+def test_without_sound_support_the_editor_still_opens_and_the_change_can_be_saved(page, store, folder, run, monkeypatch):
     monkeypatch.setattr(player, "_multimedia", None)
     job, eid = add_job(store, folder)
-    page.open_job(eid)
-    view = page.view
-    assert view._prepare_thread is None and "no sound support" in view._slide_note.text()
-    assert view._slider.isEnabled() and view._save.isEnabled()
-
-
-def test_a_job_that_rebuilt_the_voice_has_no_strength_and_says_how_to_get_one(page, store, folder, run):
-    job, eid = add_job(store, folder, noise=False, rebuilt=True)
-    page.open_job(eid)
-    view = page.view
-    assert view._rebuild.isChecked() and not view._slider.isEnabled() and "Strength: not used" in view._strength_label.text()
-    assert view._prepare_thread is None
-    view._rebuild.setChecked(False)
-    assert "rebuilt the voice, which has no strength" in view._slide_note.text()
-    p = view.plan()
-    assert p.sound == redo.SOUND_NOISE and p.slow and "takes about as long" in " ".join(p.steps)
-    assert view._save.isEnabled()
-
-
-def test_turning_voice_rebuild_on_disables_the_strength_and_names_the_slow_step(page, store, folder):
-    job, eid = add_job(store, folder)
     view = open_ready(page, eid)
-    view._rebuild.setChecked(True)
-    assert not view._slider.isEnabled() and "Strength: not used" in view._strength_label.text()
-    assert "Rebuild the voice from the original" in view._plan_text.text() and view.plan().slow
-    assert "no strength" in view._slide_note.text()
-    view._rebuild.setChecked(False)
-    assert view._slider.isEnabled() and not view.plan().slow and "Mix the original back in" in view._plan_text.text()
+    assert view.preview is None or not view.preview.live
+    view._name.setText("quiet.wav")
+    view.save()
+    assert wait_until(lambda: not view.busy) and [c.wanted.output_name for c in run.calls] == ["quiet.wav"]
 
 
 def test_voice_rebuild_without_its_model_cannot_be_saved(page, store, folder, env):
     env.voice_ready = lambda: False
-    job, eid = add_job(store, folder)
-    open_ready(page, eid)
-    view = page.view
-    view._rebuild.setChecked(True)
+    job, eid = add_job(store, folder, noise=False, rebuilt=True)  # its timeline rebuilds the voice and no rebuilt block is there
+    view = open_ready(page, eid)
     assert not view._save.isEnabled() and "rebuilds the voice is not installed" in view._plan_text.text()
+    assert not view._ed.editor.save_button.isEnabled()
 
 
 def test_the_name_must_be_usable_and_the_type_box_follows_the_ending(page, store, folder):
@@ -475,35 +426,35 @@ def test_the_name_must_be_usable_and_the_type_box_follows_the_ending(page, store
 
 # ---------------------------------------------------------------------------------------------------- change and save again
 
-def test_change_and_save_again_runs_with_the_choices_and_adds_a_new_result_next_to_the_old_one(page, store, folder, run):
+def test_save_runs_with_the_drafts_timeline_and_adds_a_new_result_next_to_the_old_one(page, store, folder, run):
     job, eid = add_job(store, folder)
     view = open_ready(page, eid)
     changed = []
     view.changed.connect(lambda: changed.append(1))
-    view._name_buttons["balanced"].click()
-    view._leveling.setChecked(False)
-    view._loudness.setCurrentIndex(view._loudness.findData("youtube"))
+    ed = view._ed
+    ed.model.select(0, ed.session.seconds)
+    ed.model.set_strength("strong")  # the editor says what to do to which part; the Save card says how to save it
     view._name.setText("talk-v2.mp3")
-    assert "Mix the original back in to the chosen strength" in view._plan_text.text() and "talk-v2.mp3" in view._plan_text.text()
-    view.save()
+    assert "talk-v2.mp3" in view._plan_text.text() and wait_until(lambda: ed.editor.save_button.isEnabled(), 5)
+    ed.editor.save_button.click()
     assert view.busy and not view._back.isEnabled() and not view._delete.isEnabled() and view._stop.isVisibleTo(view)
     assert wait_until(lambda: not view.busy)
     [call] = run.calls
-    assert (call.wanted.atten_lim_db, call.wanted.leveling, call.wanted.loudness, call.wanted.output_name, call.wanted.rebuild_voice) == \
-        (24.0, False, "youtube", "talk-v2.mp3", False)
-    assert call.replace is None
+    assert call.wanted.output_name == "talk-v2.mp3" and call.wanted.subtitles == "off" and call.replace is None
+    assert call.wanted.timeline["layers"]["noise"][0]["strength_db"] == 40.0  # Strong, from the draft
     new = folder.dir / "talk-v2.mp3"
     assert new.exists() and folder.result.read_bytes() == b"first result"  # the old result is as it was
     entry = store.get(eid)
-    assert entry.outputs == [str(new)] and entry.settings["strength_db"] == 24.0 and entry.settings["leveling"] is False
-    assert "Balanced noise reduction" in entry.summary and entry.job_dir == job.dir.name
+    assert entry.outputs == [str(new)] and entry.settings["strength_db"] == 40.0 and entry.settings["leveling"] is True
+    assert "Strong noise reduction" in entry.summary and entry.job_dir == job.dir.name
     assert "Saved talk-v2.mp3" in view.banner._label.text() and changed
     names = [view._results_layout.itemAt(i).layout().itemAt(0).widget().text() for i in range(view._results_layout.count())]
     assert names == ["talk-v2.mp3", "talk-cleaned.wav"]  # the new one first, the old one still listed
     assert view._name.text() == "talk-v2 (2).mp3" and view._save.isEnabled()  # the next name is free
+    assert not ed.model.dirty and ed.model.done == ed.model.draft  # the result is the draft now
     # the list shows what it was made with now
     page.close_job()
-    assert "Balanced" in page.findChildren(history_view._HistoryRow)[0].findChildren(history_view.ElidedLabel)[1].text()
+    assert "Strong" in page.findChildren(history_view._HistoryRow)[0].findChildren(history_view.ElidedLabel)[1].text()
 
 
 def test_a_name_that_is_taken_asks_and_replaces_only_when_the_user_says_so(page, store, folder, run):
@@ -567,7 +518,7 @@ def test_closing_the_window_stops_a_save_that_is_running(page, store, folder, ru
     run.gate = threading.Event()
     view.save()
     threading.Timer(0.2, run.gate.set).start()
-    assert page.shutdown(5000) and not view.busy and view._prepared is None
+    assert page.shutdown(5000) and not view.busy and view._ed.session is None
 
 
 def test_saving_only_the_subtitles_needs_the_transcript_but_not_the_original(page, store, folder, run):
@@ -710,11 +661,12 @@ def test_the_player_goes_back_to_the_files_when_another_job_without_copies_is_op
     job, eid = add_job(store, folder)
     old = store.add(Entry("old.wav", str(folder.original), 5.0, False, {}, 1.0, [str(folder.result)], DONE, finished_at=5.0))
     view = open_ready(page, eid)
-    pane = view.preview
-    assert pane.live and pane._player is pane._live
-    work = view._prepared.work
+    session = FakeSession.made[-1]
+    assert view.preview.live and view._player_in_editor
     page.close_job()
     page.open_job(old)
-    assert not pane.live and pane._player is pane._file and view._prepared is None and not work.exists()
-    page.open_job(eid)  # and live again for the one that has copies
-    assert wait_until(lambda: view._prepared is not None and pane.live, 10)
+    assert session.closed and view._ed.session is None and not view._player_in_editor
+    assert view.preview is not None and not view.preview.live and view.preview._player is view.preview._file and view._listen_card.isVisible()
+    page.open_job(eid)  # and the editor, with the live sound, again for the one that has copies
+    assert wait_until(lambda: view._ed.editor is not None and view.preview is not None and view.preview.live, 10)
+    assert not view._listen_card.isVisible()

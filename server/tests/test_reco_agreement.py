@@ -37,7 +37,7 @@ def _figure(x):
 
 
 def _server_heavy(x):
-    return pipeline.choose_noise_profile(x, LIVE_LIBDF, MODEL) == "heavy"
+    return pipeline.automatic_choices(_figure(x))[0] == "heavy"
 
 
 def _write(path: Path, x: np.ndarray) -> np.ndarray:

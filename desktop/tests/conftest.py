@@ -167,10 +167,18 @@ def clip_wav(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def quick_clean(monkeypatch):
-    """The noise removal is left out (the audio goes through as it is): tests of file types and names do not need it."""
-    from acw_common import pipeline
+    """The noise removal is left out (the audio goes through as it is): tests of file types and names do not need it. The timeline is still
+    made and rendered the one way there is (editor_job.render_timeline), but nothing is processed."""
+    from audio_cleaner_desktop import editor_job
 
-    monkeypatch.setattr(pipeline, "clean_audio", lambda x, *a, **k: np.array(x, dtype=np.float32))
+    def render_timeline(tl, inputs, cache, *, out=None, progress=None, **kw):
+        y = out if out is not None else np.empty(inputs.source.shape, np.float32)
+        y[:] = inputs.source
+        if progress:
+            progress(1.0)
+        return y, tl, {}, None, {}
+
+    monkeypatch.setattr(editor_job, "render_timeline", render_timeline)
 
 
 def wait_until(predicate, timeout: float = 120.0, interval: float = 0.01) -> bool:

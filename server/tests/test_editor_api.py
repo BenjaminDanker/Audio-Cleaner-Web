@@ -847,37 +847,6 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
     assert get_settings().jobs_dir.exists()
 
 
-# ------------------------------------------------------------------------- the first run fills the editor's cache
-
-def test_a_whole_file_run_after_echo_removal_fills_the_blocks_under_the_editors_own_identities():
-    """pipeline.clean_audio keys every block with one input id; after a whole-file echo removal the editor's identity of a block names the
-    echo parts that touch what it read. The runner hands clean_audio a cache that rewrites the keys (worker.editrun.EchoWholeFile), so
-    the editor's plan of the job's own timeline finds every block."""
-    from acw.worker import editrun
-    from acw_common import restore
-
-    n = int(70 * SR)
-    inputs = editor.Inputs(np.zeros((n, 1), np.float32), "jabc", reference=np.zeros(n, np.float32), reference_id="r")
-    tl = Timeline.whole_file(70.0, echo=True, noise={"strength_db": 24, "remover": "light"}, leveling=False)
-    tl2 = Timeline.whole_file(70.0, echo=True, noise=False, rebuild=True, leveling=False)
-    cache = blocks.MemoryCache()
-    wrapped = editrun.EchoWholeFile(cache, "jabc", n)
-    mark = editrun.EchoWholeFile.MARK
-    # what clean_audio does for the light remover (blocks.cache_hooks with its one input id) and for Voice rebuild
-    for lo, s, e, hi in blocks.grid_windows(0, n, blocks.grid_of("light")):
-        wrapped.put(blocks.block_key("light", mark, 0, lo, s, e, hi), np.zeros(e - s, np.float32))
-    for b in range(-(-n // restore.block_samples())):
-        wrapped.put(blocks.rebuild_key(mark, 0, b, n, restore._WINDOW_SECONDS, restore._OVERLAP_SECONDS), np.zeros(10, np.float32))
-    for lo, s, e, hi in blocks.grid_windows(0, n, blocks.grid_of("echo")):
-        cache.put(blocks.block_key("echo", "jabc~r", 0, lo, s, e, hi), np.zeros(e - s, np.float32))  # (remove_echo's own, no wrapper)
-    assert not editor.plan(tl, inputs, cache).misses
-    assert not editor.plan(tl2, inputs, cache).misses
-    assert not any(mark in k for k in cache.blocks)
-    # and a key that has no mark is left alone
-    wrapped.put("plain", np.zeros(3, np.float32))
-    assert cache.has("plain") and wrapped.has("plain") and not wrapped.has(blocks.block_key("light", mark, 0, 1, 2, 3, 4))
-
-
 def test_the_credit_history_names_each_edit_run_for_its_steps_and_minutes(client, signed_in):
     uid, h = funded(client, signed_in)
     jid = edit_job(uid, seconds=600.0, rendered="empty", name="talk.wav")

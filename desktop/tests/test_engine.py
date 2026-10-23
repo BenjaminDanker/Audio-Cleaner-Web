@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw_common import analysis, captions, clarity, pipeline, reco_model
+from acw_common import analysis, captions, clarity, dpdfnet, pipeline, reco_model
 from acw_common.ffmpeg import MediaError
 from audio_cleaner_desktop import engine, labels, resources
 
@@ -233,8 +233,8 @@ def test_heavy_noise_setting_runs_the_heavy_noise_model(clip_wav, tmp_path, monk
     if not resources.heavy_noise_model_path().is_file():
         pytest.skip("no heavy-noise model in vendor/models")
     used = []
-    real = pipeline.dpdfnet.denoise_array
-    monkeypatch.setattr(pipeline.dpdfnet, "denoise_array", lambda *a, **k: used.append(1) or real(*a, **k))
+    real = dpdfnet.run_windows  # (the editor's renderer runs the model block by block)
+    monkeypatch.setattr(dpdfnet, "run_windows", lambda *a, **k: used.append(1) or real(*a, **k))
     result = engine.process(clip_wav, engine.JobOptions(noise="heavy"), out_dir=tmp_path)
     assert result.output.is_file() and used
 
@@ -275,8 +275,21 @@ def test_echo_removed_using_the_second_audio_track(tmp_path):
     assert level(mic[echo_only]) - level(y[echo_only]) > 20
 
 
+class _Run:
+    """What one file was rendered for, read from the timeline the engine made of its choices (it renders every run the one way there is):
+    the strength and remover of its noise layer, and whether its voice was rebuilt."""
+
+    def __init__(self, tl):
+        self.tl = tl
+        parts = tl.layers["noise"]
+        self.atten_lim_db = parts[0].settings["strength_db"] if parts else None
+        self.noise = parts[0].settings["remover"] if parts else None
+        self.restore_voice = bool(tl.layers["rebuild"])
+        self.leveling = bool(tl.layers["leveling"])
+
+
 class _Calls(list):
-    """The CleanOptions clean_audio was asked for, one per file; `.kwargs` holds the rest of each call."""
+    """The _Run of each file; `.kwargs` holds the rest of each render_timeline call."""
 
     def __init__(self):
         super().__init__()
@@ -285,19 +298,20 @@ class _Calls(list):
 
 @pytest.fixture
 def fake_clean(monkeypatch):
-    """clean_audio recording what it was asked for; the noise removal reports the strength it was given (Balanced when
-    it was left to measure)."""
+    """The render recording what it was asked for (editor_job.render_timeline: the timeline the engine made of the choices), the audio
+    going through as it is."""
+    from audio_cleaner_desktop import editor_job
+
     seen = _Calls()
 
-    def clean(x, lib, model, opts, *, report=None, **kw):
-        seen.append(opts)
+    def render(tl, inputs, cache, *, out=None, **kw):
+        seen.append(_Run(tl))
         seen.kwargs.append(kw)
-        if report is not None:
-            atten = opts.atten_lim_db if opts.atten_lim_db is not None else 24.0
-            report.update(noise="rebuilt") if opts.restore_voice else report.update(noise="light", atten_lim_db=atten, noise_db=21.0)
-        return np.array(x, dtype=np.float32)
+        y = out if out is not None else np.empty(inputs.source.shape, np.float32)
+        y[:] = inputs.source
+        return y, tl, {}, None, {}
 
-    monkeypatch.setattr(pipeline, "clean_audio", clean)
+    monkeypatch.setattr(editor_job, "render_timeline", render)
     return seen
 
 
@@ -389,7 +403,7 @@ def test_the_model_picks_the_strength_and_the_remover(clip_wav, tmp_path, fake_c
         assert got.atten_lim_db == engine.STRENGTHS[rec.strength] and result.strength == rec.strength
         assert got.noise == ("heavy" if stats["noiseDb"] < pipeline.HEAVY_BELOW_DB else "light")  # the rule, given outright
         assert not got.restore_voice
-        assert "measured" in fake_clean.kwargs[-1]  # what the measurement kept goes to clean_audio (it need not clean twice)
+        assert fake_clean[-1].tl.layers["noise"][0].settings["remover"] == got.noise  # the remover is decided outright in the timeline
         seen.add((rec.strength, rec.heavy_remover))
     assert {k for k, _ in seen} == set(engine.STRENGTHS) and {v for _, v in seen} == {True, False}
 

@@ -8,7 +8,8 @@ import pytest
 
 pytest.importorskip("livekit")
 
-from acw_common import pipeline  # noqa: E402
+from acw_common import blocks, editor, pipeline  # noqa: E402
+from acw_common.timeline import Timeline  # noqa: E402
 from acw_common.ffmpeg import FFmpeg  # noqa: E402
 
 from test_common import FF_DIR, FIXTURE_FFMPEG, SR, needs_ff  # noqa: E402
@@ -60,6 +61,17 @@ def make_file(ff, path, tracks):
     return path
 
 
+def remove_echo(ff, src, probe, mic, max_seconds, work_dir=None, cancel=None):
+    """Echo removal of the whole file, the one way there is: a timeline with an echo layer over all of it, rendered with the file's second
+    track as the reference. `mic` itself when the file has no second track (the editor refuses an echo layer without a reference)."""
+    if probe.audio_tracks < 2:
+        return mic
+    ref = ff.decode(src, probe, SR, 1, max_seconds, track=1)[:, 0]
+    inp = editor.Inputs(np.asarray(mic, dtype=np.float32), "echo", reference=ref, reference_id="ref")
+    tl = Timeline(inp.seconds).paint("echo", 0, inp.seconds)
+    return editor.render(tl, inp, blocks.MemoryCache(), editor.Runner(), work_dir=work_dir, cancel=cancel)
+
+
 @pytest.fixture(scope="module")
 def ff():
     return FFmpeg(FF_DIR, threads=1)
@@ -73,7 +85,7 @@ def room(ff, tmp_path_factory):
     src = make_file(ff, d / "rec.mkv", [mic, far])
     probe = ff.probe(src)
     x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=d)
-    y = pipeline.remove_echo(ff, src, probe, x, 60, work_dir=d)
+    y = remove_echo(ff, src, probe, x, 60, work_dir=d)
     return dict(ff=ff, dir=d, src=src, probe=probe, x=x, y=y, far=far, near=near)
 
 
@@ -101,7 +113,7 @@ def test_the_result_lines_up_in_time_with_the_recording(ff, tmp_path):
     src = make_file(ff, tmp_path / "click.mkv", [mic, far])
     probe = ff.probe(src)
     x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=tmp_path)
-    y = pipeline.remove_echo(ff, src, probe, x, 60, work_dir=tmp_path)
+    y = remove_echo(ff, src, probe, x, 60, work_dir=tmp_path)
     assert y.shape == x.shape
     peak = int(np.argmax(np.abs(y[:, 0])))
     assert abs(peak - (at + 480)) < 100  # the burst's centre is where it was (it came out 432 samples late before)
@@ -118,7 +130,7 @@ def test_blocks_of_the_grid_take_the_echo_out_like_one_pass(room, monkeypatch, t
     from acw_common import blocks
 
     monkeypatch.setattr(blocks, "GRID_ECHO", blocks.Grid(3 * SR / SR + 17 / SR, 6.0, 0.01))
-    got = pipeline.remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, work_dir=tmp_path)  # (not room["dir"]: the result is a file there)
+    got = remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, work_dir=tmp_path)  # (not room["dir"]: the result is a file there)
     x, y, near = room["x"], room["y"], room["near"]
     assert got.shape == y.shape and np.isfinite(got).all()
     assert not np.array_equal(got, y)  # the later blocks did adapt on their own context
@@ -133,13 +145,17 @@ def test_blocks_of_the_grid_take_the_echo_out_like_one_pass(room, monkeypatch, t
 
 
 @needs_ff
-def test_one_track_files_are_left_alone(ff, tmp_path):
+def test_an_echo_layer_on_a_one_track_file_is_refused(ff, tmp_path):
+    """There is no desktop sound to remove the echo with: the editor says so (callers ask for echo removal only for a file with two tracks)."""
     mic, _, _ = room_recording()
     src = make_file(ff, tmp_path / "solo.mkv", [mic])
     probe = ff.probe(src)
     assert probe.audio_tracks == 1
     x = pipeline.decode_for_clean(ff, src, probe, 60, work_dir=tmp_path)
-    assert pipeline.remove_echo(ff, src, probe, x, 60, work_dir=tmp_path) is x
+    inp = editor.Inputs(np.asarray(x, dtype=np.float32), "solo")
+    with pytest.raises(editor.EditorError, match="second audio track"):
+        editor.render(Timeline(inp.seconds).paint("echo", 0, inp.seconds), inp, blocks.MemoryCache(), editor.Runner())
+    assert remove_echo(ff, src, probe, x, 60, work_dir=tmp_path) is x  # (the helper's own rule)
     assert not (tmp_path / "reference.f32").exists()
 
 
@@ -148,4 +164,4 @@ def test_cancel_stops_echo_removal(room):
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(pipeline.Cancelled):
-        pipeline.remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, cancel=cancel)
+        remove_echo(room["ff"], room["src"], room["probe"], room["x"], 60, cancel=cancel)

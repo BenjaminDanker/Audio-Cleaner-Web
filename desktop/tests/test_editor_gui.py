@@ -164,8 +164,7 @@ def run():
 
 @pytest.fixture
 def env(run):
-    return JobEnv(voice_ready=lambda: True, speech_ready=lambda: True, noise_ready=lambda: True, run=run, trash=lambda p: False,
-                  live=lambda: True, open_session=open_session)
+    return JobEnv(voice_ready=lambda: True, speech_ready=lambda: True, noise_ready=lambda: True, run=run, trash=lambda p: False, open_session=open_session)
 
 
 @pytest.fixture
@@ -200,7 +199,10 @@ def test_a_job_that_keeps_blocks_opens_with_the_editor_and_its_live_sound(view, 
     ed = ready(view, eid)
     session = FakeSession.made[-1]
     assert ed.card.isVisible() and not view._listen_card.isVisible() and view._player_in_editor
-    assert not view._rebuild.isVisible() and not view._leveling.isVisible() and view._change_title.text() == "Save as a new file"
+    # the old controls are gone: the editor is the one way to change the sound; the Save card has the name, the type and the subtitles only
+    assert not any(hasattr(view, name) for name in ("_slider", "_name_buttons", "_strength_label", "_rebuild", "_leveling", "_loudness", "_slide_note"))
+    assert not hasattr(ed, "_setup") and view._change_card.isVisible() and view._name.isVisible() and view._subtitles.isVisible()
+    assert not view._save.isVisibleTo(view)  # once the editor is open its own Save button saves
     assert view.preview is not None and view.preview.live and view.preview._stream is session.mix and ed.editor.slot.indexOf(view.preview) >= 0
     m = ed.model
     assert m.done == editor_job.baseline_timeline(job, 10.0) and m.strength_of(0, 10) == "balanced" and not m.dirty
@@ -340,30 +342,37 @@ def test_looking_for_suggestions_can_be_stopped_and_a_long_recording_waits_for_t
     assert ed._find_thread is None and "long recording" in ed.editor._find_text and ed.editor._can_find
 
 
-def test_an_old_job_with_saved_copies_keeps_its_old_cards_and_offers_to_get_ready(view, store, folder):
+def test_an_old_job_with_saved_copies_opens_in_the_editor_at_once_and_has_no_setup_button(view, store, folder):
     job, eid = add_job(store, folder, blocks=False, legacy=True)
-    ed = open_job(view, eid)
-    assert ed.card.isVisible() and ed._setup.isVisible() and view._listen_card.isVisible() and view._rebuild.isVisible()
-    assert view._change_title.text() == "Change and save again" and ed.editor is None
-    ed._setup.click()
-    assert wait_until(lambda: ed.editor is not None, 10)
+    ed = ready(view, eid)
+    assert not hasattr(ed, "_setup") and ed.card.isVisible() and view._player_in_editor and not view._listen_card.isVisible()
     job = copies.JobCopies.load(job.dir)
-    assert job.has_blocks and not job.has(copies.NOISE) and not view._listen_card.isVisible() and view._player_in_editor
+    assert job.has_blocks and not job.has(copies.NOISE)  # its copy became blocks on the way in (editor_job.make_ready)
 
 
-def test_a_job_with_nothing_to_start_from_has_no_editor_and_a_changed_original_says_so(view, store, folder):
-    job, eid = add_job(store, folder, blocks=False)
-    ed = open_job(view, eid)
-    assert not ed.card.isVisible() and ed.editor is None
-    job2, eid2 = add_job(store, folder)
+def test_a_job_with_no_saved_copies_at_all_shows_its_player_in_the_listen_card_and_no_editor(view, store, folder):
+    bare, bare_id = add_job(store, folder, blocks=False)  # (a folder with nothing in it is no saved copy)
+    assert view.show_entry(bare_id) and view.job is None and view.preview is not None and view._listen_card.isVisible()
+    eid = store.add(Entry("old.wav", str(folder.original), 5.0, False, {}, 1.0, [str(folder.result)], DONE, finished_at=5.0))
+    assert view.show_entry(eid)
+    QApplication.processEvents()
+    ed = view._ed
+    assert view.job is None and not ed.card.isVisible() and ed.editor is None and not FakeSession.made
+    assert view.preview is not None and view._listen_card.isVisible() and not view._player_in_editor and not view.preview.live
+    assert not view._change_card.isVisible()
+
+
+def test_when_the_editor_cannot_open_the_save_card_keeps_its_own_button(view, store, folder):
+    job, eid = add_job(store, folder)
     folder.original.write_bytes(b"something else entirely")
-    ed = open_job(view, eid2)
+    ed = open_job(view, eid)
     assert ed.card.isVisible() and "Fixing a moment needs the original" in ed._note.text() and ed.editor is None and not FakeSession.made
+    assert view._change_card.isVisible() and view._save.isVisibleTo(view) and not view._save.isEnabled()
 
 
 def test_leaving_a_job_closes_its_session_and_gives_the_player_back(view, store, folder):
     _, eid = add_job(store, folder)
-    _, other = add_job(store, folder, blocks=False)
+    other = store.add(Entry("old.wav", str(folder.original), 5.0, False, {}, 1.0, [str(folder.result)], DONE, finished_at=5.0))  # (no saved copies)
     ready(view, eid)
     session = FakeSession.made[-1]
     view.show_entry(other)
