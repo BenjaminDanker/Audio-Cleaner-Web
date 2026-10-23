@@ -17,7 +17,6 @@ REQUIRED_MODELS = (
 )
 REQUIRED_BINARIES = ("ffmpeg", "ffprobe", "libdf.so")
 HEARTBEAT_STALE_S = 180
-GPU_MARKER_FRESH_S = 30
 
 
 def missing_files() -> list[str]:

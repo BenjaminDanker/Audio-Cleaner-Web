@@ -117,7 +117,6 @@ def report(days: int = 30, now: int | None = None) -> dict:
                    "tiers": {k: {"sessions": v[0], "minutes": v[1] / 60} for k, v in sorted(tiers.items())}}
 
     # --- money
-    day = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%d")
     usage = {r["ref_type"] or "other": -r["s"] for r in db.all_rows(
         "SELECT ref_type, SUM(amount_micros) AS s FROM ledger WHERE kind = 'usage' AND created_at >= ? GROUP BY ref_type", (since,))}
     rep["usage_usd"] = {k: v / 1e6 for k, v in sorted(usage.items())}

@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from .. import alerts, auth, db, jobs, keycaps
+from .. import alerts, auth, db, keycaps
 from ..billing import ledger, trust
 from ..config import get_settings
 from ..security import canonical_email, client_ip, client_net, consteq, enforce, random_token, run_outbound, sha256_hex

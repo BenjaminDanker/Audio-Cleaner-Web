@@ -38,11 +38,6 @@ class Snapshot:
         return max(0.0, self.cores - self.busy_cores)
 
     @property
-    def cores_for_live(self) -> float:
-        """Cores live audio could use now: idle plus what niced work would yield."""
-        return max(0.0, self.cores - (self.busy_cores - self.nice_cores))
-
-    @property
     def memory_headroom(self) -> int:
         if self.slice_headroom is None:
             return self.mem_available

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router';
-import { api, apiOffline, streamUrl } from '../api.js';
+import { apiOffline, streamUrl } from '../api.js';
 import { liveNeedsServer, livePerMinute, needsAccount } from '../access.js';
 import { GoodToKnow } from '../alternatives.jsx';
 import { useAuth } from '../auth.jsx';
@@ -9,7 +9,7 @@ import { IconBroadcast } from '../components/Icons.jsx';
 import { PaidOffline } from '../components/Maintenance.jsx';
 import PluginInstall from '../components/PluginInstall.jsx';
 import { SignInLink, useGoSignIn } from '../components/SignIn.jsx';
-import { balanceMoney, clock, dateTime, rate, moneyUsd, trialLeft } from '../format.js';
+import { balanceMoney, clock, rate, moneyUsd, trialLeft } from '../format.js';
 import { findRate, usePageTitle, usePricing } from '../hooks.js';
 import { LANGUAGES } from '../jobs.js';
 import { startLocalLive } from '../live/local.js';

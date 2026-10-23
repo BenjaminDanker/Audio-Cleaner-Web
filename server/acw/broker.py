@@ -32,6 +32,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from . import db, hostload, jobs
+from .stream import protocol as P
 from .config import get_settings
 
 
@@ -415,7 +416,7 @@ def live_engine_status(timeout: float = 2.0) -> dict:
     s.settimeout(timeout)
     try:
         s.connect(str(get_settings().stream_worker_socket))
-        s.sendall(b"Q" + struct.pack("<I", 0))
+        s.sendall(P.MSG_QUERY + struct.pack("<I", 0))
         data = b""
         while len(data) < 5 or len(data) < 5 + struct.unpack("<I", data[1:5])[0]:
             chunk = s.recv(65536)

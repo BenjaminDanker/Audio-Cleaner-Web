@@ -26,7 +26,6 @@ import shutil
 import threading
 import time
 import unicodedata
-from datetime import datetime, timezone
 from pathlib import Path
 
 from . import automatic, db, keycaps, metrics
@@ -343,15 +342,6 @@ def check_active_limit(c, user_id: str) -> None:
     n = c.execute("SELECT COUNT(*) AS n FROM jobs WHERE user_id = ? AND status IN (?,?,?,?)", (user_id, *ACTIVE)).fetchone()["n"]
     if n >= limit:
         raise JobError(too_many_jobs_message(n), 429, retry_after=60, code=TOO_MANY_JOBS)
-
-
-def seconds_until_utc_midnight() -> int:
-    now = datetime.now(timezone.utc)
-    return max(1, 86400 - (now.hour * 3600 + now.minute * 60 + now.second))
-
-
-def utc_day() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def expiry(now: int, uploaded_at: int | None) -> int:

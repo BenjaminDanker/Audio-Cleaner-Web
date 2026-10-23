@@ -68,7 +68,6 @@ class Settings:
     stripe_secret_key: str | None
     stripe_webhook_secret: str | None
     stripe_portal_configuration: str | None  # bpc_...; unset: the portal settings saved in the dashboard
-    stripe_statement_descriptor: str
     stripe_automatic_tax: bool
     stripe_tax_code: str
     stripe_payment_method_configuration: str | None
@@ -158,7 +157,6 @@ def get_settings() -> Settings:
         stripe_secret_key=_env("STRIPE_SECRET_KEY"),
         stripe_webhook_secret=_env("STRIPE_WEBHOOK_SECRET"),
         stripe_portal_configuration=_env("STRIPE_PORTAL_CONFIGURATION"),
-        stripe_statement_descriptor=_env("STRIPE_STATEMENT_DESCRIPTOR", "AUDIO CLEANER") or "AUDIO CLEANER",
         stripe_automatic_tax=_env_bool("STRIPE_AUTOMATIC_TAX", False),
         # Electronically supplied services; change if your tax advisor says otherwise.
         stripe_tax_code=_env("STRIPE_TAX_CODE", "txcd_10000000") or "txcd_10000000",

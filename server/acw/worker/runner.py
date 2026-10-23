@@ -22,7 +22,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Any
 
 STAGES = ("probe", "analyse", "main", "finalize", "edit")
 

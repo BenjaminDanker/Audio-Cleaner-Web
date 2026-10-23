@@ -53,7 +53,6 @@ BAD_TIMELINE = "bad_timeline"
 BUSY = "job_busy"  # the job is being processed: wait for it
 NEEDS_PROCESSING = "needs_processing"  # an export of something that has to be processed (and paid for) first
 NOT_CACHED = "not_cached"  # a preview stretch of something the cache does not hold
-EDITED = "job_edited"  # the old re-run does not apply to a job that has a timeline of its own
 
 TIMELINE_MAX_BYTES = 200_000  # the JSON of a timeline (about 2,300 parts)
 MAX_PARTS = 500  # per layer
@@ -131,7 +130,6 @@ BROWSER = "browser"  # the job's folder of what the browser uploaded: the cleane
 SUBS = "subs"  # ... and of the subtitle parts' results, one folder per part (segments.json, segments.<lang>.json, asr_chunks/)
 NEEDS_UPLOADS = "needs_uploads"
 CUES_MAX_BYTES = 1_000_000  # the JSON of one free part's cues
-NOISE_BYTES_PER_SECOND = 48_000 * 2 * 4  # most a FLAC of 48 kHz audio can take per second and channel (32-bit samples, no compression)
 TRANSCRIBE_SPEED = {"standard": "transcribe_local", "accurate": "transcribe_premium"}
 
 
@@ -711,10 +709,12 @@ def make_quote(job: dict, params: dict, tl, *, rates: dict[str, int] | None = No
         billable = ed.billable(plan)
         total, lines = price(billable, rates)
     total, lines = total + subs["micros"], [*lines, *subs["lines"]]
-    # A video made on our side (the whole video was uploaded, or a sound asked for as a video) is made again with a new sound or new
-    # subtitles, the way the first run made it: its picture made again is charged again (a video conversion, jobs.convert_cost).
+    # A video made on our side (the whole video was uploaded, or a sound asked for as a video) is made again with a new sound, or new
+    # subtitles when they go inside it, the way the first run made it: its picture made again is charged again (jobs.convert_cost).
     opts = params.get("options") or {}
-    video = (bool(params.get("has_video")) or bool(opts.get("video_out"))) and bool(opts.get("output_video", True)) and not unchanged
+    embedded = bool(opts.get("embed_subtitles", True))
+    video = ((bool(params.get("has_video")) or bool(opts.get("video_out"))) and bool(opts.get("output_video", True))
+             and (not audio_same or (not subs_same and embedded)))
     convert = jobs.convert_cost(params, seconds) if video else 0
     if convert:
         total, lines = total + convert, [*lines, jobs.convert_line(params, seconds)]

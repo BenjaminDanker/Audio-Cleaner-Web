@@ -75,7 +75,7 @@ const Wave = memo(function Wave({ data, heard, w, H, tag, reading }) {
  * percentages of the length; `zoom` makes the rows wider than the screen (they scroll together). The selection is drawn on every row.
  */
 export default function Timeline({ ctx }) {
-  const { S, session, stage, ph, zoom, tips, pins, hear, hearText, heard, data, mobile, scrollRef, waveRef, reading, prog } = ctx;
+  const { S, stage, ph, zoom, tips, pins, hear, hearText, heard, data, mobile, scrollRef, waveRef, reading, prog } = ctx;
   const T = S.T;
   const [size, setSize] = useState({ w: 0, H: 92 });
   const wf = useRef(null);
@@ -102,7 +102,6 @@ export default function Timeline({ ctx }) {
   }, [w, T, zoom]);
 
   const R = ranges(S);
-  const whole = !S.sel;
   const one = !S.sel ? { s: 0, e: T } : S.sel.length === 1 ? S.sel[0] : null;
   const pct = (t) => `${(t / T) * 100}%`;
   const processing = stage === 'processing';

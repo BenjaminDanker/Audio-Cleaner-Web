@@ -45,7 +45,7 @@ function Details({ ctx }) {
 
 /** "Your files": names, labels and sizes, the subtitle preview, Download again's note, the cost and the time left, Delete now. */
 function Files({ ctx }) {
-  const { files, preview, session, job, expiresIn, delAsk, paid, finState, fin } = ctx;
+  const { files, preview, session, job, expiresIn, delAsk, paid, finState } = ctx;
   const local = !!job?.local;
   return (
     <div className="pop pl-r" role="dialog" aria-label="Your files" data-testid="files">

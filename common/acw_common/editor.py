@@ -897,7 +897,7 @@ class _Render:
 
     # ---- the steps
     def run(self) -> np.ndarray:
-        lay, inputs, n = self.lay, self.inputs, self.n
+        lay, inputs = self.lay, self.inputs
         tasks = self.keys.tasks()
         order = {s: i for i, s in enumerate(STEPS)}
         tasks.sort(key=lambda t: (order[t.step], str(t.channel), t.s))

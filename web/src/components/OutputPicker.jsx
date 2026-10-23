@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { stem } from '../format.js';
 import {
-  checkName, defaultFormatId, FORMAT, formatOfName, listOutputs, listSizes, nameForFormat, SIZES,
+  buildLimit, checkName, defaultFormatId, FORMAT, formatOfName, listOutputs, listSizes, nameForFormat, SIZES,
 } from '../media/convert.js';
 
 // "What should the result be called, and what kind of file?" A name box with a file-type list attached to its right,
@@ -46,7 +46,9 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
   useEffect(() => {
     if (!file || !info) return undefined;
     let alive = true;
-    listOutputs({ info, serverAudio }).then((l) => { if (alive) setOutputs(l); }).catch(() => { if (alive) setOutputs([{ id: 'wav', kind: 'audio', label: 'WAV', ok: true, why: '' }]); });
+    // (a video bigger than this browser can put together is made on our side, never started here to fail at the end)
+    const limit = buildLimit();
+    listOutputs({ info, serverAudio, tooBig: !!file?.size && limit != null && file.size > limit }).then((l) => { if (alive) setOutputs(l); }).catch(() => { if (alive) setOutputs([{ id: 'wav', kind: 'audio', label: 'WAV', ok: true, why: '' }]); });
     return () => { alive = false; };
   }, [file, info, serverAudio]);
 

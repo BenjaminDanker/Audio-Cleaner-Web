@@ -169,8 +169,6 @@ def accept_terms(user_id: str, how: str, ip: str | None = None) -> None:
 
 
 def create_session(response: Response, request: Request, user_id: str) -> None:
-    from .security import client_ip
-
     accept_terms(user_id, "sign-in", client_ip(request))
     settings = get_settings()
     token = random_token(32)

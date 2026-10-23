@@ -26,7 +26,7 @@ from dataclasses import replace
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from .. import auth, broker, db, keycaps, metrics, translate
+from .. import auth, broker, db, keycaps, metrics
 from ..billing import ledger, pricing, trust
 from ..config import get_settings
 from ..security import LIMITS, client_net, limiter
@@ -70,7 +70,6 @@ CONFIG_RATE = 5.0
 CONFIG_BURST = 5.0
 PACE_BURST_SECONDS = 6.0
 PACE_RATE = 1.25  # audio seconds accepted per wall-clock second
-LOW_BALANCE_WARN_SECONDS = 300
 TRIAL_LOW_WARN_SECONDS = 300
 TRIAL_BUSY_MESSAGE = "Free trial sessions are paused while live is busy. Try again in a few minutes, or add credit to go live now."
 TRIAL_ONE_AT_A_TIME_MESSAGE = "Your free trial covers one live session at a time. Stop the other one first, or add credit to run both."
@@ -211,6 +210,8 @@ class Session:
         self.premium = None
         self.translator = None  # LiveTranslator, when translations were asked for
         self.config_waiters: dict[str, asyncio.Future] = {}  # the engine's answers to feature changes, by id
+        self._outbox: asyncio.Queue | None = None  # events posted by callbacks that can't wait (post), sent in order by _sender
+        self._sender: asyncio.Task | None = None
         # Free trial: the trial seconds the account had when this session started (0: not a trial session), how many
         # of the session's seconds are already taken off the account, and whether it has moved on to paid billing.
         self.trial_budget = trial_budget
@@ -256,6 +257,31 @@ class Session:
         rest = min(max(0, samples) - n, self.trial_samples) if self.on_trial else 0
         self.trial_samples -= rest
         self.samples = max(0, self.samples - n - rest)
+
+    def post(self, ev: dict) -> None:
+        """Send `ev` from a callback that can't wait (the caption engines and the translator): in order, after what was posted
+        before, by one task the session holds (a task nobody holds can be collected before it ran)."""
+        if self._outbox is None:
+            self._outbox = asyncio.Queue()
+            self._sender = asyncio.get_running_loop().create_task(self._send_posted())
+        self._outbox.put_nowait(ev)
+
+    async def _send_posted(self) -> None:
+        while True:
+            ev = await self._outbox.get()
+            try:
+                await _send_json(self.ws, ev)
+            except Exception:  # noqa: BLE001 - the socket is gone: nothing more can be sent
+                return
+
+    async def close_outbox(self, wait: float = 2.0) -> None:
+        """At the end: let what was posted go out (the last captions), for at most `wait` seconds, then stop the sender."""
+        if self._sender is None:
+            return
+        end = time.monotonic() + wait
+        while self._outbox is not None and not self._outbox.empty() and not self._sender.done() and time.monotonic() < end:
+            await asyncio.sleep(0.05)
+        self._sender.cancel()
 
     def current_rate(self) -> int:
         """Micros per minute being provided right now."""
@@ -702,7 +728,7 @@ def _hold_message(rate: int, available: int) -> str:
 def _event_out(sess: Session):
     """Sends an event to the client and, for captions, to the translator."""
     def emit(ev: dict) -> None:
-        asyncio.ensure_future(_send_json(sess.ws, ev))
+        sess.post(ev)
         if sess.translator is not None:
             sess.translator.offer(ev)
     return emit
@@ -723,7 +749,7 @@ def _set_translations(sess: Session, features: Features) -> None:
             return
         from .live_translate import LiveTranslator
 
-        sess.translator = LiveTranslator([], None, lambda ev: asyncio.ensure_future(_send_json(sess.ws, ev)))
+        sess.translator = LiveTranslator([], None, sess.post)
     sess.translator.set_targets(list(features.translate), features.caption_language)
 
 
@@ -1094,6 +1120,7 @@ async def _finish(sess: Session) -> None:
     try:
         await _finish_inner(sess)
     finally:
+        await sess.close_outbox()
         _live_ids.discard(sess.id)
         mine = _open.get(sess.p.user_id, [])
         if sess in mine:

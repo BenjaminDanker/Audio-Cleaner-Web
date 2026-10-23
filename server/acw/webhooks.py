@@ -36,7 +36,7 @@ import ssl
 import time
 from urllib.parse import urlsplit
 
-from . import db, jobs
+from . import db
 from .config import get_settings
 from .security import random_token
 
@@ -111,11 +111,6 @@ def check_url(raw: str) -> str:
         raise ValueError("callbackUrl can't point back at this service.")
     path = parts.path or "/"
     return f"https://{host}{path}" + (f"?{parts.query}" if parts.query else "")
-
-
-def display_url(url: str) -> str:
-    """The address as shown back with the job: without the query string (it often carries a token)."""
-    return url.split("?", 1)[0]
 
 
 def _unwrap(ip: ipaddress._BaseAddress) -> ipaddress._BaseAddress:

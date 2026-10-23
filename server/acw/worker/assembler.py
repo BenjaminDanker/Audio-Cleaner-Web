@@ -22,6 +22,10 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # (numpy is imported only after the sandbox is up)
+    import numpy as np
 
 SAMPLE_RATE = 48_000
 CPU_SECONDS = 30

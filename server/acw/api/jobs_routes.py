@@ -242,7 +242,6 @@ async def upload(job_id: str, request: Request, principal: auth.Principal = Depe
     user_throttle = uploads.for_user(principal.user_id)
     pending: list[bytes] = []
     pending_n = 0
-    last_check = time.monotonic()
     last_keepalive = float("-inf")  # the first bytes move the expiry from "must start soon" to the full upload window
     checked_at = 0
     stream = request.stream().__aiter__()

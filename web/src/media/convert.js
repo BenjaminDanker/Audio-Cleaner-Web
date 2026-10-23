@@ -216,10 +216,11 @@ export async function videoPlan(info, container, px = 0, dims = null) {
  * Everything the "save as" list may hold, with whether this browser can make each for this file.
  * `serverAudio`: the sound itself comes from our server (paid cleaning), which writes any audio format, so only the
  * video files depend on this browser. A video type this browser can't make for a video is made on our side (`server`: the whole
- * video is uploaded; docs/api.md options.video_out).
+ * video is uploaded; docs/api.md options.video_out), and so is every video type when the video is `tooBig` for this browser to put
+ * together (over buildLimit() where it can't write to disk).
  * @returns {Promise<{id:string, kind:'audio'|'video', label:string, ok:boolean, why:string, server?:boolean}[]>}
  */
-export async function listOutputs({ info, serverAudio = false }) {
+export async function listOutputs({ info, serverAudio = false, tooBig = false }) {
   const caps = await outputCaps();
   const out = [];
   const sec = info?.duration || 0;
@@ -236,7 +237,7 @@ export async function listOutputs({ info, serverAudio = false }) {
   for (const f of FORMATS.filter((x) => x.kind === 'video')) {
     const plan = info?.hasVideo && !videoSource ? { ok: false, why: '' } : await videoPlan(info, f.id, 0);
     const audioOk = audioCodecsFor(caps, f.id).length > 0;
-    if (plan.ok && audioOk) out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '' });
+    if (plan.ok && audioOk && !(tooBig && info?.hasVideo)) out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '' });
     else out.push({ id: f.id, kind: 'video', label: f.label, ok: true, why: '', server: true }); // made on our side (a sound: a plain black picture)
   }
   return out;
@@ -635,7 +636,7 @@ export async function buildMedia({ format, size = 'same', videoFile = null, info
   const withPicture = !!videoFile && !!info?.hasVideo;
   const store = await diskTarget(mb, (withPicture ? videoFile.size : 0) + (audioFile?.size || 0) + 64 * 1024 ** 2, { relabel: !!subtitles && format === 'mkv' });
   if (!store.onDisk && withPicture && videoFile.size > MAX_BUILD_BYTES) {
-    throw new RemuxUnsupported('This video is too large for this browser to rebuild (over 1.5 GB). Chrome, Edge or Firefox can do it; or save the cleaned audio and combine it in your video editor.');
+    throw new RemuxUnsupported('This video is too large for this browser to put together (over 1.5 GB). Chrome, Edge or Firefox can do it; or choose a sound file type.');
   }
   const output = new mb.Output({ format: makeFormat(mb, format), target: store.target });
   const cancels = [];

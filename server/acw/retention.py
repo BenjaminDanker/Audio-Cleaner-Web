@@ -20,7 +20,6 @@ import logging
 import re
 import shutil
 import time
-from datetime import datetime, timezone
 
 from . import db
 
@@ -70,10 +69,6 @@ def _delete(table: str, where: str, params: tuple = ()) -> int:
         if n < BATCH:
             break
     return total
-
-
-def _day(ts: int) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d")
 
 
 def strip_file_name(description: str) -> str | None:

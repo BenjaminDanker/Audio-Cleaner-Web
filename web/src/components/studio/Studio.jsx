@@ -8,22 +8,22 @@ import { etaSeconds, etaText } from '../../eta.js';
 import { forgetFinish, removeLocalCard } from '../../finish.js';
 import { balanceMoney, bytes, human, shownName } from '../../format.js';
 import { findRate, loadPricing, useNow, usePricing } from '../../hooks.js';
-import { ACTIVE, jobPath, queueText, stageText } from '../../jobs.js';
+import { jobPath, queueText, stageText } from '../../jobs.js';
 import { heardSeries } from '../../editor/peaks.js';
 import { dismiss as dismissSuggestion } from '../../editor/suggest.js';
 import { MixPlayer, describe, prepare } from '../../editor/mix.js';
 import {
-  applyToSel, cost as costOf, covered, dbOf, delta as deltaOf, echoBlocked, edit, freePatch, fmt, hasWork, money, needsServer, overl, pushUndo, ranges, ratesFrom, sameOut, sameTracks,
-  selTitle, setSel, splitAll, toggleRange, toTimeline, tot, uni, trOf,
+  applyToSel, cost as costOf, dbOf, delta as deltaOf, echoBlocked, edit, freePatch, fmt, hasWork, money, needsServer, overl, pushUndo, ratesFrom, sameOut, sameTracks,
+  setSel, toggleRange, toTimeline, tot, uni,
 } from '../../editor/tracks.js';
-import { BlendPlayer, gainsFor, matchGain, memorySource, previewFits } from '../../media/blend.js';
+import { BlendPlayer, gainsFor, matchGain, memorySource } from '../../media/blend.js';
 import { buildLimit, serverPictureWork } from '../../media/convert.js';
 import { denoiserLoadState, subscribeDenoiserLoad } from '../../media/denoise.js';
 import { speechLoadState, subscribeSpeechLoad } from '../../media/speech.js';
 import { wavFits } from '../../media/wav.js';
 import { AbEngine, ElementEngine, syncPicture } from '../../studio/engine.js';
 import { tipsFor } from '../../studio/copy.js';
-import { browserVerdict, LONG_SECONDS, outputPlan, problemsFor, subsVerdict, supported, wantsOf, jobKind } from '../../studio/plan.js';
+import { browserVerdict, outputPlan, problemsFor, subsVerdict, wantsOf, jobKind } from '../../studio/plan.js';
 import { keepDraft } from '../../studio/draft.js';
 import { forgetSession, warmUpDenoiser, warmUpSpeech } from '../../studio/session.js';
 import { PAID_OFFLINE } from '../Maintenance.jsx';
@@ -77,7 +77,7 @@ export default function Studio(props) {
 
 function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcome = '', active = 0, maxActive = null }) {
   const nav = useNavigate();
-  const { balance, refresh, contact, signedIn, known } = useAuth();
+  const { balance, refresh, signedIn, known } = useAuth();
   const goSignIn = useGoSignIn();
   const offline = useSyncExternalStore(apiOffline.subscribe, apiOffline.get);
   const { data: pricing, error: pricingError } = usePricing();
@@ -777,7 +777,6 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   Object.assign(live.current, { mobile, processing, setMore, setSheet, setPop, pop, modal, more, seek, togglePlay, session });
 
   // the bar's height, for the room under the page
-  const barRef = useRef(null);
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return undefined;
@@ -805,7 +804,6 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   // ================================================================================================ what is shown
 
-  const R = ranges(S);
   const pend = session.auto ? S.sugg.filter((g) => g.st === 'new').length : 0;
   const pins = session.auto && !processing && !reading ? S.sugg.filter((g) => g.st !== 'dismissed') : [];
   const fileMeta = `${session.lengthUnknown ? 'about ' : ''}${fmt(T)} · ${session.kind === 'video' ? 'Video' : 'Audio'}${session.file ? ` · ${bytes(session.file.size)}` : ''}`;

@@ -570,9 +570,9 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
     if audio_changed and not any(o["kind"] == "audio" for o in outputs):
         raise StageFailed("Processing failed; you were not charged.", "the run made no audio")
     if audio_changed or text_changed:
-        # the other results stay (captions and transcript unless they were made again); a video made with the old sound or captions does
-        # not fit any more
-        gone = {"video", *(["audio"] if audio_changed else []), *(TEXT_KINDS if text_changed else ())}
+        # the other results stay (captions and transcript unless they were made again)
+        # (the video is replaced only when the run made it again: a new sound, or new subtitles that go inside it; editing.make_quote)
+        gone = {*(["video"] if run.get("video") else []), *(["audio"] if audio_changed else []), *(TEXT_KINDS if text_changed else ())}
         keep_old = [o for o in old if o["kind"] not in gone and o["file"] not in {x["file"] for x in outputs}]
         outputs = [*(o for o in outputs if (o["kind"] == "audio" and audio_changed) or (o["kind"] in TEXT_KINDS and text_changed)
                      or o["kind"] == "video"), *keep_old]  # (a video made on our side is made again: editrun.stage_edit)

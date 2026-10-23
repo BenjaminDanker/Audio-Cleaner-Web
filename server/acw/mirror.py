@@ -185,10 +185,6 @@ class GitHub:
                 break
         return out
 
-    def release_by_tag(self, tag: str) -> dict | None:
-        data = self._get_json(f"/repos/{self.cfg.repo}/releases/tags/{tag}", missing_ok=True)
-        return data if isinstance(data, dict) else None
-
     def _asset_url(self, asset: dict) -> str:
         url = asset.get("url")
         if not isinstance(url, str) or not url.startswith(self.cfg.api + "/"):
