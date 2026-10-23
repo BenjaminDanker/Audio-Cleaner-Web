@@ -179,3 +179,31 @@ def test_the_end_of_a_session_lets_the_last_captions_go_out_first(monkeypatch, d
 
     sent, order = asyncio.run(go())
     assert order == ["inner", "finished"] and sent == events(1)
+
+
+@pytest.mark.xfail(strict=True, reason="PRODUCT BUG (f87df76): _finish awaits close_outbox() before it forgets the session; when the websocket's handler is cancelled "
+                                       "during that wait (up to 2 s), the session stays in _live_ids and _open forever")
+def test_a_session_is_forgotten_even_when_its_end_is_cancelled_while_the_last_captions_go_out(monkeypatch):
+    async def go():
+        ws = Socket(delays=[60])  # (a client that does not take the last caption)
+        s = session(ws)
+        s.id = "s9"
+        routes._live_ids.add(s.id)
+        routes._open.setdefault("u", []).append(s)
+
+        async def inner(sess):
+            sess.post(events(1)[0])
+
+        monkeypatch.setattr(routes, "_finish_inner", inner)
+        task = asyncio.get_running_loop().create_task(routes._finish(s))
+        await asyncio.sleep(0.1)  # (it is waiting for the caption to go out)
+        task.cancel()  # (the handler is cancelled when the client goes away)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return s.id in routes._live_ids, s in routes._open.get("u", [])
+
+    try:
+        assert asyncio.run(go()) == (False, False)
+    finally:
+        routes._live_ids.discard("s9")
+        routes._open.pop("u", None)
