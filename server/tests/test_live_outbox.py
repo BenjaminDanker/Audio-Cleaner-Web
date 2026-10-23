@@ -181,8 +181,6 @@ def test_the_end_of_a_session_lets_the_last_captions_go_out_first(monkeypatch, d
     assert order == ["inner", "finished"] and sent == events(1)
 
 
-@pytest.mark.xfail(strict=True, reason="PRODUCT BUG (f87df76): _finish awaits close_outbox() before it forgets the session; when the websocket's handler is cancelled "
-                                       "during that wait (up to 2 s), the session stays in _live_ids and _open forever")
 def test_a_session_is_forgotten_even_when_its_end_is_cancelled_while_the_last_captions_go_out(monkeypatch):
     async def go():
         ws = Socket(delays=[60])  # (a client that does not take the last caption)
