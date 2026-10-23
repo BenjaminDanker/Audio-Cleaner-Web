@@ -118,8 +118,8 @@ def facts_of(job: dict, params: dict) -> dict:
 
 
 def source_id(job: dict) -> str:
-    """What identifies the samples of the recording in every cache key: the first job of the chain (the upload never changes)."""
-    return "j" + (job.get("root_job_id") or job["id"])
+    """What identifies the samples of the recording in every cache key: the job (its upload never changes)."""
+    return "j" + job["id"]
 
 
 def inputs_for(job: dict, params: dict):

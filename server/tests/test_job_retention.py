@@ -171,29 +171,6 @@ def test_delete_now_removes_the_upload_and_the_results_of_that_job_and_nothing_e
     assert one not in {j["id"] for j in client.get("/api/jobs").json()["jobs"]} and two in {j["id"] for j in client.get("/api/jobs").json()["jobs"]}
 
 
-def test_delete_now_does_not_take_a_job_that_only_shares_a_column_with_it(client, signed_in):
-    """Chains of jobs made from another are gone: rows of an older database that name another job as their root or source are separate jobs."""
-    uid, h = signed_in
-    root = make_done_job(uid)
-    old = make_done_job(uid)
-    db.execute("UPDATE jobs SET source_job_id = ?, root_job_id = ? WHERE id = ?", (root, root, old))
-    assert client.delete(f"/api/jobs/{root}", headers=h).status_code == 200
-    assert row(root)["status"] == "expired" and not folder(root).exists()
-    assert row(old)["status"] == "done" and folder(old).is_dir()
-    assert client.delete(f"/api/jobs/{old}", headers=h).status_code == 200 and row(old)["status"] == "expired"
-
-
-def test_the_retention_clock_of_a_job_does_not_move_with_another_job_of_the_old_chain(client, signed_in, clock):
-    """(an edit or a finish touches that job's own files only)"""
-    uid, _ = signed_in
-    a, b = make_done_job(uid, finished_ago=3600), make_done_job(uid, finished_ago=3600)
-    db.execute("UPDATE jobs SET root_job_id = ? WHERE id = ?", (a, b))
-    before = row(b)["expires_at"]
-    clock.advance(600)
-    jobs.touch(a)
-    assert row(a)["expires_at"] == clock.t + 7200 and row(b)["expires_at"] == before
-
-
 @pytest.mark.parametrize("state", ["uploading", "queued", "running", "cloud_asr"])
 def test_delete_is_refused_while_the_job_is_in_progress(client, signed_in, state):
     """409 and nothing deleted until it is done or canceled."""

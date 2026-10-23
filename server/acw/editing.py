@@ -468,7 +468,7 @@ def price_timeline(tl, seconds: float, rates: dict[str, int]) -> tuple[int, list
     ed = edit_store.editor_lib()
     n = int(round(seconds * edit_store.SR))
     f = {"n": n, "channels": 2, "plan": [0, 1], "spans": {"0": [[0, n]], "1": [[0, n]]}, "rebuild_mid": False, "reference": True}
-    job = {"id": "0" * 32, "claimed_seconds": seconds, "duration_seconds": seconds, "root_job_id": None}
+    job = {"id": "0" * 32, "claimed_seconds": seconds, "duration_seconds": seconds}
     inputs = edit_store.inputs_for(job, {"edit": {"facts": f}})
     t = edit_store.timeline_lib().Timeline.from_json(tl.to_json(), seconds=n / edit_store.SR)
     planned, _ = for_planning(t, None)

@@ -80,7 +80,7 @@ def render_like_the_server(job_id: str, tl: dict, cache=None, *, models: bool = 
     f = ff()
     src = folder(job_id) / "input.wav"
     x = f.decode(src, f.probe(src), SR, 1, SECONDS + 5)
-    inputs = editor.Inputs(x, edit_store.source_id({"id": job_id, "root_job_id": None}))
+    inputs = editor.Inputs(x, edit_store.source_id({"id": job_id}))
     runner = editor.Runner(HOME / "bin/libdf.so", MODELS / "DeepFilterNet3_onnx.tar.gz", MODELS / "dpdfnet" / dpdfnet.MODEL_FILE, MODELS / "sidon") if models else None
     return editor.render(Timeline.from_json(tl, seconds=len(x) / SR), inputs, cache if cache is not None else blocks.MemoryCache(), runner)
 

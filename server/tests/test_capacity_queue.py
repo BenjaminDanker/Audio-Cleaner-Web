@@ -38,6 +38,20 @@ def test_init_db_drops_the_session_owner_column_of_an_old_database():
     assert "owner" not in {r["name"] for r in db.all_rows("PRAGMA table_info(stream_sessions)")}
 
 
+def test_init_db_drops_the_chain_columns_and_their_index_of_an_old_database_and_keeps_the_jobs():
+    user = auth.get_or_create_user("old@example.com")["id"]
+    _add_job("old1", user, "done")
+    db.execute("ALTER TABLE jobs ADD COLUMN source_job_id TEXT")  # what the re-runs of an older version left
+    db.execute("ALTER TABLE jobs ADD COLUMN root_job_id TEXT")
+    db.execute("CREATE INDEX jobs_root ON jobs(root_job_id) WHERE root_job_id IS NOT NULL")
+    db.execute("UPDATE jobs SET source_job_id = 'src', root_job_id = 'root' WHERE id = 'old1'")
+    before = {k: v for k, v in dict(db.one("SELECT * FROM jobs WHERE id = 'old1'")).items() if k not in ("source_job_id", "root_job_id")}
+    db.init_db()
+    assert not {"source_job_id", "root_job_id"} & {r["name"] for r in db.all_rows("PRAGMA table_info(jobs)")}
+    assert "jobs_root" not in {r["name"] for r in db.all_rows("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert dict(db.one("SELECT * FROM jobs WHERE id = 'old1'")) == before
+
+
 def test_the_queue_is_computed_once_a_second_and_matches_the_slow_estimates(monkeypatch):
     a = auth.get_or_create_user("a@example.com")["id"]
     b = auth.get_or_create_user("b@example.com")["id"]

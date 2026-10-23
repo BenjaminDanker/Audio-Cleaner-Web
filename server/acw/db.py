@@ -334,10 +334,6 @@ MIGRATIONS = [
         " user_id TEXT NOT NULL, key TEXT NOT NULL, body_hash TEXT NOT NULL, job_id TEXT NOT NULL,"
         " created_at INTEGER NOT NULL, PRIMARY KEY (user_id, key))",
     ),
-    # (no longer written: the re-runs of "change and save again", a job of its own made from another, are gone; a job is changed by editing
-    # its timeline. The columns stay so older databases open as they are.)
-    ("jobs", "source_job_id", "ALTER TABLE jobs ADD COLUMN source_job_id TEXT"),
-    ("jobs", "root_job_id", "ALTER TABLE jobs ADD COLUMN root_job_id TEXT"),
     # The retention clock of a job's files (acw.editing): they go 2 hours after the last edit (`edited_at`: a run finishing, a
     # timeline save, a quote, a process or an export) and at the latest 6 hours after the upload arrived (`uploaded_at`).
     # `expires_at` is the moment that results in.
@@ -355,8 +351,11 @@ MIGRATIONS = [
 ]
 
 # Columns that are gone: dropped from databases made before (jobs.free: free server-side subtitle minutes;
-# stream_sessions.premium_off_seconds: replaced by the meter, see _meter_running_sessions).
-DROPPED_COLUMNS = [("jobs", "free"), ("stream_sessions", "premium_off_seconds"), ("stream_sessions", "owner")]
+# stream_sessions.premium_off_seconds: replaced by the meter, see _meter_running_sessions; jobs.source_job_id / root_job_id: the chain of
+# re-runs of "change and save again", gone since a job is changed by editing its timeline). An index on one of them goes first.
+DROPPED_COLUMNS = [("jobs", "free"), ("stream_sessions", "premium_off_seconds"), ("stream_sessions", "owner"), ("jobs", "source_job_id"),
+                   ("jobs", "root_job_id")]
+DROPPED_INDEXES = ["jobs_root"]
 
 
 def _meter_running_sessions(c) -> None:
@@ -383,7 +382,6 @@ POST_MIGRATION_SQL = [
     # The free server-side subtitle minutes are gone (free subtitles are made in the browser).
     "DROP TABLE IF EXISTS free_usage",
     "DROP TABLE IF EXISTS deleted_emails",
-    "CREATE INDEX IF NOT EXISTS jobs_root ON jobs(root_job_id) WHERE root_job_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS jobs_api_key ON jobs(api_key_id, finished_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS stream_sessions_api_key ON stream_sessions(api_key_id, ended_at) WHERE api_key_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS job_callbacks_due ON job_callbacks(next_attempt_at) WHERE state = 'pending'",
@@ -403,6 +401,8 @@ def init_db() -> None:
         if column not in cols:
             c.execute(ddl)
     _meter_running_sessions(c)
+    for name in DROPPED_INDEXES:
+        c.execute(f"DROP INDEX IF EXISTS {name}")
     for table, column in DROPPED_COLUMNS:
         if column in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
             c.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
