@@ -273,14 +273,18 @@ class Session:
                 await _send_json(self.ws, ev)
             except Exception:  # noqa: BLE001 - the socket is gone: nothing more can be sent
                 return
+            finally:
+                self._outbox.task_done()  # (sent, or given up: close_outbox waits for this, not for the queue to be empty)
 
     async def close_outbox(self, wait: float = 2.0) -> None:
         """At the end: let what was posted go out (the last captions), for at most `wait` seconds, then stop the sender."""
         if self._sender is None:
             return
-        end = time.monotonic() + wait
-        while self._outbox is not None and not self._outbox.empty() and not self._sender.done() and time.monotonic() < end:
-            await asyncio.sleep(0.05)
+        if not self._sender.done():
+            try:  # every posted event sent, the one being sent included (each is marked done after its send)
+                await asyncio.wait_for(asyncio.shield(self._outbox.join()), wait)
+            except asyncio.TimeoutError:
+                pass
         self._sender.cancel()
 
     def current_rate(self) -> int:
