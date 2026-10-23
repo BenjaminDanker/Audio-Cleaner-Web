@@ -43,9 +43,10 @@ export function browserVerdict(info, { ok = supported, wavFits = null } = {}) {
   return { ok: true, why: '' };
 }
 
-/** Does the output choice convert the file by itself: another file type than the file's own, or another picture size, chosen by the person? */
+/** Does the output choice convert the file by itself: another file type than the file's own, or another picture size, chosen by the person?
+ * (`choice.chosen`: the person picked it; a choice without it counts when `touched`) */
 export function convertsFile({ file, choice }) {
-  if (!file || !choice?.valid || !choice.touched) return false;
+  if (!file || !choice?.valid || !(choice.chosen ?? choice.touched)) return false;
   return choice.format !== formatOfName(file.name) || (!!choice.picture && choice.size !== 'same');
 }
 

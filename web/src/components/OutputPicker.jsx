@@ -24,6 +24,9 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
   const [size, setSize] = useState(initial?.size || 'same');
   const [sizes, setSizes] = useState(null);
   const [touched, setTouched] = useState(!!initial);
+  // the person chose the file type, name or size (an `initial` with `asMade`: what an earlier result was made as without being asked,
+  // the MKV that subtitles alone went into, which is no conversion)
+  const [chosen, setChosen] = useState(!!initial && !initial.asMade);
 
   // another file: start over (with `initial`: from the choices the result was made with)
   useEffect(() => {
@@ -31,6 +34,7 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
     setSizes(null);
     setSize(initial?.size || 'same');
     setTouched(!!initial);
+    setChosen(!!initial && !initial.asMade);
     if (initial) {
       setFormatState(initial.format);
       setNameState(initial.name);
@@ -91,11 +95,13 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
     setTouched(true);
     const id = formatOfName(v);
     if (id && okIds.includes(id)) setFormatState(id);
+    setChosen(true);
   }, [okIds]);
   const pickFormat = useCallback((id) => {
     setFormatState(id);
     setNameState((n) => nameForFormat(n, id));
     setTouched(true);
+    setChosen(true);
   }, []);
 
   const hint = file && info ? checkName(name, okIds) : '';
@@ -103,8 +109,8 @@ export function useOutputChoice({ file, info, keepVideo = true, serverAudio = fa
   // (a sound has no picture sizes: a video type made on our side gets a plain black picture there)
   const server = FORMAT[format]?.kind === 'video' && (serverFormat || (picture && !!sizes?.find((s) => s.id === size)?.server));
   return {
-    outputs, sizes, format, name, size, setSize: (v) => { setSize(v); setTouched(true); }, typeName, pickFormat, hint, valid: !!file && !!info && !!outputs && !hint,
-    okIds, picture, isVideoFile: FORMAT[format]?.kind === 'video', server, touched,
+    outputs, sizes, format, name, size, setSize: (v) => { setSize(v); setTouched(true); setChosen(true); }, typeName, pickFormat, hint, valid: !!file && !!info && !!outputs && !hint,
+    okIds, picture, isVideoFile: FORMAT[format]?.kind === 'video', server, touched, chosen,
     defaultVideo: () => defaultFormatId(file, info, true),
     defaultAudio: () => AUDIO_DEFAULT_FOR(file),
   };

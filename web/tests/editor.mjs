@@ -512,12 +512,12 @@ await check('suggestions made by the server: the chip says how many, the pins si
   const other = made === 'heavy' ? 'light' : 'heavy';
   pyRun(`
 import json
-from acw import editing, jobs
+from acw import edit_store, jobs
 sug = {"seconds": 10.6, "whole": {"rebuild": False, "remover": "${made}", "strength": "max"},
        "suggestions": [{"start": 2.0, "end": 5.0, "kind": "part", "rebuild": False, "noise": {"strength_db": 40, "remover": "${made}"}, "reasons": ["is noisier"]},
                        {"start": 5.5, "end": 7.0, "kind": "part", "rebuild": False, "noise": {"strength_db": 40, "remover": "${other}"}, "reasons": ["has noise that needs a stronger setting", "needs the other noise remover"]},
                        {"start": 7.5, "end": 9.0, "kind": "clipping", "rebuild": True, "noise": None, "reasons": ["sounds distorted here (clipped)"]}]}
-editing.write_suggestions(${JSON.stringify(J2.id)}, sug)
+edit_store.write_suggestions(${JSON.stringify(J2.id)}, sug)
 p = jobs.update_params(${JSON.stringify(J2.id)}, edit={**json.loads(__import__("acw.db", fromlist=["one"]).one("SELECT params_json FROM jobs WHERE id = ?", (${JSON.stringify(J2.id)},))["params_json"]).get("edit", {}), "suggestions": True})
 `);
   await autoOn();
