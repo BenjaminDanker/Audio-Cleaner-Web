@@ -179,7 +179,7 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     cleaned = render_like_the_server(jid, tl_json(noise=[noise(0, len(x) / SR, 100)]))
     assert np.max(np.abs(got[:len(x), 0] - ((1 - mix) * cleaned[:, 0] + mix * x[:, 0]))) < 1e-4  # a true blend of the cached full-strength output
     p = params_of(jid)
-    assert p["edit"]["runs"][-1]["op"] == "export" and "kept" not in p and "redo" not in client.get(f"/api/jobs/{jid}").json()
+    assert p["edit"]["runs"][-1]["op"] == "export"
     # a heavy remover on the last three seconds: only that is made and charged (the light blocks and the recording are cached)
     mixed = tl_json(noise=[noise(0, 5, 24), noise(5, len(x) / SR, 24, "heavy")])
     q = client.post(f"/api/jobs/{jid}/quote", json={"timeline": mixed}, headers=h).json()

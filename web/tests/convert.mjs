@@ -8,7 +8,7 @@
 // headless Chromium lacks is reported as a skip.
 // Needs the local backend (port 8792), `npm run build` output and the fixtures. Usage: node tests/convert.mjs
 import { execFileSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, rmSync, statSync, truncateSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { BASE, FILES, SHOTS, admin, check, dropFile, launch, pick, signIn, summary, waitCardDone, waitResult } from './helpers.mjs';
@@ -310,6 +310,43 @@ await check('made on our side: a video this browser can only read through libav 
   const mine = (g.find((x) => x.label === 'Video, made on our side') || { values: [] }).values;
   if (!here || !here.values.includes('mp4') || !here.values.includes('mkv') || mine.includes('mp4') || mine.includes('mkv')) throw new Error('groups for an MP4: ' + JSON.stringify(g));
   return `AVI: ${ours.values.join(', ')}; MP4: here ${here.values.join(', ')}${mine.length ? `, ours ${mine.join(', ')}` : ''}`;
+});
+
+await check('a video too big for this browser to put together is offered as made on our side: where it cannot write to disk (no private file system) a video over 1.5 GB gets every video type under "Video, made on our side"; the same file in a browser that can is offered them as made here', async () => {
+  const sparse = join(FILES, `big-sparse-${Date.now().toString(36)}.mp4`);
+  try {
+    // a real MP4 (its header first) followed by empty space up to 1.6 GB: a file of that size that takes no disk to keep
+    execFileSync(FFMPEG, ['-v', 'error', '-y', '-i', join(FILES, 'test.mp4'), '-c', 'copy', '-movflags', '+faststart', sparse]);
+    truncateSync(sparse, Math.round(1.6 * 1024 ** 3));
+    const groupsOf = (p) => p.locator('[data-testid=output-pop] [data-testid=out-format]').evaluate((sel) => [...sel.querySelectorAll('optgroup')].map((g) => ({ label: g.label, values: [...g.querySelectorAll('option')].map((o) => o.value) })));
+    const open = async (p) => {
+      await p.goto(`${BASE}/app`);
+      await dropFile(p, sparse);
+      if (!(await p.getByTestId('output-pop').count())) await p.getByTestId('output-button').click();
+      await p.locator('[data-testid=output-pop] [data-testid=out-format]').waitFor();
+      await p.waitForFunction(() => { const s = document.querySelector('[data-testid=output-pop] [data-testid=out-format]'); return s && !s.disabled; }, null, { timeout: 15000 });
+    };
+    // a browser that can write to disk: no limit, the file is put together here
+    await open(page);
+    const here = await groupsOf(page);
+    if (!here.find((x) => x.label === 'Video') || here.find((x) => x.label === 'Video, made on our side')) throw new Error('with a place on disk: ' + JSON.stringify(here));
+    await closeOutput();
+    // a browser that cannot (the same page, without the private file system): over 1.5 GB it is made on our side
+    const ctx = await browser.newContext();
+    try {
+      await ctx.addInitScript(() => { Object.defineProperty(StorageManager.prototype, 'getDirectory', { value: undefined, configurable: true }); });
+      const p = await ctx.newPage();
+      await open(p);
+      const g = await groupsOf(p);
+      const ours = g.find((x) => x.label === 'Video, made on our side');
+      if (!ours || ours.values.join() !== 'mp4,mov,mkv,webm' || g.some((x) => x.label === 'Video')) throw new Error('without a place on disk: ' + JSON.stringify(g));
+    } finally {
+      await ctx.close();
+    }
+    return `with a place on disk: ${here.map((x) => `${x.label}: ${x.values.join(',')}`).join('; ')}; without: all four made on our side`;
+  } finally {
+    rmSync(sparse, { force: true });
+  }
 });
 
 /** The Details popup: its lines (the total apart) and the total. */

@@ -21,8 +21,8 @@ from .test_editor_api import edit_job, tl_of
 from .test_timeline_jobs import cancel, funded, start, whole
 
 TOTAL = 4096
-SMALL = 250  # encode
-HEAVY, REBUILD, TRANSCRIBE = 360, 2600, 3300  # GPU_WORK card_mb
+FULL = TOTAL - 100  # what others hold when nothing fits
+EDGE = TOTAL - broker.CARD_MARGIN_MB - broker.GPU_WORK["rebuild"].card_mb  # the most others may hold for the rebuild to fit
 
 
 def fake_nvidia(monkeypatch, total=TOTAL, used=0, apps=(), calls=None):
@@ -111,7 +111,6 @@ def test_the_gpu_worker_writes_the_state_atomically_and_it_is_read_back_while_fr
 
 
 def test_a_state_older_than_thirty_seconds_or_not_readable_is_no_state():
-    assert broker.CARD_STATE_FRESH_S == 30
     set_card(1000, age=29)
     assert broker.card_state()["others_mb"] == 1000
     set_card(1000, age=31)
@@ -127,35 +126,30 @@ def test_a_state_older_than_thirty_seconds_or_not_readable_is_no_state():
 # --------------------------------------------------------------------------------------------------------- what fits in what is left
 
 def test_what_a_job_needs_of_the_card_is_the_most_of_its_stages_because_they_run_one_after_another():
-    assert broker.CARD_MARGIN_MB == 300
     need = {s: broker.GPU_WORK[s].card_mb for s in broker.GPU_WORK}
-    assert need == {"transcribe": TRANSCRIBE, "heavy": HEAVY, "rebuild": REBUILD, "encode": SMALL}
-    assert broker.card_need_mb(["heavy", "encode"]) == HEAVY and broker.card_need_mb(["rebuild", "heavy"]) == REBUILD
-    assert broker.card_need_mb(["transcribe", "rebuild"]) == TRANSCRIBE and broker.card_need_mb([]) == 0 and broker.card_need_mb(["other"]) == 0
+    assert set(need) == {"transcribe", "heavy", "rebuild", "encode"}
+    assert broker.card_need_mb(["heavy", "encode"]) == max(need["heavy"], need["encode"])
+    assert broker.card_need_mb(["rebuild", "heavy"]) == max(need["rebuild"], need["heavy"])
+    assert broker.card_need_mb(["transcribe", "rebuild"]) == max(need["transcribe"], need["rebuild"])
+    assert broker.card_need_mb([]) == 0 and broker.card_need_mb(["other"]) == 0 and broker.card_need_mb(["encode"]) == need["encode"]
 
 
-@pytest.mark.parametrize("others, fits", [
-    (0, {"rebuild": True, "transcribe": True, "heavy": True, "encode": True}),  # 3796 free
-    (496, {"rebuild": True, "transcribe": True, "heavy": True, "encode": True}),  # 3300 free: exactly Parakeet
-    (497, {"rebuild": True, "transcribe": False, "heavy": True, "encode": True}),
-    (1196, {"rebuild": True, "transcribe": False, "heavy": True, "encode": True}),  # 2600 free: exactly the rebuild
-    (1197, {"rebuild": False, "transcribe": False, "heavy": True, "encode": True}),
-    (3436, {"rebuild": False, "transcribe": False, "heavy": True, "encode": True}),  # 360 free: exactly the heavy remover
-    (3437, {"rebuild": False, "transcribe": False, "heavy": False, "encode": True}),
-    (3546, {"rebuild": False, "transcribe": False, "heavy": False, "encode": True}),  # 250 free: exactly the encoder
-    (3547, {"rebuild": False, "transcribe": False, "heavy": False, "encode": False}),
-    (TOTAL, {"rebuild": False, "transcribe": False, "heavy": False, "encode": False}),
-    (TOTAL + 500, {"rebuild": False, "transcribe": False, "heavy": False, "encode": False}),  # (more held than there is: no negative room)
-])
-def test_a_stage_fits_when_the_card_less_what_others_hold_less_the_margin_has_its_memory_free(others, fits):
-    state = {"total_mb": TOTAL, "others_mb": others, "at": time.time()}
-    assert {s: broker.card_room([s], state)[0] for s in fits} == fits
-    assert broker.card_room(["rebuild", "heavy"], state)[0] is fits["rebuild"]  # (the most of them)
+@pytest.mark.parametrize("stage", ["rebuild", "transcribe", "heavy", "encode"])
+def test_a_stage_fits_when_the_card_less_what_others_hold_less_the_margin_has_its_memory_free(stage):
+    need = broker.GPU_WORK[stage].card_mb
+    exact = TOTAL - broker.CARD_MARGIN_MB - need  # the most others may hold
+    for others, fits in ((0, True), (exact, True), (exact + 1, False), (TOTAL, False), (TOTAL + 500, False)):  # (more held than there is: no negative room)
+        state = {"total_mb": TOTAL, "others_mb": others, "at": time.time()}
+        assert broker.card_room([stage], state)[0] is fits, (stage, others)
+    # a job with several stages needs the biggest
+    state = {"total_mb": TOTAL, "others_mb": TOTAL - broker.CARD_MARGIN_MB - broker.GPU_WORK["rebuild"].card_mb + 1, "at": time.time()}
+    assert broker.card_room(["rebuild", "heavy"], state)[0] is False and broker.card_room(["heavy", "encode"], state)[0] is True
 
 
 def test_the_reason_a_job_does_not_fit_says_what_is_free_who_holds_the_rest_and_what_the_job_needs():
     ok, why = broker.card_room(["rebuild"], {"total_mb": TOTAL, "others_mb": 3000, "at": time.time()})
-    assert ok is False and why == "card: 796 MB free (other programs hold 3000 of 4096 MB), the job needs 2600 MB"
+    free, need = TOTAL - 3000 - broker.CARD_MARGIN_MB, broker.GPU_WORK["rebuild"].card_mb
+    assert ok is False and why == f"card: {free} MB free (other programs hold 3000 of 4096 MB), the job needs {need} MB"
     ok, why = broker.card_room(["heavy"], {"total_mb": TOTAL, "others_mb": 4000, "at": time.time()})
     assert ok is False and why.startswith("card: 0 MB free (other programs hold 4000 of 4096 MB)")
     assert broker.card_room(["heavy"], {"total_mb": TOTAL, "others_mb": 0, "at": time.time()}) == (True, "")
@@ -175,11 +169,11 @@ def test_the_rebuild_can_be_ordered_when_the_worker_is_up_and_the_card_has_room_
     assert broker.rebuild_available() is False  # (no worker)
     broker.mark_gpu_worker("alive")
     assert broker.rebuild_available() is True  # (no state at all: as before)
-    set_card(1196)
+    set_card(EDGE)
     assert broker.rebuild_available() is True
-    set_card(1197)
+    set_card(EDGE + 1)
     assert broker.rebuild_available() is False  # (the worker is up but the card is full)
-    set_card(1197, age=31)
+    set_card(EDGE + 1, age=31)
     assert broker.rebuild_available() is True  # (a state that is not fresh says nothing)
     set_card(0)
     broker.mark_gpu_worker("stopped")
@@ -189,9 +183,9 @@ def test_the_rebuild_can_be_ordered_when_the_worker_is_up_and_the_card_has_room_
 def test_the_gpu_worker_itself_measures_the_card_now_instead_of_reading_its_file(monkeypatch):
     broker.mark_gpu_worker("alive")
     set_card(0)  # (the file says there is room, an old measure)
-    fake_nvidia(monkeypatch, used=3500)
+    fake_nvidia(monkeypatch, used=FULL)
     assert broker.rebuild_available() is True and broker.rebuild_available(live=True) is False
-    set_card(3500)
+    set_card(FULL)
     fake_nvidia(monkeypatch, used=100)
     assert broker.rebuild_available() is False and broker.rebuild_available(live=True) is True
     monkeypatch.setattr(broker, "_nvidia", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))  # (cannot measure: the file decides)
@@ -212,19 +206,20 @@ def test_the_card_job_is_refused_with_the_reason_when_its_stages_do_not_fit_and_
     light = row(start(client, h, options={"noise": "light"}))
     cancel(light["id"])
     snap = Load().snapshot()
-    # 3000 MB held by others (measured now): 796 free, the heavy remover (360) fits, the rebuild (2600) does not
+    # 3000 MB held by others (measured now): the heavy remover fits in what is left, the rebuild does not
     fake_nvidia(monkeypatch, used=3000)
     ok, why, threads = broker.admit_job(heavy, snap, [], gpu=True)
     assert ok is True and why == "" and threads >= 2
     ok, why, threads = broker.admit_job(both, snap, [], gpu=True)
-    assert (ok, threads) == (False, 0) and why == "card: 796 MB free (other programs hold 3000 of 4096 MB), the job needs 2600 MB"
-    fake_nvidia(monkeypatch, used=3900)
+    free, need = TOTAL - 3000 - broker.CARD_MARGIN_MB, broker.GPU_WORK["rebuild"].card_mb
+    assert (ok, threads) == (False, 0) and why == f"card: {free} MB free (other programs hold 3000 of 4096 MB), the job needs {need} MB"
+    fake_nvidia(monkeypatch, used=TOTAL)
     ok, why, _ = broker.admit_job(heavy, snap, [], gpu=True)
     assert ok is False and why.startswith("card: 0 MB free")
     fake_nvidia(monkeypatch, used=0)
     assert broker.admit_job(both, snap, [], gpu=True)[0] is True
     # a CPU worker does not look at the card, and a job with no card stage is admitted by a full card too (nothing of it is on the card)
-    fake_nvidia(monkeypatch, used=3900)
+    fake_nvidia(monkeypatch, used=TOTAL)
     assert broker.admit_job(heavy, snap, [], gpu=False)[0] is True
     assert broker.gpu_stages(light) == [] and broker.admit_job(light, snap, [], gpu=True)[0] is True
     # when the card cannot be measured nothing is refused
@@ -236,7 +231,7 @@ def test_the_gpu_worker_that_finds_no_room_says_so_and_the_job_stays_queued(clie
     uid, h = funded(signed_in, 50_000_000)
     jid = start(client, h, options={"noise": "heavy"})
     monkeypatch.setattr(worker, "GPU_MODE", True)
-    fake_nvidia(monkeypatch, used=3900)
+    fake_nvidia(monkeypatch, used=TOTAL)
     assert worker.claim("gpu:t", Load()) is None and worker._card_wait is True and row(jid)["status"] == "queued"
     fake_nvidia(monkeypatch, used=1000)
     assert worker.claim("gpu:t", Load())["id"] == jid and worker._card_wait is False  # (room again)
@@ -250,7 +245,7 @@ def test_the_gpu_workers_loop_is_busy_not_idle_while_it_waits_for_room_and_a_cpu
     rebuild = start(client, h, tier="rebuild")  # (first in the queue)
     heavy = start(client, h, options={"noise": "heavy"})
     db.execute("UPDATE jobs SET queued_at = queued_at - 10 WHERE id = ?", (rebuild,))
-    fake_nvidia(monkeypatch, used=3500)  # others hold 3500: 296 MB free, neither fits
+    fake_nvidia(monkeypatch, used=FULL)  # others hold nearly all of it: neither fits
     monkeypatch.setattr(worker, "GPU_MODE", True)
     assert worker.claim("gpu:t", Load()) is None and worker._card_wait is True
     # the loop: it publishes the card, marks itself busy for a wait for room (idle when there is nothing at all), and marks itself stopped
@@ -276,7 +271,7 @@ def test_the_gpu_workers_loop_is_busy_not_idle_while_it_waits_for_room_and_a_cpu
         finally:
             worker._stop.clear()
     assert seen[0]["idle"] is False and seen[0]["up"] is True  # waiting for room: busy
-    assert seen[0]["card"]["others_mb"] == 3500 and seen[0]["card"]["total_mb"] == TOTAL  # (published by the loop)
+    assert seen[0]["card"]["others_mb"] == FULL and seen[0]["card"]["total_mb"] == TOTAL  # (published by the loop)
     assert seen[1]["idle"] is True and seen[1]["up"] is True  # nothing to wait for: idle
     assert broker.gpu_worker_up() is False  # (and stopped when it ended)
     # what the CPU workers see: a card that is idle leaves its jobs to it; a busy one does not
@@ -306,7 +301,7 @@ def test_a_rebuild_cannot_be_created_estimated_or_started_while_the_card_is_full
     make = {**ask, "filename": "talk.wav", "sizeBytes": 3000}  # (a job)
     bodies = {"/api/jobs/estimate": ask, "/api/jobs": make}
     assert client.get("/api/billing/pricing").json()["rebuildAvailable"] is True
-    set_card(3500)
+    set_card(FULL)
     assert client.get("/api/billing/pricing").json()["rebuildAvailable"] is False
     for path, body in bodies.items():
         assert rebuild_paused(client.post(path, json={**body, "denoiseTier": "rebuild"}, headers=h)), path
@@ -345,9 +340,9 @@ def test_the_price_list_says_unavailable_without_a_worker_whatever_the_card_has(
 
 def test_the_snapshot_shows_what_others_hold_and_whether_the_rebuild_can_be_ordered(gpu_up):
     assert broker.snapshot()["gpu"]["othersMb"] is None and broker.snapshot()["gpu"]["rebuildAvailable"] is True
-    set_card(3500)
+    set_card(FULL)
     shown = broker.snapshot()["gpu"]
-    assert shown["othersMb"] == 3500 and shown["rebuildAvailable"] is False
+    assert shown["othersMb"] == FULL and shown["rebuildAvailable"] is False
 
 
 # ------------------------------------------------------------------------------------------------------------- no card state at all

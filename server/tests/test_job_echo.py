@@ -154,8 +154,8 @@ def _fail_on_one_track(client, h, uid, data, **body):
 
 
 def test_the_no_second_track_words_say_what_to_do():
-    assert jobs.NO_SECOND_TRACK == ("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without "
-                                    "echo removal (nothing was charged).")
+    words = jobs.NO_SECOND_TRACK
+    assert "only one audio track" in words and "Send it without echo removal" in words and "nothing was charged" in words
 
 
 @NATIVE

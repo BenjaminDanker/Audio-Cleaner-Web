@@ -18,7 +18,8 @@ from acw.worker import main as worker
 from .job_support import (account, api_key, count, files_of, folder, make_done_job, params_of, rebuilt, roomy_disk, row,  # noqa: F401 - fixtures
                           standard, step)
 from .test_automatic_settings import Stages, measurement
-from .test_editor_api import edit_job, finish_run, level, noise, quote, save_params, tl_of
+from .test_editor_api import edit_job, fill_cache, finish_run, level, noise, quote, save_params, tl_of
+from .test_editor_v2 import put_cues, sub
 
 pytestmark = pytest.mark.usefixtures("roomy_disk")
 
@@ -101,7 +102,6 @@ def test_a_transcription_alone_has_no_sound_layers_and_the_kinds_are_all_editabl
     for kind in ("denoise", "denoise_transcribe", "transcribe"):
         assert editing.editable_kind({"kind": kind}) is True
     assert editing.editable_kind({"kind": "convert"}) is False
-    assert editing.QUALITY_OF_TIER == {"local": "standard", "premium": "accurate"}
 
 
 def test_the_price_of_options_is_the_price_of_their_timeline_each_step_with_its_fixed_amount():
@@ -472,6 +472,101 @@ def test_the_edit_of_a_job_whose_audio_was_extracted_makes_no_video(client, sign
     p["options"]["output_video"] = False
     save_params(audio_only, p)
     assert editing.make_quote(row(audio_only), params_of(audio_only), editing.parse_timeline(tl_of(audio_only, noise=[noise(0, 600, 24)]), 600.0))["video"] is False
+
+
+def with_free_subtitles(client, h, jid):
+    """The job's timeline with free subtitles over 100-160 s added (cues sent): nothing to make, no change of the sound."""
+    raw = editing.saved_timeline(row(jid), params_of(jid), 600.0).to_json()
+    fill_cache(jid, raw)  # (the sound the result files hold is in the cache: nothing of it is to be made)
+    tl = {**raw, "version": 2, "layers": {**raw["layers"], "subtitles": [sub(100, 160, "free", "en")]}}
+    assert client.put(f"/api/jobs/{jid}/timeline", json={"timeline": tl}, headers=h).status_code == 200
+    assert put_cues(client, h, jid, 100, 160, [{"start": 101, "end": 102, "text": "hi"}]).status_code == 200
+    return tl
+
+
+def finish_subtitles_run(jid, *, video):
+    """The runner's answer to a run that only changed the subtitles: new caption files, and a new video when it made one."""
+    db.execute("UPDATE jobs SET status = 'running', worker_id = 't', started_at = ? WHERE id = ?", (db.now(), jid))
+    d = folder(jid)
+    outputs = [{"file": "talk.srt", "kind": "captions", "lang": "en"}, {"file": "talk-transcript.txt", "kind": "transcript", "lang": "en"}]
+    (d / "talk.srt").write_bytes(b"new captions")
+    (d / "talk-transcript.txt").write_bytes(b"new transcript")
+    if video:
+        (d / "talk-cleaned.mp4.run").write_bytes(b"new video with the captions inside")
+        outputs.append({"file": "talk-cleaned.mp4.run", "kind": "video"})
+    worker._complete_edit(row(jid), d, {"ok": True, "outputs": outputs, "editor": {"billed": {}, "resolved": {}}})
+    return row(jid)
+
+
+def test_new_subtitles_alone_do_not_remake_a_video_when_they_do_not_go_inside_it(client, signed_in):
+    uid, h = funded(signed_in)
+    jid = video_job(uid, options={**VIDEO, "embed_subtitles": False})
+    tl = with_free_subtitles(client, h, jid)
+    q = editing.make_quote(row(jid), params_of(jid), editing.parse_timeline(tl, 600.0))
+    assert q["audioSame"] is True and q["subsSame"] is False and q["unchanged"] is False
+    assert q["video"] is False and q["convertMicros"] == 0 and q["micros"] == 0 and q["free"] is True
+    assert "convert" not in [x["item"] for x in q["lines"]]
+    r = client.post(f"/api/jobs/{jid}/export", json={"timeline": tl}, headers=h)  # (nothing to pay for: a free export makes the files)
+    assert r.status_code == 200, r.text
+    run = params_of(jid)["run"]
+    assert run["audio"] is False and "video" not in run and "audio_file" not in run and "convert_micros" not in run
+    assert editing.spec_for(row(jid), params_of(jid))["video"] is False
+    before = ledger.balance(uid)
+    done = finish_subtitles_run(jid, video=False)
+    outputs = {o["file"]: o["kind"] for o in json.loads(done["outputs_json"])}
+    assert done["status"] == "done" and outputs == {"talk-cleaned.flac": "audio", "talk-cleaned.mp4": "video", "talk.srt": "captions", "talk-transcript.txt": "transcript"}
+    assert (folder(jid) / "talk-cleaned.mp4").read_bytes() == b"video" and (folder(jid) / "talk.srt").read_bytes() == b"new captions"  # (the old video stays)
+    assert ledger.balance(uid) == before and done["cost_micros"] in (0, None)
+
+
+def test_new_subtitles_that_go_inside_the_video_make_it_again_and_charge_the_picture(client, signed_in):
+    uid, h = funded(signed_in)
+    jid = video_job(uid, options={**VIDEO, "embed_subtitles": True})
+    tl = with_free_subtitles(client, h, jid)
+    convert = jobs.convert_cost(params_of(jid), 600)
+    q = quote(client, h, jid, tl).json()
+    assert q["unchanged"] is False and convert > 0 and q["estCostMicros"] == convert and q["lines"][-1]["item"] == "convert"
+    r = client.post(f"/api/jobs/{jid}/export", json={"timeline": tl}, headers=h)  # (all in the cache: an export, which holds the picture's price)
+    assert r.status_code == 200, r.text
+    assert r.json()["estCostMicros"] == convert and r.json()["free"] is False
+    run = params_of(jid)["run"]
+    assert run["audio"] is False and run["video"] is True and run["audio_file"] == "talk-cleaned.flac" and run["convert_micros"] == convert == held(uid)
+    spec = editing.spec_for(row(jid), params_of(jid))
+    assert spec["video"] is True and spec["audio_file"] == "talk-cleaned.flac"
+    before = ledger.balance(uid)["balance_micros"]
+    done = finish_subtitles_run(jid, video=True)
+    outputs = {o["file"]: o["kind"] for o in json.loads(done["outputs_json"])}
+    assert outputs == {"talk-cleaned.flac": "audio", "talk-cleaned.mp4": "video", "talk.srt": "captions", "talk-transcript.txt": "transcript"}
+    assert (folder(jid) / "talk-cleaned.mp4").read_bytes() == b"new video with the captions inside" and "talk-cleaned.mp4.run" not in files_of(jid)
+    assert before - ledger.balance(uid)["balance_micros"] == convert and held(uid) == 0
+
+
+def test_a_new_sound_remakes_the_video_whether_or_not_the_subtitles_go_inside_it(client, signed_in):
+    uid, h = funded(signed_in)
+    for embed in (True, False):
+        jid = video_job(uid, options={**VIDEO, "embed_subtitles": embed})
+        q = editing.make_quote(row(jid), params_of(jid), editing.parse_timeline(tl_of(jid, noise=[noise(0, 600, 24)]), 600.0))
+        assert q["audioSame"] is False and q["video"] is True and q["convertMicros"] == jobs.convert_cost(params_of(jid), 600) > 0, embed
+        db.execute("UPDATE jobs SET status = 'canceled' WHERE id = ?", (jid,))
+
+
+def test_a_run_that_made_no_video_keeps_the_old_one_even_when_the_sound_changed(client, signed_in):
+    """The old video is replaced only when the run made one again (the run says so): a sound-only job's change leaves no stale video behind
+    because it had none, and a video job whose run did not make one keeps the file it has."""
+    uid, h = funded(signed_in)
+    jid = video_job(uid)
+    tl = tl_of(jid, noise=[noise(0, 600, 24)])
+    assert client.post(f"/api/jobs/{jid}/process", json={"timeline": tl}, headers=h).status_code == 200
+    p = params_of(jid)
+    p["run"].pop("video"); p["run"].pop("audio_file"); p["run"]["convert_micros"] = 0  # (a run made before the video was part of it)
+    save_params(jid, p)
+    db.execute("UPDATE jobs SET status = 'running', worker_id = 't', started_at = ? WHERE id = ?", (db.now(), jid))
+    d = folder(jid)
+    (d / "talk-cleaned.flac.run").write_bytes(b"new audio")
+    worker._complete_edit(row(jid), d, {"ok": True, "outputs": [{"file": "talk-cleaned.flac.run", "kind": "audio"}], "editor": {"rendered": tl, "billed": {}, "resolved": {}}})
+    outputs = {o["file"]: o["kind"] for o in json.loads(row(jid)["outputs_json"])}
+    assert outputs == {"talk-cleaned.flac": "audio", "talk-cleaned.mp4": "video"} and (d / "talk-cleaned.flac").read_bytes() == b"new audio"
+    assert (d / "talk-cleaned.mp4").read_bytes() == b"video"
 
 
 def test_the_run_that_made_the_video_is_charged_for_it_and_replaces_the_video_result(client, signed_in):

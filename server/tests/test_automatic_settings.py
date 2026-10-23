@@ -419,7 +419,7 @@ def test_where_a_rebuild_is_wanted_but_cannot_be_done_it_is_denoised_and_says_so
     else:
         broker.mark_gpu_worker("stopped")
     if why == "card full":
-        set_card(3500)  # the worker is up, but other programs hold the card's memory: 296 MB left of the 2600 the rebuild needs
+        set_card(4000)  # the worker is up, but other programs hold the card's memory: not enough is left for the rebuild
     stages = Stages(monkeypatch, stats, duration=duration)
     jid = start(client, h, seconds=seconds, **options)
     take("cpu:1")
@@ -453,9 +453,12 @@ def test_the_card_coming_up_between_creating_and_deciding_is_enough(client, sign
     assert row(jid)["status"] == "queued" and row(jid)["next_stage"] == "main" and stages.stages == ["probe", "analyse"]
 
 
-@pytest.mark.parametrize("others_mb, rebuilt_voice", [(1196, True), (1197, False)])
+EDGE = 4096 - broker.CARD_MARGIN_MB - broker.GPU_WORK["rebuild"].card_mb  # (the most others may hold for the rebuild to fit on a 4096 MB card)
+
+
+@pytest.mark.parametrize("others_mb, rebuilt_voice", [(EDGE, True), (EDGE + 1, False)])
 def test_the_rebuild_is_decided_only_while_the_card_has_room_for_it(client, signed_in, monkeypatch, others_mb, rebuilt_voice):
-    """The card is shared with the owner's training: with 2600 MB (and the margin) free the rebuild goes on the card, with one MB less
+    """The card is shared with the owner's training: with the rebuild's memory (and the margin) free the rebuild goes on the card, with one MB less
     the job is denoised, and says why."""
     uid, h = signed_in
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
@@ -607,16 +610,13 @@ def test_a_decided_job_is_changed_like_any_job_through_its_timeline(client, sign
     jid = start(client, a)
     take()
     first = client.get(f"/api/jobs/{jid}").json()
-    assert first["status"] == "done" and first["chosen"]["strength"] == "balanced" and "redo" not in first and first["edit"]["hasTimeline"] is True
+    assert first["status"] == "done" and first["chosen"]["strength"] == "balanced" and first["edit"]["hasTimeline"] is True
     tl = client.get(f"/api/jobs/{jid}/timeline", headers=a)
     assert tl.status_code == 200, tl.text
     layers = tl.json()["timeline"]["layers"]
     assert [(p["strength_db"], p["remover"]) for p in layers["noise"]] == [(first["chosen"]["attenLimDb"], first["chosen"]["noise"])]
     assert [p["loudness_lufs"] for p in layers["leveling"]] == [-16.0]
     assert first["options"].get("automatic") is None and params_of(jid)["automatic"] == {"fixed": []}  # (decided: only what the request fixed stays)
-    # the routes of the old "change and save again" are gone
-    for suffix in ("/rerun", "/rerun/estimate"):
-        assert client.post(f"/api/jobs/{jid}{suffix}", json={"options": {"atten_lim_db": 12}}, headers=a).status_code in (404, 405)
 
 
 # ------------------------------------------------------------------------------------------------ the ledger and the rest

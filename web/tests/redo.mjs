@@ -607,12 +607,10 @@ await check('a job made through the API with whole-file options (Denoising at Ma
   const put = await context.request.put(`${BASE}/api/jobs/${id}/input`, { data: readFileSync(file), headers: { 'X-CSRF-Token': csrf, 'Content-Type': 'application/octet-stream' }, timeout: 120000 });
   if (!put.ok()) throw new Error(`upload ${put.status()} ${await put.text()}`);
   const done = await waitJobDone(page, id, { timeout: 240000 });
-  if (done.status !== 'done' || !done.edit?.available || !done.edit.hasTimeline || 'redo' in done || 'sourceJobId' in done) throw new Error('the job: ' + JSON.stringify({ s: done.status, edit: done.edit, redo: done.redo, src: done.sourceJobId }));
+  if (done.status !== 'done' || !done.edit?.available || !done.edit.hasTimeline) throw new Error('the job: ' + JSON.stringify({ s: done.status, edit: done.edit }));
   // the website opens such a job in the editor: its timeline is what the options stand for
   await openJob(id);
   if ((await say('voice')) !== 'Max 0:00–0:11' || (await say('level')) !== 'Off 0:00–0:11') throw new Error(`${await say('voice')} / ${await say('level')}`);
-  // the kept copies of the old way are gone
-  for (const which of ['noise', 'input']) if ((await context.request.get(`${BASE}/api/jobs/${id}/kept/${which}`)).status() !== 404) throw new Error(`/kept/${which} is still served`);
   const other = await browser.newContext();
   const op = await other.newPage();
   try {

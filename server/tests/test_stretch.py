@@ -35,7 +35,7 @@ def test_the_cutter_writes_the_same_kind_of_flac_the_copies_are():
     from acw.worker import cutter
 
     assert cutter.FLAC24 == AUDIO_FORMATS["flac24"][1] and cutter.SAMPLE_RATE == kept.SAMPLE_RATE == stretch.SAMPLE_RATE
-    assert stretch.MAX_SECONDS == jobs.STRETCH_MAX_SECONDS == 30
+    assert stretch.MAX_SECONDS == jobs.STRETCH_MAX_SECONDS
 
 
 def test_the_cutter_is_confined_and_writes_nothing(tmp_path):

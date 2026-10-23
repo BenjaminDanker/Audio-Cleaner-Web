@@ -8,7 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from acw_common import pipeline  # noqa: E402
-from acw_common.timeline import ALL_LAYERS, LANGUAGES, LAYERS, VERSION, VERSION_2, Timeline, TimelineError  # noqa: E402
+from acw_common.timeline import LANGUAGES, LAYERS, VERSION, VERSION_2, Timeline, TimelineError  # noqa: E402
 
 
 def test_whole_file_defaults_are_every_asked_layer_on_the_whole_file():
@@ -159,7 +159,7 @@ def test_version_1_is_written_exactly_as_before_and_version_2_only_for_something
                                                    "leveling": [{"start": 0.0, "end": 50.0, "loudness_lufs": -16.0}]}}
     assert Timeline.from_json(v1).to_json() == v1 and VERSION == 1 and VERSION_2 == 2
     assert Timeline.whole_file(60.0).to_json()["version"] == 1 and list(Timeline.whole_file(60.0).to_json()["layers"]) == ["noise", "leveling"]
-    assert ALL_LAYERS == (*LAYERS, "subtitles") and Timeline(10.0).layers["subtitles"] == []
+    assert Timeline(10.0).layers["subtitles"] == []
     assert Timeline.from_json({**v1, "version": 2}).to_json() == v1  # (version 2 that says nothing new is version 1 again)
     assert Timeline.from_json(V2).to_json()["version"] == 2
     t = Timeline(100.0).paint("subtitles", 0, 5, part_settings()).erase("subtitles", 0, 5)

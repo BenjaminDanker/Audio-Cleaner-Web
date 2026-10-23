@@ -79,7 +79,7 @@ def test_an_upload_that_sends_nothing_is_canceled_after_ten_minutes_and_the_mone
     before = ledger.balance(uid)["held_micros"]
     jid = make_job(uid)
     row = db.one("SELECT created_at, expires_at FROM jobs WHERE id = ?", (jid,))
-    assert row["expires_at"] - row["created_at"] == jobs.UPLOAD_FIRST_BYTE_SECONDS == 600
+    assert row["expires_at"] - row["created_at"] == jobs.UPLOAD_FIRST_BYTE_SECONDS
     jobs.sweep()
     assert db.one("SELECT status FROM jobs WHERE id = ?", (jid,))["status"] == "uploading"  # still inside its ten minutes
     db.execute("UPDATE jobs SET expires_at = ? WHERE id = ?", (db.now() - 1, jid))

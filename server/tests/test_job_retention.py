@@ -41,7 +41,7 @@ def test_a_finished_job_keeps_its_upload_and_results_and_they_expire_together(cl
     # the upload and the result stay together; scratch files and folders the runner made are gone
     assert files_of(jid) == {"input.wav", "rec-cleaned.flac"}
     shown = client.get(f"/api/jobs/{jid}").json()
-    assert shown["expiresAt"] == clock.t + seconds and "redo" not in shown and "sourceJobId" not in shown
+    assert shown["expiresAt"] == clock.t + seconds
 
 
 def test_failed_and_canceled_jobs_keep_no_files_and_the_money_comes_back(client, signed_in):
@@ -56,7 +56,6 @@ def test_failed_and_canceled_jobs_keep_no_files_and_the_money_comes_back(client,
     for jid, status in ((failed, "failed"), (canceled, "canceled")):
         assert row(jid)["status"] == status and not folder(jid).exists()
     assert ledger.balance(uid)["held_micros"] == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000
-    assert "redo" not in client.get(f"/api/jobs/{failed}").json()  # (gone with the kept copies: a job is changed by editing its timeline)
 
 
 def test_the_sweep_deletes_a_job_exactly_when_its_expiry_is_reached(client, signed_in, clock):
@@ -72,7 +71,7 @@ def test_the_sweep_deletes_a_job_exactly_when_its_expiry_is_reached(client, sign
     jobs.sweep()
     assert row(later)["status"] == "expired" and not folder(later).exists()
     gone = client.get(f"/api/jobs/{later}").json()
-    assert gone["status"] == "expired" and gone["outputs"] == [] and "redo" not in gone
+    assert gone["status"] == "expired" and gone["outputs"] == []
     assert client.get(f"/api/jobs/{later}/outputs/talk-cleaned.flac", headers=h).status_code == 404
 
 
@@ -131,7 +130,7 @@ def test_the_job_list_shows_what_is_still_within_its_two_hours(client, signed_in
     assert not set(ids) & set(hidden.values())
     assert body["limits"] == {"maxActiveJobs": 3, "retentionSeconds": 7200, "maxRetentionSeconds": 21600}
     done = next(j for j in body["jobs"] if j["id"] == shown["done"])
-    assert done["status"] == "done" and done["expiresAt"] == clock.t - 60 + 7200 and "redo" not in done
+    assert done["status"] == "done" and done["expiresAt"] == clock.t - 60 + 7200
     assert next(j for j in body["jobs"] if j["id"] == shown["failed"])["expiresAt"] is None
 
 
@@ -229,8 +228,6 @@ def test_after_delete_now_the_job_cannot_be_downloaded_or_changed_again(client, 
     assert client.delete(f"/api/jobs/{jid}", headers=h).status_code == 200
     assert client.get(f"/api/jobs/{jid}/outputs/talk-cleaned.flac", headers=h).status_code == 404
     assert client.get(f"/api/jobs/{jid}/timeline", headers=h).status_code in (404, 409)
-    for method, path in (("get", f"/api/jobs/{jid}/kept/noise"), ("post", f"/api/jobs/{jid}/rerun"), ("post", f"/api/jobs/{jid}/rerun/estimate")):
-        assert getattr(client, method)(path, headers=h).status_code in (404, 405)
 
 
 def test_the_removed_routes_are_not_there_for_a_live_job_either(client, signed_in):

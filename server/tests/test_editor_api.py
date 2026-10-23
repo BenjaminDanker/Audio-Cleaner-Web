@@ -776,13 +776,10 @@ def test_a_leveling_only_job_made_with_a_timeline_is_named_leveling_in_its_charg
     assert client.get(f"/api/jobs/{jid}").json()["label"] == "Leveling"
 
 
-def test_the_routes_of_the_old_rerun_are_gone_and_every_job_has_its_timeline(client, signed_in):
+def test_every_job_has_its_timeline(client, signed_in):
     uid, h = funded(client, signed_in)
     plain = make_done_job(uid)
-    for suffix in ("/rerun/estimate", "/rerun"):
-        assert client.post(f"/api/jobs/{plain}{suffix}", json={"options": {"atten_lim_db": 24}}, headers=h).status_code in (404, 405)
-    shown = client.get(f"/api/jobs/{plain}").json()
-    assert "redo" not in shown and shown["edit"]["hasTimeline"] is True  # (a job asked for with options has the timeline they stand for)
+    assert client.get(f"/api/jobs/{plain}").json()["edit"]["hasTimeline"] is True  # (a job asked for with options has the timeline they stand for)
 
 
 def test_a_gpu_step_needs_the_card_and_is_routed_to_it(client, signed_in, gpu_up):

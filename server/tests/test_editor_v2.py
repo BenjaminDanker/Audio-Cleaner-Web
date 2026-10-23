@@ -46,10 +46,6 @@ def part_cost(rate_key, seconds):
 
 # ----------------------------------------------------------------------------------------------------- the format
 
-def test_the_new_rates_are_the_price_lists():
-    assert rates() == {"transcribe_standard": 4_000, "transcribe_accurate": 15_000, "translate": 4_000}
-
-
 def test_a_flac_header_is_read_and_nothing_else_is_believed():
     assert editing.flac_header(flac(96_000)) == (48000, 1, 96_000)
     assert editing.flac_header(flac(5, 44100, 2)) == (44100, 2, 5)

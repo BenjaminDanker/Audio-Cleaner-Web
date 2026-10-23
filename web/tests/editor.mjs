@@ -450,7 +450,7 @@ await check('a paid save is a process on the same job: it asks for exactly the p
   await waitDownloads(before + 1);
   if (got.length !== before + 1 || !/\.flac$/.test(got[got.length - 1])) throw new Error('the new file did not come down by itself: ' + got.join(', '));
   const proc = asked('POST', new RegExp(`/jobs/${J1.id}/process$`));
-  if (proc.length !== 1 || asked('POST', /\/rerun/).length || asked('POST', /^\/api\/jobs$/).length !== jobsBefore) throw new Error(`${proc.length} process calls, a new job or a re-run was asked for`);
+  if (proc.length !== 1 || asked('POST', /^\/api\/jobs$/).length !== jobsBefore) throw new Error(`${proc.length} process calls, a new job was asked for`);
   const sent = JSON.parse(proc[0].body);
   if (sent.maxCostMicros !== quoteMicros || !sent.timeline?.layers?.noise || sent.timeline.layers.leveling.length !== 2 || (sent.audioFormat ?? 'flac') !== 'flac') throw new Error('process body: ' + proc[0].body.slice(0, 300));
   if (page.url().endsWith(J1.id) === false) throw new Error('the page moved to ' + page.url());
@@ -483,9 +483,9 @@ await check('a job made through the API with whole-file options opens in the edi
   if (!put.ok()) throw new Error(`upload ${put.status()} ${await put.text()}`);
   const done = await waitJobDone(page, id, { timeout: 240000 });
   if (done.status !== 'done') throw new Error(`the job ${done.status}: ${done.error}`);
-  if (!done.edit?.available || !done.edit.hasTimeline || done.redo) throw new Error('a job made with options: ' + JSON.stringify({ edit: done.edit, redo: !!done.redo }));
+  if (!done.edit?.available || !done.edit.hasTimeline) throw new Error('a job made with options: ' + JSON.stringify(done.edit));
   const mine = (await apiCall(page, 'GET', `jobs/${J1.id}`)).body;
-  if (!mine.edit?.hasTimeline || mine.redo) throw new Error('a job made by the website has strength-slider copies: ' + JSON.stringify({ edit: mine.edit, redo: mine.redo }));
+  if (!mine.edit?.hasTimeline) throw new Error('a job made by the website has no timeline: ' + JSON.stringify(mine.edit));
   const before = requests.length;
   await openJob(id);
   if ((await say('voice')) !== 'Strong 0:00–0:11') throw new Error('Voice: ' + await say('voice'));

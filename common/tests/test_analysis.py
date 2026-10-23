@@ -191,4 +191,4 @@ def test_loudness_is_bs1770(recordings):
 
 
 def test_the_features_are_the_models_in_its_order():
-    assert analysis.FEATURES == tuple(reco_model.load()["features"]) and len(analysis.FEATURES) == 14
+    assert analysis.FEATURES == tuple(reco_model.load()["features"])

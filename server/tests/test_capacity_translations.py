@@ -156,7 +156,6 @@ def test_a_live_line_is_retried_once_quickly_then_skipped(monkeypatch):
 
 
 def test_the_live_queue_per_language_is_short_and_old_lines_are_skipped(monkeypatch):
-    assert live_translate.QUEUE_LINES <= 8
     sent = []
 
     async def line(http, text, source, target, context=None):

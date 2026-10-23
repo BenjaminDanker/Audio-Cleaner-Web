@@ -68,7 +68,7 @@ hand for a single `node tests/<suite>.mjs`. Overrides: `AC_HOME`, `ACW_BIN_DIR`,
 `ACW_TEST_STATE`, `E2E_FILES`. `legal-versions` (no backend: the Terms/Privacy text and how its version is decided) is in the default list. `signedout` is the free tools without an account (the Cleanup and Live pages open signed out, the free runs send nothing about the file, a paid plan says "Sign in to start" and the file and choices come back after signing in). The editor screen (the Cleanup page once a file is chosen, and a job's page) has these suites: `studio-unit` (the four tracks
 and their rules, the prices from the price list, the mapping to the server's timeline version 2, the waveform of what is heard, what the
 choices mean for the files and what stops a start, the browser's share of a job; no backend), `editor-unit` (the timeline, the mix and the
-browser's suggestions, no backend), `suggest-agreement` (the browser's suggestions against `common/acw_common/suggest.py` on generated
+browser's suggestions, no backend), `convert-unit` (the file-type list and the quote for a video, with the browser's encoders stood in for; no browser; the server tests compare its rules with the server's: `server/tests/test_web_agreement.py`), `suggest-agreement` (the browser's suggestions against `common/acw_common/suggest.py` on generated
 files; runs `tests/suggest-py.py`, a few minutes), `editor` (the screen on a backend; `EDITOR_SHOTS=<dir>` saves screenshots), `parity` (one check for
 each row of the owner's checklist of today's file pages, so nothing of the old form, the job page, Change and save again or Fix a moment is lost)
 and `redo` (saving changes to a finished job, the strength slider, a job made through the API opening in the editor).

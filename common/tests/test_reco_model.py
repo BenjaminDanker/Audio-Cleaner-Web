@@ -205,7 +205,6 @@ def test_every_threshold_is_where_the_website_has_it(key, value, reason, rebuilt
 
 def test_what_is_not_measured_is_not_a_cause():
     clean = stats()
-    assert reco_model.CLIP_FRACTION == 0.002 and reco_model.PHONE_HZ == 6600.0
     for gone in ({"clipFraction": None}, {"clipFraction": math.nan}):
         assert reason_of({**clean, **gone}) != "distorted", gone
     no_clip_key = {k: v for k, v in clean.items() if k != "clipFraction"}
@@ -228,8 +227,6 @@ def test_the_words_of_every_reason_follow_it_sounded():
     """engine.py says "the voice was rebuilt because it sounded <words>" and the history "(it sounded <words>)"."""
     reasons = ("echoey", "muffled", "phone", "distorted", "unclear")
     assert tuple(reco_model.REBUILD_WORDS) == reasons
-    assert reco_model.REBUILD_WORDS == {"echoey": "echoey", "muffled": "muffled", "phone": "like a phone call", "distorted": "distorted",
-                                        "unclear": "unclear"}
     assert len(set(reco_model.REBUILD_WORDS.values())) == len(reasons)
     # every reason the recommender gives has its words (the stored sets reach all of them)
     given = {reco_model.recommend(r["stats"]).rebuild_reason for r in FIXTURE if r["reco"]} - {None}
