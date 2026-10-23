@@ -55,6 +55,7 @@ class JobEditor:
         self.card.setVisible(job is not None)
         self._note.setText("")
         if job is None:
+            self.v._show_player()  # (a job with nothing saved: the original against its result)
             return
         if not self.v._check.ok:
             self._note.setText(f"{self.v._check.text} Fixing a moment needs the original.")

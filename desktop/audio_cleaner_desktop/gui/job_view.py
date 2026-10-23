@@ -419,6 +419,7 @@ class JobView(QWidget):
         busy = self.busy
         for w in (self._name, self._ending, self._subtitles):
             w.setEnabled(not busy)
+        self._save.setVisible(self._ed.editor is None)  # (once the editor is open its own Save button saves)
         self._save.setEnabled(p.ok and not busy)
         self._save.setToolTip("; ".join(p.problems))
         can_text = job.has(copies.TRANSCRIPT) and (self._subtitles.currentData() or "off") in redo.TEXT_KINDS and not busy
