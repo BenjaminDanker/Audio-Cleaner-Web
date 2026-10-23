@@ -1124,11 +1124,12 @@ async def _finish(sess: Session) -> None:
     try:
         await _finish_inner(sess)
     finally:
-        await sess.close_outbox()
+        # forgotten first: the wait for the last captions below can be cancelled, and must never leave the session counted as live
         _live_ids.discard(sess.id)
         mine = _open.get(sess.p.user_id, [])
         if sess in mine:
             mine.remove(sess)
+        await sess.close_outbox()
 
 
 async def _finish_inner(sess: Session) -> None:
