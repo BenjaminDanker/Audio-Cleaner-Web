@@ -7,7 +7,6 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-import numpy as np
 from acw_common import editor, pipeline
 from acw_common.ffmpeg import MediaError
 from acw_common.timeline import Timeline
@@ -137,7 +136,7 @@ class PlanSession:
         measurement a normal run makes), so the editor shows what would be done."""
         choices = None
         if options.decides:
-            choices, _ = engine._decide(self.inputs.source, options, cancel or threading.Event(), resources.voice_model_dir() is not None)
+            choices = engine._decide(self.inputs.source, options, cancel or threading.Event(), resources.voice_model_dir() is not None)
         return baseline_for(options, self.seconds, echo=self.echo_available, choices=choices)
 
     def quote(self, tl: Timeline) -> editor_job.Quote:

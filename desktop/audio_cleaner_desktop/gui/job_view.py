@@ -271,7 +271,7 @@ class JobView(QWidget):
         return True
 
     def _fill(self) -> None:
-        entry, job = self.entry, self.job
+        entry = self.entry
         self._building = True
         try:
             self._title.setText(entry.name)

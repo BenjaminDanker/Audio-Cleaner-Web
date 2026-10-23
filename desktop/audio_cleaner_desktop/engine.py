@@ -700,7 +700,7 @@ def process(
             choices = reason = picked = None
             rebuild = False
             if tl_run is None:  # the whole-file choices, decided where they are left automatic, as the timeline they stand for
-                choices, _ = _decide(x, options, cancel, voice_dir is not None)
+                choices = _decide(x, options, cancel, voice_dir is not None)
                 reason = choices.rebuild_reason if choices is not None and options.auto_rebuild and not options.rebuild_voice else None
                 _check_cancel(cancel)
                 rebuild = (options.rebuild_voice and voice_dir is not None) or bool(choices is not None and choices.rebuild)
@@ -860,22 +860,19 @@ def place_result(dest_dir: Path, out_stem: str, ext: str, tmp_out: Path, sub_tmp
 
 def _decide(
     x: np.ndarray, options: JobOptions, cancel: threading.Event, voice_model: bool,
-) -> tuple[reco_model.Choices | None, pipeline.Measured | None]:
+) -> reco_model.Choices | None:
     """What "Automatic best settings" settle for this recording, when anything is left to the trained model (JobOptions.decides):
     the recording is measured once (analysis.measure: about a minute of it, spread over the file, and the noise remover over the
     same parts) and reco_model.choose turns the measurements into settings, the same function the server's API jobs use. The
-    voice is rebuilt only if the user left that automatic and its model is installed (`voice_model`). Also returns what that
-    measurement kept of the noise remover's work, for clean_audio to use again."""
+    voice is rebuilt only if the user left that automatic and its model is installed (`voice_model`)."""
     if not options.decides:
-        return None, None
-    kept: dict = {}
-    stats = analysis.measure(x, resources.libdf_path(), resources.model_path(), cancel, kept)
+        return None
+    stats = analysis.measure(x, resources.libdf_path(), resources.model_path(), cancel)
     # An unusually short recording is decided like any other (the website only recommends nothing for under two seconds).
     rec = reco_model.recommend(stats, min_seconds=0.0)
     if rec is None:
-        return None, kept.get("measured")
-    choices = reco_model.choose(rec, rebuild_available=voice_model and options.auto_rebuild and not options.rebuild_voice)
-    return choices, kept.get("measured")
+        return None
+    return reco_model.choose(rec, rebuild_available=voice_model and options.auto_rebuild and not options.rebuild_voice)
 
 
 def _measured_strength(x: np.ndarray, cancel: threading.Event) -> float:

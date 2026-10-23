@@ -23,7 +23,6 @@ import hashlib
 import os
 import stat
 import threading
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -248,15 +247,6 @@ def block_key(step: str, input_id: str, *parts: object) -> str:
 def rebuild_key(input_id: str, job: object, b: int, n: int, window_seconds: float, overlap_seconds: float) -> str:
     """The cache key of Voice-rebuild block `b` of a recording of `n` samples (job: "mid" or the channel)."""
     return block_key("rebuild", input_id, job, f"w{window_seconds:g}o{overlap_seconds:g}", b, n)
-
-
-@dataclass
-class BlockHooks:
-    """What a model run needs to use a cache without knowing about keys: `get(desc)` returns the block or None, `put(desc, block)`
-    stores one. `desc` is a tuple of ints the model function names: (lo, s, e, hi) in the coordinates of the whole file for the
-    noise removers, (job, block index) for Voice rebuild."""
-    get: Callable[[tuple], np.ndarray | None]
-    put: Callable[[tuple, np.ndarray], None]
 
 
 def union_seconds(ranges: list[tuple[int, int]]) -> float:

@@ -120,23 +120,13 @@ def measure_windows(n: int, total_seconds: float = 60.0, count: int = 6) -> list
     return out
 
 
-@dataclass
-class Measured:
-    """What noise_figure_db heard when it measured a whole recording at once: the mono samples and DeepFilterNet3's
-    full-strength output for them. Cleaning a channel with exactly those samples at full strength with the light noise
-    remover gives that output (one contiguous run), so clean_audio uses it instead of running the model again."""
-    mono: np.ndarray
-    light: np.ndarray
-
-
 def noise_figure_db(x: np.ndarray, lib_path: str | Path, model_path: str | Path,
-                    cancel: threading.Event | None = None, keep: dict | None = None) -> float:
+                    cancel: threading.Event | None = None) -> float:
     """dB between the voice and the noise in it, as the noise remover itself hears it: DeepFilterNet3 at full strength
     runs over the measured parts of the recording (measure_windows, mono mix), and what it keeps is compared with what
     it takes out, over all of it: wind, keyboards, chatter and steady hiss alike, under the words and between them.
     99 when there is nothing to hear. The website (web/src/media/analysis.js NoiseFigure, with the same model in the
-    browser) and the live engine (native/live NoiseMeter) measure the same way. Setting `cancel` raises `Cancelled`.
-    With `keep`, a measurement of the whole recording at once is kept there as keep["measured"] (Measured)."""
+    browser) and the live engine (native/live NoiseMeter) measure the same way. Setting `cancel` raises `Cancelled`."""
     voice = removed = 0.0
     windows = measure_windows(len(x))
     for a, b in windows:
@@ -145,8 +135,6 @@ def noise_figure_db(x: np.ndarray, lib_path: str | Path, model_path: str | Path,
         y = dfn.denoise_array(np.ascontiguousarray(seg), lib_path, model_path, atten_lim_db=100.0, threads=1, cancel=cancel)
         voice += float(np.sum(np.square(y, dtype=np.float64)))
         removed += float(np.sum(np.square(seg.astype(np.float64) - y)))
-        if keep is not None and windows == [(0, len(x))]:
-            keep["measured"] = Measured(seg, y)
     if voice + removed <= 0:
         return 99.0
     return float(min(99.0, 10 * np.log10((voice + 1e-12) / (removed + 1e-12))))

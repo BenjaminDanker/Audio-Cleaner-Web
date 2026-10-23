@@ -432,8 +432,6 @@ def denoise_array(
     overlap_seconds: float | None = None,
     device: str = "cpu",
     grid: _blocks.Grid | None = None,
-    grid_offset: int = 0,
-    hooks: _blocks.BlockHooks | None = None,
 ) -> np.ndarray:
     """Denoise 48 kHz float32 audio, (n,) or (n, channels), each channel on its
     own.
@@ -441,8 +439,7 @@ def denoise_array(
     The default is the editor's block run (blocks.GRID_HEAVY): 30 s blocks at multiples of 30 s from the start of the file,
     each run on its own from a fresh model state with 24 s of the recording before it and 0.25 s after it (about 41 dB
     against one contiguous run, PESQ >= 4.4; it never reaches 50 dB; compute x1.8), exact blocks without crossfade. The
-    grid does not depend on `threads`. `grid_offset`: the position of x[0] in the whole file when x is a stretch of it.
-    `hooks`: a block cache (blocks.BlockHooks, one channel only) for full-strength runs. With `segment_seconds` and/or
+    grid does not depend on `threads`. With `segment_seconds` and/or
     `overlap_seconds` the older cut is used: segments (60 s) with that much warm-up (2 s) and a 50 ms crossfade, the
     segments made smaller to spread a short file over `threads`.
 
@@ -482,8 +479,7 @@ def denoise_array(
             progress(f)
 
     if segment_seconds is None and overlap_seconds is None:
-        return _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, grid or _blocks.grid_of("heavy"),
-                               grid_offset, hooks, out)
+        return _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, grid or _blocks.grid_of("heavy"), out)
     segment_seconds = 60.0 if segment_seconds is None else segment_seconds
     overlap_seconds = 2.0 if overlap_seconds is None else overlap_seconds
     ov = int(overlap_seconds * SAMPLE_RATE)
@@ -637,30 +633,14 @@ def run_windows(
         progress(1.0)
 
 
-def _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, grid, offset, hooks, out) -> np.ndarray:
-    """The block run of `denoise_array`: every channel's grid blocks as rows, the cached ones taken from `hooks`."""
+def _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, grid, out) -> np.ndarray:
+    """The block run of `denoise_array`: every channel's grid blocks as rows."""
     n = x.shape[0]
     chans = out2.shape[1]
-    if hooks is not None and (chans != 1 or alpha):
-        raise ValueError("a block cache needs one channel at full strength: the strength is a blend afterwards")
-    rows: list[_Row] = []
-    desc: dict[int, tuple] = {}
-    hit = 0
-    for c in range(chans):
-        for lo, s, e, hi in _blocks.grid_windows(offset, offset + n, grid):
-            cached = hooks.get((lo, s, e, hi)) if hooks is not None else None
-            if cached is not None and len(cached) == e - s:
-                out2[s - offset:e - offset, c] = cached
-                hit += e - s
-                continue
-            r = _Row(c, lo - offset, hi - offset, s - offset, e - offset, 0, 0)
-            desc[id(r)] = (lo, s, e, hi)
-            rows.append(r)
+    rows = [_Row(c, lo, hi, s, e, 0, 0) for c in range(chans) for lo, s, e, hi in _blocks.grid_windows(0, n, grid)]
     total = max(n * chans, 1)
-    done = hit
+    done = 0
     lock = threading.Lock()
-    if hit and progress:
-        progress(min(hit / total, 1.0))
 
     def report(k: int) -> None:
         nonlocal done
@@ -670,12 +650,7 @@ def _denoise_blocks(x, out2, model, alpha, workers, threads, progress, cancel, g
                 f = min(done / total, 1.0)
             progress(f)
 
-    def put(group: list[_Row]) -> None:
-        if hooks is not None:
-            for r in group:
-                hooks.put(desc[id(r)], out2[r.s:r.e, 0].copy())
-
-    _drive(model, x, _groups(rows, model, threads), out2, alpha, cancel, report, workers, put)
+    _drive(model, x, _groups(rows, model, threads), out2, alpha, cancel, report, workers)
     if progress:
         progress(1.0)
     return out

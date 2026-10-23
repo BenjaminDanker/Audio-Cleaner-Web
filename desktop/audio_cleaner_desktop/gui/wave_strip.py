@@ -148,7 +148,7 @@ class WaveStrip(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         pal = self.palette()
-        text, base = pal.windowText().color(), pal.base().color()
+        text = pal.windowText().color()
         muted = QColor(text)
         muted.setAlphaF(0.55)
         w = self.width()

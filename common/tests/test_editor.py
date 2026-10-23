@@ -633,7 +633,7 @@ def test_whole_file_noise_removal_has_no_seam_steps_and_matches_a_contiguous_run
 
 @needs_dfn
 @needs_speech
-def test_light_blocks_equal_the_contiguous_run_at_the_measured_level_and_a_cached_block_equals_a_fresh_one():
+def test_light_blocks_equal_the_contiguous_run_at_the_measured_level_and_a_second_render_takes_every_block_from_the_cache():
     x = real_noisy(70, 3)[:, 0]
     contiguous = dfn.denoise_array(x, LIB, MODEL, threads=1, segment_seconds=1e6, overlap_seconds=0.5)
     first = dfn.denoise_array(x, LIB, MODEL, threads=2)
@@ -650,8 +650,6 @@ def test_light_blocks_equal_the_contiguous_run_at_the_measured_level_and_a_cache
     puts = cache.puts
     again = editor.render(tl, inp, cache, runner=None)  # all hits
     assert cache.puts == puts and np.array_equal(again, made)
-    fresh = dfn.denoise_array(x[10 * SR:], LIB, MODEL, threads=2, grid_offset=10 * SR)  # a stretch of the file, on the file's grid
-    assert np.array_equal(fresh[20 * SR:50 * SR], first[30 * SR:60 * SR])  # the 30-60 s block is the same block (its 16 s of context start after 10 s)
 
 
 @needs_heavy

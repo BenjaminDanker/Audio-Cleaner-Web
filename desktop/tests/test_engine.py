@@ -342,7 +342,7 @@ def measured_as(monkeypatch):
     def use(stats: dict):
         asked = []
 
-        def fake(x, lib, model, cancel=None, keep=None):
+        def fake(x, lib, model, cancel=None):
             asked.append(len(x))
             return dict(stats)
 

@@ -469,26 +469,6 @@ _FE_AHEAD = 2  # feature windows in flight (see _restore_mono)
 _BLOCK = 1 << 20  # samples per step of the whole-file statistics: memory must not grow with the length of the file
 
 
-def _restore_cached(src, dst, model_dir, job, hooks, threads, device, progress, cancel, window_seconds, overlap_seconds) -> None:
-    n = len(src)
-    missing = []
-    for b in range(block_count(n, window_seconds, overlap_seconds)):
-        a, e = block_bounds(b, n, window_seconds, overlap_seconds)
-        hit = hooks.get((job, b))
-        if hit is not None and len(hit) == e - a:
-            dst[a:e] = hit
-        else:
-            missing.append(b)
-
-    def deliver(b: int, y: np.ndarray) -> None:
-        a, e = block_bounds(b, n, window_seconds, overlap_seconds)
-        dst[a:e] = y
-        hooks.put((job, b), y)
-
-    restore_blocks(src, model_dir, missing, deliver, threads=threads, device=device, progress=progress, cancel=cancel,
-                   window_seconds=window_seconds, overlap_seconds=overlap_seconds)
-
-
 def _side_db(x: np.ndarray) -> float:
     """Side energy over mid energy in dB (stereo `x`, any length: works in blocks, so a memory-mapped hour-long
     file needs a few MB, not the 8 bytes per sample and temporary of a whole-file computation)."""
@@ -536,12 +516,8 @@ def restore(
     stereo: str = "auto",
     window_seconds: float | None = None,
     overlap_seconds: float | None = None,
-    hooks=None,
 ) -> np.ndarray:
     """Restore 48 kHz float32 speech `x` of shape (n,) or (n, channels) with Sidon.
-
-    `hooks` (blocks.BlockHooks, desc = (job, block index) with job "mid" or the channel): the editor's block cache. The cached
-    blocks are not run again and the others are stored; a whole-file run with it is "all blocks".
 
     Returns an array of the same shape (written into `out` when given, e.g. a memory-mapped
     file; `out` may not alias `x`). The output level is the model's own (roughly speech
@@ -591,11 +567,7 @@ def restore(
             if progress:
                 progress(base + f / len(jobs))
 
-        if hooks is None:
-            _restore_mono(src, dst, be, progress=prog, cancel=cancel, **kw)
-        else:
-            job = "mid" if (x.ndim == 2 and len(jobs) == 1 and x.shape[1] == 2) else (i if x.ndim == 2 else 0)
-            _restore_cached(src, dst, model_dir, job, hooks, threads, device, prog, cancel, window_seconds, overlap_seconds)
+        _restore_mono(src, dst, be, progress=prog, cancel=cancel, **kw)
         if x.ndim == 2 and len(jobs) == 1 and x.shape[1] == 2:  # mid-only: same restored signal on both channels
             out[:, 1] = out[:, 0]
     if progress:

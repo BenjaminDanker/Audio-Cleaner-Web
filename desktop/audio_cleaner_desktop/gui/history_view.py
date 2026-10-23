@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 
 from ..labels import describe_settings, settings_dict  # noqa: F401 - they live in labels.py (no Qt); importable from here as before
 from . import shell
-from .history import DONE, SORTS, CopiesTotal, Entry, HistoryStore, Totals
+from .history import DONE, CopiesTotal, Entry, HistoryStore, Totals
 from .job_view import JobEnv, JobView
 from .queue_view import format_size
 from .theme import set_property

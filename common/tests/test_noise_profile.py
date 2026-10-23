@@ -65,9 +65,7 @@ def test_a_long_stereo_recording_is_measured_from_its_mono_mix_in_six_stretches(
         return seg * 0.5
 
     monkeypatch.setattr(pipeline.dfn, "denoise_array", remover)
-    keep: dict = {}
-    pipeline.noise_figure_db(mm, "lib", "model", keep=keep)
-    assert keep == {}  # only a recording measured in one piece can stand in for its cleaning
+    pipeline.noise_figure_db(mm, "lib", "model")
     assert [len(g) for g in got] == [10 * SR] * 6
     for g, (a, b) in zip(got, windows):
         assert np.allclose(g, x[a:b], atol=1e-7)
