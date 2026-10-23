@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, edit_preview, edit_store, edit_subtitles, editing, jobs, keycaps, stretch, webhooks
+from .. import auth, db, edit_preview, edit_store, edit_subtitles, editing, job_resources, job_view, jobs, keycaps, stretch, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -268,7 +268,7 @@ async def upload(job_id: str, request: Request, principal: auth.Principal = Depe
                 if received - checked_at >= UPLOAD_CHECK_EVERY:
                     checked_at = received
                     free = await anyio.to_thread.run_sync(_disk_free, data_dir)
-                    if free < jobs.DISK_RESERVE // 2:
+                    if free < job_resources.DISK_RESERVE // 2:
                         raise HTTPException(status_code=507, detail="We're short on storage space right now. Please try again a bit later.")
                 if time.monotonic() - last_keepalive >= UPLOAD_KEEPALIVE_EVERY:
                     last_keepalive = time.monotonic()
@@ -363,7 +363,7 @@ async def upload_browser_noise(
     pending_n = 0
     try:
         d.mkdir(mode=0o700, exist_ok=True)
-        if await anyio.to_thread.run_sync(_disk_free, data_dir) < jobs.DISK_RESERVE // 2 + ctx["max_bytes"]:
+        if await anyio.to_thread.run_sync(_disk_free, data_dir) < job_resources.DISK_RESERVE // 2 + ctx["max_bytes"]:
             raise HTTPException(status_code=507, detail="We're short on storage space right now. Please try again a bit later.")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         stream = request.stream().__aiter__()
@@ -460,16 +460,16 @@ def list_jobs(principal: auth.Principal = Depends(auth.require_scope("jobs"))) -
         (principal.user_id, now + 1, now, now - get_settings().job_retention_seconds),
     )
     queue = jobs.queue_snapshot() if any(r["status"] == "queued" for r in rows) else ([], {})  # shared for a second across requests
-    callbacks = jobs.callbacks_for([r["id"] for r in rows])
+    callbacks = job_view.callbacks_for([r["id"] for r in rows])
     settings = get_settings()
-    return {"jobs": [jobs.public_job(dict(r), queue, callbacks) for r in rows],
+    return {"jobs": [job_view.public_job(dict(r), queue, callbacks) for r in rows],
             "limits": {"maxActiveJobs": settings.max_active_jobs, "retentionSeconds": settings.job_retention_seconds,
                        "maxRetentionSeconds": settings.job_max_retention_seconds}}
 
 
 @router.get("/{job_id}")
 def get_job(job_id: str, principal: auth.Principal = Depends(auth.require_scope("jobs"))) -> dict:
-    return jobs.public_job(_get_owned(job_id, principal))
+    return job_view.public_job(_get_owned(job_id, principal))
 
 
 @router.post("/{job_id}/cancel")

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import alerts, db, health, jobs, metrics, retention, storage
+from . import alerts, db, health, job_resources, jobs, metrics, retention, storage
 from .billing import ledger
 from .config import get_settings
 
@@ -368,7 +368,7 @@ def check_slow_jobs(ctx: Callable[[], str]) -> list[Finding]:
     for r in db.all_rows("SELECT * FROM jobs WHERE status = 'running' AND started_at IS NOT NULL"):
         job = dict(r)
         elapsed = now - job["started_at"]
-        est = jobs.job_seconds(job)
+        est = job_resources.job_seconds(job)
         frac = (job["progress"] or 0) / 100
         projected = elapsed / frac if frac >= 0.05 else None
         if elapsed >= SLOW_MIN_ELAPSED_S and ((projected or elapsed) > SLOW_FACTOR * est):

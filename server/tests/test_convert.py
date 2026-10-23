@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from acw import automatic, broker, db, editing, jobs
+from acw import automatic, broker, db, editing, job_convert, job_resources, job_view, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw.worker import runner
@@ -67,13 +67,13 @@ def make(uid, kind="convert", seconds=600.0, filename="talk.wmv", options=None, 
 @pytest.mark.parametrize("fmt", ["mp4", "mov", "mkv", "webm"])
 @pytest.mark.parametrize("size", [None, 480, 720, 1080, 1440, 2160])
 def test_a_file_type_and_a_size_are_taken(fmt, size):
-    assert jobs.video_out_of({"video_out": {"format": fmt, "size": size}}) == {"format": fmt, "size": size}
+    assert job_convert.video_out_of({"video_out": {"format": fmt, "size": size}}) == {"format": fmt, "size": size}
     assert jobs.validate_options("convert", None, None, vo(fmt, size))["video_out"] == {"format": fmt, "size": size}
 
 
 def test_the_size_may_be_left_out_and_no_video_out_is_none():
-    assert jobs.video_out_of({"video_out": {"format": "mkv"}}) == {"format": "mkv", "size": None}
-    assert jobs.video_out_of({}) is None and jobs.video_out_of({"video_out": None}) is None
+    assert job_convert.video_out_of({"video_out": {"format": "mkv"}}) == {"format": "mkv", "size": None}
+    assert job_convert.video_out_of({}) is None and job_convert.video_out_of({"video_out": None}) is None
     assert jobs.validate_options("denoise", "standard", None, {})["video_out"] is None
 
 
@@ -134,7 +134,7 @@ def test_unknown_kinds_are_still_refused(client, signed_in):
 # ------------------------------------------------------------------------------------- what the client read of the video
 
 def checked_source(source):
-    return jobs.video_out_of({"video_out": {"format": "mp4", "size": None, "source": source}}).get("source")
+    return job_convert.video_out_of({"video_out": {"format": "mp4", "size": None, "source": source}}).get("source")
 
 
 @pytest.mark.parametrize("source, want", [
@@ -156,8 +156,8 @@ def test_what_the_client_read_of_the_video_is_taken_as_numbers(source, want):
 
 
 def test_no_source_means_none_is_kept():
-    assert jobs.video_out_of({"video_out": {"format": "mp4", "size": None}}) == {"format": "mp4", "size": None}
-    assert jobs.video_out_of({"video_out": {"format": "mp4", "size": None, "source": None}}) == {"format": "mp4", "size": None}
+    assert job_convert.video_out_of({"video_out": {"format": "mp4", "size": None}}) == {"format": "mp4", "size": None}
+    assert job_convert.video_out_of({"video_out": {"format": "mp4", "size": None, "source": None}}) == {"format": "mp4", "size": None}
     opts = jobs.validate_options("convert", None, None, vo("webm", 720, src("h264")))
     assert opts["video_out"] == {"format": "webm", "size": 720, "source": {"codec": "h264", "width": 1920, "height": 1080, "fps": 30.0}}
 
@@ -225,10 +225,10 @@ def test_a_sound_file_asked_for_as_a_video_is_taken_and_the_video_is_free(client
             j = make(uid, filename=f"talk{ext}", options=options)  # a conversion alone
             p = params_of(j["id"])
             assert (p["picture_encode"], p["convert_factor"], p["convert_rate"]) == (False, 1.0, CONVERT), (ext, options)
-            assert j["estCostMicros"] == 0 and row(j["id"])["hold_id"] is None and jobs.convert_cost(p, 600) == 0
+            assert j["estCostMicros"] == 0 and row(j["id"])["hold_id"] is None and job_convert.convert_cost(p, 600) == 0
             d = make(uid, kind="denoise", filename=f"talk{ext}", options=options)  # with cleaning: held for the cleaning alone
             assert d["estCostMicros"] == standard(600) and params_of(d["id"])["picture_encode"] is False
-            assert jobs.label_of("denoise", params_of(d["id"])) == "Denoising + Leveling"  # (no "+ Video conversion": nothing is made again)
+            assert job_view.label_of("denoise", params_of(d["id"])) == "Denoising + Leveling"  # (no "+ Video conversion": nothing is made again)
     assert held(uid) == count("jobs", "kind = 'denoise'") * standard(600)
     # an uppercase ending counts the same, and through the API
     assert params_of(make(uid, filename="TALK.WAV", options=vo("mp4", 720))["id"])["picture_encode"] is False
@@ -248,11 +248,11 @@ def test_a_video_ending_is_judged_by_the_file_when_it_is_read_not_by_its_name(si
 # ------------------------------------------------------------------------------------------------ the label, the card
 
 def test_what_a_conversion_is_called():
-    assert jobs.label_of("convert", {}) == "Video conversion"
-    assert jobs.label_of("convert", {"options": vo("mkv")}) == "Video conversion"
-    assert jobs.job_label("convert", None, None) == "Video conversion"
+    assert job_view.label_of("convert", {}) == "Video conversion"
+    assert job_view.label_of("convert", {"options": vo("mkv")}) == "Video conversion"
+    assert job_view.job_label("convert", None, None) == "Video conversion"
     clean = {"denoise_tier": "standard", "transcribe_tier": None, "rates": {"denoise": 9_000, "leveling": 1_000}}
-    assert jobs.label_of("denoise", clean) == "Denoising + Leveling"  # (a cleaning job keeps its name)
+    assert job_view.label_of("denoise", clean) == "Denoising + Leveling"  # (a cleaning job keeps its name)
 
 
 def test_the_job_page_names_a_conversion(client, signed_in):
@@ -313,7 +313,7 @@ def test_the_encoders_of_a_video_made_on_our_side():
 
 def cp(fmt, size, source, ext=None):
     opts = jobs.validate_options("convert", None, None, vo(fmt, size, source))
-    return jobs.convert_params(opts, ext)
+    return job_convert.convert_params(opts, ext)
 
 
 @pytest.mark.parametrize("fmt, size, source, ext, encode, factor", [
@@ -400,9 +400,9 @@ def test_the_picture_is_copied_or_made_again_and_counts_by_its_size(fmt, size, s
 
 
 def test_a_rate_is_pinned_with_the_job_and_nothing_is_stored_without_video_out():
-    assert jobs.convert_params(jobs.validate_options("denoise", "standard", None, {})) == {}
-    assert jobs.convert_params(jobs.validate_options("denoise", "standard", None, {}), ".wmv") == {}
-    assert jobs.convert_params({"video_out": None}) == {} and jobs.convert_params({}) == {}
+    assert job_convert.convert_params(jobs.validate_options("denoise", "standard", None, {})) == {}
+    assert job_convert.convert_params(jobs.validate_options("denoise", "standard", None, {}), ".wmv") == {}
+    assert job_convert.convert_params({"video_out": None}) == {} and job_convert.convert_params({}) == {}
     assert cp("mp4", None, None, ".wmv")["convert_rate"] == pricing.rate("convert", "standard").micros_per_minute == CONVERT
 
 
@@ -410,11 +410,11 @@ def test_a_frame_rate_outside_one_to_240_counts_as_30():
     """(a request can't say one: the checks refuse it; a value that gets here some other way counts as 30 frames a second)"""
     for fps in (500, 0, -5, None, float("nan"), 240.5):
         opts = {"video_out": {"format": "mp4", "size": None, "source": {"codec": "wmv2", "width": 3840, "height": 2160, "fps": fps}}}
-        assert jobs.convert_params(opts, ".wmv")["convert_factor"] == 4.0, fps
+        assert job_convert.convert_params(opts, ".wmv")["convert_factor"] == 4.0, fps
     opts = {"video_out": {"format": "mp4", "size": None, "source": {"codec": "wmv2", "width": 3840, "height": 2160, "fps": 240}}}
-    assert jobs.convert_params(opts, ".wmv")["convert_factor"] == 32.0  # (240 fps is a real rate)
+    assert job_convert.convert_params(opts, ".wmv")["convert_factor"] == 32.0  # (240 fps is a real rate)
     opts = {"video_out": {"format": "mp4", "size": 2160, "source": {"fps": 600}}}
-    assert jobs.convert_params(opts, ".wmv")["convert_factor"] == 4.0
+    assert job_convert.convert_params(opts, ".wmv")["convert_factor"] == 4.0
 
 
 # -------------------------------------------------------------------------------------------------- the price and its line
@@ -440,36 +440,36 @@ def conv(encode, factor=None, rate=CONVERT):
     (conv(True, 2.0, rate=12_000), 600, 24_000, 240_000),                # (the rate the job was made with, times its factor)
 ])
 def test_the_conversion_costs_the_pinned_rate_times_the_factor_by_the_second(params, seconds, per_minute, want):
-    assert jobs.convert_cost(params, seconds) == want
-    line = jobs.convert_line(params, seconds)
+    assert job_convert.convert_cost(params, seconds) == want
+    line = job_convert.convert_line(params, seconds)
     assert line == {"item": "convert", "label": "Video conversion", "quantity": 1, "usdPerMinute": per_minute / 1e6,
                     "factor": float(params.get("convert_factor") or 1.0), "micros": want}
 
 
 @pytest.mark.parametrize("params", [conv(False, 4.0), conv(None, 4.0), conv(False), conv(None), {"picture_encode": True}, {"picture_encode": True, "convert_factor": 4.0}, {}])
 def test_a_copy_an_unknown_picture_and_a_job_without_the_rate_cost_nothing(params):
-    assert jobs.convert_cost(params, 600) == 0
+    assert job_convert.convert_cost(params, 600) == 0
 
 
 def test_the_lines_say_copied_or_maybe_and_only_a_sure_price_adds_to_the_total():
-    assert jobs.convert_line({}, 600) is None and jobs.convert_line({"picture_encode": True, "convert_factor": 2.0}, 600) is None
-    copied = jobs.convert_line(conv(False, 4.0), 600)
+    assert job_convert.convert_line({}, 600) is None and job_convert.convert_line({"picture_encode": True, "convert_factor": 2.0}, 600) is None
+    copied = job_convert.convert_line(conv(False, 4.0), 600)
     assert copied == {"item": "convert", "label": "Video conversion", "quantity": 1, "usdPerMinute": 0.024, "factor": 4.0, "micros": 0, "copied": True}
-    maybe = jobs.convert_line(conv(None, 4.0), 600)  # (what it would cost, if the picture has to be made again; not in the total)
+    maybe = job_convert.convert_line(conv(None, 4.0), 600)  # (what it would cost, if the picture has to be made again; not in the total)
     assert maybe == {"item": "convert", "label": "Video conversion", "quantity": 1, "usdPerMinute": 0.024, "factor": 4.0, "micros": 240_000, "maybe": True}
-    sure = jobs.convert_line(conv(True, 4.0), 600)
+    sure = job_convert.convert_line(conv(True, 4.0), 600)
     assert sure["micros"] == 240_000 and "maybe" not in sure and "copied" not in sure
     for encode in (True, False, None):
         params = conv(encode, 4.0)
-        line = jobs.convert_line(params, 600)
+        line = job_convert.convert_line(params, 600)
         counted = 0 if line.get("maybe") else line["micros"]
-        assert counted == jobs.convert_cost(params, 600), encode
+        assert counted == job_convert.convert_cost(params, 600), encode
 
 
 @pytest.mark.parametrize("factor, per_minute", [(1.1, 6_600), (1.12, 6_720), (1.35, 8_100), (2.2, 13_200), (1.09, 6_540), (2.18, 13_080), (1.78, 10_680), (3.56, 21_360)])
 def test_the_rate_a_minute_is_exact_for_a_factor_with_two_decimals(factor, per_minute):
-    assert jobs.convert_line(conv(True, factor), 60)["usdPerMinute"] == per_minute / 1e6
-    assert jobs.convert_cost(conv(True, factor), 60) == per_minute
+    assert job_convert.convert_line(conv(True, factor), 60)["usdPerMinute"] == per_minute / 1e6
+    assert job_convert.convert_cost(conv(True, factor), 60) == per_minute
 
 
 def test_the_rate_is_exact_for_every_factor_the_probe_can_store():
@@ -479,7 +479,7 @@ def test_the_rate_is_exact_for_every_factor_the_probe_can_store():
     for hundredths in range(100, 6401):
         factor = hundredths / 100
         want = math.ceil(Fraction(CONVERT) * hundredths / 100)
-        assert jobs.convert_cost(conv(True, factor), 60) == want, factor
+        assert job_convert.convert_cost(conv(True, factor), 60) == want, factor
 
 
 # ------------------------------------------------------------------------------------------------------ estimates
@@ -639,7 +639,7 @@ def test_the_whole_upload_again_must_fit_on_the_disk(signed_in, monkeypatch):
 
     uid, _ = funded(signed_in)
     size = 2 * 1024**3
-    need = size + jobs.DISK_RESERVE  # a conversion keeps no scratch files or copies: the upload and the video made from it
+    need = size + job_resources.DISK_RESERVE  # a conversion keeps no scratch files or copies: the upload and the video made from it
     free = {"n": need}
     monkeypatch.setattr(hostload, "get", lambda d: SimpleNamespace(snapshot=lambda: SimpleNamespace(disk_free=free["n"])))
     with pytest.raises(jobs.JobError, match="short on storage") as e:
@@ -875,7 +875,7 @@ def test_a_file_that_turns_out_to_have_no_picture_gets_a_black_one_and_the_video
     assert done["status"] == "done" and done["costMicros"] == steps
     assert "main" in stages.stages and done["label"] == ("Video conversion" if kind == "convert" else "Denoising + Leveling")
     p = params_of(jid)
-    assert (p["picture_encode"], p["convert_factor"]) == (False, 1.0) and jobs.convert_cost(p, 600) == 0
+    assert (p["picture_encode"], p["convert_factor"]) == (False, 1.0) and job_convert.convert_cost(p, 600) == 0
     assert held(uid) == 0 and ledger.balance(uid)["balance_micros"] == 5_000_000 - steps
 
 

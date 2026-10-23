@@ -75,7 +75,7 @@ the estimate; `params.chosen` is what the API reports). A rebuild decided by a w
 impossible the job continues as Denoising and says so. From then on it is an ordinary job.
 
 A worker that is stopped (restart, deploy) puts its job back in the queue with the upload kept; nothing fails.
-The estimates shown to people and the slow-job monitor follow the work a job does (`jobs.SPEED`).
+The estimates shown to people and the slow-job monitor follow the work a job does (`job_resources.SPEED`).
 
 ## Changing a finished job
 

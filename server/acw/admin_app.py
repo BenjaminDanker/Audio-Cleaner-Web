@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from . import jobs as job_names, samples
+from . import job_view, samples
 from .billing import pricing
 from .config import get_settings
 
@@ -148,7 +148,7 @@ def overview(start: int | None = Query(None), end: int | None = Query(None)) -> 
             for label, micros in parts.items():
                 revenue[label] = revenue.get(label, 0) + micros
                 users_by_product.setdefault(label, set()).add(r["user_id"])
-            name = job_names.job_label(r["kind"], params.get("denoise_tier"), params.get("transcribe_tier"),
+            name = job_view.job_label(r["kind"], params.get("denoise_tier"), params.get("transcribe_tier"),
                                        "leveling" in (params.get("rates") or {})) or r["kind"]
             jobs_by.setdefault(name, {}).setdefault(r["status"], 0)
             jobs_by[name][r["status"]] += 1

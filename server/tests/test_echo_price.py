@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from acw import db, edit_prices, editing, jobs
+from acw import db, edit_prices, editing
 from acw.billing import ledger, pricing
 from acw.worker import main as worker_main
 from acw_common import editor

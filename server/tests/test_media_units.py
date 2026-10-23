@@ -35,7 +35,7 @@ def test_frame_roundtrip_and_the_frames_that_are_refused():
 
 
 def test_an_upload_name_never_names_a_path_outside_the_job():
-    from acw.jobs import safe_stem
+    from acw.job_view import safe_stem
 
     assert safe_stem("../../ét é/../x y.mp4") == "x-y"
 

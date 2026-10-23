@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from . import db, hostload, jobs
+from . import db, hostload, job_convert, job_resources
 from .stream import protocol as P
 from .config import get_settings
 
@@ -200,7 +200,7 @@ def gpu_stages(job: dict) -> list[str]:
     stages = _sound_stages(job)
     if "rebuild" not in stages and (editing.wants_echo(params) or (params.get("run") or {}).get("echo")):
         return []
-    if job.get("next_stage") != "finalize" and jobs.encodes(params):
+    if job.get("next_stage") != "finalize" and job_convert.encodes(params):
         stages.append("encode")
     return stages
 
@@ -386,19 +386,19 @@ def admit_job(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set
     """Whether `job` may start now, why not, and how many threads it gets. Memory and disk must fit with a reserve
     left for the rest of the host; CPU only decides when other jobs already run (with nothing running the queue
     always moves, niced, so it yields to everything that outranks it)."""
-    mem, disk = jobs.job_needs(job)
+    mem, disk = job_resources.job_needs(job)
     if gpu:  # the model lives in GPU memory, which other programs may hold much of (measured now: this is the GPU worker)
         ok, why = card_room(gpu_stages(job), card_usage())
         if not ok:
             return False, why, 0
-        mem = min(mem, jobs.JOB_MEM + jobs.GB)
+        mem = min(mem, job_resources.JOB_MEM + job_resources.GB)
     now = db.now()
     # Jobs started in the last minute may not have allocated their memory yet.
-    mem += sum(jobs.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
-    if snap.mem_available - mem < jobs.MEM_RESERVE or (snap.slice_headroom is not None and snap.slice_headroom - mem < jobs.SLICE_RESERVE):
-        return False, f"memory: {snap.memory_headroom / jobs.GB:.1f} GB free, job needs {mem / jobs.GB:.1f} GB", 0
-    if snap.disk_free - disk < jobs.DISK_RESERVE:
-        return False, f"disk: {snap.disk_free / jobs.GB:.0f} GB free, job needs {disk / jobs.GB:.1f} GB", 0
+    mem += sum(job_resources.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
+    if snap.mem_available - mem < job_resources.MEM_RESERVE or (snap.slice_headroom is not None and snap.slice_headroom - mem < job_resources.SLICE_RESERVE):
+        return False, f"memory: {snap.memory_headroom / job_resources.GB:.1f} GB free, job needs {mem / job_resources.GB:.1f} GB", 0
+    if snap.disk_free - disk < job_resources.DISK_RESERVE:
+        return False, f"disk: {snap.disk_free / job_resources.GB:.0f} GB free, job needs {disk / job_resources.GB:.1f} GB", 0
     # Idle CPU among the cores jobs may use now (live audio, which outranks jobs, may have taken some).
     idle = snap.idle_cores
     if cpus is not None and snap.busy_per_cpu:
@@ -444,8 +444,8 @@ def snapshot() -> dict:
         "classes": [{"name": c.name, "rank": c.rank, "realtime": c.realtime, "paid": c.paid} for c in sorted(CLASSES.values(), key=lambda c: c.rank)],
         "cpu": {"cores": snap.cores, "busy": round(snap.busy_cores, 2), "niced": round(snap.nice_cores, 2),
                 "perCpu": [round(b, 2) for b in snap.busy_per_cpu]},
-        "memory": {"available": snap.mem_available, "sliceHeadroom": snap.slice_headroom, "reserve": jobs.MEM_RESERVE},
-        "disk": {"free": snap.disk_free, "reserve": jobs.DISK_RESERVE},
+        "memory": {"available": snap.mem_available, "sliceHeadroom": snap.slice_headroom, "reserve": job_resources.MEM_RESERVE},
+        "disk": {"free": snap.disk_free, "reserve": job_resources.DISK_RESERVE},
         "live": {"sessions": by_class, "liveCores": cores, "engine": live_engine_status()},
         "gpu": {"worker": "idle" if gpu_worker_idle() else "busy" if gpu_worker_up() else "down", "card": gpu_card(),
                 "othersMb": (card_state() or {}).get("others_mb"), "rebuildAvailable": rebuild_available()},

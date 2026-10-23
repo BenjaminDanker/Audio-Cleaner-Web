@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from acw import broker, db, jobs
+from acw import broker, db, job_resources, jobs
 from acw.billing import ledger
 from acw.worker import main as W
 from tests.job_support import queue_row
@@ -109,6 +109,6 @@ def test_queue_estimates_have_a_gpu_lane(models):
     plain = queued(models, options={"noise": "light"})
     jobs.invalidate_queue_cache()
     _, waits = jobs.queue_snapshot()
-    rebuild_seconds = jobs.job_seconds(dict(db.one("SELECT * FROM jobs WHERE id = ?", (first,))))
+    rebuild_seconds = job_resources.job_seconds(dict(db.one("SELECT * FROM jobs WHERE id = ?", (first,))))
     assert waits[first] == 0 and waits[second] == int(rebuild_seconds)  # rebuilds queue behind each other on the card
     assert waits[plain] == 0  # the CPU workers have nothing in front of it

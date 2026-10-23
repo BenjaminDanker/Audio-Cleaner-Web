@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from acw import app as appmod
-from acw import db, jobs, translate
+from acw import db, translate
 from acw.billing import ledger
 from acw.stream import live_translate
 from tests.conftest import settle_payment

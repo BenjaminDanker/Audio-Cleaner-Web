@@ -380,7 +380,7 @@ def history_page(user_id: str, limit: int = 100) -> tuple[list[dict], bool]:
     raw columns every entry has `label` (what it was, in the words of the price list); usage entries also have
     `product` (clean | transcript | clean_transcript | live), `tier`, `minutes` and `displayName` (the file's
     name as the person chose it)."""
-    from .. import jobs  # noqa: PLC0415 - jobs imports this module
+    from .. import job_view  # noqa: PLC0415 - jobs imports this module
 
     rows = history(user_id, limit + 1)
     more = len(rows) > limit
@@ -405,7 +405,7 @@ def history_page(user_id: str, limit: int = 100) -> tuple[list[dict], bool]:
         s = stream_rows.get(r["ref_id"]) if r["ref_type"] == "stream" else None
         if j is not None:
             p = json.loads(j["params_json"])
-            r["label"] = jobs.label_of(j["kind"], p)  # a re-run is named for the steps it did again
+            r["label"] = job_view.label_of(j["kind"], p)  # a re-run is named for the steps it did again
             r["product"] = {"denoise": "clean", "transcribe": "transcript", "denoise_transcribe": "clean_transcript"}.get(j["kind"])
             r["tier"] = p.get("denoise_tier") or p.get("transcribe_tier")
             r["minutes"] = round((j["duration_seconds"] or 0) / 60, 1)

@@ -8,7 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
-from . import edit_prices, edit_store, jobs
+from . import edit_prices, edit_store, job_resources, jobs
 from .billing import pricing
 
 
@@ -182,7 +182,7 @@ def subtitle_charge(job_id: str, plan: dict, rates: dict[str, int]) -> int:
 
 def subtitle_seconds(plan: dict) -> float:
     """A rough wall-clock time for the subtitle work of a plan (the queue estimate)."""
-    S = jobs.SPEED
+    S = job_resources.SPEED
     return sum(S[TRANSCRIBE_SPEED[e["quality"]]] * (e["end"] - e["start"]) for e in plan["parts"] if e["transcribe"])
 
 

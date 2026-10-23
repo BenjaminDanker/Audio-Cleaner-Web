@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw import db, edit_prices, edit_store, editing, jobs
+from acw import db, edit_prices, edit_store, editing, job_resources, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw_common import blocks, editor
@@ -824,7 +824,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
 
     from acw import hostload
 
-    need = jobs.scratch_bytes("denoise", 3600) + jobs.DISK_RESERVE + 1000
+    need = job_resources.scratch_bytes("denoise", 3600) + job_resources.DISK_RESERVE + 1000
     free = need + edit_store.cache_bytes(3600, 2, 1) - 1
     hostload.get = lambda d: SimpleNamespace(snapshot=lambda: SimpleNamespace(disk_free=free))  # (roomy_disk's patch is undone with the test)
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 1000, "durationSeconds": 3600,
@@ -833,7 +833,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
     # a process promises the room its blocks and scratch take
     jid = edit_job(uid, seconds=3600.0, rendered="empty")
     tl = tl_of(jid, noise=[noise(0, 3600)])
-    need = jobs.scratch_bytes("denoise", 3600, 1) + edit_store.BLOCKS_PER_HOUR_PER_CHANNEL + jobs.DISK_RESERVE
+    need = job_resources.scratch_bytes("denoise", 3600, 1) + edit_store.BLOCKS_PER_HOUR_PER_CHANNEL + job_resources.DISK_RESERVE
     hostload.get = lambda d: SimpleNamespace(snapshot=lambda: SimpleNamespace(disk_free=need - 10**6))
     r = client.post(f"/api/jobs/{jid}/process", json={"timeline": tl}, headers=h)
     assert r.status_code == 507 and row(jid)["status"] == "done"

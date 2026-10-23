@@ -377,7 +377,7 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 | Release downloads out of date (`mirror_stale`) | only where `acw-mirror.timer` is enabled: a channel has had no successful mirror run for 2 hours, or a newer release has been on the release service for over an hour without being served (for example its signature or a checksum is wrong), twice in a row | people keep getting the last good version, never a wrong one; the mail has the last error. See "Release downloads" |
 | Not reachable from the internet (`health_public`) | local health is fine but `https://audiocleaner.live/api/health` fails from this machine twice in a row | the problem is the tunnel, VPS or Caddy; skipped when the public origin is not https |
 | File queue long (`queue_long`) | the head job has waited over 20 min, or the last job's estimated wait (`jobs.queue_wait_seconds`) is over 45 min | the mail shows busy cores for Audio Cleaner vs everything else (with the busiest other process names, e.g. `java`) and memory, so you can see when the Minecraft servers are the cause |
-| Jobs abnormally slow (`jobs_slow`) | a running job, 10+ minutes in, is projected to take over 3x its `jobs.job_seconds` estimate | same host load breakdown |
+| Jobs abnormally slow (`jobs_slow`) | a running job, 10+ minutes in, is projected to take over 3x its `job_resources.job_seconds` estimate | same host load breakdown |
 | Disk low (`disk_low`) | under 15 GB free on the data volume | |
 | Memory low (`mem_low`) | under 2 GB `MemAvailable` for 2 checks in a row | host load breakdown included |
 | Swap growing (`swap_growing`) | at least 512 MB of swap in use and up 256 MB or more over 30 minutes | |
@@ -785,7 +785,7 @@ told the service is busy. Measured numbers, 2026-10-14:
 Minecraft servers need.
 - File jobs keep decoded and cleaned audio in memory-mapped scratch files in the
   job directory, and the leveling chain works in 10 s blocks. Admission reserves 1 GB per job (4.5 GB for the
-  voice-rebuild tier, whose four single-threaded workers hold their own activations): an estimate used to decide when a job may start (`jobs.JOB_MEM`), not a limit. The real
+  voice-rebuild tier, whose four single-threaded workers hold their own activations): an estimate used to decide when a job may start (`job_resources.JOB_MEM`), not a limit. The real
   ceilings are the worker unit's MemoryMax (7 GB) and the runner's address-space limit (32 GB, memory-mapped
   scratch files included). Admission counts memory the way the kernel does: file cache in the slice is not "used".
   Scratch disk: ~0.7 GB per hour and channel, twice.
@@ -804,7 +804,7 @@ first served. The API reports `queuePosition` and `queueWaitSeconds`.
 - Studio clean, per channel at 4 threads (stereo is cleaned channel by channel, so double these for stereo):
   DeepFilterNet3 ~0.05x real time, DPDFNet-8 (heavy noise) ~0.33x, voice rebuilt ~0.9x (3 GB, one such job at a
   time, files up to 90 minutes) and echo removal a few percent more. These are the numbers in
-  `jobs.SPEED`: they drive the queue estimate and the slow-job alert, and the runner tells the worker which
+  `job_resources.SPEED`: they drive the queue estimate and the slow-job alert, and the runner tells the worker which
   noise remover a file got so the estimate follows it.
 - Local transcription: Parakeet TDT (English: v2; 24 European languages: v3)
   at ~0.09x real time on 4 CPU threads, ~0.04x on the GTX 960; Whisper

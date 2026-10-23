@@ -41,7 +41,7 @@ import math
 import re
 from pathlib import Path
 
-from . import db, edit_preview, edit_prices, edit_store, edit_subtitles, jobs, keycaps
+from . import db, edit_preview, edit_prices, edit_store, edit_subtitles, job_convert, job_resources, jobs, keycaps
 from .billing import ledger, pricing
 from .config import get_settings
 
@@ -271,9 +271,9 @@ def make_quote(job: dict, params: dict, tl, *, rates: dict[str, int] | None = No
     embedded = bool(opts.get("embed_subtitles", True))
     video = ((bool(params.get("has_video")) or bool(opts.get("video_out"))) and bool(opts.get("output_video", True))
              and (not audio_same or (not subs_same and embedded)))
-    convert = jobs.convert_cost(params, seconds) if video else 0
+    convert = job_convert.convert_cost(params, seconds) if video else 0
     if convert:
-        total, lines = total + convert, [*lines, jobs.convert_line(params, seconds)]
+        total, lines = total + convert, [*lines, job_convert.convert_line(params, seconds)]
     rebuild_s = _blocks().union_seconds(plan.asked.get("rebuild", []))
     if rebuild_s > pricing.MAX_REBUILD_SECONDS:
         raise bad(f"Voice rebuild takes up to {pricing.MAX_REBUILD_SECONDS // 60} minutes of a recording at a time; this timeline asks for {rebuild_s / 60:.0f}.")
@@ -522,7 +522,7 @@ def timeline_label(params: dict) -> str:
 
 def timeline_seconds(raw: dict, seconds: float, channels: int) -> float:
     """A rough wall-clock time for running a timeline from nothing (the queue estimate): each layer's parts at the step's speed."""
-    S = jobs.SPEED
+    S = job_resources.SPEED
     per = {"echo": S["echo"], "noise": S["denoise_auto"], "rebuild": S["denoise_rebuild"], "leveling": S["leveling"]}
     total = 0.0
     for name, parts in ((raw or {}).get("layers") or {}).items():
@@ -668,7 +668,7 @@ def estimate_seconds(q: dict, seconds: float, channels: int) -> float:
     """A rough wall-clock time for the run of a quote: what its missing blocks take, a decode and the render."""
     ed = edit_store.editor_lib()
     work = sum(ed.compute_estimate(q["plan"]).values()) / 1.5
-    return work + jobs.SPEED["leveling"] * seconds * channels + edit_subtitles.subtitle_seconds(q["subs"])
+    return work + job_resources.SPEED["leveling"] * seconds * channels + edit_subtitles.subtitle_seconds(q["subs"])
 
 
 def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: object | None = None, *, max_cost_micros: int | None = None,
@@ -693,7 +693,7 @@ def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: o
         q = None
         micros = hold = 0
         run = {"op": op, "timeline": tl.to_json(), "previous": None, "lines": [], "asked": {}, "gpu": [], "echo": False}
-        est_seconds = jobs.SPEED["suggest"] * seconds
+        est_seconds = job_resources.SPEED["suggest"] * seconds
     else:
         tl = parse_for_job(params, raw, seconds) if raw is not None else edit_store.saved_timeline(job, params, seconds)
         missing = edit_subtitles.needs_for(job_id, tl)
@@ -732,12 +732,12 @@ def start_run(user_id: str, job_id: str, api_key_id: str | None, op: str, raw: o
             run.update(video=True, audio_file=current, convert_micros=q["convertMicros"])
         if run.get("subs") and any(e["transcribe"] and e["quality"] == "standard" for e in run["subs"]["parts"]) and "transcribe" not in run["gpu"]:
             run["gpu"] = [*run["gpu"], "transcribe"]  # (the local recogniser has the card's places too)
-    need_seconds = 2 * (est_seconds + jobs.MODEL_LOAD_SECONDS)
+    need_seconds = 2 * (est_seconds + job_resources.MODEL_LOAD_SECONDS)
     if jobs.hard_deadline(job) - db.now() < need_seconds + jobs.DEADLINE_MARGIN_SECONDS:
         raise jobs.JobError("This one is about to be cleared away, so there isn’t time to process it again. Start it again from your file.", 409, code=EXPIRING)
     channels = f["channels"]
-    disk_need = (jobs.scratch_bytes("denoise", seconds, channels, echo=run["echo"]) + (edit_store.growth_bytes(q["plan"], channels) if q else 0)
-                 + jobs.DISK_RESERVE)
+    disk_need = (job_resources.scratch_bytes("denoise", seconds, channels, echo=run["echo"]) + (edit_store.growth_bytes(q["plan"], channels) if q else 0)
+                 + job_resources.DISK_RESERVE)
     if hostload.get(settings.data_dir).snapshot().disk_free < disk_need:
         raise jobs.JobError("We're short on storage space right now. Please try again a bit later.", 507)
     now = db.now()

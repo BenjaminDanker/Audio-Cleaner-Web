@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from acw import auth, db, jobs
+from acw import auth, db, job_resources, jobs
 from acw.billing import ledger, pricing, stripe_service
 from acw.stream.features import Features
 
@@ -439,9 +439,9 @@ def test_rebuild_is_limited_to_90_minutes_and_standard_is_not(gpu_up):
 
 
 def test_stage_time_limits_scale_with_the_length():
-    cpu, wall = jobs.stage_limits(4 * 3600, 4 * 3600)
+    cpu, wall = job_resources.stage_limits(4 * 3600, 4 * 3600)
     assert wall == 4 * 3600 * 2 + 1800 and cpu == 4 * 3600 * 8 + 1800
-    assert jobs.stage_limits(600, 3600)[1] == 600 * 3 + 1800
+    assert job_resources.stage_limits(600, 3600)[1] == 600 * 3 + 1800
 
 
 # ---------------------------------------------------------------- live sessions: meter, billing, saving

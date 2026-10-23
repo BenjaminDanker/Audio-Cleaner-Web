@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from acw import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, jobs
+from acw import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, job_convert, jobs
 from acw.billing import ledger
 from acw.worker import main as worker
 
@@ -380,7 +380,7 @@ def video_job(uid, *, seconds=600.0, options=None, **params):
     """A finished job whose video our side made (the whole video was uploaded): its audio and its video result, and the record an edit needs."""
     jid = edit_job(uid, seconds=seconds, ext=".mp4", name="talk.mp4", options=options if options is not None else VIDEO)
     p = params_of(jid)
-    p.update(has_video=True, **jobs.convert_params({**p["options"], **(options if options is not None else VIDEO)}, ".mp4"), **params)
+    p.update(has_video=True, **job_convert.convert_params({**p["options"], **(options if options is not None else VIDEO)}, ".mp4"), **params)
     p["options"] = {**p["options"], **(options if options is not None else VIDEO)}
     save_params(jid, p)
     outputs = [{"file": "talk-cleaned.flac", "kind": "audio", "bytes": 10}, {"file": "talk-cleaned.mp4", "kind": "video", "bytes": 20}]
@@ -398,7 +398,7 @@ def test_a_quote_of_an_edit_of_a_video_made_on_our_side_adds_the_picture_made_ag
     q = quote(client, h, jid, tl)
     assert q.status_code == 200, q.text
     lines = q.json()["lines"]
-    convert = jobs.convert_cost(p, 600)
+    convert = job_convert.convert_cost(p, 600)
     assert convert > 0 and lines[-1]["item"] == "convert" and lines[-1]["micros"] == convert
     assert q.json()["estCostMicros"] == sum(x["micros"] for x in lines) == convert + sum(x["micros"] for x in lines[:-1])
     inner = editing.make_quote(row(jid), params_of(jid), editing.parse_timeline(tl, 600.0))
@@ -416,7 +416,7 @@ def test_processing_an_edit_of_such_a_job_holds_the_conversion_and_sends_the_vid
     r = client.post(f"/api/jobs/{jid}/process", json={"timeline": tl, "maxCostMicros": price}, headers=h)
     assert r.status_code == 200, r.text
     run = params_of(jid)["run"]
-    assert run["video"] is True and run["audio_file"] == "talk-cleaned.flac" and run["convert_micros"] == jobs.convert_cost(params_of(jid), 600) > 0
+    assert run["video"] is True and run["audio_file"] == "talk-cleaned.flac" and run["convert_micros"] == job_convert.convert_cost(params_of(jid), 600) > 0
     assert held(uid) == price == run["hold"]
     spec = editing.spec_for(row(jid), params_of(jid))
     assert spec["video"] is True and spec["audio_file"] == "talk-cleaned.flac" and spec["op"] == "process"
@@ -427,7 +427,7 @@ def test_an_export_of_a_cached_change_is_free_for_a_sound_only_job_and_costs_the
     uid, h = funded(signed_in)
     sound = edit_job(uid, seconds=600.0, rendered="empty")
     video = video_job(uid)
-    for jid, want in ((sound, 0), (video, jobs.convert_cost(params_of(video), 600))):
+    for jid, want in ((sound, 0), (video, job_convert.convert_cost(params_of(video), 600))):
         tl = tl_of(jid, leveling=[level(0, 600, -14)])
         q = editing.make_quote(row(jid), params_of(jid), editing.parse_timeline(tl, 600.0))
         assert q["convertMicros"] == want and q["video"] is (jid == video)
@@ -444,7 +444,7 @@ def test_a_copied_picture_is_made_again_for_nothing_and_a_sound_asked_for_as_a_v
     assert q["video"] is True and q["convertMicros"] == 0  # (the picture is copied into the new file with the new sound)
     black = edit_job(uid, seconds=600.0, options=VIDEO)  # a sound asked for as a video: no picture came with it
     p = params_of(black)
-    p.update(has_video=False, **jobs.convert_params({**p["options"], **VIDEO}, ".wav"))
+    p.update(has_video=False, **job_convert.convert_params({**p["options"], **VIDEO}, ".wav"))
     p["options"] = {**p["options"], **VIDEO}
     save_params(black, p)
     q = editing.make_quote(row(black), params_of(black), editing.parse_timeline(tl_of(black, noise=[noise(0, 600, 24)]), 600.0))
@@ -523,7 +523,7 @@ def test_new_subtitles_that_go_inside_the_video_make_it_again_and_charge_the_pic
     uid, h = funded(signed_in)
     jid = video_job(uid, options={**VIDEO, "embed_subtitles": True})
     tl = with_free_subtitles(client, h, jid)
-    convert = jobs.convert_cost(params_of(jid), 600)
+    convert = job_convert.convert_cost(params_of(jid), 600)
     q = quote(client, h, jid, tl).json()
     assert q["unchanged"] is False and convert > 0 and q["estCostMicros"] == convert and q["lines"][-1]["item"] == "convert"
     r = client.post(f"/api/jobs/{jid}/export", json={"timeline": tl}, headers=h)  # (all in the cache: an export, which holds the picture's price)
@@ -546,7 +546,7 @@ def test_a_new_sound_remakes_the_video_whether_or_not_the_subtitles_go_inside_it
     for embed in (True, False):
         jid = video_job(uid, options={**VIDEO, "embed_subtitles": embed})
         q = editing.make_quote(row(jid), params_of(jid), editing.parse_timeline(tl_of(jid, noise=[noise(0, 600, 24)]), 600.0))
-        assert q["audioSame"] is False and q["video"] is True and q["convertMicros"] == jobs.convert_cost(params_of(jid), 600) > 0, embed
+        assert q["audioSame"] is False and q["video"] is True and q["convertMicros"] == job_convert.convert_cost(params_of(jid), 600) > 0, embed
         db.execute("UPDATE jobs SET status = 'canceled' WHERE id = ?", (jid,))
 
 

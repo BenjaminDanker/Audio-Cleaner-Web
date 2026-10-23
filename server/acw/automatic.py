@@ -102,10 +102,10 @@ def pending_cost(kind: str, params: dict, seconds: float) -> int:
 
 
 def outcome_label(kind: str, cand: dict) -> str:
-    from . import jobs
+    from . import job_view
 
     rates = cand["rates"]
-    return jobs.job_label(kind, cand["tier"], None, "leveling" in rates)
+    return job_view.job_label(kind, cand["tier"], None, "leveling" in rates)
 
 
 # ----------------------------------------------------------------------------------------------------- the decision
@@ -203,7 +203,7 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
             raise ValueError(f"no {tier} outcome was priced for this job")
         # It becomes a job made with the timeline the decided settings stand for (every job is made one way: editing.timeline_from_options),
         # at the prices pinned when it was made.
-        from . import edit_prices, editing, jobs
+        from . import edit_prices, editing, job_convert
 
         raw, rest = editing.timeline_from_options(kind, tier, t_tier, opts, seconds)
         pinned = params["automatic"]
@@ -212,7 +212,7 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
                       edit_rates=pinned.get("edit_rates") or edit_prices.step_rates(), subtitle_rates=pinned.get("subtitle_rates") or edit_prices.subtitle_rates())
         params["automatic"] = {"fixed": pinned["fixed"]}  # (the candidates were only for the hold)
         new_cost = editing.first_run_cost(kind, params, seconds)
-        new_cost += jobs.convert_cost(params, seconds)  # (a video conversion is not part of the decision: it stays as it was)
+        new_cost += job_convert.convert_cost(params, seconds)  # (a video conversion is not part of the decision: it stays as it was)
         est = row["est_cost_micros"]
         if row["hold_id"] and 0 < new_cost < est:
             ledger.reduce_hold(row["hold_id"], new_cost, c=c)

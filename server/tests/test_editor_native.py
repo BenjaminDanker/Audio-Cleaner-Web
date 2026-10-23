@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw import db, edit_preview, edit_prices, edit_store, editing, jobs
+from acw import db, edit_preview, edit_prices, edit_store, editing
 from acw.billing import ledger
 from acw_common import blocks, editor
 from acw_common.ffmpeg import FFmpeg

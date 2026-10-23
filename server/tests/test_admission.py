@@ -4,10 +4,10 @@ import time
 
 import pytest
 
-from acw import hostload, jobs
+from acw import hostload, job_resources
 from acw.worker.main import admission
 
-GB = jobs.GB
+GB = job_resources.GB
 
 
 def snap(idle=12.0, busy_nice=0.0, mem=20 * GB, disk=100 * GB, cores=16):
@@ -43,11 +43,11 @@ def test_a_job_that_leaves_the_reserve_free_starts():
 
 
 def test_the_slice_limit_keeps_its_own_smaller_reserve():
-    need = jobs.job_needs(job(transcribe="local"))[0]
-    s = hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=need + jobs.SLICE_RESERVE + 1,
+    need = job_resources.job_needs(job(transcribe="local"))[0]
+    s = hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=need + job_resources.SLICE_RESERVE + 1,
                           disk_free=100 * GB)
     assert admission(job(transcribe="local"), s, [])[0]
-    s = hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=need + jobs.SLICE_RESERVE - 1,
+    s = hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=need + job_resources.SLICE_RESERVE - 1,
                           disk_free=100 * GB)
     assert not admission(job(transcribe="local"), s, [])[0]
 

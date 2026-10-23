@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from acw import auth, db, jobs
+from acw import auth, db, job_convert, jobs
 from acw.billing import ledger, pricing
 from acw.security import sha256_hex
 
@@ -137,7 +137,7 @@ def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, op
         "edit_rates": edit_prices.step_rates(),
         **({"subtitle_rates": edit_prices.subtitle_rates()} if tl.layers["subtitles"] else {}),
         "whole_file": {"kind": kind, "denoise_tier": d_tier, "transcribe_tier": t_tier, "options": asked},
-        **jobs.convert_params(rest, ext),
+        **job_convert.convert_params(rest, ext),
     }
 
 

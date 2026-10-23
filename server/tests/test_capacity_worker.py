@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from acw import db, jobs
+from acw import db, job_resources, jobs
 from acw.billing import ledger
 from tests.test_billing_audit import make_job, running_job, user
 
@@ -132,15 +132,15 @@ def test_a_job_that_keeps_getting_interrupted_is_failed_not_requeued_forever(mon
 def test_a_stage_gets_time_while_it_progresses_up_to_a_ceiling_and_not_when_stuck_or_finished():
     base = 23_400.0  # a 90 minute voice rebuild
     # 70 percent done after the whole limit: it needs about 10,000 s more, up to the ceiling
-    new = jobs.stretched_limit(base, base, 5, 70, 60)
-    assert new is not None and base + 9_000 < new <= base * jobs.STRETCH_LIMIT
-    assert jobs.stretched_limit(base, base, 5, 99, 60) < base * 1.3  # almost finished: a little more is enough
-    assert jobs.stretched_limit(base, base, 5, 6, 60) == base * jobs.STRETCH_LIMIT  # however slowly: never beyond the ceiling
-    assert jobs.stretched_limit(base, base * 3, 5, 6, 60) is None  # and once there, it is over
+    new = job_resources.stretched_limit(base, base, 5, 70, 60)
+    assert new is not None and base + 9_000 < new <= base * job_resources.STRETCH_LIMIT
+    assert job_resources.stretched_limit(base, base, 5, 99, 60) < base * 1.3  # almost finished: a little more is enough
+    assert job_resources.stretched_limit(base, base, 5, 6, 60) == base * job_resources.STRETCH_LIMIT  # however slowly: never beyond the ceiling
+    assert job_resources.stretched_limit(base, base * 3, 5, 6, 60) is None  # and once there, it is over
     base = 10_000.0
-    assert jobs.stretched_limit(base, base, 5, 60, jobs.STALL_SECONDS + 1) is None  # stopped moving: stuck
-    assert jobs.stretched_limit(base, base, 5, 5, 0) is None  # no progress at all
-    assert jobs.stretched_limit(base, base, 5, 100, 0) is None  # finished (its result is what is awaited)
+    assert job_resources.stretched_limit(base, base, 5, 60, job_resources.STALL_SECONDS + 1) is None  # stopped moving: stuck
+    assert job_resources.stretched_limit(base, base, 5, 5, 0) is None  # no progress at all
+    assert job_resources.stretched_limit(base, base, 5, 100, 0) is None  # finished (its result is what is awaited)
 
 
 FAKE_RUNNER = textwrap.dedent("""
@@ -160,7 +160,7 @@ def _run_main(monkeypatch, plan, timeout):
     """run_stage('main') against a stand-in runner that reports progress on a schedule."""
     from acw.worker import main as W
 
-    monkeypatch.setattr(jobs, "MIN_STRETCH_SECONDS", 0.5)  # seconds-long stages in this test
+    monkeypatch.setattr(job_resources, "MIN_STRETCH_SECONDS", 0.5)  # seconds-long stages in this test
     uid = user()
     ledger.credit(uid, 5_000_000, "grant", "t", "g")
     job, d = running_job(uid)
@@ -180,7 +180,7 @@ def test_a_main_stage_that_runs_past_its_limit_but_keeps_progressing_is_not_kill
 def test_a_main_stage_whose_progress_stalls_is_killed_at_the_limit(monkeypatch):
     from acw.worker import main as W
 
-    monkeypatch.setattr(jobs, "STALL_SECONDS", 0.5)
+    monkeypatch.setattr(job_resources, "STALL_SECONDS", 0.5)
     with pytest.raises(W.StageFailed) as e:
         _run_main(monkeypatch, {"steps": [[0.1, 5], [0.5, 30]], "finish": 30}, 2)
     assert "took too long" in e.value.user_message

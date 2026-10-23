@@ -15,6 +15,9 @@ What a job keeps: its upload, the per-part editor's block cache and recording co
 folder until `expiry`: 2 hours (`job_retention_seconds`) after its last edit, and never later than 6 hours
 (`job_max_retention_seconds`) after the upload arrived. They are deleted together (`sweep`, or at once with "Delete now"). A failed or
 canceled job's files go at once.
+
+Around it: job_convert (video conversion: file type, picture size, copy or encode, its price), job_resources (what a job needs to start
+and how long it takes), job_view (how a job is shown: its label and `public_job`).
 """
 from __future__ import annotations
 
@@ -28,17 +31,17 @@ import time
 import unicodedata
 from pathlib import Path
 
-from . import automatic, db, keycaps, metrics
+from . import automatic, db, job_convert, job_resources, keycaps, metrics
 from .billing import ledger, pricing
 from .config import get_settings
+
 
 # "convert": a video made in another file type or picture size, nothing else (options.video_out).
 KINDS = {"denoise", "transcribe", "denoise_transcribe", "convert"}
 AUDIO_FORMATS = {"wav", "flac", "mp3", "m4a", "opus"}
-# options.video_out: the video result's file type and the shorter side of its picture (None: the original size).
-VIDEO_OUT_FORMATS = ("mp4", "mov", "mkv", "webm")
-VIDEO_OUT_SIZES = (480, 720, 1080, 1440, 2160)
 CAPTION_FORMATS = {"srt", "vtt", "txt", "json"}
+
+
 # Anything FFmpeg reads well; the sandboxed probe decides for real (ffmpeg.ALLOWED_FORMATS).
 AUDIO_EXTS = {
     ".wav", ".rf64", ".w64", ".mp3", ".mp2", ".mpa", ".m4a", ".m4b", ".m4r", ".aac", ".flac", ".ogg", ".oga",
@@ -53,15 +56,23 @@ ALLOWED_EXTS = {
 }
 LANG_RE = re.compile(r"^[a-z]{2,3}$")
 ACTIVE = ("uploading", "queued", "running", "cloud_asr")
+
+
 # A job that would only finish this close to the moment its files are cleared away (6 hours after the upload) is stopped instead: nobody
 # could download its results in time, so it ends as failed and is not charged.
 MIN_DELIVERY_SECONDS = 60
 TOO_LATE = "This took longer than expected and your files were about to be cleared away, so it was stopped. You weren’t charged."
+
+
 # An edit run needs this long before the files go, on top of what it takes (editing.start_run).
 DEADLINE_MARGIN_SECONDS = 300
+
+
 # The editor's preview plays short stretches of the recording and of what each step made (stretch.py). A stretch is at most this many
 # seconds.
 STRETCH_MAX_SECONDS = 30
+
+
 # Disk promised to uploads that are still arriving, per account, and the most a file may weigh per second of its
 # claimed length (320 Mbit/s: high-end video) unless it is small anyway. Without these a claim of a 4 GiB file
 # that is half a second long reserves 4 GiB of disk for an hour at no cost.
@@ -69,51 +80,15 @@ MAX_RESERVED_UPLOAD_BYTES = 8 * 1024**3
 MAX_BYTES_PER_SECOND = 40_000_000
 PLAUSIBLE_ANY_SIZE_BYTES = 200 * 1024**2
 
-# What a job needs before a worker may start it (measured 2026-10-14, see
-# docs/operations.md). Decoded/cleaned audio are memory-mapped scratch files,
-# so RAM is flat per job and disk grows with length.
-GB = 1024**3
-# Re-measured 2026-10-17 (docs/research/heavy-2026-10.md): a heavy stereo clean peaks at 0.2 GB of private memory
-# and 0.8 GB including the mapped scratch files; rounded up.
-JOB_MEM = 1 * GB
-# Parakeet fp32: 0.3 GB of private memory per job plus the 2.4 GB of weights, which are the model file's own page
-# cache, shared by every concurrent Parakeet job (the first one pays for them); Whisper turbo needs ~1.7 GB.
-LOCAL_ASR_MEM = int(3.2 * GB)
-SCRATCH_PER_HOUR_PER_CHANNEL = int(1.4 * GB)
-# Wall-clock seconds per second of audio and per channel, at 4 threads, for queue estimates and the slow-job
-# monitor. Stereo is processed channel by channel. What a job costs depends on the work it does: the noise
-# remover (DeepFilterNet3 vs the heavier DPDFNet-8; "auto" is measured on the recording, so until the runner
-# reports its choice the estimate sits in between), the voice rebuild instead of both, echo removal, and transcription.
-SPEED = {
-    "denoise_light": 0.08,  # x1.54 since the 30 s block grid with 16 s of context (common/acw_common/blocks.py)
-    "denoise_auto": 0.25,
-    "denoise_heavy": 0.49,  # x1.8 since the 30 s block grid with 24 s of context
-    "denoise_rebuild": 0.14,  # on the card (the only place it runs): 8.2 s per minute (broker.GPU_WORK)
-    "leveling": 0.01,  # Leveling on its own (with noise removal it is part of the denoise figures)
-    "echo": 0.03,
-    "transcribe_local": 0.12,
-    "transcribe_premium": 0.08,
-    "suggest": 0.22,  # the search for suggestions (acw_common.suggest, 0.22 s per audio second measured at 2 threads), a first run's extra and an on-demand run's all
-    "encode": 0.32,  # the picture made again (options.video_out): x264 on 4 threads, 1080p30 (the card's NVENC: 0.14)
-}
-MODEL_LOAD_SECONDS = 12  # a job runs two or three fresh sandboxed stages that each load their models (measured 1.1 to 4.8 s per stage, 2026-10-19)
-# Ceilings for the sandboxed stages per tier: CPU-seconds per second of audio (worst path: heavy stereo
-# cleaning and local transcription) and wall-clock seconds per second of audio.
-CPU_PER_AUDIO_SECOND = 8
-WALL_PER_AUDIO_SECOND = 3
-STAGE_SLACK_SECONDS = 1800
+
 # An upload that has not finished this long after its last bytes arrived is canceled (the clock restarts while data flows).
 UPLOAD_WINDOW_SECONDS = 3600
+
+
 # ... but a job whose upload has not sent a single byte this long after it was created is canceled (it only holds disk space).
 UPLOAD_FIRST_BYTE_SECONDS = 600
-# Never let our work take the host below these.
-# Free system memory (MemAvailable) left after a job starts: the Minecraft memory controller closes new world starts at
-# 4 GiB available and reopens at 6 GiB, so a job that took the host down to 2 GB shut players out until it ended.
-MEM_RESERVE = 6 * GB
-# Room kept under the acw slice's own MemoryMax (a separate limit, 12.5 GB: a 6 GB reserve there would stop a 6 GB
-# local transcription from ever running next to the web and live processes).
-SLICE_RESERVE = 2 * GB
-DISK_RESERVE = 10 * GB
+
+
 # Order in which workers take queued jobs: the user with the fewest jobs already running first (so one big batch
 # can't block everyone), then first come, first served.
 QUEUE_ORDER = (
@@ -127,192 +102,10 @@ def params_of(job_id: str) -> dict | None:
     return json.loads(row["params_json"]) if row else None
 
 
-def scratch_bytes(kind: str, seconds: float, channels: int = 2, echo: bool = False) -> int:
-    denoise = kind in ("denoise", "denoise_transcribe")
-    if not (denoise or echo):
-        return 0
-    # Whole-file buffers, each a half "channel-hour": decoded + cleaned per channel; echo removal adds its
-    # result per channel and the mono reference (without denoising it also needs the decoded mic).
-    buffers = 2 * channels if denoise else 0
-    if echo:
-        buffers += (channels if denoise else 2 * channels) + 1
-    return int(seconds / 3600 * buffers / 2 * SCRATCH_PER_HOUR_PER_CHANNEL)
-
-
-def job_needs(job: dict) -> tuple[int, int]:
-    """(memory, scratch disk) in bytes that `job`'s next stage needs."""
-    if job.get("next_stage") == "finalize":
-        return int(0.3 * GB), 0
-    params = json.loads(job["params_json"])
-    seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
-    if params.get("run"):  # an edit run decodes the recording and renders into scratch files (editing.py)
-        run = params["run"]
-        from . import edit_subtitles, editing
-
-        return (JOB_MEM + (LOCAL_ASR_MEM if edit_subtitles.local_asr_wanted(params) else 0),
-                scratch_bytes("denoise", seconds, int(params.get("channels") or 2), echo=bool(run.get("echo"))))
-    from . import edit_subtitles, editing
-
-    # (an automatic job not decided yet still has its whole-file subtitle tier: automatic.apply)
-    local = edit_subtitles.local_asr_wanted(params) or params.get("transcribe_tier") == "local"
-    return (JOB_MEM + (LOCAL_ASR_MEM if local else 0),
-            scratch_bytes(job["kind"], seconds, int(params.get("channels") or 2), echo=editing.wants_echo(params)))
-
-
-def job_seconds(job: dict) -> float:
-    """Rough wall-clock time the whole job takes once started, from the work it will do."""
-    params = json.loads(job["params_json"])
-    audio = float(job.get("duration_seconds") or job["claimed_seconds"])
-    channels = max(1, min(2, int(params.get("channels") or 2)))
-    opts = params.get("options", {})
-    if params.get("run"):  # an edit run: what its blocks take (editing.py), and the render
-        return float(params["run"].get("est_seconds") or 0.0) + MODEL_LOAD_SECONDS
-    t = SPEED["encode"] * audio if encodes(params) else 0.0
-    if (params.get("edit") or {}).get("first_run"):  # every job but a conversion: only its timeline's parts
-        from . import editing
-
-        t += editing.timeline_seconds(params["edit"]["timeline"], audio, channels)
-        return t + MODEL_LOAD_SECONDS
-    if automatic.pending(params):  # not decided yet: the most it can be (Denoising or Voice rebuild on the whole file, and the rest)
-        t += max(SPEED["denoise_auto"], SPEED["denoise_rebuild"]) * audio * channels
-        if opts.get("echo_reference_track"):
-            t += SPEED["echo"] * audio * channels
-        if params.get("transcribe_tier"):
-            t += SPEED["transcribe_" + params["transcribe_tier"]] * audio
-    return t + MODEL_LOAD_SECONDS
-
-
-def encodes(params: dict) -> bool:
-    """Will the job make the picture of its video again (options.video_out)? Until its file is read it may (None counts)."""
-    return bool(params.get("options", {}).get("video_out")) and params.get("picture_encode") is not False
-
-
-def _convert_rate(params: dict) -> int:
-    """Micros a minute of the video conversion: the pinned rate times the picture's size factor (convert_factor, two decimals), in whole
-    numbers (a float product can land a hair above the exact one and round up a micro)."""
-    hundredths = round(float(params.get("convert_factor") or 1.0) * 100)
-    return -(-int(params["convert_rate"]) * hundredths // 100)
-
-
-def convert_cost(params: dict, seconds: float) -> int:
-    """What the video conversion of a job costs for `seconds` (its pinned `convert_rate`, times `convert_factor`: 1 up to 1080p at 30
-    frames a second, more for a bigger or faster picture): only when the picture is made again (`picture_encode`). Both are worked out
-    from what the client read of the video (video_out.source) and checked when the file is read."""
-    if not params.get("convert_rate") or not params.get("picture_encode"):
-        return 0
-    return pricing.cost_micros("convert", "standard", seconds, _convert_rate(params))
-
-
-def convert_line(params: dict, seconds: float) -> dict | None:
-    """The price line of a video conversion (with its size `factor`): `maybe` when it can't be told yet whether the picture is made again
-    (the client did not say the video's codec; then its micros, what it would cost, are not part of the total); `copied`: the picture is
-    copied as it is, free (micros 0)."""
-    if not params.get("convert_rate"):
-        return None
-    rate = _convert_rate(params)
-    micros = 0 if params.get("picture_encode") is False else pricing.cost_micros("convert", "standard", seconds, rate)
-    return {"item": "convert", "label": pricing.rate("convert", "standard").label, "quantity": 1, "usdPerMinute": rate / pricing.MICROS_PER_USD,
-            "factor": float(params.get("convert_factor") or 1.0), "micros": micros,
-            **({"maybe": True} if params.get("picture_encode") is None else {}), **({"copied": True} if params.get("picture_encode") is False else {})}
-
-
-_CODEC_RE = re.compile(r"^[a-z0-9_]{1,32}$")
-
-
 # Echo removal asked for on a file with one audio track: there is no desktop sound to remove the echo with. The whole job is refused (a job
 # whose file is known) or fails before any work, uncharged, so nobody pays for part of what they asked for.
 NO_SECOND_TRACK = ("This file has only one audio track, so there is no desktop sound to remove the echo with. Send it without echo removal "
                    "(nothing was charged).")
-
-
-def video_out_of(options: dict) -> dict | None:
-    """options.video_out checked: {"format": one of VIDEO_OUT_FORMATS, "size": one of VIDEO_OUT_SIZES or None, "source": optional
-    {"codec": FFmpeg's codec name, "width", "height", "fps"}: the video as the client read it, so the price is known before the upload}."""
-    vo = options.get("video_out")
-    if vo is None:
-        return None
-    if not isinstance(vo, dict) or set(vo) - {"format", "size", "source"}:
-        raise JobError("video_out must be {format, size, source?}")
-    fmt = vo.get("format")
-    if fmt not in VIDEO_OUT_FORMATS:
-        raise JobError(f"video_out.format must be one of {', '.join(VIDEO_OUT_FORMATS)}")
-    size = vo.get("size")
-    if size is not None and (isinstance(size, bool) or size not in VIDEO_OUT_SIZES):
-        raise JobError(f"video_out.size must be one of {', '.join(map(str, VIDEO_OUT_SIZES))}, or null for the original size")
-    out: dict = {"format": fmt, "size": size}
-    src = vo.get("source")
-    if src is not None:
-        if not isinstance(src, dict) or set(src) - {"codec", "width", "height", "fps"}:
-            raise JobError("video_out.source must be {codec?, width?, height?, fps?}")
-        clean: dict = {}
-        if src.get("codec") is not None:
-            if not isinstance(src["codec"], str) or not _CODEC_RE.fullmatch(src["codec"]):
-                raise JobError("video_out.source.codec must be FFmpeg's codec name, like h264")
-            clean["codec"] = src["codec"]
-        for key, lo, hi in (("width", 16, 16384), ("height", 16, 16384), ("fps", 1, 240)):
-            v = src.get(key)
-            if v is None:
-                continue
-            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
-                raise JobError(f"video_out.source.{key} must be a number from {lo} to {hi}")
-            clean[key] = int(v) if key != "fps" else float(v)
-        if ("width" in clean) != ("height" in clean):
-            raise JobError("video_out.source needs both width and height, or neither")
-        out["source"] = clean
-    return out
-
-
-def convert_params(opts: dict, input_ext: str | None = None) -> dict:
-    """What a job with a video conversion stores: the rate (pinned like every price), whether the picture is made again
-    (`picture_encode`: a new size, or a file type that can't hold the video's codec; MKV holds any; None when the codec is not known)
-    and the size factor (`convert_factor`), from what the client read of the video (video_out.source); the worker checks both when it
-    reads the file. `input_ext`: the upload's ending (".mp4"), when known."""
-    from acw_common.ffmpeg import convert_factor, picture_copies, picture_size
-
-    vo = opts.get("video_out")
-    if not vo:
-        return {}
-    if input_ext in AUDIO_EXTS:  # a sound: its video gets a plain black picture, free
-        return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": False, "convert_factor": 1.0}
-    src = vo.get("source") or {}
-    w, h, fps = src.get("width"), src.get("height"), src.get("fps")
-    resize = vo["size"] is not None and not (w and h and min(w, h) == vo["size"])
-    copies = picture_copies(src.get("codec"), input_ext, "." + vo["format"])
-    encode = True if resize else None if copies is None else not copies
-    if w and h:
-        factor = convert_factor(w, h, fps, picture_size(w, h, 1.0, 0, vo["size"]) if resize else None)
-    elif vo["size"]:
-        factor = convert_factor(*picture_size(16, 9, 1.0, 0, vo["size"]), fps)  # (the size of the original not said: 16:9 at the size asked)
-    else:
-        factor = 1.0
-    return {"convert_rate": pricing.rate("convert", "standard").micros_per_minute, "picture_encode": encode, "convert_factor": factor}
-
-
-def stage_limits(seconds: float, max_seconds: float) -> tuple[int, int]:
-    """(CPU-seconds, wall-clock seconds) the main stage of a job of `seconds` of audio may use."""
-    wall = min(seconds * WALL_PER_AUDIO_SECOND, max_seconds * 2) + STAGE_SLACK_SECONDS
-    return int(seconds * CPU_PER_AUDIO_SECOND + STAGE_SLACK_SECONDS), int(wall)
-
-
-# The wall-clock limit of a stage assumes the job runs at the speed it was claimed with. When live audio or a game server
-# takes cores, the same work takes 2 to 3 times longer (a 90 min voice rebuild: 9,700 s at 4 threads, 20,000 to 29,000 s on
-# one core against a limit of 23,400 s), and killing it at the limit throws away hours of work. So at the limit a stage
-# that is still making progress gets more time, as much as its own progress says it needs (with some margin), but never
-# more than STRETCH_LIMIT times the original limit; a stage whose progress has not moved for STALL_SECONDS is stopped.
-STALL_SECONDS = 1800
-STRETCH_LIMIT = 3.0
-MIN_STRETCH_SECONDS = 60  # a stretch shorter than this is not worth it
-
-
-def stretched_limit(base: float, elapsed: float, start_progress: int, progress: int, since_progress: float) -> float | None:
-    """The new wall-clock limit of a stage (seconds from its start) for a stage that has run `elapsed` seconds, went from
-    `start_progress` to `progress` percent and last moved `since_progress` seconds ago; None when it should be stopped now."""
-    done = progress - start_progress
-    if done <= 0 or progress >= 100 or since_progress > STALL_SECONDS:
-        return None
-    projected = elapsed * (100 - start_progress) / done
-    limit = min(projected * 1.2 + STAGE_SLACK_SECONDS / 3, base * STRETCH_LIMIT)
-    return limit if limit > elapsed + MIN_STRETCH_SECONDS else None
 
 
 def queued_ids() -> list[str]:
@@ -326,8 +119,6 @@ class JobError(Exception):
         self.retry_after = retry_after  # seconds, sent as Retry-After with a 429
         self.code = code  # sent as X-Error-Code and "code" in the answer, for clients that want to tell this error from others
         self.extra = extra  # more fields of the answer (the quote of an export that needs processing)
-
-
 TOO_MANY_JOBS = "too_many_active_jobs"
 
 
@@ -389,29 +180,6 @@ def display_name(job: dict) -> str:
     return json.loads(job["params_json"]).get("display_name") or job["input_name"]
 
 
-def job_label(kind: str, denoise_tier: str | None, transcribe_tier: str | None, leveling: bool = False) -> str:
-    """Customer-facing name of what a job does (the same words as the price list). `leveling`: Leveling is part of it
-    (for a stored job: "leveling" in its pinned rates)."""
-    parts = []
-    if kind == "convert":
-        return pricing.rate("convert", "standard").label
-    if kind in ("denoise", "denoise_transcribe"):
-        if denoise_tier != pricing.NO_DENOISE:
-            parts.append("Voice rebuild" if denoise_tier == "rebuild" else "Denoising")
-        if leveling or denoise_tier == pricing.NO_DENOISE:
-            parts.append("Leveling")
-    if kind in ("transcribe", "denoise_transcribe"):
-        parts.append("Subtitles & transcript" + (", extra accurate" if transcribe_tier == "premium" else ""))
-    return " + ".join(parts)
-
-
-def safe_stem(filename: str) -> str:
-    stem = Path(filename).stem
-    stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode()
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip(".-_")[:60]
-    return stem or "audio"
-
-
 def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str | None, options: dict) -> dict:
     if kind not in KINDS:
         raise JobError("unknown job type")
@@ -446,7 +214,7 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     out["output_video"] = bool(options.get("output_video", True))
     out["embed_subtitles"] = bool(options.get("embed_subtitles", True))
     # The video result in another file type or picture size (made from the whole video, so it has to be uploaded whole).
-    out["video_out"] = video_out_of(options)
+    out["video_out"] = job_convert.video_out_of(options)
     if out["video_out"] and not out["output_video"]:
         raise JobError("video_out needs output_video")
     if kind == "convert" and not out["video_out"]:
@@ -496,8 +264,6 @@ def validate_options(kind: str, denoise_tier: str | None, transcribe_tier: str |
     if kind in ("denoise", "denoise_transcribe") and denoise_tier == pricing.NO_DENOISE and not out["leveling"]:
         raise JobError("Choose Denoising, Voice rebuild or Leveling.")
     return out
-
-
 REBUILD_PAUSED = "Voice rebuilding is paused right now. Try again later, or choose Denoising."
 
 
@@ -587,9 +353,9 @@ def estimate(kind: str, denoise_tier: str | None, transcribe_tier: str | None, d
         top, total = automatic.dearest(kind, t_tier, cands, duration_seconds, opts)
         # the lines are the dearest outcome's: the timeline it would become (automatic.apply)
         lines = editing.options_price(kind, top["tier"], t_tier, {**opts, "leveling": "leveling" in top["rates"]}, duration_seconds)[1]
-    cv = convert_params(opts)
-    total += convert_cost(cv, duration_seconds)
-    line = convert_line(cv, duration_seconds)
+    cv = job_convert.convert_params(opts)
+    total += job_convert.convert_cost(cv, duration_seconds)
+    line = job_convert.convert_line(cv, duration_seconds)
     out = {
         "estCostMicros": total,
         "estCostUsd": total / pricing.MICROS_PER_USD,
@@ -626,9 +392,9 @@ def estimate_timeline(kind: str, denoise_tier: str | None, transcribe_tier: str 
         sub = edit_subtitles.subtitle_plan(None, tl, edit_prices.subtitle_rates())
         total += sub["micros"]
         text_lines = sub["lines"]
-    cv = convert_params(opts)
-    total += convert_cost(cv, duration_seconds)
-    line = convert_line(cv, duration_seconds)
+    cv = job_convert.convert_params(opts)
+    total += job_convert.convert_cost(cv, duration_seconds)
+    line = job_convert.convert_line(cv, duration_seconds)
     if line:
         text_lines = [*text_lines, line]
     return {
@@ -649,8 +415,6 @@ class Replay(Exception):
         super().__init__(job_id)
         self.job_id = job_id
         self.est_cost_micros = est_cost_micros
-
-
 IDEMPOTENCY_SECONDS = 86400
 
 
@@ -731,7 +495,7 @@ def create_job(
     # that are still arriving have been promised (checked again, with the other limits, when the job is stored).
     from . import hostload
 
-    disk_need = size_bytes + scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"] or bool(tl and tl.layers["echo"])) + DISK_RESERVE
+    disk_need = size_bytes + job_resources.scratch_bytes(kind, claimed_seconds, echo=opts["echo_reference_track"] or bool(tl and tl.layers["echo"])) + job_resources.DISK_RESERVE
     if kind in ("denoise", "denoise_transcribe"):
         from . import edit_prices, edit_store, edit_subtitles, editing
 
@@ -749,7 +513,7 @@ def create_job(
         "transcribe_tier": transcribe_tier if kind != "denoise" and not (tl is not None and tl.layers["subtitles"]) else None,
         "input_ext": ext,
         "display_name": clean_display_name(display_name),
-        **convert_params(opts, ext),
+        **job_convert.convert_params(opts, ext),
         **({"whole_file": whole_file} if whole_file else {}),
     }
     # Prices are fixed when the job is created (the Terms), whatever happens to the price list while it waits.
@@ -773,7 +537,7 @@ def create_job(
     else:  # (a conversion: its price is the video conversion's, below)
         params["rates"] = {}
         est = 0
-    est += convert_cost(params, claimed_seconds)  # (another file type only: known once the file is read, then held if it is made again)
+    est += job_convert.convert_cost(params, claimed_seconds)  # (another file type only: known once the file is read, then held if it is made again)
     now = db.now()
     # (the record's tier, for the metrics and the ledger: a timeline job's stored tier is only a placeholder, so its Voice rebuild is named)
     tier = "rebuild" if tl is not None and tl.layers["rebuild"] else "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)
@@ -981,7 +745,7 @@ def hand_over(job: dict) -> None:
 
 
 def _seconds_left(r: dict, now: int) -> float:
-    left = job_seconds(r)
+    left = job_resources.job_seconds(r)
     if r["status"] != "queued" and r.get("started_at"):
         left = max(10.0, left - (now - r["started_at"]))
     return left
@@ -1030,114 +794,6 @@ def queue_snapshot() -> tuple[list[str], dict[str, int]]:
                     cpu_work += _seconds_left(r, now)
         _queue_cache.update(key=key, at=time.monotonic(), ids=ids, waits=waits)
         return ids, waits
-
-
-def callbacks_for(job_ids: list[str]) -> dict[str, dict]:
-    """The state of each job's callback (the jobs that have one), as shown with the job."""
-    if not job_ids:
-        return {}
-    cols = "SELECT job_id, url, state, attempts, next_attempt_at, last_status, last_error, delivered_at FROM job_callbacks"
-    if len(job_ids) == 1:
-        rows = [r for r in (db.one(f"{cols} WHERE job_id = ?", (job_ids[0],)),) if r is not None]
-    else:
-        rows = db.all_rows(f"{cols} WHERE job_id IN ({','.join('?' * len(job_ids))})", tuple(job_ids))
-    return {
-        r["job_id"]: {
-            "url": r["url"].split("?", 1)[0],  # the query string often carries a token: not shown back
-            "state": r["state"],
-            "attempts": r["attempts"],
-            "lastStatus": r["last_status"],
-            "lastError": r["last_error"],
-            "deliveredAt": r["delivered_at"],
-            "nextAttemptAt": r["next_attempt_at"] if r["state"] == "pending" and r["attempts"] else None,
-        }
-        for r in rows
-    }
-
-
-def label_of(kind: str, params: dict) -> str:
-    """The customer-facing name of what a job does: the price list's words; for a re-run, the steps it did again. A video conversion
-    that makes the picture again is named too."""
-    base = _label_of(kind, params)
-    if kind != "convert" and not params.get("run") and params.get("convert_rate") and params.get("picture_encode"):
-        return f"{base} + {pricing.rate('convert', 'standard').label}"
-    return base
-
-
-def _label_of(kind: str, params: dict) -> str:
-    if params.get("run"):
-        from . import editing
-
-        return editing.run_label(params)
-    edit = params.get("edit") or {}
-    # a job made with a timeline (it alone has `edit_rates`; its stored tier is only a placeholder) is named for its layers, also once its first run is over
-    if edit.get("first_run") or (edit.get("timeline") and params.get("edit_rates")):
-        from . import editing
-
-        return " + ".join([editing.timeline_label(params), *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
-    if automatic.pending(params):  # not decided yet: what it will do is not known
-        return " + ".join(["Automatic settings", *([job_label("transcribe", None, params["transcribe_tier"])] if params.get("transcribe_tier") else [])])
-    rates = params.get("rates") or {}
-    return job_label(kind, params.get("denoise_tier"), params.get("transcribe_tier"), "leveling" in rates)
-
-
-def public_job(job: dict, queue: tuple[list[str], dict[str, int]] | None = None, callbacks: dict[str, dict] | None = None) -> dict:
-    """`queue` is queue_snapshot() and `callbacks` callbacks_for() (pass them once when listing many jobs)."""
-    outputs = json.loads(job["outputs_json"]) if job.get("outputs_json") else []
-    params = json.loads(job["params_json"])
-    position = eta = None
-    if job["status"] == "queued":
-        ids, waits = queue_snapshot() if queue is None else queue
-        if job["id"] in waits:
-            position = ids.index(job["id"]) + 1
-            eta = waits[job["id"]]
-    callback = (callbacks if callbacks is not None else callbacks_for([job["id"]])).get(job["id"])
-    out = {
-        "queuePosition": position,
-        "queueWaitSeconds": eta,
-        "id": job["id"],
-        "kind": job["kind"],
-        "tier": job["tier"],
-        "status": job["status"],
-        "stage": job["stage"],
-        "progress": job["progress"],
-        "error": job["error"],
-        "inputName": params.get("display_name") or job["input_name"],
-        "label": label_of(job["kind"], params),
-        # (a job asked for with options: the tiers it was asked for; the timeline it became is what is made of them)
-        "denoiseTier": (params.get("whole_file") or {}).get("denoise_tier", params.get("denoise_tier")),
-        "transcribeTier": (params.get("whole_file") or {}).get("transcribe_tier", params.get("transcribe_tier")),
-        "durationSeconds": job["duration_seconds"] or job["claimed_seconds"],
-        "estCostMicros": job["est_cost_micros"],
-        "costMicros": job["cost_micros"],
-        "options": params["options"],
-        "notice": params.get("notice"),
-        "outputs": [{"name": o["file"], "kind": o["kind"], "bytes": o.get("bytes"), **({"lang": o["lang"]} if o.get("lang") else {})} for o in outputs],
-        "createdAt": job["created_at"],
-        "finishedAt": job["finished_at"],
-        # when the files are deleted: 2 hours after the last edit, never later than `hardDeadlineAt` (6 hours after the upload)
-        "expiresAt": job["expires_at"] if job["status"] == "done" else None,
-        "editedAt": job.get("edited_at") or job["finished_at"],
-        "hardDeadlineAt": hard_deadline(job),
-    }
-    from . import edit_subtitles, editing
-
-    if editing.editable_kind(job):
-        e = params.get("edit") or {}
-        out["edit"] = {"available": job["status"] == "done", "hasTimeline": bool(e.get("timeline")), "run": (params.get("run") or {}).get("op"),
-                       "lastRun": e.get("lastRun"), "suggestions": bool(e.get("suggestions"))}
-        needs = edit_subtitles.pending_needs(job, params)  # what the browser still has to send for the timeline's browser parts and free subtitles
-        if needs is not None:
-            out["needs"] = needs
-    if params.get("automatic"):
-        out["chosen"] = params.get("chosen")  # null until the file has been listened to
-        if automatic.pending(params):
-            out["maximum"] = True  # estCostMicros is the most it can cost until then
-    if job["status"] in ("queued", "running", "cloud_asr"):
-        out["estimateSeconds"] = int(job_seconds(job))  # the whole job's rough length, for the wait before progress shows
-    if callback is not None:
-        out["callback"] = callback
-    return out
 
 
 def sweep() -> None:

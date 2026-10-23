@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, hostload, jobs, keycaps, metrics
+from .. import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, hostload, job_convert, job_resources, job_view, jobs, keycaps, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -176,7 +176,7 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
     d = jobs.job_dir(job["id"])
     params = json.loads(job["params_json"])
     max_seconds = _max_seconds(job, params)
-    cpu_seconds = PROBE_CPU_SECONDS if billed is None else jobs.stage_limits(billed, max_seconds)[0]
+    cpu_seconds = PROBE_CPU_SECONDS if billed is None else job_resources.stage_limits(billed, max_seconds)[0]
     spec = {
         **extra,
         "job_id": job["id"],
@@ -185,7 +185,7 @@ def _write_spec(job: dict, extra: dict, billed: float | None = None) -> Path:
         "transcribe_tier": params["transcribe_tier"],
         "input": f"input{params['input_ext']}",
         "input_ext": params["input_ext"],
-        "output_stem": jobs.safe_stem(jobs.display_name(job)),
+        "output_stem": job_view.safe_stem(jobs.display_name(job)),
         "options": _options_for_spec(job, params),
         "max_seconds": max_seconds,
         "cpu_seconds": cpu_seconds,  # generous; the wall-clock timeout is the real limit
@@ -285,7 +285,7 @@ def run_stage(job: dict, d: Path, stage: str, timeout: float) -> dict:
         if stage != "main" or _stop.is_set() or prog["first"] is None:
             return False
         now = time.monotonic()
-        limit = jobs.stretched_limit(timeout, now - started, prog["first"], prog["now"], now - prog["at"])
+        limit = job_resources.stretched_limit(timeout, now - started, prog["first"], prog["now"], now - prog["at"])
         if limit is None or started + limit <= deadline:
             return False
         log.info("job %s stage %s still at %s%% after %.0f s: limit %.0f s -> %.0f s", job["id"], stage, prog["now"], now - started, deadline - started, limit)
@@ -405,7 +405,7 @@ def _read_result(path: Path) -> dict:
 def _job_cost(job: dict, params: dict, seconds: float, billed: dict | None = None) -> int:
     """What the job costs for `seconds` of audio, at the prices it was created with. `billed`: what a job made with a timeline reports
     having run (editing.billable_from), else the whole timeline is charged. A video conversion counts when the picture is made again."""
-    return _steps_cost(job, params, seconds, billed) + jobs.convert_cost(params, seconds)
+    return _steps_cost(job, params, seconds, billed) + job_convert.convert_cost(params, seconds)
 
 
 def _steps_cost(job: dict, params: dict, seconds: float, billed: dict | None = None) -> int:
@@ -451,7 +451,7 @@ def _reprice(job: dict, duration: float) -> None:
             raise StageFailed(str(e))
         except (ledger.InsufficientFunds, ledger.LedgerError):
             why = (" The picture of this video has to be made again for the file type or size you chose (Video conversion), more than"
-                   " the video first said; MKV at the original size keeps it as it is, for free." if jobs.convert_cost(params, duration) else "")
+                   " the video first said; MKV at the original size keeps it as it is, for free." if job_convert.convert_cost(params, duration) else "")
             raise StageFailed(
                 f"This file is {duration / 60:.1f} min and costs ${cost / 1e6:.2f}, more than your available balance.{why}"
             )
@@ -537,7 +537,7 @@ def _complete(job: dict, d: Path, res: dict) -> None:
                 cost = min(cost, int(job.get("est_cost_micros") or cost))  # (a job made with a timeline never pays more than it was held for)
             cost = ledger.capture_hold(
                 job["hold_id"], cost,
-                f"{jobs.label_of(job['kind'], costing)}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
+                f"{job_view.label_of(job['kind'], costing)}: {jobs.display_name(job)[:60]} ({duration / 60:.1f} min)", c=c,
             )
             c.execute("UPDATE jobs SET cost_micros = ? WHERE id = ?", (cost, job["id"]))
     jobs.touch(job["id"])  # (finishing is an edit of the job)
@@ -663,7 +663,7 @@ def process(job: dict, extra: dict) -> None:
         if job["next_stage"] == "finalize":
             # (a video whose picture is made again takes as long as that takes)
             seconds = float(job.get("duration_seconds") or job["claimed_seconds"])
-            res = run_stage(job, d, "finalize", max(1800, int(seconds * jobs.SPEED["encode"] * 3)) if jobs.encodes(params) else 1800)
+            res = run_stage(job, d, "finalize", max(1800, int(seconds * job_resources.SPEED["encode"] * 3)) if job_convert.encodes(params) else 1800)
             job["duration_seconds"] = db.one("SELECT duration_seconds FROM jobs WHERE id = ?", (job["id"],))["duration_seconds"]
             (_complete_edit if params.get("run") else _complete)(job, d, res)
             return
@@ -672,7 +672,7 @@ def process(job: dict, extra: dict) -> None:
             # timeline, renders it and writes the audio.
             duration = float(job["duration_seconds"])
             d = _write_spec(job, extra, duration)
-            res = run_stage(job, d, "edit", jobs.stage_limits(duration, _max_seconds(job, params))[1])
+            res = run_stage(job, d, "edit", job_resources.stage_limits(duration, _max_seconds(job, params))[1])
             if res.get("needs_cloud_asr"):
                 # Subtitle parts that need the internet (Accurate transcription, translations): the web process makes them, then the
                 # runner puts the files together (the same way a job made with a timeline and subtitles goes on after its first stage)
@@ -727,7 +727,7 @@ def process(job: dict, extra: dict) -> None:
             job["params_json"], job["est_cost_micros"] = fresh["params_json"], fresh["est_cost_micros"]
             params = json.loads(fresh["params_json"])
         d = _write_spec(job, extra, duration)
-        wall = jobs.stage_limits(duration, _max_seconds(job, params))[1]
+        wall = job_resources.stage_limits(duration, _max_seconds(job, params))[1]
         res = run_stage(job, d, "main", wall)
         if res.get("notice"):
             jobs.set_notice(job["id"], res["notice"])

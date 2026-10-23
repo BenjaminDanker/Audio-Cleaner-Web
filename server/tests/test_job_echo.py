@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw import db, jobs
+from acw import db, job_resources, jobs
 from acw.billing import ledger, pricing
 from acw_common.ffmpeg import FFmpeg
 
@@ -45,8 +45,8 @@ def test_the_option_is_taken_as_true_or_false_and_has_its_own_price(client, sign
 
 def test_echo_removal_needs_scratch_space():
     hour = 3600
-    assert jobs.scratch_bytes("denoise", hour) < jobs.scratch_bytes("denoise", hour, echo=True)
-    assert jobs.scratch_bytes("transcribe", hour) == 0 < jobs.scratch_bytes("transcribe", hour, echo=True)
+    assert job_resources.scratch_bytes("denoise", hour) < job_resources.scratch_bytes("denoise", hour, echo=True)
+    assert job_resources.scratch_bytes("transcribe", hour) == 0 < job_resources.scratch_bytes("transcribe", hour, echo=True)
 
 
 def _voice(f0, seed, seconds):
