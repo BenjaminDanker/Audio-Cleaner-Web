@@ -82,11 +82,6 @@ def test_closing_waits_at_most_the_time_it_is_given_for_a_socket_that_does_not_a
     assert 0.25 <= took < 1.5 and sender.done()  # (stopped, not left running)
 
 
-SLOW_LAST = pytest.mark.xfail(strict=True, reason="PRODUCT BUG: close_outbox sees an empty queue as soon as the sender has taken the last event "
-                                                   "and cancels the sender while the socket is still taking it: the last caption is lost")
-
-
-@SLOW_LAST
 def test_closing_does_not_cut_off_the_last_event_while_it_is_being_sent():
     """The queue is empty as soon as the sender has taken the last event, but the event is only out when the socket has taken it."""
     async def go():
@@ -165,7 +160,7 @@ def test_the_captions_and_the_translator_post_through_the_session(monkeypatch):
     assert made == [s.post]  # (the translator's events take the same queue as the captions)
 
 
-@pytest.mark.parametrize("delay", [0, pytest.param(0.1, marks=SLOW_LAST)])
+@pytest.mark.parametrize("delay", [0, 0.1])
 def test_the_end_of_a_session_lets_the_last_captions_go_out_first(monkeypatch, delay):
     async def go():
         ws = Socket(delays=[delay])
