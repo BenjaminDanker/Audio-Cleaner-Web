@@ -1,8 +1,8 @@
 """The job view's player: the preview pane (gui/player.py) with a second way to play, live (gui/live_audio.py).
 
-Given a `blend.BlendStream`, "Cleaned" plays the saved noise removal mixed with the original at the strength that is set now (it can be
-changed while it plays), and "Original" plays the original through the same stream, at the same place and loudness, so switching between
-them is instant. Without a stream it is the ordinary pane: the original against the saved result file.
+Given the editor's live mix (live_mix.LiveMix), "Cleaned" plays the sound of the draft as it is now (it can be changed while it plays), and
+"Original" plays the original through the same stream, at the same place and loudness, so switching between them is instant. Without a
+stream it is the ordinary pane: the original against the saved result file.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QUrl
 
-from ..blend import BlendStream
+from ..live_mix import LiveMix
 from . import live_audio
 from .player import PreviewPane
 
@@ -21,13 +21,13 @@ log = logging.getLogger(__name__)
 class JobPreview(PreviewPane):
     sink_factory = None  # how live sound reaches the sound card (live_audio.QtSink); tests give a stand-in
     _live: live_audio.LivePlayer | None = None  # (both stay None where QtMultimedia is not available)
-    _stream: BlendStream | None = None
+    _stream: LiveMix | None = None
 
     def _build_player(self, mm) -> None:
         super()._build_player(mm)
         self._file = self._player
         self._live = live_audio.LivePlayer(mm, self, sink_factory=type(self).sink_factory)
-        self._stream: BlendStream | None = None
+        self._stream: LiveMix | None = None
         live = self._live
         for signal, slot in (
             (live.positionChanged, self._on_position), (live.durationChanged, lambda d: self._slider.setRange(0, d)),
@@ -40,31 +40,23 @@ class JobPreview(PreviewPane):
 
     @property
     def live(self) -> bool:
-        """The sound being played is the live blend."""
+        """The sound being played is the live mix."""
         return self._player is not None and self._player is self._live and self._stream is not None
 
     def show_job(self, key: int, original: Path, cleaned: Path | None, has_video: bool, name: str,
-                 subtitle_file: Path | None = None, stream: BlendStream | None = None) -> None:
-        """Show a job: `cleaned` is its saved result (may be None); with `stream` the cleaned sound is the live blend."""
+                 subtitle_file: Path | None = None, stream: LiveMix | None = None) -> None:
+        """Show a job: `cleaned` is its saved result (may be None); with `stream` the cleaned sound is the live mix."""
         self._leave_live()
         self.show_files(key, original, cleaned, has_video, name, subtitle_file)
         if stream is not None and self._player is not None:
             self._enter_live(stream)
 
-    def use_stream(self, stream: BlendStream | None) -> None:
+    def use_stream(self, stream: LiveMix | None) -> None:
         """The stream became ready (or went away) while the job is shown."""
         if stream is None:
             self._leave_live()
         elif self._player is not None:
             self._enter_live(stream)
-
-    def set_strength(self, db: float) -> None:
-        if self._stream is not None:
-            self._stream.set_strength(db)  # (a live mix of parts ignores it: each part has its own strength)
-
-    def set_exact(self, exact: bool) -> None:
-        if self._stream is not None:
-            self._stream.exact = exact
 
     def show_files(self, key, original, cleaned, has_video, name, subtitle_file=None) -> None:  # noqa: ANN001
         self._leave_live()
@@ -72,7 +64,7 @@ class JobPreview(PreviewPane):
 
     # -- internals ----------------------------------------------------------
 
-    def _enter_live(self, stream: BlendStream) -> None:
+    def _enter_live(self, stream: LiveMix) -> None:
         was = self._which.value() if self._cleaned is not None else "cleaned"
         if self._player is self._live:
             self._live.blockSignals(True)
@@ -113,7 +105,7 @@ class JobPreview(PreviewPane):
         if self._live is not None and self._player is self._live:
             log.warning("live listening failed: %s", message)
             self._note.setText("Live listening is not available on this computer's sound output, so only the saved files can be "
-                               "played. Saving at another strength still works.")
+                               "played. Changing and saving still works.")
             self._stage.setCurrentWidget(self._note)
             self._set_controls(False)
             self._which.setEnabled(True)

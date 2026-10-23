@@ -11,7 +11,8 @@ Every cleaned file gets a folder of its own in the app's data folder (`jobs/<32 
     blocks/           the block cache of the per-part editor (acw_common.blocks.FlacCache, 24-bit FLAC): what each step made, block by
                       block (the noise removal at full strength, the rebuilt voice, the echo-free recording). A normal run fills it, an
                       edit reads it and only makes the blocks it does not have. It replaces noise.flac / rebuilt.flac / input.flac
-                      for jobs made now; jobs made before keep those copies (editor_job.migrate turns them into blocks on demand)
+                      for jobs made now; jobs made before keep those copies until they are opened or changed (editor_job.make_ready
+                      turns them into blocks then)
 
 The results and the original are NOT copied: they are the user's own files and stay where they are. The job only remembers where
 the original was, and its fingerprint (size, modified time and a hash of 16 parts of it) to know whether it is still the same
@@ -36,7 +37,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from acw_common import captions, kept
+from acw_common import captions
 from acw_common.ffmpeg import FFmpeg
 
 log = logging.getLogger(__name__)
@@ -47,9 +48,6 @@ VERSION = 1
 NOISE, REBUILT, INPUT, TRANSCRIPT, BLOCKS = "noise", "rebuilt", "input", "transcript", "blocks"
 AUDIO_KINDS = (NOISE, REBUILT, INPUT)
 BLOCKS_DIR = "blocks"
-#: A run keeps its block cache (`blocks/`). False makes it keep the whole copies jobs had before the per-part editor (noise.flac ...): for the
-#: tests of those old jobs, which the app still opens.
-KEEP_BLOCKS = True
 TRANSCRIPT_FILE = "segments.json"
 KIND_NAMES = {
     NOISE: "Noise removal at full strength", REBUILT: "Rebuilt voice", INPUT: "Recording without the speaker echo",
@@ -503,19 +501,6 @@ class Keeper:
         keeper = cls.__new__(cls)
         keeper.dir, keeper.ff, keeper.lost, keeper.job = job.dir, ff, None, job
         return keeper
-
-    def audio(self, kind: str, y, cols: list[int] | None, samples: int, **extra) -> None:
-        if self.job is None:
-            return
-        try:
-            entry = kept.save(self.ff, y, cols, self.dir / kind)
-            self.job.data["samples"] = samples
-            self.job.put_audio(kind, entry, **extra)
-        except (OSError, RuntimeError) as e:  # a full disk, an encoder that failed: the job itself goes on
-            log.warning("could not keep the %s copy: %s", kind, e)
-            self.lost = "the disk is full" if getattr(e, "errno", None) == 28 else "it could not be written"
-            for leftover in (self.dir / f"{kind}.flac", self.dir / f"{kind}-part.flac"):
-                leftover.unlink(missing_ok=True)
 
     def transcript(self, segments: list[captions.Segment], language: str | None, echo: bool) -> None:
         if self.job is None:

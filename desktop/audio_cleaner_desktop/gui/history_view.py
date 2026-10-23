@@ -102,7 +102,7 @@ class _HistoryRow(QFrame):
         set_property(status, "state", "done" if entry.status == DONE else "failed")
         layout.addWidget(status)
 
-        open_job = IconButton("waveform", "Open this job: listen, change the strength and save again, see its saved copies")
+        open_job = IconButton("waveform", "Open this job: listen, change any part of it and save again, see its saved copies")
         open_job.clicked.connect(lambda: page.open_job(entry.id))
         buttons = [open_job]
         if entry.status == DONE and outputs:

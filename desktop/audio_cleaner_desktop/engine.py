@@ -604,10 +604,10 @@ def process(
     (at the next checkpoint; encoding steps run to completion first). Raises
     MediaError for problems the user can act on. No partial output is left behind,
     and an existing file is never replaced, so the output cannot be the input.
-    `threads` limits the CPU threads this job uses. `keep_dir`: a folder (copies.new_job_dir) for the job's saved copies: the noise
-    removal at full strength or the rebuilt voice, the transcript, and a fingerprint of `src` (copies.py), which let the result be
-    changed later without running a model again (redo.py). It is removed again when the job is stopped, or fails before it
-    made any copy; a copy that can't be written never fails the job (the notice says so).
+    `threads` limits the CPU threads this job uses. `keep_dir`: a folder (copies.new_job_dir) for the job's saved copies: the block cache (what
+    each step made), the transcript, and a fingerprint of `src` (copies.py), which let the result be changed later without running a
+    model again (redo.py). It is removed again when the job is stopped, or fails before it made any block; a block that can't be written
+    never fails the job (the notice says so).
 
     `timeline` (acw_common.timeline.Timeline or its JSON): what to do to which part of the recording (the per-part editor: echo removal,
     noise removal, Voice rebuild and Leveling, each with its own parts and settings). What is outside every part of a layer is left as it
@@ -760,7 +760,7 @@ def process(
                                                              f"could not be kept ({keeper.lost or 'nothing to keep'})"]))
         except BaseException as e:
             # A cancelled or failed job's traceback still holds the memory-mapped scratch arrays
-            # (in clean_audio's frames); Windows can't delete a file that is still mapped.
+            # (in the renderer's frames); Windows can't delete a file that is still mapped.
             x = y = None
             traceback.clear_frames(e.__traceback__)
             if keeper is not None:  # stopped: nothing is kept. Failed: what was made before it failed stays (changing it later may still work)
@@ -834,24 +834,6 @@ def made_with(options: JobOptions, used: dict, rebuilt: bool, language: str | No
         "loudness": options.loudness, "audio_format": options.audio_format, "subtitles": options.subtitles,
         "language": language or options.language, "video_size": options.video_size, "echo": bool(echo),
     }
-
-
-def keep_copies(keeper: "copies.Keeper | None", x: np.ndarray, used: dict, echo: bool):
-    """The `keep` callback of pipeline.clean_audio that saves what a later change starts from (copies.py), or None."""
-    if keeper is None:
-        return None
-
-    def keep(name: str, y: np.ndarray, cols: list[int] | None) -> None:
-        if name == "denoised":
-            keeper.audio(copies.NOISE, y, cols, len(x), plan=pipeline.channel_plan(x), profile=used.get("noise"), echo=echo)
-            if echo and keeper.job is not None and keeper.job.has(copies.NOISE):  # the echo-free recording is what the strength blends in
-                keeper.audio(copies.INPUT, x, cols, len(x), echo=True)
-        else:
-            keeper.audio(copies.REBUILT, y, cols, len(x), echo=echo)
-        if keeper.job is not None:
-            keeper.job.data["echo"] = bool(echo)
-
-    return keep
 
 
 def place_result(dest_dir: Path, out_stem: str, ext: str, tmp_out: Path, sub_tmp: Path | None, sub_kind: str) -> tuple[Path, Path | None]:

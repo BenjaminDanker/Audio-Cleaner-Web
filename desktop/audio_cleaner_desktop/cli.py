@@ -184,6 +184,18 @@ def _check_speech_runtime() -> None:
         WhisperModel(str(path), device="cpu", compute_type="int8", cpu_threads=1, num_workers=1)
 
 
+def _clean(x: np.ndarray, remover: str, leveling: bool = True) -> np.ndarray:
+    """`x` cleaned the way the app cleans a file: the timeline of noise removal (and Leveling) on the whole of it, made by the editor's
+    renderer on one thread."""
+    from acw_common import editor
+    from acw_common.timeline import Timeline
+
+    from . import editor_job
+
+    tl = Timeline.whole_file(len(x) / pipeline.SAMPLE_RATE, noise={"strength_db": 100.0, "remover": remover}, leveling=leveling)
+    return editor.render(tl, editor.Inputs(x, "selftest"), None, editor_job.runner(1))
+
+
 def _check_models() -> list[str]:
     """One second of audio through each model the app runs: the heavy-noise remover (the required noise removal
     models must be installed); the optional ones are only checked where they are installed. Returns what was skipped."""
@@ -195,10 +207,7 @@ def _check_models() -> list[str]:
     x = (0.2 * np.sin(2 * np.pi * 220 * t) + 0.03 * rng.standard_normal(t.size)).astype(np.float32)
     skipped = []
 
-    y = pipeline.clean_audio(
-        x, resources.libdf_path(), resources.model_path(), pipeline.CleanOptions(noise="heavy", leveling=False),
-        threads=1, heavy_model_path=resources.heavy_noise_model_path(),
-    )
+    y = _clean(x, "heavy", leveling=False)
     if y.shape != (x.size, 1) or not np.isfinite(y).all():
         raise RuntimeError("the heavy-noise remover returned unexpected audio")
 
@@ -328,8 +337,7 @@ def selftest(gui: bool = False) -> int:
         t = np.arange(3 * sr) / sr
         rng = np.random.default_rng(0)
         x = (0.2 * np.sin(2 * np.pi * 220 * t) + 0.03 * rng.standard_normal(t.size)).astype(np.float32)
-        y = pipeline.clean_audio(x, resources.libdf_path(), resources.model_path(), threads=1,
-                                 heavy_model_path=resources.heavy_noise_model_path())
+        y = _clean(x, "light")
         if y.shape != (x.size, 1) or not np.isfinite(y).all():
             raise RuntimeError("the noise reduction engine returned unexpected audio")
         ff = engine.ffmpeg()

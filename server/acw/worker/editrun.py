@@ -7,20 +7,18 @@ This module runs in the confined process that handles the untrusted upload: it h
                       block cache, make the missing blocks and render the timeline into the result audio (or only find suggestions);
                       the subtitle parts that are still to make are transcribed (Standard here, Accurate in the web process) and the
                       caption files put together
-    render_first      the first run of a job made with a timeline: the same, from an empty cache
+    render            what both do: plan the run's timeline against the job's block cache and render it (a first run: from an
+                      empty cache)
     load_browser      the audio the browser cleaned for the noise parts that say `browser: true`
     subtitles_prepare / merge_subtitles
                       the timeline's subtitle parts: transcribe what the job's folder lacks (Standard with the local recogniser; Accurate
                       parts are cut into speech chunks for the web process), then put every part's segments, the translations and the
                       free parts' uploaded cues together as segments.json / segments.<lang>.json (acw_common.subtitles)
-    legacy_report     the first run of a job made without one (`pipeline.clean_audio`): what the editor needs to know about it
-    EchoWholeFile     lets clean_audio fill the cache after a whole-file echo removal under the editor's block identities
 """
 from __future__ import annotations
 
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
@@ -39,45 +37,6 @@ def cache_for(job_dir: Path, ff):
     from acw_common import blocks
 
     return blocks.FlacCache(job_dir / BLOCKS, ff)
-
-
-class EchoWholeFile:
-    """What `pipeline.clean_audio` is given as its cache after the whole file went through echo removal: it keys every block with one
-    `input_id`, but the editor's identity of a block names the echo parts that touch what it read (here: all of the file, cut to the
-    block's reach). `put`, `get` and `has` rewrite the key to the editor's own (editor._Identity), so a whole-file run fills the cache
-    the editor plans against."""
-
-    MARK = "\x1eecho"
-
-    def __init__(self, cache, source_id: str, n: int):
-        from acw_common import editor
-
-        self.cache = cache
-        self.n = n
-        self.ident = editor._Identity(SimpleNamespace(source_id=source_id, reference_id="r"), [(0, n)])
-
-    def _key(self, key: str) -> str:
-        from acw_common import restore
-
-        parts = key.split("|")
-        if self.MARK not in parts:
-            return key
-        i = parts.index(self.MARK)
-        if parts[1] in ("light", "heavy"):
-            lo, hi = int(parts[i + 2]), int(parts[i + 5])
-        else:  # Voice rebuild: the block's number and the length of the recording
-            lo, hi = restore.block_input_range(int(parts[i + 3]), self.n)
-        parts[i] = self.ident(lo, hi)
-        return "|".join(parts)
-
-    def get(self, key: str):
-        return self.cache.get(self._key(key))
-
-    def put(self, key: str, block) -> None:
-        self.cache.put(self._key(key), block)
-
-    def has(self, key: str) -> bool:
-        return self.cache.has(self._key(key))
 
 
 def facts_of(inputs, ff, probe, job_dir: Path, *, keep_source: bool = True) -> dict:

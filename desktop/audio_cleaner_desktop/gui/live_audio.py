@@ -1,6 +1,5 @@
-"""Live listening: the player plays a `blend.BlendStream` (the saved full-strength copy mixed with the original at a strength that can
-change at any moment), straight to the sound card in small pieces, so moving the strength slider changes what is heard within a
-fraction of a second.
+"""Live listening: the player plays the editor's live mix (live_mix.LiveMix, which can change at any moment) straight to the sound card
+in small pieces, so a change in the editor is heard within a fraction of a second.
 
 `LivePlayer` has the part of QMediaPlayer's interface that the preview pane uses (position, duration, play, pause, stop, signals), so the pane
 works with either. The sound card is reached through a small adapter (`QtSink`, QAudioSink); tests give a stand-in that pulls the
@@ -14,18 +13,20 @@ from types import SimpleNamespace
 
 from PySide6.QtCore import QIODevice, QObject, QTimer, Signal
 
-from ..blend import SAMPLE_RATE, BlendStream
+from acw_common.pipeline import SAMPLE_RATE
+
+from ..live_mix import LiveMix
 
 log = logging.getLogger(__name__)
 
-BUFFER_SECONDS = 0.1  # sound held ready for the card: the delay between moving the slider and hearing it
+BUFFER_SECONDS = 0.1  # sound held ready for the card: the delay between a change and hearing it
 TICK_MS = 50
 
 
 class PullDevice(QIODevice):
     """The sound card pulls from this: 16-bit samples of the stream, from a frame on, mixed at the strength of that moment."""
 
-    def __init__(self, stream: BlendStream, start_frame: int, parent: QObject | None = None):
+    def __init__(self, stream: LiveMix, start_frame: int, parent: QObject | None = None):
         super().__init__(parent)
         self.stream = stream
         self.frame = int(start_frame)  # the next frame to hand out
@@ -95,7 +96,7 @@ class LivePlayer(QObject):
         self._status = mm.QMediaPlayer.MediaStatus
         self._error = getattr(mm.QMediaPlayer, "Error", None)
         self._factory = sink_factory or QtSink
-        self._stream: BlendStream | None = None
+        self._stream: LiveMix | None = None
         self._sink = None
         self._device: PullDevice | None = None
         self._base = 0  # frame the sound card was last started at
@@ -104,7 +105,7 @@ class LivePlayer(QObject):
 
     # -- what QMediaPlayer has that the pane uses -----------------------------------------------------------------
 
-    def load(self, stream: BlendStream) -> None:
+    def load(self, stream: LiveMix) -> None:
         self._halt()
         self._stream, self._base = stream, 0
         self._set_state(self._state.StoppedState)

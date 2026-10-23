@@ -439,31 +439,20 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
   * *The original.* The job remembers its path and a fingerprint: size, modified time and a hash of 16 parts of the file (`copies.fingerprint`).
     Before anything is done with a copy it is checked (`copies.check_original`): same size and modified time is accepted without reading;
     a different modified time only if the parts hash the same (a copy put back); anything else is "changed", and a missing file is "moved".
-    The decoded original must also be as long as the copies (`JobCopies.samples`). When the original is moved or changed the strength
-    slider and every change but the subtitle files are unavailable with the reason in plain words; for a moved file "Find the original..."
+    The decoded original must also be as long as the copies (`JobCopies.samples`). When the original is moved or changed the editor
+    and every change but the subtitle files are unavailable with the reason in plain words; for a moved file "Find the original..."
     accepts the file it was moved to when it is the same file.
-  * *Live strength.* The strength is the blend `out = (1 - a) * full + a * original`, `a = 10 ** (-dB / 20)` (`pipeline.blend_strength`). The job view
-    decodes the original with the pipeline's own function (`decode_for_clean`, so the samples line up exactly; the echo-free copy when echo was
-    removed) and the saved noise removal into scratch files (about 5 s per hour of audio) and `blend.BlendStream` mixes them block by
-    block (0.05 ms per 50 ms block). `gui/live_audio.py` gives the blocks to the sound card in pull mode (`QAudioSink`, 16-bit, 100 ms
-    buffer, an unbuffered `QIODevice` so Qt does not read ahead), reading the strength at every block, so moving the slider changes the
-    next 100 ms. The slider has the four names (Gentle 12, Balanced 24, Strong 40, Maximum 100 dB) at equal distances and the dB in between.
-    With Leveling on, the preview is the noise removal at a constant loudness (`blend.match_gain`, the website's); with it off it is exactly
-    the saved sound. "Original" plays the same stream at the same place, so A/B is instant. Where QtMultimedia or a sound output is
-    missing the slider still chooses the strength to save. The scratch files are deleted when the job is closed.
-  * *Change and save again* (`redo.py`): strength, Leveling on/off, loudness target, file type and name, subtitle files, Voice rebuild. Only
-    the later steps run, from the copies: strength/Leveling/loudness/type/name/subtitle kind need no model. Measured for one hour of mono
-    speech: 12 s (no Leveling, FLAC), 36 s (Leveling, FLAC), 54 s (Leveling, MP3); the same change on a clip of 10 s takes under a second. Voice rebuild
-    on runs the rebuild from the original (the slow step) unless a rebuilt voice is saved (then only Leveling); off uses the saved noise removal,
-    or runs the noise removal when the job never had one. Subtitles the job never made, or in another language, listen to the original
+  * *Change and save again* (`redo.py`): the sound is changed in the editor (below, "Fix a moment"; the whole file is one part), the file type,
+    name and subtitle files in the Save card. The sound is the editor's timeline rendered from the job's blocks: only the blocks it does not
+    have are made, so a new strength or Leveling needs no model and Voice rebuild on one part rebuilds only that part. Subtitles the job never made, or in another language, listen to the original
     again; other kinds of subtitle file come from the saved transcript, and "Save only the subtitles" needs neither the original nor a model.
-    Steps that run a model keep their new copy in the job, so the next change is cheap. A new result is never written over a file: it goes next
+    Blocks a change makes stay in the job, so the next change is cheap. A new result is never written over a file: it goes next
     to the last result under a free name; if the user types the name of an existing file the app asks, and only "Replace it" moves the old file
     to the Recycle Bin / Trash and gives the new one its name.
   * *Delete.* Deleting a job (or "Delete all") removes its folder and its row, nothing else: never the results, never the original
     (`copies.delete_job_dir` only removes a folder with a name this app gives, directly in the jobs folder, and a link as a link). A job whose
     copies cannot be removed (a file in use) stays in the list. Old entries (from before this) and failed or stopped jobs: an old entry has no
-    folder and just shows and deletes; a stopped job keeps nothing; a job that failed after its noise removal keeps that copy and can be
+    folder and just shows and deletes; a stopped job keeps nothing; a job that failed after some blocks were made keeps them and can be
     saved again from the job view; a copy that cannot be written (disk full) never fails the job, the notice says it can't be changed later.
     Folders nothing points to are swept after a day.
 * **Fix a moment: the per-part editor** (the same core as the website's, `common/acw_common/{timeline,editor,blocks,suggest}.py`; the
@@ -471,15 +460,16 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
   Local processing is free, so the bar shows time, not price.
   * *The block cache replaces the whole copies.* A job made now keeps `blocks/` (24-bit FLAC, `blocks.FlacCache`: what each step made, block by
     block: the noise removal at full strength, the rebuilt voice, the echo-free recording) instead of `noise.flac`, `rebuilt.flac` and `input.flac`.
-    A normal run fills it (`engine.process` gives `pipeline.clean_audio` and `pipeline.remove_echo` the cache and `input_id`; after echo removal
-    `EchoWholeFile` rewrites the keys to the editor's own, as on the server), so an edit only makes the blocks it does not have: a new strength
+    A normal run fills it (`engine.process` renders the timeline its choices stand for, `Timeline.from_clean_options`, with
+    `editor.render`, as the server does), so an edit only makes the blocks it does not have: a new strength
     is a blend of blocks (no model runs), Voice rebuild on one part makes the blocks of that part, Leveling runs over what changed. The disk is
     the same as the old noise copy (about 0.25 GB per hour of mono; measured 65 KB per second of speech); `job.json` also keeps the recording's
     facts and waveform (so a quote needs no decoding), the timeline of the latest result, the decisions "automatic" made, and the suggestions.
     The job id of every key is the original's fingerprint (`copies.source_id_of`). Deleting a job removes the folder as before.
-  * *Old jobs.* A job with `noise.flac` etc. opens as before (strength slider, Change and save again). Its "Fix a moment" card offers "Get this job
-    ready": the copies are cut into blocks (`editor_job.migrate`, the same samples, nothing removed until every block is written) and the old
-    files are removed. A job that removed echo but did not keep the echo-free recording cannot be migrated.
+  * *Old jobs.* A job with `noise.flac` etc. is made ready by itself the first time it is opened or changed (`editor_job.make_ready`): the copies
+    are cut into blocks (`editor_job.migrate`, the same samples, nothing removed until every block is written) and the old files are removed. A
+    job whose copies can't become blocks (it removed echo but did not keep the echo-free recording) starts an empty block cache, and what a change
+    needs is made from the original.
   * *The editor* (design "Moments", `/acw-editor-designs/c-moments`, with "Show all layers" from the timeline design): the player, a strip under it
     (ruler with a pin for each suggestion, the waveform, the playhead, the selected part with two handles; click moves the playhead, drag across the
     waveform or a row chooses a part), "Hear" chips (Noise removal, Voice rebuild, Echo removal when the file has a second track, Leveling) and
@@ -487,7 +477,8 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     Voice rebuild on or off (it wins where both are on, and the panel says so), Leveling on or off with one loudness target for the job, echo removal
     on or off. All edits are `Timeline.paint` / `erase`, so the draft is always a valid timeline. "Which one should I pick?" (`labels.WHICH_TEXT`)
     says in plain words how noise reduction and Rebuild the voice differ; the settings, the part panel and the notes on a result use the same words.
-  * *Live sound* (`live_mix.LiveMix`, played by the same `LivePlayer` as the strength slider): the recording and what each step made are laid out sample
+  * *Live sound* (`live_mix.LiveMix`, played by `gui/live_audio.LivePlayer`: pull mode, `QAudioSink`, 16-bit, 100 ms buffer, an unbuffered
+    `QIODevice` so Qt does not read ahead, so a change is heard within the next 100 ms; "Original" plays the same stream at the same place): the recording and what each step made are laid out sample
     for sample in scratch files (read from the cache), and every piece the sound card asks for is mixed from the timeline: noise removal per part
     ((1 - a) x the remover's sound + a x the recording, 100 ms ramps between parts), Voice rebuild with 250 ms equal-power edges (where it is on the
     noise removal is not heard), echo removal with 50 ms ramps, Leveling by loudness (each leveled part is brought to the target, at most 12 dB;
@@ -497,7 +488,7 @@ downloaded again. The app's silent update is this same setup with `/VERYSILENT`.
     40 s" (`editor.plan` over the facts the job kept; `editor_job.CPU_COSTS` turns the plan's compute seconds into wall-clock seconds on one core
     of an ordinary computer: the light remover and Leveling as measured, the heavy remover 1.8 x the light one, Voice rebuild about 30 x, divided by
     the threads). Save runs `redo.run` with a timeline: the original is decoded, only the missing blocks are made (cancelable, with progress), the
-    timeline is rendered, and the result is a new file next to the last one (the same naming and Replace rules as Change and save again). Subtitles,
+    timeline is rendered, and the result is a new file next to the last one (the naming and Replace rules above). Subtitles,
     file type and name stay in the card below.
   * *Suggestions* (`suggest.suggest`): found in the background when a job is opened for the first time (up to 20 minutes of audio; a longer
     recording has a "Find moments to fix" button), cancelable, kept in `job.json`. Each is a card with the apply button, Show me, Dismiss, and Undo

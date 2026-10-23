@@ -1,7 +1,7 @@
 """Live listening for the per-part editor: the sound of a timeline, mixed per part while it plays. No Qt in here.
 
-`LiveMix` has what the player reads from a `blend.BlendStream` (`frames`, `channels`, `seconds`, `read`, `read_pcm16`, `set_original`), so
-the job's player (gui/job_preview.py, gui/live_audio.py) plays it the same way. It holds the recording and what each step made of it, laid out
+`LiveMix` is what the job's player (gui/job_preview.py, gui/live_audio.py) reads: `frames`, `channels`, `seconds`, `read`, `read_pcm16`,
+`set_original`. It holds the recording and what each step made of it, laid out
 sample for sample (`Layers`, memory maps filled from the job's block cache), and a snapshot of the timeline:
 
     echo removal        a 50 ms ramp between the recording and the echo-free sound at the edges of each part

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtWidgets import QHBoxLayout, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QProgressBar, QVBoxLayout
 
 from .. import editor_job, editor_session
 from ..editor_model import EditModel
@@ -40,49 +40,27 @@ class JobEditor:
         self._bar.setMaximumHeight(8)
         self._bar.hide()
         layout.addWidget(self._bar)
-        row = QHBoxLayout()
-        self._setup = QPushButton("Get this job ready for fixing moments")
-        self._setup.setToolTip("Makes this older job's saved copies into the form that fixing a moment starts from. It takes a little "
-                               "while, and the job can still be changed and saved again afterwards.")
-        self._setup.clicked.connect(self._open)
-        self._setup.hide()
-        row.addWidget(self._setup)
-        row.addStretch(1)
-        layout.addLayout(row)
         self.holder = QVBoxLayout()
         layout.addLayout(self.holder)
 
     # -- state ------------------------------------------------------------------------------------------------------------
     @property
     def active(self) -> bool:
-        """The job keeps blocks: its sound is changed here (the strength slider and the sound choices of the other cards give way)."""
-        job = self.v.job
-        return job is not None and job.has_blocks
+        """The job's sound is changed here (every job with saved copies)."""
+        return self.v.job is not None
 
-    def show(self) -> bool:
-        """A job was opened. True when the editor handles its player (the job keeps blocks)."""
+    def show(self) -> None:
+        """A job was opened: open it in the editor when its original is there."""
         job = self.v.job
-        self.card.setVisible(False)
-        self._setup.hide()
+        self.card.setVisible(job is not None)
         self._note.setText("")
         if job is None:
-            return False
-        if job.has_blocks:
-            self.card.setVisible(True)
-            if not self.v._check.ok:
-                self._note.setText(f"{self.v._check.text} Fixing a moment needs the original.")
-                self.v._show_player()
-                return True
-            self._open()
-            return True
-        if editor_session.can_edit(job):
-            self.card.setVisible(True)
-            self._note.setText("This job was cleaned before Audio Cleaner could change one moment at a time. It can be made ready for that "
-                               "(its saved copies are kept in a new form).")
-            self._setup.setVisible(self.v._check.ok)
-            if not self.v._check.ok:
-                self._note.setText(self.v._check.text)
-        return False
+            return
+        if not self.v._check.ok:
+            self._note.setText(f"{self.v._check.text} Fixing a moment needs the original.")
+            self.v._show_player()
+            return
+        self._open()
 
     def _open(self) -> None:
         from .job_view import _Worker
@@ -90,7 +68,6 @@ class JobEditor:
         v, job = self.v, self.v.job
         if job is None or self._open_thread is not None:
             return
-        self._setup.hide()
         self._note.setText("Getting the sound ready to hear your changes..." if job.has_blocks else "Getting this job ready...")
         self._bar.show()
         self._gen += 1
@@ -114,7 +91,6 @@ class JobEditor:
         self._finish_open(gen)
         if gen == self._gen:
             self._note.setText(message)
-            self._setup.setVisible(self.v.job is not None and not self.v.job.has_blocks and editor_session.can_edit(self.v.job))
             self.v._show_player()
             self.v._refresh_all()
 

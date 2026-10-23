@@ -13,16 +13,15 @@ clearly better (DeepFilterNet3 is better on lighter noise). "auto" measures the 
 Keeping it in one place means a file cleaned on the desktop sounds exactly
 like the same file cleaned on the website.
 
-Every model step runs on the block grid of blocks.py (30 s blocks, each with the context of the recording around it that the
-step measured to need), whole file or part: a whole-file run IS all the blocks, so there is one code path, no seams, and a
-block cache (`cache` / `input_id` of clean_audio) that a run fills is the one editor.render reads.
+The chain itself is made by editor.render from a timeline (what to do to which part; a whole-file run is the timeline with every
+layer on the whole file): every model step runs on the block grid of blocks.py (30 s blocks, each with the context of the recording
+around it that the step measured to need), so there is one code path and no seams. This module has what both sides need around it:
+the automatic choices, the noise figure, the channel plan, decoding and the output buffers.
 
 Strength (the attenuation limit) is a blend, in the time domain, of the noise remover's full-strength output with the
-recording itself (`blend_strength`): the models always run at full strength, so that output can be kept and the
-strength and leveling changed afterwards without running a model again (`redo_denoised`,
-`redo_rebuilt`, used by the server's "change and save again"). This is the same arithmetic libDF does in its STFT domain
-and DPDFNet does in the time domain (a * noisy + (1 - a) * enhanced, a = 10 ** (-dB / 20)); tests/test_blend.py checks it
-against the models' own limit.
+recording itself (`strength_mix`): the models always run at full strength, so a strength change never runs a model again. This is
+the same arithmetic libDF does in its STFT domain and DPDFNet does in the time domain (a * noisy + (1 - a) * enhanced,
+a = 10 ** (-dB / 20)); tests/test_blend.py checks it against the models' own limit.
 """
 from __future__ import annotations
 
@@ -33,8 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import blocks, clarity, dfn, dpdfnet, restore
-from .aec import echo_block
+from . import dfn
 from .dfn import Cancelled
 from .ffmpeg import FFmpeg, ProbeResult
 
@@ -227,243 +225,11 @@ def sound_spans(x: np.ndarray, block: int = SAMPLE_RATE * 60) -> list[tuple[int,
     return spans
 
 
-def choose_noise_profile(x: np.ndarray, lib_path: str | Path, model_path: str | Path, wanted: str = "auto",
-                         cancel: threading.Event | None = None, keep: dict | None = None) -> str:
-    """"light" or "heavy" for this recording ("auto" measures it: noise_figure_db; `keep` as there)."""
-    if wanted in ("light", "heavy"):
-        return wanted
-    return automatic_choices(noise_figure_db(x, lib_path, model_path, cancel, keep))[0]
-
-
-def done_end(spans: list[tuple[int, int]], a: int) -> slice:
-    """The silent stretch that ends where the span starting at `a` begins."""
-    prev = 0
-    for s0, s1 in spans:
-        if s0 == a:
-            return slice(prev, a)
-        prev = s1
-    return slice(a, a)
-
-
-# Called by clean_audio with what a later change of the choices can start from: ("denoised", y, todo) after the noise
-# removal at full strength (before strength and leveling; y holds the channels in `todo`, the others are filled in
-# from them afterwards), ("rebuilt", y, None) after the voice rebuild (before leveling).
-Keep = Callable[[str, np.ndarray, "list[int] | None"], None]
-BLEND_BLOCK = SAMPLE_RATE * 30
-
-
 def strength_mix(atten_lim_db: float) -> float:
     """The share `a` of the recording that stays in the result for an attenuation limit in dB (0 = nothing is blended:
     100 dB or more, the full-strength output). The same arithmetic as libDF (tract.rs) and DPDFNet."""
     lim = abs(float(atten_lim_db))
     return 0.0 if lim >= 100.0 else min(float(10.0 ** (-lim / 20.0)), 1.0)
-
-
-def blend_strength(y: np.ndarray, x: np.ndarray, atten_lim_db: float, channels: list[int] | None = None) -> np.ndarray:
-    """Limit the noise removal to `atten_lim_db`, in place: y = (1 - a) * y + a * x in the given channels (default all),
-    where y is the full-strength output and x the recording it was made from (same length and alignment), a from
-    strength_mix. Read block by block, so memory-mapped arrays are never loaded whole."""
-    a = strength_mix(atten_lim_db)
-    if a <= 0.0:
-        return y
-    for ch in (range(y.shape[1]) if channels is None else channels):
-        for s in range(0, len(y), BLEND_BLOCK):
-            e = min(len(y), s + BLEND_BLOCK)
-            y[s:e, ch] = ((1.0 - a) * y[s:e, ch].astype(np.float64) + a * x[s:e, ch].astype(np.float64)).astype(np.float32)
-    return y
-
-
-def _after_noise(
-    x: np.ndarray, y: np.ndarray, plan: list[int | None], todo: list[int], *, atten: float, opts: CleanOptions,
-    progress: Progress | None,
-) -> np.ndarray:
-    """Everything after the noise removal, from y (its full-strength output in the channels `todo`): the strength, the
-    channels that copy another, Leveling. clean_audio and redo_denoised both end here."""
-    blend_strength(y, x, atten, todo)
-    for c, src in enumerate(plan):
-        if src is None:
-            y[:, c] = 0.0
-        elif src != c:
-            y[:, c] = y[:, src]  # before the leveling: its loudness is measured on both channels, as before
-    if opts.leveling:
-        y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
-    if progress:
-        progress(1.0)
-    return y
-
-
-def redo_denoised(
-    x: np.ndarray, full: np.ndarray, plan: list[int | None], opts: CleanOptions, *, progress: Progress | None = None,
-    report: dict | None = None,
-) -> np.ndarray:
-    """The Studio-clean result for new choices (strength, leveling, loudness) from a kept full-strength noise removal: no
-    model runs. `full` is shaped like x with the channels `plan` (channel_plan(x), as kept) names filled in, and is changed
-    in place into the result."""
-    x = np.asarray(x, dtype=np.float32)
-    if x.ndim == 1:
-        x = x[:, None]
-    atten = opts.atten_lim_db if opts.atten_lim_db is not None else 100.0
-    if report is not None:
-        report.update(noise="kept", atten_lim_db=atten)
-    todo = sorted({c for c in plan if c is not None})
-    return _after_noise(x, full, plan, todo, atten=atten, opts=opts, progress=progress)
-
-
-def redo_rebuilt(
-    x: np.ndarray, rebuilt: np.ndarray, opts: CleanOptions, *, progress: Progress | None = None, report: dict | None = None,
-) -> np.ndarray:
-    """The Voice-rebuild result for new leveling choices from the kept rebuilt voice (changed in place)."""
-    x = np.asarray(x, dtype=np.float32)
-    if x.ndim == 1:
-        x = x[:, None]
-    if report is not None:
-        report.update(noise="rebuilt")
-    y = rebuilt[:, None] if rebuilt.ndim == 1 else rebuilt
-    if opts.leveling:
-        y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
-    if progress:
-        progress(1.0)
-    return y
-
-
-def clean_audio(
-    x: np.ndarray,
-    lib_path: str | Path,
-    model_path: str | Path,
-    opts: CleanOptions | None = None,
-    *,
-    threads: int = 2,
-    progress: Progress | None = None,
-    cancel: threading.Event | None = None,
-    out: np.ndarray | None = None,
-    heavy_model_path: str | Path | None = None,
-    report: dict | None = None,
-    restore_model_dir: str | Path | None = None,
-    measured: Measured | None = None,
-    keep: Keep | None = None,
-    cache: blocks.BlockCache | None = None,
-    input_id: str | None = None,
-) -> np.ndarray:
-    """Clean float32 audio shaped (samples, channels) at SAMPLE_RATE.
-
-    `cache`, with `input_id` (anything that identifies the samples of `x`; editor.Inputs.source_id when x is the recording
-    itself): the model steps use the editor's block cache, so blocks already in it are not run again and the others are
-    stored in it (the strength is a blend afterwards: the cache holds full-strength blocks only).
-
-    `progress` gets a fraction in [0, 1]; denoising is ~95% of the work.
-    Setting `cancel` aborts with `Cancelled`. The result is written into `out`
-    when given (same shape, float32; e.g. a memory-mapped file, so long inputs
-    need little RAM), otherwise into a new array. `heavy_model_path` is the
-    DPDFNet-8 model (default: dpdfnet.default_model_path()). `restore_model_dir` holds
-    Sidon's ONNX files, required for restore_voice. `report`, when given,
-    gets {"noise": "light"|"heavy"|"rebuilt"|"none"}, plus (unless
-    rebuilt) "atten_lim_db" (the strength used) and, when the noise was measured, "noise_db" (noise_figure_db).
-    `measured`: what choose_noise_profile kept (its `keep`), when the caller measured the recording itself. `keep`: see Keep."""
-    opts = opts or CleanOptions()
-    x = np.asarray(x, dtype=np.float32)
-    if x.ndim == 1:
-        x = x[:, None]
-    channels = x.shape[1]
-    if cache is not None and input_id is None:
-        raise ValueError("a block cache needs input_id")
-    if opts.restore_voice:
-        if restore_model_dir is None or not restore.available(restore_model_dir):
-            raise FileNotFoundError(f"voice rebuilding needs Sidon's models (not in {restore_model_dir})")
-        if report is not None:
-            report.update(noise="rebuilt")
-        y = restore.restore(
-            x, restore_model_dir, threads=threads, cancel=cancel, out=out, device=opts.device,
-            progress=(lambda f: progress(0.95 * f)) if progress else None,
-            hooks=None if cache is None else blocks.cache_hooks(cache, lambda d: blocks.rebuild_key(
-                input_id, d[0], d[1], len(x), restore._WINDOW_SECONDS, restore._OVERLAP_SECONDS)),
-        )
-        y = y[:, None] if y.ndim == 1 else y
-        if keep is not None:
-            keep("rebuilt", y, None)
-        if opts.leveling:
-            y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
-        if progress:
-            progress(1.0)
-        return y
-    if not opts.denoise:  # no noise removal: the recording as it is, evened out and set to the loudness (Leveling on its own)
-        if report is not None:
-            report.update(noise="none")
-        y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
-        y[:] = x
-        if opts.leveling:
-            y = clarity.process(x, y, SAMPLE_RATE, clarity.ClarityParams(loudness_lufs=opts.loudness_lufs))
-        if progress:
-            progress(1.0)
-        return y
-    # One measurement serves both automatic choices: which remover, and how strong.
-    figure = stats = None
-    if opts.noise == "auto" or opts.atten_lim_db is None:
-        kept: dict = {}
-        figure = noise_figure_db(x, lib_path, model_path, cancel, kept)
-        measured = kept.get("measured", measured)
-        if opts.atten_lim_db is None:  # the strength is picked by the model, which needs the rest of the measurements too
-            from . import analysis
-
-            stats = analysis.measure_features(x, figure)
-    auto_profile, auto_strength = automatic_choices(figure, stats) if figure is not None else (None, None)
-    profile = opts.noise if opts.noise != "auto" else auto_profile
-    atten = opts.atten_lim_db if opts.atten_lim_db is not None else auto_strength
-    heavy = Path(heavy_model_path) if heavy_model_path else dpdfnet.default_model_path()
-    if report is not None:
-        report["noise"] = profile
-        report["atten_lim_db"] = atten
-        if figure is not None:
-            report["noise_db"] = round(figure, 1)
-    share = 0.95  # of the progress bar for noise removal
-    y = np.empty(x.shape, dtype=np.float32) if out is None else (out[:, None] if out.ndim == 1 else out)
-    # Work only where it changes something: a channel that duplicates the other is cleaned once, a silent one not at
-    # all, and digital silence isn't run through the model (it stays silent).
-    plan = channel_plan(x)
-    todo = sorted({c for c in plan if c is not None})
-    if report is not None and todo != list(range(channels)):
-        report["channels_cleaned"] = len(todo)
-    for k, ch in enumerate(todo):
-        spans = sound_spans(x[:, ch])
-        if (measured is not None and profile == "light" and spans == [(0, len(x))]
-                and len(measured.mono) == len(x) and np.array_equal(measured.mono, x[:, ch])):
-            y[:, ch] = measured.light  # the measurement already cleaned exactly this at full strength (any strength is a blend of it)
-            if cache is not None:  # (the measurement ran on the same grid: these are the blocks a block run makes)
-                for lo, s, e, hi in blocks.grid_windows(0, len(x), blocks.grid_of("light")):
-                    cache.put(blocks.block_key("light", input_id, ch, lo, s, e, hi), y[s:e, ch])
-            if progress:
-                progress(share * (k + 1) / len(todo))
-            continue
-        total = sum(b - a for a, b in spans) or 1
-        done = 0
-        for a, b in spans:
-            def prog(f: float, k: int = k, done: int = done, size: int = b - a) -> None:
-                if progress:
-                    progress(share * (k + (done + f * size) / total) / len(todo))
-
-            if a > 0 or b < len(x):
-                y[done_end(spans, a), ch] = 0.0  # the silence before this span
-            extra: dict = dict(grid_offset=a)  # the blocks are the file's grid cells; x[a:b] is a stretch of the file
-            if cache is not None:
-                step = "heavy" if profile == "heavy" else "light"
-                extra["hooks"] = blocks.cache_hooks(cache, lambda d, step=step, ch=ch: blocks.block_key(step, input_id, ch, *d))
-            if profile == "heavy":
-                dpdfnet.denoise_array(
-                    x[a:b, ch], atten_lim_db=100.0, threads=threads, progress=prog, cancel=cancel,
-                    out=y[a:b, ch], model_path=heavy, device=opts.device, **extra,
-                )
-            else:
-                dfn.denoise_array(
-                    x[a:b, ch], lib_path, model_path, atten_lim_db=100.0, threads=threads, progress=prog,
-                    cancel=cancel, out=y[a:b, ch], **extra,
-                )
-            done += b - a
-        if spans[-1][1] < len(x):
-            y[spans[-1][1]:, ch] = 0.0
-    if cancel is not None and cancel.is_set():
-        raise Cancelled()
-    if keep is not None:
-        keep("denoised", y, todo)
-    return _after_noise(x, y, plan, todo, atten=atten, opts=opts, progress=progress)
 
 
 def decode_for_clean(
@@ -486,58 +252,6 @@ def output_buffer(like: np.ndarray, work_dir: Path | None = None) -> np.ndarray:
     return np.lib.format.open_memmap(Path(work_dir) / "cleaned.npy", mode="w+", dtype=np.float32, shape=like.shape)
 
 
-def remove_echo(
-    ff: FFmpeg,
-    src: Path,
-    probe: ProbeResult,
-    mic: np.ndarray,
-    max_seconds: float,
-    work_dir: Path | None = None,
-    *,
-    progress: Progress | None = None,
-    cancel: threading.Event | None = None,
-    cache: blocks.BlockCache | None = None,
-    input_id: str | None = None,
-) -> np.ndarray:
-    """Take the speaker echo out of `mic` (the decoded first track, (samples, channels)) using the file's
-    second audio track, which carries what the speakers played. Run it before noise removal.
-
-    Works on the echo block grid (blocks.GRID_ECHO: 30 s blocks, each run with a fresh canceller that has the 10 s of the
-    recording before it to adapt on; the canceller converges well inside that, so the blocks join without a seam), so with
-    `work_dir` (reference and result are scratch files there) RAM stays flat for long files. `cache` / `input_id` (what
-    identifies mic and the reference together): the editor's block cache, as in clean_audio. Returns an array shaped
-    like `mic`; `mic` itself when the file has no second track."""
-    if probe.audio_tracks < 2:
-        return mic
-    if work_dir is None:
-        ref = ff.decode(src, probe, SAMPLE_RATE, 1, max_seconds, track=1)
-    else:
-        ref = ff.decode_to_file(src, probe, SAMPLE_RATE, 1, max_seconds, Path(work_dir) / "reference.f32", track=1)
-    ref = ref[:, 0]  # a shorter reference counts as silence at the end
-    if cache is not None and input_id is None:
-        raise ValueError("a block cache needs input_id")
-    n, channels = mic.shape
-    out = (
-        np.empty(mic.shape, dtype=np.float32) if work_dir is None
-        else np.lib.format.open_memmap(Path(work_dir) / "echo-free.npy", mode="w+", dtype=np.float32, shape=mic.shape)
-    )
-    wins = blocks.grid_windows(0, n, blocks.grid_of("echo"))
-    for ch in range(channels):
-        for k, (lo, s, e, hi) in enumerate(wins):
-            if cancel is not None and cancel.is_set():
-                raise Cancelled()
-            key = blocks.block_key("echo", input_id, ch, lo, s, e, hi) if cache is not None else None
-            y = cache.get(key) if cache is not None else None
-            if y is None or len(y) != e - s:
-                y = echo_block(mic[:, ch], ref, lo, s, e, hi)
-                if cache is not None:
-                    cache.put(key, y)
-            out[s:e, ch] = y
-            if progress:
-                progress((ch + (k + 1) / len(wins)) / channels)
-    return out
-
-
 def to_speech_16k(x: np.ndarray) -> np.ndarray:
     """Float32 (samples, channels) at SAMPLE_RATE -> mono at 16 kHz for speech recognition, in blocks
     (with some context at each side, so the joins are clean)."""
@@ -556,9 +270,8 @@ def to_speech_16k(x: np.ndarray) -> np.ndarray:
 
 
 __all__ = [
-    "SAMPLE_RATE", "CleanOptions", "Cancelled", "clean_audio", "automatic_choices", "blend_strength", "strength_mix", "redo_denoised", "redo_rebuilt",
-    "channel_plan", "decode_for_clean", "output_buffer", "as_output",
-    "remove_echo", "to_speech_16k",
+    "SAMPLE_RATE", "CleanOptions", "Cancelled", "automatic_choices", "strength_mix",
+    "channel_plan", "decode_for_clean", "output_buffer", "as_output", "to_speech_16k",
 ]
 
 

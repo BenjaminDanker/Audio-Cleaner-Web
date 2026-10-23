@@ -670,7 +670,7 @@ grows with every edit that makes blocks):
 | `suggestions.json` | the suggestions of the job | tens of kB |
 
 A whole-file first run holds the recording and one cached step: about 0.5 GB an hour and channel measured (0.2 + 0.31), 0.75 GB promised in the upload reserve
-(`jobs.create_job`: `editing.cache_bytes`) next to the kept copies of the old strength slider; an edit run promises its scratch and the blocks it will make
+(`jobs.create_job`: `editing.cache_bytes`); an edit run promises its scratch and the blocks it will make
 (`editing.growth_bytes`). Everything goes with the job. The suggestions cost about 0.22 s per second of audio in the first run for recordings up to
 `ACW_SUGGEST_MAX_MINUTES` (60; 0 = only on request), measured on the noisy sample at two threads.
 

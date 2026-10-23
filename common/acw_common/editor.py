@@ -560,7 +560,7 @@ def resolve_removers(tl: Timeline, inputs: Inputs, lib_path: str | Path, model_p
 # ---------------------------------------------------------------------------------------------------------------------
 @dataclass
 class Runner:
-    """Where the models are and how to run them (the arguments of pipeline.clean_audio)."""
+    """Where the models are and how to run them."""
     lib_path: str | Path | None = None
     model_path: str | Path | None = None
     heavy_model_path: str | Path | None = None
@@ -1000,8 +1000,8 @@ def render(
     """The audio the timeline stands for, (samples, channels) float32, channels as `pipeline.channel_plan` has them (a channel that
     duplicates another is the same result, a silent one stays silent). Blocks the cache lacks are run with `runner` and put in
     the cache (`cache` None: kept for this call only, in `work_dir` when given); `out`: written into this array (e.g. a memory
-    map). `browser`: the audio of the noise parts the browser cleaned (they need it). The noise remover of every part must be decided ("light" / "heavy": resolve_removers). The default timeline
-    (every layer on the whole file) is what `pipeline.clean_audio` makes of the same recording, and fills the same cache."""
+    map). `browser`: the audio of the noise parts the browser cleaned (they need it). The noise remover of every part must be decided ("light" / "heavy": resolve_removers). A whole-file run is the
+    default timeline (every layer on the whole file)."""
     wd = Path(work_dir) if work_dir is not None else None
     own = None
     if cache is None:

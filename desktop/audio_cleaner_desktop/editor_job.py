@@ -1,7 +1,7 @@
 """The per-part editor of a desktop job: what a job remembers for it, what an edit would cost, and doing it. No Qt in here.
 
 A job's folder holds the BLOCK CACHE (copies.py, `blocks/`, acw_common.blocks.FlacCache): every block a model step made, keyed by the step,
-the model, the audio it read and where it is. A normal run (`engine.process`, which calls `pipeline.clean_audio` with this cache) fills it, so
+the model, the audio it read and where it is. A normal run (`engine.process`, which renders the timeline its choices stand for) fills it, so
 an edit only makes the blocks it does not have yet: a new strength is a blend of blocks that are there, Voice rebuild on one part makes the
 blocks of that part, and Leveling runs over what changed. The job's manifest (`job.editor`) also keeps
 
@@ -12,8 +12,8 @@ blocks of that part, and Leveling runs over what changed. The job's manifest (`j
     resolved     the noise remover each "automatic" part was decided to use (so a quote and its run agree)
     suggestions  the parts the app found that other settings would suit, and what the user did with them
 
-Old jobs (made before the block cache) keep their saved copies and open as before; `migrate` turns those copies into blocks the first time
-the editor is asked for.
+Old jobs (made before the block cache) keep their saved copies until they are opened or changed: `make_ready` turns those copies into
+blocks then (`migrate`), or starts an empty cache when there is nothing to turn.
 """
 from __future__ import annotations
 
@@ -25,11 +25,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 
-from acw_common import blocks, editor, kept, pipeline, restore, suggest
+from acw_common import blocks, editor, kept, pipeline, suggest
 from acw_common.ffmpeg import MediaError
 from acw_common.timeline import DEFAULT_LOUDNESS, Timeline, TimelineError
 
@@ -50,58 +49,6 @@ CPU_COSTS = {
     "echo": (0.12, 0.034), "light": (0.27, 0.116), "heavy": (1.5, 0.21), "rebuild": (4.3, 3.5), "leveling": (1.28, 0.013),
 }
 THREAD_EFFICIENCY = 0.7
-
-
-# ---------------------------------------------------------------------------------------------------------------------
-# Keys
-# ---------------------------------------------------------------------------------------------------------------------
-class EchoWholeFile:
-    """What `pipeline.clean_audio` is given as its cache after the whole file went through echo removal. It keys every block with one
-    `input_id`, but the editor's identity of a block names the echo parts that touch what it read (here: all of the file, cut to the
-    block's reach). `put`, `get` and `has` rewrite the key to the editor's own (editor._Identity), so a whole-file run fills the cache the
-    editor plans against."""
-
-    MARK = "\x1eecho"
-
-    def __init__(self, cache, source_id: str, n: int):
-        self.cache = cache
-        self.n = n
-        self.ident = editor._Identity(SimpleNamespace(source_id=source_id, reference_id=REFERENCE_ID), [(0, n)])
-
-    def _key(self, key: str) -> str:
-        parts = key.split("|")
-        if self.MARK not in parts:
-            return key
-        i = parts.index(self.MARK)
-        if parts[1] in ("light", "heavy"):
-            lo, hi = int(parts[i + 2]), int(parts[i + 5])
-        else:  # Voice rebuild: the block's number and the length of the recording
-            lo, hi = restore.block_input_range(int(parts[i + 3]), self.n)
-        parts[i] = self.ident(lo, hi)
-        return "|".join(parts)
-
-    def get(self, key: str):
-        return self.cache.get(self._key(key))
-
-    def put(self, key: str, block) -> None:
-        self.cache.put(self._key(key), block)
-
-    def has(self, key: str) -> bool:
-        return self.cache.has(self._key(key))
-
-
-def cache_args(cache, source_id: str, n: int, echo: bool) -> dict:
-    """The `cache` / `input_id` arguments of `pipeline.clean_audio` that make a whole-file run fill the editor's cache."""
-    if cache is None:
-        return {}
-    if echo:
-        return {"cache": EchoWholeFile(cache, source_id, n), "input_id": EchoWholeFile.MARK}
-    return {"cache": cache, "input_id": source_id}
-
-
-def echo_input_id(source_id: str) -> str:
-    """The `input_id` of `pipeline.remove_echo` (it names the recording and the speaker track together)."""
-    return f"{source_id}~{REFERENCE_ID}"
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -460,9 +407,23 @@ def migrate(job: copies.JobCopies, ff, inputs: editor.Inputs, work: Path, *, can
         if progress:
             progress((k + 1) / len(jobs))
     job.set_blocks(n, echo)
-    for kind in (copies.NOISE, copies.REBUILT, copies.INPUT):
+    for kind in copies.AUDIO_KINDS:
         job.drop(kind)
     return True
+
+
+def make_ready(job: copies.JobCopies, ff, inputs: editor.Inputs, work: Path, *, cancel: threading.Event | None = None,
+               progress: Callable[[float], None] | None = None) -> None:
+    """The job keeps blocks from here on: an old job's saved copies become blocks (`migrate`); a job with neither (its copies were
+    removed, or the recording without the speaker echo was not kept) starts an empty cache, and what a change needs is made from the
+    original."""
+    if job.has_blocks:
+        return
+    if needs_migration(job) and migrate(job, ff, inputs, work, cancel=cancel, progress=progress):
+        return
+    for kind in copies.AUDIO_KINDS:
+        job.drop(kind)
+    job.set_blocks(inputs.n, bool(job.echo) and inputs.reference is not None)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -503,7 +464,7 @@ def remove_work(work: Path) -> None:
 
 
 __all__ = [
-    "EchoWholeFile", "cache_args", "echo_input_id", "facts_of", "facts_inputs", "peaks_of", "store_facts", "job_facts", "seconds_of",
+    "facts_of", "facts_inputs", "peaks_of", "store_facts", "job_facts", "seconds_of",
     "baseline_timeline", "current_timeline", "made_from_timeline", "quote", "say_time", "render_timeline", "remember", "migrate",
-    "needs_migration", "find_suggestions", "keep_suggestions", "Quote",
+    "make_ready", "needs_migration", "find_suggestions", "keep_suggestions", "Quote",
 ]

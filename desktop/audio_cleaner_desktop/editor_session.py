@@ -19,15 +19,6 @@ log = logging.getLogger(__name__)
 Progress = Callable[[float], None]
 
 
-def can_edit(job: copies.JobCopies | None) -> bool:
-    """The job keeps blocks, or old copies that can become blocks."""
-    if job is None:
-        return False
-    if job.has_blocks:
-        return True
-    return editor_job.needs_migration(job) and not (job.echo and not job.has(copies.INPUT))
-
-
 class Session:
     """A job opened for editing: `mix` is what the player plays; `quote` says what an edit would cost; `suggest` finds moments to fix."""
 
@@ -44,14 +35,12 @@ class Session:
     @classmethod
     def open(cls, job: copies.JobCopies, *, cancel: threading.Event | None = None, progress: Progress | None = None,
              scratch_parent: Path | None = None, threads: int = 2) -> "Session":
-        """Decode the original, turn an old job's copies into blocks when that is still to do, remember the recording's facts and waveform,
+        """Decode the original, make sure the job keeps blocks (an old job's copies become blocks: editor_job.make_ready), remember the recording's facts and waveform,
         and lay out what the cache has for listening. Raises MediaError (fit for the user)."""
         cancel = cancel or threading.Event()
         check = job.check_original()
         if not check.ok:
             raise MediaError(check.text)
-        if not can_edit(job):
-            raise MediaError("This job has nothing saved that fixing a moment can start from. Clean the original again to get that.")
         ff = engine.ffmpeg(threads, cancel)
         src = job.original_path
         info = engine.probe(src, ff)
@@ -63,9 +52,7 @@ class Session:
                 progress(0.3)
             if job.samples and inputs.n != job.samples:
                 raise MediaError("The original no longer matches the saved copies (it is not the same length).")
-            if editor_job.needs_migration(job):
-                if not editor_job.migrate(job, ff, inputs, work, cancel=cancel, progress=lambda f: progress and progress(0.3 + 0.4 * f)):
-                    raise MediaError("This job can't be opened for fixing a moment. Clean the original again to get that.")
+            editor_job.make_ready(job, ff, inputs, work, cancel=cancel, progress=lambda f: progress and progress(0.3 + 0.4 * f))
             if editor_job.job_facts(job) is None or not job.editor.get("peaks"):
                 editor_job.store_facts(job, inputs, inputs.source, reference=info.audio_tracks >= 2)
             session = cls(job, ff, work, inputs, info, threads)
@@ -199,4 +186,4 @@ def only_parts(tl: Timeline, parts: list[tuple[float, float]]) -> Timeline:
     return out
 
 
-__all__ = ["Session", "PlanSession", "can_edit", "baseline_for", "only_parts"]
+__all__ = ["Session", "PlanSession", "baseline_for", "only_parts"]

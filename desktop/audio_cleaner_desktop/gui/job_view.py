@@ -11,24 +11,21 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QScrollArea, QSlider,
+    QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton, QScrollArea,
     QVBoxLayout, QWidget,
 )
 
 from acw_common.ffmpeg import MediaError
 
-from .. import blend, copies, editor_session, engine, labels, redo, resources
+from .. import copies, editor_session, engine, labels, redo, resources
 from . import shell
 from .history import DONE, Entry, HistoryStore
 from .job_preview import JobPreview
 from .queue_view import format_size
 from .theme import set_property
-from .widgets import Banner, ElidedLabel, IconButton, WrapCheck, format_time
+from .widgets import Banner, ElidedLabel, IconButton, format_time
 
 log = logging.getLogger(__name__)
-
-SLIDER_STEPS = blend.SLIDER_STEPS
-
 
 @dataclass
 class JobEnv:
@@ -38,11 +35,9 @@ class JobEnv:
     speech_ready: Callable[[], bool] = resources.speech_ready
     noise_ready: Callable[[], bool] = resources.noise_ready
     run: Callable = redo.run
-    prepare: Callable = redo.prepare_stream
     trash: Callable[[Path], bool] = shell.move_to_trash
-    scratch: Callable[[], Path | None] = lambda: None  # where the live sound is prepared; None: next to the saved copies
-    live: Callable[[], bool] = lambda: True  # prepare the sound for live listening (off where there is no sound output)
-    open_session: Callable = editor_session.Session.open  # a job that keeps blocks, opened in the editor (editor_session.py)
+    scratch: Callable[[], Path | None] = lambda: None  # where the sound is laid out for listening; None: next to the saved copies
+    open_session: Callable = editor_session.Session.open  # a job opened in the editor (editor_session.py)
 
 
 class _Worker(QThread):
@@ -109,14 +104,11 @@ class JobView(QWidget):
         self.entry: Entry | None = None
         self.job: copies.JobCopies | None = None
         self._check = copies.OriginalCheck("missing")
-        self._prepared: redo.Prepared | None = None
-        self._prepare_thread: _Worker | None = None
         self._save_thread: _Worker | None = None
-        self._generation = 0
-        self._db = 100.0
         self._building = False
         self.preview: JobPreview | None = None
-        self._player_in_editor = False  # the player sits in the editor (a job that keeps blocks), not in the Listen card
+        self._preview_slot = None  # the layout the player is in
+        self._player_in_editor = False  # the player sits in the editor, not in the Listen card
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 16, 0, 0)
@@ -201,56 +193,10 @@ class JobView(QWidget):
         self._listen_layout = layout
         self._player_slot = QVBoxLayout()
         layout.addLayout(self._player_slot)
-        head = QHBoxLayout()
-        self._strength_label = QLabel()
-        head.addWidget(self._strength_label, 1)
-        layout.addLayout(head)
-        self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setRange(0, SLIDER_STEPS)
-        self._slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self._slider.setTickInterval(SLIDER_STEPS // 3)
-        self._slider.setAccessibleName("Strength")
-        self._slider.valueChanged.connect(self._slider_moved)
-        layout.addWidget(self._slider)
-        names = QHBoxLayout()
-        names.setSpacing(6)
-        self._name_buttons: dict[str, QPushButton] = {}
-        for key, label, db in blend.NAMES:
-            button = QPushButton(f"{label}")
-            button.setObjectName("Flat")
-            button.setToolTip(f"{label} ({db:.0f} dB)")
-            button.clicked.connect(lambda _=False, d=db: self.set_strength(d))
-            names.addWidget(button)
-            self._name_buttons[key] = button
-        layout.addLayout(names)
-        self._prep_bar = QProgressBar()
-        self._prep_bar.setRange(0, 0)
-        self._prep_bar.setTextVisible(False)
-        self._prep_bar.setMaximumHeight(8)
-        layout.addWidget(self._prep_bar)
-        self._slide_note = _small()
-        layout.addWidget(self._slide_note)
         self._body.addWidget(self._listen_card)
 
     def _build_change(self) -> None:
-        self._change_card, layout = _card("Change and save again")
-        self._change_title = layout.itemAt(0).widget()
-        self._change_intro = intro = _small("Pick what to change and save it as a new file next to the old one. Only the steps that come after "
-                                            "the saved copies run again, so this takes seconds.")
-        layout.addWidget(intro)
-        self._rebuild = WrapCheck("Rebuild the voice")
-        self._rebuild.setToolTip("Rebuild the voice instead of removing the noise: for echo, a phone-quality sound or a muffled voice. "
-                                 "It has no strength.")
-        self._rebuild.toggled.connect(self._choices_changed)
-        self._leveling = WrapCheck("Leveling (even out the volume and set the loudness)")
-        self._leveling.toggled.connect(self._leveling_toggled)
-        self._loudness = QComboBox()
-        for key, label in labels.LOUDNESS_LABELS.items():
-            self._loudness.addItem(label, key)
-        self._loudness.currentIndexChanged.connect(self._choices_changed)
-        layout.addWidget(self._rebuild)
-        layout.addWidget(self._leveling)
-        layout.addWidget(self._loudness)
+        self._change_card, layout = _card("Save as a new file")
         name_row = QHBoxLayout()
         name_row.setSpacing(0)
         self._name = QLineEdit()
@@ -320,8 +266,8 @@ class JobView(QWidget):
         self._check = self.job.check_original() if self.job else copies.OriginalCheck("missing")
         self.banner.hide()
         self._fill()
-        if not self._ed.show():
-            self._start_preparing()
+        self._ed.show()
+        self._refresh_all()
         return True
 
     def _fill(self) -> None:
@@ -418,11 +364,6 @@ class JobView(QWidget):
             return
         wanted = redo.wanted_from(job)
         source = _source_of(job)
-        self._db = wanted.atten_lim_db
-        self._slider.setValue(round(blend.pos_of(self._db) * SLIDER_STEPS / 3))
-        self._rebuild.setChecked(wanted.rebuild_voice)
-        self._leveling.setChecked(wanted.leveling)
-        self._loudness.setCurrentIndex(max(0, self._loudness.findData(wanted.loudness)))
         self._subtitles.setCurrentIndex(max(0, self._subtitles.findData(wanted.subtitles)))
         self._ending.clear()
         for ending in engine.available_endings(source):
@@ -431,32 +372,6 @@ class JobView(QWidget):
         self._sync_ending()
 
     # -- the choices ------------------------------------------------------------------------------------------------
-
-    def set_strength(self, db: float) -> None:
-        """The strength to hear and to save (the slider moves to it)."""
-        self._building = True
-        try:
-            self._slider.setValue(round(blend.pos_of(db) * SLIDER_STEPS / 3))
-        finally:
-            self._building = False
-        self._set_db(blend.snap(db))
-
-    def _slider_moved(self, value: int) -> None:
-        if self._building:
-            return
-        self._set_db(blend.snap(blend.db_at(value * 3 / SLIDER_STEPS)))
-
-    def _set_db(self, db: float) -> None:
-        self._db = float(db)
-        if self.preview is not None:
-            self.preview.set_strength(self._db)
-        self._refresh_all()
-
-    def _leveling_toggled(self, on: bool) -> None:
-        self._loudness.setEnabled(on)
-        if self.preview is not None:
-            self.preview.set_exact(not on)
-        self._choices_changed()
 
     def _choices_changed(self, *_args) -> None:
         if not self._building:
@@ -478,11 +393,10 @@ class JobView(QWidget):
 
     def wanted(self) -> redo.Wanted:
         return redo.Wanted(
-            atten_lim_db=self._db, rebuild_voice=self._rebuild.isChecked(), leveling=self._leveling.isChecked(),
-            loudness=self._loudness.currentData() or engine.DEFAULT_LOUDNESS, subtitles=self._subtitles.currentData() or "off",
+            subtitles=self._subtitles.currentData() or "off",
             language=(self.job.made.get("language") if self.job and self.job.made.get("language") in engine.LANGUAGES else "auto"),
             video_size=(self.job.made.get("video_size") if self.job else "same") or "same", output_name=self._name.text().strip(),
-            timeline=self._ed.timeline_json() if self._ed.active else None,
+            timeline=self._ed.timeline_json(),
         )
 
     def plan(self) -> redo.Plan | None:
@@ -491,66 +405,20 @@ class JobView(QWidget):
         return redo.plan(self.job, self.wanted(), self._check, source=_source_of(self.job), voice_model=self._env.voice_ready(),
                          speech_model=self._env.speech_ready(), noise_models=self._env.noise_ready())
 
-    def _slide_problem(self) -> str:
-        """Why the strength can't be changed for this job ("" when it can)."""
-        job = self.job
-        if job is None:
-            return "This job was cleaned before Audio Cleaner kept copies, so its strength can't be changed."
-        if not self._check.ok:
-            return f"{self._check.text} The strength can't be changed without it."
-        if not redo.can_slide(job):
-            if job.has(copies.REBUILT) and not job.has(copies.NOISE):
-                return ("This job rebuilt the voice, which has no strength. Turn off Rebuild the voice below to remove the noise "
-                        "instead (that runs the noise removal once).")
-            return "The saved noise removal of this job is missing, so its strength can't be changed."
-        return ""
-
     def _refresh_all(self) -> None:
         if self.entry is None:
             return
         job = self.job
-        edit = self._ed.active  # the job keeps blocks: its sound is changed in the editor
-        self._listen_card.setVisible(not edit)
+        self._listen_card.setVisible(not self._player_in_editor and self.preview is not None and not self.preview.isHidden())
         self._change_card.setVisible(job is not None)
-        for w in (self._rebuild, self._leveling, self._loudness, self._save, self._change_intro):
-            w.setVisible(not edit)
-        self._change_title.setText("Save as a new file" if edit else "Change and save again")
-        problem = self._slide_problem()
-        rebuild_on = job is not None and self._rebuild.isChecked()
-        can_slide = not problem and not rebuild_on
-        self._slider.setEnabled(can_slide and not self.busy)
-        for b in self._name_buttons.values():
-            b.setEnabled(can_slide and not self.busy)
-        self._strength_label.setText(
-            f"Strength: <b>{blend.strength_name(self._db)}</b> ({self._db:.0f} dB)" if can_slide
-            else "Strength: not used" if rebuild_on else "Strength: can't be changed for this job")
-        for key, b in self._name_buttons.items():
-            b.setProperty("on", abs(blend.db_of_key(key) - self._db) < 0.5 and can_slide)
-            b.style().unpolish(b)
-            b.style().polish(b)
-        if self._prepare_thread is not None:
-            self._slide_note.setText("Getting the sound ready to try other strengths...")
-        elif rebuild_on:
-            self._slide_note.setText("Rebuilding the voice has no strength. What you hear here is the noise removal; the rebuilt voice "
-                                     "can be heard once it is saved.")
-        elif problem:
-            self._slide_note.setText(problem)
-        elif self.preview is not None and self.preview.live:
-            exact = not self._leveling.isChecked()
-            self._slide_note.setText("What you hear is what you save." if exact else
-                                     "This is the noise removal at an even loudness. Leveling is added when you save.")
-        else:
-            self._slide_note.setText(self._live_note)
-        self._prep_bar.setVisible(self._prepare_thread is not None)
         if job is None:
             return
         p = self.plan()
         text = "\n".join(["• " + s for s in p.steps] + ["", *p.problems]) if p.problems else "\n".join("• " + s for s in p.steps)
         self._plan_text.setText(("What will happen:\n" + text) if p.steps else text)
         busy = self.busy
-        for w in (self._rebuild, self._leveling, self._name, self._ending, self._subtitles):
+        for w in (self._name, self._ending, self._subtitles):
             w.setEnabled(not busy)
-        self._loudness.setEnabled(self._leveling.isChecked() and not busy)
         self._save.setEnabled(p.ok and not busy)
         self._save.setToolTip("; ".join(p.problems))
         can_text = job.has(copies.TRANSCRIPT) and (self._subtitles.currentData() or "off") in redo.TEXT_KINDS and not busy
@@ -558,21 +426,24 @@ class JobView(QWidget):
         self._save_subs.setEnabled(can_text)
         self._back.setEnabled(not busy)
         self._delete.setEnabled(not busy)
-        if edit:
-            self._ed.refresh_bar()
-
-    _live_note = ""
+        self._ed.refresh_bar()
 
     # -- the player and the live sound ---------------------------------------------------------------------------------
 
     def _ensure_preview(self) -> JobPreview:
+        """The player, in the slot it belongs in now (the Listen card, or the editor once it is open)."""
         if self.preview is None:
             self.preview = JobPreview()
+            self._preview_slot = None
+        if self._preview_slot is not self._player_slot:
+            if self._preview_slot is not None:
+                self._preview_slot.removeWidget(self.preview)
             self._player_slot.addWidget(self.preview)
+            self._preview_slot = self._player_slot
         return self.preview
 
     def _show_player(self, stream=None) -> None:
-        """The player for this job: the original against the saved result, and with `stream` the live blend."""
+        """The player for this job: the original against the saved result, and with `stream` the editor's live mix."""
         entry = self.entry
         original = self.job.original_path if self.job is not None else Path(entry.source)
         results = [p for p, _ in self._result_paths() if p.exists()]
@@ -585,80 +456,13 @@ class JobView(QWidget):
         preview = self._ensure_preview()
         subtitle = next((p for p in results if p.suffix.lower() in (".srt", ".vtt")), None)
         preview.show_job(entry.id, original, cleaned, entry.has_video, entry.name, subtitle, stream)
-        preview.set_strength(self._db)
         preview.show()
 
-    def _start_preparing(self) -> None:
-        self._live_note = ""
-        job = self.job
-        self._generation += 1
-        if job is None or self._slide_problem():
-            self._show_player()
-            self._refresh_all()
-            return
-        self._show_player()
-        if not self._env.live():
-            self._live_note = "Hear the original and the saved result with the buttons above. Drag the slider to pick a strength to save."
-            self._refresh_all()
-            return
-        if self.preview is not None and not self.preview.available:
-            self._live_note = ("Listening is not available on this computer (no sound support), but you can still pick a strength and "
-                               "save it.")
-            self._refresh_all()
-            return
-        generation = self._generation
-        env = self._env
-        exact = not self._leveling.isChecked()
-        scratch = env.scratch()
-        worker = _Worker(lambda cancel, progress: env.prepare(job, cancel=cancel, scratch_parent=scratch, exact=exact), self)
-        worker.done.connect(lambda prepared, g=generation: self._prepared_ready(prepared, g))
-        worker.failed.connect(lambda message, g=generation: self._prepare_failed(message, g))
-        worker.stopped.connect(lambda g=generation: self._prepare_over(g))
-        self._prepare_thread = worker
-        worker.start()
-        self._refresh_all()
-
-    def _prepare_over(self, generation: int) -> None:
-        thread, self._prepare_thread = self._prepare_thread, None
-        if thread is not None:
-            thread.wait()
-            thread.deleteLater()
-        if generation == self._generation:
-            self._refresh_all()
-
-    def _prepared_ready(self, prepared: redo.Prepared, generation: int) -> None:
-        self._prepare_over(generation)
-        if generation != self._generation or self.entry is None:
-            prepared.close()
-            return
-        self._prepared = prepared
-        self._show_player(prepared.stream)
-        if self.preview is not None:
-            self.preview.set_exact(not self._leveling.isChecked())
-            self.preview.set_strength(self._db)
-        self._refresh_all()
-
-    def _prepare_failed(self, message: str, generation: int) -> None:
-        self._prepare_over(generation)
-        if generation == self._generation:
-            self._live_note = f"{message} You can still pick a strength and save it."
-            self._refresh_all()
-
     def unload(self) -> None:
-        """Let go of the job: stop the sound, stop getting it ready, delete the scratch files of the live sound."""
-        self._generation += 1
+        """Let go of the job: stop the sound, close the editor (it deletes its scratch files)."""
         if self.preview is not None:
             self.preview.stop()
             self.preview.use_stream(None)
-        thread = self._prepare_thread
-        if thread is not None:
-            thread.cancel.set()
-            thread.wait()
-            self._prepare_thread = None
-            thread.deleteLater()
-        prepared, self._prepared = self._prepared, None
-        if prepared is not None:
-            prepared.close()
         self._ed.unload()
 
     def shutdown(self, timeout_ms: int | None = None) -> bool:
@@ -690,7 +494,7 @@ class JobView(QWidget):
         return "replace" if clicked is replace else "new" if clicked is new else "cancel"
 
     def save(self) -> None:
-        """Make the new result from the saved copies with the choices as they are."""
+        """Make the new result from the editor's draft and the choices as they are."""
         job = self.job
         if job is None or self.busy:
             return
@@ -782,8 +586,6 @@ class JobView(QWidget):
         self._ed.saved()
         self._refresh_all()
         self.changed.emit()
-        if not self._ed.active and self._prepared is None and self._prepare_thread is None and not self._slide_problem():
-            self._start_preparing()  # a step that ran now made the copy the slider needs
 
     def save_subtitles_only(self) -> None:
         job = self.job
@@ -824,8 +626,8 @@ class JobView(QWidget):
         self._check = self.job.check_original()
         self.banner.show_message("Found it. This job can be changed and saved again.", "info")
         self._fill_copies()
-        if not self._ed.show():
-            self._start_preparing()
+        self._ed.unload()
+        self._ed.show()
         self._refresh_all()
 
 

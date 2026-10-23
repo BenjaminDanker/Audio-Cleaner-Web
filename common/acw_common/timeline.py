@@ -15,7 +15,7 @@ and, from version 2, a layer that is not part of the sound:
     subtitles  quality "free" (the browser transcribes it) | "standard" | "accurate" (the server transcribes it), language (a
                code, null: detect) and translate (up to 3 codes, not the part's language, only with standard or accurate)
 
-The default, `Timeline.whole_file`, is every layer you ask for on the whole file: what `pipeline.clean_audio` does (no subtitles).
+The default, `Timeline.whole_file`, is every layer you ask for on the whole file (no subtitles).
 The JSON:
 
     {"version": 1, "seconds": 123.4, "layers": {
@@ -213,7 +213,7 @@ class Timeline:
 
     @classmethod
     def from_clean_options(cls, seconds: float, opts, *, echo: bool = False) -> "Timeline":
-        """The timeline that `pipeline.clean_audio(x, ..., opts)` stands for (opts.atten_lim_db None, the automatic strength,
+        """The timeline the whole-file choices `opts` (pipeline.CleanOptions) stand for (opts.atten_lim_db None, the automatic strength,
         has no timeline: measure first)."""
         if opts.atten_lim_db is None:
             raise TimelineError("an automatic strength is decided by measuring: pass the strength it chose")

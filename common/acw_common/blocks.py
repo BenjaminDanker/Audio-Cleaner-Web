@@ -3,7 +3,7 @@
 Every model step runs on a FIXED grid of blocks, each block with some context before and after it that the model sees
 but that is cropped away, and every processed block can be cached. A block is identified by the step, the settings that
 change the model run, the input it was made from and where it is; strength is not a model setting (it is a blend of the
-full-strength block with the input, pipeline.blend_strength), so a strength change never needs a model run.
+full-strength block with the input, pipeline.strength_mix), so a strength change never needs a model run.
 
     light remover (DeepFilterNet3)  30 s grid, 16 s before, 0.25 s after   (>= 58 dB against one contiguous run)
     heavy remover (DPDFNet-8)       30 s grid, 24 s before, 0.25 s after   (about 41 dB, PESQ >= 4.4)
@@ -11,9 +11,8 @@ full-strength block with the input, pipeline.blend_strength), so a strength chan
     Voice rebuild (Sidon)           its own windows (restore.py): 14 s step, each block made from the window before it,
                                     its own and the one after it, dither seeded per window: equal to a whole-file run bit for bit
 
-A whole-file run of a step is "all blocks" of the same grid (dfn.denoise_array, dpdfnet.denoise_array, restore.restore,
-pipeline.remove_echo), so a whole-file run fills the cache the editor reads and the seams of a long file get the context
-the cache has.
+A whole-file run of a step is "all blocks" of the same grid (editor.render, and dfn.denoise_array, dpdfnet.denoise_array,
+restore.restore on their own), so the seams of a long file get the context the cache has.
 
 Blocks are numpy float32 arrays of the block's core ([start, end), no context). `BlockCache` is anything with `get(key)`,
 `put(key, array)` and `has(key)`: `MemoryCache`, `DirCache` (float32 .npy files) and `FlacCache` (24-bit FLAC files, the server's) are here.
@@ -258,10 +257,6 @@ class BlockHooks:
     noise removers, (job, block index) for Voice rebuild."""
     get: Callable[[tuple], np.ndarray | None]
     put: Callable[[tuple, np.ndarray], None]
-
-
-def cache_hooks(cache: BlockCache, make_key: Callable[[tuple], str]) -> BlockHooks:
-    return BlockHooks(lambda d: cache.get(make_key(d)), lambda d, y: cache.put(make_key(d), y))
 
 
 def union_seconds(ranges: list[tuple[int, int]]) -> float:

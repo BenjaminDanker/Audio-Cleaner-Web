@@ -86,7 +86,7 @@ made again for the file's real length once it is read (`editing.refit_whole_file
 only the blocks that are missing are made and charged.
 
 Strength is a blend: the noise models always run at full strength, and the result is `(1 - a) * full + a * input` with
-`a = 10^(-dB/20)` (`pipeline.blend_strength`; 100 dB or more: no blend). That is what libDF does itself in the STFT domain after its
+`a = 10^(-dB/20)` (`pipeline.strength_mix`; 100 dB or more: no blend). That is what libDF does itself in the STFT domain after its
 post filter and what DPDFNet does in the time domain (`common/tests/test_blend.py` checks it against the models' own attenuation limit).
 So the block cache holds the noise removal at full strength, and a new strength needs no model. The free noise removal in the browser
 keeps its two signals in memory and its slider plays them (`web/src/media/blend.js`, `memorySource` and `BlendPlayer`).
@@ -103,10 +103,9 @@ FLAC in the job's `blocks/` folder (`blocks.FlacCache`; a block read back is wit
   channels are cleaned, the stretches the noise removers run on, whether there is a second track: the *facts*) is measured by the sandboxed
   runner and kept in the job's record; `editing.inputs_for` stands them in for the samples of `editor.Inputs`, so `editor.plan` (the cache misses),
   `editor.billable` and the price are computed in the web process, and a stretch of the cache is cut by confined helpers (below).
-- **Runs.** A job's first run fills the cache: `pipeline.clean_audio` is given the cache (and, after a whole-file echo removal, a wrapper that
-  rewrites its keys to the editor's own block identities, `worker/editrun.EchoWholeFile`), writes the recording as `kept-source.flac`, reports
-  the facts and looks for suggestions (`acw_common/suggest.py`). A job made *with* a timeline renders it through `editor.render` instead, from
-  an empty cache, so only its parts are made and charged. An **edit run** (`process`, `export`, `suggest`) puts the finished job back in the queue
+- **Runs.** A job's first run renders its timeline (whole-file choices are the timeline they stand for) through `editor.render` from an
+  empty cache, so only its parts are made and charged; it fills the cache, writes the recording as `kept-source.flac`, reports the facts and
+  looks for suggestions (`acw_common/suggest.py`). An **edit run** (`process`, `export`, `suggest`) puts the finished job back in the queue
   (`next_stage` `edit`, `params.run`; the job is `queued` / `running` again with a new hold): the runner's `edit` stage (`worker/editrun.py`) decodes the
   recording, decides the removers still on "auto" (`editor.resolve_removers`), plans against the cache, makes the missing blocks and renders the
   timeline (joins, Leveling per part) into the result audio. It reports what it ran (`billed`: whole seconds per step), which the worker prices

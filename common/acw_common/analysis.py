@@ -340,8 +340,8 @@ def measure_features(x: np.ndarray, noise_db: float | None = None) -> dict:
 def measure(x: np.ndarray, lib_path: str | Path, model_path: str | Path, cancel: threading.Event | None = None,
             keep: dict | None = None) -> dict:
     """measure_features plus the noise figure (pipeline.noise_figure_db: the noise remover runs over the same stretches).
-    With `keep`, a measurement of the whole recording at once is kept there as keep["measured"] (pipeline.Measured), which
-    clean_audio(measured=...) uses instead of running the noise remover again. Setting `cancel` raises dfn.Cancelled."""
+    With `keep`, a measurement of the whole recording at once is kept there as keep["measured"] (pipeline.Measured). Setting `cancel`
+    raises dfn.Cancelled."""
     from . import pipeline
 
     figure = pipeline.noise_figure_db(x, lib_path, model_path, cancel, keep)
