@@ -203,13 +203,13 @@ def apply(job_id: str, decision: dict, seconds: float) -> dict | None:
             raise ValueError(f"no {tier} outcome was priced for this job")
         # It becomes a job made with the timeline the decided settings stand for (every job is made one way: editing.timeline_from_options),
         # at the prices pinned when it was made.
-        from . import editing, jobs
+        from . import edit_prices, editing, jobs
 
         raw, rest = editing.timeline_from_options(kind, tier, t_tier, opts, seconds)
         pinned = params["automatic"]
         params.update(options=rest, denoise_tier="standard", transcribe_tier=None, rates={}, chosen=decision["chosen"],
                       edit={**(params.get("edit") or {}), "timeline": raw, "first_run": True},
-                      edit_rates=pinned.get("edit_rates") or editing.step_rates(), subtitle_rates=pinned.get("subtitle_rates") or editing.subtitle_rates())
+                      edit_rates=pinned.get("edit_rates") or edit_prices.step_rates(), subtitle_rates=pinned.get("subtitle_rates") or edit_prices.subtitle_rates())
         params["automatic"] = {"fixed": pinned["fixed"]}  # (the candidates were only for the hold)
         new_cost = editing.first_run_cost(kind, params, seconds)
         new_cost += jobs.convert_cost(params, seconds)  # (a video conversion is not part of the decision: it stays as it was)

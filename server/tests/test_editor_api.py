@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw import db, editing, jobs
+from acw import db, edit_prices, edit_store, editing, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw_common import blocks, editor
@@ -63,7 +63,7 @@ def edit_job(uid, *, seconds=600.0, channels=1, api_key_id=None, ref=False, rend
 
 
 def tl_of(jid: str, noise=(), rebuild=(), leveling=(), echo=()) -> dict:
-    seconds = editing.file_seconds(row(jid), params_of(jid))
+    seconds = edit_store.file_seconds(row(jid), params_of(jid))
     layers = {k: [dict(p) for p in v] for k, v in (("echo", echo), ("noise", noise), ("rebuild", rebuild), ("leveling", leveling)) if v}
     return {"version": 1, "seconds": seconds, "layers": layers}
 
@@ -83,9 +83,9 @@ def part(a, b):
 def fill_cache(jid: str, tl: dict) -> int:
     """Put a placeholder block in the job's cache for every block the timeline needs; returns how many."""
     job, params = row(jid), params_of(jid)
-    t, _ = editing.for_planning(Timeline.from_json(tl, seconds=editing.file_seconds(job, params)), (params["edit"].get("resolved")))
-    plan = editor.plan(t, editing.inputs_for(job, params), None)
-    cache = blocks.FlacCache(editing.blocks_dir(jid), None)
+    t, _ = editing.for_planning(Timeline.from_json(tl, seconds=edit_store.file_seconds(job, params)), (params["edit"].get("resolved")))
+    plan = editor.plan(t, edit_store.inputs_for(job, params), None)
+    cache = blocks.FlacCache(edit_store.blocks_dir(jid), None)
     for t_ in plan.tasks:
         cache.path(t_.key).write_bytes(b"fLaC")
     return len(plan.tasks)
@@ -98,8 +98,8 @@ def quote(client, h, jid, tl=None):
 
 def expected(step_seconds: dict[str, int]) -> int:
     """The price of whole seconds per step: rate x (seconds + the step's fixed amount in seconds), each step rounded up."""
-    rates = editing.step_rates()
-    return sum(editing.step_micros(rates[s], secs, editor.STEP_COSTS[s].fixed_equivalent_seconds) for s, secs in step_seconds.items())
+    rates = edit_prices.step_rates()
+    return sum(edit_prices.step_micros(rates[s], secs, editor.STEP_COSTS[s].fixed_equivalent_seconds) for s, secs in step_seconds.items())
 
 
 def finish_run(jid: str, *, billed=None, rendered="empty", outputs=("talk-cleaned.flac",), suggestions=None, facts=None) -> dict:
@@ -122,8 +122,8 @@ def finish_run(jid: str, *, billed=None, rendered="empty", outputs=("talk-cleane
 def plan_billed(jid: str, tl: dict) -> dict:
     """What the runner would report having run for the timeline: the planner's billable seconds of the cache misses."""
     job, params = row(jid), params_of(jid)
-    t, _ = editing.for_planning(Timeline.from_json(tl, seconds=editing.file_seconds(job, params)), params["edit"].get("resolved"))
-    plan = editor.plan(t, editing.inputs_for(job, params), editing.cache_for(jid), None)
+    t, _ = editing.for_planning(Timeline.from_json(tl, seconds=edit_store.file_seconds(job, params)), params["edit"].get("resolved"))
+    plan = editor.plan(t, edit_store.inputs_for(job, params), edit_store.cache_for(jid), None)
     return {s: {"seconds": b["seconds"]} for s, b in editor.billable(plan).items()}
 
 
@@ -209,7 +209,7 @@ def test_the_price_is_the_rate_times_the_seconds_asked_rounded_up_plus_the_fixed
     assert q["estCostMicros"] == want == sum(line["micros"] for line in q["lines"])
     assert [(line["item"], line["seconds"]) for line in q["lines"]] == [("denoise", 1), ("rebuild", 5), ("leveling", 62)]
     # each step's own per-minute rate: Denoising, Voice rebuild, Leveling (and echo removal's, below)
-    assert editing.step_rates() == {"echo": 2_600, "light": 9_000, "heavy": 9_000, "rebuild": 30_000, "leveling": 1_000}
+    assert edit_prices.step_rates() == {"echo": 2_600, "light": 9_000, "heavy": 9_000, "rebuild": 30_000, "leveling": 1_000}
     # a timeline without parts costs nothing and does nothing (an empty timeline is not an error for a quote)
     q = quote(client, h, jid, tl_of(jid)).json()
     assert q["estCostMicros"] == 0 and q["free"] is True and q["lines"] == []
@@ -646,8 +646,8 @@ def test_the_suggestions_of_a_run_are_checked_stored_with_the_job_and_returned(c
     assert "weren" not in str(params_of(jid)["edit"].get("lastRun"))
     # the audio is untouched by a search for suggestions
     # a runner's garbage is not believed
-    assert editing.sanitize_suggestions({"whole": {"rebuild": 1, "remover": "x", "strength": "balanced"}, "suggestions": []}, 600) is None
-    assert editing.sanitize_suggestions("nothing", 600) is None
+    assert edit_store.sanitize_suggestions({"whole": {"rebuild": 1, "remover": "x", "strength": "balanced"}, "suggestions": []}, 600) is None
+    assert edit_store.sanitize_suggestions("nothing", 600) is None
 
 
 def test_the_suggestions_of_a_first_run_are_stored_when_the_job_finishes(client, signed_in):
@@ -672,8 +672,8 @@ def test_the_suggestions_of_a_first_run_are_stored_when_the_job_finishes(client,
     assert row(jid)["expires_at"] == row(jid)["finished_at"] + 7200
     # facts that are not sane are dropped (a copy that is not a file, channels that do not add up)
     f2 = {**report["facts"], "plan": [0, 1]}
-    assert editing.sanitize_facts(f2, folder(jid)) is None
-    assert "source" not in editing.sanitize_facts({**report["facts"], "source": {**report["facts"]["source"], "file": "../x"}}, folder(jid))
+    assert edit_store.sanitize_facts(f2, folder(jid)) is None
+    assert "source" not in edit_store.sanitize_facts({**report["facts"], "source": {**report["facts"]["source"], "file": "../x"}}, folder(jid))
 
 
 # --------------------------------------------------------------------------------------- a job made with a timeline
@@ -696,7 +696,7 @@ def test_creating_a_job_with_a_timeline_checks_it_prices_only_its_parts_and_repl
     j = row(jid)
     p = params_of(jid)
     assert j["status"] == "uploading" and j["est_cost_micros"] == want and p["edit"]["first_run"] is True and p["denoise_tier"] == "standard"
-    assert p["edit"]["timeline"]["layers"]["noise"][0]["end"] == 160.5 and p["edit_rates"] == editing.step_rates()
+    assert p["edit"]["timeline"]["layers"]["noise"][0]["end"] == 160.5 and p["edit_rates"] == edit_prices.step_rates()
     assert client.get(f"/api/jobs/{jid}").json()["label"] == "Voice rebuild + Denoising + Leveling".replace("Voice rebuild + ", "")
     # the subtitles are priced as always, next to the parts
     r = client.post("/api/jobs", json={**base, "kind": "denoise_transcribe", "transcribeTier": "local", "timeline": tl}, headers=h)
@@ -816,7 +816,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
 
     uid, h = funded(client, signed_in)
     # the upload reserve counts the recording's copy and one cached step per hour of audio and channel: 0.4 + 0.35 GB, stereo
-    assert editing.cache_bytes(3600, 2, 1) == 2 * (editing.SOURCE_PER_HOUR_PER_CHANNEL + editing.BLOCKS_PER_HOUR_PER_CHANNEL) and editing.cache_bytes(3600, 2, 3) > editing.cache_bytes(3600, 2, 1)
+    assert edit_store.cache_bytes(3600, 2, 1) == 2 * (edit_store.SOURCE_PER_HOUR_PER_CHANNEL + edit_store.BLOCKS_PER_HOUR_PER_CHANNEL) and edit_store.cache_bytes(3600, 2, 3) > edit_store.cache_bytes(3600, 2, 1)
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 1000, "durationSeconds": 3600,
                                       "options": {}}, headers=h)
     assert r.status_code == 200
@@ -825,7 +825,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
     from acw import hostload
 
     need = jobs.scratch_bytes("denoise", 3600) + jobs.DISK_RESERVE + 1000
-    free = need + editing.cache_bytes(3600, 2, 1) - 1
+    free = need + edit_store.cache_bytes(3600, 2, 1) - 1
     hostload.get = lambda d: SimpleNamespace(snapshot=lambda: SimpleNamespace(disk_free=free))  # (roomy_disk's patch is undone with the test)
     r = client.post("/api/jobs", json={"kind": "denoise", "denoiseTier": "standard", "filename": "a.wav", "sizeBytes": 1000, "durationSeconds": 3600,
                                       "options": {}}, headers=h)
@@ -833,7 +833,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
     # a process promises the room its blocks and scratch take
     jid = edit_job(uid, seconds=3600.0, rendered="empty")
     tl = tl_of(jid, noise=[noise(0, 3600)])
-    need = jobs.scratch_bytes("denoise", 3600, 1) + editing.BLOCKS_PER_HOUR_PER_CHANNEL + jobs.DISK_RESERVE
+    need = jobs.scratch_bytes("denoise", 3600, 1) + edit_store.BLOCKS_PER_HOUR_PER_CHANNEL + jobs.DISK_RESERVE
     hostload.get = lambda d: SimpleNamespace(snapshot=lambda: SimpleNamespace(disk_free=need - 10**6))
     r = client.post(f"/api/jobs/{jid}/process", json={"timeline": tl}, headers=h)
     assert r.status_code == 507 and row(jid)["status"] == "done"
@@ -842,7 +842,7 @@ def test_the_cache_is_counted_in_the_disks_promise_and_deleted_with_the_job(clie
     db.execute("UPDATE jobs SET status = 'done' WHERE id = ?", (jid,))
     # (the folder of a job, blocks included, goes with it)
     (folder(jid) / "blocks" / "a.flac").write_bytes(b"x")
-    assert editing.cache_size(jid) == 1
+    assert edit_store.cache_size(jid) == 1
     assert client.delete(f"/api/jobs/{jid}", headers=h).status_code == 200 and not folder(jid).exists()
     assert get_settings().jobs_dir.exists()
 

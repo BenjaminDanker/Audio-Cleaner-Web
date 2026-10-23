@@ -97,10 +97,10 @@ def set_env(monkeypatch, **env) -> None:
 def step(name, seconds, rates=None):
     """What one step costs for `seconds` of audio on the whole file: its rate x (the whole seconds + its fixed amount of a run), rounded up
     (every job is made with a timeline, so this is the price of a job asked for with options too)."""
-    from acw import editing
+    from acw import edit_prices
     from acw_common import editor
 
-    return editing.step_micros((rates or editing.step_rates())[name], math.ceil(seconds), editor.STEP_COSTS[name].fixed_equivalent_seconds)
+    return edit_prices.step_micros((rates or edit_prices.step_rates())[name], math.ceil(seconds), editor.STEP_COSTS[name].fixed_equivalent_seconds)
 
 
 def standard(seconds, remover="light", leveling=True, rates=None):
@@ -118,7 +118,7 @@ def rebuilt(seconds, leveling=True, rates=None):
 def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, options=None, *, seconds=60.0, channels=2, ext=".wav") -> dict:
     """The stored parameters of a finished job made with whole-file options: the timeline they stand for (first run), the prices of
     its parts pinned, what was asked for kept in `whole_file` (as jobs.create_job stores them)."""
-    from acw import editing
+    from acw import edit_prices, editing
 
     d_tier = denoise_tier if kind != "transcribe" else None
     t_tier = transcribe_tier if kind != "denoise" else None
@@ -134,8 +134,8 @@ def job_params(kind="denoise", denoise_tier="standard", transcribe_tier=None, op
         "channels": channels,
         "rates": {},
         "edit": {"timeline": raw, "first_run": True},
-        "edit_rates": editing.step_rates(),
-        **({"subtitle_rates": editing.subtitle_rates()} if tl.layers["subtitles"] else {}),
+        "edit_rates": edit_prices.step_rates(),
+        **({"subtitle_rates": edit_prices.subtitle_rates()} if tl.layers["subtitles"] else {}),
         "whole_file": {"kind": kind, "denoise_tier": d_tier, "transcribe_tier": t_tier, "options": asked},
         **jobs.convert_params(rest, ext),
     }
@@ -231,11 +231,11 @@ def set_card(others_mb: int, total_mb: int = 4096, age: float = 0.0) -> None:
 
 def part_dir(job_id: str) -> Path:
     """The folder of the only subtitle part of a transcription made with whole-file options (subs/<key>): where its text and speech chunks go."""
-    from acw import editing
+    from acw import edit_store, edit_subtitles
 
     raw = params_of(job_id)["edit"]["timeline"]
-    (part,) = editing._tl().Timeline.from_json(raw, seconds=raw["seconds"]).parts("subtitles")
-    return editing.subtitle_dir(job_id, part)
+    (part,) = edit_store.timeline_lib().Timeline.from_json(raw, seconds=raw["seconds"]).parts("subtitles")
+    return edit_subtitles.subtitle_dir(job_id, part)
 
 
 def params_of(job_id: str) -> dict:

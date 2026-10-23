@@ -7,7 +7,7 @@ import struct
 
 import pytest
 
-from acw import db, editing, jobs
+from acw import db, edit_preview, edit_prices, edit_store, edit_subtitles, editing, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker
 from acw_common.timeline import Timeline
@@ -37,21 +37,21 @@ def flac(samples: int, rate=48000, channels=1, tail=b"") -> bytes:
 
 
 def rates():
-    return editing.subtitle_rates()
+    return edit_prices.subtitle_rates()
 
 
 def part_cost(rate_key, seconds):
-    return editing.step_micros(rates()[rate_key], seconds, 0.0)
+    return edit_prices.step_micros(rates()[rate_key], seconds, 0.0)
 
 
 # ----------------------------------------------------------------------------------------------------- the format
 
 def test_a_flac_header_is_read_and_nothing_else_is_believed():
-    assert editing.flac_header(flac(96_000)) == (48000, 1, 96_000)
-    assert editing.flac_header(flac(5, 44100, 2)) == (44100, 2, 5)
+    assert edit_subtitles.flac_header(flac(96_000)) == (48000, 1, 96_000)
+    assert edit_subtitles.flac_header(flac(5, 44100, 2)) == (44100, 2, 5)
     for junk in (b"", b"RIFF" + b"\0" * 60, flac(5)[:30], b"fLaC\x01" + flac(5)[5:]):
         with pytest.raises(ValueError):
-            editing.flac_header(junk)
+            edit_subtitles.flac_header(junk)
 
 
 # ------------------------------------------------------------------------------------ estimate, create and the needs
@@ -212,14 +212,14 @@ def test_a_job_is_queued_only_when_the_file_and_everything_the_browser_makes_are
     assert client.get(f"/api/jobs/{jid}").json()["needs"] == needs
     # the cues: checked, stored with the job
     assert put_cues(client, h, jid, 20, 30, [{"start": 20.5, "end": 22, "text": "Hello  there"}, {"start": 25, "end": 26, "text": "  "}]).status_code == 200
-    stored = json.loads((editing.browser_dir(jid) / "cues-20000-30000.json").read_text())
+    stored = json.loads((edit_subtitles.browser_dir(jid) / "cues-20000-30000.json").read_text())
     assert stored == {"language": "en", "cues": [{"start": 20.5, "end": 22.0, "text": "Hello there"}]}
     assert row(jid)["status"] == "uploading" and client.get(f"/api/jobs/{jid}").json()["needs"] == [needs[0]]
     # the cleaned audio is the last thing: now the job is queued like any other
     assert put_noise(client, h, jid, 10, 12, flac(96_000)).status_code == 200
     j = row(jid)
     assert j["status"] == "queued" and j["next_stage"] == "probe" and client.get(f"/api/jobs/{jid}").json()["needs"] == []
-    assert files_of(jid) >= {"input.wav", "browser"} and (editing.browser_dir(jid) / "noise-10000-12000.flac").is_file()
+    assert files_of(jid) >= {"input.wav", "browser"} and (edit_subtitles.browser_dir(jid) / "noise-10000-12000.flac").is_file()
     # a queued job takes no more (it may be running on them)
     r = put_noise(client, h, jid, 10, 12, flac(96_000))
     assert r.status_code == 409 and r.json()["code"] == "job_busy"
@@ -264,13 +264,13 @@ def test_an_upload_must_match_a_part_of_the_current_timeline_exactly(client, sig
     assert put_cues(client, h, jid, 20, 30, {"not": "a list"}).status_code == 400
     # a cue a hair past the part is cut to it; far outside is refused
     assert put_cues(client, h, jid, 20, 30, [{"start": 29.8, "end": 30.3, "text": "end"}]).status_code == 200
-    assert json.loads((editing.browser_dir(jid) / "cues-20000-30000.json").read_text())["cues"] == [{"start": 29.8, "end": 30.0, "text": "end"}]
+    assert json.loads((edit_subtitles.browser_dir(jid) / "cues-20000-30000.json").read_text())["cues"] == [{"start": 29.8, "end": 30.0, "text": "end"}]
     assert put_cues(client, h, jid, 20, 30, [{"start": 31, "end": 32, "text": "late"}]).status_code == 400
     # sizes: the cues are small JSON (the body limit answers 413), the audio can not be more than a FLAC of the part can be
     assert client.put(f"/api/jobs/{jid}/browser/cues", params={"start": 20, "end": 30}, content=b" " * (1024 * 1024 + 10), headers=h).status_code == 413
     big = client.put(f"/api/jobs/{jid}/browser/noise", params={"start": 10, "end": 12}, content=flac(96_000, tail=b"\0" * (2 * 96_000 * 8 + 2_000_000)), headers=h)
     assert big.status_code == 413
-    assert not [p for p in editing.browser_dir(jid).iterdir() if p.name.endswith(".tmp")]
+    assert not [p for p in edit_subtitles.browser_dir(jid).iterdir() if p.name.endswith(".tmp")]
     # nobody else's, and nothing unknown
     assert put_cues(client, h, "0" * 32, 20, 30, []).status_code == 404
     assert client.put(f"/api/jobs/{jid}/browser/other", content=b"x", headers=h).status_code == 404
@@ -303,7 +303,7 @@ def test_the_browser_uploads_have_their_own_rate_limit(client, signed_in, monkey
 # ----------------------------------------------------------------------------- a finished job: quote, process, needs
 
 def tl_with(jid, **layers):
-    seconds = editing.file_seconds(row(jid), params_of(jid))
+    seconds = edit_store.file_seconds(row(jid), params_of(jid))
     return {"version": 2, "seconds": seconds, "layers": {k: v for k, v in layers.items() if v}}
 
 
@@ -371,10 +371,10 @@ def test_get_timeline_returns_the_layers_and_what_is_made(client, signed_in):
     assert "needs" not in plain and "subtitles" not in plain["cached"] and plain["timeline"]["version"] == 1
     tl = tl_with(jid, noise=[browser(100, 130)], subtitles=[sub(200, 260, "free"), sub(300, 330, "standard", "en"), sub(400, 410, "accurate", "es")])
     assert client.put(f"/api/jobs/{jid}/timeline", json={"timeline": tl}, headers=h).status_code == 200
-    (editing.browser_dir(jid)).mkdir(mode=0o700)
+    (edit_subtitles.browser_dir(jid)).mkdir(mode=0o700)
     t = Timeline.from_json(tl)
-    editing.store_cues(jid, t.parts("subtitles")[0], [])
-    d = editing.subtitle_dir(jid, t.parts("subtitles")[1])
+    edit_subtitles.store_cues(jid, t.parts("subtitles")[0], [])
+    d = edit_subtitles.subtitle_dir(jid, t.parts("subtitles")[1])
     d.mkdir(parents=True)
     (d / "segments.json").write_text('{"language": "en", "segments": []}')
     shown = client.get(f"/api/jobs/{jid}/timeline").json()
@@ -391,28 +391,28 @@ def test_a_run_pays_for_the_subtitle_work_that_is_missing_only(client, signed_in
     jid = edit_job(uid, seconds=600.0, rendered="empty")
     tl = tl_with(jid, subtitles=[sub(100, 160, "standard", "en", ["es"]), sub(200, 230, "accurate", "fr")])
     t = Timeline.from_json(tl)
-    plan = editing.subtitle_plan(jid, t, rates())
+    plan = edit_subtitles.subtitle_plan(jid, t, rates())
     assert plan["micros"] == part_cost("transcribe_standard", 60) + part_cost("translate", 60) + part_cost("transcribe_accurate", 30)
     # the first part is made already, with its Spanish: nothing of it is charged again; a new language is the only cost of that part
-    d = editing.subtitle_dir(jid, t.parts("subtitles")[0])
+    d = edit_subtitles.subtitle_dir(jid, t.parts("subtitles")[0])
     d.mkdir(parents=True)
     (d / "segments.json").write_text('{"language": "en", "segments": []}')
     (d / "segments.es.json").write_text('{"language": "es", "segments": []}')
-    assert editing.subtitle_plan(jid, t, rates())["micros"] == part_cost("transcribe_accurate", 30)
+    assert edit_subtitles.subtitle_plan(jid, t, rates())["micros"] == part_cost("transcribe_accurate", 30)
     t2 = Timeline.from_json(tl_with(jid, subtitles=[sub(100, 160, "standard", "en", ["es", "de"]), sub(200, 230, "accurate", "fr")]))
-    p2 = editing.subtitle_plan(jid, t2, rates())
+    p2 = edit_subtitles.subtitle_plan(jid, t2, rates())
     assert p2["parts"][0]["transcribe"] is False and p2["parts"][0]["translate_run"] == ["de"]
     assert p2["micros"] == part_cost("translate", 60) + part_cost("transcribe_accurate", 30)
     # what the same text says in its own language is not translated into it (a language that was detected)
     detect = Timeline.from_json(tl_with(jid, subtitles=[sub(100, 160, "standard", None, ["es"])]))
-    d2 = editing.subtitle_dir(jid, detect.parts("subtitles")[0])
+    d2 = edit_subtitles.subtitle_dir(jid, detect.parts("subtitles")[0])
     d2.mkdir(parents=True)
     (d2 / "segments.json").write_text('{"language": "es", "segments": []}')
-    assert editing.subtitle_plan(jid, detect, rates())["parts"][0]["translate_run"] == []
+    assert edit_subtitles.subtitle_plan(jid, detect, rates())["parts"][0]["translate_run"] == []
     # the work is charged as it was done: a translation that was not made is not paid for
-    plan = editing.subtitle_plan(None, t2, rates())  # from nothing: both parts, three translations to make
+    plan = edit_subtitles.subtitle_plan(None, t2, rates())  # from nothing: both parts, three translations to make
     assert plan["micros"] == part_cost("transcribe_standard", 60) + 2 * part_cost("translate", 60) + part_cost("transcribe_accurate", 30)
-    assert editing.subtitle_charge(jid, plan, rates()) == part_cost("transcribe_standard", 60) + part_cost("translate", 60)  # the text and the Spanish exist; German, French and the accurate text do not
+    assert edit_subtitles.subtitle_charge(jid, plan, rates()) == part_cost("transcribe_standard", 60) + part_cost("translate", 60)  # the text and the Spanish exist; German, French and the accurate text do not
     # the pinned rates are the job's: the run is held at them
     r = client.post(f"/api/jobs/{jid}/process", json={"timeline": tl}, headers=h)
     assert r.status_code == 200, r.text
@@ -480,13 +480,13 @@ def test_a_first_run_with_subtitles_is_charged_for_what_was_made(client, signed_
     (d / "talk-cleaned.flac").write_bytes(b"audio")
     (d / "talk.srt").write_bytes(b"srt")
     (d / "kept-source.flac").write_bytes(b"fLaC")
-    key = editing.subtitle_key(Timeline.from_json(tl).parts("subtitles")[0])
+    key = edit_subtitles.subtitle_key(Timeline.from_json(tl).parts("subtitles")[0])
     (d / "subs" / key).mkdir(parents=True)
     (d / "subs" / key / "segments.json").write_text('{"language": "en", "segments": []}')
     (d / "subs" / key / "segments.es.json").write_text('{"language": "es", "segments": []}')
     (d / "subs" / key / "asr_chunks").mkdir()
     (d / "subs" / key / "asr_chunks" / "0000.mp3").write_bytes(b"x")
-    editing.store_cues(jid, Timeline.from_json(tl).parts("subtitles")[1], [])
+    edit_subtitles.store_cues(jid, Timeline.from_json(tl).parts("subtitles")[1], [])
     res = {"ok": True, "outputs": [{"file": "talk-cleaned.flac", "kind": "audio"}, {"file": "talk.srt", "kind": "captions", "lang": "en"}],
            "editor": {"billed": {"light": {"seconds": 11}}, "resolved": {}, "rendered": Timeline.from_json(tl, seconds=60).audio().to_json(),
                       "facts": {"n": n, "channels": 1, "plan": [0], "spans": {"0": [[0, n]]}, "rebuild_mid": False, "reference": False}}}
@@ -548,7 +548,7 @@ def test_peaks_come_from_the_cached_blocks_and_are_kept_per_block(client, signed
     # a block of the plan that has no outline yet when the time runs out is unknown for now, and the answer says so
     for p_ in (folder(jid) / "blocks").glob("*.peaks"):
         p_.unlink()
-    monkeypatch.setattr(editing, "PEAKS_BUDGET_SECONDS", -1.0)
+    monkeypatch.setattr(edit_preview, "PEAKS_BUDGET_SECONDS", -1.0)
     late = client.get(f"/api/jobs/{jid}/peaks/noise")
     assert late.status_code == 404  # (nothing had its outline in the time: nothing to draw yet)
 
@@ -596,7 +596,7 @@ def test_a_new_strength_on_a_browser_part_changes_nothing_in_the_sound_or_the_pr
     t = Timeline.from_json(tl)
     p = params_of(jid)
     p["edit"]["rendered"] = t.audio().to_json()
-    p["edit"]["browser_rendered"] = editing.uploads_fingerprint(jid, t)[0]
+    p["edit"]["browser_rendered"] = edit_subtitles.uploads_fingerprint(jid, t)[0]
     save_params(jid, p)
     assert client.get(f"/api/jobs/{jid}/timeline").json()["timeline"]["layers"]["noise"] == [{"start": 100.0, "end": 130.0, "browser": True, "strength_db": 12.0}]
     q = quote(client, h, jid, tl).json()
@@ -759,5 +759,5 @@ def test_audio_that_was_being_put_in_place_when_the_process_stopped_is_put_back_
     (d / "talk-cleaned.flac").write_bytes(b"NEW AUDIO")  # the swap had happened, the commit had not
     (d / "talk-cleaned.flac.bak").write_bytes(b"OLD AUDIO")
     (d / "talk-cleaned.flac.run").write_bytes(b"x")
-    editing.clear_scratch(d)
+    edit_store.clear_scratch(d)
     assert (d / "talk-cleaned.flac").read_bytes() == b"OLD AUDIO" and not {n for n in files_of(jid) if n.endswith((".bak", ".run"))}

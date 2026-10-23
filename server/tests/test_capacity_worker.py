@@ -196,7 +196,7 @@ def test_the_ceiling_still_stops_a_stage_that_never_finishes(monkeypatch):
 
 def test_a_job_that_transcribes_and_cleans_decodes_the_file_once(tmp_path, monkeypatch):
     """The 48 kHz decode made for cleaning also gives the recogniser its 16 kHz audio (no second decode of the file)."""
-    from acw import editing, jobs
+    from acw import edit_subtitles, editing, jobs
     from acw.worker import editrun, runner
     from acw_common import pipeline
     from acw_common.timeline import Timeline
@@ -219,7 +219,7 @@ def test_a_job_that_transcribes_and_cleans_decodes_the_file_once(tmp_path, monke
     raw, _rest = editing.timeline_from_options("denoise_transcribe", "standard", "premium", options, 1.0)
     spec = {"kind": "denoise_transcribe", "transcribe_tier": "premium", "options": {}, "output_stem": "t", "input": "t.wav",
             "max_seconds": 600, "models_dir": str(tmp_path / "models"),
-            "editor": {"timeline": raw, "source_id": "s", "subtitles": editing.subtitle_spec(Timeline.from_json(raw, seconds=1.0))}}
+            "editor": {"timeline": raw, "source_id": "s", "subtitles": edit_subtitles.subtitle_spec(Timeline.from_json(raw, seconds=1.0))}}
     with pytest.raises(Stop):
         runner.stage_main(tmp_path, spec)
     assert calls == ["decode 48 kHz", "to 16 kHz", "transcribe"]

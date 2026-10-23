@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from .. import auth, db, editing, jobs, keycaps, stretch, webhooks
+from .. import auth, db, edit_preview, edit_store, edit_subtitles, editing, jobs, keycaps, stretch, webhooks
 from ..billing import ledger
 from ..config import get_settings
 from ..security import client_ip, client_net, enforce, uploads
@@ -296,11 +296,11 @@ def _browser_context(job_id: str, kind: str, start: float, end: float, principal
     job, params = editing.job_for_uploads(principal.user_id, job_id, principal.api_key_id)
     if not end > start:
         raise jobs.JobError("end must be after start.", 400)
-    tl, part = editing.upload_target(job, params, kind, start, end)
+    tl, part = edit_subtitles.upload_target(job, params, kind, start, end)
     ctx = {"job": job, "params": params, "part": part, "timeline": tl}
     if kind == "noise":
-        ctx["samples"] = editing.noise_expected(job, params, part)
-        ctx["channels"] = editing.job_channels(job, params)
+        ctx["samples"] = edit_subtitles.noise_expected(job, params, part)
+        ctx["channels"] = edit_subtitles.job_channels(job, params)
         ctx["max_bytes"] = min(get_settings().max_upload_bytes, ctx["samples"] * 4 * 2 + 1024 * 1024)
     return ctx
 
@@ -325,7 +325,7 @@ def _finish_noise(ctx: dict, tmp, user_id: str) -> None:
     with open(tmp, "rb") as f:
         head = f.read(64)
     try:
-        rate, channels, samples = editing.flac_header(head)
+        rate, channels, samples = edit_subtitles.flac_header(head)
     except ValueError as e:
         raise jobs.JobError(str(e), 400)
     if rate != 48000:
@@ -334,7 +334,7 @@ def _finish_noise(ctx: dict, tmp, user_id: str) -> None:
         raise jobs.JobError(f"The FLAC must have the job's audio channels ({ctx['channels'] or '1 or 2'}), this one has {channels}.", 400)
     if samples != ctx["samples"]:
         raise jobs.JobError(f"The FLAC must hold exactly the part: {ctx['samples']} samples at 48 kHz (this one has {samples}).", 400)
-    final = editing.browser_dir(ctx["job"]["id"]) / editing.noise_name(ctx["part"].start, ctx["part"].end)
+    final = edit_subtitles.browser_dir(ctx["job"]["id"]) / edit_subtitles.noise_name(ctx["part"].start, ctx["part"].end)
     os.replace(tmp, final)
     _browser_stored(ctx, user_id)
 
@@ -354,9 +354,9 @@ async def upload_browser_noise(
         _precheck_noise(ctx, request.headers.get("content-length"))
     except jobs.JobError as e:
         return _error(e)
-    d = editing.browser_dir(job_id)
+    d = edit_subtitles.browser_dir(job_id)
     data_dir = get_settings().data_dir
-    tmp = d / f"{editing.noise_name(ctx['part'].start, ctx['part'].end)}.{os.urandom(4).hex()}.tmp"
+    tmp = d / f"{edit_subtitles.noise_name(ctx['part'].start, ctx['part'].end)}.{os.urandom(4).hex()}.tmp"
     user_throttle = uploads.for_user(principal.user_id)
     received = 0
     pending: list[bytes] = []
@@ -405,7 +405,7 @@ def _store_cues(ctx: dict, raw: bytes, user_id: str) -> None:
         cues = subtitles.check_cues(json.loads(raw.decode("utf-8")), ctx["part"].start, ctx["part"].end)
     except (ValueError, UnicodeDecodeError) as e:
         raise jobs.JobError(str(e) if not isinstance(e, UnicodeDecodeError) else "The body must be JSON.", 400)
-    editing.store_cues(ctx["job"]["id"], ctx["part"], cues)
+    edit_subtitles.store_cues(ctx["job"]["id"], ctx["part"], cues)
     _browser_stored(ctx, user_id)
 
 
@@ -558,8 +558,8 @@ def quote(job_id: str, body: QuoteBody, principal: auth.Principal = Depends(auth
     enforce("edit_plan", principal.user_id)
     try:
         job, params = editing.job_for_edit(principal.user_id, job_id, principal.api_key_id)
-        seconds = editing.file_seconds(job, params)
-        tl = editing.parse_for_job(params, body.timeline, seconds) if body.timeline is not None else editing.saved_timeline(job, params, seconds)
+        seconds = edit_store.file_seconds(job, params)
+        tl = editing.parse_for_job(params, body.timeline, seconds) if body.timeline is not None else edit_store.saved_timeline(job, params, seconds)
         q = editing.make_quote(job, params, tl)
     except jobs.JobError as e:
         return _error(e)
@@ -604,7 +604,7 @@ def get_suggestions(job_id: str, principal: auth.Principal = Depends(auth.requir
         editing.job_for_edit(principal.user_id, job_id, principal.api_key_id, need_done=False)
     except jobs.JobError as e:
         return _error(e)
-    return {"suggestions": editing.read_suggestions(job_id)}
+    return {"suggestions": edit_store.read_suggestions(job_id)}
 
 
 @router.post("/{job_id}/suggestions")
@@ -651,7 +651,7 @@ def preview(
                 return _error(jobs.JobError("The recording is not cached.", 404, code=editing.NOT_CACHED))
             data, scale = stretch.cut(d / entry["file"], first, count), float(entry["scale"])
         else:
-            plan = editing.plan_stretch(job, params, layer, first, count)
+            plan = edit_preview.plan_stretch(job, params, layer, first, count)
             if not any(plan["channels"]) and plan["missing"]:
                 return _error(jobs.JobError(f"None of this stretch is cached for {layer}.", 404, code=editing.NOT_CACHED,
                                             extra={"missing": [[round(a / 48000, 3), round(b / 48000, 3)] for a, b in plan["missing"]]}))
@@ -686,7 +686,7 @@ def peaks(job_id: str, layer: str, principal: auth.Principal = Depends(auth.requ
         return _error(jobs.JobError("Nothing is cached for this job yet.", 404, code=editing.NOT_CACHED))
     enforce("kept_cut", principal.user_id)
     try:
-        out = editing.peaks_of(job, params, layer)
+        out = edit_preview.peaks_of(job, params, layer)
     except stretch.Busy:
         raise HTTPException(status_code=503, detail="Busy right now, please try again in a moment.", headers={"Retry-After": "2"})
     except stretch.Failed:

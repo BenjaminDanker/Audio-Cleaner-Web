@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from acw import db, editing, jobs
+from acw import db, edit_preview, edit_prices, edit_store, editing, jobs
 from acw.billing import ledger
 from acw_common import blocks, editor
 from acw_common.ffmpeg import FFmpeg
@@ -80,7 +80,7 @@ def render_like_the_server(job_id: str, tl: dict, cache=None, *, models: bool = 
     f = ff()
     src = folder(job_id) / "input.wav"
     x = f.decode(src, f.probe(src), SR, 1, SECONDS + 5)
-    inputs = editor.Inputs(x, editing.source_id({"id": job_id, "root_job_id": None}))
+    inputs = editor.Inputs(x, edit_store.source_id({"id": job_id, "root_job_id": None}))
     runner = editor.Runner(HOME / "bin/libdf.so", MODELS / "DeepFilterNet3_onnx.tar.gz", MODELS / "dpdfnet" / dpdfnet.MODEL_FILE, MODELS / "sidon") if models else None
     return editor.render(Timeline.from_json(tl, seconds=len(x) / SR), inputs, cache if cache is not None else blocks.MemoryCache(), runner)
 
@@ -101,8 +101,8 @@ def test_a_job_made_with_a_timeline_only_processes_and_charges_its_parts(client,
     assert row(jid)["est_cost_micros"] == est.json()["estCostMicros"] > 0
     assert _run_worker_once("done") == jid
     done = row(jid)
-    rates = editing.step_rates()
-    want = editing.step_micros(rates["light"], 3, 0.27 / 0.116) + editing.step_micros(rates["leveling"], 3, 1.28 / 0.013)
+    rates = edit_prices.step_rates()
+    want = edit_prices.step_micros(rates["light"], 3, 0.27 / 0.116) + edit_prices.step_micros(rates["leveling"], 3, 1.28 / 0.013)
     assert done["cost_micros"] == want == est.json()["estCostMicros"]
     assert [-r["amount_micros"] for r in usage_lines(uid)] == [want]
     assert {"input.wav", "talk-cleaned.flac", "kept-source.flac", "blocks", "suggestions.json"} <= files_of(jid)
@@ -157,7 +157,7 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     assert shown["cached"]["light"] == [[0.0, round(len(x) / SR, 3)]] and shown["suggestions"] is not None
     assert shown["timeline"]["layers"]["noise"] == [{"start": 0.0, "end": round(len(x) / SR, 3), "strength_db": 100.0, "remover": "light"}]
     # the editor's cache is the one the first run filled: rendering the job's timeline needs no model (no runner is given)
-    cache = blocks.FlacCache(editing.blocks_dir(jid), f)
+    cache = blocks.FlacCache(edit_store.blocks_dir(jid), f)
     again = render_like_the_server(jid, shown["timeline"], cache, models=False)  # (no Runner: a missing block would raise)
     assert np.max(np.abs(again[:, 0] - decode(folder(jid) / "talk-cleaned.flac")[:len(again), 0])) < 1e-4
     # the result files hold this timeline: asking for it again changes nothing
@@ -185,7 +185,7 @@ def test_a_job_made_as_always_fills_the_cache_and_is_edited_from_it(client, sign
     q = client.post(f"/api/jobs/{jid}/quote", json={"timeline": mixed}, headers=h).json()
     secs = len(x) / SR - 5
     assert q["steps"]["heavy"]["seconds"] == math.ceil(secs - 1e-9) and "light" not in q["steps"]
-    want = editing.step_micros(editing.step_rates()["heavy"], math.ceil(secs - 1e-9), 2.9 / 0.386)
+    want = edit_prices.step_micros(edit_prices.step_rates()["heavy"], math.ceil(secs - 1e-9), 2.9 / 0.386)
     assert q["estCostMicros"] == want > 0 and q["lines"][0]["label"] == "Denoising"
     r = client.post(f"/api/jobs/{jid}/process", json={"timeline": mixed, "maxCostMicros": want}, headers=h)
     assert r.status_code == 200, r.text
@@ -269,9 +269,9 @@ def test_preview_stretches_line_up_sample_for_sample_for_every_layer_and_say_wha
     def fill(jid, layer, truth, skip=(), remover="light", loud=None):
         """Put the blocks of the layer's whole-file plan in the job's FLAC cache: block = the truth of its channel (not the ones in `skip`)."""
         job, p = row(jid), params_of(jid)
-        tl = editing.saved_timeline(job, p, n / SR)
-        plan = editor.plan(editing.for_planning(editing.probe_timeline(tl, layer, remover), None)[0], editing.inputs_for(job, p), None)
-        cache = blocks.FlacCache(editing.blocks_dir(jid), f)
+        tl = edit_store.saved_timeline(job, p, n / SR)
+        plan = editor.plan(editing.for_planning(edit_preview.probe_timeline(tl, layer, remover), None)[0], edit_store.inputs_for(job, p), None)
+        cache = blocks.FlacCache(edit_store.blocks_dir(jid), f)
         steps = [s for s in ("echo", "light", "heavy", "rebuild") if any(t.step == s for t in plan.tasks)]
         put = 0
         for t in plan.tasks:

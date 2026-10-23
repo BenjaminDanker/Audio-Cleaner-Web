@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from . import alerts, auth, db, editing, httpstack, jobs, retention, webhooks
+from . import alerts, auth, db, edit_subtitles, httpstack, jobs, retention, webhooks
 from . import health as health_checks
 from .api import auth_routes, billing_routes, contact_routes, downloads_routes, jobs_routes, keys_routes
 from . import translate
@@ -36,7 +36,7 @@ def _needs_transcription(job: dict) -> bool:
     """The job's cloud work starts with extra-accurate transcription: some subtitle part's speech chunks wait for it (every job makes its
     subtitles part by part)."""
     params = json.loads(job["params_json"])
-    return editing.has_subtitle_layer(params) and editing.subtitle_cloud_phase(job["id"], params) == "asr"
+    return edit_subtitles.has_subtitle_layer(params) and edit_subtitles.subtitle_cloud_phase(job["id"], params) == "asr"
 
 
 def _claim_cloud_jobs(limit: int, phase: str | None = None) -> list[dict]:
@@ -92,14 +92,14 @@ async def _run_subtitle_parts(job: dict, params: dict) -> None:
     """The cloud work of a job whose subtitles are made part by part: the Accurate parts' transcription (one phase), then the
     translations of every part (the other phase), each into the part's own folder (editing.subtitle_cloud_work). A translation that can't
     be made is left out, said in the notice and not charged."""
-    work = await asyncio.to_thread(editing.subtitle_cloud_work, job["id"], params)
-    base = jobs.job_dir(job["id"]) / editing.SUBS
+    work = await asyncio.to_thread(edit_subtitles.subtitle_cloud_work, job["id"], params)
+    base = jobs.job_dir(job["id"]) / edit_subtitles.SUBS
     if work["asr"]:
         for e in work["asr"]:
             d = base / e["key"]
             await openai_asr.run_for_job(d, e["language"], (e["end"] - e["start"]) + 30)
             await asyncio.to_thread(_clip_part, d, e)
-        again = await asyncio.to_thread(editing.subtitle_cloud_work, job["id"], params)
+        again = await asyncio.to_thread(edit_subtitles.subtitle_cloud_work, job["id"], params)
         if again["translate"]:
             await asyncio.to_thread(_set_stage, job["id"], "Waiting to translate")
             return
@@ -129,7 +129,7 @@ async def _run_cloud_job(job: dict) -> None:
     beat = asyncio.create_task(heartbeat())
     try:
         params = json.loads(job["params_json"])
-        if not editing.has_subtitle_layer(params):
+        if not edit_subtitles.has_subtitle_layer(params):
             raise ValueError("a cloud job without subtitle parts")  # (every job makes its subtitles part by part)
         await _run_subtitle_parts(job, params)
     except Exception:  # noqa: BLE001

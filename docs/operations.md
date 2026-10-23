@@ -636,7 +636,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 
 | Where | What grows | Bound |
 |---|---|---|
-| `data/jobs/` | uploads, the editor's block cache and recording copy, results | all of a job's files go together, 2 hours (`ACW_JOB_RETENTION_MINUTES`) after its last edit (finishing a run, a timeline save, a quote, a process, an export) and never later than 6 hours (`ACW_JOB_MAX_RETENTION_MINUTES`) after the upload arrived (`jobs.expiry`; `jobs.sweep`, from the web process every 30 s and from each worker every 60 s, so the deletion is accurate to about a minute), or at once with "Delete now"; the files of a failed or canceled job go at once and leftover folders after an hour; a deleted account's files at once. Sizes: "What a job keeps" below. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve (which counts the block cache, `editing.cache_bytes`) watch it |
+| `data/jobs/` | uploads, the editor's block cache and recording copy, results | all of a job's files go together, 2 hours (`ACW_JOB_RETENTION_MINUTES`) after its last edit (finishing a run, a timeline save, a quote, a process, an export) and never later than 6 hours (`ACW_JOB_MAX_RETENTION_MINUTES`) after the upload arrived (`jobs.expiry`; `jobs.sweep`, from the web process every 30 s and from each worker every 60 s, so the deletion is accurate to about a minute), or at once with "Delete now"; the files of a failed or canceled job go at once and leftover folders after an hour; a deleted account's files at once. Sizes: "What a job keeps" below. Not part of the `data_large` check (a day of work legitimately holds many GB); the `disk_low` alert (under 15 GB free) and the upload reserve (which counts the block cache, `edit_store.cache_bytes`) watch it |
 | `data/acw.sqlite3` and `-wal` | the database, see above | the table above; the log file stays ~4 MB (SQLite checkpoints it by itself) |
 | `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
 | `data/legal/` | one small page (and its hash) per version of the Terms and the Privacy Policy, plus `current.json`; never deleted | a few tens of KB per version change |
@@ -654,7 +654,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 **What a job keeps** (`data/jobs/<id>/`, until its deadline: 2 hours after its last edit, at the latest 6 hours after the upload;
 `server/acw/editing.py`): the upload as it was sent (a FLAC of 1 h of mono speech: about 0.3 GB), the results (a FLAC of the same: 0.3 GB),
 the editor's copy of the recording (24-bit FLAC, `kept.save`: about 0.36 GB per hour and channel, 0.40 for the noisiest) and its block cache
-(what each step made, 24-bit FLAC, about the same per step that ran: `editing.cache_bytes` reserves it at creation). At the example load of
+(what each step made, 24-bit FLAC, about the same per step that ran: `edit_store.cache_bytes` reserves it at creation). At the example load of
 1000 file jobs a day, 2 hours means about 83 jobs are on disk at any time instead of 1000. A preview stretch is cut on request (about 90 ms of
 one core: a process of a few ms and FFmpeg seeking by itself, at most 4 at once, 120 a burst then 2 a second per account, nothing stored).
 Setting `ACW_JOB_RETENTION_MINUTES` higher keeps all of this longer, lower shortens it (the Privacy Policy and the Terms say 2 hours after the last
@@ -665,13 +665,13 @@ grows with every edit that makes blocks):
 
 | File | What | Size, per hour of audio and channel |
 |---|---|---|
-| `kept-source.flac` | the recording as 24-bit FLAC, for the preview stretches (all channels; a channel that repeats the other costs almost nothing in FLAC) | 0.20 GB measured on the noisy test sample (0.32 to 0.40 GB for the recordings of the kept-copy measurements above); `editing.SOURCE_PER_HOUR_PER_CHANNEL` promises 0.40 GB, like the kept copies |
-| `blocks/<sha1>.flac` | the block cache: one 24-bit FLAC per block of a model step, `.scale` next to a block that was louder than a file holds | **0.31 GB measured per cached step** (a 30 s block of noise-removed speech is 2.62 MB; one of the recording itself 1.66 MB); light remover, heavy remover, echo removal and Voice rebuild are each their own cache; 0.35 GB promised (`editing.BLOCKS_PER_HOUR_PER_CHANNEL`) |
+| `kept-source.flac` | the recording as 24-bit FLAC, for the preview stretches (all channels; a channel that repeats the other costs almost nothing in FLAC) | 0.20 GB measured on the noisy test sample (0.32 to 0.40 GB for the recordings of the kept-copy measurements above); `edit_store.SOURCE_PER_HOUR_PER_CHANNEL` promises 0.40 GB, like the kept copies |
+| `blocks/<sha1>.flac` | the block cache: one 24-bit FLAC per block of a model step, `.scale` next to a block that was louder than a file holds | **0.31 GB measured per cached step** (a 30 s block of noise-removed speech is 2.62 MB; one of the recording itself 1.66 MB); light remover, heavy remover, echo removal and Voice rebuild are each their own cache; 0.35 GB promised (`edit_store.BLOCKS_PER_HOUR_PER_CHANNEL`) |
 | `suggestions.json` | the suggestions of the job | tens of kB |
 
 A whole-file first run holds the recording and one cached step: about 0.5 GB an hour and channel measured (0.2 + 0.31), 0.75 GB promised in the upload reserve
-(`jobs.create_job`: `editing.cache_bytes`); an edit run promises its scratch and the blocks it will make
-(`editing.growth_bytes`). Everything goes with the job. The suggestions cost about 0.22 s per second of audio in the first run for recordings up to
+(`jobs.create_job`: `edit_store.cache_bytes`); an edit run promises its scratch and the blocks it will make
+(`edit_store.growth_bytes`). Everything goes with the job. The suggestions cost about 0.22 s per second of audio in the first run for recordings up to
 `ACW_SUGGEST_MAX_MINUTES` (60; 0 = only on request), measured on the noisy sample at two threads.
 
 The monitor watches two sizes every 2 minutes and mails when `data/` without `jobs/` is over 5 GB (`data_large`) or the backup

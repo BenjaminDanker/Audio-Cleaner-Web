@@ -101,7 +101,7 @@ FLAC in the job's `blocks/` folder (`blocks.FlacCache`; a block read back is wit
 
 - **Planning without audio.** The web process never decodes an upload. What planning needs about the recording (its length, channels, which
   channels are cleaned, the stretches the noise removers run on, whether there is a second track: the *facts*) is measured by the sandboxed
-  runner and kept in the job's record; `editing.inputs_for` stands them in for the samples of `editor.Inputs`, so `editor.plan` (the cache misses),
+  runner and kept in the job's record; `edit_store.inputs_for` stands them in for the samples of `editor.Inputs`, so `editor.plan` (the cache misses),
   `editor.billable` and the price are computed in the web process, and a stretch of the cache is cut by confined helpers (below).
 - **Runs.** A job's first run renders its timeline (whole-file choices are the timeline they stand for) through `editor.render` from an
   empty cache, so only its parts are made and charged; it fills the cache, writes the recording as `kept-source.flac`, reports the facts and

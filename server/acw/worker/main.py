@@ -22,7 +22,7 @@ from pathlib import Path
 
 import acw_common
 
-from .. import automatic, broker, db, editing, hostload, jobs, keycaps, metrics
+from .. import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, hostload, jobs, keycaps, metrics
 from ..billing import ledger, pricing
 from ..config import get_settings
 
@@ -499,17 +499,17 @@ def _complete(job: dict, d: Path, res: dict) -> None:
         return
     report = params.pop("editor_reported", None) or editing.sanitize_report(res.get("editor"), d, duration)
     keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}"}
-            | {editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS, editing.BROWSER, editing.SUBS})
+            | {edit_store.BLOCKS, f"{edit_store.SOURCE}.flac", edit_store.SUGGESTIONS, edit_subtitles.BROWSER, edit_subtitles.SUBS})
     for p in d.iterdir():
         if p.name not in keep:
             _remove(d, p)
-    editing.clear_chunks(job["id"])
+    edit_subtitles.clear_chunks(job["id"])
     first_run = bool((params.get("edit") or {}).get("first_run"))  # a job made with a timeline (all but a conversion): charged for what ran
     if editing.editable_kind(job):
         params = editing.absorb(job, params, report)
         e = params["edit"]
         if report.get("suggestions"):
-            editing.write_suggestions(job["id"], report["suggestions"])
+            edit_store.write_suggestions(job["id"], report["suggestions"])
         if report.get("suggestions") or report.get("has_suggestions"):
             e["suggestions"] = True
     # Charging and finishing are one step: a job is never "done" without its charge, and a failure
@@ -562,8 +562,8 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
     outputs = _verified_outputs(d, res)
     # The audio of the run is written under a temporary name next to the old (editing.STAGED); it takes the old one's place only when the
     # run is complete, so the files on disk always are what the stored record says.
-    staged = {o["file"]: editing.final_name(o["file"]) for o in outputs if editing.final_name(o["file"]) != o["file"]}
-    outputs = [{**o, "file": editing.final_name(o["file"])} for o in outputs]
+    staged = {o["file"]: edit_store.final_name(o["file"]) for o in outputs if edit_store.final_name(o["file"]) != o["file"]}
+    outputs = [{**o, "file": edit_store.final_name(o["file"])} for o in outputs]
     old = json.loads(fresh["outputs_json"] or "[]")
     audio_changed = run["op"] != "suggest" and run.get("audio", True)  # (a run that only changes the subtitles leaves the sound alone)
     text_changed = run["op"] != "suggest" and run.get("subs") is not None  # the caption files are put together again
@@ -578,28 +578,28 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
                      or o["kind"] == "video"), *keep_old]  # (a video made on our side is made again: editrun.stage_edit)
     else:
         outputs = old
-    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", editing.BLOCKS, f"{editing.SOURCE}.flac", editing.SUGGESTIONS,
-                                            editing.BROWSER, editing.SUBS})
+    keep = ({o["file"] for o in outputs} | {f"input{params['input_ext']}", edit_store.BLOCKS, f"{edit_store.SOURCE}.flac", edit_store.SUGGESTIONS,
+                                            edit_subtitles.BROWSER, edit_subtitles.SUBS})
     # (until the run is committed the old results and the new audio's temporary names stay where they are)
     for p in d.iterdir():
         if p.name not in keep | set(staged) | {o["file"] for o in json.loads(fresh["outputs_json"] or "[]")}:
             _remove(d, p)
-    editing.clear_chunks(job["id"])
+    edit_subtitles.clear_chunks(job["id"])
     params = editing.absorb(job, params, report, op=run["op"], processed=run["timeline"])
     if report.get("suggestions"):
-        editing.write_suggestions(job["id"], report["suggestions"])
+        edit_store.write_suggestions(job["id"], report["suggestions"])
         params["edit"]["suggestions"] = True
     if report.get("rendered") is None and audio_changed:
         params["edit"].pop("rendered", None)  # (should not happen: the runner always says what it rendered)
     params.pop("run", None)
     est = int(job["est_cost_micros"] or 0)
     billed = report.get("billed")
-    subs_charge = editing.subtitle_charge(job["id"], run["subs"], run["subtitle_rates"]) if run.get("subs") else 0  # (what was made, translations that failed excepted)
+    subs_charge = edit_subtitles.subtitle_charge(job["id"], run["subs"], run["subtitle_rates"]) if run.get("subs") else 0  # (what was made, translations that failed excepted)
     video_charge = int(run.get("convert_micros") or 0) if any(o["kind"] == "video" for o in outputs) else 0  # (its picture made again)
-    charge = est if billed is None or run["op"] == "suggest" else min(est, editing.price(billed, run["rates"])[0] + subs_charge + video_charge)
+    charge = est if billed is None or run["op"] == "suggest" else min(est, edit_prices.price(billed, run["rates"])[0] + subs_charge + video_charge)
     if run["op"] == "suggest":
         charge = 0
-    swapped = editing.swap_in(d, staged)
+    swapped = edit_store.swap_in(d, staged)
     try:
         with db.tx() as c:
             uploaded = c.execute("SELECT COALESCE(uploaded_at, created_at) AS t, COALESCE(cost_micros, 0) AS spent FROM jobs WHERE id = ?", (job["id"],)).fetchone()
@@ -610,7 +610,7 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
             ).rowcount
             if not n:
                 log.warning("job %s is no longer running; not completing it", job["id"])
-                editing.undo_swap(swapped)
+                edit_store.undo_swap(swapped)
                 return
             if job["hold_id"]:
                 asked = max([0.0, *(run.get("asked") or {}).values()])
@@ -622,9 +622,9 @@ def _complete_edit(job: dict, d: Path, res: dict) -> None:
                 charged = 0
             c.execute("UPDATE jobs SET cost_micros = ?, est_cost_micros = ? WHERE id = ?", (uploaded["spent"] + charged, charged, job["id"]))
     except BaseException:
-        editing.undo_swap(swapped)  # (the old audio is back: the record, which did not change, and the files agree)
+        edit_store.undo_swap(swapped)  # (the old audio is back: the record, which did not change, and the files agree)
         raise
-    editing.commit_swap(swapped)
+    edit_store.commit_swap(swapped)
     for p in d.iterdir():  # (and now the old results that the new ones replaced, under other names, can go)
         if p.name not in keep:
             _remove(d, p)
@@ -736,7 +736,7 @@ def process(job: dict, extra: dict) -> None:
             # waits in the job's record for the finishing step (which may run after the cloud stage).
             rep = editing.sanitize_report(res["editor"], d, duration)
             if rep.get("suggestions"):
-                editing.write_suggestions(job["id"], rep.pop("suggestions"))
+                edit_store.write_suggestions(job["id"], rep.pop("suggestions"))
                 rep["has_suggestions"] = True
             jobs.update_params(job["id"], editor_reported=rep)
         if res.get("needs_cloud_asr"):

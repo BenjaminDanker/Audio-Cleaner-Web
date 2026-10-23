@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from acw import db, editing, jobs
+from acw import db, edit_prices, editing, jobs
 from acw.billing import ledger, pricing
 from acw.worker import main as worker_main
 from acw_common import editor
@@ -15,7 +15,7 @@ SECONDS = 600
 
 
 def step(name, seconds=SECONDS, rates=None):
-    return editing.step_micros((rates or editing.step_rates())[name], math.ceil(seconds), editor.STEP_COSTS[name].fixed_equivalent_seconds)
+    return edit_prices.step_micros((rates or edit_prices.step_rates())[name], math.ceil(seconds), editor.STEP_COSTS[name].fixed_equivalent_seconds)
 
 
 def body(**options):
@@ -36,7 +36,7 @@ def params_of(jid):
 def test_the_price_list_has_the_row_and_the_editor_uses_the_same_constant(client):
     row = next(r for r in client.get("/api/billing/pricing").json()["rates"] if r["product"] == "echo")
     assert row == {"product": "echo", "tier": "standard", "label": "Echo removal", "usdPerMinute": 0.0026, "usdPerHour": 0.156, "available": True}
-    assert pricing.rate("echo", "standard").micros_per_minute == 2_600 == editing.step_rates()["echo"]
+    assert pricing.rate("echo", "standard").micros_per_minute == 2_600 == edit_prices.step_rates()["echo"]
     assert not hasattr(editing, "ECHO_MICROS_PER_MINUTE")
 
 

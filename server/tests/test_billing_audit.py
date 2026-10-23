@@ -398,7 +398,7 @@ def test_a_job_that_is_no_longer_running_is_not_charged_again():
 
 
 def test_job_prices_are_fixed_at_creation(monkeypatch):
-    from acw import editing
+    from acw import edit_prices
     from acw.worker import main as W
 
     from .job_support import standard
@@ -410,7 +410,7 @@ def test_job_prices_are_fixed_at_creation(monkeypatch):
     assert pinned["light"] == pinned["heavy"] == 9_000 and pinned["leveling"] == 1_000
     monkeypatch.setitem(pricing.RATES, ("denoise", "standard"), pricing.Rate("denoise", "standard", "x", 90_000))
     monkeypatch.setitem(pricing.RATES, ("leveling", "standard"), pricing.Rate("leveling", "standard", "x", 50_000))
-    assert editing.step_rates()["light"] == 90_000  # (today's list is dearer)
+    assert edit_prices.step_rates()["light"] == 90_000  # (today's list is dearer)
     W._complete(job, d, {"outputs": [{"file": "out.wav", "kind": "audio"}]})
     assert db.one("SELECT cost_micros FROM jobs WHERE id = ?", (job["id"],))["cost_micros"] == standard(600, rates=pinned)
 

@@ -8,7 +8,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from acw import app as web, db, editing, stretch, translate
+from acw import app as web, db, edit_prices, edit_subtitles, stretch, translate
 from acw.asr import openai_asr
 from acw.billing import ledger
 from acw_common import blocks
@@ -44,7 +44,7 @@ def run_the_web_process(jid):
     after which the job is back in the queue for the worker's last stage."""
     phases = []
     while row(jid)["status"] == "cloud_asr":
-        phases.append(editing.subtitle_cloud_phase(jid, params_of(jid)))
+        phases.append(edit_subtitles.subtitle_cloud_phase(jid, params_of(jid)))
         asyncio.run(web._run_subtitle_parts(row(jid), params_of(jid)))
         assert len(phases) <= 2
     return phases
@@ -138,7 +138,7 @@ def test_an_edit_run_makes_only_the_subtitle_parts_that_changed(client, signed_i
     assert client.put(f"/api/jobs/{jid}/input", content=data, headers=h).status_code == 200
     _run_worker_once("done")
     spent = row(jid)["cost_micros"]
-    assert spent == part_cost("transcribe_standard", 6) + editing.step_micros(editing.step_rates()["light"], 3, 0.27 / 0.116)
+    assert spent == part_cost("transcribe_standard", 6) + edit_prices.step_micros(edit_prices.step_rates()["light"], 3, 0.27 / 0.116)
     audio_before = (folder(jid) / "talk-cleaned.flac").read_bytes()
     # the outline of what the remover made (blocks decoded by the confined helper, kept next to them): the 8 s file is one block
     out = client.get(f"/api/jobs/{jid}/peaks/noise")

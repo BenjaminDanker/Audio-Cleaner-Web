@@ -120,16 +120,16 @@ def test_second_track_removes_the_echo_and_the_scratch_files_are_gone(client, si
     # timeline (echo removal and noise removal on the whole file) needs nothing to be made, and the quote of editing it says so
     import json
 
-    from acw import editing
+    from acw import edit_store, editing
 
     row = dict(db.one("SELECT * FROM jobs WHERE id = ?", (job["id"],)))
     params = json.loads(row["params_json"])
-    seconds = editing.file_seconds(row, params)
-    made_with = editing.saved_timeline(row, params, seconds)
+    seconds = edit_store.file_seconds(row, params)
+    made_with = edit_store.saved_timeline(row, params, seconds)
     assert params["edit"]["facts"]["reference"] is True and "echo" in made_with.to_json()["layers"]
     q = editing.make_quote(row, params, made_with)
     assert q["misses"] == 0 and q["unchanged"] is True
-    softer = editing.saved_timeline(row, params, seconds)
+    softer = edit_store.saved_timeline(row, params, seconds)
     softer.paint("noise", 0.0, softer.seconds, {"strength_db": 24.0, "remover": softer.parts("noise")[0].settings["remover"]})
     softer.erase("leveling", 0.0, softer.seconds)
     q = editing.make_quote(row, params, softer)

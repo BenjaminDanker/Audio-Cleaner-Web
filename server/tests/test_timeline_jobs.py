@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from acw import automatic, broker, db, editing, jobs
+from acw import automatic, broker, db, edit_prices, edit_store, edit_subtitles, editing, jobs
 from acw.billing import ledger
 from acw.worker import main as worker
 
@@ -117,7 +117,7 @@ def test_the_price_of_options_is_the_price_of_their_timeline_each_step_with_its_
     # the same timeline sent as a timeline costs the same
     raw, _ = editing.timeline_from_options("denoise", "standard", None, asked(), 600.0)
     again = editing.parse_timeline(raw, 600.0)
-    assert editing.price_timeline(again, 600.0, editing.step_rates())[0] == micros
+    assert editing.price_timeline(again, 600.0, edit_prices.step_rates())[0] == micros
 
 
 def test_the_estimate_of_options_is_the_estimate_of_the_timeline_sent_instead(client, signed_in, gpu_up):
@@ -145,7 +145,7 @@ def test_creating_a_job_with_options_makes_a_job_with_the_timeline_they_stand_fo
     assert p["edit"] == {"timeline": want, "first_run": True} and p["whole_file"] == {"kind": "denoise", "denoise_tier": "standard", "transcribe_tier": None,
                                                                                       "options": asked(**options)}
     assert (p["transcribe_tier"], p["rates"]) == (None, {})  # (the steps are the timeline's, at the prices pinned now)
-    assert p["edit_rates"] == editing.step_rates() and "subtitle_rates" not in p
+    assert p["edit_rates"] == edit_prices.step_rates() and "subtitle_rates" not in p
     assert row(jid)["est_cost_micros"] == est["estCostMicros"] == held(uid) == step("echo", 600) + step("light", 600) + step("leveling", 600)
     assert db.one("SELECT amount_micros FROM holds WHERE ref_id = ?", (jid,))["amount_micros"] == est["estCostMicros"]
     shown = client.get(f"/api/jobs/{jid}").json()
@@ -203,7 +203,7 @@ def test_the_whole_file_subtitles_part_is_made_again_too(client, signed_in, monk
     jid = start(client, h, kind="denoise_transcribe", seconds=60, transcribe="local", options={"noise": "light", "language": "en"})
     p = params_of(jid)
     assert p["edit"]["timeline"]["layers"]["subtitles"] == [{"start": 0.0, "end": 60.0, "quality": "standard", "language": "en", "translate": []}]
-    assert p["subtitle_rates"] == editing.subtitle_rates() and p["transcribe_tier"] is None
+    assert p["subtitle_rates"] == edit_prices.subtitle_rates() and p["transcribe_tier"] is None
     assert held(uid) == standard(60) + math.ceil(60 * 4_000 / 60)
     take()
     done = client.get(f"/api/jobs/{jid}").json()
@@ -224,7 +224,7 @@ def test_a_transcription_alone_is_a_timeline_of_subtitles(client, signed_in, mon
     p = params_of(jid)
     assert p["edit"]["timeline"] == {"version": 2, "seconds": 600.0, "layers": {"subtitles": [
         {"start": 0.0, "end": 600.0, "quality": "standard", "language": "en", "translate": ["es"]}]}}
-    assert (p["denoise_tier"], p["transcribe_tier"], p["rates"]) == (None, None, {}) and p["subtitle_rates"] == editing.subtitle_rates()
+    assert (p["denoise_tier"], p["transcribe_tier"], p["rates"]) == (None, None, {}) and p["subtitle_rates"] == edit_prices.subtitle_rates()
     assert row(jid)["kind"] == "transcribe" and row(jid)["est_cost_micros"] == est["estCostMicros"] == held(uid)
     shown = client.get(f"/api/jobs/{jid}").json()
     assert shown["edit"]["hasTimeline"] is True and shown["label"] == "Subtitles"
@@ -302,7 +302,7 @@ def test_a_timeline_sent_with_a_transcription_tier_gets_the_subtitles_as_a_part_
     assert p["transcribe_tier"] is None and p["edit"]["timeline"]["layers"]["subtitles"] == [
         {"start": 0.0, "end": 600.0, "quality": "standard", "language": "en", "translate": ["es"]}]
     assert "language" not in p["options"] or p["options"]["language"] is None  # (the part holds them)
-    assert p["subtitle_rates"] == editing.subtitle_rates()
+    assert p["subtitle_rates"] == edit_prices.subtitle_rates()
 
 
 def test_a_transcription_alone_may_be_sent_as_an_empty_timeline_with_a_tier(client, signed_in):
@@ -333,7 +333,7 @@ def test_an_automatic_job_is_priced_and_held_by_the_timeline_it_could_become_and
     assert client.put(f"/api/jobs/{jid}/input", content=bytes(3000), headers=h).status_code == 200
     subs = math.ceil(60 * 4_000 / 60)
     assert r.json()["estCostMicros"] == rebuilt(60) + subs == held(uid) and r.json()["maximum"] is True  # (the dearest it could be)
-    assert params_of(jid)["automatic"]["edit_rates"] == editing.step_rates()  # pinned now
+    assert params_of(jid)["automatic"]["edit_rates"] == edit_prices.step_rates()  # pinned now
     take()
     p = params_of(jid)
     done = client.get(f"/api/jobs/{jid}").json()
@@ -341,7 +341,7 @@ def test_an_automatic_job_is_priced_and_held_by_the_timeline_it_could_become_and
     layers = p["edit"]["timeline"]["layers"]
     assert [x["remover"] for x in layers["noise"]] == ["light"] and layers["subtitles"] == [{"start": 0.0, "end": 60.0, "quality": "standard", "language": "en", "translate": []}]
     assert done["costMicros"] == standard(60) + subs and held(uid) == 0 and "main" in stages.stages
-    assert p["subtitle_rates"] == editing.subtitle_rates()
+    assert p["subtitle_rates"] == edit_prices.subtitle_rates()
 
 
 def test_an_automatic_job_is_decided_at_the_prices_it_was_made_at(client, signed_in, monkeypatch, gpu_up):
@@ -404,7 +404,7 @@ def test_a_quote_of_an_edit_of_a_video_made_on_our_side_adds_the_picture_made_ag
     inner = editing.make_quote(row(jid), params_of(jid), editing.parse_timeline(tl, 600.0))
     assert inner["video"] is True and inner["convertMicros"] == convert
     # an unchanged timeline changes nothing: no video is made
-    same = editing.make_quote(row(jid), params_of(jid), editing.saved_timeline(row(jid), params_of(jid), 600.0))
+    same = editing.make_quote(row(jid), params_of(jid), edit_store.saved_timeline(row(jid), params_of(jid), 600.0))
     assert same["unchanged"] is True and same["video"] is False and same["convertMicros"] == 0
 
 
@@ -476,7 +476,7 @@ def test_the_edit_of_a_job_whose_audio_was_extracted_makes_no_video(client, sign
 
 def with_free_subtitles(client, h, jid):
     """The job's timeline with free subtitles over 100-160 s added (cues sent): nothing to make, no change of the sound."""
-    raw = editing.saved_timeline(row(jid), params_of(jid), 600.0).to_json()
+    raw = edit_store.saved_timeline(row(jid), params_of(jid), 600.0).to_json()
     fill_cache(jid, raw)  # (the sound the result files hold is in the cache: nothing of it is to be made)
     tl = {**raw, "version": 2, "layers": {**raw["layers"], "subtitles": [sub(100, 160, "free", "en")]}}
     assert client.put(f"/api/jobs/{jid}/timeline", json={"timeline": tl}, headers=h).status_code == 200
@@ -734,7 +734,7 @@ def test_the_cloud_loop_fails_a_cloud_job_without_subtitle_parts_and_charges_not
     old_way = {"id": jid, "params_json": json.dumps({"transcribe_tier": "premium", "options": {"translate": ["es"]}})}
     assert appmod._needs_transcription(old_way) is False  # (no whole-file transcription any more: only subtitle parts wait for it)
     (cloud,) = appmod._claim_cloud_jobs(1)
-    assert not editing.has_subtitle_layer(json.loads(cloud["params_json"]))
+    assert not edit_subtitles.has_subtitle_layer(json.loads(cloud["params_json"]))
     asyncio.run(appmod._run_cloud_job(cloud))
     failed = row(jid)
     assert failed["status"] == "failed" and failed["error"] == "Extra accurate transcription failed; you were not charged."
