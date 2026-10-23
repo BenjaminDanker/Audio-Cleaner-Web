@@ -10,6 +10,7 @@ subtitles). Subtitles ("<name>-cleaned.srt" ...) go next to it, or into the vide
 """
 from __future__ import annotations
 
+import dataclasses
 import gc
 import logging
 import os
@@ -29,6 +30,7 @@ import numpy as np
 
 from acw_common import analysis, captions, editor as editor_core, pipeline, reco_model, transcribe
 from acw_common.ffmpeg import AUDIO_FORMATS, FFmpeg, MediaError, ProbeResult, VideoOut
+from acw_common.timeline import Timeline
 
 from . import copies, models, resources
 
@@ -664,23 +666,17 @@ def process(
             notice = None
             from . import editor_job  # (it imports this module)
 
+            # Every run is made one way: from a timeline (the per-part editor's), also one asked for with the whole-file choices of
+            # `options` (they become the timeline they stand for once the recording is measured, below), as on the server.
             tl_run = _timeline_for(timeline, info)
             cache = None  # the job's block cache (copies.py): what a run makes, the next edit starts from
-            sid = copies.source_id_of(copies.fingerprint(src)) if tl_run is not None or keeper is not None else None
-            if keeper is not None and keeper.job is not None and copies.KEEP_BLOCKS:
+            sid = copies.source_id_of(copies.fingerprint(src))
+            if keeper is not None and keeper.job is not None:
                 cache = keeper.job.block_cache(ff)
-            if options.echo_track and tl_run is None:
-                if info.audio_tracks >= 2:
-                    mic = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
-                    if cache is not None:
-                        keeper.blocks(len(mic), True)
-                        _keep_facts(keeper, mic, info)
-                    x = pipeline.remove_echo(ff, src, info, mic, MAX_SECONDS, work_dir=work, cancel=cancel,
-                                             **({"cache": keeper.quiet(cache), "input_id": editor_job.echo_input_id(sid)} if cache is not None else {}))
-                    mic = None
-                else:
-                    notice = "only one audio track, so no speaker echo was removed"
-            echo_used = x is not None
+            echo_wanted = bool(tl_run.layers["echo"] if tl_run is not None else options.echo_track)
+            if echo_wanted and info.audio_tracks < 2:
+                notice = "only one audio track, so no speaker echo was removed"
+            echo_used = False
             segments, language = [], None
             if want_subs:
                 segments, language = _transcribe(
@@ -694,51 +690,37 @@ def process(
                 sub_tmp = work / f"subtitles{_SUBTITLE_SUFFIX[sub_kind]}"
                 sub_tmp.write_text(_subtitle_text(sub_kind, segments, language), encoding="utf-8")
 
-            if x is None:
-                x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
-                if cache is not None:
-                    keeper.blocks(len(x), bool(tl_run is not None and tl_run.layers["echo"] and info.audio_tracks >= 2))
-                    _keep_facts(keeper, x, info)
+            x = pipeline.decode_for_clean(ff, src, info, MAX_SECONDS, work_dir=work)
+            if cache is not None:
+                keeper.blocks(len(x), echo_wanted and info.audio_tracks >= 2)
+                _keep_facts(keeper, x, info)
             report(decode_end)
             used: dict = {}
             voice_dir = resources.voice_model_dir()
-            tl_done, decided = None, {}
-            if tl_run is not None:  # the per-part editor's way: only the parts asked for, from the job's block cache
-                ref = None
-                if tl_run.layers["echo"] and info.audio_tracks >= 2:
-                    ref = ff.decode_to_file(src, info, pipeline.SAMPLE_RATE, 1, MAX_SECONDS, work / "reference.f32", track=1)[:, 0]
-                inputs = editor_core.Inputs(x, sid, reference=ref, reference_id=editor_job.REFERENCE_ID if ref is not None else None)
-                y, tl_done, decided, tl_notice, _ = editor_job.render_timeline(
-                    tl_run, inputs, cache, work=work, threads=threads, progress=report.span(decode_end, clean_end), cancel=cancel,
-                    out=pipeline.output_buffer(x, work))
-                notice = "; ".join(filter(None, [notice, tl_notice]))
-                echo_used = bool(tl_done.layers["echo"])
-                choices = measured = reason = picked = None
-                rebuild = bool(tl_done.layers["rebuild"])
-            else:
-                choices, measured = _decide(x, options, cancel, voice_dir is not None)
+            choices = reason = picked = None
+            rebuild = False
+            if tl_run is None:  # the whole-file choices, decided where they are left automatic, as the timeline they stand for
+                choices, _ = _decide(x, options, cancel, voice_dir is not None)
                 reason = choices.rebuild_reason if choices is not None and options.auto_rebuild and not options.rebuild_voice else None
                 _check_cancel(cancel)
                 rebuild = (options.rebuild_voice and voice_dir is not None) or bool(choices is not None and choices.rebuild)
-                y = pipeline.clean_audio(
-                    x,
-                    resources.libdf_path(),
-                    resources.model_path(),
-                    _clean_options(options, choices, rebuild),
-                    threads=threads,
-                    progress=report.span(decode_end, clean_end),
-                    cancel=cancel,
-                    out=pipeline.output_buffer(x, work),
-                    heavy_model_path=resources.heavy_noise_model_path(),
-                    restore_model_dir=voice_dir,
-                    report=used,
-                    measured=measured,
-                    keep=None if cache is not None else keep_copies(keeper, x, used, echo_used),
-                    **editor_job.cache_args(keeper.quiet(cache) if cache is not None else None, sid, len(x), echo_used),
-                )
-            picked = None
-            if options.strength == AUTO_STRENGTH and "atten_lim_db" in used:
-                picked = next((k for k, db in STRENGTHS.items() if db == used["atten_lim_db"]), None)
+                copts = _clean_options(options, choices, rebuild)
+                if copts.atten_lim_db is None:  # an automatic strength the trained model did not give: the noise figure's
+                    copts = dataclasses.replace(copts, atten_lim_db=_measured_strength(x, cancel))
+                if options.strength == AUTO_STRENGTH and not rebuild:
+                    picked = next((k for k, db in STRENGTHS.items() if db == copts.atten_lim_db), None)
+                tl_run = Timeline.from_clean_options(len(x) / pipeline.SAMPLE_RATE, copts, echo=echo_wanted and info.audio_tracks >= 2)
+            # the per-part editor's way: only the parts asked for, from the job's block cache (a first run fills it)
+            ref = None
+            if tl_run.layers["echo"] and info.audio_tracks >= 2:
+                ref = ff.decode_to_file(src, info, pipeline.SAMPLE_RATE, 1, MAX_SECONDS, work / "reference.f32", track=1)[:, 0]
+            inputs = editor_core.Inputs(x, sid, reference=ref, reference_id=editor_job.REFERENCE_ID if ref is not None else None)
+            y, tl_done, decided, tl_notice, _ = editor_job.render_timeline(
+                tl_run, inputs, keeper.quiet(cache) if cache is not None else None, work=work, threads=threads, progress=report.span(decode_end, clean_end), cancel=cancel,
+                out=pipeline.output_buffer(x, work))
+            notice = "; ".join(filter(None, [notice, tl_notice]))
+            echo_used = bool(tl_done.layers["echo"])
+            rebuild = bool(tl_done.layers["rebuild"])
             if reason and rebuild:
                 from . import labels  # (it imports this module)
 
@@ -751,11 +733,7 @@ def process(
                 notice = "; ".join(filter(None, [notice, "the model that rebuilds the voice is not installed, so it was "
                                                  "cleaned the usual way. Download it in Settings to rebuild voices"]))
             _check_cancel(cancel)
-            if tl_done is not None:
-                made = {**made_with(options, used, rebuild, language, echo_used, picked),
-                        **editor_job.made_from_timeline(tl_done, echo=echo_used)}
-            else:
-                made = made_with(options, used, rebuild, language, echo_used, picked)
+            made = {**made_with(options, used, rebuild, language, echo_used, picked), **editor_job.made_from_timeline(tl_done, echo=echo_used)}
             if keeper is not None:
                 keeper.made(**made)
             kept = _write(ff, src, pipeline.as_output(y), info, options, tmp_out, sub_tmp if embed else None, language,
@@ -771,9 +749,8 @@ def process(
             sidecar = sub_tmp is not None and not embed
             final, sub_final = place_result(dest_dir, out_stem, ext, tmp_out, sub_tmp if sidecar else None, sub_kind)
             if keeper is not None:
-                if keeper.job is not None:
-                    if tl_done is not None:  # the job's latest result stands for this timeline (and the removers it decided)
-                        editor_job.remember(keeper.job, tl_done, decided)
+                if keeper.job is not None:  # the job's latest result stands for this timeline (and the removers it decided)
+                    editor_job.remember(keeper.job, tl_done, decided)
                     keeper.job.add_save([final, *([sub_final] if sub_final else [])], made)
                 if keeper.finish():
                     notice = "; ".join(filter(None, [notice, keeper.lost and f"saved copies for changing this later could not "
@@ -808,7 +785,7 @@ def process(
     kept_here = keeper is not None and keeper.job is not None and bool(keeper.job)
     return JobResult(
         final, info.duration, info.has_video, sub_final, embedded=embed and sub_tmp is not None, language=language,
-        notice=notice, strength=picked, rebuilt=reason if rebuild else None,
+        notice=notice or None, strength=picked, rebuilt=reason if rebuild else None,
         kept_dir=Path(keep_dir) if kept_here else None, made=made,
     )
 
@@ -917,6 +894,13 @@ def _decide(
         return None, kept.get("measured")
     choices = reco_model.choose(rec, rebuild_available=voice_model and options.auto_rebuild and not options.rebuild_voice)
     return choices, kept.get("measured")
+
+
+def _measured_strength(x: np.ndarray, cancel: threading.Event) -> float:
+    """The automatic strength for a recording the trained model gave none for: the one its noise figure calls for (pipeline.automatic_choices,
+    the rule the old whole-file engine used too)."""
+    figure = pipeline.noise_figure_db(x, resources.libdf_path(), resources.model_path(), cancel)
+    return float(pipeline.automatic_choices(figure, analysis.measure_features(x, figure))[1])
 
 
 def _clean_options(options: JobOptions, choices: reco_model.Choices | None, rebuild: bool) -> pipeline.CleanOptions:

@@ -458,25 +458,26 @@ class JobCopies:
 # ---------------------------------------------------------------------------------------------------- written while a job runs
 
 class QuietCache:
-    """The job's block cache as a run that is only cleaning a file sees it: a block that cannot be written (disk full, an encoder that failed)
-    is left out and reported (`on_lost`), never failing the job. The run does not read the blocks back, so nothing else changes."""
+    """The job's block cache as a run sees it that must not fail over it: a block that cannot be written (disk full, an encoder that
+    failed) is reported (`on_lost`) and kept in memory for the rest of this run only (the renderer reads back what it made to put the
+    result together), so the job goes on and the result is whole; the job just doesn't keep that block for later."""
 
     def __init__(self, cache, on_lost) -> None:
         self.cache, self.on_lost = cache, on_lost
-        self._lost: set[str] = set()
+        self._here: dict = {}
 
     def has(self, key: str) -> bool:
-        return key not in self._lost and self.cache.has(key)
+        return key in self._here or self.cache.has(key)
 
     def get(self, key: str):
-        return None if key in self._lost else self.cache.get(key)
+        return self._here[key] if key in self._here else self.cache.get(key)
 
     def put(self, key: str, block) -> None:
         try:
             self.cache.put(key, block)
         except (OSError, RuntimeError) as e:  # a full disk, an encoder that failed: the job itself goes on
             log.warning("could not keep a block: %s", e)
-            self._lost.add(key)
+            self._here[key] = block
             self.on_lost(e)
 
 
