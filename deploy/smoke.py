@@ -93,6 +93,15 @@ def _spa():
     expect(st == 200 and b'<div id="root"' in body, f"status {st}")
 
 
+@check("site: a missing script is a 404, not the app")
+def _missing():
+    # A tab on an old page asks for scripts that a newer publish removed: a real 404 tells it to reload, the app's
+    # index.html (200) would break it quietly (deploy/vps/sites/00-audio-cleaner-snippets.caddy, the acw_spa rewrite).
+    for path in ("/assets/acw-smoke-missing.js", "/dfn/acw-smoke-missing.js"):
+        st, _, _ = fetch(SITE + path, method="HEAD")
+        expect(st == 404, f"{path}: status {st} (expected 404)")
+
+
 @check("www redirects to the site")
 def _www():
     st, h, _ = fetch("https://www.audiocleaner.live/pricing?x=1", follow=False)

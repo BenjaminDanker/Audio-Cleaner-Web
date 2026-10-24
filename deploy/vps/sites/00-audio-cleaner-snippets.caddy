@@ -134,9 +134,13 @@
 		@acw_html not path /assets/* /dfn/*
 		header @acw_html Cache-Control "no-cache"
 		# App routes (/app, /login, ...) get index.html; a missing hashed script or a missing file under assets/ or
-		# dfn/ is a real 404, so a tab on an old page can tell it must reload.
-		@acw_spa not path /assets/* /dfn/*
-		try_files @acw_spa {path} /index.html
+		# dfn/ is a real 404, so a tab on an old page can tell it must reload. (A rewrite, not try_files: try_files
+		# takes no matcher, so it read "@acw_spa" as a file name and sent every missing file to index.html.)
+		@acw_spa {
+			not path /assets/* /dfn/* /.*
+			not file
+		}
+		rewrite @acw_spa /index.html
 		file_server {
 			precompressed zstd gzip
 		}
