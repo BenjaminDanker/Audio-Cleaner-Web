@@ -9,11 +9,12 @@
 # secrets/ (the owner's own tokens and keys: update-signing-key.pem, github-actions-*.token, ...). An allowlist, so
 # a secret that nobody thought about stays with its owner.
 
+# shellcheck disable=SC2034  # (sourced: the variables here are read by move-to-acw.sh and move-back-to-silver.sh)
 MOVE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$MOVE_DIR/../.." && pwd)"
 SVC="${ACW_SERVICE_USER_NAME:-acw}"            # the service account
 STATE_DIR="${ACW_MOVE_STATE_DIR:-/var/lib/acw-move}"
-BACKUP_DIR="${ACW_BACKUP_DIR:-/mnt/mc-storage/audio-cleaner-backups}"
+BACKUP_DIR="${ACW_BACKUP_DIR:-/mnt/mc-storage/audio-cleaner/backups}"
 MARKER=/etc/acw-service-user                    # names the account the services run as (deploy/lib.sh reads it)
 DIR_ITEMS=(app app.prev venv venv-gpu bin models wasm data)
 SHARED_ITEMS=(bin models wasm venv venv-gpu)    # readable by the owner, too: tools, dev runs and the web build use them
