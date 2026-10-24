@@ -8,6 +8,8 @@
 # machine without the service account, ACW_DELEGATE=0 and everything runs directly, as before the split.
 # Overrides: ACW_SERVICE_USER (set it empty to force the single-account behaviour), ACW_DELEGATE=0|1, ACW_RUN.
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=deploy/color.sh
+. "$LIB_DIR/color.sh"
 # deploy/host/move-*.sh leave this file while the folders and units are between two accounts: nothing may deploy then.
 if [ -e "${ACW_MOVE_STATE_DIR:-/var/lib/acw-move}/in-progress" ] && [ -z "${ACW_ALLOW_UNFINISHED_MOVE:-}" ]; then
   echo "a move of the services between accounts is unfinished ($(cat "${ACW_MOVE_STATE_DIR:-/var/lib/acw-move}/in-progress")): run deploy/host/move-to-acw.sh again to finish it, or deploy/host/move-back-to-silver.sh" >&2
@@ -29,6 +31,24 @@ if [ "$ACW_DELEGATE" = 1 ]; then
 else
   H="${ACW_HOME:-$HOME/audio-cleaner}"
 fi
+
+# The website's build needs Node 20 or newer (CI builds with 22; an older one only warns at npm ci and breaks later).
+# Used by publish-web.sh, and by install.sh BEFORE it touches the server, so a deploy never puts new server code live next
+# to a website it then cannot build.
+require_node() {
+  local major version where
+  major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  [ "$major" -ge 20 ] 2>/dev/null && return 0
+  version="$(node --version 2>/dev/null || echo missing)"
+  where="$(command -v node 2>/dev/null || true)"
+  say_fail "Node $version${where:+ ($where)} is too old: the website needs Node 20 or newer (22 like CI)."
+  {
+    echo "  Install Node 22 (docs/operations.md, \"Node.js\"), then run the deploy again:"
+    echo "    curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh   # only adds the repository"
+    echo "    sudo apt-get install -y nodejs     # this installs it (apt-cache policy nodejs shows Candidate 22.x once the repository is there)"
+  } >&2
+  return 1
+}
 
 # Run a command as the service account (directly when this already is that account). Absolute paths only: the
 # working directory is / when delegating.
@@ -117,10 +137,10 @@ check_running() {
     sleep 2
   done
   if [ "$ok" = 1 ]; then
-    echo "all units active, deep health ok"
+    say_ok "all units active, deep health ok"
     return 0
   fi
-  [ -n "$bad" ] && echo "not active after ${ACW_CHECK_SECONDS:-30} s:$bad" >&2
-  echo "health: ${health:-no answer}" >&2
+  [ -n "$bad" ] && say_fail "not active after ${ACW_CHECK_SECONDS:-30} s:$bad"
+  say_fail "health: ${health:-no answer}"
   return 1
 }

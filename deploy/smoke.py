@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import re
 import socket
 import ssl
@@ -29,17 +30,23 @@ REPO = Path(__file__).resolve().parents[1]
 CERT_DAYS = 14  # a certificate closer to expiry than this means Caddy's renewal is stuck
 
 results: list[tuple[bool, str, str]] = []
+checks: list[tuple[str, object]] = []
 
 
 def check(name: str):
+    """Register a check; run_checks() runs them all (importing this file touches nothing, so a test can call one)."""
     def wrap(fn):
-        try:
-            detail = fn() or ""
-            results.append((True, name, detail))
-        except Exception as e:  # noqa: BLE001 - every failure is a finding
-            results.append((False, name, f"{type(e).__name__}: {e}"))
+        checks.append((name, fn))
         return fn
     return wrap
+
+
+def run_checks() -> None:
+    for name, fn in checks:
+        try:
+            results.append((True, name, fn() or ""))
+        except Exception as e:  # noqa: BLE001 - every failure is a finding
+            results.append((False, name, f"{type(e).__name__}: {e}"))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -92,10 +99,15 @@ def _www():
     expect(st == 308 and h.get("Location") == SITE + "/pricing?x=1", f"{st} {h.get('Location')}")
 
 
-@check("free tools' code needs a sign-in")
-def _dfn_gate():
-    st, _, _ = fetch(SITE + "/dfn/df.js", method="HEAD")
-    expect(st in (401, 403), f"status {st} without a session")
+@check("free tools' code is public (served without a sign-in)")
+def _dfn_public():
+    # The free in-browser tools work without an account (Terms, Privacy, web/tests/signedout.mjs), so the glue code they load is
+    # plain static files for everybody (docs/security.md, deploy/vps/sites/*.caddy: /dfn/* has no forward_auth). A sign-in here
+    # would break them for every signed-out visitor. The check also
+    # insists on real JavaScript, not the app's index.html (a missing file served as the page would look like a 200).
+    st, h, body = fetch(SITE + "/dfn/df.js")
+    expect(st == 200, f"/dfn/df.js: status {st} (the free tools need it without a session)")
+    expect("javascript" in h.get("Content-Type", "") and not body.lstrip().startswith(b"<"), f"/dfn/df.js is not JavaScript ({h.get('Content-Type')})")
 
 
 # ---- the API, by process ----------------------------------------------------------------------------------------------
@@ -204,14 +216,36 @@ def _tunnels():
     expect('"process":"live"' in lines["18795"].replace(" ", ""), f"18795 (acw-live): {lines['18795']}")
 
 
+def use_color() -> bool:
+    """Same rule as deploy/color.sh: ACW_COLOR=1|0 (install.sh sets it) wins; otherwise a terminal on stdout and no NO_COLOR."""
+    forced = os.environ.get("ACW_COLOR")
+    if forced in ("0", "1"):
+        return forced == "1" and sys.stdout.isatty()
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR") and os.environ.get("TERM", "dumb") != "dumb"
+
+
+def paint(text: str, code: str, color: bool) -> str:
+    return f"\033[{code}m{text}\033[0m" if color else text
+
+
 def main() -> int:
     quiet = "--quiet" in sys.argv[1:]
+    color = use_color()
+    run_checks()
+    summary = os.environ.get("ACW_SUMMARY")  # deploy/color.sh: the deploy lists every red line again at its end
     for ok, name, detail in results:
         if ok and quiet:
             continue
-        print(f"{'ok  ' if ok else 'FAIL'}  {name}{('  (' + detail + ')') if detail else ''}")
+        line = f"{'ok  ' if ok else 'FAIL'}  {name}{('  (' + detail + ')') if detail else ''}"
+        print(paint(line, "32" if ok else "1;31", color))
+        if not ok and summary:
+            try:
+                with open(summary, "a") as f:
+                    f.write("R\t" + line.split("\n")[0] + "\n")
+            except OSError:
+                pass
     failed = sum(not ok for ok, _, _ in results)
-    print(f"smoke: {len(results) - failed}/{len(results)} ok" + (f", {failed} FAILED" if failed else ""))
+    print(paint(f"smoke: {len(results) - failed}/{len(results)} ok" + (f", {failed} FAILED" if failed else ""), "1;31" if failed else "32", color))
     return 1 if failed else 0
 
 

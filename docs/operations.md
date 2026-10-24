@@ -80,6 +80,8 @@ script refuses another history, so an old checkout can't overwrite newer code):
 ```bash
 cd ~/repos/Audio-Cleaner-Web && git checkout on-prem && git merge --ff-only desktop-merge   # or pull
 deploy/install.sh                      # as the owner: check, stage for acw, back up, copy, restart what changed, verify, publish the site if web/ changed
+                                       # On a terminal the output is coloured (red: fix it or the deploy stopped, yellow: look at it, green:
+                                       # ok; none with NO_COLOR or when piped) and ends with a summary that lists every red and yellow line again.
 python3 deploy/smoke.py               # the live site from outside: pages, headers, API, live, downloads, Stripe and Google
                                        # addresses, the old address, certificates, the models on Hugging Face, the tunnels
                                        # (install.sh runs it at the end; it changes nothing)
@@ -120,6 +122,12 @@ than 20. Ubuntu 24.04's own `nodejs` is 18, so Node comes from NodeSource:
     curl -fsSL https://deb.nodesource.com/setup_22.x -o /tmp/nodesource_setup.sh && sudo bash /tmp/nodesource_setup.sh
     sudo apt-get install -y nodejs        # replaces Ubuntu's nodejs and npm packages
     node --version                        # v22.x
+
+The first command only adds the NodeSource repository; the second is what installs Node 22. If `node --version` still says 18
+after the first one alone, `apt-cache policy nodejs` shows `Installed: 18.x` next to `Candidate: 22.x`: run the second command.
+`install.sh` checks Node before it stages or restarts anything when the website has to be published, so an old Node stops the
+deploy with production untouched. (A user-space Node in `~/.local` would also work, but the PATH has `~/.local/bin` last,
+after `/usr/bin`, so it would have to be put first in `~/.profile`; the apt route needs no PATH changes.)
 
 ## Services (acw's user units, linger on)
 

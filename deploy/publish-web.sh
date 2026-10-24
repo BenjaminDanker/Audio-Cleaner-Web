@@ -20,13 +20,8 @@ if [ -n "$ACW_SERVICE_USER" ] && [ "$(id -un)" = "$ACW_SERVICE_USER" ]; then
   exit 1
 fi
 cd "$REPO/web"
-# The website's libraries need Node 20 or newer (CI builds with 22); an older one only warns at npm ci and breaks later.
-node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-if [ "$node_major" -lt 20 ]; then
-  echo "publish-web.sh: Node $(node --version 2>/dev/null || echo missing) is too old; the website needs Node 20 or newer (22 like CI)." >&2
-  echo "  Install Node 22 (docs/operations.md, \"Node.js\"), then run the deploy again." >&2
-  exit 1
-fi
+# The website's libraries need Node 20 or newer (CI builds with 22; an older one only warns at npm ci and breaks later).
+require_node || exit 1
 npm ci --no-audit --no-fund
 LEGAL_ENV="$(bash "$REPO/deploy/legal-archive.sh")"   # version and archive the Terms and the Privacy Policy; the versions for the build (stdout)
 while IFS='=' read -r name value; do export "$name=$value"; done <<< "$LEGAL_ENV"
@@ -57,7 +52,10 @@ printf '%s\n' "$NEW_LIST" | ssh vps 'set -eu
   fi
   cp /tmp/acw-assets-new .assets-current
   rm -f /tmp/acw-assets-new /tmp/acw-assets-keep'
-ssh vps 'curl -s -o /dev/null -w "%{http_code} " https://audiocleaner.live/ && curl -s https://audiocleaner.live/api/health'
-echo
 # Record which web/ tree is published (install.sh publishes only when it differs); the file is in acw's data folder.
 git -C "$REPO" rev-parse HEAD:web | put_as_acw /dev/stdin "$H/data/web-published" 600 2>/dev/null || true
+live="$(ssh vps 'curl -s -o /dev/null -w "%{http_code} " https://audiocleaner.live/ && curl -s https://audiocleaner.live/api/health' || true)"
+case "$live" in
+  "200 "*'"ok":true'*) say_ok "published; the site answers: $live" ;;
+  *) { say_fail "published, but the site does not answer as expected: ${live:-no answer}"; exit 1; } ;;
+esac

@@ -72,6 +72,22 @@ QUIET=0
 if [ "$PLAN" = 1 ] || [ "$PACKAGES_ONLY" = 1 ]; then QUIET=1; fi
 say() { [ "$QUIET" = 1 ] || echo "$@"; }
 
+# Everything red or yellow (deploy/color.sh) is also written to $ACW_SUMMARY and listed again at the very end, so it cannot scroll
+# past. The server part (acw) writes its own file in the folder staged for it; the owner's run reads it after that part ends.
+SHOW_SUMMARY=1
+if [ "$QUIET" = 1 ]; then ACW_SUMMARY=""; SHOW_SUMMARY=0                    # --plan, --packages-only: nothing to report
+elif [ "$ROLE" = server ] && [ "${ACW_FROM_OWNER:-}" = 1 ]; then ACW_SUMMARY="$REPO/.deploy-summary"; SHOW_SUMMARY=0; : >> "$ACW_SUMMARY"
+else ACW_SUMMARY="$(mktemp)"; fi
+export ACW_SUMMARY
+DRAINING=0
+cleanup() {
+  local rc=$?
+  [ "$DRAINING" = 1 ] && drain_off
+  if [ "$SHOW_SUMMARY" = 1 ]; then acw_print_summary "$ACW_SUMMARY" "$rc"; rm -f "$ACW_SUMMARY"; fi
+  true
+}
+trap cleanup EXIT
+
 # ---- Which commit is this? The owner's checkout and a single-account install ask git; the folder staged for acw has no
 # .git, the owner's run wrote DEPLOY_INFO (commit, branch, subject, web tree) into it.
 HAVE_GIT=0
@@ -116,8 +132,8 @@ if [ "$QUIET" = 0 ]; then
     done
   fi
   if [ "${#problems[@]}" -gt 0 ]; then
-    for p in "${problems[@]}"; do echo "problem: $p" >&2; done
-    if [ "$FORCE" = 1 ]; then echo "continuing because of --force" >&2; else echo "refusing to deploy (--force overrides)" >&2; exit 1; fi
+    for p in "${problems[@]}"; do say_fail "problem: $p"; done
+    if [ "$FORCE" = 1 ]; then say_warn "continuing because of --force"; else say_fail "refusing to deploy (--force overrides)"; exit 1; fi
   fi
 
   # Syntax gate: a file that does not even parse never reaches the running service.
@@ -139,31 +155,44 @@ fi
 # as its version and is archived, and data/legal/current.json (the version the server asks users to accept) is brought up to date, before
 # anything is restarted. A text that is archived already changes nothing. (publish-web.sh does the same for the website's build.)
 legal_versions() {
-  bash "$REPO/deploy/legal-archive.sh" > /dev/null || { echo "refusing to deploy: the Terms / Privacy Policy could not be versioned (above)" >&2; exit 1; }
+  bash "$REPO/deploy/legal-archive.sh" > /dev/null || { say_fail "refusing to deploy: the Terms / Privacy Policy could not be versioned (above)"; exit 1; }
 }
 
 # ---- The parts that need the owner's VPS login key and the owner's checkout: the website and the smoke test (which
 # runs `ssh vps`). Run by the owner (or, with one account, by that account) once everything else went well.
+# Does the website have to be published? "needed" (web/ is committed and differs from what was published last), "dirty"
+# (web/ has uncommitted changes) or "unchanged".
+web_publish_state() {
+  local web_tree published
+  web_tree="$(git -C "$REPO" rev-parse HEAD:web)"
+  published="$(as_acw cat "$H/data/web-published" 2>/dev/null || true)"
+  if [ -n "$(git -C "$REPO" status --porcelain -- web)" ]; then echo dirty
+  elif [ "$web_tree" != "$published" ]; then echo needed
+  else echo unchanged; fi
+}
 vps_parts() {  # vps_parts STATUS -> the status after both
-  local status="$1" web_tree published
-  # ---- 13. Website: publish only when web/ changed since the last publish.
+  local status="$1" state
+  # ---- 13. Website: publish only when web/ changed since the last publish. (Called in a `||` list, so errexit is off in here:
+  # every failure is checked by hand, none may be swallowed.)
   if [ "$status" = 0 ]; then
-    web_tree=$(git -C "$REPO" rev-parse HEAD:web)
-    published="$(as_acw cat "$H/data/web-published" 2>/dev/null || true)"
-    if [ -n "$(git -C "$REPO" status --porcelain -- web)" ]; then
-      echo "web/ has uncommitted changes: not publishing the website (commit first, or run deploy/publish-web.sh)" >&2
-    elif [ "$web_tree" != "$published" ]; then
-      echo "web/ changed since the last publish: publishing the website"
-      bash "$REPO/deploy/publish-web.sh"  # records the published web/ tree itself
-    else
-      echo "website unchanged (already published)"
-    fi
+    state="$(web_publish_state)"
+    case "$state" in
+      dirty) say_warn "web/ has uncommitted changes: the website was NOT published (commit first, or run deploy/publish-web.sh); the live site is older than the server" ;;
+      needed)
+        echo "web/ changed since the last publish: publishing the website"
+        if ! bash "$REPO/deploy/publish-web.sh"; then  # records the published web/ tree itself
+          status=1
+          say_fail "the website was NOT published (above): the live site still runs the old website against the new server. Fix the cause, then run deploy/publish-web.sh"
+        fi ;;
+      *) echo "website unchanged (already published)" ;;
+    esac
   fi
   # ---- 14. Smoke test: what users and the apps reach, from outside (deploy/smoke.py). It changes nothing; a failure here
   # is reported (and fails the deploy's exit status) but rolls nothing back: it can also be Hugging Face or a certificate.
-  if [ "$status" = 0 ] && [ "$RESTART" = 1 ]; then
+  # It runs even when the website could not be published: that is exactly when it is worth seeing.
+  if [ "$1" = 0 ] && [ "$RESTART" = 1 ]; then
     echo "smoke test:"
-    python3 "$REPO/deploy/smoke.py" --quiet || { status=1; echo "the smoke test found problems (above); the deploy itself is in place" >&2; }
+    python3 "$REPO/deploy/smoke.py" --quiet || { status=1; say_fail "the smoke test found problems (above); the deploy itself is in place"; }
   fi
   return "$status"
 }
@@ -171,7 +200,13 @@ vps_parts() {  # vps_parts STATUS -> the status after both
 # ================================================================== the owner's run: hand over to acw
 if [ "$ROLE" = owner ]; then
   as_acw true 2>/dev/null \
-    || { echo "cannot run commands as $ACW_SERVICE_USER without a password (sudo -n -u $ACW_SERVICE_USER true failed): see /etc/sudoers.d/acw, deploy/host/move-to-acw.sh" >&2; exit 1; }
+    || { say_fail "cannot run commands as $ACW_SERVICE_USER without a password (sudo -n -u $ACW_SERVICE_USER true failed): see /etc/sudoers.d/acw, deploy/host/move-to-acw.sh"; exit 1; }
+  # The website is the half of the deploy that can fail after the server is live (it needs Node and the VPS key): check Node now,
+  # before anything is staged or restarted, so a failure leaves production as it was.
+  if [ "$(web_publish_state)" = needed ] && ! require_node; then
+    if [ "$FORCE" = 1 ]; then say_warn "continuing because of --force: the server is deployed, the website will NOT be published"
+    else say_fail "nothing was changed: the website could not be built, and the new server must not go live next to the old website (--force deploys the server alone)"; exit 1; fi
+  fi
   legal_versions
   STAGE="$(stage_for_acw "$COMMIT" deploy server common native)"
   printf 'commit=%s\nbranch=%s\nsubject=%s\n' "$COMMIT" "$BRANCH" "$SUBJECT" | put_as_acw /dev/stdin "$STAGE/DEPLOY_INFO" 644
@@ -183,14 +218,14 @@ if [ "$ROLE" = owner ]; then
   # sudo drops the environment: hand over the few settings that are meant to reach the server part.
   envs=()
   for v in ACW_WORKERS ACW_MEMORY_PERCENT ACW_ARCHIVE_DIR; do [ -n "${!v:-}" ] && envs+=("$v=${!v}"); done
-  envs+=(ACW_FROM_OWNER=1)  # the server part then leaves out what the owner's run says itself (header, "run as the owner")
+  envs+=(ACW_FROM_OWNER=1 "ACW_COLOR=$ACW_COLOR")  # the server part then leaves out what the owner's run says itself (header, "run as the owner")
   server() { as_acw env ${envs[@]+"${envs[@]}"} bash "$STAGE/deploy/install.sh" --server-only "$@"; }
 
   # What would the server part need that only the owner can do? (read-only)
-  plan="$(server --plan)" || { echo "the server part could not plan the deploy (above)" >&2; exit 1; }
+  plan="$(server --plan)" || { say_fail "the server part could not plan the deploy (above)"; exit 1; }
   plan_get() { printf '%s\n' "$plan" | sed -n "s/^plan .*\\b$1=\\([01]\\).*/\\1/p" | head -1; }
   NEED_DF="$(plan_get need_df)"; NEED_LIVE="$(plan_get need_live)"; LOCK_NOW="$(plan_get lock_changed)"
-  [ -n "$NEED_DF" ] && [ -n "$NEED_LIVE" ] && [ -n "$LOCK_NOW" ] || { echo "unreadable plan from the server part: $plan" >&2; exit 1; }
+  [ -n "$NEED_DF" ] && [ -n "$NEED_LIVE" ] && [ -n "$LOCK_NOW" ] || { say_fail "unreadable plan from the server part: $plan"; exit 1; }
   extra=()
   if [ "$NEED_LIVE" = 1 ] && [ "$LOCK_NOW" = 1 ]; then
     # acw-live links the sherpa-onnx library of the venv: install the new packages first, build against them.
@@ -218,8 +253,9 @@ if [ "$ROLE" = owner ]; then
 
   rc=0
   server "${pass[@]+"${pass[@]}"}" ${extra[@]+"${extra[@]}"} "--native-from=$OUTDIR" || rc=$?
+  as_acw cat "$STAGE/.deploy-summary" 2>/dev/null >> "$ACW_SUMMARY" || true  # what the server part found red or yellow
   if [ "$rc" != 0 ]; then
-    echo "the server part failed (exit $rc); nothing was published and no smoke test ran. Logs: acw-logs acw-web -n 80; roll back with deploy/rollback.sh" >&2
+    say_fail "the server part failed (exit $rc); nothing was published and no smoke test ran. Logs: acw-logs acw-web -n 80; roll back with deploy/rollback.sh"
     exit "$rc"
   fi
   vps_status=0
@@ -232,7 +268,7 @@ mkdir -p "$H"/{app/acw,app/acw_common,bin,models,data,secrets}
 chmod 700 "$H/data" "$H/secrets"
 # The tunnels' destination (user@address of the VPS) lives here, not in the repo.
 if ! grep -Eq '^ACW_VPS=[^@[:space:]]+@[^[:space:]]+$' "$H/secrets/vps.env" 2>/dev/null || grep -q '^ACW_VPS=user@vps-address$' "$H/secrets/vps.env"; then
-  echo "error: $H/secrets/vps.env needs ACW_VPS=<user>@<VPS address> (see deploy/vps.env.example)" >&2
+  say_fail "error: $H/secrets/vps.env needs ACW_VPS=<user>@<VPS address> (see deploy/vps.env.example)"
   exit 1
 fi
 if [ "$ROLE" = single ]; then legal_versions; fi   # (the owner's run did this before staging; the server part, acw, has no checkout to render from)
@@ -349,9 +385,6 @@ else
 fi
 
 # ---- 3. Live sessions: a live, stream or live-tunnel restart cuts all of them (a web or bulk restart does not)
-DRAINING=0
-cleanup() { [ "$DRAINING" = 1 ] && drain_off; true; }
-trap cleanup EXIT
 if [ "$RESTART" = 1 ]; then
   cuts_live=0
   for u in ${RESTART_UNITS[@]+"${RESTART_UNITS[@]}"}; do case "$u" in acw-live.service|acw-stream.service|acw-tunnel-live.service) cuts_live=1 ;; esac; done
@@ -363,13 +396,13 @@ if [ "$RESTART" = 1 ]; then
       mkdir -p "$H/data"; drain_on; DRAINING=1
       echo "new live sessions are refused until the restart is done"
       if ! wait_for_live "$WAIT_LIVE"; then
-        if [ "$FORCE" = 1 ]; then echo "$(live_sessions) live session(s) still running: restarting anyway (--force)" >&2
-        else echo "live sessions are still running after ${WAIT_LIVE}s; not deploying (--force restarts anyway)" >&2; exit 1; fi
+        if [ "$FORCE" = 1 ]; then say_warn "$(live_sessions) live session(s) still running: restarting anyway (--force)"
+        else say_fail "live sessions are still running after ${WAIT_LIVE}s; not deploying (--force restarts anyway)"; exit 1; fi
       fi
     elif [ "$FORCE" = 1 ]; then
-      echo "$LIVE live session(s) will be cut (--force)" >&2
+      say_warn "$LIVE live session(s) will be cut (--force)"
     else
-      echo "$LIVE live session(s) are running and this deploy restarts the process or worker they run on." >&2
+      say_fail "$LIVE live session(s) are running and this deploy restarts the process or worker they run on."
       echo "Use --wait-live[=SECONDS] to stop new sessions and wait for these to end, or --force." >&2
       exit 1
     fi
@@ -379,10 +412,10 @@ fi
 # ---- 4. Snapshot the database with the code that is running now (init-db below may change the schema)
 if [ -f "$H/data/acw.sqlite3" ] && [ -d "$H/app/acw" ] && [ -x "$H/venv/bin/python" ]; then
   if ! acw_admin backup "$H/data/backups" --keep 10 >/dev/null; then
-    if [ "$FORCE" = 1 ]; then echo "warning: the pre-deploy database backup failed (--force)" >&2
-    else echo "the pre-deploy database backup failed its checks; not deploying (--force overrides)" >&2; exit 1; fi
+    if [ "$FORCE" = 1 ]; then say_warn "the pre-deploy database backup failed (--force)"
+    else say_fail "the pre-deploy database backup failed its checks; not deploying (--force overrides)"; exit 1; fi
   else
-    echo "database backed up to $H/data/backups"
+    say_ok "database backed up to $H/data/backups"
   fi
 fi
 
@@ -427,7 +460,7 @@ if [ "$NEED_DF" = 1 ]; then
   if ! install_native libdf.so "$H/bin/libdf.so" "$H/bin/libdf.so.src" "$DF_STAMP"; then
     # shellcheck disable=SC1091
     command -v cargo >/dev/null 2>&1 || { [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"; } || true
-    command -v cargo >/dev/null 2>&1 || { echo "libDF has to be rebuilt (native/deepfilter changed) and this account has no Rust toolchain: run deploy/install.sh as the owner, who builds it and hands it over" >&2; exit 1; }
+    command -v cargo >/dev/null 2>&1 || { say_fail "libDF has to be rebuilt (native/deepfilter changed) and this account has no Rust toolchain: run deploy/install.sh as the owner, who builds it and hands it over"; exit 1; }
     BUILD_DIR="$H/src/deepfilter-build" OUT="$H/src/deepfilter-build/out" bash "$REPO/native/deepfilter/build.sh" native
     install -m 755 "$H/src/deepfilter-build/out/libdf.so" "$H/bin/.libdf.so.new"
     mv -f "$H/bin/.libdf.so.new" "$H/bin/libdf.so"
@@ -439,7 +472,7 @@ if [ "$NEED_LIVE" = 1 ]; then
   if ! install_native acw-live "$H/bin/acw-live" "$H/bin/acw-live.src" "$LIVE_STAMP"; then
     # shellcheck disable=SC1091
     command -v cargo >/dev/null 2>&1 || { [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"; } || true
-    command -v cargo >/dev/null 2>&1 || { echo "the live engine has to be rebuilt (native/live changed) and this account has no Rust toolchain: run deploy/install.sh as the owner, who builds it and hands it over" >&2; exit 1; }
+    command -v cargo >/dev/null 2>&1 || { say_fail "the live engine has to be rebuilt (native/live changed) and this account has no Rust toolchain: run deploy/install.sh as the owner, who builds it and hands it over"; exit 1; }
     bash "$REPO/native/live/build.sh" "$H/bin"
     echo "$LIVE_STAMP" > "$H/bin/acw-live.src"
   fi
@@ -448,7 +481,7 @@ fi
 # Every file in deploy/models.lock is present and has the recorded sha256 (downloads what is missing or wrong, never
 # touches a correct file; FFmpeg and the models archive come from the lock's pinned URLs, or from
 # $ACW_ARCHIVE_DIR). Every feature needs its files: anything missing stops the deploy.
-bash "$REPO/deploy/fetch-models.sh" || { echo "models or programs missing or wrong (deploy/fetch-models.sh --check -v lists them)" >&2; exit 1; }
+bash "$REPO/deploy/fetch-models.sh" || { say_fail "models or programs missing or wrong (deploy/fetch-models.sh --check -v lists them)"; exit 1; }
 
 # ---- 8. Config
 if [ ! -f "$H/secrets/acw.env" ]; then
@@ -478,7 +511,7 @@ systemctl --user enable --now acw-monitor.timer >/dev/null 2>&1
 # minute after the timer).
 systemctl --user enable --now acw-mirror.timer >/dev/null 2>&1
 if [ "$BULK_TUNNEL" = 0 ]; then
-  echo "note: acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'acw-ctl enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)" >&2
+  say_warn "acw-tunnel-bulk (uploads/downloads on their own SSH connection) is installed but not enabled: after the VPS key allows port 18794, run 'acw-ctl enable --now acw-tunnel-bulk' (docs/operations.md, Bulk transfers)"
 fi
 # Workers beyond the new count (moved to a smaller machine): stop them.
 for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-worker@$i.service" >/dev/null 2>&1 || true; done
@@ -487,7 +520,7 @@ for i in $(seq $(( WORKERS + 1 )) 16); do systemctl --user disable --now "acw-wo
 systemctl --user enable $UNITS >/dev/null 2>&1
 
 if [ "$RESTART" = 1 ]; then
-  systemctl --user is-active --quiet acw-mirror.timer || echo "warning: acw-mirror.timer is not active (acw-ctl status acw-mirror.timer): release downloads will not update" >&2
+  systemctl --user is-active --quiet acw-mirror.timer || say_warn "acw-mirror.timer is not active (acw-ctl status acw-mirror.timer): release downloads will not update"
   echo "release downloads: $(acw_admin mirror --status 2>/dev/null | tr '\n' '|' || echo unknown)"
 fi
 
@@ -509,14 +542,14 @@ if [ "$RESTART" = 1 ]; then
   check_running $UNITS || STATUS=1
   systemctl --user --no-pager --plain list-units 'acw-*' | sed -n '1,16p'
   if [ "$STATUS" != 0 ]; then
-    echo "The deploy did not come up cleanly. Previous code is in $H/app.prev: run deploy/rollback.sh" >&2
+    say_fail "The deploy did not come up cleanly. Previous code is in $H/app.prev: run deploy/rollback.sh"
   fi
 fi
 drain_off; DRAINING=0
 
 # ---- 12. Logs: the user journal should not keep client addresses longer than the Privacy Policy says (90 days)
 if ! grep -rqs 'MaxRetentionSec' /etc/systemd/journald.conf /etc/systemd/journald.conf.d 2>/dev/null; then
-  echo "note: set a journal retention once (needs sudo): see 'Log retention' in docs/operations.md" >&2
+  say_warn "set a journal retention once (needs sudo): see 'Log retention' in docs/operations.md"
 fi
 
 # ---- 13 and 14. Website and smoke test: the owner's (VPS login key). Not done by acw.

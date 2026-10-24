@@ -16,6 +16,8 @@
 # Needs curl, sha256sum (or shasum), and python3 (zip archives) or tar (tar.xz archives) when archive members are needed.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=deploy/color.sh
+. "$HERE/color.sh"
 H="${ACW_HOME:-$HOME/audio-cleaner}"
 # With the service account (acw, /etc/acw-service-user) the production folder is acw's: the owner may only --check it
 # (bin and models are readable by the owner); fetching is done by acw, through deploy/install.sh.
@@ -71,6 +73,7 @@ selected() {  # selected TARGET: does --only allow it?
   return 1
 }
 say() { [ "$VERBOSE" = 1 ] && echo "$@"; return 0; }
+say_okv() { [ "$VERBOSE" = 1 ] && say_ok "$@"; return 0; }
 
 download() {  # download URL DEST: resumes a partial download, retries once from scratch
   local url="$1" dest="$2" quiet=(-sS)
@@ -102,23 +105,23 @@ while read -r kind flags sha size target rest || [ -n "${kind:-}" ]; do
   case "$kind" in
     local)
       case "$st" in
-        ok) OK=$((OK + 1)); say "ok       $target (local)" ;;
+        ok) OK=$((OK + 1)); say_okv "ok       $target (local)" ;;
         missing)
           if [ "$opt" = 1 ]; then ABSENT_OPT=$((ABSENT_OPT + 1)); say "absent   $target (optional, local: $rest)"
-          else MISSING=$((MISSING + 1)); echo "MISSING  $target: cannot be downloaded: $rest" >&2; fi ;;
-        wrong) LOCAL_CHANGED=$((LOCAL_CHANGED + 1)); echo "changed  $target differs from the recorded sha256 (a local build or conversion; $rest)" >&2 ;;
+          else MISSING=$((MISSING + 1)); say_fail "MISSING  $target: cannot be downloaded: $rest"; fi ;;
+        wrong) LOCAL_CHANGED=$((LOCAL_CHANGED + 1)); say_warn "changed  $target differs from the recorded sha256 (a local build or conversion; $rest)" ;;
       esac
       continue ;;
     file|member) ;;
     *) echo "unknown kind '$kind' in the lock" >&2; exit 2 ;;
   esac
-  if [ "$st" = ok ]; then OK=$((OK + 1)); say "ok       $target"; continue; fi
+  if [ "$st" = ok ]; then OK=$((OK + 1)); say_okv "ok       $target"; continue; fi
   # Something is missing or wrong.
   if [ "$opt" = 1 ] && [ "$st" = missing ] && { [ "$CHECK" = 1 ] || [ "$OPTIONAL" = 0 ]; }; then
     ABSENT_OPT=$((ABSENT_OPT + 1)); say "absent   $target (optional)"; continue
   fi
   if [ "$CHECK" = 1 ]; then
-    if [ "$st" = missing ]; then MISSING=$((MISSING + 1)); echo "MISSING  $target" >&2; else WRONG=$((WRONG + 1)); echo "WRONG    $target (size or sha256 differs from the lock)" >&2; fi
+    if [ "$st" = missing ]; then MISSING=$((MISSING + 1)); say_fail "MISSING  $target"; else WRONG=$((WRONG + 1)); say_fail "WRONG    $target (size or sha256 differs from the lock)"; fi
     continue
   fi
   if [ "$kind" = file ]; then
@@ -127,7 +130,7 @@ while read -r kind flags sha size target rest || [ -n "${kind:-}" ]; do
     if download "$rest" "$part" && [ "$(sha_of "$part")" = "$sha" ] && [ "$(size_of "$part")" = "$size" ]; then
       install_mode "$target" "$part"; mv -f "$part" "$dest"; FIXED=$((FIXED + 1))
     else
-      rm -f "$part"; FAILED=$((FAILED + 1)); echo "FAILED   $target: download failed or sha256 mismatch ($rest)" >&2
+      rm -f "$part"; FAILED=$((FAILED + 1)); say_fail "FAILED   $target: download failed or sha256 mismatch ($rest)"
     fi
   else
     printf '%s\t%s\t%s\t%s\t%s\n' "${rest%%:*}" "${rest#*:}" "$target" "$sha" "$size" >> "$NEED"
@@ -151,7 +154,7 @@ if [ -s "$NEED" ]; then
       download "$a_url" "$arc" || true
     fi
     if [ ! -f "$arc" ] || [ "$(size_of "$arc")" != "$a_size" ] || [ "$(sha_of "$arc")" != "$a_sha" ]; then
-      echo "FAILED   archive $base: missing or its sha256 does not match the lock ($a_url)" >&2
+      say_fail "FAILED   archive $base: missing or its sha256 does not match the lock ($a_url)"
       FAILED=$((FAILED + $(grep -c "^$name	" "$NEED")))
       continue
     fi
@@ -172,7 +175,7 @@ PY
       if [ -f "$part" ] && [ "$(sha_of "$part")" = "$sha" ] && [ "$(size_of "$part")" = "$size" ]; then
         install_mode "$target" "$part"; mv -f "$part" "$dest"; FIXED=$((FIXED + 1)); echo "unpacked $target"
       else
-        rm -f "$part"; FAILED=$((FAILED + 1)); echo "FAILED   $target: not in $base or its sha256 does not match the lock" >&2
+        rm -f "$part"; FAILED=$((FAILED + 1)); say_fail "FAILED   $target: not in $base or its sha256 does not match the lock"
       fi
     done < "$NEED"
   done
@@ -183,7 +186,9 @@ summary="models: $OK ok"
 [ "$MISSING" -gt 0 ] && summary="$summary, $MISSING MISSING"
 [ "$WRONG" -gt 0 ] && summary="$summary, $WRONG WRONG"
 [ "$FAILED" -gt 0 ] && summary="$summary, $FAILED FAILED"
-[ "$ABSENT_OPT" -gt 0 ] && summary="$summary, $ABSENT_OPT optional absent"
+[ "$ABSENT_OPT" -gt 0 ] && summary="$summary, $ABSENT_OPT optional absent (not needed to run; --with-optional fetches them, -v names them)"
 [ "$LOCAL_CHANGED" -gt 0 ] && summary="$summary, $LOCAL_CHANGED local files changed since recorded"
-echo "$summary"
-[ $((MISSING + WRONG + FAILED)) -eq 0 ]
+# The count goes to stdout as before (the lines above, one per problem, are what the deploy summary lists).
+if [ $((MISSING + WRONG + FAILED)) -gt 0 ]; then acw_paint 1 '1;31' "$summary"; echo; exit 1
+elif [ "$LOCAL_CHANGED" -gt 0 ]; then acw_paint 1 33 "$summary"; echo
+else acw_paint 1 32 "$summary"; echo; fi
