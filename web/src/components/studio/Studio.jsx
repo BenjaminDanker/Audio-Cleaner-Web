@@ -8,7 +8,7 @@ import { forgetFinish, removeLocalCard } from '../../finish.js';
 import { bytes } from '../../format.js';
 import { findRate, loadPricing, useNow, usePricing } from '../../hooks.js';
 import { jobPath } from '../../jobs.js';
-import { heardSeries } from '../../editor/peaks.js';
+import { heardSeries, pcmPeaks } from '../../editor/peaks.js';
 import { dismiss as dismissSuggestion } from '../../editor/suggest.js';
 import { describe, prepare } from '../../editor/mix.js';
 import {
@@ -196,7 +196,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     let alive = true;
     setLocalPeaks(null);
     if (done && isLocal && fin?.pcm && session.wave.data) {
-      import('../../editor/peaks.js').then(({ pcmPeaks }) => pcmPeaks(fin.pcm, session.wave.data.top)).then((p) => { if (alive) setLocalPeaks(p); }).catch(() => {});
+      Promise.resolve().then(() => pcmPeaks(fin.pcm, session.wave.data.top)).then((p) => { if (alive) setLocalPeaks(p); }).catch(() => {});
     }
     return () => { alive = false; };
   }, [done, isLocal, fin?.pcm, session.wave.data]); // eslint-disable-line react-hooks/exhaustive-deps

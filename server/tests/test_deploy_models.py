@@ -216,12 +216,19 @@ def test_downloads_and_archives_with_the_wrong_hash_are_refused_and_the_rest_sti
     assert (toy.home / "models/b.txt").exists() and (toy.home / "bin/tarred").exists()  # the others were fine
 
 
-def test_optional_files_only_with_the_flag(toy):
+def test_optional_files_are_never_fetched_but_a_present_one_must_be_right(toy):
     toy.build()
-    toy.run("--with-optional", check=True)
-    assert (toy.home / "models/c.opt").read_bytes() == toy.data["c.opt"]
+    toy.run(check=True)
+    assert not (toy.home / "models/c.opt").exists()  # never fetched, and its absence is not an error
+    r = toy.run("--check", "-v")
+    assert r.returncode == 0 and "absent   models/c.opt (optional)" in r.stdout
+    assert "not needed to run; -v names them" in toy.run("--check").stdout
+    assert toy.run("--with-optional").returncode != 0 and not (toy.home / "models/c.opt").exists()  # the flag is gone
     (toy.home / "models/c.opt").write_bytes(b"x")  # a present optional file must be right
-    assert toy.run("--check").returncode == 1
+    r = toy.run("--check")
+    assert r.returncode == 1 and "WRONG" in r.stderr
+    (toy.home / "models/c.opt").write_bytes(toy.data["c.opt"])
+    assert toy.run("--check").returncode == 0
 
 
 def test_local_files_are_checked_not_fetched(toy):

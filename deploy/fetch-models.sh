@@ -3,7 +3,6 @@
 # Idempotent: a file that is already right is not touched; a missing or wrong one is fetched again.
 #   deploy/fetch-models.sh                    fetch what is missing or wrong (required files only)
 #   deploy/fetch-models.sh --check            only verify; exit 1 if a required file is missing or wrong (changes nothing)
-#   deploy/fetch-models.sh --with-optional    also fetch the optional files (TorchScript Sidon weights)
 #   deploy/fetch-models.sh --only GLOB        only targets matching GLOB, e.g. --only 'models/dpdfnet/*'
 #   deploy/fetch-models.sh --dest-dir DIR     with --only matching one file: put that file in DIR instead of ~/audio-cleaner/<target>
 #   deploy/fetch-models.sh --archive FILE     use this local copy of an archive (matched by file name) instead of downloading it,
@@ -29,7 +28,6 @@ if [ -z "${ACW_HOME:-}" ] && [ -n "$SVC_USER" ] && [ "$(id -un)" != "$SVC_USER" 
 fi
 LOCK="$HERE/models.lock"
 CHECK=0
-OPTIONAL=0
 VERBOSE=0
 ONLY=""
 DEST_DIR=""
@@ -37,7 +35,6 @@ ARCHIVES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK=1 ;;
-    --with-optional) OPTIONAL=1 ;;
     -v|--verbose) VERBOSE=1 ;;
     --only) ONLY="${2:?--only needs a pattern}"; shift ;;
     --dest-dir) DEST_DIR="${2:?--dest-dir needs a directory}"; shift ;;
@@ -117,7 +114,7 @@ while read -r kind flags sha size target rest || [ -n "${kind:-}" ]; do
   esac
   if [ "$st" = ok ]; then OK=$((OK + 1)); say_okv "ok       $target"; continue; fi
   # Something is missing or wrong.
-  if [ "$opt" = 1 ] && [ "$st" = missing ] && { [ "$CHECK" = 1 ] || [ "$OPTIONAL" = 0 ]; }; then
+  if [ "$opt" = 1 ] && [ "$st" = missing ]; then
     ABSENT_OPT=$((ABSENT_OPT + 1)); say "absent   $target (optional)"; continue
   fi
   if [ "$CHECK" = 1 ]; then
@@ -186,7 +183,7 @@ summary="models: $OK ok"
 [ "$MISSING" -gt 0 ] && summary="$summary, $MISSING MISSING"
 [ "$WRONG" -gt 0 ] && summary="$summary, $WRONG WRONG"
 [ "$FAILED" -gt 0 ] && summary="$summary, $FAILED FAILED"
-[ "$ABSENT_OPT" -gt 0 ] && summary="$summary, $ABSENT_OPT optional absent (not needed to run; --with-optional fetches them, -v names them)"
+[ "$ABSENT_OPT" -gt 0 ] && summary="$summary, $ABSENT_OPT optional absent (not needed to run; -v names them)"
 [ "$LOCAL_CHANGED" -gt 0 ] && summary="$summary, $LOCAL_CHANGED local files changed since recorded"
 # The count goes to stdout as before (the lines above, one per problem, are what the deploy summary lists).
 if [ $((MISSING + WRONG + FAILED)) -gt 0 ]; then acw_paint 1 '1;31' "$summary"; echo; exit 1

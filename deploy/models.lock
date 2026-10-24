@@ -10,7 +10,7 @@
 #   member   -|optional  ...   bytes    bin/ffmpeg                     NAME:path/inside/the/archive
 #   local    -|optional  ...   bytes    bin/libdf.so                   NOTE: cannot be downloaded (built or converted here)
 #
-# optional: not needed to run the product; checked when present, fetched only with --with-optional.
+# optional: not needed to run the product (a file built here for a test or another build); checked when present, never fetched.
 # local: files that cannot be traced to a download: --check verifies that they exist and match (a different hash
 #   is reported as "changed", not as an error: a rebuild legitimately differs); nothing fetches them.
 # To change a pin: download the new file, run sha256sum on it, and replace the URL, sha256 and size here.
@@ -58,8 +58,6 @@ file     -         98a74b21b4cc0017c1e7030319a4a96f4a9506e50f0708f3a516d02a77c96
 file     -         9a22d372c51455c34f13405da2520baefb7125bd16981397561423ed32d24f36 2435420160 models/parakeet-v3/encoder-model.onnx.data           https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/encoder-model.onnx.data
 file     -         a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f     139764 models/parakeet-v3/nemo128.onnx                      https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/nemo128.onnx
 file     -         d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d      93939 models/parakeet-v3/vocab.txt                         https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce/vocab.txt
-file     optional  34dcc80fab75bd1336369ba5b2063f6da475887aa824db94b495c4059c5fdea4  209824877 models/sidon/decoder_cpu.pt                          https://huggingface.co/sarulab-speech/sidon-v0.1/resolve/b3b02d8bbd55fdbc410e6e46e76ef95ace4fbf52/decoder_cpu.pt
-file     optional  fd9abc906a9048b3c047bd3d246a25f6485d09c2d6bb85e098f527f844efc019  795498929 models/sidon/feature_extractor_cpu.pt                https://huggingface.co/sarulab-speech/sidon-v0.1/resolve/b3b02d8bbd55fdbc410e6e46e76ef95ace4fbf52/feature_extractor_cpu.pt
 file     -         2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b       1075 models/silero-vad/LICENSE.txt                        https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/LICENSE.txt
 file     -         1094039d370c82889582ba739a3d1caac5754c8b3a17a66a534200c9f72086e2         30 models/silero-vad/config.json                        https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/config.json
 file     -         1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3    2327524 models/silero-vad/silero_vad.onnx                    https://huggingface.co/istupakov/silero-vad-onnx/resolve/b3e3ee3cce4c11ceb63b1a0b229d916069c1ddf6/silero_vad.onnx

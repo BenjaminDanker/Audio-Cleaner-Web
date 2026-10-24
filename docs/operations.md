@@ -760,7 +760,6 @@ Hugging Face themselves (`web/src/media/models.js` pins them).
 ```bash
 deploy/fetch-models.sh --check -v      # verify only (changes nothing); exit 1 if a required file is missing or wrong
 deploy/fetch-models.sh                 # download what is missing or wrong, verify, never touch a correct file (install.sh runs this)
-deploy/fetch-models.sh --with-optional # also the TorchScript Sidon weights (research fallback, 1 GB)
 ```
 
 - **Not downloadable** (marked `local` in the lock): `bin/libdf.so` (build it: `native/deepfilter/build.sh`),
