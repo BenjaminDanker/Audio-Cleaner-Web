@@ -9,7 +9,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 import numpy as np
 import lightgbm as lgb
 
-B = os.path.expanduser("~/audio-cleaner-train")
+B = os.path.expanduser("~/audio-cleaner/research/auto-settings")
 OUT = os.path.join(B, "out")
 os.makedirs(OUT, exist_ok=True)
 FEATS = ["floorDb", "levelDb", "peakDb", "silentFraction", "speechFraction", "bandDynDb", "hasSpeech",

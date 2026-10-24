@@ -8,7 +8,7 @@ import numpy as np
 import soundfile as sf
 from scipy import signal
 
-ROOT = os.environ.get("AC_ROOT", os.path.expanduser("~/audio-cleaner-train"))
+ROOT = os.environ.get("AC_ROOT", os.path.expanduser("~/audio-cleaner/research/auto-settings"))
 FF = subprocess.run([sys.executable, "-c", "import imageio_ffmpeg as i;print(i.get_ffmpeg_exe())"],
                     capture_output=True, text=True).stdout.strip()
 FS = 48000

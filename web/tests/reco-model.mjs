@@ -1,7 +1,7 @@
 // Checks of the automatic settings model (src/reco-model.js, generated data src/reco-model-data.js). No browser, no backend:
 //   node tests/reco-model.mjs
 // Always: modelDecision gives valid ids on synthetic stats, missing measurements do not throw, FEATURES are the measurements that
-// Analyser.result() returns (src/media/analysis.js). When the training output exists (default ~/audio-cleaner-train, or
+// Analyser.result() returns (src/media/analysis.js). When the training output exists (default ~/audio-cleaner/research/auto-settings, or
 // RECO_TRAIN_DIR), also: the rounded numbers of the web copy decide the same as the original reco-model.js + reco-model.json on
 // every row of work/test/feat/stats.jsonl (skipped with a message otherwise, e.g. in CI).
 import assert from 'node:assert/strict';
@@ -82,7 +82,7 @@ check('FEATURES are the measurements Analyser.result() returns', () => {
 });
 
 // ---- the rounding check against the unrounded original -------------------------------------------------------------------
-const TRAIN = process.env.RECO_TRAIN_DIR || join(homedir(), 'audio-cleaner-train');
+const TRAIN = process.env.RECO_TRAIN_DIR || join(homedir(), 'audio-cleaner', 'research', 'auto-settings');
 const ORIG_JS = join(TRAIN, 'out', 'reco-model.js');
 const ORIG_JSON = join(TRAIN, 'out', 'reco-model.json');
 const ROWS = join(TRAIN, 'work', 'test', 'feat', 'stats.jsonl');

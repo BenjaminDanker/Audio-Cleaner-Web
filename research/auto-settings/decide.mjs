@@ -2,7 +2,7 @@
 // rules inside the model's uncertain band (0.4-0.6), as the product would. usage: node decide.mjs <model.json> <stats.jsonl> <out.jsonl> [rules.jsonl]
 // Output per clip: {id, strength, heavy, rebuild, restoreHighs, uncertain, strengthProbs, probs, rawRebuild, rawRestore}
 import { readFileSync, writeFileSync } from 'node:fs';
-import { loadModel, decideFromModel, predict } from '/home/silver/audio-cleaner-train/out/reco-model.js';
+import { loadModel, decideFromModel, predict } from '/home/silver/audio-cleaner/research/auto-settings/out/reco-model.js';
 const [modelPath, statsPath, outPath, rulesPath] = process.argv.slice(2);
 const model = loadModel(readFileSync(modelPath, 'utf8'));
 const rules = rulesPath ? Object.fromEntries(readFileSync(rulesPath, 'utf8').trim().split('\n').map((l) => { const r = JSON.parse(l); return [r.id, r.rules]; })) : {};

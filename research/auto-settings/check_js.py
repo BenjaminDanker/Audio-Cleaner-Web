@@ -4,7 +4,7 @@ import json, os, sys
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from train import load, cur_strength, cur_heavy, cur_rebuild, cur_restore
-B = os.path.expanduser("~/audio-cleaner-train"); OUT = f"{B}/out"
+B = os.path.expanduser("~/audio-cleaner/research/auto-settings"); OUT = f"{B}/out"
 te = load("test")
 ids = json.load(open(f"{OUT}/test_ids.json"))["ids"]
 assert ids == te["ids"]

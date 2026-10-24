@@ -2,13 +2,13 @@
 # usage: label_split.sh <split> ; dedupe stats by id, 3 label shards (CPU, low priority), concatenate into labels.jsonl.
 set -u
 S=$1
-B=$HOME/audio-cleaner-train
+B=$HOME/audio-cleaner/research/auto-settings
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=-1
 NICE="nice -n 19 ionice -c3"
 cd $B
 venv/bin/python - "$S" <<'PY'
 import json, os, sys
-S = sys.argv[1]; B = os.path.expanduser('~/audio-cleaner-train')
+S = sys.argv[1]; B = os.path.expanduser('~/audio-cleaner/research/auto-settings')
 seen, lines = set(), []
 for l in open(f'{B}/work/{S}/feat/stats.jsonl'):
     if not l.strip(): continue

@@ -48,7 +48,7 @@ Note: the product no longer uses the restore-highs head, so `decide.mjs`, `rules
 
 ## Running it
 
-The scripts expect the working tree at `~/audio-cleaner-train` (venv with lightgbm, pesq, soundfile, scipy, onnxruntime) and this
+The scripts expect the working tree at `~/audio-cleaner/research/auto-settings` (venv with lightgbm, pesq, soundfile, scipy, onnxruntime) and this
 repository at `~/repos/acw-desktop-merge` (they import the web measurement code from it). CPU only.
 
     bash run_split.sh <split> <count>          # generate, measure, current rules, labels (train / val / test)

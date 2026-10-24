@@ -6,7 +6,7 @@ import numpy as np
 import librosa
 import onnxruntime as ort
 
-MODEL = "/home/silver/audio-cleaner-train/work/DNS-Challenge/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
+MODEL = "/home/silver/audio-cleaner/research/auto-settings/work/DNS-Challenge/DNSMOS/DNSMOS/sig_bak_ovr.onnx"
 _sess = None
 
 def _s():

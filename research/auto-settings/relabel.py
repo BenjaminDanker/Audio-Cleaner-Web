@@ -4,7 +4,7 @@ noise figure. usage: relabel.py <split>   (keeps the previous file as labels_v1.
 import json, os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from labelscheme import heavy_label
-B = os.path.expanduser("~/audio-cleaner-train")
+B = os.path.expanduser("~/audio-cleaner/research/auto-settings")
 S = sys.argv[1]
 d = f"{B}/work/{S}/feat"
 stats = {}

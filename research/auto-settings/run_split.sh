@@ -2,7 +2,7 @@
 # usage: run_split.sh <split> <count> ; generate, measure (Node, 3 shards), label (3 shards). Low priority.
 set -u
 S=$1; N=$2
-B=$HOME/audio-cleaner-train
+B=$HOME/audio-cleaner/research/auto-settings
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 UV_THREADPOOL_SIZE=1
 export DFN_WASM=$B/models/df_bg.wasm DFN_MODEL=$B/models/DeepFilterNet3_onnx.tar.gz
 NICE="nice -n 19 ionice -c3"
@@ -16,7 +16,7 @@ wait
 # 2. manifest, then 3 shards of the measuring
 venv/bin/python - "$S" <<'PY'
 import glob, json, os, sys
-S = sys.argv[1]; B = os.path.expanduser('~/audio-cleaner-train')
+S = sys.argv[1]; B = os.path.expanduser('~/audio-cleaner/research/auto-settings')
 ids = sorted(os.path.basename(p)[:-5] for p in glob.glob(f'{B}/clips/{S}/*.json'))
 m = [{'id': i, 'path': f'{B}/clips/{S}/{i}.wav'} for i in ids]
 for k in range(3):

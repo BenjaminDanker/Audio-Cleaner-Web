@@ -3,7 +3,7 @@
 import sys, glob, os, json, time, numpy as np, soundfile as sf
 from scipy.signal import resample_poly
 from scipy.ndimage import binary_dilation
-sys.path.insert(0,'/home/silver/repos/acw-left/common')
+sys.path.insert(0,'/home/silver/repos/Audio-Cleaner-Web/common')
 from acw_common import dfn
 from faster_whisper.vad import get_vad_model
 L=sys.argv[1]; SR=48000; LIB=L+'/dfout/libdf.so'; M='/home/silver/audio-cleaner/models/DeepFilterNet3_onnx.tar.gz'

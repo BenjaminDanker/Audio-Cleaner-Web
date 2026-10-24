@@ -2,7 +2,7 @@
 # utts/ (LibriSpeech utterances as 16 kHz wav + refs.json), dfout/libdf.so (the build), item3/ (made by the make_*.py).
 import sys, glob, os, numpy as np, soundfile as sf
 from scipy.ndimage import distance_transform_edt
-sys.path.insert(0,'/home/silver/repos/acw-left/common')
+sys.path.insert(0,'/home/silver/repos/Audio-Cleaner-Web/common')
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 import pauses
 L=sys.argv[1]; SR=48000; fr=480; VAD='/home/silver/audio-cleaner/models/silero-vad/silero_vad.onnx'

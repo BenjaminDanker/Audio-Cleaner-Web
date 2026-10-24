@@ -1,7 +1,7 @@
 """Common Voice 17.0 English test shard (CC0), first N clips -> 48 kHz mono WAV (real-world recordings, no labels used)."""
 import os, subprocess, sys, tarfile
 import soundfile as sf
-B = "/home/silver/audio-cleaner-train"
+B = "/home/silver/audio-cleaner/research/auto-settings"
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 400
 FF = subprocess.run([sys.executable, "-c", "import imageio_ffmpeg as i;print(i.get_ffmpeg_exe())"], capture_output=True, text=True).stdout.strip()
 out = f"{B}/clips/cv"; os.makedirs(out, exist_ok=True)

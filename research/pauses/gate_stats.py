@@ -1,7 +1,7 @@
 # Evaluation of skipping noisy pauses (docs/research/skip-noisy-pauses-2026-10.md). L = a scratch directory holding
 # utts/ (LibriSpeech utterances as 16 kHz wav + refs.json), dfout/libdf.so (the build), item3/ (made by the make_*.py).
 import sys, os, numpy as np, soundfile as sf
-sys.path.insert(0,'/home/silver/repos/acw-left/common')
+sys.path.insert(0,'/home/silver/repos/Audio-Cleaner-Web/common')
 sys.path.insert(0, __import__('os').path.dirname(__file__))
 import pauses
 from acw_common import dfn

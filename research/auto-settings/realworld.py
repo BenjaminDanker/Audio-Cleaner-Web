@@ -6,9 +6,9 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 import numpy as np, soundfile as sf
 from scipy.signal import resample_poly
-sys.path.insert(0, "/home/silver/audio-cleaner-train/src")
+sys.path.insert(0, "/home/silver/audio-cleaner/research/auto-settings/src")
 from dnsmos import dnsmos16
-B = "/home/silver/audio-cleaner-train"
+B = "/home/silver/audio-cleaner/research/auto-settings"
 stats_p, rules_p, new_p, raw_dir = sys.argv[1:5]
 ATTEN = [12, 24, 40, 100]
 ATT_OF = {"gentle": 12, "balanced": 24, "strong": 40, "max": 100}

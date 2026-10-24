@@ -9,7 +9,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
 import numpy as np, soundfile as sf
-B = "/home/silver/audio-cleaner-train"
+B = "/home/silver/audio-cleaner/research/auto-settings"
 REPO = "/home/silver/repos/acw-desktop-merge"
 LIST = f"{B}/out/listening"
 WORK = f"{B}/work/listen"

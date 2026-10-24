@@ -2,7 +2,7 @@
 libri/LibriTTS_R/{dev,test}-clean/<speaker>/<chapter>/<id>.wav (24 kHz PCM, as in the original release)."""
 import glob, os, sys
 import pyarrow.parquet as pq
-B = os.path.expanduser("~/audio-cleaner-train")
+B = os.path.expanduser("~/audio-cleaner/research/auto-settings")
 n = 0
 for pat, sub in [("test.clean-*.parquet", "test-clean"), ("dev.clean-*.parquet", "dev-clean")]:
     for path in sorted(glob.glob(os.path.join(B, "data", pat))):

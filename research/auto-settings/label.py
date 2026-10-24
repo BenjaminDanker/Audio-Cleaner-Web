@@ -12,7 +12,7 @@ from pesq import pesq
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from labelscheme import ATTEN, strength_label, heavy_label
 
-ROOT = os.environ.get("AC_ROOT", os.path.expanduser("~/audio-cleaner-train"))
+ROOT = os.environ.get("AC_ROOT", os.path.expanduser("~/audio-cleaner/research/auto-settings"))
 split, stats_path, raw_dir, out_path = sys.argv[1:5]
 clip_dir = os.path.join(ROOT, "clips", split)
 
