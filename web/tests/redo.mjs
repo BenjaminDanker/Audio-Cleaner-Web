@@ -37,13 +37,6 @@ context.on('request', (r) => {
   if (u.pathname.startsWith('/api/')) { requests.push(`${r.method()} ${u.pathname}`); reqTimes.push(Date.now()); }
   if (/\/preview\/(source|noise|rebuild|echo)$/.test(u.pathname)) previewAsked.push(u.pathname + u.search);
 });
-const quotes = [];
-const quoteLost = []; // the quotes whose answer could not be read here
-context.on('response', async (res) => {
-  const u = new URL(res.url());
-  if (res.request().method() !== 'POST' || !/\/api\/jobs\/[0-9a-f]+\/quote$/.test(u.pathname)) return;
-  try { quotes.push({ path: u.pathname, body: JSON.parse(res.request().postData()), answer: await res.json() }); } catch (e) { quoteLost.push(String(e?.message || e).slice(0, 120)); /* not an answer */ }
-});
 await signIn(page, EMAIL);
 admin('grant', EMAIL, '5', 'redo test');
 
@@ -64,7 +57,6 @@ const sections = (tr) => page.locator(`[data-testid=track-${tr}] [data-testid=se
 const say = async (tr) => (await sections(tr)).map((x) => `${x.text} ${clock(x.s)}–${clock(x.e)}`).join(' | ');
 const gains = async () => JSON.parse(await studio(page).getAttribute('data-gains'));
 const timeNow = async () => Number(await studio(page).getAttribute('data-time'));
-const lastQuote = () => quotes.at(-1);
 const jobOf = async (id) => (await apiCall(page, 'GET', `jobs/${id}`)).body;
 /** The rows of the billing page's credit history (the page is open already); says what the page shows when there is no table. */
 async function ledgerRows() {
@@ -91,12 +83,27 @@ async function spare(need = 70) {
     await new Promise((r) => setTimeout(r, 500));
   }
 }
-/** The price on Save changes has settled: the quote is in and the button is on. Answers the button's text. */
+/**
+ * What the page would save now, priced by our side: presses Save changes with the save stopped (nothing is made or charged), takes the
+ * timeline it sent, and asks the server's quote for that timeline. Answers {body, answer}.
+ */
+async function quoteOfEditor() {
+  const re = /\/api\/jobs\/[0-9a-f]+\/(process|export)$/;
+  let body = null;
+  const stop = (r) => { body = r.request().postDataJSON(); return r.fulfill({ status: 400, json: { detail: 'Stopped by the test.' } }); };
+  await page.route(re, stop);
+  try {
+    await page.getByTestId('save-changes').click();
+    for (let i = 0; i < 100 && !body; i++) await sleep(100);
+  } finally { await page.unroute(re, stop); }
+  if (!body) throw new Error('Save changes sent nothing');
+  const id = /\/app\/job\/([0-9a-f]+)/.exec(page.url())[1];
+  return { body, answer: (await apiCall(page, 'POST', `jobs/${id}/quote`, { timeline: body.timeline })).body };
+}
+/** The price on Save changes has settled (it is worked out here at once): the button is on. Answers the button's text. */
 async function savePrice() {
   await page.getByTestId('save-changes').waitFor({ timeout: 15000 });
   await page.waitForFunction(() => { const x = document.querySelector('[data-testid=save-changes]'); return x && !x.disabled; }, null, { timeout: 15000 });
-  // every quote the page asked for has been answered and noted here (the price on the button is the last one's)
-  for (let i = 0; i < 50 && quotes.length + quoteLost.length < countBy(/\/quote$/); i++) await sleep(100);
   await sleep(150);
   return (await page.getByTestId('save-changes').innerText()).replace(/\s+/g, ' ').trim();
 }
@@ -179,13 +186,14 @@ await check('a new strength with Leveling still on is paid (the button shows its
   if ((await mainButton(page)) !== 'Download again') throw new Error('main button: ' + await mainButton(page));
   await setStrength(page, 'strong'); // (nothing is chosen: the whole file)
   const label = await savePrice();
-  const q = lastQuote();
-  if (q.answer.free || !q.answer.lines.some((l) => l.item === 'leveling') || q.answer.lines.some((l) => l.item === 'denoise')) throw new Error('price lines (only Leveling runs again): ' + JSON.stringify(q.answer.lines));
-  if (label !== `Save changes · ${money(q.answer.estCostMicros)}` || !/^Save changes · \$0\.00\d$/.test(label)) throw new Error('Save label: ' + label);
+  if (!/^Save changes · \$0\.00\d$/.test(label)) throw new Error('Save label: ' + label);
+  const q = await quoteOfEditor(); // (the price the page worked out is our side's quote for the timeline it sends)
   jobsBefore = (await listJobs(page)).jobs.length;
   got.length = 0;
   const [req] = await Promise.all([page.waitForRequest((r) => r.url().endsWith(`/api/jobs/${J1}/process`) && r.method() === 'POST'), page.getByTestId('save-changes').click()]);
   processBody = req.postDataJSON();
+  if (q.answer.free || !q.answer.lines.some((l) => l.item === 'leveling') || q.answer.lines.some((l) => l.item === 'denoise')) throw new Error('price lines (only Leveling runs again): ' + JSON.stringify(q.answer.lines));
+  if (label !== `Save changes · ${money(q.answer.estCostMicros)}`) throw new Error(`Save label: ${label}, the server's quote ${q.answer.estCostMicros}`);
   if (Object.keys(processBody).some((k) => !['audioFormat', 'maxCostMicros', 'timeline'].includes(k)) || !processBody.timeline || processBody.free) throw new Error('sent: ' + JSON.stringify(processBody).slice(0, 300));
   if (processBody.maxCostMicros !== q.answer.estCostMicros || !(processBody.maxCostMicros > 0)) throw new Error('the quoted price was not sent along: ' + JSON.stringify(processBody).slice(0, 300));
   const noise = processBody.timeline.layers.noise;
@@ -287,7 +295,7 @@ await check('Leveling turned on for a job made without it is a paid step by itse
   const cost0 = (await jobOf(J2)).costMicros;
   await setLeveling(page, 'youtube');
   const label = await savePrice();
-  const q = lastQuote().answer;
+  const q = (await quoteOfEditor()).answer;
   const lv = q.lines;
   if (lv.length !== 1 || lv[0].item !== 'leveling') throw new Error('lines: ' + JSON.stringify(lv));
   const micros = Math.ceil(((lv[0].usdPerMinute * 1e6) / 60) * (Math.ceil(lv[0].seconds) + lv[0].fixedSeconds));

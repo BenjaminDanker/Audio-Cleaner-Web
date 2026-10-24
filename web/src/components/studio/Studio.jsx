@@ -142,7 +142,9 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   session.env = { rates, pricing, rebuildOk: !rebuildOffered || !!pricing?.rebuildAvailable, active, maxActive, signedIn };
 
   // ---- the price (usePrice.js) ----
-  const { est, estMicros, conversion } = useEstimate({ session, S, T, ver, plan, info, outFile, choice, rates, stage, signedIn, c, server });
+  const { estMicros, conversion, price } = useEstimate({ session, S, T, ver, plan, info, outFile, choice, pricing, server });
+  // the price the page shows: sent with the start (our side never charges more than 10 % above it)
+  const shownMicros = estMicros;
   const changedTracks = done && !!session.snap && !sameTracks(S.tracks, session.snap.tracks, T);
   const outNow = useMemo(() => ({ format: choice.format, name: choice.name, size: choice.size }), [choice.format, choice.name, choice.size]);
   const mediaMade = !fin || (() => { const w = fin.effective(); return !!(w.sound || w.embed); })(); // (the file type and name only matter when a media file is made)
@@ -153,13 +155,13 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   const locked = done && !!job && !isLocal && !canEdit;
   const lockedWhy = locked ? 'The files this needs are cleared away, so strength, Leveling and the other paid choices can’t be changed any more. File type, name and subtitle files still can.' : '';
 
-  const { quote, deltaMicros, affordableSave } = useQuote({ session, S, T, job, isLocal, canEdit, changedTracks, c, rates });
+  const { quote, deltaMicros, affordableSave } = useQuote({ session, S, T, ver, job, isLocal, canEdit, changedTracks, c, rates, pricing, balance });
 
   // ---- problems that stop a start ----
   const activeCount = active;
   const problems = problemsFor({
-    info, file: session.file, tracks: S.tracks, est: estMicros, estReady: est.state !== 'loading', duration: T, maxJob: pricing?.maxJobSeconds, pricing, pricingError,
-    balance, active: activeCount, maxActive: maxActive || null, plan, choice, out: session.out, partsError: est.state === 'error' ? est.error : '',
+    info, file: session.file, tracks: S.tracks, est: estMicros, duration: T, maxJob: pricing?.maxJobSeconds, pricing, pricingError,
+    balance, active: activeCount, maxActive: maxActive || null, plan, choice, out: session.out,
   });
   const cleaning = plan.cleaning;
   // The one rule for who can start what (access.js): a plan with a priced part is done on our side and needs an account; everything else runs here.
@@ -300,7 +302,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
     if (account && (stage === 'ready' ? canStart : true)) { await signInToStart(); return; }
     if (stage === 'ready') {
       if (!canStart) return;
-      const res = await session.start({ choice, plan, refresh });
+      const res = await session.start({ choice, plan, refresh, shownMicros });
       if (res?.id) { session.touch(); nav(jobPath(res.id), { state: session.welcome ? { submitted: session.welcome } : null }); }
       else if (session.canceled) { session.canceled = false; say('Canceled. You weren’t charged.'); }
       return;
@@ -311,7 +313,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
         const db = reblendDb();
         if (isLocal && changedTracks && db == null) {
           // a card made here: the new tracks run again from the file
-          const res = await session.start({ choice, plan, refresh });
+          const res = await session.start({ choice, plan, refresh, shownMicros });
           if (res?.id) nav(jobPath(res.id));
           return;
         }
@@ -520,7 +522,7 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   const pend = session.auto ? S.sugg.filter((g) => g.st === 'new').length : 0;
   const pins = session.auto && !processing && !reading ? S.sugg.filter((g) => g.st !== 'dismissed') : [];
-  const fileMeta = `${session.lengthUnknown ? 'about ' : ''}${fmt(T)} · ${session.kind === 'video' ? 'Video' : 'Audio'}${session.file ? ` · ${bytes(session.file.size)}` : ''}`;
+  const fileMeta = `${fmt(T)} · ${session.kind === 'video' ? 'Video' : 'Audio'}${session.file ? ` · ${bytes(session.file.size)}` : ''}`;
   const reco = session.reco;
 
   // processing: what the bar says
@@ -559,8 +561,8 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
 
   const ctx = {
     S, session, tips, stage, sheet, mobile, info, verdict, sVerdict, rebuildPaused, locked, lockedWhy, eta, loadLeft, ph, zoom, pins, hear, hearText, heard, data,
-    scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, serverTotal: !server ? 0 : est.state === 'ok' ? est.micros : null,
-    partsNote: needsServer(S.tracks) && est.state === 'ok' && !est.local, localPrice: server && est.state === 'ok' && !!est.local, conversion, pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
+    scrollRef, waveRef, reading, prog: processing ? (procLine?.value ?? 0) : 0, cost: c, total: estMicros, rates: rates || { std: 0, ext: 0 }, deltaMicros, changed: changedTracks, price,
+    conversion, pop, choice, plan, out: session.out, files, preview: previewText, job, expiresIn, delAsk, paid: job?.costMicros || session.paid || 0, finState, fin, bar, needVideo,
     disabled: processing, willDownload, tooBigNote, mkvNote, primaryDisabled,
     h: { onDb, slideStart, slideEnd, onVideo: (f) => fin?.setVideo(f) },
   };

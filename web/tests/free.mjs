@@ -6,16 +6,18 @@
 // Needs the local backend (port 8792, see helpers.mjs) with `ACW_MODEL_HOST=http://127.0.0.1:8798/ npm run build` output (the
 // model host is mirror.mjs) and the fixtures (make-fixtures.sh).
 // Usage: node tests/free.mjs
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BASE, FILES, SHOTS, check, dropFile, launch, mainButton, mirror, pick, resultAttr, setStrength, settleRecommendation, signIn, summary, waitResult } from './helpers.mjs';
 
 const EMAIL = process.env.E2E_EMAIL || 'e2e-main@example.com'; // the free option needs an account
 const SOURCE_FRAMES = 508591; // noisy.wav at 48 kHz; the other fixtures are made from it (tests/make-fixtures.sh)
 const close = (frames) => Math.abs(frames - SOURCE_FRAMES) < SOURCE_FRAMES * 0.02; // codec padding is a few ms
 
+const SERVER_DIR = process.env.ACW_SERVER_DIR || fileURLToPath(new URL('../../server', import.meta.url));
 const FFPROBE = process.env.FFPROBE || join(homedir(), 'audio-cleaner', 'bin', 'ffprobe');
 const { browser, page, logs } = await launch([], { acceptDownloads: true });
 const models = await mirror(); // the local model host: what the browser downloaded from it
@@ -83,11 +85,51 @@ await check('free: other inputs clean in the browser: 44.1 kHz stereo WAV (two c
   return `stereo: frames=${st.frames}; mp3: frames=${mp3.frames}`;
 });
 
+await check('a raw .amr and a raw ADTS .aac (the file states no length) get their exact length, counted from the file itself, and an MP3 without a length header, an M4A, an OGG and a FLAC the same billed second as our side: the editor\'s length is what ffmpeg decodes, and nothing is guessed from the size', async () => {
+  const FF = join(homedir(), 'audio-cleaner', 'bin', 'ffmpeg');
+  const src = join(FILES, 'noisy.wav');
+  const made = [
+    ['raw.amr', ['-ar', '8000', '-ac', '1', '-c:a', 'libopencore_amrnb', '-f', 'amr']],
+    ['raw-adts.aac', ['-c:a', 'aac', '-b:a', '64k', '-f', 'adts']],
+    // the browser's own reader (not libav.js): an MP3 with no length header (VBR, no Xing frame), an M4A, an OGG and a FLAC
+    ['vbr-noxing.mp3', ['-c:a', 'libmp3lame', '-q:a', '4', '-write_xing', '0']],
+    ['sound.m4a', ['-c:a', 'aac', '-b:a', '96k']],
+    ['sound.ogg', ['-c:a', 'libvorbis', '-q:a', '4']],
+    ['sound.flac', ['-c:a', 'flac']],
+  ];
+  const seen = [];
+  const wrong = [];
+  for (const [name, args] of made) {
+    execFileSync(FF, ['-v', 'error', '-y', '-i', src, ...args, join(FILES, name)]);
+    // the truth: the whole file decoded (ffmpeg's own clock at the end), and what ffprobe says without decoding (an estimate from the size for a raw file)
+    const run = spawnSync(FF, ['-v', 'info', '-i', join(FILES, name), '-f', 'null', '-'], { encoding: 'utf8' });
+    const t = [...run.stderr.matchAll(/time=(\d+):(\d+):(\d+\.\d+)/g)].at(-1);
+    const decoded = Number(t[1]) * 3600 + Number(t[2]) * 60 + Number(t[3]);
+    const probed = Number(execFileSync(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', join(FILES, name)], { encoding: 'utf8' }).trim());
+    await page.goto(`${BASE}/app`);
+    await dropFile(page, join(FILES, name));
+    await page.getByTestId('wave').waitFor({ timeout: 60000 });
+    const T = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
+    if (await page.getByTestId('length-unknown').count() || /about/i.test(await page.getByTestId('file-meta').innerText())) throw new Error(`${name}: the length is shown as a guess`);
+    // the length our side bills (the worker's probe stage: what decodes) is the same to the started second, which is what is billed
+    const server = Number(execFileSync(process.env.ACW_PYTHON || join(homedir(), 'audio-cleaner', 'venv', 'bin', 'python'), ['-c',
+      'import sys; from pathlib import Path; from acw.worker import runner; print(runner.stage_probe(Path(sys.argv[1]).parent, {"bin_dir": sys.argv[2], "input": Path(sys.argv[1]).name, "threads": 2, "max_seconds": 14400, "options": {}})["duration"])',
+      join(FILES, name), join(homedir(), 'audio-cleaner', 'bin')], { encoding: 'utf8', cwd: SERVER_DIR, env: { ...process.env, PYTHONPATH: [SERVER_DIR, join(SERVER_DIR, '..', 'common')].join(':') } }).trim());
+    const line = `${name}: page ${T.toFixed(3)} s, decoded ${decoded.toFixed(3)} s, ffprobe ${probed.toFixed(3)} s, billed by our side ${server.toFixed(3)} s`;
+    if (Math.abs(T - decoded) > 0.06) wrong.push(`${line}: the page's length is not the decoded one`);
+    if (Math.ceil(T - 1e-6) !== Math.ceil(server - 1e-6)) wrong.push(`${line}: the billed seconds differ (page ${Math.ceil(T - 1e-6)}, our side ${Math.ceil(server - 1e-6)})`);
+    seen.push(`${name}: page ${T.toFixed(3)} s, decoded ${decoded.toFixed(3)} s, ffprobe ${probed.toFixed(3)} s, billed by our side ${server.toFixed(3)} s`);
+  }
+  console.log('LENGTHS ' + seen.join(' | '));
+  if (wrong.length) throw new Error(wrong.join(' || '));
+  return seen.join('; ');
+});
+
 await check('free: WMA (read by libav.js) shows its real length and is cleaned; AVI (AC-3 sound) gives the sound back as WAV with a note why', async () => {
   await page.goto(`${BASE}/app`);
   await dropFile(page, join(FILES, 'noisy.wma'));
   await page.getByTestId('file-meta').filter({ hasText: /0:1[01]/ }).waitFor({ timeout: 30000 });
-  if (await page.getByTestId('length-unknown').count()) throw new Error('length shown as a guess');
+  if (await page.getByTestId('length-unknown').count() || /about/i.test(await page.getByTestId('file-meta').innerText())) throw new Error('length shown as a guess');
   const w = await runFree('noisy.wma');
   if (!close(w.frames) || w.rms < 0.001) throw new Error(`wma ${JSON.stringify(w)}`);
   await page.goto(`${BASE}/app`);

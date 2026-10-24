@@ -1,67 +1,49 @@
-import { useEffect, useState } from 'react';
-import { delta as deltaOf, tot } from '../../editor/tracks.js';
+import { useMemo } from 'react';
+import { quoteLocal } from '../../editor/quote.js';
+import { convertPrice, delta as deltaOf, priceOf } from '../../editor/tracks.js';
 import { serverPictureWork } from '../../media/convert.js';
-import { jobKind } from '../../studio/plan.js';
 
 /**
- * The price of starting: worked out here from the public price list when signed out, otherwise asked of our side (it prices the
- * timeline as the job will be held), and what a video conversion on our side adds (`conversion`).
+ * The price of starting, worked out here (editor/tracks.js priceOf, the same rules as our side) from the price list the page loaded once,
+ * and what a video conversion on our side adds (`conversion`).
  */
-export function useEstimate({ session, S, T, ver, plan, info, outFile, choice, rates, stage, signedIn, c, server }) {
-  const [est, setEst] = useState({ state: 'idle', micros: null, error: '' });
-  const kind = jobKind(S.tracks, plan);
-  // a video made on our side: Video conversion, certain at a new size (another file type only: once the file is read, so "if needed")
-  const convertLine = est.data?.lines?.find((l) => l.item === 'convert') || null;
-  // (signed out, the same rules worked out here from the public price list: media/convert.js serverPictureWork)
+export function useEstimate({ session, S, T, ver, plan, info, outFile, choice, pricing, server }) {
+  // The price, worked out here at once with the same rules as our side (editor/tracks.js priceOf) from the price list the page loaded
+  // once: it shows as soon as a setting changes. Our side works out the same price itself when the job is made.
+  const price = useMemo(() => priceOf(S.tracks, pricing, T), [ver, pricing, T]); // eslint-disable-line react-hooks/exhaustive-deps
+  // A video made on our side: Video conversion when the picture is made again (media/convert.js serverPictureWork, from the video's codec
+  // and size as the file says them; if its codec were ever unknown the full price is shown, and our side charges less if it can copy it).
   const work = plan.serverConvert ? serverPictureWork(info, session.fileName || outFile?.name, choice.format, choice.size) : null;
-  const encodes = convertLine ? (convertLine.maybe ? null : !convertLine.copied) : work?.encode ?? null;
-  const factor = convertLine ? convertLine.factor || 1 : work?.factor || 1;
-  const convertMicros = plan.serverConvert && rates?.cv ? tot(rates.cv * factor * Math.ceil(T)) : 0;
+  const factor = work?.factor || 1;
   const conversion = plan.serverConvert
     ? (work?.black ? { free: true, server: true, black: true }
-      : encodes === false ? { free: true, server: true } : { micros: convertLine ? convertLine.micros : convertMicros, maybe: encodes == null, factor })
+      : work?.encode === false ? { free: true, server: true }
+        : { micros: pricing ? convertPrice(pricing, factor, T) : 0, factor })
     : plan.converting ? { free: true } : null;
-  useEffect(() => {
-    if (stage !== 'ready' || !kind || !session.file || !rates) { setEst({ state: 'idle', micros: null, error: '' }); return undefined; }
-    // signed out there is nobody to ask: the price list is public, so the price is worked out here from it (what the file is is never asked)
-    if (!signedIn) { setEst({ state: 'ok', micros: c.total + (conversion && !conversion.free && !conversion.maybe ? convertMicros : 0), error: '', local: true }); return undefined; }
-    const body = session.estimateBody({ choice, plan });
-    if (!body) return undefined;
-    setEst((e) => ({ ...e, state: 'loading', error: '' }));
-    const ctl = new AbortController();
-    const t = setTimeout(() => {
-      session.estimate(body, ctl.signal).then(
-        (d) => setEst({ state: 'ok', micros: d.estCostMicros, error: '', data: d }),
-        (e) => { if (e?.name !== 'AbortError') setEst({ state: 'error', micros: null, error: e.detail || e.message || 'Couldn’t work out the price of these parts.' }); },
-      );
-    }, 400);
-    return () => { clearTimeout(t); ctl.abort(); };
-  }, [stage, kind, ver, rates, choice.format, choice.size, plan.serverConvert, signedIn]); // eslint-disable-line react-hooks/exhaustive-deps
-  // a job on our side is priced as it will be held: its timeline's price, which counts what each run costs besides the minutes (docs/api.md section 8)
-  const estMicros = !server ? 0 : !rates ? null : est.state === 'ok' ? est.micros : null;
-  return { est, estMicros, conversion };
+  const total = price.micros + (conversion && !conversion.free ? conversion.micros : 0);
+  const estMicros = !server ? 0 : !pricing ? null : total;
+  return { estMicros, conversion, price };
 }
 
-/** What saving the changes of a finished job costs: our side's quote for a job of parts (a card made here: starting again costs what
- * the paid parts cost). */
-export function useQuote({ session, S, T, job, isLocal, canEdit, changedTracks, c, rates }) {
-  const [quote, setQuote] = useState({ state: 'idle', q: null, error: '' });
-  // (asked again when the timeline it prices changes, not on every redraw: a redraw would cancel the answer on its way)
-  const quoteKey = changedTracks && job && !isLocal && canEdit ? JSON.stringify(session.timelineOf(S.tracks).toJSON()) : '';
-  useEffect(() => {
-    if (!changedTracks || !job || isLocal || !canEdit) { setQuote({ state: 'idle', q: null, error: '' }); return undefined; }
-    setQuote((q) => ({ ...q, state: 'loading', error: '' }));
-    const ctl = new AbortController();
-    const t = setTimeout(() => {
-      session.quote(ctl.signal).then(
-        (q) => setQuote({ state: 'ok', q, error: '' }),
-        (e) => { if (e?.name !== 'AbortError') setQuote({ state: 'error', q: null, error: e.detail || e.message || 'Couldn’t work out the price.' }); },
-      );
-    }, 450);
-    return () => { clearTimeout(t); ctl.abort(); };
-  }, [changedTracks, quoteKey, job?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+/** What saving the changes of a finished job costs: worked out here at once (editor/quote.js, the same planning and pricing as our side's
+ * quote) from what the job's timeline answer carried when it was opened; a card made here: starting again costs what the paid parts cost. */
+export function useQuote({ session, S, T, ver, job, isLocal, canEdit, changedTracks, c, rates, pricing, balance }) {
+  const quote = useMemo(() => {
+    if (!changedTracks || !job || isLocal || !canEdit) return { state: 'idle', q: null, error: '' };
+    const qi = session.server?.quote;
+    if (!qi || !pricing) return { state: 'loading', q: null, error: '' };
+    try {
+      const r = quoteLocal(session.timelineOf(S.tracks), qi, session.server.rendered, pricing.stepFixedSeconds);
+      if (pricing.maxRebuildSeconds && r.rebuildSeconds > pricing.maxRebuildSeconds) {
+        return { state: 'error', q: null, error: `Voice rebuild takes up to ${Math.floor(pricing.maxRebuildSeconds / 60)} minutes of a recording at a time; this asks for ${Math.round(r.rebuildSeconds / 60)}.` };
+      }
+      const available = balance?.available_micros;
+      return { state: 'ok', q: { ...r, estCostMicros: r.micros, availableMicros: available, affordable: available == null || available >= r.micros }, error: '' };
+    } catch (e) {
+      return { state: 'error', q: null, error: e.message || 'Couldn’t work out the price.' };
+    }
+  }, [changedTracks, ver, job?.id, isLocal, canEdit, session.server, pricing, balance?.available_micros]); // eslint-disable-line react-hooks/exhaustive-deps
   const deltaMicros = changedTracks ? (quote.state === 'ok' && quote.q ? quote.q.estCostMicros : isLocal ? c.total : deltaOf(S.tracks, session.snap.tracks, T, rates)) : 0;
   const affordableSave = quote.state !== 'ok' || !quote.q || quote.q.affordable !== false;
-
   return { quote, deltaMicros, affordableSave };
 }

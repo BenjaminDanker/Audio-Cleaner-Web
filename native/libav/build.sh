@@ -51,7 +51,7 @@ export EMSDK_USE_CURL=1
 # ---------------------------------------------------------------------------
 DEMUXERS=(
   asf avi flv mpegps mpegvideo mpegts au caf aiff mp4 matroska ogg wav w64 wavpack
-  ape tta mpc mpc8 amr amrnb amrwb ac3 eac3 dts dtshd mp3 aac flac
+  ape tta mpc mpc8 amr amrnb amrwb ac3 eac3 dts dtshd mp3 aac flac mxf dv rm
 )
 # Notes: "wavpack" (libav.js fragment) = wv demuxer + wavpack decoder; "mp4" = mov demuxer.
 # "mpegps" is the MPEG program-stream demuxer. libav.js's own "demuxer-mpeg" fragment passes
@@ -62,6 +62,7 @@ DEMUXERS=(
 DECODERS=(
   wmav1 wmav2 wmapro wmalossless ac3 eac3 dca ape tta wavpack mpc7 mpc8
   amrnb amrwb mp1float mp2float mp3float aac aac_latm vorbis opus flac alac
+  cook ra_144 ra_288 sipr atrac3
 )
 PARSERS=(aac aac_latm ac3 amr dca flac mpegaudio mpegvideo opus vorbis)
 # libav.js only exposes swresample through avfilter (it has no direct swr_* bindings), so the

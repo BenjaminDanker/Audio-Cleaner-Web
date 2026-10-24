@@ -1,7 +1,7 @@
 // What the editor's choices mean for the files: which files the result has, whether the subtitles can go into the video, and what stops a
 // start (the messages are the Cleanup form's, word for word). Pure functions of the tracks and the output choice.
 
-import { balanceMoney, money as siteMoney, stem } from '../format.js';
+import { stem } from '../format.js';
 import { tooManyText } from '../jobs.js';
 import { canHoldSubtitles, defaultFormatId, formatOfName } from '../media/convert.js';
 import { anyFreeNoise, anyFreeSubs, anyPaidSubs, anySubs, changesSound, hasWork, needsServer, serverSound } from '../editor/tracks.js';
@@ -123,9 +123,6 @@ export function problemsFor({
   if (server && maxActive && active >= maxActive) problems.push({ text: tooManyText(active) });
   if (partsError) problems.push({ text: partsError });
   if (server && estReady && est == null && duration && pricingError) problems.push({ text: 'We couldn’t load the prices just now, so this can’t start yet.', kind: 'prices' });
-  if (server && est != null && balance && est > balance.available_micros) {
-    problems.push({ text: `This costs about ${siteMoney(est)}, but your balance is ${balanceMoney(balance.available_micros)}. You can also choose the free options.`, kind: 'credit' });
-  }
   if (info && !hasWork(tracks) && !plan?.converting) problems.push({ text: 'Choose at least one thing to do: noise removal, subtitles, or another file type or video size.' });
   if (plan.wantsText && !out.sfiles.length) problems.push({ text: 'Choose at least one caption or transcript format.' });
   if (plan.embedHere && (plan.cleaning || plan.converting) && !canHoldSubtitles(choice.format)) {

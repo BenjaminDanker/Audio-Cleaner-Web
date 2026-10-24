@@ -533,7 +533,10 @@ await check('signed out: a plan with a paid part says "Sign in to start" with th
   const lines = await detailLines(page);
   if (!lines.some((l) => /^Noise removal · /.test(l) && /\$0\.0\d/.test(l)) || !lines.some((l) => /^Leveling · 0:04/.test(l)) || !lines.some((l) => /^Subtitles, Standard · /.test(l))) throw new Error('details: ' + lines.join(' | '));
   await page.getByTestId('bar-det').click();
-  if (!(await page.getByTestId('details-local').count())) throw new Error('no note that the exact price comes with signing in');
+  // (worked out here with the server's own numbers: each step's start-up is on its line, and the old "the price changes once you sign in" note is gone)
+  if (await page.getByTestId('details-local').count()) throw new Error('the old note about the price changing once signed in is back');
+  if (!lines.some((l) => /^Noise removal · \d+:\d\d \+ (?:[\d.]+ s|\d+:\d\d) start-up /.test(l)) || !lines.some((l) => /^Leveling · 0:04 \+ (?:[\d.]+ s|\d+:\d\d) start-up /.test(l))) throw new Error('no start-up on the lines: ' + lines.join(' | '));
+  if (/Includes a small amount for each run|Worked out from the price list/.test(await page.getByTestId('details').innerText())) throw new Error('an old note in Details');
   await page.getByTestId('bar-det').click();
   onlyPublic('while a paid plan was chosen');
   before = { title: await selectionTitle(page), lines, out: (await page.getByTestId('output-button').innerText()).replace(/\s+/g, ' ').trim() };
@@ -545,7 +548,7 @@ await check('signed out: a plan with a paid part says "Sign in to start" with th
   return `kept ${copy.name} (${copy.size} bytes); details: ${lines.join(' | ')}`;
 });
 
-await check('signing in (the link opened in another tab) brings the file and the editor state back as they were, then the kept copy is gone; the price now comes from our side', async () => {
+await check('signing in (the link opened in another tab) brings the file and the editor state back as they were, then the kept copy is gone; the price is the same, worked out here, and nothing asks our side for it', async () => {
   // (the first tab stays on the sign-in page; a second tab has no memory of where the visitor came from, so it must not depend on that)
   const p2 = await context.newPage();
   const calls2 = [];
@@ -567,7 +570,7 @@ await check('signing in (the link opened in another tab) brings the file and the
   if (!/signed in/.test(note)) throw new Error('note: ' + note);
   if (await kept(p2)) throw new Error('the kept copy is still there');
   if (await p2.evaluate((k) => localStorage.getItem(k), KEPT)) throw new Error('the note about the kept copy is still there');
-  if (!calls2.includes('POST /api/jobs/estimate')) throw new Error('signed in, the price should be asked of our side: ' + calls2.join(', '));
+  if (calls2.includes('POST /api/jobs/estimate')) throw new Error('signed in, the price is worked out here: our side should not be asked: ' + calls2.join(', '));
   // Automatic is as it was left (dropFile switched it off): the restored tracks are not set again
   const auto = await editorState(p2);
   if (auto.checked !== 'false' || auto.ariaDisabled) throw new Error(`the switch after signing in: checked ${auto.checked}, aria-disabled ${auto.ariaDisabled}`);
@@ -683,7 +686,7 @@ await check('the pages that belong to an account still ask for sign-in (billing,
   }
 });
 
-await check('signed in nothing changes: the Cleanup page shows the jobs list and the balance (no line about the free tools without an account), the same paid plan shows "Start · price" from the price asked of our side', async () => {
+await check('signed in nothing changes: the Cleanup page shows the jobs list and the balance (no line about the free tools without an account), the same paid plan shows "Start · price" worked out here (no estimate asked of our side)', async () => {
   const p = await context.newPage();
   const seen = [];
   p.on('request', (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) seen.push(`${r.method()} ${u.pathname}`); });
@@ -698,11 +701,11 @@ await check('signed in nothing changes: the Cleanup page shows the jobs list and
     if ((await editorState(p)).tip) throw new Error('the signed-out tooltip is on the switch while signed in: ' + (await editorState(p)).tip);
     await pick(p, 'noise', 'denoise');
     await p.waitForFunction(() => /^Start · \$/.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 30000 });
-    if (!seen.includes('POST /api/jobs/estimate')) throw new Error('no estimate: ' + seen.join(', '));
+    if (seen.includes('POST /api/jobs/estimate')) throw new Error('an estimate was asked of our side: ' + seen.join(', '));
     await p.goto(`${BASE}/app/live`);
     await p.getByTestId('live-free-banner').waitFor();
     if (await p.getByTestId('keys-signin').count()) throw new Error('keys ask to sign in while signed in');
-    return 'jobs list, balance, estimate and API keys as before';
+    return 'jobs list, balance, the price worked out here and API keys as before';
   } finally {
     await p.close();
   }

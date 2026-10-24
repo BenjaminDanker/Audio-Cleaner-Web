@@ -16,8 +16,6 @@ export async function loadEditor(jobId, signal) {
   };
 }
 
-export const quoteTimeline = (jobId, tl, signal) => api(`jobs/${jobId}/quote`, { method: 'POST', body: { timeline: tl.toJSON() }, signal });
-
 /** Process (paid, only what is missing is made) or export (free, from the cache alone). */
 export function saveTimeline(jobId, tl, { free, maxCostMicros, audioFormat }) {
   return api(`jobs/${jobId}/${free ? 'export' : 'process'}`, {
@@ -52,4 +50,3 @@ export const uploadBrowserCues = (jobId, { start, end }, cues, signal) => api(`j
 export const needsOf = (e) => (e?.code === 'needs_uploads' ? e.needs || e.body?.needs || [] : null);
 
 /** The price of a job's timeline before it is made (nothing is held): kind, durations and the timeline. */
-export const estimateTimeline = (body, signal) => api('jobs/estimate', { method: 'POST', body, signal });

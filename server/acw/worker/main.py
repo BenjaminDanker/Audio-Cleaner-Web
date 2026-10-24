@@ -437,6 +437,11 @@ def _reprice(job: dict, duration: float) -> None:
         )
     db.execute("UPDATE jobs SET duration_seconds = ? WHERE id = ?", (duration, job["id"]))
     cost = _job_cost(job, params, duration)
+    quoted = params.get("max_cost_micros")
+    if jobs.over_quote(cost, quoted):  # (stopped before the work: failed jobs are not charged)
+        longer = f" The file is {duration / 60:.1f} min long, not the {claimed / 60:.1f} min your browser could tell." if duration > claimed + 1 else ""
+        raise StageFailed(f"This came to ${cost / 1e6:.2f}, more than 10% above the ${quoted / 1e6:.2f} shown, so it was stopped and you "
+                          f"weren't charged.{longer} Start it again to see the new price.")
     if cost > job["est_cost_micros"]:
         try:
             with db.tx() as c:
@@ -689,7 +694,7 @@ def process(job: dict, extra: dict) -> None:
         else:
             probe = run_stage(job, d, "probe", PROBE_TIMEOUT)
             try:
-                duration = float(probe["duration"])  # the longer of the header's and the measured length
+                duration = float(probe["duration"])  # the length that decodes (runner.stage_probe), not the header's
                 channels = min(max(int(probe.get("channels") or 1), 1), 2)
             except (KeyError, TypeError, ValueError):
                 raise StageFailed("Processing failed; you were not charged.", "malformed probe result")

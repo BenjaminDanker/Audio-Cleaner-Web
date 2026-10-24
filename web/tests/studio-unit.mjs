@@ -39,7 +39,7 @@ const m = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputF
 const {
   Timeline, TimelineError, makeState, edit, splitAll, setSel, toggleRange, selTitle, cost, delta, valSig, sameTracks, ratesFrom, money, toTimeline, fromTimeline,
   freshTracks, vkey, uni, overl, applyToSel, freePatch, echoBlocked, undo, redo, pushUndo, recoPatches, applyReco, toSuggestion, autoDone, needsServer, serverSound,
-  changesSound, freeNoiseRanges, freeSubRanges, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
+  changesSound, freeNoiseRanges, freeSubRanges, priceOf, convertPrice, fmt, lenTxt, perMinute, heardSeries, layerPeaks, rangePeaks, overlayPeaks, prepare, outputPlan, problemsFor, jobKind, wantsOf, subsVerdict,
   browserVerdict, inGigabytes, fitPcm, samplesOf, piecesIn, rangeFor, tipsFor, priceWords, dbOf, lvlOfLufs,
   needsAccount, editorNeedsAccount, liveNeedsServer, liveProducts, livePerMinute, hasWork,
   convertsFile, videoOutOf, Finish, finishSeconds, listSizes, serverSize, formatOfName, SIZES, videoSourceHint, convertFactor, serverPictureWork,
@@ -479,7 +479,7 @@ await check('files: wantsOf is what the finishing step (finish.js) takes: the so
   assert.deepEqual([w3.sound, w3.embed, w3.format, w3.name, w3.size], [false, true, 'mkv', 'talk-subtitled.mkv', 'same']);
 });
 
-await check('start: the messages that stop it are the Cleanup form\'s, word for word (no sound, too long, too big, too many files, prices, credit, nothing chosen, no format, MKV)', () => {
+await check('start: the messages that stop it are the Cleanup form\'s, word for word (no sound, too long, too big, too many files, prices, nothing chosen, no format, MKV; a price above the balance is not one: our side refuses that start)', () => {
   const S = state();
   const base = { info: AUDIO, file: { size: 1e6 }, tracks: S.tracks, est: 1000, duration: 180, maxJob: 4 * 3600, pricing: PRICING, pricingError: null, balance: { available_micros: 5e6 }, active: 0, maxActive: 3,
     choice: choiceOf('wav'), out: out0 };
@@ -492,8 +492,8 @@ await check('start: the messages that stop it are the Cleanup form\'s, word for 
   assert.deepEqual(problemsFor({ ...base, est: null, pricingError: 'x', plan: outputPlan({ tracks: S.tracks, info: AUDIO, file: base.file, choice: base.choice, out: base.out }) }).map((p) => [p.text, p.kind]),
     [['We couldn’t load the prices just now, so this can’t start yet.', 'prices']]);
   const poor = problemsFor({ ...base, est: 2e6, balance: { available_micros: 1e6 }, plan: outputPlan({ tracks: S.tracks, info: AUDIO, file: base.file, choice: base.choice, out: base.out }) });
-  assert.equal(poor[0].text, 'This costs about $2.00, but your balance is $1.00. You can also choose the free options.');
-  assert.equal(poor[0].kind, 'credit');
+  // (a price above the balance no longer stops a start here: our side refuses it, 402 "This job costs about ..."; see tests/files.mjs)
+  assert.deepEqual(poor, []);
   const none = state(); edit(none, 'voice', 0, 180, { mode: 0 }); edit(none, 'level', 0, 180, { lvl: 0 });
   assert.deepEqual(run({ tracks: none.tracks }), ['Choose at least one thing to do: noise removal, subtitles, or another file type or video size.']);
   const subs = state(); edit(subs, 'subs', 0, 180, { q: 2 });
@@ -742,8 +742,8 @@ await check('convert: Start is possible with only another type or size, and with
   assert.deepEqual(texts(server, { file: { name: 'talk.mp4', size: 5 * 1024 ** 3 } }),
     ['This file is 5 GB. The most we can take for upload is 4 GB. Cleaning in your browser doesn’t upload the file, so this limit doesn’t apply there.']);
   assert.deepEqual(texts(conv('mkv'), { file: { name: 'talk.mp4', size: 5 * 1024 ** 3 } }), []); // (made in the browser: no upload, no limit)
-  assert.deepEqual(texts(server, { est: 2e6, balance: { available_micros: 1e6 } }), ['This costs about $2.00, but your balance is $1.00. You can also choose the free options.']);
-  assert.deepEqual(texts(conv('mkv'), { est: 2e6, balance: { available_micros: 1e6 } }), []); // (free in the browser: no price to be short of)
+  assert.deepEqual(texts(server, { est: 2e6, balance: { available_micros: 1e6 } }), []); // (a price above the balance is refused by our side when it starts: 402)
+  assert.deepEqual(texts(conv('mkv'), { est: 2e6, balance: { available_micros: 1e6 } }), []);
   assert.deepEqual(texts(server, { active: 3 }), ['You have 3 files being processed. Start this one when one of them is done.']);
   // subtitles put into the video need MKV for a converted file too
   const subs = nothing(); edit(subs, 'subs', 0, 180, { q: 1 });
@@ -901,6 +901,86 @@ await check('words: tooltips carry the live prices (and leave them out while the
   for (const v of Object.values(t)) if (typeof v === 'string') for (const re of BANNED) assert.doesNotMatch(v, re);
   assert.equal(fmt(3723), '1:02:03');
   assert.equal(lenTxt(125), '2 min 5 s');
+});
+
+// the price list with what the server also says (GET /api/billing/pricing): each step's start-up per run (acw_common.editor.STEP_COSTS) and the conversion rate
+const FIXED = { echo: 0.12, light: 0.27, heavy: 2.9, rebuild: 4.3, leveling: 1.28 };
+const PRICING2 = { ...PRICING, stepFixedSeconds: FIXED, rates: [...PRICING.rates, { product: 'convert', tier: 'standard', usdPerMinute: 0.006 }] };
+const bare = (T) => { const S = state(T); edit(S, 'voice', 0, T, { mode: 0 }); edit(S, 'level', 0, T, { lvl: 0 }); return S; }; // (nothing switched on)
+const shape = (p) => p.lines.map((l) => [l.item, l.seconds, Math.round(l.fixedSeconds * 1000) / 1000, l.micros]);
+// (the exact agreement with the server's price, for many track sets, is server/tests/test_web_agreement.py)
+
+await check('priceOf: a step is its rate x (the whole seconds of its parts, rounded up once over their union, + its start-up) / 60, rounded up to a micro; the lines add up to the total', () => {
+  const S = state(600);
+  edit(S, 'voice', 0, 600, { mode: 1, kind: 'paid', rem: 1 });
+  edit(S, 'level', 0, 600, { lvl: 2 });
+  const p = priceOf(S.tracks, PRICING2, S.T);
+  assert.deepEqual(shape(p), [['denoise', 600, 0.27, 90041], ['leveling', 600, 1.28, 10022]]); // 9000 x 600.27 / 60 = 90040.5; 1000 x 601.28 / 60 = 10021.3
+  assert.equal(p.micros, 100063);
+  assert.equal(p.micros, p.lines.reduce((a, l) => a + l.micros, 0));
+  assert.deepEqual(p.lines.map((l) => l.label), ['Noise removal', 'Leveling']);
+  // no start-up in the list (an old server): the plain per-second price
+  assert.equal(priceOf(S.tracks, PRICING, S.T).micros, 90000 + 10000);
+  assert.ok(priceOf(S.tracks, null, S.T).lines.every((l) => Object.is(l.micros, 0)) && Object.is(priceOf(S.tracks, null, S.T).micros, 0)); // (never -0)
+  assert.deepEqual(priceOf(S.tracks, PRICING2).micros, priceOf(S.tracks, PRICING2, S.T).micros); // (T left out: the tracks' last end) // (no price list: nothing to price with)
+});
+
+await check('priceOf: several parts of one step round up once over their union (20.9 s is 21 s, not 11 + 11); parts of other steps do not join them', () => {
+  const S = bare(100);
+  edit(S, 'voice', 0, 10.2, { mode: 1, kind: 'paid', rem: 1 });
+  edit(S, 'voice', 20, 30.7, { mode: 1, kind: 'paid', rem: 1 });
+  edit(S, 'echo', 5, 25, { on: 1 });
+  const p = priceOf(S.tracks, PRICING2, S.T);
+  assert.deepEqual(shape(p), [['denoise', 21, 0.27, 3191], ['echo', 20, 0.12, 872]]); // 9000 x 21.27 / 60 = 3190.5; 2600 x 20.12 / 60 = 871.9
+});
+
+await check('priceOf: Light, Heavy and Auto noise removal are one line, each remover rounded on its own (Auto is held as Light); Voice rebuild is its own line', () => {
+  const S = bare(300);
+  edit(S, 'voice', 0, 100.3, { mode: 1, kind: 'paid', rem: 0 }); // auto: light
+  edit(S, 'voice', 100.3, 200.6, { mode: 1, kind: 'paid', rem: 2 }); // heavy
+  edit(S, 'voice', 200.6, 250, { mode: 2 });
+  const p = priceOf(S.tracks, PRICING2, S.T);
+  assert.deepEqual(shape(p), [['denoise', 202, 3.17, 30776], ['rebuild', 50, 4.3, 27150]]); // 9000 x 101.27 / 60 + 9000 x 103.9 / 60; 30000 x 54.3 / 60
+});
+
+await check('priceOf: free (browser) noise removal and free subtitles are listed as free lines that cost nothing; paid parts beside them still cost', () => {
+  const S = bare(200);
+  edit(S, 'voice', 0, 100.2, { mode: 1, kind: 'free', str: 2 });
+  edit(S, 'subs', 0, 50, { q: 1 });
+  let p = priceOf(S.tracks, PRICING2, S.T);
+  assert.deepEqual(p.lines.map((l) => [l.item, l.seconds, l.micros, !!l.free]), [['denoise_free', 101, 0, true], ['transcribe_free', 50, 0, true]]);
+  assert.equal(p.micros, 0);
+  edit(S, 'voice', 100.2, 200, { mode: 1, kind: 'paid', rem: 1 });
+  p = priceOf(S.tracks, PRICING2, S.T);
+  assert.deepEqual(p.lines.map((l) => l.item), ['denoise', 'denoise_free', 'transcribe_free']);
+  assert.ok(p.micros > 0 && p.micros === p.lines[0].micros);
+});
+
+await check('priceOf: subtitle parts are priced each at its quality and its whole seconds (at least one), and the translations once more per language; the spoken language is no translation', () => {
+  const S = bare(120);
+  edit(S, 'subs', 0, 60, { q: 2, lang: 'en', tr: ['en', 'es'] });
+  edit(S, 'subs', 60, 60.3, { q: 3, lang: 'en', tr: [] });
+  const p = priceOf(S.tracks, PRICING2, S.T);
+  assert.deepEqual(shape(p), [['transcribe', 60, 0, 4000], ['transcribe_accurate', 1, 0, 250], ['translate', 60, 0, 4000]]);
+  assert.deepEqual(p.lines[2].languages, ['es']);
+  assert.equal(p.micros, 8250);
+});
+
+await check('convertPrice: the conversion rate x the picture\'s size factor (in whole hundredths), per started second, rounded up', () => {
+  assert.equal(convertPrice(PRICING2, 1, 600), 60000);
+  assert.equal(convertPrice(PRICING2, 1.76, 600), 105600); // 6000 x 1.76 = 10560 a minute
+  assert.equal(convertPrice(PRICING2, 1.76, 0.2), 176); // one started second
+  assert.ok(Object.is(convertPrice(PRICING2, 2, 0), 0)); // (never -0)
+  assert.equal(convertPrice(PRICING2, undefined, 60), 6000);
+  assert.equal(convertPrice(PRICING, 2, 60), 0); // (no conversion rate on the list)
+});
+
+await check('start: a price above the balance is not a problem here any more (our side refuses it with a 402)', () => {
+  const S = state();
+  const base = { info: AUDIO, file: { size: 1e6 }, tracks: S.tracks, est: 9e9, duration: 180, maxJob: 4 * 3600, pricing: PRICING, pricingError: null, balance: { available_micros: 0 }, active: 0, maxActive: 3,
+    choice: choiceOf('wav'), out: out0 };
+  const probs = problemsFor({ ...base, plan: outputPlan({ tracks: S.tracks, info: AUDIO, file: base.file, choice: base.choice, out: base.out }) });
+  assert.deepEqual(probs, []);
 });
 
 console.log(failed ? `\n${failed} check(s) failed` : '\nall passed');

@@ -97,10 +97,10 @@ def stage_probe(job_dir: Path, spec: dict) -> dict:
     ff = _ff(spec)
     p = ff.probe(job_dir / spec["input"])
     limit = spec["max_seconds"]
-    # The header's length is only what the file claims; billing and limits use what actually decodes.
+    # The header's length is only what the file claims (for raw AMR, ADTS AAC and the like it is an estimate from the bitrate, a few %
+    # off); billing and limits use what actually decodes, which is also what the website counts from the file's packets.
     # Reading stops a minute past the limit, which is enough to tell the file is too long.
-    measured = ff.measure_duration(job_dir / spec["input"], p, limit + 60)
-    duration = max(p.duration, measured)
+    duration = ff.measure_duration(job_dir / spec["input"], p, limit + 60)
     if duration > limit + 1:
         if spec.get("denoise_tier") == "rebuild":
             raise MediaError(

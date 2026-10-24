@@ -485,7 +485,7 @@ function LiveDemo({ pricing, offline }) {
       {free ? (
         <p className="mb0" data-testid="live-price" data-usd-per-minute="0"><b>Cost: free.</b> <span className="muted">Nothing is sent to us, so nothing is charged.</span></p>
       ) : (
-      <p className="mb0" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
+      <p className="mb0 live-price" data-testid="live-price" data-usd-per-minute={priceKnown ? perMin : ''} aria-live="polite">
         {!pricing && <span className="muted">Loading prices…</span>}
         {pricing && perMin <= 0 && priceKnown && <span className="muted">Turn on noise removal or captions to start.</span>}
         {pricing && !priceKnown && <span className="muted">We don’t have a price for that combination.</span>}

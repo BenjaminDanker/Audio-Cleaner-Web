@@ -382,10 +382,13 @@ blockquote { margin: 0 0 1em; padding: 4px 16px; border-left: 4px solid var(--br
 .price-wrap { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; }
 .price-table th, .price-table td { vertical-align: top; }
 .price-table tbody th[scope="row"] { font-weight: 400; text-align: left; width: 100%; overflow-wrap: anywhere; }
+/* the live page's price line: room for its longest text (two lines on a phone) from the start, so nothing moves when the prices arrive */
+.live-price { min-height: 3.2em; }
 .price-table tr.group th { padding-block: 8px; }
 .price-table .svc { display: block; font-weight: 650; }
 .price-table .desc { display: block; margin-top: 2px; }
-.price-table td.num { text-align: right; }
+/* a fixed width that fits the widest price ("$0.0026 / min"): the column is the same before and after the prices load, so nothing rewraps */
+.price-table td.num { text-align: right; width: 8.5em; min-width: 8.5em; }
 .price-main { display: block; font-weight: 700; }
 .price-sub { display: block; }
 .free-note { color: var(--success); }

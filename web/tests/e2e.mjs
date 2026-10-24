@@ -53,6 +53,69 @@ if (want('basic')) {
   });
 }
 
+if (want('basic')) {
+  /**
+   * The layout shift (the page's own 'layout-shift' entries, summed) that the arrival of the price list causes: /api/billing/pricing is held back
+   * for 1.5 s, then answered; the shifts that happen from that moment on are the prices'. `scroll`: a selector brought to the top of the screen first
+   * (what is on screen is what can shift). Answers {after, total} (after: from the prices' arrival; total: since the page was asked for).
+   */
+  const shiftOnPrices = async ({ path, width, height, scroll = null, signedInAs = null, wait = 'main h1' }) => {
+    const ctx = await browser.newContext({ viewport: { width, height } });
+    try {
+      const p = await ctx.newPage();
+      if (signedInAs) await signIn(p, signedInAs);
+      await p.addInitScript(() => {
+        window.__shifts = [];
+        new PerformanceObserver((l) => { for (const e of l.getEntries()) if (!e.hadRecentInput) window.__shifts.push([performance.timeOrigin + e.startTime, e.value, (e.sources || []).map((x) => { const n = x.node; const r = x.previousRect; const q = x.currentRect; return (n ? n.nodeName + '.' + String(n.className || '').split(' ')[0] + ' "' + String(n.textContent || '').trim().slice(0, 24) + '"' : '?') + ' y ' + Math.round(r.y) + '->' + Math.round(q.y) + ' h ' + Math.round(r.height) + '->' + Math.round(q.height); }).join('; ')]); }).observe({ type: 'layout-shift', buffered: true });
+      });
+      let arrived = null;
+      await p.route('**/api/billing/pricing', async (r) => {
+        await new Promise((res) => setTimeout(res, 1500));
+        const real = await r.fetch();
+        arrived = Date.now();
+        await r.fulfill({ response: real });
+      });
+      await p.goto(`${BASE}${path}`, { waitUntil: 'domcontentloaded' });
+      await p.waitForSelector(wait, { timeout: 15000 });
+      if (scroll) await p.locator(scroll).first().evaluate((el) => el.scrollIntoView({ block: 'start' }));
+      const rowsOf = () => p.locator('[data-testid=prices] tbody tr').count();
+      const rowsBefore = await rowsOf().catch(() => 0);
+      const t0 = Date.now();
+      while (arrived === null && Date.now() - t0 < 15000) await p.waitForTimeout(100);
+      if (arrived === null) throw new Error('the price list was never asked for');
+      await p.waitForTimeout(1500); // (everything that moves because of it has moved)
+      const shifts = await p.evaluate(() => window.__shifts);
+      const sum = (l) => Math.round(l.reduce((n, [, v]) => n + v, 0) * 10000) / 10000;
+      const rowsAfter = await rowsOf().catch(() => 0);
+      return { rows: `${rowsBefore}->${rowsAfter}`, after: sum(shifts.filter(([t]) => t >= arrived - 30)), total: sum(shifts), n: shifts.length, what: shifts.filter(([t]) => t >= arrived - 30).map(([, v, d]) => v.toFixed(4) + ' [' + d + ']').join(' / ') };
+    } finally {
+      await ctx.close();
+    }
+  };
+  const LIMIT = 0.01;
+  await check('no layout shift when the prices arrive: the landing page\'s price table (drawn in full with hidden prices while the list loads) and the Live page\'s price line, at desktop width and at 390 px, with the price list held back for 1.5 s', async () => {
+    const live = `e2e-cls-${Date.now()}@example.com`;
+    const cases = [
+      ['landing, desktop, top of the page', { path: '/', width: 1280, height: 900 }],
+      ['landing, desktop, price table at the top of the screen', { path: '/', width: 1280, height: 900, scroll: '[data-testid=prices]' }],
+      ['landing, 390 px, top of the page', { path: '/', width: 390, height: 844 }],
+      ['landing, 390 px, price table at the top of the screen', { path: '/', width: 390, height: 844, scroll: '[data-testid=prices]' }],
+      ['live, desktop', { path: '/app/live', width: 1280, height: 900, signedInAs: live, wait: '[data-testid=live-price]' }],
+      ['live, 390 px', { path: '/app/live', width: 390, height: 844, signedInAs: live, wait: '[data-testid=live-price]' }],
+    ];
+    const got = [];
+    const bad = [];
+    for (const [name, o] of cases) {
+      const r = await shiftOnPrices(o);
+      got.push(`${name}: ${r.after} from the prices (${r.total} in all, ${r.n} shifts; table rows ${r.rows})${r.after ? ' ' + r.what : ''}`);
+      if (!(r.after < LIMIT)) bad.push(`${name}: ${r.after}`);
+    }
+    console.log('CLS ' + got.join(' | '));
+    if (bad.length) throw new Error(`layout shift of at least ${LIMIT} when the prices arrive: ${bad.join('; ')}; all: ${got.join(' | ')}`);
+    return got.join(' | ');
+  });
+}
+
 if (want('auth')) {
   // Each sign-in runs in its own browser context, so the shared page below stays the e2e account.
   await check('sign-in: a login link lands on /app with the token gone; a reused link and a cut-off token get a friendly error; signed-out /app/billing goes to /login', async () => {

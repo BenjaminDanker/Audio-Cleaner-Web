@@ -40,7 +40,6 @@ export function recordOf(session, choice, now = Date.now()) {
     type: session.file.type,
     lastModified: session.file.lastModified,
     seconds: session.T,
-    lengthUnknown: !!session.lengthUnknown,
     tracks: json(S.tracks),
     sel: S.sel ? json(S.sel) : null,
     sugg: json(S.sugg || []),

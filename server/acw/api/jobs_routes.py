@@ -43,6 +43,9 @@ class CreateJob(BaseModel):
     callbackUrl: str | None = Field(default=None, max_length=600)
     options: dict = Field(default_factory=dict)
     timeline: Any = None  # only its parts are processed and charged (acw_common.timeline format v1, docs/api.md); checked by editing.parse_timeline
+    # The price the caller showed. A job that would cost more than 10 % above it (jobs.PRICE_TOLERANCE) is refused (409 price_changed), or
+    # stopped once its file is read, and never charged.
+    maxCostMicros: int | None = Field(default=None, ge=0, le=10**12)
 
 
 class EstimateJob(BaseModel):
@@ -154,6 +157,7 @@ def create(body: CreateJob, request: Request, response: Response, principal: aut
             callback_url=callback,
             idempotency=idem,
             timeline=body.timeline,
+            max_cost_micros=body.maxCostMicros,
         )
     except jobs.Replay as r:  # a parallel request with the same key won
         return _replayed({"id": r.job_id, "estCostMicros": r.est_cost_micros}, response)

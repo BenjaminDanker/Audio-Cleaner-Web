@@ -37,6 +37,7 @@ around it are
 from __future__ import annotations
 
 import json
+import os
 import math
 import re
 from pathlib import Path
@@ -52,7 +53,7 @@ NOT_FINISHED = "job_not_finished"
 FILES_GONE = "job_files_gone"  # the files are cleared away (expired or deleted): start again from the file
 NOTHING_TO_CHANGE = "nothing_to_change"
 EXPIRING = "job_expiring"  # too close to the end of the job's 6 hours to run again
-PRICE_CHANGED = "price_changed"  # the price is above `maxCostMicros`
+PRICE_CHANGED = jobs.PRICE_CHANGED  # the price is above `maxCostMicros`
 NOT_EDITABLE = "job_not_editable"  # a job without audio steps (subtitles only), or an old job whose audio facts were never recorded
 BAD_TIMELINE = "bad_timeline"
 BUSY = "job_busy"  # the job is being processed: wait for it
@@ -306,6 +307,45 @@ def make_quote(job: dict, params: dict, tl, *, rates: dict[str, int] | None = No
         "gpu": gpu_stages_of(plan),
         "video": video,
         "convertMicros": convert,
+    }
+
+
+def quote_inputs(job: dict, params: dict) -> dict:
+    """What the website needs to work out `make_quote` itself, sent once with the timeline (web/src/editor/quote.js does the same
+    planning and pricing, so the price of an edit shows at once): the recording's facts and identity, the cache (the sha1 names of
+    its blocks, blocks.FlacCache.name), the removers "auto" was decided as, the subtitle parts already made, the rates pinned to the
+    job, and what remaking the video costs."""
+    seconds = edit_store.file_seconds(job, params)
+    f = edit_store.facts_of(job, params)
+    d = edit_store.blocks_dir(job["id"])
+    try:
+        cached = sorted(x.name[:-5] for x in os.scandir(d) if x.name.endswith(".flac") and len(x.name) == 45 and x.is_file(follow_symlinks=False))
+    except OSError:
+        cached = []
+    subs: dict = {}
+    root = jobs.job_dir(job["id"]) / edit_subtitles.SUBS
+    try:
+        folders = [x for x in os.scandir(root) if x.is_dir(follow_symlinks=False)]
+    except OSError:
+        folders = []
+    for x in folders:
+        have = edit_store.read_json(Path(x.path) / "segments.json", 20_000_000)
+        made = sorted(y.name[len("segments."):-len(".json")] for y in os.scandir(x.path)
+                      if y.name.startswith("segments.") and y.name.endswith(".json") and y.name != "segments.json" and y.is_file(follow_symlinks=False))
+        subs[x.name] = {"done": isinstance(have, dict), "language": have.get("language") if isinstance(have, dict) else None, "translations": made}
+    opts = params.get("options") or {}
+    return {
+        "facts": {"n": f["n"], "channels": f["channels"], "plan": f["plan"], "spans": f["spans"], "rebuildMid": bool(f["rebuild_mid"]),
+                  "reference": bool(f.get("reference"))},
+        "sourceId": edit_store.source_id(job),
+        "cached": cached,
+        "resolved": (params.get("edit") or {}).get("resolved") or {},
+        "subtitles": subs,
+        "rates": edit_prices.step_rates(),
+        "subtitleRates": params.get("subtitle_rates") or edit_prices.subtitle_rates(),
+        "video": {"makes": (bool(params.get("has_video")) or bool(opts.get("video_out"))) and bool(opts.get("output_video", True)),
+                  "embedded": bool(opts.get("embed_subtitles", True)), "convertMicros": job_convert.convert_cost(params, seconds),
+                  "convertLine": job_convert.convert_line(params, seconds)},
     }
 
 
@@ -631,6 +671,8 @@ def timeline_info(job: dict, params: dict) -> dict:
         out["cached"]["subtitles"] = [[p.start, p.end] for p in tl.layers["subtitles"]
                                       if (edit_subtitles.cues_of(job["id"], p) is not None if p.settings["quality"] == "free"
                                           else edit_store.regular_file(edit_subtitles.subtitle_dir(job["id"], p) / "segments.json"))]
+    if job["status"] == "done":
+        out["quote"] = quote_inputs(job, params)
     if f and f.get("source") and job["status"] == "done":
         out["preview"] = {"layers": ["source", "echo", "noise", "rebuild"], "samples": f["n"], "channels": f["channels"],
                           "sourceScale": f["source"]["scale"], "stretchMaxSeconds": jobs.STRETCH_MAX_SECONDS}

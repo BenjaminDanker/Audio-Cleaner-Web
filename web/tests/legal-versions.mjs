@@ -38,6 +38,12 @@ await check('both pages render with their text, the contact form always on; the 
   return `terms ${r.terms.sha256.slice(0, 12)}, privacy ${r.privacy.sha256.slice(0, 12)}`;
 });
 
+await check('the Terms say a job never costs more than 10% above the price shown (it is stopped and not charged)', () => {
+  const t = r.terms.text.replace(/\s+/g, ' ');
+  assert.match(t, /more than 10% above the price shown before it started/);
+  assert.match(t, /stopped before it is processed and not charged/);
+});
+
 await check('the pages show the versions the build gives them, and the hash does not change with them', async () => {
   const v = await renderAll({ terms: '2030-05-06', privacy: '2030-05-06-2' });
   assert.match(v.terms.text, /^Terms of Service\nVersion 2030-05-06\.\n/);

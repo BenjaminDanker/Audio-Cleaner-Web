@@ -359,7 +359,7 @@ async function detailsOf() {
 }
 const COUNTS = (n) => new RegExp(`^Video conversion · counts ${n}× \\(bigger or faster than 1080p at 30 fps\\) `);
 
-await check('a video made on our side is priced up front from what the browser read of it: the estimate asked for carries the video\'s codec, size and frame rate, Details says how much the picture counts, and a copy into another type is free and says so', async () => {
+await check('a video made on our side is priced up front, here, from what the browser read of it (its codec, size and frame rate; no estimate is asked of our side), Details says how much the picture counts, and a copy into another type is free and says so', async () => {
   const sent = [];
   const onReq = (rq) => { const u = new URL(rq.url()); if (u.pathname === '/api/jobs/estimate') sent.push(rq.postDataJSON()); };
   page.on('request', onReq);
@@ -370,17 +370,12 @@ await check('a video made on our side is priced up front from what the browser r
     await page.waitForFunction(() => /^Start · \$0\.004$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     let d = await detailsOf();
     if (d.lines.length !== 1 || !COUNTS(4).test(d.lines[0]) || !/ \$0\.004$/.test(d.lines[0]) || d.total !== '$0.004') throw new Error('webm: ' + JSON.stringify(d));
-    const body = sent.at(-1);
-    if (body?.kind !== 'convert' || body.options.video_out.format !== 'webm' || body.options.video_out.size !== null) throw new Error('estimate asked: ' + JSON.stringify(body));
-    const source = body.options.video_out.source;
-    if (source?.codec !== 'mpeg4' || source.width !== 3840 || source.height !== 2160 || Math.abs(source.fps - 30) > 0.5) throw new Error('source: ' + JSON.stringify(source));
     await openOutput();
     await field('out-size').selectOption('720');
     await closeOutput();
     await page.waitForFunction(() => /^Start · \$0\.002$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     d = await detailsOf();
     if (d.lines.length !== 1 || !COUNTS(2).test(d.lines[0]) || d.total !== '$0.002') throw new Error('webm 720p: ' + JSON.stringify(d));
-    if (sent.at(-1).options.video_out.size !== 720) throw new Error('estimate for 720p: ' + JSON.stringify(sent.at(-1)));
     await openOutput();
     await field('out-format').selectOption('mkv');
     await field('out-size').selectOption('same');
@@ -388,8 +383,8 @@ await check('a video made on our side is priced up front from what the browser r
     await page.waitForFunction(() => /^Start · Free$/.test(document.querySelector('.studio .bb .btn-lg')?.textContent.trim() || ''), null, { timeout: 15000 });
     d = await detailsOf();
     if (d.lines.join('|') !== 'Video on our side, the picture copied as it is Free' || d.total !== 'Free') throw new Error('mkv: ' + JSON.stringify(d));
-    const copied = sent.at(-1);
-    return `webm 4× ($0.004), 720p 2× ($0.002), MKV copied; source ${JSON.stringify(source)}; last estimate format ${copied.options.video_out.format}`;
+    if (sent.length) throw new Error('our side was asked for the price: ' + JSON.stringify(sent));
+    return 'webm 4× ($0.004), 720p 2× ($0.002), MKV copied';
   } finally {
     page.off('request', onReq);
   }

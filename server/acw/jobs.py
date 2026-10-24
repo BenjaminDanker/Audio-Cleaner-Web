@@ -61,6 +61,16 @@ ACTIVE = ("uploading", "queued", "running", "cloud_asr")
 # A job that would only finish this close to the moment its files are cleared away (6 hours after the upload) is stopped instead: nobody
 # could download its results in time, so it ends as failed and is not charged.
 MIN_DELIVERY_SECONDS = 60
+# A job never costs more than this much above the price its caller was shown (`maxCostMicros`): one that would (the file is longer
+# than the client could tell, a video's picture has to be made again after all, prices changed) is refused, or stopped once its file is
+# read, and not charged. The website works out the same price as the server, so in practice only the file's real length differs.
+PRICE_TOLERANCE = 0.10
+PRICE_CHANGED = "price_changed"
+
+
+def over_quote(cost: int, quoted: int | None) -> bool:
+    """`cost` is more than PRICE_TOLERANCE above the price the caller was shown (`quoted` None: no price was given)."""
+    return quoted is not None and cost > quoted * (1 + PRICE_TOLERANCE)
 TOO_LATE = "This took longer than expected and your files were about to be cleared away, so it was stopped. You weren’t charged."
 
 
@@ -456,6 +466,7 @@ def create_job(
     callback_url: str | None = None,
     idempotency: tuple[str, str] | None = None,
     timeline: object | None = None,
+    max_cost_micros: int | None = None,
 ) -> dict:
     settings = get_settings()
     ext = Path(filename).suffix.lower()
@@ -538,6 +549,11 @@ def create_job(
         params["rates"] = {}
         est = 0
     est += job_convert.convert_cost(params, claimed_seconds)  # (another file type only: known once the file is read, then held if it is made again)
+    if over_quote(est, max_cost_micros):
+        raise JobError(f"This costs ${est / 1e6:.2f}, more than the ${max_cost_micros / 1e6:.2f} shown. Nothing was charged; please try again.",
+                       409, code=PRICE_CHANGED)
+    if max_cost_micros is not None:
+        params["max_cost_micros"] = int(max_cost_micros)  # (the worker holds the job to it once the file is read)
     now = db.now()
     # (the record's tier, for the metrics and the ledger: a timeline job's stored tier is only a placeholder, so its Voice rebuild is named)
     tier = "rebuild" if tl is not None and tl.layers["rebuild"] else "/".join(t for t in (params["denoise_tier"], params["transcribe_tier"]) if t)

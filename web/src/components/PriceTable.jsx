@@ -25,6 +25,16 @@ const LABELS = {
   'transcribe_translate/standard': 'Translated subtitles, per language',
 };
 
+// The rows as the price list has them (server/acw/billing/pricing.py public_price_list: order and names), drawn while it loads so
+// the table has its full size at once and only the prices fill in (nothing below it moves when they arrive).
+const WHILE_LOADING = [
+  ['denoise', 'standard', 'Denoising'], ['denoise', 'rebuild', 'Voice rebuild'], ['leveling', 'standard', 'Leveling'],
+  ['echo', 'standard', 'Echo removal'], ['transcribe', 'local', 'Transcription'], ['transcribe', 'premium', 'Transcription, extra accurate'],
+  ['transcribe_translate', 'standard', 'Translated subtitles, per language'], ['convert', 'standard', 'Video conversion'],
+  ['stream_denoise', 'light', 'Live noise removal'], ['stream_captions', 'local', 'Live captions'],
+  ['stream_captions', 'premium', 'Live captions, extra accurate'], ['stream_translate', 'standard', 'Live caption translation, per language'],
+].map(([product, tier, label]) => ({ product, tier, label, available: true, loading: true }));
+
 const GROUPS = [
   { id: 'free', title: 'Free', products: [] },
   { id: 'files', title: 'Files', products: ['denoise', 'echo', 'leveling', 'transcribe', 'transcribe_translate', 'convert'] },
@@ -40,15 +50,14 @@ const GROUPS = [
  */
 export default function PriceTable({ only, testId = 'prices', showNote = true }) {
   const { data, error, loading } = usePricing();
-  if (loading) return <p role="status" className="muted center"><span className="spinner" aria-hidden="true" /> Loading prices…</p>;
-  if (error || !data) {
+  if (!loading && (error || !data)) {
     return <div className="banner banner-warn" role="alert">We couldn&rsquo;t load the prices just now. Please reload the page in a moment.</div>;
   }
   const groups = GROUPS.filter((g) => !only || only.includes(g.id));
   return (
     <div className="stack">
       <div className="price-wrap">
-        <table className="price-table" data-testid={testId}>
+        <table className="price-table" data-testid={testId} aria-busy={loading ? 'true' : undefined}>
           <caption className="sr-only">What each service costs</caption>
           <thead className="sr-only">
             <tr><th scope="col">Service</th><th scope="col">Price</th></tr>
@@ -56,7 +65,7 @@ export default function PriceTable({ only, testId = 'prices', showNote = true })
           <tbody>
             {groups.map((g) => (g.id === 'free'
               ? <FreeRows key={g.id} title={g.title} />
-              : <GroupRows key={g.id} group={g} rates={data.rates} />))}
+              : <GroupRows key={g.id} group={g} rates={loading ? WHILE_LOADING : data.rates} />))}
           </tbody>
         </table>
       </div>
@@ -108,10 +117,17 @@ function GroupRows({ group, rates }) {
               <span className="svc">{LABELS[`${r.product}/${r.tier}`] || r.label}</span>
               {desc && <span className="small muted desc">{desc}</span>}
             </th>
-            <td className="num">
-              <span className="price-main">{rate(r.usdPerMinute)} / min</span>
-              <span className="small muted price-sub">{moneyUsd(r.usdPerHour)} / hour</span>
-            </td>
+            {r.loading ? (
+              <td className="num" aria-label="Loading">
+                <span className="price-main" style={{ visibility: 'hidden' }}>$0.0000 / min</span>
+                <span className="small muted price-sub" style={{ visibility: 'hidden' }}>$0.00 / hour</span>
+              </td>
+            ) : (
+              <td className="num">
+                <span className="price-main">{rate(r.usdPerMinute)} / min</span>
+                <span className="small muted price-sub">{moneyUsd(r.usdPerHour)} / hour</span>
+              </td>
+            )}
           </tr>
         );
       })}

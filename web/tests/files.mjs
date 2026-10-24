@@ -1,6 +1,6 @@
 // The editor for a file (the Cleanup page once a file is chosen): what each choice sends to the server (checked by stopping the job
 // request, so nothing is made; the body is a timeline, docs/api.md section 8), the prices in the editor (the price on Start is the
-// server's own estimate for the same timeline: the page asks for it, and the Details list adds up from the price list), files that cannot be
+// server's own estimate for the same timeline, which the page works out itself from the price list, as Details adds it up), files that cannot be
 // used or that come with no credit, names shown safely, and two real paid jobs: a WAV sent as FLAC gives the same result as the raw
 // upload, and echo removal with two audio tracks.
 // Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output and the fixtures (make-fixtures.sh).
@@ -69,35 +69,24 @@ const started = (s) => Math.ceil(s - 1e-6);
 const listPrice = ({ noise = 0, rebuild = 0, level = 0, std = 0, ext = 0 }) => Math.ceil(started(noise) * perSecond('denoise', 'standard') + started(rebuild) * perSecond('denoise', 'rebuild') + started(level) * perSecond('leveling', 'standard')
   + started(std) * perSecond('transcribe', 'local') + started(ext) * perSecond('transcribe', 'premium') - 1e-6);
 /** The request without the file's fields: what the page itself asks the estimate with. */
-const withoutFile = ({ filename: _f, sizeBytes: _s, displayName: _d, ...rest }) => rest;
-// Every estimate the page asked (a job on our side is priced by the server: the timeline, without the file), with the server's answer.
-const estimates = [];
-page.on('response', async (res) => {
-  if (res.request().method() !== 'POST' || new URL(res.url()).pathname !== '/api/jobs/estimate') return;
-  try { estimates.push({ body: res.request().postDataJSON(), answer: await res.json(), status: res.status() }); } catch { /* aborted */ }
-});
+const withoutFile = ({ filename: _f, sizeBytes: _s, displayName: _d, maxCostMicros: _m, ...rest }) => rest;
 /**
- * The price on Start is the server's estimate for the timeline in the editor: waits for it, then checks that the page's own request carried no
- * file fields, that the server says the same for the same body when asked again, that nothing charges Restore highs, and that the price is not
- * below what the price list asks for the parts (`atLeast`: the server adds each step's per-run amount). Answers {body, answer}.
+ * The price on Start is worked out by the page itself (editor/tracks.js priceOf): waits for it, presses Start (the job request is stopped, so
+ * the timeline the page sends is seen), asks the server for the estimate of that same timeline, and checks that Start's price is the server's
+ * to the micro, that nothing charges Restore highs, and that the price is not below what the price list asks for the parts (`atLeast`: the
+ * server adds each step's per-run amount). Answers {body, answer}.
  */
 async function startIsServers({ atLeast = 0 } = {}) {
-  await page.waitForTimeout(700); // (the page asks 400 ms after the last change; until it has the answer Start shows no price)
   await waitStartPrice();
   const label = await mainButton(page);
-  for (let i = 0; i < 50; i++) {
-    const e = estimates.at(-1);
-    if (e && label === `Start · ${words(e.answer.estCostMicros)}`) break;
-    await page.waitForTimeout(100);
-  }
-  const e = estimates.at(-1);
-  if (!e || label !== `Start · ${words(e.answer.estCostMicros)}`) throw new Error(`Start says "${label}", the page's last estimate says ${e?.answer?.estCostMicros}`);
-  for (const k of ['filename', 'displayName', 'sizeBytes']) if (k in e.body) throw new Error(`the estimate carries the file field ${k}`);
-  const mine = await apiCall(page, 'POST', 'jobs/estimate', e.body);
-  if (mine.status !== 200 || mine.body.estCostMicros !== e.answer.estCostMicros) throw new Error(`the page's estimate ${e.answer.estCostMicros}, the server's for the same body: ${JSON.stringify(mine).slice(0, 300)}`);
+  const body = await send();
+  const mine = await apiCall(page, 'POST', 'jobs/estimate', withoutFile(body));
+  if (mine.status !== 200) throw new Error(`the server's estimate for the timeline sent: ${JSON.stringify(mine).slice(0, 300)}`);
+  if (!(body.maxCostMicros >= 0) || `Start · ${words(body.maxCostMicros)}` !== label) throw new Error(`the job request carries maxCostMicros ${body.maxCostMicros}, the button says "${label}"`); // (the price shown: our side stops a job more than 10% above it)
+  if (label !== `Start · ${words(mine.body.estCostMicros)}`) throw new Error(`Start says "${label}", the server's estimate for the same timeline says ${mine.body.estCostMicros} (${words(mine.body.estCostMicros)})`);
   if (mine.body.lines.some((l) => l.item === 'highs')) throw new Error('the server has a highs line: ' + JSON.stringify(mine.body.lines));
   if (mine.body.estCostMicros < atLeast) throw new Error(`the server's estimate ${mine.body.estCostMicros} is below the price list's ${atLeast}`);
-  return { body: e.body, answer: mine.body };
+  return { body, answer: mine.body };
 }
 /**
  * This backend has no card, so the server will not price a Voice rebuild ("paused right now"): the estimate for a timeline with a rebuild part is
@@ -117,9 +106,9 @@ async function rebuildPricing() {
   });
 }
 const unrebuildPricing = () => page.unroute('**/api/jobs/estimate');
-/** The estimate the page asked about is the timeline that is sent. */
+/** What is sent the second time is the timeline that was priced (the same choices, the same request). */
 const sameTimeline = (asked, sent) => {
-  if (JSON.stringify(asked.body.timeline) !== JSON.stringify(sent.timeline)) throw new Error(`the price was asked for ${JSON.stringify(asked.body.timeline)}, the job sent ${JSON.stringify(sent.timeline)}`);
+  if (JSON.stringify(asked.body.timeline) !== JSON.stringify(sent.timeline)) throw new Error(`the price was worked out for ${JSON.stringify(asked.body.timeline)}, the job sent ${JSON.stringify(sent.timeline)}`);
 };
 const { rate: shownRate } = await import('../src/format.js');
 
@@ -155,32 +144,37 @@ await check('bad files: an empty file is refused with a clear message; a tiny te
   return empty;
 });
 
-await check('bad files: a file the browser cannot open gets Free noise removal greyed out with the reason, Standard as the starting choice, and an honest unknown length', async () => {
+await check('bad files: a file whose length no reader can find (garbage with an .mp3 name) is refused with a plain sentence, never priced from a guess from its size; no Start and no "about" length', async () => {
   await freshApp();
-  // (not through dropFile: the starting choices are what is looked at here)
+  // (not through dropFile: nothing is chosen first)
   await page.setInputFiles('input[type=file]', join(FILES, 'garbage.mp3'));
-  await start().waitFor({ timeout: 30000 });
-  await settleRecommendation(page);
-  const free = page.locator('.studio button[data-act=v-kind][data-v=free]');
-  if ((await free.getAttribute('aria-disabled')) !== 'true') throw new Error('free noise removal offered for a file the browser cannot open');
-  const why = (await free.getAttribute('data-tip')).trim();
-  if (why !== 'Your browser can’t open this file type. Paid Denoising can do it.') throw new Error('reason: ' + why);
-  if ((await page.getByTestId('voice-noise').getAttribute('aria-checked')) !== 'true' || (await page.locator('.studio button[data-act=v-kind][data-v=paid]').getAttribute('aria-pressed')) !== 'true') throw new Error('Standard noise removal should be the starting choice');
-  await page.getByTestId('length-unknown').waitFor({ timeout: 15000 });
+  await page.getByTestId('job-error').waitFor({ timeout: 60000 });
+  const why = (await page.getByTestId('job-error').innerText()).trim();
+  if (!/This browser couldn’t read this file’s length\./.test(why)) throw new Error('reason: ' + why);
+  if (await start().count()) throw new Error('Start offered for a file with no length');
+  if (await page.getByTestId('length-unknown').count()) throw new Error('the guessed-length note is back');
   await page.screenshot({ path: join(SHOTS, 'cleanup-unreadable.png'), fullPage: true });
   return why;
 });
 
-await check('credit: an account with no balance cannot start a paid job (Start off, the reason, "Add credit"); free subtitles on a 10 min file start with no credit', async () => {
+await check('credit: an account with no balance sees no warning before it starts (the price is on Start), and our side refuses the start (402, "This job costs about ...") with the job-error banner and no job; free subtitles on a 10 min file start with no credit', async () => {
   await freshApp();
   await choose('noisy.wav');
   await pick(page, 'noise', 'denoise');
-  const msg = page.locator('[data-testid=notes] .banner-warn', { hasText: /your balance is/ });
-  await msg.waitFor();
-  if (!(await msg.getByRole('link', { name: 'Add credit' }).count())) throw new Error('no Add credit link');
-  if (await start().isEnabled()) throw new Error('start enabled with no credit');
+  await start().waitFor();
+  await page.waitForFunction(() => /^Start · \$/.test(document.querySelector('[data-testid=start]')?.innerText.replace(/\s+/g, ' ').trim() || ''), null, { timeout: 15000 });
+  if (await page.locator('[data-testid=notes]', { hasText: /your balance is/ }).count()) throw new Error('a balance warning before starting');
+  if (!(await start().isEnabled())) throw new Error('start is off for a price above the balance (our side decides)');
+  passThrough = true; // (the real server answers this one)
+  const refused = page.waitForResponse((r) => /\/api\/jobs$/.test(r.url()) && r.request().method() === 'POST');
+  await start().click();
+  const r = await refused;
+  passThrough = false;
+  if (r.status() !== 402) throw new Error('status ' + r.status());
+  const msg = page.getByTestId('job-error');
+  await msg.waitFor({ timeout: 15000 });
   const reason = (await msg.innerText()).replace(/\s+/g, ' ').trim();
-  if (!/^This costs about .+, but your balance is \$0\.00\. You can also choose the free options\. Add credit$/.test(reason)) throw new Error('reason: ' + reason);
+  if (!/^This job costs about \$\d+\.\d\d; your available balance is \$0\.00\./.test(reason)) throw new Error('reason: ' + reason);
   await freshApp();
   await choose('long10min.mp3');
   await pick(page, 'noise', 'off');
@@ -415,7 +409,8 @@ await check('the price on Start is exactly the server\'s own estimate for the ti
   await page.getByTestId('bar-det').click();
   const lines = (await page.getByTestId('details').innerText()).replace(/\s+/g, ' ');
   if ((await page.getByTestId('details-total').innerText()) !== words(whole1.answer.estCostMicros) || !/Noise removal · 0:\d\d/.test(lines) || !/Leveling · 0:\d\d/.test(lines)) throw new Error('Details: ' + lines);
-  if (!/Includes a small amount for each run\. Parts are rounded up to whole seconds\./.test(lines)) throw new Error('Details does not say the price includes each run\'s amount: ' + lines);
+  if (!/Noise removal · 0:\d\d \+ (?:[\d.]+ s|\d+:\d\d) start-up \$/.test(lines) || !/Leveling · 0:\d\d \+ (?:[\d.]+ s|\d+:\d\d) start-up \$/.test(lines)) throw new Error('Details has no start-up on its lines: ' + lines);
+  if (/Includes a small amount for each run|details-local/.test(lines)) throw new Error('an old note in Details: ' + lines);
   if (/highs/i.test(lines)) throw new Error('a highs line in Details: ' + lines);
   await page.getByTestId('bar-det').click();
   posts.length = 0;

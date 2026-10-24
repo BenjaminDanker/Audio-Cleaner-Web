@@ -10,35 +10,33 @@ import { tipAttr } from './ui.jsx';
 const LANG = Object.fromEntries(LANGUAGES.map(([c, n]) => [c || 'auto', n]));
 const typeLabel = (id) => FORMAT[id]?.label.replace(/ \(.*\)$/, '') || String(id).toUpperCase();
 
-/** "Details": what the price is made of. */
+/** A step's start-up per run, as seconds of audio: "2.3 s", "1:38". */
+const startup = (f) => (f < 60 ? `${Math.round(f * 10) / 10} s` : fmt(f));
+
+/** "Details": what the price is made of, line by line (editor/tracks.js priceOf: the same rules as our side), adding up to the total. */
 function Details({ ctx }) {
-  const { cost: c, total, deltaMicros, changed, serverTotal, partsNote, localPrice } = ctx;
+  const { price, total, deltaMicros, changed } = ctx;
   const L = [];
-  const li = (a, b) => <li key={a}><span>{a}</span><span>{b}</span></li>;
-  if (c.nPaid) L.push(li(`Noise removal · ${fmt(c.nPaid)}`, money(c.noise)));
-  if (c.nFree) L.push(li(`Noise removal, free · ${fmt(c.nFree)}`, 'Free'));
-  if (c.rSec) L.push(li(`Voice rebuild · ${fmt(c.rSec)}`, money(c.rebuild)));
-  if (c.eSec) L.push(li(`Echo removal · ${fmt(c.eSec)}`, money(c.echo)));
-  if (c.lSec) L.push(li(`Leveling · ${fmt(c.lSec)}`, money(c.level)));
-  if (c.sStd) L.push(li(`Subtitles, Standard · ${fmt(c.sStd)}`, money(c.sStd * ctx.rates.std)));
-  if (c.sExt) L.push(li(`Subtitles, Extra accurate · ${fmt(c.sExt)}`, money(c.sExt * ctx.rates.ext)));
-  if (c.trSec) L.push(li(`Translations · ${c.trLangs.map((l) => LANG[l]).join(', ')}`, money(c.tr)));
-  if (c.sFree) L.push(li(`Subtitles, free · ${fmt(c.sFree)}`, 'Free'));
+  const li = (key, a, b) => <li key={key}><span>{a}</span><span>{b}</span></li>;
+  for (const l of price?.lines || []) {
+    const what = l.item === 'translate' ? `${l.label} · ${l.languages.map((c) => LANG[c] || c).join(', ')} · ${fmt(l.seconds)}` : `${l.label} · ${fmt(l.seconds)}`;
+    const plus = l.fixedSeconds > 0 ? ` + ${startup(l.fixedSeconds)} start-up` : '';
+    L.push(li(l.item, what + plus, l.free ? 'Free' : money(l.micros)));
+  }
   const cv = ctx.conversion;
   const big = cv?.factor > 1 ? ` · counts ${Math.round(cv.factor * 10) / 10}× (bigger or faster than 1080p at 30 fps)` : '';
-  if (cv?.free) L.push(li(cv.black ? 'Video with a plain black picture, on our side' : cv.server ? 'Video on our side, the picture copied as it is' : 'File type or size, in your browser', 'Free'));
-  else if (cv?.maybe) L.push(li(`Video conversion, only if the picture has to be made again (MKV never needs it)${big}`, `up to ${money(cv.micros)}`));
-  else if (cv) L.push(li(`Video conversion${big}`, money(cv.micros)));
+  if (cv?.free) L.push(li('cv', cv.black ? 'Video with a plain black picture, on our side' : cv.server ? 'Video on our side, the picture copied as it is' : 'File type or size, in your browser', 'Free'));
+  else if (cv) L.push(li('cv', `Video conversion${big}`, money(cv.micros)));
+  const anyStartup = (price?.lines || []).some((l) => l.fixedSeconds > 0);
   return (
     <div className="pop pl-r" role="dialog" aria-label="Details" data-testid="details">
       <ul className="fl">
-        {L.length ? L : li('Nothing switched on', '')}
-        <li className="tot"><span>{changed ? 'Total so far' : 'Total'}</span><span data-testid="details-total">{money(serverTotal != null ? serverTotal : total)}</span></li>
+        {L.length ? L : li('none', 'Nothing switched on', '')}
+        <li className="tot"><span>{changed ? 'Total so far' : 'Total'}</span><span data-testid="details-total">{money(total ?? price?.micros ?? 0)}</span></li>
         {changed && <li className="tot"><span>Save changes</span><span>{money(deltaMicros)}</span></li>}
       </ul>
-      {partsNote && <p className="note">Includes a small amount for each run. Parts are rounded up to whole seconds.</p>}
-      {localPrice && <p className="note" data-testid="details-local">Worked out from the price list. Once you sign in, the price also includes a small amount for each run.</p>}
-      <p className="note">You only pay for what gets processed. Billed per second of audio, no minimum charge.</p>
+      {anyStartup && <p className="note">Each step also counts its start-up once per run (loading what it needs), at the same rate as its audio.</p>}
+      <p className="note">Each line is its seconds of audio, rounded up to a whole second, at that step&rsquo;s price a minute. No minimum charge.</p>
     </div>
   );
 }

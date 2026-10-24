@@ -222,6 +222,87 @@ export function cost(tracks, R) {
   return c;
 }
 
+/**
+ * The price of the tracks, exactly as our side holds it for a job made with them (server: editing.price_timeline, priced by
+ * edit_prices.price, and edit_subtitles.subtitle_plan), so it shows at once and adds up line by line:
+ *   a step (noise removal light / heavy, Voice rebuild, echo removal, Leveling) = its rate a minute x (the whole seconds its parts
+ *   cover, rounded up once for the step, + the step's start-up per run, `pricing.stepFixedSeconds`) / 60, rounded up to a micro;
+ *   light and heavy noise removal are one line (each step rounded on its own);
+ *   subtitles: each part at its quality's rate x its whole seconds (at least 1), and the same again for each translation.
+ * Parts made in the browser are listed as free. Returns {lines: [{item, label, seconds, fixedSeconds, micros, free?, languages?}], micros}.
+ */
+export function priceOf(tracks, pricing, T = null) {
+  const perMin = (product, tier) => { const r = findRate(pricing, product, tier); return r ? Math.round(r.usdPerMinute * 1e6) : 0; };
+  const fixed = pricing?.stepFixedSeconds || {};
+  const atRate = (rateMin, secs, f = 0) => Math.max(0, Math.ceil((rateMin * (secs + f)) / 60 - 1e-9));
+  const whole = (rs) => {
+    let total = 0;
+    let end = -Infinity;
+    [...rs].sort((p, q) => p[0] - q[0]).forEach(([a, b]) => {
+      if (a >= end) { total += b - a; end = b; } else if (b > end) { total += b - end; end = b; }
+    });
+    return total > 0 ? Math.ceil(total - 1e-9) : 0;
+  };
+  // the parts exactly as the server reads them: the timeline this page sends (ends to the millisecond, the last one to the recording's end)
+  const seconds = T ?? Math.max(0, ...Object.values(tracks).flat().map((x) => x.e || 0));
+  const tl = toTimeline(tracks, seconds);
+  const span = (p) => [p.start, p.end];
+  const R = { light: [], heavy: [], rebuild: tl.parts('rebuild').map(span), echo: tl.parts('echo').map(span), leveling: tl.parts('leveling').map(span) };
+  let freeNoise = 0;
+  for (const p of tl.parts('noise')) {
+    if (p.settings.browser) freeNoise += p.end - p.start;
+    else R[p.settings.remover === 'heavy' ? 'heavy' : 'light'].push(span(p)); // ("auto" is held as the light one)
+  }
+  const rate = { light: perMin('denoise', 'standard'), heavy: perMin('denoise', 'standard'), rebuild: perMin('denoise', 'rebuild'),
+    echo: perMin('echo', 'standard'), leveling: perMin('leveling', 'standard') };
+  const step = (k) => {
+    const secs = whole(R[k]);
+    return secs ? { seconds: secs, fixedSeconds: fixed[k] || 0, micros: atRate(rate[k], secs, fixed[k] || 0) } : null;
+  };
+  const lines = [];
+  const li = step('light');
+  const hv = step('heavy');
+  if (li || hv) {
+    lines.push({ item: 'denoise', label: 'Noise removal', seconds: (li?.seconds || 0) + (hv?.seconds || 0),
+      fixedSeconds: (li?.fixedSeconds || 0) + (hv?.fixedSeconds || 0), micros: (li?.micros || 0) + (hv?.micros || 0) });
+  }
+  if (freeNoise > 0) lines.push({ item: 'denoise_free', label: 'Noise removal, free', seconds: Math.ceil(freeNoise - 1e-9), fixedSeconds: 0, micros: 0, free: true });
+  [['rebuild', 'Voice rebuild'], ['echo', 'Echo removal'], ['leveling', 'Leveling']].forEach(([k, label]) => {
+    const r = step(k);
+    if (r) lines.push({ item: k, label, ...r });
+  });
+  const sub = { standard: [0, 0], accurate: [0, 0] };
+  let freeSubs = 0;
+  let trSecs = 0;
+  let trMicros = 0;
+  const langs = [];
+  for (const p of tl.parts('subtitles')) {
+    const q = p.settings.quality;
+    const secs = Math.max(1, Math.ceil(p.end - p.start - 1e-9));
+    if (q === 'free') { freeSubs += secs; continue; }
+    const m = atRate(perMin('transcribe', q === 'standard' ? 'local' : 'premium'), secs);
+    sub[q][0] += secs; sub[q][1] += m;
+    for (const l of p.settings.translate || []) {
+      trSecs += secs; trMicros += atRate(perMin('transcribe_translate', 'standard'), secs);
+      if (!langs.includes(l)) langs.push(l);
+    }
+  }
+  if (sub.standard[0]) lines.push({ item: 'transcribe', label: 'Subtitles, Standard', seconds: sub.standard[0], fixedSeconds: 0, micros: sub.standard[1] });
+  if (sub.accurate[0]) lines.push({ item: 'transcribe_accurate', label: 'Subtitles, Extra accurate', seconds: sub.accurate[0], fixedSeconds: 0, micros: sub.accurate[1] });
+  if (trSecs) lines.push({ item: 'translate', label: 'Translations', seconds: trSecs, fixedSeconds: 0, micros: trMicros, languages: langs });
+  if (freeSubs) lines.push({ item: 'transcribe_free', label: 'Subtitles, free', seconds: freeSubs, fixedSeconds: 0, micros: 0, free: true });
+  return { lines, micros: lines.reduce((x, l) => x + l.micros, 0) };
+}
+
+/** Video conversion on our side for a recording of `seconds` (server: job_convert.convert_cost): the rate a minute times the picture's
+ * size factor in whole hundredths, rounded up, then priced per started second. */
+export function convertPrice(pricing, factor, seconds) {
+  const r = findRate(pricing, 'convert', 'standard');
+  if (!r) return 0;
+  const rateMin = Math.ceil((Math.round(r.usdPerMinute * 1e6) * Math.round((factor || 1) * 100)) / 100 - 1e-9);
+  return Math.max(0, Math.ceil((rateMin * Math.max(0, Math.ceil(seconds))) / 60 - 1e-9));
+}
+
 /** The segments of the file where the tracks of `a` and `b` are constant: [[start, end], ...]. */
 function segments(T, ...sets) {
   const edges = new Set([0, T]);

@@ -45,18 +45,22 @@ async function stubJob(id, extra = {}, timeline = null, tl = {}) {
     durationSeconds: 60, progress: 100, stage: '', costMicros: 2600, expiresAt: now() + 7000, queuePosition: null, queueWaitSeconds: null, options: {}, transcribeTier: null,
     outputs: [{ name: `${id}-cleaned.flac`, kind: 'audio', bytes: 123456 }], edit: { available: true, hasTimeline: true, run: null, lastRun: null, suggestions: false }, ...extra,
   };
-  const state = { job, quotes: [] };
+  const state = { job };
   await page.route(/\/api\/jobs$/, (r) => (r.request().method() === 'GET' ? r.fulfill({ json: { jobs: [state.job], limits: { maxActiveJobs: 3, retentionSeconds: 7200 } } }) : r.continue()));
   await page.route(new RegExp(`/api/jobs/${id}$`), (r) => (r.request().method() === 'GET' ? r.fulfill({ json: state.job }) : r.continue()));
   await page.route(`**/api/jobs/${id}/timeline`, (r) => r.fulfill({ json: {
     timeline: timeline || { version: 1, seconds: 60, layers: { noise: [{ start: 0, end: 60, strength_db: 24, remover: 'auto' }], leveling: [{ start: 0, end: 60, loudness_lufs: -14 }] } },
-    rendered: null, seconds: 60, channels: 1, secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null, ...tl,
+    rendered: null, seconds: 60, channels: 1, secondTrack: false, cached: {}, suggestions: null, run: null, lastRun: null, preview: null,
+    // what the page needs to work out the price of a change itself (editing.quote_inputs): nothing made yet, so every step of a change is charged
+    quote: { facts: { n: 2880000, channels: 1, plan: [0], spans: { 0: [[0, 2880000]] }, rebuildMid: false, reference: false }, sourceId: 'stub', cached: [], resolved: {}, subtitles: {},
+      rates: { echo: 2600, light: 9000, heavy: 9000, rebuild: 30000, leveling: 1000 }, subtitleRates: { transcribe_standard: 4000, transcribe_accurate: 15000, translate: 4000 },
+      video: { makes: false, embedded: true, convertMicros: 0, convertLine: null } },
+    ...tl,
   } }));
   await page.route(`**/api/jobs/${id}/peaks/**`, (r) => r.fulfill({ status: 404, json: { detail: 'Nothing is cached for this job yet.', code: 'not_cached' } }));
   await page.route(`**/api/jobs/${id}/suggestions`, (r) => r.fulfill({ json: { suggestions: null } }));
-  await page.route(`**/api/jobs/${id}/quote`, (r) => { const body = r.request().postDataJSON(); state.quotes.push(body); r.fulfill({ json: state.quote ? state.quote(body) : { estCostMicros: 1234, estCostUsd: 0.001234, free: false, unchanged: false, needsProcess: true, approximate: false, lines: [], affordable: true, availableMicros: 5000000 } }); });
   await page.route(`**/api/jobs/${id}/outputs/**`, (r) => r.fulfill({ body: 'x', contentType: 'application/octet-stream' }));
-  state.off = async () => { for (const p of [/\/api\/jobs$/, new RegExp(`/api/jobs/${id}$`), `**/api/jobs/${id}/timeline`, `**/api/jobs/${id}/peaks/**`, `**/api/jobs/${id}/suggestions`, `**/api/jobs/${id}/quote`, `**/api/jobs/${id}/outputs/**`]) await page.unroute(p); };
+  state.off = async () => { for (const p of [/\/api\/jobs$/, new RegExp(`/api/jobs/${id}$`), `**/api/jobs/${id}/timeline`, `**/api/jobs/${id}/peaks/**`, `**/api/jobs/${id}/suggestions`, `**/api/jobs/${id}/outputs/**`]) await page.unroute(p); };
   return state;
 }
 const gotoJob = async (id) => { await page.goto(`${BASE}/app/job/${id}`); await page.getByTestId('studio').waitFor({ timeout: 20000 }); await sleep(600); };
@@ -357,15 +361,14 @@ await check('Leveling: Keep original loudness is the fifth option, Keep (the tim
   return 'Keep';
 });
 
-await check('Leveling: Leveling on its own, without noise removal, makes a paid job whose timeline has Leveling alone, at the price the server gives for it', async () => {
+await check('Leveling: Leveling on its own, without noise removal, makes a paid job whose timeline has Leveling alone, at the price the server gives for it (worked out here)', async () => {
   await open('noisy.wav');
   await setSubs(page, 'off');
-  const done = page.waitForResponse((r) => r.url().endsWith('/api/jobs/estimate') && r.request().postDataJSON().timeline.layers.noise === undefined, { timeout: 20000 });
   await setVoice(page, 'off');
-  const res = await done;
-  const body = res.request().postDataJSON();
-  if (Object.keys(body.timeline.layers).join() !== 'leveling') throw new Error('layers ' + Object.keys(body.timeline.layers));
-  const micros = (await res.json()).estCostMicros;
+  const T = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
+  const est = (await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', durationSeconds: T, options: { audio_format: 'flac' }, timeline: { version: 1, seconds: T, layers: { leveling: [{ start: 0, end: T, loudness_lufs: -14 }] } } })).body;
+  const micros = est.estCostMicros;
+  if (est.lines.map((l) => l.item).join() !== 'leveling') throw new Error('lines ' + JSON.stringify(est.lines));
   const shown = micros < 1000 ? '<$0.001' : `$${(micros / 1e6).toFixed(micros >= 100000 || micros % 10000 === 0 ? 2 : 3)}`;
   await page.waitForFunction((t) => document.querySelector('[data-testid=start]')?.textContent === t, `Start · ${shown}`, { timeout: 10000 });
   return `${await mainButton(page)} (${micros} micros)`;
@@ -643,15 +646,16 @@ await check('The result file: this browser can\'t make some types; audio saved a
 
 /* ================================================================================================ Price, credit and limits */
 
-await check('Price, credit and limits: Start · price is the real price (the server\'s estimate for what will be held; here the answer is changed to prove the page does not make it up)', async () => {
+await check('Price, credit and limits: Start · price is worked out here (no estimate is asked of our side) and is the price list\'s', async () => {
   const asked = [];
-  await page.route('**/api/jobs/estimate', (r) => { asked.push(r.request().postDataJSON()); return r.fulfill({ json: { estCostMicros: 1234567, estCostUsd: 1.234567, lines: [], availableMicros: 5000000, affordable: true } }); });
+  const onReq = (r) => { if (new URL(r.url()).pathname === '/api/jobs/estimate') asked.push(r.url()); };
+  page.on('request', onReq);
   try {
     await open('noisy.wav');
-    await page.waitForFunction(() => /^Start · \$1\.23$/.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 15000 });
-    if (!asked.length || asked.at(-1).kind !== 'denoise' || !asked.at(-1).timeline?.layers?.noise) throw new Error('the estimate was not asked for the timeline: ' + JSON.stringify(asked.at(-1)));
+    await page.waitForFunction(() => /^Start · \$0\.0\d+$/.test(document.querySelector('[data-testid=start]')?.textContent || ''), null, { timeout: 15000 });
+    if (asked.length) throw new Error('the price was asked of our side: ' + asked.join(', '));
     return await mainButton(page);
-  } finally { await page.unroute('**/api/jobs/estimate'); }
+  } finally { page.off('request', onReq); }
 });
 
 await check('Price, credit and limits: the price lines of Details come from the live price list (changed here to prove it)', async () => {
@@ -665,22 +669,22 @@ await check('Price, credit and limits: the price lines of Details come from the 
     await setSubs(page, 'off');
     await page.getByTestId('bar-det').click();
     const secs = Number(await page.getByTestId('wave').getAttribute('data-seconds'));
-    const want = Math.ceil((1200000 * Math.ceil(secs)) / 60); // billed per second of audio, a started second counts
-    has(await txt(page.getByTestId('details')), new RegExp(`Noise removal · \\d+:\\d\\d \\$${(want / 1e6).toFixed(want >= 100000 ? 2 : 3).replace('.', '\\.')}`));
+    const want = Math.ceil((1200000 * (Math.ceil(secs) + real.stepFixedSeconds.light)) / 60 - 1e-9); // billed per second of audio (a started second counts) and the step's start-up per run
+    has(await txt(page.getByTestId('details')), new RegExp(`Noise removal · \\d+:\\d\\d \\+ (?:[\\d.]+ s|\\d+:\\d\\d) start-up \\$${(want / 1e6).toFixed(want >= 100000 ? 2 : 3).replace('.', '\\.')}`));
     return 'Details: ' + (await txt(page.getByTestId('details'))).slice(0, 80);
   } finally { await page.unroute('**/api/billing/pricing'); }
 });
 
-await check('Price, credit and limits: Details lists what the price is made of and says "You only pay for what gets processed. Billed per second of audio, no minimum charge."', async () => {
+await check('Price, credit and limits: Details lists what the price is made of and says each line is its seconds of audio at that step\'s price a minute, no minimum charge', async () => {
   await open('speech.wav');
   await setSubs(page, 'standard');
   await page.getByTestId('bar-det').click();
   const d = await txt(page.getByTestId('details'));
-  has(d, /Noise removal · 0:1[01] \$/);
-  has(d, /Leveling · 0:1[01] /);
+  has(d, /Noise removal · 0:1[01] \+ (?:[\d.]+ s|\d+:\d\d) start-up \$/);
+  has(d, /Leveling · 0:1[01] \+ (?:[\d.]+ s|\d+:\d\d) start-up /);
   has(d, /Subtitles, Standard · /);
   has(d, /Total/);
-  has(d, /You only pay for what gets processed\. Billed per second of audio, no minimum charge\./);
+  has(d, /Each line is its seconds of audio, rounded up to a whole second, at that step.s price a minute\. No minimum charge\./);
   await page.locator('.studio select[data-act=tr-add]').selectOption('es');
   has(await txt(page.getByTestId('details')), /Translations · Spanish/);
   return d.slice(0, 160);
@@ -698,10 +702,11 @@ await check('Price, credit and limits: not enough credit, prices that cannot loa
   await p.locator('.studio button[data-act=auto]').click().catch(() => {});
   await p.locator('.studio button[data-act=v-mode][data-v="1"]').click();
   await p.locator('.studio button[data-act=v-kind][data-v=paid]').click();
-  await p.waitForSelector('[data-testid=notes] .banner-warn');
-  has(await p.getByTestId('notes').innerText(), /This costs about \$[\d.]+, but your balance is \$0\.00\. You can also choose the free options\./);
-  if (!(await p.getByTestId('notes').getByRole('link', { name: 'Add credit' }).count())) throw new Error('no Add credit link');
-  if (!(await p.getByTestId('start').isDisabled())) throw new Error('Start is on without credit');
+  await p.getByTestId('start').waitFor();
+  if (await p.getByTestId('notes').count() && /your balance is/.test(await p.getByTestId('notes').innerText())) throw new Error('a balance warning before starting');
+  await p.getByTestId('start').click(); // (our side refuses it: 402)
+  await p.getByTestId('job-error').waitFor({ timeout: 15000 });
+  has(await p.getByTestId('job-error').innerText(), /This job costs about \$[\d.]+; your available balance is \$0\.00\./);
   await other.close();
   // prices that cannot load
   await page.route('**/api/billing/pricing', (r) => r.fulfill({ status: 500, json: { detail: 'no' } }));
@@ -885,7 +890,6 @@ await check('After processing: a free run is kept in this tab only, with Remove'
 
 await check('After processing: Change and save again — strength, rebuild, leveling, subtitles, type, name, files, into the video, price — are the same controls with Save changes · price', async () => {
   const s = await doneJob('pd5', ['pd5-cleaned.flac']);
-  s.quote = () => ({ estCostMicros: 2158, estCostUsd: 0.002158, free: false, unchanged: false, needsProcess: true, approximate: false, lines: [], affordable: true, availableMicros: 5000000 });
   try {
     await gotoJob('pd5');
     has(await txt(page.getByTestId('download-again')), /^Download again$/);
@@ -893,10 +897,9 @@ await check('After processing: Change and save again — strength, rebuild, leve
     await setLeveling(page, 'broadcast');
     await setSubs(page, 'standard');
     await page.getByTestId('save-changes').waitFor();
-    await page.waitForFunction(() => /Save changes · \$0\.002/.test(document.querySelector('[data-testid=save-changes]')?.textContent || ''), null, { timeout: 8000 });
-    if (!s.quotes.length) throw new Error('the price was not asked of the server');
-    const layers = s.quotes.at(-1).timeline.layers;
-    if (layers.noise[0].strength_db !== 40 || layers.leveling[0].loudness_lufs !== -23 || layers.subtitles[0].quality !== 'standard') throw new Error(JSON.stringify(layers));
+    await page.waitForFunction(() => /Save changes · \$0\.0\d+/.test(document.querySelector('[data-testid=save-changes]')?.textContent || ''), null, { timeout: 8000 });
+    has((await sectionTexts('voice')).join(' '), /Strong/);
+    has((await sectionTexts('level')).join(' '), /Broadcast/);
     await page.getByTestId('output-button').click();
     await page.getByTestId('out-name').fill('again.mp3');
     await page.getByTestId('output-button').click();

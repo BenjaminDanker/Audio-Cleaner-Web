@@ -51,7 +51,7 @@
 
 `worker/runner.py` and `acw_common/pipeline.py` (the desktop app runs the same functions in the same order):
 
-1. **probe**: container, streams, header duration, and the length that really decodes (billing uses the longer).
+1. **probe**: container, streams, header duration, and the length that really decodes (billing uses that one: a header can be wrong, and for raw streams it is only an estimate).
 2. **echo removal** (only with `echo_reference_track` and a second audio track): WebRTC AEC3 (via the LiveKit
    SDK) cancels the speaker sound recorded on track 2 from the mic on track 1. The result is shifted back by the
    canceller's 9 ms so it lines up with the video and the subtitles.

@@ -7,11 +7,11 @@
 //  3. painting parts (a new one replaces what it covers) and the rows (a click on a section chooses exactly it, a drag across a row chooses a part);
 //  4. hearing what a part gets after processing: the speaker buttons, `data-gains` (strength as a blend, a switched-off track drops out,
 //     the original), "Hearing: …" and the heard line;
-//  5. the price after a change: Save changes · $ from `POST …/quote` a moment after the last change, a paid save is a `process` with the shown
+//  5. the price after a change: Save changes · $ worked out here at once (editor/quote.js; the server's `POST …/quote` for the same timeline says the same), a paid save is a `process` with the shown
 //     price on the SAME job, the ledger has one line, a free save is an `export`; the plain messages when it can't be paid or is refused;
 //     a job made through the API with no timeline opens in the editor;
 //  6. suggestions made by the server: the chip, the pins, the card (Apply / Dismiss), undo, dismissed ones stay dismissed after a reload;
-//  7. the start screen with parts: the estimate (`POST /api/jobs/estimate` with the timeline), Details, the job it makes; Voice Off for the
+//  7. the start screen with parts: the price worked out here (the server's estimate for the same timeline says the same), Details, the job it makes; Voice Off for the
 //     whole file with noise removal on one part is only that part; suggestions found in the browser before the upload (a worker, progress,
 //     Cancel, "Suggestions appear after the first run." for a file over 30 minutes);
 //  8. phone (390x844, touch, light and dark): no sideways scroll, the inspector is a sheet above the bar, tap / long-press / Select more;
@@ -36,22 +36,46 @@ const { browser, context, page, logs } = await launch();
 const got = [];
 page.on('download', (d) => got.push(d.suggestedFilename()));
 const requests = [];
-const onRequest = (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) requests.push({ m: r.method(), p: u.pathname + u.search, body: r.postData() }); };
+const onRequest = (r) => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) requests.push({ m: r.method(), p: u.pathname + u.search, body: r.postData(), t: Date.now() }); };
 context.on('request', onRequest);
-const quoteAnswers = [];
-context.on('response', async (res) => {
-  const u = new URL(res.url());
-  if (res.request().method() !== 'POST' || !/\/api\/jobs\/[0-9a-f]+\/quote$/.test(u.pathname)) return;
-  try { quoteAnswers.push({ path: u.pathname, body: JSON.parse(res.request().postData()), answer: await res.json() }); } catch { /* not an answer */ }
-});
-const lastQuote = () => quoteAnswers.at(-1);
 await signIn(page, EMAIL);
 admin('grant', EMAIL, '5', 'editor test');
 const sleep = (ms) => page.waitForTimeout(ms);
 const near = (a, b, tol, what) => { if (!(Math.abs(a - b) <= tol)) throw new Error(`${what}: ${a} vs ${b}`); };
+/**
+ * What the page would save now, priced by our side: presses Save changes with the save stopped (nothing is made or charged), takes the
+ * timeline it sent (and the price it held the money at, `maxCostMicros`, for a paid save), and asks the server's quote for that timeline.
+ * Answers {body, answer}.
+ */
+let ownQuotes = 0; // (the quotes this test itself asks of our side, to compare with the page's price)
+async function quoteOfEditor(p = page) {
+  const re = /\/api\/jobs\/[0-9a-f]+\/(process|export)$/;
+  let body = null;
+  const stop = (r) => { body = r.request().postDataJSON(); return r.fulfill({ status: 400, json: { detail: 'Stopped by the test.' } }); };
+  await p.route(re, stop);
+  try {
+    await p.getByTestId('save-changes').click();
+    for (let i = 0; i < 100 && !body; i++) await sleep(100);
+  } finally { await p.unroute(re, stop); }
+  if (!body) throw new Error('Save changes sent nothing');
+  const id = /\/app\/job\/([0-9a-f]+)/.exec(p.url())[1];
+  ownQuotes++;
+  const answer = (await apiCall(p, 'POST', `jobs/${id}/quote`, { timeline: body.timeline })).body;
+  return { body, answer };
+}
+/** Waits until `need` calls are spare in the server's per-client allowance (a burst of 120, refilled at 2 a second): the editor's pages and previews come in bursts, and a long run would meet 429. */
+async function spare(need = 60) {
+  for (;;) {
+    let tokens = 120; let last = requests[0]?.t ?? Date.now();
+    for (const r of requests) { tokens = Math.min(120, tokens + (r.t - last) / 500) - 1; last = r.t; }
+    tokens = Math.min(120, tokens + (Date.now() - last) / 500);
+    if (tokens >= need) return;
+    await new Promise((res) => setTimeout(res, 500));
+  }
+}
 const asked = (m, re) => requests.filter((r) => r.m === m && re.test(r.p));
 const shot = async (name, p = page) => { if (SHOTS) await p.screenshot({ path: join(SHOTS, `${name}.png`) }); };
-const gotoApp = async (path = '/app', p = page) => { await p.goto(`${BASE}${path}`); await p.getByTestId('available').or(p.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
+const gotoApp = async (path = '/app', p = page) => { await spare(); await p.goto(`${BASE}${path}`); await p.getByTestId('available').or(p.getByTestId('job-page')).first().waitFor({ timeout: 20000 }); };
 const waitDownloads = async (n, timeout = 60000) => { const t0 = Date.now(); while (got.length < n && Date.now() - t0 < timeout) await sleep(250); await sleep(600); };
 const balance = async () => (await apiCall(page, 'GET', 'me')).body.balance?.available_micros ?? (await apiCall(page, 'GET', 'billing/balance')).body?.available_micros;
 const autoOn = () => page.evaluate((k) => localStorage.setItem(k, 'on'), AUTO_KEY);
@@ -96,7 +120,7 @@ async function waitEditor(p = page) {
   await p.locator('[data-testid=track-voice] [data-testid=section]').first().waitFor();
   await p.waitForFunction(() => document.querySelector('[data-testid=waveform]')?.dataset.reading === 'no', null, { timeout: 40000 });
 }
-const openJob = async (id, p = page) => { await p.goto(`${BASE}/app/job/${id}`); await waitEditor(p); };
+const openJob = async (id, p = page) => { await spare(); await p.goto(`${BASE}/app/job/${id}`); await waitEditor(p); };
 /** The price on Save changes has settled: the quote is in and the button is on. Answers the button's text. */
 async function savePrice(p = page) {
   const b = p.getByTestId('save-changes');
@@ -406,41 +430,37 @@ await check('what is heard follows the timeline: strength is a blend (Gentle: 0.
 /* ------------------------------------------------------------------------------------------------ 5. the price, saving */
 
 
-await check('the price comes from our side a moment after the last change (not on every click): Save changes · $ is the quote, and it follows the next change', async () => {
+await check('the price is worked out here at once (no request for it): Save changes · $ is the server\'s quote for the same timeline to the micro, and it follows the next change', async () => {
   const first = await savePrice();
-  const n1 = asked('POST', /\/quote$/).length;
-  if (n1 < 1 || n1 > 4) throw new Error(`${n1} quotes for four changes (they are asked for a moment after the last one, not for each)`);
-  const q1 = lastQuote();
-  if (q1.body.timeline?.version !== 1 || q1.body.timeline.layers.noise.length !== 4 || q1.body.timeline.layers.leveling.length !== 1) throw new Error('the quote has the wrong timeline: ' + JSON.stringify(q1.body).slice(0, 300));
+  const q1 = await quoteOfEditor();
+  if (asked('POST', /\/quote$|\/estimate$/).length !== ownQuotes) throw new Error('the page asked our side for a price: ' + asked('POST', /\/quote$|\/estimate$/).map((r) => r.p).join(', '));
+  if (q1.body.timeline?.version !== 1 || q1.body.timeline.layers.noise.length !== 4 || q1.body.timeline.layers.leveling.length !== 1) throw new Error('the save has the wrong timeline: ' + JSON.stringify(q1.body).slice(0, 300));
   if (q1.answer.free || !(q1.answer.estCostMicros >= 1000)) throw new Error('quote: ' + JSON.stringify(q1.answer).slice(0, 300));
-  if (first !== `Save changes · ${money(q1.answer.estCostMicros)}`) throw new Error(`the button says "${first}", the quote ${q1.answer.estCostMicros} micros (${money(q1.answer.estCostMicros)})`);
+  if (first !== `Save changes · ${money(q1.answer.estCostMicros)}` || q1.body.maxCostMicros !== q1.answer.estCostMicros) throw new Error(`the button says "${first}" and holds ${q1.body.maxCostMicros}, the server's quote ${q1.answer.estCostMicros} micros (${money(q1.answer.estCostMicros)})`);
   if (!q1.answer.lines.some((l) => l.item === 'leveling') || q1.answer.lines.some((l) => l.item === 'denoise')) throw new Error('what runs (only Leveling on the changed parts): ' + JSON.stringify(q1.answer.lines));
   // Details belong to the start screen; here the bar has Your files and the price is the button
   if (await page.getByTestId('bar-det').count() || !(await page.getByTestId('bar-files').count())) throw new Error('bar: Details after the job is done');
   await shot('editor-price');
-  // the next change: Leveling off for the Gentle part makes the price smaller, and a new quote is asked for
-  const answered = quoteAnswers.length;
+  // the next change: Leveling off for the Gentle part makes the price smaller
   await drag(15, 25);
   if ((await selectionTitle(page)) !== '0:15–0:25 · 10 s') throw new Error('the part was not chosen: ' + await selectionTitle(page));
   await setLeveling(page, 'off');
   if ((await say('level')) !== 'YouTube 0:00–0:15 | Off 0:15–0:25 | YouTube 0:25–0:48') throw new Error('Leveling off for the part: ' + await say('level'));
-  const t0 = Date.now();
-  const forThis = () => quoteAnswers.slice(answered).filter((q) => q.body.timeline.layers.leveling?.length === 2);
-  while (!forThis().length && Date.now() - t0 < 15000) await sleep(200); // (a quote for the half-way state, the part chosen but Leveling not off yet, may come first)
   const second = await savePrice();
-  const q2 = forThis().at(-1);
-  if (!q2) throw new Error(`no quote for the next change: ${JSON.stringify(quoteAnswers.slice(answered).map((q) => [q.body.timeline.layers.leveling?.length, q.answer.estCostMicros, q.answer.free]))}; the editor says ${await say('level')}; the button says ${await mainButton(page)}`);
-  if (q2 !== lastQuote()) throw new Error('a later quote came: ' + JSON.stringify(quoteAnswers.slice(answered).map((q) => [q.body.timeline.layers.leveling?.length, q.answer.estCostMicros])));
+  const q2 = await quoteOfEditor();
+  if (q2.body.timeline.layers.leveling?.length !== 2) throw new Error('the timeline of the next change: ' + JSON.stringify(q2.body.timeline.layers.leveling));
   if (!(q2.answer.estCostMicros < q1.answer.estCostMicros)) throw new Error(`${q2.answer.estCostMicros} is not less than ${q1.answer.estCostMicros}: ${JSON.stringify(q2.answer.lines)} ${JSON.stringify(q2.answer.steps)}`);
-  if (second !== `Save changes · ${money(q2.answer.estCostMicros)}`) throw new Error(`the button says "${second}", the quote ${q2.answer.estCostMicros}`);
+  if (second !== `Save changes · ${money(q2.answer.estCostMicros)}` || q2.body.maxCostMicros !== q2.answer.estCostMicros) throw new Error(`the button says "${second}", the server's quote ${q2.answer.estCostMicros}`);
+  if (asked('POST', /\/quote$|\/estimate$/).length !== ownQuotes) throw new Error('the page asked our side for a price');
   return `${first} -> ${second} (${q1.answer.estCostMicros} -> ${q2.answer.estCostMicros} micros)`;
 });
 
 await check('a paid save is a process on the same job: it asks for exactly the price it was shown (maxCostMicros), the job runs again, the new file comes down by itself, the ledger has one "Edited" line, and the files now hold this timeline', async () => {
   const bal0 = await balance();
-  const quoteMicros = lastQuote().answer.estCostMicros;
+  const quoteMicros = (await quoteOfEditor()).answer.estCostMicros; // (the server's price for the timeline the page would save)
   const before = got.length;
   const jobsBefore = asked('POST', /^\/api\/jobs$/).length;
+  const mark = requests.length;
   await page.getByTestId('save-changes').click();
   await page.locator('[data-testid=studio][data-stage=processing]').waitFor({ timeout: 15000 });
   if (!/^(Saving|Processing)/.test((await page.getByTestId('processing').innerText()).trim())) throw new Error('the main button while it runs: ' + await page.getByTestId('processing').innerText());
@@ -449,7 +469,7 @@ await check('a paid save is a process on the same job: it asks for exactly the p
   await waitResult(page, 'result', 120000);
   await waitDownloads(before + 1);
   if (got.length !== before + 1 || !/\.flac$/.test(got[got.length - 1])) throw new Error('the new file did not come down by itself: ' + got.join(', '));
-  const proc = asked('POST', new RegExp(`/jobs/${J1.id}/process$`));
+  const proc = requests.slice(mark).filter((r) => r.m === 'POST' && new RegExp(`/jobs/${J1.id}/process$`).test(r.p));
   if (proc.length !== 1 || asked('POST', /^\/api\/jobs$/).length !== jobsBefore) throw new Error(`${proc.length} process calls, a new job was asked for`);
   const sent = JSON.parse(proc[0].body);
   if (sent.maxCostMicros !== quoteMicros || !sent.timeline?.layers?.noise || sent.timeline.layers.leveling.length !== 2 || (sent.audioFormat ?? 'flac') !== 'flac') throw new Error('process body: ' + proc[0].body.slice(0, 300));
@@ -559,6 +579,7 @@ p = jobs.update_params(${JSON.stringify(J2.id)}, edit={**json.loads(__import__("
 });
 
 await check('a change that needs nothing new is free: the button says "Save changes · Free", a save is an export (no process, no charge), the new file comes down by itself', async () => {
+  await spare(80);
   const bal0 = await balance();
   // (a part made with Auto as the remover is decided again when it runs, so a quote counts it as the light remover: the free choice is the remover the job holds)
   const held = (await apiCall(page, 'GET', `jobs/${J2.id}/timeline`)).body.cached;
@@ -568,15 +589,26 @@ await check('a change that needs nothing new is free: the button says "Save chan
   await drag(2, 6);
   await setStrength(page, 'balanced');
   const label = await savePrice();
-  if (label !== 'Save changes · Free') throw new Error(`label: ${label}; the quote: ${JSON.stringify(lastQuote().answer.lines)} ${JSON.stringify(lastQuote().answer.steps)} ${JSON.stringify(lastQuote().body.timeline.layers.noise)}`);
-  const q = lastQuote();
-  if (!q.answer.free || q.answer.estCostMicros !== 0) throw new Error('quote: ' + JSON.stringify(q.answer).slice(0, 200));
+  // (the save is an export: its request goes through, and our side's quote for the timeline in it is asked for first, to compare with the price the page showed)
+  let q = null;
+  const spy = async (r) => {
+    const rq = r.request();
+    const body = rq.postDataJSON();
+    const { 'content-length': _l, ...headers } = rq.headers();
+    q = { body, answer: await (await page.request.post(`${BASE}/api/jobs/${J2.id}/quote`, { data: { timeline: body.timeline }, headers })).json() };
+    await r.continue();
+  };
+  await page.route(new RegExp(`/api/jobs/${J2.id}/(process|export)$`), spy);
   await shot('editor-free');
   const before = got.length;
   await page.getByTestId('save-changes').click();
   await waitCardDone(page);
   await waitResult(page, 'result', 120000);
   await waitDownloads(before + 1);
+  await page.unroute(new RegExp(`/api/jobs/${J2.id}/(process|export)$`), spy);
+  if (!q) throw new Error('the save went without being seen');
+  if (label !== 'Save changes · Free') throw new Error(`label: ${label}; the server's quote: ${JSON.stringify(q.answer.lines)} ${JSON.stringify(q.answer.steps)} ${JSON.stringify(q.body.timeline.layers.noise)}`);
+  if (!q.answer.free || q.answer.estCostMicros !== 0 || 'maxCostMicros' in q.body) throw new Error('quote: ' + JSON.stringify(q.answer).slice(0, 200) + ' / ' + JSON.stringify(q.body).slice(0, 100));
   if (got.length !== before + 1) throw new Error('no new file by itself');
   const ex = asked('POST', new RegExp(`/jobs/${J2.id}/export$`));
   if (ex.length !== 1 || asked('POST', new RegExp(`/jobs/${J2.id}/process$`)).length) throw new Error('export / process calls');
@@ -589,60 +621,50 @@ await check('a change that needs nothing new is free: the button says "Save chan
   return 'export, free';
 });
 
-await check('errors are plain: a price the person cannot pay says so with a link to add credit and Save changes is off; a timeline the server refuses shows the server\'s words', async () => {
+await check('errors are plain: a price the person cannot pay says so with a link to add credit and Save changes is off', async () => {
   const id = J1.id;
-  await openJob(id);
-  // a quote that is too dear for the balance
-  await page.route(`**/api/jobs/${id}/quote`, (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({
-    estCostMicros: 9_000_000, estCostUsd: 9, free: false, unchanged: false, needsProcess: true, approximate: false, lines: [{ item: 'leveling', label: 'Leveling', quantity: 1, seconds: 48, micros: 9_000_000 }], steps: { leveling: { blocks: 1, seconds: 48 } }, asked: {},
-    timeline: {}, expiresAt: 1, availableMicros: 1_000_000, affordable: false,
-  }) }));
+  // the job's own prices at a hundred thousand times what they are, so that saving a change costs more than the balance
+  const dear = (r) => r.fetch().then(async (res) => {
+    const j = await res.json();
+    if (j.quote) for (const k of Object.keys(j.quote.rates)) j.quote.rates[k] *= 100000;
+    return r.fulfill({ response: res, json: j });
+  });
+  await page.route(`**/api/jobs/${id}/timeline`, dear);
   try {
+    await openJob(id);
     await drag(5, 9);
     await setStrength(page, 'gentle');
     const note = page.locator('[data-testid=notes] .banner-warn', { hasText: /This costs about/ });
     await note.waitFor({ timeout: 15000 });
     const t = (await note.innerText()).replace(/\s+/g, ' ');
-    if (!/This costs about \$9\.00, but your balance is \$1\.00\./.test(t) || !/Add credit/.test(t)) throw new Error('poor: ' + t);
+    if (!/This costs about \$\d+\.\d\d, but your balance is \$\d+\.\d\d\./.test(t) || !/Add credit/.test(t)) throw new Error('poor: ' + t);
     if ((await note.getByRole('link', { name: 'Add credit' }).getAttribute('href')) !== '/app/billing') throw new Error('the link');
     if (!(await page.getByTestId('save-changes').isDisabled())) throw new Error('Save changes is on although the price is too high');
-    await page.unroute(`**/api/jobs/${id}/quote`);
-    await page.route(`**/api/jobs/${id}/quote`, (route) => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ detail: 'Voice rebuilding is paused right now. Try again later, or choose Noise removal.' }) }));
-    await setStrength(page, 'balanced');
-    await page.getByTestId('quote-error').waitFor({ timeout: 15000 });
-    if (!/paused right now/.test(await page.getByTestId('quote-error').innerText())) throw new Error('the server\'s words are not shown');
-    if (!(await page.getByTestId('save-changes').isDisabled())) throw new Error('Save changes is on without a price');
   } finally {
-    await page.unroute(`**/api/jobs/${id}/quote`).catch(() => {});
+    await page.unroute(`**/api/jobs/${id}/timeline`, dear).catch(() => {});
   }
-  return 'insufficient balance and a refused timeline are shown plainly';
+  return 'an insufficient balance is shown plainly';
 });
 
 /* ------------------------------------------------------------------------------------------------ 7. the start screen with parts */
 
-await check('the start screen with parts: the whole file is priced here from the price list (no request), a part chosen makes Start wait for the price of the parts from our side (POST /api/jobs/estimate with the timeline, no tier and no sound options), Details lists what it is made of, and the job is made with that timeline', async () => {
+await check('the start screen with parts: every price is worked out here from the price list (no request for it), a part chosen changes it at once, it is the estimate our side gives for the timeline the job is made with (no tier and no sound options), Details lists what it is made of, and the job is made with that timeline', async () => {
   await gotoApp('/app');
   await dropFile(page, join(FILES, 'noisy.wav'));
   await setKind(page, 'paid');
   await setStrength(page, 'max');
   await setLeveling(page, 'youtube');
   await sleep(1200);
-  const est0 = asked('POST', /\/jobs\/estimate$/).length;
   const startWhole = await mainButton(page);
   if (!/^Start · \$0\.0\d+$/.test(startWhole)) throw new Error('Start for the whole file: ' + startWhole);
-  if (asked('POST', /\/jobs\/estimate$/).length !== est0) throw new Error('the whole file asked our side for its price');
   await drag(2, 6);
   await setStrength(page, 'gentle');
-  await sleep(1000);
-  const est = asked('POST', /\/jobs\/estimate$/).slice(est0);
-  if (!est.length) throw new Error('no estimate was asked of our side');
-  const body = JSON.parse(est.at(-1).body);
-  if (body.kind !== 'denoise' || !body.timeline?.layers?.noise?.length || 'denoiseTier' in body || 'transcribeTier' in body || ['atten_lim_db', 'noise', 'leveling', 'loudness_lufs', 'echo_reference_track'].some((k) => k in (body.options || {}))) throw new Error('estimate body: ' + est.at(-1).body.slice(0, 400));
+  if (asked('POST', /\/jobs\/estimate$/).length) throw new Error('our side was asked for the price');
   const startNow = await mainButton(page);
   if (!/^Start · \$0\.0\d+$/.test(startNow)) throw new Error('Start: ' + startNow);
   await page.getByTestId('bar-det').click();
   const det = (await page.getByTestId('details').innerText()).replace(/\s+/g, ' ');
-  if (!/Noise removal · 0:11 \$0\.\d+/.test(det) || !/Leveling · 0:11/.test(det) || !/Includes a small amount for each run\. Parts are rounded up to whole seconds\./.test(det)) throw new Error('details: ' + det);
+  if (!/Noise removal · 0:11 \+ (?:[\d.]+ s|\d+:\d\d) start-up \$0\.\d+/.test(det) || !/Leveling · 0:11 \+ (?:[\d.]+ s|\d+:\d\d) start-up/.test(det) || /Includes a small amount for each run/.test(det)) throw new Error('details: ' + det);
   if ((await page.getByTestId('details-total').innerText()) !== startNow.replace('Start · ', '')) throw new Error(`Details total ${await page.getByTestId('details-total').innerText()} vs ${startNow}`);
   await shot('start-parts');
   await page.getByTestId('bar-det').click();
@@ -652,6 +674,9 @@ await check('the start screen with parts: the whole file is priced here from the
   const id = jobIdOf(page);
   const created = asked('POST', /^\/api\/jobs$/).pop();
   const sent = JSON.parse(created.body);
+  const { filename: _f, sizeBytes: _s, displayName: _d, maxCostMicros: _m, ...asked1 } = sent;
+  const server = (await apiCall(page, 'POST', 'jobs/estimate', asked1)).body;
+  if (startNow !== `Start · ${money(server.estCostMicros)}`) throw new Error(`Start said "${startNow}", the server's estimate for the timeline sent is ${server.estCostMicros} (${money(server.estCostMicros)})`);
   if (!sent.timeline || 'denoiseTier' in sent || 'transcribeTier' in sent || ['atten_lim_db', 'noise', 'leveling', 'echo_reference_track'].some((k) => k in sent.options)) throw new Error('create body: ' + created.body.slice(0, 400));
   if (sent.options.audio_format !== 'flac' || sent.kind !== 'denoise') throw new Error('create options: ' + JSON.stringify(sent.options));
   if (!/^Got it, we’re on it\./.test(await page.getByTestId('submitted').innerText())) throw new Error('no welcome note');
@@ -686,9 +711,9 @@ await check('Voice Off for the whole file and noise removal on one part is only 
   if (!(onlyMicros < wholeMicros)) throw new Error(`only a part ${only} is not less than the whole file ${whole}`);
   if (await page.getByTestId('start').isDisabled()) throw new Error('Start is off with a part chosen');
   if ((await say('voice')) !== 'Off 0:00–0:10 | Strong 0:10–0:20 | Off 0:20–0:48') throw new Error('voice: ' + await say('voice'));
-  const body = JSON.parse(asked('POST', /\/jobs\/estimate$/).pop().body);
-  const total = body.timeline.layers.noise.reduce((s, p) => s + p.end - p.start, 0);
-  if (!(total < 12 && total >= 9) || Object.keys(body.timeline.layers).join() !== 'noise' || body.timeline.layers.noise.length !== 1) throw new Error('the timeline covers ' + total + ' s: ' + JSON.stringify(body.timeline.layers));
+  const noisy = (await sections('voice')).filter((x) => !/^Off/.test(x.text));
+  const total = noisy.reduce((n, x) => n + x.e - x.s, 0);
+  if (!(total < 12 && total >= 9) || noisy.length !== 1) throw new Error('the part with noise removal covers ' + total + ' s: ' + JSON.stringify(noisy));
   // back to the whole file
   await page.getByTestId('select-all').click();
   await setVoice(page, 'noise');
@@ -984,7 +1009,7 @@ await check('echo removal has its own price: the price table row and its line, t
   await page.getByTestId('bar-det').click();
   const on = (await page.getByTestId('details').innerText()).replace(/\s+/g, ' ');
   await page.getByTestId('bar-det').click();
-  if (!/Echo removal · 0:\d\d (<\$0\.001|\$0\.\d+)/.test(on)) throw new Error('Details with echo removal: ' + on);
+  if (!/Echo removal · 0:\d\d \+ (?:[\d.]+ s|\d+:\d\d) start-up (<\$0\.001|\$0\.\d+)/.test(on)) throw new Error('Details with echo removal: ' + on);
   // our side: an estimate lists it as a line of its own, with a timeline and with whole-file options (which stand for the same timeline)
   const e = (await apiCall(page, 'POST', 'jobs/estimate', { kind: 'denoise', durationSeconds: 600, options: { audio_format: 'flac' }, timeline: { version: 1, seconds: 600, layers: { echo: [{ start: 0, end: 600 }] } } })).body;
   const line = e.lines.find((l) => l.item === 'echo');

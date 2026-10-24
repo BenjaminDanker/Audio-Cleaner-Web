@@ -302,8 +302,8 @@ class FFmpeg:
         """Length of an audio track as it really decodes, in seconds (at most `max_seconds`).
 
         The duration in the container header is whatever the file's author wrote (a FLAC or Matroska
-        header can say 10 s over hours of audio), so anything billed or limited by length must use
-        max(probe.duration, this)."""
+        header can say 10 s over hours of audio, and raw streams only have an estimate from the bitrate), so anything billed or
+        limited by length uses this."""
         rate = 8000  # only the length matters: decode cheaply, discard the samples
         args = [
             self.ffmpeg, "-nostdin", "-hide_banner", "-v", "error", *self._in(path), "-i", path_arg(path),

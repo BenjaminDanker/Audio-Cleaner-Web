@@ -97,6 +97,40 @@ export async function* libavFrames(file, { signal } = {}) {
   }
 }
 
+/**
+ * The length of a stream whose file does not say it (raw AMR, ADTS AAC, some MPEG streams): read every packet of it, without decoding,
+ * from its first start to its last end (its time base). Exact, and quick: nothing is decoded.
+ */
+async function scanLength(libav, fmt, st) {
+  const pkt = await libav.av_packet_alloc();
+  try {
+    const big = (lo, hi) => (hi === -2147483648 && lo === 0 ? null : hi * 4294967296 + (lo >>> 0)); // (AV_NOPTS_VALUE: no time)
+    let first = null;
+    let end = 0;
+    let sum = 0;
+    for (;;) {
+      const [res, packets] = await libav.ff_read_frame_multi(fmt, pkt, { limit: 4 * 1024 * 1024 });
+      const eof = res === libav.AVERROR_EOF;
+      if (res !== 0 && !eof && res !== -libav.EAGAIN) break;
+      for (const p of packets[st.index] || []) {
+        const dur = big(p.duration || 0, p.durationhi || 0) || 0;
+        sum += dur;
+        const pts = big(p.pts ?? 0, p.ptshi ?? -2147483648);
+        if (pts !== null) {
+          if (first === null || pts < first) first = pts;
+          end = Math.max(end, pts + dur);
+        }
+      }
+      if (eof) break;
+    }
+    const ticks = first !== null && end > first ? end - first : sum;
+    const t = (ticks * st.time_base_num) / st.time_base_den;
+    return t > 0 && Number.isFinite(t) ? t : null;
+  } finally {
+    await libav.av_packet_free_js(pkt).catch(() => {});
+  }
+}
+
 /** What libav.js can tell about a file the browser can't read: {duration, hasAudio, hasVideo, audioTracks, channels, sampleRate}, or null. */
 export async function libavProbe(file) {
   if (!DIR) return null;
@@ -135,8 +169,13 @@ export async function libavProbe(file) {
     const lo = await libav.AVFormatContext_duration(fmt);
     const hi = await libav.AVFormatContext_durationhi(fmt);
     const us = hi * 4294967296 + (lo >>> 0);
+    // AV_TIME_BASE units; unknown is a huge negative number. A sound on its own (raw AMR, ADTS AAC, AC-3, ...) often only has an estimate
+    // from its bitrate, a few % off: its packets are counted (quick, these files are small), as our side bills what decodes. A video's
+    // container says its length from an index or timestamps; counted too when it says nothing.
+    const stated = us > 0 && Number.isFinite(us) ? us / 1e6 : null;
+    const duration = a && (!vs || !stated) ? (await scanLength(libav, fmt, a)) ?? stated : stated;
     return {
-      duration: us > 0 && Number.isFinite(us) ? us / 1e6 : null, // AV_TIME_BASE units; unknown is a huge negative number
+      duration,
       hasAudio: !!a,
       hasVideo: v,
       audioTracks: streams.filter((s) => s.codec_type === libav.AVMEDIA_TYPE_AUDIO).length,

@@ -83,7 +83,6 @@ export function notesOf({
   if (session.restoredNote && stage === 'ready') notes.push({ key: 'back', cls: 'banner banner-success', text: `${signedIn ? 'You’re signed in. ' : ''}Your file and choices are back as you left them.`, testid: 'draft-restored' });
   if (session.error) notes.push({ key: 'error', cls: session.errorKind === 'storage' ? 'banner banner-warn' : 'banner banner-error', text: session.error, testid: 'job-error' });
   if (stage === 'ready') problems.forEach((p) => notes.push({ key: p.text, cls: 'banner banner-warn', text: p.text, kind: p.kind }));
-  if (stage === 'ready' && session.lengthUnknown) notes.push({ key: 'len', cls: 'hint', text: 'Your browser can’t read the length of this file type, so the numbers here are a rough guess from its size. We measure it after the upload and you pay for the real length.', testid: 'length-unknown' });
   if (keepOpen) notes.push({ key: 'open', cls: 'hint', text: 'Keep this tab open while it works.', testid: 'keep-open' });
   if (welcome && job && !isLocal) notes.push({ key: 'welcome', cls: 'banner banner-success', text: welcome, testid: 'submitted' });
   if (job?.notice) notes.push({ key: 'notice', cls: 'banner banner-info small', text: job.notice, testid: 'job-notice' });

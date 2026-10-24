@@ -40,6 +40,17 @@ def test_the_price_list_has_the_row_and_the_editor_uses_the_same_constant(client
     assert not hasattr(editing, "ECHO_MICROS_PER_MINUTE")
 
 
+def test_the_price_list_gives_each_step_s_fixed_amount_the_website_prices_with(client):
+    from acw_common import editor
+
+    got = client.get("/api/billing/pricing").json()["stepFixedSeconds"]
+    assert set(got) == {"echo", "light", "heavy", "rebuild", "leveling"} == set(editor.STEP_COSTS)
+    assert got == {step: c.fixed_equivalent_seconds for step, c in editor.STEP_COSTS.items()}
+    assert all(isinstance(v, float) and v > 0 for v in got.values())
+    # the amounts the editor's steps cost per run are what the estimate adds: 10 min of echo removal = rate x (600 + fixed) / 60
+    assert edit_prices.step_micros(edit_prices.step_rates()["echo"], 600, got["echo"]) == 26_153
+
+
 def test_the_estimate_has_an_echo_line_only_when_it_is_on(client, signed_in):
     uid, h = signed_in
     plain = client.post("/api/jobs/estimate", json=est(), headers=h).json()

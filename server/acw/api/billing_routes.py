@@ -26,6 +26,12 @@ def _require_stripe() -> None:
         raise HTTPException(status_code=503, detail="Payments are not available yet.")
 
 
+def _step_fixed_seconds() -> dict[str, float]:
+    from acw_common import editor
+
+    return {step: c.fixed_equivalent_seconds for step, c in editor.STEP_COSTS.items()}
+
+
 @router.get("/pricing")
 def get_pricing() -> dict:
     return {
@@ -40,6 +46,9 @@ def get_pricing() -> dict:
         "maxJobSeconds": pricing.MAX_JOB_SECONDS,
         "maxUploadBytes": get_settings().max_upload_bytes,
         "maxRebuildSeconds": pricing.MAX_REBUILD_SECONDS,
+        # Each step's fixed amount per run (loading its model in a fresh stage), as seconds of audio at the step's own rate: a
+        # price is rate x (whole seconds of its parts + this), step by step (editing.price). The website prices with the same numbers.
+        "stepFixedSeconds": _step_fixed_seconds(),
         "rebuildAvailable": broker.rebuild_available(),  # the voice rebuild runs only on the card, and only when it has room
         "paymentsEnabled": stripe_service.enabled(),
         "taxAddedAtCheckout": get_settings().stripe_automatic_tax,

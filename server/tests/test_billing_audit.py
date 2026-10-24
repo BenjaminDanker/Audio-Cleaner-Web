@@ -78,6 +78,37 @@ def test_forged_header_is_billed_and_limited_by_the_measured_length(tmp_path):
 
 
 @NATIVE
+def test_a_header_that_says_more_than_the_file_decodes_is_billed_by_the_decoded_length(tmp_path):
+    """Raw AMR and ADTS AAC only have a bitrate estimate in their header, a few % off either way: the length billed is the one that decodes
+    (the website counts the same from the file's packets), not the larger of the two."""
+    from acw.worker import runner
+    from acw_common.ffmpeg import FFmpeg
+
+    path = forged_flac(tmp_path, real=10, claimed=120)
+    probe = FFmpeg(HOME / "bin").probe(path)
+    assert probe.duration == pytest.approx(120, abs=0.1)  # (the header says twelve times what is there)
+    got = runner.stage_probe(tmp_path, runner_spec(tmp_path))["duration"]
+    assert got == pytest.approx(10, abs=0.5) and got < 11
+    # (and within the limit by what decodes: a header over the limit does not stop a file that is under it)
+    assert runner.stage_probe(tmp_path, runner_spec(tmp_path, max_seconds=60))["duration"] == pytest.approx(10, abs=0.5)
+
+
+@NATIVE
+@pytest.mark.parametrize("name, args", [("raw.amr", ["-ar", "8000", "-ac", "1", "-c:a", "libopencore_amrnb", "-f", "amr"]),
+                                        ("raw-adts.aac", ["-c:a", "aac", "-b:a", "64k", "-f", "adts"])])
+def test_a_raw_amr_or_adts_file_is_billed_by_the_length_that_decodes_not_by_its_estimated_header(tmp_path, name, args):
+    from acw.worker import runner
+    from acw_common.ffmpeg import FFmpeg
+
+    ffmpeg = HOME / "bin" / "ffmpeg"
+    subprocess.run([str(ffmpeg), "-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=37.32:sample_rate=8000", "-y", *args, str(tmp_path / name)], check=True)
+    ff = FFmpeg(HOME / "bin")
+    decoded = ff.measure_duration(tmp_path / name, ff.probe(tmp_path / name), 3600)
+    got = runner.stage_probe(tmp_path, {**runner_spec(tmp_path), "input": name})["duration"]
+    assert got == pytest.approx(decoded, abs=0.001) and got == pytest.approx(37.32, abs=0.3)  # (AAC pads a few frames)
+
+
+@NATIVE
 def test_decode_stops_at_the_billed_length(tmp_path):
     from acw.worker import runner
     from acw_common.ffmpeg import FFmpeg

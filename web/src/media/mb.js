@@ -85,9 +85,16 @@ export async function probeMedia(file) {
       info.canDecode = await aTrack.canDecode();
     }
     let d = null;
-    try {
-      d = await input.getDurationFromMetadata();
-    } catch { /* fall through */ }
+    // MP3 and ADTS AAC have no dependable stated length (a VBR MP3 without a Xing header is measured from its first frames, far off):
+    // their length is computed from the frames to the end, which is what our side bills (the length that decodes)
+    const mb = await loadMediabunny();
+    const fmt = await input.getFormat().catch(() => null);
+    const counted = fmt === mb.MP3 || fmt === mb.ADTS;
+    if (!counted) {
+      try {
+        d = await input.getDurationFromMetadata();
+      } catch { /* fall through */ }
+    }
     if (!d) {
       try {
         d = await input.computeDuration();
@@ -98,8 +105,17 @@ export async function probeMedia(file) {
   } catch {
     /* not a container mediabunny understands; fall back to the browser */
   }
+  if (info.viaMediabunny && info.canDecode !== false && (!info.duration || (info.hasVideo && !info.ffVideoCodec))) {
+    // A file the browser reads but that does not say its length, or names its picture's codec in a way we can't map: libav.js reads
+    // just that (decoding stays the browser's).
+    const l = await libavProbe(file);
+    if (l) {
+      if (!info.duration && l.duration) info.duration = l.duration;
+      if (info.hasVideo && !info.ffVideoCodec && l.picture?.ffVideoCodec) info.ffVideoCodec = l.picture.ffVideoCodec;
+    }
+  }
   if (!info.viaMediabunny || info.canDecode === false) {
-    // A format the browser can't read (WMA, AVI, MPEG, AC-3, AMR, ...): ask the libav.js decoder, downloaded only now.
+    // A format the browser can't read (WMA, AVI, MPEG, AC-3, AMR, MXF, RealMedia, ...): ask the libav.js decoder, downloaded only now.
     const l = await libavProbe(file);
     if (l?.hasAudio) {
       Object.assign(info, { hasAudio: true, hasVideo: info.hasVideo || l.hasVideo, channels: l.channels || info.channels, sampleRate: l.sampleRate || info.sampleRate });

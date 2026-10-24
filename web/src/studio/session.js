@@ -5,7 +5,7 @@
 
 import { api } from '../api.js';
 import { addLocalCard, beginFinish } from '../finish.js';
-import { estimateTimeline, loadEditor, loadLayerPeaks, needsOf, quoteTimeline, saveTimeline, uploadBrowserCues, uploadBrowserNoise } from '../editor/api.js';
+import { loadEditor, loadLayerPeaks, needsOf, saveTimeline, uploadBrowserCues, uploadBrowserNoise } from '../editor/api.js';
 import { filePeaks, layerPeaks, overlayPeaks, rangePeaks } from '../editor/peaks.js';
 import { loadSuggestions, suggestionState } from '../editor/suggest.js';
 import {
@@ -66,7 +66,6 @@ export class Session {
     this.fileName = '';
     this.T = 0;
     this.S = null;
-    this.lengthUnknown = false;
     this.out = { sfiles: ['srt'], burn: false }; // (the file type, name and picture size are the Output popover's own state)
     this.wave = { state: 'reading', data: null }; // 'reading' | 'ok' | 'none'
     this.layers = null; // the server's peaks per layer, once the job is done: {source, echo, noise, rebuild}
@@ -131,11 +130,12 @@ export class Session {
     s.file = file;
     s.info = info;
     s.fileName = file.name;
-    // Some formats (WMA, AMR, AVI, MPEG...) the browser can't read, but the server can. Then the length is a rough guess from the file
-    // size (128 kbit/s) until the server measures it; the price is corrected to the real length.
-    s.lengthUnknown = !!(!info.duration && info.hasAudio !== false);
-    const guess = Math.min(Math.max(30, (file.size * 8) / 128000), 4 * 3600);
-    s.T = info.duration || (s.lengthUnknown ? guess : 1);
+    // The length is always read from the file itself (media/mb.js probeMedia: the browser, else libav.js, which counts it from the file's
+    // packets when the file does not say it), so the price shown is the price. A file neither can read is not guessed at.
+    if (!info.duration && info.hasAudio !== false) {
+      throw new Error('This browser couldn’t read this file’s length. If your connection dropped, please try again; otherwise the file may be damaged.');
+    }
+    s.T = info.duration || 1;
     s.S = makeState(s.T, { second: s.second, auto: s.auto });
     // Without an account only the free options can be chosen: every free option this file can have is on from the start, and
     // Automatic (which runs in this browser, nothing is sent) picks among them only.
@@ -164,7 +164,6 @@ export class Session {
   /** Put back what a draft kept: the tracks, the selection, the suggestions, the file choices, and what the quick listen found. */
   restore(rec) {
     this.T = rec.seconds;
-    this.lengthUnknown = !!rec.lengthUnknown;
     this.auto = !!rec.auto;
     this.signedOutStart = false;
     this.S = makeState(this.T, { second: this.second, auto: this.auto });
@@ -215,24 +214,12 @@ export class Session {
       const r = await filePeaks(this.file, { signal: ctl.signal, info: this.info });
       if (ctl.signal.aborted) return;
       this.wave = { state: 'ok', data: r };
-      // the length the file really has (the browser could not tell it before, or told it a little differently); work that was kept already
-      // knows it, unless it was kept before the length was found
-      if (this.lengthUnknown || (!this.info.duration && !this.restored)) this.setLength(r.dur);
     } catch (e) {
       if (e?.name === 'AbortError' || ctl.signal.aborted) return;
       this.wave = { state: 'none', data: null };
     }
     this.touch();
     this.afterWave();
-  }
-
-  /** The recording turned out to be this long: the tracks start again at this length (nothing was changed yet). */
-  setLength(seconds) {
-    const t = Math.max(1, seconds);
-    this.T = t;
-    this.lengthUnknown = false;
-    this.S = makeState(t, { second: this.second, auto: this.auto });
-    if (this.signedOutStart) this.freeStart();
   }
 
   afterWave() {
@@ -518,7 +505,7 @@ export class Session {
    * there is no job: the result is a card of this tab only. Resolves {id} once the job (or the card) exists and the browser's share is done,
    * or null when it was canceled or failed (then `error` says why).
    */
-  async start({ choice, plan, onJobCreated, refresh, estimate }) {
+  async start({ choice, plan, onJobCreated, refresh, shownMicros }) {
     const file = this.file;
     const info = this.info;
     const ctl = new AbortController();
@@ -540,7 +527,7 @@ export class Session {
     try {
       // (the page asks to sign in instead of getting here; this keeps a job from being tried with no account all the same)
       if (server && !this.env.signedIn) throw new Error('Sign in to start this. Your file and choices are kept while you do.');
-      if (server) return await this.startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, estimate });
+      if (server) return await this.startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, shownMicros });
       return await this.startLocal({ file, info, tracks, T, wants, choice, freeNoise, freeSubs, ctl });
     } catch (e) {
       failed = true;
@@ -605,7 +592,7 @@ export class Session {
     await Promise.all([...noiseTasks, ...cueTasks]);
   }
 
-  async startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, estimate }) {
+  async startJob({ file, info, tracks, T, wants, choice, plan, freeNoise, freeSubs, ctl, onJobCreated, refresh, shownMicros }) {
     const kind = jobKind(tracks, plan);
     const videoOut = videoOutOf(plan, choice, serverSize(choice.size), videoSourceHint(info));
     // a job made with parts says what is done in its timeline (docs/api.md section 8): the subtitles' quality, language and translations are the
@@ -622,6 +609,8 @@ export class Session {
       },
       timeline: toTimeline(tracks, T).toJSON(),
     };
+    // the price the page showed: our side stops a job that would cost more than 10 % above it, without charging (jobs.PRICE_TOLERANCE)
+    if (shownMicros != null) body.maxCostMicros = shownMicros;
     let share = null;
     const out = await submitJob({
       file, info, body, signal: ctl.signal,
@@ -815,26 +804,5 @@ export class Session {
       return null;
     }
   }
-
-  /* ================================================================================================ the price, asked of our side */
-
-  /** The price of these tracks before the job exists: the server's estimate for a timeline of parts (it counts what each run costs besides). */
-  estimateBody({ choice, plan }) {
-    const tracks = this.S.tracks;
-    const kind = jobKind(tracks, plan);
-    if (!kind) return null;
-    const videoOut = videoOutOf(plan, choice, serverSize(choice.size), videoSourceHint(this.info));
-    if (kind === 'convert') return { kind, durationSeconds: this.T, options: { video_out: videoOut } };
-    return {
-      kind, durationSeconds: this.T,
-      options: { audio_format: serverAudioFormat(choice.format, this.file, this.info), caption_formats: ['srt', 'vtt', 'txt'], ...(videoOut ? { video_out: videoOut } : {}) },
-      timeline: toTimeline(tracks, this.T).toJSON(),
-    };
-  }
-
-  /** The price of saving the changes of a job (nothing is held by asking). */
-  quote(signal) { return quoteTimeline(this.job.id, this.timelineOf(this.S.tracks), signal); }
-
-  async estimate(body, signal) { return estimateTimeline(body, signal); }
 }
 
