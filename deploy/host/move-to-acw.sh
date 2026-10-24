@@ -55,7 +55,7 @@ extra_preflight() {
   else
     [ -f "$TO_HOME/.ssh/known_hosts" ] || problem "$OWNER_HOME/.ssh/known_hosts does not exist"
   fi
-  [ -d "$BACKUP_DIR" ] || problem "$BACKUP_DIR does not exist (is /mnt/mc-storage mounted?)"
+  [ -d "$BACKUP_DIR" ] || problem "$BACKUP_DIR does not exist (is /mnt/storage mounted?)"
   [ -f "$FROM_H/secrets/vps.env" ] || [ -f "$TO_H/secrets/vps.env" ] || problem "secrets/vps.env is missing (the tunnels read it)"
   if [ -d "$OWNER_HOME" ] && [ "$(stat -c %a "$OWNER_HOME" 2>/dev/null || echo 0)" -gt 750 ] 2>/dev/null; then
     problem "$OWNER_HOME is mode $(stat -c %a "$OWNER_HOME"): $SVC could read what is world-readable in it; chmod 750 $OWNER_HOME first"

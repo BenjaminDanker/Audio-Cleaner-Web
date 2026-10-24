@@ -260,7 +260,7 @@ network, so it is built to reach nothing but the public internet:
   `command="/bin/false"`: no shell; docs/vps.md).
 - No malware/CSAM scanning of uploads (audio-only product, files deleted 2 hours after a job's last edit and at the latest 6 hours after the upload);
   revisit if video volume grows.
-- Backups: a nightly snapshot goes to `/mnt/mc-storage/audio-cleaner/backups`
+- Backups: a nightly snapshot goes to `/mnt/storage/audio-cleaner/backups`
   (another disk, 30 kept; `acw-backup.timer`) and is checked right after writing (SQLite integrity and ledger
   sums; the monitor mails when it fails). That does not survive losing the machine: the encrypted off-box copy is
   built in but switched off until you configure it (docs/operations.md, "Backups").

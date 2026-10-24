@@ -56,7 +56,7 @@ after changing them.
 `bin models wasm venv venv-gpu` of acw (group `acw` plus an ACL entry for the owner, which also covers login sessions that
 began before the group was added: a group change reaches a running session and the owner's own systemd user manager only
 at the next login), but **not** `app`, `data`, `secrets` (acw only, 0700): use `acw-sh` or `acw-admin` for those.
-`/mnt/mc-storage/audio-cleaner/backups` belongs to acw (750).
+`/mnt/storage/audio-cleaner/backups` belongs to acw (750).
 
 **Where the deploy steps run.** `deploy/install.sh` run by the owner: (1) git checks (clean tree, descendant of the
 deployed `app/VERSION`) and the syntax gate; (2) `git archive HEAD` of `deploy server common native` into
@@ -390,11 +390,11 @@ is re-armed, so the next occurrence mails immediately. State lives in the
 | Memory low (`mem_low`) | under 2 GB `MemAvailable` for 2 checks in a row | host load breakdown included |
 | Swap growing (`swap_growing`) | at least 512 MB of swap in use and up 256 MB or more over 30 minutes | |
 | Live sessions refused (`live_full`) | more than 10 stream sessions ended with `end_reason = 'full'` in the last hour (counted from `stream_sessions`; `ACW_ALERT_FULL_THRESHOLD` changes the 10) | |
-| Backup overdue (`backup_stale`) | the newest snapshot in `/mnt/mc-storage/audio-cleaner/backups` (`ACW_BACKUP_DIR`) is older than 36 h, or none is found (disk not mounted) | |
+| Backup overdue (`backup_stale`) | the newest snapshot in `/mnt/storage/audio-cleaner/backups` (`ACW_BACKUP_DIR`) is older than 36 h, or none is found (disk not mounted) | |
 | Backup failed its check (`backup_bad`) | `backup-status.json` next to the snapshots says the file is empty, failed SQLite's integrity check, or its ledger sums do not match, or the off-machine copy failed | the backup unit fails too |
 | Balances do not match the ledger (`ledger_invariant`) | an account's balance differs from the sum of its ledger entries, or its held amount from its active holds | look before restarting anything; `acw.admin check-money` |
 | Data directory large (`data_large`) | `~/audio-cleaner/data` without `jobs/` is over 5 GB (`ACW_DATA_ALERT_GB`) | something that should be bounded is growing: `acw.admin storage`, then "What grows and what bounds it" |
-| Backup folder large (`backups_large`) | `/mnt/mc-storage/audio-cleaner/backups` is over 20 GB (`ACW_BACKUPS_ALERT_GB`) | 30 snapshots are far smaller than that: look for stray files |
+| Backup folder large (`backups_large`) | `/mnt/storage/audio-cleaner/backups` is over 20 GB (`ACW_BACKUPS_ALERT_GB`) | 30 snapshots are far smaller than that: look for stray files |
 | Old payment records (`old_money_records`) | ledger, payment or money-audit rows are more than 7 years and 30 days old | nothing is deleted by itself; run `acw.admin compact-money` (see "Payment records after 7 years") |
 | Extra-accurate transcription stuck (`cloud_asr_stuck`) | a job has waited on the OpenAI transcription for over 30 minutes | |
 | Many uploads (`uploads_piling`) | more than 15 uploads in progress, or more than 40 GB promised | |
@@ -491,7 +491,7 @@ when the alert address is the one you want. The address never reaches a browser:
 ## Backups
 
 Every night (`acw-backup.timer`, 04:17) `python -m acw.admin backup` writes a consistent snapshot of the database to
-`/mnt/mc-storage/audio-cleaner/backups` (another disk; 30 kept), then **checks it**: the file is unzipped to a
+`/mnt/storage/audio-cleaner/backups` (another disk; 30 kept), then **checks it**: the file is unzipped to a
 scratch copy, `PRAGMA integrity_check` must say `ok`, and every account's balance must equal the sum of its ledger
 entries and its held amount the sum of its active holds. A snapshot that fails is renamed `*.bad`, the unit fails (you
 get a mail) and `backup-status.json` records why (the monitor reads it). `deploy/install.sh` takes the same kind of
@@ -515,14 +515,14 @@ After setting it up, run `acw-ctl start acw-backup.service` and look at `acw-log
 ```bash
 # As the owner. The folder paths below are acw's: run the file steps in `acw-sh`.
 # 1. pick a snapshot and check it first (an encrypted off-machine copy: gpg --decrypt -o x.sqlite3.gz x.sqlite3.gz.gpg)
-ls -1 /mnt/mc-storage/audio-cleaner/backups | tail
-acw-admin --worker-env verify-backup /mnt/mc-storage/audio-cleaner/backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz
+ls -1 /mnt/storage/audio-cleaner/backups | tail
+acw-admin --worker-env verify-backup /mnt/storage/audio-cleaner/backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz
 # 2. stop everything that writes (the tunnel can stay: the site shows its maintenance message)
 acw-ctl stop acw-web 'acw-worker@*' acw-worker-gpu acw-stream acw-monitor.timer acw-backup.timer
 # 3. keep what is there, put the snapshot in place (in `acw-sh`: ~/audio-cleaner/data is acw's)
 acw-sh
 cd ~/audio-cleaner/data && mkdir -p ../data-before-restore && cp -a acw.sqlite3* ../data-before-restore/ && rm -f acw.sqlite3 acw.sqlite3-wal acw.sqlite3-shm
-gunzip -c /mnt/mc-storage/audio-cleaner/backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz > acw.sqlite3 && chmod 600 acw.sqlite3
+gunzip -c /mnt/storage/audio-cleaner/backups/acw-YYYYMMDD-HHMMSS.sqlite3.gz > acw.sqlite3 && chmod 600 acw.sqlite3
 # 4. schema (additive), then the money check, then start
 cd ~/audio-cleaner/app && acw-admin init-db && acw-admin check-money
 acw-ctl start acw-stream acw-web 'acw-worker@1' 'acw-worker@2' acw-monitor.timer acw-backup.timer   # and the other workers
@@ -649,7 +649,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 | `data/backups/` | a snapshot before every deploy | the newest 10 (`install.sh`), plus at most 3 failed ones (`*.bad`) |
 | `data/legal/` | one small page (and its hash) per version of the Terms and the Privacy Policy, plus `current.json`; never deleted | a few tens of KB per version change |
 | `data/metrics.prom`, markers (`live-*`, `lock.sha`, `web-published`, `gpu-worker-idle`, `gpu-worker-alive`) | rewritten in place, fixed names | a few KB in all |
-| `/mnt/mc-storage/audio-cleaner/backups` | nightly snapshot, gzipped | the newest 30, plus at most 3 failed (`*.bad`) and `backup-status.json`; also pruned on a night when the backup fails. About a quarter of the database size each: ~250 MB x 30 = 7.5 GB at the worst example above. Not ours: a stray `Audio-Cleaner-desktop-repo.bundle` (16 MB) |
+| `/mnt/storage/audio-cleaner/backups` | nightly snapshot, gzipped | the newest 30, plus at most 3 failed (`*.bad`) and `backup-status.json`; also pruned on a night when the backup fails. About a quarter of the database size each: ~250 MB x 30 = 7.5 GB at the worst example above. Not ours: a stray `Audio-Cleaner-desktop-repo.bundle` (16 MB) |
 | The off-machine copy (if set up) | one encrypted file a night | "the remote end keeps everything": prune it there (Backups) |
 | Journal (acw's user journal: `acw-logs`) | see below | size and age caps |
 | `/var/log/syslog` (rsyslog gets a copy of everything journald sees, `ForwardToSyslog=yes`) | the same lines, with client addresses | logrotate: weekly, 4 kept, so about five weeks (inside the 90 days); ~16 MB a week at the example load |
@@ -955,7 +955,7 @@ What it does, in this order (`--dry-run` prints each command):
    (`pip --version`, `uvicorn --version` fail before the rewrite and work after) and by `server/tests/test_move_to_acw.py`.
 7. **The tunnel key**: `acw_tunnel(.pub)` is copied to `/home/acw/.ssh` (0600, acw) and the `vps` host key line(s)
    (`ssh-keygen -F vps`, hashed or not) to `/home/acw/.ssh/known_hosts`. The owner's own login key and `~/.ssh/config`
-   are not copied. The backup folder `/mnt/mc-storage/audio-cleaner/backups` is chowned to acw (750).
+   are not copied. The backup folder `/mnt/storage/audio-cleaner/backups` is chowned to acw (750).
 8. **`acw-live` is rebuilt** by the owner against the venv in its new place. This cannot be skipped: the binary records the
    absolute path of the sherpa-onnx library twice (rpath and the folder its Landlock sandbox lets it read); copied as is it
    would look in `/home/silver/...`, which acw cannot read, and live would not start. The source stamp `bin/acw-live.src`

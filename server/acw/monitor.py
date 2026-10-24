@@ -44,7 +44,7 @@ RESTART_WINDOW_S = 30 * 60
 RESTART_ALERT_AT = 2
 FULL_PER_HOUR = int(os.environ.get("ACW_ALERT_FULL_THRESHOLD", "10"))
 BACKUP_MAX_AGE_S = 36 * 3600
-BACKUP_DIR = Path(os.environ.get("ACW_BACKUP_DIR", "/mnt/mc-storage/audio-cleaner/backups"))
+BACKUP_DIR = Path(os.environ.get("ACW_BACKUP_DIR", "/mnt/storage/audio-cleaner/backups"))
 UNIT_DIR = Path.home() / ".config/systemd/user"
 
 

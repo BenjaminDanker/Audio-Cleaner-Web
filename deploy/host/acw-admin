@@ -2,7 +2,7 @@
 # acw-admin [--worker-env] [-m MODULE] ARGS...   python -m acw.admin ARGS as acw, with the environment the units get:
 # secrets/acw-worker.env, secrets/backup.env (when present), then secrets/acw.env (the web secrets: Stripe, SMTP, ...).
 #   acw-admin activity        acw-admin stats --days 7        acw-admin grant someone@example.com 5 "support credit"
-#   acw-admin --worker-env backup /mnt/mc-storage/audio-cleaner/backups --keep 30    (no web secrets: what install.sh uses)
+#   acw-admin --worker-env backup /mnt/storage/audio-cleaner/backups --keep 30    (no web secrets: what install.sh uses)
 #   acw-admin -m acw.alerts test                                                      (another module of the app)
 # Paths in ARGS are absolute and readable by acw (it cannot enter your home).
 set -euo pipefail
