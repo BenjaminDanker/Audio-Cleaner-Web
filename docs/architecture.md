@@ -5,7 +5,7 @@
         │ HTTPS / WSS
         ▼
  VPS (Caddy, audiocleaner.live)
-   /*              → static site from /var/www/audio (incl. free WASM denoiser)
+   /*              → static site from /srv/audio-cleaner/website (incl. free WASM denoiser)
    /api/*          → 127.0.0.1:18790 ──────────────┐   request bodies capped (64 KB; 4 GB only for the upload route)
    job uploads and result downloads                 │
                    → 127.0.0.1:18794 (falls back    │ two SSH reverse tunnels, separate TCP connections

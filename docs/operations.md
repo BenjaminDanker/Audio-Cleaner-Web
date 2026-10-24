@@ -195,7 +195,7 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
 3. **Bulk tunnel.** On primary-ram: `acw-ctl enable --now acw-tunnel-bulk`, then on the VPS
    `curl -s 127.0.0.1:18794/api/health`. From now on `deploy/install.sh`, `deploy/rollback.sh` and the monitor treat it
    like the other units (`deploy/install.sh` prints a reminder until it is enabled).
-4. **Caddy.** On primary-ram `deploy/vps/publish-edge.sh` (copies the sites to the VPS and reloads Caddy; a configuration
+4. **Caddy.** On primary-ram `deploy/vps/publish-sites.sh` (copies the sites to the VPS and reloads Caddy; a configuration
    that does not load is put back; no sudo). The upload
    route (`.../input`, still 4 GB, no stall timeouts) and `.../outputs/...` now go to `127.0.0.1:18794` first and fall back to
    `127.0.0.1:18790` (`lb_policy first`, a health check every 10 s, 30 s of avoidance after a failed connection), so a
@@ -206,7 +206,7 @@ Rates (environment of `acw-bulk`: add to `~/audio-cleaner/secrets/acw.env`, then
    `GET .../outputs/...` lines (client address, status, milliseconds), the main `acw-web` log shows none for them.
 
 Back out: put the previous version of `deploy/vps/sites/00-audio-cleaner-snippets.caddy` back (`git checkout` of the old
-commit) and run `deploy/vps/publish-edge.sh`; on primary-ram `acw-ctl disable --now acw-tunnel-bulk`. The main path never changed.
+commit) and run `deploy/vps/publish-sites.sh`; on primary-ram `acw-ctl disable --now acw-tunnel-bulk`. The main path never changed.
 
 The router: `IPQoS` marks the two SSH connections so a router that prioritises by DSCP or runs smart queueing (SQM,
 cake/fq_codel) can favour the live one. It does nothing without such a router; the separate connection and process are
@@ -656,7 +656,7 @@ Take a backup first (`acw-ctl start acw-backup.service`).
 | GitHub releases of the desktop app | installers | the newest 5 automatic ones (docs/desktop.md) |
 | `data/downloads/` | the mirrored release files | the current version of each channel plus the previous one for 7 days: ~0.1 GB of OBS plugin packages (the only channel: the desktop app and the models come from GitHub releases and Hugging Face); `mirror` refuses to download unless 5 GB stay free, `acw_downloads_bytes{channel}` in `metrics.prom` shows it |
 | `app.prev` | one previous copy of the code (1 MB) | replaced at every deploy |
-| `/var/www/audio` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
+| `/srv/audio-cleaner/website` on the VPS | hashed files under `assets/` (1.2 MB per release) and the engine under `dfn/` (24 MB, replaced in place) | `publish-web.sh` keeps this release and the one before it, deletes older hashed files; so ~2.5 MB of assets plus the engine |
 | `~/.cache/pip` (3.0 GB today), `~/audio-cleaner/dev` (2.4 GB), `src` (5.1 GB), `research` (18 GB), `venv-gpu` (3.9 GB), `models` (9 GB) | pip's download cache; test fixtures and scratch; build trees; experiments; the pinned models | **not managed by any code** and not checked by the monitor. `pip cache purge`, `dev/` and `src/` ("safe to delete", Layout) and `research/` are yours to clean; `models/` is fixed by `deploy/models.lock` |
 
 **What a job keeps** (`data/jobs/<id>/`, until its deadline: 2 hours after its last edit, at the latest 6 hours after the upload;
@@ -709,7 +709,7 @@ Audio Cleaner has its own domain, `https://audiocleaner.live` (`www.` redirects 
 
 - DNS (Namecheap): `A` record of `@` to the VPS, `www` a CNAME to `@`. The sites are in `deploy/vps/sites/`
   (`audiocleaner.live.caddy`, the shared routes in `00-audio-cleaner-snippets.caddy`), published with
-  `deploy/vps/publish-edge.sh` (docs/vps.md).
+  `deploy/vps/publish-sites.sh` (docs/vps.md).
 - `acw.env` and `acw-worker.env`: `ACW_PUBLIC_ORIGIN=https://audiocleaner.live`, `ACW_BASE_PATH=` (empty). The base path is
   now `/`: pages and API are at `/app`, `/login`, `/contact`, `/api/...`, `/dfn/...`, `/assets/...`, with no `/audio`
   prefix. The session cookie is `__Host-acw_session` (Secure, `Path=/`, no Domain; with a base path it would be
@@ -728,7 +728,7 @@ Still to do (needs you):
    signing secret in `acw.env`; keep the old endpoint (`https://mc-multi-world.space/audio/api/stripe/webhook`) until events
    stop arriving there, then delete it. Checkout return URLs follow `ACW_PUBLIC_ORIGIN`.
 3. **Retiring the old address:** remove the two `/audio` blocks from `deploy/vps/sites/mc-multi-world.space.caddy` and run
-   `deploy/vps/publish-edge.sh`. Keep them until OBS plugin users have updated to a build that uses
+   `deploy/vps/publish-sites.sh`. Keep them until OBS plugin users have updated to a build that uses
    `audiocleaner.live`, and until no Stripe event or API call arrives through `/audio/api` (the Caddy access log on the
    VPS shows it).
 

@@ -20,7 +20,7 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
 - ⬜ Journal retention (one sudo command, docs/operations.md "Log retention"): the Privacy Policy promises 90 days
 - ⬜ Uptime alert (e.g. the Pi curls `https://audiocleaner.live/api/health` every minute and pings you)
 
-- ✅ Caddy changes go out with `deploy/vps/publish-edge.sh` (no sudo); firewall, packages and the main Caddyfile with
+- ✅ Caddy changes go out with `deploy/vps/publish-sites.sh` (no sudo); firewall, packages and the main Caddyfile with
   `--setup` and `setup.sh` (docs/vps.md)
 - ⬜ Router: enable SQM / fq_codel (cake) on the home link. Big downloads in the house
   otherwise add 200-500 ms to live-stream latency (measured during research downloads).

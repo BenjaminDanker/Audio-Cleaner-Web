@@ -17,19 +17,20 @@ mc-multi-world.space {
 		reverse_proxy 127.0.0.1:18788
 	}
 
-	# Resource packs of the Minecraft servers (/var/www/pack, owned by silver).
+	# Resource packs of the Minecraft servers: /pack/<name>.zip from /srv/minecraft/resource-packs (owned by silver; publish:
+	# scp <name>.zip vps:/srv/minecraft/resource-packs/). /pack/tech/... and /pack/magitech/... are the packs' versioned URLs.
 	handle /pack/tech/* {
-		rewrite * /pack/tech.zip
-		root * /var/www
+		rewrite * /tech.zip
+		root * /srv/minecraft/resource-packs
 		file_server
 	}
 	handle /pack/magitech/* {
-		rewrite * /pack/magitech.zip
-		root * /var/www
+		rewrite * /magitech.zip
+		root * /srv/minecraft/resource-packs
 		file_server
 	}
-	handle /pack/* {
-		root * /var/www
+	handle_path /pack/* {
+		root * /srv/minecraft/resource-packs
 		file_server
 	}
 

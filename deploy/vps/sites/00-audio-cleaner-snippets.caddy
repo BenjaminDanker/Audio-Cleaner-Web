@@ -97,10 +97,10 @@
 	}
 }
 
-# Everything else: the website from /var/www/audio (deploy/publish-web.sh puts it there).
+# Everything else: the website from /srv/audio-cleaner/website (deploy/publish-web.sh puts it there).
 (acw_site) {
 	handle {
-		root * /var/www/audio
+		root * /srv/audio-cleaner/website
 		# Turnstile (human check on email sign-in) is NOT enabled. To enable it, set TURNSTILE_SITE_KEY and
 		# TURNSTILE_SECRET in acw.env and change these three directives in the Content-Security-Policy below:
 		#     script-src 'self' 'wasm-unsafe-eval' https://challenges.cloudflare.com;

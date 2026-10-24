@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the website and publish it to the VPS (/var/www/audio, served by Caddy).
+# Build the website and publish it to the VPS (/srv/audio-cleaner/website, served by Caddy).
 # Requires the one-time VPS setup (deploy/vps/setup.sh, docs/vps.md). deploy/install.sh runs this
 # by itself when web/ changed, so you rarely need to call it directly.
 #
@@ -33,7 +33,7 @@ VITE_BASE=/ npm run build
 find dist -type f \( -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.wasm' -o -name '*.svg' -o -name '*.json' -o -name '*.mjs' \) \
   -exec gzip -kf9 {} \; -exec zstd -q -f -19 {} -o {}.zst \;
 
-DEST=vps:/var/www/audio/
+DEST=vps:/srv/audio-cleaner/website/
 # 1. Everything except the entry page; stale files go, but not the hashed files of the previous release.
 rsync -az --delay-updates --delete --filter='P /assets/***' --filter='P /.assets-current' \
   --chmod=D755,F644 --exclude '/index.html' --exclude '/index.html.gz' --exclude '/index.html.zst' dist/ "$DEST"
@@ -42,7 +42,7 @@ rsync -az --delay-updates --chmod=F644 dist/index.html dist/index.html.gz dist/i
 # 3. Hashed files older than the previous release go; remember this release's files for the next time.
 NEW_LIST="$(cd dist && find assets -type f | sed 's|^assets/||' | sort)"
 printf '%s\n' "$NEW_LIST" | ssh vps 'set -eu
-  cd /var/www/audio
+  cd /srv/audio-cleaner/website
   cat > /tmp/acw-assets-new
   # first release published this way: what is live now counts as the previous release
   [ -f .assets-current ] || { [ -d assets ] && ( cd assets && find . -type f | sed "s|^\./||" | sort ) > .assets-current; } || : > .assets-current
