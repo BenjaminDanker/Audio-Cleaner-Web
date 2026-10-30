@@ -78,6 +78,23 @@ def env(tmp_path, tmp_path_factory, monkeypatch):
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def no_host_capacity(monkeypatch):
+    """No test reaches the real host capacity service (abstract socket @host-capacity, which runs on this machine):
+    reserve_job answers "not running" (None, so admission uses its own memory rule) and the socket name points at
+    nothing. Tests that need other answers patch capacity.reserve_job; test_capacity_service.py starts its own server."""
+    import uuid
+
+    from acw import capacity
+
+    def not_running(job_id, memory):
+        return None
+
+    not_running.real = capacity.reserve_job  # (for the test of the function itself)
+    monkeypatch.setattr(capacity, "reserve_job", not_running)
+    monkeypatch.setattr(capacity, "SOCKET", "\0acw-test-nothing-" + uuid.uuid4().hex)
+
+
 @pytest.fixture
 def gpu_up():
     """The GPU worker is up (the voice rebuild can be ordered: it runs only on the card)."""

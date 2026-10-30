@@ -64,3 +64,109 @@ def test_job_threads_follow_the_idle_cores_of_the_job_cpus():
     s = hostload.Snapshot(**{**s.__dict__, "busy_per_cpu": tuple(per)})
     ok, _, threads = admission(job(), s, [], cpus={0, 1, 2, 3, 4, 5})
     assert ok and threads == 2
+
+
+# --- the host capacity service (acw.capacity) decides memory, asked last ---------------------------------------------
+
+from acw import capacity  # noqa: E402
+
+
+@pytest.fixture
+def asked(monkeypatch):
+    """Patches capacity.reserve_job; `answer[0]` is what it replies, `calls` what it was asked."""
+    calls, answer = [], [None]
+
+    def reserve_job(job_id, memory):
+        calls.append((job_id, memory))
+        return answer[0]
+
+    monkeypatch.setattr(capacity, "reserve_job", reserve_job)
+    return calls, answer
+
+
+def with_id(j, job_id="j1"):
+    return {**j, "id": job_id}
+
+
+def test_the_service_granting_memory_admits_even_when_the_local_rule_would_refuse(asked):
+    calls, answer = asked
+    answer[0] = (True, "")
+    ok, why, threads = admission(with_id(job()), snap(mem=1 * GB), [])
+    assert ok and why == "" and threads == 6
+    assert len(calls) == 1
+
+
+def test_the_service_refusing_passes_its_reason_through(asked):
+    calls, answer = asked
+    answer[0] = (False, "game servers hold 40 GB")
+    assert admission(with_id(job()), snap(mem=100 * GB), []) == (False, "memory: game servers hold 40 GB", 0)
+
+
+def test_no_answer_uses_the_local_reserve_both_ways(asked):
+    calls, answer = asked
+    answer[0] = None
+    assert not admission(with_id(job()), snap(mem=6.9 * GB), [])[0]
+    assert admission(with_id(job()), snap(mem=7.1 * GB), [])[0]
+    assert len(calls) == 2
+
+
+def test_the_local_rule_still_counts_recent_jobs_when_the_service_is_silent(asked):
+    fresh = job(transcribe="local", started=int(time.time()))
+    assert admission(with_id(job()), snap(mem=8 * GB), [])[0]
+    ok, why, _ = admission(with_id(job()), snap(mem=8 * GB), [fresh])
+    assert not ok and why.startswith("memory")
+
+
+def test_the_service_is_asked_for_this_jobs_own_memory_only(asked):
+    calls, answer = asked
+    answer[0] = (True, "")
+    fresh = job(transcribe="local", started=int(time.time()))  # a recent job: counts locally, not in the request
+    assert admission(with_id(job(transcribe="local"), "abc"), snap(), [fresh])[0]
+    assert calls == [("abc", job_resources.job_needs(job(transcribe="local"))[0])]
+
+
+def test_a_finalize_stage_asks_for_its_small_need(asked):
+    calls, answer = asked
+    answer[0] = (True, "")
+    j = {**job(), "next_stage": "finalize"}
+    assert admission(with_id(j, "f"), snap(), [])[0]
+    assert calls == [("f", job_resources.job_needs(j)[0])]
+
+
+def test_a_job_without_an_id_never_asks(asked):
+    calls, answer = asked
+    answer[0] = (False, "never")
+    assert admission(job(), snap(), [])[0]  # (the local rule decides)
+    assert calls == []
+
+
+@pytest.mark.parametrize("j, s, why", [
+    (job(seconds=4 * 3600), snap(disk=15 * GB), "disk"),
+    (job(), snap(idle=0.5), "cpu"),
+    (job(), hostload.Snapshot(cores=16, busy_cores=4, nice_cores=0, mem_available=30 * GB, slice_headroom=1 * GB, disk_free=100 * GB), "memory"),
+])
+def test_a_job_refused_for_disk_cpu_or_the_slice_reserves_nothing(asked, j, s, why):
+    calls, answer = asked
+    answer[0] = (True, "")
+    running = [job(started=0)]  # (the cpu check only applies while others run)
+    ok, reason, _ = admission(with_id(j), s, running)
+    assert not ok and reason.startswith(why)
+    assert calls == []
+
+
+def test_cpu_is_not_checked_with_nothing_running_so_the_service_is_asked(asked):
+    calls, answer = asked
+    answer[0] = (True, "")
+    assert admission(with_id(job()), snap(idle=0.5), [])[0]
+    assert len(calls) == 1
+
+
+def test_the_gpu_path_asks_with_the_reduced_own_memory(asked, monkeypatch):
+    from acw import broker
+
+    calls, answer = asked
+    answer[0] = (True, "")
+    monkeypatch.setattr(broker, "card_room", lambda stages, usage: (True, ""))
+    j = with_id(job(transcribe="local"), "g")
+    assert admission(j, snap(), [], gpu=True)[0]
+    assert calls == [("g", min(job_resources.job_needs(j)[0], job_resources.JOB_MEM + job_resources.GB))]

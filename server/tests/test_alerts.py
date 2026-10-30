@@ -431,3 +431,82 @@ def test_timer_service_alert_resolves_after_two_clean_runs_in_a_row(mail, monkey
         seen.append((len(mail), row()))
     assert seen == [(1, 1), (1, 1), (1, 1), (1, 1), (2, 0), (2, 0)]
     assert [m[0] for m in mail] == ["acw-mirror.service failed", "Resolved: acw-mirror.service failed"]
+
+
+# --- _relay_or_smtp: the home watcher first, mail directly when it doesn't answer ------------------------------------
+
+import http.server  # noqa: E402
+import threading  # noqa: E402
+
+
+@pytest.fixture
+def relay(monkeypatch):
+    """A local HTTP relay answering with `status[0]`; records the posted bodies. _smtp_send is captured (no mail is sent)."""
+    got, status = [], [200]
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append((self.headers.get("Content-Type"), json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            self.send_response(status[0])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    mailed = []
+    monkeypatch.setattr(alerts, "_smtp_send", lambda subject, body: mailed.append((subject, body)))
+    monkeypatch.setenv("ACW_ALERT_RELAY_URL", f"http://127.0.0.1:{server.server_port}/alert")
+    yield got, status, mailed, server
+    server.shutdown()
+    server.server_close()
+
+
+def test_a_relay_that_answers_200_takes_the_alert(relay):
+    got, status, mailed, _ = relay
+    alerts._relay_or_smtp("Disk low", "5 GB free")
+    assert got == [("application/json", {"subject": "Disk low", "body": "5 GB free"})]
+    assert mailed == []
+
+
+def test_a_relay_error_falls_back_to_mail(relay):
+    got, status, mailed, _ = relay
+    status[0] = 500
+    alerts._relay_or_smtp("s", "b")
+    assert len(got) == 1 and mailed == [("s", "b")]
+
+
+def test_a_relay_not_listening_falls_back_to_mail(relay, monkeypatch):
+    got, status, mailed, server = relay
+    port = server.server_port
+    server.shutdown()
+    server.server_close()
+    monkeypatch.setenv("ACW_ALERT_RELAY_URL", f"http://127.0.0.1:{port}/alert")
+    alerts._relay_or_smtp("s", "b")
+    assert mailed == [("s", "b")]
+
+
+@pytest.mark.xfail(strict=True, reason="product bug: urllib.request.Request(url) is built outside the try in alerts._relay_or_smtp, "
+                   "so a malformed ACW_ALERT_RELAY_URL raises ValueError instead of falling back to _smtp_send")
+def test_a_malformed_relay_url_falls_back_to_mail(relay, monkeypatch):
+    got, status, mailed, _ = relay
+    monkeypatch.setenv("ACW_ALERT_RELAY_URL", "not a url")
+    alerts._relay_or_smtp("s", "b")
+    assert mailed == [("s", "b")] and got == []
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_without_a_relay_the_alert_is_mailed_directly(relay, monkeypatch, value):
+    got, status, mailed, _ = relay
+    if value is None:
+        monkeypatch.delenv("ACW_ALERT_RELAY_URL")
+    else:
+        monkeypatch.setenv("ACW_ALERT_RELAY_URL", value)
+    alerts._relay_or_smtp("s", "b")
+    assert mailed == [("s", "b")] and got == []
+
+
+def test_deliver_is_the_relay_function():
+    assert alerts._deliver is alerts._relay_or_smtp
