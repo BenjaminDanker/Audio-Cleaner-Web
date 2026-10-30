@@ -14,7 +14,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
-from . import alerts, auth, db, edit_subtitles, httpstack, jobs, retention, webhooks
+from . import alerts, auth, dashboard_stats, db, edit_subtitles, httpstack, jobs, retention, webhooks
 from . import health as health_checks
 from .api import auth_routes, billing_routes, contact_routes, downloads_routes, jobs_routes, keys_routes
 from . import translate
@@ -205,7 +205,8 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         log.exception("alert start-up check failed")
     # Job callbacks (docs/api.md) go out from this process only: the workers and the bulk process have no network.
-    tasks = [asyncio.create_task(_cloud_asr_loop()), asyncio.create_task(_housekeeping_loop()), asyncio.create_task(webhooks.run_loop())]
+    tasks = [asyncio.create_task(_cloud_asr_loop()), asyncio.create_task(_housekeeping_loop()), asyncio.create_task(webhooks.run_loop()),
+             asyncio.create_task(dashboard_stats.run_loop())]
     try:
         yield
     finally:

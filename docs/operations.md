@@ -350,6 +350,10 @@ watcher on the Raspberry Pi (Host-Ops `host_watch.py`), the one place that mails
 (primary-ram down, the VPS, Minecraft, and ours). If the watcher doesn't answer, we mail it ourselves through the same SMTP
 account, so nothing is lost. The watcher sends what it gets as it is; de-duplication and "resolved" mails stay here.
 
+**Home dashboard.** With `ACW_DASHBOARD_STATSD` set (`127.0.0.1:8125`), the web process sends every 10 s how many jobs run
+and wait per feature (the website's own names), live sessions per kind and the GPU worker's state to Netdata, which shows them
+on the home page on the Raspberry Pi (Host-Ops `netdata/home.html`, http://192.168.1.200:19999/home.html). `acw.dashboard_stats`.
+
 **Set up (once).** Set `ACW_ALERT_EMAIL` and the `SMTP_*` variables in `~/audio-cleaner/secrets/acw.env` (the monitor
 and the failure hook read that file; workers send no mail; the mail account is described under "Mail"):
 
