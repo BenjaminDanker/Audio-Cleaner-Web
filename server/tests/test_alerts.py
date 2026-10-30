@@ -486,8 +486,8 @@ def test_a_relay_not_listening_falls_back_to_mail(relay, monkeypatch):
     monkeypatch.setenv("ACW_ALERT_RELAY_URL", f"http://127.0.0.1:{port}/alert")
     alerts._relay_or_smtp("s", "b")
     assert mailed == [("s", "b")]
-@pytest.mark.xfail(strict=True, reason="product bug: urllib.request.Request(url) is built outside the try in alerts._relay_or_smtp, "
-                   "so a malformed ACW_ALERT_RELAY_URL raises ValueError instead of falling back to _smtp_send")
+
+
 def test_a_malformed_relay_url_falls_back_to_mail(relay, monkeypatch):
     got, status, mailed, _ = relay
     monkeypatch.setenv("ACW_ALERT_RELAY_URL", "not a url")
