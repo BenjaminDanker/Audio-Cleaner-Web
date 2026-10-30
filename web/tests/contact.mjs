@@ -1,15 +1,19 @@
 // The contact form (/contact): with no mail set up on the test backend it is switched off (404 and a calm page); with mail
 // "on" (answered by the test, as the backend has no mail account) the form sends what was typed and nothing more, a hidden trap
 // field stays empty and out of reach, a rate-limit wait is said in hours, and a failed job's link opens the form with its number.
+// With the human check configured (a site key from /api/auth/providers; window.turnstile is a stub here, no Cloudflare) Send waits for the token,
+// the token is sent, and the widget is reset after an error and for the next message.
 // Needs the local backend (port 8792, see helpers.mjs) with `npm run build` output. Usage: node tests/contact.mjs
 import { BASE, check, launch, signIn, summary } from './helpers.mjs';
 
 const ME_OUT = { signedIn: false, contactForm: true };
 const GOOD = { name: 'Sam', email: 'sam@example.com', message: 'How long do you keep my results for?' };
 
-/** Pretend the server can send mail: /api/me says so (signed out), and /api/contact is answered by `handler`. */
-async function mailOn(page, handler = () => ({ status: 200, json: { ok: true } })) {
+/** Pretend the server can send mail: /api/me says so (signed out), and /api/contact is answered by `handler`.
+ *  /api/auth/providers answers with `siteKey` as the human check's key (null = the check is off, whatever the test backend has). */
+async function mailOn(page, handler = () => ({ status: 200, json: { ok: true } }), siteKey = null) {
   const posts = [];
+  await page.route('**/api/auth/providers', (r) => r.fulfill({ status: 200, json: { google: true, email: true, turnstileSiteKey: siteKey } }));
   await page.route('**/api/me', (r) => r.fulfill({ status: 200, json: ME_OUT }));
   await page.route('**/api/contact', async (r) => {
     posts.push(r.request().postDataJSON());
@@ -43,6 +47,7 @@ await check('contact, mail on: Send stays off until the address and a real messa
   await page.goto(`${BASE}/contact`);
   await page.getByLabel('Your message').waitFor();
   if (!(await send(page).isDisabled())) throw new Error('enabled on an empty form');
+  if (await page.getByTestId('turnstile').count()) throw new Error('the human check is shown although the server has no key for it');
   await fill(page, { email: 'not-an-address', message: 'short' });
   if (!(await send(page).isDisabled())) throw new Error('enabled with a bad address and a short message');
   await fill(page, { email: GOOD.email, message: 'short' });
@@ -56,6 +61,7 @@ await check('contact, mail on: Send stays off until the address and a real messa
   if (posts.length !== 1) throw new Error(`${posts.length} posts`);
   const p = posts[0];
   if (p.email !== GOOD.email || p.topic !== 'billing' || p.message !== GOOD.message || p.name !== 'Sam' || p.website !== '' || 'job' in p) throw new Error(JSON.stringify(p));
+  if ('turnstileToken' in p) throw new Error('a token was sent with the human check off: ' + JSON.stringify(p));
   return 'sent as typed';
 });
 
@@ -110,6 +116,60 @@ await check('contact, signed in and from a failed job: the account address is fi
   await page.getByTestId('contact-done').waitFor();
   if (posts.length !== 1 || posts[0].job !== jid || posts[0].topic !== 'job') throw new Error(JSON.stringify(posts));
   return 'ok';
+});
+
+await check('contact, human check configured: the widget shows, Send waits for its token (and again after it expires), the token is sent, and the widget is reset after an error and for the next message', async () => {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const p = await ctx.newPage();
+  // A stand-in for Cloudflare's script (the page uses window.turnstile when it is there and loads nothing): render() keeps the options, so the test can play the widget.
+  await ctx.addInitScript(() => {
+    window.__ts = { renders: [], removed: [] };
+    window.turnstile = {
+      render(el, opts) { el.textContent = 'human check (test stub)'; window.__ts.renders.push(opts); return window.__ts.renders.length; },
+      remove(id) { window.__ts.removed.push(id); },
+    };
+  });
+  const answers = [{ status: 400, json: { detail: 'Human check failed, try again.' } }, { status: 200, json: { ok: true } }];
+  const posts = await mailOn(p, (_body, n) => answers[n - 1] || answers.at(-1), 'test-site-key');
+  const renders = () => p.evaluate(() => window.__ts.renders.length);
+  const widget = (fn, ...args) => p.evaluate(([f, a]) => window.__ts.renders.at(-1)[f](...a), [fn, args]); // 'callback' (token), 'expired-callback'
+  const isOff = async (why) => { if (!(await send(p).isDisabled())) throw new Error('Send is on ' + why); };
+  const isOn = async (why) => { if (await send(p).isDisabled()) throw new Error('Send is off ' + why); };
+  await p.goto(`${BASE}/contact`);
+  await p.getByTestId('turnstile').waitFor();
+  await p.waitForFunction(() => window.__ts.renders.length === 1);
+  if ((await p.evaluate(() => window.__ts.renders[0].sitekey)) !== 'test-site-key') throw new Error('the widget did not get the site key');
+  await fill(p);
+  await isOff('before the human check has given a token');
+  await widget('callback', 'tok-1');
+  await isOn('with the token');
+  await widget('expired-callback');
+  await isOff('after the token expired');
+  await widget('callback', 'tok-1');
+  await send(p).click();
+  await p.getByTestId('contact-error').waitFor();
+  if (!/Human check failed, try again\./.test(await p.getByTestId('contact-error').innerText())) throw new Error(await p.getByTestId('contact-error').innerText());
+  await p.waitForFunction(() => window.__ts.renders.length === 2); // reset: the old widget is removed and a new one drawn
+  if (!(await p.evaluate(() => window.__ts.removed.length))) throw new Error('the old widget was not removed');
+  await isOff('after an error, before a fresh token');
+  if ((await p.getByLabel('Your message').inputValue()) !== GOOD.message) throw new Error('the form lost what was typed');
+  await widget('callback', 'tok-2');
+  await isOn('with a fresh token');
+  await send(p).click();
+  await p.getByTestId('contact-done').waitFor({ timeout: 10000 });
+  if (posts.length !== 2 || posts[0].turnstileToken !== 'tok-1' || posts[1].turnstileToken !== 'tok-2') throw new Error(JSON.stringify(posts));
+  if (posts[1].email !== GOOD.email || posts[1].message !== GOOD.message || posts[1].website !== '') throw new Error(JSON.stringify(posts[1]));
+  // the next message gets a new widget and needs its own token
+  await p.getByRole('button', { name: 'Send another message' }).click();
+  await p.getByLabel('Your message').waitFor();
+  await p.waitForFunction(() => window.__ts.renders.length === 3);
+  await fill(p);
+  await isOff('for the next message without a new token');
+  await widget('callback', 'tok-3');
+  await isOn('with the next message\'s token');
+  if ((await renders()) !== 3) throw new Error(`${await renders()} widgets drawn`);
+  await ctx.close();
+  return 'token gates Send, is sent, widget reset';
 });
 
 console.log('LOGS:\n' + logs.filter((l) => !/Failed to load resource|net::ERR_FAILED/.test(l)).join('\n'));

@@ -1,9 +1,12 @@
 """The contact form: POST /api/contact mails the owner; the owner's address never reaches a browser; limits; no message
 text is stored."""
+from urllib.parse import parse_qs
+
+import httpx
 import pytest
 
 from acw import alerts, db, security
-from acw.api import contact_routes
+from acw.api import contact_routes, turnstile
 from acw.config import get_settings
 
 from .conftest import ORIGIN, login
@@ -28,6 +31,38 @@ def mail(monkeypatch):
 
 def send(client, headers=H, **over):
     return client.post("/api/contact", json={**GOOD, **over}, headers=headers)
+
+
+class Cloudflare:
+    """Cloudflare's siteverify: what it is asked (form fields), and what it answers (`answer`; an Exception is raised instead)."""
+
+    def __init__(self, monkeypatch):
+        self.posts, self.answer = [], {"success": True}
+        cf = self
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            cf.posts.append((str(request.url), {k: v[0] for k, v in parse_qs(request.content.decode()).items()}))
+            if isinstance(cf.answer, Exception):
+                raise cf.answer
+            return httpx.Response(200, json=cf.answer)
+
+        real = httpx.AsyncClient
+        monkeypatch.setattr(turnstile.httpx, "AsyncClient", lambda *a, **k: real(*a, **{**k, "transport": httpx.MockTransport(handler)}))
+
+
+@pytest.fixture
+def cloudflare(monkeypatch):
+    """Cloudflare is stubbed (nothing leaves the machine); Turnstile itself stays unconfigured unless a test uses `human_check`."""
+    return Cloudflare(monkeypatch)
+
+
+@pytest.fixture
+def human_check(monkeypatch, cloudflare):
+    """The human check is configured (secret set) and Cloudflare says yes unless a test changes `cloudflare.answer`."""
+    monkeypatch.setenv("TURNSTILE_SECRET", "ts-secret")
+    monkeypatch.setenv("TURNSTILE_SITE_KEY", "ts-site")
+    get_settings.cache_clear()
+    return cloudflare
 
 
 def test_message_is_mailed_with_reply_to_and_no_address_or_text_in_the_log(client, mail):
@@ -98,6 +133,70 @@ def test_a_honeypot_field_looks_like_success_but_sends_nothing(client, mail):
     assert db.one("SELECT COUNT(*) n FROM audit_log WHERE action = 'contact_sent'")["n"] == 0
 
 
+def test_without_a_turnstile_secret_no_token_is_needed_and_cloudflare_is_never_asked(client, mail, cloudflare):
+    assert not get_settings().turnstile_secret
+    assert send(client).status_code == 200  # as before: no token in the body
+    assert send(client, email="t2@example.com", turnstileToken="whatever").status_code == 200  # a token is ignored, not checked
+    assert len(mail) == 2 and cloudflare.posts == []
+
+
+def test_with_a_turnstile_secret_a_missing_token_is_refused_and_nothing_is_sent(client, mail, human_check):
+    r = send(client)
+    assert r.status_code == 400 and r.json()["detail"] == "Complete the human check."
+    assert send(client, turnstileToken="").status_code == 400  # an empty token is no token
+    assert send(client, turnstileToken=None).status_code == 400
+    assert not mail and human_check.posts == []  # refused before Cloudflare is asked
+    assert db.one("SELECT COUNT(*) n FROM audit_log WHERE action = 'contact_sent'")["n"] == 0
+
+
+def test_with_a_turnstile_secret_a_verified_token_sends_the_mail(client, mail, human_check):
+    h = {**H, "X-Forwarded-For": "203.0.113.9"}
+    r = send(client, headers=h, turnstileToken="good-token")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    (msg,) = mail
+    assert msg["Reply-To"] == "sam@example.com"
+    ((url, form),) = human_check.posts
+    assert url == turnstile.VERIFY_URL
+    assert form == {"secret": "ts-secret", "response": "good-token", "remoteip": "203.0.113.9"}
+    assert "good-token" not in msg.get_content()  # the token is not part of the mail or the audit log
+    assert "good-token" not in str([dict(row) for row in db.all_rows("SELECT * FROM audit_log")])
+
+
+def test_with_a_turnstile_secret_a_failed_or_unreachable_check_is_refused_and_nothing_is_sent(client, mail, human_check):
+    for answer in ({"success": False, "error-codes": ["invalid-input-response"]}, {"success": "true"}, {}, httpx.ConnectError("no route")):
+        human_check.answer = answer
+        security.limiter.reset()  # (a refused check still counts against the network's hourly messages: it comes after the limits)
+        r = send(client, turnstileToken="bad-token")
+        assert r.status_code == 400 and r.json()["detail"] == "Human check failed, try again.", answer
+    assert not mail and len(human_check.posts) == 4
+    human_check.answer = {"success": True}
+    security.limiter.reset()
+    assert send(client, turnstileToken="fresh-token").status_code == 200
+    assert len(mail) == 1
+
+
+def test_the_human_check_comes_before_the_honeypot_and_after_the_network_limits(client, mail, human_check):
+    # a bot that fills the trap field still has to pass the check: no silent 200 for a request without (or with a bad) token
+    r = send(client, website="http://spam.example")
+    assert r.status_code == 400 and r.json()["detail"] == "Complete the human check."
+    human_check.answer = {"success": False}
+    r = send(client, website="http://spam.example", turnstileToken="bad-token")
+    assert r.status_code == 400 and r.json()["detail"] == "Human check failed, try again."
+    # with the check passed the trap still works: success to the caller, nothing sent
+    human_check.answer = {"success": True}
+    security.limiter.reset()
+    r = send(client, website="http://spam.example", turnstileToken="good-token")
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert not mail and db.one("SELECT COUNT(*) n FROM audit_log WHERE action = 'contact_sent'")["n"] == 0
+    # the per-network limit is answered before Cloudflare is asked
+    security.limiter.reset()
+    for i in range(3):
+        assert send(client, email=f"l{i}@example.com", turnstileToken="good-token").status_code == 200
+    asked = len(human_check.posts)
+    r = send(client, email="l9@example.com", turnstileToken="good-token")
+    assert r.status_code == 429 and len(human_check.posts) == asked and len(mail) == 3
+
+
 def test_limits_per_network_and_per_mailbox(client, mail):
     # three an hour per network: the fourth is refused with a wait
     for i in range(3):
@@ -125,6 +224,7 @@ def test_a_network_gets_ten_messages_a_day(client, mail):
 
 
 def test_the_whole_site_has_a_daily_cap_that_says_try_tomorrow(client, mail):
+    assert contact_routes.CONTACT_DAILY_CAP == 30  # the mail service's free 100 a day also carries sign-in links
     now = db.now()
     for i in range(contact_routes.CONTACT_DAILY_CAP):
         db.execute("INSERT INTO audit_log(user_id, actor, action, detail, ip, created_at) VALUES (NULL,'visitor','contact_sent','question',NULL,?)",

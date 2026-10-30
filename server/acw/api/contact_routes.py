@@ -7,7 +7,8 @@ else (the audit log only records that a message was sent, with its topic, never 
 Abuse limits, all of them before any mail is sent:
   * a hidden "website" field that people never see (a filled one is answered with the normal success, silently dropped)
   * per network (IPv6 per /64): 3 per hour and 10 per day; per mailbox: 3 per hour and 5 per day
-  * the whole site: CONTACT_DAILY_CAP (100) per rolling day, counted from the audit log so a restart doesn't reset it
+  * the whole site: CONTACT_DAILY_CAP (30) per rolling day, counted from the audit log so a restart doesn't reset it
+  * the human check (Cloudflare Turnstile) when its keys are configured, the same one as on email sign-in; off without keys
   * same-origin requests only, and the usual CSRF token when signed in; bodies are limited to 64 KB elsewhere
   * mail goes out through the outbound thread budget (`run_outbound`)
 """
@@ -24,11 +25,12 @@ from pydantic import BaseModel, Field
 from .. import alerts, auth, db
 from ..security import client_ip, client_net, enforce, run_outbound
 from .auth_routes import _require_same_origin, canonical_email, clean_email
+from .turnstile import verify_turnstile
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["contact"])
 
-CONTACT_DAILY_CAP = 100
+CONTACT_DAILY_CAP = 30  # messages a day for the whole site: the mail service's free 100 a day also carries sign-in links and support replies
 MESSAGE_MIN = 10
 MESSAGE_MAX = 5000
 TOPICS = {
@@ -73,6 +75,7 @@ class ContactBody(BaseModel):
     message: str = Field(max_length=MESSAGE_MAX)
     job: str | None = Field(default=None, max_length=64)
     website: str | None = Field(default=None, max_length=500)  # honeypot
+    turnstileToken: str | None = Field(default=None, max_length=4096)  # the human check, when Turnstile is configured (as on sign-in)
 
 
 def available() -> bool:
@@ -154,6 +157,7 @@ async def contact(body: ContactBody, request: Request, principal: auth.Principal
     net = client_net(ip)
     enforce("contact_ip", net)
     enforce("contact_ip_day", net)
+    await verify_turnstile(body.turnstileToken, ip)
     if body.website:  # a human never sees this field
         log.info("contact form: honeypot filled, dropped")
         return {"ok": True}

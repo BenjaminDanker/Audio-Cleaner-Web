@@ -499,9 +499,11 @@ when the alert address is the one you want. The address never reaches a browser:
   number was given, what the job is (kind, status, error text). Plain text only; control characters and anything that could
   start another mail header are stripped.
 - Limits: 3 per hour and 10 per day per network (IPv6 per /64), 3 per hour and 5 per day per mailbox (no `+tag`, Gmail dots
-  ignored), 100 per rolling day for the whole site (counted from the audit log, so a restart does not reset it; the form then says
-  to try again tomorrow, with a Retry-After). A hidden field that people never see makes bots look successful but sends nothing.
-  Same-origin requests only, and the usual CSRF token when signed in.
+  ignored), 30 per rolling day for the whole site (counted from the audit log, so a restart does not reset it; the form then says
+  to try again tomorrow, with a Retry-After). 30 because the mail service's free 100 a day (see "Mail") also carries the sign-in
+  links and the support replies. A hidden field that people never see makes bots look successful but sends nothing.
+  Same-origin requests only, and the usual CSRF token when signed in. With Turnstile keys configured (launch checklist), the
+  form also shows the same human check as email sign-in.
 - The text of a message is **not stored** anywhere (not in the database, not in the journal). The audit log keeps that a
   message was sent (time, topic, account if signed in, network address for 90 days).
 - Check it: sign out, open `/contact`, send a test, and look in the mailbox (spam folder first time: it comes from

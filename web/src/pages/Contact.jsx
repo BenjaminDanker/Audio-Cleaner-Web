@@ -4,6 +4,7 @@ import { api, waitText } from '../api.js';
 import { useAuth } from '../auth.jsx';
 import { useNow, usePageTitle } from '../hooks.js';
 import NeedsServer from '../components/Maintenance.jsx';
+import Turnstile from '../components/Turnstile.jsx';
 import { SITE } from '../site.js';
 
 const TOPICS = [
@@ -40,6 +41,9 @@ export default function Contact() {
   const [error, setError] = useState('');
   const [sentTo, setSentTo] = useState('');
   const [blockedUntil, setBlockedUntil] = useState(0);
+  const [siteKey, setSiteKey] = useState(null); // the human check's key; null = the check is off
+  const [token, setToken] = useState(null);
+  const [resetKey, setResetKey] = useState(0);
   const touched = useRef(false);
   const alertRef = useRef(null);
   const now = useNow(blockedUntil ? 1000 : 3_600_000);
@@ -51,6 +55,10 @@ export default function Contact() {
   useEffect(() => {
     if (error) alertRef.current?.focus({ preventScroll: false });
   }, [error]);
+  // The same human check as email sign-in, when the server has one configured.
+  useEffect(() => {
+    api('auth/providers', { redirectOn401: false }).then((p) => setSiteKey(p?.turnstileSiteKey || null)).catch(() => {});
+  }, []);
 
   if (!ready) return <div className="loading-screen" role="status"><span className="spinner" aria-hidden="true" /> <span className="sr-only">Loading</span></div>;
 
@@ -75,7 +83,7 @@ export default function Contact() {
   const waitLeft = Math.max(0, Math.ceil((blockedUntil - now) / 1000));
   const messageLen = message.trim().length;
   const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
-  const canSend = emailOk && messageLen >= MIN && messageLen <= MAX && !busy && waitLeft === 0;
+  const canSend = emailOk && messageLen >= MIN && messageLen <= MAX && !busy && waitLeft === 0 && (!siteKey || token);
 
   async function submit(e) {
     e.preventDefault();
@@ -93,12 +101,16 @@ export default function Contact() {
           message: message.trim(),
           job: topic === 'job' && job.trim() ? job.trim() : undefined,
           website: trap,
+          turnstileToken: token || undefined,
         },
       });
       setSentTo(email.trim());
       setMessage('');
+      setToken(null); // used up; the next message gets a fresh check
     } catch (err) {
       setError(friendly(err));
+      setToken(null); // a token is good for one try
+      setResetKey((k) => k + 1);
       if (err.status === 429 && err.retryAfter) setBlockedUntil(Date.now() + Math.min(err.retryAfter, 86400) * 1000);
     } finally {
       setBusy(false);
@@ -162,6 +174,7 @@ export default function Contact() {
             <label htmlFor="c-extra">Leave this empty</label>
             <input id="c-extra" name="c-extra" tabIndex={-1} autoComplete="off" value={trap} onChange={(e) => setTrap(e.target.value)} />
           </div>
+          {siteKey && <Turnstile siteKey={siteKey} onToken={setToken} onError={setError} resetKey={resetKey} />}
           {error && <div className="banner banner-error" role="alert" tabIndex={-1} ref={alertRef} data-testid="contact-error">{error}</div>}
           {waitLeft > 0 && <p className="muted small mb0" role="status" data-testid="contact-wait">You can send again in {waitText(waitLeft)}.</p>}
           <div className="row">
