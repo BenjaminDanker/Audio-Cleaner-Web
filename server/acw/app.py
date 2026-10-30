@@ -206,7 +206,7 @@ async def lifespan(app: FastAPI):
         log.exception("alert start-up check failed")
     # Job callbacks (docs/api.md) go out from this process only: the workers and the bulk process have no network.
     tasks = [asyncio.create_task(_cloud_asr_loop()), asyncio.create_task(_housekeeping_loop()), asyncio.create_task(webhooks.run_loop()),
-             asyncio.create_task(dashboard_stats.run_loop())]
+             asyncio.create_task(dashboard_stats.send_loop())]
     try:
         yield
     finally:

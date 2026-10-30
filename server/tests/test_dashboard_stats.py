@@ -205,8 +205,6 @@ def test_a_job_with_broken_params_is_skipped_not_fatal(gpu):
     assert g["jobs_waiting"] == 2 and g["jobs_running"] == 2  # the totals still count every queued/running row
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: params_json that is valid JSON but not an object ('null', '[]', '5') raises AttributeError in "
-                   "features() (params.get), which collect() does not catch (it catches ValueError/KeyError/TypeError)")
 @pytest.mark.parametrize("raw", ["null", "[]", "5", '"text"'])
 def test_params_that_are_json_but_not_an_object_are_skipped(gpu, raw):
     uid = add_user()
@@ -274,7 +272,7 @@ def test_send_sends_the_whole_collect(gpu):
     assert "acw.job_running_denoising:1|g" in lines
 
 
-# ---------------------------------------------------------------------------------------------------------- run_loop
+# ---------------------------------------------------------------------------------------------------------- send_loop
 
 def stop_after(monkeypatch, rounds):
     """asyncio.sleep (called once per round, after the round) lets `rounds` rounds through, then cancels the loop."""
@@ -299,7 +297,7 @@ def test_the_loop_returns_at_once_when_off(monkeypatch):
     loop = asyncio.new_event_loop()
     try:
         monkeypatch.setattr(ds.asyncio, "sleep", boom)
-        assert loop.run_until_complete(ds.run_loop()) is None
+        assert loop.run_until_complete(ds.send_loop()) is None
     finally:
         loop.close()
 
@@ -310,7 +308,7 @@ def test_the_loop_sends_a_round_then_sleeps_the_interval(monkeypatch, gpu):
         monkeypatch.setenv("ACW_DASHBOARD_STATSD", f"{host}:{port}")
         calls = stop_after(monkeypatch, 1)
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.run_loop())
+            asyncio.run(ds.send_loop())
         assert calls == [ds.INTERVAL_S]
         n = len(ds.collect())
         lines = drain(rx, n)
@@ -330,7 +328,7 @@ def test_a_failing_round_is_logged_once_and_the_loop_goes_on(monkeypatch, caplog
     stop_after(monkeypatch, 3)
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.run_loop())
+            asyncio.run(ds.send_loop())
     assert len(runs) == 3 and not sent  # kept going every round
     records = [r for r in caplog.records if r.name == "acw.dashboard_stats"]
     assert len(records) == 1 and "database is locked" in caplog.text
@@ -350,5 +348,5 @@ def test_the_log_is_armed_again_after_a_good_round(monkeypatch, caplog):
     stop_after(monkeypatch, 4)
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(ds.run_loop())
+            asyncio.run(ds.send_loop())
     assert [r.exc_info[1].args[0] for r in caplog.records if r.name == "acw.dashboard_stats"] == ["a", "c"]

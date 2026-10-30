@@ -60,7 +60,7 @@ def collect() -> dict[str, float]:
     for r in rows:
         try:
             names = features(r["kind"], json.loads(r["params_json"]))
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, AttributeError):
             continue
         state = "waiting" if r["status"] == "queued" else "running"
         for name in names:
@@ -96,7 +96,7 @@ def send(gauges: dict[str, float], addr: tuple[str, int]) -> None:
             udp.sendto(f"acw.{key}:{value}|g".encode(), addr)
 
 
-async def run_loop() -> None:
+async def send_loop() -> None:
     addr = target()
     if addr is None:
         return
