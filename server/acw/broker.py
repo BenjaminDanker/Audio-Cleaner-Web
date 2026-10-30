@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from . import db, hostload, job_convert, job_resources
+from . import capacity, db, hostload, job_convert, job_resources
 from .stream import protocol as P
 from .config import get_settings
 
@@ -385,18 +385,21 @@ def admit_job(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set
               gpu: bool = False, max_threads: int = 6) -> tuple[bool, str, int]:
     """Whether `job` may start now, why not, and how many threads it gets. Memory and disk must fit with a reserve
     left for the rest of the host; CPU only decides when other jobs already run (with nothing running the queue
-    always moves, niced, so it yields to everything that outranks it)."""
+    always moves, niced, so it yields to everything that outranks it). The host's memory is handed out by the host
+    capacity service (acw.capacity), asked last so a job refused for disk or CPU reserves nothing; when it doesn't
+    answer, our own reserve (job_resources.MEM_RESERVE) decides."""
     mem, disk = job_resources.job_needs(job)
     if gpu:  # the model lives in GPU memory, which other programs may hold much of (measured now: this is the GPU worker)
         ok, why = card_room(gpu_stages(job), card_usage())
         if not ok:
             return False, why, 0
         mem = min(mem, job_resources.JOB_MEM + job_resources.GB)
+    own = mem
     now = db.now()
     # Jobs started in the last minute may not have allocated their memory yet.
     mem += sum(job_resources.job_needs(r)[0] for r in running if (r["started_at"] or 0) > now - 60)
-    if snap.mem_available - mem < job_resources.MEM_RESERVE or (snap.slice_headroom is not None and snap.slice_headroom - mem < job_resources.SLICE_RESERVE):
-        return False, f"memory: {snap.memory_headroom / job_resources.GB:.1f} GB free, job needs {mem / job_resources.GB:.1f} GB", 0
+    if snap.slice_headroom is not None and snap.slice_headroom - mem < job_resources.SLICE_RESERVE:
+        return False, f"memory: {snap.slice_headroom / job_resources.GB:.1f} GB left under the service limit, job needs {mem / job_resources.GB:.1f} GB", 0
     if snap.disk_free - disk < job_resources.DISK_RESERVE:
         return False, f"disk: {snap.disk_free / job_resources.GB:.0f} GB free, job needs {disk / job_resources.GB:.1f} GB", 0
     # Idle CPU among the cores jobs may use now (live audio, which outranks jobs, may have taken some).
@@ -405,6 +408,12 @@ def admit_job(job: dict, snap: hostload.Snapshot, running: list[dict], cpus: set
         idle = sum(1.0 - snap.busy_per_cpu[c] for c in cpus if c < len(snap.busy_per_cpu))
     if running and idle < MIN_IDLE_CORES and not gpu:
         return False, f"cpu: {idle:.1f} job cores idle", 0
+    host = capacity.reserve_job(job["id"], own) if job.get("id") is not None else None
+    if host is not None:
+        if not host[0]:
+            return False, f"memory: {host[1]}", 0
+    elif snap.mem_available - mem < job_resources.MEM_RESERVE:
+        return False, f"memory: {snap.memory_headroom / job_resources.GB:.1f} GB free, job needs {mem / job_resources.GB:.1f} GB", 0
     return True, "", max(2, min(max_threads, int(idle) - 1))
 
 

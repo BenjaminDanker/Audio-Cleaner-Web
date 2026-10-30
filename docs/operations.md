@@ -345,6 +345,11 @@ to `ACW_ALERT_EMAIL` with subject prefix `[Audio Cleaner]`; mails carry counts,
 job ids (first 8 characters) and status codes only, never user emails, file
 names or transcripts.
 
+**Who sends them.** With `ACW_ALERT_RELAY_URL` set (`http://192.168.1.200:25581/alert`), an alert is handed to the home
+watcher on the Raspberry Pi (Host-Ops `host_watch.py`), the one place that mails every alert for the home machines
+(primary-ram down, the VPS, Minecraft, and ours). If the watcher doesn't answer, we mail it ourselves through the same SMTP
+account, so nothing is lost. The watcher sends what it gets as it is; de-duplication and "resolved" mails stay here.
+
 **Set up (once).** Set `ACW_ALERT_EMAIL` and the `SMTP_*` variables in `~/audio-cleaner/secrets/acw.env` (the monitor
 and the failure hook read that file; workers send no mail; the mail account is described under "Mail"):
 
@@ -804,7 +809,7 @@ Minecraft servers need.
 **File jobs (Studio clean, transcription).** One CPU worker per 3 physical
 cores (min 2, max 8; `ACW_WORKERS` overrides), plus the GPU worker when there
 is one. A worker takes the next job only when its measured needs fit (memory
-and scratch disk with a reserve for the host: 6 GB of free system memory, the point where the Minecraft memory controller reopens world starts, and 2 GB under the acw slice's own MemoryMax; idle cores among the CPUs jobs
+and scratch disk with a reserve for the host: the host's memory is handed out by the host capacity service (Host-Ops `host_capacity.py`, shared with the Minecraft servers; `acw.capacity`), which serves file jobs first: while a job waits for memory, new Minecraft players and server starts wait (at most 15 minutes per job). When the service doesn't answer, a job needs 6 GB of free system memory left after it starts. Either way 2 GB stay free under the acw slice's own MemoryMax; idle cores among the CPUs jobs
 may use right now); with nothing running the queue always moves. Queue order:
 paid before free, then the user with the fewest jobs running, then first come
 first served. The API reports `queuePosition` and `queueWaitSeconds`.

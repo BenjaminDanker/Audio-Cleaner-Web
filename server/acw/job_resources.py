@@ -51,8 +51,8 @@ STAGE_SLACK_SECONDS = 1800
 
 
 # Never let our work take the host below these.
-# Free system memory (MemAvailable) left after a job starts: the Minecraft memory controller closes new world starts at
-# 4 GiB available and reopens at 6 GiB, so a job that took the host down to 2 GB shut players out until it ended.
+# Free system memory (MemAvailable) left after a job starts, used only while the host capacity service (acw.capacity) doesn't
+# answer: normally that service hands out the host's memory, to us first and then to Minecraft.
 MEM_RESERVE = 6 * GB
 
 

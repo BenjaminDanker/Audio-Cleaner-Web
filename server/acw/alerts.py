@@ -22,6 +22,7 @@ CLI:  python -m acw.alerts test | status | unit-failed UNIT
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -32,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from email.message import EmailMessage
 
@@ -97,7 +99,23 @@ def _smtp_send(subject: str, body: str) -> None:
 
 
 # Indirection so tests can capture mail without a server.
-_deliver = _smtp_send
+def _relay_or_smtp(subject: str, body: str) -> None:
+    """Hand the alert to the home watcher on the Raspberry Pi (Host-Ops host_watch.py), the one place that mails every
+    alert for the home machines; mail it ourselves when the watcher isn't set (ACW_ALERT_RELAY_URL) or doesn't answer."""
+    url = os.environ.get("ACW_ALERT_RELAY_URL", "").strip()
+    if url:
+        request = urllib.request.Request(url, data=json.dumps({"subject": subject, "body": body}).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                if response.status == 200:
+                    return
+        except (OSError, ValueError) as e:
+            log.warning("alert relay didn't answer (%s); mailing directly", type(e).__name__)
+    _smtp_send(subject, body)
+
+
+_deliver = _relay_or_smtp
 _deliver_message = _smtp_send_message
 
 
