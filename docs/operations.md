@@ -767,9 +767,10 @@ Still to do (needs you):
    `ACW_CONTACT_EMAIL` only to send them somewhere else (see "Contact form").
 6. `acw-ctl restart acw-web` after editing `acw.env`.
 
-The VPS side (Caddy routes, firewall, frp) is in the repository and done: docs/vps.md. Turnstile's three CSP additions
-are written in `00-audio-cleaner-snippets.caddy`, commented out; the request-body and header-timeout settings are in
-the snippets and in `deploy/vps/Caddyfile`.
+The VPS side (Caddy routes, firewall, frp) is in the repository and done: docs/vps.md. The site's Content-Security-Policy
+in `00-audio-cleaner-snippets.caddy` allows Cloudflare Turnstile; the human check itself is on once `TURNSTILE_SITE_KEY` and
+`TURNSTILE_SECRET` are in `acw.env` (a Turnstile widget for `audiocleaner.live`, Managed mode, in the Cloudflare dashboard). The
+request-body and header-timeout settings are in the snippets and in `deploy/vps/Caddyfile`.
 
 ## Rebuilding native pieces and models
 

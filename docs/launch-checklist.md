@@ -34,7 +34,7 @@ Status as of 2026-10-15. ✅ done · ⬜ needs you · 🔬 research phase
   (docs/payments.md), customer portal enabled, statement descriptor,
   ✅ done 2026-10-15 (live; no Radar rule needed: authorize-first country check). Radar: switch to Lite before 2027-01-21.
 - ✅ OpenAI key set (premium file + live captions verified in production)
-- ⬜ Cloudflare Turnstile keys (optional, for the email sign-in form and the contact form). Without them neither has a bot check (sign-in: 3 mails per address and 6 per network per hour; contact: the limits in docs/operations.md, "Contact form"). To enable: keys in acw.env, and the three CSP additions that are commented in deploy/vps/sites/00-audio-cleaner-snippets.caddy
+- ⬜ Cloudflare Turnstile keys (optional, for the email sign-in form and the contact form). Without them neither has a bot check (sign-in: 3 mails per address and 6 per network per hour; contact: the limits in docs/operations.md, "Contact form"). To enable: keys in acw.env (the site's CSP and the Privacy Policy already allow and name it)
 
 ## Business / legal
 - ⬜ Fill `web/src/site.js`: support email, legal name/address, jurisdiction (shown in footer/Terms/Privacy).
