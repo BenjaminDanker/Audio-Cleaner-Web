@@ -157,24 +157,25 @@ await check('bad files: a file whose length no reader can find (garbage with an 
   return why;
 });
 
-await check('credit: an account with no balance sees no warning before it starts (the price is on Start), and our side refuses the start (402, "This job costs about ...") with the job-error banner and no job; free subtitles on a 10 min file start with no credit', async () => {
+await check('credit: with no balance a priced start is off (Start is grey with its price, no balance warning, the header says $0.00) while free runs (Free noise removal, free subtitles on a 10 min file) are not held back; with credit on the page Start is on, and our side still refuses a start above the real balance (402, "This job costs about ...")', async () => {
   await freshApp();
   await choose('noisy.wav');
   await pick(page, 'noise', 'denoise');
   await start().waitFor();
   await page.waitForFunction(() => /^Start · \$/.test(document.querySelector('[data-testid=start]')?.innerText.replace(/\s+/g, ' ').trim() || ''), null, { timeout: 15000 });
   if (await page.locator('[data-testid=notes]', { hasText: /your balance is/ }).count()) throw new Error('a balance warning before starting');
-  if (!(await start().isEnabled())) throw new Error('start is off for a price above the balance (our side decides)');
-  passThrough = true; // (the real server answers this one)
-  const refused = page.waitForResponse((r) => /\/api\/jobs$/.test(r.url()) && r.request().method() === 'POST');
-  await start().click();
-  const r = await refused;
-  passThrough = false;
-  if (r.status() !== 402) throw new Error('status ' + r.status());
-  const msg = page.getByTestId('job-error');
-  await msg.waitFor({ timeout: 15000 });
-  const reason = (await msg.innerText()).replace(/\s+/g, ' ').trim();
-  if (!/^This job costs about \$\d+\.\d\d; your available balance is \$0\.00\./.test(reason)) throw new Error('reason: ' + reason);
+  const chip = (await page.locator('.balance-chip').innerText()).trim(); // (the header's balance: the page's own 'available' number is gone once a file is chosen)
+  if (chip !== '$0.00') throw new Error('the account is not empty: ' + chip);
+  if (await start().isEnabled()) throw new Error('start is on for a price above a balance of $0.00');
+  // (nothing is sent by a click on the grey button)
+  const sent = posts.length;
+  await start().click({ force: true, timeout: 2000 }).catch(() => {});
+  await page.waitForTimeout(500);
+  if (posts.length !== sent || await page.getByTestId('job-error').count()) throw new Error('a job request went out from the grey button');
+  // free runs are not held back by an empty balance
+  await pick(page, 'noise', 'browser');
+  if ((await mainButton(page)) !== 'Start · Free') throw new Error('free noise removal label: ' + await mainButton(page));
+  if (!(await start().isEnabled())) throw new Error('Free noise removal is held back by a balance of $0.00');
   await freshApp();
   await choose('long10min.mp3');
   await pick(page, 'noise', 'off');
@@ -182,6 +183,63 @@ await check('credit: an account with no balance sees no warning before it starts
   await page.getByTestId('start').waitFor();
   if ((await mainButton(page)) !== 'Start · Free') throw new Error('label: ' + await mainButton(page));
   if (!(await start().isEnabled())) throw new Error('free start disabled for a free 10 min file');
+  // the edge: the page's balance is exactly the price (on) or one micro below it (off); the price is read from the request the page sends
+  let shown = null; // the balance the page is told (null: the account's own)
+  const meHandler = async (r) => {
+    const res = await r.fetch(); const j = await res.json();
+    await r.fulfill({ response: res, json: shown == null ? j : { ...j, balance: { ...j.balance, available_micros: shown, balance_micros: shown } } });
+  };
+  await page.route('**/api/me', meHandler);
+  let reason;
+  try {
+    shown = 5_000_000;
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'denoise');
+    await waitStartPrice();
+    if (!(await start().isEnabled())) throw new Error('start is off with $5.00 on the page');
+    const price = (await send()).maxCostMicros;
+    if (!(price > 1)) throw new Error('price ' + price);
+    shown = price - 1;
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'denoise');
+    await waitStartPrice();
+    if (await start().isEnabled()) throw new Error(`start is on with a balance one micro below the price (${price})`);
+    shown = price;
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'denoise');
+    await waitStartPrice();
+    if (!(await start().isEnabled())) throw new Error(`start is off with a balance exactly the price (${price})`);
+    // the page thinks there is credit but the account has none: our side's own check stays (402, "This job costs about ...", no job)
+    shown = 5_000_000;
+    await freshApp();
+    await choose('noisy.wav');
+    await pick(page, 'noise', 'denoise');
+    await waitStartPrice();
+    passThrough = true; // (the real server answers this one)
+    const refused = page.waitForResponse((r) => /\/api\/jobs$/.test(r.url()) && r.request().method() === 'POST');
+    await start().click();
+    const r = await refused;
+    passThrough = false;
+    if (r.status() !== 402) throw new Error('status ' + r.status());
+    const msg = page.getByTestId('job-error');
+    await msg.waitFor({ timeout: 15000 });
+    reason = (await msg.innerText()).replace(/\s+/g, ' ').trim();
+    if (!/^This job costs about \$\d+\.\d\d; your available balance is \$0\.00\./.test(reason)) throw new Error('reason: ' + reason);
+  } finally {
+    passThrough = false;
+    await page.unroute('**/api/me', meHandler);
+  }
+  // credit comes (the account state is read again by a reload): Start is on for the same choices
+  admin('grant', EMAIL, '1', 'files credit check');
+  await freshApp();
+  if ((await page.getByTestId('available').innerText()).trim() !== '$1.00') throw new Error('the credit is not on the page: ' + await page.getByTestId('available').innerText());
+  await choose('noisy.wav');
+  await pick(page, 'noise', 'denoise');
+  await waitStartPrice();
+  if (!(await start().isEnabled())) throw new Error('start is off with $1.00 of credit');
   return reason;
 });
 
@@ -332,6 +390,59 @@ await check('echo removal and translation: Echo removal is offered only with Sta
   const S = shape(t, 'noise,subtitles', 2).subtitles;
   if (S[0].quality !== 'standard' || JSON.stringify(S[0].translate) !== '["es"]') throw new Error('translate: ' + JSON.stringify(S));
   return `${b.filename} ${b.sizeBytes} bytes of ${size}`;
+});
+
+// What a video's start does on the page: the sound is pulled out in a worker (src/media/extract.worker.js), so the page keeps answering, and only the sound goes up.
+// (the page is watched from the start of each document: long tasks (> 50 ms) the browser reports, the workers made, and whether the progress words showed)
+await page.addInitScript(() => {
+  window.__long = [];
+  window.__workers = [];
+  window.__saw = false;
+  try { new PerformanceObserver((l) => { for (const e of l.getEntries()) window.__long.push(Math.round(e.duration)); }).observe({ type: 'longtask', buffered: true }); } catch { /* not offered: the check says so */ }
+  const W = window.Worker;
+  window.Worker = class extends W { constructor(u, o) { super(u, o); window.__workers.push(String(u)); } };
+  const look = () => { if (!window.__saw && document.body && document.body.textContent.includes('Pulling the sound out of your video')) window.__saw = true; };
+  new MutationObserver(look).observe(document, { subtree: true, childList: true, characterData: true });
+});
+const videoStart = async (file) => {
+  await freshApp();
+  await choose(file);
+  await pick(page, 'noise', 'denoise');
+  await waitStartPrice();
+  if (!(await page.evaluate(() => 'PerformanceObserver' in window && PerformanceObserver.supportedEntryTypes.includes('longtask')))) throw new Error('this browser reports no long tasks');
+  await page.evaluate(() => { window.__long.length = 0; window.__workers.length = 0; });
+  const body = await send();
+  await page.waitForTimeout(300); // (the observer's reports are delivered a little later)
+  const seen = await page.evaluate(() => ({ long: window.__long, workers: window.__workers, saw: window.__saw }));
+  return { body, ...seen };
+};
+
+await check('a video goes up as its sound only, pulled out in a worker: the request names a .m4a far smaller than the video, the worker was started, and no task held the page for a second', async () => {
+  const size = statSync(join(FILES, 'test.mp4')).size;
+  const { body, long, workers, saw } = await videoStart('test.mp4');
+  if (!/\.m4a$/.test(body.filename) || !(body.sizeBytes < size / 4)) throw new Error(`the request says ${body.filename}, ${body.sizeBytes} bytes of a ${size} byte video`);
+  if (body.displayName !== 'test.mp4') throw new Error('displayName ' + body.displayName);
+  if (body.options.output_video !== false) throw new Error('output_video ' + body.options.output_video);
+  if (!workers.some((u) => /extract\.worker/.test(u))) throw new Error('no extract worker was started: ' + JSON.stringify(workers));
+  if (long.some((ms) => ms >= 1000)) throw new Error('the page was held for ' + Math.max(...long) + ' ms: ' + JSON.stringify(long));
+  return `${body.filename} ${body.sizeBytes} of ${size} bytes; worker ${workers.length}; long tasks ${JSON.stringify(long)}; progress words ${saw ? 'seen' : 'too quick to see'}`;
+});
+
+await check('when the worker cannot load, the sound is still pulled out (on the page, as before): the same small .m4a goes up', async () => {
+  const blocked = [];
+  const onFail = (r) => { if (/extract\.worker/.test(r.url())) blocked.push(r.url()); };
+  page.on('requestfailed', onFail);
+  await page.route(/extract\.worker/, (r) => r.abort());
+  try {
+    const size = statSync(join(FILES, 'test.mp4')).size;
+    const { body, workers } = await videoStart('test.mp4');
+    if (!workers.some((u) => /extract\.worker/.test(u)) || !blocked.length) throw new Error(`the page did not try the worker (made ${JSON.stringify(workers)}, failed ${JSON.stringify(blocked)})`);
+    if (!/\.m4a$/.test(body.filename) || !(body.sizeBytes < size / 4)) throw new Error(`the request says ${body.filename}, ${body.sizeBytes} bytes of a ${size} byte video`);
+    return `${body.filename} ${body.sizeBytes} of ${size} bytes after the worker failed to load`;
+  } finally {
+    page.off('requestfailed', onFail);
+    await page.unroute(/extract\.worker/);
+  }
 });
 
 await check('rebuild the voice: its own price (the server\'s) and no strength/remover choices; the request has a rebuild part and no noise part', async () => {

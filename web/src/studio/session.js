@@ -61,6 +61,8 @@ export class Session {
     this.id = `draft-${++draftN}`;
     this.v = 0;
     this.listeners = new Set();
+    this.lastTouch = 0; // touchSoon()
+    this.touchTimer = null;
     this.file = null;
     this.info = null;
     this.fileName = '';
@@ -100,7 +102,15 @@ export class Session {
   subscribe = (fn) => { this.listeners.add(fn); return () => this.listeners.delete(fn); };
   getVersion = () => this.v;
   touch() { this.v++; for (const fn of this.listeners) fn(); }
+  /** touch() for progress: at most every 100 ms. A progress callback can fire thousands of times in one go (pulling the sound out of an
+   * hour-long video reports every packet) and every touch redraws the whole editor at once: that froze the page for over a minute. */
+  touchSoon() {
+    const now = performance.now();
+    if (now - (this.lastTouch || 0) >= 100) { this.lastTouch = now; this.touch(); return; }
+    if (!this.touchTimer) this.touchTimer = setTimeout(() => { this.touchTimer = null; this.lastTouch = performance.now(); this.touch(); }, 100);
+  }
   dispose() {
+    clearTimeout(this.touchTimer);
     this.abort?.abort();
     this.listenCtl?.abort();
     this.sgTask?.cancel();
@@ -320,7 +330,7 @@ export class Session {
     this.touch();
     const task = startSuggestions(this.file, this.info, {
       seconds: this.T,
-      onProgress: (f) => { this.sg = { ...this.sg, progress: f }; this.touch(); },
+      onProgress: (f) => { this.sg = { ...this.sg, progress: f }; this.touchSoon(); },
     });
     this.sgTask = task;
     task.done.then(
@@ -487,7 +497,7 @@ export class Session {
 
   setTask(name, task) {
     this.run = { ...(this.run || { tasks: {} }), tasks: { ...(this.run?.tasks || {}), [name]: task } };
-    this.touch();
+    this.touchSoon();
   }
 
   clearTask(name) {

@@ -168,8 +168,11 @@ function Ready({ session, job, fin, ver, onNewFile, onChanged, onDeleted, welcom
   // Offline, the paid parts can't be started by anyone, and signing in isn't possible either.
   // (until the account check has been answered nobody is told to sign in: it may be a busy moment, not a visitor who is signed out)
   const account = needsAccount(server, signedIn) && known && !offline && (stage === 'ready' || (done && isLocal && changedTracks));
+  // a priced job the balance can't cover is not started (the button stays grey; the header shows the balance): our side would refuse it anyway,
+  // after a video's sound had been pulled out for nothing
+  const affordable = !server || estMicros == null || balance?.available_micros == null || estMicros <= balance.available_micros;
   const canStart = stage === 'ready' && !!session.file && !!info && !reading && problems.length === 0 && (!server || (estMicros != null && !offline && known))
-    && (!(cleaning || plan.converting) || choice.valid) && (hasWork(S.tracks) || plan.converting);
+    && affordable && (!(cleaning || plan.converting) || choice.valid) && (hasWork(S.tracks) || plan.converting);
 
   // ---- the picture and the sound (usePlayback.js) ----
   const tl = useMemo(() => { try { return toTimeline(S.tracks, T); } catch { return null; } }, [ver]); // eslint-disable-line react-hooks/exhaustive-deps

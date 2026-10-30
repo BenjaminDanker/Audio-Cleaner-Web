@@ -695,15 +695,23 @@ await check('Price, credit and limits: not enough credit, prices that cannot loa
   const other = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const p = await other.newPage();
   await signIn(p, `poor-${Date.now()}@example.com`);
-  await p.goto(`${BASE}/app`);
-  await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
-  await p.getByTestId('start').waitFor();
-  await p.waitForFunction(() => !document.querySelector('[data-testid=reco-listening]'), null, { timeout: 60000 });
-  await p.locator('.studio button[data-act=auto]').click().catch(() => {});
-  await p.locator('.studio button[data-act=v-mode][data-v="1"]').click();
-  await p.locator('.studio button[data-act=v-kind][data-v=paid]').click();
-  await p.getByTestId('start').waitFor();
+  const choosePaid = async () => {
+    await p.goto(`${BASE}/app`);
+    await p.setInputFiles('input[type=file]', join(FILES, 'noisy.wav'));
+    await p.getByTestId('start').waitFor();
+    await p.waitForFunction(() => !document.querySelector('[data-testid=reco-listening]'), null, { timeout: 60000 });
+    await p.locator('.studio button[data-act=auto]').click().catch(() => {});
+    await p.locator('.studio button[data-act=v-mode][data-v="1"]').click();
+    await p.locator('.studio button[data-act=v-kind][data-v=paid]').click();
+    await p.getByTestId('start').waitFor();
+    await p.waitForFunction(() => /^Start · \$/.test(document.querySelector('[data-testid=start]')?.innerText.replace(/\s+/g, ' ').trim() || ''), null, { timeout: 15000 });
+  };
+  await choosePaid();
   if (await p.getByTestId('notes').count() && /your balance is/.test(await p.getByTestId('notes').innerText())) throw new Error('a balance warning before starting');
+  if (!(await p.getByTestId('start').isDisabled())) throw new Error('Start is on for a price above a balance of $0.00'); // (the page does not start what the balance cannot pay)
+  // the page told there is credit while the account has none: our side refuses it (402)
+  await p.route('**/api/me', async (r) => { const res = await r.fetch(); const j = await res.json(); await r.fulfill({ response: res, json: { ...j, balance: { ...j.balance, available_micros: 5_000_000, balance_micros: 5_000_000 } } }); });
+  await choosePaid();
   await p.getByTestId('start').click(); // (our side refuses it: 402)
   await p.getByTestId('job-error').waitFor({ timeout: 15000 });
   has(await p.getByTestId('job-error').innerText(), /This job costs about \$[\d.]+; your available balance is \$0\.00\./);

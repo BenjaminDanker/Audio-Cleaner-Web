@@ -22,10 +22,38 @@ const needsDecode = (codec) => !MKA_CODECS.has(codec) && !(codec && codec.starts
 
 /**
  * `tracks: 2` keeps the first two audio tracks (mic and desktop sound, for echo removal) in one Matroska audio file.
+ * Runs in a worker (extract.worker.js): mediabunny copies an hour of packets in one go without giving the page a turn, which held the
+ * whole page still for seconds. Where the worker can't start, it runs here instead.
  * @returns {Promise<{blob: Blob, filename: string, codec: string, reencoded: boolean} | null>}
  *   null when extraction is not possible (caller uploads the original file instead).
  */
-export async function extractAudio(file, { tracks = 1, onProgress, signal } = {}) {
+export function extractAudio(file, { tracks = 1, onProgress, signal } = {}) {
+  let worker;
+  try {
+    worker = new Worker(new URL('./extract.worker.js', import.meta.url), { type: 'module' });
+  } catch {
+    return extractAudioHere(file, { tracks, onProgress, signal });
+  }
+  return new Promise((resolve, reject) => {
+    const end = () => { signal?.removeEventListener('abort', stop); worker.terminate(); };
+    function stop() { end(); reject(new DOMException('Canceled', 'AbortError')); }
+    if (signal?.aborted) { stop(); return; }
+    signal?.addEventListener('abort', stop, { once: true });
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'progress') { onProgress?.(m.frac); return; }
+      end();
+      if (m.type === 'done') resolve(m.result);
+      else reject(new Error(m.message || 'Could not pull the sound out of the video.'));
+    };
+    // the worker itself could not load (an old browser): do it here
+    worker.onerror = (e) => { e.preventDefault?.(); end(); resolve(extractAudioHere(file, { tracks, onProgress, signal })); };
+    worker.postMessage({ file, tracks });
+  });
+}
+
+/** extractAudio's work itself, wherever it runs (the worker, or the page as a fallback). */
+export async function extractAudioHere(file, { tracks = 1, onProgress, signal } = {}) {
   const mb = await loadMediabunny();
   const { input } = await openInput(file);
   try {
