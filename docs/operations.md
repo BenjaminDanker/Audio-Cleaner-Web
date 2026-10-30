@@ -792,9 +792,9 @@ deploy/fetch-models.sh                 # download what is missing or wrong, veri
 More users never slow a running job down; they wait longer for a slot or are
 told the service is busy. Measured numbers, 2026-10-14:
 
-**Memory.** Every `acw-*` unit runs in `acw.slice`, capped at 40% of RAM
-(12 GB on this 31 GB box; set at install), so Audio Cleaner can't take RAM the
-Minecraft servers need.
+**Memory.** The host capacity service (below) decides who gets the machine's memory, Audio Cleaner first. Every `acw-*`
+unit runs in `acw.slice`, capped at 85% of RAM (26.5 GB on this 31 GB box; set at install) only as a backstop against a
+runaway: 15% always stays with the system, a little more than the 12.5% at which new Minecraft players start to wait.
 - File jobs keep decoded and cleaned audio in memory-mapped scratch files in the
   job directory, and the leveling chain works in 10 s blocks. Admission reserves 1 GB per job (4.5 GB for the
   voice-rebuild tier, whose four single-threaded workers hold their own activations): an estimate used to decide when a job may start (`job_resources.JOB_MEM`), not a limit. The real
@@ -844,7 +844,7 @@ memory and load. Its sandboxed runner may also open `/dev/nvidia*` and has no ad
 limit (CUDA reserves huge virtual ranges).
 
 **Sized from the machine.** `deploy/install.sh` reads the core count and RAM:
-all services together may use `ACW_MEMORY_PERCENT` (default 40) of RAM
+all services together may use `ACW_MEMORY_PERCENT` (default 85, a backstop) of RAM
 (`acw.slice.d/size.conf`), file workers scale with cores, and live capacity
 scales with cores and the start-up speed calibration. Moving to a bigger
 machine needs no edits: run `deploy/install.sh` there.

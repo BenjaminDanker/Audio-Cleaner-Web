@@ -56,8 +56,7 @@ STAGE_SLACK_SECONDS = 1800
 MEM_RESERVE = 6 * GB
 
 
-# Room kept under the acw slice's own MemoryMax (a separate limit, 12.5 GB: a 6 GB reserve there would stop a 6 GB
-# local transcription from ever running next to the web and live processes).
+# Room kept under the acw slice's own MemoryMax (a separate backstop limit, 85 % of RAM at install).
 SLICE_RESERVE = 2 * GB
 DISK_RESERVE = 10 * GB
 

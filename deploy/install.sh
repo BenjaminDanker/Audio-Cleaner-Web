@@ -321,11 +321,12 @@ if [ "$PACKAGES_ONLY" = 1 ]; then
 fi
 
 # Sized from this machine, so a bigger CPU or more RAM is used without edits:
-# all Audio Cleaner services may use ACW_MEMORY_PERCENT of RAM (the rest stays
-# with the game servers and the system); one file worker per 3 physical cores.
+# all Audio Cleaner services may use ACW_MEMORY_PERCENT of RAM, only a backstop against a runaway: the host capacity
+# service hands out the memory (Audio Cleaner first, then the game servers), and 15 % always stays with the system;
+# one file worker per 3 physical cores.
 # Live audio capacity scales by itself (core count + start-up calibration).
 MEM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
-PCT="${ACW_MEMORY_PERCENT:-40}"
+PCT="${ACW_MEMORY_PERCENT:-85}"
 PHYS=$(lscpu -p=core,socket | grep -v '^#' | sort -u | wc -l)
 WORKERS="${ACW_WORKERS:-$(( PHYS / 3 < 2 ? 2 : (PHYS / 3 > 8 ? 8 : PHYS / 3) ))}"
 U="$HOME/.config/systemd/user"
