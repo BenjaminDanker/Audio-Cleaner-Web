@@ -104,9 +104,9 @@ def _relay_or_smtp(subject: str, body: str) -> None:
     alert for the home machines; mail it ourselves when the watcher isn't set (ACW_ALERT_RELAY_URL) or doesn't answer."""
     url = os.environ.get("ACW_ALERT_RELAY_URL", "").strip()
     if url:
-        request = urllib.request.Request(url, data=json.dumps({"subject": subject, "body": body}).encode(),
-                                         headers={"Content-Type": "application/json"}, method="POST")
         try:
+            request = urllib.request.Request(url, data=json.dumps({"subject": subject, "body": body}).encode(),
+                                             headers={"Content-Type": "application/json"}, method="POST")
             with urllib.request.urlopen(request, timeout=5) as response:
                 if response.status == 200:
                     return
