@@ -274,16 +274,33 @@ def test_send_sends_the_whole_collect(gpu):
 
 # ---------------------------------------------------------------------------------------------------------- send_loop
 
-def stop_after(monkeypatch, rounds):
-    """asyncio.sleep (called once per round, after the round) lets `rounds` rounds through, then cancels the loop."""
-    calls = []
+def fake_clock_rounds(monkeypatch, rounds, start=1000.0):
+    """Runs send_loop for `rounds` rounds on a fake clock. loop.time() reads the clock, and each asyncio.sleep moves it on
+    by the seconds slept, so round k starts at start + (k - 1) while SEND_S is 1. The `rounds`-th sleep cancels the loop.
+    Returns (sleeps, clock): the argument of every sleep, and the clock."""
+    clock = types.SimpleNamespace(now=start)
+    sleeps = []
+    real_get_running_loop = asyncio.get_running_loop
+
+    class LoopWithFakeTime:
+        def __init__(self, loop):
+            self._loop = loop
+
+        def time(self):
+            return clock.now
+
+        def __getattr__(self, name):
+            return getattr(self._loop, name)
 
     async def fake_sleep(seconds):
-        calls.append(seconds)
-        if len(calls) >= rounds:
+        sleeps.append(seconds)
+        clock.now += seconds
+        if len(sleeps) >= rounds:
             raise asyncio.CancelledError
+
+    monkeypatch.setattr(ds.asyncio, "get_running_loop", lambda: LoopWithFakeTime(real_get_running_loop()))
     monkeypatch.setattr(ds.asyncio, "sleep", fake_sleep)
-    return calls
+    return sleeps, clock
 
 
 def test_the_loop_returns_at_once_when_off(monkeypatch):
@@ -302,20 +319,61 @@ def test_the_loop_returns_at_once_when_off(monkeypatch):
         loop.close()
 
 
-def test_the_loop_sends_a_round_then_sleeps_the_interval(monkeypatch, gpu):
+
+
+def test_the_loop_sends_a_round_then_sleeps_the_send_interval(monkeypatch, gpu):
     with receiver() as rx:
         host, port = rx.getsockname()
         monkeypatch.setenv("ACW_DASHBOARD_STATSD", f"{host}:{port}")
-        calls = stop_after(monkeypatch, 1)
+        sleeps, _ = fake_clock_rounds(monkeypatch, 1)
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(ds.send_loop())
-        assert calls == [ds.INTERVAL_S]
+        assert sleeps == [ds.SEND_S]
         n = len(ds.collect())
         lines = drain(rx, n)
     assert "acw.jobs_running:0|g" in lines and "acw.gpu_worker:0|g" in lines
 
 
-def test_a_failing_round_is_logged_once_and_the_loop_goes_on(monkeypatch, caplog):
+def test_rounds_within_the_interval_resend_the_count_and_it_is_counted_again_after_it(monkeypatch):
+    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
+    counts = iter([{"x": 1}, {"x": 2}])
+    collected = []
+
+    def collect():
+        collected.append(1)
+        return next(counts)
+    monkeypatch.setattr(ds, "collect", collect)
+    sent = []
+    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
+    # rounds start at t, t+1, ... t+10: counted at t and at t+10 (INTERVAL_S later), the rounds between resend the count
+    sleeps, _ = fake_clock_rounds(monkeypatch, 11)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ds.send_loop())
+    assert sleeps == [ds.SEND_S] * 11
+    assert len(collected) == 2
+    assert sent == [{"x": 1}] * 10 + [{"x": 2}]
+
+
+def test_a_failing_count_drops_the_stored_count_until_the_next_good_one(monkeypatch):
+    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
+    outcomes = iter([{"x": 1}, RuntimeError("boom"), {"x": 3}])
+
+    def collect():
+        o = next(outcomes)
+        if isinstance(o, Exception):
+            raise o
+        return o
+    monkeypatch.setattr(ds, "collect", collect)
+    sent = []
+    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
+    fake_clock_rounds(monkeypatch, 21)  # counts at t, t+10, t+20
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(ds.send_loop())
+    # the count of t is sent until t+10; the failing count at t+10 sends nothing until the good one at t+20
+    assert sent == [{"x": 1}] * 10 + [{"x": 3}]
+
+
+def test_a_failing_count_sends_nothing_and_is_logged_once_within_one_interval(monkeypatch, caplog):
     monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
     runs = []
 
@@ -325,18 +383,38 @@ def test_a_failing_round_is_logged_once_and_the_loop_goes_on(monkeypatch, caplog
     monkeypatch.setattr(ds, "collect", broken)
     sent = []
     monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
-    stop_after(monkeypatch, 3)
+    sleeps, _ = fake_clock_rounds(monkeypatch, 5)  # one count, then four rounds that do not count
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(ds.send_loop())
-    assert len(runs) == 3 and not sent  # kept going every round
+    assert sleeps == [ds.SEND_S] * 5  # the loop went on every round
+    assert len(runs) == 1 and not sent
     records = [r for r in caplog.records if r.name == "acw.dashboard_stats"]
     assert len(records) == 1 and "database is locked" in caplog.text
 
 
-def test_the_log_is_armed_again_after_a_good_round(monkeypatch, caplog):
+def test_a_failing_count_is_logged_once_across_several_intervals(monkeypatch, caplog):
     monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
-    outcomes = iter([RuntimeError("a"), RuntimeError("b"), {"x": 1}, RuntimeError("c")])
+    runs = []
+
+    def broken():
+        runs.append(1)
+        raise RuntimeError("database is locked")
+    monkeypatch.setattr(ds, "collect", broken)
+    sent = []
+    monkeypatch.setattr(ds, "send", lambda g, a: sent.append(g))
+    fake_clock_rounds(monkeypatch, 21)  # counts at t, t+10, t+20: all fail
+    with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(ds.send_loop())
+    assert len(runs) == 3 and not sent
+    records = [r for r in caplog.records if r.name == "acw.dashboard_stats"]
+    assert len(records) == 1
+
+
+def test_the_log_is_armed_again_after_a_good_count(monkeypatch, caplog):
+    monkeypatch.setenv("ACW_DASHBOARD_STATSD", "127.0.0.1:9")
+    outcomes = iter([RuntimeError("a"), {"x": 1}, RuntimeError("c")])
 
     def collect():
         o = next(outcomes)
@@ -345,7 +423,7 @@ def test_the_log_is_armed_again_after_a_good_round(monkeypatch, caplog):
         return o
     monkeypatch.setattr(ds, "collect", collect)
     monkeypatch.setattr(ds, "send", lambda g, a: None)
-    stop_after(monkeypatch, 4)
+    fake_clock_rounds(monkeypatch, 21)  # counts at t (fails), t+10 (good), t+20 (fails)
     with caplog.at_level(logging.WARNING, logger="acw.dashboard_stats"):
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(ds.send_loop())

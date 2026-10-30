@@ -1,6 +1,6 @@
 """Live numbers for the home dashboard: jobs running and waiting per feature, live sessions, the GPU worker.
 
-Every 10 s the web process sends them as statsd gauges to Netdata on this host (`ACW_DASHBOARD_STATSD`, e.g. 127.0.0.1:8125;
+Every 10 s the web process counts them, and every second it sends the latest count as statsd gauges to Netdata on this host (`ACW_DASHBOARD_STATSD`, e.g. 127.0.0.1:8125;
 unset = off, so test and dev instances send nothing). Netdata streams them to the Raspberry Pi, whose home page (Host-Ops
 netdata/home.html) shows them. Features are named with the website's own words (job_view.label_of), so a new feature shows up
 on the page without changes here. Best effort: a problem is logged once and never reaches a job.
@@ -18,7 +18,8 @@ from . import broker, db, job_view
 
 log = logging.getLogger("acw.dashboard_stats")
 
-INTERVAL_S = 10
+INTERVAL_S = 10  # how often the database is counted
+SEND_S = 1  # how often the latest count is sent: Netdata draws a missed second as a gap
 # Always sent (0 when idle) so their graphs are continuous; other features are added when a job has them.
 FEATURES = ["Denoising", "Voice rebuild", "Leveling", "Subtitles & transcript", "Subtitles & transcript, extra accurate",
             "Echo removal", "Translation", "Video conversion", "Automatic settings"]
@@ -101,12 +102,20 @@ async def send_loop() -> None:
     if addr is None:
         return
     failing = False
+    gauges: dict[str, float] | None = None
+    counted_at = float("-inf")
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            send(await asyncio.to_thread(collect), addr)
-            failing = False
+            if loop.time() - counted_at >= INTERVAL_S:
+                counted_at = loop.time()
+                gauges = await asyncio.to_thread(collect)
+                failing = False  # only a good count re-arms the log: rounds that just resend say nothing about it
+            if gauges is not None:
+                send(gauges, addr)
         except Exception:  # noqa: BLE001
+            gauges = None  # a stale count is worse than a gap
             if not failing:
                 log.exception("dashboard numbers could not be sent (will keep trying)")
             failing = True
-        await asyncio.sleep(INTERVAL_S)
+        await asyncio.sleep(SEND_S)
